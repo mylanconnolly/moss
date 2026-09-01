@@ -149,9 +149,16 @@ RAM base + `0x80000` (the link address, `0x40080000`); QEMU honors the
 protocol by placing the DTB in RAM (observed at `0x48000000`) and passing its
 physical address in `x0`, entering with MMU/caches off. QEMU `virt` provides
 *no* DTB for plain ELF loads — that is why the Image header exists. Only core
-0 runs at boot (secondaries arrive via PSCI in Phase 2). The assembly between
-QEMU and `kmain` is ~20 instructions: park non-zero cores, clear BSS, set the
-boot stack, jump.
+0 runs at boot (secondaries arrive via PSCI in Phase 2).
+
+The kernel links in the high half (39-bit VAs; TTBR1 space at
+`0xffffff8000000000`, direct map virt = phys + that offset — see
+`kernel/mem.zig`). The boot assembly parks non-zero cores, clears BSS, builds
+one coarse L1 table (1GB blocks; shared by TTBR0-identity and TTBR1 since
+both index identically), enables the MMU, and jumps to `kmain` high. `kmain`
+then rebuilds TTBR1 from the devicetree's memory map with 4K-granular W^X
+over the kernel image and disables TTBR0 walks (TCR.EPD0), dropping the
+identity map.
 
 ## Zig conventions
 
@@ -159,10 +166,11 @@ boot stack, jump.
 - `build.zig` is the entire build: kernel, userspace, images, QEMU targets.
 - Kernel code avoids FP/SIMD (enforced by disabled target features): CPACR
   resets with FP trapped and trap handlers won't save vector state.
-- Kernel code is built `strict_align` (enforced by target features): with the
-  MMU off, EL1 treats all memory as Device memory, where the unaligned
-  accesses memcpy/fmt otherwise emit are alignment faults. Revisit once the
-  MMU is up (Phase 1).
+- All Zig code runs with the MMU on: boot.zig enables it (coarse map) before
+  jumping to kmain, so compiled code never touches Device-typed memory where
+  unaligned accesses fault. Pre-MMU work is confined to the hand-written,
+  aligned assembly in boot.zig — keep it that way, or bring `strict_align`
+  back.
 - `shared/` may not import kernel or userspace code and may not allocate; it
   must compile for every target including `thumb-freestanding` leaf nodes.
 - Kernel code allocates only through the quota-accounted kernel allocator —

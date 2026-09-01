@@ -21,6 +21,7 @@ pooled hardware.
 | `zig build run` | Boot in QEMU `virt` (TCG). **Ctrl-A X** exits QEMU. |
 | `zig build run-hvf` | Boot with Hypervisor.framework acceleration (Apple Silicon) |
 | `zig build run -Dpanic-test` | Boot, then deliberately panic to exercise the panic handler |
+| `zig build run -Dfault-test` | Boot, then read unmapped memory to exercise fault reporting |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout

@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
         "panic-test",
         "Panic after boot to exercise the panic handler",
     ) orelse false;
+    const fault_test = b.option(
+        bool,
+        "fault-test",
+        "Read unmapped memory after boot to exercise fault reporting",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -15,11 +20,11 @@ pub fn build(b: *std.Build) void {
         .abi = .none,
         // CPACR_EL1 resets with FP/SIMD trapped at EL1 and the kernel never
         // saves vector state, so kernel code must not touch those registers.
+        // strict_align is NOT needed: all Zig code runs with the MMU on
+        // (boot.zig enables it before kmain); only pre-MMU code — which is
+        // all hand-written, aligned assembly — would fault on unaligned
+        // access to Device-typed memory.
         .cpu_features_sub = std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon }),
-        // With the MMU off, EL1 treats all memory as Device memory, where
-        // unaligned accesses fault; strict_align keeps codegen aligned until
-        // the MMU comes up (Phase 1).
-        .cpu_features_add = std.Target.aarch64.featureSet(&.{.strict_align}),
     });
 
     const shared_mod = b.createModule(.{
@@ -28,6 +33,7 @@ pub fn build(b: *std.Build) void {
 
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "panic_test", panic_test);
+    build_opts.addOption(bool, "fault_test", fault_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -92,6 +98,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const shared_tests = b.addTest(.{ .root_module = shared_test_mod });
+    const dt_test_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/dt.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    const dt_tests = b.addTest(.{ .root_module = dt_test_mod });
     const test_step = b.step("test", "Run host-side unit tests");
     test_step.dependOn(&b.addRunArtifact(shared_tests).step);
+    test_step.dependOn(&b.addRunArtifact(dt_tests).step);
 }

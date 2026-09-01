@@ -1,0 +1,56 @@
+//! Kernel address space constants and the direct map.
+//!
+//! Layout (4K granule, 39-bit VAs on both halves):
+//!   TTBR0: user space, 0x0000000000000000 .. 0x0000007fffffffff (Phase 3;
+//!          disabled via TCR.EPD0 once the boot identity map is dropped)
+//!   TTBR1: kernel,     0xffffff8000000000 .. 0xffffffffffffffff
+//!
+//! The kernel occupies the direct map: virt = phys + kvirt_offset, with the
+//! kernel image's own pages re-protected W^X at 4K granularity. Device MMIO
+//! is mapped at its direct-map address with device attributes.
+
+pub const page_size: usize = 4096;
+
+pub const kvirt_offset: u64 = 0xffffff80_0000_0000;
+
+pub fn physToVirt(pa: u64) u64 {
+    return pa + kvirt_offset;
+}
+
+pub fn virtToPhys(va: u64) u64 {
+    return va - kvirt_offset;
+}
+
+pub fn physToPtr(comptime T: type, pa: u64) T {
+    return @ptrFromInt(physToVirt(pa));
+}
+
+pub fn alignDown(x: u64, comptime a: u64) u64 {
+    return x & ~(a - 1);
+}
+
+pub fn alignUp(x: u64, comptime a: u64) u64 {
+    return (x + a - 1) & ~(a - 1);
+}
+
+// Linker script symbols. Only their addresses are meaningful.
+extern const __kernel_start: u8;
+extern const __text_end: u8;
+extern const __rodata_end: u8;
+extern const __kernel_end: u8;
+
+pub fn kernelStart() u64 {
+    return @intFromPtr(&__kernel_start);
+}
+
+pub fn textEnd() u64 {
+    return @intFromPtr(&__text_end);
+}
+
+pub fn rodataEnd() u64 {
+    return @intFromPtr(&__rodata_end);
+}
+
+pub fn kernelEnd() u64 {
+    return @intFromPtr(&__kernel_end);
+}

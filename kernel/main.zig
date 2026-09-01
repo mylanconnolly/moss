@@ -3,7 +3,15 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const shared = @import("shared");
+const dt = @import("dt.zig");
+const gic = @import("gic.zig");
+const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
+const mem = @import("mem.zig");
+const mmu = @import("mmu.zig");
+const pmem = @import("pmem.zig");
+const timer = @import("timer.zig");
+const trap = @import("trap.zig");
 
 comptime {
     _ = @import("boot.zig");
@@ -11,33 +19,64 @@ comptime {
 
 pub const panic = std.debug.FullPanic(panicHandler);
 
-const dtb_magic: u32 = 0xd00dfeed;
-
 export fn kmain(dtb_pa: u64) noreturn {
     log.print("\nmoss {f} — aarch64 / qemu-virt\n\n", .{shared.version});
 
-    log.info("core 0 up at EL{d}", .{currentEl()});
+    trap.init();
+    log.info("core 0 up at EL{d}, vectors installed", .{currentEl()});
 
-    // QEMU passes the DTB in x0 only for Linux-protocol (raw Image) boots;
-    // for ELF loads x0 is 0 and the DTB sits at the base of RAM.
-    const ram_base: u64 = 0x4000_0000;
-    const candidates = [_]u64{ dtb_pa, ram_base };
-    const dtb: ?u64 = for (candidates) |pa| {
-        if (pa == 0) continue;
-        const magic_be: *const volatile u32 = @ptrFromInt(pa);
-        if (std.mem.bigToNative(u32, magic_be.*) == dtb_magic) break pa;
-    } else null;
-    if (dtb) |pa| {
-        log.info("devicetree at 0x{x}", .{pa});
-    } else {
-        log.warn("no devicetree found (x0=0x{x})", .{dtb_pa});
+    // QEMU passes the DTB in x0 per the arm64 Image boot protocol.
+    const fdt = dt.Fdt.parse(mem.physToPtr([*]const u8, dtb_pa)) catch |e| {
+        std.debug.panic("bad devicetree at 0x{x}: {t}", .{ dtb_pa, e });
+    };
+    var region_buf: [8]dt.MemRegion = undefined;
+    const regions = fdt.memoryRegions(&region_buf) catch |e| {
+        std.debug.panic("devicetree memory walk failed: {t}", .{e});
+    };
+    for (regions) |r| {
+        log.info("ram: 0x{x} + {d}MB", .{ r.base, r.size >> 20 });
+    }
+
+    pmem.init(regions);
+    pmem.reserve(
+        mem.virtToPhys(mem.kernelStart()),
+        mem.kernelEnd() - mem.kernelStart(),
+    );
+    pmem.reserve(dtb_pa, fdt.totalSize());
+    const s = pmem.stats();
+    log.info("pmem: {d}MB free of {d}MB", .{ s.free_bytes >> 20, s.total_bytes >> 20 });
+
+    mmu.init(regions) catch |e| std.debug.panic("mmu build failed: {t}", .{e});
+    mmu.activate();
+    log.info("mmu: W^X kernel map active, boot identity map dropped", .{});
+
+    // Allocator smoke test: quota round-trips to zero.
+    {
+        const before = kalloc.kernel_account.used;
+        const page = kalloc.allocPage(&kalloc.kernel_account) catch |e| {
+            std.debug.panic("kalloc failed: {t}", .{e});
+        };
+        page[0] = 0xa5;
+        kalloc.freePage(&kalloc.kernel_account, page);
+        std.debug.assert(kalloc.kernel_account.used == before);
+        log.info("kalloc: page alloc/free round-trip, quota balanced", .{});
+    }
+
+    gic.init();
+    timer.init();
+    trap.enableIrqs();
+
+    if (build_options.fault_test) {
+        log.warn("about to read unmapped memory (-Dfault-test)", .{});
+        const bad: *volatile u64 = @ptrFromInt(0xffffff7f_dead_0000);
+        _ = bad.*;
     }
 
     if (build_options.panic_test) {
         @panic("panic test requested via -Dpanic-test");
     }
 
-    log.info("boot complete; nothing more to do — halting", .{});
+    log.info("boot complete; idling on wfi", .{});
     halt();
 }
 

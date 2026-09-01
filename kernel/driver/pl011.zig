@@ -4,7 +4,10 @@
 //! This lives in the kernel only for boot logging and panic output; real
 //! serial ownership moves to a userspace driver in Phase 7.
 
-const base: usize = 0x0900_0000;
+const mem = @import("../mem.zig");
+
+// Accessed through the direct map: Zig code only ever runs with the MMU on.
+const base: usize = mem.kvirt_offset + 0x0900_0000;
 
 const dr: *volatile u32 = @ptrFromInt(base + 0x00);
 const fr: *volatile u32 = @ptrFromInt(base + 0x18);
