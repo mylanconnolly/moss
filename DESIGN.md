@@ -78,6 +78,17 @@ benchmark): consumers of a bound notification must drain it with notify_wait
 after every interrupted recv, or the latched bits make every future recv
 return interrupted.
 
+A teardown lesson bought by an intermittent hang (the shell arc's check
+caught it at ~1-in-3): destroyThreadsOf marks a RUNNING thread exited and
+nudges its core — but that thread may concurrently be entering sleep() or
+an IPC block on another core, and blindly setting .sleeping/.blocked there
+overwrote the death mark, resurrecting the thread into the sleepers list
+or a wait queue so its domain never drained. Every voluntary state
+transition now checks for a pending kill under the big lock and dies
+instead of parking. The race was as old as SMP teardown itself; today's
+faster userspace merely widened the window until a 45-second suite could
+hit it.
+
 Two scheduler lessons from the same benchmark: (1) enqueueing a thread onto
 another core must *kick* that core (SGI out of wfi; need_resched + a
 preempt check on syscall return for the local core) — without it every
@@ -474,6 +485,43 @@ transport & build work, in order of what the digging found:
 Remaining headroom, in likely order: the Debug kernel's syscall/IPC
 paths, per-block XTS/MAC call overheads in fssvc's single thread, and
 read pipelining beyond one readahead window.
+
+## Developer tooling
+
+**As built (msh + typed introspection):** the developer console is an
+ordinary user process wired from exactly four capabilities — nothing about
+it is special to the kernel:
+
+- **The console** is a userspace virtio-console driver (`user/cons.zig`,
+  device id 3 — the third virtio device class through the same mmio/IRQ/
+  DMA grant interface). It serves a raw byte pipe to one client over a
+  channel + shared buffer; reads block the driver on the RX interrupt
+  (single client, and the kernel channel deliberately refuses recv while
+  a reply is pending). Echo and line discipline live in the client.
+- **msh** (`user/shell.zig`) holds the console channel, an fs view (the
+  same badged view protocol as every service), init's front channel, and
+  a spawner cap. Its command set is typed IPC end to end: ls/cat/write/
+  mkdir/rm/mv/ln/readlink/stat/df/sync over the fs protocol
+  (`user/fsclient.zig` — the client stubs shared with the fs demo roles),
+  svc/start/stop over init's protocol, ps/mem over the kernel's
+  introspection syscalls. Text exists only at the human boundary.
+- **Introspection authority = spawn authority**: domain_list and sysinfo
+  are gated on the spawner cap — the right to create domains carries the
+  right to see the ledger. domain_list fills the caller's buffer with
+  typed `shared.DomainRec` records (state, threads, name, exit code,
+  kobj/user used-and-limit) straight from the kernel's accounts; sysinfo
+  reports pmem, cores, uptime. domain_stat (per-ctl-cap) also reports
+  budgets now, so supervisors can watch their children's consumption.
+- **init grew a granted-channel mode** (a spawner hands it its front
+  channel; it serves until every client cap dies, then revokes its
+  services and exits) plus status/stop requests — a deliberate stop is
+  remembered and not restarted; connect doubles as start.
+- `zig build run-shell` boots the whole topology with the console on the
+  terminal (kernel log in zig-out/shell-kernel.log). The check's shell
+  spec boots the same topology with the console on a TCP chardev and
+  drives a real scripted session — fifteen commands, each response
+  asserted — then `exit` must land the usual leak bar (pmem
+  byte-identical, accounts zero).
 
 ## Networking
 

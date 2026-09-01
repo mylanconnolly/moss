@@ -6,11 +6,12 @@ tested; Phase 12+ items are the open pool.
 
 ## Commands
 
-- `zig build check` — THE gate: 12 OS tests under QEMU + host unit tests,
+- `zig build check` — THE gate: 13 OS tests under QEMU + host unit tests,
   ~45s. Run before every commit. Failure logs: `zig-out/check/*.log`.
 - `zig build test` — host unit tests only (shared ABI, dt parser, rings,
   lib/ lz4+xts, the full mossfs suite incl. crash sweeps).
 - `zig build bench | bench-soft` — host perf baselines (DESIGN.md table).
+- `zig build -Dshell-test && zig build run-shell` — interactive msh console.
 - `zig build run | run-hvf | run-blk | run-net | run-cluster` — manual
   boots (pair with `-D<name>-test` flags; see README test matrix).
 

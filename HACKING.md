@@ -19,7 +19,10 @@ done without rediscovering the sharp edges.
   tests, ~45s. Run it before committing. Logs land in `zig-out/check/`.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
-  echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment).
+  echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),
+  and `run-shell` — build with `-Dshell-test` first; your terminal becomes
+  msh (type `help`; kernel log lands in zig-out/shell-kernel.log; `exit`
+  powers the machine off).
 
 ## Adding things
 
@@ -41,6 +44,11 @@ x3/x4=blob va/len) → add to `user_progs` in `build.zig` **and** to
 polled (`would_block`) so one loop serves everyone; a bound notification
 (`notifyBind`) can interrupt your blocked `recv` — drain it with
 `notifyWait` after every `interrupted` or the latched bits will spin you.
+
+**A shell command**: add a `cmdFoo` + dispatch line in `user/shell.zig`
+(use the fsclient stubs / typed protocols — never parse text out of
+another service), and extend `shell_script` in `tools/runner.zig` so the
+scripted console session covers it.
 
 **An OS test**: write a driver in `kernel/main.zig` gated on a new
 build option; make it log a unique `"<name>-test: PASS ..."` line and then

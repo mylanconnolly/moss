@@ -148,7 +148,7 @@ fn connect(log_h: u64, init_b: u64, service: shared.ServiceId) u64 {
                 if (ok.cap == 0) usys.exit(133);
                 return ok.cap;
             },
-            .failed => usys.exit(134),
+            else => usys.exit(134),
         },
         .err => usys.exit(135),
     }

@@ -172,6 +172,17 @@ pub fn shmMap(handle: u64) IpcResult {
     return syscall6(.shm_map, handle, 0, 0, 0, 0, 0);
 }
 
+/// domain_list: data[0] = DomainRec count written into buf.
+pub fn domainList(spawner_h: u64, buf: []u8) IpcResult {
+    return syscall6(.domain_list, spawner_h, @intFromPtr(buf.ptr), buf.len, 0, 0, 0);
+}
+
+/// sysinfo: data[0] = pmem free bytes, data[1] = total bytes,
+/// data[2] = online cores, data[3] = uptime ticks.
+pub fn sysInfo(spawner_h: u64) IpcResult {
+    return syscall6(.sysinfo, spawner_h, 0, 0, 0, 0, 0);
+}
+
 fn syscall3(nr: shared.Syscall, a0: u64, a1: u64, a2: u64) u64 {
     return asm volatile ("svc #0"
         : [ret] "={x0}" (-> u64),

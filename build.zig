@@ -90,6 +90,11 @@ pub fn build(b: *std.Build) void {
         "fabric-test",
         "Run the multi-node fabric demo (use run-cluster)",
     ) orelse false;
+    const shell_test = b.option(
+        bool,
+        "shell-test",
+        "Boot the developer shell topology (use run-shell for a live console)",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -139,6 +144,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "fs_test", fs_test);
     build_opts.addOption(bool, "net_test", net_test);
     build_opts.addOption(bool, "fabric_test", fabric_test);
+    build_opts.addOption(bool, "shell_test", shell_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -164,6 +170,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "fs", .src = "user/fs.zig" },
         .{ .name = "net", .src = "user/net.zig" },
         .{ .name = "fabric", .src = "user/fabric.zig" },
+        .{ .name = "cons", .src = "user/cons.zig" },
+        .{ .name = "shell", .src = "user/shell.zig" },
     };
     const user_blobs = b.addWriteFiles();
     var blobs_zig: std.ArrayList(u8) = .empty;
@@ -283,6 +291,45 @@ pub fn build(b: *std.Build) void {
     run_blk.step.dependOn(&mkdisk.step);
     const run_blk_step = b.step("run-blk", "Boot with a virtio disk attached (pairs with -Dblk-test).");
     run_blk_step.dependOn(&run_blk.step);
+
+    // run-shell: the interactive developer boot. YOUR TERMINAL IS MSH —
+    // the virtio console rides stdio while the kernel log goes to a file.
+    // Build with -Dshell-test (the same topology the scripted check uses).
+    const mkdisk_sh = b.addSystemCommand(&.{
+        "sh", "-c", "test -f zig-out/shell-disk.img || dd if=/dev/zero of=zig-out/shell-disk.img bs=1048576 count=8 2>/dev/null",
+    });
+    const run_shell = b.addSystemCommand(&.{
+        "qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "cortex-a72",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-drive",
+        "if=none,file=zig-out/shell-disk.img,format=raw,id=hd",
+        "-device",
+        "virtio-blk-device,drive=hd",
+        "-device",
+        "virtio-serial-device",
+        "-chardev",
+        "stdio,id=c0,signal=off",
+        "-device",
+        "virtconsole,chardev=c0",
+        "-display",
+        "none",
+        "-serial",
+        "file:zig-out/shell-kernel.log",
+        "-smp",
+        "4",
+        "-m",
+        "512M",
+    });
+    run_shell.addArg("-kernel");
+    run_shell.addFileArg(kernel_bin.getOutput());
+    run_shell.step.dependOn(&mkdisk_sh.step);
+    const run_shell_step = b.step("run-shell", "Interactive msh console (build with -Dshell-test; kernel log in zig-out/shell-kernel.log).");
+    run_shell_step.dependOn(&run_shell.step);
 
     // run-net: virtio-net over slirp (v4 + v6), with a guestfwd echo server
     // (cat) at 10.0.2.100:9000.
@@ -415,10 +462,12 @@ pub fn build(b: *std.Build) void {
         "panic_test",  "fault_test", "sched_test", "domain_test",
         "ipc_test",    "init_test",  "sandbox_test", "flap_test",
         "blk_test",    "fs_test",    "net_test",   "fabric_test",
+        "shell_test",
     };
     const variants = [_][]const u8{
         "panic", "fault", "sched", "domain", "ipc",  "init",
         "sandbox", "flap", "blk",  "fs",     "net",  "fabric",
+        "shell",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();

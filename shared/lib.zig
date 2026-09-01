@@ -75,6 +75,12 @@ pub const Syscall = enum(u64) {
     /// chan_mint(chan_a, badge) -> x2 = badged channel_b handle. Serving
     /// side only; recv delivers the caller's badge in x6.
     chan_mint = 24,
+    /// domain_list(spawner, buf_va, buf_len) -> x1 = record count. Fills
+    /// buf with DomainRec records; spawn authority gates seeing the tree.
+    domain_list = 25,
+    /// sysinfo(spawner) -> x1 = pmem free bytes, x2 = pmem total bytes,
+    /// x3 = online cores, x4 = uptime ticks.
+    sysinfo = 26,
     _,
 };
 
@@ -93,6 +99,74 @@ pub const DomainState = enum(u64) {
     dying = 1,
     dead = 2,
 };
+
+/// One row of domain_list: fixed 48-byte little-endian record, written
+/// into the caller's buffer by the kernel and decoded with the helpers
+/// below — typed introspection, no text scraping.
+pub const DomainRec = struct {
+    id: u32,
+    state: DomainState,
+    threads: u8,
+    name: [16]u8, // NUL-padded
+    exit_code: u64,
+    kobj_kb: u64, // used KB << 32 | limit KB
+    user_kb: u64, // used KB << 32 | limit KB
+
+    pub const size = 48;
+
+    pub fn encode(r: *const DomainRec, out: *[size]u8) void {
+        std.mem.writeInt(u32, out[0..4], r.id, .little);
+        out[4] = @intCast(@intFromEnum(r.state));
+        out[5] = r.threads;
+        out[6] = 0;
+        out[7] = 0;
+        @memcpy(out[8..24], &r.name);
+        std.mem.writeInt(u64, out[24..32], r.exit_code, .little);
+        std.mem.writeInt(u64, out[32..40], r.kobj_kb, .little);
+        std.mem.writeInt(u64, out[40..48], r.user_kb, .little);
+    }
+
+    pub fn decode(b: *const [size]u8) DomainRec {
+        return .{
+            .id = std.mem.readInt(u32, b[0..4], .little),
+            .state = std.enums.fromInt(DomainState, b[4]) orelse .dead,
+            .threads = b[5],
+            .name = b[8..24].*,
+            .exit_code = std.mem.readInt(u64, b[24..32], .little),
+            .kobj_kb = std.mem.readInt(u64, b[32..40], .little),
+            .user_kb = std.mem.readInt(u64, b[40..48], .little),
+        };
+    }
+
+    pub fn nameSlice(r: *const DomainRec) []const u8 {
+        var n: usize = 0;
+        while (n < r.name.len and r.name[n] != 0) n += 1;
+        return r.name[0..n];
+    }
+};
+
+test "DomainRec codec round trip" {
+    var name: [16]u8 = @splat(0);
+    @memcpy(name[0..5], "fssvc");
+    const r: DomainRec = .{
+        .id = 7,
+        .state = .alive,
+        .threads = 2,
+        .name = name,
+        .exit_code = 0,
+        .kobj_kb = (123 << 32) | 1024,
+        .user_kb = (2048 << 32) | 4096,
+    };
+    var buf: [DomainRec.size]u8 = undefined;
+    r.encode(&buf);
+    const d = DomainRec.decode(&buf);
+    try std.testing.expectEqual(r.id, d.id);
+    try std.testing.expectEqual(r.state, d.state);
+    try std.testing.expectEqual(r.threads, d.threads);
+    try std.testing.expectEqualStrings("fssvc", d.nameSlice());
+    try std.testing.expectEqual(r.kobj_kb, d.kobj_kb);
+    try std.testing.expectEqual(r.user_kb, d.user_kb);
+}
 
 /// Syscall results: 0 is success, anything else is one of these.
 pub const Errno = enum(u64) {
@@ -127,6 +201,8 @@ pub const ImageId = enum(u64) {
     fs = 7,
     net = 8,
     fabric = 9,
+    cons = 10,
+    shell = 11,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -199,12 +275,20 @@ pub const FaultMsg = union(enum(u64)) {
 /// Init's front-channel protocol: ask to be connected to a service; the
 /// reply attaches a fresh channel-B cap for it.
 pub const InitRequest = union(enum(u64)) {
+    /// Connect to (lazily starting, or restarting a stopped) service.
     connect: struct { service: u64 },
+    /// Service-level status: up/down, restart usage.
+    status: struct { service: u64 },
+    /// Deliberate stop: the instance is destroyed and supervision will
+    /// not restart it (connect starts it again).
+    stop: struct { service: u64 },
 };
 
 pub const InitReply = union(enum(u64)) {
     connected: void,
     failed: struct { err: u64 },
+    svc_status: struct { up: u64, restarts: u64, max_restarts: u64 },
+    stopped: void,
 };
 
 /// The logging service protocol: 24 bytes of text packed into the words.
@@ -248,6 +332,25 @@ pub const BlkResp = union(enum(u64)) {
 };
 
 pub const blk_sector_size: u64 = 512;
+
+// ---------------------------------------------------------------- console
+//
+// The console service protocol (virtio-console driver): a raw byte pipe
+// for one client. Bytes move through a shared buffer granted via setup;
+// read blocks until at least one byte is available. Echo and line
+// discipline belong to the client (msh).
+
+pub const ConsReq = union(enum(u64)) {
+    setup: void, // + shm cap: the byte buffer
+    read: struct { max: u64 }, // -> bytes at buf[0..n]
+    write: struct { len: u64 }, // <- bytes from buf[0..len]
+};
+
+pub const ConsResp = union(enum(u64)) {
+    ok: void,
+    n: struct { n: u64 },
+    cons_err: struct { code: u64 },
+};
 
 // ------------------------------------------------------------- filesystem
 //
@@ -296,12 +399,16 @@ pub const FsReq = union(enum(u64)) {
     readlink: struct { path_off: u64, path_len: u64 }, // target -> buf
     /// Durability barrier: everything acknowledged is on disk on reply.
     sync: void,
+    /// Volume stats (the `df` shape): free/total 4K blocks + encryption.
+    statfs: void,
+    close: struct { fd: u64 },
 };
 
 pub const FsResp = union(enum(u64)) {
     ok: void,
     num: struct { n: u64 },
     stat: struct { typ: u64, size: u64, mtime: u64 }, // typ: FsType
+    statfs: struct { free_blocks: u64, total_blocks: u64, encrypted: u64 },
     fs_err: struct { code: u64 },
 };
 

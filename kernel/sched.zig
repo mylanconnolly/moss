@@ -173,6 +173,10 @@ pub fn registerCpu(cpu_id: u32) void {
     );
 }
 
+pub fn uptimeTicks() u64 {
+    return global_ticks;
+}
+
 pub fn onlineCount() u32 {
     var n: u32 = 0;
     for (&cpus) |*cpu| {
@@ -224,6 +228,14 @@ pub fn sleep(ticks: u64) void {
     const cpu = thisCpu();
     const t = cpu.current;
     std.debug.assert(t != cpu.idle); // the idle thread never sleeps
+    // Teardown race: destroyThreadsOf may have marked this (then-running)
+    // thread exited from another core while it was entering this syscall.
+    // Overwriting that with .sleeping would resurrect it into the sleepers
+    // list and the domain would never drain. Die here instead.
+    if (t.state == .exited) {
+        scheduleLocked(); // never returns: exited threads are reaped
+        unreachable;
+    }
     t.state = .sleeping;
     t.wake_tick = global_ticks + ticks;
     sleepers.append(&t.node);
@@ -296,6 +308,13 @@ pub fn release(daif: u64) void {
 pub fn blockCurrentLocked(list: ?*std.DoublyLinkedList, slot: ?*?*Thread) void {
     const t = thisCpu().current;
     std.debug.assert(t != thisCpu().idle);
+    // Same teardown race as sleep(): a concurrent destroy may have marked
+    // this thread exited; parking it would overwrite that and leak it into
+    // an IPC wait structure. Die instead.
+    if (t.state == .exited) {
+        scheduleLocked(); // never returns
+        unreachable;
+    }
     t.state = .blocked;
     t.block_list = list;
     t.block_slot = slot;

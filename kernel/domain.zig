@@ -119,6 +119,35 @@ pub fn init(image_table: []const []const u8) void {
     images = image_table;
 }
 
+/// Fill `buf` with shared.DomainRec records for every live slot (the
+/// domain_list syscall's worker). Returns the record count.
+pub fn fillRecs(buf: []u8) usize {
+    var n: usize = 0;
+    for (&domains) |*d| {
+        if (d.state == .unused) continue;
+        if ((n + 1) * shared.DomainRec.size > buf.len) break;
+        var name: [16]u8 = @splat(0);
+        const len = @min(d.name.len, 16);
+        @memcpy(name[0..len], d.name[0..len]);
+        const rec: shared.DomainRec = .{
+            .id = d.id,
+            .state = switch (d.state) {
+                .alive => .alive,
+                .dying => .dying,
+                else => .dead,
+            },
+            .threads = @intCast(@min(d.threads_alive.load(.acquire), 255)),
+            .name = name,
+            .exit_code = d.exit_code,
+            .kobj_kb = ((d.kobj.balance() / 1024) << 32) | (d.kobj.limit / 1024),
+            .user_kb = ((d.user_mem.balance() / 1024) << 32) | (d.user_mem.limit / 1024),
+        };
+        rec.encode(buf[n * shared.DomainRec.size ..][0..shared.DomainRec.size]);
+        n += 1;
+    }
+    return n;
+}
+
 pub fn imageById(id: u64) ?[]const u8 {
     if (id >= images.len) return null;
     return images[@intCast(id)];

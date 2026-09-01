@@ -11,7 +11,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster };
+const Kind = enum { plain, blk, net, cluster, shell };
 
 const Spec = struct {
     name: []const u8,
@@ -47,11 +47,13 @@ const specs = [_]Spec{
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS" },
+    .{ .name = "shell", .kind = .shell, .pass = "shell-test: PASS", .timeout_s = 120 },
     .{ .name = "fabric", .kind = .cluster, .pass = "fabric-test: PASS", .timeout_s = 120 },
 };
 
 const check_dir = "zig-out/check";
 const cluster_port = "31901";
+const shell_port: u16 = 31903;
 const poll_ms = 100;
 
 var io: Io = undefined;
@@ -114,6 +116,7 @@ fn specByName(name: []const u8) ?Spec {
 
 fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .cluster) return runCluster(spec, bin, polls);
+    if (spec.kind == .shell) return runShell(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
     if (spec.kind == .blk) try makeDisk(disk);
@@ -178,6 +181,150 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const verdict = watch(log1, spec, spec.extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log1);
     return verdict.ok;
+}
+
+/// The scripted developer-console session: boot the shell topology with
+/// the virtio console on a TCP chardev, drive real commands through msh,
+/// require each expected response, then `exit` and require the PASS
+/// marker + leak check in the kernel log. A reader thread drains the
+/// socket into a shared buffer the script polls — same poll-with-timeout
+/// shape as the log watching.
+const ConsoleTap = struct {
+    fd: std.posix.fd_t,
+    buf: [1 << 16]u8 = undefined,
+    /// Reader thread appends bytes then releases len; the main thread
+    /// acquires len and scans past its discard watermark. Single writer,
+    /// single reader, append-only: no lock needed.
+    len: std.atomic.Value(usize) = .init(0),
+    start: usize = 0, // main-thread-only discard watermark
+
+    fn readerLoop(t: *ConsoleTap) void {
+        var chunk: [1024]u8 = undefined;
+        while (true) {
+            const n = std.posix.read(t.fd, &chunk) catch break;
+            if (n == 0) break;
+            const old = t.len.load(.monotonic);
+            const k = @min(n, t.buf.len - old);
+            if (k == 0) break;
+            @memcpy(t.buf[old .. old + k], chunk[0..k]);
+            t.len.store(old + k, .release);
+        }
+    }
+
+    fn clear(t: *ConsoleTap) void {
+        t.start = t.len.load(.acquire);
+    }
+
+    fn contains(t: *ConsoleTap, pat: []const u8) bool {
+        const end = t.len.load(.acquire);
+        if (end <= t.start) return false;
+        return std.mem.indexOf(u8, t.buf[t.start..end], pat) != null;
+    }
+};
+
+const shell_script = [_]struct { send: []const u8, expect: []const u8 }{
+    .{ .send = "help", .expect = "commands:" },
+    .{ .send = "ps", .expect = "fssvc" },
+    .{ .send = "mem", .expect = "MB free" },
+    .{ .send = "df", .expect = "(encrypted)" },
+    .{ .send = "mkdir data/smoke", .expect = "ok" },
+    .{ .send = "write data/smoke/hi.txt typed ipc all the way down", .expect = "ok" },
+    .{ .send = "cat data/smoke/hi.txt", .expect = "typed ipc all the way down" },
+    .{ .send = "ln data/smoke/l hi.txt", .expect = "ok" },
+    .{ .send = "cat data/smoke/l", .expect = "typed ipc" },
+    .{ .send = "stat data/smoke/l", .expect = "symlink" },
+    .{ .send = "start 1", .expect = "started" },
+    .{ .send = "svc", .expect = "up" },
+    .{ .send = "stop 1", .expect = "stopped" },
+    .{ .send = "rm data/smoke/l", .expect = "ok" },
+    .{ .send = "sync", .expect = "ok" },
+};
+
+fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
+    cwd.deleteFile(io, disk) catch {};
+    try makeDisk(disk);
+    const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}-1.log", .{ check_dir, spec.name });
+    cwd.deleteFile(io, log_path) catch {};
+
+    var args: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args, log_path, bin);
+    try appendDisk(&args, disk);
+    try args.appendSlice(gpa, &.{
+        "-device", "virtio-serial-device",
+        "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{shell_port}),
+        "-device",  "virtconsole,chardev=c0",
+    });
+
+    var child = try spawnQemu(args.items);
+    defer child.kill(io);
+
+    // Connect (QEMU binds the chardev at startup).
+    var fd: ?std.posix.fd_t = null;
+    for (0..50) |_| {
+        fd = tcpConnect(shell_port) catch {
+            sleepMs(100);
+            polls.* += 1;
+            continue;
+        };
+        break;
+    }
+    const sock = fd orelse {
+        reportFailure(spec.name, "console socket never accepted", log_path);
+        return false;
+    };
+    var tap = try gpa.create(ConsoleTap);
+    tap.* = .{ .fd = sock };
+    const th = try std.Thread.spawn(.{}, ConsoleTap.readerLoop, .{tap});
+    th.detach();
+
+    // Prompt, then the script, then exit.
+    sockSend(sock, "\r");
+    if (!waitFor(tap, "msh> ", 300, polls)) {
+        reportFailure(spec.name, "no shell prompt", log_path);
+        return false;
+    }
+    for (&shell_script) |step| {
+        tap.clear();
+        sockSend(sock, step.send);
+        sockSend(sock, "\r");
+        if (!(waitFor(tap, step.expect, 300, polls) and waitFor(tap, "msh> ", 300, polls))) {
+            std.debug.print("[FAIL] {s}: console step '{s}' missing '{s}'\n", .{ spec.name, step.send, step.expect });
+            reportFailure(spec.name, "console script step failed", log_path);
+            return false;
+        }
+    }
+    tap.clear();
+    sockSend(sock, "exit\r");
+
+    const verdict = watch(log_path, spec, spec.extra, polls);
+    if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
+    return verdict.ok;
+}
+
+fn sockSend(fd: std.posix.fd_t, bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(fd, bytes.ptr + off, bytes.len - off);
+        if (n <= 0) return;
+        off += @intCast(n);
+    }
+}
+
+fn tcpConnect(port: u16) !std.posix.fd_t {
+    const addr = try Io.net.IpAddress.parse("127.0.0.1", port);
+    const stream = try addr.connect(io, .{ .mode = .stream });
+    return stream.socket.handle;
+}
+
+/// Poll the console tap for a pattern; `ticks` are 100ms polls.
+fn waitFor(tap: *ConsoleTap, pat: []const u8, ticks: u64, polls: *u64) bool {
+    for (0..ticks) |_| {
+        if (tap.contains(pat)) return true;
+        sleepMs(poll_ms);
+        polls.* += 1;
+    }
+    return false;
 }
 
 const Verdict = struct { ok: bool, why: []const u8 = "" };

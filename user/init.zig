@@ -10,7 +10,9 @@
 //!   dead service is respawned on a fresh channel, and dependents re-wire
 //!   by asking init to connect them again.
 //!
-//! Grant layout (insert order log→spawner): log in x0, spawner at slot 1.
+//! Grant layout (insert order log→chan→spawner): log in x0; without a
+//! channel grant spawner sits at slot 1 (demo boot), with one it shifts
+//! to slot 2 (shell boot, serveFront mode).
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
@@ -37,7 +39,10 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-const spawner: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
+// Grant insert order is log -> chan -> spawner: without a channel grant
+// (the demo boot) spawner sits at slot 1; with one (the shell boot,
+// serveFront) it shifts to slot 2. Set at startup.
+var spawner: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
 
 /// The topology: what init can activate, and how stubborn it is about
 /// keeping each entry alive. This is the compiled-in typed constant; it
@@ -135,6 +140,8 @@ const Instance = struct {
     chan_a_dropped: bool = true,
     restarts: u64 = 0,
     up: bool = false,
+    /// Deliberately stopped: supervision leaves it down; connect revives.
+    stopped: bool = false,
 };
 
 var instances: [8]Instance = @splat(.{});
@@ -142,7 +149,7 @@ var glog: u64 = 0;
 
 const svc_limits = usys.kbLimits(1 << 10, 4 << 10); // 1MB kobj, 4MB user per service
 
-export fn umain(log_h: u64, _: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
 
     const notif = usys.notifyCreate();
@@ -154,6 +161,13 @@ export fn umain(log_h: u64, _: u64, arg: u64, blob_va: u64, blob_len: u64) callc
 
     loadTopology(blob_va, blob_len);
     _ = usys.log(log_h, "init: up; topology present, nothing started (lazy)");
+
+    if (chan_h != 0) spawner = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
+
+    // Granted-channel mode: a spawner (the shell boot) hands init its
+    // front channel's serving side; init serves it until every client cap
+    // dies, then revokes its services and exits — no demo worker.
+    if (chan_h != 0) serveFront(chan_h, notif.data[0]);
 
     // Front channel: workers call here. We keep both ends; worker gets a
     // copy of B at spawn.
@@ -191,6 +205,26 @@ export fn umain(log_h: u64, _: u64, arg: u64, blob_va: u64, blob_len: u64) callc
     usys.exit(0);
 }
 
+fn serveFront(front_a: u64, notif: u64) noreturn {
+    while (true) {
+        const r = usys.recvMsg(front_a);
+        switch (r.err) {
+            .interrupted => {
+                _ = usys.notifyWait(notif);
+                superviseDeaths();
+            },
+            .ok => handleRequest(front_a, r),
+            .peer_dead => break,
+            else => usys.exit(117),
+        }
+    }
+    for (instances[0..topology_len]) |*inst| {
+        if (inst.up) _ = usys.domainDestroy(inst.ctl);
+    }
+    _ = usys.log(glog, "init: front channel closed; services revoked; exiting");
+    usys.exit(0);
+}
+
 fn handleRequest(front_a: u64, r: usys.IpcResult) void {
     const req = shared.decodeMsg(shared.InitRequest, r.data) orelse {
         _ = usys.replyTyped(shared.InitReply, front_a, .{
@@ -224,7 +258,42 @@ fn handleRequest(front_a: u64, r: usys.IpcResult) void {
                     return;
                 }
             }
+            inst.stopped = false; // connect doubles as (re)start
             _ = usys.replyTyped(shared.InitReply, front_a, .connected, inst.chan_b);
+        },
+        .status => |q| {
+            const idx = findService(q.service) orelse {
+                _ = usys.replyTyped(shared.InitReply, front_a, .{
+                    .failed = .{ .err = @intFromEnum(shared.Errno.bad_arg) },
+                }, 0);
+                return;
+            };
+            const inst = &instances[idx];
+            // Refresh liveness so status never reports a corpse as up.
+            if (inst.up and inst.ctl != 0) {
+                const st = usys.domainStat(inst.ctl);
+                if (st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.dead)) {
+                    inst.up = false;
+                }
+            }
+            _ = usys.replyTyped(shared.InitReply, front_a, .{ .svc_status = .{
+                .up = @intFromBool(inst.up),
+                .restarts = inst.restarts,
+                .max_restarts = topology[idx].max_restarts,
+            } }, 0);
+        },
+        .stop => |q| {
+            const idx = findService(q.service) orelse {
+                _ = usys.replyTyped(shared.InitReply, front_a, .{
+                    .failed = .{ .err = @intFromEnum(shared.Errno.bad_arg) },
+                }, 0);
+                return;
+            };
+            const inst = &instances[idx];
+            if (inst.up and inst.ctl != 0) _ = usys.domainDestroy(inst.ctl);
+            inst.up = false;
+            inst.stopped = true;
+            _ = usys.replyTyped(shared.InitReply, front_a, .stopped, 0);
         },
     }
 }
@@ -262,7 +331,7 @@ fn activate(idx: usize) bool {
 /// One-for-one supervision with budget + backoff.
 fn superviseDeaths() void {
     for (instances[0..topology_len], 0..) |*inst, idx| {
-        if (!inst.up or inst.ctl == 0) continue;
+        if (!inst.up or inst.ctl == 0 or inst.stopped) continue;
         const st = usys.domainStat(inst.ctl);
         if (st.err != .ok) continue;
         if (st.data[0] != @intFromEnum(shared.DomainState.dead)) continue;

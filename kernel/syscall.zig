@@ -12,6 +12,7 @@ const domain = @import("domain.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
 const log = @import("log.zig");
+const pmem = @import("pmem.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 const trap = @import("trap.zig");
@@ -54,6 +55,8 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .dma_alloc => sysDmaAlloc(d, frame),
         .notify_bind => sysNotifyBind(d, frame.regs[0]),
         .chan_mint => sysChanMint(d, frame),
+        .domain_list => sysDomainList(d, frame),
+        .sysinfo => sysSysinfo(d, frame),
         _ => errno(.nosys),
     };
 }
@@ -208,6 +211,36 @@ fn sysDomainStat(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         else => @intFromEnum(shared.DomainState.dead),
     };
     frame.regs[2] = child.exit_code;
+    // Budgets, used KB << 32 | limit KB (introspection for supervisors).
+    frame.regs[3] = ((child.kobj.balance() / 1024) << 32) | (child.kobj.limit / 1024);
+    frame.regs[4] = ((child.user_mem.balance() / 1024) << 32) | (child.user_mem.limit / 1024);
+    return errno(.ok);
+}
+
+/// domain_list(spawner, buf, len): typed DomainRec records for every live
+/// domain — the whole tree. Spawn authority is the gate: the right to
+/// create domains carries the right to see the ledger.
+fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    _ = d.captable.?.lookup(h, .spawner) orelse return errno(.bad_handle);
+    const ptr = frame.regs[1];
+    const len = frame.regs[2];
+    if (len == 0 or len > 64 * 1024) return errno(.bad_arg);
+    if (!userRangeOk(d, ptr, len)) return errno(.fault);
+    const buf = @as([*]u8, @ptrFromInt(ptr))[0..len];
+    frame.regs[1] = domain.fillRecs(buf);
+    return errno(.ok);
+}
+
+/// sysinfo(spawner): pmem free/total bytes, online cores, uptime ticks.
+fn sysSysinfo(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    _ = d.captable.?.lookup(h, .spawner) orelse return errno(.bad_handle);
+    const st = pmem.stats();
+    frame.regs[1] = st.free_bytes;
+    frame.regs[2] = st.total_bytes;
+    frame.regs[3] = sched.onlineCount();
+    frame.regs[4] = sched.uptimeTicks();
     return errno(.ok);
 }
 

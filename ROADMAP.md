@@ -178,7 +178,22 @@ The pooling story stops being theory.
 - Dynamic fabric membership; smarter placement ("any node with 4 free cores").
 - Time-partitioning opt-in for side-channel-sensitive domains.
 - EL2: Moss as hypervisor, partitioning one box into pool nodes — the pooling story from both directions.
-- virtio-gpu/input; developer shell and tooling (`mossctl`: typed-IPC introspection of init, domains, and budgets — no text scraping).
+- virtio-gpu and input devices (the graphical console).
+- ✅ **Developer shell and tooling** (done): **msh**, an interactive shell
+  over a new virtio-console driver (moss's third virtio device class),
+  holding exactly the caps a console needs — console channel, fs view,
+  init front channel, spawner. The mossctl functionality is typed-IPC
+  builtins: `ps`/`mem` via new spawner-gated kernel introspection
+  syscalls (domain_list fills typed DomainRec records straight from the
+  ledger — state, threads, kobj/user budgets; sysinfo reports pmem,
+  cores, uptime; spawn authority is the gate on seeing the tree),
+  `svc`/`start`/`stop` via init's extended protocol (deliberate stops
+  are not restarted), and ls/cat/write/mkdir/rm/mv/ln/readlink/stat/
+  df/sync over the ordinary fs view protocol. `zig build run-shell`
+  boots it interactively (your terminal is the machine; kernel log in a
+  file); the check's shell spec drives a real scripted session over a
+  socket chardev and holds the usual leak bar. No text scraping
+  anywhere — text exists only where a human reads it.
 - ✅ **mossfs v2 — a filesystem you can trust** (done): replaced the
   Phase 9 teaching filesystem behind the same view-cap protocol, as a
   service swap with no migration. As built (`user/mossfs.zig` +

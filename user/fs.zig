@@ -29,6 +29,7 @@
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const mossfs = @import("mossfs.zig");
+const fsc = @import("fsclient.zig");
 
 comptime {
     asm (
@@ -154,6 +155,8 @@ fn fssvc(log_h: u64, chan_h: u64, blob_va: u64, blob_len: u64) noreturn {
             .symlink => |sl| reply(doSymlink(v, sl.path, sl.target)),
             .readlink => |rl| reply(doReadlink(v, rl.path_off, rl.path_len)),
             .sync => reply(doSync()),
+            .statfs => reply(doStatfs()),
+            .close => |c| reply(doClose(v, c.fd)),
         }
         // Batched durability: commit between ops when enough is dirty.
         if (disk_ok) mfs.maybeCommit(nowSec()) catch {};
@@ -907,6 +910,22 @@ fn doReadlink(v: *View, path_off: u64, path_len: u64) shared.FsResp {
     }
 }
 
+fn doClose(v: *View, fdn: u64) shared.FsResp {
+    if (fdn >= max_fds or !v.fds[fdn].used) return ferr(.bad_fd);
+    v.fds[fdn].used = false;
+    return .ok;
+}
+
+fn doStatfs() shared.FsResp {
+    if (!disk_ok) return ferr(.io);
+    const free = mfs.freeBlocksTotal() catch |err| return mapErr(err);
+    return .{ .statfs = .{
+        .free_blocks = free,
+        .total_blocks = mfs.nsecs / mossfs.spb,
+        .encrypted = @intFromBool(mfs.enc),
+    } };
+}
+
 fn doSync() shared.FsResp {
     if (!disk_ok) return ferr(.io);
     mfs.sync(nowSec()) catch |err| return mapErr(err);
@@ -1002,273 +1021,120 @@ fn doDerive(v: *View, path_off: u64, path_len: u64, want_ro: bool) void {
     _ = usys.capDrop(minted.data[1]); // the transferred copy carries the ref
 }
 
-// -------------------------------------------------------------- clients
-
-fn fsOpen(chan: u64, buf: [*]u8, path: []const u8, create: u64) union(enum) { fd: u64, err: shared.FsErr } {
-    @memcpy(buf[1024 .. 1024 + path.len], path);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .open = .{ .path_off = 1024, .path_len = path.len, .create = create },
-    }, 0)) {
-        .ok => |rep| switch (rep) {
-            .num => |x| return .{ .fd = x.n },
-            .fs_err => |e| return .{ .err = @enumFromInt(e.code) },
-            else => return .{ .err = .io },
-        },
-        .err => return .{ .err = .io },
-    }
-}
-
-fn fsWrite(chan: u64, buf: [*]u8, fd: u64, data: []const u8) bool {
-    @memcpy(buf[0..data.len], data);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .write = .{ .fd = fd, .off = 0, .len = data.len },
-    }, 0)) {
-        .ok => |rep| return rep == .num,
-        .err => return false,
-    }
-}
-
-fn fsRead(chan: u64, fd: u64, len: u64) ?u64 {
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .read = .{ .fd = fd, .off = 0, .len = len },
-    }, 0)) {
-        .ok => |rep| switch (rep) {
-            .num => |x| return x.n,
-            else => return null,
-        },
-        .err => return null,
-    }
-}
-
-fn fsList(chan: u64, buf: [*]u8, path: []const u8) ?u64 {
-    @memcpy(buf[1024 .. 1024 + path.len], path);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .list = .{ .path_off = 1024, .path_len = path.len },
-    }, 0)) {
-        .ok => |rep| switch (rep) {
-            .num => |x| return x.n,
-            else => return null,
-        },
-        .err => return null,
-    }
-}
-
-fn attachBuf(chan: u64) struct { va: u64, cap: u64 } {
-    const s = usys.shmCreate(shared.fs_buf_pages);
-    if (s.err != .ok) usys.exit(210);
-    const m = usys.shmMap(s.data[0]);
-    if (m.err != .ok) usys.exit(211);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .attach_buf, s.data[0])) {
-        .ok => {},
-        .err => usys.exit(212),
-    }
-    return .{ .va = m.data[0], .cap = s.data[0] };
-}
-
-fn fsMkdir(chan: u64, buf: [*]u8, path: []const u8) bool {
-    @memcpy(buf[1024 .. 1024 + path.len], path);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .open = .{ .path_off = 1024, .path_len = path.len, .create = 2 },
-    }, 0)) {
-        .ok => |rep| return rep == .ok,
-        .err => return false,
-    }
-}
-
-fn fsDelete(chan: u64, buf: [*]u8, path: []const u8) union(enum) { ok, err: shared.FsErr } {
-    @memcpy(buf[1024 .. 1024 + path.len], path);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .delete = .{ .path_off = 1024, .path_len = path.len },
-    }, 0)) {
-        .ok => |rep| switch (rep) {
-            .ok => return .ok,
-            .fs_err => |e| return .{ .err = @enumFromInt(e.code) },
-            else => return .{ .err = .io },
-        },
-        .err => return .{ .err = .io },
-    }
-}
-
-fn fsRename(chan: u64, buf: [*]u8, from: []const u8, to: []const u8) bool {
-    @memcpy(buf[1024 .. 1024 + from.len], from);
-    @memcpy(buf[1536 .. 1536 + to.len], to);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .rename = .{ .from = 1024 | (from.len << 32), .to = 1536 | (to.len << 32) },
-    }, 0)) {
-        .ok => |rep| return rep == .ok,
-        .err => return false,
-    }
-}
-
-fn fsTruncate(chan: u64, fd: u64, len: u64) bool {
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .truncate = .{ .fd = fd, .len = len },
-    }, 0)) {
-        .ok => |rep| return rep == .ok,
-        .err => return false,
-    }
-}
-
-const StatOut = struct { typ: u64, size: u64, mtime: u64 };
-
-fn fsStat(chan: u64, buf: [*]u8, path: []const u8) ?StatOut {
-    @memcpy(buf[1024 .. 1024 + path.len], path);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .stat = .{ .path_off = 1024, .path_len = path.len },
-    }, 0)) {
-        .ok => |rep| switch (rep) {
-            .stat => |st| return .{ .typ = st.typ, .size = st.size, .mtime = st.mtime },
-            else => return null,
-        },
-        .err => return null,
-    }
-}
-
-fn fsSymlink(chan: u64, buf: [*]u8, path: []const u8, target: []const u8) bool {
-    @memcpy(buf[1024 .. 1024 + path.len], path);
-    @memcpy(buf[1536 .. 1536 + target.len], target);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .symlink = .{ .path = 1024 | (path.len << 32), .target = 1536 | (target.len << 32) },
-    }, 0)) {
-        .ok => |rep| return rep == .ok,
-        .err => return false,
-    }
-}
-
-fn fsReadlink(chan: u64, buf: [*]u8, path: []const u8) ?u64 {
-    @memcpy(buf[1024 .. 1024 + path.len], path);
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
-        .readlink = .{ .path_off = 1024, .path_len = path.len },
-    }, 0)) {
-        .ok => |rep| switch (rep) {
-            .num => |x| return x.n,
-            else => return null,
-        },
-        .err => return null,
-    }
-}
-
-fn fsSync(chan: u64) bool {
-    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .sync, 0)) {
-        .ok => |rep| return rep == .ok,
-        .err => return false,
-    }
-}
-
 fn alice(log_h: u64, fs_chan: u64) noreturn {
     var line: [96]u8 = undefined;
-    const b = attachBuf(fs_chan);
+    const b = fsc.attachBuf(fs_chan);
     const buf: [*]u8 = @ptrFromInt(b.va);
 
     // Boot image is readable...
-    switch (fsOpen(fs_chan, buf, "boot/etc/motd", 0)) {
+    switch (fsc.fsOpen(fs_chan, buf, "boot/etc/motd", 0)) {
         .fd => |fd| {
-            const n = fsRead(fs_chan, fd, 64) orelse usys.exit(101);
+            const n = fsc.fsRead(fs_chan, fd, 64) orelse usys.exit(101);
             _ = usys.log(log_h, cat(&line, "alice: boot/etc/motd says: ", buf[0..n]));
         },
         .err => usys.exit(102),
     }
     // ...but never writable, even for a rw root view.
-    switch (fsOpen(fs_chan, buf, "boot/hack", 1)) {
+    switch (fsc.fsOpen(fs_chan, buf, "boot/hack", 1)) {
         .fd => usys.exit(103),
         .err => |e| if (e != .denied) usys.exit(104),
     }
 
     // Real storage, standard hierarchy: private state in state/alice,
     // shared payload in data/pub for bob.
-    if (!fsMkdir(fs_chan, buf, "state/alice")) usys.exit(105);
-    switch (fsOpen(fs_chan, buf, "state/alice/secret.txt", 1)) {
-        .fd => |fd| if (!fsWrite(fs_chan, buf, fd, "top secret stuff")) usys.exit(106),
+    if (!fsc.fsMkdir(fs_chan, buf, "state/alice")) usys.exit(105);
+    switch (fsc.fsOpen(fs_chan, buf, "state/alice/secret.txt", 1)) {
+        .fd => |fd| if (!fsc.fsWrite(fs_chan, buf, fd, "top secret stuff")) usys.exit(106),
         .err => usys.exit(107),
     }
-    if (!fsMkdir(fs_chan, buf, "data/pub")) usys.exit(108);
-    switch (fsOpen(fs_chan, buf, "data/pub/note.txt", 1)) {
-        .fd => |fd| if (!fsWrite(fs_chan, buf, fd, "hello from alice")) usys.exit(109),
+    if (!fsc.fsMkdir(fs_chan, buf, "data/pub")) usys.exit(108);
+    switch (fsc.fsOpen(fs_chan, buf, "data/pub/note.txt", 1)) {
+        .fd => |fd| if (!fsc.fsWrite(fs_chan, buf, fd, "hello from alice")) usys.exit(109),
         .err => usys.exit(110),
     }
 
-    const n = fsList(fs_chan, buf, "") orelse usys.exit(111);
+    const n = fsc.fsList(fs_chan, buf, "") orelse usys.exit(111);
     _ = usys.log(log_h, cat(&line, "alice: / holds: ", collapse(buf[0..n])));
 
     // volatile/ starts every boot empty — run 2 proves the clearing.
-    if (fsStat(fs_chan, buf, "volatile/scratch") != null) usys.exit(140);
-    if (!fsMkdir(fs_chan, buf, "volatile/scratch")) usys.exit(141);
-    switch (fsOpen(fs_chan, buf, "volatile/scratch/tmp.txt", 1)) {
-        .fd => |fd| if (!fsWrite(fs_chan, buf, fd, "gone at reboot")) usys.exit(142),
+    if (fsc.fsStat(fs_chan, buf, "volatile/scratch") != null) usys.exit(140);
+    if (!fsc.fsMkdir(fs_chan, buf, "volatile/scratch")) usys.exit(141);
+    switch (fsc.fsOpen(fs_chan, buf, "volatile/scratch/tmp.txt", 1)) {
+        .fd => |fd| if (!fsc.fsWrite(fs_chan, buf, fd, "gone at reboot")) usys.exit(142),
         .err => usys.exit(143),
     }
     _ = usys.log(log_h, "alice: volatile/ empty at boot — cleared as promised");
 
     // O_EXCL, truncate, stat.
-    _ = fsDelete(fs_chan, buf, "state/alice/x.tmp"); // idempotent across runs
-    const xfd = switch (fsOpen(fs_chan, buf, "state/alice/x.tmp", 3)) {
+    _ = fsc.fsDelete(fs_chan, buf, "state/alice/x.tmp"); // idempotent across runs
+    const xfd = switch (fsc.fsOpen(fs_chan, buf, "state/alice/x.tmp", 3)) {
         .fd => |fd| fd,
         .err => usys.exit(144),
     };
-    if (!fsWrite(fs_chan, buf, xfd, "0123456789abcdef")) usys.exit(145);
-    switch (fsOpen(fs_chan, buf, "state/alice/x.tmp", 3)) {
+    if (!fsc.fsWrite(fs_chan, buf, xfd, "0123456789abcdef")) usys.exit(145);
+    switch (fsc.fsOpen(fs_chan, buf, "state/alice/x.tmp", 3)) {
         .fd => usys.exit(146), // O_EXCL on an existing file must refuse
         .err => |e| if (e != .exists) usys.exit(147),
     }
-    if (!fsTruncate(fs_chan, xfd, 4)) usys.exit(148);
-    const xst = fsStat(fs_chan, buf, "state/alice/x.tmp") orelse usys.exit(149);
+    if (!fsc.fsTruncate(fs_chan, xfd, 4)) usys.exit(148);
+    const xst = fsc.fsStat(fs_chan, buf, "state/alice/x.tmp") orelse usys.exit(149);
     if (xst.typ != @intFromEnum(shared.FsType.file) or xst.size != 4) usys.exit(150);
 
     // Rename (same dir and across dirs), delete.
-    _ = fsDelete(fs_chan, buf, "data/y.tmp");
-    if (!fsRename(fs_chan, buf, "state/alice/x.tmp", "data/y.tmp")) usys.exit(151);
-    if (fsStat(fs_chan, buf, "state/alice/x.tmp") != null) usys.exit(152);
-    const yst = fsStat(fs_chan, buf, "data/y.tmp") orelse usys.exit(153);
+    _ = fsc.fsDelete(fs_chan, buf, "data/y.tmp");
+    if (!fsc.fsRename(fs_chan, buf, "state/alice/x.tmp", "data/y.tmp")) usys.exit(151);
+    if (fsc.fsStat(fs_chan, buf, "state/alice/x.tmp") != null) usys.exit(152);
+    const yst = fsc.fsStat(fs_chan, buf, "data/y.tmp") orelse usys.exit(153);
     if (yst.size != 4) usys.exit(154);
-    switch (fsDelete(fs_chan, buf, "data/y.tmp")) {
+    switch (fsc.fsDelete(fs_chan, buf, "data/y.tmp")) {
         .ok => {},
         .err => usys.exit(155),
     }
 
     // Directory delete honors emptiness.
-    _ = fsDelete(fs_chan, buf, "data/tmpd/f.txt");
-    _ = fsDelete(fs_chan, buf, "data/tmpd");
-    if (!fsMkdir(fs_chan, buf, "data/tmpd")) usys.exit(156);
-    switch (fsOpen(fs_chan, buf, "data/tmpd/f.txt", 1)) {
+    _ = fsc.fsDelete(fs_chan, buf, "data/tmpd/f.txt");
+    _ = fsc.fsDelete(fs_chan, buf, "data/tmpd");
+    if (!fsc.fsMkdir(fs_chan, buf, "data/tmpd")) usys.exit(156);
+    switch (fsc.fsOpen(fs_chan, buf, "data/tmpd/f.txt", 1)) {
         .fd => {},
         .err => usys.exit(157),
     }
-    switch (fsDelete(fs_chan, buf, "data/tmpd")) {
+    switch (fsc.fsDelete(fs_chan, buf, "data/tmpd")) {
         .ok => usys.exit(158), // must refuse: not empty
         .err => |e| if (e != .not_empty) usys.exit(159),
     }
-    switch (fsDelete(fs_chan, buf, "data/tmpd/f.txt")) {
+    switch (fsc.fsDelete(fs_chan, buf, "data/tmpd/f.txt")) {
         .ok => {},
         .err => usys.exit(160),
     }
-    switch (fsDelete(fs_chan, buf, "data/tmpd")) {
+    switch (fsc.fsDelete(fs_chan, buf, "data/tmpd")) {
         .ok => {},
         .err => usys.exit(161),
     }
 
     // Symlinks: in-view resolution works; stored verbatim, so an escape
     // target only fails at resolution (for everyone).
-    _ = fsDelete(fs_chan, buf, "data/pub/ln");
-    _ = fsDelete(fs_chan, buf, "data/pub/esc");
-    if (!fsSymlink(fs_chan, buf, "data/pub/ln", "note.txt")) usys.exit(162);
-    switch (fsOpen(fs_chan, buf, "data/pub/ln", 0)) {
+    _ = fsc.fsDelete(fs_chan, buf, "data/pub/ln");
+    _ = fsc.fsDelete(fs_chan, buf, "data/pub/esc");
+    if (!fsc.fsSymlink(fs_chan, buf, "data/pub/ln", "note.txt")) usys.exit(162);
+    switch (fsc.fsOpen(fs_chan, buf, "data/pub/ln", 0)) {
         .fd => |fd| {
-            const ln = fsRead(fs_chan, fd, 64) orelse usys.exit(163);
+            const ln = fsc.fsRead(fs_chan, fd, 64) orelse usys.exit(163);
             if (!eq(buf[0..ln], "hello from alice")) usys.exit(164);
         },
         .err => usys.exit(165),
     }
-    const rln = fsReadlink(fs_chan, buf, "data/pub/ln") orelse usys.exit(166);
+    const rln = fsc.fsReadlink(fs_chan, buf, "data/pub/ln") orelse usys.exit(166);
     if (!eq(buf[0..rln], "note.txt")) usys.exit(167);
-    const lst = fsStat(fs_chan, buf, "data/pub/ln") orelse usys.exit(168);
+    const lst = fsc.fsStat(fs_chan, buf, "data/pub/ln") orelse usys.exit(168);
     if (lst.typ != @intFromEnum(shared.FsType.symlink)) usys.exit(169);
-    if (!fsSymlink(fs_chan, buf, "data/pub/esc", "../../state/alice/secret.txt")) usys.exit(170);
-    switch (fsOpen(fs_chan, buf, "data/pub/esc", 0)) {
+    if (!fsc.fsSymlink(fs_chan, buf, "data/pub/esc", "../../state/alice/secret.txt")) usys.exit(170);
+    switch (fsc.fsOpen(fs_chan, buf, "data/pub/esc", 0)) {
         .fd => usys.exit(171),
         .err => |e| if (e != .bad_path) usys.exit(172),
     }
 
-    if (!fsSync(fs_chan)) usys.exit(173);
+    if (!fsc.fsSync(fs_chan)) usys.exit(173);
     _ = usys.log(log_h, "alice: v2 ops verified — delete, rename, truncate, stat, symlink, excl, sync");
 
     // Throughput baseline through the whole stack (IPC + fssvc + mossfs
@@ -1283,8 +1149,8 @@ const bench_chunk = 32768;
 const bench_chunks = 16; // 512KB
 
 fn benchOne(log_h: u64, fs_chan: u64, buf: [*]u8, label: []const u8, compressible: bool) void {
-    _ = fsDelete(fs_chan, buf, "state/alice/bench.bin");
-    const fd = switch (fsOpen(fs_chan, buf, "state/alice/bench.bin", 1)) {
+    _ = fsc.fsDelete(fs_chan, buf, "state/alice/bench.bin");
+    const fd = switch (fsc.fsOpen(fs_chan, buf, "state/alice/bench.bin", 1)) {
         .fd => |f| f,
         .err => usys.exit(174),
     };
@@ -1301,7 +1167,7 @@ fn benchOne(log_h: u64, fs_chan: u64, buf: [*]u8, label: []const u8, compressibl
             .err => usys.exit(176),
         }
     }
-    if (!fsSync(fs_chan)) usys.exit(177);
+    if (!fsc.fsSync(fs_chan)) usys.exit(177);
     const w_us = (usys.cycles() - t0) * 1_000_000 / hz;
 
     const t1 = usys.cycles();
@@ -1325,11 +1191,11 @@ fn benchOne(log_h: u64, fs_chan: u64, buf: [*]u8, label: []const u8, compressibl
     n = putNum(&msg, n, "w=", total_kb * 1_000_000 / @max(w_us, 1));
     n = putNum(&msg, n, " r=", total_kb * 1_000_000 / @max(r_us, 1));
     _ = usys.log(log_h, msg[0..n]);
-    switch (fsDelete(fs_chan, buf, "state/alice/bench.bin")) {
+    switch (fsc.fsDelete(fs_chan, buf, "state/alice/bench.bin")) {
         .ok => {},
         .err => usys.exit(180),
     }
-    if (!fsSync(fs_chan)) usys.exit(181);
+    if (!fsc.fsSync(fs_chan)) usys.exit(181);
 }
 
 fn fillChunk(buf: [*]u8, compressible: bool, seed: *u64) void {
@@ -1377,11 +1243,11 @@ fn collapse(s: []u8) []const u8 {
 
 fn bob(log_h: u64, fs_chan: u64) noreturn {
     var line: [96]u8 = undefined;
-    const b = attachBuf(fs_chan);
+    const b = fsc.attachBuf(fs_chan);
     const buf: [*]u8 = @ptrFromInt(b.va);
 
     // The whole world is note.txt and alice's two symlinks.
-    const n = fsList(fs_chan, buf, "") orelse usys.exit(120);
+    const n = fsc.fsList(fs_chan, buf, "") orelse usys.exit(120);
     if (!eq(buf[0..n], "note.txt\nln\nesc\n")) {
         _ = usys.log(log_h, cat(&line, "bob: unexpected view: ", buf[0..n]));
         usys.exit(121);
@@ -1390,41 +1256,41 @@ fn bob(log_h: u64, fs_chan: u64) noreturn {
 
     // A symlink inside the view resolves; one that points outward cannot
     // even be pronounced (its ".." fails like any other path).
-    switch (fsOpen(fs_chan, buf, "ln", 0)) {
+    switch (fsc.fsOpen(fs_chan, buf, "ln", 0)) {
         .fd => |fd| {
-            const ln = fsRead(fs_chan, fd, 64) orelse usys.exit(136);
+            const ln = fsc.fsRead(fs_chan, fd, 64) orelse usys.exit(136);
             if (!eq(buf[0..ln], "hello from alice")) usys.exit(137);
         },
         .err => usys.exit(138),
     }
-    switch (fsOpen(fs_chan, buf, "esc", 0)) {
+    switch (fsc.fsOpen(fs_chan, buf, "esc", 0)) {
         .fd => usys.exit(139),
         .err => |e| if (e != .bad_path) usys.exit(140),
     }
-    if (fsSymlink(fs_chan, buf, "own.lnk", "note.txt")) usys.exit(141); // ro view
-    switch (fsDelete(fs_chan, buf, "note.txt")) {
+    if (fsc.fsSymlink(fs_chan, buf, "own.lnk", "note.txt")) usys.exit(141); // ro view
+    switch (fsc.fsDelete(fs_chan, buf, "note.txt")) {
         .ok => usys.exit(142), // ro view
         .err => |e| if (e != .denied) usys.exit(143),
     }
     _ = usys.log(log_h, "bob: symlinks resolve in-view, escape and ro-violations refused");
 
-    switch (fsOpen(fs_chan, buf, "note.txt", 0)) {
+    switch (fsc.fsOpen(fs_chan, buf, "note.txt", 0)) {
         .fd => |fd| {
-            const rn = fsRead(fs_chan, fd, 64) orelse usys.exit(122);
+            const rn = fsc.fsRead(fs_chan, fd, 64) orelse usys.exit(122);
             if (!eq(buf[0..rn], "hello from alice")) usys.exit(123);
             _ = usys.log(log_h, cat(&line, "bob: read note.txt: ", buf[0..rn]));
             // Writing through a read-only view must fail.
-            if (fsWrite(fs_chan, buf, fd, "vandalism")) usys.exit(124);
+            if (fsc.fsWrite(fs_chan, buf, fd, "vandalism")) usys.exit(124);
         },
         .err => usys.exit(125),
     }
 
     // Creation refused, escape unpronounceable, privilege un-upgradeable.
-    switch (fsOpen(fs_chan, buf, "graffiti.txt", 1)) {
+    switch (fsc.fsOpen(fs_chan, buf, "graffiti.txt", 1)) {
         .fd => usys.exit(126),
         .err => |e| if (e != .denied) usys.exit(127),
     }
-    switch (fsOpen(fs_chan, buf, "../../state/alice/secret.txt", 0)) {
+    switch (fsc.fsOpen(fs_chan, buf, "../../state/alice/secret.txt", 0)) {
         .fd => usys.exit(128),
         .err => |e| if (e != .bad_path) usys.exit(129),
     }
@@ -1434,7 +1300,7 @@ fn bob(log_h: u64, fs_chan: u64) noreturn {
     }, 0)) {
         .ok => |ok| {
             if (ok.cap == 0) usys.exit(130);
-            switch (fsOpen(fs_chan, buf, "sneaky.txt", 1)) { // still on old cap: ro
+            switch (fsc.fsOpen(fs_chan, buf, "sneaky.txt", 1)) { // still on old cap: ro
                 .fd => usys.exit(131),
                 .err => {},
             }
@@ -1443,7 +1309,7 @@ fn bob(log_h: u64, fs_chan: u64) noreturn {
                 .ok => {},
                 .err => usys.exit(132),
             }
-            switch (fsOpen(ok.cap, buf, "sneaky.txt", 1)) {
+            switch (fsc.fsOpen(ok.cap, buf, "sneaky.txt", 1)) {
                 .fd => usys.exit(133), // upgrade would be a hole
                 .err => |e| if (e != .denied) usys.exit(134),
             }

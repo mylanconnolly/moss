@@ -77,7 +77,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     sched.registerCpu(0);
     // Image table order must match shared.ImageId.
     const blobs = @import("user_blobs");
-    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs, blobs.net, blobs.fabric });
+    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs, blobs.net, blobs.fabric, blobs.cons, blobs.shell });
     domain.setSystemBlob(blobs.bootfs);
     irq.init();
     domain.startReaper();
@@ -139,6 +139,12 @@ export fn kmain(dtb_pa: u64) noreturn {
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    if (build_options.shell_test) {
+        _ = sched.spawn("boot-watch", shellTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -558,6 +564,151 @@ fn fsTestWorker(_: u64) void {
         psci.systemOff();
     } else {
         std.debug.panic("fs-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
+    }
+}
+
+/// Developer-tooling boot: the storage stack, the virtio-console driver,
+/// init (serving its front channel), and msh — the interactive shell —
+/// wired together by capability grants. Used by both `zig build
+/// run-shell` (a human on the console) and the scripted shell check
+/// (the runner drives the console over a socket chardev). PASS when msh
+/// exits cleanly and nothing leaked.
+fn shellTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    // Storage: driver, then the FS service (encrypted volume, fs-test key).
+    const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const blkdrv = domain.spawn("blkdrv", blobs.blk, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = blk_ch,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
+
+    const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const fssvc = domain.spawn("fssvc", blobs.fs, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = fs_ch,
+        .grant_blob = blobs.bootfs,
+        .user_limit = 4 << 20,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
+
+    // Console driver (virtio-console, device id 3).
+    const cons_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const consdrv = domain.spawn("consdrv", blobs.cons, .{
+        .grant_debug_log = true,
+        .grant_channel_a = cons_ch,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn consdrv: {t}", .{e});
+
+    // FS handshake: badge-0 buffer, key, disk (same flow as fs-test).
+    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
+    ipc.refShm(pathbuf);
+    var res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .attach_buf),
+        .cap_type = @intFromEnum(cap.CapType.shm),
+        .cap_obj = @intFromPtr(pathbuf),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    const shell_key = "moss-fs-test-key-0123456789abcde";
+    @memcpy(pb[0..32], shell_key);
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    ipc.refSide(blk_ch, .b);
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .attach_disk),
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = @intFromPtr(blk_ch),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    // The shell's filesystem view: the whole root, read-write.
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 0, .ro = 0 } }),
+    }, 0);
+    std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
+    const view_obj = res.msg.cap_obj;
+    const view_badge = res.msg.cap_badge;
+
+    // init, serving a granted front channel (no demo worker).
+    const front_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const initd = domain.spawn("init", blobs.init, .{
+        .grant_debug_log = true,
+        .grant_spawner = true,
+        .grant_channel_a = front_ch,
+        .grant_blob = blobs.bootfs,
+        .kobj_limit = 4 << 20,
+        .user_limit = 24 << 20, // its services' budgets nest inside
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn init: {t}", .{e});
+
+    // msh: serves its boot channel; we feed it cons, fs view, init front.
+    const boot_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const msh = domain.spawn("msh", blobs.shell, .{
+        .grant_debug_log = true,
+        .grant_spawner = true, // gates ps/mem introspection
+        .grant_channel_a = boot_ch,
+        .user_limit = 2 << 20,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn msh: {t}", .{e});
+
+    ipc.refSide(cons_ch, .b);
+    res = ipc.call(boot_ch, .{
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = @intFromPtr(cons_ch),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    res = ipc.call(boot_ch, .{
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = view_obj,
+        .cap_badge = view_badge,
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    ipc.refSide(front_ch, .b);
+    res = ipc.call(boot_ch, .{
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = @intFromPtr(front_ch),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    log.info("shell: system up — msh on the console", .{});
+
+    // The human (or the runner's script) drives; we wait for msh to exit.
+    while (msh.state != .dead) sched.sleep(5);
+    const msh_code = msh.exit_code;
+
+    // Teardown, inside out: init exits on front-channel death, then the
+    // drivers and the FS.
+    ipc.unrefSide(front_ch, .b);
+    while (initd.state != .dead) sched.sleep(1);
+    domain.destroy(consdrv);
+    while (consdrv.state != .dead) sched.sleep(1);
+    domain.destroy(fssvc);
+    while (fssvc.state != .dead) sched.sleep(1);
+    domain.destroy(blkdrv);
+    while (blkdrv.state != .dead) sched.sleep(1);
+    ipc.unrefSide(fs_ch, .b);
+    ipc.unrefSide(boot_ch, .b);
+    ipc.unrefShm(pathbuf);
+
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    if (msh_code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
+        log.info("shell-test: PASS — an interactive capability shell, nothing leaked", .{});
+        psci.systemOff();
+    } else {
+        std.debug.panic("shell-test: FAIL — msh exit {d}, pmem delta {d}B", .{
+            msh_code, frames_before -% frames_after,
+        });
     }
 }
 
