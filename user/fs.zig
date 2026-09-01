@@ -1167,7 +1167,101 @@ fn alice(log_h: u64, fs_chan: u64) noreturn {
 
     if (!fsSync(fs_chan)) usys.exit(173);
     _ = usys.log(log_h, "alice: v2 ops verified — delete, rename, truncate, stat, symlink, excl, sync");
+
+    // Throughput baseline through the whole stack (IPC + fssvc + mossfs
+    // + ring + blkdrv + virtio) on this encrypted volume: 512KB in 2KB
+    // chunks, compressible then incompressible, write+sync and read.
+    benchOne(log_h, fs_chan, buf, "alice: bench comp KB/s: ", true);
+    benchOne(log_h, fs_chan, buf, "alice: bench raw  KB/s: ", false);
     usys.exit(0);
+}
+
+const bench_chunk = 2048;
+const bench_chunks = 256; // 512KB
+
+fn benchOne(log_h: u64, fs_chan: u64, buf: [*]u8, label: []const u8, compressible: bool) void {
+    _ = fsDelete(fs_chan, buf, "state/alice/bench.bin");
+    const fd = switch (fsOpen(fs_chan, buf, "state/alice/bench.bin", 1)) {
+        .fd => |f| f,
+        .err => usys.exit(174),
+    };
+    var seed: u64 = 0x9e3779b97f4a7c15;
+    const hz = usys.cycleHz();
+
+    const t0 = usys.cycles();
+    for (0..bench_chunks) |i| {
+        fillChunk(buf, compressible, &seed);
+        switch (usys.callTyped(shared.FsReq, shared.FsResp, fs_chan, .{
+            .write = .{ .fd = fd, .off = i * bench_chunk, .len = bench_chunk },
+        }, 0)) {
+            .ok => |rep| if (rep != .num) usys.exit(175),
+            .err => usys.exit(176),
+        }
+    }
+    if (!fsSync(fs_chan)) usys.exit(177);
+    const w_us = (usys.cycles() - t0) * 1_000_000 / hz;
+
+    const t1 = usys.cycles();
+    for (0..bench_chunks) |i| {
+        switch (usys.callTyped(shared.FsReq, shared.FsResp, fs_chan, .{
+            .read = .{ .fd = fd, .off = i * bench_chunk, .len = bench_chunk },
+        }, 0)) {
+            .ok => |rep| if (rep != .num) usys.exit(178),
+            .err => usys.exit(179),
+        }
+    }
+    const r_us = (usys.cycles() - t1) * 1_000_000 / hz;
+
+    const total_kb: u64 = bench_chunks * bench_chunk / 1024;
+    var msg: [96]u8 = undefined;
+    var n: usize = 0;
+    for (label) |c| {
+        msg[n] = c;
+        n += 1;
+    }
+    n = putNum(&msg, n, "w=", total_kb * 1_000_000 / @max(w_us, 1));
+    n = putNum(&msg, n, " r=", total_kb * 1_000_000 / @max(r_us, 1));
+    _ = usys.log(log_h, msg[0..n]);
+    switch (fsDelete(fs_chan, buf, "state/alice/bench.bin")) {
+        .ok => {},
+        .err => usys.exit(180),
+    }
+    if (!fsSync(fs_chan)) usys.exit(181);
+}
+
+fn fillChunk(buf: [*]u8, compressible: bool, seed: *u64) void {
+    if (compressible) {
+        for (0..bench_chunk) |i| buf[i] = @truncate(i / 32);
+    } else {
+        for (0..bench_chunk / 8) |i| {
+            seed.* = seed.* *% 6364136223846793005 +% 1442695040888963407;
+            const v = seed.*;
+            inline for (0..8) |j| buf[i * 8 + j] = @truncate(v >> (j * 8));
+        }
+    }
+}
+
+fn putNum(msg: []u8, n0: usize, prefix: []const u8, v: u64) usize {
+    var n = n0;
+    for (prefix) |c| {
+        msg[n] = c;
+        n += 1;
+    }
+    var digits: [20]u8 = undefined;
+    var d: usize = 0;
+    var x = v;
+    while (true) {
+        digits[d] = '0' + @as(u8, @intCast(x % 10));
+        d += 1;
+        x /= 10;
+        if (x == 0) break;
+    }
+    while (d > 0) {
+        d -= 1;
+        msg[n] = digits[d];
+        n += 1;
+    }
+    return n;
 }
 
 /// Newlines to spaces, for one-line logging.

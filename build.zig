@@ -322,6 +322,42 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const dt_tests = b.addTest(.{ .root_module = dt_test_mod });
+    // Host baseline benchmarks (`zig build bench`): primitives + the
+    // mossfs core over a RAM device, ReleaseFast. `bench-soft` strips the
+    // CPU's AES feature to approximate today's no-NEON moss userspace.
+    for ([_]struct { step: []const u8, soft: bool }{
+        .{ .step = "bench", .soft = false },
+        .{ .step = "bench-soft", .soft = true },
+    }) |bv| {
+        const btarget = if (bv.soft) b.resolveTargetQuery(.{
+            .cpu_features_sub = std.Target.aarch64.featureSet(&.{.aes}),
+        }) else b.resolveTargetQuery(.{});
+        const blib = b.createModule(.{
+            .root_source_file = b.path("lib/lib.zig"),
+            .target = btarget,
+            .optimize = .ReleaseFast,
+        });
+        const bfs = b.createModule(.{
+            .root_source_file = b.path("user/mossfs.zig"),
+            .target = btarget,
+            .optimize = .ReleaseFast,
+        });
+        bfs.addImport("mosslib", blib);
+        const bmod = b.createModule(.{
+            .root_source_file = b.path("tools/bench.zig"),
+            .target = btarget,
+            .optimize = .ReleaseFast,
+        });
+        bmod.addImport("mosslib", blib);
+        bmod.addImport("mossfs", bfs);
+        const bexe = b.addExecutable(.{ .name = b.fmt("moss-{s}", .{bv.step}), .root_module = bmod });
+        const brun = b.addRunArtifact(bexe);
+        b.step(bv.step, if (bv.soft)
+            "Host baselines with software AES (approximates moss userspace today)"
+        else
+            "Host baselines (native AES)").dependOn(&brun.step);
+    }
+
     const lib_test_mod = b.createModule(.{
         .root_source_file = b.path("lib/lib.zig"),
         .target = host_target,

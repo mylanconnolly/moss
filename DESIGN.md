@@ -381,6 +381,54 @@ hostile-input decoder fuzzing; the OS fs-test runs on an
 encrypted+compressed volume end to end, and the disk image was verified
 to contain no plaintext (content or names).
 
+### Performance baselines (v3, 2026-09-01, M3 Max)
+
+`zig build bench` (native, hardware AES) and `zig build bench-soft` (AES
+feature stripped ≈ today's no-NEON moss userspace) measure primitives and
+the core over a RAM device (ReleaseFast, 4K blocks, 8MB file); the fs
+check's alice logs whole-stack numbers (IPC + fssvc + mossfs + ring +
+blkdrv + virtio, 2KB chunks, 512KB, encrypted volume).
+
+| Primitive (4K blocks) | hw AES | soft AES |
+|---|---|---|
+| xxhash64 | 7.9 GB/s | 7.0 GB/s |
+| SipHash-2-4 MAC | 1.2 GB/s | 1.2 GB/s |
+| **AES-256-XTS encrypt / decrypt** | **1.48 / 1.58 GB/s** | **0.11 / 0.12 GB/s** |
+| LZ4 compress text / random | 2.3 / 1.2 GB/s | 3.0 / 1.3 GB/s |
+| LZ4 decompress text | 5.7 GB/s | 7.1 GB/s |
+
+| mossfs core (RAM dev), write+sync / read | hw AES | soft AES |
+|---|---|---|
+| plain, compressible | 1421 / 3333 MB/s | 1482 / 3548 MB/s |
+| plain, random | 789 / 4946 MB/s | 777 / 4864 MB/s |
+| encrypted, compressible | 1187 / 2557 MB/s | 435 / 688 MB/s |
+| encrypted, random | 476 / 893 MB/s | **93 / 110 MB/s** |
+
+Whole-stack (encrypted volume, 2KB-chunk protocol writes): QEMU HVF
+compressible 9.6 / 11.2 MB/s (w/r), random 3.6 / 4.1 MB/s; TCG (pure
+emulation, for regression trends only) 2.1 / 2.4 and 0.7 / 0.8 MB/s.
+
+What the numbers say:
+- **Encryption's cost today is the software AES**: ~13× slower than the
+  hardware path, and it fully dominates the encrypted-random profile
+  (93 MB/s core ≈ raw soft-XTS throughput). The FP/SIMD + hardware-AES
+  ROADMAP item is the fix and these are its "before" numbers. A second,
+  later lever: the XTS implementation is serial per 16B block; the AES
+  cores expose 6–8-wide parallel encrypt that fits XTS's independent
+  blocks (tweaks precomputable).
+- **Compression is a pure win**, not a tradeoff: it multiplies encrypted
+  throughput (fewer bytes reach AES — 435 vs 93 MB/s core, 9.6 vs 3.6
+  MB/s in-OS) and packs 8 compressible blocks per bitmap byte (the 8MB
+  text file cost 265 blocks).
+- **The whole-stack gap vs the core** (~4 vs ~93 MB/s encrypted-random on
+  HVF) is protocol chunking, not the FS: 2KB view-buffer chunks mean two
+  IPC round trips and a read-modify-write per 4K block. Larger view
+  buffers / the ring transport for FS data are the known lever if bulk
+  FS throughput ever matters before hardware AES lands.
+- Checksums are nowhere near the bottleneck (SipHash 1.2 GB/s), and the
+  plain-volume core (0.8–1.5 GB/s writes into RAM) says the CoW/commit
+  machinery itself is cheap.
+
 ## Networking
 
 **As built (Phase 10):** the net service is one userspace process holding

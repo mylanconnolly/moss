@@ -99,6 +99,10 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
   implementations checked in as hex. Test them alone with
   `zig test lib/lib.zig`. New shared code goes here as a static module —
   there is no dynamic loader (locked decision in ROADMAP.md).
+- Baselines: `zig build bench` / `zig build bench-soft` print primitive
+  and core throughput (numbers recorded in DESIGN.md); alice logs
+  whole-stack `bench` lines during every fs check run — watch them for
+  regressions.
 - The fs check runs on an encrypted+compressed volume: the kernel driver
   stages a fixed key via set_key before attach_disk. Wrong key, missing
   key, or a non-blank non-mossfs disk all degrade fssvc to bootfs-only
