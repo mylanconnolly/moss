@@ -53,10 +53,13 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
 
 // ------------------------------------------------------- domain management
 
-/// spawn(spawner, image, arg, chan, flags): create a domain from an
-/// embedded image with exactly the named grants; returns a domain_ctl
-/// handle. The caller's registered death-watch (if any) is signaled when
-/// the child dies.
+/// spawn(spawner, image, arg, chan, flags, limits): create a child domain
+/// from an embedded image with exactly the named grants; returns a
+/// domain_ctl handle. The child's budgets (x5: kobj KB in the low word,
+/// user KB in the high word; 0 = defaults) are a slice of the caller's —
+/// accounts cascade, so the caller's limits bound the whole subtree. The
+/// caller's registered death-watch (if any) is signaled when the child
+/// dies, and destroying the caller destroys the child.
 fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const spawner_h: shared.Handle = @bitCast(frame.regs[0]);
     _ = d.captable.?.lookup(spawner_h, .spawner) orelse return errno(.bad_handle);
@@ -67,13 +70,17 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         "user";
     const flags = frame.regs[4];
 
+    const limits = frame.regs[5];
     var manifest: domain.Manifest = .{
         .grant_debug_log = flags & shared.SpawnFlags.grant_log != 0,
         .grant_spawner = flags & shared.SpawnFlags.grant_spawner != 0,
         .arg = frame.regs[2],
         .auto_reap = true,
         .watcher = d.death_watch,
+        .parent = d,
     };
+    if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
+    if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
     if (frame.regs[3] != 0) {
         const chan_h: shared.Handle = @bitCast(frame.regs[3]);
         if (flags & shared.SpawnFlags.chan_side_a != 0) {

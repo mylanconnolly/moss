@@ -26,6 +26,8 @@ pooled hardware.
 | `zig build run -Ddomain-test` | Boot, then spawn/revoke/leak-check user domains (EL0 + caps) |
 | `zig build run -Dipc-test` | Boot, then typed RPC, cap grants, fault-as-message, peer death |
 | `zig build run -Dinit-test` | Boot userspace root+init: lazy activation, supervised restarts, re-wiring |
+| `zig build run -Dsandbox-test` | Interposition proxy, nested domains, one-call subtree revocation, benchmarks |
+| `zig build run -Dflap-test` | Supervision drill: restart budget exhausts, escalation climbs the tree |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout

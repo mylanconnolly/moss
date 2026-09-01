@@ -57,6 +57,8 @@ pub const Manifest = struct {
     arg: u64 = 0,
     /// Grant spawn authority (root and init hold this; services never do).
     grant_spawner: bool = false,
+    /// Parent in the domain tree (the spawning domain, for syscall spawns).
+    parent: ?*Domain = null,
     /// Kernel reaper auto-finishes teardown and signals the watcher; off
     /// for kernel-test-driver domains that finish manually.
     auto_reap: bool = false,
@@ -90,6 +92,7 @@ pub const Domain = struct {
     death_watch: ?*ipc.Notification = null,
     /// Outstanding domain_ctl caps; a dead slot is reusable only at zero.
     ctl_refs: std.atomic.Value(u32) = .init(0),
+    parent: ?*Domain = null,
 };
 
 var domains: [max_domains]Domain = @splat(.{});
@@ -128,7 +131,9 @@ fn reaperLoop(_: u64) void {
     while (true) {
         sched.sleep(1);
         for (&domains) |*d| {
-            if (d.state == .dying and d.auto_reap and drained(d)) {
+            // Children must finish first: their credits cascade into the
+            // parent's accounts, which the parent's teardown verifies.
+            if (d.state == .dying and d.auto_reap and drained(d) and !hasUnfinishedChildren(d)) {
                 finishTeardown(d);
                 if (d.watcher) |n| {
                     d.watcher = null;
@@ -138,6 +143,13 @@ fn reaperLoop(_: u64) void {
             }
         }
     }
+}
+
+fn hasUnfinishedChildren(d: *const Domain) bool {
+    for (&domains) |*c| {
+        if (c.parent == d and (c.state == .alive or c.state == .dying)) return true;
+    }
+    return false;
 }
 
 fn onThreadReaped(ctx: *anyopaque) void {
@@ -150,10 +162,15 @@ fn onThreadReaped(ctx: *anyopaque) void {
 /// manifest grants, one thread started at the image entry.
 pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Domain {
     const d = allocSlot() orelse return Error.NoDomainSlots;
-    errdefer d.state = .unused;
+    errdefer abortSpawn(d);
     d.name = name;
     d.kobj = .{ .limit = manifest.kobj_limit };
     d.user_mem = .{ .limit = manifest.user_limit };
+    if (manifest.parent) |p| {
+        d.parent = p;
+        d.kobj.parent = &p.kobj;
+        d.user_mem.parent = &p.user_mem;
+    }
 
     // Header check.
     if (image.len < @sizeOf(shared.UserImageHeader)) return Error.BadImage;
@@ -250,6 +267,25 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     return d;
 }
 
+/// Unwind a partially-built domain when spawn fails: everything allocated
+/// so far returns, and the accounts (and their parents) balance again.
+fn abortSpawn(d: *Domain) void {
+    if (d.captable) |ct| {
+        kalloc.freePage(&d.kobj, @ptrCast(ct));
+        d.captable = null;
+    }
+    if (d.ttbr0_pa != 0) {
+        mmu.destroyUserSpace(d.ttbr0_pa, &d.user_mem, &d.kobj, d.asid);
+        d.ttbr0_pa = 0;
+    }
+    if (d.watcher) |n| {
+        d.watcher = null;
+        ipc.unrefNotification(n);
+    }
+    std.debug.assert(d.kobj.balance() == 0 and d.user_mem.balance() == 0);
+    d.state = .unused;
+}
+
 /// The single revocation: mark the domain dying, kill its threads, and
 /// release every cap it held — closing channel sides, which is what
 /// delivers peer_dead to whoever is blocked on the other end. Threads
@@ -258,6 +294,10 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
 pub fn destroy(d: *Domain) void {
     if (d.state != .alive) return;
     d.state = .dying;
+    // The subtree dies with the parent: one revocation, transitively.
+    for (&domains) |*c| {
+        if (c.parent == d and c.state == .alive) destroy(c);
+    }
     const freed = sched.destroyThreadsOf(d);
     if (freed > 0) _ = d.threads_alive.fetchSub(freed, .acq_rel);
     // Threads are gone (or marked dead); now the authority dies with them.

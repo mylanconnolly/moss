@@ -38,8 +38,15 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
         1 => logsvc(log_h, chan_h),
         2 => greeter(log_h, chan_h),
         3 => worker(log_h, chan_h),
+        4 => flapper(log_h),
         else => usys.exit(250),
     }
+}
+
+/// The drill's subject: dies on arrival, every single time.
+fn flapper(log_h: u64) noreturn {
+    _ = usys.log(log_h, "flapper: born; crashing immediately");
+    usys.exit(1);
 }
 
 const crash_every = 4;

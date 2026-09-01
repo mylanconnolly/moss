@@ -65,13 +65,19 @@ const Instance = struct {
 var instances: [topology.len]Instance = @splat(.{});
 var glog: u64 = 0;
 
-export fn umain(log_h: u64, _: u64, _: u64) callconv(.c) noreturn {
+const svc_limits = usys.kbLimits(1 << 10, 4 << 10); // 1MB kobj, 4MB user per service
+
+export fn umain(log_h: u64, _: u64, arg: u64) callconv(.c) noreturn {
     glog = log_h;
-    _ = usys.log(log_h, "init: up; topology loaded, nothing started (lazy)");
 
     const notif = usys.notifyCreate();
     if (notif.err != .ok) usys.exit(110);
     if (usys.watchDeaths(notif.data[0]) != .ok) usys.exit(111);
+
+    // arg 1: the flapping-service drill instead of the normal topology.
+    if (arg == 1) flapDrill(notif.data[0]);
+
+    _ = usys.log(log_h, "init: up; topology loaded, nothing started (lazy)");
 
     // Front channel: workers call here. We keep both ends; worker gets a
     // copy of B at spawn.
@@ -80,7 +86,7 @@ export fn umain(log_h: u64, _: u64, _: u64) callconv(.c) noreturn {
     const front_a = front.data[0];
     const front_b = front.data[1];
 
-    const worker = usys.spawn(spawner, .services, 3, front_b, shared.SpawnFlags.grant_log);
+    const worker = usys.spawn(spawner, .services, 3, front_b, shared.SpawnFlags.grant_log, svc_limits);
     if (worker.err != .ok) usys.exit(113);
 
     var workers_done = false;
@@ -125,6 +131,15 @@ fn handleRequest(front_a: u64, r: usys.IpcResult) void {
                 return;
             };
             const inst = &instances[idx];
+            // Never hand out a channel to a corpse: a death we have not yet
+            // processed shows up here as a dead instance.
+            if (inst.up and inst.ctl != 0) {
+                const st = usys.domainStat(inst.ctl);
+                if (st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.dead)) {
+                    inst.up = false;
+                    inst.restarts += 1;
+                }
+            }
             if (!inst.up) {
                 if (!activate(idx)) {
                     _ = usys.replyTyped(shared.InitReply, front_a, .{
@@ -151,6 +166,7 @@ fn activate(idx: usize) bool {
         entry.arg,
         ch.data[0],
         shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a,
+        svc_limits,
     );
     if (r.err != .ok) return false;
     // The service serves side A; we keep B for wiring clients, and drop our
@@ -199,4 +215,40 @@ fn findService(id: u64) ?usize {
         if (@intFromEnum(e.service) == id) return i;
     }
     return null;
+}
+
+/// The supervision-restart drill: a service that dies on arrival, every
+/// time. The budget bounds the restarts, backoff spaces them out, and when
+/// the budget is spent init escalates to ITS supervisor by exiting — root
+/// then applies its own policy, and the failure travels up the tree
+/// instead of spinning at the bottom.
+const flap_budget = 3;
+const escalate_code = 77;
+
+fn flapDrill(notif: u64) noreturn {
+    _ = usys.log(glog, "init: flap drill — supervising a service that always crashes");
+    var restarts: u64 = 0;
+    var ctl = spawnFlapper();
+    while (true) {
+        _ = usys.notifyWait(notif);
+        const st = usys.domainStat(ctl);
+        if (st.err != .ok) usys.exit(115);
+        if (st.data[0] != @intFromEnum(shared.DomainState.dead)) continue;
+
+        if (restarts == flap_budget) {
+            _ = usys.log(glog, "init: flapper exhausted its restart budget; escalating to my supervisor");
+            usys.exit(escalate_code);
+        }
+        restarts += 1;
+        usys.sleep(restarts); // backoff grows with each death
+        _ = usys.capDrop(ctl);
+        ctl = spawnFlapper();
+        _ = usys.log(glog, "init: flapper died; restarted (budget shrinking)");
+    }
+}
+
+fn spawnFlapper() u64 {
+    const r = usys.spawn(spawner, .services, 4, 0, shared.SpawnFlags.grant_log, svc_limits);
+    if (r.err != .ok) usys.exit(116);
+    return r.data[0];
 }

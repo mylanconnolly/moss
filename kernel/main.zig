@@ -70,7 +70,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     sched.registerCpu(0);
     // Image table order must match shared.ImageId.
     const blobs = @import("user_blobs");
-    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services });
+    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox });
     domain.startReaper();
     gic.initDistributor();
     gic.initCore(0);
@@ -106,6 +106,18 @@ export fn kmain(dtb_pa: u64) noreturn {
 
     if (build_options.init_test) {
         _ = sched.spawn("boot-watch", initTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    if (build_options.sandbox_test) {
+        _ = sched.spawn("boot-watch", sandboxTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    if (build_options.flap_test) {
+        _ = sched.spawn("boot-watch", flapTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -249,6 +261,9 @@ fn initTestWorker(_: u64) void {
     const root = domain.spawn("root", blobs.root, .{
         .grant_debug_log = true,
         .grant_spawner = true,
+        // Roomy: the whole userspace tree's usage cascades into these.
+        .kobj_limit = 16 << 20,
+        .user_limit = 48 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
 
     while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);
@@ -265,6 +280,96 @@ fn initTestWorker(_: u64) void {
             frames_before -% frames_after, root.exit_code,
         });
     }
+}
+
+/// Phase 6 exit-criterion driver: interposition (filter + audit proxy the
+/// child cannot detect), nesting (grandchild from the child's budget
+/// slice), subtree revocation in one call, and setup/teardown benchmarks.
+fn sandboxTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    // Benchmark: spawn + revoke of a minimal domain must stay cheap.
+    {
+        const freq = asm ("mrs %[v], cntfrq_el0"
+            : [v] "=r" (-> u64),
+        );
+        const t0 = cycles();
+        const bench = domain.spawn("bench", blobs.sandbox, .{
+            .arg = 5, // sleeper
+            .auto_reap = true,
+        }) catch |e| std.debug.panic("spawn bench: {t}", .{e});
+        const t1 = cycles();
+        domain.destroy(bench);
+        const t2 = cycles();
+        while (bench.state != .dead) sched.sleep(1);
+        const t3 = cycles();
+        log.info("sandbox-test: bench — spawn {d}us, destroy call {d}us, full reclaim {d}us", .{
+            (t1 - t0) * 1_000_000 / freq,
+            (t2 - t1) * 1_000_000 / freq,
+            (t3 - t0) * 1_000_000 / freq,
+        });
+    }
+
+    log.info("sandbox-test: starting sandbox parent", .{});
+    const parent = domain.spawn("parent", blobs.sandbox, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_spawner = true,
+        .kobj_limit = 4 << 20,
+        .user_limit = 16 << 20,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn parent: {t}", .{e});
+
+    sched.sleep(20); // let the child log through the proxy
+
+    log.info("sandbox-test: revoking the parent (one call, whole subtree)", .{});
+    domain.destroy(parent);
+    while (parent.state != .dead) sched.sleep(1);
+
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    if (frames_after == frames_before) {
+        log.info("sandbox-test: PASS — subtree reclaimed, budgets zero, pmem identical", .{});
+    } else {
+        std.debug.panic("sandbox-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
+    }
+}
+
+/// The supervision-restart drill: a permanently-crashing service must
+/// exhaust init's restart budget and escalate up the tree (init exits 77,
+/// root retries init once, then gives up and reports 77).
+fn flapTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    log.info("flap-test: starting root with the flap-drill topology", .{});
+    const root = domain.spawn("root", blobs.root, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_spawner = true,
+        .kobj_limit = 16 << 20,
+        .user_limit = 48 << 20,
+    }) catch |e| std.debug.panic("spawn root: {t}", .{e});
+
+    while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);
+    domain.finishTeardown(root);
+
+    sched.sleep(5);
+    const frames_after = pmem.stats().free_bytes;
+    if (root.exit_code == 77 and frames_after == frames_before) {
+        log.info("flap-test: PASS — escalation reached the top (code 77), pmem identical", .{});
+    } else {
+        std.debug.panic("flap-test: FAIL — root exit {d}, pmem delta {d}B", .{
+            root.exit_code, frames_before -% frames_after,
+        });
+    }
+}
+
+fn cycles() u64 {
+    return asm volatile ("mrs %[v], cntpct_el0"
+        : [v] "=r" (-> u64),
+    );
 }
 
 fn notifHelper(arg: u64) void {

@@ -14,9 +14,14 @@ pub const Error = error{
     OutOfFrames,
 };
 
+/// Hierarchical quota account: domains form a tree, and a child's account
+/// points at its parent's, so every allocation charges the whole chain —
+/// a parent's limit genuinely bounds its subtree's total consumption. The
+/// budget slice a manifest names is a local cap within that bound.
 pub const Account = struct {
     limit: usize,
     used: std.atomic.Value(usize) = .init(0),
+    parent: ?*Account = null,
 
     pub fn charge(self: *Account, bytes: usize) Error!void {
         const prev = self.used.fetchAdd(bytes, .monotonic);
@@ -24,11 +29,18 @@ pub const Account = struct {
             _ = self.used.fetchSub(bytes, .monotonic);
             return Error.QuotaExceeded;
         }
+        if (self.parent) |p| {
+            p.charge(bytes) catch |e| {
+                _ = self.used.fetchSub(bytes, .monotonic);
+                return e;
+            };
+        }
     }
 
     pub fn credit(self: *Account, bytes: usize) void {
         const prev = self.used.fetchSub(bytes, .monotonic);
         std.debug.assert(prev >= bytes);
+        if (self.parent) |p| p.credit(bytes);
     }
 
     pub fn balance(self: *const Account) usize {

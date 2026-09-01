@@ -137,6 +137,12 @@ pub fn recv(ch: *Channel, out: *Msg) shared.Errno {
     const daif = sched.acquire();
     defer sched.release(daif);
     while (true) {
+        // A signal that arrived while this thread was busy between recvs
+        // must not be lost: surface latched bound-notification bits first.
+        if (sched.thisCpu().current.bound_notif) |bn| {
+            const n: *Notification = @ptrCast(@alignCast(bn));
+            if (n.bits != 0) return .interrupted;
+        }
         if (!ch.a_open) return .peer_dead;
         if (ch.processing != null) return .busy;
         if (ch.callers.popFirst()) |node| {
@@ -292,6 +298,7 @@ pub fn bindNotification(n: *Notification, t: *sched.Thread) void {
     const daif = sched.acquire();
     defer sched.release(daif);
     n.bound = t;
+    t.bound_notif = n;
 }
 
 /// Block until any bits are signaled; returns and clears them.

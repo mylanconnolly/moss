@@ -62,8 +62,14 @@ pub fn recvMsg(channel: u64) IpcResult {
     return syscall6(.recv, channel, 0, 0, 0, 0, 0);
 }
 
-pub fn spawn(spawner: u64, image: shared.ImageId, arg: u64, chan: u64, flags: u64) IpcResult {
-    return syscall6(.spawn, spawner, @intFromEnum(image), arg, chan, flags, 0);
+/// limits: kobj KB | user KB << 32 (0 = defaults); the child's budgets are
+/// a slice of the caller's.
+pub fn spawn(spawner: u64, image: shared.ImageId, arg: u64, chan: u64, flags: u64, limits: u64) IpcResult {
+    return syscall6(.spawn, spawner, @intFromEnum(image), arg, chan, flags, limits);
+}
+
+pub fn kbLimits(kobj_kb: u64, user_kb: u64) u64 {
+    return kobj_kb | (user_kb << 32);
 }
 
 /// chan_create: data[0] = side A handle, data[1] = side B handle.

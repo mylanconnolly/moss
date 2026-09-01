@@ -94,6 +94,10 @@ pub const Thread = struct {
     block_slot: ?*?*Thread = null,
     /// Blocked inside recv, interruptible by a bound notification.
     in_recv: bool = false,
+    /// The notification bound to this thread (an *ipc.Notification; opaque
+    /// to avoid an import cycle). recv checks its latched bits before
+    /// blocking so a signal can never be lost between recvs.
+    bound_notif: ?*anyopaque = null,
     node: std.DoublyLinkedList.Node = .{},
 };
 

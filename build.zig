@@ -33,6 +33,16 @@ pub fn build(b: *std.Build) void {
         "init-test",
         "Boot the userspace root/init tree: lazy activation, supervised restarts, re-wiring",
     ) orelse false;
+    const sandbox_test = b.option(
+        bool,
+        "sandbox-test",
+        "Run the sandbox demo: interposition proxy, nested domains, subtree revocation, benchmarks",
+    ) orelse false;
+    const flap_test = b.option(
+        bool,
+        "flap-test",
+        "Run the supervision-restart drill: budget exhaustion escalates up the tree",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -58,6 +68,8 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "domain_test", domain_test);
     build_opts.addOption(bool, "ipc_test", ipc_test);
     build_opts.addOption(bool, "init_test", init_test);
+    build_opts.addOption(bool, "sandbox_test", sandbox_test);
+    build_opts.addOption(bool, "flap_test", flap_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -78,6 +90,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "root", .src = "user/root.zig" },
         .{ .name = "init", .src = "user/init.zig" },
         .{ .name = "services", .src = "user/services.zig" },
+        .{ .name = "sandbox", .src = "user/sandbox.zig" },
     };
     const user_blobs = b.addWriteFiles();
     var blobs_zig: std.ArrayList(u8) = .empty;

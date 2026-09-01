@@ -104,6 +104,7 @@ pub const ImageId = enum(u64) {
     root = 2,
     init = 3,
     services = 4,
+    sandbox = 5,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -187,6 +188,16 @@ pub const InitReply = union(enum(u64)) {
 /// The logging service protocol: 24 bytes of text packed into the words.
 pub const LogMsg = union(enum(u64)) {
     text: struct { a: u64, b: u64, c: u64 },
+};
+
+/// One-time configuration a spawner sends a proxy before it starts serving:
+/// the upstream channel cap rides as the attachment.
+pub const ProxyCfg = union(enum(u64)) {
+    upstream: void,
+};
+
+pub const ProxyCfgReply = union(enum(u64)) {
+    ok: void,
 };
 
 pub const LogReply = union(enum(u64)) {

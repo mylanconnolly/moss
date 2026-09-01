@@ -51,6 +51,25 @@ subtree — threads, memory, caps, in-flight IPC (peers get death
 notifications). Quota accounting returning to zero after teardown is the
 correctness check.
 
+**As built (Phase 6):** domains carry a parent pointer; destroy() recurses
+over children before the parent, and the reaper finishes children first so
+their credits cascade home before the parent's balance is verified. Quota
+accounts are hierarchical — a child's account points at its parent's and
+every charge walks the chain — so a parent's limit genuinely bounds its
+subtree's total consumption, and the budget slice named at sys_spawn
+(kobj/user KB packed in x5) is a local cap within that bound. Failed spawns
+unwind completely (abortSpawn). Teardown latency is dominated by the
+reaper's polling cadence (one 100ms tick per dependency layer), not by
+work; the destroy call itself is ~hundreds of microseconds. Event-driven
+reaping is a cheap future win if latency ever matters.
+
+A lesson recorded in code: a notification bound to a thread must have its
+latched bits checked *inside recv before blocking* — the interrupt-on-signal
+path alone loses signals that arrive while the supervisor is busy between
+recvs (the classic lost wakeup). Init also refuses to hand out a channel to
+an instance it can see is already dead, closing the window where a death is
+signaled but not yet processed.
+
 Because a fresh domain holds *nothing*, the empty sandbox is the zero value.
 Sandboxing is not a mode; it is the absence of grants.
 
