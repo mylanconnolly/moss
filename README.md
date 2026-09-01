@@ -28,7 +28,7 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 (`brew install qemu`).
 
 ```sh
-zig build check      # the whole test suite: 12 OS tests under QEMU + host unit tests (~45s)
+zig build check      # the whole test suite: 13 OS tests under QEMU + host unit tests (~45s)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 ```
@@ -78,6 +78,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | fabric | Cross-VM RPC, remote spawn, node-kill recovery | `zig build run-cluster -Dfabric-test` |
+| shell | msh scripted console session: ps/mem/svc + file ops on the encrypted volume | `zig build -Dshell-test && zig build run-shell` (interactive) |
 
 Host-side unit tests (`zig build test`) cover the shared ABI: handles,
 typed message codecs, rings, and the devicetree parser.
