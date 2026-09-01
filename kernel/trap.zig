@@ -8,15 +8,17 @@
 
 const std = @import("std");
 const log = @import("log.zig");
+const domain = @import("domain.zig");
 const gic = @import("gic.zig");
 const sched = @import("sched.zig");
+const syscall = @import("syscall.zig");
 const timer = @import("timer.zig");
 
 pub const TrapFrame = extern struct {
     regs: [31]u64,
     elr: u64,
     spsr: u64,
-    _pad: u64,
+    sp_el0: u64,
 };
 
 comptime {
@@ -69,6 +71,8 @@ comptime {
         \\        str     x1, [sp, #248]
         \\        mrs     x1, spsr_el1
         \\        str     x1, [sp, #256]
+        \\        mrs     x1, sp_el0
+        \\        str     x1, [sp, #264]
         \\        mov     x1, x0
         \\        mov     x0, sp
         \\        bl      trapHandler
@@ -76,6 +80,8 @@ comptime {
         \\        msr     elr_el1, x1
         \\        ldr     x1, [sp, #256]
         \\        msr     spsr_el1, x1
+        \\        ldr     x1, [sp, #264]
+        \\        msr     sp_el0, x1
         \\        ldp     x2, x3, [sp, #16]
         \\        ldp     x4, x5, [sp, #32]
         \\        ldp     x6, x7, [sp, #48]
@@ -133,7 +139,8 @@ const Kind = enum(u64) {
 export fn trapHandler(frame: *TrapFrame, kind_raw: u64) callconv(.c) void {
     const kind: Kind = @enumFromInt(kind_raw);
     switch (kind) {
-        .cur_spx_irq => handleIrq(),
+        .cur_spx_irq, .lower64_irq => handleIrq(),
+        .lower64_sync => handleUserSync(frame),
         else => reportFault(frame, kind),
     }
 }
@@ -143,12 +150,37 @@ fn handleIrq() void {
     if (intid == gic.spurious_intid) return;
     switch (intid) {
         timer.intid => timer.handleIrq(),
+        gic.resched_sgi => {}, // just here for the preempt below
         else => log.warn("unexpected interrupt {d}", .{intid}),
     }
     // EOI before any context switch: a preempted-away thread must not hold
     // this core's active-interrupt state hostage.
     gic.endOfInterrupt(intid);
     sched.preemptIfNeeded();
+}
+
+/// Synchronous exception from EL0: a syscall, or a fault that kills the
+/// domain (fault-as-message to a supervisor arrives with IPC in Phase 4).
+fn handleUserSync(frame: *TrapFrame) void {
+    const esr = asm ("mrs %[v], esr_el1"
+        : [v] "=r" (-> u64),
+    );
+    const ec: u8 = @truncate(esr >> 26);
+    if (ec == 0x15) {
+        syscall.dispatch(frame);
+        return;
+    }
+    const far = asm ("mrs %[v], far_el1"
+        : [v] "=r" (-> u64),
+    );
+    const t = sched.thisCpu().current;
+    const d: *domain.Domain = @ptrCast(@alignCast(t.user_ctx.?));
+    log.warn("domain {s}: fault at EL0 — {s} (esr=0x{x} far=0x{x} elr=0x{x}); killing it", .{
+        d.name, ecName(ec), esr, far, frame.elr,
+    });
+    d.exit_code = 0xdead;
+    domain.destroy(d);
+    sched.exit();
 }
 
 fn reportFault(frame: *TrapFrame, kind: Kind) noreturn {

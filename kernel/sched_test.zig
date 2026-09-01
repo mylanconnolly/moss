@@ -18,16 +18,16 @@ const timer = @import("timer.zig");
 
 pub fn start() void {
     for (0..sched.onlineCount()) |cpu| {
-        _ = sched.spawn("pin", @intCast(cpu), pinWorker, cpu) catch |e| {
+        _ = sched.spawn("pin", pinWorker, cpu, .{ .affinity = @intCast(cpu) }) catch |e| {
             std.debug.panic("spawn pin{d}: {t}", .{ cpu, e });
         };
     }
     for (0..3) |i| {
-        _ = sched.spawn("migrant", null, migrantWorker, i) catch |e| {
+        _ = sched.spawn("migrant", migrantWorker, i, .{}) catch |e| {
             std.debug.panic("spawn migrant{d}: {t}", .{ i, e });
         };
     }
-    _ = sched.spawn("mortal", null, mortalWorker, 0) catch |e| {
+    _ = sched.spawn("mortal", mortalWorker, 0, .{}) catch |e| {
         std.debug.panic("spawn mortal: {t}", .{e});
     };
     log.info("sched-test: {d} pins, 3 migrants, 1 mortal started", .{sched.onlineCount()});

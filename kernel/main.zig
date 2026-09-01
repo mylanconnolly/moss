@@ -3,6 +3,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const shared = @import("shared");
+const domain = @import("domain.zig");
 const dt = @import("dt.zig");
 const gic = @import("gic.zig");
 const kalloc = @import("kalloc.zig");
@@ -55,17 +56,18 @@ export fn kmain(dtb_pa: u64) noreturn {
 
     // Allocator smoke test: quota round-trips to zero.
     {
-        const before = kalloc.kernel_account.used;
+        const before = kalloc.kernel_account.balance();
         const page = kalloc.allocPage(&kalloc.kernel_account) catch |e| {
             std.debug.panic("kalloc failed: {t}", .{e});
         };
         page[0] = 0xa5;
         kalloc.freePage(&kalloc.kernel_account, page);
-        std.debug.assert(kalloc.kernel_account.used == before);
+        std.debug.assert(kalloc.kernel_account.balance() == before);
         log.info("kalloc: page alloc/free round-trip, quota balanced", .{});
     }
 
     sched.registerCpu(0);
+    domain.init();
     gic.initDistributor();
     gic.initCore(0);
     timer.initCore(0);
@@ -86,9 +88,58 @@ export fn kmain(dtb_pa: u64) noreturn {
         sched_test.start();
     }
 
+    if (build_options.domain_test) {
+        _ = sched.spawn("root-sim", domainTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn root-sim: {t}", .{e});
+        };
+    }
+
     log.info("boot complete; core 0 idling", .{});
     // This context is core 0's idle thread from here on.
     halt();
+}
+
+/// Phase 3 exit-criterion driver, standing in for the Phase 5 root task:
+/// spawn a domain from a manifest, watch it work, revoke it, and verify
+/// nothing leaked — then spawn the same image with an empty manifest and
+/// watch authority be refused.
+fn domainTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    log.info("domain-test: spawning 'hello' (debug_log granted)", .{});
+    const hello = domain.spawn("hello", blobs.hello, .{
+        .grant_debug_log = true,
+    }) catch |e| std.debug.panic("spawn hello: {t}", .{e});
+
+    sched.sleep(22); // let it live a little
+    log.info("domain-test: revoking 'hello' (one operation)", .{});
+    domain.destroy(hello);
+    while (!domain.drained(hello)) sched.sleep(1);
+    domain.finishTeardown(hello);
+    log.info("domain-test: hello destroyed — kobj={d}B user={d}B (both must be 0)", .{
+        hello.kobj.balance(), hello.user_mem.balance(),
+    });
+
+    log.info("domain-test: spawning 'sneaky' (same binary, empty manifest)", .{});
+    const sneaky = domain.spawn("sneaky", blobs.hello, .{}) catch |e|
+        std.debug.panic("spawn sneaky: {t}", .{e});
+    while (!domain.drained(sneaky)) sched.sleep(1);
+    domain.finishTeardown(sneaky);
+    log.info("domain-test: sneaky exited with code {d} (42 = every attempt denied)", .{
+        sneaky.exit_code,
+    });
+
+    const frames_after = pmem.stats().free_bytes;
+    if (frames_after == frames_before) {
+        log.info("domain-test: PASS — pmem identical ({d}MB free), quotas zero", .{
+            frames_after >> 20,
+        });
+    } else {
+        std.debug.panic("domain-test: LEAK — {d}B of frames unaccounted", .{
+            frames_before -% frames_after,
+        });
+    }
 }
 
 fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {

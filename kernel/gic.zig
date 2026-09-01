@@ -61,6 +61,20 @@ pub fn enableLocalInterrupt(cpu: u32, intid: u5) void {
     gicrSgi(cpu, 0x100).* = @as(u32, 1) << intid; // ISENABLER0
 }
 
+/// SGI used only to nudge a core into its preemption path.
+pub const resched_sgi: u32 = 1;
+
+/// Send the resched SGI to one core (affinity 0.0.0.cpu, as on QEMU virt).
+pub fn sendSgi(cpu: u32) void {
+    const val: u64 = (@as(u64, resched_sgi) << 24) | (@as(u64, 1) << @intCast(cpu));
+    asm volatile (
+        \\msr icc_sgi1r_el1, %[v]
+        \\isb
+        :
+        : [v] "r" (val),
+    );
+}
+
 pub fn acknowledge() u32 {
     const intid = asm volatile ("mrs %[v], icc_iar1_el1"
         : [v] "=r" (-> u64),

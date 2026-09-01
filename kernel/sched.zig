@@ -10,12 +10,18 @@
 //! the interrupted thread's kernel stack, so its trap frame simply waits on
 //! that stack until the thread is next scheduled and the handler unwinds.
 //!
+//! Threads may carry a user address space (TTBR0 root + ASID): switching to
+//! such a thread programs TTBR0 and enables its walks; switching to a pure
+//! kernel thread disables TTBR0 walks entirely (TCR.EPD0) so no stale user
+//! mappings are ever reachable from kernel-only contexts.
+//!
 //! Rules for this module: schedule() is entered with the big lock held and
 //! IRQs masked; every resume point after a context switch (schedule's return
 //! or the new-thread trampoline) must reap any exited predecessor and
 //! release the lock. No logging while holding the big lock.
 
 const std = @import("std");
+const gic = @import("gic.zig");
 const kalloc = @import("kalloc.zig");
 const lock = @import("lock.zig");
 const log = @import("log.zig");
@@ -55,11 +61,29 @@ pub const Thread = struct {
     /// which also makes unpinned threads migrate, exercising SMP paths.
     affinity: ?u32 = null,
     stack_pa: u64 = 0,
+    stack_account: *kalloc.Account = &kalloc.kernel_account,
     /// CPU budget accounting stub: consumed timer ticks. Domains attach
-    /// real budgets here in Phase 3.
+    /// real budgets here in Phase 3+.
     cpu_ticks: u64 = 0,
     wake_tick: u64 = 0,
+    /// User address space, or 0 for kernel-only threads.
+    user_ttbr0: u64 = 0,
+    asid: u16 = 0,
+    /// Owning domain (opaque here to avoid an import cycle).
+    user_ctx: ?*anyopaque = null,
+    /// Where the thread currently is; exactly one is non-null unless the
+    /// thread is sleeping (then it sits in the sleepers list) or exited.
+    on_cpu: ?u32 = null,
+    queued_on: ?u32 = null,
     node: std.DoublyLinkedList.Node = .{},
+};
+
+pub const SpawnOpts = struct {
+    affinity: ?u32 = null,
+    user_ttbr0: u64 = 0,
+    asid: u16 = 0,
+    user_ctx: ?*anyopaque = null,
+    stack_account: *kalloc.Account = &kalloc.kernel_account,
 };
 
 pub const PerCpu = struct {
@@ -80,6 +104,10 @@ var next_thread_id: u32 = 1;
 var balance_next: u32 = 0;
 var global_ticks: u64 = 0;
 
+/// Invoked (under the big lock — keep it lock-light) when a thread owned by
+/// a user context has been fully reaped.
+pub var user_thread_reaped: ?*const fn (*anyopaque) void = null;
+
 pub fn thisCpu() *PerCpu {
     return @ptrFromInt(asm ("mrs %[v], tpidr_el1"
         : [v] "=r" (-> u64),
@@ -94,6 +122,7 @@ pub fn registerCpu(cpu_id: u32) void {
     idle.name = "idle";
     idle.state = .running;
     idle.affinity = cpu_id;
+    idle.on_cpu = cpu_id;
     const cpu = &cpus[cpu_id];
     cpu.* = .{ .id = cpu_id, .current = idle, .idle = idle, .online = true };
     big_lock.unlockRestore(daif);
@@ -111,22 +140,25 @@ pub fn onlineCount() u32 {
     return n;
 }
 
-pub fn spawn(name: []const u8, affinity: ?u32, entry: *const fn (u64) void, arg: u64) Error!*Thread {
+pub fn spawn(name: []const u8, entry: *const fn (u64) void, arg: u64, opts: SpawnOpts) Error!*Thread {
     const stack_pa = pmem.allocContiguous(stack_pages) orelse return Error.OutOfFrames;
     errdefer pmem.freeContiguous(stack_pa, stack_pages);
-    try kalloc.kernel_account.charge(stack_pages * mem.page_size);
-    errdefer kalloc.kernel_account.credit(stack_pages * mem.page_size);
+    try opts.stack_account.charge(stack_pages * mem.page_size);
+    errdefer opts.stack_account.credit(stack_pages * mem.page_size);
 
     const daif = big_lock.lockIrqSave();
     defer big_lock.unlockRestore(daif);
 
     const t = try allocThreadSlotLocked();
     t.name = name;
-    t.affinity = affinity;
+    t.affinity = opts.affinity;
     t.stack_pa = stack_pa;
-    t.cpu_ticks = 0;
+    t.stack_account = opts.stack_account;
+    t.user_ttbr0 = opts.user_ttbr0;
+    t.asid = opts.asid;
+    t.user_ctx = opts.user_ctx;
     // New threads begin in the trampoline, which unlocks the scheduler and
-    // enables IRQs before tail-calling entry(arg) from x19/x20.
+    // enables IRQs, then calls entry(arg) through a C-ABI shim.
     t.ctx = .{ .sp = mem.physToVirt(stack_pa) + stack_pages * mem.page_size };
     t.ctx.regs[0] = @intFromPtr(entry); // x19
     t.ctx.regs[1] = arg; // x20
@@ -157,12 +189,46 @@ pub fn sleep(ticks: u64) void {
 }
 
 pub fn exit() noreturn {
-    const daif = big_lock.lockIrqSave();
-    _ = daif; // this context never resumes; DAIF dies with it
+    _ = big_lock.lockIrqSave(); // this context never resumes
     const cpu = thisCpu();
     cpu.current.state = .exited;
     scheduleLocked();
     unreachable;
+}
+
+/// Kill every thread belonging to `ctx` (domain teardown). Threads not
+/// currently running are freed immediately; running ones are marked exited
+/// and their cores nudged, so they die at the next preemption and are
+/// reaped (each reap invokes user_thread_reaped). Returns how many were
+/// freed on the spot.
+pub fn destroyThreadsOf(ctx: *anyopaque) u32 {
+    const daif = big_lock.lockIrqSave();
+    defer big_lock.unlockRestore(daif);
+    const self_cpu = thisCpu().id;
+    var freed: u32 = 0;
+    for (&threads) |*t| {
+        if (t.state == .unused or t.user_ctx != ctx) continue;
+        switch (t.state) {
+            .ready => {
+                cpus[t.queued_on.?].queue.remove(&t.node);
+                freeThreadLocked(t);
+                freed += 1;
+            },
+            .sleeping => {
+                sleepers.remove(&t.node);
+                freeThreadLocked(t);
+                freed += 1;
+            },
+            .running => {
+                t.state = .exited;
+                const c = t.on_cpu.?;
+                cpus[c].need_resched = true;
+                if (c != self_cpu) gic.sendSgi(c);
+            },
+            .exited, .unused => {},
+        }
+    }
+    return freed;
 }
 
 /// Timer-tick hook, called from IRQ context (IRQs masked) on every core.
@@ -233,6 +299,7 @@ fn enqueueLocked(t: *Thread) void {
         }
         break :blk 0;
     };
+    t.queued_on = target;
     cpus[target].queue.append(&t.node);
 }
 
@@ -252,26 +319,69 @@ fn scheduleLocked() void {
 
     switch (prev.state) {
         .running => {
+            prev.on_cpu = null;
             if (prev != cpu.idle) enqueueLocked(prev);
         },
-        .exited => cpu.reap = prev,
-        .sleeping, .ready, .unused => {},
+        .exited => {
+            prev.on_cpu = null;
+            cpu.reap = prev;
+        },
+        .sleeping => prev.on_cpu = null,
+        .ready, .unused => {},
     }
     next.state = .running;
+    next.queued_on = null;
+    next.on_cpu = cpu.id;
     cpu.current = next;
+    programUserSpace(next);
     __context_switch(&prev.ctx, &next.ctx);
     // We are back on this thread, possibly much later, still under the big
     // lock taken by whoever switched to us.
     reapLocked();
 }
 
+/// Program TTBR0 for the incoming thread: its domain's tables (walks
+/// enabled), or no user space at all for kernel threads (walks disabled via
+/// TCR.EPD0 — kernel-only contexts can never reach stale user mappings).
+fn programUserSpace(t: *Thread) void {
+    const epd0: u64 = 1 << 7;
+    const tcr = asm ("mrs %[v], tcr_el1"
+        : [v] "=r" (-> u64),
+    );
+    if (t.user_ttbr0 != 0) {
+        asm volatile (
+            \\msr ttbr0_el1, %[ttbr]
+            \\msr tcr_el1, %[tcr]
+            \\isb
+            :
+            : [ttbr] "r" (t.user_ttbr0 | (@as(u64, t.asid) << 48)),
+              [tcr] "r" (tcr & ~epd0),
+        );
+    } else if (tcr & epd0 == 0) {
+        asm volatile (
+            \\msr tcr_el1, %[tcr]
+            \\isb
+            :
+            : [tcr] "r" (tcr | epd0),
+        );
+    }
+}
+
+fn freeThreadLocked(t: *Thread) void {
+    pmem.freeContiguous(t.stack_pa, stack_pages);
+    t.stack_account.credit(stack_pages * mem.page_size);
+    t.* = .{};
+}
+
 fn reapLocked() void {
     const cpu = thisCpu();
     if (cpu.reap) |dead| {
         cpu.reap = null;
-        pmem.freeContiguous(dead.stack_pa, stack_pages);
-        kalloc.kernel_account.credit(stack_pages * mem.page_size);
-        dead.state = .unused;
+        const ctx = dead.user_ctx;
+        freeThreadLocked(dead);
+        if (ctx) |c| {
+            if (user_thread_reaped) |cb| cb(c);
+        }
     }
 }
 

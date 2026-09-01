@@ -18,6 +18,11 @@ pub fn build(b: *std.Build) void {
         "sched-test",
         "Run pinned + migrating threads across all cores after boot",
     ) orelse false;
+    const domain_test = b.option(
+        bool,
+        "domain-test",
+        "Spawn, revoke, and leak-check user domains after boot",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -40,6 +45,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "panic_test", panic_test);
     build_opts.addOption(bool, "fault_test", fault_test);
     build_opts.addOption(bool, "sched_test", sched_test);
+    build_opts.addOption(bool, "domain_test", domain_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -49,6 +55,35 @@ pub fn build(b: *std.Build) void {
     });
     kernel_mod.addImport("shared", shared_mod);
     kernel_mod.addOptions("build_options", build_opts);
+
+    // User programs: freestanding flat MOSS images, embedded in the kernel
+    // until a filesystem exists (Phase 9).
+    const hello_mod = b.createModule(.{
+        .root_source_file = b.path("user/hello.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    hello_mod.addImport("shared", shared_mod);
+    const hello = b.addExecutable(.{
+        .name = "hello.elf",
+        .root_module = hello_mod,
+    });
+    hello.setLinkerScript(b.path("user/user.ld"));
+    hello.entry = .{ .symbol_name = "_ustart" };
+    const hello_bin = b.addObjCopy(hello.getEmittedBin(), .{
+        .format = .bin,
+        .basename = "hello.bin",
+    });
+    const user_blobs = b.addWriteFiles();
+    _ = user_blobs.addCopyFile(hello_bin.getOutput(), "hello.bin");
+    const user_blobs_src = user_blobs.add(
+        "user_blobs.zig",
+        "pub const hello = @embedFile(\"hello.bin\");\n",
+    );
+    kernel_mod.addAnonymousImport("user_blobs", .{
+        .root_source_file = user_blobs_src,
+    });
 
     const kernel = b.addExecutable(.{
         .name = "moss-kernel.elf",

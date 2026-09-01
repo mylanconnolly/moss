@@ -23,6 +23,43 @@ pub const Handle = packed struct(u64) {
     }
 };
 
+/// Syscall numbers, passed in x8; arguments in x0..x5, result in x0.
+pub const Syscall = enum(u64) {
+    log = 1,
+    yield = 2,
+    sleep = 3,
+    exit = 4,
+    _,
+};
+
+/// Syscall results: 0 is success, anything else is one of these.
+pub const Errno = enum(u64) {
+    ok = 0,
+    bad_handle = 1,
+    denied = 2,
+    fault = 3,
+    bad_arg = 4,
+    nosys = 5,
+    _,
+};
+
+/// Header at the start of a flat user image ("MOSS" magic). Written by the
+/// user program's entry assembly from linker-script symbols; read by the
+/// kernel loader. All sizes are from the image base, 4K-aligned.
+pub const UserImageHeader = extern struct {
+    magic: u32,
+    version: u32,
+    text_size: u64,
+    load_size: u64,
+    mem_size: u64,
+
+    pub const expected_magic: u32 = 0x53534f4d; // "MOSS" little-endian
+};
+
+/// Entry convention for user programs: x0 holds the debug-log capability
+/// handle (as bits), or 0 when the manifest granted none.
+pub const user_image_base: u64 = 0x40_0000;
+
 test "handle round-trips through its integer representation" {
     const h: Handle = .{ .slot = 7, .generation = 42 };
     const bits: u64 = @bitCast(h);

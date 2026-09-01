@@ -16,16 +16,23 @@ pub const Error = error{
 
 pub const Account = struct {
     limit: usize,
-    used: usize = 0,
+    used: std.atomic.Value(usize) = .init(0),
 
     pub fn charge(self: *Account, bytes: usize) Error!void {
-        if (self.used + bytes > self.limit) return Error.QuotaExceeded;
-        self.used += bytes;
+        const prev = self.used.fetchAdd(bytes, .monotonic);
+        if (prev + bytes > self.limit) {
+            _ = self.used.fetchSub(bytes, .monotonic);
+            return Error.QuotaExceeded;
+        }
     }
 
     pub fn credit(self: *Account, bytes: usize) void {
-        std.debug.assert(self.used >= bytes);
-        self.used -= bytes;
+        const prev = self.used.fetchSub(bytes, .monotonic);
+        std.debug.assert(prev >= bytes);
+    }
+
+    pub fn balance(self: *const Account) usize {
+        return self.used.load(.monotonic);
     }
 };
 

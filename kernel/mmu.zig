@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const dt = @import("dt.zig");
+const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
 const pmem = @import("pmem.zig");
@@ -17,9 +18,11 @@ const valid = 1 << 0;
 const table_or_page = 1 << 1; // in L1/L2: table; in L3: page (0 = 2MB/1GB block in L1/L2)
 const attr_device = 0 << 2; // MAIR idx0 (Device-nGnRnE, set up in boot.zig)
 const attr_normal = 1 << 2; // MAIR idx1 (Normal WB WA)
+const ap_el0 = 1 << 6;
 const ap_ro = 1 << 7;
 const sh_inner = 3 << 8;
 const af = 1 << 10;
+const ng = 1 << 11;
 const pxn = 1 << 53;
 const uxn = 1 << 54;
 
@@ -141,6 +144,85 @@ fn l2Index(va: u64) usize {
 
 fn l3Index(va: u64) usize {
     return @intCast((va >> 12) & 0x1ff);
+}
+
+/// User-space (TTBR0) mappings — non-global so per-domain ASIDs isolate TLB
+/// entries; W^X in user space too: code is read-only + EL0-executable, data
+/// is EL0-writable + never executable anywhere.
+pub const UserPerms = enum {
+    code, // R X (EL0), read-only everywhere, PXN
+    data, // RW (EL0+EL1), XN everywhere
+
+    fn bits(self: UserPerms) u64 {
+        return switch (self) {
+            .code => attr_normal | sh_inner | af | ng | ap_el0 | ap_ro | pxn,
+            .data => attr_normal | sh_inner | af | ng | ap_el0 | pxn | uxn,
+        };
+    }
+};
+
+/// Map one user page into a domain's TTBR0 tree, allocating intermediate
+/// tables from the domain's kernel-object account.
+pub fn mapUserPage(
+    root_pa_user: u64,
+    va: u64,
+    pa: u64,
+    perms: UserPerms,
+    table_account: *kalloc.Account,
+) !void {
+    const l2 = try walkUser(root_pa_user, l1Index(va), table_account);
+    const l3 = try walkUser(l2, l2Index(va), table_account);
+    entryAt(l3, l3Index(va)).* = pa | perms.bits() | valid | table_or_page;
+}
+
+fn walkUser(table_pa: u64, index: usize, account: *kalloc.Account) !u64 {
+    const entry = entryAt(table_pa, index);
+    if (entry.* & valid != 0) {
+        return entry.* & 0x0000_ffff_ffff_f000;
+    }
+    const page = try kalloc.allocPage(account);
+    const next = mem.virtToPhys(@intFromPtr(page));
+    entry.* = next | valid | table_or_page;
+    return next;
+}
+
+/// Tear down a user TTBR0 tree: leaf pages are credited to `user_account`,
+/// table pages to `table_account`, and everything returns to pmem.
+pub fn destroyUserSpace(
+    root_pa_user: u64,
+    user_account: *kalloc.Account,
+    table_account: *kalloc.Account,
+    asid: u16,
+) void {
+    const l1 = mem.physToPtr([*]volatile u64, root_pa_user);
+    for (0..512) |e1| {
+        if (l1[e1] & valid == 0) continue;
+        const l2_pa = l1[e1] & 0x0000_ffff_ffff_f000;
+        const l2 = mem.physToPtr([*]volatile u64, l2_pa);
+        for (0..512) |e2| {
+            if (l2[e2] & valid == 0) continue;
+            const l3_pa = l2[e2] & 0x0000_ffff_ffff_f000;
+            const l3 = mem.physToPtr([*]volatile u64, l3_pa);
+            for (0..512) |e3| {
+                if (l3[e3] & valid == 0) continue;
+                const page_pa = l3[e3] & 0x0000_ffff_ffff_f000;
+                kalloc.freePage(user_account, mem.physToPtr([*]u8, page_pa));
+            }
+            kalloc.freePage(table_account, mem.physToPtr([*]u8, l3_pa));
+        }
+        kalloc.freePage(table_account, mem.physToPtr([*]u8, l2_pa));
+    }
+    kalloc.freePage(table_account, mem.physToPtr([*]u8, root_pa_user));
+
+    // Retire every TLB entry tagged with this ASID before the slot is reused.
+    asm volatile (
+        \\dsb ish
+        \\tlbi aside1is, %[v]
+        \\dsb ish
+        \\isb
+        :
+        : [v] "r" (@as(u64, asid) << 48),
+    );
 }
 
 /// Switch TTBR1 to the rebuilt tables and disable TTBR0 walks (TCR.EPD0),

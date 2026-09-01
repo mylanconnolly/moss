@@ -23,6 +23,7 @@ pooled hardware.
 | `zig build run -Dpanic-test` | Boot, then deliberately panic to exercise the panic handler |
 | `zig build run -Dfault-test` | Boot, then read unmapped memory to exercise fault reporting |
 | `zig build run -Dsched-test` | Boot, then run pinned + migrating threads across all 4 cores |
+| `zig build run -Ddomain-test` | Boot, then spawn/revoke/leak-check user domains (EL0 + caps) |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout

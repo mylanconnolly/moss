@@ -30,6 +30,15 @@ first-class participant: any cap can be re-exported through a proxy with the
 proxy's own bookkeeping, because interposition and cross-node delegation both
 depend on it.
 
+**User address spaces** live in TTBR0 (39-bit low half), one tree per domain,
+TLB-tagged with the domain's ASID (retired with `tlbi aside1is` at teardown).
+Kernel-only threads run with TTBR0 walks disabled (TCR.EPD0), so stale user
+mappings are unreachable outside the owning domain's threads. User mappings
+are W^X and non-global; ARMv8.0 has no PAN, so syscalls may read user buffers
+through the live TTBR0 mapping after explicit range checks (revisit on
+v8.1+). Syscall ABI: x8 = number, x0..x5 args, x0 = result — numbers and
+errnos defined in `shared/` like everything else that crosses the boundary.
+
 ## Domains
 
 The domain is the unit of spawn, quota, sandboxing, and teardown — the
