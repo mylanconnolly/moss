@@ -99,6 +99,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("shared/lib.zig"),
     });
 
+    // Static libraries (lib/): pure freestanding-safe modules — the locked
+    // code-sharing model (no dynamic loader).
+    const lib_mod = b.createModule(.{
+        .root_source_file = b.path("lib/lib.zig"),
+    });
+
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "panic_test", panic_test);
     build_opts.addOption(bool, "fault_test", fault_test);
@@ -148,6 +154,7 @@ pub fn build(b: *std.Build) void {
             .code_model = .small,
         });
         prog_mod.addImport("shared", shared_mod);
+        prog_mod.addImport("mosslib", lib_mod);
         const prog = b.addExecutable(.{
             .name = b.fmt("{s}.elf", .{p.name}),
             .root_module = prog_mod,
@@ -315,15 +322,23 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const dt_tests = b.addTest(.{ .root_module = dt_test_mod });
+    const lib_test_mod = b.createModule(.{
+        .root_source_file = b.path("lib/lib.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    const lib_tests = b.addTest(.{ .root_module = lib_test_mod });
     const mossfs_test_mod = b.createModule(.{
         .root_source_file = b.path("user/mossfs.zig"),
         .target = host_target,
         .optimize = optimize,
     });
+    mossfs_test_mod.addImport("mosslib", lib_test_mod);
     const mossfs_tests = b.addTest(.{ .root_module = mossfs_test_mod });
     const test_step = b.step("test", "Run host-side unit tests");
     test_step.dependOn(&b.addRunArtifact(shared_tests).step);
     test_step.dependOn(&b.addRunArtifact(dt_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lib_tests).step);
     test_step.dependOn(&b.addRunArtifact(mossfs_tests).step);
 
     // ------------------------------------------------------------- check

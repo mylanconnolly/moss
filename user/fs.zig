@@ -1,8 +1,9 @@
 //! The filesystem, by x2:
 //!   1 "fssvc" — the FS service. Serves a union namespace: "boot/" is a
 //!               read-only MARC archive granted at spawn (the boot image
-//!               filesystem), everything else is mossfs v2 — a CoW,
-//!               checksummed, crash-consistent filesystem (user/mossfs.zig)
+//!               filesystem), everything else is mossfs v3 — a CoW,
+//!               checksummed, crash-consistent, compressed and (when a
+//!               key is granted) encrypted filesystem (user/mossfs.zig)
 //!               living on the virtio-blk driver over the ring transport.
 //!               A *view* is a badged channel cap this service mints: the
 //!               badge picks {subtree root, read-only} server-side, so a
@@ -62,8 +63,6 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64)
 
 // ------------------------------------------------------------ the service
 
-const sector = 512;
-const sectors_per_block = mossfs.block_size / sector; // 8
 const max_views = 16;
 const max_boot = 16;
 const max_fds = 8;
@@ -119,19 +118,19 @@ fn fssvc(log_h: u64, chan_h: u64, blob_va: u64, blob_len: u64) noreturn {
             _ = usys.replyTyped(shared.FsResp, serve_a, ferr(.bad_path), 0);
             continue;
         };
-        // The disk arrives once, from the spawner, as an attach on open —
-        // recognized by an attach_buf carrying a channel cap before any
-        // disk exists.
-        if (!disk_ok and r.cap != 0 and req == .attach_buf) {
-            setupDisk(r.cap);
-            _ = usys.replyTyped(shared.FsResp, serve_a, .ok, 0);
-            continue;
-        }
         const v = viewOf(r.badge) orelse {
             _ = usys.replyTyped(shared.FsResp, serve_a, ferr(.bad_fd), 0);
             continue;
         };
         switch (req) {
+            .attach_disk => {
+                if (disk_ok or r.badge != 0 or r.cap == 0) {
+                    reply(ferr(.denied));
+                } else {
+                    reply(setupDisk(r.cap));
+                }
+            },
+            .set_key => |sk| reply(doSetKey(v, r.badge, sk.off, sk.len)),
             .attach_buf => {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
@@ -199,9 +198,9 @@ fn nowSec() u64 {
 
 // ----------------------------------------------------------- disk backend
 //
-// mossfs speaks 4K blocks against a BlockDev vtable; this one rides the
+// mossfs speaks sector runs against a BlockDev vtable; this one rides the
 // blk driver's ring transport (SQ/CQ in shared memory, notification
-// doorbells), one 8-sector request per block. flush goes over the sync
+// doorbells), one virtio request per run. flush goes over the sync
 // channel — it is rare and the reply doubles as the barrier ack.
 
 var blk_chan: u64 = 0;
@@ -210,12 +209,13 @@ var blk_ring: *shared.RingBuf = undefined;
 var sq_bell: u64 = 0;
 var cq_bell: u64 = 0;
 var dev_ctx_dummy: u8 = 0;
+var pending_key: ?[32]u8 = null;
 
-fn ringIo(comptime is_write: bool, addr: u64) mossfs.DevError!void {
+fn ringIo(comptime is_write: bool, sector: u64, count: u64) mossfs.DevError!void {
     const req: shared.BlkReq = if (is_write)
-        .{ .write = .{ .sector = addr * sectors_per_block, .off = 0, .count = sectors_per_block } }
+        .{ .write = .{ .sector = sector, .off = 0, .count = count } }
     else
-        .{ .read = .{ .sector = addr * sectors_per_block, .off = 0, .count = sectors_per_block } };
+        .{ .read = .{ .sector = sector, .off = 0, .count = count } };
     if (!blk_ring.sqPush(.{ .id = 1, .words = shared.encodeMsg(shared.BlkReq, req) }))
         return error.IoError;
     _ = usys.notifySignal(sq_bell, 1);
@@ -225,16 +225,18 @@ fn ringIo(comptime is_write: bool, addr: u64) mossfs.DevError!void {
     if (resp != .ok) return error.IoError;
 }
 
-fn devRead(_: *anyopaque, addr: u64, dst: *[mossfs.block_size]u8) mossfs.DevError!void {
-    try ringIo(false, addr);
+fn devRead(_: *anyopaque, sector: u64, count: u64, dst: []u8) mossfs.DevError!void {
+    if (count == 0 or count > shared.blk_max_sectors) return error.IoError;
+    try ringIo(false, sector, count);
     const src: [*]const volatile u8 = @ptrFromInt(blk_buf);
-    for (0..mossfs.block_size) |i| dst[i] = src[i];
+    for (0..dst.len) |i| dst[i] = src[i];
 }
 
-fn devWrite(_: *anyopaque, addr: u64, src: *const [mossfs.block_size]u8) mossfs.DevError!void {
+fn devWrite(_: *anyopaque, sector: u64, count: u64, src: []const u8) mossfs.DevError!void {
+    if (count == 0 or count > shared.blk_max_sectors) return error.IoError;
     const dst: [*]volatile u8 = @ptrFromInt(blk_buf);
-    for (0..mossfs.block_size) |i| dst[i] = src[i];
-    try ringIo(true, addr);
+    for (0..src.len) |i| dst[i] = src[i];
+    try ringIo(true, sector, count);
 }
 
 fn devFlush(_: *anyopaque) mossfs.DevError!void {
@@ -244,7 +246,21 @@ fn devFlush(_: *anyopaque) mossfs.DevError!void {
     }
 }
 
-fn setupDisk(chan: u64) void {
+/// Badge-0-only: stage the volume master key (32 bytes in the view
+/// buffer, zeroized here after the copy — the key lives only in our BSS).
+fn doSetKey(v: *View, badge: u64, off: u64, len: u64) shared.FsResp {
+    if (badge != 0 or disk_ok) return ferr(.denied);
+    if (len != 32) return ferr(.bad_key);
+    const src = viewPath(v, off, len) orelse return ferr(.bad_path);
+    var key: [32]u8 = undefined;
+    @memcpy(&key, src);
+    const wipe: [*]volatile u8 = @ptrFromInt(v.buf + off);
+    for (0..len) |i| wipe[i] = 0;
+    pending_key = key;
+    return .ok;
+}
+
+fn setupDisk(chan: u64) shared.FsResp {
     blk_chan = chan;
 
     // Data window.
@@ -282,27 +298,48 @@ fn setupDisk(chan: u64) void {
         },
         .err => usys.exit(208),
     };
-    const nblocks = sectors / sectors_per_block;
     const dev: mossfs.BlockDev = .{
         .ctx = @ptrCast(&dev_ctx_dummy),
         .readFn = devRead,
         .writeFn = devWrite,
         .flushFn = devFlush,
-        .nblocks = nblocks,
+        .nsecs = sectors,
     };
 
-    // Mount; format on first boot. Groups: 128MB (32768 blocks) when the
-    // volume is big enough for several, else 16MB toy groups.
+    // Mount; format only a genuinely blank disk (all-zero superblock
+    // region) — a garbage or wrong-format disk is NEVER auto-wiped: the
+    // service stays up serving bootfs so an operator can intervene.
     var fresh = false;
     mfs.mount(dev) catch |err| switch (err) {
         error.NoFilesystem => {
-            const gb: u64 = if (nblocks >= 4 * 32768) 32768 else 4096;
-            mossfs.Fs.format(dev, gb) catch usys.exit(209);
+            if (!sbRegionZero(dev)) {
+                _ = usys.log(glog, "fssvc: DISK IS NOT MOSSFS AND NOT BLANK — refusing to format; bootfs only");
+                return ferr(.io);
+            }
+            // Groups: 128MB (262144 sectors) when the volume is big
+            // enough for several, else 16MB toy groups.
+            const gs: u64 = if (sectors >= 4 * 262144) 262144 else 32768;
+            const keyp: ?*const [32]u8 = if (pending_key) |*k| k else null;
+            mossfs.Fs.format(dev, gs, keyp) catch usys.exit(209);
             mfs.mount(dev) catch usys.exit(210);
             fresh = true;
         },
         else => usys.exit(211),
     };
+
+    // Key gating: nothing touches object trees until the key checks out.
+    if (mfs.keyRequired()) {
+        const kp = pending_key orelse {
+            _ = usys.log(glog, "fssvc: ENCRYPTED VOLUME, NO KEY — serving bootfs only");
+            return ferr(.bad_key);
+        };
+        mfs.setKey(&kp) catch {
+            _ = usys.log(glog, "fssvc: WRONG KEY for encrypted volume — serving bootfs only");
+            return ferr(.bad_key);
+        };
+    }
+    if (pending_key) |*k| @memset(k, 0);
+    pending_key = null;
     disk_ok = true;
 
     const now = nowSec();
@@ -312,7 +349,13 @@ fn setupDisk(chan: u64) void {
             const o = mfs.allocObject(.dir, now) catch usys.exit(212);
             mfs.dirAdd(mossfs.root_obj, name, o, .dir, now) catch usys.exit(213);
         }
-        _ = usys.log(glog, "fssvc: formatted fresh mossfs (std hierarchy)");
+        if (mfs.enc) {
+            _ = usys.log(glog, "fssvc: formatted fresh mossfs (std hierarchy, encrypted)");
+        } else {
+            _ = usys.log(glog, "fssvc: formatted fresh mossfs (std hierarchy)");
+        }
+    } else if (mfs.enc) {
+        _ = usys.log(glog, "fssvc: existing mossfs found (encrypted, key verified)");
     } else {
         _ = usys.log(glog, "fssvc: existing mossfs found");
     }
@@ -320,6 +363,19 @@ fn setupDisk(chan: u64) void {
     // volatile/ starts every boot empty — that is its contract.
     clearVolatile(now);
     mfs.sync(now) catch usys.exit(214);
+    return .ok;
+}
+
+/// True when superblock sectors 0..63 are entirely zero (blank disk).
+fn sbRegionZero(dev: mossfs.BlockDev) bool {
+    var buf: [mossfs.block_size]u8 = undefined;
+    for (0..mossfs.sb_slots) |slot| {
+        dev.readFn(dev.ctx, slot * 8, 8, &buf) catch return false;
+        for (buf) |b| {
+            if (b != 0) return false;
+        }
+    }
+    return true;
 }
 
 fn ringSetup(comptime which: shared.BlkReq, cap: u64) void {
@@ -357,6 +413,7 @@ fn deleteChildren(dir: u32, now: u64, depth: u32) void {
 fn mapErr(err: mossfs.Error) shared.FsResp {
     return ferr(switch (err) {
         error.NoSpace, error.NoObjects, error.TooLarge => .no_space,
+        error.NoKey, error.BadKey => .bad_key,
         else => .io,
     });
 }
@@ -477,6 +534,7 @@ fn resolveDisk(root: u32, path0: []const u8, follow_last: bool) Resolved {
 fn errCode(err: mossfs.Error) shared.FsErr {
     return switch (err) {
         error.NoSpace, error.NoObjects, error.TooLarge => .no_space,
+        error.NoKey, error.BadKey => .bad_key,
         else => .io,
     };
 }

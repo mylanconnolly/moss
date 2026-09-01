@@ -310,6 +310,77 @@ flips, superblock-election checks, and a randomized op sequence mirrored
 against an in-memory model. Persistence is proven in QEMU by the fs
 check's double-run on one disk image.
 
+### mossfs v3: compression and encryption
+
+**As built (mossfs v3):** a format rev on v2 (no migration; disks
+reformat), adding per-block compression and FS-native encryption. The
+first consumers of the locked code-sharing model: `lib/lz4.zig` and
+`lib/xts.zig` are pure, freestanding-safe static modules, host-tested
+against OpenSSL-generated vectors and interop-checked both directions
+against the reference LZ4.
+
+- **Sector-granular, byte-aligned allocation.** A `BlockPtr` packs
+  `[flags u8 | psize u8 | sector u48]` + 8-byte csum; the bitmap bit is
+  now a 512B sector. Allocation policy: metadata and raw data take one
+  full free bitmap *byte* (8 aligned sectors); compressed runs (1..7
+  sectors) pack inside a single byte and never cross byte boundaries.
+  The per-group free counter counts free **bytes** — an exact lower bound
+  on full-block capacity — so compressed-run fragmentation can never
+  invisibly starve a commit, and the ENOSPC reserve keeps its guarantee.
+  Frees and the quarantine are range-aware (overlap-checked): a freed
+  5-sector run and a fresh 3-sector allocation must never intersect.
+- **Compression** (LZ4, data blocks only — file, dir, and symlink
+  content; indirect blocks are pointer+MAC soup and stay raw): a 4K block
+  is stored compressed only when that saves at least one sector. The
+  csum/MAC covers the *stored* plaintext form, so verification always
+  precedes decoding; the decoder is additionally output-driven and fully
+  bounds-checked (LZ4 is not self-terminating, and stored runs carry
+  sector padding — the decoder stops at 4096 output bytes and ignores
+  trailing pad).
+- **Encryption** (AES-256-XTS per 512B sector, tweak = absolute physical
+  sector — the dm-crypt convention; CoW rewrites land at fresh sectors).
+  Encrypted classes: object data, indirect blocks, the objmap.
+  Plaintext classes: superblocks, group table, bitmaps — so mount and
+  allocation work keyless, while every object op (and all background
+  work: deleting-set drain, commits, fssvc's volatile-clearing) is gated
+  on the key. Encrypted blocks use SipHash-2-4-64 keyed MACs as their
+  pointer csums, so a plaintext parent (the SB's objmap-root pointer)
+  leaks no plaintext digest. Compress, then encrypt.
+- **Key flow**: 256-bit master key → HKDF-SHA256 → XTS key pair + block
+  MAC key + SB MAC key. The key arrives capability-shaped: badge-0-only
+  `FsReq.set_key` (32 bytes through the view buffer, zeroized after
+  reading) before `FsReq.attach_disk`. On encrypted volumes each SB slot
+  carries a keyed MAC over the slot; slot election stays keyless
+  (xxhash), and `setKey` verifies the elected slot's MAC — a wrong key
+  fails there, immediately and cleanly, and an at-rest attacker who
+  splices old-but-individually-valid pointers into a superblock is
+  caught at the same check. **Security invariant: every pointer is
+  protected by a MAC'd parent rooted at the MAC'd superblock** — the
+  per-block MAC does not (and need not) bind sector identity; do not
+  break the chain when "optimizing" the SB.
+- **Auto-format is guarded**: a mount failure formats only a genuinely
+  blank disk (all-zero SB region). Garbage, wrong-format, or
+  wrong-version disks are never wiped — fssvc logs loudly and serves
+  bootfs only, leaving the disk for the operator.
+- **Documented residuals** (honesty section): rolling back ≤8 txgs by
+  zeroing newer SB slots is undetectable without external anti-rollback
+  state, as is whole-disk replay; MAC tags are 64-bit (the format
+  constraint — upgrade path is a wider BlockPtr in a future rev);
+  plaintext bitmaps/group table leak volume fill and churn patterns;
+  AES is the software implementation until FP/SIMD context switching
+  lands (ROADMAP), and XTS is tamper-*evident* (with the MAC), not AEAD.
+
+The read cache is keyed by masked sector address and holds the logical 4K
+plaintext, inserted only after MAC verification — cache hits may skip
+verification precisely because inserts never bypass it (the v2
+duplicate-entry lesson, restated for packed pointers). The host harness
+runs the crash-injection sweep and the randomized model test on both
+plaintext and encrypted volumes, plus: wrong-key and SB-splice rejection,
+ciphertext-flip fail-closed, compression space accounting, and
+hostile-input decoder fuzzing; the OS fs-test runs on an
+encrypted+compressed volume end to end, and the disk image was verified
+to contain no plaintext (content or names).
+
 ## Networking
 
 **As built (Phase 10):** the net service is one userspace process holding

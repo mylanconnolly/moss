@@ -84,14 +84,25 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 
 - Blocking-op polling and single-outstanding fabric exchanges are v0
   choices; async rings are the upgrade path.
-- mossfs v2 (CoW, checksums, txg commits) is the disk backend; its core
-  (`user/mossfs.zig`) is a pure std-only library, so debug it on the host:
-  `zig test user/mossfs.zig` runs the whole suite including the
-  crash-injection sweep (RamDev records every write; each cut point and
-  torn final write must remount to a valid pre- or post-txg tree). When a
-  commit-path bug hides behind the overlay cache, compare a fresh mount
-  (`t_fs2.mount(dev)`) against the live instance — disk right + live wrong
-  means cache aliasing, both wrong means the commit wrote it.
+- mossfs v3 (CoW, checksums, txg commits, LZ4 compression, XTS
+  encryption) is the disk backend; its core (`user/mossfs.zig`) is a pure
+  library over `lib/` static modules, so debug it on the host:
+  `zig test --dep mosslib -Mroot=user/mossfs.zig -Mmosslib=lib/lib.zig`
+  runs the whole suite including both crash-injection sweeps (RamDev
+  records every sector run; each cut point and torn final request must
+  remount to a valid pre- or post-txg tree). When a commit-path bug hides
+  behind the overlay cache, compare a fresh mount (`t_fs2.mount(dev)`)
+  against the live instance — disk right + live wrong means cache
+  aliasing, both wrong means the commit wrote it.
+- `lib/` modules (lz4, xts) are pure and freestanding-safe: no
+  allocators, no OS imports, test vectors generated from reference
+  implementations checked in as hex. Test them alone with
+  `zig test lib/lib.zig`. New shared code goes here as a static module —
+  there is no dynamic loader (locked decision in ROADMAP.md).
+- The fs check runs on an encrypted+compressed volume: the kernel driver
+  stages a fixed key via set_key before attach_disk. Wrong key, missing
+  key, or a non-blank non-mossfs disk all degrade fssvc to bootfs-only
+  serving with a loud log line — auto-format touches only all-zero disks.
 - QEMU disks must keep the default writeback cache; `cache=unsafe` drops
   the FLUSH barriers mossfs's crash consistency depends on.
 - No PAN (ARMv8.0), no IOMMU yet, no cap transfer across nodes beyond

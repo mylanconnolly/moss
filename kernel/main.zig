@@ -477,23 +477,33 @@ fn fsTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
 
-    // Hand the FS its disk: an attach carrying the blk channel cap.
-    ipc.refSide(blk_ch, .b);
-    var res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .attach_buf),
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = @intFromPtr(blk_ch),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-
     // A path buffer for the kernel's own root view (badge 0).
     const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
     const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
     ipc.refShm(pathbuf);
-    res = ipc.call(fs_ch, .{
+    var res = ipc.call(fs_ch, .{
         .data = shared.encodeMsg(shared.FsReq, .attach_buf),
         .cap_type = @intFromEnum(cap.CapType.shm),
         .cap_obj = @intFromPtr(pathbuf),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    // Stage the volume key (badge-0 handshake): the test volume is
+    // encrypted + compressed, exercising the full v3 path.
+    const test_key = "moss-fs-test-key-0123456789abcde";
+    comptime std.debug.assert(test_key.len == 32);
+    @memcpy(pb[0..32], test_key);
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    // Hand the FS its disk: an attach_disk carrying the blk channel cap.
+    ipc.refSide(blk_ch, .b);
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .attach_disk),
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = @intFromPtr(blk_ch),
     }, 0);
     std.debug.assert(res.err == .ok);
 

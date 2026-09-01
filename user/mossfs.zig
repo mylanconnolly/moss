@@ -1,34 +1,41 @@
-//! mossfs v2 — a copy-on-write, checksummed, crash-consistent filesystem.
+//! mossfs v3 — a copy-on-write, checksummed, crash-consistent filesystem
+//! with per-block compression (LZ4) and FS-native encryption (AES-256-XTS).
 //!
-//! PURE library: std-only, no OS imports, driven through a BlockDev vtable
-//! — the same code runs in fssvc over virtio-blk and in host unit tests
-//! over a RAM device, where the crash-injection harness cuts the write
-//! stream at every point and proves consistency.
+//! PURE library: std-only plus the moss static lib modules (lz4, xts),
+//! driven through a sector-run BlockDev vtable — the same code runs in
+//! fssvc over virtio-blk and in host unit tests over a RAM device, where
+//! the crash-injection harness cuts the write stream at every point and
+//! proves consistency.
 //!
-//! Design (see the mossfs v2 plan and DESIGN.md):
+//! Design (see DESIGN.md):
 //! - Never update in place. All state hangs off a superblock through
-//!   checksummed BlockPtrs {addr, xxhash64}; every read verifies, so the
-//!   tree is self-validating and torn/misdirected writes are detected.
-//! - 8 rotating superblock slots (blocks 0..7); mount picks the highest
-//!   txg whose full-slot checksum verifies. No fsck, ever.
-//! - Objects (file/dir/symlink) are 128B dnodes in the objmap, itself a
-//!   CoW block tree. Files: 3 direct ptrs + an indirect tree (level<=4,
-//!   256 ptrs/block -> 16TB max file). Directories: 64B fixed dirents.
-//!   Symlinks are ordinary small objects holding the target path.
-//! - Free space: allocation groups (size set at format; 1GiB production,
-//!   tiny in tests) with per-group CoW bitmaps referenced from a CoW
-//!   group table carrying free counts. Commit cost scales with dirty
-//!   groups, not volume size; nothing volume-proportional at mount.
-//! - Transactions: mutations live in an in-memory overlay (dirty data
-//!   blocks, dirty dnodes, per-object trim boundaries). Commit: (A) the
-//!   object subgraph is rebuilt bottom-up (alloc, fill, checksum, write —
-//!   its checksums never depend on bitmaps); (B) the space subgraph's
-//!   addresses reach fixpoint (allocating bitmap/group-table blocks
-//!   dirties bitmaps; allocation prefers already-dirty groups so this
-//!   converges); (C) bitmaps and the group table are filled, checksummed
-//!   bottom-up, written; (D) FLUSH -> superblock slot -> FLUSH. Blocks
-//!   freed from the old tree are quarantined: recorded free in the new
-//!   bitmaps but never reallocated within the txg that freed them.
+//!   checksummed BlockPtrs; every read verifies before anything else runs,
+//!   so the tree is self-validating and torn/misdirected writes are
+//!   detected. 8 rotating superblock slots (sectors 0..63); mount picks
+//!   the highest txg whose full-slot checksum verifies. No fsck, ever.
+//! - The logical unit is a 4K block; the physical unit is a 512B sector.
+//!   A BlockPtr packs [flags u8 | psize u8 | sector u48] + an 8-byte
+//!   csum/MAC. Data blocks are LZ4-compressed when that saves at least a
+//!   sector (psize < 8); metadata is always a full 8-sector run. The
+//!   stored form is what the csum covers, so verification precedes the
+//!   (bounds-checked, output-driven) decoder.
+//! - Encryption is per-block: object data, indirect blocks, and the objmap
+//!   are AES-256-XTS-encrypted (tweak = absolute sector); superblocks,
+//!   group table, and bitmaps stay plaintext so mount and allocation work
+//!   keyless. Encrypted blocks use a keyed SipHash-2-4 MAC as their csum;
+//!   the SB additionally carries a keyed MAC verified at setKey — wrong
+//!   keys fail there, cleanly. Compress, then encrypt.
+//! - Free space: allocation groups with per-group CoW sector bitmaps
+//!   referenced from a CoW group table. Allocation is byte-aligned in the
+//!   bitmap: metadata/raw runs take one full free byte (8 aligned
+//!   sectors); compressed runs pack inside a single byte and never cross
+//!   byte boundaries. The free counter counts free BYTES — an exact lower
+//!   bound on metadata capacity, which keeps the ENOSPC reserve honest
+//!   under fragmentation.
+//! - Transactions: overlay -> commit (A) object subgraph bottom-up,
+//!   (B) space-subgraph address fixpoint, (C) bitmaps/group table filled
+//!   and written, (D) FLUSH -> superblock -> FLUSH. Freed runs are
+//!   quarantined (range-overlap checked) until the superblock lands.
 //! - Large delete/truncate are O(1): subtrees go onto a persisted
 //!   deleting set (object 1) drained a bounded amount per commit; mount
 //!   resumes draining, so a crash mid-huge-delete needs no special case.
@@ -37,8 +44,13 @@
 //! an operation — callers invoke maybeCommit()/sync() between ops.
 
 const std = @import("std");
+const mosslib = @import("mosslib");
+const lz4 = mosslib.lz4;
+const xts = mosslib.xts;
 
 pub const block_size = 4096;
+pub const sector_size = 512;
+pub const spb = block_size / sector_size; // sectors per logical block
 pub const ptrs_per_block = block_size / 16; // 256
 pub const sb_slots = 8;
 pub const dirent_size = 64;
@@ -47,12 +59,12 @@ pub const dnode_size = 128;
 pub const dnodes_per_block = block_size / dnode_size; // 32
 pub const max_level = 4;
 pub const max_objs: u32 = 1 << 20;
-pub const gt_entry_size = 144; // 8 bitmap ptrs (128B) + free count + pad
+pub const gt_entry_size = 144; // 8 bitmap ptrs (128B) + free counts + pad
 pub const gt_per_block = block_size / gt_entry_size; // 28
-const bits_per_bblock: u64 = block_size * 8; // 32768
+const bits_per_bblock: u64 = block_size * 8; // sectors covered per bitmap block
 
-const sb_magic = "MOS2";
-const fs_version: u32 = 2;
+const sb_magic = "MOS3";
+const fs_version: u32 = 3;
 
 pub const DevError = error{IoError};
 
@@ -67,32 +79,60 @@ pub const Error = error{
     /// than the configured limits. Ops are meant to be small.
     Overflow,
     NoFilesystem,
+    /// The volume is encrypted and the operation needs the key.
+    NoKey,
+    /// setKey: the key does not authenticate this volume's superblock.
+    BadKey,
 };
 
+/// Sector-run block device: read/write `count` 512-byte sectors starting
+/// at absolute sector `sector`; buffers are count*512 bytes.
 pub const BlockDev = struct {
     ctx: *anyopaque,
-    readFn: *const fn (ctx: *anyopaque, addr: u64, dst: *[block_size]u8) DevError!void,
-    writeFn: *const fn (ctx: *anyopaque, addr: u64, src: *const [block_size]u8) DevError!void,
+    readFn: *const fn (ctx: *anyopaque, sector: u64, count: u64, dst: []u8) DevError!void,
+    writeFn: *const fn (ctx: *anyopaque, sector: u64, count: u64, src: []const u8) DevError!void,
     flushFn: *const fn (ctx: *anyopaque) DevError!void,
-    nblocks: u64,
+    nsecs: u64,
 
-    fn read(d: BlockDev, addr: u64, dst: *[block_size]u8) DevError!void {
-        return d.readFn(d.ctx, addr, dst);
+    fn read(d: BlockDev, sector: u64, count: u64, dst: []u8) DevError!void {
+        return d.readFn(d.ctx, sector, count, dst);
     }
-    fn write(d: BlockDev, addr: u64, src: *const [block_size]u8) DevError!void {
-        return d.writeFn(d.ctx, addr, src);
+    fn write(d: BlockDev, sector: u64, count: u64, src: []const u8) DevError!void {
+        return d.writeFn(d.ctx, sector, count, src);
     }
     fn flush(d: BlockDev) DevError!void {
         return d.flushFn(d.ctx);
     }
 };
 
+pub const flag_comp: u8 = 1; // stored form is LZ4-compressed
+pub const flag_enc: u8 = 2; // stored form is XTS-encrypted
+
+/// Packed pointer to a stored block: w = [flags u8 | psize u8 | sector u48]
+/// + 8-byte csum (xxhash64 of the stored plaintext form, or keyed SipHash
+/// when encrypted). Whole-word 0 = hole (sector 0 is a superblock sector,
+/// never allocatable, so 0 stays a safe sentinel).
 pub const BlockPtr = struct {
-    addr: u64 = 0, // 0 = hole (block 0 is a superblock slot, never data)
+    w: u64 = 0,
     csum: u64 = 0,
 
     fn isHole(p: BlockPtr) bool {
-        return p.addr == 0;
+        return p.w == 0;
+    }
+    /// First absolute sector of the stored run.
+    fn sec(p: BlockPtr) u64 {
+        return p.w & 0xffff_ffff_ffff;
+    }
+    /// Stored length in sectors (1..8).
+    fn psize(p: BlockPtr) u64 {
+        return (p.w >> 48) & 0xff;
+    }
+    fn flags(p: BlockPtr) u8 {
+        return @intCast(p.w >> 56);
+    }
+    fn pack(sector: u64, ps: u64, fl: u8) u64 {
+        std.debug.assert(sector < (1 << 48) and ps >= 1 and ps <= spb);
+        return sector | (ps << 48) | (@as(u64, fl) << 56);
     }
 };
 
@@ -113,7 +153,7 @@ pub const Stat = struct { typ: ObjType, size: u64, mtime: u64 };
 pub const root_obj: u32 = 0;
 pub const delset_obj: u32 = 1;
 const first_user_obj: u32 = 2;
-const del_entry_size = 24; // {addr u64, csum u64, level u8, pad}
+const del_entry_size = 24; // {ptr word u64, csum u64, level u8, pad}
 
 // ------------------------------------------------------------ capacities
 
@@ -130,8 +170,31 @@ pub const alloc_reserve = 96; // headroom so a commit can always land
 
 // --------------------------------------------------------------- codecs
 
-fn csum(data: *const [block_size]u8) u64 {
+fn xxsum(data: []const u8) u64 {
     return std.hash.XxHash64.hash(0x6d6f7373, data);
+}
+
+const SipMac = std.crypto.auth.siphash.SipHash64(2, 4);
+
+/// Derived key material: master -> HKDF-SHA256 -> XTS pair + block MAC
+/// key + superblock MAC key.
+pub const KeySchedule = struct {
+    xts_ctx: xts.Xts256,
+    mac_key: [16]u8,
+    sb_mac_key: [16]u8,
+};
+
+fn deriveSchedule(master: *const [32]u8) KeySchedule {
+    const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
+    const prk = Hkdf.extract("mossfs v3", master);
+    var xk: [xts.key_len]u8 = undefined;
+    Hkdf.expand(&xk, "xts", prk);
+    var ks: KeySchedule = undefined;
+    Hkdf.expand(&ks.mac_key, "mac", prk);
+    Hkdf.expand(&ks.sb_mac_key, "sb-mac", prk);
+    ks.xts_ctx = xts.Xts256.init(xk);
+    std.crypto.secureZero(u8, &xk);
+    return ks;
 }
 
 fn leU(comptime T: type, b: []const u8) T {
@@ -143,12 +206,12 @@ fn puU(comptime T: type, b: []u8, v: T) void {
 }
 
 fn putPtr(b: []u8, p: BlockPtr) void {
-    puU(u64, b[0..8], p.addr);
+    puU(u64, b[0..8], p.w);
     puU(u64, b[8..16], p.csum);
 }
 
 fn getPtr(b: []const u8) BlockPtr {
-    return .{ .addr = leU(u64, b[0..8]), .csum = leU(u64, b[8..16]) };
+    return .{ .w = leU(u64, b[0..8]), .csum = leU(u64, b[8..16]) };
 }
 
 fn putDnode(b: []u8, d: *const Dnode) void {
@@ -190,7 +253,10 @@ fn levelFor(idx: u64) u8 {
 // ------------------------------------------------------- state structs
 
 const RCacheEnt = struct {
-    addr: u64 = 0, // 0 = empty
+    /// Masked first sector of the stored run; 0 = empty. Holds the LOGICAL
+    /// 4K plaintext (post-decrypt, post-decompress), inserted only after
+    /// verification — that is why cache hits may skip verification.
+    addr: u64 = 0,
     lru: u64 = 0,
     data: [block_size]u8 = undefined,
 };
@@ -245,12 +311,23 @@ pub const Fs = struct {
     gt_root: BlockPtr = .{},
     gt_level: u8 = 0,
     gcount: u32 = 0,
-    group_blocks: u64 = 0,
+    group_secs: u64 = 0,
     bblocks_per_group: u32 = 0,
-    nblocks: u64 = 0,
+    nsecs: u64 = 0,
     free_hint: u32 = first_user_obj,
 
+    /// Free bitmap BYTES per group (8 aligned free sectors each): the
+    /// exact metadata/raw-block capacity, and the ENOSPC currency.
     gfree: [max_groups]u32 = @splat(0),
+
+    // Encryption state (volume key; per-subtree keys are a reserved hook).
+    enc: bool = false,
+    key_ok: bool = false,
+    xts_ctx: xts.Xts256 = undefined,
+    mac_key: [16]u8 = undefined,
+    sb_mac_key: [16]u8 = undefined,
+
+    lz_tbl: lz4.EncTable = undefined,
 
     rc: [rcache_n]RCacheEnt = @splat(.{}),
     lru_tick: u64 = 0,
@@ -259,6 +336,7 @@ pub const Fs = struct {
     dd_count: u32 = 0,
     ddn: [max_dirty_dnodes]DirtyDnode = @splat(.{}),
 
+    /// Quarantined freed runs, packed sector | len<<48 (range-checked).
     freed: [max_frees]u64 = @splat(0),
     freed_count: u32 = 0,
 
@@ -267,7 +345,7 @@ pub const Fs = struct {
 
     commits: u64 = 0,
 
-    pub const max_groups = 16384; // 16TB at 1GiB groups; raise as needed
+    pub const max_groups = 8192; // 1TB at 128MB groups; growth path: wider gt entries
 
     // ------------------------------------------------------- read cache
 
@@ -306,18 +384,45 @@ pub const Fs = struct {
         @memcpy(&e.data, data);
     }
 
-    /// Verified read through the cache. The returned pointer is valid
-    /// only until the next cache operation — copy out to keep it.
+    /// csum/MAC over a stored plaintext form.
+    fn storedCsum(fs: *Fs, stored: []const u8, enc: bool) u64 {
+        if (enc) return SipMac.toInt(stored, &fs.mac_key);
+        return xxsum(stored);
+    }
+
+    /// Verified read through the cache: fetch the stored run, decrypt,
+    /// verify the csum/MAC over the stored plaintext form, THEN decompress
+    /// into the cache as the logical 4K block. The returned pointer is
+    /// valid only until the next cache operation — copy out to keep it.
     fn readPtr(fs: *Fs, p: BlockPtr) Error!*const [block_size]u8 {
         std.debug.assert(!p.isHole());
-        if (fs.cacheFind(p.addr)) |e| return &e.data;
+        if (fs.cacheFind(p.sec())) |e| return &e.data;
+
+        const ps = p.psize();
+        if (ps < 1 or ps > spb) return Error.Corrupt;
+        const enc = p.flags() & flag_enc != 0;
+        if (enc and !fs.key_ok) return Error.NoKey;
+        var stored: [block_size]u8 = undefined;
+        const sbytes = stored[0 .. ps * sector_size];
+        fs.dev.read(p.sec(), ps, sbytes) catch return Error.IoError;
+        if (enc) {
+            var i: u64 = 0;
+            while (i < ps) : (i += 1) {
+                fs.xts_ctx.decryptSector(stored[i * sector_size ..][0..sector_size], p.sec() + i);
+            }
+        }
+        if (fs.storedCsum(sbytes, enc) != p.csum) return Error.Corrupt;
+
         const e = fs.cacheSlot();
-        const prev = e.addr;
         e.addr = 0;
-        fs.dev.read(p.addr, &e.data) catch return Error.IoError;
-        _ = prev;
-        if (csum(&e.data) != p.csum) return Error.Corrupt;
-        e.addr = p.addr;
+        if (p.flags() & flag_comp != 0) {
+            const n = lz4.decompress(sbytes, &e.data) catch return Error.Corrupt;
+            if (n != block_size) return Error.Corrupt;
+        } else {
+            if (ps != spb) return Error.Corrupt;
+            @memcpy(&e.data, &stored);
+        }
+        e.addr = p.sec();
         fs.lru_tick += 1;
         e.lru = fs.lru_tick;
         return &e.data;
@@ -362,26 +467,28 @@ pub const Fs = struct {
         return null;
     }
 
-    fn quarantine(fs: *Fs, addr: u64) Error!void {
-        if (addr == 0) return;
+    fn quarantine(fs: *Fs, sector: u64, len: u64) Error!void {
         if (fs.freed_count >= max_frees) return Error.Overflow;
-        fs.freed[fs.freed_count] = addr;
+        fs.freed[fs.freed_count] = sector | (len << 48);
         fs.freed_count += 1;
-        fs.cacheDrop(addr);
+        fs.cacheDrop(sector);
     }
 
-    fn isQuarantined(fs: *Fs, addr: u64) bool {
-        for (fs.freed[0..fs.freed_count]) |a| {
-            if (a == addr) return true;
+    /// Range-overlap check: may [sector, sector+len) be handed out?
+    fn quarantineOverlaps(fs: *Fs, sector: u64, len: u64) bool {
+        for (fs.freed[0..fs.freed_count]) |q| {
+            const qs = q & 0xffff_ffff_ffff;
+            const ql = q >> 48;
+            if (sector < qs + ql and qs < sector + len) return true;
         }
         return false;
     }
 
-    /// Free a committed block: quarantine + clear its bitmap bit.
-    fn freeCommitted(fs: *Fs, addr: u64) Error!void {
-        if (addr == 0) return;
-        try fs.quarantine(addr);
-        try fs.freeInBitmap(addr);
+    /// Free a committed stored run: quarantine + clear its bitmap bits.
+    fn freeCommitted(fs: *Fs, p: BlockPtr) Error!void {
+        if (p.isHole()) return;
+        try fs.quarantine(p.sec(), p.psize());
+        try fs.freeInBitmap(p.sec(), p.psize());
     }
 
     // ------------------------------------------------------------ objmap
@@ -553,7 +660,7 @@ pub const Fs = struct {
     fn delsetPush(fs: *Fs, p: BlockPtr, level: u8, now: u64) Error!void {
         if (p.isHole()) return;
         var ent: [del_entry_size]u8 = @splat(0);
-        puU(u64, ent[0..8], p.addr);
+        puU(u64, ent[0..8], p.w);
         puU(u64, ent[8..16], p.csum);
         ent[16] = level;
         const dn = try fs.dnodeOf(delset_obj);
@@ -593,7 +700,7 @@ pub const Fs = struct {
             if (dn.size < del_entry_size) break;
             var ent: [del_entry_size]u8 = undefined;
             _ = try fs.readObj(delset_obj, dn.size - del_entry_size, &ent);
-            const p: BlockPtr = .{ .addr = leU(u64, ent[0..8]), .csum = leU(u64, ent[8..16]) };
+            const p: BlockPtr = .{ .w = leU(u64, ent[0..8]), .csum = leU(u64, ent[8..16]) };
             const level = ent[16];
             try fs.truncateObjRaw(delset_obj, dn.size - del_entry_size, now);
             if (level > 0) {
@@ -604,7 +711,7 @@ pub const Fs = struct {
                     if (!child.isHole()) try fs.delsetPush(child, level - 1, now);
                 }
             }
-            try fs.freeCommitted(p.addr);
+            try fs.freeCommitted(p);
             freed += 1;
         }
         return freed;
@@ -802,7 +909,15 @@ pub const Fs = struct {
     }
 
     // ------------------------------------------------------- allocation
+    //
+    // Bitmap bit = one sector. Allocation is byte-aligned: metadata and
+    // raw data take a whole free byte (8 aligned sectors); compressed runs
+    // (psize <= 7) pack inside a single byte and never cross byte
+    // boundaries. The per-group free counter counts free BYTES, so it is
+    // an exact lower bound on full-block capacity — fragmentation from
+    // compressed runs can never starve a commit invisibly.
 
+    /// Free bitmap bytes = allocatable full 4K blocks. The ENOSPC gate.
     pub fn freeBlocksTotal(fs: *Fs) Error!u64 {
         var total: u64 = 0;
         for (fs.gfree[0..fs.gcount]) |c| total += c;
@@ -842,58 +957,98 @@ pub const Fs = struct {
         return getPtr(blk[(group % gt_per_block) * gt_entry_size + sub * 16 ..]);
     }
 
-    fn bitTest(w: *Wbb, bit: u64) bool {
-        return w.data[@intCast(bit / 8)] & (@as(u8, 1) << @intCast(bit % 8)) != 0;
-    }
-
-    fn bitSet(w: *Wbb, bit: u64) void {
-        w.data[@intCast(bit / 8)] |= @as(u8, 1) << @intCast(bit % 8);
-    }
-
-    fn bitClear(w: *Wbb, bit: u64) void {
-        w.data[@intCast(bit / 8)] &= ~(@as(u8, 1) << @intCast(bit % 8));
-    }
-
-    /// Allocate one block (during commit). Prefers groups whose bitmaps
-    /// are already dirty this txg; never hands out a quarantined address.
-    fn allocBlock(fs: *Fs) Error!u64 {
+    /// Allocate a full byte-aligned 8-sector run (metadata / raw blocks).
+    /// Prefers groups whose bitmaps are already dirty this txg; never
+    /// hands out anything overlapping a quarantined range.
+    fn allocMeta(fs: *Fs) Error!u64 {
         for (&fs.wbb) |*w| {
             if (!w.used) continue;
-            if (try fs.allocInGroup(w.group)) |a| return a;
+            if (try fs.allocRunInGroup(w.group, spb)) |a| return a;
         }
         for (0..fs.gcount) |g| {
             if (fs.gfree[g] == 0) continue;
-            if (try fs.allocInGroup(@intCast(g))) |a| return a;
+            if (try fs.allocRunInGroup(@intCast(g), spb)) |a| return a;
         }
         return Error.NoSpace;
     }
 
-    fn allocInGroup(fs: *Fs, group: u32) Error!?u64 {
-        if (fs.gfree[group] == 0) return null;
+    /// Allocate `n` (1..7) contiguous sectors inside a single bitmap byte
+    /// (compressed data). Prefers partially-used bytes so free bytes — the
+    /// full-block capacity — are spent last.
+    fn allocSub(fs: *Fs, n: u64) Error!u64 {
+        std.debug.assert(n >= 1 and n < spb);
+        for (&fs.wbb) |*w| {
+            if (!w.used) continue;
+            if (try fs.allocRunInGroup(w.group, n)) |a| return a;
+        }
+        for (0..fs.gcount) |g| {
+            if (fs.gfree[g] == 0) continue; // conservative: free-byte gate
+            if (try fs.allocRunInGroup(@intCast(g), n)) |a| return a;
+        }
+        return Error.NoSpace;
+    }
+
+    fn allocRunInGroup(fs: *Fs, group: u32, n: u64) Error!?u64 {
+        // Pass 1 (sub-byte runs only): pack into partially-used bytes.
+        if (n < spb) {
+            if (try fs.scanGroup(group, n, .partial)) |a| return a;
+        }
+        return fs.scanGroup(group, n, .free_byte);
+    }
+
+    const ScanMode = enum { partial, free_byte };
+
+    fn scanGroup(fs: *Fs, group: u32, n: u64, mode: ScanMode) Error!?u64 {
+        const g_start = @as(u64, group) * fs.group_secs;
         for (0..fs.bblocks_per_group) |sub| {
             const w = try fs.wbbGet(group, @intCast(sub));
-            var bit: u64 = 0;
-            while (bit < bits_per_bblock) : (bit += 1) {
-                const inner = sub * bits_per_bblock + bit;
-                if (inner >= fs.group_blocks) break; // bitmap tail past the group
-                if (bitTest(w, bit)) continue;
-                const addr = @as(u64, group) * fs.group_blocks + inner;
-                if (addr >= fs.nblocks) break;
-                if (fs.isQuarantined(addr)) continue;
-                bitSet(w, bit);
-                fs.gfree[group] -= 1;
-                return addr;
+            const first_sec = @as(u64, sub) * bits_per_bblock;
+            for (0..block_size) |bi| {
+                const inner = first_sec + bi * 8;
+                if (inner + spb > fs.group_secs) break; // partial tail: format marked it used
+                const sec0 = g_start + inner;
+                if (sec0 + spb > fs.nsecs) break;
+                const b = w.data[bi];
+                switch (mode) {
+                    .free_byte => if (b != 0) continue,
+                    .partial => if (b == 0 or b == 0xff) continue,
+                }
+                if (n == spb) {
+                    if (fs.quarantineOverlaps(sec0, spb)) continue;
+                    w.data[bi] = 0xff;
+                    fs.gfree[group] -= 1;
+                    return sec0;
+                }
+                // Find n contiguous free bits inside this byte.
+                var shift: usize = 0;
+                const mask_base: u8 = @intCast((@as(u16, 1) << @intCast(n)) - 1);
+                while (shift + n <= 8) : (shift += 1) {
+                    const mask = mask_base << @intCast(shift);
+                    if (b & mask != 0) continue;
+                    const sec = sec0 + shift;
+                    if (fs.quarantineOverlaps(sec, n)) continue;
+                    if (b == 0) fs.gfree[group] -= 1; // byte leaves the free pool
+                    w.data[bi] |= mask;
+                    return sec;
+                }
             }
         }
         return null;
     }
 
-    fn freeInBitmap(fs: *Fs, addr: u64) Error!void {
-        const group: u32 = @intCast(addr / fs.group_blocks);
-        const inner = addr % fs.group_blocks;
+    fn freeInBitmap(fs: *Fs, sector: u64, len: u64) Error!void {
+        const group: u32 = @intCast(sector / fs.group_secs);
+        const inner = sector % fs.group_secs;
+        std.debug.assert(inner / 8 == (inner + len - 1) / 8); // never crosses a byte
         const w = try fs.wbbGet(group, @intCast(inner / bits_per_bblock));
-        bitClear(w, inner % bits_per_bblock);
-        fs.gfree[group] += 1;
+        const bit_in_bb = inner % bits_per_bblock;
+        const bi: usize = @intCast(bit_in_bb / 8);
+        const off: usize = @intCast(bit_in_bb % 8);
+        const was = w.data[bi];
+        var mask: u8 = 0;
+        for (0..len) |i| mask |= @as(u8, 1) << @intCast(off + i);
+        w.data[bi] &= ~mask;
+        if (was != 0 and w.data[bi] == 0) fs.gfree[group] += 1; // byte fully free again
     }
 
     // ------------------------------------------------------------ commit
@@ -940,19 +1095,67 @@ pub const Fs = struct {
         if (fs.hasWork()) try fs.commit();
     }
 
-    fn writeNew(fs: *Fs, addr: u64, data: *const [block_size]u8) Error!BlockPtr {
+    /// Storage class of a new block: `space` (bitmaps/group table — always
+    /// plaintext, never compressed), `tree` (objmap + indirect nodes —
+    /// encrypted on encrypted volumes, never compressed), `data` (object
+    /// content — encrypted and compression-attempted).
+    const Class = enum { space, tree, data };
+
+    /// Allocate + write one logical block: compress (data class), csum/MAC
+    /// the stored plaintext form, encrypt, write the run, cache the
+    /// logical plaintext. Compress-then-encrypt, verify-before-decompress.
+    fn writeNew(fs: *Fs, data: *const [block_size]u8, class: Class) Error!BlockPtr {
+        var stored: [block_size]u8 = undefined;
+        var ps: u64 = spb;
+        var fl: u8 = 0;
+        if (class == .data) {
+            // Worth it only if at least one sector is saved.
+            if (lz4.compress(data, stored[0 .. (spb - 1) * sector_size], &fs.lz_tbl)) |clen| {
+                ps = (clen + sector_size - 1) / sector_size;
+                @memset(stored[clen .. ps * sector_size], 0);
+                fl |= flag_comp;
+            }
+        }
+        if (fl & flag_comp == 0) @memcpy(&stored, data);
+        if (fs.enc and class != .space) {
+            if (!fs.key_ok) return Error.NoKey;
+            fl |= flag_enc;
+        }
+        const sector = if (ps == spb) try fs.allocMeta() else try fs.allocSub(ps);
+        const cs = fs.storedCsum(stored[0 .. ps * sector_size], fl & flag_enc != 0);
+        if (fl & flag_enc != 0) {
+            var i: u64 = 0;
+            while (i < ps) : (i += 1) {
+                fs.xts_ctx.encryptSector(stored[i * sector_size ..][0..sector_size], sector + i);
+            }
+        }
+        try fs.writeRun(sector, ps, stored[0 .. ps * sector_size]);
+        fs.cacheInsert(sector, data);
+        return .{ .w = BlockPtr.pack(sector, ps, fl), .csum = cs };
+    }
+
+    /// Write a space-class block at a preallocated byte-aligned run
+    /// (commit phase C: addresses were fixed in phase B).
+    fn writeNewAt(fs: *Fs, sector: u64, data: *const [block_size]u8) Error!BlockPtr {
+        try fs.writeRun(sector, spb, data);
+        fs.cacheInsert(sector, data);
+        return .{ .w = BlockPtr.pack(sector, spb, 0), .csum = xxsum(data) };
+    }
+
+    fn writeRun(fs: *Fs, sector: u64, ps: u64, bytes: []const u8) Error!void {
         if (dbg_track) {
-            for (dbg_written[0..dbg_written_n]) |a| {
-                if (a == addr) std.debug.panic("double writeNew addr {d}", .{addr});
+            for (dbg_written[0..dbg_written_n]) |r| {
+                const rs = r & 0xffff_ffff_ffff;
+                const rl = r >> 48;
+                if (sector < rs + rl and rs < sector + ps)
+                    std.debug.panic("overlapping writes: sector {d}+{d} vs {d}+{d}", .{ sector, ps, rs, rl });
             }
             if (dbg_written_n < dbg_written.len) {
-                dbg_written[dbg_written_n] = addr;
+                dbg_written[dbg_written_n] = sector | (ps << 48);
                 dbg_written_n += 1;
             }
         }
-        fs.dev.write(addr, data) catch return Error.IoError;
-        fs.cacheInsert(addr, data);
-        return .{ .addr = addr, .csum = csum(data) };
+        fs.dev.write(sector, ps, bytes) catch return Error.IoError;
     }
 
     fn anyDirtyLeafIn(fs: *Fs, obj: u32, first_blkidx: u64, span_blocks: u64) bool {
@@ -1015,11 +1218,10 @@ pub const Fs = struct {
             if (h == 1) {
                 const blkidx = c_base + 3;
                 if (fs.dirtyDataFind(e.obj, blkidx)) |dblk| {
-                    const addr = try fs.allocBlock();
-                    const np = try fs.writeNew(addr, &dblk.data);
+                    const np = try fs.writeNew(&dblk.data, .data);
                     // Free the committed version (trim already handled).
                     const oldp = try fs.origFileBlockPtr(e.obj, blkidx);
-                    try fs.freeCommitted(oldp.addr);
+                    try fs.freeCommitted(oldp);
                     putPtr(content[c * 16 ..], np);
                 }
             } else {
@@ -1046,9 +1248,8 @@ pub const Fs = struct {
             }
         }
 
-        const addr = try fs.allocBlock();
-        const np = try fs.writeNew(addr, &content);
-        try fs.freeCommitted(old.addr);
+        const np = try fs.writeNew(&content, .tree);
+        try fs.freeCommitted(old);
         return np;
     }
 
@@ -1058,10 +1259,9 @@ pub const Fs = struct {
         // Directs.
         for (0..3) |i| {
             if (fs.dirtyDataFind(e.obj, i)) |dblk| {
-                const addr = try fs.allocBlock();
-                const np = try fs.writeNew(addr, &dblk.data);
+                const np = try fs.writeNew(&dblk.data, .data);
                 const oldp = try fs.origFileBlockPtr(e.obj, i);
-                try fs.freeCommitted(oldp.addr);
+                try fs.freeCommitted(oldp);
                 e.dn.direct[i] = np;
             } else if (i < e.trim) {
                 e.dn.direct[i] = e.orig.direct[i];
@@ -1112,9 +1312,8 @@ pub const Fs = struct {
                     putDnode(content[(e.obj % dnodes_per_block) * dnode_size ..], &e.dn);
                 }
             }
-            const addr = try fs.allocBlock();
-            const np = try fs.writeNew(addr, &content);
-            try fs.freeCommitted(old.addr);
+            const np = try fs.writeNew(&content, .tree);
+            try fs.freeCommitted(old);
             return np;
         }
         const child_span = treeCapacity(h - 1);
@@ -1140,9 +1339,8 @@ pub const Fs = struct {
                 }
             }
         }
-        const addr = try fs.allocBlock();
-        const np = try fs.writeNew(addr, &content);
-        try fs.freeCommitted(old.addr);
+        const np = try fs.writeNew(&content, .tree);
+        try fs.freeCommitted(old);
         return np;
     }
 
@@ -1188,9 +1386,9 @@ pub const Fs = struct {
             var changed = false;
             for (&fs.wbb) |*w| {
                 if (w.used and w.new_addr == 0) {
-                    const na = try fs.allocBlock();
+                    const na = try fs.allocMeta();
                     w.new_addr = na;
-                    try fs.freeCommitted(w.old.addr);
+                    try fs.freeCommitted(w.old);
                     changed = true;
                 }
             }
@@ -1201,8 +1399,8 @@ pub const Fs = struct {
                 if (fs.gtdFind(0, leaf) == null) {
                     const old = try fs.gtLeafPtr(leaf);
                     const g = try fs.gtdAdd(0, leaf, old);
-                    g.new_addr = try fs.allocBlock();
-                    try fs.freeCommitted(old.addr);
+                    g.new_addr = try fs.allocMeta();
+                    try fs.freeCommitted(old);
                     changed = true;
                 }
             }
@@ -1217,8 +1415,8 @@ pub const Fs = struct {
                         if (fs.gtdFind(h, nid) == null) {
                             const old = try fs.origGtNodePtr(h, nid);
                             const pn = try fs.gtdAdd(h, nid, old);
-                            pn.new_addr = try fs.allocBlock();
-                            try fs.freeCommitted(old.addr);
+                            pn.new_addr = try fs.allocMeta();
+                            try fs.freeCommitted(old);
                             changed = true;
                         }
                     }
@@ -1229,7 +1427,7 @@ pub const Fs = struct {
 
         // --- C: fill + checksum + write the space subgraph, bottom-up. ---
         for (&fs.wbb) |*w| {
-            if (w.used) w.new_ptr = try fs.writeNew(w.new_addr, &w.data);
+            if (w.used) w.new_ptr = try fs.writeNewAt(w.new_addr, &w.data);
         }
         // Leaves: old content patched with new bitmap ptrs + free counts.
         for (&fs.gtd) |*g| {
@@ -1252,7 +1450,7 @@ pub const Fs = struct {
                     puU(u32, entry[128..132], fs.gfree[@intCast(grp)]);
                 }
             }
-            g.new_ptr = try fs.writeNew(g.new_addr, &content);
+            g.new_ptr = try fs.writeNewAt(g.new_addr, &content);
         }
         // Path nodes, height by height.
         var h: u8 = 1;
@@ -1267,7 +1465,7 @@ pub const Fs = struct {
                         putPtr(content[@as(usize, @intCast(cg.nid % ptrs_per_block)) * 16 ..], cg.new_ptr);
                     }
                 }
-                g.new_ptr = try fs.writeNew(g.new_addr, &content);
+                g.new_ptr = try fs.writeNewAt(g.new_addr, &content);
             }
         }
         var new_gt_root = fs.gt_root;
@@ -1317,25 +1515,42 @@ pub const Fs = struct {
 
     // -------------------------------------------------- superblock, mount
 
-    fn writeSuper(fs: *Fs, obj_root: BlockPtr, obj_level: u8, gt_root: BlockPtr) Error!void {
-        var blk: [block_size]u8 = @splat(0);
+    /// Fill a superblock slot image (sans slot-local fields set by caller).
+    fn fillSuper(blk: *[block_size]u8, txg: u64, slot: u32, nsecs: u64, group_secs: u64, bbpg: u32, gcount: u32, obj_root: BlockPtr, obj_level: u8, gt_root: BlockPtr, gt_level: u8, free_hint: u32, enc: bool) void {
+        @memset(blk, 0);
         @memcpy(blk[0..4], sb_magic);
         puU(u32, blk[4..8], fs_version);
-        puU(u64, blk[8..16], fs.txg + 1);
-        puU(u32, blk[16..20], fs.slot_next);
-        puU(u64, blk[24..32], fs.nblocks);
-        puU(u64, blk[32..40], fs.group_blocks);
-        puU(u32, blk[40..44], fs.bblocks_per_group);
-        puU(u32, blk[44..48], fs.gcount);
+        puU(u64, blk[8..16], txg);
+        puU(u32, blk[16..20], slot);
+        puU(u64, blk[24..32], nsecs);
+        puU(u64, blk[32..40], group_secs);
+        puU(u32, blk[40..44], bbpg);
+        puU(u32, blk[44..48], gcount);
         putPtr(blk[48..], obj_root);
         blk[64] = obj_level;
         putPtr(blk[72..], gt_root);
-        blk[88] = fs.gt_level;
-        puU(u32, blk[92..96], fs.free_hint);
-        // Full-slot self-checksum (txg and slot index inside the sum).
+        blk[88] = gt_level;
+        puU(u32, blk[92..96], free_hint);
+        blk[96] = @intFromBool(enc);
+    }
+
+    /// Seal a slot: keyed MAC (encrypted volumes) at [-16..-8], then the
+    /// keyless full-slot self-checksum at [-8..] covering everything —
+    /// slot election stays keyless; the MAC is what setKey verifies.
+    fn sealSuper(blk: *[block_size]u8, enc: bool, sb_mac_key: *const [16]u8) void {
+        if (enc) {
+            const mac = SipMac.toInt(blk[0 .. block_size - 16], sb_mac_key);
+            puU(u64, blk[block_size - 16 .. block_size - 8], mac);
+        }
         const sc = std.hash.XxHash64.hash(0x5342, blk[0 .. block_size - 8]);
         puU(u64, blk[block_size - 8 ..], sc);
-        fs.dev.write(fs.slot_next % sb_slots, &blk) catch return Error.IoError;
+    }
+
+    fn writeSuper(fs: *Fs, obj_root: BlockPtr, obj_level: u8, gt_root: BlockPtr) Error!void {
+        var blk: [block_size]u8 = undefined;
+        fillSuper(&blk, fs.txg + 1, fs.slot_next, fs.nsecs, fs.group_secs, fs.bblocks_per_group, fs.gcount, obj_root, obj_level, gt_root, fs.gt_level, fs.free_hint, fs.enc);
+        sealSuper(&blk, fs.enc, &fs.sb_mac_key);
+        fs.dev.write((fs.slot_next % sb_slots) * spb, spb, &blk) catch return Error.IoError;
     }
 
     pub fn mount(fs: *Fs, dev: BlockDev) Error!void {
@@ -1345,7 +1560,7 @@ pub const Fs = struct {
         var found = false;
         var blk: [block_size]u8 = undefined;
         for (0..sb_slots) |slot| {
-            dev.read(slot, &blk) catch continue;
+            dev.read(slot * spb, spb, &blk) catch continue;
             if (!std.mem.eql(u8, blk[0..4], sb_magic)) continue;
             if (leU(u32, blk[4..8]) != fs_version) continue;
             const sc = std.hash.XxHash64.hash(0x5342, blk[0 .. block_size - 8]);
@@ -1358,11 +1573,11 @@ pub const Fs = struct {
             }
         }
         if (!found) return Error.NoFilesystem;
-        dev.read(best_slot, &blk) catch return Error.IoError;
+        dev.read(best_slot * spb, spb, &blk) catch return Error.IoError;
         fs.txg = best_txg;
         fs.slot_next = (best_slot + 1) % sb_slots;
-        fs.nblocks = @min(leU(u64, blk[24..32]), dev.nblocks);
-        fs.group_blocks = leU(u64, blk[32..40]);
+        fs.nsecs = @min(leU(u64, blk[24..32]), dev.nsecs);
+        fs.group_secs = leU(u64, blk[32..40]);
         fs.bblocks_per_group = leU(u32, blk[40..44]);
         fs.gcount = leU(u32, blk[44..48]);
         fs.obj_root = getPtr(blk[48..]);
@@ -1370,8 +1585,9 @@ pub const Fs = struct {
         fs.gt_root = getPtr(blk[72..]);
         fs.gt_level = blk[88];
         fs.free_hint = leU(u32, blk[92..96]);
+        fs.enc = blk[96] != 0;
         if (fs.gcount > max_groups) return Error.TooLarge;
-        // Free counts, from the group table (lazy bitmaps; this is small).
+        // Free-byte counts, from the group table (lazy bitmaps; small).
         for (0..fs.gcount) |g| {
             const p = try fs.gtLeafPtr(g / gt_per_block);
             if (p.isHole()) return Error.Corrupt;
@@ -1380,127 +1596,187 @@ pub const Fs = struct {
         }
     }
 
+    /// Whether object operations are gated on setKey.
+    pub fn keyRequired(fs: *Fs) bool {
+        return fs.enc and !fs.key_ok;
+    }
+
+    /// Derive the key schedule from the 256-bit master key and verify it
+    /// against the mounted superblock's keyed MAC. Wrong keys fail HERE —
+    /// cleanly, before any object read could go wrong.
+    pub fn setKey(fs: *Fs, master: *const [32]u8) Error!void {
+        if (!fs.enc) return Error.BadKey; // plaintext volume takes no key
+        fs.deriveKeys(master);
+        // Re-read the elected slot and check its MAC.
+        const slot = (fs.slot_next + sb_slots - 1) % sb_slots;
+        var blk: [block_size]u8 = undefined;
+        fs.dev.read(slot * spb, spb, &blk) catch return Error.IoError;
+        const mac = SipMac.toInt(blk[0 .. block_size - 16], &fs.sb_mac_key);
+        if (mac != leU(u64, blk[block_size - 16 .. block_size - 8])) {
+            fs.key_ok = false;
+            return Error.BadKey;
+        }
+        fs.key_ok = true;
+    }
+
+    fn deriveKeys(fs: *Fs, master: *const [32]u8) void {
+        const ks = deriveSchedule(master);
+        fs.xts_ctx = ks.xts_ctx;
+        fs.mac_key = ks.mac_key;
+        fs.sb_mac_key = ks.sb_mac_key;
+    }
+
     // ------------------------------------------------------------ format
 
     /// Create a fresh filesystem. `group_blocks` tunes allocation-group
     /// size (1 GiB = 1 << 18 in production; small in tests) and must be a
     /// multiple of 32768 or exactly cover the volume in one group.
-    pub fn format(dev: BlockDev, group_blocks: u64) Error!void {
-        const nblocks = dev.nblocks;
-        if (nblocks < 64) return Error.TooLarge;
-        const gb = group_blocks;
-        const bbpg: u32 = @intCast((gb + bits_per_bblock - 1) / bits_per_bblock);
+    /// Create a fresh filesystem. `group_secs` tunes allocation-group size
+    /// in sectors (262144 = 128MB in production; small in tests); must be a
+    /// multiple of 8 (bitmap-byte alignment). Pass a master key to create
+    /// an encrypted volume (object data, indirect blocks, and the objmap
+    /// are ciphertext; superblocks, group table, and bitmaps are not).
+    pub fn format(dev: BlockDev, group_secs: u64, key: ?*const [32]u8) Error!void {
+        const nsecs = dev.nsecs;
+        if (nsecs < 512 or group_secs % 8 != 0) return Error.TooLarge;
+        const gsecs = group_secs;
+        const bbpg: u32 = @intCast((gsecs + bits_per_bblock - 1) / bits_per_bblock);
         if (bbpg > 8) return Error.TooLarge; // 8 ptrs per group entry
-        const gcount: u32 = @intCast((nblocks + gb - 1) / gb);
+        const gcount: u32 = @intCast((nsecs + gsecs - 1) / gsecs);
         if (gcount > max_groups) return Error.TooLarge;
         const gt_leaves: u64 = (gcount + gt_per_block - 1) / gt_per_block;
-        const gt_level: u8 = if (gt_leaves <= 1) 0 else 1;
-        if (gt_leaves > ptrs_per_block) return Error.TooLarge; // format supports level<=1
+        const gt_level: u8 = if (gt_leaves <= 1) 0 else if (gt_leaves <= ptrs_per_block) 1 else 2;
+        const l1_count: u64 = if (gt_level == 2) (gt_leaves + ptrs_per_block - 1) / ptrs_per_block else 0;
+        if (l1_count > ptrs_per_block) return Error.TooLarge;
 
-        // Bootstrap layout in group 0, after the superblock slots:
-        //   [8]                 objmap leaf 0
-        //   [9 .. 9+L)          group-table leaves
-        //   [9+L]               group-table root (only if gt_level == 1)
-        //   group g bitmaps: g == 0 -> right after the above; else at the
-        //   group's own first blocks.
-        var cursor: u64 = sb_slots;
-        const objmap_addr = cursor;
-        cursor += 1;
-        const gtl_addr = cursor;
-        cursor += gt_leaves;
-        const gtr_addr = cursor;
-        if (gt_level == 1) cursor += 1;
-        const g0_bitmap_addr = cursor;
-        cursor += bbpg;
-        if (cursor >= gb or cursor >= nblocks) return Error.TooLarge;
+        const ks: ?KeySchedule = if (key) |k| deriveSchedule(k) else null;
+
+        // Bootstrap layout in group 0 (sector units, all runs 8-aligned):
+        // SB slots at 0..63, then objmap leaf, group-table leaves, L1
+        // nodes (gt_level 2), root (gt_level >= 1), group-0 bitmaps.
+        // Other groups' bitmaps sit at their own first sectors.
+        var cursor: u64 = sb_slots * spb;
+        const objmap_sec = cursor;
+        cursor += spb;
+        const gtl_sec = cursor;
+        cursor += gt_leaves * spb;
+        const l1_sec = cursor;
+        cursor += l1_count * spb;
+        const gtr_sec = cursor;
+        if (gt_level >= 1) cursor += spb;
+        const g0_bitmap_sec = cursor;
+        cursor += @as(u64, bbpg) * spb;
+        if (cursor >= gsecs or cursor >= nsecs) return Error.TooLarge;
 
         var blk: [block_size]u8 = @splat(0);
 
-        // Objmap leaf: root dir (obj 0) and the deleting set (obj 1).
+        // Objmap leaf: root dir (obj 0) and the deleting set (obj 1) —
+        // encrypted (tree class) on encrypted volumes.
         var dn_root: Dnode = .{ .typ = .dir };
         var dn_del: Dnode = .{ .typ = .file };
         putDnode(blk[0..], &dn_root);
         putDnode(blk[dnode_size..], &dn_del);
-        dev.write(objmap_addr, &blk) catch return Error.IoError;
-        const objmap_ptr: BlockPtr = .{ .addr = objmap_addr, .csum = csum(&blk) };
+        const objmap_ptr = try writeFormatBlock(dev, objmap_sec, &blk, if (ks) |*k| k else null);
 
         // Bitmaps: written per group; group-table entries collected.
-        var gt_leaf_bufs_ok = true;
-        _ = &gt_leaf_bufs_ok;
-        var gt_leaf: [block_size]u8 = undefined;
+        var gt_leaf: [block_size]u8 = @splat(0);
         var leaf_idx: u64 = 0;
         var slot_in_leaf: u64 = 0;
-        @memset(&gt_leaf, 0);
         var gtl_ptrs: [ptrs_per_block]BlockPtr = @splat(.{});
+        var l1_ptrs: [ptrs_per_block]BlockPtr = @splat(.{});
 
         var bm: [block_size]u8 = undefined;
         for (0..gcount) |g| {
-            const g_start = @as(u64, g) * gb;
-            const bm_base = if (g == 0) g0_bitmap_addr else g_start;
-            var free_count: u32 = 0;
+            const g_start = @as(u64, g) * gsecs;
+            const bm_base = if (g == 0) g0_bitmap_sec else g_start;
+            var free_bytes: u32 = 0;
             var entry: [gt_entry_size]u8 = @splat(0);
             for (0..bbpg) |sub| {
                 @memset(&bm, 0);
-                const bit_base = g_start + sub * bits_per_bblock;
-                var bit: u64 = 0;
-                while (bit < bits_per_bblock) : (bit += 1) {
-                    const addr = bit_base + bit;
-                    const used = addr >= nblocks or addr >= g_start + gb or
-                        (g == 0 and addr < cursor) or
-                        (g != 0 and addr >= bm_base and addr < bm_base + bbpg);
-                    if (used) {
-                        bm[@intCast(bit / 8)] |= @as(u8, 1) << @intCast(bit % 8);
-                    } else if (addr < nblocks and addr < g_start + gb) {
-                        free_count += 1;
+                const sec_base = g_start + sub * bits_per_bblock;
+                for (0..block_size) |bi| {
+                    var byte: u8 = 0;
+                    for (0..8) |bit| {
+                        const sec = sec_base + bi * 8 + bit;
+                        const used = sec >= nsecs or sec >= g_start + gsecs or
+                            (g == 0 and sec < cursor) or
+                            (g != 0 and sec >= bm_base and sec < bm_base + @as(u64, bbpg) * spb);
+                        if (used) byte |= @as(u8, 1) << @intCast(bit);
                     }
+                    bm[bi] = byte;
+                    if (byte == 0) free_bytes += 1;
                 }
-                const a = bm_base + sub;
-                dev.write(a, &bm) catch return Error.IoError;
-                putPtr(entry[sub * 16 ..], .{ .addr = a, .csum = csum(&bm) });
+                const a = bm_base + sub * spb;
+                dev.write(a, spb, &bm) catch return Error.IoError;
+                putPtr(entry[sub * 16 ..], .{ .w = BlockPtr.pack(a, spb, 0), .csum = xxsum(&bm) });
             }
-            puU(u32, entry[128..132], free_count);
+            puU(u32, entry[128..132], free_bytes);
             @memcpy(gt_leaf[@intCast(slot_in_leaf * gt_entry_size)..][0..gt_entry_size], &entry);
             slot_in_leaf += 1;
             if (slot_in_leaf == gt_per_block or g == gcount - 1) {
-                const a = gtl_addr + leaf_idx;
-                dev.write(a, &gt_leaf) catch return Error.IoError;
-                gtl_ptrs[@intCast(leaf_idx)] = .{ .addr = a, .csum = csum(&gt_leaf) };
+                const a = gtl_sec + leaf_idx * spb;
+                dev.write(a, spb, &gt_leaf) catch return Error.IoError;
+                gtl_ptrs[@intCast(leaf_idx % ptrs_per_block)] = .{ .w = BlockPtr.pack(a, spb, 0), .csum = xxsum(&gt_leaf) };
                 leaf_idx += 1;
                 slot_in_leaf = 0;
                 @memset(&gt_leaf, 0);
+                // gt_level 2: flush a full set of 256 leaves into an L1 node.
+                if (gt_level == 2 and (leaf_idx % ptrs_per_block == 0 or g == gcount - 1)) {
+                    @memset(&blk, 0);
+                    const in_node = if (leaf_idx % ptrs_per_block == 0) ptrs_per_block else leaf_idx % ptrs_per_block;
+                    for (0..in_node) |i| putPtr(blk[i * 16 ..], gtl_ptrs[i]);
+                    const l1i = (leaf_idx - 1) / ptrs_per_block;
+                    const a1 = l1_sec + l1i * spb;
+                    dev.write(a1, spb, &blk) catch return Error.IoError;
+                    l1_ptrs[@intCast(l1i)] = .{ .w = BlockPtr.pack(a1, spb, 0), .csum = xxsum(&blk) };
+                    gtl_ptrs = @splat(.{});
+                }
             }
         }
         var gt_root: BlockPtr = gtl_ptrs[0];
-        if (gt_level == 1) {
+        if (gt_level >= 1) {
             @memset(&blk, 0);
-            for (0..gt_leaves) |i| putPtr(blk[i * 16 ..], gtl_ptrs[i]);
-            dev.write(gtr_addr, &blk) catch return Error.IoError;
-            gt_root = .{ .addr = gtr_addr, .csum = csum(&blk) };
+            if (gt_level == 1) {
+                for (0..gt_leaves) |i| putPtr(blk[i * 16 ..], gtl_ptrs[i]);
+            } else {
+                for (0..l1_count) |i| putPtr(blk[i * 16 ..], l1_ptrs[i]);
+            }
+            dev.write(gtr_sec, spb, &blk) catch return Error.IoError;
+            gt_root = .{ .w = BlockPtr.pack(gtr_sec, spb, 0), .csum = xxsum(&blk) };
         }
 
         // Superblock slot 0 (txg 1); wipe the other slots so stale
         // filesystems can never win the mount election.
         @memset(&blk, 0);
-        for (1..sb_slots) |slot| dev.write(slot, &blk) catch return Error.IoError;
+        for (1..sb_slots) |slot| dev.write(slot * spb, spb, &blk) catch return Error.IoError;
         dev.flush() catch return Error.IoError;
 
-        @memcpy(blk[0..4], sb_magic);
-        puU(u32, blk[4..8], fs_version);
-        puU(u64, blk[8..16], 1); // txg
-        puU(u32, blk[16..20], 0); // slot
-        puU(u64, blk[24..32], nblocks);
-        puU(u64, blk[32..40], gb);
-        puU(u32, blk[40..44], bbpg);
-        puU(u32, blk[44..48], gcount);
-        putPtr(blk[48..], objmap_ptr);
-        blk[64] = 0; // objmap level
-        putPtr(blk[72..], gt_root);
-        blk[88] = gt_level;
-        puU(u32, blk[92..96], first_user_obj);
-        const sc = std.hash.XxHash64.hash(0x5342, blk[0 .. block_size - 8]);
-        puU(u64, blk[block_size - 8 ..], sc);
-        dev.write(0, &blk) catch return Error.IoError;
+        fillSuper(&blk, 1, 0, nsecs, gsecs, bbpg, gcount, objmap_ptr, 0, gt_root, gt_level, first_user_obj, ks != null);
+        var zero_key: [16]u8 = @splat(0);
+        sealSuper(&blk, ks != null, if (ks) |*k| &k.sb_mac_key else &zero_key);
+        dev.write(0, spb, &blk) catch return Error.IoError;
         dev.flush() catch return Error.IoError;
+    }
+
+    /// Write one tree-class 4K block at format time (encrypt + MAC when
+    /// the volume is encrypted); returns its pointer.
+    fn writeFormatBlock(dev: BlockDev, sector: u64, content: *const [block_size]u8, ks: ?*const KeySchedule) Error!BlockPtr {
+        var fl: u8 = 0;
+        var stored: [block_size]u8 = undefined;
+        @memcpy(&stored, content);
+        var cs: u64 = undefined;
+        if (ks) |k| {
+            fl |= flag_enc;
+            cs = SipMac.toInt(&stored, &k.mac_key);
+            var i: u64 = 0;
+            while (i < spb) : (i += 1) {
+                k.xts_ctx.encryptSector(stored[i * sector_size ..][0..sector_size], sector + i);
+            }
+        } else {
+            cs = xxsum(&stored);
+        }
+        dev.write(sector, spb, &stored) catch return Error.IoError;
+        return .{ .w = BlockPtr.pack(sector, spb, fl), .csum = cs };
     }
 };
 
@@ -1510,12 +1786,12 @@ pub const Fs = struct {
 // ======================================================================
 
 pub const RamDev = struct {
-    blocks: [][block_size]u8,
-    /// Recorded write sequence since last resetLog (addr per write).
-    wlog: [4096]u64 = undefined,
+    secs: [][sector_size]u8,
+    /// Recorded write sequence since last reset: sector | count<<48.
+    wlog: [16384]u64 = undefined,
     wlog_len: usize = 0,
-    /// When set, writes stop being applied after this many more writes
-    /// (simulating power loss mid-stream); the final write can be torn.
+    /// When set, write REQUESTS stop being applied after this many more;
+    /// the final request can be torn inside the run at a sector boundary.
     cut_after: ?usize = null,
     tear_final: bool = false,
     dropped: usize = 0,
@@ -1527,19 +1803,21 @@ pub const RamDev = struct {
             .readFn = doRead,
             .writeFn = doWrite,
             .flushFn = doFlush,
-            .nblocks = rd.blocks.len,
+            .nsecs = rd.secs.len,
         };
     }
 
-    fn doRead(ctx: *anyopaque, addr: u64, dst: *[block_size]u8) DevError!void {
+    fn doRead(ctx: *anyopaque, sector: u64, count: u64, dst: []u8) DevError!void {
         const rd: *RamDev = @ptrCast(@alignCast(ctx));
-        if (addr >= rd.blocks.len) return DevError.IoError;
-        @memcpy(dst, &rd.blocks[@intCast(addr)]);
+        if (sector + count > rd.secs.len or dst.len != count * sector_size) return DevError.IoError;
+        for (0..count) |i| {
+            @memcpy(dst[i * sector_size ..][0..sector_size], &rd.secs[@intCast(sector + i)]);
+        }
     }
 
-    fn doWrite(ctx: *anyopaque, addr: u64, src: *const [block_size]u8) DevError!void {
+    fn doWrite(ctx: *anyopaque, sector: u64, count: u64, src: []const u8) DevError!void {
         const rd: *RamDev = @ptrCast(@alignCast(ctx));
-        if (addr >= rd.blocks.len) return DevError.IoError;
+        if (sector + count > rd.secs.len or src.len != count * sector_size) return DevError.IoError;
         if (rd.cut_after) |*n| {
             if (n.* == 0) {
                 rd.dropped += 1;
@@ -1547,21 +1825,26 @@ pub const RamDev = struct {
             }
             n.* -= 1;
             if (n.* == 0 and rd.tear_final) {
-                // Torn write: only a prefix of the sectors lands, the rest
-                // is garbage.
-                const sectors = 1 + rd.prng.random().uintLessThan(usize, 7);
-                @memcpy(rd.blocks[@intCast(addr)][0 .. sectors * 512], src[0 .. sectors * 512]);
-                rd.prng.random().bytes(rd.blocks[@intCast(addr)][sectors * 512 ..]);
-                if (rd.wlog_len < rd.wlog.len) {
-                    rd.wlog[rd.wlog_len] = addr;
-                    rd.wlog_len += 1;
+                // Torn request: a prefix of the run lands; one further
+                // sector is garbage.
+                const landed = rd.prng.random().uintLessThan(usize, @intCast(count));
+                for (0..landed) |i| {
+                    @memcpy(&rd.secs[@intCast(sector + i)], src[i * sector_size ..][0..sector_size]);
                 }
+                if (landed < count) rd.prng.random().bytes(&rd.secs[@intCast(sector + landed)]);
+                rd.log(sector, count);
                 return;
             }
         }
-        @memcpy(&rd.blocks[@intCast(addr)], src);
+        for (0..count) |i| {
+            @memcpy(&rd.secs[@intCast(sector + i)], src[i * sector_size ..][0..sector_size]);
+        }
+        rd.log(sector, count);
+    }
+
+    fn log(rd: *RamDev, sector: u64, count: u64) void {
         if (rd.wlog_len < rd.wlog.len) {
-            rd.wlog[rd.wlog_len] = addr;
+            rd.wlog[rd.wlog_len] = sector | (count << 48);
             rd.wlog_len += 1;
         }
     }
@@ -1580,28 +1863,47 @@ var dbg_written_n: usize = 0;
 
 const testing = std.testing;
 
-const test_blocks = 2048; // 8MB volume
-const test_group_blocks = 512; // tiny groups: multi-group on a toy volume
+const test_secs = 16384; // 8MB volume
+const test_group_secs = 4096; // tiny groups: multi-group on a toy volume
 
-var t_storage: [test_blocks][block_size]u8 = undefined;
+var t_storage: [test_secs][sector_size]u8 = undefined;
+var t_snap: [test_secs][sector_size]u8 = undefined;
 var t_fs: Fs = undefined;
 var t_fs2: Fs = undefined;
 
+const test_master_key: [32]u8 = blk: {
+    var k: [32]u8 = undefined;
+    for (&k, 0..) |*b, i| b.* = @intCast(i * 7 + 3);
+    break :blk k;
+};
+
+/// Per-config key: null = plaintext volume; set = encrypted volume.
+var t_key: ?*const [32]u8 = null;
+
 fn freshDev(rd: *RamDev) BlockDev {
     for (&t_storage) |*b| @memset(b, 0xAA); // poison
-    rd.* = .{ .blocks = &t_storage };
+    rd.* = .{ .secs = &t_storage };
     return rd.dev();
+}
+
+fn fmtDev(dev: BlockDev) !void {
+    try Fs.format(dev, test_group_secs, t_key);
+}
+
+fn mountKeyed(f: *Fs, dev: BlockDev) !void {
+    try f.mount(dev);
+    if (t_key) |k| try f.setKey(k);
 }
 
 test "format, mount, small file round trip, remount persistence" {
     var rd: RamDev = undefined;
     const dev = freshDev(&rd);
-    try Fs.format(dev, test_group_blocks);
+    try fmtDev(dev);
     try t_fs.mount(dev);
 
     const obj = try t_fs.allocObject(.file, 100);
     try t_fs.dirAdd(root_obj, "hello.txt", obj, .file, 100);
-    _ = try t_fs.writeObj(obj, 0, "hello mossfs v2", 101);
+    _ = try t_fs.writeObj(obj, 0, "hello mossfs v3", 101);
     try t_fs.sync(101);
 
     // Remount from scratch: everything must persist.
@@ -1610,7 +1912,7 @@ test "format, mount, small file round trip, remount persistence" {
     try testing.expectEqual(obj, found.obj);
     var buf: [64]u8 = undefined;
     const n = try t_fs2.readObj(found.obj, 0, &buf);
-    try testing.expectEqualStrings("hello mossfs v2", buf[0..n]);
+    try testing.expectEqualStrings("hello mossfs v3", buf[0..n]);
     const st = try t_fs2.statObj(found.obj);
     try testing.expectEqual(@as(u64, 101), st.mtime);
     try testing.expectEqual(ObjType.file, st.typ);
@@ -1619,14 +1921,16 @@ test "format, mount, small file round trip, remount persistence" {
 test "large file through indirect levels, sparse holes, truncate, delete" {
     var rd: RamDev = undefined;
     const dev = freshDev(&rd);
-    try Fs.format(dev, test_group_blocks);
+    try fmtDev(dev);
     try t_fs.mount(dev);
 
     const obj = try t_fs.allocObject(.file, 1);
-    // Write into the second indirect level (idx 3 + 256 + 10).
+    // Write into the second indirect level (idx 3 + 256 + 10); random
+    // pattern so it exercises the raw (incompressible) path.
     const far: u64 = (3 + ptrs_per_block + 10) * block_size;
     var pat: [block_size]u8 = undefined;
-    for (&pat, 0..) |*c, i| c.* = @truncate(i *% 7 +% 1);
+    var prng = std.Random.DefaultPrng.init(42);
+    prng.random().bytes(&pat);
     _ = try t_fs.writeObj(obj, far, &pat, 2);
     _ = try t_fs.writeObj(obj, 0, "front", 3);
     try t_fs.sync(3);
@@ -1651,9 +1955,7 @@ test "large file through indirect levels, sparse holes, truncate, delete" {
     n = try t_fs2.readObj(obj, far, buf[0..8]);
     try testing.expectEqualStrings("again\x00\x00\x00", buf[0..8]);
 
-    // Delete entirely; space must eventually return.
-    const free_before = try t_fs2.freeBlocksTotal();
-    _ = free_before;
+    // Delete entirely; the deleting set must fully drain.
     _ = try t_fs2.dirRemove(root_obj, "nope", 6); // no-op remove is fine
     try t_fs2.freeObject(obj, 6);
     try t_fs2.sync(6);
@@ -1665,7 +1967,7 @@ test "large file through indirect levels, sparse holes, truncate, delete" {
 test "directories: add, lookup, remove, list, emptiness" {
     var rd: RamDev = undefined;
     const dev = freshDev(&rd);
-    try Fs.format(dev, test_group_blocks);
+    try fmtDev(dev);
     try t_fs.mount(dev);
 
     const d = try t_fs.allocObject(.dir, 1);
@@ -1689,7 +1991,7 @@ test "directories: add, lookup, remove, list, emptiness" {
 test "corruption is detected, never returned" {
     var rd: RamDev = undefined;
     const dev = freshDev(&rd);
-    try Fs.format(dev, test_group_blocks);
+    try fmtDev(dev);
     try t_fs.mount(dev);
     const obj = try t_fs.allocObject(.file, 1);
     var pat: [block_size]u8 = undefined;
@@ -1697,10 +1999,10 @@ test "corruption is detected, never returned" {
     _ = try t_fs.writeObj(obj, 0, &pat, 1);
     try t_fs.sync(1);
 
-    // Find the file's data block on disk and flip one byte.
+    // Find the file's data run on disk and flip one byte.
     try t_fs2.mount(dev);
     const dn = try t_fs2.dnodeOf(obj);
-    const victim = dn.direct[0].addr;
+    const victim = dn.direct[0].sec();
     try testing.expect(victim != 0);
     t_storage[@intCast(victim)][100] ^= 0x40;
 
@@ -1711,31 +2013,146 @@ test "corruption is detected, never returned" {
 test "superblock rotation: older valid slot wins over a torn newest" {
     var rd: RamDev = undefined;
     const dev = freshDev(&rd);
-    try Fs.format(dev, test_group_blocks);
+    try fmtDev(dev);
     try t_fs.mount(dev);
     const obj = try t_fs.allocObject(.file, 1);
     _ = try t_fs.writeObj(obj, 0, "one", 1);
-    try t_fs.sync(1); // txg 2 -> slot 0? (slot_next was 1 at mount)
+    try t_fs.sync(1);
     _ = try t_fs.writeObj(obj, 0, "two", 2);
     try t_fs.sync(2);
     const latest_slot = (t_fs.slot_next + sb_slots - 1) % sb_slots;
     // Corrupt the newest superblock: mount must fall back cleanly.
-    t_storage[latest_slot][500] ^= 0xFF;
+    t_storage[latest_slot * spb][500] ^= 0xFF;
     try t_fs2.mount(dev);
     var buf: [8]u8 = undefined;
     const n = try t_fs2.readObj(obj, 0, &buf);
     try testing.expectEqualStrings("one", buf[0..n]);
 }
 
+test "compression saves space; incompressible data stays raw" {
+    var rd: RamDev = undefined;
+    const dev = freshDev(&rd);
+    try fmtDev(dev);
+    try t_fs.mount(dev);
+    const before = try t_fs.freeBlocksTotal();
+
+    // 24 highly-compressible blocks.
+    const zo = try t_fs.allocObject(.file, 1);
+    var text: [block_size]u8 = undefined;
+    for (0..block_size / 64) |i| @memcpy(text[i * 64 ..][0..64], "all work and no play makes moss a dull filesystem ~~~~~~~~~~~~~\n");
+    for (0..24) |i| _ = try t_fs.writeObj(zo, i * block_size, &text, 1);
+    try t_fs.sync(1);
+    const after_comp = try t_fs.freeBlocksTotal();
+    const comp_cost = before - after_comp;
+    // 24 compressed blocks must cost far fewer than 24 free bytes
+    // (sub-byte packing), plus a handful of metadata blocks.
+    try testing.expect(comp_cost < 16);
+
+    // 24 incompressible blocks cost at least one byte each.
+    const ro = try t_fs.allocObject(.file, 2);
+    var prng = std.Random.DefaultPrng.init(7);
+    var rnd: [block_size]u8 = undefined;
+    for (0..24) |i| {
+        prng.random().bytes(&rnd);
+        _ = try t_fs.writeObj(ro, i * block_size, &rnd, 2);
+    }
+    try t_fs.sync(2);
+    const after_raw = try t_fs.freeBlocksTotal();
+    try testing.expect(after_comp - after_raw >= 24);
+
+    // Both read back exactly right after a remount.
+    try t_fs2.mount(dev);
+    var buf: [block_size]u8 = undefined;
+    _ = try t_fs2.readObj(zo, 23 * block_size, &buf);
+    try testing.expectEqualSlices(u8, &text, &buf);
+    prng = std.Random.DefaultPrng.init(7);
+    for (0..24) |i| {
+        prng.random().bytes(&rnd);
+        _ = try t_fs2.readObj(ro, i * block_size, &buf);
+        try testing.expectEqualSlices(u8, &rnd, &buf);
+    }
+}
+
+test "encrypted volume: roundtrip, key gating, wrong key fails at setKey" {
+    var rd: RamDev = undefined;
+    const dev = freshDev(&rd);
+    try Fs.format(dev, test_group_secs, &test_master_key);
+    try t_fs.mount(dev);
+    try testing.expect(t_fs.keyRequired());
+
+    // Keyless: allocation metadata is readable, objects are not.
+    var buf: [64]u8 = undefined;
+    try testing.expectError(Error.NoKey, t_fs.readObj(root_obj, 0, &buf));
+    _ = try t_fs.freeBlocksTotal();
+
+    // Wrong key: rejected at setKey by the superblock MAC, cleanly.
+    var wrong = test_master_key;
+    wrong[0] ^= 1;
+    try testing.expectError(Error.BadKey, t_fs.setKey(&wrong));
+    try testing.expect(t_fs.keyRequired());
+
+    try t_fs.setKey(&test_master_key);
+    const obj = try t_fs.allocObject(.file, 1);
+    try t_fs.dirAdd(root_obj, "secret.txt", obj, .file, 1);
+    _ = try t_fs.writeObj(obj, 0, "attack at dawn, obviously", 1);
+    try t_fs.sync(1);
+
+    // The plaintext must not appear anywhere on the device.
+    const raw = @as([*]const u8, @ptrCast(&t_storage))[0 .. test_secs * sector_size];
+    try testing.expect(std.mem.indexOf(u8, raw, "attack at dawn") == null);
+    try testing.expect(std.mem.indexOf(u8, raw, "secret.txt") == null);
+
+    // Remount + key: everything back.
+    try t_fs2.mount(dev);
+    try t_fs2.setKey(&test_master_key);
+    const found = (try t_fs2.dirLookup(root_obj, "secret.txt")).?;
+    const n = try t_fs2.readObj(found.obj, 0, &buf);
+    try testing.expectEqualStrings("attack at dawn, obviously", buf[0..n]);
+}
+
+test "encrypted volume: ciphertext flip fails closed; SB splice is caught" {
+    var rd: RamDev = undefined;
+    const dev = freshDev(&rd);
+    try Fs.format(dev, test_group_secs, &test_master_key);
+    try t_fs.mount(dev);
+    try t_fs.setKey(&test_master_key);
+    const obj = try t_fs.allocObject(.file, 1);
+    var pat: [block_size]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(3);
+    prng.random().bytes(&pat);
+    _ = try t_fs.writeObj(obj, 0, &pat, 1);
+    try t_fs.sync(1);
+
+    // Flip one ciphertext byte: the keyed MAC must reject the block.
+    try t_fs2.mount(dev);
+    try t_fs2.setKey(&test_master_key);
+    const dn = try t_fs2.dnodeOf(obj);
+    t_storage[@intCast(dn.direct[0].sec())][7] ^= 0x01;
+    var buf: [block_size]u8 = undefined;
+    try testing.expectError(Error.Corrupt, t_fs2.readObj(obj, 0, &buf));
+
+    // SB splice: edit the elected slot and re-seal its keyless checksum.
+    // Election still accepts it — but setKey's keyed MAC does not.
+    const slot = (t_fs.slot_next + sb_slots - 1) % sb_slots;
+    var sb: [block_size]u8 = undefined;
+    for (0..spb) |i| @memcpy(sb[i * sector_size ..][0..sector_size], &t_storage[slot * spb + i]);
+    sb[48] ^= 0x04; // graft a different objmap root pointer
+    const sc = std.hash.XxHash64.hash(0x5342, sb[0 .. block_size - 8]);
+    puU(u64, sb[block_size - 8 ..], sc);
+    for (0..spb) |i| @memcpy(&t_storage[slot * spb + i], sb[i * sector_size ..][0..sector_size]);
+    try t_fs2.mount(dev);
+    try testing.expectError(Error.BadKey, t_fs2.setKey(&test_master_key));
+}
+
 // The heart of the matter: run a scripted workload; for every prefix of
 // the write stream (clean cut AND torn final write), remount and verify
 // the filesystem is consistent and equals either the pre- or post-txg
-// state.
-test "crash injection sweep" {
+// state. Runs on both a plaintext and an encrypted volume.
+fn crashSweep() !void {
     var rd: RamDev = undefined;
     var dev = freshDev(&rd);
-    try Fs.format(dev, test_group_blocks);
-    try t_fs.mount(dev);
+    try fmtDev(dev);
+    try mountKeyed(&t_fs, dev);
     const obj = try t_fs.allocObject(.file, 1);
     try t_fs.dirAdd(root_obj, "f", obj, .file, 1);
     _ = try t_fs.writeObj(obj, 0, "BEFORE-STATE", 1);
@@ -1760,12 +2177,12 @@ test "crash injection sweep" {
         while (cut <= total_writes) : (cut += 1) {
             // Restore the pre-txg image and replay with a cut.
             @memcpy(&t_storage, &t_snap);
-            rd = .{ .blocks = &t_storage };
+            rd = .{ .secs = &t_storage };
             rd.cut_after = cut;
             rd.tear_final = tear == 1 and cut > 0;
             dev = rd.dev();
 
-            try t_fs2.mount(dev);
+            try mountKeyed(&t_fs2, dev);
             _ = try t_fs2.writeObj(obj, 0, "AFTER!-STATE", 2);
             const o2 = try t_fs2.allocObject(.file, 2);
             try t_fs2.dirAdd(root_obj, "g", o2, .file, 2);
@@ -1775,7 +2192,7 @@ test "crash injection sweep" {
             // Power cycle: remount and verify exactly-old-or-new.
             rd.cut_after = null;
             rd.tear_final = false;
-            try t_fs.mount(dev);
+            try mountKeyed(&t_fs, dev);
             var buf: [64]u8 = undefined;
             const fref = (try t_fs.dirLookup(root_obj, "f")).?;
             const n = try t_fs.readObj(fref.obj, 0, &buf);
@@ -1793,19 +2210,29 @@ test "crash injection sweep" {
     }
 }
 
-var t_snap: [test_blocks][block_size]u8 = undefined;
+test "crash injection sweep (plaintext)" {
+    t_key = null;
+    try crashSweep();
+}
+
+test "crash injection sweep (encrypted)" {
+    t_key = &test_master_key;
+    defer t_key = null;
+    try crashSweep();
+}
 
 // Model-based randomized workload: mirror ops against a trivial in-memory
-// model; verify equality after every commit and after remount.
-test "randomized ops vs model" {
+// model; verify equality after every commit and after remount. The data
+// mix alternates compressible and incompressible content so both stored
+// forms churn through the allocator.
+fn modelRun() !void {
     var rd: RamDev = undefined;
     const dev = freshDev(&rd);
-    try Fs.format(dev, test_group_blocks);
-    try t_fs.mount(dev);
+    try fmtDev(dev);
+    try mountKeyed(&t_fs, dev);
 
     const Model = struct {
         used: [16]bool = @splat(false),
-        name: [16]u8 = undefined,
         obj: [16]u32 = undefined,
         content: [16][96]u8 = undefined,
         len: [16]usize = @splat(0),
@@ -1830,7 +2257,11 @@ test "randomized ops vs model" {
                     model.len[slot] = 0;
                 }
                 var data: [64]u8 = undefined;
-                rand.bytes(&data);
+                if (rand.boolean()) {
+                    rand.bytes(&data);
+                } else {
+                    @memset(&data, @as(u8, @intCast(slot)) + 'A');
+                }
                 const wl = 1 + rand.uintLessThan(usize, 63);
                 _ = try t_fs.writeObj(model.obj[slot], 0, data[0..wl], now);
                 if (wl > model.len[slot]) model.len[slot] = wl;
@@ -1859,7 +2290,7 @@ test "randomized ops vs model" {
     // Verify against the model, then again after a remount.
     for (0..2) |round| {
         const f = if (round == 0) &t_fs else blk: {
-            try t_fs2.mount(dev);
+            try mountKeyed(&t_fs2, dev);
             break :blk &t_fs2;
         };
         for (0..16) |slot| {
@@ -1876,4 +2307,15 @@ test "randomized ops vs model" {
             try testing.expectEqualSlices(u8, model.content[slot][0..n], buf[0..n]);
         }
     }
+}
+
+test "randomized ops vs model (plaintext)" {
+    t_key = null;
+    try modelRun();
+}
+
+test "randomized ops vs model (encrypted)" {
+    t_key = &test_master_key;
+    defer t_key = null;
+    try modelRun();
 }

@@ -40,6 +40,7 @@ the Phase 12+ pool below is the open frontier.
 | Network addressing | **IPv6-native ABI**: every address in every protocol is 128 bits; IPv4 destinations travel v4-mapped (`::ffff:a.b.c.d`). There is no IPv4-only code path to depend on — the stack speaks both families on the wire (ARP for v4, NDP/ICMPv6 for v6), but the system's idea of an address is IPv6. Filters/allowlists compare full 128-bit addresses. | v4-only ABIs are the next legacy trap; v4-mapped addressing is the proven dual-stack shape and costs nothing. |
 | Word size | 64-bit only, permanently. The application/microcontroller divide is MMU vs. MPU, not word size: no-MMU hardware (Pico 2 / RP2350 class) cannot express per-domain address spaces at all, and 32-bit would break load-bearing design elements — the linear direct map doesn't fit in a 32-bit address space (hello highmem/kmap), generational handles lose generation width, and the IPC ABI forks. The 64-bit budget market is already the budget market ($5 RV64 Milk-V Duo, $15 aarch64 Pi Zero 2 W); new 32-bit application-class silicon serves vendor-BSP embedded lines that would never adopt a new OS. MCU-class devices join the pool as **fabric leaf nodes** instead (see Phase 12). | No second OS wearing the same name; no design pressure from hardware the architecture can't serve. |
 | Language/toolchain | Zig, version pinned (currently 0.16.0). `build.zig` is the entire build: kernel, userspace, image packing, `zig build run`, `zig build run-cluster`. Comptime Zig types are the IDL — IPC protocols defined once in `shared/`, marshaling/stubs generated at comptime. | No Make, no shell scripts, no separate IDL compiler, ABI type-checked from one source of truth. |
+| Code sharing | **Static linking only — no dynamic loader, ever.** Shared functionality lives in `lib/`: pure, freestanding-safe, host-testable Zig modules (lz4, xts, ...) compiled into each program that imports them. Where key custody matters, a capability *service* holds the secret instead of a library. Code-page dedup, if ever needed, comes from content-addressed images (`img/`), not load-time linking. | Relocation machinery, symbol versioning, and loader attack surface bought nothing at moss's scale; static modules keep every binary analyzable and every ABI a comptime-checked Zig type. |
 
 ### Non-goals (permanently, unless revisited here)
 
@@ -195,9 +196,35 @@ The pooling story stops being theory.
   std-only library; `zig build test` runs crash-injection sweeps (every
   cut point + torn final writes), corruption flips, superblock-election
   and model-based randomized-op tests against it on the host. Scoping
-  notes: torn-4K-write detection-only (CoW makes them harmless);
+  notes: torn-write detection-only (CoW makes them harmless);
   cross-parent directory rename refused (no ancestry walk yet); linear
   dirents (hashed dirs are a format-versioned evolution).
+- ✅ **mossfs v3 — compression + encryption** (done): format rev on v2, no
+  migration. Per-block LZ4 (data blocks; stored only when it saves ≥1
+  sector) over sector-granular, byte-aligned allocation (bitmap bit =
+  sector; metadata/raw runs take one full free byte, compressed runs pack
+  inside a byte; the free counter counts free bytes so the ENOSPC reserve
+  survives fragmentation; frees and quarantine are range-aware).
+  FS-native AES-256-XTS encryption (tweak = absolute sector): object
+  data, indirect blocks, and the objmap are ciphertext; superblocks,
+  group table, and bitmaps stay plaintext so mount/allocation are
+  keyless. Encrypted blocks use keyed SipHash-2-4 MACs as their csums;
+  the SB carries a keyed MAC verified at set_key (wrong keys fail there,
+  cleanly; SB splices are caught). Keys: 256-bit master → HKDF → XTS +
+  MAC keys, delivered badge-0-only via FsReq.set_key before
+  FsReq.attach_disk; background work (drain/commit/volatile-clearing) is
+  key-gated; auto-format only on an all-zero SB region (garbage disks are
+  never wiped — degraded bootfs-only serving instead). lib/lz4 + lib/xts
+  are the first `lib/` static modules (OpenSSL-cross-validated vectors).
+  Documented residuals: ≤8-txg rollback via SB-slot zeroing (no external
+  anti-rollback state), 64-bit MAC tags (format constraint), plaintext
+  allocation metadata leaks fill/churn patterns, software AES until
+  FP/SIMD lands.
+- **FP/SIMD context switching + hardware crypto**: enable CPACR_EL1
+  FP/NEON for userspace with per-thread vector-state save/restore (lazy
+  or eager), then build userspace with NEON + AES target features —
+  std.crypto's armcrypto AES path replaces soft AES and mossfs encryption
+  reaches hardware speed. Kernel stays FP-free.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

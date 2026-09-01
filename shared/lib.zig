@@ -260,6 +260,12 @@ pub const blk_sector_size: u64 = 512;
 
 pub const FsReq = union(enum(u64)) {
     attach_buf: void, // + shm cap: this view's path/data buffer
+    /// Root handshake: hand the FS its disk (+ blk channel cap). On an
+    /// encrypted volume, set_key must have arrived first.
+    attach_disk: void,
+    /// Badge-0 only, before attach_disk: 32 bytes of master key material
+    /// in the view buffer (zeroized by the service after reading).
+    set_key: struct { off: u64, len: u64 },
     /// create: 0 = open existing, 1 = create file (or open existing),
     /// 2 = create directory (ok if it exists), 3 = create file, O_EXCL
     open: struct { path_off: u64, path_len: u64, create: u64 },
@@ -305,6 +311,7 @@ pub const FsErr = enum(u64) {
     exists = 6,
     io = 7,
     not_empty = 8, // directory delete/replace target not empty
+    bad_key = 9, // wrong or missing volume key
 };
 
 /// Boot filesystem archive ("MARC"): a flat sequence of
