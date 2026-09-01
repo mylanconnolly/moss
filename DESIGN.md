@@ -6,6 +6,11 @@ says *how the pieces work together* and records reasoning detailed enough to
 stop relitigation. When this document and the code disagree, one of them has a
 bug — fix whichever is wrong, deliberately.
 
+Sections marked **"As built"** describe the running system (phases 0–11, all
+covered by `zig build check`) including the scoping compromises of each v0
+and the lessons individual bugs paid for; the surrounding prose is the
+destination those versions evolve toward.
+
 ## Kernel model
 
 Moss is a capability-based microkernel. The kernel implements: address spaces,

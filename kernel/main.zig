@@ -196,6 +196,7 @@ fn domainTestWorker(_: u64) void {
         log.info("domain-test: PASS — pmem identical ({d}MB free), quotas zero", .{
             frames_after >> 20,
         });
+        psci.systemOff();
     } else {
         std.debug.panic("domain-test: LEAK — {d}B of frames unaccounted", .{
             frames_before -% frames_after,
@@ -276,6 +277,7 @@ fn ipcTestWorker(_: u64) void {
     const shm_left = ipc.shm_account.balance();
     if (frames_after == frames_before and shm_left == 0 and askr.exit_code == 7) {
         log.info("ipc-test: PASS — pmem identical, shm account zero, death observed", .{});
+        psci.systemOff();
     } else {
         std.debug.panic("ipc-test: FAIL — pmem delta {d}B, shm {d}B, askr exit {d}", .{
             frames_before -% frames_after, shm_left, askr.exit_code,
@@ -309,6 +311,7 @@ fn initTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (frames_after == frames_before and root.exit_code == 0) {
         log.info("init-test: PASS — userspace tree finished clean, pmem identical", .{});
+        psci.systemOff();
     } else {
         std.debug.panic("init-test: FAIL — pmem delta {d}B, root exit {d}", .{
             frames_before -% frames_after, root.exit_code,
@@ -365,6 +368,7 @@ fn sandboxTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (frames_after == frames_before) {
         log.info("sandbox-test: PASS — subtree reclaimed, budgets zero, pmem identical", .{});
+        psci.systemOff();
     } else {
         std.debug.panic("sandbox-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
@@ -393,6 +397,7 @@ fn flapTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (root.exit_code == 77 and frames_after == frames_before) {
         log.info("flap-test: PASS — escalation reached the top (code 77), pmem identical", .{});
+        psci.systemOff();
     } else {
         std.debug.panic("flap-test: FAIL — root exit {d}, pmem delta {d}B", .{
             root.exit_code, frames_before -% frames_after,
@@ -435,6 +440,7 @@ fn blkTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (user.exit_code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
         log.info("blk-test: PASS — real disk I/O through a sandboxed userspace driver, nothing leaked", .{});
+        psci.systemOff();
     } else {
         std.debug.panic("blk-test: FAIL — client exit {d}, pmem delta {d}B", .{
             user.exit_code, frames_before -% frames_after,
@@ -536,6 +542,7 @@ fn fsTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (frames_after == frames_before) {
         log.info("fs-test: PASS — disjoint namespaces on real storage, nothing leaked", .{});
+        psci.systemOff();
     } else {
         std.debug.panic("fs-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
@@ -608,6 +615,7 @@ fn netTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (frames_after == frames_before and ipc.shm_account.balance() == 0) {
         log.info("net-test: PASS — dual-stack tcp via userspace netsvc, allowlist enforced, nothing leaked", .{});
+        psci.systemOff();
     } else {
         std.debug.panic("net-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }

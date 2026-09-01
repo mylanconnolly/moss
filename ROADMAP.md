@@ -8,6 +8,9 @@ This document is the plan of record: locked decisions first, then phased
 milestones, each with a concrete exit criterion. Change decisions here before
 changing them in code.
 
+**Status:** phases 0–11 are complete (✅) and covered by `zig build check`;
+the Phase 12+ pool below is the open frontier.
+
 ---
 
 ## Locked decisions
@@ -48,7 +51,7 @@ dependencies (`After=`-style), graceful-shutdown protocols (crash-only instead).
 
 ---
 
-## Phase 0 — Toolchain and boot skeleton
+## Phase 0 — Toolchain and boot skeleton ✅
 
 Repo scaffolding and the ten-thousand-times loop.
 
@@ -60,7 +63,7 @@ Repo scaffolding and the ten-thousand-times loop.
 
 **Exit:** `zig build run` prints a banner over serial and panics cleanly on demand.
 
-## Phase 1 — Kernel foundations
+## Phase 1 — Kernel foundations ✅
 
 - EL1 exception vectors; synchronous fault reporting with useful register dumps.
 - Physical frame allocator from the devicetree memory map (minimal DT parsing).
@@ -70,7 +73,7 @@ Repo scaffolding and the ten-thousand-times loop.
 
 **Exit:** timer ticks are handled and logged; a deliberate bad access produces a readable fault report, not a hang.
 
-## Phase 2 — Threads and scheduling
+## Phase 2 — Threads and scheduling ✅
 
 - Kernel threads, context switch, sleep/wake.
 - Per-core run queues and per-core state (structures SMP-honest from the start); big kernel lock for now.
@@ -79,7 +82,7 @@ Repo scaffolding and the ten-thousand-times loop.
 
 **Exit:** a multi-core test — threads pinned and migrating across 4 cores — runs clean under load.
 
-## Phase 3 — User mode, capabilities, domains
+## Phase 3 — User mode, capabilities, domains ✅
 
 The security model becomes real here; everything later builds on it.
 
@@ -91,7 +94,7 @@ The security model becomes real here; everything later builds on it.
 
 **Exit:** a user process spawns with an explicit cap manifest, runs, syscalls, and is destroyed by one revocation with nothing leaked (verified by quota accounting returning to zero).
 
-## Phase 4 — IPC
+## Phase 4 — IPC ✅
 
 - Channels: sync call/reply fast path in registers; typed messages via comptime stubs from `shared/`.
 - Notification primitive (lightweight async wakeup).
@@ -101,7 +104,7 @@ The security model becomes real here; everything later builds on it.
 
 **Exit:** two user processes RPC through typed stubs; killing one delivers a death notification to the other, which handles it and continues.
 
-## Phase 5 — Root task, init, and userspace runtime
+## Phase 5 — Root task, init, and userspace runtime ✅
 
 - Root task receives boot caps (memory, device ranges, IRQ caps) from the kernel; stays minimal — it starts and supervises *only* the init service, retaining enough caps to restart it.
 - Userspace runtime library: allocator, IPC stubs, spawn helper taking a **sandbox manifest** (typed Zig value: budgets + caps + restart policy).
@@ -111,7 +114,7 @@ The security model becomes real here; everything later builds on it.
 
 **Exit:** init lazily spawns two services on first use from the compiled topology; killing one triggers a supervised restart, and its dependent observes channel death and re-wires through init.
 
-## Phase 6 — Sandboxing demonstrated end-to-end
+## Phase 6 — Sandboxing demonstrated end-to-end ✅
 
 Proves the invariants before drivers complicate the world.
 
@@ -123,7 +126,7 @@ Proves the invariants before drivers complicate the world.
 
 **Exit:** demo: parent spawns a child with a filtered+audited manifest; child cannot detect or escape the proxy; parent revocation reclaims the whole subtree. This demo and the restart drill become permanent regression tests.
 
-## Phase 7 — Userspace drivers and virtio-blk
+## Phase 7 — Userspace drivers and virtio-blk ✅
 
 - Driver interface: MMIO-mapping caps, IRQ-as-message, explicit DMA grants (IOMMU-shaped API, identity-stubbed under QEMU).
 - Virtio transport (virtio-mmio first; PCI ECAM if/when needed).
@@ -131,14 +134,14 @@ Proves the invariants before drivers complicate the world.
 
 **Exit:** a user process reads and writes disk blocks through the driver over IPC; the driver runs under a manifest like any other process.
 
-## Phase 8 — Async rings
+## Phase 8 — Async rings ✅
 
 - io_uring-style shared-memory submission/completion rings as a first-class channel transport — same message semantics, no thread-per-request.
 - Migrate virtio-blk to rings; measure against the sync path.
 
 **Exit:** ring-based block I/O beats the sync path on a throughput benchmark; both transports pass the same protocol tests.
 
-## Phase 9 — Filesystem service and namespaces
+## Phase 9 — Filesystem service and namespaces ✅
 
 - Read-only boot image filesystem first; a simple writable FS on virtio-blk second.
 - Directory caps + per-process namespace trees; `readOnlyView`-style derivations.
@@ -147,7 +150,7 @@ Proves the invariants before drivers complicate the world.
 
 **Exit:** processes with disjoint filesystem views prove per-process namespaces on real storage.
 
-## Phase 10 — Networking
+## Phase 10 — Networking ✅
 
 - virtio-net driver (userspace, rings).
 - Small TCP/IP service (own minimal stack; scope ruthlessly — enough for the fabric protocol and a demo, not an RFC museum).
@@ -155,7 +158,7 @@ Proves the invariants before drivers complicate the world.
 
 **Exit:** two processes on one node talk TCP through the net service; a sandboxed child can reach only allowlisted destinations.
 
-## Phase 11 — Multi-node: the fabric
+## Phase 11 — Multi-node: the fabric ✅
 
 The pooling story stops being theory.
 

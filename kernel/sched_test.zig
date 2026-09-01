@@ -13,10 +13,28 @@
 
 const std = @import("std");
 const log = @import("log.zig");
+const psci = @import("psci.zig");
 const sched = @import("sched.zig");
 const timer = @import("timer.zig");
 
+var migrant_wakes = std.atomic.Value(u64).init(0);
+
+/// Everything happens from a driver thread, not from kmain's idle context:
+/// since wakeup kicks (Phase 8), spawning a busy pinned thread onto your
+/// own core preempts you immediately — and the idle thread, once displaced
+/// by threads that never yield, does not come back.
 pub fn start() void {
+    _ = sched.spawn("sched-driver", driver, 0, .{}) catch |e| {
+        std.debug.panic("spawn sched-driver: {t}", .{e});
+    };
+}
+
+fn driver(_: u64) void {
+    startWorkers();
+    watcher();
+}
+
+fn startWorkers() void {
     for (0..sched.onlineCount()) |cpu| {
         _ = sched.spawn("pin", pinWorker, cpu, .{ .affinity = @intCast(cpu) }) catch |e| {
             std.debug.panic("spawn pin{d}: {t}", .{ cpu, e });
@@ -54,8 +72,22 @@ fn migrantWorker(id: u64) void {
     while (true) {
         sched.sleep(3 + id); // 300-500ms, staggered
         wakes += 1;
+        _ = migrant_wakes.fetchAdd(1, .monotonic);
         log.info("migrant{d}: wake {d} on core {d}", .{ id, wakes, sched.thisCpu().id });
     }
+}
+
+/// Bounded verdict: pins under load and migrants making progress for ~10s
+/// (a wrong-core pin would have panicked long before), then report and
+/// power off so automation gets a clean exit.
+fn watcher() void {
+    sched.sleep(100);
+    const wakes = migrant_wakes.load(.monotonic);
+    if (wakes < 20) {
+        std.debug.panic("sched-test: FAIL — migrants stalled ({d} wakes)", .{wakes});
+    }
+    log.info("sched-test: PASS — pins stayed pinned under load, {d} migrant wakes across cores", .{wakes});
+    psci.systemOff();
 }
 
 fn mortalWorker(_: u64) void {

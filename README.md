@@ -1,44 +1,92 @@
 # moss
 
-A clean-slate, capability-based microkernel OS in Zig. Modern 64-bit hardware
-only, sandboxed by construction, designed to compose multiple machines into
-pooled hardware.
+A clean-slate, capability-based microkernel OS in Zig — modern 64-bit
+hardware only, sandboxed by construction, IPv6-native, and designed from the
+first commit to compose multiple machines into pooled hardware.
 
-- [ROADMAP.md](ROADMAP.md) — the plan of record: locked decisions, phased
-  milestones with exit criteria, and the invariants no phase may break.
-- [DESIGN.md](DESIGN.md) — the architecture narrative behind those decisions.
+Every numbered phase of the original roadmap (0–11) is built and covered by
+an automated test suite: from boot-to-banner, through user-mode capabilities
+and domains, IPC with typed comptime-generated stubs, a userspace init with
+supervision, interposition sandboxing, userspace virtio drivers, async
+rings, a filesystem with per-process namespace views, dual-stack TCP/IP,
+and a two-node fabric doing cross-VM RPC with node-kill recovery.
 
-## Requirements
+## The three documents
 
-- Zig **0.16.0** (pinned; version bumps are deliberate commits)
-- QEMU (`brew install qemu`)
+- **[ROADMAP.md](ROADMAP.md)** — the plan of record: locked decisions with
+  rationale, phased milestones with exit criteria, invariants no change may
+  break, and the Phase 12+ pool of future work.
+- **[DESIGN.md](DESIGN.md)** — the architecture narrative: how the pieces
+  work together, with "as built" sections and the lessons each phase paid
+  for.
+- **[HACKING.md](HACKING.md)** — the practical guide: building, running,
+  debugging, and extending (new syscalls, services, tests).
 
-## Commands
+## Quickstart
 
-| Command | What it does |
-|---|---|
-| `zig build` | Build the kernel ELF into `zig-out/bin/` |
-| `zig build run` | Boot in QEMU `virt` (TCG). **Ctrl-A X** exits QEMU. |
-| `zig build run-hvf` | Boot with Hypervisor.framework acceleration (Apple Silicon) |
-| `zig build run -Dpanic-test` | Boot, then deliberately panic to exercise the panic handler |
-| `zig build run -Dfault-test` | Boot, then read unmapped memory to exercise fault reporting |
-| `zig build run -Dsched-test` | Boot, then run pinned + migrating threads across all 4 cores |
-| `zig build run -Ddomain-test` | Boot, then spawn/revoke/leak-check user domains (EL0 + caps) |
-| `zig build run -Dipc-test` | Boot, then typed RPC, cap grants, fault-as-message, peer death |
-| `zig build run -Dinit-test` | Boot userspace root+init: lazy activation, supervised restarts, re-wiring |
-| `zig build run -Dsandbox-test` | Interposition proxy, nested domains, one-call subtree revocation, benchmarks |
-| `zig build run -Dflap-test` | Supervision drill: restart budget exhausts, escalation climbs the tree |
-| `zig build run-blk -Dblk-test` | Userspace virtio-blk: verified I/O over sync channels AND async rings, raced |
-| `zig build run-blk -Dfs-test` | FS service on virtio-blk: per-process namespace views (badged caps) on real storage |
-| `zig build run-net -Dnet-test` | Dual-stack TCP through userspace netsvc; allowlist views enforced |
-| `zig build run-cluster -Dfabric-test` | 2-node cluster: cross-VM RPC, remote spawn, node-kill recovery |
-| `zig build test` | Host-side unit tests of `shared/` |
+Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
+(`brew install qemu`).
+
+```sh
+zig build check      # the whole test suite: 12 OS tests under QEMU + host unit tests (~45s)
+zig build run        # boot interactively (TCG; Ctrl-A X exits)
+zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
+```
+
+## Architecture at a glance
+
+```
+        node 1                                node 2
+  ┌───────────────────────────────┐    ┌──────────────────┐
+  │ apps      services   drivers  │    │                   │
+  │ ┌─────┐  ┌────────┐ ┌──────┐  │    │  fabric peer      │
+  │ │alice│  │fssvc   │ │blkdrv│  │    │  (remote spawn,   │
+  │ │boxed│  │netsvc  │ │      │  │TCP │   proxied         │
+  │ └──┬──┘  │fabsvc ─┼─┼──────┼──┼────┼──▶ channels)      │
+  │    │caps │init,...│ │ EL0  │  │    │                   │
+  │ ┌──▼─────┴────────┴─┴──────┐  │    └──────────────────┘
+  │ │ microkernel (EL1): caps, │  │
+  │ │ domains, IPC, sched, MMU │  │      Everything above the
+  │ └──────────────────────────┘  │      kernel line is an
+  └───────────────────────────────┘      ordinary sandboxed
+                                         userspace process.
+```
+
+The kernel provides exactly: address spaces, threads, domains (the unit of
+spawn/quota/teardown), capability tables with generational badged handles,
+synchronous channels + notifications, and interrupt/fault delivery as
+messages. Everything else — drivers, filesystems, networking, init,
+supervision, the multi-node fabric — is userspace reached over channels,
+and therefore interposable, sandboxable, and revocable.
+
+## Test matrix
+
+`zig build check` builds one kernel variant per test (in parallel) and
+boots each under QEMU with the right machine config; tests self-report a
+PASS marker and power off. Individual tests can still be run by hand:
+
+| Test | Proves | Manual invocation |
+|---|---|---|
+| panic, fault | Panic handler; decoded fault reports | `zig build run -Dpanic-test` / `-Dfault-test` |
+| sched | SMP: pinned + migrating threads under load | `zig build run -Dsched-test` |
+| domain | Spawn/revoke/leak-check; no ambient authority | `zig build run -Ddomain-test` |
+| ipc | Typed RPC, cap grants, fault-as-message, peer death | `zig build run -Dipc-test` |
+| init | Userspace root+init: lazy activation, supervised restart, re-wiring | `zig build run -Dinit-test` |
+| sandbox | Interposition proxy, nested domains, one-call subtree revocation | `zig build run -Dsandbox-test` |
+| flap | Restart budget exhaustion escalates up the supervision tree | `zig build run -Dflap-test` |
+| blk | Userspace virtio-blk; sync channels vs async rings, raced | `zig build run-blk -Dblk-test` |
+| fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
+| net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
+| fabric | Cross-VM RPC, remote spawn, node-kill recovery | `zig build run-cluster -Dfabric-test` |
+
+Host-side unit tests (`zig build test`) cover the shared ABI: handles,
+typed message codecs, rings, and the devicetree parser.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `kernel/` | The microkernel (aarch64-freestanding) |
-| `shared/` | ABI/protocol types — the comptime IDL, compiled identically everywhere |
-| `user/` | Userspace: root task, init, services, drivers (from Phase 3) |
-| `tools/` | Host-side tooling (image packing, `mossctl`, cluster runner) |
+| `kernel/` | The microkernel (aarch64-freestanding, boots as an arm64 Image) |
+| `shared/` | The ABI/IDL: types that compile identically for kernel, userspace, and host tests |
+| `user/` | Userspace: root task, init, services, drivers, demo programs |
+| `tools/` | Host-side tooling (`runner.zig` = the `check` harness) |

@@ -318,4 +318,57 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run host-side unit tests");
     test_step.dependOn(&b.addRunArtifact(shared_tests).step);
     test_step.dependOn(&b.addRunArtifact(dt_tests).step);
+
+    // ------------------------------------------------------------- check
+    // `zig build check`: one kernel variant per OS test (built in
+    // parallel), then tools/runner.zig boots each under QEMU with the
+    // right machine config and scores it by its serial markers. Tests
+    // power themselves off after reporting, so runs are quick.
+    const runner_mod = b.createModule(.{
+        .root_source_file = b.path("tools/runner.zig"),
+        .target = host_target,
+        .optimize = .Debug,
+    });
+    const runner = b.addExecutable(.{ .name = "moss-check", .root_module = runner_mod });
+    const run_check = b.addRunArtifact(runner);
+
+    const all_test_opts = [_][]const u8{
+        "panic_test",  "fault_test", "sched_test", "domain_test",
+        "ipc_test",    "init_test",  "sandbox_test", "flap_test",
+        "blk_test",    "fs_test",    "net_test",   "fabric_test",
+    };
+    const variants = [_][]const u8{
+        "panic", "fault", "sched", "domain", "ipc",  "init",
+        "sandbox", "flap", "blk",  "fs",     "net",  "fabric",
+    };
+    for (variants) |vn| {
+        const vopts = b.addOptions();
+        const enabled = b.fmt("{s}_test", .{vn});
+        for (all_test_opts) |on| {
+            vopts.addOption(bool, on, std.mem.eql(u8, on, enabled));
+        }
+        const vmod = b.createModule(.{
+            .root_source_file = b.path("kernel/main.zig"),
+            .target = kernel_target,
+            .optimize = optimize,
+            .code_model = .small,
+        });
+        vmod.addImport("shared", shared_mod);
+        vmod.addOptions("build_options", vopts);
+        vmod.addAnonymousImport("user_blobs", .{ .root_source_file = user_blobs_src });
+        const vexe = b.addExecutable(.{
+            .name = b.fmt("moss-check-{s}.elf", .{vn}),
+            .root_module = vmod,
+        });
+        vexe.setLinkerScript(b.path("kernel/linker.ld"));
+        const vbin = b.addObjCopy(vexe.getEmittedBin(), .{
+            .format = .bin,
+            .basename = b.fmt("moss-check-{s}.bin", .{vn}),
+        });
+        run_check.addArg(vn);
+        run_check.addFileArg(vbin.getOutput());
+    }
+    const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests)");
+    check_step.dependOn(test_step);
+    check_step.dependOn(&run_check.step);
 }
