@@ -84,7 +84,15 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 
 - Blocking-op polling and single-outstanding fabric exchanges are v0
   choices; async rings are the upgrade path.
-- mossfs v1 is a teaching filesystem; mossfs v2 (checksums, CoW, delete)
-  is specified in ROADMAP Phase 12+.
+- mossfs v2 (CoW, checksums, txg commits) is the disk backend; its core
+  (`user/mossfs.zig`) is a pure std-only library, so debug it on the host:
+  `zig test user/mossfs.zig` runs the whole suite including the
+  crash-injection sweep (RamDev records every write; each cut point and
+  torn final write must remount to a valid pre- or post-txg tree). When a
+  commit-path bug hides behind the overlay cache, compare a fresh mount
+  (`t_fs2.mount(dev)`) against the live instance — disk right + live wrong
+  means cache aliasing, both wrong means the commit wrote it.
+- QEMU disks must keep the default writeback cache; `cache=unsafe` drops
+  the FLUSH barriers mossfs's crash consistency depends on.
 - No PAN (ARMv8.0), no IOMMU yet, no cap transfer across nodes beyond
   spawn-time grants. All recorded in DESIGN.md "as built" sections.

@@ -473,6 +473,7 @@ fn fsTestWorker(_: u64) void {
         .grant_debug_log = true,
         .grant_channel_a = fs_ch,
         .grant_blob = blobs.bootfs,
+        .user_limit = 4 << 20, // mossfs core: caches + overlay live in BSS
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
 
@@ -505,6 +506,7 @@ fn fsTestWorker(_: u64) void {
     const alice = domain.spawn("alice", blobs.fs, .{
         .arg = 2,
         .grant_debug_log = true,
+        .user_limit = 4 << 20, // the fs image carries the mossfs BSS for every role
         .grant_channel_b = @ptrFromInt(res.msg.cap_obj),
         .grant_channel_b_badge = res.msg.cap_badge,
         .auto_reap = true,
@@ -523,6 +525,7 @@ fn fsTestWorker(_: u64) void {
     const bob = domain.spawn("bob", blobs.fs, .{
         .arg = 3,
         .grant_debug_log = true,
+        .user_limit = 4 << 20, // the fs image carries the mossfs BSS for every role
         .grant_channel_b = @ptrFromInt(res.msg.cap_obj),
         .grant_channel_b_badge = res.msg.cap_badge,
         .auto_reap = true,

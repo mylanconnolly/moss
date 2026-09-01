@@ -19,6 +19,8 @@ const Spec = struct {
     pass: []const u8,
     /// Additional marker that must also appear.
     extra: ?[]const u8 = null,
+    /// Marker required on every run (persistence runs included).
+    always_extra: ?[]const u8 = null,
     /// For panic-path tests, "KERNEL PANIC" is the point, not a failure.
     panic_is_failure: bool = true,
     /// Second run on the same disk (persistence); this marker must appear.
@@ -41,6 +43,7 @@ const specs = [_]Spec{
         .kind = .blk,
         .pass = "fs-test: PASS",
         .extra = "formatted fresh mossfs",
+        .always_extra = "alice: v2 ops verified",
         .second_run_extra = "existing mossfs found",
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS" },
@@ -198,7 +201,9 @@ fn watch(log_path: []const u8, spec: Spec, extra: ?[]const u8, polls: *u64) Verd
         }
         const have_pass = std.mem.indexOf(u8, content, spec.pass) != null;
         const have_extra = extra == null or std.mem.indexOf(u8, content, extra.?) != null;
-        if (have_pass and have_extra) return .{ .ok = true };
+        const have_always = spec.always_extra == null or
+            std.mem.indexOf(u8, content, spec.always_extra.?) != null;
+        if (have_pass and have_extra and have_always) return .{ .ok = true };
 
         if (n * poll_ms / 1000 > spec.timeout_s) {
             return .{ .ok = false, .why = "timeout" };

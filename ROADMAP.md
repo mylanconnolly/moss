@@ -178,19 +178,26 @@ The pooling story stops being theory.
 - Time-partitioning opt-in for side-channel-sensitive domains.
 - EL2: Moss as hypervisor, partitioning one box into pool nodes — the pooling story from both directions.
 - virtio-gpu/input; developer shell and tooling (`mossctl`: typed-IPC introspection of init, domains, and budgets — no text scraping).
-- **mossfs v2 — a filesystem you can trust**: replaces the Phase 9 teaching
-  filesystem behind the same view-cap protocol. Requirements: copy-on-write
-  or log-structured layout (never update in place — crash consistency
-  without fsck, and flash-friendly by construction since flash cannot
-  rewrite in place either); checksums on every block of data and metadata,
-  verified on read (detect corruption, bit rot, misdirected writes);
-  transactional rename/delete and O_EXCL; a write-back block cache with
-  explicit barriers over the ring transport; indirect blocks and free-space
-  management that scales past toy sizes; graceful full-disk behavior. Wear
-  leveling stays the FTL's job on managed flash, but the allocator should
-  avoid hot-spotting sector 0-style structures (superblock copies rotate).
-  The protocol already isolates clients from the implementation, so v2 is a
-  service swap, not a migration.
+- ✅ **mossfs v2 — a filesystem you can trust** (done): replaced the
+  Phase 9 teaching filesystem behind the same view-cap protocol, as a
+  service swap with no migration. As built (`user/mossfs.zig` +
+  `user/fs.zig`, design in DESIGN.md): CoW block tree, xxhash64-checked
+  block pointers verified on every read, transaction groups committed via
+  8 rotating full-slot-checksummed superblocks (FLUSH-bracketed), 128B
+  dnodes in a CoW objmap (nlink reserved — hardlinks deferred for the
+  view-exclusivity design pass), symlinks resolved relative to their
+  containing directory under view rules, allocation groups with per-group
+  CoW bitmaps + free-count table (mount cost independent of volume size),
+  async deleting-set for TB-scale delete/truncate with bounded per-txg
+  drain, quarantined frees, batched txg durability + explicit sync,
+  delete/rename/truncate/stat/symlink/readlink/O_EXCL in the protocol,
+  volatile/ cleared at mount, ENOSPC headroom reserve. The core is a pure
+  std-only library; `zig build test` runs crash-injection sweeps (every
+  cut point + torn final writes), corruption flips, superblock-election
+  and model-based randomized-op tests against it on the host. Scoping
+  notes: torn-4K-write detection-only (CoW makes them harmless);
+  cross-parent directory rename refused (no ancestry walk yet); linear
+  dirents (hashed dirs are a format-versioned evolution).
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

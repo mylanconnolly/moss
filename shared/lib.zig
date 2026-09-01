@@ -223,18 +223,23 @@ pub const ProxyCfgReply = union(enum(u64)) {
 };
 
 /// The block service protocol. Data moves through a shared-memory buffer
-/// the client grants once via setup; read/write name a sector and an offset
-/// into that buffer. One 512-byte sector per request for now.
+/// the client grants once via setup; read/write name a sector run (count
+/// 1..8, one virtio request) and an offset into that buffer. flush is a
+/// durability barrier (virtio T_FLUSH); if the device did not offer the
+/// flush feature it succeeds as a no-op and the driver logs the weakness.
 pub const BlkReq = union(enum(u64)) {
     setup: void, // + shm cap attachment
     capacity: void,
-    read: struct { sector: u64, off: u64 },
-    write: struct { sector: u64, off: u64 },
+    read: struct { sector: u64, off: u64, count: u64 },
+    write: struct { sector: u64, off: u64, count: u64 },
+    flush: void,
     /// Ring transport setup over the sync channel (one cap each):
     ring_setup: void, // + ring shm cap
     ring_sq_bell: void, // + notification the client rings after submitting
     ring_cq_bell: void, // + notification the server rings after completing
 };
+
+pub const blk_max_sectors: u64 = 8; // 4KB per request
 
 pub const BlkResp = union(enum(u64)) {
     ok: void,
@@ -255,7 +260,8 @@ pub const blk_sector_size: u64 = 512;
 
 pub const FsReq = union(enum(u64)) {
     attach_buf: void, // + shm cap: this view's path/data buffer
-    /// create: 0 = open existing, 1 = create file, 2 = create directory
+    /// create: 0 = open existing, 1 = create file (or open existing),
+    /// 2 = create directory (ok if it exists), 3 = create file, O_EXCL
     open: struct { path_off: u64, path_len: u64, create: u64 },
     read: struct { fd: u64, off: u64, len: u64 }, // data lands in buf[0..n]
     write: struct { fd: u64, off: u64, len: u64 }, // data taken from buf[0..n]
@@ -263,22 +269,42 @@ pub const FsReq = union(enum(u64)) {
     /// Derive a narrower view (readOnlyView and friends); the reply
     /// attaches a freshly minted badged channel cap.
     derive: struct { path_off: u64, path_len: u64, ro: u64 },
+    /// Remove a file, symlink, or empty directory. Final symlinks are
+    /// removed, never followed.
+    delete: struct { path_off: u64, path_len: u64 },
+    /// Atomic rename/move within one view; each word is off | len<<32.
+    /// An existing target is replaced (directories only when empty).
+    rename: struct { from: u64, to: u64 },
+    truncate: struct { fd: u64, len: u64 },
+    /// stat does not follow a final symlink.
+    stat: struct { path_off: u64, path_len: u64 },
+    /// Create a symlink; each word is off | len<<32. The target is stored
+    /// verbatim and resolves relative to the link's containing directory.
+    symlink: struct { path: u64, target: u64 },
+    readlink: struct { path_off: u64, path_len: u64 }, // target -> buf
+    /// Durability barrier: everything acknowledged is on disk on reply.
+    sync: void,
 };
 
 pub const FsResp = union(enum(u64)) {
     ok: void,
     num: struct { n: u64 },
+    stat: struct { typ: u64, size: u64, mtime: u64 }, // typ: FsType
     fs_err: struct { code: u64 },
 };
+
+/// Object types as reported by stat (mirrors mossfs.ObjType).
+pub const FsType = enum(u64) { file = 1, dir = 2, symlink = 3 };
 
 pub const FsErr = enum(u64) {
     denied = 1, // read-only view
     not_found = 2,
     no_space = 3,
-    bad_path = 4, // "..", absolute, or malformed
+    bad_path = 4, // "..", absolute, malformed, or symlink loop
     bad_fd = 5,
     exists = 6,
     io = 7,
+    not_empty = 8, // directory delete/replace target not empty
 };
 
 /// Boot filesystem archive ("MARC"): a flat sequence of

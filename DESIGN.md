@@ -218,7 +218,7 @@ capability views make unrepresentable).
 | `conf/` | admin-written, service-read | per-service configuration: `conf/<service>/...` |
 | `state/` | service-owned, survives reboot | each service's private mutable state: `state/<service>/` |
 | `data/` | user/application payload | the only tree where sharing between services is expected, always via explicit view grants |
-| `volatile/` | cleared every boot | per-service scratch: `volatile/<service>/` (boot-time clearing lands with mossfs v2's delete) |
+| `volatile/` | cleared every boot | per-service scratch: `volatile/<service>/` — the FS service empties it at every mount |
 
 Default grant policy — the hierarchy *is* the default cap topology: a
 service named X conventionally receives `state/X` (rw), `volatile/X` (rw),
@@ -237,9 +237,78 @@ starts at the view root and strictly descends ("." and ".." are rejected),
 so escape is unpronounceable rather than forbidden. The FS service
 (userspace) serves a union namespace: boot/ is a read-only MARC archive
 granted at spawn (the boot image filesystem — init loads its typed topology
-from it), disk/ is mossfs, a deliberately tiny writable FS (64 inodes,
-direct blocks, no delete yet) on the virtio-blk driver. Persistence is
-real: a second boot finds the same files.
+from it); everything else is mossfs on the virtio-blk driver.
+
+### mossfs v2
+
+**As built (mossfs v2):** the disk backend is a copy-on-write block tree
+in the ZFS family — `user/mossfs.zig`, a pure std-only library written
+against a 4K BlockDev vtable, with the service (`user/fs.zig`) riding the
+blk driver's ring transport (flush goes over the sync channel; the reply
+is the barrier ack).
+
+- **Never update in place.** All state is reached from a superblock
+  through `{addr, xxhash64}` block pointers; every read verifies its
+  checksum, so corruption, bit rot, and misdirected or torn writes are
+  *detected* — bad bits are never returned (a torn 4K write is 8
+  non-atomic sectors: detection-only by design, CoW makes it harmless).
+  A transaction group writes a complete new subtree, FLUSHes, writes one
+  of 8 rotating superblock slots (full-slot checksum, embedded txg and
+  slot index), FLUSHes again. Mount elects the highest-txg slot that
+  fully verifies; a torn superblock just loses that slot. Crash = the
+  last committed tree, always; there is no fsck because there is nothing
+  to fix.
+- **Objects, not inodes**: 128-byte dnodes (type, size, mtime, 3 direct +
+  1 indirect pointer, level ≤ 4 → 16TB max file) live in the objmap,
+  itself a CoW tree keyed by object id. `nlink` is reserved but always 1:
+  hardlinks are deferred deliberately — a second dirent to the same
+  object would defeat subtree-view exclusivity, and that wants its own
+  design pass. Directories are packed 64B dirents (linear scan; hashed
+  dirs are a format-versioned v3 option).
+- **Symlinks** store their target verbatim and resolve *relative to the
+  containing directory* under the same component rules as any path (no
+  "..", no absolute targets, 8 follows max, stat/delete/readlink do not
+  follow). A link that points outside a view fails at resolution — for
+  every view — rather than being a hole.
+- **Allocation groups** (format-time size; 128MB on real volumes) each
+  own CoW bitmap blocks referenced from a group table with per-group free
+  counts: mount reads nothing proportional to volume size, and commit
+  cost tracks *dirty groups*, not the volume. Commit assigns addresses in
+  a fixpoint (allocations dirty bitmaps, which need addresses; preferring
+  already-dirty groups bounds it), then fills, checksums bottom-up, and
+  writes. Blocks freed this txg are quarantined until the superblock
+  lands.
+- **Deletes are asynchronous**: delete/truncate detach whole subtrees
+  onto a persisted deleting-set object and return; each later txg drains
+  a bounded slice, and mount resumes draining — a TB-scale delete cannot
+  stall a commit, and crashing mid-delete is handled for free. `sync`
+  drains fully, then commits.
+- **Durability is batched**: ops are acknowledged in memory and committed
+  in groups (between ops only, never inside one); `FsReq.sync` is the
+  explicit barrier. A crash loses recent unsynced acks, never structure.
+  (Run QEMU disks with default writeback cache — never `cache=unsafe`,
+  which drops the FLUSH barriers the design depends on.)
+
+The protocol grew delete, rename (atomic within a txg; directory moves
+across parents are refused pending an ancestry walk), truncate, stat,
+symlink/readlink, O_EXCL create, and sync; `volatile/` is emptied at every
+mount. Deleting an object invalidates any fd or derived view rooted at it.
+
+Lessons paid for (both found by the host harness, neither by inspection):
+an allocation bitmap block can cover more bits than its group owns — the
+scan must stop at the group boundary or it silently allocates another
+group's blocks; and a block cache must never hold two entries for one
+address — freed blocks legitimately re-read during a commit re-enter the
+cache, and when a later txg reuses that address, hits can return the stale
+entry (cache hits skip checksum verification, so nothing catches it). The
+symptom was spectacular: a directory dnode whose size read as 5.7×10¹⁸.
+
+The core is host-testable by construction: the same file runs under
+`zig build test` with a RAM BlockDev doing write-sequence recording, crash
+injection (a cut after every write, plus torn final writes), corruption
+flips, superblock-election checks, and a randomized op sequence mirrored
+against an in-memory model. Persistence is proven in QEMU by the fs
+check's double-run on one disk image.
 
 ## Networking
 

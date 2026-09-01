@@ -87,8 +87,10 @@ const desc_f_next = 1;
 const desc_f_write = 2;
 
 const q_num = 32; // virtqueue descriptors
-const slots = 8; // concurrent requests, 3 descriptors + one 544B buffer each
-const slot_bytes = 544; // 16B header + 512B data + 1B status, padded
+const slots = 8; // concurrent requests, up to 3 descriptors each
+// DMA layout: page 0 = virtqueue; page 1 = per-slot 16B headers (s*64) and
+// status bytes (s*64+32); pages 2..9 = one 4KB data buffer per slot.
+const dma_pages = 10;
 
 const Desc = extern struct {
     addr: u64,
@@ -97,10 +99,13 @@ const Desc = extern struct {
     next: u16,
 };
 
+const Op = enum { read, write, flush };
+
 const InFlight = struct {
     id: u64, // ring correlation id, or sync_id for channel requests
-    write: bool,
+    op: Op,
     shm_off: u64,
+    count: u64, // sectors (1..8); 0 for flush
 };
 
 const sync_id: u64 = 0xffff_ffff_ffff_ffff;
@@ -108,8 +113,11 @@ const sync_id: u64 = 0xffff_ffff_ffff_ffff;
 var dev_base: u64 = 0;
 var vq_va: u64 = 0;
 var vq_dev: u64 = 0;
+var hdr_va: u64 = 0;
+var hdr_dev: u64 = 0;
 var buf_va: u64 = 0;
 var buf_dev: u64 = 0;
+var have_flush = false;
 var irq_notif: u64 = 0;
 var slot_idx: u64 = 0; // this device's virtio-mmio slot (for irq offset)
 var used_seen: u16 = 0;
@@ -156,13 +164,15 @@ fn blkdrv(log_h: u64, chan_h: u64) noreturn {
     }
     if (usys.irqBind(irq_h, irq_notif, slot_idx) != .ok) usys.exit(173);
 
-    // DMA: page 0 = virtqueue, pages 1-2 = 8 request buffers.
-    const dma = usys.dmaAlloc(3);
+    // DMA: page 0 = virtqueue, page 1 = headers/status, pages 2..9 = data.
+    const dma = usys.dmaAlloc(dma_pages);
     if (dma.err != .ok) usys.exit(174);
     vq_va = dma.data[0];
     vq_dev = dma.data[1];
-    buf_va = dma.data[0] + 4096;
-    buf_dev = dma.data[1] + 4096;
+    hdr_va = dma.data[0] + 4096;
+    hdr_dev = dma.data[1] + 4096;
+    buf_va = dma.data[0] + 2 * 4096;
+    buf_dev = dma.data[1] + 2 * 4096;
 
     initDevice();
     const capacity = readCap();
@@ -211,8 +221,9 @@ fn blkdrv(log_h: u64, chan_h: u64) noreturn {
                     .capacity = .{ .sectors = capacity },
                 }, 0);
             },
-            .read => |io| _ = usys.replyTyped(shared.BlkResp, chan_h, syncIo(false, io.sector, io.off), 0),
-            .write => |io| _ = usys.replyTyped(shared.BlkResp, chan_h, syncIo(true, io.sector, io.off), 0),
+            .read => |io| _ = usys.replyTyped(shared.BlkResp, chan_h, syncIo(.read, io.sector, io.off, io.count), 0),
+            .write => |io| _ = usys.replyTyped(shared.BlkResp, chan_h, syncIo(.write, io.sector, io.off, io.count), 0),
+            .flush => _ = usys.replyTyped(shared.BlkResp, chan_h, syncFlush(), 0),
         }
     }
 }
@@ -222,11 +233,16 @@ fn initDevice() void {
     reg(R.status).* = status_ack;
     reg(R.status).* = status_ack | status_driver;
 
-    // Accept only VIRTIO_F_VERSION_1 (feature bit 32).
+    // Accept VIRTIO_F_VERSION_1 (bit 32) and, if offered, the flush
+    // barrier (VIRTIO_BLK_F_FLUSH, bit 9) — the filesystem's durability
+    // depends on it, so its absence is loudly degraded, not hidden.
+    reg(R.device_features_sel).* = 0;
+    const dev_feats = reg(R.device_features).*;
+    have_flush = dev_feats & (1 << 9) != 0;
     reg(R.driver_features_sel).* = 1;
     reg(R.driver_features).* = 1;
     reg(R.driver_features_sel).* = 0;
-    reg(R.driver_features).* = 0;
+    reg(R.driver_features).* = if (have_flush) (1 << 9) else 0;
 
     reg(R.status).* = status_ack | status_driver | status_features_ok;
     if (reg(R.status).* & status_features_ok == 0) usys.exit(176);
@@ -259,25 +275,37 @@ fn readCap() u64 {
 /// Queue one request into a free slot (descriptor chain 3s..3s+2, buffer
 /// slot s). Caller publishes avail.idx and rings the device afterwards.
 fn submitSlot(s: usize, fl: InFlight, sector: u64) void {
-    const bva = buf_va + s * slot_bytes;
-    const bdev = buf_dev + s * slot_bytes;
-    const hdr: [*]volatile u32 = @ptrFromInt(bva);
-    hdr[0] = if (fl.write) 1 else 0; // VIRTIO_BLK_T_OUT / T_IN
+    const hva = hdr_va + s * 64;
+    const hdev = hdr_dev + s * 64;
+    const dva = buf_va + s * 4096;
+    const ddev = buf_dev + s * 4096;
+    const nbytes = fl.count * 512;
+    const hdr: [*]volatile u32 = @ptrFromInt(hva);
+    hdr[0] = switch (fl.op) { // VIRTIO_BLK_T_*
+        .read => 0,
+        .write => 1,
+        .flush => 4,
+    };
     hdr[1] = 0;
-    @as(*volatile u64, @ptrFromInt(bva + 8)).* = sector;
-    @as(*volatile u8, @ptrFromInt(bva + 528)).* = 0xff;
-    if (fl.write) copy(@ptrFromInt(bva + 16), @ptrFromInt(shm_va + fl.shm_off), 512);
+    @as(*volatile u64, @ptrFromInt(hva + 8)).* = sector;
+    @as(*volatile u8, @ptrFromInt(hva + 32)).* = 0xff; // status
+    if (fl.op == .write) copy(@ptrFromInt(dva), @ptrFromInt(shm_va + fl.shm_off), nbytes);
 
     const descs: [*]volatile Desc = @ptrFromInt(vq_va);
     const d0: u16 = @intCast(3 * s);
-    descs[d0] = .{ .addr = bdev, .len = 16, .flags = desc_f_next, .next = d0 + 1 };
-    descs[d0 + 1] = .{
-        .addr = bdev + 16,
-        .len = 512,
-        .flags = if (fl.write) desc_f_next else desc_f_next | desc_f_write,
-        .next = d0 + 2,
-    };
-    descs[d0 + 2] = .{ .addr = bdev + 528, .len = 1, .flags = desc_f_write, .next = 0 };
+    descs[d0] = .{ .addr = hdev, .len = 16, .flags = desc_f_next, .next = d0 + 1 };
+    if (fl.op == .flush) {
+        // No data descriptor: header then status.
+        descs[d0 + 1] = .{ .addr = hdev + 32, .len = 1, .flags = desc_f_write, .next = 0 };
+    } else {
+        descs[d0 + 1] = .{
+            .addr = ddev,
+            .len = @intCast(nbytes),
+            .flags = if (fl.op == .write) desc_f_next else desc_f_next | desc_f_write,
+            .next = d0 + 2,
+        };
+        descs[d0 + 2] = .{ .addr = hdev + 32, .len = 1, .flags = desc_f_write, .next = 0 };
+    }
 
     const avail_ring: [*]volatile u16 = @ptrFromInt(vq_va + 512 + 4);
     avail_ring[avail_shadow % q_num] = d0;
@@ -314,10 +342,9 @@ fn drainUsed() void {
             @ptrFromInt(vq_va + 1024 + 4 + (used_seen % q_num) * 8);
         const s = elem.id / 3;
         const fl = inflight[s].?;
-        const bva = buf_va + s * slot_bytes;
-        const status: u64 = @as(*volatile u8, @ptrFromInt(bva + 528)).*;
-        if (!fl.write and status == 0) {
-            copy(@ptrFromInt(shm_va + fl.shm_off), @ptrFromInt(bva + 16), 512);
+        const status: u64 = @as(*volatile u8, @ptrFromInt(hdr_va + s * 64 + 32)).*;
+        if (fl.op == .read and status == 0) {
+            copy(@ptrFromInt(shm_va + fl.shm_off), @ptrFromInt(buf_va + s * 4096), fl.count * 512);
         }
         const resp: shared.BlkResp = if (status == 0) .ok else .{ .io_err = .{ .code = status } };
         if (fl.id == sync_id) {
@@ -342,15 +369,28 @@ fn waitIrqAndDrain() void {
     drainUsed();
 }
 
+fn ioOk(off: u64, count: u64) bool {
+    return count >= 1 and count <= shared.blk_max_sectors and
+        off % 512 == 0 and off + count * 512 <= 4096;
+}
+
 /// One request over the sync transport: submit alone, wait it out.
-fn syncIo(write: bool, sector: u64, off: u64) shared.BlkResp {
-    if (shm_va == 0) return .{ .io_err = .{ .code = 1 } };
+fn syncIo(op: Op, sector: u64, off: u64, count: u64) shared.BlkResp {
+    if (op != .flush) {
+        if (shm_va == 0) return .{ .io_err = .{ .code = 1 } };
+        if (!ioOk(off, count)) return .{ .io_err = .{ .code = 3 } };
+    }
     const s = freeSlot() orelse return .{ .io_err = .{ .code = 2 } };
     sync_done = false;
-    submitSlot(s, .{ .id = sync_id, .write = write, .shm_off = off }, sector);
+    submitSlot(s, .{ .id = sync_id, .op = op, .shm_off = off, .count = count }, sector);
     kick();
     while (!sync_done) waitIrqAndDrain();
     return if (sync_status == 0) .ok else .{ .io_err = .{ .code = sync_status } };
+}
+
+fn syncFlush() shared.BlkResp {
+    if (!have_flush) return .ok; // degraded, logged at startup
+    return syncIo(.flush, 0, 0, 0);
 }
 
 /// The async transport: drain SQ entries into free slots (batched kicks),
@@ -364,8 +404,14 @@ fn serveRing() void {
             if (!rb.sqPop(&e)) break;
             const req = shared.decodeMsg(shared.BlkReq, e.words) orelse continue;
             switch (req) {
-                .read => |io| submitSlot(s, .{ .id = e.id, .write = false, .shm_off = io.off }, io.sector),
-                .write => |io| submitSlot(s, .{ .id = e.id, .write = true, .shm_off = io.off }, io.sector),
+                .read => |io| {
+                    if (!ioOk(io.off, io.count)) continue;
+                    submitSlot(s, .{ .id = e.id, .op = .read, .shm_off = io.off, .count = io.count }, io.sector);
+                },
+                .write => |io| {
+                    if (!ioOk(io.off, io.count)) continue;
+                    submitSlot(s, .{ .id = e.id, .op = .write, .shm_off = io.off, .count = io.count }, io.sector);
+                },
                 else => continue,
             }
             queued += 1;
@@ -426,7 +472,7 @@ fn blkuser(log_h: u64, chan_h: u64) noreturn {
     const t0 = usys.cycles();
     for (0..bench_ops) |i| {
         switch (usys.callTyped(shared.BlkReq, shared.BlkResp, chan_h, .{
-            .read = .{ .sector = i % 8, .off = 0 },
+            .read = .{ .sector = i % 8, .off = 0, .count = 1 },
         }, 0)) {
             .ok => {},
             .err => usys.exit(186),
@@ -443,6 +489,7 @@ fn blkuser(log_h: u64, chan_h: u64) noreturn {
             const req: shared.BlkReq = .{ .read = .{
                 .sector = submitted % 8,
                 .off = (submitted % 8) * 512,
+                .count = 1,
             } };
             if (!rb.sqPush(.{ .id = submitted, .words = shared.encodeMsg(shared.BlkReq, req) })) break;
             submitted += 1;
@@ -474,9 +521,9 @@ const RingCtx = struct { rb: *shared.RingBuf, sq: u64, cq: u64 };
 /// sync channel or over the ring, same protocol either way.
 fn verifyRoundTrip(chan_h: u64, buf: [*]volatile u8, sector: u64, ring_ctx: ?RingCtx) void {
     for (0..512) |i| buf[i] = @truncate(i *% 7 +% sector);
-    doOp(chan_h, .{ .write = .{ .sector = sector, .off = 0 } }, ring_ctx);
+    doOp(chan_h, .{ .write = .{ .sector = sector, .off = 0, .count = 1 } }, ring_ctx);
     for (0..512) |i| buf[i] = 0;
-    doOp(chan_h, .{ .read = .{ .sector = sector, .off = 0 } }, ring_ctx);
+    doOp(chan_h, .{ .read = .{ .sector = sector, .off = 0, .count = 1 } }, ring_ctx);
     for (0..512) |i| {
         if (buf[i] != @as(u8, @truncate(i *% 7 +% sector))) usys.exit(190);
     }

@@ -315,9 +315,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const dt_tests = b.addTest(.{ .root_module = dt_test_mod });
+    const mossfs_test_mod = b.createModule(.{
+        .root_source_file = b.path("user/mossfs.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    const mossfs_tests = b.addTest(.{ .root_module = mossfs_test_mod });
     const test_step = b.step("test", "Run host-side unit tests");
     test_step.dependOn(&b.addRunArtifact(shared_tests).step);
     test_step.dependOn(&b.addRunArtifact(dt_tests).step);
+    test_step.dependOn(&b.addRunArtifact(mossfs_tests).step);
 
     // ------------------------------------------------------------- check
     // `zig build check`: one kernel variant per OS test (built in
