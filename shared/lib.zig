@@ -59,6 +59,16 @@ pub const Syscall = enum(u64) {
     watch_deaths = 17,
     /// cap_drop(handle): release one capability
     cap_drop = 18,
+    /// mmio_map(handle) -> x1 = va, x2 = bytes (device-attribute mapping)
+    mmio_map = 19,
+    /// irq_bind(irq_handle, notif_handle, offset): SPI (cap base + offset)
+    /// signals the notification; the line is masked until irq_ack
+    irq_bind = 20,
+    /// irq_ack(irq_handle, offset): re-enable the line after handling
+    irq_ack = 21,
+    /// dma_alloc(pages) -> x1 = va, x2 = device address (physically
+    /// contiguous; device address == physical until an IOMMU arrives)
+    dma_alloc = 22,
     _,
 };
 
@@ -105,6 +115,7 @@ pub const ImageId = enum(u64) {
     init = 3,
     services = 4,
     sandbox = 5,
+    blk = 6,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -199,6 +210,24 @@ pub const ProxyCfg = union(enum(u64)) {
 pub const ProxyCfgReply = union(enum(u64)) {
     ok: void,
 };
+
+/// The block service protocol. Data moves through a shared-memory buffer
+/// the client grants once via setup; read/write name a sector and an offset
+/// into that buffer. One 512-byte sector per request for now.
+pub const BlkReq = union(enum(u64)) {
+    setup: void, // + shm cap attachment
+    capacity: void,
+    read: struct { sector: u64, off: u64 },
+    write: struct { sector: u64, off: u64 },
+};
+
+pub const BlkResp = union(enum(u64)) {
+    ok: void,
+    capacity: struct { sectors: u64 },
+    io_err: struct { code: u64 },
+};
+
+pub const blk_sector_size: u64 = 512;
 
 pub const LogReply = union(enum(u64)) {
     ok: void,

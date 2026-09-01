@@ -61,6 +61,26 @@ pub fn enableLocalInterrupt(cpu: u32, intid: u5) void {
     gicrSgi(cpu, 0x100).* = @as(u32, 1) << intid; // ISENABLER0
 }
 
+fn gicd64(offset: u64) *volatile u64 {
+    return mem.physToPtr(*volatile u64, gicd_base + offset);
+}
+
+/// Enable a shared peripheral interrupt (intid >= 32), routed to core 0.
+pub fn enableSpi(intid: u32) void {
+    const reg = intid / 32;
+    const bit = @as(u32, 1) << @intCast(intid % 32);
+    gicd(0x80 + reg * 4).* = gicd(0x80 + reg * 4).* | bit; // IGROUPR: group 1
+    gicd64(0x6000 + @as(u64, intid) * 8).* = 0; // IROUTER: affinity 0.0.0.0
+    gicd(0x100 + reg * 4).* = bit; // ISENABLER
+}
+
+/// Mask an SPI (until the handler acks a level-triggered source).
+pub fn disableSpi(intid: u32) void {
+    const reg = intid / 32;
+    const bit = @as(u32, 1) << @intCast(intid % 32);
+    gicd(0x180 + reg * 4).* = bit; // ICENABLER
+}
+
 /// SGI used only to nudge a core into its preemption path.
 pub const resched_sgi: u32 = 1;
 

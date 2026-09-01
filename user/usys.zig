@@ -94,6 +94,24 @@ pub fn capDrop(handle: u64) shared.Errno {
     return @enumFromInt(syscall3(.cap_drop, handle, 0, 0));
 }
 
+/// mmio_map: data[0] = va, data[1] = bytes.
+pub fn mmioMap(handle: u64) IpcResult {
+    return syscall6(.mmio_map, handle, 0, 0, 0, 0, 0);
+}
+
+pub fn irqBind(handle: u64, notif: u64, offset: u64) shared.Errno {
+    return @enumFromInt(syscall3(.irq_bind, handle, notif, offset));
+}
+
+pub fn irqAck(handle: u64, offset: u64) shared.Errno {
+    return @enumFromInt(syscall3(.irq_ack, handle, offset, 0));
+}
+
+/// dma_alloc: data[0] = va, data[1] = device address.
+pub fn dmaAlloc(pages: u64) IpcResult {
+    return syscall6(.dma_alloc, pages, 0, 0, 0, 0, 0);
+}
+
 pub fn replyTyped(comptime Rep: type, channel: u64, rep: Rep, send_cap: u64) shared.Errno {
     const words = shared.encodeMsg(Rep, rep);
     return syscall6(.reply, channel, words[0], words[1], words[2], words[3], send_cap).err;

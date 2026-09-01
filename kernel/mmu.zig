@@ -155,11 +155,13 @@ fn l3Index(va: u64) usize {
 pub const UserPerms = enum {
     code, // R X (EL0), read-only everywhere, PXN
     data, // RW (EL0+EL1), XN everywhere
+    device, // MMIO for userspace drivers: Device-nGnRnE, RW, XN
 
     fn bits(self: UserPerms) u64 {
         return switch (self) {
             .code => attr_normal | sh_inner | af | ng | ap_el0 | ap_ro | pxn,
             .data => attr_normal | sh_inner | af | ng | ap_el0 | pxn | uxn,
+            .device => attr_device | af | ng | ap_el0 | pxn | uxn,
         };
     }
 };

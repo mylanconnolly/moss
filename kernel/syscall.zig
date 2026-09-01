@@ -10,6 +10,7 @@ const std = @import("std");
 const cap = @import("cap.zig");
 const domain = @import("domain.zig");
 const ipc = @import("ipc.zig");
+const irq = @import("irq.zig");
 const log = @import("log.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
@@ -47,8 +48,60 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .domain_destroy => sysDomainDestroy(d, frame.regs[0]),
         .watch_deaths => sysWatchDeaths(d, frame.regs[0]),
         .cap_drop => sysCapDrop(d, frame.regs[0]),
+        .mmio_map => sysMmioMap(d, frame),
+        .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
+        .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
+        .dma_alloc => sysDmaAlloc(d, frame),
         _ => errno(.nosys),
     };
+}
+
+// ---------------------------------------------------------------- drivers
+
+fn sysMmioMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    const obj = d.captable.?.lookup(h, .mmio) orelse return errno(.bad_handle);
+    const base = obj & 0x0000_ffff_ffff_f000;
+    const pages = obj >> 48;
+    const va = domain.mapMmio(d, base, pages) catch return errno(.no_space);
+    frame.regs[1] = va;
+    frame.regs[2] = pages * 4096;
+    return errno(.ok);
+}
+
+fn resolveIrq(d: *domain.Domain, handle_bits: u64, offset: u64) ?u32 {
+    const h: shared.Handle = @bitCast(handle_bits);
+    const obj = d.captable.?.lookup(h, .irq) orelse return null;
+    const base: u32 = @truncate(obj);
+    const count = obj >> 32;
+    if (offset >= count) return null;
+    return base + @as(u32, @intCast(offset));
+}
+
+fn sysIrqBind(d: *domain.Domain, handle_bits: u64, notif_bits: u64, offset: u64) u64 {
+    const intid = resolveIrq(d, handle_bits, offset) orelse return errno(.bad_handle);
+    const nh: shared.Handle = @bitCast(notif_bits);
+    const nobj = d.captable.?.lookup(nh, .notification) orelse return errno(.bad_handle);
+    irq.bind(intid, @ptrFromInt(nobj)) catch |e| return errno(switch (e) {
+        irq.Error.Busy => .busy,
+        irq.Error.OutOfRange => .bad_arg,
+    });
+    return errno(.ok);
+}
+
+fn sysIrqAck(d: *domain.Domain, handle_bits: u64, offset: u64) u64 {
+    const intid = resolveIrq(d, handle_bits, offset) orelse return errno(.bad_handle);
+    irq.ack(intid) catch return errno(.bad_arg);
+    return errno(.ok);
+}
+
+fn sysDmaAlloc(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const npages = frame.regs[0];
+    if (npages == 0 or npages > 16) return errno(.bad_arg);
+    const r = domain.mapDma(d, npages) catch return errno(.no_space);
+    frame.regs[1] = r.va;
+    frame.regs[2] = r.dev;
+    return errno(.ok);
 }
 
 // ------------------------------------------------------- domain management

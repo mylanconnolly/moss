@@ -43,6 +43,11 @@ pub fn build(b: *std.Build) void {
         "flap-test",
         "Run the supervision-restart drill: budget exhaustion escalates up the tree",
     ) orelse false;
+    const blk_test = b.option(
+        bool,
+        "blk-test",
+        "Run the virtio-blk demo (use with zig build run-blk, which attaches a disk)",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -70,6 +75,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "init_test", init_test);
     build_opts.addOption(bool, "sandbox_test", sandbox_test);
     build_opts.addOption(bool, "flap_test", flap_test);
+    build_opts.addOption(bool, "blk_test", blk_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -91,6 +97,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "init", .src = "user/init.zig" },
         .{ .name = "services", .src = "user/services.zig" },
         .{ .name = "sandbox", .src = "user/sandbox.zig" },
+        .{ .name = "blk", .src = "user/blk.zig" },
     };
     const user_blobs = b.addWriteFiles();
     var blobs_zig: std.ArrayList(u8) = .empty;
@@ -170,6 +177,30 @@ pub fn build(b: *std.Build) void {
     run_hvf.addFileArg(kernel_bin.getOutput());
     const run_hvf_step = b.step("run-hvf", "Boot the kernel in QEMU with Hypervisor.framework acceleration.");
     run_hvf_step.dependOn(&run_hvf.step);
+
+    // run-blk: like run, plus a scratch virtio disk (created if missing).
+    const mkdisk = b.addSystemCommand(&.{
+        "sh", "-c", "test -f zig-out/disk.img || dd if=/dev/zero of=zig-out/disk.img bs=1048576 count=4 2>/dev/null",
+    });
+    const run_blk = b.addSystemCommand(&.{
+        "qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "cortex-a72",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-drive",
+        "if=none,file=zig-out/disk.img,format=raw,id=hd",
+        "-device",
+        "virtio-blk-device,drive=hd",
+    });
+    run_blk.addArgs(&qemu_common);
+    run_blk.addArg("-kernel");
+    run_blk.addFileArg(kernel_bin.getOutput());
+    run_blk.step.dependOn(&mkdisk.step);
+    const run_blk_step = b.step("run-blk", "Boot with a virtio disk attached (pairs with -Dblk-test).");
+    run_blk_step.dependOn(&run_blk.step);
 
     const shared_test_mod = b.createModule(.{
         .root_source_file = b.path("shared/lib.zig"),

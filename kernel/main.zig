@@ -7,6 +7,7 @@ const domain = @import("domain.zig");
 const dt = @import("dt.zig");
 const gic = @import("gic.zig");
 const ipc = @import("ipc.zig");
+const irq = @import("irq.zig");
 const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
@@ -70,7 +71,8 @@ export fn kmain(dtb_pa: u64) noreturn {
     sched.registerCpu(0);
     // Image table order must match shared.ImageId.
     const blobs = @import("user_blobs");
-    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox });
+    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk });
+    irq.init();
     domain.startReaper();
     gic.initDistributor();
     gic.initCore(0);
@@ -118,6 +120,12 @@ export fn kmain(dtb_pa: u64) noreturn {
 
     if (build_options.flap_test) {
         _ = sched.spawn("boot-watch", flapTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    if (build_options.blk_test) {
+        _ = sched.spawn("boot-watch", blkTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -362,6 +370,48 @@ fn flapTestWorker(_: u64) void {
     } else {
         std.debug.panic("flap-test: FAIL — root exit {d}, pmem delta {d}B", .{
             root.exit_code, frames_before -% frames_after,
+        });
+    }
+}
+
+/// Phase 7 exit-criterion driver: a userspace virtio-blk driver serving a
+/// userspace client over IPC — the kernel only wires caps: MMIO window,
+/// IRQ range, channel, log. QEMU virt: virtio-mmio slots at 0x0a000000
+/// (32 x 0x200), IRQs SPI 16.. (intid 48..).
+fn blkTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    log.info("blk-test: starting userspace virtio-blk driver", .{});
+    const drv = domain.spawn("blkdrv", blobs.blk, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = ch,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
+
+    const user = domain.spawn("blkuser", blobs.blk, .{
+        .arg = 2,
+        .grant_debug_log = true,
+        .grant_channel_b = ch,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn blkuser: {t}", .{e});
+
+    while (user.state != .dead) sched.sleep(2);
+    log.info("blk-test: client exited with code {d}", .{user.exit_code});
+    domain.destroy(drv);
+    while (drv.state != .dead) sched.sleep(1);
+
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    if (user.exit_code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
+        log.info("blk-test: PASS — real disk I/O through a sandboxed userspace driver, nothing leaked", .{});
+    } else {
+        std.debug.panic("blk-test: FAIL — client exit {d}, pmem delta {d}B", .{
+            user.exit_code, frames_before -% frames_after,
         });
     }
 }

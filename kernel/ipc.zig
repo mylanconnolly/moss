@@ -265,6 +265,11 @@ pub fn createNotification() Error!*Notification {
 pub fn signal(n: *Notification, bits: u64) void {
     const daif = sched.acquire();
     defer sched.release(daif);
+    signalLocked(n, bits);
+}
+
+/// Signal with the big lock already held (IRQ delivery).
+pub fn signalLocked(n: *Notification, bits: u64) void {
     n.bits |= bits;
     if (n.waiter) |t| {
         n.waiter = null;
@@ -317,6 +322,10 @@ pub fn wait(n: *Notification) struct { err: shared.Errno, bits: u64 } {
     return .{ .err = @enumFromInt(t.ipc_status), .bits = t.ipc_data[0] };
 }
 
+/// Registered by irq.zig; called with the big lock held when a
+/// notification is freed, so IRQ bindings never outlive their target.
+pub var notif_freed_hook: ?*const fn (*Notification) void = null;
+
 pub fn unrefNotification(n: *Notification) void {
     const daif = sched.acquire();
     defer sched.release(daif);
@@ -329,6 +338,7 @@ pub fn unrefNotification(n: *Notification) void {
             t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
             sched.wakeLocked(t);
         }
+        if (notif_freed_hook) |f| f(n);
         n.* = .{};
     }
 }
@@ -386,7 +396,7 @@ pub var domain_ctl_release: ?*const fn (u64) void = null;
 /// cap deletion (cap_drop).
 pub fn releaseCap(cap_type: cap.CapType, obj: u64) void {
     switch (cap_type) {
-        .empty, .debug_log, .spawner => {},
+        .empty, .debug_log, .spawner, .mmio, .irq => {},
         .channel_a => unrefSide(@ptrFromInt(obj), .a),
         .channel_b => unrefSide(@ptrFromInt(obj), .b),
         .notification => unrefNotification(@ptrFromInt(obj)),

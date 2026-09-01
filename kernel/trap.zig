@@ -10,6 +10,7 @@ const std = @import("std");
 const log = @import("log.zig");
 const domain = @import("domain.zig");
 const gic = @import("gic.zig");
+const irq = @import("irq.zig");
 const sched = @import("sched.zig");
 const syscall = @import("syscall.zig");
 const timer = @import("timer.zig");
@@ -151,7 +152,11 @@ fn handleIrq() void {
     switch (intid) {
         timer.intid => timer.handleIrq(),
         gic.resched_sgi => {}, // just here for the preempt below
-        else => log.warn("unexpected interrupt {d}", .{intid}),
+        else => {
+            if (!(intid >= 32 and irq.deliver(intid))) {
+                log.warn("unexpected interrupt {d}", .{intid});
+            }
+        },
     }
     // EOI before any context switch: a preempted-away thread must not hold
     // this core's active-interrupt state hostage.

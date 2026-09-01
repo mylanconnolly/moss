@@ -158,6 +158,19 @@ IRQ-delivery-as-message, and explicit DMA grants shaped like an IOMMU is
 present (identity-stubbed under QEMU until the SMMU lands). Drivers run under
 manifests like any other process and are as sandboxable as anything else.
 
+**As built (Phase 7):** an `mmio` cap names a physical window (mapped with
+device attributes via mmio_map); an `irq` cap names an SPI range, and
+irq_bind routes a line to a notification — delivery masks the line (level
+sources must not storm) and irq_ack re-enables after the driver services
+the device; dma_alloc returns contiguous zeroed pages with a VA and a
+device address (== physical, but callers must treat it as opaque so the
+SMMU can change the answer later). The virtio-blk driver speaks the modern
+(version 2) virtio-mmio interface with a split virtqueue, probes the slots
+its window covers, and serves a typed block protocol; bulk data crosses via
+a client-granted shm buffer. QEMU note: virtio-mmio devices default to
+force-legacy — run with `-global virtio-mmio.force-legacy=false` (run-blk
+does).
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

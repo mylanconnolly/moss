@@ -24,6 +24,10 @@ pub const CapType = enum(u8) {
     spawner,
     /// Control over one spawned domain (stat, destroy).
     domain_ctl,
+    /// A physical MMIO window: object = base | pages << 48.
+    mmio,
+    /// A contiguous SPI range: object = base intid | count << 32.
+    irq,
 };
 
 const Entry = struct {

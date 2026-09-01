@@ -15,6 +15,7 @@ const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
+const pmem = @import("pmem.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 
@@ -57,6 +58,10 @@ pub const Manifest = struct {
     arg: u64 = 0,
     /// Grant spawn authority (root and init hold this; services never do).
     grant_spawner: bool = false,
+    /// Driver grants: an MMIO window and/or an SPI range. Handle slots
+    /// follow the fixed insert order (log, channel, spawner, mmio, irq).
+    grant_mmio: ?struct { base: u64, pages: u64 } = null,
+    grant_irq: ?struct { base: u32, count: u32 } = null,
     /// Parent in the domain tree (the spawning domain, for syscall spawns).
     parent: ?*Domain = null,
     /// Kernel reaper auto-finishes teardown and signals the watcher; off
@@ -242,6 +247,14 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     if (manifest.grant_spawner) {
         _ = table.insert(.spawner, 0) orelse return Error.CapTableFull;
     }
+    if (manifest.grant_mmio) |m| {
+        std.debug.assert(m.base % mem.page_size == 0 and m.pages < (1 << 16));
+        _ = table.insert(.mmio, m.base | (m.pages << 48)) orelse return Error.CapTableFull;
+    }
+    if (manifest.grant_irq) |i| {
+        _ = table.insert(.irq, @as(u64, i.base) | (@as(u64, i.count) << 32)) orelse
+            return Error.CapTableFull;
+    }
     d.init_arg = manifest.arg;
     d.supervisor = manifest.supervisor;
     d.auto_reap = manifest.auto_reap;
@@ -365,6 +378,48 @@ pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
     }
     d.shm_map_next = base + s.npages * mem.page_size;
     return base;
+}
+
+/// Map an MMIO window (device attributes, unowned: teardown must never
+/// hand MMIO addresses to the frame allocator).
+pub fn mapMmio(d: *Domain, base_pa: u64, pages: u64) !u64 {
+    const base = d.shm_map_next;
+    for (0..pages) |i| {
+        try mmu.mapUserPageTagged(
+            d.ttbr0_pa,
+            base + i * mem.page_size,
+            base_pa + i * mem.page_size,
+            .device,
+            &d.kobj,
+            false,
+        );
+    }
+    d.shm_map_next = base + pages * mem.page_size;
+    return base;
+}
+
+/// DMA grant: physically contiguous, zeroed, owned pages; returns the VA
+/// and the device address (== physical until an IOMMU arrives — the API
+/// shape is the IOMMU's).
+pub fn mapDma(d: *Domain, npages: u64) !struct { va: u64, dev: u64 } {
+    const pa = pmem.allocContiguous(@intCast(npages)) orelse return Error.OutOfFrames;
+    errdefer pmem.freeContiguous(pa, @intCast(npages));
+    try d.user_mem.charge(npages * mem.page_size);
+    errdefer d.user_mem.credit(npages * mem.page_size);
+    const bytes = mem.physToPtr([*]u8, pa);
+    @memset(bytes[0 .. npages * mem.page_size], 0);
+    const base = d.shm_map_next;
+    for (0..npages) |i| {
+        try mmu.mapUserPage(
+            d.ttbr0_pa,
+            base + i * mem.page_size,
+            pa + i * mem.page_size,
+            .data,
+            &d.kobj,
+        );
+    }
+    d.shm_map_next = base + npages * mem.page_size;
+    return .{ .va = base, .dev = pa };
 }
 
 /// Fault-as-message: park the faulting thread as a caller on the supervisor
