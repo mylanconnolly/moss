@@ -273,6 +273,24 @@ MCU-class devices (no MMU) never run the kernel; they run a tiny leaf-node
 runtime speaking Moss protocols over serial/USB/network and appear in the pool
 as typed channels.
 
+**As built (Phase 11, fabric v0):** each node's fabric service serves one
+channel; peers speak a versioned wire protocol over TCP (frames
+[len][type][ver], hello/spawn/call), membership is a static table (node N =
+10.77.0.N on a private segment, cluster netsvc mode). A *remote channel* is
+a badged cap on the local fabric service: badged calls forward verbatim as
+call_req frames and return the peer's reply words — the same four typed
+message words that cross local channels, so remote services are
+indistinguishable to callers (the remote-echo server literally runs
+unmodified CalcRequest-serving code). Remote spawn ships {image, arg} to
+the peer, which spawns under a local manifest and proxies the child's
+channel back. Peer death surfaces as an error-sentinel reply on in-flight
+calls (fabric error codes; the drill kills a node via PSCI SYSTEM_OFF
+mid-RPC and the survivor recovers). v0 honesty notes: one outstanding wire
+exchange at a time, no cap transfer across nodes beyond spawn-time grants,
+polling-driven pumping (the node driver ticks the fabric), and death is an
+error reply rather than a full channel-death notification — each a known
+evolution point, none an ABI change.
+
 ## Security posture
 
 - W^X unconditional, NX everywhere, separate address spaces per domain,

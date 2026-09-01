@@ -31,6 +31,7 @@ pooled hardware.
 | `zig build run-blk -Dblk-test` | Userspace virtio-blk: verified I/O over sync channels AND async rings, raced |
 | `zig build run-blk -Dfs-test` | FS service on virtio-blk: per-process namespace views (badged caps) on real storage |
 | `zig build run-net -Dnet-test` | Dual-stack TCP through userspace netsvc; allowlist views enforced |
+| `zig build run-cluster -Dfabric-test` | 2-node cluster: cross-VM RPC, remote spawn, node-kill recovery |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout

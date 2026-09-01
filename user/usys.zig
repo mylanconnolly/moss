@@ -64,6 +64,15 @@ pub fn recvMsg(channel: u64) IpcResult {
     return syscall6(.recv, channel, 0, 0, 0, 0, 0);
 }
 
+/// Raw-word call/reply for proxies that forward messages verbatim.
+pub fn callRaw(channel: u64, w: [4]u64, send_cap: u64) IpcResult {
+    return syscall6(.call, channel, w[0], w[1], w[2], w[3], send_cap);
+}
+
+pub fn replyRaw(channel: u64, w: [4]u64, send_cap: u64) shared.Errno {
+    return syscall6(.reply, channel, w[0], w[1], w[2], w[3], send_cap).err;
+}
+
 /// limits: kobj KB | user KB << 32 (0 = defaults); the child's budgets are
 /// a slice of the caller's.
 pub fn spawn(spawner: u64, image: shared.ImageId, arg: u64, chan: u64, flags: u64, limits: u64) IpcResult {

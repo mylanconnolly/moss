@@ -102,6 +102,42 @@ pub const Fdt = struct {
         }
     }
 
+    /// The /chosen bootargs string (QEMU -append), if present.
+    pub fn bootargs(self: Fdt) ?[]const u8 {
+        var depth: i32 = 0;
+        var in_chosen = false;
+        var pos: usize = self.struct_off;
+        while (true) {
+            const tok = self.word(&pos) catch return null;
+            switch (tok) {
+                tok_begin_node => {
+                    const name = self.nodeName(&pos) catch return null;
+                    depth += 1;
+                    if (depth == 2) in_chosen = std.mem.eql(u8, name, "chosen");
+                },
+                tok_end_node => {
+                    if (depth == 2) in_chosen = false;
+                    depth -= 1;
+                    if (depth <= 0) return null;
+                },
+                tok_prop => {
+                    const len = self.word(&pos) catch return null;
+                    const name_off = self.word(&pos) catch return null;
+                    const data = self.bytes(&pos, len) catch return null;
+                    const name = self.string(name_off) catch return null;
+                    if (in_chosen and std.mem.eql(u8, name, "bootargs") and data.len > 0) {
+                        // Nul-terminated.
+                        var n: usize = 0;
+                        while (n < data.len and data[n] != 0) n += 1;
+                        return data[0..n];
+                    }
+                },
+                tok_nop => {},
+                else => return null,
+            }
+        }
+    }
+
     fn word(self: Fdt, pos: *usize) Error!u32 {
         if (pos.* + 4 > self.blob.len) return Error.Truncated;
         const v = be32(self.blob[pos.*..][0..4]);

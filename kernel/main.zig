@@ -14,6 +14,7 @@ const log = @import("log.zig");
 const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
 const pmem = @import("pmem.zig");
+const psci = @import("psci.zig");
 const sched = @import("sched.zig");
 const sched_test = @import("sched_test.zig");
 const smp = @import("smp.zig");
@@ -42,6 +43,10 @@ export fn kmain(dtb_pa: u64) noreturn {
     };
     for (regions) |r| {
         log.info("ram: 0x{x} + {d}MB", .{ r.base, r.size >> 20 });
+    }
+    if (fdt.bootargs()) |args| {
+        boot_node = parseNodeArg(args);
+        if (boot_node != 0) log.info("bootargs: node id {d}", .{boot_node});
     }
 
     pmem.init(regions);
@@ -72,7 +77,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     sched.registerCpu(0);
     // Image table order must match shared.ImageId.
     const blobs = @import("user_blobs");
-    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs });
+    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs, blobs.net, blobs.fabric });
     domain.setSystemBlob(blobs.bootfs);
     irq.init();
     domain.startReaper();
@@ -140,6 +145,12 @@ export fn kmain(dtb_pa: u64) noreturn {
 
     if (build_options.net_test) {
         _ = sched.spawn("boot-watch", netTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    if (build_options.fabric_test) {
+        _ = sched.spawn("boot-watch", fabricTestWorker, boot_node, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -600,6 +611,146 @@ fn netTestWorker(_: u64) void {
     } else {
         std.debug.panic("net-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
+}
+
+var boot_node: u64 = 0;
+
+fn parseNodeArg(args: []const u8) u64 {
+    const key = "node=";
+    var i: usize = 0;
+    outer: while (i + key.len < args.len + 1) : (i += 1) {
+        for (key, 0..) |c, j| {
+            if (i + j >= args.len or args[i + j] != c) continue :outer;
+        }
+        var v: u64 = 0;
+        var k = i + key.len;
+        while (k < args.len and args[k] >= '0' and args[k] <= '9') : (k += 1) {
+            v = v * 10 + (args[k] - '0');
+        }
+        return v;
+    }
+    return 0;
+}
+
+/// Phase 11 exit-criterion driver, parameterized by node id (from
+/// bootargs). Node 1 is the initiator: hello with node 2, remote-spawn a
+/// service THERE, RPC to it through the proxied channel, and survive node
+/// 2's death mid-conversation. Node 2 serves reactively and then powers
+/// off — the node-kill drill.
+fn fabricTestWorker(node: u64) void {
+    const blobs = @import("user_blobs");
+    log.info("fabric-test: node {d} coming up", .{node});
+
+    // The network, in cluster mode.
+    const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    _ = domain.spawn("netsvc", blobs.net, .{
+        .arg = 1 | (node << 8),
+        .grant_debug_log = true,
+        .grant_channel_a = net_ch,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
+    sched.sleep(3);
+
+    // The fabric service, wired to a net view.
+    const fab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    _ = domain.spawn("fabsvc", blobs.fabric, .{
+        .arg = 1 | (node << 8),
+        .grant_debug_log = true,
+        .grant_channel_a = fab_ch,
+        .grant_spawner = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
+    const view = deriveNetView(net_ch, 0, 0, 0);
+    var res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .attach_net),
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = view.obj,
+        .cap_badge = view.badge,
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    if (node != 1) {
+        // Node 2+: pump the fabric for 90 ticks, then die abruptly.
+        for (0..90) |_| {
+            _ = ipc.call(fab_ch, .{
+                .data = shared.encodeMsg(shared.FabReq, .poll),
+            }, 0);
+            sched.sleep(1);
+        }
+        log.info("fabric-test: node {d} powering off mid-conversation (drill)", .{node});
+        psci.systemOff();
+    }
+
+    // Node 1: the initiator.
+    var hello_ok = false;
+    for (0..60) |_| {
+        res = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .{ .connect_peer = .{ .node = 2 } }),
+        }, 0);
+        if (res.err == .ok) {
+            if (shared.decodeMsg(shared.FabResp, res.msg.data)) |rep| {
+                if (rep == .ok) {
+                    hello_ok = true;
+                    break;
+                }
+            }
+        }
+        sched.sleep(3);
+    }
+    if (!hello_ok) std.debug.panic("fabric-test: no hello from node 2", .{});
+    log.info("fabric-test: cross-VM hello with node 2 complete", .{});
+
+    // Remote spawn: run remote-echo ON NODE 2 from node 1's manifest.
+    res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .{ .remote_spawn = .{
+            .node = 2,
+            .image = @intFromEnum(shared.ImageId.fabric),
+            .arg = 2,
+        } }),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse
+        @panic("fabric-test: bad spawn reply");
+    if (rep != .spawned or res.msg.cap_type == 0)
+        std.debug.panic("fabric-test: remote spawn failed", .{});
+    const remote_badge = res.msg.cap_badge;
+    log.info("fabric-test: remote-echo spawned on node 2; got proxied channel", .{});
+
+    // Cross-VM typed RPC through the proxied channel until the peer dies.
+    var rpcs: u64 = 0;
+    var observed_death = false;
+    for (0..200) |i| {
+        const call_res = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.CalcRequest, .{ .add = .{ .a = i, .b = 1000 } }),
+        }, remote_badge);
+        if (call_res.err != .ok) break;
+        if (call_res.msg.data[0] == shared.fabric_err_sentinel) {
+            log.info("fabric-test: peer died mid-RPC (fabric error {d}); observed and recovering", .{
+                call_res.msg.data[1],
+            });
+            observed_death = true;
+            break;
+        }
+        const crep = shared.decodeMsg(shared.CalcReply, call_res.msg.data) orelse break;
+        switch (crep) {
+            .sum => |v| {
+                if (v.value != i + 1000) std.debug.panic("fabric-test: bad RPC result", .{});
+                rpcs += 1;
+                if (rpcs == 1) log.info("fabric-test: first cross-VM RPC verified ({d}+1000={d})", .{ i, v.value });
+            },
+            .hi => {},
+        }
+        sched.sleep(3);
+    }
+
+    if (rpcs > 0 and observed_death) {
+        log.info("fabric-test: PASS — {d} cross-VM RPCs, remote spawn, node-kill observed and survived", .{rpcs});
+    } else {
+        std.debug.panic("fabric-test: FAIL — rpcs={d} death_observed={}", .{ rpcs, observed_death });
+    }
+    psci.systemOff();
 }
 
 fn deriveNetView(net_ch: *ipc.Channel, hi: u64, lo: u64, port: u64) struct { obj: u64, badge: u64 } {

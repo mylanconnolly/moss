@@ -47,9 +47,10 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 const mmio_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 const irq_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
 
-export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
-    switch (role) {
-        1 => netsvc(log_h, chan_h),
+export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
+    // arg: low byte = role; byte 1 = cluster node id (0 = slirp mode).
+    switch (arg & 0xff) {
+        1 => netsvc(log_h, chan_h, (arg >> 8) & 0xff),
         2 => echosrv(log_h, chan_h),
         3 => echocli(log_h, chan_h),
         4 => boxed(log_h, chan_h),
@@ -94,11 +95,14 @@ fn v4Addr(ip: u32) Addr {
     return a;
 }
 
-const own_ip4: u32 = shared.net_own_ip4;
-const gw_ip4: u32 = shared.net_gw_ip4;
-var own_ip6: Addr = undefined; // fec0::15
-var gw_ip6: Addr = undefined; // fec0::2
+// Slirp mode (node 0) or cluster mode (node N: static 10.77.0.N / fdcc::N,
+// everything on-link, broadcast MAC delivery — no gateways to resolve).
+var own_ip4: u32 = shared.net_own_ip4;
+var gw_ip4: u32 = shared.net_gw_ip4;
+var own_ip6: Addr = undefined;
+var gw_ip6: Addr = undefined;
 var loop6: Addr = undefined; // ::1
+var cluster_node: u64 = 0;
 
 fn isLocalAddr(a: Addr) bool {
     if (isV4Mapped(a)) {
@@ -833,28 +837,44 @@ const NetView = struct {
 var views: [max_views]NetView = @splat(.{});
 var serve_a: u64 = 0;
 
-fn netsvc(log_h: u64, chan_h: u64) noreturn {
-    own_ip6 = addrFromWords(shared.net_own_ip6[0], shared.net_own_ip6[1]);
-    gw_ip6 = addrFromWords(shared.net_gw_ip6[0], shared.net_gw_ip6[1]);
+fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
+    cluster_node = node;
     loop6 = @splat(0);
     loop6[15] = 1;
+    if (node == 0) {
+        own_ip6 = addrFromWords(shared.net_own_ip6[0], shared.net_own_ip6[1]);
+        gw_ip6 = addrFromWords(shared.net_gw_ip6[0], shared.net_gw_ip6[1]);
+    } else {
+        own_ip4 = shared.nodeIp4(node);
+        own_ip6 = addrFromWords(0xfdcc_0000_0000_0000, node);
+        gw_ip6 = @splat(0);
+    }
 
     serve_a = chan_h;
     netInit();
     _ = usys.log(log_h, "netsvc: nic up, resolving gateways");
 
-    // Resolve both gateways before serving anyone.
-    var tries: u32 = 0;
-    while (!have_gw4 or !have_gw6) {
-        if (!have_gw4) arpRequestGw();
-        if (!have_gw6) ndpSolicitGw();
-        _ = usys.notifyWait(irq_notif);
-        irqDrain();
-        tries += 1;
-        if (tries > 50) usys.exit(177);
+    if (node == 0) {
+        // Slirp: resolve both gateways before serving anyone.
+        var tries: u32 = 0;
+        while (!have_gw4 or !have_gw6) {
+            if (!have_gw4) arpRequestGw();
+            if (!have_gw6) ndpSolicitGw();
+            _ = usys.notifyWait(irq_notif);
+            irqDrain();
+            tries += 1;
+            if (tries > 50) usys.exit(177);
+        }
+    } else {
+        // Cluster: a private segment of known peers; broadcast delivery
+        // stands in for neighbor discovery (peers filter by IP).
+        gw_mac = @splat(0xff);
+        gw6_mac = @splat(0xff);
+        have_gw4 = true;
+        have_gw6 = true;
     }
     if (usys.notifyBind(irq_notif) != .ok) usys.exit(178);
-    _ = usys.log(log_h, "netsvc: virtio-net up, v4+v6 gateways resolved, serving");
+    _ = usys.log(log_h, "netsvc: virtio-net up, serving");
 
     views[0] = .{ .used = true }; // badge 0: unrestricted root view
 

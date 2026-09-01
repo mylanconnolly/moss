@@ -126,6 +126,7 @@ pub const ImageId = enum(u64) {
     blk = 6,
     fs = 7,
     net = 8,
+    fabric = 9,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -343,6 +344,58 @@ pub const TcpState = enum(u64) {
     established = 4,
     close_wait = 5,
 };
+
+// ---------------------------------------------------------------- fabric
+//
+// The multi-node fabric: init at a larger radius. Each node runs a fabric
+// service; peers speak a VERSIONED wire protocol over TCP (frames:
+// [len u16][type u8][ver u8][payload], little-endian). A remote channel is
+// a badged cap on the local fabric service — calls forward as call_req
+// frames and come back as call_resp, so remote services look exactly like
+// local ones to their callers. Cluster nodes use static addressing:
+// node N is 10.77.0.N / fdcc::N.
+
+pub const fabric_port: u64 = 7100;
+pub const fabric_ver: u8 = 1;
+
+pub fn nodeIp4(node: u64) u32 {
+    return 0x0A4D_0000 | @as(u32, @intCast(node));
+}
+
+/// Local control protocol for the fabric service (badge 0). Badged calls
+/// are not FabReq: their words forward verbatim to the remote peer.
+pub const FabReq = union(enum(u64)) {
+    attach_net: void, // + net view cap; also starts the listener
+    poll: void, // pump TCP (the driver's tick keeps the fabric breathing)
+    connect_peer: struct { node: u64 },
+    remote_spawn: struct { node: u64, image: u64, arg: u64 },
+};
+
+pub const FabResp = union(enum(u64)) {
+    ok: void,
+    spawned: void, // + remote-channel cap attached
+    fab_err: struct { code: u64 },
+};
+
+pub const FabErr = enum(u64) {
+    no_peer = 1,
+    timeout = 2,
+    disconnected = 3,
+    refused = 4,
+    no_space = 5,
+};
+
+/// Badged-session error reply sentinel: word0 = this, word1 = FabErr code.
+/// (No sane protocol tag collides with it.)
+pub const fabric_err_sentinel: u64 = 0xffff_ffff_ffff_ffff;
+
+// Wire frame types.
+pub const fw_hello: u8 = 1;
+pub const fw_hello_ack: u8 = 2;
+pub const fw_spawn_req: u8 = 3;
+pub const fw_spawn_ack: u8 = 4;
+pub const fw_call_req: u8 = 5;
+pub const fw_call_resp: u8 = 6;
 
 // QEMU slirp constants (static config; DHCP/SLAAC are not Phase 10
 // problems). v4 net 10.0.2.0/24, v6 prefix fec0::/64.
