@@ -20,9 +20,9 @@ done without rediscovering the sharp edges.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
   echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),
-  and `run-shell` — build with `-Dshell-test` first; your terminal becomes
-  msh (type `help`; kernel log lands in zig-out/shell-kernel.log; `exit`
-  powers the machine off).
+  and `run-shell` — your terminal becomes msh, no flags needed (type
+  `help`; kernel log lands in zig-out/shell-kernel.log; the `exit`
+  command powers the machine off — Ctrl-C goes to the guest, not QEMU).
 
 ## Adding things
 

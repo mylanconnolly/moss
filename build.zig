@@ -325,10 +325,8 @@ pub fn build(b: *std.Build) void {
         "-m",
         "512M",
     });
-    run_shell.addArg("-kernel");
-    run_shell.addFileArg(kernel_bin.getOutput());
     run_shell.step.dependOn(&mkdisk_sh.step);
-    const run_shell_step = b.step("run-shell", "Interactive msh console (build with -Dshell-test; kernel log in zig-out/shell-kernel.log).");
+    const run_shell_step = b.step("run-shell", "Interactive msh console on your terminal (kernel log: zig-out/shell-kernel.log; exit with the `exit` command).");
     run_shell_step.dependOn(&run_shell.step);
 
     // run-net: virtio-net over slirp (v4 + v6), with a guestfwd echo server
@@ -495,6 +493,11 @@ pub fn build(b: *std.Build) void {
         });
         run_check.addArg(vn);
         run_check.addFileArg(vbin.getOutput());
+        // Plain `zig build run-shell` boots this variant — no flag needed.
+        if (std.mem.eql(u8, vn, "shell")) {
+            run_shell.addArg("-kernel");
+            run_shell.addFileArg(vbin.getOutput());
+        }
     }
     const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests)");
     check_step.dependOn(test_step);

@@ -78,7 +78,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | fabric | Cross-VM RPC, remote spawn, node-kill recovery | `zig build run-cluster -Dfabric-test` |
-| shell | msh scripted console session: ps/mem/svc + file ops on the encrypted volume | `zig build -Dshell-test && zig build run-shell` (interactive) |
+| shell | msh scripted console session: ps/mem/svc + file ops on the encrypted volume | `zig build run-shell` (interactive) |
 
 Host-side unit tests (`zig build test`) cover the shared ABI: handles,
 typed message codecs, rings, and the devicetree parser.

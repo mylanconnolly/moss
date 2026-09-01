@@ -11,7 +11,7 @@ tested; Phase 12+ items are the open pool.
 - `zig build test` — host unit tests only (shared ABI, dt parser, rings,
   lib/ lz4+xts, the full mossfs suite incl. crash sweeps).
 - `zig build bench | bench-soft` — host perf baselines (DESIGN.md table).
-- `zig build -Dshell-test && zig build run-shell` — interactive msh console.
+- `zig build run-shell` — interactive msh console on your terminal.
 - `zig build run | run-hvf | run-blk | run-net | run-cluster` — manual
   boots (pair with `-D<name>-test` flags; see README test matrix).
 
