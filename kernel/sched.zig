@@ -1,0 +1,329 @@
+//! Kernel threads and the per-core scheduler.
+//!
+//! Structurally SMP-honest: every core owns a run queue and an idle thread,
+//! reachable through TPIDR_EL1, and nothing assumes a single core. The
+//! *locking* is still a big kernel lock over all scheduler state — fine at
+//! this scale, revisited when it shows up in measurements.
+//!
+//! Preemption: the timer tick sets need_resched; the trap handler calls
+//! preempt() after EOI. Context switches happen inside the IRQ handler on
+//! the interrupted thread's kernel stack, so its trap frame simply waits on
+//! that stack until the thread is next scheduled and the handler unwinds.
+//!
+//! Rules for this module: schedule() is entered with the big lock held and
+//! IRQs masked; every resume point after a context switch (schedule's return
+//! or the new-thread trampoline) must reap any exited predecessor and
+//! release the lock. No logging while holding the big lock.
+
+const std = @import("std");
+const kalloc = @import("kalloc.zig");
+const lock = @import("lock.zig");
+const log = @import("log.zig");
+const mem = @import("mem.zig");
+const pmem = @import("pmem.zig");
+
+pub const max_cpus = 8;
+const max_threads = 64;
+const stack_pages = 4;
+
+pub const Error = error{
+    NoThreadSlots,
+    OutOfFrames,
+    QuotaExceeded,
+};
+
+const Context = extern struct {
+    // x19..x28, x29 (fp), x30 (lr), then sp.
+    regs: [12]u64 = @splat(0),
+    sp: u64 = 0,
+};
+
+pub const State = enum {
+    unused,
+    ready,
+    running,
+    sleeping,
+    exited,
+};
+
+pub const Thread = struct {
+    ctx: Context = .{},
+    id: u32 = 0,
+    name: []const u8 = "",
+    state: State = .unused,
+    /// Pinned core, or null to balance round-robin on every enqueue —
+    /// which also makes unpinned threads migrate, exercising SMP paths.
+    affinity: ?u32 = null,
+    stack_pa: u64 = 0,
+    /// CPU budget accounting stub: consumed timer ticks. Domains attach
+    /// real budgets here in Phase 3.
+    cpu_ticks: u64 = 0,
+    wake_tick: u64 = 0,
+    node: std.DoublyLinkedList.Node = .{},
+};
+
+pub const PerCpu = struct {
+    id: u32,
+    current: *Thread,
+    idle: *Thread,
+    queue: std.DoublyLinkedList = .{},
+    reap: ?*Thread = null,
+    need_resched: bool = false,
+    online: bool = false,
+};
+
+var cpus: [max_cpus]PerCpu = undefined;
+var threads: [max_threads]Thread = @splat(.{});
+var sleepers: std.DoublyLinkedList = .{};
+var big_lock: lock.SpinLock = .{};
+var next_thread_id: u32 = 1;
+var balance_next: u32 = 0;
+var global_ticks: u64 = 0;
+
+pub fn thisCpu() *PerCpu {
+    return @ptrFromInt(asm ("mrs %[v], tpidr_el1"
+        : [v] "=r" (-> u64),
+    ));
+}
+
+/// Register the calling core: its current execution context becomes the
+/// core's idle thread. Called once per core before that core enables IRQs.
+pub fn registerCpu(cpu_id: u32) void {
+    const daif = big_lock.lockIrqSave();
+    const idle = allocThreadSlotLocked() catch @panic("no thread slot for idle");
+    idle.name = "idle";
+    idle.state = .running;
+    idle.affinity = cpu_id;
+    const cpu = &cpus[cpu_id];
+    cpu.* = .{ .id = cpu_id, .current = idle, .idle = idle, .online = true };
+    big_lock.unlockRestore(daif);
+    asm volatile ("msr tpidr_el1, %[v]"
+        :
+        : [v] "r" (@intFromPtr(cpu)),
+    );
+}
+
+pub fn onlineCount() u32 {
+    var n: u32 = 0;
+    for (&cpus) |*cpu| {
+        if (cpu.online) n += 1;
+    }
+    return n;
+}
+
+pub fn spawn(name: []const u8, affinity: ?u32, entry: *const fn (u64) void, arg: u64) Error!*Thread {
+    const stack_pa = pmem.allocContiguous(stack_pages) orelse return Error.OutOfFrames;
+    errdefer pmem.freeContiguous(stack_pa, stack_pages);
+    try kalloc.kernel_account.charge(stack_pages * mem.page_size);
+    errdefer kalloc.kernel_account.credit(stack_pages * mem.page_size);
+
+    const daif = big_lock.lockIrqSave();
+    defer big_lock.unlockRestore(daif);
+
+    const t = try allocThreadSlotLocked();
+    t.name = name;
+    t.affinity = affinity;
+    t.stack_pa = stack_pa;
+    t.cpu_ticks = 0;
+    // New threads begin in the trampoline, which unlocks the scheduler and
+    // enables IRQs before tail-calling entry(arg) from x19/x20.
+    t.ctx = .{ .sp = mem.physToVirt(stack_pa) + stack_pages * mem.page_size };
+    t.ctx.regs[0] = @intFromPtr(entry); // x19
+    t.ctx.regs[1] = arg; // x20
+    t.ctx.regs[11] = @intFromPtr(&__thread_trampoline); // x30
+    enqueueLocked(t);
+    return t;
+}
+
+/// Give up the CPU voluntarily; the thread re-enters its queue (possibly on
+/// another core, if unpinned).
+pub fn yield() void {
+    const daif = big_lock.lockIrqSave();
+    defer big_lock.unlockRestore(daif);
+    scheduleLocked();
+}
+
+/// Sleep for at least `ticks` timer ticks.
+pub fn sleep(ticks: u64) void {
+    const daif = big_lock.lockIrqSave();
+    defer big_lock.unlockRestore(daif);
+    const cpu = thisCpu();
+    const t = cpu.current;
+    std.debug.assert(t != cpu.idle); // the idle thread never sleeps
+    t.state = .sleeping;
+    t.wake_tick = global_ticks + ticks;
+    sleepers.append(&t.node);
+    scheduleLocked();
+}
+
+pub fn exit() noreturn {
+    const daif = big_lock.lockIrqSave();
+    _ = daif; // this context never resumes; DAIF dies with it
+    const cpu = thisCpu();
+    cpu.current.state = .exited;
+    scheduleLocked();
+    unreachable;
+}
+
+/// Timer-tick hook, called from IRQ context (IRQs masked) on every core.
+/// Core 0 additionally advances global time and wakes due sleepers.
+pub fn onTick(is_timekeeper: bool) void {
+    const daif = big_lock.lockIrqSave();
+    defer big_lock.unlockRestore(daif);
+    const cpu = thisCpu();
+    cpu.current.cpu_ticks += 1;
+
+    if (is_timekeeper) {
+        global_ticks += 1;
+        var it = sleepers.first;
+        while (it) |node| {
+            const next = node.next;
+            const t: *Thread = @fieldParentPtr("node", node);
+            if (t.wake_tick <= global_ticks) {
+                sleepers.remove(node);
+                t.state = .ready;
+                enqueueLocked(t);
+            }
+            it = next;
+        }
+    }
+
+    // Round-robin: preempt whenever someone else is waiting for this core.
+    if (cpu.queue.first != null) cpu.need_resched = true;
+}
+
+/// Called by the trap handler after EOI when returning from an interrupt.
+pub fn preemptIfNeeded() void {
+    const cpu = thisCpu();
+    if (!cpu.need_resched) return;
+    const daif = big_lock.lockIrqSave();
+    defer big_lock.unlockRestore(daif);
+    cpu.need_resched = false;
+    scheduleLocked();
+}
+
+pub fn currentName() []const u8 {
+    return thisCpu().current.name;
+}
+
+pub fn ticksOfCurrent() u64 {
+    return thisCpu().current.cpu_ticks;
+}
+
+fn allocThreadSlotLocked() Error!*Thread {
+    for (&threads) |*t| {
+        if (t.state == .unused) {
+            t.* = .{ .id = next_thread_id, .state = .ready };
+            next_thread_id += 1;
+            return t;
+        }
+    }
+    return Error.NoThreadSlots;
+}
+
+fn enqueueLocked(t: *Thread) void {
+    t.state = .ready;
+    const target = t.affinity orelse blk: {
+        // Round-robin across online cores on every enqueue.
+        var tries: u32 = 0;
+        while (tries < max_cpus) : (tries += 1) {
+            const c = balance_next % max_cpus;
+            balance_next +%= 1;
+            if (cpus[c].online) break :blk c;
+        }
+        break :blk 0;
+    };
+    cpus[target].queue.append(&t.node);
+}
+
+/// Core scheduling decision. Big lock held, IRQs masked.
+fn scheduleLocked() void {
+    const cpu = thisCpu();
+    const prev = cpu.current;
+
+    const next: *Thread = if (cpu.queue.popFirst()) |node|
+        @fieldParentPtr("node", node)
+    else if (prev.state == .running)
+        return // nothing else to run, keep going
+    else
+        cpu.idle;
+
+    if (next == prev) return;
+
+    switch (prev.state) {
+        .running => {
+            if (prev != cpu.idle) enqueueLocked(prev);
+        },
+        .exited => cpu.reap = prev,
+        .sleeping, .ready, .unused => {},
+    }
+    next.state = .running;
+    cpu.current = next;
+    __context_switch(&prev.ctx, &next.ctx);
+    // We are back on this thread, possibly much later, still under the big
+    // lock taken by whoever switched to us.
+    reapLocked();
+}
+
+fn reapLocked() void {
+    const cpu = thisCpu();
+    if (cpu.reap) |dead| {
+        cpu.reap = null;
+        pmem.freeContiguous(dead.stack_pa, stack_pages);
+        kalloc.kernel_account.credit(stack_pages * mem.page_size);
+        dead.state = .unused;
+    }
+}
+
+/// First code run by a new thread, called from the trampoline with the big
+/// lock still held and IRQs masked.
+export fn schedThreadStart() callconv(.c) void {
+    reapLocked();
+    big_lock.unlock();
+    asm volatile ("msr daifclr, #2");
+}
+
+/// C-ABI shim between the trampoline and the entry function: the entry
+/// pointer uses Zig's unspecified calling convention (hidden parameters in
+/// Debug builds included), so the call must be emitted by the compiler, not
+/// hand-written in the trampoline's assembly.
+export fn schedThreadRun(entry_raw: u64, arg: u64) callconv(.c) noreturn {
+    const entry: *const fn (u64) void = @ptrFromInt(entry_raw);
+    entry(arg);
+    exit();
+}
+
+extern fn __context_switch(prev: *Context, next: *Context) void;
+extern const __thread_trampoline: anyopaque;
+
+comptime {
+    asm (
+        \\.section .text, "ax"
+        \\.global __context_switch
+        \\__context_switch:
+        \\        stp     x19, x20, [x0]
+        \\        stp     x21, x22, [x0, #16]
+        \\        stp     x23, x24, [x0, #32]
+        \\        stp     x25, x26, [x0, #48]
+        \\        stp     x27, x28, [x0, #64]
+        \\        stp     x29, x30, [x0, #80]
+        \\        mov     x2, sp
+        \\        str     x2, [x0, #96]
+        \\        ldp     x19, x20, [x1]
+        \\        ldp     x21, x22, [x1, #16]
+        \\        ldp     x23, x24, [x1, #32]
+        \\        ldp     x25, x26, [x1, #48]
+        \\        ldp     x27, x28, [x1, #64]
+        \\        ldp     x29, x30, [x1, #80]
+        \\        ldr     x2, [x1, #96]
+        \\        mov     sp, x2
+        \\        ret
+        \\
+        \\.global __thread_trampoline
+        \\__thread_trampoline:
+        \\        bl      schedThreadStart
+        \\        mov     x0, x19
+        \\        mov     x1, x20
+        \\        bl      schedThreadRun
+    );
+}

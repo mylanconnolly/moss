@@ -9,6 +9,7 @@
 const std = @import("std");
 const log = @import("log.zig");
 const gic = @import("gic.zig");
+const sched = @import("sched.zig");
 const timer = @import("timer.zig");
 
 pub const TrapFrame = extern struct {
@@ -140,11 +141,14 @@ export fn trapHandler(frame: *TrapFrame, kind_raw: u64) callconv(.c) void {
 fn handleIrq() void {
     const intid = gic.acknowledge();
     if (intid == gic.spurious_intid) return;
-    defer gic.endOfInterrupt(intid);
     switch (intid) {
         timer.intid => timer.handleIrq(),
         else => log.warn("unexpected interrupt {d}", .{intid}),
     }
+    // EOI before any context switch: a preempted-away thread must not hold
+    // this core's active-interrupt state hostage.
+    gic.endOfInterrupt(intid);
+    sched.preemptIfNeeded();
 }
 
 fn reportFault(frame: *TrapFrame, kind: Kind) noreturn {

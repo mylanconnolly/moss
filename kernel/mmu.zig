@@ -69,7 +69,7 @@ pub fn init(regions: []const dt.MemRegion) Error!void {
     // Device windows, 4K pages at direct-map addresses.
     try mapDeviceRange(0x0900_0000, 0x1000); // PL011 UART
     try mapDeviceRange(0x0800_0000, 0x1_0000); // GICv3 distributor
-    try mapDeviceRange(0x080a_0000, 0x2_0000); // GICv3 redistributor, core 0
+    try mapDeviceRange(0x080a_0000, 0x10_0000); // GICv3 redistributors, 8 cores
 }
 
 /// Map one 2MB span overlapping the kernel image as 4K pages with W^X perms.

@@ -94,5 +94,33 @@ comptime {
         \\        mov     sp, x1
         \\        ldr     x1, =kmain
         \\        br      x1
+        \\
+        \\// PSCI CPU_ON entry for secondary cores (called with its physical
+        \\// address). Same MMU setup as the primary, reusing the boot L1
+        \\// table core 0 left in place; the stack is handed over in the
+        \\// __secondary_stack global (cores are brought up one at a time).
+        \\.global _secondary_start
+        \\_secondary_start:
+        \\        ldr     x10, =0xffffff8000000000
+        \\        ldr     x1, =__boot_l1_table
+        \\        sub     x1, x1, x10
+        \\        ldr     x2, =0xff00
+        \\        msr     mair_el1, x2
+        \\        ldr     x2, =0x2b5193519
+        \\        msr     tcr_el1, x2
+        \\        msr     ttbr0_el1, x1
+        \\        msr     ttbr1_el1, x1
+        \\        dsb     ish
+        \\        isb
+        \\        mrs     x2, sctlr_el1
+        \\        ldr     x3, =0x1005
+        \\        orr     x2, x2, x3
+        \\        msr     sctlr_el1, x2
+        \\        isb
+        \\        ldr     x1, =__secondary_stack
+        \\        ldr     x1, [x1]
+        \\        mov     sp, x1
+        \\        ldr     x1, =secondaryEntry
+        \\        br      x1
     );
 }

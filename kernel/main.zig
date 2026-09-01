@@ -10,6 +10,9 @@ const log = @import("log.zig");
 const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
 const pmem = @import("pmem.zig");
+const sched = @import("sched.zig");
+const sched_test = @import("sched_test.zig");
+const smp = @import("smp.zig");
 const timer = @import("timer.zig");
 const trap = @import("trap.zig");
 
@@ -62,8 +65,11 @@ export fn kmain(dtb_pa: u64) noreturn {
         log.info("kalloc: page alloc/free round-trip, quota balanced", .{});
     }
 
-    gic.init();
-    timer.init();
+    sched.registerCpu(0);
+    gic.initDistributor();
+    gic.initCore(0);
+    timer.initCore(0);
+    smp.bringUp();
     trap.enableIrqs();
 
     if (build_options.fault_test) {
@@ -76,7 +82,12 @@ export fn kmain(dtb_pa: u64) noreturn {
         @panic("panic test requested via -Dpanic-test");
     }
 
-    log.info("boot complete; idling on wfi", .{});
+    if (build_options.sched_test) {
+        sched_test.start();
+    }
+
+    log.info("boot complete; core 0 idling", .{});
+    // This context is core 0's idle thread from here on.
     halt();
 }
 

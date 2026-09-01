@@ -13,6 +13,11 @@ pub fn build(b: *std.Build) void {
         "fault-test",
         "Read unmapped memory after boot to exercise fault reporting",
     ) orelse false;
+    const sched_test = b.option(
+        bool,
+        "sched-test",
+        "Run pinned + migrating threads across all cores after boot",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -34,6 +39,7 @@ pub fn build(b: *std.Build) void {
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "panic_test", panic_test);
     build_opts.addOption(bool, "fault_test", fault_test);
+    build_opts.addOption(bool, "sched_test", sched_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -61,7 +67,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_bin.step);
 
     const qemu_common = [_][]const u8{
-        "-smp",        "1",
+        "-smp",        "4",
         "-m",          "512M",
         "-nographic",
     };

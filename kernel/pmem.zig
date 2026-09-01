@@ -1,8 +1,9 @@
 //! Physical frame allocator: a bitmap over 4K frames, fed by the devicetree
-//! memory map. Single-core for now; a lock arrives with SMP in Phase 2.
+//! memory map.
 
 const std = @import("std");
 const dt = @import("dt.zig");
+const lock = @import("lock.zig");
 const mem = @import("mem.zig");
 
 /// Highest physical address tracked. 4GB covers QEMU virt configurations we
@@ -16,6 +17,7 @@ var bitmap: [frame_count / 8]u8 = @splat(0);
 var free_frames: usize = 0;
 var total_frames: usize = 0;
 var cursor: usize = 0;
+var lk: lock.SpinLock = .{};
 
 pub fn init(regions: []const dt.MemRegion) void {
     for (regions) |r| {
@@ -47,6 +49,8 @@ pub fn reserve(base: u64, size: u64) void {
 
 /// Allocate one 4K frame; returns its physical address.
 pub fn alloc() ?u64 {
+    const daif = lk.lockIrqSave();
+    defer lk.unlockRestore(daif);
     var scanned: usize = 0;
     var f = cursor;
     while (scanned < frame_count) : (scanned += 1) {
@@ -62,6 +66,37 @@ pub fn alloc() ?u64 {
     return null;
 }
 
+/// Allocate `n` physically contiguous frames (so their direct-map VAs are
+/// contiguous too); returns the physical address of the first.
+pub fn allocContiguous(n: usize) ?u64 {
+    const daif = lk.lockIrqSave();
+    defer lk.unlockRestore(daif);
+    var run: usize = 0;
+    var f: usize = 0;
+    while (f < frame_count) : (f += 1) {
+        if (testBit(f)) {
+            run += 1;
+            if (run == n) {
+                const first = f + 1 - n;
+                for (first..f + 1) |g| {
+                    clearBit(g);
+                }
+                free_frames -= n;
+                return first * mem.page_size;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    return null;
+}
+
+pub fn freeContiguous(pa: u64, n: usize) void {
+    for (0..n) |i| {
+        free(pa + i * mem.page_size);
+    }
+}
+
 pub fn allocZeroed() ?u64 {
     const pa = alloc() orelse return null;
     const page = mem.physToPtr([*]u8, pa);
@@ -70,6 +105,8 @@ pub fn allocZeroed() ?u64 {
 }
 
 pub fn free(pa: u64) void {
+    const daif = lk.lockIrqSave();
+    defer lk.unlockRestore(daif);
     const f = pa / mem.page_size;
     std.debug.assert(f < frame_count);
     std.debug.assert(!testBit(f));

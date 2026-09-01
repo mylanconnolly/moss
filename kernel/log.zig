@@ -1,8 +1,12 @@
 //! Boot/panic logger over the PL011. Formats into a fixed stack buffer so it
-//! works with no allocator and inside the panic path.
+//! works with no allocator and inside the panic path. A spinlock keeps lines
+//! from different cores whole; never call while holding the scheduler lock.
 
 const std = @import("std");
+const lock = @import("lock.zig");
 const pl011 = @import("driver/pl011.zig");
+
+var lk: lock.SpinLock = .{};
 
 pub const Level = enum {
     debug,
@@ -21,10 +25,7 @@ pub const Level = enum {
 };
 
 pub fn log(level: Level, comptime fmt: []const u8, args: anytype) void {
-    pl011.write("[");
-    pl011.write(level.tag());
-    pl011.write("] ");
-    print(fmt ++ "\n", args);
+    print("[{s}] " ++ fmt ++ "\n", .{level.tag()} ++ args);
 }
 
 pub fn debug(comptime fmt: []const u8, args: anytype) void {
@@ -45,10 +46,10 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
 
 pub fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, fmt, args) catch {
-        pl011.write(&buf);
-        pl011.write("<truncated>\n");
-        return;
+    const line = std.fmt.bufPrint(&buf, fmt, args) catch blk: {
+        break :blk "<log line too long>\n";
     };
+    const daif = lk.lockIrqSave();
+    defer lk.unlockRestore(daif);
     pl011.write(line);
 }

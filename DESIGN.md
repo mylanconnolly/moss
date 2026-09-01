@@ -175,3 +175,9 @@ identity map.
   must compile for every target including `thumb-freestanding` leaf nodes.
 - Kernel code allocates only through the quota-accounted kernel allocator —
   no hidden allocation, no global general-purpose heap.
+- Assembly may only call `export`/`callconv(.c)` functions, never a
+  Zig-calling-convention function or function pointer: Zig's unspecified
+  convention is free to add hidden parameters (and does, in Debug builds —
+  an error-trace pointer in x0). The thread trampoline learned this the hard
+  way; entry points reached from asm go through C-ABI shims like
+  `schedThreadRun`.
