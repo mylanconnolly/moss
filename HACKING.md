@@ -63,6 +63,13 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 
 - Assembly may only call `export`/`callconv(.c)` functions. Zig's
   unspecified convention has hidden parameters in Debug builds.
+- The kernel is FP-free by build flags; the scheduler's __fp_save/__fp_restore
+  stubs are the only EL1 vector instructions (`.arch_extension` admits
+  them). Userspace has NEON + hardware AES; the vector unit is per-thread
+  state saved eagerly at context switch. If you write a userspace FP
+  probe, make it `inline` — clobbering callee-saved v8-v15 in an outlined
+  function makes the compiler's epilogue restore stale values right after
+  your asm.
 - All scheduler/IPC state shares the big kernel lock; **never log while
   holding it** (the logger has its own lock).
 - Enqueueing a thread kicks the target core (SGI); do long-running work

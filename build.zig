@@ -86,13 +86,25 @@ pub fn build(b: *std.Build) void {
         .cpu_arch = .aarch64,
         .os_tag = .freestanding,
         .abi = .none,
-        // CPACR_EL1 resets with FP/SIMD trapped at EL1 and the kernel never
-        // saves vector state, so kernel code must not touch those registers.
+        // The kernel never touches FP/SIMD outside the scheduler's
+        // hand-written save/restore stubs, so compiled kernel code must
+        // not use those registers (no vector state on kernel paths).
         // strict_align is NOT needed: all Zig code runs with the MMU on
         // (boot.zig enables it before kmain); only pre-MMU code — which is
         // all hand-written, aligned assembly — would fault on unaligned
         // access to Device-typed memory.
         .cpu_features_sub = std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon }),
+    });
+
+    // Userspace gets the vector unit: trap.init sets CPACR_EL1.FPEN and
+    // the scheduler saves/restores per-thread FP state, so user programs
+    // build with NEON plus the AES instructions (hardware AES-XTS in
+    // std.crypto; QEMU's cortex-a72 and HVF's host CPU both provide them).
+    const user_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .freestanding,
+        .abi = .none,
+        .cpu_features_add = std.Target.aarch64.featureSet(&.{.aes}),
     });
 
     const shared_mod = b.createModule(.{
@@ -149,7 +161,7 @@ pub fn build(b: *std.Build) void {
     for (user_progs) |p| {
         const prog_mod = b.createModule(.{
             .root_source_file = b.path(p.src),
-            .target = kernel_target,
+            .target = user_target,
             .optimize = optimize,
             .code_model = .small,
         });
@@ -353,7 +365,7 @@ pub fn build(b: *std.Build) void {
         const bexe = b.addExecutable(.{ .name = b.fmt("moss-{s}", .{bv.step}), .root_module = bmod });
         const brun = b.addRunArtifact(bexe);
         b.step(bv.step, if (bv.soft)
-            "Host baselines with software AES (approximates moss userspace today)"
+            "Host baselines with software AES (the pre-FP/SIMD reference point)"
         else
             "Host baselines (native AES)").dependOn(&brun.step);
     }

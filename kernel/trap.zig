@@ -111,6 +111,17 @@ pub fn init() void {
         :
         : [addr] "r" (@intFromPtr(&__vectors)),
     );
+    // FPEN = 0b11: FP/SIMD untrapped at EL0 and EL1. Userspace owns the
+    // vector unit (NEON + hardware AES); the kernel is compiled without
+    // FP features and touches the registers only in the scheduler's
+    // save/restore stubs (which need the EL1 permission this grants).
+    asm volatile (
+        \\mrs x8, cpacr_el1
+        \\orr x8, x8, #(0x3 << 20)
+        \\msr cpacr_el1, x8
+        :
+        :
+        : .{ .x8 = true });
     asm volatile ("isb");
 }
 

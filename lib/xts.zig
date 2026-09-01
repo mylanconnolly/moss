@@ -26,26 +26,39 @@ pub const Xts256 = struct {
         };
     }
 
+    const wide = 8; // XTS blocks are independent: run the AES cores wide
+
     pub fn encryptSector(x: *const Xts256, buf: *[sector_size]u8, sector: u64) void {
-        var t = x.tweak(sector);
+        var tw: [sector_size]u8 align(16) = undefined;
+        x.tweakRun(&tw, sector);
+        xorAll(buf, &tw);
         var i: usize = 0;
-        while (i < sector_size) : (i += 16) {
-            const b = buf[i..][0..16];
-            xor16(b, &t);
-            x.enc1.encrypt(b, b);
-            xor16(b, &t);
-            gfDouble(&t);
+        while (i < sector_size) : (i += 16 * wide) {
+            const b = buf[i..][0 .. 16 * wide];
+            x.enc1.encryptWide(wide, b, b);
         }
+        xorAll(buf, &tw);
     }
 
     pub fn decryptSector(x: *const Xts256, buf: *[sector_size]u8, sector: u64) void {
+        var tw: [sector_size]u8 align(16) = undefined;
+        x.tweakRun(&tw, sector);
+        xorAll(buf, &tw);
+        var i: usize = 0;
+        while (i < sector_size) : (i += 16 * wide) {
+            const b = buf[i..][0 .. 16 * wide];
+            x.dec1.decryptWide(wide, b, b);
+        }
+        xorAll(buf, &tw);
+    }
+
+    /// The 32 per-block tweaks of one sector: E(K2, sector) then GF
+    /// doubling — a cheap serial shift chain.
+    fn tweakRun(x: *const Xts256, tw: *[sector_size]u8, sector: u64) void {
         var t = x.tweak(sector);
         var i: usize = 0;
         while (i < sector_size) : (i += 16) {
-            const b = buf[i..][0..16];
-            xor16(b, &t);
-            x.dec1.decrypt(b, b);
-            xor16(b, &t);
+            @memcpy(tw[i..][0..16], &t);
             gfDouble(&t);
         }
     }
@@ -59,19 +72,23 @@ pub const Xts256 = struct {
     }
 };
 
-fn xor16(b: *[16]u8, t: *const [16]u8) void {
-    for (b, t) |*x, y| x.* ^= y;
+fn xorAll(b: *[sector_size]u8, t: *const [sector_size]u8) void {
+    var i: usize = 0;
+    while (i < sector_size) : (i += 8) {
+        const x = std.mem.readInt(u64, b[i..][0..8], .little) ^
+            std.mem.readInt(u64, t[i..][0..8], .little);
+        std.mem.writeInt(u64, b[i..][0..8], x, .little);
+    }
 }
 
 /// Multiply by x in GF(2^128), little-endian byte order, P1619 polynomial.
 fn gfDouble(t: *[16]u8) void {
-    var carry: u8 = 0;
-    for (t) |*b| {
-        const next_carry = b.* >> 7;
-        b.* = (b.* << 1) | carry;
-        carry = next_carry;
-    }
-    if (carry != 0) t[0] ^= 0x87;
+    const lo = std.mem.readInt(u64, t[0..8], .little);
+    const hi = std.mem.readInt(u64, t[8..16], .little);
+    var nlo = lo << 1;
+    if (hi >> 63 != 0) nlo ^= 0x87;
+    std.mem.writeInt(u64, t[0..8], nlo, .little);
+    std.mem.writeInt(u64, t[8..16], (hi << 1) | (lo >> 63), .little);
 }
 
 // ----------------------------------------------------------------- tests

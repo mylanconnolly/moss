@@ -152,7 +152,7 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64) shared.Errno {
         if (!ch.a_open) return .peer_dead;
         if (ch.processing != null) return .busy;
         if (ch.callers.popFirst()) |node| {
-            const caller: *sched.Thread = @fieldParentPtr("node", node);
+            const caller: *sched.Thread = @alignCast(@fieldParentPtr("node", node));
             caller.block_list = null;
             ch.processing = caller;
             caller.block_slot = &ch.processing;
@@ -207,7 +207,7 @@ fn closeSide(ch: *Channel, side: Side) void {
     // Callers can't be served anymore once A is gone.
     if (!ch.a_open) {
         while (ch.callers.popFirst()) |node| {
-            const t: *sched.Thread = @fieldParentPtr("node", node);
+            const t: *sched.Thread = @alignCast(@fieldParentPtr("node", node));
             t.block_list = null;
             t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
             sched.wakeLocked(t);

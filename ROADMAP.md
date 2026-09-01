@@ -220,11 +220,21 @@ The pooling story stops being theory.
   anti-rollback state), 64-bit MAC tags (format constraint), plaintext
   allocation metadata leaks fill/churn patterns, software AES until
   FP/SIMD lands.
-- **FP/SIMD context switching + hardware crypto**: enable CPACR_EL1
-  FP/NEON for userspace with per-thread vector-state save/restore (lazy
-  or eager), then build userspace with NEON + AES target features —
-  std.crypto's armcrypto AES path replaces soft AES and mossfs encryption
-  reaches hardware speed. Kernel stays FP-free.
+- ✅ **FP/SIMD context switching + hardware crypto** (done): CPACR_EL1
+  FPEN opened in trap.init (every core); the scheduler eagerly
+  saves/restores per-thread v0-v31 + fpsr/fpcr for user threads only
+  (528B in Thread, zero-initialized so a fresh thread can never see
+  another domain's vector registers); the kernel remains FP-free by
+  build flags, its only vector instructions the hand-written stubs.
+  Userspace builds with NEON + AES features → std.crypto takes the
+  armcrypto path, and lib/xts runs the AES cores 8-wide (XTS blocks are
+  independent) with word-wise GF doubling: host XTS 1.5→2.3 GB/s (hw),
+  and encrypted-random whole-stack throughput rose 3.7-4.5x on HVF
+  (13.4/18.6 MB/s w/r). Correctness is pinned by an adversarial probe in
+  the ipc test: both processes stamp all 32 vector registers with
+  distinct patterns around blocking syscalls and verify bit-exact
+  survival across context switches. Remaining whole-stack ceiling is
+  the 2KB view-buffer protocol chunking (tracked below).
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

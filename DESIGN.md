@@ -86,6 +86,25 @@ functional test notices but which taxes every IPC round-trip ~2500x; and
 (2) the resched SGI has to be enabled in each core's redistributor
 (GICR_ISENABLER0), or the kicks vanish without any error.
 
+**FP/SIMD (as built):** userspace owns the vector unit — trap.init opens
+CPACR_EL1.FPEN on every core, and the scheduler saves/restores v0-v31 +
+fpsr/fpcr **eagerly at context switch, for user threads only** (528B per
+thread, zero-initialized at spawn so a fresh thread can never observe
+another domain's vector registers). Kernel threads skip it entirely: the
+kernel is compiled without FP/NEON features, so user vector registers
+survive syscalls untouched in hardware, and the hand-written save/restore
+stubs (admitted by `.arch_extension` in otherwise FP-free kernel text)
+are the only vector instructions at EL1. Eager beats lazy here: no trap
+choreography, no per-core owner tracking across migration, and the cost
+(~a cacheline-friendly 1KB copy per user-thread switch) is noise at
+moss's switch rates. Correctness is pinned by an adversarial probe in the
+ipc test — both processes stamp all 32 registers with distinct patterns
+around blocking syscalls and require bit-exact survival. Probe-writing
+lesson: an inline-asm block that clobbers callee-saved v8-v15 inside a
+non-inline function makes the compiler restore the *old* values right
+after your asm (ABI-mandated epilogue) — the probe must be `inline` or
+it corrupts itself and frames the kernel.
+
 Because a fresh domain holds *nothing*, the empty sandbox is the zero value.
 Sandboxing is not a mode; it is the absence of grants.
 
@@ -393,9 +412,13 @@ blkdrv + virtio, 2KB chunks, 512KB, encrypted volume).
 |---|---|---|
 | xxhash64 | 7.9 GB/s | 7.0 GB/s |
 | SipHash-2-4 MAC | 1.2 GB/s | 1.2 GB/s |
-| **AES-256-XTS encrypt / decrypt** | **1.48 / 1.58 GB/s** | **0.11 / 0.12 GB/s** |
+| **AES-256-XTS encrypt / decrypt** (8-wide) | **2.32 / 2.49 GB/s** | **0.12 / 0.13 GB/s** |
 | LZ4 compress text / random | 2.3 / 1.2 GB/s | 3.0 / 1.3 GB/s |
 | LZ4 decompress text | 5.7 GB/s | 7.1 GB/s |
+
+(The original serial XTS measured 1.48/1.58 GB/s hw; running the AES
+cores 8-wide over XTS's independent blocks plus word-wise GF doubling
+brought it to 2.3/2.5.)
 
 | mossfs core (RAM dev), write+sync / read | hw AES | soft AES |
 |---|---|---|
@@ -404,27 +427,24 @@ blkdrv + virtio, 2KB chunks, 512KB, encrypted volume).
 | encrypted, compressible | 1187 / 2557 MB/s | 435 / 688 MB/s |
 | encrypted, random | 476 / 893 MB/s | **93 / 110 MB/s** |
 
-Whole-stack (encrypted volume, 2KB-chunk protocol writes): QEMU HVF
-compressible 9.6 / 11.2 MB/s (w/r), random 3.6 / 4.1 MB/s; TCG (pure
-emulation, for regression trends only) 2.1 / 2.4 and 0.7 / 0.8 MB/s.
+Whole-stack (encrypted volume, 2KB-chunk protocol writes), before → after
+hardware AES: QEMU HVF compressible 9.6/11.2 → **20.6/28.4** MB/s (w/r),
+random 3.6/4.1 → **13.4/18.6** MB/s; TCG (pure emulation, regression
+trends only) 2.1/2.4 → 4.9/5.7 and 0.7/0.8 → 2.5/3.7 MB/s.
 
 What the numbers say:
-- **Encryption's cost today is the software AES**: ~13× slower than the
-  hardware path, and it fully dominates the encrypted-random profile
-  (93 MB/s core ≈ raw soft-XTS throughput). The FP/SIMD + hardware-AES
-  ROADMAP item is the fix and these are its "before" numbers. A second,
-  later lever: the XTS implementation is serial per 16B block; the AES
-  cores expose 6–8-wide parallel encrypt that fits XTS's independent
-  blocks (tweaks precomputable).
+- **Software AES was the encryption cost** (~13× off hardware, fully
+  dominating encrypted-random at 93 MB/s core). With FP/SIMD context
+  switching landed and userspace built with NEON+AES, the armcrypto path
+  plus 8-wide XTS lifted encrypted-random whole-stack throughput
+  3.7–4.5×.
 - **Compression is a pure win**, not a tradeoff: it multiplies encrypted
-  throughput (fewer bytes reach AES — 435 vs 93 MB/s core, 9.6 vs 3.6
-  MB/s in-OS) and packs 8 compressible blocks per bitmap byte (the 8MB
-  text file cost 265 blocks).
-- **The whole-stack gap vs the core** (~4 vs ~93 MB/s encrypted-random on
-  HVF) is protocol chunking, not the FS: 2KB view-buffer chunks mean two
-  IPC round trips and a read-modify-write per 4K block. Larger view
-  buffers / the ring transport for FS data are the known lever if bulk
-  FS throughput ever matters before hardware AES lands.
+  throughput (fewer bytes reach AES) and packs 8 compressible blocks per
+  bitmap byte (the 8MB text file cost 265 blocks).
+- **The remaining whole-stack ceiling is protocol chunking**, not crypto:
+  2KB view-buffer chunks mean two IPC round trips and a read-modify-write
+  per 4K block. Larger view buffers / the ring transport for FS data are
+  the lever if bulk FS throughput matters next.
 - Checksums are nowhere near the bottleneck (SipHash 1.2 GB/s), and the
   plain-volume core (0.8–1.5 GB/s writes into RAM) says the CoW/commit
   machinery itself is cheap.

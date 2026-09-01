@@ -45,6 +45,18 @@ const Context = extern struct {
     sp: u64 = 0,
 };
 
+/// EL0 FP/SIMD state (v0-v31 + fpsr/fpcr), saved EAGERLY at context switch
+/// for user threads only — kernel threads are FP-free by construction (the
+/// kernel is built without FP/NEON features), so their switches skip this
+/// entirely and user FP registers survive syscalls untouched in hardware.
+/// Zero-initialized at spawn: a fresh thread restores zeros and can never
+/// observe another domain's vector registers.
+const FpState = extern struct {
+    v: [32][16]u8 align(16) = @splat(@splat(0)),
+    fpsr: u64 = 0,
+    fpcr: u64 = 0,
+};
+
 pub const State = enum {
     unused,
     ready,
@@ -59,6 +71,7 @@ pub const State = enum {
 
 pub const Thread = struct {
     ctx: Context = .{},
+    fp: FpState = .{},
     id: u32 = 0,
     name: []const u8 = "",
     state: State = .unused,
@@ -316,7 +329,7 @@ pub fn onTick(is_timekeeper: bool) void {
         var it = sleepers.first;
         while (it) |node| {
             const next = node.next;
-            const t: *Thread = @fieldParentPtr("node", node);
+            const t: *Thread = @alignCast(@fieldParentPtr("node", node));
             if (t.wake_tick <= global_ticks) {
                 sleepers.remove(node);
                 t.state = .ready;
@@ -411,7 +424,7 @@ fn scheduleLocked() void {
     const prev = cpu.current;
 
     const next: *Thread = if (cpu.queue.popFirst()) |node|
-        @fieldParentPtr("node", node)
+        @as(*Thread, @alignCast(@fieldParentPtr("node", node)))
     else if (prev.state == .running)
         return // nothing else to run, keep going
     else
@@ -436,6 +449,10 @@ fn scheduleLocked() void {
     next.on_cpu = cpu.id;
     cpu.current = next;
     programUserSpace(next);
+    // Vector state travels with user threads (see FpState). Exited
+    // threads skip the save — their state is about to be reaped.
+    if (prev.user_ttbr0 != 0 and prev.state != .exited) __fp_save(&prev.fp);
+    if (next.user_ttbr0 != 0) __fp_restore(&next.fp);
     __context_switch(&prev.ctx, &next.ctx);
     // We are back on this thread, possibly much later, still under the big
     // lock taken by whoever switched to us.
@@ -506,6 +523,8 @@ export fn schedThreadRun(entry_raw: u64, arg: u64) callconv(.c) noreturn {
 }
 
 extern fn __context_switch(prev: *Context, next: *Context) void;
+extern fn __fp_save(st: *FpState) void;
+extern fn __fp_restore(st: *const FpState) void;
 extern const __thread_trampoline: anyopaque;
 
 comptime {
@@ -537,5 +556,57 @@ comptime {
         \\        mov     x0, x19
         \\        mov     x1, x20
         \\        bl      schedThreadRun
+        \\
+        \\// FP/SIMD save/restore for user threads. The kernel target is
+        \\// built without FP features, so these are the only vector
+        \\// instructions in kernel text; the directive admits them.
+        \\.arch_extension fp
+        \\.arch_extension simd
+        \\.global __fp_save
+        \\__fp_save:
+        \\        stp     q0, q1, [x0, #0]
+        \\        stp     q2, q3, [x0, #32]
+        \\        stp     q4, q5, [x0, #64]
+        \\        stp     q6, q7, [x0, #96]
+        \\        stp     q8, q9, [x0, #128]
+        \\        stp     q10, q11, [x0, #160]
+        \\        stp     q12, q13, [x0, #192]
+        \\        stp     q14, q15, [x0, #224]
+        \\        stp     q16, q17, [x0, #256]
+        \\        stp     q18, q19, [x0, #288]
+        \\        stp     q20, q21, [x0, #320]
+        \\        stp     q22, q23, [x0, #352]
+        \\        stp     q24, q25, [x0, #384]
+        \\        stp     q26, q27, [x0, #416]
+        \\        stp     q28, q29, [x0, #448]
+        \\        stp     q30, q31, [x0, #480]
+        \\        mrs     x1, fpsr
+        \\        mrs     x2, fpcr
+        \\        str     x1, [x0, #512]
+        \\        str     x2, [x0, #520]
+        \\        ret
+        \\.global __fp_restore
+        \\__fp_restore:
+        \\        ldr     x1, [x0, #512]
+        \\        ldr     x2, [x0, #520]
+        \\        msr     fpsr, x1
+        \\        msr     fpcr, x2
+        \\        ldp     q0, q1, [x0, #0]
+        \\        ldp     q2, q3, [x0, #32]
+        \\        ldp     q4, q5, [x0, #64]
+        \\        ldp     q6, q7, [x0, #96]
+        \\        ldp     q8, q9, [x0, #128]
+        \\        ldp     q10, q11, [x0, #160]
+        \\        ldp     q12, q13, [x0, #192]
+        \\        ldp     q14, q15, [x0, #224]
+        \\        ldp     q16, q17, [x0, #256]
+        \\        ldp     q18, q19, [x0, #288]
+        \\        ldp     q20, q21, [x0, #320]
+        \\        ldp     q22, q23, [x0, #352]
+        \\        ldp     q24, q25, [x0, #384]
+        \\        ldp     q26, q27, [x0, #416]
+        \\        ldp     q28, q29, [x0, #448]
+        \\        ldp     q30, q31, [x0, #480]
+        \\        ret
     );
 }
