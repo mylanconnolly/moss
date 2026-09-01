@@ -150,13 +150,14 @@ pub fn build(b: *std.Build) void {
             b.fmt("pub const {s} = @embedFile(\"{s}.bin\");\n", .{ p.name, p.name }),
         ) catch @panic("OOM");
     }
-    // The boot filesystem: a MARC archive assembled right here.
+    // The boot filesystem: a MARC archive assembled right here, laid out
+    // per the standard hierarchy (identity in etc/, boot config in conf/).
     const bootfs = buildMarc(b, &.{
         .{ .path = "etc/motd", .data = "Welcome to moss.\n" },
         .{ .path = "etc/version", .data = "moss 0.0.0\n" },
         // Init's service topology: "service image arg max_restarts", numeric
         // per shared.ServiceId / shared.ImageId.
-        .{ .path = "topology.txt", .data = "0 4 1 5\n1 4 2 5\n" },
+        .{ .path = "conf/init.topology", .data = "0 4 1 5\n1 4 2 5\n" },
     });
     _ = user_blobs.add("bootfs.marc", bootfs);
     blobs_zig.appendSlice(

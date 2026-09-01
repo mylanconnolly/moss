@@ -197,6 +197,30 @@ Per-process namespaces are pure capability topology (Plan 9 in spirit): a
 process's filesystem is the view caps it holds, nothing more, and there is
 no path syntax for what lies outside a view.
 
+### The system namespace
+
+There is no global root in moss, so the "filesystem hierarchy" is two
+conventions: what the root-of-trust view looks like, and which views are
+granted to whom by default. Directories are organized by **lifecycle and
+ownership**, never by file type — no /usr-vs-/bin archaeology, no /etc
+dumping ground, no shared /tmp (a classic cross-service attack surface that
+capability views make unrepresentable).
+
+| Path | Lifecycle | Contents |
+|---|---|---|
+| `boot/` | immutable, from the boot image | system identity (`boot/etc/`) and boot-time config (`boot/conf/` — init's topology lives at `boot/conf/init.topology`); later: verified/signed |
+| `img/` | immutable, content-addressed (future) | service and application images once they move out of the kernel's embedded table |
+| `conf/` | admin-written, service-read | per-service configuration: `conf/<service>/...` |
+| `state/` | service-owned, survives reboot | each service's private mutable state: `state/<service>/` |
+| `data/` | user/application payload | the only tree where sharing between services is expected, always via explicit view grants |
+| `volatile/` | cleared every boot | per-service scratch: `volatile/<service>/` (boot-time clearing lands with mossfs v2's delete) |
+
+Default grant policy — the hierarchy *is* the default cap topology: a
+service named X conventionally receives `state/X` (rw), `volatile/X` (rw),
+and `conf/X` (ro), each as a separate derived view. Services cannot see each
+other's state not by discipline but by construction; anything in `data/` is
+granted case by case. The root-of-trust view (init's) sees everything.
+
 **As built (Phase 9):** channel caps can carry a *badge* (seL4-style),
 minted only by the serving side (chan_mint) and delivered to recv with
 every call — one channel serves many scoped clients with unforgeable

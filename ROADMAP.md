@@ -26,6 +26,7 @@ changing them in code.
 | Process creation | Spawn-only, from a blank address space + an explicit cap manifest. No `fork()`. No signals — faults and async events are messages to a supervisor-held cap. | Kills COW-on-fork complexity and ambient inheritance; gives debuggers/supervisors for free. |
 | Namespaces | Per-process, Plan 9 style: a process's filesystem *is* the directory caps it was handed; its network *is* the network-service cap it was handed (or a filtered proxy, or nothing). | The empty sandbox is the zero value. |
 | Init | Two layers: a tiny, near-finished **root task** (dispenses boot resources, supervises only init) and a replaceable, restartable **init service** with no special kernel status. Init = capability wiring + supervision + lazy start. | Init crashing must not take the resource ledger with it; no PID-1 mystique. |
+| Filesystem hierarchy | Organized by **lifecycle and ownership**, never file type: `boot/` (immutable boot image), `img/` (immutable images, future), `conf/` (admin-written config), `state/<service>/` (private mutable state), `data/` (shared-by-grant payload), `volatile/<service>/` (cleared each boot). The hierarchy is the default view-grant policy: a service gets `state/X` + `volatile/X` rw and `conf/X` ro as separate derived views — isolation by construction, not discipline. No shared /tmp, ever. | FHS's failure modes are lifecycle confusion; capability views make the clean split enforceable for free. |
 | Service model | The sandbox manifest **is** the unit file (one typed Zig value: budgets + caps + restart policy). Dependencies are capability wiring, never ordering — no `After=`-style graph; the channel is the synchronization point. **Channel activation** by default: init retains server ends and spawns services on first message. | Boot-ordering bugs become unrepresentable; boot time = time to first useful service; systemd's good ideas without its ambient-authority sprawl. |
 | Supervision | OTP-style supervision trees: crash-only services, restart strategies (one-for-one / all-for-one), restart budgets with backoff and escalation. Restart = domain revoke + respawn from manifest; dependents observe channel death and re-wire through init. Supervisors nest with domains. | Domain teardown makes restarts provably leak-free; crash-only means no separate graceful-shutdown protocol to get wrong. |
 | Orchestration | A unit file, a sandbox manifest, and a remote-spawn request are the **same artifact**. Node-local init and the multi-node fabric are the same operation at different radii (fabric adds placement + cap proxying). | Cluster orchestration becomes an extension of init, not a k8s-shaped bolt-on. |
@@ -173,6 +174,19 @@ The pooling story stops being theory.
 - Time-partitioning opt-in for side-channel-sensitive domains.
 - EL2: Moss as hypervisor, partitioning one box into pool nodes — the pooling story from both directions.
 - virtio-gpu/input; developer shell and tooling (`mossctl`: typed-IPC introspection of init, domains, and budgets — no text scraping).
+- **mossfs v2 — a filesystem you can trust**: replaces the Phase 9 teaching
+  filesystem behind the same view-cap protocol. Requirements: copy-on-write
+  or log-structured layout (never update in place — crash consistency
+  without fsck, and flash-friendly by construction since flash cannot
+  rewrite in place either); checksums on every block of data and metadata,
+  verified on read (detect corruption, bit rot, misdirected writes);
+  transactional rename/delete and O_EXCL; a write-back block cache with
+  explicit barriers over the ring transport; indirect blocks and free-space
+  management that scales past toy sizes; graceful full-disk behavior. Wear
+  leveling stays the FTL's job on managed flash, but the allocator should
+  avoid hot-spotting sector 0-style structures (superblock copies rotate).
+  The protocol already isolates clients from the implementation, so v2 is a
+  service swap, not a migration.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

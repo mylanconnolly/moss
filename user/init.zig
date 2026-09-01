@@ -77,7 +77,7 @@ fn loadTopology(blob_va: u64, blob_len: u64) void {
         const path = blob[off .. off + plen];
         const data = blob[off + plen .. off + plen + dlen];
         off += plen + dlen;
-        if (!eqBytes(path, "topology.txt")) continue;
+        if (!eqBytes(path, "conf/init.topology")) continue;
 
         var n: usize = 0;
         var lines = data;

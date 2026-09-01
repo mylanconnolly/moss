@@ -489,14 +489,14 @@ fn fsTestWorker(_: u64) void {
     while (alice.state != .dead) sched.sleep(2);
     if (alice.exit_code != 0) std.debug.panic("alice failed: {d}", .{alice.exit_code});
 
-    // Bob: only disk/pub, and only to look at.
-    const p = "disk/pub";
+    // Bob: only data/pub, and only to look at.
+    const p = "data/pub";
     @memcpy(pb[0..p.len], p);
     res = ipc.call(fs_ch, .{
         .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = p.len, .ro = 1 } }),
     }, 0);
     std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
-    log.info("fs-test: bob gets a read-only view of disk/pub", .{});
+    log.info("fs-test: bob gets a read-only view of data/pub", .{});
     const bob = domain.spawn("bob", blobs.fs, .{
         .arg = 3,
         .grant_debug_log = true,

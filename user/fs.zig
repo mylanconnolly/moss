@@ -197,7 +197,15 @@ fn setupDisk() void {
         diskWrite(0, &sb);
         var root: Inode = .{ .typ = 2 };
         writeInode(ino_root, &root);
-        _ = usys.log(glog, "fssvc: formatted fresh mossfs");
+        // The standard hierarchy exists from the first format.
+        for ([_][]const u8{ "conf", "state", "data", "volatile" }) |name| {
+            const ino = allocInode() orelse usys.exit(208);
+            var node: Inode = .{ .typ = 2 };
+            writeInode(ino, &node);
+            var rootnode = readInode(ino_root);
+            if (!dirAdd(ino_root, &rootnode, name, ino)) usys.exit(209);
+        }
+        _ = usys.log(glog, "fssvc: formatted fresh mossfs (std hierarchy)");
     } else {
         _ = usys.log(glog, "fssvc: existing mossfs found");
     }
@@ -366,13 +374,14 @@ fn resolve(v: *View, path: []const u8, scratch: *[64]u8) Resolved {
 
     switch (v.kind) {
         .uroot => {
+            // The system namespace: boot/ overlays the archive; everything
+            // else (conf, state, data, volatile, ...) is the disk root.
             if (path.len == 0) return .uroot;
             const head = firstComp(path);
             if (badComp(head)) return .bad;
             const rest = if (head.len == path.len) "" else path[head.len + 1 ..];
             if (eq(head, "boot")) return resolveBoot("", rest, scratch);
-            if (eq(head, "disk")) return resolveDisk(ino_root, rest);
-            return .missing;
+            return resolveDisk(ino_root, path);
         },
         .boot => {
             const prefix = v.boot_prefix[0..v.boot_prefix_len];
@@ -526,7 +535,7 @@ fn doList(v: *View, path_off: u64, path_len: u64) shared.FsResp {
         .missing, .boot_file => return ferr(.not_found),
         .uroot => {
             n = putLine(out, n, "boot");
-            n = putLine(out, n, "disk");
+            n = listDiskDir(ino_root, out, n);
         },
         .boot_dir => |bd| {
             // Unique next components under the prefix.
@@ -555,16 +564,22 @@ fn doList(v: *View, path_off: u64, path_len: u64) shared.FsResp {
         },
         .disk => |dk| {
             if (!dk.is_dir) return ferr(.not_found);
-            const dir = readInode(dk.ino);
-            var e: [dirent_size]u8 = undefined;
-            var off: u64 = 0;
-            while (off < dir.size) : (off += dirent_size) {
-                if (fileRead(&dir, off, dirent_size, &e) != dirent_size) break;
-                if (e[2] != 0) n = putLine(out, n, e[4 .. 4 + e[3]]);
-            }
+            n = listDiskDir(dk.ino, out, n);
         },
     }
     return .{ .num = .{ .n = n } };
+}
+
+fn listDiskDir(ino: u32, out: []u8, start: usize) usize {
+    var n = start;
+    const dir = readInode(ino);
+    var e: [dirent_size]u8 = undefined;
+    var off: u64 = 0;
+    while (off < dir.size) : (off += dirent_size) {
+        if (fileRead(&dir, off, dirent_size, &e) != dirent_size) break;
+        if (e[2] != 0) n = putLine(out, n, e[4 .. 4 + e[3]]);
+    }
+    return n;
 }
 
 fn doDerive(v: *View, path_off: u64, path_len: u64, want_ro: bool) void {
@@ -700,19 +715,21 @@ fn alice(log_h: u64, fs_chan: u64) noreturn {
         .err => |e| if (e != .denied) usys.exit(104),
     }
 
-    // Real storage: a private file and a public one for bob.
-    switch (fsOpen(fs_chan, buf, "disk/secret.txt", 1)) {
-        .fd => |fd| if (!fsWrite(fs_chan, buf, fd, "top secret stuff")) usys.exit(105),
-        .err => usys.exit(106),
+    // Real storage, standard hierarchy: private state in state/alice,
+    // shared payload in data/pub for bob.
+    if (!fsMkdir(fs_chan, buf, "state/alice")) usys.exit(105);
+    switch (fsOpen(fs_chan, buf, "state/alice/secret.txt", 1)) {
+        .fd => |fd| if (!fsWrite(fs_chan, buf, fd, "top secret stuff")) usys.exit(106),
+        .err => usys.exit(107),
     }
-    if (!fsMkdir(fs_chan, buf, "disk/pub")) usys.exit(107);
-    switch (fsOpen(fs_chan, buf, "disk/pub/note.txt", 1)) {
-        .fd => |fd| if (!fsWrite(fs_chan, buf, fd, "hello from alice")) usys.exit(108),
-        .err => usys.exit(109),
+    if (!fsMkdir(fs_chan, buf, "data/pub")) usys.exit(108);
+    switch (fsOpen(fs_chan, buf, "data/pub/note.txt", 1)) {
+        .fd => |fd| if (!fsWrite(fs_chan, buf, fd, "hello from alice")) usys.exit(109),
+        .err => usys.exit(110),
     }
 
-    const n = fsList(fs_chan, buf, "disk") orelse usys.exit(110);
-    _ = usys.log(log_h, cat(&line, "alice: disk/ now holds: ", collapse(buf[0..n])));
+    const n = fsList(fs_chan, buf, "") orelse usys.exit(111);
+    _ = usys.log(log_h, cat(&line, "alice: / holds: ", collapse(buf[0..n])));
     usys.exit(0);
 }
 
@@ -753,7 +770,7 @@ fn bob(log_h: u64, fs_chan: u64) noreturn {
         .fd => usys.exit(126),
         .err => |e| if (e != .denied) usys.exit(127),
     }
-    switch (fsOpen(fs_chan, buf, "../secret.txt", 0)) {
+    switch (fsOpen(fs_chan, buf, "../../state/alice/secret.txt", 0)) {
         .fd => usys.exit(128),
         .err => |e| if (e != .bad_path) usys.exit(129),
     }
