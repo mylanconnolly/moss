@@ -53,6 +53,7 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
         .dma_alloc => sysDmaAlloc(d, frame),
         .notify_bind => sysNotifyBind(d, frame.regs[0]),
+        .chan_mint => sysChanMint(d, frame),
         _ => errno(.nosys),
     };
 }
@@ -140,6 +141,9 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         .watcher = d.death_watch,
         .parent = d,
     };
+    if (flags & shared.SpawnFlags.grant_bootfs != 0 and domain.systemBlob().len > 0) {
+        manifest.grant_blob = domain.systemBlob();
+    }
     if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
     if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
     if (frame.regs[3] != 0) {
@@ -239,14 +243,14 @@ fn sysCapDrop(d: *domain.Domain, handle_bits: u64) u64 {
 
 fn sysCall(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const handle: shared.Handle = @bitCast(frame.regs[0]);
-    const obj = d.captable.?.lookup(handle, .channel_b) orelse return errno(.bad_handle);
-    const ch: *ipc.Channel = @ptrFromInt(obj);
+    const lb = d.captable.?.lookupBadge(handle, .channel_b) orelse return errno(.bad_handle);
+    const ch: *ipc.Channel = @ptrFromInt(lb.obj);
 
     var msg: ipc.Msg = .{ .data = frame.regs[1..5].* };
     if (frame.regs[5] != 0) {
         if (attachCap(d, frame.regs[5], &msg)) |e| return errno(e);
     }
-    const res = ipc.call(ch, msg);
+    const res = ipc.call(ch, msg, lb.badge);
     if (res.err != .ok) {
         dropAttachment(res.msg);
         return errno(res.err);
@@ -260,9 +264,26 @@ fn sysRecv(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const obj = d.captable.?.lookup(handle, .channel_a) orelse return errno(.bad_handle);
     const ch: *ipc.Channel = @ptrFromInt(obj);
     var msg: ipc.Msg = .{};
-    const e = ipc.recv(ch, &msg);
+    var badge: u64 = 0;
+    const e = ipc.recv(ch, &msg, &badge);
     if (e != .ok) return errno(e);
     deliver(d, msg, frame);
+    frame.regs[6] = badge;
+    return errno(.ok);
+}
+
+/// chan_mint(chan_a, badge) -> badged channel_b handle. Only the serving
+/// side can mint identities for its own channel.
+fn sysChanMint(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const handle: shared.Handle = @bitCast(frame.regs[0]);
+    const obj = d.captable.?.lookup(handle, .channel_a) orelse return errno(.bad_handle);
+    const ch: *ipc.Channel = @ptrFromInt(obj);
+    ipc.refSide(ch, .b);
+    const h = d.captable.?.insertBadged(.channel_b, obj, frame.regs[1]) orelse {
+        ipc.unrefSide(ch, .b);
+        return errno(.no_space);
+    };
+    frame.regs[2] = @bitCast(h);
     return errno(.ok);
 }
 
@@ -294,10 +315,11 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
         msg.cap_obj = obj;
         return null;
     }
-    if (d.captable.?.lookup(handle, .channel_b)) |obj| {
-        ipc.refSide(@ptrFromInt(obj), .b);
+    if (d.captable.?.lookupBadge(handle, .channel_b)) |lb| {
+        ipc.refSide(@ptrFromInt(lb.obj), .b);
         msg.cap_type = @intFromEnum(cap.CapType.channel_b);
-        msg.cap_obj = obj;
+        msg.cap_obj = lb.obj;
+        msg.cap_badge = lb.badge; // the badge travels with the cap
         return null;
     }
     if (d.captable.?.lookup(handle, .channel_a)) |obj| {
@@ -316,7 +338,7 @@ fn deliver(d: *domain.Domain, msg: ipc.Msg, frame: *trap.TrapFrame) void {
     frame.regs[5] = 0;
     if (msg.cap_type != 0) {
         const ct: cap.CapType = @enumFromInt(msg.cap_type);
-        if (d.captable.?.insert(ct, msg.cap_obj)) |h| {
+        if (d.captable.?.insertBadged(ct, msg.cap_obj, msg.cap_badge)) |h| {
             frame.regs[5] = @bitCast(h);
         } else {
             dropAttachment(msg); // table full: the grant is dropped, not leaked

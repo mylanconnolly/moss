@@ -71,7 +71,7 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
         .init,
         arg,
         0,
-        shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner,
+        shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs,
         usys.kbLimits(8 << 10, 24 << 10), // init's slice: 8MB kobj, 24MB user
     );
     if (r.err != .ok) {

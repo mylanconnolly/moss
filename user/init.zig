@@ -49,10 +49,85 @@ const Entry = struct {
     max_restarts: u64,
 };
 
-const topology = [_]Entry{
+const default_topology = [_]Entry{
     .{ .service = .logsvc, .image = .services, .arg = 1, .max_restarts = 5 },
     .{ .service = .greeter, .image = .services, .arg = 2, .max_restarts = 5 },
 };
+
+/// Live topology: the compiled-in default, unless the boot filesystem
+/// carries topology.txt — the same typed entries, loaded from disk.
+var topology: [8]Entry = undefined;
+var topology_len: usize = 0;
+
+/// topology.txt: one "service image arg max_restarts" line per entry, all
+/// numeric (shared.ServiceId / shared.ImageId values).
+fn loadTopology(blob_va: u64, blob_len: u64) void {
+    for (default_topology, 0..) |e, i| topology[i] = e;
+    topology_len = default_topology.len;
+    if (blob_len < 4) return;
+    const blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
+    if (!eqBytes(blob[0..4], shared.marc_magic)) return;
+
+    var off: usize = 4;
+    while (off + 8 <= blob.len) {
+        const plen = leu32(blob[off..]);
+        const dlen = leu32(blob[off + 4 ..]);
+        off += 8;
+        if (off + plen + dlen > blob.len) return;
+        const path = blob[off .. off + plen];
+        const data = blob[off + plen .. off + plen + dlen];
+        off += plen + dlen;
+        if (!eqBytes(path, "topology.txt")) continue;
+
+        var n: usize = 0;
+        var lines = data;
+        while (lines.len > 0 and n < topology.len) {
+            var eol: usize = 0;
+            while (eol < lines.len and lines[eol] != '\n') eol += 1;
+            const line = lines[0..eol];
+            lines = if (eol == lines.len) "" else lines[eol + 1 ..];
+            var nums: [4]u64 = undefined;
+            if (!parseNums(line, &nums)) continue;
+            topology[n] = .{
+                .service = @enumFromInt(nums[0]),
+                .image = @enumFromInt(nums[1]),
+                .arg = nums[2],
+                .max_restarts = nums[3],
+            };
+            n += 1;
+        }
+        if (n > 0) {
+            topology_len = n;
+            _ = usys.log(glog, "init: topology loaded from boot filesystem");
+        }
+        return;
+    }
+}
+
+fn parseNums(line: []const u8, out: *[4]u64) bool {
+    var i: usize = 0;
+    for (out) |*v| {
+        while (i < line.len and line[i] == ' ') i += 1;
+        if (i >= line.len or line[i] < '0' or line[i] > '9') return false;
+        v.* = 0;
+        while (i < line.len and line[i] >= '0' and line[i] <= '9') : (i += 1) {
+            v.* = v.* * 10 + (line[i] - '0');
+        }
+    }
+    return true;
+}
+
+fn eqBytes(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x != y) return false;
+    }
+    return true;
+}
+
+fn leu32(b: []const u8) u32 {
+    return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
+}
 
 const Instance = struct {
     ctl: u64 = 0, // domain_ctl handle, 0 = never started
@@ -62,12 +137,12 @@ const Instance = struct {
     up: bool = false,
 };
 
-var instances: [topology.len]Instance = @splat(.{});
+var instances: [8]Instance = @splat(.{});
 var glog: u64 = 0;
 
 const svc_limits = usys.kbLimits(1 << 10, 4 << 10); // 1MB kobj, 4MB user per service
 
-export fn umain(log_h: u64, _: u64, arg: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, _: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
 
     const notif = usys.notifyCreate();
@@ -77,7 +152,8 @@ export fn umain(log_h: u64, _: u64, arg: u64) callconv(.c) noreturn {
     // arg 1: the flapping-service drill instead of the normal topology.
     if (arg == 1) flapDrill(notif.data[0]);
 
-    _ = usys.log(log_h, "init: up; topology loaded, nothing started (lazy)");
+    loadTopology(blob_va, blob_len);
+    _ = usys.log(log_h, "init: up; topology present, nothing started (lazy)");
 
     // Front channel: workers call here. We keep both ends; worker gets a
     // copy of B at spawn.
@@ -108,7 +184,7 @@ export fn umain(log_h: u64, _: u64, arg: u64) callconv(.c) noreturn {
 
     // Crash-only for everyone else, orderly exit for init: revoke what we
     // started and report.
-    for (&instances) |*inst| {
+    for (instances[0..topology_len]) |*inst| {
         if (inst.up) _ = usys.domainDestroy(inst.ctl);
     }
     _ = usys.log(glog, "init: worker finished; services revoked; exiting");
@@ -185,7 +261,7 @@ fn activate(idx: usize) bool {
 
 /// One-for-one supervision with budget + backoff.
 fn superviseDeaths() void {
-    for (&instances, 0..) |*inst, idx| {
+    for (instances[0..topology_len], 0..) |*inst, idx| {
         if (!inst.up or inst.ctl == 0) continue;
         const st = usys.domainStat(inst.ctl);
         if (st.err != .ok) continue;
@@ -211,7 +287,7 @@ fn workerFinished(worker_ctl: u64) bool {
 }
 
 fn findService(id: u64) ?usize {
-    for (topology, 0..) |e, i| {
+    for (topology[0..topology_len], 0..) |e, i| {
         if (@intFromEnum(e.service) == id) return i;
     }
     return null;

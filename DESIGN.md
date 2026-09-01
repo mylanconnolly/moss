@@ -191,6 +191,27 @@ a client-granted shm buffer. QEMU note: virtio-mmio devices default to
 force-legacy — run with `-global virtio-mmio.force-legacy=false` (run-blk
 does).
 
+## Filesystems and namespaces
+
+Per-process namespaces are pure capability topology (Plan 9 in spirit): a
+process's filesystem is the view caps it holds, nothing more, and there is
+no path syntax for what lies outside a view.
+
+**As built (Phase 9):** channel caps can carry a *badge* (seL4-style),
+minted only by the serving side (chan_mint) and delivered to recv with
+every call — one channel serves many scoped clients with unforgeable
+identity. A filesystem view is a badged cap into the FS service, whose
+badge selects server-side {subtree root, read-only}; derive() mints
+narrower views (readOnlyView is derive with ro set), and privilege only
+ever shrinks — deriving rw from an ro view yields ro. Path resolution
+starts at the view root and strictly descends ("." and ".." are rejected),
+so escape is unpronounceable rather than forbidden. The FS service
+(userspace) serves a union namespace: boot/ is a read-only MARC archive
+granted at spawn (the boot image filesystem — init loads its typed topology
+from it), disk/ is mossfs, a deliberately tiny writable FS (64 inodes,
+direct blocks, no delete yet) on the virtio-blk driver. Persistence is
+real: a second boot finds the same files.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

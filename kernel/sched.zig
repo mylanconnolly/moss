@@ -88,6 +88,9 @@ pub const Thread = struct {
     ipc_data: [4]u64 = @splat(0),
     ipc_cap_type: u8 = 0,
     ipc_cap_obj: u64 = 0,
+    ipc_cap_badge: u64 = 0,
+    /// The badge of the channel_b cap the caller used (delivered to recv).
+    ipc_badge: u64 = 0,
     ipc_status: u64 = 0,
     /// While .blocked: the queue or single-waiter slot holding this thread.
     block_list: ?*std.DoublyLinkedList = null,

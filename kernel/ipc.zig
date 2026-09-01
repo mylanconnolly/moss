@@ -34,6 +34,7 @@ pub const Msg = struct {
     /// Cap in transit (kernel representation). cap_type 0 = none.
     cap_type: u8 = 0,
     cap_obj: u64 = 0,
+    cap_badge: u64 = 0,
 };
 
 pub const Channel = struct {
@@ -101,8 +102,9 @@ pub const CallResult = struct {
 };
 
 /// Client side: send four words (+ optional cap) and block until the reply
-/// or the peer's death.
-pub fn call(ch: *Channel, msg: Msg) CallResult {
+/// or the peer's death. `caller_badge` is the badge minted into the cap the
+/// caller invoked (0 for unbadged/kernel callers); recv delivers it.
+pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
     const daif = sched.acquire();
     defer sched.release(daif);
     if (!ch.a_open or !ch.b_open) return .{ .err = .peer_dead };
@@ -111,6 +113,8 @@ pub fn call(ch: *Channel, msg: Msg) CallResult {
     t.ipc_data = msg.data;
     t.ipc_cap_type = msg.cap_type;
     t.ipc_cap_obj = msg.cap_obj;
+    t.ipc_cap_badge = msg.cap_badge;
+    t.ipc_badge = caller_badge;
     t.ipc_status = @intFromEnum(shared.Errno.ok);
 
     if (ch.server_waiting) |server| {
@@ -128,12 +132,14 @@ pub fn call(ch: *Channel, msg: Msg) CallResult {
         .data = t.ipc_data,
         .cap_type = t.ipc_cap_type,
         .cap_obj = t.ipc_cap_obj,
+        .cap_badge = t.ipc_cap_badge,
     } };
 }
 
 /// Server side: block until a call arrives; its words land in the returned
-/// Msg and the caller is parked in `processing` until reply().
-pub fn recv(ch: *Channel, out: *Msg) shared.Errno {
+/// Msg (badge_out gets the caller's cap badge) and the caller is parked in
+/// `processing` until reply().
+pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64) shared.Errno {
     const daif = sched.acquire();
     defer sched.release(daif);
     while (true) {
@@ -154,7 +160,9 @@ pub fn recv(ch: *Channel, out: *Msg) shared.Errno {
                 .data = caller.ipc_data,
                 .cap_type = caller.ipc_cap_type,
                 .cap_obj = caller.ipc_cap_obj,
+                .cap_badge = caller.ipc_cap_badge,
             };
+            badge_out.* = caller.ipc_badge;
             return .ok;
         }
         if (!ch.b_open) return .peer_dead;
@@ -181,6 +189,7 @@ pub fn reply(ch: *Channel, msg: Msg) shared.Errno {
     client.ipc_data = msg.data;
     client.ipc_cap_type = msg.cap_type;
     client.ipc_cap_obj = msg.cap_obj;
+    client.ipc_cap_badge = msg.cap_badge;
     client.ipc_status = @intFromEnum(shared.Errno.ok);
     sched.wakeLocked(client);
     return .ok;

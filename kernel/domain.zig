@@ -51,6 +51,11 @@ pub const Manifest = struct {
     /// Grant one channel end (its handle arrives in x1 at entry).
     grant_channel_a: ?*ipc.Channel = null,
     grant_channel_b: ?*ipc.Channel = null,
+    /// Badge for the granted channel_b cap (view identity etc.).
+    grant_channel_b_badge: u64 = 0,
+    /// Read-only blob copied into the address space; its va/len arrive in
+    /// x3/x4 at entry (the boot filesystem image, service configs, ...).
+    grant_blob: ?[]const u8 = null,
     /// Faults become messages on this channel (side A held by the
     /// supervisor); without one, a faulting domain is killed outright.
     supervisor: ?*ipc.Channel = null,
@@ -87,6 +92,8 @@ pub const Domain = struct {
     init_handle: u64 = 0,
     init_handle2: u64 = 0,
     init_arg: u64 = 0,
+    blob_va: u64 = 0,
+    blob_len: u64 = 0,
     shm_map_next: u64 = shm_window_base,
     supervisor: ?*ipc.Channel = null,
     threads_alive: std.atomic.Value(u32) = .init(0),
@@ -241,7 +248,8 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
         const h = table.insert(.channel_a, @intFromPtr(ch)) orelse return Error.CapTableFull;
         d.init_handle2 = @bitCast(h);
     } else if (manifest.grant_channel_b) |ch| {
-        const h = table.insert(.channel_b, @intFromPtr(ch)) orelse return Error.CapTableFull;
+        const h = table.insertBadged(.channel_b, @intFromPtr(ch), manifest.grant_channel_b_badge) orelse
+            return Error.CapTableFull;
         d.init_handle2 = @bitCast(h);
     }
     if (manifest.grant_spawner) {
@@ -254,6 +262,25 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     if (manifest.grant_irq) |i| {
         _ = table.insert(.irq, @as(u64, i.base) | (@as(u64, i.count) << 32)) orelse
             return Error.CapTableFull;
+    }
+    if (manifest.grant_blob) |blob| {
+        const blob_base = d.shm_map_next;
+        var boff: u64 = 0;
+        while (boff < blob.len) : (boff += mem.page_size) {
+            const page = kalloc.allocPage(&d.user_mem) catch return Error.QuotaExceeded;
+            const n = @min(blob.len - boff, mem.page_size);
+            @memcpy(page[0..n], blob[boff..][0..n]);
+            mmu.mapUserPage(
+                d.ttbr0_pa,
+                blob_base + boff,
+                mem.virtToPhys(@intFromPtr(page)),
+                .rodata,
+                &d.kobj,
+            ) catch return Error.QuotaExceeded;
+        }
+        d.shm_map_next = blob_base + mem.alignUp(blob.len, mem.page_size);
+        d.blob_va = blob_base;
+        d.blob_len = blob.len;
     }
     d.init_arg = manifest.arg;
     d.supervisor = manifest.supervisor;
@@ -433,7 +460,7 @@ pub fn reportFaultToSupervisor(d: *Domain, esr: u64, far: u64, elr: u64) bool {
             .fault = .{ .esr = esr, .far = far, .elr = elr },
         }),
     };
-    _ = ipc.call(ch, msg);
+    _ = ipc.call(ch, msg, 0);
     // Reached only if the supervisor is already gone (peer_dead): nobody is
     // left to decide, so the domain dies the direct way.
     destroy(d);
@@ -442,10 +469,12 @@ pub fn reportFaultToSupervisor(d: *Domain, esr: u64, far: u64, elr: u64) bool {
 
 fn userThreadEntry(arg: u64) void {
     const d: *Domain = @ptrFromInt(arg);
-    enterUser(d.entry_va, d.stack_top, d.init_handle, d.init_handle2, d.init_arg);
+    enterUser(d.entry_va, d.stack_top, .{
+        d.init_handle, d.init_handle2, d.init_arg, d.blob_va, d.blob_len,
+    });
 }
 
-fn enterUser(entry: u64, sp: u64, arg0: u64, arg1: u64, arg2: u64) noreturn {
+fn enterUser(entry: u64, sp: u64, args: [5]u64) noreturn {
     asm volatile (
         \\msr daifset, #0xf
         \\msr elr_el1, %[e]
@@ -454,13 +483,28 @@ fn enterUser(entry: u64, sp: u64, arg0: u64, arg1: u64, arg2: u64) noreturn {
         \\mov x0, %[a0]
         \\mov x1, %[a1]
         \\mov x2, %[a2]
+        \\mov x3, %[a3]
+        \\mov x4, %[a4]
         \\eret
         :
         : [e] "r" (entry),
           [s] "r" (sp),
-          [a0] "r" (arg0),
-          [a1] "r" (arg1),
-          [a2] "r" (arg2),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .memory = true });
+          [a0] "r" (args[0]),
+          [a1] "r" (args[1]),
+          [a2] "r" (args[2]),
+          [a3] "r" (args[3]),
+          [a4] "r" (args[4]),
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .memory = true });
     unreachable;
+}
+
+/// The system boot blob (bootfs archive), grantable via SpawnFlags.
+var system_blob: []const u8 = &.{};
+
+pub fn setSystemBlob(blob: []const u8) void {
+    system_blob = blob;
+}
+
+pub fn systemBlob() []const u8 {
+    return system_blob;
 }

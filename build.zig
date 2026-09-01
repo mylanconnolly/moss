@@ -1,5 +1,23 @@
 const std = @import("std");
 
+const MarcEntry = struct { path: []const u8, data: []const u8 };
+
+/// Assemble a MARC boot-filesystem archive: "MARC" magic, then per entry
+/// { path_len u32 LE, data_len u32 LE, path, data }.
+fn buildMarc(b: *std.Build, entries: []const MarcEntry) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(b.allocator, "MARC") catch @panic("OOM");
+    for (entries) |e| {
+        var hdr: [8]u8 = undefined;
+        std.mem.writeInt(u32, hdr[0..4], @intCast(e.path.len), .little);
+        std.mem.writeInt(u32, hdr[4..8], @intCast(e.data.len), .little);
+        out.appendSlice(b.allocator, &hdr) catch @panic("OOM");
+        out.appendSlice(b.allocator, e.path) catch @panic("OOM");
+        out.appendSlice(b.allocator, e.data) catch @panic("OOM");
+    }
+    return out.items;
+}
+
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const host_target = b.standardTargetOptions(.{});
@@ -48,6 +66,11 @@ pub fn build(b: *std.Build) void {
         "blk-test",
         "Run the virtio-blk demo (use with zig build run-blk, which attaches a disk)",
     ) orelse false;
+    const fs_test = b.option(
+        bool,
+        "fs-test",
+        "Run the filesystem demo: per-process namespace views on real storage (use run-blk)",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -76,6 +99,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "sandbox_test", sandbox_test);
     build_opts.addOption(bool, "flap_test", flap_test);
     build_opts.addOption(bool, "blk_test", blk_test);
+    build_opts.addOption(bool, "fs_test", fs_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -98,6 +122,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "services", .src = "user/services.zig" },
         .{ .name = "sandbox", .src = "user/sandbox.zig" },
         .{ .name = "blk", .src = "user/blk.zig" },
+        .{ .name = "fs", .src = "user/fs.zig" },
     };
     const user_blobs = b.addWriteFiles();
     var blobs_zig: std.ArrayList(u8) = .empty;
@@ -125,6 +150,20 @@ pub fn build(b: *std.Build) void {
             b.fmt("pub const {s} = @embedFile(\"{s}.bin\");\n", .{ p.name, p.name }),
         ) catch @panic("OOM");
     }
+    // The boot filesystem: a MARC archive assembled right here.
+    const bootfs = buildMarc(b, &.{
+        .{ .path = "etc/motd", .data = "Welcome to moss.\n" },
+        .{ .path = "etc/version", .data = "moss 0.0.0\n" },
+        // Init's service topology: "service image arg max_restarts", numeric
+        // per shared.ServiceId / shared.ImageId.
+        .{ .path = "topology.txt", .data = "0 4 1 5\n1 4 2 5\n" },
+    });
+    _ = user_blobs.add("bootfs.marc", bootfs);
+    blobs_zig.appendSlice(
+        b.allocator,
+        "pub const bootfs = @embedFile(\"bootfs.marc\");\n",
+    ) catch @panic("OOM");
+
     const user_blobs_src = user_blobs.add("user_blobs.zig", blobs_zig.items);
     kernel_mod.addAnonymousImport("user_blobs", .{
         .root_source_file = user_blobs_src,

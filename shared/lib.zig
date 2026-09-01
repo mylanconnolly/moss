@@ -72,6 +72,9 @@ pub const Syscall = enum(u64) {
     /// notify_bind(notification): a signal interrupts this thread's
     /// blocked recv (Errno.interrupted) — the ring doorbell hook
     notify_bind = 23,
+    /// chan_mint(chan_a, badge) -> x2 = badged channel_b handle. Serving
+    /// side only; recv delivers the caller's badge in x6.
+    chan_mint = 24,
     _,
 };
 
@@ -80,6 +83,8 @@ pub const SpawnFlags = struct {
     pub const grant_spawner: u64 = 1 << 1;
     /// Grant the A (serving) side of the channel in x3 instead of B.
     pub const chan_side_a: u64 = 1 << 2;
+    /// Grant the system boot blob (bootfs archive); va/len arrive in x3/x4.
+    pub const grant_bootfs: u64 = 1 << 3;
 };
 
 /// Domain lifecycle as reported by domain_stat.
@@ -119,6 +124,7 @@ pub const ImageId = enum(u64) {
     services = 4,
     sandbox = 5,
     blk = 6,
+    fs = 7,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -235,6 +241,47 @@ pub const BlkResp = union(enum(u64)) {
 };
 
 pub const blk_sector_size: u64 = 512;
+
+// ------------------------------------------------------------- filesystem
+//
+// The FS protocol. A filesystem *view* is a badged channel_b cap minted by
+// the FS service: the badge selects server-side state {subtree root,
+// read-only}, so per-process namespaces are pure capability topology —
+// there is no way to name anything outside your view. Paths and file data
+// travel through a per-view shared buffer (attach_buf); path resolution is
+// strictly descending ("." and ".." are rejected).
+
+pub const FsReq = union(enum(u64)) {
+    attach_buf: void, // + shm cap: this view's path/data buffer
+    /// create: 0 = open existing, 1 = create file, 2 = create directory
+    open: struct { path_off: u64, path_len: u64, create: u64 },
+    read: struct { fd: u64, off: u64, len: u64 }, // data lands in buf[0..n]
+    write: struct { fd: u64, off: u64, len: u64 }, // data taken from buf[0..n]
+    list: struct { path_off: u64, path_len: u64 }, // names -> buf, '\n'-separated
+    /// Derive a narrower view (readOnlyView and friends); the reply
+    /// attaches a freshly minted badged channel cap.
+    derive: struct { path_off: u64, path_len: u64, ro: u64 },
+};
+
+pub const FsResp = union(enum(u64)) {
+    ok: void,
+    num: struct { n: u64 },
+    fs_err: struct { code: u64 },
+};
+
+pub const FsErr = enum(u64) {
+    denied = 1, // read-only view
+    not_found = 2,
+    no_space = 3,
+    bad_path = 4, // "..", absolute, or malformed
+    bad_fd = 5,
+    exists = 6,
+    io = 7,
+};
+
+/// Boot filesystem archive ("MARC"): a flat sequence of
+/// { path_len: u32 LE, data_len: u32 LE, path bytes, data bytes }.
+pub const marc_magic = "MARC";
 
 // ---------------------------------------------------------------- rings
 //

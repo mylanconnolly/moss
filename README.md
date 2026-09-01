@@ -29,6 +29,7 @@ pooled hardware.
 | `zig build run -Dsandbox-test` | Interposition proxy, nested domains, one-call subtree revocation, benchmarks |
 | `zig build run -Dflap-test` | Supervision drill: restart budget exhausts, escalation climbs the tree |
 | `zig build run-blk -Dblk-test` | Userspace virtio-blk: verified I/O over sync channels AND async rings, raced |
+| `zig build run-blk -Dfs-test` | FS service on virtio-blk: per-process namespace views (badged caps) on real storage |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout

@@ -30,11 +30,15 @@ pub const CapType = enum(u8) {
     irq,
 };
 
-const Entry = struct {
+pub const Entry = struct {
     cap_type: CapType,
     generation: u40,
-    /// Object reference; meaning depends on cap_type. Unused so far.
+    /// Object reference; meaning depends on cap_type.
     object: u64,
+    /// Badge: opaque server-chosen identity minted into channel_b caps
+    /// (seL4-style); delivered to the server with every call so one
+    /// channel can serve many scoped clients. 0 = unbadged.
+    badge: u64 = 0,
 };
 
 pub const slots = 128;
@@ -55,14 +59,28 @@ pub const Table = struct {
     }
 
     pub fn insert(self: *Table, cap_type: CapType, object: u64) ?shared.Handle {
+        return self.insertBadged(cap_type, object, 0);
+    }
+
+    pub fn insertBadged(self: *Table, cap_type: CapType, object: u64, badge: u64) ?shared.Handle {
         for (&self.entries, 0..) |*e, i| {
             if (e.cap_type == .empty) {
                 e.cap_type = cap_type;
                 e.object = object;
+                e.badge = badge;
                 return .{ .slot = @intCast(i), .generation = e.generation };
             }
         }
         return null;
+    }
+
+    /// Like lookup, but also yields the badge.
+    pub fn lookupBadge(self: *Table, handle: shared.Handle, expect: CapType) ?struct { obj: u64, badge: u64 } {
+        if (handle.slot >= slots) return null;
+        const e = &self.entries[handle.slot];
+        if (e.generation != handle.generation) return null;
+        if (e.cap_type != expect) return null;
+        return .{ .obj = e.object, .badge = e.badge };
     }
 
     pub fn lookup(self: *Table, handle: shared.Handle, expect: CapType) ?u64 {
@@ -80,6 +98,7 @@ pub const Table = struct {
         if (e.generation != handle.generation or e.cap_type == .empty) return false;
         e.cap_type = .empty;
         e.object = 0;
+        e.badge = 0;
         e.generation +%= 1;
         return true;
     }

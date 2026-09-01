@@ -3,6 +3,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const shared = @import("shared");
+const cap = @import("cap.zig");
 const domain = @import("domain.zig");
 const dt = @import("dt.zig");
 const gic = @import("gic.zig");
@@ -71,7 +72,8 @@ export fn kmain(dtb_pa: u64) noreturn {
     sched.registerCpu(0);
     // Image table order must match shared.ImageId.
     const blobs = @import("user_blobs");
-    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk });
+    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs });
+    domain.setSystemBlob(blobs.bootfs);
     irq.init();
     domain.startReaper();
     gic.initDistributor();
@@ -126,6 +128,12 @@ export fn kmain(dtb_pa: u64) noreturn {
 
     if (build_options.blk_test) {
         _ = sched.spawn("boot-watch", blkTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    if (build_options.fs_test) {
+        _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -207,7 +215,8 @@ fn ipcTestWorker(_: u64) void {
     }) catch |e| std.debug.panic("spawn crasher: {t}", .{e});
     {
         var msg: ipc.Msg = .{};
-        const e = ipc.recv(fault_ch, &msg);
+        var badge: u64 = 0;
+        const e = ipc.recv(fault_ch, &msg, &badge);
         std.debug.assert(e == .ok);
         const fm = shared.decodeMsg(shared.FaultMsg, msg.data).?;
         log.info("ipc-test: supervisor got fault message from crasher: esr=0x{x} far=0x{x} elr=0x{x}", .{
@@ -413,6 +422,105 @@ fn blkTestWorker(_: u64) void {
         std.debug.panic("blk-test: FAIL — client exit {d}, pmem delta {d}B", .{
             user.exit_code, frames_before -% frames_after,
         });
+    }
+}
+
+/// Phase 9 exit-criterion driver: filesystem service on the virtio-blk
+/// driver, per-process namespaces as badged view caps. Alice gets the root
+/// view (rw) and populates the disk; bob gets a derived read-only view of
+/// disk/pub and must be unable to see, write, or escape anything else.
+fn fsTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    // The storage stack: driver, then the FS service on top of it.
+    const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const drv = domain.spawn("blkdrv", blobs.blk, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = blk_ch,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
+
+    const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const fssvc = domain.spawn("fssvc", blobs.fs, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = fs_ch,
+        .grant_blob = blobs.bootfs,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
+
+    // Hand the FS its disk: an attach carrying the blk channel cap.
+    ipc.refSide(blk_ch, .b);
+    var res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .attach_buf),
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = @intFromPtr(blk_ch),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    // A path buffer for the kernel's own root view (badge 0).
+    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
+    ipc.refShm(pathbuf);
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .attach_buf),
+        .cap_type = @intFromEnum(cap.CapType.shm),
+        .cap_obj = @intFromPtr(pathbuf),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    // Alice: the whole root view, read-write.
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 0, .ro = 0 } }),
+    }, 0);
+    std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
+    log.info("fs-test: alice gets the root view (rw)", .{});
+    const alice = domain.spawn("alice", blobs.fs, .{
+        .arg = 2,
+        .grant_debug_log = true,
+        .grant_channel_b = @ptrFromInt(res.msg.cap_obj),
+        .grant_channel_b_badge = res.msg.cap_badge,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn alice: {t}", .{e});
+    while (alice.state != .dead) sched.sleep(2);
+    if (alice.exit_code != 0) std.debug.panic("alice failed: {d}", .{alice.exit_code});
+
+    // Bob: only disk/pub, and only to look at.
+    const p = "disk/pub";
+    @memcpy(pb[0..p.len], p);
+    res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = p.len, .ro = 1 } }),
+    }, 0);
+    std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
+    log.info("fs-test: bob gets a read-only view of disk/pub", .{});
+    const bob = domain.spawn("bob", blobs.fs, .{
+        .arg = 3,
+        .grant_debug_log = true,
+        .grant_channel_b = @ptrFromInt(res.msg.cap_obj),
+        .grant_channel_b_badge = res.msg.cap_badge,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn bob: {t}", .{e});
+    while (bob.state != .dead) sched.sleep(2);
+    if (bob.exit_code != 0) std.debug.panic("bob failed: {d}", .{bob.exit_code});
+
+    // Teardown, inside out: the FS first, then its driver.
+    domain.destroy(fssvc);
+    while (fssvc.state != .dead) sched.sleep(1);
+    domain.destroy(drv);
+    while (drv.state != .dead) sched.sleep(1);
+    ipc.unrefSide(fs_ch, .b);
+    ipc.unrefShm(pathbuf);
+
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    if (frames_after == frames_before) {
+        log.info("fs-test: PASS — disjoint namespaces on real storage, nothing leaked", .{});
+    } else {
+        std.debug.panic("fs-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
 }
 
