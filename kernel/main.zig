@@ -6,6 +6,7 @@ const shared = @import("shared");
 const domain = @import("domain.zig");
 const dt = @import("dt.zig");
 const gic = @import("gic.zig");
+const ipc = @import("ipc.zig");
 const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
@@ -94,6 +95,12 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.ipc_test) {
+        _ = sched.spawn("root-sim", ipcTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn root-sim: {t}", .{e});
+        };
+    }
+
     log.info("boot complete; core 0 idling", .{});
     // This context is core 0's idle thread from here on.
     halt();
@@ -140,6 +147,91 @@ fn domainTestWorker(_: u64) void {
             frames_before -% frames_after,
         });
     }
+}
+
+/// Phase 4 exit-criterion driver: two user processes RPC through typed
+/// stubs; the server is revoked mid-conversation and the client observes
+/// peer_dead and carries on. Plus: buffer-cap grant over a channel,
+/// fault-as-message to a supervisor, kernel-side notification smoke test,
+/// and the usual nothing-leaked accounting at the end.
+fn ipcTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    // Notification smoke test, kernel-side: signal from a helper thread.
+    {
+        const n = ipc.createNotification() catch @panic("notif pool empty");
+        _ = sched.spawn("notif-helper", notifHelper, @intFromPtr(n), .{}) catch
+            @panic("spawn notif-helper");
+        const got = ipc.wait(n);
+        log.info("ipc-test: notification delivered bits 0b{b} ({t})", .{ got.bits, got.err });
+        ipc.unrefNotification(n);
+    }
+
+    // Fault-as-message: crasher faults, the supervisor (this thread) gets
+    // the message and pronounces the verdict.
+    const fault_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const crasher = domain.spawn("crasher", blobs.pingpong, .{
+        .grant_debug_log = true,
+        .supervisor = fault_ch,
+        .arg = 3,
+    }) catch |e| std.debug.panic("spawn crasher: {t}", .{e});
+    {
+        var msg: ipc.Msg = .{};
+        const e = ipc.recv(fault_ch, &msg);
+        std.debug.assert(e == .ok);
+        const fm = shared.decodeMsg(shared.FaultMsg, msg.data).?;
+        log.info("ipc-test: supervisor got fault message from crasher: esr=0x{x} far=0x{x} elr=0x{x}", .{
+            fm.fault.esr, fm.fault.far, fm.fault.elr,
+        });
+        log.info("ipc-test: supervisor verdict: teardown", .{});
+        domain.destroy(crasher);
+        while (!domain.drained(crasher)) sched.sleep(1);
+        domain.finishTeardown(crasher);
+    }
+    ipc.unrefSide(fault_ch, .a);
+
+    // The RPC pair: calc serves side A, askr calls on side B.
+    const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const calc = domain.spawn("calc", blobs.pingpong, .{
+        .grant_debug_log = true,
+        .grant_channel_a = ch,
+        .arg = 1,
+    }) catch |e| std.debug.panic("spawn calc: {t}", .{e});
+    const askr = domain.spawn("askr", blobs.pingpong, .{
+        .grant_debug_log = true,
+        .grant_channel_b = ch,
+        .arg = 2,
+    }) catch |e| std.debug.panic("spawn askr: {t}", .{e});
+
+    sched.sleep(15); // let them converse
+    log.info("ipc-test: revoking calc mid-conversation", .{});
+    domain.destroy(calc);
+    while (!domain.drained(calc)) sched.sleep(1);
+    domain.finishTeardown(calc);
+
+    // askr must observe peer_dead and exit 7 on its own.
+    while (!(askr.state == .dying and domain.drained(askr))) sched.sleep(1);
+    domain.finishTeardown(askr);
+    log.info("ipc-test: askr exited with code {d} (7 = observed peer_dead and continued)", .{
+        askr.exit_code,
+    });
+
+    const frames_after = pmem.stats().free_bytes;
+    const shm_left = ipc.shm_account.balance();
+    if (frames_after == frames_before and shm_left == 0 and askr.exit_code == 7) {
+        log.info("ipc-test: PASS — pmem identical, shm account zero, death observed", .{});
+    } else {
+        std.debug.panic("ipc-test: FAIL — pmem delta {d}B, shm {d}B, askr exit {d}", .{
+            frames_before -% frames_after, shm_left, askr.exit_code,
+        });
+    }
+}
+
+fn notifHelper(arg: u64) void {
+    const n: *ipc.Notification = @ptrFromInt(arg);
+    sched.sleep(2);
+    ipc.signal(n, 0b101);
 }
 
 fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {

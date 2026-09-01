@@ -21,6 +21,7 @@
 //! release the lock. No logging while holding the big lock.
 
 const std = @import("std");
+const cap = @import("cap.zig");
 const gic = @import("gic.zig");
 const kalloc = @import("kalloc.zig");
 const lock = @import("lock.zig");
@@ -49,6 +50,10 @@ pub const State = enum {
     ready,
     running,
     sleeping,
+    /// Parked on an IPC object (channel queue, single waiter slot, ...).
+    /// Exactly one of block_list/block_slot says where, so teardown can
+    /// always unlink.
+    blocked,
     exited,
 };
 
@@ -71,10 +76,22 @@ pub const Thread = struct {
     asid: u16 = 0,
     /// Owning domain (opaque here to avoid an import cycle).
     user_ctx: ?*anyopaque = null,
+    /// The domain's capability table (same for all its threads); lets IPC
+    /// translate caps without reaching into domain internals.
+    captable: ?*cap.Table = null,
     /// Where the thread currently is; exactly one is non-null unless the
     /// thread is sleeping (then it sits in the sleepers list) or exited.
     on_cpu: ?u32 = null,
     queued_on: ?u32 = null,
+    /// IPC mailbox: message words, an optional cap in transit, and the
+    /// status the blocked operation completed with.
+    ipc_data: [4]u64 = @splat(0),
+    ipc_cap_type: u8 = 0,
+    ipc_cap_obj: u64 = 0,
+    ipc_status: u64 = 0,
+    /// While .blocked: the queue or single-waiter slot holding this thread.
+    block_list: ?*std.DoublyLinkedList = null,
+    block_slot: ?*?*Thread = null,
     node: std.DoublyLinkedList.Node = .{},
 };
 
@@ -83,6 +100,7 @@ pub const SpawnOpts = struct {
     user_ttbr0: u64 = 0,
     asid: u16 = 0,
     user_ctx: ?*anyopaque = null,
+    captable: ?*cap.Table = null,
     stack_account: *kalloc.Account = &kalloc.kernel_account,
 };
 
@@ -157,6 +175,7 @@ pub fn spawn(name: []const u8, entry: *const fn (u64) void, arg: u64, opts: Spaw
     t.user_ttbr0 = opts.user_ttbr0;
     t.asid = opts.asid;
     t.user_ctx = opts.user_ctx;
+    t.captable = opts.captable;
     // New threads begin in the trampoline, which unlocks the scheduler and
     // enables IRQs, then calls entry(arg) through a C-ABI shim.
     t.ctx = .{ .sp = mem.physToVirt(stack_pa) + stack_pages * mem.page_size };
@@ -197,9 +216,10 @@ pub fn exit() noreturn {
 }
 
 /// Kill every thread belonging to `ctx` (domain teardown). Threads not
-/// currently running are freed immediately; running ones are marked exited
-/// and their cores nudged, so they die at the next preemption and are
-/// reaped (each reap invokes user_thread_reaped). Returns how many were
+/// currently running are freed immediately (unlinked from run queues,
+/// sleepers, or whatever IPC object they block on); running ones are marked
+/// exited and their cores nudged, so they die at the next preemption and
+/// are reaped (each reap invokes user_thread_reaped). Returns how many were
 /// freed on the spot.
 pub fn destroyThreadsOf(ctx: *anyopaque) u32 {
     const daif = big_lock.lockIrqSave();
@@ -219,6 +239,12 @@ pub fn destroyThreadsOf(ctx: *anyopaque) u32 {
                 freeThreadLocked(t);
                 freed += 1;
             },
+            .blocked => {
+                if (t.block_list) |l| l.remove(&t.node);
+                if (t.block_slot) |s| s.* = null;
+                freeThreadLocked(t);
+                freed += 1;
+            },
             .running => {
                 t.state = .exited;
                 const c = t.on_cpu.?;
@@ -229,6 +255,41 @@ pub fn destroyThreadsOf(ctx: *anyopaque) u32 {
         }
     }
     return freed;
+}
+
+/// Expose the big lock to IPC: channel state and scheduling share one lock
+/// (the big-kernel-lock era), so wait/wake transitions are race-free.
+pub fn acquire() u64 {
+    return big_lock.lockIrqSave();
+}
+
+pub fn release(daif: u64) void {
+    big_lock.unlockRestore(daif);
+}
+
+/// Park the current thread on a wait queue or single-waiter slot. Big lock
+/// held. Returns when someone wakes the thread; its mailbox then holds the
+/// operation's outcome.
+pub fn blockCurrentLocked(list: ?*std.DoublyLinkedList, slot: ?*?*Thread) void {
+    const t = thisCpu().current;
+    std.debug.assert(t != thisCpu().idle);
+    t.state = .blocked;
+    t.block_list = list;
+    t.block_slot = slot;
+    if (list) |l| l.append(&t.node);
+    if (slot) |s| s.* = t;
+    scheduleLocked();
+    t.block_list = null;
+    t.block_slot = null;
+}
+
+/// Wake a blocked thread the caller has already unlinked (popped from its
+/// queue / cleared from its slot). Big lock held.
+pub fn wakeLocked(t: *Thread) void {
+    std.debug.assert(t.state == .blocked);
+    t.block_list = null;
+    t.block_slot = null;
+    enqueueLocked(t);
 }
 
 /// Timer-tick hook, called from IRQ context (IRQs masked) on every core.
@@ -326,7 +387,7 @@ fn scheduleLocked() void {
             prev.on_cpu = null;
             cpu.reap = prev;
         },
-        .sleeping => prev.on_cpu = null,
+        .sleeping, .blocked => prev.on_cpu = null,
         .ready, .unused => {},
     }
     next.state = .running;

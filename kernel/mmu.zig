@@ -25,6 +25,9 @@ const af = 1 << 10;
 const ng = 1 << 11;
 const pxn = 1 << 53;
 const uxn = 1 << 54;
+/// Software bit: this mapping does not own its frame (shm grants); address
+/// space teardown must not free it.
+const sw_unowned = 1 << 55;
 
 const Perms = enum {
     kernel_text, // RX, read-only
@@ -162,7 +165,9 @@ pub const UserPerms = enum {
 };
 
 /// Map one user page into a domain's TTBR0 tree, allocating intermediate
-/// tables from the domain's kernel-object account.
+/// tables from the domain's kernel-object account. Unowned mappings (shm
+/// grants) are tagged so teardown leaves their frames to the object that
+/// owns them.
 pub fn mapUserPage(
     root_pa_user: u64,
     va: u64,
@@ -170,9 +175,21 @@ pub fn mapUserPage(
     perms: UserPerms,
     table_account: *kalloc.Account,
 ) !void {
+    return mapUserPageTagged(root_pa_user, va, pa, perms, table_account, true);
+}
+
+pub fn mapUserPageTagged(
+    root_pa_user: u64,
+    va: u64,
+    pa: u64,
+    perms: UserPerms,
+    table_account: *kalloc.Account,
+    owned: bool,
+) !void {
+    const tag: u64 = if (owned) 0 else sw_unowned;
     const l2 = try walkUser(root_pa_user, l1Index(va), table_account);
     const l3 = try walkUser(l2, l2Index(va), table_account);
-    entryAt(l3, l3Index(va)).* = pa | perms.bits() | valid | table_or_page;
+    entryAt(l3, l3Index(va)).* = pa | perms.bits() | tag | valid | table_or_page;
 }
 
 fn walkUser(table_pa: u64, index: usize, account: *kalloc.Account) !u64 {
@@ -205,6 +222,7 @@ pub fn destroyUserSpace(
             const l3 = mem.physToPtr([*]volatile u64, l3_pa);
             for (0..512) |e3| {
                 if (l3[e3] & valid == 0) continue;
+                if (l3[e3] & sw_unowned != 0) continue; // shm: owner frees it
                 const page_pa = l3[e3] & 0x0000_ffff_ffff_f000;
                 kalloc.freePage(user_account, mem.physToPtr([*]u8, page_pa));
             }

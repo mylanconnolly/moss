@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const cap = @import("cap.zig");
+const ipc = @import("ipc.zig");
 const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
@@ -20,6 +21,9 @@ const shared = @import("shared");
 const max_domains = 16;
 const user_stack_pages = 4;
 const user_stack_top: u64 = 0x800_0000; // 128MB, far above the image
+
+/// Shared-memory mappings land here, bump-allocated per domain.
+pub const shm_window_base: u64 = 0x1000_0000;
 
 pub const Error = error{
     NoDomainSlots,
@@ -43,6 +47,14 @@ pub const Manifest = struct {
     kobj_limit: usize = 1 << 20,
     user_limit: usize = 1 << 20,
     grant_debug_log: bool = false,
+    /// Grant one channel end (its handle arrives in x1 at entry).
+    grant_channel_a: ?*ipc.Channel = null,
+    grant_channel_b: ?*ipc.Channel = null,
+    /// Faults become messages on this channel (side A held by the
+    /// supervisor); without one, a faulting domain is killed outright.
+    supervisor: ?*ipc.Channel = null,
+    /// Opaque argument delivered in x2 at entry (role tags etc.).
+    arg: u64 = 0,
 };
 
 pub const Domain = struct {
@@ -59,6 +71,10 @@ pub const Domain = struct {
     stack_base: u64 = 0,
     stack_top: u64 = 0,
     init_handle: u64 = 0,
+    init_handle2: u64 = 0,
+    init_arg: u64 = 0,
+    shm_map_next: u64 = shm_window_base,
+    supervisor: ?*ipc.Channel = null,
     threads_alive: std.atomic.Value(u32) = .init(0),
     exit_code: u64 = 0,
 };
@@ -145,6 +161,15 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
         const h = table.insert(.debug_log, 0) orelse return Error.CapTableFull;
         d.init_handle = @bitCast(h);
     }
+    if (manifest.grant_channel_a) |ch| {
+        const h = table.insert(.channel_a, @intFromPtr(ch)) orelse return Error.CapTableFull;
+        d.init_handle2 = @bitCast(h);
+    } else if (manifest.grant_channel_b) |ch| {
+        const h = table.insert(.channel_b, @intFromPtr(ch)) orelse return Error.CapTableFull;
+        d.init_handle2 = @bitCast(h);
+    }
+    d.init_arg = manifest.arg;
+    d.supervisor = manifest.supervisor;
 
     d.state = .alive;
     d.threads_alive.store(1, .release);
@@ -152,6 +177,7 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
         .user_ttbr0 = d.ttbr0_pa,
         .asid = d.asid,
         .user_ctx = d,
+        .captable = table,
         .stack_account = &d.kobj,
     }) catch |e| {
         d.threads_alive.store(0, .release);
@@ -164,14 +190,29 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     return d;
 }
 
-/// The single revocation: mark the domain dying and kill its threads.
-/// Threads running on other cores die at their next preemption; once
-/// drained() reports true, finishTeardown() reclaims the rest.
+/// The single revocation: mark the domain dying, kill its threads, and
+/// release every cap it held — closing channel sides, which is what
+/// delivers peer_dead to whoever is blocked on the other end. Threads
+/// running on other cores die at their next preemption; once drained()
+/// reports true, finishTeardown() reclaims the rest.
 pub fn destroy(d: *Domain) void {
     if (d.state != .alive) return;
     d.state = .dying;
     const freed = sched.destroyThreadsOf(d);
     if (freed > 0) _ = d.threads_alive.fetchSub(freed, .acq_rel);
+    // Threads are gone (or marked dead); now the authority dies with them.
+    for (&d.captable.?.entries) |*e| {
+        if (e.cap_type != .empty) {
+            ipc.releaseCap(e.cap_type, e.object);
+            e.cap_type = .empty;
+            e.generation +%= 1;
+        }
+    }
+    // A supervised domain counts as a live client of its fault channel.
+    if (d.supervisor) |ch| {
+        d.supervisor = null;
+        ipc.unrefSide(ch, .b);
+    }
 }
 
 pub fn drained(d: *const Domain) bool {
@@ -208,25 +249,63 @@ fn allocSlot() ?*Domain {
 
 /// Kernel-thread entry for a domain's initial thread: drop to EL0 at the
 /// image entry, with the manifest's initial handle (or 0) in x0.
-fn userThreadEntry(arg: u64) void {
-    const d: *Domain = @ptrFromInt(arg);
-    enterUser(d.entry_va, d.stack_top, d.init_handle);
+/// Map an shm object into the calling domain's window; the mapping is
+/// tagged unowned so teardown leaves the frames to the shm object.
+pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
+    const base = d.shm_map_next;
+    for (0..s.npages) |i| {
+        try mmu.mapUserPageTagged(
+            d.ttbr0_pa,
+            base + i * mem.page_size,
+            s.pages[i],
+            .data,
+            &d.kobj,
+            false,
+        );
+    }
+    d.shm_map_next = base + s.npages * mem.page_size;
+    return base;
 }
 
-fn enterUser(entry: u64, sp: u64, arg0: u64) noreturn {
+/// Fault-as-message: park the faulting thread as a caller on the supervisor
+/// channel; the supervisor's verdict is domain teardown, so the call only
+/// ever completes by the thread being destroyed. Returns false when the
+/// domain has no supervisor (caller kills the domain instead).
+pub fn reportFaultToSupervisor(d: *Domain, esr: u64, far: u64, elr: u64) bool {
+    const ch = d.supervisor orelse return false;
+    const msg: ipc.Msg = .{
+        .data = shared.encodeMsg(shared.FaultMsg, .{
+            .fault = .{ .esr = esr, .far = far, .elr = elr },
+        }),
+    };
+    _ = ipc.call(ch, msg);
+    // Reached only if the supervisor is already gone (peer_dead): nobody is
+    // left to decide, so the domain dies the direct way.
+    destroy(d);
+    sched.exit();
+}
+
+fn userThreadEntry(arg: u64) void {
+    const d: *Domain = @ptrFromInt(arg);
+    enterUser(d.entry_va, d.stack_top, d.init_handle, d.init_handle2, d.init_arg);
+}
+
+fn enterUser(entry: u64, sp: u64, arg0: u64, arg1: u64, arg2: u64) noreturn {
     asm volatile (
         \\msr daifset, #0xf
         \\msr elr_el1, %[e]
         \\msr sp_el0, %[s]
         \\msr spsr_el1, xzr
-        \\mov x0, %[a]
-        \\mov x1, xzr
-        \\mov x2, xzr
+        \\mov x0, %[a0]
+        \\mov x1, %[a1]
+        \\mov x2, %[a2]
         \\eret
         :
         : [e] "r" (entry),
           [s] "r" (sp),
-          [a] "r" (arg0),
+          [a0] "r" (arg0),
+          [a1] "r" (arg1),
+          [a2] "r" (arg2),
         : .{ .x0 = true, .x1 = true, .x2 = true, .memory = true });
     unreachable;
 }

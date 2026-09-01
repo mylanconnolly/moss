@@ -175,10 +175,13 @@ fn handleUserSync(frame: *TrapFrame) void {
     );
     const t = sched.thisCpu().current;
     const d: *domain.Domain = @ptrCast(@alignCast(t.user_ctx.?));
+    d.exit_code = 0xdead;
+    // Fault-as-message: a supervised domain's faults go to its supervisor,
+    // which decides its fate; only unsupervised domains are killed here.
+    if (domain.reportFaultToSupervisor(d, esr, far, frame.elr)) unreachable;
     log.warn("domain {s}: fault at EL0 — {s} (esr=0x{x} far=0x{x} elr=0x{x}); killing it", .{
         d.name, ecName(ec), esr, far, frame.elr,
     });
-    d.exit_code = 0xdead;
     domain.destroy(d);
     sched.exit();
 }

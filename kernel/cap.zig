@@ -12,6 +12,14 @@ pub const CapType = enum(u8) {
     empty,
     /// Authority to write to the kernel debug log.
     debug_log,
+    /// The serving end of a channel (recv/reply).
+    channel_a,
+    /// The calling end of a channel (call).
+    channel_b,
+    /// A notification object (signal/wait).
+    notification,
+    /// A shared-memory grant (map).
+    shm,
 };
 
 const Entry = struct {

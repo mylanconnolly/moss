@@ -24,11 +24,27 @@ pub const Handle = packed struct(u64) {
 };
 
 /// Syscall numbers, passed in x8; arguments in x0..x5, result in x0.
+/// IPC calls additionally return message words in x1..x4 and a received cap
+/// handle (or 0) in x5.
 pub const Syscall = enum(u64) {
     log = 1,
     yield = 2,
     sleep = 3,
     exit = 4,
+    /// call(channel, w0..w3, cap) -> reply w0..w3, cap
+    call = 5,
+    /// recv(channel) -> msg w0..w3, cap
+    recv = 6,
+    /// reply(channel, w0..w3, cap)
+    reply = 7,
+    notify_create = 8,
+    notify_signal = 9,
+    /// notify_wait(notification) -> x1 = accumulated bits (cleared)
+    notify_wait = 10,
+    /// shm_create(pages) -> x1 = handle
+    shm_create = 11,
+    /// shm_map(handle) -> x1 = va
+    shm_map = 12,
     _,
 };
 
@@ -40,7 +56,73 @@ pub const Errno = enum(u64) {
     fault = 3,
     bad_arg = 4,
     nosys = 5,
+    /// The other end of the channel is gone. In-flight operations complete
+    /// with this — a blocked call returns it the moment the peer dies.
+    peer_dead = 6,
+    busy = 7,
+    bad_state = 8,
+    no_space = 9,
     _,
+};
+
+/// Encode a message union into the four IPC data words: word 0 is the tag,
+/// words 1..3 the payload fields (u64s, at most three). This is the seed of
+/// the comptime IDL: protocol types written once here compile identically
+/// into both sides' stubs.
+pub fn encodeMsg(comptime T: type, val: T) [4]u64 {
+    var out: [4]u64 = @splat(0);
+    out[0] = @intFromEnum(val);
+    switch (val) {
+        inline else => |payload| {
+            const P = @TypeOf(payload);
+            if (P != void) {
+                const fields = @typeInfo(P).@"struct".fields;
+                comptime std.debug.assert(fields.len <= 3);
+                comptime var i = 1;
+                inline for (fields) |f| {
+                    comptime std.debug.assert(f.type == u64);
+                    out[i] = @field(payload, f.name);
+                    i += 1;
+                }
+            }
+        },
+    }
+    return out;
+}
+
+pub fn decodeMsg(comptime T: type, words: [4]u64) ?T {
+    const Tag = @typeInfo(T).@"union".tag_type.?;
+    const tag = std.enums.fromInt(Tag, words[0]) orelse return null;
+    switch (tag) {
+        inline else => |t| {
+            const P = @FieldType(T, @tagName(t));
+            if (P == void) return @unionInit(T, @tagName(t), {});
+            var p: P = undefined;
+            comptime var i = 1;
+            inline for (@typeInfo(P).@"struct".fields) |f| {
+                @field(p, f.name) = words[i];
+                i += 1;
+            }
+            return @unionInit(T, @tagName(t), p);
+        },
+    }
+}
+
+/// The first typed protocol: a trivial calculator, used by the Phase 4
+/// demo. A request may carry a shared-memory cap with a greeting.
+pub const CalcRequest = union(enum(u64)) {
+    add: struct { a: u64, b: u64 },
+    greet: void,
+};
+
+pub const CalcReply = union(enum(u64)) {
+    sum: struct { value: u64 },
+    hi: void,
+};
+
+/// Fault messages delivered to a supervisor channel (fault-as-message).
+pub const FaultMsg = union(enum(u64)) {
+    fault: struct { esr: u64, far: u64, elr: u64 },
 };
 
 /// Header at the start of a flat user image ("MOSS" magic). Written by the
@@ -59,6 +141,19 @@ pub const UserImageHeader = extern struct {
 /// Entry convention for user programs: x0 holds the debug-log capability
 /// handle (as bits), or 0 when the manifest granted none.
 pub const user_image_base: u64 = 0x40_0000;
+
+test "typed messages round-trip through the four data words" {
+    const req: CalcRequest = .{ .add = .{ .a = 17, .b = 25 } };
+    const words = encodeMsg(CalcRequest, req);
+    const back = decodeMsg(CalcRequest, words) orelse return error.DecodeFailed;
+    try std.testing.expectEqual(req, back);
+
+    const greet = encodeMsg(CalcRequest, .greet);
+    try std.testing.expectEqual(CalcRequest.greet, decodeMsg(CalcRequest, greet).?);
+
+    // A junk tag decodes to null, never to a wrong message.
+    try std.testing.expectEqual(@as(?CalcRequest, null), decodeMsg(CalcRequest, .{ 99, 0, 0, 0 }));
+}
 
 test "handle round-trips through its integer representation" {
     const h: Handle = .{ .slot = 7, .generation = 42 };

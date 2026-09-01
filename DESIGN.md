@@ -64,7 +64,11 @@ semantics.
 
 Two transports, one contract:
 
-1. **Sync fast path** — call/reply in registers, for RPC-shaped traffic.
+1. **Sync fast path** — call/reply in registers, for RPC-shaped traffic. As
+   built: four message words + one optional cap attachment per message; side
+   A serves (recv/reply), side B calls; per-side refcounts close a side when
+   its last cap dies. Cap transfer over messages is the buffer-grant
+   mechanism — an shm cap granted in a call is how out-of-line data crosses.
 2. **Async rings** (Phase 8) — io_uring-style shared-memory
    submission/completion rings for bulk and streams, so services don't need a
    thread per request.

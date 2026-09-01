@@ -24,6 +24,7 @@ pooled hardware.
 | `zig build run -Dfault-test` | Boot, then read unmapped memory to exercise fault reporting |
 | `zig build run -Dsched-test` | Boot, then run pinned + migrating threads across all 4 cores |
 | `zig build run -Ddomain-test` | Boot, then spawn/revoke/leak-check user domains (EL0 + caps) |
+| `zig build run -Dipc-test` | Boot, then typed RPC, cap grants, fault-as-message, peer death |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout
