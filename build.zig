@@ -21,6 +21,15 @@ fn buildMarc(b: *std.Build, entries: []const MarcEntry) []const u8 {
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const host_target = b.standardTargetOptions(.{});
+    // User programs default to ReleaseSafe: the FS/crypto hot paths live
+    // in userspace and Debug costs them ~2-5x, while ReleaseSafe keeps
+    // every bounds/overflow check. The kernel follows -Doptimize (Debug
+    // by default) — it has no hot loops that matter yet.
+    const user_optimize = b.option(
+        std.builtin.OptimizeMode,
+        "user-optimize",
+        "Optimize mode for user programs (default ReleaseSafe)",
+    ) orelse .ReleaseSafe;
     const panic_test = b.option(
         bool,
         "panic-test",
@@ -162,7 +171,7 @@ pub fn build(b: *std.Build) void {
         const prog_mod = b.createModule(.{
             .root_source_file = b.path(p.src),
             .target = user_target,
-            .optimize = optimize,
+            .optimize = user_optimize,
             .code_model = .small,
         });
         prog_mod.addImport("shared", shared_mod);

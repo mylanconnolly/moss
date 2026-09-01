@@ -87,6 +87,7 @@ const View = struct {
     boot_prefix_len: usize = 0,
     obj: u32 = 0, // disk subtree root
     buf: u64 = 0,
+    buf_pages: u64 = 0,
     fds: [max_fds]Fd = @splat(.{}),
 };
 
@@ -134,7 +135,10 @@ fn fssvc(log_h: u64, chan_h: u64, blob_va: u64, blob_len: u64) noreturn {
             .attach_buf => {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
-                    if (m.err == .ok) v.buf = m.data[0];
+                    if (m.err == .ok) {
+                        v.buf = m.data[0];
+                        v.buf_pages = m.data[1];
+                    }
                 }
                 _ = usys.replyTyped(shared.FsResp, serve_a, .ok, 0);
             },
@@ -198,48 +202,146 @@ fn nowSec() u64 {
 
 // ----------------------------------------------------------- disk backend
 //
-// mossfs speaks sector runs against a BlockDev vtable; this one rides the
-// blk driver's ring transport (SQ/CQ in shared memory, notification
-// doorbells), one virtio request per run. flush goes over the sync
-// channel — it is rare and the reply doubles as the barrier ack.
+// mossfs speaks sector runs (<= 8 sectors) against a BlockDev vtable; this
+// one rides the blk driver's ring transport (SQ/CQ in shared memory,
+// notification doorbells) over a 256K data window of 8 x 32K slots:
+//
+// - WRITES COALESCE AND PIPELINE: adjacent runs (the byte-aligned
+//   allocator emits mostly-sequential addresses) accumulate into an open
+//   32K staging slot and ship as one 64-sector request; up to 7 such
+//   requests are in flight at once. This is sound because mossfs orders
+//   writes only at dev.flush() and never reads back a sector written
+//   since the last flush except through its cache.
+// - READS drain outstanding writes (belt and braces), then fetch 32K of
+//   READAHEAD into slot 0 — sequential file reads hit the next 7 blocks
+//   for free. A write overlapping the readahead range invalidates it.
+// - flush drains, then goes over the sync channel; the reply doubles as
+//   the barrier ack.
+
+const blk_slots = 8; // 32K window slots; slot 0 = read/readahead, 1..7 = writes
+const slot_bytes: u64 = 32768;
+const slot_secs: u64 = slot_bytes / 512; // 64: one protocol request
 
 var blk_chan: u64 = 0;
-var blk_buf: u64 = 0; // 4K shm data window shared with the driver
+var blk_buf: u64 = 0; // 8-slot shm data window; slot i at i*slot_bytes
 var blk_ring: *shared.RingBuf = undefined;
 var sq_bell: u64 = 0;
 var cq_bell: u64 = 0;
 var dev_ctx_dummy: u8 = 0;
 var pending_key: ?[32]u8 = null;
+var slot_busy: [blk_slots]bool = @splat(false); // [0] unused (read slot)
+var wr_error = false; // sticky until the next barrier reports it
 
-fn ringIo(comptime is_write: bool, sector: u64, count: u64) mossfs.DevError!void {
-    const req: shared.BlkReq = if (is_write)
-        .{ .write = .{ .sector = sector, .off = 0, .count = count } }
-    else
-        .{ .read = .{ .sector = sector, .off = 0, .count = count } };
-    if (!blk_ring.sqPush(.{ .id = 1, .words = shared.encodeMsg(shared.BlkReq, req) }))
+// Open write-staging run (in its reserved slot, not yet submitted).
+var stage_slot: u32 = 0; // 0 = none open
+var stage_sector: u64 = 0;
+var stage_secs: u64 = 0;
+
+// Readahead: slot 0 holds ra_secs sectors starting at ra_sector.
+var ra_sector: u64 = 0;
+var ra_secs: u64 = 0;
+var dev_nsecs: u64 = 0; // set at attach; mfs may not be mounted yet
+
+/// Reap one completion (blocking); frees its slot. IO errors latch into
+/// wr_error so the barrier that needs them can fail the whole txg.
+fn reapOne() void {
+    var e: shared.RingEntry = undefined;
+    while (!blk_ring.cqPop(&e)) _ = usys.notifyWait(cq_bell);
+    if (e.id < blk_slots) slot_busy[@intCast(e.id)] = false;
+    const resp = shared.decodeMsg(shared.BlkResp, e.words) orelse {
+        wr_error = true;
+        return;
+    };
+    if (resp != .ok) wr_error = true;
+}
+
+fn submitStage() void {
+    if (stage_slot == 0) return;
+    const req: shared.BlkReq = .{ .write = .{
+        .sector = stage_sector,
+        .off = @as(u64, stage_slot) * slot_bytes,
+        .count = stage_secs,
+    } };
+    if (blk_ring.sqPush(.{ .id = stage_slot, .words = shared.encodeMsg(shared.BlkReq, req) })) {
+        slot_busy[stage_slot] = true;
+        _ = usys.notifySignal(sq_bell, 1);
+    } else {
+        wr_error = true; // SQ full cannot happen at <=7 in flight; fail safe
+    }
+    stage_slot = 0;
+}
+
+fn drainWrites() void {
+    submitStage();
+    var outstanding: u32 = 0;
+    for (slot_busy) |b| {
+        if (b) outstanding += 1;
+    }
+    while (outstanding > 0) : (outstanding -= 1) reapOne();
+}
+
+fn takeWriteSlot() u32 {
+    while (true) {
+        for (slot_busy[1..], 1..) |b, i| {
+            if (!b) return @intCast(i);
+        }
+        reapOne();
+    }
+}
+
+fn devRead(_: *anyopaque, sector: u64, count: u64, dst: []u8) mossfs.DevError!void {
+    if (count == 0 or count > mossfs.spb) return error.IoError;
+    if (sector >= ra_sector and sector + count <= ra_sector + ra_secs) {
+        const src: [*]const volatile u8 = @ptrFromInt(blk_buf + (sector - ra_sector) * 512);
+        for (0..dst.len) |i| dst[i] = src[i];
+        return;
+    }
+    drainWrites();
+    if (wr_error) return error.IoError;
+    ra_secs = 0;
+    const want = @min(slot_secs, dev_nsecs -| sector);
+    if (want < count) return error.IoError;
+    const req: shared.BlkReq = .{ .read = .{ .sector = sector, .off = 0, .count = want } };
+    if (!blk_ring.sqPush(.{ .id = blk_slots, .words = shared.encodeMsg(shared.BlkReq, req) }))
         return error.IoError;
     _ = usys.notifySignal(sq_bell, 1);
     var e: shared.RingEntry = undefined;
     while (!blk_ring.cqPop(&e)) _ = usys.notifyWait(cq_bell);
     const resp = shared.decodeMsg(shared.BlkResp, e.words) orelse return error.IoError;
     if (resp != .ok) return error.IoError;
-}
-
-fn devRead(_: *anyopaque, sector: u64, count: u64, dst: []u8) mossfs.DevError!void {
-    if (count == 0 or count > shared.blk_max_sectors) return error.IoError;
-    try ringIo(false, sector, count);
+    ra_sector = sector;
+    ra_secs = want;
     const src: [*]const volatile u8 = @ptrFromInt(blk_buf);
     for (0..dst.len) |i| dst[i] = src[i];
 }
 
 fn devWrite(_: *anyopaque, sector: u64, count: u64, src: []const u8) mossfs.DevError!void {
-    if (count == 0 or count > shared.blk_max_sectors) return error.IoError;
-    const dst: [*]volatile u8 = @ptrFromInt(blk_buf);
+    if (count == 0 or count > mossfs.spb) return error.IoError;
+    // Stale-readahead guard: this range's content is changing.
+    if (sector < ra_sector + ra_secs and ra_sector < sector + count) ra_secs = 0;
+    if (stage_slot != 0) {
+        if (sector == stage_sector + stage_secs and stage_secs + count <= slot_secs) {
+            const dst: [*]volatile u8 = @ptrFromInt(blk_buf + @as(u64, stage_slot) * slot_bytes + stage_secs * 512);
+            for (0..src.len) |i| dst[i] = src[i];
+            stage_secs += count;
+            return;
+        }
+        submitStage();
+    }
+    const slot = takeWriteSlot();
+    stage_slot = slot;
+    stage_sector = sector;
+    stage_secs = count;
+    const dst: [*]volatile u8 = @ptrFromInt(blk_buf + @as(u64, slot) * slot_bytes);
     for (0..src.len) |i| dst[i] = src[i];
-    try ringIo(true, sector, count);
 }
 
 fn devFlush(_: *anyopaque) mossfs.DevError!void {
+    drainWrites();
+    if (wr_error) {
+        wr_error = false; // reported; the failed txg will not superblock
+        return error.IoError;
+    }
     switch (usys.callTyped(shared.BlkReq, shared.BlkResp, blk_chan, .flush, 0)) {
         .ok => |rep| if (rep != .ok) return error.IoError,
         .err => return error.IoError,
@@ -263,8 +365,8 @@ fn doSetKey(v: *View, badge: u64, off: u64, len: u64) shared.FsResp {
 fn setupDisk(chan: u64) shared.FsResp {
     blk_chan = chan;
 
-    // Data window.
-    const s = usys.shmCreate(1);
+    // Data window: 8 x 32K slots (readahead + coalesced write pipeline).
+    const s = usys.shmCreate(blk_slots * slot_bytes / 4096);
     if (s.err != .ok) usys.exit(201);
     const m = usys.shmMap(s.data[0]);
     if (m.err != .ok) usys.exit(202);
@@ -298,6 +400,7 @@ fn setupDisk(chan: u64) shared.FsResp {
         },
         .err => usys.exit(208),
     };
+    dev_nsecs = sectors;
     const dev: mossfs.BlockDev = .{
         .ctx = @ptrCast(&dev_ctx_dummy),
         .readFn = devRead,
@@ -558,7 +661,7 @@ fn resolveParent(v: *View, path: []const u8, scratch: *[64]u8) union(enum) { dir
 }
 
 fn viewPath(v: *View, off: u64, len: u64) ?[]const u8 {
-    if (v.buf == 0 or len > max_path or off + len > 4096) return null;
+    if (v.buf == 0 or len > max_path or off + len > v.buf_pages * 4096) return null;
     return @as([*]const u8, @ptrFromInt(v.buf + off))[0..len];
 }
 
@@ -624,7 +727,7 @@ fn fdInsert(v: *View, fd: Fd) shared.FsResp {
 
 fn doRead(v: *View, fdn: u64, off: u64, len: u64) shared.FsResp {
     if (fdn >= max_fds or !v.fds[fdn].used) return ferr(.bad_fd);
-    if (v.buf == 0 or len > 2048) return ferr(.bad_path);
+    if (v.buf == 0 or len > v.buf_pages * 4096 or len > shared.fs_max_io) return ferr(.bad_path);
     const dst = @as([*]u8, @ptrFromInt(v.buf))[0..len];
     const fd = &v.fds[fdn];
     if (fd.boot) {
@@ -642,7 +745,7 @@ fn doWrite(v: *View, fdn: u64, off: u64, len: u64) shared.FsResp {
     if (v.ro) return ferr(.denied);
     if (fdn >= max_fds or !v.fds[fdn].used) return ferr(.bad_fd);
     if (v.fds[fdn].boot) return ferr(.denied);
-    if (v.buf == 0 or len > 2048) return ferr(.bad_path);
+    if (v.buf == 0 or len > v.buf_pages * 4096 or len > shared.fs_max_io) return ferr(.bad_path);
     const src = @as([*]const u8, @ptrFromInt(v.buf))[0..len];
     const fd = &v.fds[fdn];
     // The object may have been deleted out from under the fd.
@@ -951,7 +1054,7 @@ fn fsList(chan: u64, buf: [*]u8, path: []const u8) ?u64 {
 }
 
 fn attachBuf(chan: u64) struct { va: u64, cap: u64 } {
-    const s = usys.shmCreate(1);
+    const s = usys.shmCreate(shared.fs_buf_pages);
     if (s.err != .ok) usys.exit(210);
     const m = usys.shmMap(s.data[0]);
     if (m.err != .ok) usys.exit(211);
@@ -1169,15 +1272,15 @@ fn alice(log_h: u64, fs_chan: u64) noreturn {
     _ = usys.log(log_h, "alice: v2 ops verified — delete, rename, truncate, stat, symlink, excl, sync");
 
     // Throughput baseline through the whole stack (IPC + fssvc + mossfs
-    // + ring + blkdrv + virtio) on this encrypted volume: 512KB in 2KB
+    // + ring + blkdrv + virtio) on this encrypted volume: 512KB in 32KB
     // chunks, compressible then incompressible, write+sync and read.
     benchOne(log_h, fs_chan, buf, "alice: bench comp KB/s: ", true);
     benchOne(log_h, fs_chan, buf, "alice: bench raw  KB/s: ", false);
     usys.exit(0);
 }
 
-const bench_chunk = 2048;
-const bench_chunks = 256; // 512KB
+const bench_chunk = 32768;
+const bench_chunks = 16; // 512KB
 
 fn benchOne(log_h: u64, fs_chan: u64, buf: [*]u8, label: []const u8, compressible: bool) void {
     _ = fsDelete(fs_chan, buf, "state/alice/bench.bin");

@@ -20,7 +20,7 @@ const sched = @import("sched.zig");
 const shared = @import("shared");
 
 const max_domains = 16;
-const user_stack_pages = 12; // mossfs's CoW rebuild keeps a block per tree level on the stack
+const user_stack_pages = 24; // mossfs's CoW rebuild keeps 4K frames per tree level; ReleaseSafe inlining stacks several
 const user_stack_top: u64 = 0x800_0000; // 128MB, far above the image
 
 /// Shared-memory mappings land here, bump-allocated per domain.

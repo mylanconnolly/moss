@@ -10,7 +10,11 @@ done without rediscovering the sharp edges.
   are deliberate, standalone commits — kernel code touches the parts of the
   language that churn.
 - `zig build` produces `zig-out/bin/moss-kernel.bin` (a raw arm64 Image;
-  the `.elf` sits beside it for symbols) plus every user program.
+  the `.elf` sits beside it for symbols) plus every user program. User
+  programs build ReleaseSafe by default (`-Duser-optimize` overrides);
+  the kernel follows `-Doptimize` (Debug default — ReleaseFast kernel is
+  untested territory). Benchmark numbers are meaningless from a Debug
+  userspace; that mistake cost a 5x mystery once.
 - `zig build check` is the gate: 12 OS tests under QEMU plus host unit
   tests, ~45s. Run it before committing. Logs land in `zig-out/check/`.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),

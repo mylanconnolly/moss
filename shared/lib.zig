@@ -239,7 +239,7 @@ pub const BlkReq = union(enum(u64)) {
     ring_cq_bell: void, // + notification the server rings after completing
 };
 
-pub const blk_max_sectors: u64 = 8; // 4KB per request
+pub const blk_max_sectors: u64 = 64; // 32KB per request (one driver DMA slot)
 
 pub const BlkResp = union(enum(u64)) {
     ok: void,
@@ -257,6 +257,12 @@ pub const blk_sector_size: u64 = 512;
 // there is no way to name anything outside your view. Paths and file data
 // travel through a per-view shared buffer (attach_buf); path resolution is
 // strictly descending ("." and ".." are rejected).
+
+/// View buffers are up to 8 pages (the shm ceiling); one read/write op
+/// moves up to fs_max_io bytes through them. Bigger ops amortize the IPC
+/// round trip AND let full 4K blocks skip the read-modify-write path.
+pub const fs_buf_pages: u64 = 8;
+pub const fs_max_io: u64 = fs_buf_pages * 4096;
 
 pub const FsReq = union(enum(u64)) {
     attach_buf: void, // + shm cap: this view's path/data buffer

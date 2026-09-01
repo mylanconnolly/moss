@@ -88,9 +88,10 @@ const desc_f_write = 2;
 
 const q_num = 32; // virtqueue descriptors
 const slots = 8; // concurrent requests, up to 3 descriptors each
-// DMA layout: page 0 = virtqueue; page 1 = per-slot 16B headers (s*64) and
-// status bytes (s*64+32); pages 2..9 = one 4KB data buffer per slot.
-const dma_pages = 10;
+const slot_bytes = 32768; // per-slot data buffer: one 64-sector request
+// DMA layout: a 2-page region for the virtqueue (page 0) and per-slot 16B
+// headers (s*64) / status bytes (s*64+32) (page 1), plus one 8-page data
+// region per slot (dma_alloc caps a single allocation at 16 pages).
 
 const Desc = extern struct {
     addr: u64,
@@ -105,7 +106,7 @@ const InFlight = struct {
     id: u64, // ring correlation id, or sync_id for channel requests
     op: Op,
     shm_off: u64,
-    count: u64, // sectors (1..8); 0 for flush
+    count: u64, // sectors (1..64); 0 for flush
 };
 
 const sync_id: u64 = 0xffff_ffff_ffff_ffff;
@@ -115,8 +116,8 @@ var vq_va: u64 = 0;
 var vq_dev: u64 = 0;
 var hdr_va: u64 = 0;
 var hdr_dev: u64 = 0;
-var buf_va: u64 = 0;
-var buf_dev: u64 = 0;
+var slot_va: [slots]u64 = @splat(0);
+var slot_dev: [slots]u64 = @splat(0);
 var have_flush = false;
 var irq_notif: u64 = 0;
 var slot_idx: u64 = 0; // this device's virtio-mmio slot (for irq offset)
@@ -125,6 +126,7 @@ var avail_shadow: u16 = 0;
 var inflight: [slots]?InFlight = @splat(null);
 var inflight_count: u64 = 0;
 var shm_va: u64 = 0;
+var shm_len: u64 = 0;
 var ring: ?*shared.RingBuf = null;
 var sq_bell_h: u64 = 0;
 var cq_bell: u64 = 0;
@@ -164,15 +166,19 @@ fn blkdrv(log_h: u64, chan_h: u64) noreturn {
     }
     if (usys.irqBind(irq_h, irq_notif, slot_idx) != .ok) usys.exit(173);
 
-    // DMA: page 0 = virtqueue, page 1 = headers/status, pages 2..9 = data.
-    const dma = usys.dmaAlloc(dma_pages);
+    // DMA: virtqueue + headers, then one 32K data region per slot.
+    const dma = usys.dmaAlloc(2);
     if (dma.err != .ok) usys.exit(174);
     vq_va = dma.data[0];
     vq_dev = dma.data[1];
     hdr_va = dma.data[0] + 4096;
     hdr_dev = dma.data[1] + 4096;
-    buf_va = dma.data[0] + 2 * 4096;
-    buf_dev = dma.data[1] + 2 * 4096;
+    for (0..slots) |i| {
+        const d = usys.dmaAlloc(slot_bytes / 4096);
+        if (d.err != .ok) usys.exit(174);
+        slot_va[i] = d.data[0];
+        slot_dev[i] = d.data[1];
+    }
 
     initDevice();
     const capacity = readCap();
@@ -194,7 +200,10 @@ fn blkdrv(log_h: u64, chan_h: u64) noreturn {
             .setup => {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
-                    if (m.err == .ok) shm_va = m.data[0];
+                    if (m.err == .ok) {
+                        shm_va = m.data[0];
+                        shm_len = m.data[1] * 4096;
+                    }
                 }
                 _ = usys.replyTyped(shared.BlkResp, chan_h, .ok, 0);
             },
@@ -277,8 +286,8 @@ fn readCap() u64 {
 fn submitSlot(s: usize, fl: InFlight, sector: u64) void {
     const hva = hdr_va + s * 64;
     const hdev = hdr_dev + s * 64;
-    const dva = buf_va + s * 4096;
-    const ddev = buf_dev + s * 4096;
+    const dva = slot_va[s];
+    const ddev = slot_dev[s];
     const nbytes = fl.count * 512;
     const hdr: [*]volatile u32 = @ptrFromInt(hva);
     hdr[0] = switch (fl.op) { // VIRTIO_BLK_T_*
@@ -344,7 +353,7 @@ fn drainUsed() void {
         const fl = inflight[s].?;
         const status: u64 = @as(*volatile u8, @ptrFromInt(hdr_va + s * 64 + 32)).*;
         if (fl.op == .read and status == 0) {
-            copy(@ptrFromInt(shm_va + fl.shm_off), @ptrFromInt(buf_va + s * 4096), fl.count * 512);
+            copy(@ptrFromInt(shm_va + fl.shm_off), @ptrFromInt(slot_va[s]), fl.count * 512);
         }
         const resp: shared.BlkResp = if (status == 0) .ok else .{ .io_err = .{ .code = status } };
         if (fl.id == sync_id) {
@@ -370,8 +379,10 @@ fn waitIrqAndDrain() void {
 }
 
 fn ioOk(off: u64, count: u64) bool {
+    // Bounded by the client's ACTUAL mapped window (from shm_map), so a
+    // client granting one page cannot steer the driver past its mapping.
     return count >= 1 and count <= shared.blk_max_sectors and
-        off % 512 == 0 and off + count * 512 <= 4096;
+        off % 512 == 0 and off + count * 512 <= shm_len;
 }
 
 /// One request over the sync transport: submit alone, wait it out.

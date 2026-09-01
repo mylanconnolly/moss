@@ -23,6 +23,10 @@ SECTIONS
     . = ALIGN(4096);
     __umem_end = .;
 
+    /* No unwinder in moss userspace; ReleaseSafe emits these and they
+     * must not spill past the accounted load image. */
+    /DISCARD/ : { *(.eh_frame*) *(.ARM.exidx*) *(.comment) }
+
     __utext_size = __utext_end - 0x400000;
     __uload_size = __uload_end - 0x400000;
     __umem_size = __umem_end - 0x400000;

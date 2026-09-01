@@ -397,6 +397,7 @@ fn sysShmMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const s: *ipc.Shm = @ptrFromInt(obj);
     const va = domain.mapShm(d, s) catch return errno(.no_space);
     frame.regs[1] = va;
+    frame.regs[2] = s.npages; // so services can bound IO by the real window
     return errno(.ok);
 }
 

@@ -163,7 +163,7 @@ const max_dirty_dnodes = 48;
 const max_wbb = 24; // working (dirty) bitmap blocks per txg
 const max_frees = 768; // quarantined frees per txg
 const max_gt_dirty = 32; // dirty group-table leaves / path nodes per txg
-const commit_data_threshold = 96;
+const commit_data_threshold = 144; // fits a 512K stream in one txg (dd cap 160)
 const commit_dnode_threshold = 32;
 const drain_budget = 48; // deleting-set frees per commit
 pub const alloc_reserve = 96; // headroom so a commit can always land
@@ -570,7 +570,11 @@ pub const Fs = struct {
         try fs.readPtrCopy(p, dst);
     }
 
-    fn dirtyFileBlock(fs: *Fs, obj: u32, blkidx: u64) Error!*DirtyData {
+    /// Claim (or find) the overlay slot for a file block. `full` promises
+    /// the caller overwrites all 4096 bytes, so the committed content is
+    /// never fetched — sequential block-aligned writes skip the
+    /// read-modify-write (and its decrypt/decompress) entirely.
+    fn dirtyFileBlock(fs: *Fs, obj: u32, blkidx: u64, full: bool) Error!*DirtyData {
         if (fs.dirtyDataFind(obj, blkidx)) |e| return e;
         for (&fs.dd) |*e| {
             if (e.used) continue;
@@ -578,8 +582,12 @@ pub const Fs = struct {
             e.obj = obj;
             e.blkidx = blkidx;
             fs.dd_count += 1;
-            const p = try fs.origFileBlockPtr(obj, blkidx);
-            try fs.readPtrCopy(p, &e.data);
+            if (full) {
+                // Content is entirely caller-supplied; nothing to read.
+            } else {
+                const p = try fs.origFileBlockPtr(obj, blkidx);
+                try fs.readPtrCopy(p, &e.data);
+            }
             return e;
         }
         return Error.Overflow;
@@ -638,7 +646,7 @@ pub const Fs = struct {
             const pos = off + done;
             const bo: usize = @intCast(pos % block_size);
             const chunk = @min(src.len - done, block_size - bo);
-            const e = try fs.dirtyFileBlock(obj, pos / block_size);
+            const e = try fs.dirtyFileBlock(obj, pos / block_size, bo == 0 and chunk == block_size);
             @memcpy(e.data[bo .. bo + chunk], src[done .. done + chunk]);
             done += chunk;
         }
@@ -675,7 +683,7 @@ pub const Fs = struct {
             const pos = off + done;
             const bo: usize = @intCast(pos % block_size);
             const chunk = @min(src.len - done, block_size - bo);
-            const e = try fs.dirtyFileBlock(obj, pos / block_size);
+            const e = try fs.dirtyFileBlock(obj, pos / block_size, bo == 0 and chunk == block_size);
             @memcpy(e.data[bo .. bo + chunk], src[done .. done + chunk]);
             done += chunk;
         }
@@ -760,7 +768,7 @@ pub const Fs = struct {
         if (keep_blocks < e.trim) e.trim = keep_blocks;
         // Zero the tail of the kept boundary block.
         if (newlen % block_size != 0) {
-            const db = try fs.dirtyFileBlock(obj, keep_blocks - 1);
+            const db = try fs.dirtyFileBlock(obj, keep_blocks - 1, false);
             @memset(db.data[@intCast(newlen % block_size)..], 0);
         }
         e.dn.size = newlen;

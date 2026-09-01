@@ -427,27 +427,53 @@ brought it to 2.3/2.5.)
 | encrypted, compressible | 1187 / 2557 MB/s | 435 / 688 MB/s |
 | encrypted, random | 476 / 893 MB/s | **93 / 110 MB/s** |
 
-Whole-stack (encrypted volume, 2KB-chunk protocol writes), before → after
-hardware AES: QEMU HVF compressible 9.6/11.2 → **20.6/28.4** MB/s (w/r),
-random 3.6/4.1 → **13.4/18.6** MB/s; TCG (pure emulation, regression
-trends only) 2.1/2.4 → 4.9/5.7 and 0.7/0.8 → 2.5/3.7 MB/s.
+Whole-stack (encrypted volume, alice's bench through IPC + fssvc +
+mossfs + ring + blkdrv + virtio), the full progression on HVF (w/r MB/s,
+incompressible / compressible):
 
-What the numbers say:
-- **Software AES was the encryption cost** (~13× off hardware, fully
-  dominating encrypted-random at 93 MB/s core). With FP/SIMD context
-  switching landed and userspace built with NEON+AES, the armcrypto path
-  plus 8-wide XTS lifted encrypted-random whole-stack throughput
-  3.7–4.5×.
-- **Compression is a pure win**, not a tradeoff: it multiplies encrypted
-  throughput (fewer bytes reach AES) and packs 8 compressible blocks per
-  bitmap byte (the 8MB text file cost 265 blocks).
-- **The remaining whole-stack ceiling is protocol chunking**, not crypto:
-  2KB view-buffer chunks mean two IPC round trips and a read-modify-write
-  per 4K block. Larger view buffers / the ring transport for FS data are
-  the lever if bulk FS throughput matters next.
-- Checksums are nowhere near the bottleneck (SipHash 1.2 GB/s), and the
-  plain-volume core (0.8–1.5 GB/s writes into RAM) says the CoW/commit
-  machinery itself is cheap.
+| stage | raw | comp |
+|---|---|---|
+| v3 as first landed (soft AES, Debug userspace, 2KB ops) | 3.6 / 4.1 | 9.6 / 11.2 |
+| + hardware AES (FP/SIMD enablement) | 13.4 / 18.6 | 20.6 / 28.4 |
+| + transport & build work (below) | **128 / 264** | **275 / 385** |
+
+Even TCG (pure emulation) now reaches 38/54 raw and 44/66 comp. The
+transport & build work, in order of what the digging found:
+
+- **Userspace was running Debug.** The single biggest factor (~5x): the
+  crypto and FS hot paths live in userspace, and the OS build never got
+  an optimize flag. User programs now default to **ReleaseSafe** (every
+  bounds/overflow check retained; `-Duser-optimize` overrides), while
+  the kernel stays on `-Doptimize`. Fallout fixed en route: ReleaseSafe
+  emits `.eh_frame` sections that spilled past the accounted load image
+  (discarded in user.ld — the spawn header check caught it as BadImage),
+  and deeper inlining of the commit recursion's 4K frames needed 96KB
+  user stacks.
+- **32K protocol ops**: view buffers are 8 pages (`shm_map` now reports
+  the mapped size so services bound IO by the real window) and one
+  read/write moves up to 32KB — 16x fewer IPC round trips, and
+  block-aligned full writes skip the read-modify-write entirely (a
+  `full` flag on the overlay claim skips fetching + decrypting the
+  committed block).
+- **Coalesced, pipelined block writes**: the blk protocol takes
+  64-sector (32K) requests into per-slot 32K driver DMA regions; fssvc
+  merges the allocator's mostly-sequential runs into open 32K staging
+  slots and keeps up to 7 requests in flight. This is sound because of a
+  core invariant now load-bearing: **mossfs orders writes only at
+  dev.flush() and never reads back a sector written since the last
+  flush except through its cache** — writes between barriers may
+  complete in any order.
+- **32K readahead** on the read side (slot 0 of the window): sequential
+  file reads get the next 7 blocks free; a write overlapping the
+  readahead range invalidates it.
+- **Commit threshold 96 -> 144 dirty blocks**, so a 512KB stream is one
+  txg (one flush pair, not two).
+- Ruled out empirically: host fsync behind virtio FLUSH (`cache=unsafe`
+  changed nothing — QEMU absorbs flushes for this image cheaply).
+
+Remaining headroom, in likely order: the Debug kernel's syscall/IPC
+paths, per-block XTS/MAC call overheads in fssvc's single thread, and
+read pipelining beyond one readahead window.
 
 ## Networking
 
