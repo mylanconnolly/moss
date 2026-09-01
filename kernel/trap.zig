@@ -173,6 +173,9 @@ fn handleUserSync(frame: *TrapFrame) void {
     const ec: u8 = @truncate(esr >> 26);
     if (ec == 0x15) {
         syscall.dispatch(frame);
+        // A syscall may have made someone runnable on this core (e.g. a
+        // reply waking a caller): honor it before returning to EL0.
+        sched.preemptIfNeeded();
         return;
     }
     const far = asm ("mrs %[v], far_el1"

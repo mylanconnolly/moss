@@ -112,6 +112,25 @@ pub fn dmaAlloc(pages: u64) IpcResult {
     return syscall6(.dma_alloc, pages, 0, 0, 0, 0, 0);
 }
 
+pub fn notifyBind(handle: u64) shared.Errno {
+    return @enumFromInt(syscall3(.notify_bind, handle, 0, 0));
+}
+
+/// Virtual counter ticks (EL0 access enabled by the kernel).
+pub fn cycles() u64 {
+    return asm volatile (
+        \\isb
+        \\mrs %[v], cntvct_el0
+        : [v] "=r" (-> u64),
+    );
+}
+
+pub fn cycleHz() u64 {
+    return asm ("mrs %[v], cntfrq_el0"
+        : [v] "=r" (-> u64),
+    );
+}
+
 pub fn replyTyped(comptime Rep: type, channel: u64, rep: Rep, send_cap: u64) shared.Errno {
     const words = shared.encodeMsg(Rep, rep);
     return syscall6(.reply, channel, words[0], words[1], words[2], words[3], send_cap).err;

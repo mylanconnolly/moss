@@ -42,6 +42,9 @@ pub fn initCore(cpu: u32) void {
 
     // SGIs/PPIs: group 1, highest priority.
     gicrSgi(cpu, 0x80).* = 0xffff_ffff; // IGROUPR0
+    // The resched SGI must be enabled per-core or cross-core wakeup kicks
+    // silently vanish (ISENABLER is set-bits, no RMW needed).
+    gicrSgi(cpu, 0x100).* = @as(u32, 1) << @intCast(resched_sgi);
 
     // System-register CPU interface on, priority mask open, group 1 enabled.
     asm volatile (
@@ -72,6 +75,10 @@ pub fn enableSpi(intid: u32) void {
     gicd(0x80 + reg * 4).* = gicd(0x80 + reg * 4).* | bit; // IGROUPR: group 1
     gicd64(0x6000 + @as(u64, intid) * 8).* = 0; // IROUTER: affinity 0.0.0.0
     gicd(0x100 + reg * 4).* = bit; // ISENABLER
+}
+
+pub fn gicdRead(offset: u64) u32 {
+    return gicd(offset).*;
 }
 
 /// Mask an SPI (until the handler acks a level-triggered source).

@@ -52,8 +52,16 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
         .dma_alloc => sysDmaAlloc(d, frame),
+        .notify_bind => sysNotifyBind(d, frame.regs[0]),
         _ => errno(.nosys),
     };
+}
+
+fn sysNotifyBind(d: *domain.Domain, handle_bits: u64) u64 {
+    const h: shared.Handle = @bitCast(handle_bits);
+    const obj = d.captable.?.lookup(h, .notification) orelse return errno(.bad_handle);
+    ipc.bindNotification(@ptrFromInt(obj), sched.thisCpu().current);
+    return errno(.ok);
 }
 
 // ---------------------------------------------------------------- drivers

@@ -69,6 +69,9 @@ pub const Syscall = enum(u64) {
     /// dma_alloc(pages) -> x1 = va, x2 = device address (physically
     /// contiguous; device address == physical until an IOMMU arrives)
     dma_alloc = 22,
+    /// notify_bind(notification): a signal interrupts this thread's
+    /// blocked recv (Errno.interrupted) — the ring doorbell hook
+    notify_bind = 23,
     _,
 };
 
@@ -219,6 +222,10 @@ pub const BlkReq = union(enum(u64)) {
     capacity: void,
     read: struct { sector: u64, off: u64 },
     write: struct { sector: u64, off: u64 },
+    /// Ring transport setup over the sync channel (one cap each):
+    ring_setup: void, // + ring shm cap
+    ring_sq_bell: void, // + notification the client rings after submitting
+    ring_cq_bell: void, // + notification the server rings after completing
 };
 
 pub const BlkResp = union(enum(u64)) {
@@ -228,6 +235,77 @@ pub const BlkResp = union(enum(u64)) {
 };
 
 pub const blk_sector_size: u64 = 512;
+
+// ---------------------------------------------------------------- rings
+//
+// The async transport: a submission ring and a completion ring in one
+// shared page, single-producer/single-consumer each, with notification
+// doorbells for wakeups. Entries carry the same typed message words as
+// channels plus a correlation id — same semantics, different transport.
+// The data plane needs no syscalls; only the doorbells do.
+
+pub const ring_entries = 16;
+
+pub const RingEntry = extern struct {
+    id: u64,
+    words: [4]u64,
+};
+
+pub const RingBuf = extern struct {
+    sq_head: u32,
+    sq_tail: u32,
+    _pad0: [56]u8,
+    cq_head: u32,
+    cq_tail: u32,
+    _pad1: [56]u8,
+    sq: [ring_entries]RingEntry,
+    cq: [ring_entries]RingEntry,
+
+    pub fn init(self: *RingBuf) void {
+        self.sq_head = 0;
+        self.sq_tail = 0;
+        self.cq_head = 0;
+        self.cq_tail = 0;
+    }
+
+    pub fn sqPush(self: *RingBuf, e: RingEntry) bool {
+        return push(&self.sq, &self.sq_head, &self.sq_tail, e);
+    }
+
+    pub fn sqPop(self: *RingBuf, out: *RingEntry) bool {
+        return pop(&self.sq, &self.sq_head, &self.sq_tail, out);
+    }
+
+    pub fn cqPush(self: *RingBuf, e: RingEntry) bool {
+        return push(&self.cq, &self.cq_head, &self.cq_tail, e);
+    }
+
+    pub fn cqPop(self: *RingBuf, out: *RingEntry) bool {
+        return pop(&self.cq, &self.cq_head, &self.cq_tail, out);
+    }
+
+    fn push(ring: *[ring_entries]RingEntry, head: *u32, tail: *u32, e: RingEntry) bool {
+        const t = @atomicLoad(u32, tail, .monotonic);
+        const h = @atomicLoad(u32, head, .acquire);
+        if (t -% h == ring_entries) return false; // full
+        ring[t % ring_entries] = e;
+        @atomicStore(u32, tail, t +% 1, .release);
+        return true;
+    }
+
+    fn pop(ring: *[ring_entries]RingEntry, head: *u32, tail: *u32, out: *RingEntry) bool {
+        const h = @atomicLoad(u32, head, .monotonic);
+        const t = @atomicLoad(u32, tail, .acquire);
+        if (h == t) return false; // empty
+        out.* = ring[h % ring_entries];
+        @atomicStore(u32, head, h +% 1, .release);
+        return true;
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(RingBuf) <= 4096);
+}
 
 pub const LogReply = union(enum(u64)) {
     ok: void,
@@ -291,6 +369,35 @@ test "strings round-trip through message words" {
     try std.testing.expectEqualStrings("worker msg 7", wordsToStr(&buf, w));
     const empty = strToWords("");
     try std.testing.expectEqualStrings("", wordsToStr(&buf, empty));
+}
+
+test "rings push and pop with wraparound, full and empty detected" {
+    var page: [4096]u8 align(64) = @splat(0);
+    const rb: *RingBuf = @ptrCast(@alignCast(&page));
+    rb.init();
+
+    var out: RingEntry = undefined;
+    try std.testing.expect(!rb.sqPop(&out)); // empty
+
+    // Fill completely, then overflow must be refused.
+    for (0..ring_entries) |i| {
+        try std.testing.expect(rb.sqPush(.{ .id = i, .words = .{ i, 0, 0, 0 } }));
+    }
+    try std.testing.expect(!rb.sqPush(.{ .id = 99, .words = @splat(0) }));
+
+    // Drain in order.
+    for (0..ring_entries) |i| {
+        try std.testing.expect(rb.sqPop(&out));
+        try std.testing.expectEqual(@as(u64, i), out.id);
+    }
+    try std.testing.expect(!rb.sqPop(&out));
+
+    // Wraparound: interleave 3 full cycles.
+    for (0..3 * ring_entries) |i| {
+        try std.testing.expect(rb.cqPush(.{ .id = i, .words = @splat(i) }));
+        try std.testing.expect(rb.cqPop(&out));
+        try std.testing.expectEqual(@as(u64, i), out.id);
+    }
 }
 
 test "handle round-trips through its integer representation" {

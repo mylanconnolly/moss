@@ -28,7 +28,7 @@ pooled hardware.
 | `zig build run -Dinit-test` | Boot userspace root+init: lazy activation, supervised restarts, re-wiring |
 | `zig build run -Dsandbox-test` | Interposition proxy, nested domains, one-call subtree revocation, benchmarks |
 | `zig build run -Dflap-test` | Supervision drill: restart budget exhausts, escalation climbs the tree |
-| `zig build run-blk -Dblk-test` | Userspace virtio-blk driver: verified sector I/O over IPC |
+| `zig build run-blk -Dblk-test` | Userspace virtio-blk: verified I/O over sync channels AND async rings, raced |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout

@@ -118,6 +118,7 @@ pub const PerCpu = struct {
     reap: ?*Thread = null,
     need_resched: bool = false,
     online: bool = false,
+    ticks: u64 = 0, // debug
 };
 
 var cpus: [max_cpus]PerCpu = undefined;
@@ -305,6 +306,7 @@ pub fn onTick(is_timekeeper: bool) void {
     defer big_lock.unlockRestore(daif);
     const cpu = thisCpu();
     cpu.current.cpu_ticks += 1;
+    cpu.ticks += 1;
 
     if (is_timekeeper) {
         global_ticks += 1;
@@ -339,6 +341,28 @@ pub fn currentName() []const u8 {
     return thisCpu().current.name;
 }
 
+/// Debug: log every live thread and where it is.
+pub fn debugDump() void {
+    for (&threads) |*t| {
+        if (t.state == .unused) continue;
+        log.info("thread {s}#{d}: {t} in_recv={} list={} slot={} cpu={?d} q={?d}", .{
+            t.name,              t.id,
+            t.state,             t.in_recv,
+            t.block_list != null, t.block_slot != null,
+            t.on_cpu,            t.queued_on,
+        });
+    }
+    for (&cpus) |*c| {
+        if (!c.online) continue;
+        var qlen: usize = 0;
+        var it = c.queue.first;
+        while (it) |node| : (it = node.next) qlen += 1;
+        log.info("cpu{d}: qlen={d} need_resched={} current={s} ticks={d}", .{
+            c.id, qlen, c.need_resched, c.current.name, c.ticks,
+        });
+    }
+}
+
 pub fn ticksOfCurrent() u64 {
     return thisCpu().current.cpu_ticks;
 }
@@ -368,6 +392,14 @@ fn enqueueLocked(t: *Thread) void {
     };
     t.queued_on = target;
     cpus[target].queue.append(&t.node);
+    // Kick the target so wakeups run in microseconds, not at the next
+    // 100ms tick: another core gets an SGI (leaving wfi -> preempt path);
+    // our own core is handled at the next preempt point (IRQ exit or
+    // syscall return).
+    cpus[target].need_resched = true;
+    if (&cpus[target] != thisCpu()) {
+        gic.sendSgi(target);
+    }
 }
 
 /// Core scheduling decision. Big lock held, IRQs masked.

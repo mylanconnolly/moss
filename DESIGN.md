@@ -68,7 +68,18 @@ latched bits checked *inside recv before blocking* — the interrupt-on-signal
 path alone loses signals that arrive while the supervisor is busy between
 recvs (the classic lost wakeup). Init also refuses to hand out a channel to
 an instance it can see is already dead, closing the window where a death is
-signaled but not yet processed.
+signaled but not yet processed. And its sibling (found by the Phase 8
+benchmark): consumers of a bound notification must drain it with notify_wait
+after every interrupted recv, or the latched bits make every future recv
+return interrupted.
+
+Two scheduler lessons from the same benchmark: (1) enqueueing a thread onto
+another core must *kick* that core (SGI out of wfi; need_resched + a
+preempt check on syscall return for the local core) — without it every
+cross-core wakeup silently waits for the target's next 100ms tick, which no
+functional test notices but which taxes every IPC round-trip ~2500x; and
+(2) the resched SGI has to be enabled in each core's redistributor
+(GICR_ISENABLER0), or the kicks vanish without any error.
 
 Because a fresh domain holds *nothing*, the empty sandbox is the zero value.
 Sandboxing is not a mode; it is the absence of grants.
@@ -88,9 +99,18 @@ Two transports, one contract:
    A serves (recv/reply), side B calls; per-side refcounts close a side when
    its last cap dies. Cap transfer over messages is the buffer-grant
    mechanism — an shm cap granted in a call is how out-of-line data crosses.
-2. **Async rings** (Phase 8) — io_uring-style shared-memory
-   submission/completion rings for bulk and streams, so services don't need a
-   thread per request.
+2. **Async rings** — io_uring-style shared-memory submission/completion
+   rings for bulk and streams, so services don't need a thread per request.
+   As built (Phase 8): the ring is pure userspace over existing primitives —
+   an shm grant holds the SQ/CQ pair (SPSC, acquire/release indices, defined
+   in shared/ and host-tested), notifications are the doorbells, and
+   notify_bind lets the server's blocked recv be interrupted by the
+   submission bell, so one thread serves both transports. Entries carry the
+   same typed message words as channels plus a correlation id — same
+   semantics, different transport; the data plane costs no syscalls, only
+   the doorbells do. Measured on virtio-blk at queue depth 8: ~6x the
+   sync-channel throughput (19.5us vs 123us per 512B read under TCG; 7.9us
+   per op under HVF).
 
 **Failure is in the vocabulary.** Channel death is always observable: peers
 receive a death notification and in-flight operations complete with a distinct

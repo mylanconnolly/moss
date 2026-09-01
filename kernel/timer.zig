@@ -29,6 +29,14 @@ pub fn initCore(cpu: u32) void {
         :
         : [one] "r" (@as(u64, 1)),
     );
+    // Let EL0 read the counters (cntvct/cntpct): userspace benchmarks and
+    // timeouts need a clock that doesn't cost a syscall.
+    asm volatile (
+        \\msr cntkctl_el1, %[v]
+        \\isb
+        :
+        : [v] "r" (@as(u64, 0b11)),
+    );
 }
 
 var uptime_ticks: u64 = 0;
