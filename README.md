@@ -30,6 +30,7 @@ pooled hardware.
 | `zig build run -Dflap-test` | Supervision drill: restart budget exhausts, escalation climbs the tree |
 | `zig build run-blk -Dblk-test` | Userspace virtio-blk: verified I/O over sync channels AND async rings, raced |
 | `zig build run-blk -Dfs-test` | FS service on virtio-blk: per-process namespace views (badged caps) on real storage |
+| `zig build run-net -Dnet-test` | Dual-stack TCP through userspace netsvc; allowlist views enforced |
 | `zig build test` | Host-side unit tests of `shared/` |
 
 ## Layout

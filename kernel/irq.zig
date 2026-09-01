@@ -56,10 +56,14 @@ pub fn deliver(intid: u32) bool {
 }
 
 /// Called by notification teardown WITH THE BIG LOCK HELD: sever any
-/// bindings so a dead notification is never signaled.
+/// bindings so a dead notification is never signaled, and mask the lines —
+/// an unbound level-triggered device would interrupt-storm to nowhere.
 fn onNotificationFreed(n: *ipc.Notification) void {
-    for (&bindings) |*b| {
-        if (b.* == n) b.* = null;
+    for (&bindings, 0..) |*b, i| {
+        if (b.* == n) {
+            b.* = null;
+            gic.disableSpi(@intCast(spi_base + i));
+        }
     }
 }
 

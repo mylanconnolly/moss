@@ -125,6 +125,7 @@ pub const ImageId = enum(u64) {
     sandbox = 5,
     blk = 6,
     fs = 7,
+    net = 8,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -282,6 +283,75 @@ pub const FsErr = enum(u64) {
 /// Boot filesystem archive ("MARC"): a flat sequence of
 /// { path_len: u32 LE, data_len: u32 LE, path bytes, data bytes }.
 pub const marc_magic = "MARC";
+
+// ------------------------------------------------------------- networking
+//
+// The net service protocol. Like filesystems, network access is a badged
+// view: the badge selects server-side filter state. An unrestricted view
+// can derive filtered ones (allowlist of one destination, no listening) —
+// allowlist-shaped network access as the sandbox idiom. Blocking ops are
+// polled (would_block) so one serve loop handles every client; the async
+// ring transport is the future home of real wakeups.
+//
+// Addressing is IPv6-native: every address is 128 bits, carried as two
+// words (hi = bytes 0..8 big-endian, lo = bytes 8..16). IPv4 destinations
+// are v4-mapped (::ffff:a.b.c.d) — the ABI has no IPv4-only path to
+// depend on, and the stack speaks both families on the wire.
+
+pub const NetReq = union(enum(u64)) {
+    attach_buf: void, // + shm cap: payload buffer for this view
+    tcp_listen: struct { port: u64 }, // family-agnostic
+    tcp_connect: struct { ip_hi: u64, ip_lo: u64, port: u64 },
+    tcp_status: struct { sock: u64 }, // -> num(TcpState)
+    tcp_accept: struct { sock: u64 }, // -> num(new sock) | would_block
+    tcp_send: struct { sock: u64, len: u64 }, // data from buf[0..len]
+    tcp_recv: struct { sock: u64, len: u64 }, // data into buf[0..n]
+    tcp_close: struct { sock: u64 },
+    /// ICMP echo (v6 or v4 by address); poll ping_check for replies seen.
+    ping: struct { ip_hi: u64, ip_lo: u64 },
+    ping_check: void, // -> num(replies received so far)
+    /// Unrestricted views only: mint a filtered view allowing exactly one
+    /// outbound destination (and no listening). Reply attaches the cap.
+    derive: struct { ip_hi: u64, ip_lo: u64, port: u64 },
+};
+
+/// v4-mapped IPv6 words for an IPv4 address given as 0xAABBCCDD.
+pub fn v4Words(ip: u32) [2]u64 {
+    return .{ 0, 0x0000_ffff_0000_0000 | @as(u64, ip) };
+}
+
+pub const NetResp = union(enum(u64)) {
+    ok: void,
+    num: struct { n: u64 },
+    net_err: struct { code: u64 },
+};
+
+pub const NetErr = enum(u64) {
+    would_block = 1,
+    denied = 2,
+    refused = 3,
+    closed = 4,
+    bad = 5,
+    no_space = 6,
+};
+
+pub const TcpState = enum(u64) {
+    closed = 0,
+    listen = 1,
+    syn_sent = 2,
+    syn_rcvd = 3,
+    established = 4,
+    close_wait = 5,
+};
+
+// QEMU slirp constants (static config; DHCP/SLAAC are not Phase 10
+// problems). v4 net 10.0.2.0/24, v6 prefix fec0::/64.
+pub const net_own_ip4: u32 = 0x0A00_020F; // 10.0.2.15
+pub const net_gw_ip4: u32 = 0x0A00_0202; // 10.0.2.2
+pub const net_echo_ip4: u32 = 0x0A00_0264; // 10.0.2.100 (guestfwd echo)
+pub const net_echo_port: u64 = 9000;
+pub const net_own_ip6: [2]u64 = .{ 0xfec0_0000_0000_0000, 0x15 }; // fec0::15
+pub const net_gw_ip6: [2]u64 = .{ 0xfec0_0000_0000_0000, 0x2 }; // fec0::2
 
 // ---------------------------------------------------------------- rings
 //

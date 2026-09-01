@@ -71,6 +71,11 @@ pub fn build(b: *std.Build) void {
         "fs-test",
         "Run the filesystem demo: per-process namespace views on real storage (use run-blk)",
     ) orelse false;
+    const net_test = b.option(
+        bool,
+        "net-test",
+        "Run the networking demo: dual-stack TCP + allowlist views (use run-net)",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -100,6 +105,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "flap_test", flap_test);
     build_opts.addOption(bool, "blk_test", blk_test);
     build_opts.addOption(bool, "fs_test", fs_test);
+    build_opts.addOption(bool, "net_test", net_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -123,6 +129,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sandbox", .src = "user/sandbox.zig" },
         .{ .name = "blk", .src = "user/blk.zig" },
         .{ .name = "fs", .src = "user/fs.zig" },
+        .{ .name = "net", .src = "user/net.zig" },
     };
     const user_blobs = b.addWriteFiles();
     var blobs_zig: std.ArrayList(u8) = .empty;
@@ -241,6 +248,27 @@ pub fn build(b: *std.Build) void {
     run_blk.step.dependOn(&mkdisk.step);
     const run_blk_step = b.step("run-blk", "Boot with a virtio disk attached (pairs with -Dblk-test).");
     run_blk_step.dependOn(&run_blk.step);
+
+    // run-net: virtio-net over slirp (v4 + v6), with a guestfwd echo server
+    // (cat) at 10.0.2.100:9000.
+    const run_net = b.addSystemCommand(&.{
+        "qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "cortex-a72",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-netdev",
+        "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
+        "-device",
+        "virtio-net-device,netdev=n0",
+    });
+    run_net.addArgs(&qemu_common);
+    run_net.addArg("-kernel");
+    run_net.addFileArg(kernel_bin.getOutput());
+    const run_net_step = b.step("run-net", "Boot with a virtio NIC on slirp (pairs with -Dnet-test).");
+    run_net_step.dependOn(&run_net.step);
 
     const shared_test_mod = b.createModule(.{
         .root_source_file = b.path("shared/lib.zig"),

@@ -138,6 +138,12 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.net_test) {
+        _ = sched.spawn("boot-watch", netTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
     log.info("boot complete; core 0 idling", .{});
     // This context is core 0's idle thread from here on.
     halt();
@@ -522,6 +528,88 @@ fn fsTestWorker(_: u64) void {
     } else {
         std.debug.panic("fs-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
+}
+
+/// Phase 10 exit-criterion driver: two processes speak TCP through the
+/// userspace net service (loopback over v4-mapped AND IPv6, plus real wire
+/// TCP through slirp), and a sandboxed child holding an allowlist view can
+/// reach only its allowlisted destination.
+fn netTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    log.info("net-test: starting userspace netsvc (driver + dual-stack tcp)", .{});
+    const svc = domain.spawn("netsvc", blobs.net, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = net_ch,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
+    sched.sleep(5);
+    if (svc.state == .dead) std.debug.panic("netsvc died at init: exit {d}", .{svc.exit_code});
+
+    // Unrestricted views for the echo pair, via derive.
+    const srv_view = deriveNetView(net_ch, 0, 0, 0);
+    const cli_view = deriveNetView(net_ch, 0, 0, 0);
+    const srv = domain.spawn("echosrv", blobs.net, .{
+        .arg = 2,
+        .grant_debug_log = true,
+        .grant_channel_b = @ptrFromInt(srv_view.obj),
+        .grant_channel_b_badge = srv_view.badge,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn echosrv: {t}", .{e});
+    sched.sleep(3);
+    const cli = domain.spawn("echocli", blobs.net, .{
+        .arg = 3,
+        .grant_debug_log = true,
+        .grant_channel_b = @ptrFromInt(cli_view.obj),
+        .grant_channel_b_badge = cli_view.badge,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn echocli: {t}", .{e});
+
+    while (cli.state != .dead) sched.sleep(2);
+    if (cli.exit_code != 0) std.debug.panic("echocli failed: {d}", .{cli.exit_code});
+    while (srv.state != .dead) sched.sleep(2);
+    if (srv.exit_code != 0) std.debug.panic("echosrv failed: {d}", .{srv.exit_code});
+    log.info("net-test: both echo processes finished clean", .{});
+
+    // The sandboxed child: allowlist = the wire echo destination only.
+    const v4w = shared.v4Words(shared.net_echo_ip4);
+    const box_view = deriveNetView(net_ch, v4w[0], v4w[1], shared.net_echo_port);
+    const box = domain.spawn("boxed", blobs.net, .{
+        .arg = 4,
+        .grant_debug_log = true,
+        .grant_channel_b = @ptrFromInt(box_view.obj),
+        .grant_channel_b_badge = box_view.badge,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn boxed: {t}", .{e});
+    while (box.state != .dead) sched.sleep(2);
+    if (box.exit_code != 0) std.debug.panic("boxed failed: {d}", .{box.exit_code});
+
+    domain.destroy(svc);
+    while (svc.state != .dead) sched.sleep(1);
+    ipc.unrefSide(net_ch, .b);
+
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    if (frames_after == frames_before and ipc.shm_account.balance() == 0) {
+        log.info("net-test: PASS — dual-stack tcp via userspace netsvc, allowlist enforced, nothing leaked", .{});
+    } else {
+        std.debug.panic("net-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
+    }
+}
+
+fn deriveNetView(net_ch: *ipc.Channel, hi: u64, lo: u64, port: u64) struct { obj: u64, badge: u64 } {
+    const res = ipc.call(net_ch, .{
+        .data = shared.encodeMsg(shared.NetReq, .{
+            .derive = .{ .ip_hi = hi, .ip_lo = lo, .port = port },
+        }),
+    }, 0);
+    std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
+    return .{ .obj = res.msg.cap_obj, .badge = res.msg.cap_badge };
 }
 
 fn cycles() u64 {

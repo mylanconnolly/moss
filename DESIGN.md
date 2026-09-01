@@ -236,6 +236,26 @@ from it), disk/ is mossfs, a deliberately tiny writable FS (64 inodes,
 direct blocks, no delete yet) on the virtio-blk driver. Persistence is
 real: a second boot finds the same files.
 
+## Networking
+
+**As built (Phase 10):** the net service is one userspace process holding
+the virtio-net driver and a deliberately tiny dual-stack TCP/IP: ARP (v4)
+and NDP/ICMPv6 (v6) resolve the slirp gateways at startup; TCP is
+stop-and-wait (one unacked segment per socket), in-order receive, fixed
+windows, no options — enough for the fabric protocol, not an RFC museum.
+The ABI is IPv6-native: addresses are always 128 bits (two words), IPv4
+rides v4-mapped, and there is no v4-only path to fossilize. Local
+destinations (own addresses, ::1, 127/8) short-circuit through the stack,
+so same-node processes speak real TCP without touching the wire. Network
+access is a badged view (same idiom as filesystems): filtered views carry a
+one-destination outbound allowlist and may not listen, ping, or derive —
+allowlist-shaped network access as the sandbox default. Blocking ops are
+polled (would_block); rings are the future wakeup path. Lessons paid for:
+on loopback, emit-is-synchronous means all TCP bookkeeping must precede
+emission; virtio config space must be read at aligned offsets; and severing
+an IRQ binding must also mask the line or a level-triggered device storms
+into the void.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
