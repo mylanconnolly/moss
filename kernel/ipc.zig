@@ -55,6 +55,10 @@ pub const Notification = struct {
     refs: u32 = 0,
     bits: u64 = 0,
     waiter: ?*sched.Thread = null,
+    /// A thread bound via watch_deaths: a signal arriving while it is
+    /// blocked in recv interrupts the recv (Errno.interrupted) so one
+    /// thread can both serve a channel and supervise.
+    bound: ?*sched.Thread = null,
 };
 
 pub const Shm = struct {
@@ -150,7 +154,9 @@ pub fn recv(ch: *Channel, out: *Msg) shared.Errno {
         if (!ch.b_open) return .peer_dead;
         const t = sched.thisCpu().current;
         t.ipc_status = @intFromEnum(shared.Errno.ok);
+        t.in_recv = true;
         sched.blockCurrentLocked(null, &ch.server_waiting);
+        t.in_recv = false;
         if (t.ipc_status != @intFromEnum(shared.Errno.ok)) {
             return @enumFromInt(t.ipc_status);
         }
@@ -211,6 +217,16 @@ fn closeSide(ch: *Channel, side: Side) void {
     }
 }
 
+/// A cap to a side was duplicated (cap transfer, spawn grant).
+pub fn refSide(ch: *Channel, side: Side) void {
+    const daif = sched.acquire();
+    defer sched.release(daif);
+    switch (side) {
+        .a => ch.refs_a += 1,
+        .b => ch.refs_b += 1,
+    }
+}
+
 pub fn unrefSide(ch: *Channel, side: Side) void {
     const last = blk: {
         const daif = sched.acquire();
@@ -251,7 +267,31 @@ pub fn signal(n: *Notification, bits: u64) void {
         t.ipc_status = @intFromEnum(shared.Errno.ok);
         n.bits = 0;
         sched.wakeLocked(t);
+        return;
     }
+    // Interrupt a bound thread blocked in recv; the bits stay latched for
+    // its follow-up notify_wait.
+    if (n.bound) |t| {
+        if (t.state == .blocked and t.in_recv and t.block_slot != null) {
+            t.block_slot.?.* = null;
+            t.block_slot = null;
+            t.ipc_status = @intFromEnum(shared.Errno.interrupted);
+            sched.wakeLocked(t);
+        }
+    }
+}
+
+pub fn refNotification(n: *Notification) void {
+    const daif = sched.acquire();
+    defer sched.release(daif);
+    n.refs += 1;
+}
+
+/// Bind `t` for recv interruption (see Notification.bound).
+pub fn bindNotification(n: *Notification, t: *sched.Thread) void {
+    const daif = sched.acquire();
+    defer sched.release(daif);
+    n.bound = t;
 }
 
 /// Block until any bits are signaled; returns and clears them.
@@ -330,16 +370,21 @@ pub fn unrefShm(s: *Shm) void {
 
 // -------------------------------------------------------------- releasing
 
+/// Registered by domain.zig (import-cycle firewall): releases one
+/// domain_ctl reference.
+pub var domain_ctl_release: ?*const fn (u64) void = null;
+
 /// Release one cap's reference to whatever kernel object it names. Called
 /// for each entry when a domain's cap table is torn down, and by explicit
-/// cap deletion later.
+/// cap deletion (cap_drop).
 pub fn releaseCap(cap_type: cap.CapType, obj: u64) void {
     switch (cap_type) {
-        .empty, .debug_log => {},
+        .empty, .debug_log, .spawner => {},
         .channel_a => unrefSide(@ptrFromInt(obj), .a),
         .channel_b => unrefSide(@ptrFromInt(obj), .b),
         .notification => unrefNotification(@ptrFromInt(obj)),
         .shm => unrefShm(@ptrFromInt(obj)),
+        .domain_ctl => if (domain_ctl_release) |f| f(obj),
     }
 }
 

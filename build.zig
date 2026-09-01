@@ -28,6 +28,11 @@ pub fn build(b: *std.Build) void {
         "ipc-test",
         "Run the IPC demo: typed RPC, cap grants, fault-as-message, peer death",
     ) orelse false;
+    const init_test = b.option(
+        bool,
+        "init-test",
+        "Boot the userspace root/init tree: lazy activation, supervised restarts, re-wiring",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -52,6 +57,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "sched_test", sched_test);
     build_opts.addOption(bool, "domain_test", domain_test);
     build_opts.addOption(bool, "ipc_test", ipc_test);
+    build_opts.addOption(bool, "init_test", init_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -64,9 +70,14 @@ pub fn build(b: *std.Build) void {
 
     // User programs: freestanding flat MOSS images, embedded in the kernel
     // until a filesystem exists (Phase 9).
+    // Order here is cosmetic; the kernel's image table order must match
+    // shared.ImageId.
     const user_progs = [_]struct { name: []const u8, src: []const u8 }{
         .{ .name = "hello", .src = "user/hello.zig" },
         .{ .name = "pingpong", .src = "user/pingpong.zig" },
+        .{ .name = "root", .src = "user/root.zig" },
+        .{ .name = "init", .src = "user/init.zig" },
+        .{ .name = "services", .src = "user/services.zig" },
     };
     const user_blobs = b.addWriteFiles();
     var blobs_zig: std.ArrayList(u8) = .empty;

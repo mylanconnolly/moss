@@ -45,7 +45,35 @@ pub const Syscall = enum(u64) {
     shm_create = 11,
     /// shm_map(handle) -> x1 = va
     shm_map = 12,
+    /// spawn(spawner, image, arg, chan, flags) -> x1 = domain_ctl handle
+    spawn = 13,
+    /// chan_create() -> x1 = side A handle, x2 = side B handle
+    chan_create = 14,
+    /// domain_stat(ctl) -> x1 = DomainState, x2 = exit code
+    domain_stat = 15,
+    /// domain_destroy(ctl) — the one revocation
+    domain_destroy = 16,
+    /// watch_deaths(notification): deaths of domains this domain spawns are
+    /// signaled here; also binds the calling thread so a signal interrupts
+    /// its blocked recv (Errno.interrupted)
+    watch_deaths = 17,
+    /// cap_drop(handle): release one capability
+    cap_drop = 18,
     _,
+};
+
+pub const SpawnFlags = struct {
+    pub const grant_log: u64 = 1 << 0;
+    pub const grant_spawner: u64 = 1 << 1;
+    /// Grant the A (serving) side of the channel in x3 instead of B.
+    pub const chan_side_a: u64 = 1 << 2;
+};
+
+/// Domain lifecycle as reported by domain_stat.
+pub const DomainState = enum(u64) {
+    alive = 0,
+    dying = 1,
+    dead = 2,
 };
 
 /// Syscall results: 0 is success, anything else is one of these.
@@ -62,7 +90,27 @@ pub const Errno = enum(u64) {
     busy = 7,
     bad_state = 8,
     no_space = 9,
+    /// A bound notification fired while this thread was blocked in recv;
+    /// drain it with notify_wait, then resume receiving.
+    interrupted = 10,
     _,
+};
+
+/// Images the kernel can spawn, indexed into its embedded blob table until
+/// a filesystem exists (Phase 9). Order must match the kernel's table.
+pub const ImageId = enum(u64) {
+    hello = 0,
+    pingpong = 1,
+    root = 2,
+    init = 3,
+    services = 4,
+};
+
+/// Services init knows how to activate. Discovery is by protocol id over
+/// init's channel — never by global name.
+pub const ServiceId = enum(u64) {
+    logsvc = 0,
+    greeter = 1,
 };
 
 /// Encode a message union into the four IPC data words: word 0 is the tag,
@@ -125,6 +173,48 @@ pub const FaultMsg = union(enum(u64)) {
     fault: struct { esr: u64, far: u64, elr: u64 },
 };
 
+/// Init's front-channel protocol: ask to be connected to a service; the
+/// reply attaches a fresh channel-B cap for it.
+pub const InitRequest = union(enum(u64)) {
+    connect: struct { service: u64 },
+};
+
+pub const InitReply = union(enum(u64)) {
+    connected: void,
+    failed: struct { err: u64 },
+};
+
+/// The logging service protocol: 24 bytes of text packed into the words.
+pub const LogMsg = union(enum(u64)) {
+    text: struct { a: u64, b: u64, c: u64 },
+};
+
+pub const LogReply = union(enum(u64)) {
+    ok: void,
+};
+
+/// Pack a short string into three message words (nul-padded, max 24 bytes).
+pub fn strToWords(s: []const u8) [3]u64 {
+    var bytes: [24]u8 = @splat(0);
+    const n = @min(s.len, 24);
+    @memcpy(bytes[0..n], s[0..n]);
+    return .{
+        std.mem.readInt(u64, bytes[0..8], .little),
+        std.mem.readInt(u64, bytes[8..16], .little),
+        std.mem.readInt(u64, bytes[16..24], .little),
+    };
+}
+
+/// Unpack; returns the slice up to the first nul within `buf`.
+pub fn wordsToStr(buf: *[24]u8, w: [3]u64) []const u8 {
+    std.mem.writeInt(u64, buf[0..8], w[0], .little);
+    std.mem.writeInt(u64, buf[8..16], w[1], .little);
+    std.mem.writeInt(u64, buf[16..24], w[2], .little);
+    var n: usize = 0;
+    while (n < 24 and buf[n] != 0) n += 1;
+    return buf[0..n];
+}
+
 /// Header at the start of a flat user image ("MOSS" magic). Written by the
 /// user program's entry assembly from linker-script symbols; read by the
 /// kernel loader. All sizes are from the image base, 4K-aligned.
@@ -153,6 +243,14 @@ test "typed messages round-trip through the four data words" {
 
     // A junk tag decodes to null, never to a wrong message.
     try std.testing.expectEqual(@as(?CalcRequest, null), decodeMsg(CalcRequest, .{ 99, 0, 0, 0 }));
+}
+
+test "strings round-trip through message words" {
+    const w = strToWords("worker msg 7");
+    var buf: [24]u8 = undefined;
+    try std.testing.expectEqualStrings("worker msg 7", wordsToStr(&buf, w));
+    const empty = strToWords("");
+    try std.testing.expectEqualStrings("", wordsToStr(&buf, empty));
 }
 
 test "handle round-trips through its integer representation" {

@@ -20,6 +20,10 @@ pub const CapType = enum(u8) {
     notification,
     /// A shared-memory grant (map).
     shm,
+    /// Authority to spawn and destroy domains.
+    spawner,
+    /// Control over one spawned domain (stat, destroy).
+    domain_ctl,
 };
 
 const Entry = struct {

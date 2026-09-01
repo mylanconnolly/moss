@@ -92,6 +92,8 @@ pub const Thread = struct {
     /// While .blocked: the queue or single-waiter slot holding this thread.
     block_list: ?*std.DoublyLinkedList = null,
     block_slot: ?*?*Thread = null,
+    /// Blocked inside recv, interruptible by a bound notification.
+    in_recv: bool = false,
     node: std.DoublyLinkedList.Node = .{},
 };
 

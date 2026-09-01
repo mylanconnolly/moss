@@ -109,9 +109,28 @@ Init is three small responsibilities on top of our primitives:
   respawn from manifest, provably leak-free. Dependents observe channel death
   and re-wire through init. Supervisors nest with domains.
 
-**Crash-only policy:** every service must tolerate being killed at any
-instant. Restart is the recovery path; there is no graceful-shutdown protocol
-to get wrong.
+**Crash-only policy (in force since Phase 5):** every service must tolerate
+being killed at any instant — no cleanup handlers, no shutdown handshakes,
+no state that only survives a polite exit. Restart is the recovery path;
+there is no graceful-shutdown protocol to get wrong. Clients hold up their
+end: an in-flight call completing with peer_dead means the request may or
+may not have been processed, so requests should be safe to resend (the
+Phase 5 worker demonstrates the idiom: observe peer_dead, re-wire through
+init, resend). Init itself and the root task are the only processes with
+orderly exits, because they are the ones reporting system outcome.
+
+**As built (Phase 5):** spawn authority is a `spawner` capability exercised
+through sys_spawn against the kernel's embedded image table (a filesystem
+replaces the table in Phase 9); a spawned domain is controlled through a
+`domain_ctl` cap (stat/destroy — destroy is the one revocation). Deaths are
+delivered to the spawner's registered death-watch notification, and a
+notification bound to a thread (sys_watch_deaths) interrupts that thread's
+blocked recv with Errno.interrupted — one thread can serve a channel and
+supervise simultaneously, the seL4 bound-notification idea. A kernel reaper
+finishes teardown of drained domains and fires the watch. Init keeps the
+client end of every service channel it creates and hands out copies on
+connect; a service's death closes the channel (init holds no serving-side
+cap), so dependents learn of the death exactly the way any peer does.
 
 ## Drivers
 

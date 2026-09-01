@@ -68,7 +68,10 @@ export fn kmain(dtb_pa: u64) noreturn {
     }
 
     sched.registerCpu(0);
-    domain.init();
+    // Image table order must match shared.ImageId.
+    const blobs = @import("user_blobs");
+    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services });
+    domain.startReaper();
     gic.initDistributor();
     gic.initCore(0);
     timer.initCore(0);
@@ -98,6 +101,12 @@ export fn kmain(dtb_pa: u64) noreturn {
     if (build_options.ipc_test) {
         _ = sched.spawn("root-sim", ipcTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn root-sim: {t}", .{e});
+        };
+    }
+
+    if (build_options.init_test) {
+        _ = sched.spawn("boot-watch", initTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
 
@@ -224,6 +233,36 @@ fn ipcTestWorker(_: u64) void {
     } else {
         std.debug.panic("ipc-test: FAIL — pmem delta {d}B, shm {d}B, askr exit {d}", .{
             frames_before -% frames_after, shm_left, askr.exit_code,
+        });
+    }
+}
+
+/// Phase 5 exit-criterion driver: the kernel's only jobs are to spawn the
+/// userspace root task with the boot grants and verify nothing leaked once
+/// the whole tree has finished. Everything else — init, lazy activation,
+/// supervision, re-wiring — happens in userspace.
+fn initTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    log.info("init-test: starting userspace root task", .{});
+    const root = domain.spawn("root", blobs.root, .{
+        .grant_debug_log = true,
+        .grant_spawner = true,
+    }) catch |e| std.debug.panic("spawn root: {t}", .{e});
+
+    while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);
+    domain.finishTeardown(root);
+    log.info("init-test: root exited with code {d}", .{root.exit_code});
+
+    // Give the reaper a beat to finish any stragglers, then account.
+    sched.sleep(5);
+    const frames_after = pmem.stats().free_bytes;
+    if (frames_after == frames_before and root.exit_code == 0) {
+        log.info("init-test: PASS — userspace tree finished clean, pmem identical", .{});
+    } else {
+        std.debug.panic("init-test: FAIL — pmem delta {d}B, root exit {d}", .{
+            frames_before -% frames_after, root.exit_code,
         });
     }
 }

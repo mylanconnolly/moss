@@ -43,8 +43,49 @@ pub fn callTyped(
     return .{ .ok = rep };
 }
 
+/// Like callTyped but also surfaces a cap attached to the reply.
+pub fn callTypedCap(
+    comptime Req: type,
+    comptime Rep: type,
+    channel: u64,
+    req: Req,
+    send_cap: u64,
+) union(enum) { ok: struct { rep: Rep, cap: u64 }, err: shared.Errno } {
+    const words = shared.encodeMsg(Req, req);
+    const r = syscall6(.call, channel, words[0], words[1], words[2], words[3], send_cap);
+    if (r.err != .ok) return .{ .err = r.err };
+    const rep = shared.decodeMsg(Rep, r.data) orelse return .{ .err = .bad_arg };
+    return .{ .ok = .{ .rep = rep, .cap = r.cap } };
+}
+
 pub fn recvMsg(channel: u64) IpcResult {
     return syscall6(.recv, channel, 0, 0, 0, 0, 0);
+}
+
+pub fn spawn(spawner: u64, image: shared.ImageId, arg: u64, chan: u64, flags: u64) IpcResult {
+    return syscall6(.spawn, spawner, @intFromEnum(image), arg, chan, flags, 0);
+}
+
+/// chan_create: data[0] = side A handle, data[1] = side B handle.
+pub fn chanCreate() IpcResult {
+    return syscall6(.chan_create, 0, 0, 0, 0, 0, 0);
+}
+
+/// domain_stat: data[0] = shared.DomainState, data[1] = exit code.
+pub fn domainStat(ctl: u64) IpcResult {
+    return syscall6(.domain_stat, ctl, 0, 0, 0, 0, 0);
+}
+
+pub fn domainDestroy(ctl: u64) shared.Errno {
+    return @enumFromInt(syscall3(.domain_destroy, ctl, 0, 0));
+}
+
+pub fn watchDeaths(notif: u64) shared.Errno {
+    return @enumFromInt(syscall3(.watch_deaths, notif, 0, 0));
+}
+
+pub fn capDrop(handle: u64) shared.Errno {
+    return @enumFromInt(syscall3(.cap_drop, handle, 0, 0));
 }
 
 pub fn replyTyped(comptime Rep: type, channel: u64, rep: Rep, send_cap: u64) shared.Errno {

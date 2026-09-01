@@ -41,8 +41,130 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .notify_wait => sysNotifyWait(d, frame),
         .shm_create => sysShmCreate(d, frame),
         .shm_map => sysShmMap(d, frame),
+        .spawn => sysSpawn(d, frame),
+        .chan_create => sysChanCreate(d, frame),
+        .domain_stat => sysDomainStat(d, frame),
+        .domain_destroy => sysDomainDestroy(d, frame.regs[0]),
+        .watch_deaths => sysWatchDeaths(d, frame.regs[0]),
+        .cap_drop => sysCapDrop(d, frame.regs[0]),
         _ => errno(.nosys),
     };
+}
+
+// ------------------------------------------------------- domain management
+
+/// spawn(spawner, image, arg, chan, flags): create a domain from an
+/// embedded image with exactly the named grants; returns a domain_ctl
+/// handle. The caller's registered death-watch (if any) is signaled when
+/// the child dies.
+fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const spawner_h: shared.Handle = @bitCast(frame.regs[0]);
+    _ = d.captable.?.lookup(spawner_h, .spawner) orelse return errno(.bad_handle);
+    const image = domain.imageById(frame.regs[1]) orelse return errno(.bad_arg);
+    const name = if (std.enums.fromInt(shared.ImageId, frame.regs[1])) |id|
+        @tagName(id)
+    else
+        "user";
+    const flags = frame.regs[4];
+
+    var manifest: domain.Manifest = .{
+        .grant_debug_log = flags & shared.SpawnFlags.grant_log != 0,
+        .grant_spawner = flags & shared.SpawnFlags.grant_spawner != 0,
+        .arg = frame.regs[2],
+        .auto_reap = true,
+        .watcher = d.death_watch,
+    };
+    if (frame.regs[3] != 0) {
+        const chan_h: shared.Handle = @bitCast(frame.regs[3]);
+        if (flags & shared.SpawnFlags.chan_side_a != 0) {
+            const obj = d.captable.?.lookup(chan_h, .channel_a) orelse return errno(.bad_handle);
+            const ch: *ipc.Channel = @ptrFromInt(obj);
+            ipc.refSide(ch, .a);
+            manifest.grant_channel_a = ch;
+        } else {
+            const obj = d.captable.?.lookup(chan_h, .channel_b) orelse return errno(.bad_handle);
+            const ch: *ipc.Channel = @ptrFromInt(obj);
+            ipc.refSide(ch, .b);
+            manifest.grant_channel_b = ch;
+        }
+    }
+
+    const child = domain.spawn(name, image, manifest) catch |e| {
+        if (manifest.grant_channel_a) |ch| ipc.unrefSide(ch, .a);
+        if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b);
+        return errno(switch (e) {
+            domain.Error.QuotaExceeded => .no_space,
+            domain.Error.BadImage => .bad_arg,
+            else => .no_space,
+        });
+    };
+    _ = child.ctl_refs.fetchAdd(1, .acq_rel);
+    const h = d.captable.?.insert(.domain_ctl, @intFromPtr(child)) orelse {
+        _ = child.ctl_refs.fetchSub(1, .acq_rel);
+        domain.destroy(child);
+        return errno(.no_space);
+    };
+    frame.regs[1] = @bitCast(h);
+    return errno(.ok);
+}
+
+fn sysChanCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const ch = ipc.createChannel(1, 1) catch return errno(.no_space);
+    const ha = d.captable.?.insert(.channel_a, @intFromPtr(ch)) orelse {
+        ipc.unrefSide(ch, .a);
+        ipc.unrefSide(ch, .b);
+        return errno(.no_space);
+    };
+    const hb = d.captable.?.insert(.channel_b, @intFromPtr(ch)) orelse {
+        _ = d.captable.?.remove(ha);
+        ipc.unrefSide(ch, .a);
+        ipc.unrefSide(ch, .b);
+        return errno(.no_space);
+    };
+    frame.regs[1] = @bitCast(ha);
+    frame.regs[2] = @bitCast(hb);
+    return errno(.ok);
+}
+
+fn sysDomainStat(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    const obj = d.captable.?.lookup(h, .domain_ctl) orelse return errno(.bad_handle);
+    const child: *domain.Domain = @ptrFromInt(obj);
+    frame.regs[1] = switch (child.state) {
+        .alive => @intFromEnum(shared.DomainState.alive),
+        .dying => @intFromEnum(shared.DomainState.dying),
+        else => @intFromEnum(shared.DomainState.dead),
+    };
+    frame.regs[2] = child.exit_code;
+    return errno(.ok);
+}
+
+fn sysDomainDestroy(d: *domain.Domain, handle_bits: u64) u64 {
+    const h: shared.Handle = @bitCast(handle_bits);
+    const obj = d.captable.?.lookup(h, .domain_ctl) orelse return errno(.bad_handle);
+    domain.destroy(@ptrFromInt(obj));
+    return errno(.ok);
+}
+
+fn sysWatchDeaths(d: *domain.Domain, handle_bits: u64) u64 {
+    const h: shared.Handle = @bitCast(handle_bits);
+    const obj = d.captable.?.lookup(h, .notification) orelse return errno(.bad_handle);
+    const n: *ipc.Notification = @ptrFromInt(obj);
+    d.death_watch = n;
+    ipc.bindNotification(n, sched.thisCpu().current);
+    return errno(.ok);
+}
+
+fn sysCapDrop(d: *domain.Domain, handle_bits: u64) u64 {
+    const h: shared.Handle = @bitCast(handle_bits);
+    if (h.slot >= cap.slots) return errno(.bad_handle);
+    const e = &d.captable.?.entries[h.slot];
+    if (e.generation != h.generation or e.cap_type == .empty) return errno(.bad_handle);
+    const ct = e.cap_type;
+    const obj = e.object;
+    _ = d.captable.?.remove(h);
+    ipc.releaseCap(ct, obj);
+    return errno(.ok);
 }
 
 // --------------------------------------------------------------- channels
@@ -99,11 +221,20 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
         return null;
     }
     if (d.captable.?.lookup(handle, .notification)) |obj| {
-        const n: *ipc.Notification = @ptrFromInt(obj);
-        const daif = sched.acquire();
-        n.refs += 1;
-        sched.release(daif);
+        ipc.refNotification(@ptrFromInt(obj));
         msg.cap_type = @intFromEnum(cap.CapType.notification);
+        msg.cap_obj = obj;
+        return null;
+    }
+    if (d.captable.?.lookup(handle, .channel_b)) |obj| {
+        ipc.refSide(@ptrFromInt(obj), .b);
+        msg.cap_type = @intFromEnum(cap.CapType.channel_b);
+        msg.cap_obj = obj;
+        return null;
+    }
+    if (d.captable.?.lookup(handle, .channel_a)) |obj| {
+        ipc.refSide(@ptrFromInt(obj), .a);
+        msg.cap_type = @intFromEnum(cap.CapType.channel_a);
         msg.cap_obj = obj;
         return null;
     }

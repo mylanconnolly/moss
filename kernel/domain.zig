@@ -55,6 +55,13 @@ pub const Manifest = struct {
     supervisor: ?*ipc.Channel = null,
     /// Opaque argument delivered in x2 at entry (role tags etc.).
     arg: u64 = 0,
+    /// Grant spawn authority (root and init hold this; services never do).
+    grant_spawner: bool = false,
+    /// Kernel reaper auto-finishes teardown and signals the watcher; off
+    /// for kernel-test-driver domains that finish manually.
+    auto_reap: bool = false,
+    /// Notification signaled (with this domain's slot bit) when it dies.
+    watcher: ?*ipc.Notification = null,
 };
 
 pub const Domain = struct {
@@ -77,13 +84,60 @@ pub const Domain = struct {
     supervisor: ?*ipc.Channel = null,
     threads_alive: std.atomic.Value(u32) = .init(0),
     exit_code: u64 = 0,
+    auto_reap: bool = false,
+    watcher: ?*ipc.Notification = null,
+    /// This domain's registered death-watch (for domains IT spawns).
+    death_watch: ?*ipc.Notification = null,
+    /// Outstanding domain_ctl caps; a dead slot is reusable only at zero.
+    ctl_refs: std.atomic.Value(u32) = .init(0),
 };
 
 var domains: [max_domains]Domain = @splat(.{});
 var next_domain_id: u32 = 1;
 
-pub fn init() void {
+/// Embedded user images, indexed by shared.ImageId. Registered by kmain.
+var images: []const []const u8 = &.{};
+
+pub fn init(image_table: []const []const u8) void {
     sched.user_thread_reaped = &onThreadReaped;
+    ipc.domain_ctl_release = &onCtlReleased;
+    images = image_table;
+}
+
+pub fn imageById(id: u64) ?[]const u8 {
+    if (id >= images.len) return null;
+    return images[@intCast(id)];
+}
+
+fn onCtlReleased(obj: u64) void {
+    const d: *Domain = @ptrFromInt(obj);
+    _ = d.ctl_refs.fetchSub(1, .acq_rel);
+}
+
+pub fn slotIndex(d: *const Domain) u6 {
+    return @intCast((@intFromPtr(d) - @intFromPtr(&domains[0])) / @sizeOf(Domain));
+}
+
+/// The reaper: finishes teardown of drained auto-reap domains outside any
+/// syscall context, then signals whoever watches for the death.
+pub fn startReaper() void {
+    _ = sched.spawn("reaper", reaperLoop, 0, .{}) catch @panic("spawn reaper");
+}
+
+fn reaperLoop(_: u64) void {
+    while (true) {
+        sched.sleep(1);
+        for (&domains) |*d| {
+            if (d.state == .dying and d.auto_reap and drained(d)) {
+                finishTeardown(d);
+                if (d.watcher) |n| {
+                    d.watcher = null;
+                    ipc.signal(n, @as(u64, 1) << slotIndex(d));
+                    ipc.unrefNotification(n);
+                }
+            }
+        }
+    }
 }
 
 fn onThreadReaped(ctx: *anyopaque) void {
@@ -168,8 +222,14 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
         const h = table.insert(.channel_b, @intFromPtr(ch)) orelse return Error.CapTableFull;
         d.init_handle2 = @bitCast(h);
     }
+    if (manifest.grant_spawner) {
+        _ = table.insert(.spawner, 0) orelse return Error.CapTableFull;
+    }
     d.init_arg = manifest.arg;
     d.supervisor = manifest.supervisor;
+    d.auto_reap = manifest.auto_reap;
+    d.watcher = manifest.watcher;
+    if (manifest.watcher) |n| ipc.refNotification(n);
 
     d.state = .alive;
     d.threads_alive.store(1, .release);
