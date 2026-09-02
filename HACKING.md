@@ -52,10 +52,16 @@ polled (`would_block`) so one loop serves everyone; a bound notification
 (`notifyBind`) can interrupt your blocked `recv` — drain it with
 `notifyWait` after every `interrupted` or the latched bits will spin you.
 
-**A shell command**: add a `cmdFoo` + dispatch line in `user/shell.zig`
-(use the fsclient stubs / typed protocols — never parse text out of
-another service), and extend `shell_script` in `tools/runner.zig` so the
-scripted console session covers it.
+**A shell command**: add an arm to `hostCall` in `user/shell.zig` that
+turns typed IPC into a `mshl.Value` (a table, record, string, or
+nothing — never text parsed out of another service; rendering is the
+interpreter's job), add the name to `command_names` (tab completion),
+and extend `shell_script` in `tools/runner.zig` so the scripted console
+session covers it (`.raw = true` sends bytes without a newline; an empty
+`expect` waits for the prompt only). A LANGUAGE feature (a verb over
+values, syntax, an operator) belongs in `lib/mshl.zig` with a host test
+beside it — `zig test lib/mshl.zig` runs in a second; the QEMU check is
+for integration.
 
 **A run tool** (a program msh starts in its own domain): new image as
 above, `runtool.takeSetup(chan_h)` first thing (it collects the console,

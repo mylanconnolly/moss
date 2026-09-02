@@ -298,29 +298,48 @@ const ConsoleTap = struct {
     }
 };
 
-const shell_script = [_]struct { send: []const u8, expect: []const u8 }{
-    .{ .send = "help", .expect = "commands:" },
+/// A scripted step: `send` goes to the console (with "\r" unless raw),
+/// then `expect` must appear (empty = only the prompt), then the prompt.
+const Step = struct { send: []const u8, expect: []const u8, raw: bool = false };
+
+const shell_script = [_]Step{
+    .{ .send = "help", .expect = "commands" },
     .{ .send = "ps", .expect = "fssvc" },
-    .{ .send = "mem", .expect = "MB free" },
-    .{ .send = "df", .expect = "(encrypted)" },
-    .{ .send = "mkdir data/smoke", .expect = "ok" },
-    .{ .send = "write data/smoke/hi.txt typed ipc all the way down", .expect = "ok" },
+    .{ .send = "mem", .expect = "free_mb" },
+    .{ .send = "df", .expect = "encrypted: true" },
+    .{ .send = "mkdir data/smoke", .expect = "" },
+    .{ .send = "write data/smoke/hi.txt \"typed ipc all the way down\"", .expect = "" },
     .{ .send = "cat data/smoke/hi.txt", .expect = "typed ipc all the way down" },
-    .{ .send = "ln data/smoke/l hi.txt", .expect = "ok" },
+    .{ .send = "ln data/smoke/l hi.txt", .expect = "" },
     .{ .send = "cat data/smoke/l", .expect = "typed ipc" },
     .{ .send = "stat data/smoke/l", .expect = "symlink" },
     .{ .send = "start 1", .expect = "started" },
     .{ .send = "svc", .expect = "up" },
     .{ .send = "stop 1", .expect = "stopped" },
     .{ .send = "nodes", .expect = "up" },
-    .{ .send = "rspawn 9 9", .expect = "rspawn: failed" },
-    .{ .send = "rm data/smoke/l", .expect = "ok" },
-    .{ .send = "sync", .expect = "ok" },
-    .{ .send = "rand", .expect = "rand: " },
+    .{ .send = "rspawn 9 9", .expect = "error: rspawn" },
+    .{ .send = "rm data/smoke/l", .expect = "" },
+    .{ .send = "sync", .expect = "" },
+    .{ .send = "rand | len", .expect = "32" },
     .{ .send = "ls img", .expect = "index" },
     .{ .send = "run ps", .expect = "no spawn authority held" },
     .{ .send = "run ls data/smoke", .expect = "hi.txt" },
     .{ .send = "run nope", .expect = "no such image" },
+    // The language: typed pipelines, variables, control flow, redirection.
+    .{ .send = "ls data/smoke | where size > 0 | get name", .expect = "hi.txt" },
+    .{ .send = "ls data/smoke | select name size", .expect = "hi.txt  26" },
+    .{ .send = "let n = (ls data/smoke | len); if $n == 1 { echo \"one file\" } else { echo many }", .expect = "one file" },
+    .{ .send = "for f in (ls data/smoke | get name) { echo \"file: $f\" }", .expect = "file: hi.txt" },
+    .{ .send = "let i = 0; while $i < 3 { let i = $i + 1 }; $i", .expect = "3" },
+    .{ .send = "tree data", .expect = "hi.txt" },
+    .{ .send = "ls data/smoke | select name > data/listing.txt", .expect = "" },
+    .{ .send = "cat data/listing.txt", .expect = "hi.txt" },
+    .{ .send = "echo hello world > data/hello.txt", .expect = "" },
+    .{ .send = "cat data/hello.txt | lines | first 1", .expect = "hello world" },
+    .{ .send = "(stat data/smoke).type == dir", .expect = "true" },
+    // The editor: tab completes a command, ctrl-c abandons the line.
+    .{ .send = "mkd\t", .expect = "mkdir", .raw = true },
+    .{ .send = "\x03", .expect = "^C", .raw = true },
 };
 
 fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
@@ -372,8 +391,9 @@ fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
     for (&shell_script) |step| {
         tap.clear();
         sockSend(sock, step.send);
-        sockSend(sock, "\r");
-        if (!(waitFor(tap, step.expect, 300, polls) and waitFor(tap, "msh> ", 300, polls))) {
+        if (!step.raw) sockSend(sock, "\r");
+        const got = step.expect.len == 0 or waitFor(tap, step.expect, 300, polls);
+        if (!(got and waitFor(tap, "msh> ", 300, polls))) {
             std.debug.print("[FAIL] {s}: console step '{s}' missing '{s}'\n", .{ spec.name, step.send, step.expect });
             reportFailure(spec.name, "console script step failed", log_path);
             return false;

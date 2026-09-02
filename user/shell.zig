@@ -2,24 +2,28 @@
 //! capabilities a developer console needs: a console channel (virtio
 //! console driver), a filesystem view (the same badged view protocol as
 //! everyone else), an init front channel (service control), and a
-//! spawner cap (which gates the kernel's typed introspection: domain
-//! records and system stats — the mossctl functionality, as builtins).
+//! spawner cap (kernel introspection and `run`).
+//!
+//! The language is mshl (lib/mshl.zig): pipelines carry VALUES — records
+//! and tables from typed IPC — and text exists only when a value is
+//! rendered here for the human. msh is the interpreter's host: every
+//! command below turns a typed reply into a value; the language does the
+//! rest (where/sort-by/select/get, let/if/for/while, redirection).
 //!
 //! Startup handshake: msh serves its spawn channel; the boot driver
-//! calls in three messages, each carrying one cap, in fixed order —
-//! console channel, fs view, init front — then msh prints the banner.
-//!
-//! Everything is typed IPC end to end; the only text in the system is
-//! what msh renders for the human.
+//! calls in four messages, each carrying one cap, in fixed order —
+//! console channel, fs view, init front, fabric — then msh prints the
+//! banner and hands the console to the line editor.
 
+const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
 const loader = @import("loader.zig");
 const tty = @import("tty.zig");
-const Line = tty.Line;
-const out = tty.out;
-const digits = tty.digits;
+const lineedit = @import("lineedit.zig");
+const mshl = @import("mosslib").mshl;
+const Value = mshl.Value;
 
 comptime {
     asm (
@@ -39,7 +43,7 @@ comptime {
     );
 }
 
-pub const panic = @import("std").debug.FullPanic(uPanic);
+pub const panic = std.debug.FullPanic(uPanic);
 
 fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
@@ -51,13 +55,23 @@ const spawner_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 var cons_chan: u64 = 0;
 var cons_buf: u64 = 0; // 1-page byte buffer shared with the console driver
 var cons_shm_h: u64 = 0; // its cap: run tools get the same buffer
-var run_stage: loader.Stage = undefined;
 var fs_chan: u64 = 0;
 var fs_buf: [*]u8 = undefined;
 var init_chan: u64 = 0;
 var fab_chan: u64 = 0;
 var fab_buf: u64 = 0; // attached lazily on first `nodes`
 var glog: u64 = 0;
+var run_stage: loader.Stage = undefined;
+
+// The interpreter's memory: a per-line arena (reset before every line)
+// and a persistent region for variables. Static, like everything in
+// moss userspace; msh's manifest budget covers it.
+var heap_line: [2 << 20]u8 = undefined;
+var heap_vars: [1 << 20]u8 = undefined;
+var line_fba: std.heap.FixedBufferAllocator = undefined;
+var vars_fba: std.heap.FixedBufferAllocator = undefined;
+var interp: mshl.Interp = undefined;
+var host_ctx: u8 = 0;
 
 export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     glog = log_h;
@@ -93,69 +107,70 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     const b = fsc.attachBuf(fs_chan);
     fs_buf = @ptrFromInt(b.va);
 
+    line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
+    vars_fba = std.heap.FixedBufferAllocator.init(&heap_vars);
+    interp = mshl.Interp.init(line_fba.allocator(), vars_fba.allocator(), .{
+        .ctx = @ptrCast(&host_ctx),
+        .call = hostCall,
+    });
+
     _ = usys.log(log_h, "msh: up, serving the console");
-    out("\r\nmoss shell — 'help' lists commands\r\n");
+    tty.out("\r\nmoss shell — 'help' lists commands; tab completes; pipelines carry tables\r\n");
     repl();
 }
 
 fn repl() noreturn {
-    var line: [256]u8 = undefined;
+    var editor: lineedit.Editor = .{
+        .io = .{ .ctx = @ptrCast(&host_ctx), .read = edRead, .write = edWrite, .complete = edComplete },
+        .prompt = "msh> ",
+    };
+    var line: [lineedit.max_line]u8 = undefined;
     while (true) {
-        out("msh> ");
-        const n = readLine(&line);
-        const cmd = trim(line[0..n]);
-        if (cmd.len == 0) continue;
-        dispatch(cmd);
+        const n = editor.readLine(&line);
+        const src = trim(line[0..n]);
+        if (src.len == 0) continue;
+        line_fba.reset();
+        if (interp.run(src)) |_| {
+            printText(interp.out.items);
+        } else |e| switch (e) {
+            error.Exit => {
+                tty.out("bye\r\n");
+                usys.exit(0);
+            },
+            error.OutOfMemory => tty.out("error: out of memory (line too large)\r\n"),
+            error.Syntax, error.Runtime => {
+                tty.out("error: ");
+                tty.out(interp.err_msg);
+                tty.out("\r\n");
+            },
+        }
     }
 }
 
-// ------------------------------------------------------------- line input
-
-fn readLine(line: []u8) usize {
-    var n: usize = 0;
-    while (true) {
-        const got = consRead(64);
-        var echo: [192]u8 = undefined;
-        var e: usize = 0;
-        const src: [*]const volatile u8 = @ptrFromInt(cons_buf);
-        var done = false;
-        for (0..got) |i| {
-            const c = src[i];
-            switch (c) {
-                '\r', '\n' => {
-                    echo[e] = '\r';
-                    echo[e + 1] = '\n';
-                    e += 2;
-                    done = true;
-                    break;
-                },
-                0x7f, 0x08 => {
-                    if (n > 0) {
-                        n -= 1;
-                        @memcpy(echo[e .. e + 3], "\x08 \x08");
-                        e += 3;
-                    }
-                },
-                0x03 => { // ctrl-c: abandon the line
-                    @memcpy(echo[e .. e + 4], "^C\r\n");
-                    e += 4;
-                    n = 0;
-                    done = true;
-                    break;
-                },
-                else => {
-                    if (c >= 0x20 and c < 0x7f and n < line.len) {
-                        line[n] = c;
-                        n += 1;
-                        echo[e] = c;
-                        e += 1;
-                    }
-                },
-            }
+/// Console output: '\n' becomes "\r\n".
+fn printText(text: []const u8) void {
+    var start: usize = 0;
+    for (text, 0..) |c, i| {
+        if (c == '\n') {
+            tty.out(text[start..i]);
+            tty.out("\r\n");
+            start = i + 1;
         }
-        if (e > 0) out(echo[0..e]);
-        if (done) return n;
     }
+    if (start < text.len) tty.out(text[start..]);
+}
+
+// ------------------------------------------------------------ editor io
+
+fn edRead(_: *anyopaque, buf: []u8) usize {
+    const got = consRead(@min(buf.len, 64));
+    const src: [*]const volatile u8 = @ptrFromInt(cons_buf);
+    for (0..got) |i| buf[i] = src[i];
+    return got;
+}
+
+fn edWrite(_: *anyopaque, bytes: []const u8) void {
+    tty.out(bytes);
 }
 
 fn consRead(max: u64) u64 {
@@ -170,55 +185,460 @@ fn consRead(max: u64) u64 {
     }
 }
 
-// ------------------------------------------------------------ line output
+const command_names = [_][]const u8{
+    "ls",    "tree", "cat",  "open",  "write",    "save",  "stat",
+    "mkdir", "rm",   "mv",   "ln",    "readlink", "sync",  "df",
+    "ps",    "mem",  "svc",  "start", "stop",     "nodes", "rspawn",
+    "rand",  "run",  "help", "exit",
+};
 
-// -------------------------------------------------------------- dispatch
-
-fn dispatch(cmd: []const u8) void {
-    var args: [4][]const u8 = undefined;
-    const argc = split(cmd, &args);
-    const c0 = args[0];
-
-    if (eq(c0, "help")) return cmdHelp();
-    if (eq(c0, "ps")) return cmdPs();
-    if (eq(c0, "mem")) return cmdMem();
-    if (eq(c0, "svc")) return cmdSvc();
-    if (eq(c0, "nodes")) return cmdNodes();
-    if (eq(c0, "rspawn") and argc >= 3) return cmdRspawn(args[1], args[2]);
-    if (eq(c0, "start") and argc >= 2) return cmdStart(args[1]);
-    if (eq(c0, "stop") and argc >= 2) return cmdStop(args[1]);
-    if (eq(c0, "ls")) return cmdLs(if (argc >= 2) args[1] else "");
-    if (eq(c0, "cat") and argc >= 2) return cmdCat(args[1]);
-    if (eq(c0, "write") and argc >= 3) return cmdWrite(args[1], rest(cmd, args[2]));
-    if (eq(c0, "mkdir") and argc >= 2) return cmdMkdir(args[1]);
-    if (eq(c0, "rm") and argc >= 2) return cmdRm(args[1]);
-    if (eq(c0, "mv") and argc >= 3) return cmdMv(args[1], args[2]);
-    if (eq(c0, "ln") and argc >= 3) return cmdLn(args[1], args[2]);
-    if (eq(c0, "readlink") and argc >= 2) return cmdReadlink(args[1]);
-    if (eq(c0, "stat") and argc >= 2) return cmdStat(args[1]);
-    if (eq(c0, "df")) return cmdDf();
-    if (eq(c0, "sync")) return cmdSync();
-    if (eq(c0, "rand")) return cmdRand();
-    if (eq(c0, "run") and argc >= 2) return cmdRun(args[1], if (argc >= 3) args[2] else "");
-    if (eq(c0, "exit")) {
-        out("bye\r\n");
-        usys.exit(0);
+/// Tab completion: command names in command position, paths elsewhere
+/// (listing the prefix's directory through the view; directories get a
+/// trailing '/').
+fn edComplete(_: *anyopaque, word: []const u8, first: bool, out: *[lineedit.max_candidates][lineedit.candidate_len]u8, lens: *[lineedit.max_candidates]usize) usize {
+    var n: usize = 0;
+    if (first) {
+        for (command_names) |c| n = addCandidate(out, lens, n, c, word, "", false);
+        for (mshl.builtin_names) |c| n = addCandidate(out, lens, n, c, word, "", false);
+        return n;
     }
-    out("unknown command (try 'help')\r\n");
+    var slash: ?usize = null;
+    for (word, 0..) |c, i| {
+        if (c == '/') slash = i;
+    }
+    const dir = if (slash) |i| word[0..i] else "";
+    const prefix = if (slash) |i| word[i + 1 ..] else word;
+    const dir_prefix = if (slash) |i| word[0 .. i + 1] else "";
+    const count = fsc.fsList(fs_chan, fs_buf, dir) orelse return 0;
+    var names: [4096]u8 = undefined;
+    const k = @min(count, names.len);
+    @memcpy(names[0..k], fs_buf[0..k]);
+    var it = std.mem.splitScalar(u8, names[0..k], '\n');
+    while (it.next()) |name| {
+        if (name.len == 0 or !startsWith(name, prefix)) continue;
+        var full: [256]u8 = undefined;
+        const fl = joinPath(&full, dir, name);
+        const st = fsc.fsStat(fs_chan, fs_buf, full[0..fl]);
+        const is_dir = st != null and st.?.typ == @intFromEnum(shared.FsType.dir);
+        n = addCandidate(out, lens, n, name, "", dir_prefix, is_dir);
+        if (n == lineedit.max_candidates) break;
+    }
+    return n;
 }
 
-fn cmdHelp() void {
-    out("commands:\r\n" ++
-        "  ps                    domains: state, threads, budgets\r\n" ++
-        "  mem                   physical memory, cores, uptime\r\n" ++
-        "  svc | start N | stop N   services via init\r\n" ++
-        "  nodes                 fabric membership (id, state, free MB)\r\n" ++
-        "  rspawn N I            spawn image I on node N (0 = least loaded)\r\n" ++
-        "  ls [p] | cat p | write p text... | mkdir p | rm p\r\n" ++
-        "  mv a b | ln p target | readlink p | stat p | df | sync\r\n" ++
-        "  rand                  16 bytes from the kernel CSPRNG (getrandom)\r\n" ++
-        "  run NAME [path]       run a program from img/ in its own domain\r\n" ++
-        "  exit\r\n");
+fn addCandidate(out: *[lineedit.max_candidates][lineedit.candidate_len]u8, lens: *[lineedit.max_candidates]usize, n: usize, name: []const u8, prefix: []const u8, dir_prefix: []const u8, is_dir: bool) usize {
+    if (n == lineedit.max_candidates or !startsWith(name, prefix)) return n;
+    const total = dir_prefix.len + name.len + @intFromBool(is_dir);
+    if (total > lineedit.candidate_len) return n;
+    @memcpy(out[n][0..dir_prefix.len], dir_prefix);
+    @memcpy(out[n][dir_prefix.len .. dir_prefix.len + name.len], name);
+    if (is_dir) out[n][total - 1] = '/';
+    lens[n] = total;
+    return n + 1;
+}
+
+// ------------------------------------------------------------- the host
+//
+// Every command: typed IPC in, a Value out. The language never sees text
+// from another service.
+
+fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
+    const a = it.arena;
+    if (is(name, "help")) return .{ .str = help_text };
+    if (is(name, "exit")) return error.Exit;
+    if (is(name, "ls")) return try lsTable(it, if (args.len > 0) try pathArg(it, args[0]) else "");
+    if (is(name, "tree")) {
+        var path: []const u8 = "";
+        var depth: usize = 8;
+        var i: usize = 0;
+        while (i < args.len) : (i += 1) {
+            const s = try pathArg(it, args[i]);
+            if (is(s, "--depth") and i + 1 < args.len) {
+                depth = @intCast(try intOf(it, args[i + 1]));
+                i += 1;
+            } else path = s;
+        }
+        var text: std.ArrayList(u8) = .empty;
+        try text.appendSlice(a, if (path.len == 0) "." else path);
+        try text.append(a, '\n');
+        try treeInto(it, &text, path, "", depth);
+        return .{ .str = text.items };
+    }
+    if (is(name, "cat") or is(name, "open")) {
+        if (args.len < 1) return it.fail("{s}: path expected", .{name});
+        return .{ .str = try readFile(it, try pathArg(it, args[0])) };
+    }
+    if (is(name, "write")) {
+        if (args.len < 2) return it.fail("write: path and text expected", .{});
+        var text: std.ArrayList(u8) = .empty;
+        try mshl.renderInline(args[1], a, &text);
+        try writeFile(it, try pathArg(it, args[0]), text.items);
+        return .nothing;
+    }
+    if (is(name, "save")) {
+        // `x | save path`, or the redirect form (path, rendered text).
+        if (args.len < 1) return it.fail("save: path expected", .{});
+        var text: std.ArrayList(u8) = .empty;
+        if (args.len >= 2) {
+            try mshl.renderInline(args[1], a, &text);
+        } else if (input) |v| {
+            try mshl.render(v, a, &text);
+        } else return it.fail("save: nothing to save", .{});
+        try writeFile(it, try pathArg(it, args[0]), text.items);
+        return .nothing;
+    }
+    if (is(name, "stat")) {
+        if (args.len < 1) return it.fail("stat: path expected", .{});
+        const path = try pathArg(it, args[0]);
+        const st = fsc.fsStat(fs_chan, fs_buf, path) orelse return it.fail("stat: {s}: not found", .{path});
+        return try statRecord(it, baseName(path), st);
+    }
+    if (is(name, "mkdir")) {
+        if (args.len < 1) return it.fail("mkdir: path expected", .{});
+        const path = try pathArg(it, args[0]);
+        if (!fsc.fsMkdir(fs_chan, fs_buf, path)) return it.fail("mkdir: {s}: failed", .{path});
+        return .nothing;
+    }
+    if (is(name, "rm")) {
+        if (args.len < 1) return it.fail("rm: path expected", .{});
+        const path = try pathArg(it, args[0]);
+        return switch (fsc.fsDelete(fs_chan, fs_buf, path)) {
+            .ok => .nothing,
+            .err => |e| it.fail("rm: {s}: {t}", .{ path, e }),
+        };
+    }
+    if (is(name, "mv")) {
+        if (args.len < 2) return it.fail("mv: from and to expected", .{});
+        if (!fsc.fsRename(fs_chan, fs_buf, try pathArg(it, args[0]), try pathArg(it, args[1]))) return it.fail("mv: failed", .{});
+        return .nothing;
+    }
+    if (is(name, "ln")) {
+        if (args.len < 2) return it.fail("ln: path and target expected", .{});
+        if (!fsc.fsSymlink(fs_chan, fs_buf, try pathArg(it, args[0]), try pathArg(it, args[1]))) return it.fail("ln: failed", .{});
+        return .nothing;
+    }
+    if (is(name, "readlink")) {
+        if (args.len < 1) return it.fail("readlink: path expected", .{});
+        const n = fsc.fsReadlink(fs_chan, fs_buf, try pathArg(it, args[0])) orelse return it.fail("readlink: failed", .{});
+        return .{ .str = try a.dupe(u8, fs_buf[0..@min(n, 256)]) };
+    }
+    if (is(name, "sync")) {
+        if (!fsc.fsSync(fs_chan)) return it.fail("sync: failed", .{});
+        return .nothing;
+    }
+    if (is(name, "df")) {
+        const st = fsc.fsStatfs(fs_chan) orelse return it.fail("df: failed", .{});
+        return try record(it, &.{ "free_kb", "total_kb", "encrypted" }, &.{
+            .{ .int = @intCast(st.free_blocks * 4) }, .{ .int = @intCast(st.total_blocks * 4) }, .{ .bool = st.encrypted },
+        });
+    }
+    if (is(name, "ps")) return try psTable(it);
+    if (is(name, "mem")) {
+        const r = usys.sysInfo(spawner_h);
+        if (r.err != .ok) return it.fail("mem: introspection denied", .{});
+        return try record(it, &.{ "free_mb", "total_mb", "cores", "uptime_s" }, &.{
+            .{ .int = @intCast(r.data[0] >> 20) }, .{ .int = @intCast(r.data[1] >> 20) }, .{ .int = @intCast(r.data[2]) }, .{ .int = @intCast(r.data[3] / 10) },
+        });
+    }
+    if (is(name, "svc")) return try svcTable(it);
+    if (is(name, "start") or is(name, "stop")) {
+        if (args.len < 1) return it.fail("{s}: service id expected", .{name});
+        const id: u64 = @intCast(try intOf(it, args[0]));
+        return try svcControl(it, name, id);
+    }
+    if (is(name, "nodes")) return try nodesTable(it);
+    if (is(name, "rspawn")) {
+        if (args.len < 2) return it.fail("rspawn: node and image id expected", .{});
+        return try rspawn(it, @intCast(try intOf(it, args[0])), @intCast(try intOf(it, args[1])));
+    }
+    if (is(name, "rand")) {
+        var bytes: [16]u8 = undefined;
+        const e = usys.getrandom(&bytes);
+        if (e == .bad_state) return it.fail("rand: kernel pool unseeded (no rngd)", .{});
+        if (e != .ok) return it.fail("rand: refused", .{});
+        var hex: [32]u8 = undefined;
+        const digits = "0123456789abcdef";
+        for (bytes, 0..) |x, i| {
+            hex[i * 2] = digits[x >> 4];
+            hex[i * 2 + 1] = digits[x & 15];
+        }
+        return .{ .str = try a.dupe(u8, &hex) };
+    }
+    if (is(name, "run")) {
+        if (args.len < 1) return it.fail("run: image name expected", .{});
+        try cmdRun(it, try pathArg(it, args[0]), if (args.len > 1) try pathArg(it, args[1]) else "");
+        return .nothing;
+    }
+    return null;
+}
+
+const help_text =
+    \\commands (every one yields a value; pipe them):
+    \\  ls [p] | tree [p] [--depth n] | stat p | cat p | write p text | save p
+    \\  mkdir p | rm p | mv a b | ln p target | readlink p | df | sync
+    \\  ps | mem | svc | start N | stop N | nodes | rspawn N I | rand
+    \\  run NAME [path]        a program from img/ in its own domain
+    \\language:
+    \\  x | where size > 4kb | sort-by name --desc | select name size
+    \\  x | get col | first n | last n | reverse | len | keys | lines
+    \\  let v = expr; $v; "text $v"; if c { } else { }; for x in list { }
+    \\  while c { }; (sub | pipeline); [a, b]; x > path  (save rendered)
+    \\  ctrl-a/e, arrows, history, tab completes commands and paths
+;
+
+// ------------------------------------------------------------ filesystem
+
+fn lsTable(it: *mshl.Interp, path: []const u8) mshl.Error!Value {
+    const a = it.arena;
+    const count = fsc.fsList(fs_chan, fs_buf, path) orelse return it.fail("ls: {s}: cannot list", .{path});
+    const names = try a.dupe(u8, fs_buf[0..count]);
+    var rows: std.ArrayList([]const Value) = .empty;
+    var split = std.mem.splitScalar(u8, names, '\n');
+    while (split.next()) |name| {
+        if (name.len == 0) continue;
+        var full: [256]u8 = undefined;
+        const fl = joinPath(&full, path, name);
+        const st = fsc.fsStat(fs_chan, fs_buf, full[0..fl]) orelse continue;
+        const row = try a.alloc(Value, 4);
+        row[0] = .{ .str = name };
+        row[1] = .{ .str = typeName(st.typ) };
+        row[2] = .{ .int = @intCast(st.size) };
+        row[3] = .{ .int = @intCast(st.mtime) };
+        try rows.append(a, row);
+    }
+    return .{ .table = .{ .cols = &.{ "name", "type", "size", "mtime" }, .rows = rows.items } };
+}
+
+fn treeInto(it: *mshl.Interp, text: *std.ArrayList(u8), path: []const u8, indent: []const u8, depth: usize) mshl.Error!void {
+    const a = it.arena;
+    if (depth == 0) return;
+    const count = fsc.fsList(fs_chan, fs_buf, path) orelse return;
+    const names = try a.dupe(u8, fs_buf[0..count]);
+    var total: usize = 0;
+    var split = std.mem.splitScalar(u8, names, '\n');
+    while (split.next()) |n| {
+        if (n.len > 0) total += 1;
+    }
+    var i: usize = 0;
+    split = std.mem.splitScalar(u8, names, '\n');
+    while (split.next()) |name| {
+        if (name.len == 0) continue;
+        i += 1;
+        const last = i == total;
+        var full: [256]u8 = undefined;
+        const fl = joinPath(&full, path, name);
+        const st = fsc.fsStat(fs_chan, fs_buf, full[0..fl]);
+        try text.appendSlice(a, indent);
+        try text.appendSlice(a, if (last) "└── " else "├── ");
+        try text.appendSlice(a, name);
+        if (st) |s| {
+            if (s.typ == @intFromEnum(shared.FsType.dir)) {
+                try text.appendSlice(a, "/\n");
+                const sub = try std.mem.concat(a, u8, &.{ indent, if (last) "    " else "│   " });
+                try treeInto(it, text, full[0..fl], sub, depth - 1);
+                continue;
+            }
+            if (s.typ == @intFromEnum(shared.FsType.symlink)) try text.appendSlice(a, " -> ?");
+        }
+        try text.append(a, '\n');
+    }
+}
+
+fn readFile(it: *mshl.Interp, path: []const u8) mshl.Error![]const u8 {
+    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 0)) {
+        .fd => |f| f,
+        .err => |e| return it.fail("cannot open {s}: {t}", .{ path, e }),
+    };
+    defer fsc.fsClose(fs_chan, fd);
+    var out: std.ArrayList(u8) = .empty;
+    var off: u64 = 0;
+    while (true) {
+        const n = fsc.fsReadAt(fs_chan, fd, off, shared.fs_max_io) orelse return it.fail("read error on {s}", .{path});
+        if (n == 0) break;
+        try out.appendSlice(it.arena, fs_buf[0..n]);
+        off += n;
+    }
+    return out.items;
+}
+
+fn writeFile(it: *mshl.Interp, path: []const u8, text: []const u8) mshl.Error!void {
+    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 1)) {
+        .fd => |f| f,
+        .err => |e| return it.fail("cannot open {s}: {t}", .{ path, e }),
+    };
+    defer fsc.fsClose(fs_chan, fd);
+    var off: usize = 0;
+    while (off < text.len) {
+        const n = @min(shared.fs_max_io, text.len - off);
+        if (!fsc.fsWriteAt(fs_chan, fs_buf, fd, off, text[off .. off + n])) return it.fail("write failed on {s}", .{path});
+        off += n;
+    }
+    if (!fsc.fsTruncate(fs_chan, fd, text.len)) return it.fail("truncate failed on {s}", .{path});
+}
+
+fn statRecord(it: *mshl.Interp, name: []const u8, st: fsc.StatOut) mshl.Error!Value {
+    return record(it, &.{ "name", "type", "size", "mtime" }, &.{
+        .{ .str = name }, .{ .str = typeName(st.typ) }, .{ .int = @intCast(st.size) }, .{ .int = @intCast(st.mtime) },
+    });
+}
+
+fn typeName(typ: u64) []const u8 {
+    return switch (typ) {
+        @intFromEnum(shared.FsType.file) => "file",
+        @intFromEnum(shared.FsType.dir) => "dir",
+        @intFromEnum(shared.FsType.symlink) => "symlink",
+        else => "?",
+    };
+}
+
+// ---------------------------------------------------------- introspection
+
+fn psTable(it: *mshl.Interp) mshl.Error!Value {
+    const a = it.arena;
+    var recs: [16 * shared.DomainRec.size]u8 = undefined;
+    const r = usys.domainList(spawner_h, &recs);
+    if (r.err != .ok) return it.fail("ps: introspection denied", .{});
+    var rows: std.ArrayList([]const Value) = .empty;
+    for (0..r.data[0]) |i| {
+        const rec = shared.DomainRec.decode(recs[i * shared.DomainRec.size ..][0..shared.DomainRec.size]);
+        const row = try a.alloc(Value, 8);
+        row[0] = .{ .int = rec.id };
+        row[1] = .{ .str = try a.dupe(u8, rec.nameSlice()) };
+        row[2] = .{ .str = switch (rec.state) {
+            .alive => "alive",
+            .dying => "dying",
+            .dead => "dead",
+        } };
+        row[3] = .{ .int = rec.threads };
+        row[4] = .{ .int = @intCast(rec.kobj_kb >> 32) };
+        row[5] = .{ .int = @intCast(rec.kobj_kb & 0xffff_ffff) };
+        row[6] = .{ .int = @intCast(rec.user_kb >> 32) };
+        row[7] = .{ .int = @intCast(rec.user_kb & 0xffff_ffff) };
+        try rows.append(a, row);
+    }
+    return .{ .table = .{
+        .cols = &.{ "id", "name", "state", "threads", "kobj_kb", "kobj_max", "user_kb", "user_max" },
+        .rows = rows.items,
+    } };
+}
+
+const svc_names = [_][]const u8{ "logsvc", "greeter" };
+
+fn svcTable(it: *mshl.Interp) mshl.Error!Value {
+    const a = it.arena;
+    var rows: std.ArrayList([]const Value) = .empty;
+    for (svc_names, 0..) |sname, id| {
+        switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{
+            .status = .{ .service = id },
+        }, 0)) {
+            .ok => |rep| switch (rep) {
+                .svc_status => |st| {
+                    const row = try a.alloc(Value, 5);
+                    row[0] = .{ .int = @intCast(id) };
+                    row[1] = .{ .str = sname };
+                    row[2] = .{ .str = if (st.up != 0) "up" else "down" };
+                    row[3] = .{ .int = @intCast(st.restarts) };
+                    row[4] = .{ .int = @intCast(st.max_restarts) };
+                    try rows.append(a, row);
+                },
+                else => return it.fail("svc: bad reply from init", .{}),
+            },
+            .err => return it.fail("svc: init unreachable", .{}),
+        }
+    }
+    return .{ .table = .{ .cols = &.{ "id", "name", "state", "restarts", "max" }, .rows = rows.items } };
+}
+
+fn svcControl(it: *mshl.Interp, op: []const u8, id: u64) mshl.Error!Value {
+    if (is(op, "start")) {
+        switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{
+            .connect = .{ .service = id },
+        }, 0)) {
+            .ok => |ok| switch (ok.rep) {
+                .connected => {
+                    if (ok.cap != 0) _ = usys.capDrop(ok.cap); // we only wanted the side effect
+                    return .{ .str = "started" };
+                },
+                else => return it.fail("start: init refused service {d}", .{id}),
+            },
+            .err => return it.fail("start: init unreachable", .{}),
+        }
+    }
+    switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{
+        .stop = .{ .service = id },
+    }, 0)) {
+        .ok => |rep| switch (rep) {
+            .stopped => return .{ .str = "stopped" },
+            else => return it.fail("stop: init refused service {d}", .{id}),
+        },
+        .err => return it.fail("stop: init unreachable", .{}),
+    }
+}
+
+// ----------------------------------------------------------------- fabric
+
+fn fabAttach() bool {
+    if (fab_buf != 0) return true;
+    const s = usys.shmCreate(1);
+    if (s.err != .ok) return false;
+    const m = usys.shmMap(s.data[0]);
+    if (m.err != .ok) return false;
+    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .attach_buf, s.data[0])) {
+        .ok => {},
+        .err => return false,
+    }
+    fab_buf = m.data[0];
+    return true;
+}
+
+fn nodesTable(it: *mshl.Interp) mshl.Error!Value {
+    const a = it.arena;
+    if (!fabAttach()) return it.fail("nodes: fabric unreachable", .{});
+    const n = switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .members, 0)) {
+        .ok => |rep| switch (rep) {
+            .num => |x| x.n,
+            else => return it.fail("nodes: bad reply", .{}),
+        },
+        .err => return it.fail("nodes: fabric unreachable", .{}),
+    };
+    var rows: std.ArrayList([]const Value) = .empty;
+    const recs: [*]const u8 = @ptrFromInt(fab_buf);
+    for (0..n) |i| {
+        const rec = recs[i * shared.fab_member_size ..];
+        const row = try a.alloc(Value, 3);
+        row[0] = .{ .int = @as(i64, rec[0]) | (@as(i64, rec[1]) << 8) };
+        row[1] = .{ .str = if (rec[2] != 0) "up" else "down" };
+        row[2] = .{ .int = @as(i64, rec[4]) | (@as(i64, rec[5]) << 8) };
+        try rows.append(a, row);
+    }
+    return .{ .table = .{ .cols = &.{ "id", "state", "free_mb" }, .rows = rows.items } };
+}
+
+fn rspawn(it: *mshl.Interp, node: u64, image: u64) mshl.Error!Value {
+    switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{
+        .remote_spawn = .{ .node = node, .image = image, .arg = 2 },
+    }, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .spawned => |sp| {
+                if (ok.cap == 0) return it.fail("rspawn: no channel came back", .{});
+                defer _ = usys.capDrop(ok.cap);
+                // Prove the remote channel with a typed RPC through it.
+                const r = usys.callRaw(ok.cap, shared.encodeMsg(shared.CalcRequest, .{
+                    .add = .{ .a = 40, .b = 2 },
+                }), 0);
+                var sum: i64 = -1;
+                if (r.err == .ok and r.data[0] != shared.fabric_err_sentinel) {
+                    if (shared.decodeMsg(shared.CalcReply, r.data)) |crep| {
+                        if (crep == .sum) sum = @intCast(crep.sum.value);
+                    }
+                }
+                return try record(it, &.{ "node", "rpc_40_plus_2" }, &.{ .{ .int = @intCast(sp.node) }, .{ .int = sum } });
+            },
+            .fab_err => |e| return it.fail("rspawn: fabric refused ({t})", .{@as(shared.FabErr, @enumFromInt(e.code))}),
+            else => return it.fail("rspawn: failed", .{}),
+        },
+        .err => return it.fail("rspawn: fabric unreachable", .{}),
+    }
 }
 
 // -------------------------------------------------------------------- run
@@ -236,27 +656,27 @@ const run_kinds = [_]RunKind{
     .{ .name = "ls", .view = true },
 };
 
-fn cmdRun(name: []const u8, path: []const u8) void {
+fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void {
     var digest: [shared.img_digest_hex_len]u8 = undefined;
-    if (!indexLookup(name, &digest)) return out("run: no such image in img/index\r\n");
+    if (!indexLookup(name, &digest)) return it.fail("run: no such image in img/index: {s}", .{name});
     var img_path: [4 + shared.img_digest_hex_len]u8 = undefined;
     @memcpy(img_path[0..4], "img/");
     @memcpy(img_path[4..], &digest);
-    const len = readIntoStage(&img_path) orelse return out("run: image unreadable\r\n");
-    if (!run_stage.verify(len, &digest)) return out("run: image does not match its digest; refusing\r\n");
+    const len = readIntoStage(&img_path) orelse return it.fail("run: image unreadable", .{});
+    if (!run_stage.verify(len, &digest)) return it.fail("run: image does not match its digest; refusing", .{});
 
     var kind: RunKind = .{ .name = name };
     for (run_kinds) |k| {
-        if (eq(k.name, name)) kind = k;
+        if (is(k.name, name)) kind = k;
     }
     var view: u64 = 0;
     if (kind.view) {
-        view = fsc.fsDerive(fs_chan, fs_buf, path, kind.ro) orelse return out("run: no such path\r\n");
+        view = fsc.fsDerive(fs_chan, fs_buf, path, kind.ro) orelse return it.fail("run: no such path: {s}", .{path});
     }
 
     // The tool serves side A of its boot channel; we feed it caps on B.
     const ch = usys.chanCreate();
-    if (ch.err != .ok) return out("run: out of channels\r\n");
+    if (ch.err != .ok) return it.fail("run: out of channels", .{});
     var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
     if (kind.introspect) flags |= shared.SpawnFlags.grant_introspect;
     const sp = usys.spawn(spawner_h, run_stage.handle, 0, ch.data[0], flags, usys.kbLimits(512, 2 << 10));
@@ -264,7 +684,7 @@ fn cmdRun(name: []const u8, path: []const u8) void {
     if (sp.err != .ok) {
         _ = usys.capDrop(ch.data[1]);
         if (view != 0) _ = usys.capDrop(view);
-        return out("run: spawn refused\r\n");
+        return it.fail("run: spawn refused ({t})", .{sp.err});
     }
     const boot = ch.data[1];
     var ok = runSend(boot, .console, cons_chan) and runSend(boot, .console_buf, cons_shm_h);
@@ -274,14 +694,14 @@ fn cmdRun(name: []const u8, path: []const u8) void {
         ok = runSend(boot, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0);
     }
     if (ok) ok = runSend(boot, .go, 0);
-    if (!ok) out("run: the program did not take its setup\r\n");
+    if (!ok) tty.out("run: the program did not take its setup\r\n");
 
     // The console is the tool's until it exits.
     while (true) {
         const st = usys.domainStat(sp.data[0]);
         if (st.err != .ok or st.data[0] == @intFromEnum(shared.DomainState.dead)) {
             if (st.err == .ok and st.data[1] != 0) {
-                var l: Line = .{};
+                var l: tty.Line = .{};
                 _ = l.str("run: ").str(name).str(" exited with code ").num(st.data[1]);
                 l.flush();
             }
@@ -312,16 +732,12 @@ fn indexLookup(name: []const u8, digest: *[shared.img_digest_hex_len]u8) bool {
     var text: [4096]u8 = undefined;
     const m = @min(n, text.len);
     @memcpy(text[0..m], fs_buf[0..m]);
-    var lines = text[0..m];
-    while (lines.len > 0) {
-        var eol: usize = 0;
-        while (eol < lines.len and lines[eol] != '\n') eol += 1;
-        const line = lines[0..eol];
-        lines = if (eol == lines.len) "" else lines[eol + 1 ..];
+    var lines = std.mem.splitScalar(u8, text[0..m], '\n');
+    while (lines.next()) |line| {
         var sp: usize = 0;
         while (sp < line.len and line[sp] != ' ') sp += 1;
         if (sp == line.len or line.len - sp - 1 != shared.img_digest_hex_len) continue;
-        if (eq(line[0..sp], name)) {
+        if (is(line[0..sp], name)) {
             @memcpy(digest, line[sp + 1 ..]);
             return true;
         }
@@ -346,292 +762,50 @@ fn readIntoStage(path: []const u8) ?usize {
     return off;
 }
 
-// --------------------------------------------------------- introspection
-
-fn cmdPs() void {
-    var recs: [16 * shared.DomainRec.size]u8 = undefined;
-    const r = usys.domainList(spawner_h, &recs);
-    if (r.err != .ok) return out("ps: introspection denied\r\n");
-    tty.domainTable(&recs, r.data[0]);
-}
-
-fn cmdMem() void {
-    const r = usys.sysInfo(spawner_h);
-    if (r.err != .ok) return out("mem: introspection denied\r\n");
-    var l: Line = .{};
-    _ = l.str("pmem: ").num(r.data[0] >> 20).str(" MB free of ").num(r.data[1] >> 20).str(" MB");
-    l.flush();
-    _ = l.str("cores: ").num(r.data[2]).str("   uptime: ").num(r.data[3] / 10).str("s");
-    l.flush();
-}
-
-/// getrandom needs no capability at all — the one ambient syscall besides
-/// the counter, because random bytes are authority over nothing.
-fn cmdRand() void {
-    var bytes: [16]u8 = undefined;
-    const e = usys.getrandom(&bytes);
-    if (e == .bad_state) return out("rand failed: kernel pool unseeded (no rngd)\r\n");
-    if (e != .ok) return out("rand failed\r\n");
-    var l: Line = .{};
-    _ = l.str("rand: ").hex(&bytes);
-    l.flush();
-}
-
-// -------------------------------------------------------------- services
-
-const svc_names = [_][]const u8{ "logsvc", "greeter" };
-
-fn cmdSvc() void {
-    var l: Line = .{};
-    _ = l.str("  ID NAME      STATE  RESTARTS");
-    l.flush();
-    for (svc_names, 0..) |name, id| {
-        switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{
-            .status = .{ .service = id },
-        }, 0)) {
-            .ok => |rep| switch (rep) {
-                .svc_status => |st| {
-                    _ = l.pad(3).num(id).str(" ").str(name);
-                    _ = l.pad(14).str(if (st.up != 0) "up" else "down");
-                    _ = l.pad(21).num(st.restarts).str("/").num(st.max_restarts);
-                    l.flush();
-                },
-                else => out("svc: bad reply\r\n"),
-            },
-            .err => out("svc: init unreachable\r\n"),
-        }
-    }
-}
-
-fn cmdStart(arg: []const u8) void {
-    const id = atoi(arg) orelse return out("start: bad service id\r\n");
-    switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{
-        .connect = .{ .service = id },
-    }, 0)) {
-        .ok => |ok| switch (ok.rep) {
-            .connected => {
-                // We only wanted the start side effect; drop the channel.
-                if (ok.cap != 0) _ = usys.capDrop(ok.cap);
-                out("started\r\n");
-            },
-            else => out("start: failed\r\n"),
-        },
-        .err => out("start: init unreachable\r\n"),
-    }
-}
-
-fn cmdStop(arg: []const u8) void {
-    const id = atoi(arg) orelse return out("stop: bad service id\r\n");
-    switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{
-        .stop = .{ .service = id },
-    }, 0)) {
-        .ok => |rep| switch (rep) {
-            .stopped => out("stopped\r\n"),
-            else => out("stop: failed\r\n"),
-        },
-        .err => out("stop: init unreachable\r\n"),
-    }
-}
-
-// ----------------------------------------------------------------- fabric
-
-fn fabAttach() bool {
-    if (fab_buf != 0) return true;
-    const s = usys.shmCreate(1);
-    if (s.err != .ok) return false;
-    const m = usys.shmMap(s.data[0]);
-    if (m.err != .ok) return false;
-    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .attach_buf, s.data[0])) {
-        .ok => {},
-        .err => return false,
-    }
-    fab_buf = m.data[0];
-    return true;
-}
-
-fn cmdNodes() void {
-    if (!fabAttach()) return out("nodes: fabric unreachable\r\n");
-    const n = switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .members, 0)) {
-        .ok => |rep| switch (rep) {
-            .num => |x| x.n,
-            else => return out("nodes: bad reply\r\n"),
-        },
-        .err => return out("nodes: fabric unreachable\r\n"),
-    };
-    var l: Line = .{};
-    _ = l.str("  ID STATE  FREE MB");
-    l.flush();
-    const recs: [*]const u8 = @ptrFromInt(fab_buf);
-    for (0..n) |i| {
-        const rec = recs[i * shared.fab_member_size ..];
-        const id = @as(u64, rec[0]) | (@as(u64, rec[1]) << 8);
-        const up = rec[2] != 0;
-        const free = @as(u64, rec[4]) | (@as(u64, rec[5]) << 8);
-        _ = l.pad(3).num(id);
-        _ = l.pad(5).str(if (up) "up" else "down");
-        _ = l.pad(12).num(free);
-        l.flush();
-    }
-}
-
-fn cmdRspawn(node_s: []const u8, image_s: []const u8) void {
-    const node = atoi(node_s) orelse return out("rspawn: bad node\r\n");
-    const image = atoi(image_s) orelse return out("rspawn: bad image id\r\n");
-    switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{
-        .remote_spawn = .{ .node = node, .image = image, .arg = 2 },
-    }, 0)) {
-        .ok => |ok| switch (ok.rep) {
-            .spawned => |sp| {
-                if (ok.cap == 0) return out("rspawn: no channel\r\n");
-                // Prove the remote channel with a typed RPC through it.
-                const r = usys.callRaw(ok.cap, shared.encodeMsg(shared.CalcRequest, .{
-                    .add = .{ .a = 40, .b = 2 },
-                }), 0);
-                var l: Line = .{};
-                if (r.err == .ok and r.data[0] != shared.fabric_err_sentinel) {
-                    if (shared.decodeMsg(shared.CalcReply, r.data)) |crep| {
-                        if (crep == .sum) {
-                            _ = l.str("spawned on node ").num(sp.node)
-                                .str("; remote says 40+2=").num(crep.sum.value);
-                            l.flush();
-                            _ = usys.capDrop(ok.cap);
-                            return;
-                        }
-                    }
-                }
-                _ = l.str("spawned on node ").num(sp.node).str(" but the RPC failed");
-                l.flush();
-                _ = usys.capDrop(ok.cap);
-            },
-            else => out("rspawn: failed\r\n"),
-        },
-        .err => out("rspawn: fabric unreachable\r\n"),
-    }
-}
-
-// ------------------------------------------------------------- filesystem
-
-fn cmdLs(path: []const u8) void {
-    const n = fsc.fsList(fs_chan, fs_buf, path) orelse return out("ls: error\r\n");
-    if (n == 0) return out("(empty)\r\n");
-    var tmp: [2048]u8 = undefined;
-    for (0..n) |i| tmp[i] = if (fs_buf[i] == '\n') '\n' else fs_buf[i];
-    // Console wants \r\n.
-    var o: usize = 0;
-    var lineb: [2100]u8 = undefined;
-    for (tmp[0..n]) |c| {
-        if (c == '\n') {
-            lineb[o] = '\r';
-            o += 1;
-        }
-        lineb[o] = c;
-        o += 1;
-    }
-    out(lineb[0..o]);
-}
-
-fn cmdCat(path: []const u8) void {
-    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 0)) {
-        .fd => |f| f,
-        .err => return out("cat: cannot open\r\n"),
-    };
-    defer fsc.fsClose(fs_chan, fd);
-    var off: u64 = 0;
-    var tmp: [2048]u8 = undefined;
-    while (true) {
-        const n = fsc.fsReadAt(fs_chan, fd, off, 2048) orelse return out("cat: read error\r\n");
-        if (n == 0) break;
-        for (0..n) |i| tmp[i] = fs_buf[i];
-        out(tmp[0..n]);
-        off += n;
-    }
-    out("\r\n");
-}
-
-fn cmdWrite(path: []const u8, text: []const u8) void {
-    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 1)) {
-        .fd => |f| f,
-        .err => return out("write: cannot open\r\n"),
-    };
-    defer fsc.fsClose(fs_chan, fd);
-    if (!fsc.fsWrite(fs_chan, fs_buf, fd, text)) return out("write: failed\r\n");
-    if (!fsc.fsTruncate(fs_chan, fd, text.len)) return out("write: truncate failed\r\n");
-    out("ok\r\n");
-}
-
-fn cmdMkdir(path: []const u8) void {
-    if (fsc.fsMkdir(fs_chan, fs_buf, path)) out("ok\r\n") else out("mkdir: failed\r\n");
-}
-
-fn cmdRm(path: []const u8) void {
-    switch (fsc.fsDelete(fs_chan, fs_buf, path)) {
-        .ok => out("ok\r\n"),
-        .err => out("rm: failed\r\n"),
-    }
-}
-
-fn cmdMv(from: []const u8, to: []const u8) void {
-    if (fsc.fsRename(fs_chan, fs_buf, from, to)) out("ok\r\n") else out("mv: failed\r\n");
-}
-
-fn cmdLn(path: []const u8, target: []const u8) void {
-    if (fsc.fsSymlink(fs_chan, fs_buf, path, target)) out("ok\r\n") else out("ln: failed\r\n");
-}
-
-fn cmdReadlink(path: []const u8) void {
-    const n = fsc.fsReadlink(fs_chan, fs_buf, path) orelse return out("readlink: failed\r\n");
-    var tmp: [256]u8 = undefined;
-    const k = @min(n, tmp.len);
-    for (0..k) |i| tmp[i] = fs_buf[i];
-    out(tmp[0..k]);
-    out("\r\n");
-}
-
-fn cmdStat(path: []const u8) void {
-    const st = fsc.fsStat(fs_chan, fs_buf, path) orelse return out("stat: not found\r\n");
-    var l: Line = .{};
-    _ = l.str(switch (st.typ) {
-        @intFromEnum(shared.FsType.file) => "file",
-        @intFromEnum(shared.FsType.dir) => "dir",
-        @intFromEnum(shared.FsType.symlink) => "symlink",
-        else => "?",
-    }).str("  size ").num(st.size).str("  mtime ").num(st.mtime);
-    l.flush();
-}
-
-fn cmdDf() void {
-    const st = fsc.fsStatfs(fs_chan) orelse return out("df: failed\r\n");
-    var l: Line = .{};
-    _ = l.num(st.free_blocks * 4).str(" KB free of ").num(st.total_blocks * 4).str(" KB");
-    _ = l.str(if (st.encrypted) "  (encrypted)" else "");
-    l.flush();
-}
-
-fn cmdSync() void {
-    if (fsc.fsSync(fs_chan)) out("ok\r\n") else out("sync: failed\r\n");
-}
-
 // ------------------------------------------------------------- utilities
 
-fn split(s: []const u8, out_args: *[4][]const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < s.len and n < 4) {
-        while (i < s.len and s[i] == ' ') i += 1;
-        if (i >= s.len) break;
-        const start = i;
-        while (i < s.len and s[i] != ' ') i += 1;
-        out_args[n] = s[start..i];
-        n += 1;
-    }
-    return n;
+fn record(it: *mshl.Interp, keys: []const []const u8, vals: []const Value) mshl.Error!Value {
+    return .{ .record = .{ .keys = keys, .vals = try it.arena.dupe(Value, vals) } };
 }
 
-/// Everything from token `from` to the end of the command (for `write`'s
-/// free text argument, spaces preserved).
-fn rest(cmd: []const u8, from: []const u8) []const u8 {
-    const off = @intFromPtr(from.ptr) - @intFromPtr(cmd.ptr);
-    return cmd[off..];
+fn pathArg(it: *mshl.Interp, v: Value) mshl.Error![]const u8 {
+    return switch (v) {
+        .str => |s| s,
+        .int => |i| std.fmt.allocPrint(it.arena, "{d}", .{i}) catch return error.OutOfMemory,
+        else => it.fail("path expected, got a {s}", .{v.typeName()}),
+    };
+}
+
+fn intOf(it: *mshl.Interp, v: Value) mshl.Error!i64 {
+    return switch (v) {
+        .int => |i| i,
+        .str => |s| std.fmt.parseInt(i64, s, 10) catch it.fail("number expected, got '{s}'", .{s}),
+        else => it.fail("number expected, got a {s}", .{v.typeName()}),
+    };
+}
+
+fn joinPath(out: *[256]u8, dir: []const u8, name: []const u8) usize {
+    var n: usize = 0;
+    if (dir.len > 0) {
+        const d = @min(dir.len, out.len - 1);
+        @memcpy(out[0..d], dir[0..d]);
+        n = d;
+        out[n] = '/';
+        n += 1;
+    }
+    const k = @min(name.len, out.len - n);
+    @memcpy(out[n .. n + k], name[0..k]);
+    return n + k;
+}
+
+fn baseName(path: []const u8) []const u8 {
+    var i = path.len;
+    while (i > 0 and path[i - 1] != '/') i -= 1;
+    return path[i..];
+}
+
+fn startsWith(s: []const u8, prefix: []const u8) bool {
+    return s.len >= prefix.len and is(s[0..prefix.len], prefix);
 }
 
 fn trim(s: []const u8) []const u8 {
@@ -642,20 +816,6 @@ fn trim(s: []const u8) []const u8 {
     return s[a..b];
 }
 
-fn eq(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (x != y) return false;
-    }
-    return true;
-}
-
-fn atoi(s: []const u8) ?u64 {
-    if (s.len == 0) return null;
-    var v: u64 = 0;
-    for (s) |c| {
-        if (c < '0' or c > '9') return null;
-        v = v * 10 + (c - '0');
-    }
-    return v;
+fn is(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
 }

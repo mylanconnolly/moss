@@ -229,6 +229,34 @@ The pooling story stops being theory.
   kept a single pending connection, so a burst of SYNs orphaned
   established sockets nobody would read (a real backlog now; the fabric
   also tears down a half-open dial before redialing).
+- ✅ **msh v2: a structured shell language, line editor, and typed
+  pipelines** (done). The shell got the OS's own thinking: pipelines
+  carry VALUES (records and tables straight from typed IPC), never bytes
+  to be re-parsed, and text exists only when the final value is rendered
+  for the human. The language, **mshl** (`lib/mshl.zig`), is a pure,
+  host-tested `lib/` module — values (nothing/bool/int/string/list/
+  record/table), a small regular grammar (commands with arguments,
+  `|` pipelines, `>` redirection = `| save`, `let`, `if/else`, `for`,
+  `while`, `$vars`, `"interpolated $text"`, `(sub | pipelines)`,
+  `[lists]`, `.field` access, comparison/boolean/arithmetic operators,
+  size units like `4kb`), and the table verbs (`where` with bare column
+  names, `sort-by --desc`, `select`, `get`, `first/last`, `reverse`,
+  `len`, `keys`, `lines`). msh is the interpreter's *host*: every
+  command turns a typed reply into a value — `ls` is a name/type/size/
+  mtime table, `stat`/`df`/`mem` are records, `ps`/`svc`/`nodes` are
+  tables, `tree` draws a subtree, `cat`/`open` read, `write`/`save` and
+  `> path` write rendered text. A line editor (`user/lineedit.zig`)
+  gives history, cursor keys, ctrl-a/e/k/u, and tab completion of
+  commands and paths (directories listed through the view, suffixed
+  `/`). The interpreter's memory is two static arenas in msh's BSS (per-
+  line, reset each line; persistent for variables). The shell check
+  drives the language end to end: where/select/get over a real
+  listing, let/if/for/while, `>` redirection round-tripped through
+  `cat`, sub-pipelines, and the editor's tab and ctrl-c. Next along
+  this line: typed output from `run` programs (a records channel, so
+  `ps` and `ls` as programs emit tables and compose with builtins);
+  scripts from files and a startup script under `conf/msh/`; `def`
+  functions; a records-to-bytes format for `save`.
 - ✅ **Programs as files: the content-addressed `img/` store, the
   introspect cap, and `run`** (done). At the shell boot, init — the
   thing that already holds the archive and the catalog — installs every

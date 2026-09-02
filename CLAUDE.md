@@ -9,7 +9,8 @@ tested; Phase 12+ items are the open pool.
 - `zig build check` — THE gate: 14 OS tests under QEMU + host unit tests,
   ~55s. Run before every commit. Failure logs: `zig-out/check/*.log`.
 - `zig build test` — host unit tests only (shared ABI, dt parser, rings,
-  lib/ lz4+xts, the full mossfs suite incl. crash sweeps).
+  lib/ lz4+xts+fabcert+mshl, the full mossfs suite incl. crash sweeps).
+  `zig test lib/mshl.zig` alone is the fast loop for shell-language work.
 - `zig build bench | bench-soft` — host perf baselines (DESIGN.md table).
 - `zig build run-shell` — interactive msh console on your terminal.
 - `zig build run | run-hvf | run-blk | run-net | run-cluster` — manual

@@ -735,9 +735,9 @@ fn shellTestWorker(_: u64) void {
     const boot_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     const msh = domain.spawn("msh", .{ .blob = img(.shell) }, .{
         .grant_debug_log = true,
-        .grant_spawner = true, // gates ps/mem introspection
+        .grant_spawner = true, // gates ps/mem introspection and `run`
         .grant_channel_a = boot_ch,
-        .user_limit = 2 << 20,
+        .user_limit = 8 << 20, // the interpreter's arenas live in its BSS
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn msh: {t}", .{e});
 

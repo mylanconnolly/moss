@@ -616,9 +616,40 @@ it is special to the kernel:
 - `zig build run-shell` boots the whole topology with the console on the
   terminal (kernel log in zig-out/shell-kernel.log). The check's shell
   spec boots the same topology with the console on a TCP chardev and
-  drives a real scripted session — fifteen commands, each response
-  asserted — then `exit` must land the usual leak bar (pmem
-  byte-identical, accounts zero).
+  drives a real scripted session — every response asserted — then
+  `exit` must land the usual leak bar (pmem byte-identical, accounts
+  zero).
+
+**msh v2 (as built): a structured shell.** The shell took the OS's own
+position on interfaces: a pipeline carries *values*, never bytes to be
+re-parsed, and text exists only when the final value is rendered for
+the human. The language, mshl, is a pure `lib/` module tested on the
+host like the filesystem core: values (nothing, bool, int, string,
+list, record, table), a small regular grammar (commands with arguments;
+`|` pipelines; `> path` as sugar for `| save path`; `let`, `if/else`,
+`for`, `while`; `$vars`; `"interpolated $text"`; `(sub | pipelines)`;
+`[lists]`; `.field`/`.index` access; comparison, boolean, and
+arithmetic operators; size units), and the table verbs — `where` (bare
+words name columns of the current row, elsewhere they are strings),
+`sort-by`, `select`, `get`, `first`/`last`, `reverse`, `len`, `keys`,
+`lines`. msh is the interpreter's *host*: it maps command names to
+typed IPC and returns values — `ls` is a name/type/size/mtime table
+(one stat per entry through the view), `stat`/`df`/`mem` are records,
+`ps`/`svc`/`nodes` are tables, `tree` draws a subtree, `cat`/`open`
+read a file, `write`/`save` write rendered text. Unknown names fall
+through to the interpreter's error. The line editor (`user/lineedit.zig`)
+owns the console between commands: history, cursor keys, ctrl-a/e/k/u/l,
+and tab completion — command names in command position, otherwise
+paths, listing the prefix's directory through the view and marking
+directories with `/`. Memory is two static arenas in msh's BSS: a
+per-line arena reset before every line and a persistent region into
+which `let` deep-copies its values (a fixed-buffer allocator; msh's
+manifest budget covers it). Field access is parsed as a postfix glued
+to a primary rather than as a token, so bare words keep their dots
+(`hi.txt`, `10.77.0.1`) while `(stat p).type` and `$row.size` work.
+Deliberately not yet: typed output from `run` programs (they still
+write text to the console they are handed), scripts from files, `def`,
+and a records-to-bytes format for `save` (it writes rendered text).
 
 ## Networking
 

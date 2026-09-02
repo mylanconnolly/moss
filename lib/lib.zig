@@ -5,10 +5,12 @@
 
 pub const fabcert = @import("fabcert.zig");
 pub const lz4 = @import("lz4.zig");
+pub const mshl = @import("mshl.zig");
 pub const xts = @import("xts.zig");
 
 test {
     _ = fabcert;
     _ = lz4;
+    _ = mshl;
     _ = xts;
 }
