@@ -46,7 +46,7 @@ zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silico
   │ └──┬──┘  │fabsvc ─┼─┼──────┼──┼────┼──▶ channels)      │
   │    │caps │init,...│ │ EL0  │  │    │                   │
   │ ┌──▼─────┴────────┴─┴──────┐  │    └──────────────────┘
-  │ │ microkernel (EL1): caps, │  │
+  │ │ microkernel (EL2/EL1): caps, │  │
   │ │ domains, IPC, sched, MMU │  │      Everything above the
   │ └──────────────────────────┘  │      kernel line is an
   └───────────────────────────────┘      ordinary sandboxed

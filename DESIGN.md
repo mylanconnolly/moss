@@ -1167,6 +1167,31 @@ then rebuilds TTBR1 from the devicetree's memory map with 4K-granular W^X
 over the kernel image and disables TTBR0 walks (TCR.EPD0), dropping the
 identity map.
 
+**EL2 host (as built, 2026-09-02).** Entered at EL2 (`virtualization=on`),
+the boot assembly first makes the core a VHE host — `HCR_EL2.E2H|TGE|RW`,
+`ICC_SRE_EL2` — and nothing else changes: under E2H every EL1-named
+system register the kernel writes (SCTLR, TCR, TTBRx, MAIR, VBAR, ELR,
+SPSR, ESR, FAR, CPACR, CNTKCTL, CNTP_*) names its EL2 counterpart, the
+`*E1` TLB invalidations apply to the EL2&0 regime, EL0 traps straight
+to EL2 under TGE, and `eret` to EL0 works as before. Two things are
+decided at run time: the PSCI conduit (HVC at EL1, SMC as the host — an
+HVC would trap to ourselves; the SMC is spelled as an encoding because
+the assembler wants an EL3 target) and the tick's line (CNTP at EL1 is
+PPI 30; the same CNTP names reach the hypervisor physical timer at EL2,
+PPI 26). Secondaries arrive at EL2 too and take the same path. Entered
+at EL1 the kernel runs there unchanged; the whole check runs as the EL2
+host under TCG (`-cpu cortex-a76`, which has VHE — the A72 does not).
+
+HVF cannot host it: Apple's nested virtualization exposes an EL2
+without VHE (ID_AA64MMFR1.VH = 0; the E2H bit reads back clear), and a
+high-half kernel has no TTBR1 at a non-VHE EL2. `run-hvf` therefore
+boots at EL1 as before; guests are a TCG-only affair until real
+hardware. The move to a v8.2 CPU model also brought PAN, which the
+design had deferred: syscalls read user buffers through the live user
+mapping after explicit range checks, so boot sets `SCTLR.SPAN` and
+clears `PSTATE.PAN` — PAN as defence in depth (toggling it around user
+copies) stays on the list.
+
 ## Zig conventions
 
 - Version pinned in `build.zig.zon`; bumps are deliberate, standalone commits.

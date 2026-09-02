@@ -1,18 +1,23 @@
-//! EL1 physical generic timer (CNTP, PPI 30), per core: fixed 100ms tick
-//! driving preemption everywhere; core 0 is the timekeeper (uptime, sleeper
-//! wakeups).
+//! Physical generic timer, per core: fixed 100ms tick driving preemption
+//! everywhere; core 0 is the timekeeper (uptime, sleeper wakeups). At EL1
+//! it is CNTP (PPI 30); as the EL2 host the same CNTP_* names reach the
+//! hypervisor physical timer, whose line is PPI 26.
 
 const log = @import("log.zig");
 const gic = @import("gic.zig");
 const sched = @import("sched.zig");
 
-pub const intid: u32 = 30;
+pub var intid: u32 = 30;
 pub const ticks_per_second = 10;
 
 var interval: u64 = 0;
 
 pub fn initCore(cpu: u32) void {
     if (cpu == 0) {
+        const el = asm ("mrs %[el], CurrentEL"
+            : [el] "=r" (-> u64),
+        ) >> 2;
+        intid = if (el == 2) 26 else 30;
         const freq = asm ("mrs %[v], cntfrq_el0"
             : [v] "=r" (-> u64),
         );
@@ -21,7 +26,7 @@ pub fn initCore(cpu: u32) void {
             freq, 1000 / ticks_per_second,
         });
     }
-    gic.enableLocalInterrupt(cpu, intid);
+    gic.enableLocalInterrupt(cpu, @intCast(intid));
     rearm();
     asm volatile (
         \\msr cntp_ctl_el0, %[one]

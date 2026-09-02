@@ -260,5 +260,6 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   which blocks on `rng.isSeeded()`), and fabsvc refuses attach_net with
   no_entropy otherwise. `-Drng-test` is the drill; `rand` in msh is the
   quickest manual poke.
-- No PAN (ARMv8.0), no IOMMU yet, no cap transfer across nodes beyond
+- PAN is off (SCTLR.SPAN, PSTATE.PAN=0 at boot: the kernel reads user
+  buffers through the live mapping after range checks); no cap transfer across nodes beyond
   spawn-time grants. All recorded in DESIGN.md "as built" sections.

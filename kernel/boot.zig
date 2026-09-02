@@ -16,6 +16,11 @@
 //! here, so one table serves). kmain later rebuilds TTBR1 with 4K-granular
 //! W^X from the real memory map and disables TTBR0 via TCR.EPD0.
 //!
+//! Entered at EL2 (virtualization=on), the kernel makes itself a VHE host
+//! first — HCR_EL2.E2H|TGE|RW — so that every EL1-named system register
+//! below names its EL2 counterpart and EL0 traps straight to EL2; the
+//! rest of the kernel is unchanged. Entered at EL1, it runs there.
+//!
 //! Cache/TLB invalidation before enable is minimal (QEMU-clean, not yet
 //! real-hardware-clean).
 //!
@@ -47,6 +52,22 @@ comptime {
         \\1:      wfe
         \\        b       1b
         \\2:
+        \\        // Entered at EL2 (QEMU virt with virtualization=on)? Then run
+        \\        // as a VHE host: HCR_EL2.E2H|TGE|RW. From here every EL1-named
+        \\        // system register (SCTLR, TCR, TTBRx, MAIR, VBAR, ELR, SPSR,
+        \\        // ESR, FAR, TPIDR, CNTKCTL, CNTP_*) names its EL2 counterpart,
+        \\        // EL0 traps straight to EL2, and the kernel below is unchanged.
+        \\        mrs     x2, CurrentEL
+        \\        cmp     x2, #8
+        \\        b.ne    20f
+        \\        ldr     x2, =0x480000000               // E2H | RW
+        \\        orr     x2, x2, #(1 << 27)              // TGE
+        \\        msr     hcr_el2, x2
+        \\        isb
+        \\        mov     x2, #0x9                        // ICC_SRE_EL2: SRE | Enable
+        \\        msr     icc_sre_el2, x2
+        \\        isb
+        \\20:
         \\        ldr     x10, =0xffffff8000000000        // KERNEL_VIRT_OFFSET
         \\
         \\        // Clear BSS (physical addresses; boot L1 table lives inside).
@@ -84,10 +105,15 @@ comptime {
         \\        dsb     ish
         \\        isb
         \\        mrs     x2, sctlr_el1
-        \\        ldr     x3, =0x1005                     // M | C | I
+        \\        ldr     x3, =0x801005                   // SPAN | M | C | I
         \\        orr     x2, x2, x3
         \\        msr     sctlr_el1, x2
         \\        isb
+        \\        // PAN (ARMv8.1+): off. Syscalls read user buffers through the
+        \\        // live user mapping after explicit range checks; SPAN above
+        \\        // keeps exception entry from re-arming it. (`msr pan, #0`, as
+        \\        // an encoding: the assembler wants the extension named.)
+        \\        .inst   0xd500409f
         \\
         \\        // High half from here on.
         \\        ldr     x1, =__boot_stack_top
@@ -101,6 +127,18 @@ comptime {
         \\// __secondary_stack global (cores are brought up one at a time).
         \\.global _secondary_start
         \\_secondary_start:
+        \\        // Same EL2 host setup as the primary.
+        \\        mrs     x2, CurrentEL
+        \\        cmp     x2, #8
+        \\        b.ne    21f
+        \\        ldr     x2, =0x480000000               // E2H | RW
+        \\        orr     x2, x2, #(1 << 27)              // TGE
+        \\        msr     hcr_el2, x2
+        \\        isb
+        \\        mov     x2, #0x9                        // ICC_SRE_EL2: SRE | Enable
+        \\        msr     icc_sre_el2, x2
+        \\        isb
+        \\21:
         \\        ldr     x10, =0xffffff8000000000
         \\        ldr     x1, =__boot_l1_table
         \\        sub     x1, x1, x10
@@ -113,10 +151,11 @@ comptime {
         \\        dsb     ish
         \\        isb
         \\        mrs     x2, sctlr_el1
-        \\        ldr     x3, =0x1005
+        \\        ldr     x3, =0x801005                   // SPAN | M | C | I
         \\        orr     x2, x2, x3
         \\        msr     sctlr_el1, x2
         \\        isb
+        \\        .inst   0xd500409f                      // msr pan, #0
         \\        ldr     x1, =__secondary_stack
         \\        ldr     x1, [x1]
         \\        mov     sp, x1

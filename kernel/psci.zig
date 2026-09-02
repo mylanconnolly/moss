@@ -1,5 +1,6 @@
-//! PSCI (Power State Coordination Interface) via HVC — the conduit QEMU
-//! virt advertises when the kernel runs at EL1.
+//! PSCI (Power State Coordination Interface): HVC when the kernel runs at
+//! EL1, SMC when it is the EL2 host (an HVC would trap to ourselves) —
+//! the conduits QEMU virt advertises for each.
 
 pub const Error = error{
     NotSupported,
@@ -44,6 +45,20 @@ pub fn cpuOn(target_mpidr: u64, entry_pa: u64, context_id: u64) Error!void {
 }
 
 fn call(fid: u64, a1: u64, a2: u64, a3: u64) u64 {
+    const el = asm ("mrs %[el], CurrentEL"
+        : [el] "=r" (-> u64),
+    ) >> 2;
+    if (el == 2) {
+        // `smc #0`, as an encoding: the assembler wants an EL3-enabled
+        // target to spell it.
+        return asm volatile (".inst 0xd4000003"
+            : [ret] "={x0}" (-> u64),
+            : [fid] "{x0}" (fid),
+              [a1] "{x1}" (a1),
+              [a2] "{x2}" (a2),
+              [a3] "{x3}" (a3),
+            : .{ .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x8 = true, .x9 = true, .x10 = true, .x11 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x16 = true, .x17 = true, .memory = true });
+    }
     return asm volatile ("hvc #0"
         : [ret] "={x0}" (-> u64),
         : [fid] "{x0}" (fid),

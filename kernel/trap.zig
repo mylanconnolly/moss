@@ -160,14 +160,12 @@ export fn trapHandler(frame: *TrapFrame, kind_raw: u64) callconv(.c) void {
 fn handleIrq() void {
     const intid = gic.acknowledge();
     if (intid == gic.spurious_intid) return;
-    switch (intid) {
-        timer.intid => timer.handleIrq(),
-        gic.resched_sgi => {}, // just here for the preempt below
-        else => {
-            if (!(intid >= 32 and (smmu.handleIrq(intid) or irq.deliver(intid)))) {
-                log.warn("unexpected interrupt {d}", .{intid});
-            }
-        },
+    if (intid == timer.intid) {
+        timer.handleIrq();
+    } else if (intid == gic.resched_sgi) {
+        // just here for the preempt below
+    } else if (!(intid >= 32 and (smmu.handleIrq(intid) or irq.deliver(intid)))) {
+        log.warn("unexpected interrupt {d}", .{intid});
     }
     // EOI before any context switch: a preempted-away thread must not hold
     // this core's active-interrupt state hostage.

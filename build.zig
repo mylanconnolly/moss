@@ -266,9 +266,9 @@ pub fn build(b: *std.Build) void {
     const run_qemu = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3,iommu=smmuv3",
+        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
         "-cpu",
-        "cortex-a72",
+        "cortex-a76",
     });
     run_qemu.addArgs(&qemu_common);
     run_qemu.addArg("-kernel");
@@ -296,9 +296,9 @@ pub fn build(b: *std.Build) void {
     const run_blk = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3,iommu=smmuv3",
+        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
         "-cpu",
-        "cortex-a72",
+        "cortex-a76",
         "-drive",
         "if=none,file=zig-out/disk.img,format=raw,id=hd",
         "-device",
@@ -320,9 +320,9 @@ pub fn build(b: *std.Build) void {
     const run_shell = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3,iommu=smmuv3",
+        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
         "-cpu",
-        "cortex-a72",
+        "cortex-a76",
         "-drive",
         "if=none,file=zig-out/shell-disk.img,format=raw,id=hd",
         "-device",
@@ -359,9 +359,9 @@ pub fn build(b: *std.Build) void {
     const run_net = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3,iommu=smmuv3",
+        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
         "-cpu",
-        "cortex-a72",
+        "cortex-a76",
         "-netdev",
         "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
         "-device",
@@ -380,13 +380,13 @@ pub fn build(b: *std.Build) void {
     cluster.addArg(b.fmt(
         \\set -e
         \\K={s}
-        \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3 -cpu cortex-a72 -smp 4 -m 512M -display none \
+        \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 -smp 4 -m 512M -display none \
         \\  -nic none -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
         \\  -netdev socket,id=n0,listen=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0 \
         \\  -append "node=1" -serial file:zig-out/cluster-node1.log -kernel "$K" &
         \\A=$!
         \\sleep 1
-        \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3 -cpu cortex-a72 -smp 4 -m 512M -display none \
+        \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 -smp 4 -m 512M -display none \
         \\  -nic none -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
         \\  -netdev socket,id=n0,connect=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0 \
         \\  -append "node=2" -serial file:zig-out/cluster-node2.log -kernel "$K" &

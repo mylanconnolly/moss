@@ -34,7 +34,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     log.print("\nmoss {f} — aarch64 / qemu-virt\n\n", .{shared.version});
 
     trap.init();
-    log.info("core 0 up at EL{d}, vectors installed", .{currentEl()});
+    log.info("core 0 up at EL{d}{s}, vectors installed", .{ currentEl(), if (currentEl() == 2) " (VHE host)" else "" });
 
     // QEMU passes the DTB in x0 per the arm64 Image boot protocol.
     const fdt = dt.Fdt.parse(mem.physToPtr([*]const u8, dtb_pa)) catch |e| {

@@ -521,9 +521,9 @@ fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []con
     try args.appendSlice(gpa, &.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3,iommu=smmuv3",
+        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
         "-cpu",
-        "cortex-a72",
+        "cortex-a76",
         "-smp",
         "4",
         "-m",
