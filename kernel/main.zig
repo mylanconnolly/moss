@@ -15,6 +15,7 @@ const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
 const pmem = @import("pmem.zig");
 const psci = @import("psci.zig");
+const rng = @import("rng.zig");
 const sched = @import("sched.zig");
 const sched_test = @import("sched_test.zig");
 const smp = @import("smp.zig");
@@ -77,7 +78,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     sched.registerCpu(0);
     // Image table order must match shared.ImageId.
     const blobs = @import("user_blobs");
-    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs, blobs.net, blobs.fabric, blobs.cons, blobs.shell });
+    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs, blobs.net, blobs.fabric, blobs.cons, blobs.shell, blobs.rng });
     domain.setSystemBlob(blobs.bootfs);
     irq.init();
     domain.startReaper();
@@ -151,6 +152,12 @@ export fn kmain(dtb_pa: u64) noreturn {
 
     if (build_options.net_test) {
         _ = sched.spawn("boot-watch", netTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    if (build_options.rng_test) {
+        _ = sched.spawn("boot-watch", rngTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -598,6 +605,9 @@ fn shellTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
 
+    // Entropy first: the fabric refuses the network until the pool is live.
+    const rngd = spawnRngd(0);
+
     // The network + a single-node fabric (msh's nodes/rspawn commands).
     const shellnet_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     const shellnet = domain.spawn("netsvc", blobs.net, .{
@@ -764,6 +774,8 @@ fn shellTestWorker(_: u64) void {
     while (fssvc.state != .dead) sched.sleep(1);
     domain.destroy(blkdrv);
     while (blkdrv.state != .dead) sched.sleep(1);
+    domain.destroy(rngd);
+    while (rngd.state != .dead) sched.sleep(1);
     ipc.unrefSide(fs_ch, .b);
     ipc.unrefSide(boot_ch, .b);
     ipc.unrefShm(pathbuf);
@@ -853,6 +865,91 @@ fn netTestWorker(_: u64) void {
     }
 }
 
+/// The entropy driver: virtio-rng behind the standard driver grants plus
+/// the entropy cap — the one holder of the right to seed the kernel
+/// pool. Blocks until the boot seed has landed (getrandom is fail-closed
+/// until then, and the services spawned next depend on it).
+/// `reseed_ticks` = 0 takes the driver's default.
+fn spawnRngd(reseed_ticks: u64) *domain.Domain {
+    const blobs = @import("user_blobs");
+    const d = domain.spawn("rngd", blobs.rng, .{
+        .arg = 1 | (reseed_ticks << 8),
+        .grant_debug_log = true,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_entropy = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn rngd: {t}", .{e});
+    var waited: u64 = 0;
+    while (!rng.isSeeded()) : (waited += 1) {
+        if (d.state == .dead) std.debug.panic("rngd died before seeding: exit {d}", .{d.exit_code});
+        if (waited == 100) std.debug.panic("rngd never seeded the pool", .{});
+        sched.sleep(1);
+    }
+    return d;
+}
+
+/// The entropy drill: (1) the pool is fail-closed — a probe spawned
+/// before any driver exists gets bad_state; (2) the userspace virtio-rng
+/// driver seeds it through the entropy cap; (3) a probe verifies
+/// getrandom end to end (fresh bytes per call, every bad argument
+/// refused, seeding without the cap refused); (4) the driver's own
+/// reseed clock delivers more entropy; (5) the kernel itself can draw;
+/// then the usual teardown bar: pmem byte-identical.
+fn rngTestWorker(_: u64) void {
+    const blobs = @import("user_blobs");
+    const frames_before = pmem.stats().free_bytes;
+
+    log.info("rng-test: probing the pool before any entropy driver exists", .{});
+    const early = domain.spawn("rngprobe", blobs.rng, .{
+        .arg = 3,
+        .grant_debug_log = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn rngprobe: {t}", .{e});
+    while (early.state != .dead) sched.sleep(1);
+    if (early.exit_code != 0) std.debug.panic("rng-test: FAIL — early probe exit {d}", .{early.exit_code});
+
+    log.info("rng-test: starting userspace virtio-rng driver (reseed every 5 ticks)", .{});
+    const rngd = spawnRngd(5);
+    const seeds0 = rng.seedCount();
+    log.info("rng-test: pool seeded by rngd ({d} seed so far)", .{seeds0});
+
+    const probe = domain.spawn("rngprobe", blobs.rng, .{
+        .arg = 2,
+        .grant_debug_log = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn rngprobe: {t}", .{e});
+    while (probe.state != .dead) sched.sleep(1);
+    if (probe.exit_code != 0) std.debug.panic("rng-test: FAIL — probe exit {d}", .{probe.exit_code});
+
+    // The driver keeps feeding the pool on its own clock.
+    var waited: u64 = 0;
+    while (rng.seedCount() < seeds0 + 2) : (waited += 1) {
+        if (waited == 200) std.debug.panic("rng-test: FAIL — no reseeds arrived", .{});
+        sched.sleep(1);
+    }
+    log.info("rng-test: reseeds landing ({d} seeds total)", .{rng.seedCount()});
+
+    // Kernel-side draw: two blocks, distinct.
+    var ka: [32]u8 = undefined;
+    var kb: [32]u8 = undefined;
+    rng.fill(&ka) catch @panic("kernel draw refused");
+    rng.fill(&kb) catch @panic("kernel draw refused");
+    if (std.mem.eql(u8, &ka, &kb)) std.debug.panic("rng-test: FAIL — kernel draws identical", .{});
+
+    domain.destroy(rngd);
+    while (rngd.state != .dead) sched.sleep(1);
+
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    if (frames_after == frames_before) {
+        log.info("rng-test: PASS — hardware entropy through a sandboxed driver, getrandom fail-closed and policed, nothing leaked", .{});
+        psci.systemOff();
+    } else {
+        std.debug.panic("rng-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
+    }
+}
+
 var boot_node: u64 = 0;
 var boot_drill: u64 = 0;
 var boot_badkey: u64 = 0;
@@ -892,6 +989,9 @@ fn fabricTestWorker(arg: u64) void {
     const badkey = (arg >> 16) & 0xff;
     const blobs = @import("user_blobs");
     log.info("fabric-test: node {d} coming up (drill={d})", .{ node, drill });
+
+    // Entropy: handshake nonces come from getrandom; no pool, no fabric.
+    _ = spawnRngd(0);
 
     // The network, in cluster mode.
     const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");

@@ -81,6 +81,15 @@ pub const Syscall = enum(u64) {
     /// sysinfo(spawner) -> x1 = pmem free bytes, x2 = pmem total bytes,
     /// x3 = online cores, x4 = uptime ticks.
     sysinfo = 26,
+    /// getrandom(buf_va, len): fill buf with 1..rng_max_request bytes from
+    /// the kernel CSPRNG. Ungated — randomness is not authority over any
+    /// object (the same standing as reading the counter). Fail-closed:
+    /// bad_state until the entropy driver has seeded the pool.
+    getrandom = 27,
+    /// rng_seed(entropy_handle, buf_va, len): feed rng_min_seed..
+    /// rng_max_request bytes of hardware entropy into the kernel pool.
+    /// The entropy cap gates it (the virtio-rng driver holds one).
+    rng_seed = 28,
     _,
 };
 
@@ -203,6 +212,7 @@ pub const ImageId = enum(u64) {
     fabric = 9,
     cons = 10,
     shell = 11,
+    rng = 12,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -351,6 +361,18 @@ pub const ConsResp = union(enum(u64)) {
     n: struct { n: u64 },
     cons_err: struct { code: u64 },
 };
+
+// ---------------------------------------------------------------- entropy
+//
+// The kernel entropy pool (kernel/rng.zig) is a ChaCha8 fast-key-erasure
+// CSPRNG seeded only through rng_seed; the userspace virtio-rng driver
+// (user/rng.zig, device id 4) harvests hardware entropy and holds the
+// entropy cap. getrandom serves at most rng_max_request bytes per call
+// (a bound on time under the kernel lock, not a throughput limit), and
+// refuses with bad_state until the first seed has landed.
+
+pub const rng_max_request: u64 = 256;
+pub const rng_min_seed: u64 = 32;
 
 // ------------------------------------------------------------- filesystem
 //
@@ -543,6 +565,7 @@ pub const FabErr = enum(u64) {
     refused = 4,
     no_space = 5,
     no_key = 6, // fail-closed: the fabric key was never staged
+    no_entropy = 7, // fail-closed: the kernel pool is unseeded (no rngd)
 };
 
 /// Badged-session error reply sentinel: word0 = this, word1 = FabErr code.

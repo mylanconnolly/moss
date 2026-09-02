@@ -206,9 +206,31 @@ The pooling story stops being theory.
   every subsequent frame — membership gossip, heartbeats, spawn, calls —
   travels sealed (AEAD, counter nonces over the ordered TCP stream). The
   check's fabric drill includes an **imposter node with a wrong key**
-  that must be refused by the handshake. Handshake nonces come from an
-  HMAC over the cycle counter and a per-boot counter under the fabric
-  key (no RNG syscall yet; virtio-rng is the noted evolution).
+  that must be refused by the handshake. Handshake nonces are 16 bytes
+  from getrandom (originally an HMAC over the cycle counter under the
+  fabric key, until the entropy work below landed); attach_net refuses
+  the network while the kernel pool is unseeded, as it does without a
+  key.
+- ✅ **Entropy: virtio-rng + getrandom/rng_seed** (done): the kernel
+  carries a ChaCha8 fast-key-erasure CSPRNG (`kernel/rng.zig`) that it
+  never seeds itself — hardware entropy enters only through `rng_seed`,
+  gated by a new `entropy` cap held by the userspace virtio-rng driver
+  (`user/rng.zig`, device id 4, the fourth virtio device class through
+  the unchanged mmio/IRQ/DMA grant interface). rngd keys the pool with
+  64 bytes at boot and reseeds on its own clock. `getrandom` is the one
+  ambient syscall besides the counter: random bytes are authority over
+  nothing, so no cap is demanded — but it is **fail-closed** (bad_state
+  until the boot seed lands; no cycle-counter stand-in ever), bounded to
+  256 bytes per call, and it checks that the target is user-WRITABLE
+  (text and the granted blob are refused — the same fix closed a latent
+  domain_list hole where a caller could point the kernel at a read-only
+  page). The check's rng drill: fail-closed before any driver, driver
+  seeds, probe verifies fresh bytes/argument policing/cap gating,
+  reseeds land, kernel-side draws, teardown leak bar. msh has `rand`.
+  Every QEMU config now carries a virtio-rng; the shell and fabric boots
+  start rngd first. Not interposable (like the counter) — a domain that
+  must see deterministic randomness is a future manifest option, not a
+  proxy.
 - **Per-node identity keys — the desired end-state for fabric security.**
   A shared cluster key is **symmetric trust**: any member can impersonate
   any other member, and revoking one node means rekeying the cluster —
@@ -221,8 +243,10 @@ The pooling story stops being theory.
   so that a compromised node is a revocable identity rather than a
   cluster rekey. std.crypto already carries Ed25519 and ML-DSA; the
   handshake transcript is designed to carry signatures in place of the
-  HMAC proofs without changing the frame shapes. Depends on a real RNG
-  (virtio-rng) for key generation.
+  HMAC proofs without changing the frame shapes. The RNG it needs for
+  key generation is in place (getrandom, above); the remaining
+  prerequisite is somewhere to keep a node's private key across boots
+  (state/ on an encrypted volume, or a key-custody service).
 - Time-partitioning opt-in for side-channel-sensitive domains.
 - EL2: Moss as hypervisor, partitioning one box into pool nodes — the pooling story from both directions.
 - virtio-gpu and input devices (the graphical console).

@@ -183,6 +183,17 @@ pub fn sysInfo(spawner_h: u64) IpcResult {
     return syscall6(.sysinfo, spawner_h, 0, 0, 0, 0, 0);
 }
 
+/// getrandom: fill buf (1..rng_max_request bytes) from the kernel CSPRNG.
+/// bad_state until the entropy driver has seeded the pool.
+pub fn getrandom(buf: []u8) shared.Errno {
+    return @enumFromInt(syscall3(.getrandom, @intFromPtr(buf.ptr), buf.len, 0));
+}
+
+/// rng_seed: feed hardware entropy into the kernel pool (entropy cap).
+pub fn rngSeed(entropy_h: u64, bytes: []const u8) shared.Errno {
+    return @enumFromInt(syscall3(.rng_seed, entropy_h, @intFromPtr(bytes.ptr), bytes.len));
+}
+
 fn syscall3(nr: shared.Syscall, a0: u64, a1: u64, a2: u64) u64 {
     return asm volatile ("svc #0"
         : [ret] "={x0}" (-> u64),

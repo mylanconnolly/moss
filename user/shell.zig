@@ -204,6 +204,14 @@ const Line = struct {
         return l;
     }
 
+    fn hex(l: *Line, bytes: []const u8) *Line {
+        const digits_ = "0123456789abcdef";
+        for (bytes) |b| {
+            _ = l.str(&[_]u8{ digits_[b >> 4], digits_[b & 15] });
+        }
+        return l;
+    }
+
     /// Right-pad with spaces to column `col` (from line start).
     fn pad(l: *Line, col: usize) *Line {
         while (l.n < col and l.n < l.buf.len) {
@@ -246,6 +254,7 @@ fn dispatch(cmd: []const u8) void {
     if (eq(c0, "stat") and argc >= 2) return cmdStat(args[1]);
     if (eq(c0, "df")) return cmdDf();
     if (eq(c0, "sync")) return cmdSync();
+    if (eq(c0, "rand")) return cmdRand();
     if (eq(c0, "exit")) {
         out("bye\r\n");
         usys.exit(0);
@@ -262,6 +271,7 @@ fn cmdHelp() void {
         "  rspawn N I            spawn image I on node N (0 = least loaded)\r\n" ++
         "  ls [p] | cat p | write p text... | mkdir p | rm p\r\n" ++
         "  mv a b | ln p target | readlink p | stat p | df | sync\r\n" ++
+        "  rand                  16 bytes from the kernel CSPRNG (getrandom)\r\n" ++
         "  exit\r\n");
 }
 
@@ -298,6 +308,18 @@ fn cmdMem() void {
     _ = l.str("pmem: ").num(r.data[0] >> 20).str(" MB free of ").num(r.data[1] >> 20).str(" MB");
     l.flush();
     _ = l.str("cores: ").num(r.data[2]).str("   uptime: ").num(r.data[3] / 10).str("s");
+    l.flush();
+}
+
+/// getrandom needs no capability at all — the one ambient syscall besides
+/// the counter, because random bytes are authority over nothing.
+fn cmdRand() void {
+    var bytes: [16]u8 = undefined;
+    const e = usys.getrandom(&bytes);
+    if (e == .bad_state) return out("rand failed: kernel pool unseeded (no rngd)\r\n");
+    if (e != .ok) return out("rand failed\r\n");
+    var l: Line = .{};
+    _ = l.str("rand: ").hex(&bytes);
     l.flush();
 }
 

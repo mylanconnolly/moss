@@ -64,9 +64,12 @@ pub const Manifest = struct {
     /// Grant spawn authority (root and init hold this; services never do).
     grant_spawner: bool = false,
     /// Driver grants: an MMIO window and/or an SPI range. Handle slots
-    /// follow the fixed insert order (log, channel, spawner, mmio, irq).
+    /// follow the fixed insert order (log, channel, spawner, mmio, irq,
+    /// entropy).
     grant_mmio: ?struct { base: u64, pages: u64 } = null,
     grant_irq: ?struct { base: u32, count: u32 } = null,
+    /// Grant the right to seed the kernel entropy pool (the rng driver).
+    grant_entropy: bool = false,
     /// Parent in the domain tree (the spawning domain, for syscall spawns).
     parent: ?*Domain = null,
     /// Kernel reaper auto-finishes teardown and signals the watcher; off
@@ -86,6 +89,8 @@ pub const Domain = struct {
     ttbr0_pa: u64 = 0,
     captable: ?*cap.Table = null,
     entry_va: u64 = 0,
+    /// End of the R+X text pages; [text_end_va, image_end_va) is RW data.
+    text_end_va: u64 = 0,
     image_end_va: u64 = 0,
     stack_base: u64 = 0,
     stack_top: u64 = 0,
@@ -247,6 +252,7 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
         ) catch return Error.QuotaExceeded;
     }
     d.entry_va = base + @sizeOf(shared.UserImageHeader);
+    d.text_end_va = base + header.text_size;
     d.image_end_va = base + header.mem_size;
 
     // User stack.
@@ -291,6 +297,9 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     if (manifest.grant_irq) |i| {
         _ = table.insert(.irq, @as(u64, i.base) | (@as(u64, i.count) << 32)) orelse
             return Error.CapTableFull;
+    }
+    if (manifest.grant_entropy) {
+        _ = table.insert(.entropy, 0) orelse return Error.CapTableFull;
     }
     if (manifest.grant_blob) |blob| {
         const blob_base = d.shm_map_next;

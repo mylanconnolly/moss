@@ -146,7 +146,6 @@ var tick: u64 = 0; // the local poll clock
 var last_ping: u64 = 0;
 var fabric_key: [32]u8 = @splat(0);
 var have_key = false;
-var nonce_ctr: u64 = 0;
 var mesh_logged = false;
 
 // One outstanding wire exchange at a time (v0 serializes).
@@ -180,6 +179,12 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                 if (!have_key) {
                     _ = usys.log(glog, "fabsvc: NO FABRIC KEY — refusing the network (fail closed)");
                     freply(ferr(.no_key));
+                    continue;
+                }
+                var probe: [16]u8 = undefined;
+                if (usys.getrandom(&probe) != .ok) {
+                    _ = usys.log(glog, "fabsvc: NO ENTROPY — kernel pool unseeded; refusing the network (fail closed)");
+                    freply(ferr(.no_entropy));
                     continue;
                 }
                 if (r.cap != 0) {
@@ -369,18 +374,16 @@ fn doMembers() shared.FabResp {
 // session keys from HKDF over both nonces. The key never crosses the
 // wire; the wire version sits inside every MAC (downgrade = auth fail).
 
-/// Handshake nonce: unique + unpredictable to non-key-holders. No RNG
-/// syscall exists yet (virtio-rng is a noted evolution); cycles + a
-/// counter under an HMAC of the fabric key is honest for this purpose.
+/// Handshake nonce: 16 bytes from the kernel CSPRNG (getrandom, seeded
+/// by the virtio-rng driver). attach_net already proved the pool is
+/// live; a refusal here means it went away, and the fabric stays closed.
 fn mkNonce() [16]u8 {
-    nonce_ctr += 1;
-    var msg: [24]u8 = undefined;
-    puleu64(msg[0..8], usys.cycles());
-    puleu64(msg[8..16], my_node);
-    puleu64(msg[16..24], nonce_ctr);
-    var mac: [Hmac.mac_length]u8 = undefined;
-    Hmac.create(&mac, &msg, &fabric_key);
-    return mac[0..16].*;
+    var n: [16]u8 = undefined;
+    if (usys.getrandom(&n) != .ok) {
+        _ = usys.log(glog, "fabsvc: getrandom refused mid-life; no handshake without entropy");
+        usys.exit(158);
+    }
+    return n;
 }
 
 /// Transcript MAC: label || ver || dialer node || acceptor node ||

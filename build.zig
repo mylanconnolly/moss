@@ -95,6 +95,11 @@ pub fn build(b: *std.Build) void {
         "shell-test",
         "Boot the developer shell topology (use run-shell for a live console)",
     ) orelse false;
+    const rng_test = b.option(
+        bool,
+        "rng-test",
+        "Run the entropy drill: virtio-rng driver seeds the kernel pool; getrandom fail-closed + policed",
+    ) orelse false;
 
     const kernel_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
@@ -145,6 +150,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "net_test", net_test);
     build_opts.addOption(bool, "fabric_test", fabric_test);
     build_opts.addOption(bool, "shell_test", shell_test);
+    build_opts.addOption(bool, "rng_test", rng_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -172,6 +178,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "fabric", .src = "user/fabric.zig" },
         .{ .name = "cons", .src = "user/cons.zig" },
         .{ .name = "shell", .src = "user/shell.zig" },
+        .{ .name = "rng", .src = "user/rng.zig" },
     };
     const user_blobs = b.addWriteFiles();
     var blobs_zig: std.ArrayList(u8) = .empty;
@@ -236,10 +243,15 @@ pub fn build(b: *std.Build) void {
     const install_bin = b.addInstallBinFile(kernel_bin.getOutput(), "moss-kernel.bin");
     b.getInstallStep().dependOn(&install_bin.step);
 
+    // Every boot carries a virtio-rng: the entropy driver is part of the
+    // base system (fabric handshakes refuse to run without it), and the
+    // modern (v2) virtio-mmio transport is what every driver speaks.
     const qemu_common = [_][]const u8{
         "-smp",        "4",
         "-m",          "512M",
         "-nographic",
+        "-global",     "virtio-mmio.force-legacy=false",
+        "-device",     "virtio-rng-device",
     };
 
     const run_qemu = b.addSystemCommand(&.{
@@ -278,8 +290,6 @@ pub fn build(b: *std.Build) void {
         "virt,gic-version=3",
         "-cpu",
         "cortex-a72",
-        "-global",
-        "virtio-mmio.force-legacy=false",
         "-drive",
         "if=none,file=zig-out/disk.img,format=raw,id=hd",
         "-device",
@@ -311,6 +321,8 @@ pub fn build(b: *std.Build) void {
         "-device",
         "virtio-blk-device,drive=hd",
         "-device",
+        "virtio-rng-device",
+        "-device",
         "virtio-serial-device",
         "-chardev",
         "stdio,id=c0,signal=off",
@@ -341,8 +353,6 @@ pub fn build(b: *std.Build) void {
         "virt,gic-version=3",
         "-cpu",
         "cortex-a72",
-        "-global",
-        "virtio-mmio.force-legacy=false",
         "-netdev",
         "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
         "-device",
@@ -362,13 +372,13 @@ pub fn build(b: *std.Build) void {
         \\set -e
         \\K={s}
         \\qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 512M -display none \
-        \\  -global virtio-mmio.force-legacy=false \
+        \\  -global virtio-mmio.force-legacy=false -device virtio-rng-device \
         \\  -netdev socket,id=n0,listen=127.0.0.1:31337 -device virtio-net-device,netdev=n0 \
         \\  -append "node=1" -serial file:zig-out/cluster-node1.log -kernel "$K" &
         \\A=$!
         \\sleep 1
         \\qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 512M -display none \
-        \\  -global virtio-mmio.force-legacy=false \
+        \\  -global virtio-mmio.force-legacy=false -device virtio-rng-device \
         \\  -netdev socket,id=n0,connect=127.0.0.1:31337 -device virtio-net-device,netdev=n0 \
         \\  -append "node=2" -serial file:zig-out/cluster-node2.log -kernel "$K" &
         \\B=$!
@@ -464,12 +474,12 @@ pub fn build(b: *std.Build) void {
         "panic_test",  "fault_test", "sched_test", "domain_test",
         "ipc_test",    "init_test",  "sandbox_test", "flap_test",
         "blk_test",    "fs_test",    "net_test",   "fabric_test",
-        "shell_test",
+        "shell_test",  "rng_test",
     };
     const variants = [_][]const u8{
         "panic", "fault", "sched", "domain", "ipc",  "init",
         "sandbox", "flap", "blk",  "fs",     "net",  "fabric",
-        "shell",
+        "shell", "rng",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();

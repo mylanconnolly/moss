@@ -13,6 +13,7 @@ const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
 const log = @import("log.zig");
 const pmem = @import("pmem.zig");
+const rng = @import("rng.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 const trap = @import("trap.zig");
@@ -57,6 +58,8 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .chan_mint => sysChanMint(d, frame),
         .domain_list => sysDomainList(d, frame),
         .sysinfo => sysSysinfo(d, frame),
+        .getrandom => sysGetrandom(d, frame.regs[0], frame.regs[1]),
+        .rng_seed => sysRngSeed(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         _ => errno(.nosys),
     };
 }
@@ -226,9 +229,34 @@ fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const ptr = frame.regs[1];
     const len = frame.regs[2];
     if (len == 0 or len > 64 * 1024) return errno(.bad_arg);
-    if (!userRangeOk(d, ptr, len)) return errno(.fault);
+    if (!userRangeWritable(d, ptr, len)) return errno(.fault);
     const buf = @as([*]u8, @ptrFromInt(ptr))[0..len];
     frame.regs[1] = domain.fillRecs(buf);
+    return errno(.ok);
+}
+
+// ---------------------------------------------------------------- entropy
+
+/// getrandom(buf, len): CSPRNG bytes straight into the caller's buffer.
+/// No capability: randomness is not authority over anything (it has the
+/// same standing as the counter). Fail-closed before the first seed.
+fn sysGetrandom(d: *domain.Domain, ptr: u64, len: u64) u64 {
+    if (len == 0 or len > shared.rng_max_request) return errno(.bad_arg);
+    if (!userRangeWritable(d, ptr, len)) return errno(.fault);
+    const buf = @as([*]u8, @ptrFromInt(ptr))[0..len];
+    rng.fill(buf) catch return errno(.bad_state);
+    return errno(.ok);
+}
+
+/// rng_seed(entropy, buf, len): the entropy cap — held by the rng driver
+/// — is the only way bytes enter the pool.
+fn sysRngSeed(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
+    const h: shared.Handle = @bitCast(handle_bits);
+    _ = d.captable.?.lookup(h, .entropy) orelse return errno(.bad_handle);
+    if (len < shared.rng_min_seed or len > shared.rng_max_request) return errno(.bad_arg);
+    if (!userRangeOk(d, ptr, len)) return errno(.fault);
+    const bytes = @as([*]const u8, @ptrFromInt(ptr))[0..len];
+    rng.seed(bytes);
     return errno(.ok);
 }
 
@@ -452,6 +480,7 @@ fn sysExit(d: *domain.Domain, code: u64) noreturn {
     sched.exit();
 }
 
+/// A user range the kernel may READ through the live TTBR0 mapping.
 fn userRangeOk(d: *domain.Domain, ptr: u64, len: u64) bool {
     const end = ptr +% len;
     if (end < ptr) return false;
@@ -459,6 +488,21 @@ fn userRangeOk(d: *domain.Domain, ptr: u64, len: u64) bool {
     const in_stack = ptr >= d.stack_base and end <= d.stack_top;
     const in_shm = ptr >= domain.shm_window_base and end <= d.shm_map_next;
     return in_image or in_stack or in_shm;
+}
+
+/// A user range the kernel may WRITE: like userRangeOk minus the
+/// read-only pages (text, the granted blob). A kernel store into a page
+/// the user cannot write would be an EL1 permission fault — a panic the
+/// caller could provoke — so writable syscalls check this instead.
+fn userRangeWritable(d: *domain.Domain, ptr: u64, len: u64) bool {
+    const end = ptr +% len;
+    if (end < ptr) return false;
+    const in_data = ptr >= d.text_end_va and end <= d.image_end_va;
+    const in_stack = ptr >= d.stack_base and end <= d.stack_top;
+    const in_shm = ptr >= domain.shm_window_base and end <= d.shm_map_next;
+    const blob_end = d.blob_va + d.blob_len;
+    const hits_blob = d.blob_len != 0 and ptr < blob_end and end > d.blob_va;
+    return in_data or in_stack or (in_shm and !hits_blob);
 }
 
 fn errno(e: shared.Errno) u64 {

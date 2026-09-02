@@ -47,6 +47,7 @@ const specs = [_]Spec{
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS" },
+    .{ .name = "rng", .pass = "rng-test: PASS", .extra = "rngprobe: unseeded pool refuses getrandom" },
     .{ .name = "shell", .kind = .shell, .pass = "shell-test: PASS", .timeout_s = 120 },
     .{ .name = "fabric", .kind = .cluster, .pass = "fabric-test: PASS", .timeout_s = 120 },
 };
@@ -301,6 +302,7 @@ const shell_script = [_]struct { send: []const u8, expect: []const u8 }{
     .{ .send = "rspawn 9 9", .expect = "rspawn: failed" },
     .{ .send = "rm data/smoke/l", .expect = "ok" },
     .{ .send = "sync", .expect = "ok" },
+    .{ .send = "rand", .expect = "rand: " },
 };
 
 fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
@@ -463,6 +465,8 @@ fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []con
         "none",
         "-global",
         "virtio-mmio.force-legacy=false",
+        "-device",
+        "virtio-rng-device",
         "-serial",
         try std.fmt.allocPrint(gpa, "file:{s}", .{log_path}),
         "-kernel",

@@ -15,8 +15,8 @@ done without rediscovering the sharp edges.
   the kernel follows `-Doptimize` (Debug default — ReleaseFast kernel is
   untested territory). Benchmark numbers are meaningless from a Debug
   userspace; that mistake cost a 5x mystery once.
-- `zig build check` is the gate: 12 OS tests under QEMU plus host unit
-  tests, ~45s. Run it before committing. Logs land in `zig-out/check/`.
+- `zig build check` is the gate: 14 OS tests under QEMU plus host unit
+  tests, ~55s. Run it before committing. Logs land in `zig-out/check/`.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
   echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),
@@ -30,7 +30,10 @@ done without rediscovering the sharp edges.
 arm + implementation in `kernel/syscall.zig` (args in `frame.regs[0..6]`,
 results written back to the frame) → wrapper in `user/usys.zig`. Anything
 that names a kernel object goes through a capability lookup — no syscall
-takes a raw object id.
+takes a raw object id. A syscall that reads a user buffer checks
+`userRangeOk`; one that WRITES a user buffer checks `userRangeWritable`
+(text and the granted blob are read-only to EL1 too — a kernel store there
+is a panic the caller provoked).
 
 **A user program**: new file in `user/` with the MOSS header stanza (copy
 the `comptime { asm(...) }` block and the `uPanic` handler from any
@@ -90,8 +93,8 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 - Sentinels must not collide with valid values (sockets and slots start at
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in
-  `domain.spawn`: log→chan→spawner→mmio→irq; user programs hardcode
-  the slots they expect (documented per program).
+  `domain.spawn`: log→chan→spawner→mmio→irq→entropy; user programs
+  hardcode the slots they expect (documented per program).
 - The three image lists (build.zig, shared.ImageId, kernel image table)
   are order-coupled.
 - `shared/` may not import kernel or user code and may not allocate; it is
@@ -142,5 +145,12 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
   serving with a loud log line — auto-format touches only all-zero disks.
 - QEMU disks must keep the default writeback cache; `cache=unsafe` drops
   the FLUSH barriers mossfs's crash consistency depends on.
+- Every QEMU config carries `-device virtio-rng-device` (and
+  `force-legacy=false`, now in the common args): rngd is part of the
+  base system. getrandom is fail-closed — a service that needs random
+  bytes must start after rngd has seeded (boot drivers use `spawnRngd`,
+  which blocks on `rng.isSeeded()`), and fabsvc refuses attach_net with
+  no_entropy otherwise. `-Drng-test` is the drill; `rand` in msh is the
+  quickest manual poke.
 - No PAN (ARMv8.0), no IOMMU yet, no cap transfer across nodes beyond
   spawn-time grants. All recorded in DESIGN.md "as built" sections.

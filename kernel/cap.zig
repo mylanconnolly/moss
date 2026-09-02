@@ -28,6 +28,8 @@ pub const CapType = enum(u8) {
     mmio,
     /// A contiguous SPI range: object = base intid | count << 32.
     irq,
+    /// Authority to seed the kernel entropy pool (rng_seed).
+    entropy,
 };
 
 pub const Entry = struct {

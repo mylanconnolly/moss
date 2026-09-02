@@ -226,6 +226,40 @@ a client-granted shm buffer. QEMU note: virtio-mmio devices default to
 force-legacy — run with `-global virtio-mmio.force-legacy=false` (run-blk
 does).
 
+### Entropy
+
+**As built:** the kernel entropy pool (`kernel/rng.zig`) is a ChaCha8
+fast-key-erasure CSPRNG (std.Random.ChaCha, pure integer code — the
+kernel stays FP-free) that the kernel never seeds itself: no cycle-counter
+mixing, no boot-time guesswork. Entropy enters only through `rng_seed`,
+gated by the `entropy` capability, which the manifest grants to exactly
+one domain — the userspace virtio-rng driver (`user/rng.zig`, device id 4,
+one request virtqueue of device-writable buffers; the fourth virtio device
+class through the unchanged mmio/IRQ/DMA grant interface). rngd harvests
+64 bytes at boot to key the pool, wipes its landing buffer after every
+copy, and reseeds on its own sleep clock; it serves no channel, because
+consumers do not talk to it — they call `getrandom`.
+
+`getrandom(buf, len)` is ungated: random bytes are authority over nothing,
+so it stands where the counter does (the only two ambient reads in the
+ABI). It is fail-closed — `bad_state` until the boot seed has landed, so a
+service that starts before rngd gets an honest error, never a weak number
+— bounded to 256 bytes per call (a bound on time under the pool lock, not
+a throughput limit; the pool has its own spinlock and never touches the
+big lock), and it writes only into user-WRITABLE ranges. Every QEMU
+configuration carries a `virtio-rng-device`; the shell and fabric boots
+start rngd before anything that needs a nonce. msh's `rand` prints a draw.
+
+Lesson paid for while adding it: `userRangeOk` answered "may the kernel
+touch this?" for reads and writes alike, but text pages and the granted
+bootfs blob are read-only to EL0 *and therefore to EL1* (AP=RO applies to
+both), so a caller pointing `domain_list` at its own text would have
+faulted the kernel — a permission fault at EL1, i.e. a user-provokable
+panic. Writable syscalls now check `userRangeWritable` (data + stack +
+shm window minus the blob). Residual, deliberate: getrandom is not
+interposable, like the counter; a domain that must observe deterministic
+randomness needs a manifest option, not a proxy.
+
 ## Filesystems and namespaces
 
 Per-process namespaces are pure capability topology (Plan 9 in spirit): a
@@ -632,10 +666,11 @@ Threat-model honesty, in order of importance:
   gossip membership) as capabilities — so a compromised node is a
   revocable identity, not a rekey. The transcript MACs are shaped to be
   replaced by signatures without changing frame layouts; see ROADMAP.
-- Handshake nonces are an HMAC over the cycle counter and a per-boot
-  counter under the fabric key: unique and unpredictable to non-key-
-  holders, but not from a hardware RNG (none is wired; virtio-rng is the
-  evolution, and per-node keypairs will require it).
+- Handshake nonces are 16 bytes from getrandom (the kernel pool seeded
+  by the virtio-rng driver — see Entropy under Drivers). attach_net
+  probes the pool and refuses the network with no_entropy while it is
+  unseeded, the same fail-closed gate as a missing key; a refusal after
+  that exits the service rather than handshaking with weak nonces.
 - Membership *claims* are authenticated (only key-holders can gossip)
   but not *verified* (a member's node id is asserted, not proven — the
   per-node-identity item again).
