@@ -17,6 +17,7 @@ const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
+const smmu = @import("smmu.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 
@@ -486,8 +487,11 @@ pub fn destroy(d: *Domain) void {
     const freed = sched.destroyThreadsOf(d);
     if (freed > 0) _ = d.threads_alive.fetchSub(freed, .acq_rel);
     // Threads are gone (or marked dead); now the authority dies with them.
+    // A held device is unbound from these tables first: they are freed
+    // in finishTeardown and the SMMU must never walk them afterwards.
     for (&d.captable.?.entries) |*e| {
         if (e.cap_type != .empty) {
+            if (e.cap_type == .device) smmu.detachIfHolder(e.object, @ptrCast(d), d.asid);
             ipc.releaseCap(e.cap_type, e.object);
             e.cap_type = .empty;
             e.generation +%= 1;
@@ -584,8 +588,9 @@ pub fn mapMmio(d: *Domain, base_pa: u64, pages: u64) !u64 {
 }
 
 /// DMA grant: physically contiguous, zeroed, owned pages; returns the VA
-/// and the device address (== physical until an IOMMU arrives — the API
-/// shape is the IOMMU's).
+/// and the device address — the VA itself when the SMMU translates the
+/// holder's devices through these very tables, the physical address on
+/// a machine without one.
 pub fn mapDma(d: *Domain, npages: u64) !struct { va: u64, dev: u64 } {
     const pa = pmem.allocContiguous(@intCast(npages)) orelse return Error.OutOfFrames;
     errdefer pmem.freeContiguous(pa, @intCast(npages));
@@ -604,7 +609,8 @@ pub fn mapDma(d: *Domain, npages: u64) !struct { va: u64, dev: u64 } {
         );
     }
     d.shm_map_next = base + npages * mem.page_size;
-    return .{ .va = base, .dev = pa };
+    asm volatile ("dsb ishst"); // the SMMU walks these tables too
+    return .{ .va = base, .dev = if (smmu.active) base else pa };
 }
 
 /// Fault-as-message: park the faulting thread as a caller on the supervisor

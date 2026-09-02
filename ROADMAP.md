@@ -174,7 +174,24 @@ The pooling story stops being theory.
 ## Phase 12 and beyond (unordered)
 
 - x86_64 port (the HAL's honesty test) and UEFI boot for real aarch64 hardware.
-- Real IOMMU (SMMU) backing the DMA-grant API.
+- ✅ **Real IOMMU (SMMU) backing the DMA-grant API** (done, 2026-09-02):
+  an SMMUv3 in front of the PCIe bus, stage-1 translation, with a
+  device's DMA translated through the **holder's own page tables** —
+  the same TTBR0 the CPU uses for that domain, so device address ==
+  the driver's virtual address and `dma_alloc` stops lying. Receiving a
+  device cap binds the stream to the receiver (last holder wins);
+  releasing it (cap_drop, teardown) unbinds and invalidates before the
+  tables are freed. Streams without a holder abort; faults terminate,
+  are recorded on the event queue and logged by the kernel (throttled).
+  QEMU only puts PCIe behind the SMMU, so this arrived with the move
+  from virtio-mmio to virtio-pci (ECAM enumeration + device caps, the
+  stage before). The `smmu` test: the block drill with every DMA
+  translated, then a rogue handed the disk that asks it to DMA into a
+  kernel page — refused, 128 events recorded against that stream and
+  sector, canary intact. Every other test now runs behind the SMMU
+  too, under TCG and HVF. Residuals: five or more endpoints share INTx
+  lines (MSI-X via the ITS when needed); SMMU stage 2 is what a guest
+  passthrough would use (see EL2).
 - ✅ **Kernel: the big lock retired** (done): per-core run-queue locks,
   per-thread locks, per-channel/notification locks, leaf locks for the
   object tables, timers, IRQ bindings, sleepers and the thread table

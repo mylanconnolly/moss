@@ -104,6 +104,21 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 
 ## Debugging techniques that have paid off
 
+- One OS test by hand, without the whole gate: `zig build -D<name>-test`
+  then `zig-out/bin/moss-check <name> zig-out/bin/moss-kernel.bin`
+  (the runner is installed alongside the kernel). Logs land in
+  `zig-out/check/`.
+- A kernel fault dump prints the top 0x120 bytes of the current thread's
+  stack after the registers. An SPSR-looking word (`0x60000345`) there,
+  or a stack pointer below the thread's stack, is a stack overflow — a
+  Debug kernel spends over a kilobyte per formatted log line, and
+  iterating an array by value (`for (arr)`) copies it onto the stack;
+  iterate by pointer (`for (&arr) |*b|`). Kernel stacks are 32K.
+- QEMU's SMMU/virtio device models explain themselves: add
+  `-d guest_errors,unimp -D <file>` (the SMMU's "not allowed yet"
+  messages live there) or `-trace 'smmuv3_*' -trace 'smmu_*'` to see
+  every translation, event and command.
+
 - **Read the fault dump.** ESR class is decoded for you; `far` is the bad
   address; `elr` locates the code (`objdump -d zig-out/bin/moss-kernel.elf`
   and search). Most bugs in this repo's history fell to the dump alone.

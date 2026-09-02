@@ -482,6 +482,49 @@ virtqueues stay in the drivers, whose layouts differ. Boots pass
 `-nic none`: QEMU otherwise adds a transitional virtio-net that would
 sit on the bus as an unclaimed endpoint.
 
+### The SMMU (as built, 2026-09-02)
+
+An SMMUv3 (`kernel/smmu.zig`) sits in front of the PCIe bus; every boot
+runs with it (`iommu=smmuv3`, `iommu_platform=on` on each device, so the
+devices honour it and offer ACCESS_PLATFORM). Stage-1 translation only,
+and the IO page table of a device **is the page table of the domain
+holding its capability**: the context descriptor's TTB0 is that
+domain's TTBR0, its ASID the domain's ASID, MAIR as the CPU programs
+it. So a device sees exactly the driver's view of memory — user pages
+carry AP[1] (EL0-accessible), and PCI transactions are unprivileged, so
+the CPU's permissions apply unchanged — and `dma_alloc` returns the VA
+as the device address. A shared buffer mapped into a driver is DMA-able
+for precisely the reason the driver can read it; a kernel page, another
+domain's memory, or an unmapped address is not, and the transaction
+aborts. Streams are requester ids (slot << 3 on bus 0), the stream
+table is linear (256 entries) and starts empty: a device nobody holds
+cannot DMA at all.
+
+Binding follows the capability: `syscall.deliver`, installing a
+received `device` cap, calls `smmu.attach` (CD, then STE, then
+CFGI_STE + SYNC) — the last holder handed the cap owns the stream, so
+root → init → driver ends with the driver. `cap_drop` and domain
+teardown call `detachIfHolder` (STE invalid, CFGI_STE, TLBI by ASID,
+SYNC) **before** the domain's tables are freed — teardown does it in
+`destroy` while releasing capabilities, and `finishTeardown` frees the
+tables later. Faults terminate (CD.S=0) and are recorded (CD.R=1,
+CD.A=1); the event queue is drained on the SMMU's interrupt and logged
+(the first few, then counted), the global-error line reports an
+overflowed event queue.
+
+Lessons: (1) QEMU's model rejects an STE with S1STALLD set ("stalling
+fault model not allowed yet" under `-d unimp`), the opposite of what
+the name suggests; leave it clear, the CD's S=0 already terminates.
+(2) The SMMU's wired interrupts are edge-triggered pulses; the GIC's
+default level-sensitive configuration never sees them — `configureEdge`
+before enabling. (3) A refused burst is retried by QEMU's DMA helpers
+word by word: one rogue sector is 128 events, enough to fill the queue;
+the drill checks a range and the kernel throttles the log. (4) The
+drill's first cut overflowed its 16K kernel stack — iterating the 4K
+canary by value copied it onto a stack already crowded by Debug-mode
+formatting frames — and corrupted its own locals; the fault reporter
+now dumps the stack top, and kernel stacks are 32K.
+
 ### Entropy
 
 **As built:** the kernel entropy pool (`kernel/rng.zig`) is a ChaCha8

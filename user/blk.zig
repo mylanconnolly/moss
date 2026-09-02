@@ -47,14 +47,58 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 var dev_h: u64 = 0;
 
 export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
-    switch (role) {
+    switch (role & 0xff) {
         1 => {
             takeDevice(chan_h);
             blkdrv(log_h, chan_h);
         },
         2 => blkuser(log_h, boot.take(chan_h).cap(.disk)),
+        3 => {
+            takeDevice(chan_h);
+            rogue(log_h, role >> 8);
+        },
         else => usys.exit(250),
     }
+}
+
+/// The IOMMU drill's villain: a "driver" that brings the disk up
+/// honestly and then asks it to DMA one sector into `target` — a
+/// physical address it was never given (a kernel page). Behind the
+/// SMMU the device address space is this program's own, so the request
+/// can only fault; without one it would land.
+fn rogue(log_h: u64, target: u64) noreturn {
+    const n = usys.notifyCreate();
+    if (n.err != .ok) usys.exit(170);
+    irq_notif = n.data[0];
+    dev = virtio.Dev.open(dev_h, .blk) orelse usys.exit(172);
+    if (usys.irqBind(dev_h, irq_notif, 0) != .ok) usys.exit(173);
+    const dma = usys.dmaAlloc(2);
+    if (dma.err != .ok) usys.exit(174);
+    vq_va = dma.data[0];
+    vq_dev = dma.data[1];
+    hdr_va = dma.data[0] + 4096;
+    hdr_dev = dma.data[1] + 4096;
+    initDevice();
+
+    // Header (read, sector 0) -> data straight into the target -> status.
+    const hdr: [*]volatile u32 = @ptrFromInt(hdr_va);
+    hdr[0] = 0; // VIRTIO_BLK_T_IN
+    hdr[1] = 0;
+    hdr[2] = 0;
+    hdr[3] = 0;
+    const descs: [*]volatile Desc = @ptrFromInt(vq_va);
+    descs[0] = .{ .addr = hdr_dev, .len = 16, .flags = desc_f_next, .next = 1 };
+    descs[1] = .{ .addr = target, .len = 512, .flags = desc_f_write | desc_f_next, .next = 2 };
+    descs[2] = .{ .addr = hdr_dev + 32, .len = 1, .flags = desc_f_write, .next = 0 };
+    const avail_ring: [*]volatile u16 = @ptrFromInt(vq_va + 512 + 4);
+    avail_ring[0] = 0;
+    avail_shadow = 1;
+    _ = usys.log(log_h, "rogue: asking the disk to DMA a sector into kernel memory");
+    kick();
+    usys.sleep(5);
+    const used_idx: *volatile u16 = @ptrFromInt(vq_va + 1024 + 2);
+    _ = usys.log(log_h, if (used_idx.* == 0) "rogue: the device never completed the request" else "rogue: the device completed the request");
+    usys.exit(0);
 }
 
 /// The boot handshake: whoever spawned us hands over the device.

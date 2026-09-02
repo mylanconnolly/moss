@@ -19,6 +19,7 @@ const psci = @import("psci.zig");
 const rng = @import("rng.zig");
 const sched = @import("sched.zig");
 const sched_test = @import("sched_test.zig");
+const smmu = @import("smmu.zig");
 const smp = @import("smp.zig");
 const timer = @import("timer.zig");
 const trap = @import("trap.zig");
@@ -55,6 +56,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     // enumerated once the memory map is up (its ECAM needs a mapping).
     pcie_host = fdt.pcieHost();
     if (pcie_host == null) log.warn("devicetree: no PCIe host; userspace drivers will find no devices", .{});
+    smmu_info = fdt.smmu();
 
     pmem.init(regions);
     pmem.reserve(
@@ -69,6 +71,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     mmu.activate();
     log.info("mmu: W^X kernel map active, boot identity map dropped", .{});
     if (pcie_host) |h| pci.init(h);
+    if (smmu_info) |i| smmu.init(i) else log.warn("devicetree: no SMMU; device DMA is untranslated", .{});
 
     // Allocator smoke test: quota round-trips to zero.
     {
@@ -165,6 +168,9 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.smmu_test) {
+        _ = sched.spawn("smmu-test", smmuTestWorker, 0, .{}) catch @panic("spawn smmu-test");
+    }
     if (build_options.rng_test) {
         _ = sched.spawn("boot-watch", rngTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -645,6 +651,75 @@ fn rngTestWorker(_: u64) void {
     }
 }
 
+/// The IOMMU drill. First the ordinary block drill, now with every DMA
+/// translated by the SMMU (root, init and the blk profile's units, as
+/// in the blk test). Then a rogue: a program handed the same disk that
+/// asks it to DMA into a kernel page — the physical address of the
+/// canary below — and the SMMU must refuse: an event recorded with that
+/// stream id and address, the canary untouched. PASS also holds the
+/// usual leak bar.
+var smmu_canary: [4096]u8 align(4096) = @splat(0);
+
+fn smmuTestWorker(_: u64) void {
+    const frames_before = pmem.stats().free_bytes;
+    if (!smmu.active) std.debug.panic("smmu-test: FAIL — no SMMU in front of the bus", .{});
+    const blk_idx = pci.byKind(.blk) orelse std.debug.panic("smmu-test: FAIL — no virtio-blk on the bus", .{});
+
+    log.info("smmu-test: block drill with every DMA translated", .{});
+    const root = domain.spawn("root", .{ .blob = img(.root) }, .{
+        .arg = 2 | (@intFromEnum(shared.BootProfile.blk) << 8),
+        .grant_debug_log = true,
+        .grant_spawner = true,
+        .grant_bootfs = true,
+        .grant_devices = true,
+        .grant_entropy = true,
+        .kobj_limit = 24 << 20,
+        .user_limit = 96 << 20,
+    }) catch |e| std.debug.panic("spawn root: {t}", .{e});
+    while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);
+    domain.finishTeardown(root);
+    if (root.exit_code != 0) std.debug.panic("smmu-test: FAIL — block drill exit {d}", .{root.exit_code});
+    if (smmu.fault_count != 0) std.debug.panic("smmu-test: FAIL — {d} DMA faults during the honest drill", .{smmu.fault_count});
+    log.info("smmu-test: block drill completed through the SMMU without a fault", .{});
+
+    @memset(&smmu_canary, 0xa5);
+    const target = mem.virtToPhys(@intFromPtr(&smmu_canary));
+    log.info("smmu-test: handing the disk to a rogue that targets kernel page 0x{x}", .{target});
+    const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const rogue = domain.spawn("rogue", .{ .blob = img(.blk) }, .{
+        .arg = 3 | (target << 8),
+        .grant_debug_log = true,
+        .grant_channel_a = ch,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn rogue: {t}", .{e});
+    bootGiveDevice(ch, .blk);
+    bootGo(ch);
+    ipc.unrefSide(ch, .b);
+    while (rogue.state != .dead) sched.sleep(1);
+    sched.sleep(3);
+
+    // (By pointer: iterating the array by value would copy 4K onto a
+    // kernel stack that Debug-mode formatting frames already crowd.)
+    var intact = true;
+    for (&smmu_canary) |*b| {
+        if (b.* != 0xa5) intact = false;
+    }
+    // The device retries a refused burst word by word: many events, all
+    // inside the one sector it was pointed at.
+    const sid = pci.devices[blk_idx].sid;
+    const faulted = smmu.fault_count >= 1 and smmu.last_fault_sid == sid and
+        smmu.first_fault_addr == target and smmu.last_fault_addr >= target and smmu.last_fault_addr < target + 512;
+    const frames_after = pmem.stats().free_bytes;
+    if (intact and faulted and frames_after == frames_before and ipc.shm_account.balance() == 0) {
+        log.info("smmu-test: PASS — DMA confined to the holder's address space: the rogue's write to kernel memory was refused ({d} refusals recorded, canary intact), nothing leaked", .{smmu.fault_count});
+        psci.systemOff();
+    } else {
+        std.debug.panic("smmu-test: FAIL — canary intact {}, fault matched {} (count {d}, sid {d}, addr 0x{x}), pmem delta {d}B", .{
+            intact, faulted, smmu.fault_count, smmu.last_fault_sid, smmu.last_fault_addr, frames_before -% frames_after,
+        });
+    }
+}
+
 var boot_node: u64 = 0;
 var boot_drill: u64 = 0;
 var boot_badkey: u64 = 0;
@@ -665,6 +740,7 @@ fn parseProfile(args: []const u8) shared.BootProfile {
 
 /// The PCIe host bridge from the devicetree (null if none).
 var pcie_host: ?dt.PcieHost = null;
+var smmu_info: ?dt.Smmu = null;
 
 /// Hand a device of the given kind (the first enumerated) to a program
 /// over its boot channel, filed under its kind.

@@ -17,6 +17,7 @@ const pmem = @import("pmem.zig");
 const rng = @import("rng.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
+const smmu = @import("smmu.zig");
 const trap = @import("trap.zig");
 
 pub fn dispatch(frame: *trap.TrapFrame) void {
@@ -320,6 +321,7 @@ fn sysCapDrop(d: *domain.Domain, handle_bits: u64) u64 {
     const ct = e.cap_type;
     const obj = e.object;
     _ = d.captable.?.remove(h);
+    if (ct == .device) smmu.detachIfHolder(obj, @ptrCast(d), d.asid);
     ipc.releaseCap(ct, obj);
     return errno(.ok);
 }
@@ -443,6 +445,9 @@ fn deliver(d: *domain.Domain, msg: ipc.Msg, frame: *trap.TrapFrame) void {
         const ct: cap.CapType = @enumFromInt(msg.cap_type);
         if (d.captable.?.insertBadged(ct, msg.cap_obj, msg.cap_badge)) |h| {
             frame.regs[5] = @bitCast(h);
+            // Receiving a device binds its DMA to this address space: the
+            // last holder handed the cap is the one whose memory it sees.
+            if (ct == .device) smmu.attach(msg.cap_obj, d.ttbr0_pa, d.asid, @ptrCast(d));
         } else {
             dropAttachment(msg); // table full: the grant is dropped, not leaked
         }

@@ -52,6 +52,11 @@ pub fn build(b: *std.Build) void {
         "flap-test",
         "Run the supervision-restart drill: budget exhaustion escalates up the tree",
     ) orelse false;
+    const smmu_test = b.option(
+        bool,
+        "smmu-test",
+        "Run the IOMMU drill: the block drill through the SMMU, then a rogue DMA refused",
+    ) orelse false;
     const blk_test = b.option(
         bool,
         "blk-test",
@@ -128,6 +133,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "sandbox_test", sandbox_test);
     build_opts.addOption(bool, "flap_test", flap_test);
     build_opts.addOption(bool, "blk_test", blk_test);
+    build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "fs_test", fs_test);
     build_opts.addOption(bool, "net_test", net_test);
     build_opts.addOption(bool, "fabric_test", fabric_test);
@@ -250,17 +256,17 @@ pub fn build(b: *std.Build) void {
     // are modern-only virtio over PCI (the SMMU sits in front of PCIe;
     // `-nic none` suppresses QEMU's stray default NIC).
     const qemu_common = [_][]const u8{
-        "-smp",                             "4",
-        "-m",                               "512M",
-        "-nographic",                       "-nic",
-        "none",                             "-device",
-        "virtio-rng-pci,disable-legacy=on",
+        "-smp",                                               "4",
+        "-m",                                                 "512M",
+        "-nographic",                                         "-nic",
+        "none",                                               "-device",
+        "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
     };
 
     const run_qemu = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3",
+        "virt,gic-version=3,iommu=smmuv3",
         "-cpu",
         "cortex-a72",
     });
@@ -273,7 +279,7 @@ pub fn build(b: *std.Build) void {
     const run_hvf = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3,accel=hvf",
+        "virt,gic-version=3,iommu=smmuv3,accel=hvf",
         "-cpu",
         "host",
     });
@@ -290,13 +296,13 @@ pub fn build(b: *std.Build) void {
     const run_blk = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3",
+        "virt,gic-version=3,iommu=smmuv3",
         "-cpu",
         "cortex-a72",
         "-drive",
         "if=none,file=zig-out/disk.img,format=raw,id=hd",
         "-device",
-        "virtio-blk-pci,disable-legacy=on,drive=hd",
+        "virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=hd",
     });
     run_blk.addArgs(&qemu_common);
     run_blk.addArg("-kernel");
@@ -314,19 +320,19 @@ pub fn build(b: *std.Build) void {
     const run_shell = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3",
+        "virt,gic-version=3,iommu=smmuv3",
         "-cpu",
         "cortex-a72",
         "-drive",
         "if=none,file=zig-out/shell-disk.img,format=raw,id=hd",
         "-device",
-        "virtio-blk-pci,disable-legacy=on,drive=hd",
+        "virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=hd",
         "-nic",
         "none",
         "-device",
-        "virtio-rng-pci,disable-legacy=on",
+        "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         "-device",
-        "virtio-serial-pci,disable-legacy=on",
+        "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
         "-chardev",
         "stdio,id=c0,signal=off",
         "-device",
@@ -334,7 +340,7 @@ pub fn build(b: *std.Build) void {
         "-netdev",
         "user,id=un0",
         "-device",
-        "virtio-net-pci,disable-legacy=on,netdev=un0",
+        "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=un0",
         "-display",
         "none",
         "-serial",
@@ -353,13 +359,13 @@ pub fn build(b: *std.Build) void {
     const run_net = b.addSystemCommand(&.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3",
+        "virt,gic-version=3,iommu=smmuv3",
         "-cpu",
         "cortex-a72",
         "-netdev",
         "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
         "-device",
-        "virtio-net-pci,disable-legacy=on,netdev=n0",
+        "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
     });
     run_net.addArgs(&qemu_common);
     run_net.addArg("-kernel");
@@ -374,15 +380,15 @@ pub fn build(b: *std.Build) void {
     cluster.addArg(b.fmt(
         \\set -e
         \\K={s}
-        \\qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 512M -display none \
-        \\  -nic none -device virtio-rng-pci,disable-legacy=on \
-        \\  -netdev socket,id=n0,listen=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,netdev=n0 \
+        \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3 -cpu cortex-a72 -smp 4 -m 512M -display none \
+        \\  -nic none -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
+        \\  -netdev socket,id=n0,listen=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0 \
         \\  -append "node=1" -serial file:zig-out/cluster-node1.log -kernel "$K" &
         \\A=$!
         \\sleep 1
-        \\qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 512M -display none \
-        \\  -nic none -device virtio-rng-pci,disable-legacy=on \
-        \\  -netdev socket,id=n0,connect=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,netdev=n0 \
+        \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3 -cpu cortex-a72 -smp 4 -m 512M -display none \
+        \\  -nic none -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
+        \\  -netdev socket,id=n0,connect=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0 \
         \\  -append "node=2" -serial file:zig-out/cluster-node2.log -kernel "$K" &
         \\B=$!
         \\wait $A $B || true
@@ -471,18 +477,21 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     const runner = b.addExecutable(.{ .name = "moss-check", .root_module = runner_mod });
+    // Installed too, so one test can be run by hand:
+    //   zig build -D<name>-test && zig-out/bin/moss-check <name> zig-out/bin/moss-kernel.bin
+    b.installArtifact(runner);
     const run_check = b.addRunArtifact(runner);
 
     const all_test_opts = [_][]const u8{
         "panic_test", "fault_test", "sched_test",   "domain_test",
         "ipc_test",   "init_test",  "sandbox_test", "flap_test",
         "blk_test",   "fs_test",    "net_test",     "fabric_test",
-        "shell_test", "rng_test",
+        "shell_test", "rng_test",   "smmu_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc", "init",
         "sandbox", "flap",  "blk",   "fs",     "net", "fabric",
-        "shell",   "rng",
+        "shell",   "rng",   "smmu",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();

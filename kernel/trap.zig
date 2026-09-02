@@ -8,10 +8,12 @@
 
 const std = @import("std");
 const log = @import("log.zig");
+const mem = @import("mem.zig");
 const domain = @import("domain.zig");
 const gic = @import("gic.zig");
 const irq = @import("irq.zig");
 const sched = @import("sched.zig");
+const smmu = @import("smmu.zig");
 const syscall = @import("syscall.zig");
 const timer = @import("timer.zig");
 
@@ -162,7 +164,7 @@ fn handleIrq() void {
         timer.intid => timer.handleIrq(),
         gic.resched_sgi => {}, // just here for the preempt below
         else => {
-            if (!(intid >= 32 and irq.deliver(intid))) {
+            if (!(intid >= 32 and (smmu.handleIrq(intid) or irq.deliver(intid)))) {
                 log.warn("unexpected interrupt {d}", .{intid});
             }
         },
@@ -217,6 +219,19 @@ fn reportFault(frame: *TrapFrame, kind: Kind) noreturn {
         esr, ec, esr & 0x1ffffff, far,
     });
     log.print("!! elr=0x{x:0>16} spsr=0x{x:0>16}\n", .{ frame.elr, frame.spsr });
+    // The top of the current thread's stack: a foreign exception frame
+    // there (an SPSR-looking word, an ELR) names whoever ran on it.
+    const cur = sched.thisCpu().current;
+    if (cur.stack_pa != 0) {
+        const top = mem.physToVirt(cur.stack_pa) + sched.stack_pages * mem.page_size;
+        const words: [*]const u64 = @ptrFromInt(top - 0x120);
+        log.print("!! thread {s} stack top 0x{x}:", .{ cur.name, top });
+        for (0..36) |i| {
+            if (i % 4 == 0) log.print("\n!!  -0x{x:0>3}:", .{0x120 - i * 8});
+            log.print(" {x:0>16}", .{words[i]});
+        }
+        log.print("\n", .{});
+    }
     var i: usize = 0;
     while (i < 31) : (i += 4) {
         log.print("!!", .{});

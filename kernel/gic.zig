@@ -77,6 +77,14 @@ pub fn enableSpi(intid: u32) void {
     gicd(0x100 + reg * 4).* = bit; // ISENABLER
 }
 
+/// Make an SPI edge-triggered (GICD_ICFGR): pulsed sources — the SMMU's
+/// event and error lines — are lost on a level-sensitive configuration.
+pub fn configureEdge(intid: u32) void {
+    const reg = intid / 16;
+    const shift: u5 = @intCast((intid % 16) * 2 + 1);
+    gicd(0xc00 + reg * 4).* = gicd(0xc00 + reg * 4).* | (@as(u32, 1) << shift);
+}
+
 pub fn gicdRead(offset: u64) u32 {
     return gicd(offset).*;
 }

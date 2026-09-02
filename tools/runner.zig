@@ -40,6 +40,7 @@ const specs = [_]Spec{
     .{ .name = "sandbox", .pass = "sandbox-test: PASS" },
     .{ .name = "flap", .pass = "flap-test: PASS" },
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
+    .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused" },
     .{
         .name = "fs",
         .kind = .blk,
@@ -152,7 +153,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         .blk => try appendDisk(&args, disk),
         .net => try args.appendSlice(gpa, &.{
             "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
-            "-device", "virtio-net-pci,disable-legacy=on,netdev=n0",
+            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
         }),
         else => {},
     }
@@ -182,7 +183,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try appendBase(&args1, log1, bin);
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
-        "-device", "virtio-net-pci,disable-legacy=on,netdev=h1",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{cluster_port}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s3,listen=127.0.0.1:{s}", .{cluster_port2}),
@@ -264,7 +265,7 @@ fn joinerArgs(log_path: []const u8, bin: []const u8, port: []const u8, append: [
     try appendBase(&args, log_path, bin);
     try args.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{port}),
-        "-device", "virtio-net-pci,disable-legacy=on,netdev=n0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
         "-append", append,
     });
     return args.items;
@@ -381,11 +382,11 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
     try appendBase(&args, log_path, bin);
     try appendDisk(&args, disk);
     try args.appendSlice(gpa, &.{
-        "-device",  "virtio-serial-pci,disable-legacy=on",
+        "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
         "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{shell_port}),
         "-device",  "virtconsole,chardev=c0",
         "-netdev",  "user,id=un0",
-        "-device",  "virtio-net-pci,disable-legacy=on,netdev=un0",
+        "-device",  "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=un0",
     });
 
     var child = try spawnQemu(args.items);
@@ -520,7 +521,7 @@ fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []con
     try args.appendSlice(gpa, &.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3",
+        "virt,gic-version=3,iommu=smmuv3",
         "-cpu",
         "cortex-a72",
         "-smp",
@@ -532,7 +533,7 @@ fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []con
         "-nic",
         "none",
         "-device",
-        "virtio-rng-pci,disable-legacy=on",
+        "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         "-serial",
         try std.fmt.allocPrint(gpa, "file:{s}", .{log_path}),
         "-kernel",
@@ -545,7 +546,7 @@ fn appendDisk(args: *std.ArrayList([]const u8), disk: []const u8) !void {
         "-drive",
         try std.fmt.allocPrint(gpa, "if=none,file={s},format=raw,id=hd", .{disk}),
         "-device",
-        "virtio-blk-pci,disable-legacy=on,drive=hd",
+        "virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=hd",
     });
 }
 

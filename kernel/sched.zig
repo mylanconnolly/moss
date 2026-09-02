@@ -44,7 +44,10 @@ const pmem = @import("pmem.zig");
 
 pub const max_cpus = 8;
 const max_threads = 64;
-const stack_pages = 4;
+/// Kernel stacks (kernel threads and every user thread's syscall stack):
+/// 32K. Debug builds spend freely — a formatted log line is over a
+/// kilobyte of frames — and an overflow lands in a neighbour's stack.
+pub const stack_pages = 8;
 
 pub const Error = error{
     NoThreadSlots,

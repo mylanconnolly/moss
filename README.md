@@ -29,7 +29,7 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 (`brew install qemu`).
 
 ```sh
-zig build check      # the whole test suite: 14 OS tests under QEMU + host unit tests (~55s)
+zig build check      # the whole test suite: 15 OS tests under QEMU + host unit tests (~70s)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 ```
@@ -76,6 +76,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | sandbox | Interposition proxy, nested domains, one-call subtree revocation | `zig build run -Dsandbox-test` |
 | flap | Restart budget exhaustion escalates up the supervision tree | `zig build run -Dflap-test` |
 | blk | Userspace virtio-blk; sync channels vs async rings, raced | `zig build run-blk -Dblk-test` |
+| smmu | The IOMMU: the block drill with every DMA translated by the SMMUv3, then a rogue driver's DMA into a kernel page refused and recorded | `zig build run-blk -Dsmmu-test` |
 | fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
