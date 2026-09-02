@@ -24,10 +24,10 @@ pub const CapType = enum(u8) {
     spawner,
     /// Control over one spawned domain (stat, destroy).
     domain_ctl,
-    /// A physical MMIO window: object = base | pages << 48.
-    mmio,
-    /// A contiguous SPI range: object = base intid | count << 32.
-    irq,
+    /// A device (object = index into pci.devices): its MMIO BAR and
+    /// config page, its interrupt line, and — with the SMMU in front —
+    /// the DMA identity that binds the device to the holder's memory.
+    device,
     /// Authority to seed the kernel entropy pool (rng_seed).
     entropy,
     /// Read-only introspection (domain_list, sysinfo) without spawn

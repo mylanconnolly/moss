@@ -130,7 +130,7 @@ Proves the invariants before drivers complicate the world.
 ## Phase 7 — Userspace drivers and virtio-blk ✅
 
 - Driver interface: MMIO-mapping caps, IRQ-as-message, explicit DMA grants (IOMMU-shaped API, identity-stubbed under QEMU).
-- Virtio transport (virtio-mmio first; PCI ECAM if/when needed).
+- Virtio transport (virtio-mmio first; PCI ECAM if/when needed). *Since 2026-09-02: PCI only — the SMMU sits in front of PCIe, so device caps name PCI endpoints (see Phase 12 "Real IOMMU").*
 - virtio-blk driver as an ordinary sandboxed userspace process.
 
 **Exit:** a user process reads and writes disk blocks through the driver over IPC; the driver runs under a manifest like any other process.

@@ -15,6 +15,7 @@ const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
+const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
@@ -43,9 +44,6 @@ pub const State = enum {
     dead,
 };
 
-pub const MmioGrant = struct { base: u64, pages: u64 };
-pub const IrqGrant = struct { base: u32, count: u32 };
-
 /// The unit file, the sandbox, and (later) the remote-spawn request: what a
 /// domain may consume and what it holds. Nothing not named here is granted.
 pub const Manifest = struct {
@@ -68,11 +66,11 @@ pub const Manifest = struct {
     arg: u64 = 0,
     /// Grant spawn authority (root and init hold this; services never do).
     grant_spawner: bool = false,
-    /// Driver grants: an MMIO window and/or an SPI range. Handle slots
-    /// follow the fixed insert order (log, channel, spawner, mmio, irq,
-    /// entropy).
-    grant_mmio: ?MmioGrant = null,
-    grant_irq: ?IrqGrant = null,
+    /// Handle slots follow the fixed insert order (log, channel, spawner,
+    /// entropy, introspect, devices).
+    /// Every enumerated PCI device (root's boot grant; it forwards them
+    /// to init, which hands each to the unit that drives it).
+    grant_devices: bool = false,
     /// Grant the right to seed the kernel entropy pool (the rng driver).
     grant_entropy: bool = false,
     /// Grant read-only introspection (domain_list/sysinfo) — what a
@@ -395,19 +393,16 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     if (manifest.grant_spawner) {
         _ = table.insert(.spawner, 0) orelse return Error.CapTableFull;
     }
-    if (manifest.grant_mmio) |m| {
-        std.debug.assert(m.base % mem.page_size == 0 and m.pages < (1 << 16));
-        _ = table.insert(.mmio, m.base | (m.pages << 48)) orelse return Error.CapTableFull;
-    }
-    if (manifest.grant_irq) |i| {
-        _ = table.insert(.irq, @as(u64, i.base) | (@as(u64, i.count) << 32)) orelse
-            return Error.CapTableFull;
-    }
     if (manifest.grant_entropy) {
         _ = table.insert(.entropy, 0) orelse return Error.CapTableFull;
     }
     if (manifest.grant_introspect) {
         _ = table.insert(.introspect, 0) orelse return Error.CapTableFull;
+    }
+    if (manifest.grant_devices) {
+        for (0..pci.count) |i| {
+            _ = table.insert(.device, i) orelse return Error.CapTableFull;
+        }
     }
     if (manifest.grant_bootfs and system_blob_len > 0) {
         // Shared read-only frames: the archive is immutable, so every

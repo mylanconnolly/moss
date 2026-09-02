@@ -146,7 +146,8 @@ var boot_va: u64 = 0;
 var boot_len: u64 = 0;
 var front_a: u64 = 0;
 var front_b: u64 = 0;
-var devices: [shared.cap_tag_count]u64 = @splat(0); // mmio, irq, entropy from root
+var devices: [boot.max_device_kinds]u64 = @splat(0); // device caps by kind, from root
+var entropy_cap: u64 = 0;
 
 // The unit parser's memory: a small arena, reset per file.
 var heap: [256 << 10]u8 = undefined;
@@ -373,10 +374,16 @@ fn giveOne(u: *Unit, g: Give) bool {
             return boot.giveCap(u.chan_b, g.tag, dep.chan_b);
         },
         .device => {
-            const dtag = std.meta.stringToEnum(shared.CapTag, g.name) orelse return false;
-            const cap = devices[@intFromEnum(dtag)];
+            // `device: entropy` is the one non-PCI "device": the kernel
+            // pool's seeding authority.
+            if (std.mem.eql(u8, g.name, "entropy")) {
+                if (entropy_cap == 0) return false;
+                return boot.giveCap(u.chan_b, g.tag, entropy_cap);
+            }
+            const kind = std.meta.stringToEnum(shared.DeviceKind, g.name) orelse return false;
+            const cap = devices[@intFromEnum(kind)];
             if (cap == 0) return false;
-            return boot.giveCap(u.chan_b, g.tag, cap);
+            return boot.giveDevice(u.chan_b, cap, @intFromEnum(kind));
         },
         .shm => {
             const s = usys.shmCreate(g.pages);
@@ -617,7 +624,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
 
     // Root hands over the devices on our boot channel.
     const setup = boot.take(chan_h);
-    devices = setup.caps;
+    devices = setup.devices;
+    entropy_cap = setup.cap(.entropy);
     _ = usys.capDrop(chan_h);
 
     const notif = usys.notifyCreate();

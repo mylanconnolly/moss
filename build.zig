@@ -246,14 +246,15 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_bin.step);
 
     // Every boot carries a virtio-rng: the entropy driver is part of the
-    // base system (fabric handshakes refuse to run without it), and the
-    // modern (v2) virtio-mmio transport is what every driver speaks.
+    // base system (fabric handshakes refuse to run without it). Devices
+    // are modern-only virtio over PCI (the SMMU sits in front of PCIe;
+    // `-nic none` suppresses QEMU's stray default NIC).
     const qemu_common = [_][]const u8{
-        "-smp",                           "4",
-        "-m",                             "512M",
-        "-nographic",                     "-global",
-        "virtio-mmio.force-legacy=false", "-device",
-        "virtio-rng-device",
+        "-smp",                             "4",
+        "-m",                               "512M",
+        "-nographic",                       "-nic",
+        "none",                             "-device",
+        "virtio-rng-pci,disable-legacy=on",
     };
 
     const run_qemu = b.addSystemCommand(&.{
@@ -295,7 +296,7 @@ pub fn build(b: *std.Build) void {
         "-drive",
         "if=none,file=zig-out/disk.img,format=raw,id=hd",
         "-device",
-        "virtio-blk-device,drive=hd",
+        "virtio-blk-pci,disable-legacy=on,drive=hd",
     });
     run_blk.addArgs(&qemu_common);
     run_blk.addArg("-kernel");
@@ -316,16 +317,16 @@ pub fn build(b: *std.Build) void {
         "virt,gic-version=3",
         "-cpu",
         "cortex-a72",
-        "-global",
-        "virtio-mmio.force-legacy=false",
         "-drive",
         "if=none,file=zig-out/shell-disk.img,format=raw,id=hd",
         "-device",
-        "virtio-blk-device,drive=hd",
+        "virtio-blk-pci,disable-legacy=on,drive=hd",
+        "-nic",
+        "none",
         "-device",
-        "virtio-rng-device",
+        "virtio-rng-pci,disable-legacy=on",
         "-device",
-        "virtio-serial-device",
+        "virtio-serial-pci,disable-legacy=on",
         "-chardev",
         "stdio,id=c0,signal=off",
         "-device",
@@ -333,7 +334,7 @@ pub fn build(b: *std.Build) void {
         "-netdev",
         "user,id=un0",
         "-device",
-        "virtio-net-device,netdev=un0",
+        "virtio-net-pci,disable-legacy=on,netdev=un0",
         "-display",
         "none",
         "-serial",
@@ -358,7 +359,7 @@ pub fn build(b: *std.Build) void {
         "-netdev",
         "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
         "-device",
-        "virtio-net-device,netdev=n0",
+        "virtio-net-pci,disable-legacy=on,netdev=n0",
     });
     run_net.addArgs(&qemu_common);
     run_net.addArg("-kernel");
@@ -374,14 +375,14 @@ pub fn build(b: *std.Build) void {
         \\set -e
         \\K={s}
         \\qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 512M -display none \
-        \\  -global virtio-mmio.force-legacy=false -device virtio-rng-device \
-        \\  -netdev socket,id=n0,listen=127.0.0.1:31337 -device virtio-net-device,netdev=n0 \
+        \\  -nic none -device virtio-rng-pci,disable-legacy=on \
+        \\  -netdev socket,id=n0,listen=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,netdev=n0 \
         \\  -append "node=1" -serial file:zig-out/cluster-node1.log -kernel "$K" &
         \\A=$!
         \\sleep 1
         \\qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -smp 4 -m 512M -display none \
-        \\  -global virtio-mmio.force-legacy=false -device virtio-rng-device \
-        \\  -netdev socket,id=n0,connect=127.0.0.1:31337 -device virtio-net-device,netdev=n0 \
+        \\  -nic none -device virtio-rng-pci,disable-legacy=on \
+        \\  -netdev socket,id=n0,connect=127.0.0.1:31337 -device virtio-net-pci,disable-legacy=on,netdev=n0 \
         \\  -append "node=2" -serial file:zig-out/cluster-node2.log -kernel "$K" &
         \\B=$!
         \\wait $A $B || true

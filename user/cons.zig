@@ -1,6 +1,6 @@
 //! The console driver: virtio-console (device id 3) as a userspace
 //! process — moss's third virtio device class through the same driver
-//! interface (mmio grant, IRQ-as-notification, DMA grant). No MULTIPORT:
+//! interface (device cap, IRQ-as-notification, DMA grant). No MULTIPORT:
 //! port 0 is the console, queue 0 = receiveq, queue 1 = transmitq.
 //!
 //! Serves one client (msh) over its channel: setup grants the byte
@@ -12,6 +12,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
 
 comptime {
@@ -38,47 +39,17 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-// The device arrives over the boot channel (BootReq cap{mmio}, cap{irq});
-// the same channel then serves the console client.
-var mmio_h: u64 = 0;
-var irq_h: u64 = 0;
+// The device arrives over the boot channel (BootReq cap{device}); the
+// same channel then serves the console client.
+var dev_h: u64 = 0;
 
 export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     const setup = boot.take(chan_h);
-    mmio_h = setup.cap(.mmio);
-    irq_h = setup.cap(.irq);
-    if (mmio_h == 0 or irq_h == 0) usys.exit(169);
+    dev_h = setup.device(.console);
+    if (dev_h == 0) usys.exit(169);
     consdrv(log_h, chan_h);
 }
 
-// virtio-mmio registers (modern, version 2) — same map as blk/net.
-const R = struct {
-    const magic = 0x00;
-    const version = 0x04;
-    const device_id = 0x08;
-    const device_features_sel = 0x14;
-    const driver_features = 0x20;
-    const driver_features_sel = 0x24;
-    const queue_sel = 0x30;
-    const queue_num_max = 0x34;
-    const queue_num = 0x38;
-    const queue_ready = 0x44;
-    const queue_notify = 0x50;
-    const interrupt_status = 0x60;
-    const interrupt_ack = 0x64;
-    const status = 0x70;
-    const queue_desc_lo = 0x80;
-    const queue_desc_hi = 0x84;
-    const queue_driver_lo = 0x90;
-    const queue_driver_hi = 0x94;
-    const queue_device_lo = 0xa0;
-    const queue_device_hi = 0xa4;
-};
-
-const status_ack = 1;
-const status_driver = 2;
-const status_driver_ok = 4;
-const status_features_ok = 8;
 const desc_f_write = 2;
 
 const Desc = extern struct {
@@ -93,8 +64,7 @@ const rx_bufs = 8;
 const rx_buf_len = 64;
 const tx_buf_len = 2048;
 
-var dev_base: u64 = 0;
-var slot_idx: u64 = 0;
+var dev: virtio.Dev = undefined;
 var irq_notif: u64 = 0;
 // DMA: page 0 = rx virtqueue, page 1 = tx virtqueue,
 // page 2 = rx buffers (8 x 64B) then the tx buffer.
@@ -117,38 +87,16 @@ var fifo: [1024]u8 = undefined;
 var fifo_head: usize = 0; // read position
 var fifo_tail: usize = 0; // write position
 
-fn reg(off: u64) *volatile u32 {
-    return @ptrFromInt(dev_base + off);
-}
-
 fn consdrv(log_h: u64, chan_h: u64) noreturn {
     const n = usys.notifyCreate();
     if (n.err != .ok) usys.exit(160);
     irq_notif = n.data[0];
 
-    const mm = usys.mmioMap(mmio_h);
-    if (mm.err != .ok) usys.exit(161);
-    const mmio_base = mm.data[0];
-    const nslots = mm.data[1] / 0x200;
-
-    var found = false;
-    var s: u64 = 0;
-    while (s < nslots) : (s += 1) {
-        dev_base = mmio_base + s * 0x200;
-        if (reg(R.magic).* == 0x74726976 and
-            reg(R.version).* == 2 and
-            reg(R.device_id).* == 3)
-        {
-            found = true;
-            slot_idx = s;
-            break;
-        }
-    }
-    if (!found) {
-        _ = usys.log(log_h, "consdrv: no virtio-console device found");
-        usys.exit(162);
-    }
-    if (usys.irqBind(irq_h, irq_notif, slot_idx) != .ok) usys.exit(163);
+    dev = virtio.Dev.open(dev_h, .console) orelse {
+        _ = usys.log(log_h, "consdrv: the device handed to us is not a virtio-console");
+        usys.exit(172);
+    };
+    if (usys.irqBind(dev_h, irq_notif, 0) != .ok) usys.exit(163);
     // RX interrupts must break the blocked recv (the sharp-edge list:
     // drain with notifyWait after every interrupted, or spin forever).
     if (usys.notifyBind(irq_notif) != .ok) usys.exit(168);
@@ -234,39 +182,15 @@ fn replyRead(chan_h: u64, max: u64) void {
 // ------------------------------------------------------------ virtio glue
 
 fn initDevice() void {
-    reg(R.status).* = 0;
-    reg(R.status).* = status_ack;
-    reg(R.status).* = status_ack | status_driver;
-
     // VERSION_1 only; no console features needed (no MULTIPORT).
-    reg(R.driver_features_sel).* = 1;
-    reg(R.driver_features).* = 1;
-    reg(R.driver_features_sel).* = 0;
-    reg(R.driver_features).* = 0;
-
-    reg(R.status).* = status_ack | status_driver | status_features_ok;
-    if (reg(R.status).* & status_features_ok == 0) usys.exit(166);
-
+    _ = dev.negotiate(0, 0) orelse usys.exit(166);
     setupQueue(0, rxq_dev);
     setupQueue(1, txq_dev);
-
-    reg(R.status).* = status_ack | status_driver | status_features_ok | status_driver_ok;
+    dev.driverOk();
 }
 
-fn setupQueue(qi: u32, vq_dev: u64) void {
-    reg(R.queue_sel).* = qi;
-    if (reg(R.queue_num_max).* < q_num) usys.exit(167);
-    reg(R.queue_num).* = q_num;
-    const desc = vq_dev;
-    const avail = vq_dev + 512;
-    const used = vq_dev + 1024;
-    reg(R.queue_desc_lo).* = @truncate(desc);
-    reg(R.queue_desc_hi).* = @truncate(desc >> 32);
-    reg(R.queue_driver_lo).* = @truncate(avail);
-    reg(R.queue_driver_hi).* = @truncate(avail >> 32);
-    reg(R.queue_device_lo).* = @truncate(used);
-    reg(R.queue_device_hi).* = @truncate(used >> 32);
-    reg(R.queue_ready).* = 1;
+fn setupQueue(qi: u16, vq_dev: u64) void {
+    if (!dev.queueSetup(qi, q_num, vq_dev, vq_dev + 512, vq_dev + 1024)) usys.exit(167);
 }
 
 /// Post every RX buffer as a device-writable descriptor.
@@ -291,13 +215,12 @@ fn publish(vq_va: u64, shadow: u16, queue: u32) void {
     asm volatile ("dmb ish");
     avail_idx.* = shadow;
     asm volatile ("dmb ish");
-    reg(R.queue_notify).* = queue;
+    dev.notify(@intCast(queue));
 }
 
 fn ackIrq() void {
-    const isr = reg(R.interrupt_status).*;
-    reg(R.interrupt_ack).* = isr;
-    _ = usys.irqAck(irq_h, slot_idx);
+    _ = dev.isrRead();
+    _ = usys.irqAck(dev_h, 0);
 }
 
 /// Pull completed RX buffers into the fifo and repost them.

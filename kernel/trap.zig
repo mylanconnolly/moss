@@ -119,9 +119,7 @@ pub fn init() void {
         \\mrs x8, cpacr_el1
         \\orr x8, x8, #(0x3 << 20)
         \\msr cpacr_el1, x8
-        :
-        :
-        : .{ .x8 = true });
+        ::: .{ .x8 = true });
     asm volatile ("isb");
 }
 

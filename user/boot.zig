@@ -8,9 +8,12 @@ const usys = @import("usys.zig");
 
 pub const max_secret = 256;
 pub const max_data = 256;
+pub const max_device_kinds = 8;
 
 pub const Setup = struct {
     caps: [shared.cap_tag_count]u64 = @splat(0),
+    /// Device caps filed by kind (a program may be handed several).
+    devices: [max_device_kinds]u64 = @splat(0),
     buf_va: u64 = 0, // the `buf` cap, mapped
     buf_pages: u64 = 0,
     secret_buf: [max_secret]u8 = @splat(0),
@@ -26,6 +29,10 @@ pub const Setup = struct {
 
     pub fn has(s: *const Setup, tag: shared.CapTag) bool {
         return s.cap(tag) != 0;
+    }
+
+    pub fn device(s: *const Setup, kind: shared.DeviceKind) u64 {
+        return s.devices[@intFromEnum(kind)];
     }
 
     pub fn arg(s: *const Setup) []const u8 {
@@ -63,6 +70,7 @@ pub fn take(chan_h: u64) Setup {
             .cap => |c| {
                 if (c.tag < shared.cap_tag_count and r.cap != 0) {
                     s.caps[c.tag] = r.cap;
+                    if (c.tag == @intFromEnum(shared.CapTag.device) and c.kind < max_device_kinds) s.devices[c.kind] = r.cap;
                     if (c.tag == @intFromEnum(shared.CapTag.buf)) {
                         const m = usys.shmMap(r.cap);
                         if (m.err == .ok) {
@@ -115,5 +123,10 @@ pub fn give(boot_chan: u64, req: shared.BootReq, cap: u64) bool {
 }
 
 pub fn giveCap(boot_chan: u64, tag: shared.CapTag, cap: u64) bool {
-    return give(boot_chan, .{ .cap = .{ .tag = @intFromEnum(tag) } }, cap);
+    return give(boot_chan, .{ .cap = .{ .tag = @intFromEnum(tag), .kind = 0 } }, cap);
+}
+
+/// Hand over a device cap, filed under its kind.
+pub fn giveDevice(boot_chan: u64, cap: u64, kind: u64) bool {
+    return give(boot_chan, .{ .cap = .{ .tag = @intFromEnum(shared.CapTag.device), .kind = kind } }, cap);
 }

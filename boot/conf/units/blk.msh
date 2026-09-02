@@ -3,7 +3,6 @@
   image: blk
   arg:   1
   give: [
-    { tag: mmio, device: mmio }
-    { tag: irq,  device: irq }
+    { tag: device, device: blk }
   ]
 }

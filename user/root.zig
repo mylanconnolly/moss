@@ -4,10 +4,11 @@
 //! the system's resource ledger with it — so the ledger-holder does nothing
 //! else.
 //!
-//! Grant layout (fresh table, insert order log→spawner→mmio→irq→entropy):
-//! log arrives in x0; spawner at slot 1; the device capabilities the
-//! kernel minted from the devicetree at slots 2, 3, 4. Root forwards the
-//! devices to init over init's boot channel — root never uses them.
+//! Grant layout (fresh table, insert order log→spawner→entropy→devices):
+//! log arrives in x0; spawner at slot 1; entropy at slot 2; then one
+//! device capability per PCI endpoint the kernel enumerated, from slot 3
+//! until the first empty slot. Root forwards them all to init over
+//! init's boot channel, each filed by kind — root never uses them.
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
@@ -39,9 +40,8 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 }
 
 const spawner: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
-const mmio_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
-const irq_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
-const entropy_h: u64 = @bitCast(shared.Handle{ .slot = 4, .generation = 1 });
+const entropy_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
+const first_device_slot = 3;
 const max_init_restarts = 1;
 
 var stage: loader.Stage = undefined;
@@ -103,7 +103,14 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
     }
     // The devices go to init, which hands them to drivers per unit file.
     const b = ch.data[1];
-    var ok = boot.giveCap(b, .mmio, mmio_h) and boot.giveCap(b, .irq, irq_h) and boot.giveCap(b, .entropy, entropy_h);
+    var ok = boot.giveCap(b, .entropy, entropy_h);
+    var slot: u32 = first_device_slot;
+    while (ok) : (slot += 1) {
+        const h: u64 = @bitCast(shared.Handle{ .slot = @intCast(slot), .generation = 1 });
+        const info = usys.deviceInfo(h);
+        if (info.err != .ok) break;
+        ok = boot.giveDevice(b, h, info.data[0]);
+    }
     ok = ok and boot.give(b, .go, 0);
     if (!ok) {
         _ = usys.log(log_h, "root: init did not take its boot setup");

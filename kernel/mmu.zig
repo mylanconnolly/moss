@@ -99,6 +99,18 @@ fn mapKernelImageChunk(chunk_pa: u64) Error!void {
     }
 }
 
+/// Map a device window into the live kernel tables (post-activate): PCI
+/// ECAM, discovered after the memory map is up.
+pub fn mapDeviceLive(base: u64, size: u64) Error!void {
+    try mapDeviceRange(base, size);
+    asm volatile (
+        \\dsb ishst
+        \\tlbi vmalle1is
+        \\dsb ish
+        \\isb
+    );
+}
+
 fn mapDeviceRange(base: u64, size: u64) Error!void {
     var pa = base;
     while (pa < base + size) : (pa += mem.page_size) {

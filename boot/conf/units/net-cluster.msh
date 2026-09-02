@@ -4,7 +4,6 @@
   image: net
   arg:   257
   give: [
-    { tag: mmio, device: mmio }
-    { tag: irq,  device: irq }
+    { tag: device, device: net }
   ]
 }

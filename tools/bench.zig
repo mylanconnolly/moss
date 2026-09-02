@@ -110,9 +110,8 @@ fn primitives() !void {
         }
         const dec_ns = timer.read();
         std.debug.print("lz4 {s:<7} c {d:>6} MB/s  d {d:>6} MB/s  ratio {d}%\n", .{
-            @tagName(kind), mbps(total, enc_ns),
-            if (clen < block) mbps(total, dec_ns) else 0,
-            clen * 100 / block,
+            @tagName(kind),                               mbps(total, enc_ns),
+            if (clen < block) mbps(total, dec_ns) else 0, clen * 100 / block,
         });
         sink +%= dlen;
     }
@@ -174,7 +173,7 @@ fn oneConfig(comptime enc: bool, comptime kind: anytype) !void {
     const free_after = try fs.freeBlocksTotal();
     const cfg = if (enc) "enc  " else "plain";
     std.debug.print("  {s} {s:<7} write+sync {d:>5} MB/s   read {d:>5} MB/s   disk cost {d} blocks for {d}\n", .{
-        cfg, @tagName(kind), mbps(nblocks * block, w_ns), mbps(nblocks * block, r_ns),
+        cfg,                      @tagName(kind), mbps(nblocks * block, w_ns), mbps(nblocks * block, r_ns),
         free_before - free_after, nblocks,
     });
 }

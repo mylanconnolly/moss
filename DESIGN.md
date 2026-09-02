@@ -417,28 +417,41 @@ cap), so dependents learn of the death exactly the way any peer does.
 
 ## Drivers
 
-Userspace, virtio-first. The driver interface is: MMIO-mapping caps,
-IRQ-delivery-as-message, and explicit DMA grants shaped like an IOMMU is
-present (identity-stubbed under QEMU until the SMMU lands). Drivers run under
-manifests like any other process and are as sandboxable as anything else.
+Userspace, virtio-first. The driver interface is: a **device
+capability** (its registers, its interrupt line, and — with the SMMU —
+its DMA identity), IRQ-delivery-as-message, and explicit DMA grants
+shaped like an IOMMU is present. Drivers run under manifests like any
+other process and are as sandboxable as anything else.
 
-**Device capabilities (as built, boot-orchestration stage 1):** the
-kernel mints the virtio-mmio window and its SPI range from the
-devicetree's `virtio,mmio` nodes at boot (`dt.virtioWindow`, tested on
-the host against a synthetic tree) — no address or interrupt number is
-a constant in kernel code any more. Authority capabilities (log,
-spawner, mmio, irq, entropy, introspect) are plain object words with no
+**PCI and device capabilities (as built, 2026-09-02):** devices are
+virtio over PCI, modern transport only. The kernel does at boot what
+firmware would have: `dt.pcieHost` finds the host bridge (ECAM window,
+32-bit MMIO range, the INTx→SPI base; host-tested against a synthetic
+tree), `pci.init` walks bus 0, sizes and places every memory BAR in the
+MMIO window, enables decoding and bus mastering, and records each
+endpoint — its 4K config page, the BAR its virtio capabilities live in,
+its INTx line as a GIC intid (QEMU virt rotates INTA..D per slot from
+SPI 3), and its requester id, the stream id the SMMU will key on. A
+`device` cap is an index into that table; `mmio_map` maps the BAR and
+the config page (a driver reads the capability list itself), `irq_bind`
+routes the line, `device_info` says what it is. Kinds are the virtio
+device ids (`shared.DeviceKind`: net, blk, console, rng), so root can
+forward what it was granted without knowing anything, and init files
+each cap by kind for unit files' `{ tag: device, device: blk }`. Five
+or more endpoints would share INTx lines (four per bus); MSI-X through
+the ITS is the answer when that day comes. Authority capabilities (log,
+spawner, device, entropy, introspect) are plain object words with no
 refcount, and they travel in messages exactly like shm and channel caps:
-delegation is copying. So a driver no longer needs the kernel's manifest
-to hand it a device — whoever holds the device cap (root, then init)
-gives it away over the program's **boot channel**. The boot protocol
+delegation is copying. So a driver never needs the kernel's manifest to
+hand it a device — whoever holds the device cap (root, then init) gives
+it away over the program's **boot channel**. The boot protocol
 (`shared.BootReq`) is the one setup handshake every program starts
-with: `cap{tag}` with the cap attached (tags say what a cap is FOR:
-console, view, mmio, irq, entropy, disk, net, init, fabric, ...),
-`secret{off,len}` for key material staged in the `buf` cap (copied out
-and zeroized), `arg` text, then `go`. `user/boot.zig` takes it, and every
-program now starts with it: the block, net, and console drivers receive
-`mmio` + `irq`; fssvc its root buffer, the volume key as a `secret`, and
+with: `cap{tag, kind}` with the cap attached (tags say what a cap is
+FOR: console, view, device, entropy, disk, net, init, fabric, ...; kind
+files a device), `secret{off,len}` for key material staged in the `buf`
+cap (copied out and zeroized), `arg` text, then `go`. `user/boot.zig`
+takes it, and every program starts with it: the block, net, console and
+rng drivers receive their `device`; fssvc its root buffer, the volume key as a `secret`, and
 the disk channel; fabroot its buffer and the root seed; fabsvc its
 buffer, identity material, and net view; msh its console, view, init,
 and fabric channels. The per-service setup requests left the ABI with
@@ -454,18 +467,20 @@ acknowledged — before the service had run. A shared buffer is not a
 reply. Anything a program hands back is a request with a reply, never a
 promise about buffer contents after an ack.
 
-**As built (Phase 7):** an `mmio` cap names a physical window (mapped with
-device attributes via mmio_map); an `irq` cap names an SPI range, and
-irq_bind routes a line to a notification — delivery masks the line (level
+**As built (Phase 7, transport replaced 2026-09-02):** irq_bind routes
+a device's line to a notification — delivery masks the line (level
 sources must not storm) and irq_ack re-enables after the driver services
 the device; dma_alloc returns contiguous zeroed pages with a VA and a
-device address (== physical, but callers must treat it as opaque so the
-SMMU can change the answer later). The virtio-blk driver speaks the modern
-(version 2) virtio-mmio interface with a split virtqueue, probes the slots
-its window covers, and serves a typed block protocol; bulk data crosses via
-a client-granted shm buffer. QEMU note: virtio-mmio devices default to
-force-legacy — run with `-global virtio-mmio.force-legacy=false` (run-blk
-does).
+device address (callers treat it as opaque: the SMMU decides what it
+is). `user/virtio.zig` is the one virtio-pci transport every driver
+shares: it maps the device, walks the PCI capability list for the
+common/notify/ISR/device-config structures, resets and negotiates
+(VERSION_1 always, ACCESS_PLATFORM whenever offered — which is what a
+driver behind an IOMMU wants), programs split virtqueues, rings
+doorbells, and reads the ISR byte (which also deasserts INTx). The
+virtqueues stay in the drivers, whose layouts differ. Boots pass
+`-nic none`: QEMU otherwise adds a transitional virtio-net that would
+sit on the bus as an unclaimed endpoint.
 
 ### Entropy
 

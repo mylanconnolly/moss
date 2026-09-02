@@ -65,12 +65,14 @@ pub const Syscall = enum(u64) {
     watch_deaths = 17,
     /// cap_drop(handle): release one capability
     cap_drop = 18,
-    /// mmio_map(handle) -> x1 = va, x2 = bytes (device-attribute mapping)
+    /// mmio_map(device_handle) -> x1 = BAR va, x2 = BAR bytes, x3 = the
+    /// function's PCI config page va, x4 = the BAR's index (device-
+    /// attribute mappings)
     mmio_map = 19,
-    /// irq_bind(irq_handle, notif_handle, offset): SPI (cap base + offset)
-    /// signals the notification; the line is masked until irq_ack
+    /// irq_bind(device_handle, notif_handle, 0): the device's interrupt
+    /// line signals the notification; the line is masked until irq_ack
     irq_bind = 20,
-    /// irq_ack(irq_handle, offset): re-enable the line after handling
+    /// irq_ack(device_handle, 0): re-enable the line after handling
     irq_ack = 21,
     /// dma_alloc(pages) -> x1 = va, x2 = device address (physically
     /// contiguous; device address == physical until an IOMMU arrives)
@@ -108,6 +110,9 @@ pub const Syscall = enum(u64) {
     thread_create = 30,
     /// thread_exit(): end the calling thread only (exit ends the domain).
     thread_exit = 31,
+    /// device_info(device_handle) -> x1 = DeviceKind, x2 = requester id
+    /// (bus<<8|slot<<3|fn), x3 = BAR bytes
+    device_info = 32,
     _,
 };
 
@@ -359,8 +364,7 @@ pub const CapTag = enum(u64) {
     console = 1, // a console channel
     console_buf = 2, // the console's byte buffer (shm)
     view = 3, // a filesystem view
-    mmio = 4, // a device MMIO window
-    irq = 5, // a device interrupt range
+    device = 4, // a device: its registers, interrupt line and DMA identity
     entropy = 6, // the right to seed the kernel pool
     buf = 7, // a shared buffer the program should map (service staging)
     disk = 8, // a block service channel
@@ -376,9 +380,23 @@ pub const CapTag = enum(u64) {
 
 pub const cap_tag_count = 14;
 
+/// What a device is, by virtio device id (the modern PCI device id minus
+/// 0x1040). A device cap is handed over with its kind so the receiver
+/// can file it without asking.
+pub const DeviceKind = enum(u64) {
+    none = 0,
+    net = 1,
+    blk = 2,
+    console = 3,
+    rng = 4,
+};
+
+pub const device_kind_count = 5;
+
 pub const BootReq = union(enum(u64)) {
-    /// + cap attachment: what it is for.
-    cap: struct { tag: u64 },
+    /// + cap attachment: what it is for; `kind` (DeviceKind) files a
+    /// device cap, 0 otherwise.
+    cap: struct { tag: u64, kind: u64 },
     /// Secret material at buf[off..off+len] of the `buf` cap (the
     /// program copies it out and zeroizes the buffer).
     secret: struct { off: u64, len: u64 },

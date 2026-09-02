@@ -139,8 +139,16 @@ pub fn capDrop(handle: u64) shared.Errno {
 }
 
 /// mmio_map: data[0] = va, data[1] = bytes.
+/// mmio_map(device): data[0] = BAR va, data[1] = BAR bytes, data[2] =
+/// PCI config page va, data[3] = BAR index.
 pub fn mmioMap(handle: u64) IpcResult {
     return syscall6(.mmio_map, handle, 0, 0, 0, 0, 0);
+}
+
+/// device_info(device): data[0] = DeviceKind, data[1] = requester id,
+/// data[2] = BAR bytes.
+pub fn deviceInfo(handle: u64) IpcResult {
+    return syscall6(.device_info, handle, 0, 0, 0, 0, 0);
 }
 
 pub fn irqBind(handle: u64, notif: u64, offset: u64) shared.Errno {

@@ -21,6 +21,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
 
 comptime {
@@ -47,9 +48,8 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-// The device arrives over the boot channel (BootReq cap{mmio}, cap{irq}).
-var mmio_h: u64 = 0;
-var irq_h: u64 = 0;
+// The device arrives over the boot channel (BootReq cap{device}).
+var dev_h: u64 = 0;
 
 export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     // arg: low byte = role; byte 1 = cluster node id (0 = slirp mode).
@@ -68,9 +68,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
 /// The boot handshake: whoever spawned us hands over the device.
 fn takeDevice(chan_h: u64) void {
     const setup = boot.take(chan_h);
-    mmio_h = setup.cap(.mmio);
-    irq_h = setup.cap(.irq);
-    if (mmio_h == 0 or irq_h == 0) usys.exit(169);
+    dev_h = setup.device(.net);
+    if (dev_h == 0) usys.exit(169);
 }
 
 // ------------------------------------------------------------- addresses
@@ -129,30 +128,6 @@ fn isLocalAddr(a: Addr) bool {
 
 // ---------------------------------------------------------------- virtio
 
-const R = struct {
-    const magic = 0x00;
-    const version = 0x04;
-    const device_id = 0x08;
-    const device_features_sel = 0x14;
-    const driver_features = 0x20;
-    const driver_features_sel = 0x24;
-    const queue_sel = 0x30;
-    const queue_num_max = 0x34;
-    const queue_num = 0x38;
-    const queue_ready = 0x44;
-    const queue_notify = 0x50;
-    const interrupt_status = 0x60;
-    const interrupt_ack = 0x64;
-    const status = 0x70;
-    const queue_desc_lo = 0x80;
-    const queue_desc_hi = 0x84;
-    const queue_driver_lo = 0x90;
-    const queue_driver_hi = 0x94;
-    const queue_device_lo = 0xa0;
-    const queue_device_hi = 0xa4;
-    const config = 0x100;
-};
-
 const Desc = extern struct { addr: u64, len: u32, flags: u16, next: u16 };
 const desc_f_write = 2;
 const qn = 8;
@@ -161,7 +136,7 @@ const frame_cap = 2048;
 const n_rx = 8;
 const n_tx = 4;
 
-var dev_base: u64 = 0;
+var dev: virtio.Dev = undefined;
 var vq_va: u64 = 0;
 var vq_dev: u64 = 0;
 var rx_va: u64 = 0;
@@ -169,7 +144,6 @@ var rx_dev: u64 = 0;
 var tx_va: u64 = 0;
 var tx_dev: u64 = 0;
 var irq_notif: u64 = 0;
-var slot_idx: u64 = 0;
 
 const Q = struct { desc: u64, avail: u64, used: u64, idx: u32 };
 const rxq: Q = .{ .desc = 0, .avail = 128, .used = 256, .idx = 0 };
@@ -185,10 +159,6 @@ var gw_mac: [6]u8 = undefined;
 var have_gw4 = false;
 var gw6_mac: [6]u8 = undefined;
 var have_gw6 = false;
-
-fn reg(off: u64) *volatile u32 {
-    return @ptrFromInt(dev_base + off);
-}
 
 fn qDescs(q: Q) [*]volatile Desc {
     return @ptrFromInt(vq_va + q.desc);
@@ -215,20 +185,10 @@ fn netInit() void {
     if (n.err != .ok) usys.exit(170);
     irq_notif = n.data[0];
 
-    const mm = usys.mmioMap(mmio_h);
-    if (mm.err != .ok) usys.exit(171);
-    var found = false;
-    var s: u64 = 0;
-    while (s < mm.data[1] / 0x200) : (s += 1) {
-        dev_base = mm.data[0] + s * 0x200;
-        if (reg(R.magic).* == 0x74726976 and reg(R.version).* == 2 and reg(R.device_id).* == 1) {
-            found = true;
-            slot_idx = s;
-            break;
-        }
-    }
-    if (!found) usys.exit(172);
-    if (usys.irqBind(irq_h, irq_notif, slot_idx) != .ok) usys.exit(173);
+    dev = virtio.Dev.open(dev_h, .net) orelse {
+        usys.exit(172);
+    };
+    if (usys.irqBind(dev_h, irq_notif, 0) != .ok) usys.exit(173);
 
     const dma = usys.dmaAlloc(7);
     if (dma.err != .ok) usys.exit(174);
@@ -239,33 +199,15 @@ fn netInit() void {
     tx_va = vq_va + 5 * 4096;
     tx_dev = vq_dev + 5 * 4096;
 
-    reg(R.status).* = 0;
-    reg(R.status).* = 1;
-    reg(R.status).* = 1 | 2;
-    reg(R.driver_features_sel).* = 0;
-    reg(R.driver_features).* = 1 << 5; // MAC
-    reg(R.driver_features_sel).* = 1;
-    reg(R.driver_features).* = 1; // VERSION_1
-    reg(R.status).* = 1 | 2 | 8;
-    if (reg(R.status).* & 8 == 0) usys.exit(175);
-
+    _ = dev.negotiate(1 << 5, 0) orelse usys.exit(175); // MAC
     for ([_]Q{ rxq, txq }) |q| {
-        reg(R.queue_sel).* = q.idx;
-        if (reg(R.queue_num_max).* < qn) usys.exit(176);
-        reg(R.queue_num).* = qn;
-        reg(R.queue_desc_lo).* = @truncate(vq_dev + q.desc);
-        reg(R.queue_desc_hi).* = @truncate((vq_dev + q.desc) >> 32);
-        reg(R.queue_driver_lo).* = @truncate(vq_dev + q.avail);
-        reg(R.queue_driver_hi).* = @truncate((vq_dev + q.avail) >> 32);
-        reg(R.queue_device_lo).* = @truncate(vq_dev + q.used);
-        reg(R.queue_device_hi).* = @truncate((vq_dev + q.used) >> 32);
-        reg(R.queue_ready).* = 1;
+        if (!dev.queueSetup(@intCast(q.idx), qn, vq_dev + q.desc, vq_dev + q.avail, vq_dev + q.used)) usys.exit(176);
     }
-    reg(R.status).* = 1 | 2 | 8 | 4;
+    dev.driverOk();
 
     // Config space is read in aligned words (unaligned MMIO faults).
-    const m0 = reg(R.config).*;
-    const m1 = reg(R.config + 4).*;
+    const m0 = dev.devRead32(0);
+    const m1 = dev.devRead32(4);
     mac = .{
         @truncate(m0),       @truncate(m0 >> 8),
         @truncate(m0 >> 16), @truncate(m0 >> 24),
@@ -285,7 +227,7 @@ fn netInit() void {
     asm volatile ("dmb ish");
     qAvailIdx(rxq).* = rx_shadow;
     asm volatile ("dmb ish");
-    reg(R.queue_notify).* = rxq.idx;
+    dev.notify(@intCast(rxq.idx));
 }
 
 fn wireTx(frame: []const u8) void {
@@ -309,7 +251,7 @@ fn wireTx(frame: []const u8) void {
     asm volatile ("dmb ish");
     qAvailIdx(txq).* = tx_shadow;
     asm volatile ("dmb ish");
-    reg(R.queue_notify).* = txq.idx;
+    dev.notify(@intCast(txq.idx));
 }
 
 fn drainTxUsed() void {
@@ -332,7 +274,7 @@ fn drainRxUsed() void {
         qAvailIdx(rxq).* = rx_shadow;
         rx_seen +%= 1;
     }
-    reg(R.queue_notify).* = rxq.idx;
+    dev.notify(@intCast(rxq.idx));
 }
 
 fn netTick() void {
@@ -342,9 +284,8 @@ fn netTick() void {
 }
 
 fn irqDrain() void {
-    const isr = reg(R.interrupt_status).*;
-    reg(R.interrupt_ack).* = isr;
-    _ = usys.irqAck(irq_h, slot_idx);
+    _ = dev.isrRead();
+    _ = usys.irqAck(dev_h, 0);
     netTick();
 }
 

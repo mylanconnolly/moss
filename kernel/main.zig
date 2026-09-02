@@ -13,6 +13,7 @@ const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
+const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
 const psci = @import("psci.zig");
 const rng = @import("rng.zig");
@@ -50,17 +51,10 @@ export fn kmain(dtb_pa: u64) noreturn {
         if (boot_node != 0) log.info("bootargs: node id {d}", .{boot_node});
         boot_profile = parseProfile(args);
     }
-    // The device capabilities come from the tree, not from constants: the
-    // virtio-mmio window and its SPI range are what root (and, for now,
-    // the boot drivers) hand to userspace drivers.
-    if (fdt.virtioWindow()) |vw| {
-        devices = vw;
-        log.info("devicetree: virtio-mmio window 0x{x} + {d} pages, intids {d}..{d}", .{
-            vw.mmio_base, vw.mmio_pages, vw.irq_base, vw.irq_base + vw.irq_count - 1,
-        });
-    } else {
-        log.warn("devicetree: no virtio-mmio transports; userspace drivers will find no devices", .{});
-    }
+    // Devices come from the tree, not from constants: the PCIe host is
+    // enumerated once the memory map is up (its ECAM needs a mapping).
+    pcie_host = fdt.pcieHost();
+    if (pcie_host == null) log.warn("devicetree: no PCIe host; userspace drivers will find no devices", .{});
 
     pmem.init(regions);
     pmem.reserve(
@@ -74,6 +68,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     mmu.init(regions) catch |e| std.debug.panic("mmu build failed: {t}", .{e});
     mmu.activate();
     log.info("mmu: W^X kernel map active, boot identity map dropped", .{});
+    if (pcie_host) |h| pci.init(h);
 
     // Allocator smoke test: quota round-trips to zero.
     {
@@ -333,8 +328,7 @@ fn initTestWorker(_: u64) void {
         .grant_spawner = true,
         .grant_bootfs = true,
         // Roomy: the whole userspace tree's usage cascades into these.
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
+        .grant_devices = true,
         .grant_entropy = true,
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
@@ -424,8 +418,7 @@ fn flapTestWorker(_: u64) void {
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
+        .grant_devices = true,
         .grant_entropy = true,
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
@@ -484,8 +477,7 @@ fn systemDrill(comptime name: []const u8) void {
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
+        .grant_devices = true,
         .grant_entropy = true,
         .kobj_limit = 24 << 20,
         .user_limit = 96 << 20,
@@ -529,8 +521,7 @@ fn spawnRngd(reseed_ticks: u64) *domain.Domain {
         .grant_channel_a = boot_ch,
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn rngd: {t}", .{e});
-    bootGive(boot_ch, .mmio, .mmio, mmioCapObj(), 0);
-    bootGive(boot_ch, .irq, .irq, irqCapObj(), 0);
+    bootGiveDevice(boot_ch, .rng);
     bootGive(boot_ch, .entropy, .entropy, 0, 0);
     bootGo(boot_ch);
     ipc.unrefSide(boot_ch, .b);
@@ -550,7 +541,7 @@ fn spawnRngd(reseed_ticks: u64) *domain.Domain {
 
 fn bootGive(boot_ch: *ipc.Channel, tag: shared.CapTag, ct: cap.CapType, obj: u64, badge: u64) void {
     const res = ipc.call(boot_ch, .{
-        .data = shared.encodeMsg(shared.BootReq, .{ .cap = .{ .tag = @intFromEnum(tag) } }),
+        .data = shared.encodeMsg(shared.BootReq, .{ .cap = .{ .tag = @intFromEnum(tag), .kind = 0 } }),
         .cap_type = @intFromEnum(ct),
         .cap_obj = obj,
         .cap_badge = badge,
@@ -580,17 +571,16 @@ fn bootGo(boot_ch: *ipc.Channel) void {
     std.debug.assert(res.err == .ok);
 }
 
-/// Spawn a driver (log + its service channel) and hand it the device
-/// window and interrupt range over that channel, then go.
-fn spawnDevice(name: []const u8, id: shared.ImageId, arg: u64, ch: *ipc.Channel) *domain.Domain {
+/// Spawn a driver (log + its service channel) and hand it its device
+/// over that channel, then go.
+fn spawnDevice(name: []const u8, id: shared.ImageId, arg: u64, ch: *ipc.Channel, kind: shared.DeviceKind) *domain.Domain {
     const d = domain.spawn(name, .{ .blob = img(id) }, .{
         .arg = arg,
         .grant_debug_log = true,
         .grant_channel_a = ch,
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn {s}: {t}", .{ name, e });
-    bootGive(ch, .mmio, .mmio, mmioCapObj(), 0);
-    bootGive(ch, .irq, .irq, irqCapObj(), 0);
+    bootGiveDevice(ch, kind);
     bootGo(ch);
     return d;
 }
@@ -673,27 +663,20 @@ fn parseProfile(args: []const u8) shared.BootProfile {
     return .system;
 }
 
-/// The virtio-mmio device window from the devicetree (zero if none).
-var devices: dt.VirtioWindow = .{ .mmio_base = 0, .mmio_pages = 0, .irq_base = 0, .irq_count = 0 };
+/// The PCIe host bridge from the devicetree (null if none).
+var pcie_host: ?dt.PcieHost = null;
 
-fn devMmio() ?domain.MmioGrant {
-    if (devices.mmio_pages == 0) return null;
-    return .{ .base = devices.mmio_base, .pages = devices.mmio_pages };
-}
-
-fn devIrq() ?domain.IrqGrant {
-    if (devices.irq_count == 0) return null;
-    return .{ .base = devices.irq_base, .count = devices.irq_count };
-}
-
-/// The device capability object words (the same encoding the cap table
-/// holds), for handing devices to a program over its boot channel.
-fn mmioCapObj() u64 {
-    return devices.mmio_base | (devices.mmio_pages << 48);
-}
-
-fn irqCapObj() u64 {
-    return @as(u64, devices.irq_base) | (@as(u64, devices.irq_count) << 32);
+/// Hand a device of the given kind (the first enumerated) to a program
+/// over its boot channel, filed under its kind.
+fn bootGiveDevice(boot_ch: *ipc.Channel, kind: shared.DeviceKind) void {
+    const idx = pci.byKind(kind) orelse std.debug.panic("no {t} device on the bus", .{kind});
+    const res = ipc.call(boot_ch, .{
+        .data = shared.encodeMsg(shared.BootReq, .{ .cap = .{ .tag = @intFromEnum(shared.CapTag.device), .kind = @intFromEnum(kind) } }),
+        .cap_type = @intFromEnum(cap.CapType.device),
+        .cap_obj = idx,
+        .cap_badge = 0,
+    }, 0);
+    std.debug.assert(res.err == .ok);
 }
 
 fn parseArgNum(args: []const u8, comptime key: []const u8) u64 {
@@ -736,7 +719,7 @@ fn fabricTestWorker(arg: u64) void {
 
     // The network, in cluster mode.
     const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    _ = spawnDevice("netsvc", .net, 1 | (node << 8), net_ch);
+    _ = spawnDevice("netsvc", .net, 1 | (node << 8), net_ch, .net);
     sched.sleep(3);
 
     // The fabric service, wired to a net view.

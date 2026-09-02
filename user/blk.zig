@@ -1,6 +1,6 @@
 //! virtio-blk, in userspace, by x2:
-//!   1 "blkdrv"  — the driver: probes the virtio-mmio slots its MMIO cap
-//!                 covers, brings up the block device (modern interface,
+//!   1 "blkdrv"  — the driver: takes its virtio-blk device cap over the
+//!                 boot channel, brings it up (virtio-pci, modern only,
 //!                 split virtqueue, up to 8 requests in flight), and serves
 //!                 the block protocol over BOTH transports: sync channel
 //!                 call/reply, and an io_uring-style SQ/CQ ring in shared
@@ -16,6 +16,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
 
 comptime {
@@ -42,9 +43,8 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-// The device arrives over the boot channel (BootReq cap{mmio}, cap{irq}).
-var mmio_h: u64 = 0;
-var irq_h: u64 = 0;
+// The device arrives over the boot channel (BootReq cap{device}).
+var dev_h: u64 = 0;
 
 export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
     switch (role) {
@@ -60,43 +60,11 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
 /// The boot handshake: whoever spawned us hands over the device.
 fn takeDevice(chan_h: u64) void {
     const setup = boot.take(chan_h);
-    mmio_h = setup.cap(.mmio);
-    irq_h = setup.cap(.irq);
-    if (mmio_h == 0 or irq_h == 0) usys.exit(169);
+    dev_h = setup.device(.blk);
+    if (dev_h == 0) usys.exit(169);
 }
 
 // ------------------------------------------------------------- the driver
-
-// virtio-mmio registers (modern, version 2).
-const R = struct {
-    const magic = 0x00;
-    const version = 0x04;
-    const device_id = 0x08;
-    const device_features = 0x10;
-    const device_features_sel = 0x14;
-    const driver_features = 0x20;
-    const driver_features_sel = 0x24;
-    const queue_sel = 0x30;
-    const queue_num_max = 0x34;
-    const queue_num = 0x38;
-    const queue_ready = 0x44;
-    const queue_notify = 0x50;
-    const interrupt_status = 0x60;
-    const interrupt_ack = 0x64;
-    const status = 0x70;
-    const queue_desc_lo = 0x80;
-    const queue_desc_hi = 0x84;
-    const queue_driver_lo = 0x90;
-    const queue_driver_hi = 0x94;
-    const queue_device_lo = 0xa0;
-    const queue_device_hi = 0xa4;
-    const config = 0x100;
-};
-
-const status_ack = 1;
-const status_driver = 2;
-const status_driver_ok = 4;
-const status_features_ok = 8;
 
 const desc_f_next = 1;
 const desc_f_write = 2;
@@ -126,7 +94,7 @@ const InFlight = struct {
 
 const sync_id: u64 = 0xffff_ffff_ffff_ffff;
 
-var dev_base: u64 = 0;
+var dev: virtio.Dev = undefined;
 var vq_va: u64 = 0;
 var vq_dev: u64 = 0;
 var hdr_va: u64 = 0;
@@ -135,7 +103,6 @@ var slot_va: [slots]u64 = @splat(0);
 var slot_dev: [slots]u64 = @splat(0);
 var have_flush = false;
 var irq_notif: u64 = 0;
-var slot_idx: u64 = 0; // this device's virtio-mmio slot (for irq offset)
 var used_seen: u16 = 0;
 var avail_shadow: u16 = 0;
 var inflight: [slots]?InFlight = @splat(null);
@@ -148,38 +115,16 @@ var cq_bell: u64 = 0;
 var sync_done: bool = false;
 var sync_status: u64 = 0;
 
-fn reg(off: u64) *volatile u32 {
-    return @ptrFromInt(dev_base + off);
-}
-
 fn blkdrv(log_h: u64, chan_h: u64) noreturn {
     const n = usys.notifyCreate();
     if (n.err != .ok) usys.exit(170);
     irq_notif = n.data[0];
 
-    const mm = usys.mmioMap(mmio_h);
-    if (mm.err != .ok) usys.exit(171);
-    const mmio_base = mm.data[0];
-    const nslots = mm.data[1] / 0x200;
-
-    var found = false;
-    var s: u64 = 0;
-    while (s < nslots) : (s += 1) {
-        dev_base = mmio_base + s * 0x200;
-        if (reg(R.magic).* == 0x74726976 and
-            reg(R.version).* == 2 and
-            reg(R.device_id).* == 2)
-        {
-            found = true;
-            slot_idx = s;
-            break;
-        }
-    }
-    if (!found) {
-        _ = usys.log(log_h, "blkdrv: no virtio-blk device found");
+    dev = virtio.Dev.open(dev_h, .blk) orelse {
+        _ = usys.log(log_h, "blkdrv: the device handed to us is not a virtio-blk");
         usys.exit(172);
-    }
-    if (usys.irqBind(irq_h, irq_notif, slot_idx) != .ok) usys.exit(173);
+    };
+    if (usys.irqBind(dev_h, irq_notif, 0) != .ok) usys.exit(173);
 
     // DMA: virtqueue + headers, then one 32K data region per slot.
     const dma = usys.dmaAlloc(2);
@@ -253,46 +198,19 @@ fn blkdrv(log_h: u64, chan_h: u64) noreturn {
 }
 
 fn initDevice() void {
-    reg(R.status).* = 0;
-    reg(R.status).* = status_ack;
-    reg(R.status).* = status_ack | status_driver;
-
-    // Accept VIRTIO_F_VERSION_1 (bit 32) and, if offered, the flush
-    // barrier (VIRTIO_BLK_F_FLUSH, bit 9) — the filesystem's durability
-    // depends on it, so its absence is loudly degraded, not hidden.
-    reg(R.device_features_sel).* = 0;
-    const dev_feats = reg(R.device_features).*;
-    have_flush = dev_feats & (1 << 9) != 0;
-    reg(R.driver_features_sel).* = 1;
-    reg(R.driver_features).* = 1;
-    reg(R.driver_features_sel).* = 0;
-    reg(R.driver_features).* = if (have_flush) (1 << 9) else 0;
-
-    reg(R.status).* = status_ack | status_driver | status_features_ok;
-    if (reg(R.status).* & status_features_ok == 0) usys.exit(176);
-
-    reg(R.queue_sel).* = 0;
-    if (reg(R.queue_num_max).* < q_num) usys.exit(177);
-    reg(R.queue_num).* = q_num;
-
+    // Accept VIRTIO_F_VERSION_1 and, if offered, the flush barrier
+    // (VIRTIO_BLK_F_FLUSH, bit 9) — the filesystem's durability depends
+    // on it, so its absence is loudly degraded, not hidden.
+    const f = dev.negotiate(1 << 9, 0) orelse usys.exit(176);
+    have_flush = f.lo & (1 << 9) != 0;
     // Virtqueue layout in the DMA page: descs @0, avail @512, used @1024.
-    const desc = vq_dev;
-    const avail = vq_dev + 512;
-    const used = vq_dev + 1024;
-    reg(R.queue_desc_lo).* = @truncate(desc);
-    reg(R.queue_desc_hi).* = @truncate(desc >> 32);
-    reg(R.queue_driver_lo).* = @truncate(avail);
-    reg(R.queue_driver_hi).* = @truncate(avail >> 32);
-    reg(R.queue_device_lo).* = @truncate(used);
-    reg(R.queue_device_hi).* = @truncate(used >> 32);
-    reg(R.queue_ready).* = 1;
-
-    reg(R.status).* = status_ack | status_driver | status_features_ok | status_driver_ok;
+    if (!dev.queueSetup(0, q_num, vq_dev, vq_dev + 512, vq_dev + 1024)) usys.exit(177);
+    dev.driverOk();
 }
 
 fn readCap() u64 {
-    const lo: u64 = reg(R.config).*;
-    const hi: u64 = reg(R.config + 4).*;
+    const lo: u64 = dev.devRead32(0);
+    const hi: u64 = dev.devRead32(4);
     return lo | (hi << 32);
 }
 
@@ -345,7 +263,7 @@ fn kick() void {
     asm volatile ("dmb ish");
     avail_idx.* = avail_shadow;
     asm volatile ("dmb ish");
-    reg(R.queue_notify).* = 0;
+    dev.notify(0);
 }
 
 fn freeSlot() ?usize {
@@ -387,9 +305,8 @@ fn drainUsed() void {
 
 fn waitIrqAndDrain() void {
     _ = usys.notifyWait(irq_notif);
-    const isr = reg(R.interrupt_status).*;
-    reg(R.interrupt_ack).* = isr;
-    _ = usys.irqAck(irq_h, slot_idx);
+    _ = dev.isrRead();
+    _ = usys.irqAck(dev_h, 0);
     drainUsed();
 }
 

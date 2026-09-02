@@ -12,6 +12,7 @@ const domain = @import("domain.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
 const log = @import("log.zig");
+const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
 const rng = @import("rng.zig");
 const sched = @import("sched.zig");
@@ -51,6 +52,7 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .watch_deaths => sysWatchDeaths(d, frame.regs[0]),
         .cap_drop => sysCapDrop(d, frame.regs[0]),
         .mmio_map => sysMmioMap(d, frame),
+        .device_info => sysDeviceInfo(d, frame),
         .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
         .dma_alloc => sysDmaAlloc(d, frame),
@@ -78,22 +80,35 @@ fn sysNotifyBind(d: *domain.Domain, handle_bits: u64) u64 {
 
 fn sysMmioMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const h: shared.Handle = @bitCast(frame.regs[0]);
-    const obj = d.captable.?.lookup(h, .mmio) orelse return errno(.bad_handle);
-    const base = obj & 0x0000_ffff_ffff_f000;
-    const pages = obj >> 48;
-    const va = domain.mapMmio(d, base, pages) catch return errno(.no_space);
+    const idx = d.captable.?.lookup(h, .device) orelse return errno(.bad_handle);
+    const dev = &pci.devices[idx];
+    if (dev.bar_len == 0) return errno(.bad_state);
+    const pages = (dev.bar_len + 4095) / 4096;
+    const va = domain.mapMmio(d, dev.bar_pa, pages) catch return errno(.no_space);
+    const cfg = domain.mapMmio(d, dev.cfg_pa, 1) catch return errno(.no_space);
     frame.regs[1] = va;
     frame.regs[2] = pages * 4096;
+    frame.regs[3] = cfg;
+    frame.regs[4] = dev.bar_index;
+    return errno(.ok);
+}
+
+fn sysDeviceInfo(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    const idx = d.captable.?.lookup(h, .device) orelse return errno(.bad_handle);
+    const dev = &pci.devices[idx];
+    frame.regs[1] = @intFromEnum(dev.kind);
+    frame.regs[2] = dev.sid;
+    frame.regs[3] = dev.bar_len;
     return errno(.ok);
 }
 
 fn resolveIrq(d: *domain.Domain, handle_bits: u64, offset: u64) ?u32 {
     const h: shared.Handle = @bitCast(handle_bits);
-    const obj = d.captable.?.lookup(h, .irq) orelse return null;
-    const base: u32 = @truncate(obj);
-    const count = obj >> 32;
-    if (offset >= count) return null;
-    return base + @as(u32, @intCast(offset));
+    const idx = d.captable.?.lookup(h, .device) orelse return null;
+    if (offset != 0) return null;
+    const intid = pci.devices[idx].intid;
+    return if (intid == 0) null else intid;
 }
 
 fn sysIrqBind(d: *domain.Domain, handle_bits: u64, notif_bits: u64, offset: u64) u64 {
@@ -383,7 +398,7 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
     if (handle.slot < cap.slots) {
         const e = &d.captable.?.entries[handle.slot];
         if (e.generation == handle.generation) switch (e.cap_type) {
-            .debug_log, .spawner, .mmio, .irq, .entropy, .introspect => {
+            .debug_log, .spawner, .device, .entropy, .introspect => {
                 msg.cap_type = @intFromEnum(e.cap_type);
                 msg.cap_obj = e.object;
                 return null;

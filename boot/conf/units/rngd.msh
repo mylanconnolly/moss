@@ -5,8 +5,7 @@
   arg:     1
   profiles: [system]
   give: [
-    { tag: mmio,    device: mmio }
-    { tag: irq,     device: irq }
+    { tag: device, device: rng }
     { tag: entropy, device: entropy }
   ]
   restart: { max: 5 }
