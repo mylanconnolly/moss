@@ -86,6 +86,20 @@ pub fn replyTypedTo(comptime Rep: type, channel: u64, rep: Rep, send_cap: u64, t
     return syscall7(.reply, channel, words[0], words[1], words[2], words[3], send_cap, token).err;
 }
 
+/// Start another thread in this domain running `f(arg)` on `stack` (the
+/// domain's own memory, 16-byte aligned end); it exits when f returns.
+pub fn threadCreate(f: *const fn (u64) callconv(.c) void, arg: u64, stack: []u8) shared.Errno {
+    const top = (@intFromPtr(stack.ptr) + stack.len) & ~@as(u64, 15);
+    return syscall6(.thread_create, @intFromPtr(&threadTrampoline), @intFromPtr(f), arg, top, 0, 0).err;
+}
+
+fn threadTrampoline(fnp: u64, arg: u64) callconv(.c) noreturn {
+    const f: *const fn (u64) callconv(.c) void = @ptrFromInt(fnp);
+    f(arg);
+    _ = syscall3(.thread_exit, 0, 0, 0);
+    unreachable;
+}
+
 /// timer_arm: signal `notif` with `bits` every `period` ticks (0 disarms).
 pub fn timerArm(notif: u64, period: u64, bits: u64) shared.Errno {
     return @enumFromInt(syscall3(.timer_arm, notif, period, bits));

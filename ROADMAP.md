@@ -229,6 +229,31 @@ The pooling story stops being theory.
   kept a single pending connection, so a burst of SYNs orphaned
   established sockets nobody would read (a real backlog now; the fabric
   also tears down a half-open dial before redialing).
+- ✅ **The fabric's promise kept: a channel across the network is a
+  slower channel** (done). Three v0 residuals fell together. **Cap
+  transfer across nodes**: a channel cap attached to a call on a remote
+  channel — or to a reply — becomes an *export* on its node (a small id
+  peers may call) and a badged *session* on the other, so the receiver
+  holds an ordinary channel cap that calls back through the reverse
+  proxy; the drill hands a local calc service to a remotely spawned
+  child, which calls back through it and returns the sum. **Many
+  exchanges in flight per link**: the kernel's new deferred replies let
+  the fabric park each caller under its reply token and carry on;
+  responses are matched by sequence number, a peer's death or a timeout
+  fails every exchange on that link cleanly (the drill drives three
+  callers at once and asserts overlap). **No polling**: the fabric arms
+  a kernel timer notification for its heartbeat clock and a netsvc
+  socket *doorbell* on every socket (`NetReq.watch`), both on one bound
+  notification that interrupts its recv; the test drivers no longer
+  tick it and the shell boot never did. The proxy deadlock this
+  uncovered — a callee calling back through the fabric that was
+  blocked calling it — is why user domains can now create **threads**
+  (`thread_create`/`thread_exit`, same cap table, a domain-supplied
+  stack): inbound remote calls run on a small worker pool while the
+  serve thread alone touches peers and the wire. Remaining fabric
+  residuals: static node addressing; identities and revocations held
+  in memory; shm caps do not cross (by design), notifications do not
+  yet.
 - ✅ **Boot orchestration into userspace** (done, three stages). The
   end state, now built: the kernel spawns root with log, spawner, the
   boot archive, and the device capabilities; root forwards them to init;

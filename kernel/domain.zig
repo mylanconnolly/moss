@@ -123,7 +123,61 @@ pub const Domain = struct {
     /// Outstanding domain_ctl caps; a dead slot is reusable only at zero.
     ctl_refs: std.atomic.Value(u32) = .init(0),
     parent: ?*Domain = null,
+    /// Start records for extra user threads (thread_create).
+    starts: [max_domain_threads]ThreadStart = @splat(.{}),
 };
+
+pub const max_domain_threads = 8;
+
+const ThreadStart = struct {
+    used: bool = false,
+    d: ?*Domain = null,
+    entry: u64 = 0,
+    sp: u64 = 0,
+    x0: u64 = 0,
+    x1: u64 = 0,
+};
+
+/// Another thread in `d`: same address space and cap table, entering
+/// `entry` with x0/x1 on a user-supplied stack. Counted in threads_alive
+/// like the first thread, so teardown drains it the same way.
+pub fn createThread(d: *Domain, entry: u64, sp: u64, x0: u64, x1: u64) Error!void {
+    var slot: ?*ThreadStart = null;
+    for (&d.starts) |*ts| {
+        if (!ts.used) {
+            slot = ts;
+            break;
+        }
+    }
+    const ts = slot orelse return Error.NoThreadSlots;
+    ts.* = .{ .used = true, .d = d, .entry = entry, .sp = sp, .x0 = x0, .x1 = x1 };
+    _ = d.threads_alive.fetchAdd(1, .acq_rel);
+    _ = sched.spawn(d.name, extraThreadEntry, @intFromPtr(ts), .{
+        .user_ttbr0 = d.ttbr0_pa,
+        .asid = d.asid,
+        .user_ctx = d,
+        .captable = d.captable.?,
+        .stack_account = &d.kobj,
+    }) catch |e| {
+        _ = d.threads_alive.fetchSub(1, .acq_rel);
+        ts.* = .{};
+        return switch (e) {
+            sched.Error.NoThreadSlots => Error.NoThreadSlots,
+            sched.Error.OutOfFrames => Error.OutOfFrames,
+            sched.Error.QuotaExceeded => Error.QuotaExceeded,
+        };
+    };
+}
+
+fn extraThreadEntry(arg: u64) void {
+    const ts: *ThreadStart = @ptrFromInt(arg);
+    const entry = ts.entry;
+    const sp = ts.sp;
+    const x0 = ts.x0;
+    const x1 = ts.x1;
+    ts.* = .{}; // the record is free once its values are in registers
+    enterUser(entry, sp, .{ x0, x1, 0, 0, 0 });
+}
 
 var domains: [max_domains]Domain = @splat(.{});
 var next_domain_id: u32 = 1;

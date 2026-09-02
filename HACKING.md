@@ -139,8 +139,15 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 
 ## Known scoping notes (deliberate, tracked)
 
-- Blocking-op polling and single-outstanding fabric exchanges are v0
-  choices; async rings are the upgrade path.
+- A service that needs a clock arms a timer notification (`timerArm`);
+  one that waits on sockets asks netsvc to `watch` them with its
+  notification; bind the notification and the recv is interrupted on
+  either. Nothing ticks the fabric any more (`FabReq.poll` is a no-op
+  pump kept for compatibility). A server that must call out on a
+  caller's behalf holds the caller open by its recv token
+  (`replyRawTo`) or runs the blocking call on a worker thread
+  (`threadCreate`) — never inline in its serve loop: a callee that
+  calls back deadlocks it.
 - netsvc listeners keep a 4-deep accept backlog; a SYN past it is
   dropped and the client's SYN retransmit retries. A five-second fabric
   timeout with nothing logged on either side was once an orphaned

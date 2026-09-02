@@ -101,6 +101,13 @@ pub const Syscall = enum(u64) {
     /// disarms. A clock as a notification — the same wake path as an
     /// IRQ, so a serving thread's recv is interrupted on time.
     timer_arm = 29,
+    /// thread_create(entry, x0, x1, stack_top): another thread in this
+    /// domain, entering `entry` with x0/x1 on a stack the domain supplies
+    /// (its own memory); it shares the cap table. Threads are how a
+    /// service makes blocking calls on others' behalf without stalling.
+    thread_create = 30,
+    /// thread_exit(): end the calling thread only (exit ends the domain).
+    thread_exit = 31,
     _,
 };
 
@@ -562,6 +569,11 @@ pub const NetReq = union(enum(u64)) {
     /// Unrestricted views only: mint a filtered view allowing exactly one
     /// outbound destination (and no listening). Reply attaches the cap.
     derive: struct { ip_hi: u64, ip_lo: u64, port: u64 },
+    /// + notification cap: the socket's doorbell. Signaled (bit 1) when
+    /// it has news — data, a state change, a connection to accept — so a
+    /// client can block in recv with the notification bound instead of
+    /// polling. One bell per socket; dropped with the socket.
+    watch: struct { sock: u64 },
 };
 
 /// v4-mapped IPv6 words for an IPv4 address given as 0xAABBCCDD.
@@ -649,6 +661,8 @@ pub const FabReq = union(enum(u64)) {
     /// Fill the attached buffer with fab_member_size-byte records
     /// {node u16, up u8, pad u8, free_mb u16, pad u16}; reply num{n}.
     members: void,
+    /// num{the most wire exchanges this node has had in flight at once}.
+    stats: void,
 };
 
 pub const FabResp = union(enum(u64)) {
@@ -696,6 +710,15 @@ pub const fw_hello: u8 = 1;
 pub const fw_hello_ack: u8 = 2;
 pub const fw_spawn_req: u8 = 3;
 pub const fw_spawn_ack: u8 = 4;
+// Remote calls: [export u32][seq u32][4 x u64][export-of-attached-cap u32]
+// and [seq u32][ok u8][4 x u64][export-of-reply-cap u32]. An EXPORT is a
+// channel a node has made reachable by its peers under a small id (a
+// remotely spawned child's channel, or any channel cap a caller attached
+// to a call or a server attached to a reply); the other side binds a
+// badged session to (node, export) and hands out the badge as an
+// ordinary channel cap. That is cap transfer across the wire: a channel
+// that crosses the network is a slower channel, in both directions. Many
+// exchanges may be in flight per link; seq matches responses.
 pub const fw_call_req: u8 = 5;
 pub const fw_call_resp: u8 = 6;
 // v2+: membership + liveness frames.

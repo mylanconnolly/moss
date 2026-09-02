@@ -61,6 +61,8 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .getrandom => sysGetrandom(d, frame.regs[0], frame.regs[1]),
         .rng_seed => sysRngSeed(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         .timer_arm => sysTimerArm(d, frame.regs[0], frame.regs[1], frame.regs[2]),
+        .thread_create => sysThreadCreate(d, frame.regs[0], frame.regs[1], frame.regs[2], frame.regs[3]),
+        .thread_exit => sched.exit(),
         _ => errno(.nosys),
     };
 }
@@ -509,6 +511,19 @@ fn sysLog(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     // kernel can read the buffer through the user mapping directly.
     const bytes = @as([*]const u8, @ptrFromInt(ptr))[0..len];
     log.print("[{s}] {s}\n", .{ d.name, bytes });
+    return errno(.ok);
+}
+
+/// thread_create(entry, x0, x1, stack_top): the entry must lie in the
+/// image and the stack top in writable user memory; the rest is the
+/// domain's business.
+fn sysThreadCreate(d: *domain.Domain, entry: u64, x0: u64, x1: u64, sp: u64) u64 {
+    if (!userRangeOk(d, entry, 4) or entry % 4 != 0) return errno(.fault);
+    if (sp % 16 != 0 or !userRangeWritable(d, sp - 16, 16)) return errno(.fault);
+    domain.createThread(d, entry, sp, x0, x1) catch |e| return errno(switch (e) {
+        domain.Error.NoThreadSlots => .no_space,
+        else => .no_space,
+    });
     return errno(.ok);
 }
 

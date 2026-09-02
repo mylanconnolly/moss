@@ -207,6 +207,19 @@ Two transports, one contract:
    A serves (recv/reply), side B calls; per-side refcounts close a side when
    its last cap dies. Cap transfer over messages is the buffer-grant
    mechanism — an shm cap granted in a call is how out-of-line data crosses.
+   **Deferred replies (as built):** a server may recv again before
+   replying — up to eight callers sit in a channel's pending slots, and
+   recv returns a token (slot + serial) that reply names; token 0 answers
+   the oldest, which is what one-at-a-time servers keep doing. A proxy
+   can therefore hold many exchanges open while its loop runs on. **A
+   timer is a notification** (timer_arm: a period and the bits to
+   signal), delivered on the same path as an IRQ, so a serving thread's
+   recv is interrupted on time and nothing needs to be polled by whoever
+   spawned it. **Threads (as built):** a domain may create more threads
+   (thread_create: entry, two registers, a stack from its own memory;
+   thread_exit ends just that thread) sharing its cap table and counted
+   in its teardown; a service that must make blocking calls on others'
+   behalf runs them on workers so its serve thread never stalls.
 2. **Async rings** — io_uring-style shared-memory submission/completion
    rings for bulk and streams, so services don't need a thread per request.
    As built (Phase 8): the ring is pure userspace over existing primitives —
@@ -888,12 +901,35 @@ Threat-model honesty:
   outside the handshake; a burned counter on a would_block ping is
   rolled back so the streams never desync.
 
-v0 honesty notes that remain: one outstanding wire exchange at a time, no
-cap transfer across nodes beyond spawn-time grants, polling-driven
-pumping (the node driver — or the shell boot — ticks the fabric), death
-of in-flight calls is an error-sentinel reply, and node id → 10.77.0.N
-addressing is static (dynamic addressing is a separate concern). Each a
-known evolution point, none an ABI change.
+**The promise kept (as built):** a channel across the network is a
+slower channel, in both directions. An *export* is a local channel a
+node has made reachable by peers under a small id — a remotely spawned
+child's channel, or any channel cap a caller attached to a call or a
+server attached to a reply; the other node binds a badged *session* to
+(node, export) and hands out the badge as an ordinary channel cap. A
+cap that crossed the wire calls back through the reverse proxy, which
+the drill proves by handing a local service to a remote child. Many
+exchanges are in flight per link: a forwarded call parks its caller
+under the kernel's reply token, responses are matched by sequence
+number, and a peer's death or a timeout fails every exchange on that
+link with the error sentinel. Nobody pumps the fabric: it arms a timer
+notification for its clock and a netsvc doorbell (`watch`) on every
+socket, on one bound notification that interrupts its recv. Inbound
+calls run on a worker pool; the serve thread alone touches peers and
+the wire — workers own only their job record and ring the serve thread
+when the result is in.
+
+Lesson paid for: the first cut served inbound calls inline, and the
+moment a capability crossed the wire the remote callee called back
+through the fabric that was blocked calling it — a deadlock that the
+timeout turned into a dropped peer. A proxy that makes blocking calls
+on behalf of others needs more than one thread; that is why user
+domains can create threads now.
+
+v0 honesty notes that remain: node id → 10.77.0.N addressing is static
+(dynamic addressing is a separate concern), identities and revocations
+are held in memory, shm caps do not cross nodes (by design: no
+cross-machine shared memory) and notifications do not yet.
 
 A teardown lesson from wiring the fabric into the shell boot: an shm
 cap delivered to a service is unref'd by *that service's* teardown, so

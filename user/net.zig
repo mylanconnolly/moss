@@ -631,7 +631,13 @@ const Sock = struct {
     backlog: [backlog_len]u8 = @splat(0),
     backlog_n: u8 = 0,
     peer_closed: bool = false,
+    /// Doorbell: a client's notification, rung on every change.
+    bell: u64 = 0,
 };
+
+fn ring(s: *Sock) void {
+    if (s.bell != 0) _ = usys.notifySignal(s.bell, 1);
+}
 
 var socks: [max_socks]Sock = @splat(.{});
 var next_eph: u16 = 40000;
@@ -755,6 +761,7 @@ fn retransmitScan() void {
         if (s.rexmits > 8) {
             s.state = .closed;
             s.una_active = false;
+            ring(s);
             continue;
         }
         s.rexmits += 1;
@@ -797,12 +804,14 @@ fn tcpInput(src: Addr, seg: []const u8) void {
             tcpSendTracked(c, F_SYN | F_ACK, "");
             l.backlog[l.backlog_n] = @intCast(ci);
             l.backlog_n += 1;
+            ring(l);
             return;
         }
     }
 }
 
 fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, payload: []const u8) void {
+    defer ring(s);
     if (flags & F_RST != 0) {
         s.state = .closed;
         s.una_active = false;
@@ -810,7 +819,14 @@ fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, payload: []const u8) void 
     }
     if (flags & F_ACK != 0 and s.una_active and ack == s.snd_nxt) {
         s.una_active = false;
-        if (s.state == .syn_rcvd) s.state = .established;
+        if (s.state == .syn_rcvd) {
+            s.state = .established;
+            // The listener's client waits on accept; the newly
+            // established socket is what it will take.
+            for (&socks) |*l| {
+                if (l.used and l.state == .listen and l.lport == s.lport) ring(l);
+            }
+        }
     }
     switch (s.state) {
         .syn_sent => {
@@ -937,6 +953,7 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             .ping => |q| nreply(opPing(v, q.ip_hi, q.ip_lo)),
             .ping_check => nreply(.{ .num = .{ .n = ping_replies } }),
             .derive => |q| opDerive(v, q.ip_hi, q.ip_lo, q.port),
+            .watch => |q| nreply(opWatch(r.badge, q.sock, r.cap)),
         }
     }
 }
@@ -1039,8 +1056,19 @@ fn opRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     return .{ .num = .{ .n = n } };
 }
 
+fn opWatch(badge: u64, idx: u64, bell: u64) shared.NetResp {
+    const s = sockOf(badge, idx) orelse return nerr(.bad);
+    if (bell == 0) return nerr(.bad);
+    if (s.bell != 0) _ = usys.capDrop(s.bell);
+    s.bell = bell;
+    // Anything already waiting is news the client has not heard yet.
+    if (s.rx_len > 0 or s.backlog_n > 0 or s.peer_closed) ring(s);
+    return .ok;
+}
+
 fn opClose(badge: u64, idx: u64) shared.NetResp {
     const s = sockOf(badge, idx) orelse return nerr(.bad);
+    if (s.bell != 0) _ = usys.capDrop(s.bell);
     if (s.state == .established or s.state == .close_wait) {
         tcpEmit(s, s.snd_nxt, F_FIN | F_ACK, "");
     }

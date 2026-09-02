@@ -15,7 +15,9 @@
 //!   2 "remote-echo" — the remotely-spawned service: an ordinary
 //!                     CalcRequest server on its granted channel; it
 //!                     neither knows nor cares that its clients are on
-//!                     another machine.
+//!                     another machine. Handed a channel cap with a
+//!                     greet, it calls back through it — proving a cap
+//!                     that crossed the wire works in the other direction.
 //!   3 "fabroot"     — the root of trust: the one holder of the cluster's
 //!                     root signing key. Mints node certificates and
 //!                     revocations for boot orchestration (RootReq);
@@ -95,7 +97,22 @@ fn remoteEcho(log_h: u64, chan_h: u64) noreturn {
             .add => |a| _ = usys.replyTyped(shared.CalcReply, chan_h, .{
                 .sum = .{ .value = a.a + a.b },
             }, 0),
-            .greet => _ = usys.replyTyped(shared.CalcReply, chan_h, .hi, 0),
+            .greet => {
+                if (r.cap != 0) {
+                    // A channel arrived with the greeting: use it. From
+                    // here it is an ordinary cap; the fabric on this node
+                    // carries the call back to wherever it came from.
+                    var rep: shared.CalcReply = .hi;
+                    switch (usys.callTyped(shared.CalcRequest, shared.CalcReply, r.cap, .{ .add = .{ .a = 1, .b = 2 } }, 0)) {
+                        .ok => |cr| rep = cr,
+                        .err => {},
+                    }
+                    _ = usys.capDrop(r.cap);
+                    _ = usys.replyTyped(shared.CalcReply, chan_h, rep, 0);
+                } else {
+                    _ = usys.replyTyped(shared.CalcReply, chan_h, .hi, 0);
+                }
+            },
         }
     }
 }
@@ -236,25 +253,73 @@ const Member = struct {
     last_heard: u64 = 0,
 };
 
-/// A-side: badge -> the remote service's home. Keyed by NODE (not peer
-/// slot) so a peer slot recycled by rejoin can never misroute a stale
-/// session; calls to a rebooted node fail cleanly instead.
+/// A-side: badge -> a channel on another node (its export id there).
+/// Keyed by NODE (not peer slot) so a peer slot recycled by rejoin can
+/// never misroute a stale session; calls to a rebooted node fail cleanly.
 const Session = struct {
     used: bool = false,
     node: u64 = 0,
     remote_id: u32 = 0,
 };
 
-/// B-side: remote session id -> local channel to the spawned child.
-const RSession = struct {
+/// B-side: a local channel made reachable by peers under an id — a
+/// remotely spawned child's channel, or any channel cap that crossed the
+/// wire in a call or a reply.
+const Export = struct {
     used: bool = false,
     chan_b: u64 = 0,
 };
 
+/// A local call forwarded to a peer and awaiting its response: the
+/// caller stays parked in the kernel under its reply token while the
+/// serve loop carries on — many exchanges in flight per link.
+const InFlight = struct {
+    used: bool = false,
+    token: u64 = 0,
+    seq: u32 = 0,
+    node: u64 = 0,
+    deadline: u64 = 0,
+};
+
+const max_inflight = 8; // the kernel's pending-reply slots per channel
+const call_timeout = 30; // ticks
+
+/// An inbound remote call being served by a worker thread: the local
+/// callee may itself call out through this fabric (a cap that crossed
+/// the wire), so the serve loop must never block on it. Workers own
+/// only their job record; every peer and wire touch stays on the serve
+/// thread, which the worker rings when the result is in.
+const Job = struct {
+    state: std.atomic.Value(u32) = .init(0), // 0 free, 1 running, 2 done
+    node: u64 = 0,
+    seq: u32 = 0,
+    chan_b: u64 = 0,
+    cap: u64 = 0, // minted session cap to hand the callee (dropped after)
+    words: [4]u64 = @splat(0),
+    ok: bool = false,
+    reply: [4]u64 = @splat(0),
+    reply_cap: u64 = 0,
+    bell: u64 = 0, // the worker's own notification
+};
+
+const n_workers = 4;
+const worker_stack = 16 << 10;
+
 var peers: [max_peers]Peer = @splat(.{});
 var members: [max_members]Member = @splat(.{});
 var sessions: [max_sessions]Session = @splat(.{});
-var rsessions: [max_sessions]RSession = @splat(.{});
+var exports: [max_sessions]Export = @splat(.{});
+var inflight: [max_inflight]InFlight = @splat(.{});
+var next_seq: u32 = 1;
+var max_inflight_seen: u64 = 0;
+// The event source: socket doorbells (bit_net) and the heartbeat clock
+// (bit_tick) on one bound notification.
+var notif: u64 = 0;
+const bit_net: u64 = 1;
+const bit_tick: u64 = 2;
+const bit_work: u64 = 4;
+var jobs: [n_workers]Job = @splat(.{});
+var worker_stacks: [n_workers][worker_stack]u8 = undefined;
 var serve_a: u64 = 0;
 var net_chan: u64 = 0;
 var net_buf: u64 = 0;
@@ -263,7 +328,7 @@ const no_sock: u64 = 0xffff_ffff_ffff_ffff;
 var lsock: u64 = no_sock; // sockets are small indices; 0 is valid!
 var my_node: u64 = 0;
 var glog: u64 = 0;
-var tick: u64 = 0; // the local poll clock
+var tick: u64 = 0; // the local clock: one timer signal per kernel tick
 var last_ping: u64 = 0;
 // This node's identity: its signing keypair, the cluster key (the root
 // of trust's public key), and the certificate the root issued for it.
@@ -294,9 +359,6 @@ var spawn_ack_code: u8 = 0; // 1 = spawned, 2 = unauthorized, 0 = failed
 
 /// hello / hello_ack body prefix: [node u16][nonce 16][eph pk 32][cert].
 const hello_len = 2 + 16 + 32 + fabcert.cert_len;
-var got_call_resp = false;
-var call_resp_ok = false;
-var call_resp_words: [4]u64 = @splat(0);
 
 fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     glog = log_h;
@@ -319,12 +381,37 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     setup.wipeSecret();
     net_chan = setup.cap(.net);
 
+    // Nobody pumps us: socket doorbells and a timer interrupt our recv.
+    const n = usys.notifyCreate();
+    if (n.err != .ok) usys.exit(163);
+    notif = n.data[0];
+    if (usys.notifyBind(notif) != .ok) usys.exit(164);
+    if (usys.timerArm(notif, 1, bit_tick) != .ok) usys.exit(165);
+    // Workers for inbound calls: each waits on its own bell.
+    for (&jobs, 0..) |*j, i| {
+        const b = usys.notifyCreate();
+        if (b.err != .ok) usys.exit(166);
+        j.bell = b.data[0];
+        if (usys.threadCreate(worker, i, &worker_stacks[i]) != .ok) usys.exit(167);
+    }
+
     while (true) {
         const r = usys.recvMsg(serve_a);
+        if (r.err == .interrupted) {
+            const w = usys.notifyWait(notif); // drain the latched bits
+            if (w.err == .ok and w.data[0] & bit_tick != 0) {
+                tick += 1;
+                heartbeat();
+                expireInflight();
+            }
+            if (w.err == .ok and w.data[0] & bit_work != 0) finishJobs();
+            pumpAll();
+            continue;
+        }
         if (r.err == .peer_dead) usys.exit(0);
         if (r.err != .ok) usys.exit(151);
         if (r.badge != 0) {
-            forwardCall(r.badge, r.data);
+            forwardCall(r.badge, r.data, r.cap, r.token);
             continue;
         }
         const req = shared.decodeMsg(shared.FabReq, r.data) orelse {
@@ -399,10 +486,10 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                 freply(.ok);
             },
             .members => freply(doMembers()),
+            .stats => freply(.{ .num = .{ .n = max_inflight_seen } }),
             .poll => {
-                tick += 1;
+                // Kept for callers that still tick us; the clock is ours.
                 pumpAll();
-                heartbeat();
                 freply(.ok);
             },
             .connect_peer => |q| freply(doConnectPeer(q.node)),
@@ -771,7 +858,13 @@ fn netAttach() void {
         .err => usys.exit(154),
     }
     lsock = nnum(ncall(.{ .tcp_listen = .{ .port = shared.fabric_port } })) orelse usys.exit(155);
+    watchSock(lsock);
     _ = usys.log(glog, "fabsvc: listening on the fabric port");
+}
+
+/// Ring our notification whenever this socket has news.
+fn watchSock(sock: u64) void {
+    _ = usys.callTyped(shared.NetReq, shared.NetResp, net_chan, .{ .watch = .{ .sock = sock } }, notif);
 }
 
 fn ncall(req: shared.NetReq) shared.NetResp {
@@ -850,6 +943,13 @@ fn peerFailed(p: *Peer) void {
     if (p.dead) return;
     p.dead = true;
     _ = ncall(.{ .tcp_close = .{ .sock = p.sock } });
+    // Every exchange in flight to it completes with a clean error.
+    for (&inflight) |*f| {
+        if (f.used and f.node == p.node) {
+            failReply(f.token, .disconnected);
+            f.* = .{};
+        }
+    }
     if (p.greeted) {
         _ = usys.log(glog, "fabsvc: peer lost; membership updated");
         memberDown(p.node);
@@ -863,6 +963,7 @@ fn pumpAll() void {
     if (lsock != no_sock) {
         const resp = ncall(.{ .tcp_accept = .{ .sock = lsock } });
         if (nnum(resp)) |sock| {
+            watchSock(sock);
             for (&peers) |*p| {
                 if (!p.used) {
                     p.* = .{ .used = true, .sock = sock, .born = tick };
@@ -1100,7 +1201,7 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             if (!allowed) _ = usys.log(glog, "fabsvc: refused spawn: peer's certificate does not authorize that image");
             var sid: u32 = 0;
             var ok = false;
-            for (&rsessions, 0..) |*rs, i| {
+            for (&exports, 0..) |*rs, i| {
                 if (!allowed) break;
                 if (rs.used) continue;
                 if (stage == null) stage = loader.Stage.init(loader.Stage.default_pages);
@@ -1148,33 +1249,58 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             if (applyRevocation(body[0..fabcert.rev_len])) gossipRevocation(body[0..fabcert.rev_len], p);
         },
         shared.fw_call_req => {
-            // [session u32][seq u32][4 x u64] -> call the local child.
-            if (body.len < 40) return;
-            const sid = leu32(body[0..4]);
+            // [export u32][seq u32][4 x u64][cap export u32] -> a worker
+            // calls the local channel; a cap that crossed with the call
+            // becomes a badged session back to the caller's node. No
+            // free worker = refused, never a stall.
+            if (body.len < 44) return;
+            const eid = leu32(body[0..4]);
             const seq = leu32(body[4..8]);
             var w: [4]u64 = undefined;
             for (0..4) |i| w[i] = leu64(body[8 + i * 8 .. 16 + i * 8]);
-            var ok = false;
-            var rw: [4]u64 = @splat(0);
-            if (sid < max_sessions and rsessions[sid].used) {
-                const res = usys.callRaw(rsessions[sid].chan_b, w, 0);
-                if (res.err == .ok) {
-                    ok = true;
-                    rw = res.data;
+            const cap_export = leu32(body[40..44]);
+            var job: ?*Job = null;
+            for (&jobs) |*j| {
+                if (j.state.load(.acquire) == 0) {
+                    job = j;
+                    break;
                 }
             }
-            var resp: [41]u8 = undefined;
-            frameHdr(resp[0..4], 41, shared.fw_call_resp);
-            puleu32(resp[4..8], seq);
-            resp[8] = if (ok) 1 else 0;
-            for (0..4) |i| puleu64(resp[9 + i * 8 .. 17 + i * 8], rw[i]);
-            _ = sendFrame(p, &resp);
+            if (eid >= max_sessions or !exports[eid].used or job == null) {
+                sendCallResp(p, seq, false, @splat(0), 0);
+                return;
+            }
+            const j = job.?;
+            j.node = p.node;
+            j.seq = seq;
+            j.chan_b = exports[eid].chan_b;
+            j.cap = if (cap_export != 0) sessionCap(p.node, cap_export - 1) else 0;
+            j.words = w;
+            j.state.store(1, .release);
+            _ = usys.notifySignal(j.bell, 1);
         },
         shared.fw_call_resp => {
-            if (body.len < 37) return;
-            call_resp_ok = body[4] != 0;
-            for (0..4) |i| call_resp_words[i] = leu64(body[5 + i * 8 .. 13 + i * 8]);
-            got_call_resp = true;
+            // [seq u32][ok u8][4 x u64][cap export u32] -> answer the
+            // parked caller by its token.
+            if (body.len < 41) return;
+            const seq = leu32(body[0..4]);
+            const ok = body[4] != 0;
+            var rw: [4]u64 = undefined;
+            for (0..4) |i| rw[i] = leu64(body[5 + i * 8 .. 13 + i * 8]);
+            const cap_export = leu32(body[37..41]);
+            for (&inflight) |*f| {
+                if (!f.used or f.seq != seq or f.node != p.node) continue;
+                if (!ok) {
+                    failReply(f.token, .refused);
+                } else {
+                    var minted: u64 = 0;
+                    if (cap_export != 0) minted = sessionCap(p.node, cap_export - 1);
+                    _ = usys.replyRawTo(serve_a, rw, minted, f.token);
+                    if (minted != 0) _ = usys.capDrop(minted);
+                }
+                f.* = .{};
+                break;
+            }
         },
         else => {},
     }
@@ -1222,6 +1348,7 @@ fn doConnectPeer(node: u64) shared.FabResp {
         .ip_lo = words[1],
         .port = shared.fabric_port,
     } })) orelse return ferr(.refused);
+    watchSock(sock);
 
     // Wait for the handshake, pumping our own stack.
     var established = false;
@@ -1333,67 +1460,143 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
         freply(ferr(.refused));
         return;
     }
-    // Bind a local badge to the remote session and hand out the cap: the
+    // Bind a local badge to the remote export and hand out the cap: the
     // caller receives an ordinary-looking channel to a remote service.
-    var badge: u64 = 0;
-    var found = false;
+    const minted = sessionCap(node, spawn_ack_session);
+    if (minted == 0) {
+        freply(ferr(.no_space));
+        return;
+    }
+    _ = usys.replyTyped(shared.FabResp, serve_a, .{ .spawned = .{ .node = node } }, minted);
+    _ = usys.capDrop(minted);
+}
+
+/// A worker thread: wait for a job, make the (blocking) local call, hand
+/// the result back to the serve thread.
+fn worker(idx: u64) callconv(.c) void {
+    const j = &jobs[idx];
+    while (true) {
+        _ = usys.notifyWait(j.bell);
+        if (j.state.load(.acquire) != 1) continue;
+        const res = usys.callRaw(j.chan_b, j.words, j.cap);
+        if (j.cap != 0) _ = usys.capDrop(j.cap);
+        j.ok = res.err == .ok;
+        j.reply = res.data;
+        j.reply_cap = if (res.err == .ok) res.cap else 0;
+        j.state.store(2, .release);
+        _ = usys.notifySignal(notif, bit_work);
+    }
+}
+
+/// Serve thread: send every finished job's response.
+fn finishJobs() void {
+    for (&jobs) |*j| {
+        if (j.state.load(.acquire) != 2) continue;
+        var export_id: u32 = 0;
+        if (j.reply_cap != 0) {
+            if (exportNew(j.reply_cap)) |x| export_id = x + 1 else _ = usys.capDrop(j.reply_cap);
+        }
+        if (peerByNode(j.node)) |p| {
+            if (p.greeted) sendCallResp(p, j.seq, j.ok, j.reply, export_id);
+        }
+        j.* = .{ .bell = j.bell };
+    }
+}
+
+fn sendCallResp(p: *Peer, seq: u32, ok: bool, rw: [4]u64, export_id: u32) void {
+    var resp: [45]u8 = undefined;
+    frameHdr(resp[0..4], 45, shared.fw_call_resp);
+    puleu32(resp[4..8], seq);
+    resp[8] = if (ok) 1 else 0;
+    for (0..4) |i| puleu64(resp[9 + i * 8 .. 17 + i * 8], rw[i]);
+    puleu32(resp[41..45], export_id);
+    _ = sendFrame(p, &resp);
+}
+
+/// A badged cap on this service bound to (node, export id there): the
+/// local face of a remote channel. 0 when the tables are full.
+fn sessionCap(node: u64, remote_id: u32) u64 {
     for (&sessions, 0..) |*se, i| {
-        if (!se.used) {
-            se.* = .{ .used = true, .node = node, .remote_id = spawn_ack_session };
-            badge = i + 1;
-            found = true;
+        if (se.used) continue;
+        se.* = .{ .used = true, .node = node, .remote_id = remote_id };
+        const minted = usys.chanMint(serve_a, i + 1);
+        if (minted.err != .ok) {
+            se.* = .{};
+            return 0;
+        }
+        return minted.data[1];
+    }
+    return 0;
+}
+
+/// Make a local channel cap reachable by peers under an export id.
+fn exportNew(chan_b: u64) ?u32 {
+    for (&exports, 0..) |*e, i| {
+        if (e.used) continue;
+        e.* = .{ .used = true, .chan_b = chan_b };
+        return @intCast(i);
+    }
+    return null;
+}
+
+/// A badged call: forward the words (and any attached channel cap, as
+/// an export) to the remote peer and park the caller under its reply
+/// token; the response — or the peer's death, or a timeout — answers it
+/// later from the serve loop. This is the remote channel's entire
+/// implementation, and nothing here waits.
+fn forwardCall(badge: u64, words: [4]u64, cap: u64, token: u64) void {
+    if (badge - 1 >= max_sessions or !sessions[badge - 1].used) return failReply(token, .no_peer);
+    const sess = &sessions[badge - 1];
+    const p = greetedPeer(sess.node) orelse return failReply(token, .disconnected);
+    var slot: ?*InFlight = null;
+    for (&inflight) |*f| {
+        if (!f.used) {
+            slot = f;
             break;
         }
     }
-    if (!found) {
-        freply(ferr(.no_space));
-        return;
+    const f = slot orelse return failReply(token, .no_space);
+    var cap_export: u32 = 0;
+    if (cap != 0) {
+        const x = exportNew(cap) orelse return failReply(token, .no_space);
+        cap_export = x + 1;
     }
-    const minted = usys.chanMint(serve_a, badge);
-    if (minted.err != .ok) {
-        sessions[badge - 1].used = false;
-        freply(ferr(.no_space));
-        return;
+    const seq = next_seq;
+    next_seq +%= 1;
+    if (next_seq == 0) next_seq = 1;
+    f.* = .{ .used = true, .token = token, .seq = seq, .node = sess.node, .deadline = tick + call_timeout };
+    var req: [48]u8 = undefined;
+    frameHdr(req[0..4], 48, shared.fw_call_req);
+    puleu32(req[4..8], sess.remote_id);
+    puleu32(req[8..12], seq);
+    for (0..4) |i| puleu64(req[12 + i * 8 .. 20 + i * 8], words[i]);
+    puleu32(req[44..48], cap_export);
+    if (!sendFrame(p, &req)) {
+        f.* = .{};
+        return failReply(token, .disconnected);
     }
-    _ = usys.replyTyped(shared.FabResp, serve_a, .{ .spawned = .{ .node = node } }, minted.data[1]);
-    _ = usys.capDrop(minted.data[1]);
+    var live: u64 = 0;
+    for (&inflight) |*g| {
+        if (g.used) live += 1;
+    }
+    if (live > max_inflight_seen) max_inflight_seen = live;
 }
 
-/// A badged call: forward the words to the remote peer, reply with the
-/// remote's words — or the error sentinel if the peer is gone. This is the
-/// remote channel's entire implementation.
-fn forwardCall(badge: u64, words: [4]u64) void {
-    const fail = struct {
-        fn f(code: shared.FabErr) void {
-            _ = usys.replyRaw(serve_a, .{
-                shared.fabric_err_sentinel, @intFromEnum(code), 0, 0,
-            }, 0);
-        }
-    }.f;
-    if (badge - 1 >= max_sessions or !sessions[badge - 1].used) return fail(.no_peer);
-    const sess = &sessions[badge - 1];
-    const p = greetedPeer(sess.node) orelse return fail(.disconnected);
+fn failReply(token: u64, code: shared.FabErr) void {
+    _ = usys.replyRawTo(serve_a, .{ shared.fabric_err_sentinel, @intFromEnum(code), 0, 0 }, 0, token);
+}
 
-    got_call_resp = false;
-    var req: [44]u8 = undefined;
-    frameHdr(req[0..4], 44, shared.fw_call_req);
-    puleu32(req[4..8], sess.remote_id);
-    puleu32(req[8..12], 1);
-    for (0..4) |i| puleu64(req[12 + i * 8 .. 20 + i * 8], words[i]);
-    if (!sendFrame(p, &req)) return fail(.disconnected);
-    for (0..30) |_| {
-        pumpAll();
-        if (got_call_resp) {
-            if (!call_resp_ok) return fail(.refused);
-            _ = usys.replyRaw(serve_a, call_resp_words, 0);
-            return;
-        }
-        if (p.dead) return fail(.disconnected);
-        usys.sleep(1);
+/// The clock's job: an exchange past its deadline fails its caller and
+/// its peer — the node-kill drill lands here when a peer vanishes
+/// mid-RPC before the heartbeats notice.
+fn expireInflight() void {
+    for (&inflight) |*f| {
+        if (!f.used or tick < f.deadline) continue;
+        const node = f.node;
+        failReply(f.token, .timeout);
+        f.* = .{};
+        if (peerByNode(node)) |p| peerFailed(p);
     }
-    // The node-kill drill lands here: a peer that vanishes mid-RPC.
-    peerFailed(p);
-    return fail(.timeout);
 }
 
 // ------------------------------------------------------------- utilities

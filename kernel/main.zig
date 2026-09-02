@@ -995,9 +995,59 @@ fn fabricTestWorker(arg: u64) void {
     log.info("fabric-test: membership complete — nodes 1,2,3 up (join + gossip)", .{});
 
     // Stage B: placement — "run this anywhere" picks a live loaded node.
-    var landed = remoteSpawnRpc(fab_ch, 0) orelse
+    const placed = remoteSpawnRpc(fab_ch, 0) orelse
         std.debug.panic("fabric-test: placement spawn failed", .{});
+    var landed = placed.node;
     log.info("fabric-test: placement spawn landed on node {d}; RPC verified", .{landed});
+
+    // Stage B2: a capability crosses the wire. A local calc service's
+    // channel rides a greet to the remote child, which calls back through
+    // it — node 2 to node 1 over the reverse proxy — and returns the sum.
+    {
+        const calc_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+        const calc = domain.spawn("calc", .{ .blob = img(.pingpong) }, .{
+            .grant_debug_log = true,
+            .grant_channel_a = calc_ch,
+            .arg = 1,
+            .auto_reap = true,
+        }) catch |e| std.debug.panic("spawn calc: {t}", .{e});
+        ipc.refSide(calc_ch, .b);
+        const xres = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.CalcRequest, .greet),
+            .cap_type = @intFromEnum(cap.CapType.channel_b),
+            .cap_obj = @intFromPtr(calc_ch),
+        }, placed.badge);
+        const rep = if (xres.err == .ok and xres.msg.data[0] != shared.fabric_err_sentinel)
+            shared.decodeMsg(shared.CalcReply, xres.msg.data)
+        else
+            null;
+        if (rep == null or rep.? != .sum or rep.?.sum.value != 3)
+            std.debug.panic("fabric-test: FAIL — the capability did not work across the wire", .{});
+        log.info("fabric-test: capability crossed the wire and called back: 1+2=3", .{});
+        domain.destroy(calc);
+        while (calc.state != .dead) sched.sleep(1);
+        ipc.unrefSide(calc_ch, .b);
+    }
+
+    // Stage B3: exchanges pipeline. Three callers hammer the remote
+    // channel at once; the fabric must keep more than one in flight.
+    {
+        test_fab_ch = fab_ch;
+        callers_done.store(0, .release);
+        for (0..3) |i| {
+            _ = sched.spawn("caller", concurrentCaller, placed.badge | (@as(u64, i) << 32), .{}) catch @panic("spawn caller");
+        }
+        var waited: u64 = 0;
+        while (callers_done.load(.acquire) < 3) : (waited += 1) {
+            if (waited == 600) std.debug.panic("fabric-test: FAIL — concurrent callers never finished", .{});
+            sched.sleep(1);
+        }
+        const st = ipc.call(fab_ch, .{ .data = shared.encodeMsg(shared.FabReq, .stats) }, 0);
+        const rep = shared.decodeMsg(shared.FabResp, st.msg.data) orelse @panic("bad stats reply");
+        if (rep != .num or rep.num.n < 2)
+            std.debug.panic("fabric-test: FAIL — exchanges never overlapped", .{});
+        log.info("fabric-test: {d} exchanges in flight at once through one link", .{rep.num.n});
+    }
 
     // Stage C: node 2's drill poweroff must surface as membership, with no
     // call in flight — the heartbeats alone carry the news.
@@ -1011,8 +1061,8 @@ fn fabricTestWorker(arg: u64) void {
     log.info("fabric-test: node 2 rejoined the fabric", .{});
 
     // Stage E: the rejoined node hosts work again.
-    landed = remoteSpawnRpc(fab_ch, 2) orelse
-        std.debug.panic("fabric-test: post-rejoin spawn failed", .{});
+    landed = (remoteSpawnRpc(fab_ch, 2) orelse
+        std.debug.panic("fabric-test: post-rejoin spawn failed", .{})).node;
     log.info("fabric-test: rejoined node hosts work again", .{});
 
     // Stage F: revoke node 3's identity through the root of trust. The
@@ -1131,14 +1181,11 @@ fn fabRevoke(root: FabRoot, fab_ch: *ipc.Channel, fb: [*]u8, node: u64, min_seri
     if (rep != .ok) @panic("fabsvc refused the revocation");
 }
 
-/// Pump the fabric for `ticks` driver ticks.
+/// Let `ticks` pass. Nobody pumps the fabric any more — its own timer
+/// and socket doorbells keep it breathing — so waiting is just waiting.
 fn fabPump(fab_ch: *ipc.Channel, ticks: u64) void {
-    for (0..ticks) |_| {
-        _ = ipc.call(fab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .poll),
-        }, 0);
-        sched.sleep(1);
-    }
+    _ = fab_ch;
+    sched.sleep(ticks);
 }
 
 /// Poll the fabric's member view until `node` reaches `want_up`.
@@ -1162,9 +1209,33 @@ fn waitMember(fab_ch: *ipc.Channel, pb: [*]u8, node: u64, want_up: bool, ticks: 
     return false;
 }
 
+var test_fab_ch: *ipc.Channel = undefined;
+var callers_done: std.atomic.Value(u32) = .init(0);
+
+/// One of the concurrent callers: eight adds through the remote channel,
+/// each answer checked.
+fn concurrentCaller(arg: u64) void {
+    const badge = arg & 0xffff_ffff;
+    const id = arg >> 32;
+    for (0..8) |i| {
+        const a: u64 = id * 100 + i;
+        const res = ipc.call(test_fab_ch, .{
+            .data = shared.encodeMsg(shared.CalcRequest, .{ .add = .{ .a = a, .b = 1 } }),
+        }, badge);
+        if (res.err != .ok or res.msg.data[0] == shared.fabric_err_sentinel)
+            std.debug.panic("fabric-test: FAIL — concurrent call {d}/{d} failed", .{ id, i });
+        const rep = shared.decodeMsg(shared.CalcReply, res.msg.data) orelse @panic("bad reply");
+        if (rep != .sum or rep.sum.value != a + 1)
+            std.debug.panic("fabric-test: FAIL — concurrent call answered wrong", .{});
+    }
+    _ = callers_done.fetchAdd(1, .acq_rel);
+}
+
+const Placed = struct { node: u64, badge: u64 };
+
 /// remote_spawn (node 0 = placement) + one verified RPC through the
-/// proxied channel. Returns the node the spawn landed on.
-fn remoteSpawnRpc(fab_ch: *ipc.Channel, node: u64) ?u64 {
+/// proxied channel. Returns the node the spawn landed on and the badge.
+fn remoteSpawnRpc(fab_ch: *ipc.Channel, node: u64) ?Placed {
     const res = ipc.call(fab_ch, .{
         .data = shared.encodeMsg(shared.FabReq, .{ .remote_spawn = .{
             .node = node,
@@ -1184,7 +1255,7 @@ fn remoteSpawnRpc(fab_ch: *ipc.Channel, node: u64) ?u64 {
     if (call_res.msg.data[0] == shared.fabric_err_sentinel) return null;
     const crep = shared.decodeMsg(shared.CalcReply, call_res.msg.data) orelse return null;
     if (crep != .sum or crep.sum.value != 42) return null;
-    return landed;
+    return .{ .node = landed, .badge = badge };
 }
 
 const NetView = struct { obj: u64, badge: u64 };
