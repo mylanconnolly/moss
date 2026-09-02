@@ -1,12 +1,15 @@
 # The fabric service for node 1 (arg = 1 | node << 8). Its identity is
-# certified by fabroot after boot; only then does it open the network.
+# born on this node on first boot (a random seed) and kept, with its
+# certificate, in state/fabric — the root of trust is needed only to
+# certify a new identity. Revocations it accepts are kept there too.
 {
   image:   fabric
   arg:     257
   grant:   [log, spawner, bootfs]
   give: [
-    { tag: buf, shm: 1 }
-    { tag: net, netview: net-cluster }
+    { tag: buf,  shm: 1 }
+    { tag: net,  netview: net-cluster }
+    { tag: view, fs: state/fabric, ro: false, mkdir: true }
   ]
-  certify: { root: fabroot, seed: conf/fabric/node1.seed, node: 1, gossip: true, spawn: true }
+  certify: { root: fabroot, node: 1, gossip: true, spawn: true, state: state/fabric }
 }

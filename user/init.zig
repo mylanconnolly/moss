@@ -74,6 +74,7 @@ const Give = struct {
     ro: bool = true,
     allow: u32 = 0, // netview: a one-destination allowlist (v4), 0 = none
     port: u64 = 0,
+    mkdir: bool = false, // view: create the directory first (idempotent)
 };
 
 fn parseV4(s: []const u8) ?u32 {
@@ -100,9 +101,10 @@ fn parseV4(s: []const u8) ?u32 {
 
 const Certify = struct {
     root: []const u8,
-    seed: []const u8,
     node: u64,
     flags: u64,
+    /// Where the identity lives across boots (seed + certificate files).
+    state: []const u8,
 };
 
 const Unit = struct {
@@ -133,6 +135,7 @@ const Unit = struct {
     restarts: u64 = 0,
     buf_h: u64 = 0, // its `buf` shm cap, if a give created one
     buf_va: u64 = 0, // ... mapped here (secrets are staged through it)
+    identity_restored: bool = false,
 };
 
 var units: [max_units]Unit = undefined;
@@ -231,6 +234,7 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 give.kind = .view;
                 give.name = str(x) orelse continue;
                 if (gr.get("ro")) |ro| give.ro = ro.truthy();
+                if (gr.get("mkdir")) |mk| give.mkdir = mk.truthy();
             } else if (gr.get("netview")) |x| {
                 give.kind = .netview;
                 give.name = str(x) orelse continue;
@@ -269,9 +273,9 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             };
             u.certify = .{
                 .root = str(c.record.get("root")) orelse return null,
-                .seed = str(c.record.get("seed")) orelse return null,
                 .node = @intCast(int(c.record.get("node")) orelse 1),
                 .flags = flags,
+                .state = str(c.record.get("state")) orelse "state/fabric",
             };
         }
     }
@@ -400,6 +404,7 @@ fn giveOne(u: *Unit, g: Give) bool {
             if (!ensureUp(fs) or fs.buf_va == 0) return false;
             // A path of `arg` means the unit's argument text (run tools).
             const path = g.name;
+            if (g.mkdir and !fsc.fsMkdir(fs.chan_b, @ptrFromInt(fs.buf_va), path)) return false;
             const view = fsc.fsDerive(fs.chan_b, @ptrFromInt(fs.buf_va), path, g.ro) orelse return false;
             const ok = boot.giveCap(u.chan_b, g.tag, view);
             _ = usys.capDrop(view);
@@ -425,14 +430,30 @@ fn giveOne(u: *Unit, g: Give) bool {
     }
 }
 
-/// Before go: compose the identity secret (node seed + the root's
-/// cluster key) into the unit's buffer.
+/// Before go: the identity secret — the node's seed (restored from its
+/// state, or born now from the kernel pool and kept there) plus the
+/// root's cluster key — into the unit's buffer.
 fn certifySecret(u: *Unit) bool {
     const c = u.certify.?;
     const root = unitByName(c.root) orelse return false;
-    if (!ensureUp(root) or root.buf_va == 0 or u.buf_va == 0) return false;
-    const seed = shared.marcFind(archive(), c.seed) orelse return false;
-    if (seed.len != 32) return false;
+    const fs = unitByName("fs") orelse return false;
+    if (!ensureUp(fs) or fs.buf_va == 0 or u.buf_va == 0) return false;
+    if (!ensureUp(root) or root.buf_va == 0) return false;
+    var seed: [32]u8 = undefined;
+    var seed_path: [64]u8 = undefined;
+    const sp = joinPath(&seed_path, c.state, "identity.seed");
+    if (stateRead(fs, sp, &seed)) {
+        u.identity_restored = true;
+    } else {
+        // Born here, from this node's entropy — never handed in.
+        var tries: usize = 0;
+        while (usys.getrandom(&seed) != .ok) : (tries += 1) {
+            if (tries == 50) return false; // rngd never seeded the pool
+            usys.sleep(1);
+        }
+        if (!stateWrite(fs, sp, &seed)) return false;
+        u.identity_restored = false;
+    }
     switch (usys.callTyped(shared.RootReq, shared.FabResp, root.chan_b, .cluster_key, 0)) {
         .ok => |rep| if (rep != .num) return false,
         .err => return false,
@@ -441,33 +462,46 @@ fn certifySecret(u: *Unit) bool {
     const pk: [*]const volatile u8 = @ptrFromInt(root.buf_va);
     for (0..32) |i| dst[i] = seed[i];
     for (0..32) |i| dst[32 + i] = pk[i];
+    @memset(&seed, 0);
     return boot.give(u.chan_b, .{ .secret = .{ .off = 0, .len = 64 } }, 0);
 }
 
-/// After go: the unit hands back its public key, the root signs it into
-/// a certificate with the unit's authorizations, set_cert installs it
-/// (opening the network — retried while the entropy pool is still
-/// seeding).
+/// After go: install the certificate — the one kept in state if the
+/// identity was restored, else a fresh one from the root of trust over
+/// the public key the unit hands back, kept in state for next time.
+/// set_cert opens the network (retried while the entropy pool seeds).
 fn certifyFinish(u: *Unit) bool {
     const c = u.certify.?;
-    const root = unitByName(c.root) orelse return false;
-    switch (usys.callTyped(shared.FabReq, shared.FabResp, u.chan_b, .identity_key, 0)) {
-        .ok => |rep| if (rep != .num) return false,
-        .err => return false,
-    }
-    const pk: [*]const volatile u8 = @ptrFromInt(u.buf_va);
-    const rb: [*]volatile u8 = @ptrFromInt(root.buf_va);
-    for (0..32) |i| rb[i] = pk[i];
-    switch (usys.callTyped(shared.RootReq, shared.FabResp, root.chan_b, .{ .issue = .{
-        .node = c.node,
-        .flags_serial = c.flags | (1 << 8),
-        .image_mask = ~@as(u64, 0),
-    } }, 0)) {
-        .ok => |rep| if (rep != .num) return false,
-        .err => return false,
-    }
+    const fs = unitByName("fs") orelse return false;
+    var cert_path: [64]u8 = undefined;
+    const cp = joinPath(&cert_path, c.state, "identity.cert");
+    var cert: [shared.fab_cert_len]u8 = undefined;
     const ub: [*]volatile u8 = @ptrFromInt(u.buf_va);
-    for (0..shared.fab_cert_len) |i| ub[i] = rb[i];
+    if (u.identity_restored and stateRead(fs, cp, &cert)) {
+        logLine("init: fabric identity restored from state for unit ", u.name);
+    } else {
+        const root = unitByName(c.root) orelse return false;
+        if (!ensureUp(root) or root.buf_va == 0) return false;
+        switch (usys.callTyped(shared.FabReq, shared.FabResp, u.chan_b, .identity_key, 0)) {
+            .ok => |rep| if (rep != .num) return false,
+            .err => return false,
+        }
+        const pk: [*]const volatile u8 = @ptrFromInt(u.buf_va);
+        const rb: [*]volatile u8 = @ptrFromInt(root.buf_va);
+        for (0..32) |i| rb[i] = pk[i];
+        switch (usys.callTyped(shared.RootReq, shared.FabResp, root.chan_b, .{ .issue = .{
+            .node = c.node,
+            .flags_serial = c.flags | (1 << 8),
+            .image_mask = ~@as(u64, 0),
+        } }, 0)) {
+            .ok => |rep| if (rep != .num) return false,
+            .err => return false,
+        }
+        for (0..shared.fab_cert_len) |i| cert[i] = rb[i];
+        if (!stateWrite(fs, cp, &cert)) return false;
+        logLine("init: fabric identity born and certified for unit ", u.name);
+    }
+    for (0..shared.fab_cert_len) |i| ub[i] = cert[i];
     var attempt: usize = 0;
     while (attempt < 30) : (attempt += 1) {
         switch (usys.callTyped(shared.FabReq, shared.FabResp, u.chan_b, .{ .set_cert = .{ .off = 0, .len = shared.fab_cert_len } }, 0)) {
@@ -483,6 +517,35 @@ fn certifyFinish(u: *Unit) bool {
         }
     }
     return false;
+}
+
+/// Read a whole small file from the root-of-trust view into `out`
+/// (exactly out.len bytes, else false).
+fn stateRead(fs: *Unit, path: []const u8, out: []u8) bool {
+    const buf: [*]u8 = @ptrFromInt(fs.buf_va);
+    const fd = switch (fsc.fsOpen(fs.chan_b, buf, path, 0)) {
+        .fd => |fd| fd,
+        .err => return false,
+    };
+    defer fsc.fsClose(fs.chan_b, fd);
+    const n = fsc.fsRead(fs.chan_b, fd, out.len + 1) orelse return false;
+    if (n != out.len) return false;
+    @memcpy(out, buf[0..out.len]);
+    return true;
+}
+
+fn stateWrite(fs: *Unit, path: []const u8, data: []const u8) bool {
+    const buf: [*]u8 = @ptrFromInt(fs.buf_va);
+    if (!writeFile(fs.chan_b, buf, path, data)) return false;
+    return fsc.fsSync(fs.chan_b);
+}
+
+fn joinPath(out: *[64]u8, dir: []const u8, name: []const u8) []const u8 {
+    const n = @min(dir.len, out.len - name.len - 1);
+    @memcpy(out[0..n], dir[0..n]);
+    out[n] = '/';
+    @memcpy(out[n + 1 .. n + 1 + name.len], name);
+    return out[0 .. n + 1 + name.len];
 }
 
 /// The program store: derive the root view from a freshly started

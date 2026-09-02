@@ -181,6 +181,11 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   service is missing, and `zig-out/shell-kernel.log` for init's "give
   failed"/"could not wire" lines. The other OS tests keep their kernel
   boot drivers and orchestrate their own topologies.
+- Under the system boot a node's fabric identity lives in
+  `state/fabric/` (seed + certificate; revocations beside them). A stale
+  identity is fixed by deleting that directory; the next boot enrolls a
+  fresh one with the root of trust. `zig build run-shell` keeps its
+  volume, so it enrolls once.
 - The fabric is fail-closed: fabsvc takes its buffer, identity material
   (seed + cluster key, a boot `secret`), and net view over its boot
   channel, then `identity_key` hands its public key back, fabroot

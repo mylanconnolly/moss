@@ -184,17 +184,16 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{
         "etc/motd",                   "etc/version",
         "conf/fs.key",                "conf/fabric/root.seed",
-        "conf/fabric/node1.seed",     "conf/units/rngd.msh",
-        "conf/units/blk.msh",         "conf/units/fs.msh",
-        "conf/units/net.msh",         "conf/units/fabroot.msh",
-        "conf/units/fabsvc.msh",      "conf/units/cons.msh",
-        "conf/units/msh.msh",         "conf/units/logsvc.msh",
-        "conf/units/greeter.msh",     "conf/units/ps.msh",
-        "conf/units/ls.msh",          "conf/units/net-cluster.msh",
-        "conf/units/blk-drill.msh",   "conf/units/fs-alice.msh",
-        "conf/units/fs-bob.msh",      "conf/units/net-echosrv.msh",
-        "conf/units/net-echocli.msh", "conf/units/net-boxed.msh",
-        "conf/msh/startup.msh",
+        "conf/units/rngd.msh",        "conf/units/blk.msh",
+        "conf/units/fs.msh",          "conf/units/net.msh",
+        "conf/units/fabroot.msh",     "conf/units/fabsvc.msh",
+        "conf/units/cons.msh",        "conf/units/msh.msh",
+        "conf/units/logsvc.msh",      "conf/units/greeter.msh",
+        "conf/units/ps.msh",          "conf/units/ls.msh",
+        "conf/units/net-cluster.msh", "conf/units/blk-drill.msh",
+        "conf/units/fs-alice.msh",    "conf/units/fs-bob.msh",
+        "conf/units/net-echosrv.msh", "conf/units/net-echocli.msh",
+        "conf/units/net-boxed.msh",   "conf/msh/startup.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
     }

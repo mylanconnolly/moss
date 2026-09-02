@@ -36,6 +36,7 @@ const usys = @import("usys.zig");
 
 const loader = @import("loader.zig");
 const boot = @import("boot.zig");
+const fsc = @import("fsclient.zig");
 const fabcert = @import("mosslib").fabcert;
 const Aead = std.crypto.aead.aegis.Aegis128L;
 const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
@@ -342,6 +343,12 @@ var boot_va: u64 = 0;
 var boot_len: u64 = 0;
 var stage: ?loader.Stage = null;
 
+/// Our state (a view of state/fabric, when the unit gives one): the
+/// revocations we hold survive a reboot there.
+var state_view: u64 = 0;
+var state_buf: [*]u8 = undefined;
+const revocations_file = "revocations";
+
 /// Revocations we hold: certs of `node` below min_serial are refused.
 const Revoked = struct {
     used: bool = false,
@@ -380,6 +387,11 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     }
     setup.wipeSecret();
     net_chan = setup.cap(.net);
+    if (setup.has(.view)) {
+        state_view = setup.cap(.view);
+        state_buf = @ptrFromInt(fsc.attachBuf(state_view).va);
+        loadRevocations();
+    }
 
     // Nobody pumps us: socket doorbells and a timer interrupt our recv.
     const n = usys.notifyCreate();
@@ -797,6 +809,7 @@ fn applyRevocation(rec: *const [fabcert.rev_len]u8) bool {
     e.min_serial = r.min_serial;
     e.rec = rec.*;
     _ = usys.log(glog, "fabsvc: revocation accepted from trust root");
+    saveRevocations();
     for (&peers) |*p| {
         if (p.used and !p.dead and p.greeted and p.node == r.node and p.serial_theirs < r.min_serial) {
             _ = usys.log(glog, "fabsvc: identity revoked by trust root; peer dropped");
@@ -817,6 +830,43 @@ fn sendRevocations(p: *Peer) void {
         @memcpy(f[4..], &e.rec);
         _ = sendFrame(p, &f);
     }
+}
+
+/// Restore held revocations from state (a file of rev_len records).
+fn loadRevocations() void {
+    const fd = switch (fsc.fsOpen(state_view, state_buf, revocations_file, 0)) {
+        .fd => |fd| fd,
+        .err => return,
+    };
+    defer fsc.fsClose(state_view, fd);
+    const n = fsc.fsRead(state_view, fd, max_members * fabcert.rev_len) orelse return;
+    var restored: usize = 0;
+    var off: usize = 0;
+    while (off + fabcert.rev_len <= n) : (off += fabcert.rev_len) {
+        var rec: [fabcert.rev_len]u8 = undefined;
+        @memcpy(&rec, state_buf[off .. off + fabcert.rev_len]);
+        if (applyRevocation(&rec)) restored += 1;
+    }
+    if (restored > 0) _ = usys.log(glog, "fabsvc: revocations restored from state");
+}
+
+/// Keep every held revocation in state (rewritten whole; a handful of
+/// 72-byte records).
+fn saveRevocations() void {
+    if (state_view == 0) return;
+    const fd = switch (fsc.fsOpen(state_view, state_buf, revocations_file, 1)) {
+        .fd => |fd| fd,
+        .err => return,
+    };
+    defer fsc.fsClose(state_view, fd);
+    var off: usize = 0;
+    for (&revoked) |*e| {
+        if (!e.used or e.min_serial == 0) continue;
+        if (!fsc.fsWriteAt(state_view, state_buf, fd, off, &e.rec)) return;
+        off += fabcert.rev_len;
+    }
+    _ = fsc.fsTruncate(state_view, fd, off);
+    _ = fsc.fsSync(state_view);
 }
 
 fn gossipRevocation(rec: *const [fabcert.rev_len]u8, except: ?*Peer) void {

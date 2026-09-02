@@ -51,7 +51,14 @@ const specs = [_]Spec{
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .append = "profile=net" },
     .{ .name = "rng", .pass = "rng-test: PASS", .extra = "rngprobe: unseeded pool refuses getrandom" },
-    .{ .name = "shell", .kind = .shell, .pass = "shell-test: PASS", .timeout_s = 120 },
+    .{
+        .name = "shell",
+        .kind = .shell,
+        .pass = "shell-test: PASS",
+        .extra = "fabric identity born and certified",
+        .second_run_extra = "fabric identity restored from state",
+        .timeout_s = 120,
+    },
     .{ .name = "fabric", .kind = .cluster, .pass = "fabric-test: PASS", .extra = "fabsvc: revoked identity refused", .timeout_s = 150 },
 };
 
@@ -359,7 +366,15 @@ fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
     cwd.deleteFile(io, disk) catch {};
     try makeDisk(disk);
-    const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}-1.log", .{ check_dir, spec.name });
+    // A fresh volume, then the same volume again: what was born on the
+    // first boot must be restored on the second.
+    if (!try runShellOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
+    if (spec.second_run_extra) |extra2| return runShellOnce(spec, bin, disk, 2, extra2, polls);
+    return true;
+}
+
+fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[]const u8, polls: *u64) !bool {
+    const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}-{d}.log", .{ check_dir, spec.name, run_no });
     cwd.deleteFile(io, log_path) catch {};
 
     var args: std.ArrayList([]const u8) = .empty;
@@ -415,7 +430,7 @@ fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
     tap.clear();
     sockSend(sock, "exit\r");
 
-    const verdict = watch(log_path, spec, spec.extra, polls);
+    const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
     return verdict.ok;
 }

@@ -944,10 +944,22 @@ timeout turned into a dropped peer. A proxy that makes blocking calls
 on behalf of others needs more than one thread; that is why user
 domains can create threads now.
 
+**Identity across boots (as built):** under the system boot, init
+looks for `state/fabric/identity.seed` through the root-of-trust view;
+absent, the seed is born from the kernel pool and written there, the
+public key is certified by fabroot and the certificate kept beside it;
+present, seed and certificate are restored and fabroot is not needed
+at all. fabsvc keeps the revocations it accepts in the same state (a
+file of records, rewritten whole) and reloads them at boot. Re-enrolling
+a node is deleting its state; the shell check boots one volume twice to
+prove both paths. The archive holds only the root of trust's seed (test
+material) — no node secret is handed in any more.
+
 v0 honesty notes that remain: node id → 10.77.0.N addressing is static
-(dynamic addressing is a separate concern), identities and revocations
-are held in memory, shm caps do not cross nodes (by design: no
-cross-machine shared memory) and notifications do not yet.
+(dynamic addressing is a separate concern), shm caps do not cross nodes
+(by design: no cross-machine shared memory) and notifications do not
+yet; the multi-node drill's nodes have no disk and take kernel-composed
+test seeds.
 
 A teardown lesson from wiring the fabric into the shell boot: an shm
 cap delivered to a service is unref'd by *that service's* teardown, so

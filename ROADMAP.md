@@ -250,10 +250,20 @@ The pooling story stops being theory.
   blocked calling it — is why user domains can now create **threads**
   (`thread_create`/`thread_exit`, same cap table, a domain-supplied
   stack): inbound remote calls run on a small worker pool while the
-  serve thread alone touches peers and the wire. Remaining fabric
-  residuals: static node addressing; identities and revocations held
-  in memory; shm caps do not cross (by design), notifications do not
-  yet.
+  serve thread alone touches peers and the wire. ✅ **Identities
+  persist** (done): under the system boot a node's identity is born on
+  the node — a random seed from the kernel pool on first boot, kept
+  with its certificate in `state/fabric/` on the encrypted volume (the
+  unit's own state tier, created by init from the unit file's `mkdir`
+  view give) — and restored on every later boot without the root of
+  trust, which is needed only to certify a new identity; fabsvc keeps
+  the revocations it accepts in the same state and reloads them at
+  boot. The shell check boots the same volume twice: "identity born
+  and certified", then "identity restored from state". Re-enrolling a
+  node is deleting its state. Remaining fabric residuals: static node
+  addressing; shm caps do not cross (by design), notifications do not
+  yet; the fabric drill's nodes still take kernel-composed test seeds
+  (they have no disk).
 - ✅ **Boot orchestration into userspace** (done, three stages). The
   end state, now built: the kernel spawns root with log, spawner, the
   boot archive, and the device capabilities; root forwards them to init;
