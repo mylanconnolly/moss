@@ -189,7 +189,7 @@ const command_names = [_][]const u8{
     "ls",    "tree", "cat",  "open",  "write",    "save",  "stat",
     "mkdir", "rm",   "mv",   "ln",    "readlink", "sync",  "df",
     "ps",    "mem",  "svc",  "start", "stop",     "nodes", "rspawn",
-    "rand",  "run",  "help", "exit",
+    "rand",  "run",  "help", "exit",  "clear",
 };
 
 /// Tab completion: command names in command position, paths elsewhere
@@ -246,6 +246,10 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     const a = it.arena;
     if (is(name, "help")) return .{ .str = help_text };
     if (is(name, "exit")) return error.Exit;
+    if (is(name, "clear")) {
+        tty.out("\x1b[2J\x1b[H"); // clear the screen, cursor home (ctrl-l does the same)
+        return .nothing;
+    }
     if (is(name, "ls")) return try lsTable(it, if (args.len > 0) try pathArg(it, args[0]) else "");
     if (is(name, "tree")) {
         var path: []const u8 = "";
@@ -384,6 +388,7 @@ const help_text =
     \\  let v = expr; $v; "text $v"; if c { } else { }; for x in list { }
     \\  while c { }; (sub | pipeline); [a, b]; x > path  (save rendered)
     \\  ctrl-a/e, arrows, history, tab completes commands and paths
+    \\  clear (or ctrl-l) | help | exit
 ;
 
 // ------------------------------------------------------------ filesystem
