@@ -327,9 +327,17 @@ const shell_script = [_]Step{
     .{ .send = "sync", .expect = "" },
     .{ .send = "rand | len", .expect = "32" },
     .{ .send = "ls img", .expect = "index" },
-    .{ .send = "run ps", .expect = "no spawn authority held" },
-    .{ .send = "run ls data/smoke", .expect = "hi.txt" },
+    // Programs return values: their tables compose with the language.
+    .{ .send = "run ps | where name == shell | get name", .expect = "shell" },
+    .{ .send = "run ls data/smoke | get name", .expect = "hi.txt" },
     .{ .send = "run nope", .expect = "no such image" },
+    // Functions, data files, scripts (the startup script defined `alive`).
+    .{ .send = "def twice [x] { $x * 2 }; twice 21", .expect = "42" },
+    .{ .send = "alive | where name == fs | len", .expect = "1" },
+    .{ .send = "ls data/smoke | to-data | save data/l.msh", .expect = "" },
+    .{ .send = "open data/l.msh | from-data | get name", .expect = "hi.txt" },
+    .{ .send = "write data/s.msh \"let n = 7; \\$n + 1000\"", .expect = "" },
+    .{ .send = "source data/s.msh", .expect = "1007" },
     // The language: typed pipelines, variables, control flow, redirection.
     .{ .send = "ls data/smoke | where size > 0 | get name", .expect = "hi.txt" },
     .{ .send = "ls data/smoke | select name size", .expect = "hi.txt  26" },
@@ -387,10 +395,10 @@ fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const th = try std.Thread.spawn(.{}, ConsoleTap.readerLoop, .{tap});
     th.detach();
 
-    // Prompt, then the script, then exit.
+    // The startup script prints the motd before the first prompt.
     sockSend(sock, "\r");
-    if (!waitFor(tap, "msh> ", 300, polls)) {
-        reportFailure(spec.name, "no shell prompt", log_path);
+    if (!waitFor(tap, "Welcome to moss", 300, polls) or !waitFor(tap, "msh> ", 300, polls)) {
+        reportFailure(spec.name, "no startup banner / shell prompt", log_path);
         return false;
     }
     for (&shell_script) |step| {

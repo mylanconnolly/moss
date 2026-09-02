@@ -74,6 +74,11 @@ values, syntax, an operator) belongs in `lib/mshl.zig` with a host test
 beside it — `zig test lib/mshl.zig` runs in a second; the QEMU check is
 for integration.
 
+**A run tool's result**: build a `mshl.Value` in a `result.Result` arena
+and `deliver` it — it lands in msh's `out` buffer as a data literal and
+becomes the command's value (a table is a list of records). Render text
+only when `deliver` returns false (no `out`: a human is watching).
+
 **A program that needs more than log + one channel** (a driver, a
 service, a run tool): call `boot.take(chan_h)` first thing — it serves
 the boot channel until `go`, collecting caps by tag (`setup.cap(.mmio)`,

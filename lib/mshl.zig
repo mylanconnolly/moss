@@ -112,8 +112,14 @@ pub const builtin_names = [_][]const u8{
 };
 
 pub const max_vars = 32;
+pub const max_funcs = 16;
 
 const Var = struct { name: []const u8, value: Value };
+
+/// `def name [params] { body }`: the body's tree lives in the persistent
+/// allocator (source and nodes copied), so a function outlives the line
+/// that defined it.
+const Func = struct { name: []const u8, params: []const []const u8, body: *Node };
 
 pub const Interp = struct {
     /// Per-evaluation temporaries (reset by the host between lines).
@@ -129,6 +135,8 @@ pub const Interp = struct {
     err_msg: []const u8 = "",
     /// Set by `where`: the row bare words resolve against.
     row: ?Record = null,
+    funcs: [max_funcs]Func = undefined,
+    nfuncs: usize = 0,
 
     pub fn init(arena: std.mem.Allocator, persist: std.mem.Allocator, host: Host) Interp {
         return .{ .arena = arena, .persist = persist, .host = host };
@@ -144,6 +152,25 @@ pub const Interp = struct {
         const v = try self.evalBlock(prog);
         try render(v, self.arena, &self.out);
         return v;
+    }
+
+    /// Evaluate a program without touching `out` (scripts sourced from
+    /// inside a command); the caller renders the value if it wants to.
+    pub fn evalSource(self: *Interp, src: []const u8) Error!Value {
+        var p = Parser{ .it = self, .lex = Lexer{ .src = src } };
+        const prog = try p.program();
+        return self.evalBlock(prog);
+    }
+
+    /// Run a script the way the prompt runs lines: every top-level
+    /// statement's value is rendered into `out` as it is produced.
+    pub fn evalScript(self: *Interp, src: []const u8, out: *std.ArrayList(u8)) Error!void {
+        var p = Parser{ .it = self, .lex = Lexer{ .src = src } };
+        const prog = try p.program();
+        for (prog) |stmt| {
+            const v = try self.evalStmt(stmt);
+            try render(v, self.arena, out);
+        }
     }
 
     /// Parse `src` as DATA: one literal value (usually a record), nothing
@@ -229,6 +256,10 @@ pub const Interp = struct {
         switch (n.*) {
             .let => |l| {
                 try self.setVar(l.name, try self.evalNode(l.expr));
+                return .nothing;
+            },
+            .def => |d| {
+                try self.defineFunc(d.name, d.params, d.body);
                 return .nothing;
             },
             .if_ => |c| {
@@ -326,8 +357,51 @@ pub const Interp = struct {
                     },
                 };
             },
-            .let, .if_, .for_, .while_ => return self.evalStmt(n),
+            .let, .def, .if_, .for_, .while_ => return self.evalStmt(n),
         }
+    }
+
+    // ---------------------------------------------------------- functions
+
+    fn defineFunc(self: *Interp, name: []const u8, params: []const []const u8, body: *Node) Error!void {
+        const pname = try self.persist.dupe(u8, name);
+        const pparams = try self.persist.alloc([]const u8, params.len);
+        for (params, 0..) |p, i| pparams[i] = try self.persist.dupe(u8, p);
+        const pbody = try dupNode(self.persist, body);
+        for (self.funcs[0..self.nfuncs]) |*f| {
+            if (std.mem.eql(u8, f.name, name)) {
+                f.* = .{ .name = pname, .params = pparams, .body = pbody };
+                return;
+            }
+        }
+        if (self.nfuncs == max_funcs) return self.fail("too many functions", .{});
+        self.funcs[self.nfuncs] = .{ .name = pname, .params = pparams, .body = pbody };
+        self.nfuncs += 1;
+    }
+
+    fn findFunc(self: *Interp, name: []const u8) ?*Func {
+        for (self.funcs[0..self.nfuncs]) |*f| {
+            if (std.mem.eql(u8, f.name, name)) return f;
+        }
+        return null;
+    }
+
+    /// Call a function: parameters bind as variables in a scope that ends
+    /// with the call; the pipeline input is `$in`.
+    fn callFunc(self: *Interp, f: *Func, args: []const Value, input: ?Value) Error!Value {
+        if (args.len != f.params.len) return self.fail("{s}: {d} argument(s) expected, got {d}", .{ f.name, f.params.len, args.len });
+        const saved = self.nvars;
+        defer self.nvars = saved;
+        for (f.params, args) |p, a| try self.setVarNew(p, a);
+        try self.setVarNew("in", input orelse .nothing);
+        return self.evalNode(f.body);
+    }
+
+    /// A fresh binding (shadowing), for scopes.
+    fn setVarNew(self: *Interp, name: []const u8, v: Value) Error!void {
+        if (self.nvars == max_vars) return self.fail("too many variables", .{});
+        self.vars[self.nvars] = .{ .name = try self.persist.dupe(u8, name), .value = try dupValue(self.persist, v) };
+        self.nvars += 1;
     }
 
     fn fieldOf(self: *Interp, base: Value, name: []const u8) Error!Value {
@@ -428,6 +502,7 @@ pub const Interp = struct {
 
         const args = try self.arena.alloc(Value, c.args.len);
         for (c.args, 0..) |a, i| args[i] = try self.evalNode(a);
+        if (self.findFunc(c.name)) |f| return self.callFunc(f, args, input);
         if (try self.builtin(c.name, args, input)) |v| return v;
         if (try self.host.call(self.host.ctx, self, c.name, args, input)) |v| return v;
         return self.fail("unknown command '{s}'", .{c.name});
@@ -583,6 +658,17 @@ pub const Interp = struct {
             for (names, 0..) |k, i| vals[i] = .{ .str = k };
             return .{ .list = vals };
         }
+        if (eql(u8, name, "to-data")) {
+            const v = input orelse (if (args.len > 0) args[0] else return self.fail("to-data: needs input", .{}));
+            var buf: std.ArrayList(u8) = .empty;
+            try writeData(v, self.arena, &buf);
+            return .{ .str = buf.items };
+        }
+        if (eql(u8, name, "from-data")) {
+            const v = input orelse (if (args.len > 0) args[0] else return self.fail("from-data: needs input", .{}));
+            if (v != .str) return self.fail("from-data: needs text", .{});
+            return try tableize(self.arena, try self.parseData(v.str));
+        }
         if (eql(u8, name, "lines")) {
             const v = input orelse (if (args.len > 0) args[0] else return self.fail("lines: needs input", .{}));
             if (v != .str) return self.fail("lines: needs a string", .{});
@@ -612,6 +698,134 @@ pub const Interp = struct {
         };
     }
 };
+
+/// A list of records with one shape is a table; anything else is itself.
+/// The data syntax has no table literal — a table IS a list of records —
+/// so readers call this on what they parse.
+pub fn tableize(a: std.mem.Allocator, v: Value) Error!Value {
+    if (v != .list or v.list.len == 0) return v;
+    const first = v.list[0];
+    if (first != .record) return v;
+    const cols = first.record.keys;
+    for (v.list) |item| {
+        if (item != .record or item.record.keys.len != cols.len) return v;
+        for (item.record.keys, cols) |k, c| {
+            if (!std.mem.eql(u8, k, c)) return v;
+        }
+    }
+    const rows = try a.alloc([]const Value, v.list.len);
+    for (v.list, 0..) |item, i| rows[i] = item.record.vals;
+    return .{ .table = .{ .cols = cols, .rows = rows } };
+}
+
+/// Write a value as a data literal the strict parser reads back: the
+/// interchange form for files (`to-data` / `from-data`) and for programs
+/// that hand msh structured results.
+pub fn writeData(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!void {
+    switch (v) {
+        .nothing => try out.appendSlice(a, "null"),
+        .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
+        .int => |i| {
+            var buf: [24]u8 = undefined;
+            try out.appendSlice(a, std.fmt.bufPrint(&buf, "{d}", .{i}) catch "0");
+        },
+        .str => |s| try writeStr(s, a, out),
+        .list => |l| {
+            try out.append(a, '[');
+            for (l, 0..) |item, i| {
+                if (i > 0) try out.appendSlice(a, ", ");
+                try writeData(item, a, out);
+            }
+            try out.append(a, ']');
+        },
+        .record => |r| {
+            try out.append(a, '{');
+            for (r.keys, r.vals, 0..) |k, val, i| {
+                if (i > 0) try out.appendSlice(a, ", ");
+                try out.appendSlice(a, k);
+                try out.appendSlice(a, ": ");
+                try writeData(val, a, out);
+            }
+            try out.append(a, '}');
+        },
+        .table => |t| {
+            try out.append(a, '[');
+            for (t.rows, 0..) |row, ri| {
+                if (ri > 0) try out.appendSlice(a, ",\n ");
+                try writeData(.{ .record = .{ .keys = t.cols, .vals = row } }, a, out);
+            }
+            try out.append(a, ']');
+        },
+    }
+}
+
+/// Quote unless the text reads back as the same bare word.
+fn writeStr(s: []const u8, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!void {
+    var bare = s.len > 0 and !std.ascii.isDigit(s[0]) and s[0] != '-' and s[0] != '$';
+    for (s) |c| {
+        if (!Lexer.isWordChar(c) or c == ':' or c == '#') bare = false;
+    }
+    if (bare and s[s.len - 1] == ':') bare = false;
+    for ([_][]const u8{ "true", "false", "null", "not", "and", "or", "in" }) |kw| {
+        if (std.mem.eql(u8, s, kw)) bare = false;
+    }
+    if (bare) return out.appendSlice(a, s);
+    try out.append(a, '"');
+    for (s) |c| switch (c) {
+        '"' => try out.appendSlice(a, "\\\""),
+        '\\' => try out.appendSlice(a, "\\\\"),
+        '\n' => try out.appendSlice(a, "\\n"),
+        '$' => try out.appendSlice(a, "\\$"),
+        else => try out.append(a, c),
+    };
+    try out.append(a, '"');
+}
+
+/// Deep copy of a tree (function bodies outlive the line arena).
+fn dupNode(a: std.mem.Allocator, n: *Node) Error!*Node {
+    const out = try a.create(Node);
+    out.* = switch (n.*) {
+        .let => |l| .{ .let = .{ .name = try a.dupe(u8, l.name), .expr = try dupNode(a, l.expr) } },
+        .def => |d| blk: {
+            const ps = try a.alloc([]const u8, d.params.len);
+            for (d.params, 0..) |p, i| ps[i] = try a.dupe(u8, p);
+            break :blk .{ .def = .{ .name = try a.dupe(u8, d.name), .params = ps, .body = try dupNode(a, d.body) } };
+        },
+        .if_ => |c| .{ .if_ = .{ .cond = try dupNode(a, c.cond), .then = try dupNode(a, c.then), .else_ = if (c.else_) |e| try dupNode(a, e) else null } },
+        .for_ => |f| .{ .for_ = .{ .name = try a.dupe(u8, f.name), .iter = try dupNode(a, f.iter), .body = try dupNode(a, f.body) } },
+        .while_ => |w| .{ .while_ = .{ .cond = try dupNode(a, w.cond), .body = try dupNode(a, w.body) } },
+        .block => |stmts| .{ .block = try dupNodes(a, stmts) },
+        .pipeline => |p| .{ .pipeline = .{ .stages = try dupNodes(a, p.stages), .redirect = if (p.redirect) |r| try a.dupe(u8, r) else null } },
+        .call => |c| .{ .call = .{ .name = try a.dupe(u8, c.name), .args = try dupNodes(a, c.args) } },
+        .lit => |v| .{ .lit = try dupValue(a, v) },
+        .word => |w| .{ .word = try a.dupe(u8, w) },
+        .var_ => |v| .{ .var_ = try a.dupe(u8, v) },
+        .interp => |parts| blk: {
+            const ps = try a.alloc(StrPart, parts.len);
+            for (parts, 0..) |p, i| ps[i] = switch (p) {
+                .text => |t| .{ .text = try a.dupe(u8, t) },
+                .var_ => |v| .{ .var_ = try a.dupe(u8, v) },
+            };
+            break :blk .{ .interp = ps };
+        },
+        .field => |f| .{ .field = .{ .base = try dupNode(a, f.base), .name = try a.dupe(u8, f.name) } },
+        .list => |items| .{ .list = try dupNodes(a, items) },
+        .record => |fields| blk: {
+            const fs = try a.alloc(Field, fields.len);
+            for (fields, 0..) |f, i| fs[i] = .{ .key = try a.dupe(u8, f.key), .value = try dupNode(a, f.value) };
+            break :blk .{ .record = fs };
+        },
+        .binop => |b| .{ .binop = .{ .op = b.op, .lhs = try dupNode(a, b.lhs), .rhs = try dupNode(a, b.rhs) } },
+        .unop => |u| .{ .unop = .{ .op = u.op, .operand = try dupNode(a, u.operand) } },
+    };
+    return out;
+}
+
+fn dupNodes(a: std.mem.Allocator, ns: []const *Node) Error![]const *Node {
+    const out = try a.alloc(*Node, ns.len);
+    for (ns, 0..) |n, i| out[i] = try dupNode(a, n);
+    return out;
+}
 
 pub fn valueEql(a: Value, b: Value) bool {
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) {
@@ -964,6 +1178,7 @@ const Lexer = struct {
 
 pub const Node = union(enum) {
     let: struct { name: []const u8, expr: *Node },
+    def: struct { name: []const u8, params: []const []const u8, body: *Node },
     if_: struct { cond: *Node, then: *Node, else_: ?*Node },
     for_: struct { name: []const u8, iter: *Node, body: *Node },
     while_: struct { cond: *Node, body: *Node },
@@ -1085,6 +1300,26 @@ const Parser = struct {
             _ = p.take();
             const e = try p.expr();
             return p.mk(.{ .let = .{ .name = name.word, .expr = e } });
+        }
+        if (isWord(t, "def")) {
+            _ = p.take();
+            const name = p.take();
+            if (name != .word) return p.syntax("def: name expected", .{});
+            var params: std.ArrayList([]const u8) = .empty;
+            if (p.peekAt() == .lbracket) {
+                _ = p.take();
+                while (true) {
+                    const q = p.take();
+                    switch (q) {
+                        .rbracket => break,
+                        .comma => continue,
+                        .word => |w| try params.append(p.a(), w),
+                        else => return p.syntax("def: parameter name expected", .{}),
+                    }
+                }
+            }
+            const body = try p.block();
+            return p.mk(.{ .def = .{ .name = name.word, .params = params.items, .body = body } });
         }
         if (isWord(t, "if")) return p.ifStmt();
         if (isWord(t, "for")) {
@@ -1476,15 +1711,9 @@ const TestHost = struct {
 };
 
 fn testInterp(host: *TestHost, arena: std.mem.Allocator) Interp {
-    return Interp.init(arena, std.testing.allocator, .{ .ctx = host, .call = TestHost.call });
-}
-
-fn freeVars(it: *Interp) void {
-    for (it.vars[0..it.nvars]) |v| {
-        std.testing.allocator.free(v.name);
-        freeValue(v.value);
-    }
-    it.nvars = 0;
+    // Variables and functions persist in the same arena here; msh gives
+    // them a region of their own.
+    return Interp.init(arena, arena, .{ .ctx = host, .call = TestHost.call });
 }
 
 fn expectOut(it: *Interp, src: []const u8, expected: []const u8) !void {
@@ -1515,7 +1744,6 @@ test "let, if, for, while, interpolation" {
     defer arena_state.deinit();
     var host = TestHost{};
     var it = testInterp(&host, arena_state.allocator());
-    defer freeVars(&it);
     try expectOut(&it, "let x = 3; $x * 2", "6\n");
     try expectOut(&it, "if $x == 3 { echo yes } else { echo no }", "yes\n");
     try expectOut(&it, "if $x == 4 { echo yes } else if $x == 3 { echo three } else { echo no }", "three\n");
@@ -1524,38 +1752,11 @@ test "let, if, for, while, interpolation" {
     try expectOut(&it, "let name = \"moss\"; echo \"hello $name!\"", "hello moss!\n");
 }
 
-fn freeValue(v: Value) void {
-    switch (v) {
-        .str => |s| std.testing.allocator.free(s),
-        .list => |l| {
-            for (l) |x| freeValue(x);
-            std.testing.allocator.free(l);
-        },
-        .record => |r| {
-            for (r.keys) |k| std.testing.allocator.free(k);
-            std.testing.allocator.free(r.keys);
-            for (r.vals) |x| freeValue(x);
-            std.testing.allocator.free(r.vals);
-        },
-        .table => |t| {
-            for (t.cols) |k| std.testing.allocator.free(k);
-            std.testing.allocator.free(t.cols);
-            for (t.rows) |r| {
-                for (r) |x| freeValue(x);
-                std.testing.allocator.free(r);
-            }
-            std.testing.allocator.free(t.rows);
-        },
-        else => {},
-    }
-}
-
 test "pipelines over tables: where, sort-by, select, get, first, len" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var host = TestHost{};
     var it = testInterp(&host, arena_state.allocator());
-    defer freeVars(&it);
     try expectOut(&it, "ls | len", "3\n");
     try expectOut(&it, "ls | where size > 1kb | get name", "big.bin\n");
     try expectOut(&it, "ls | where type == dir | select name", "name\n----\nsub\n");
@@ -1635,6 +1836,41 @@ test "record literals and the strict data parser" {
     try std.testing.expectError(Error.Runtime, it.parseData("{ a: $x }"));
     try std.testing.expectError(Error.Syntax, it.parseData("{ a: 1 } { b: 2 }"));
     try std.testing.expectError(Error.Syntax, it.parseData("echo hi"));
+}
+
+test "def: functions with parameters, $in, and persistence across lines" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var host = TestHost{};
+    var it = testInterp(&host, arena_state.allocator());
+    try expectOut(&it, "def twice [x] { $x * 2 }", "");
+    try expectOut(&it, "twice 21", "42\n");
+    try expectOut(&it, "def big { $in | where size > 1kb | get name }", "");
+    try expectOut(&it, "ls | big", "big.bin\n");
+    try expectOut(&it, "def greet [who] { echo \"hi $who\" }; greet moss", "hi moss\n");
+    try std.testing.expectError(Error.Runtime, it.run("twice 1 2"));
+}
+
+test "to-data / from-data round-trip through the strict parser" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var host = TestHost{};
+    var it = testInterp(&host, arena_state.allocator());
+    try expectOut(&it, "ls | to-data | from-data | where size > 1kb | get name", "big.bin\n");
+    try expectOut(&it, "[1, \"two words\", true, null] | to-data", "[1, \"two words\", true, null]\n");
+    try expectOut(&it, "{ a: \"x:y\", b: [1] } | to-data | from-data | get a", "x:y\n");
+    try expectOut(&it, "\"a\\\"b\" | to-data | from-data", "a\"b\n");
+    try expectOut(&it, "ls | to-data | from-data | len", "3\n");
+}
+
+test "scripts render every statement's value" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var host = TestHost{};
+    var it = testInterp(&host, arena_state.allocator());
+    var out: std.ArrayList(u8) = .empty;
+    try it.evalScript("echo one\nlet x = 2\n$x\ndef f { 3 }\nf", &out);
+    try std.testing.expectEqualStrings("one\n2\n3\n", out.items);
 }
 
 test "records render as key: value lines; tables align" {

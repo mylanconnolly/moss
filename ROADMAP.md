@@ -339,11 +339,22 @@ The pooling story stops being theory.
   line, reset each line; persistent for variables). The shell check
   drives the language end to end: where/select/get over a real
   listing, let/if/for/while, `>` redirection round-tripped through
-  `cat`, sub-pipelines, and the editor's tab and ctrl-c. Next along
-  this line: typed output from `run` programs (a records channel, so
-  `ps` and `ls` as programs emit tables and compose with builtins);
-  scripts from files and a startup script under `conf/msh/`; `def`
-  functions; a records-to-bytes format for `save`.
+  `cat`, sub-pipelines, and the editor's tab and ctrl-c. ✅ **Follow-ups** (done): `run` programs
+  hand back a **value**, not text — the `out` capability is a buffer
+  the program writes an mshl data literal into (`user/result.zig`; the
+  data syntax is the interchange form, a table is a list of records),
+  and msh returns it, so `run ps | where state == alive | get name`
+  works and ps/ls print text only when nobody gave them an `out`.
+  `def name [params] { body }` defines functions (`$in` is the pipeline
+  input; bodies persist across lines); `to-data`/`from-data` write and
+  read the data form, so `x | to-data | save p.msh` and `open p.msh |
+  from-data` round-trip through the strict parser; `source p` runs a
+  script in the session, and the startup script (`conf/msh/startup.msh`
+  on the volume, else the archive's `boot/conf/msh/startup.msh`) runs
+  before the first prompt — it prints the motd and defines `alive`.
+  Scripts render every top-level statement's value as they go, the way
+  the prompt does. Residual: `save` alone still writes rendered text
+  (use `to-data`); run arguments are 24 bytes of text.
 - ✅ **Programs as files: the content-addressed `img/` store, the
   introspect cap, and `run`** (done). At the shell boot, init — the
   thing that already holds the archive and the catalog — installs every

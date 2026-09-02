@@ -194,6 +194,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/blk-drill.msh",   "conf/units/fs-alice.msh",
         "conf/units/fs-bob.msh",      "conf/units/net-echosrv.msh",
         "conf/units/net-echocli.msh", "conf/units/net-boxed.msh",
+        "conf/msh/startup.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
     }

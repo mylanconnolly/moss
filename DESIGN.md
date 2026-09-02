@@ -738,9 +738,22 @@ which `let` deep-copies its values (a fixed-buffer allocator; msh's
 manifest budget covers it). Field access is parsed as a postfix glued
 to a primary rather than as a token, so bare words keep their dots
 (`hi.txt`, `10.77.0.1`) while `(stat p).type` and `$row.size` work.
-Deliberately not yet: typed output from `run` programs (they still
-write text to the console they are handed), scripts from files, `def`,
-and a records-to-bytes format for `save` (it writes rendered text).
+**Programs return values (as built):** a program `run` by msh is handed
+an `out` capability — a buffer it writes its result into as an mshl
+*data literal*, the same syntax the strict parser reads (a table is a
+list of records; `tableize` turns one back). msh parses it and the
+program's value flows into the pipeline; ps and ls render text only
+when nobody gave them an `out`. The data syntax is thus the interchange
+form everywhere: `to-data`/`from-data` write and read it, `save` of a
+`to-data` result is a file `open | from-data` reads back, and a unit
+file is the same syntax read by the same parser. `def name [params] {
+body }` defines functions whose bodies persist across lines (`$in` is
+the pipeline input; parameters bind in a scope that ends with the
+call); `source p` runs a script in the session and the startup script
+(`conf/msh/startup.msh` on the volume, else the archive's) runs before
+the first prompt. A script renders every top-level statement's value as
+it goes, the way the prompt does — the first cut rendered only the
+last, and a startup script ending in a `def` printed nothing.
 
 ## Networking
 

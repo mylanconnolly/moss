@@ -80,7 +80,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
 | fabric | Per-node identities (root-signed certs, signed DH, sealed transport): join, gossip, placement, death, rejoin, imposter refused, spawn authorization, revocation | `zig build run-cluster -Dfabric-test` |
-| shell | msh scripted console session: typed pipelines (where/select/get over real listings), let/if/for/while, `>` redirection, tab completion, and `run` of content-addressed programs from `img/` in their own domains | `zig build run-shell` (interactive) |
+| shell | msh scripted console session: typed pipelines (where/select/get over real listings), let/if/for/while/def, `>` redirection, data files, scripts and a startup script, tab completion, and `run` of content-addressed programs whose results are values | `zig build run-shell` (interactive) |
 
 Host-side unit tests (`zig build test`) cover the shared ABI (handles,
 typed message codecs, rings, the boot archive), the devicetree parser,

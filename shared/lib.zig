@@ -368,9 +368,13 @@ pub const CapTag = enum(u64) {
     init = 10, // an init front channel (re-wiring, service control)
     fabric = 11, // the fabric service's channel
     spawner = 12, // spawn authority
+    /// A result buffer (shm): a program run by msh writes its result
+    /// there as an mshl data literal (NUL-terminated) and msh returns it
+    /// as the command's value — structured output, no text to re-parse.
+    out = 13,
 };
 
-pub const cap_tag_count = 13;
+pub const cap_tag_count = 14;
 
 pub const BootReq = union(enum(u64)) {
     /// + cap attachment: what it is for.

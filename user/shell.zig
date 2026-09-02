@@ -62,6 +62,10 @@ var fab_chan: u64 = 0;
 var fab_buf: u64 = 0; // attached lazily on first `nodes`
 var glog: u64 = 0;
 var run_stage: loader.Stage = undefined;
+// The result buffer run programs write their value into (data literal).
+var run_out_h: u64 = 0;
+var run_out_va: u64 = 0;
+const run_out_pages: u64 = 8;
 
 // The interpreter's memory: a per-line arena (reset before every line)
 // and a persistent region for variables. Static, like everything in
@@ -98,6 +102,14 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     }
     tty.init(cons_chan, cons_buf);
     run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(147);
+    {
+        const o = usys.shmCreate(run_out_pages);
+        if (o.err != .ok) usys.exit(148);
+        const om = usys.shmMap(o.data[0]);
+        if (om.err != .ok) usys.exit(149);
+        run_out_h = o.data[0];
+        run_out_va = om.data[0];
+    }
 
     // Filesystem view buffer.
     const b = fsc.attachBuf(fs_chan);
@@ -112,7 +124,35 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
 
     _ = usys.log(log_h, "msh: up, serving the console");
     tty.out("\r\nmoss shell — 'help' lists commands; tab completes; pipelines carry tables\r\n");
+    startup();
     repl();
+}
+
+/// The startup script: conf/msh/startup.msh on the volume if the admin
+/// wrote one, else the archive's boot/conf/msh/startup.msh. Runs in the
+/// same interpreter, so its variables and functions are the session's.
+fn startup() void {
+    line_fba.reset();
+    for ([_][]const u8{ "conf/msh/startup.msh", "boot/conf/msh/startup.msh" }) |path| {
+        const text = readFile(&interp, path) catch continue;
+        runScript(text);
+        return;
+    }
+}
+
+fn runScript(text: []const u8) void {
+    var out: std.ArrayList(u8) = .empty;
+    if (interp.evalScript(text, &out)) |_| {
+        printText(out.items);
+    } else |e| switch (e) {
+        error.Exit => usys.exit(0),
+        error.OutOfMemory => tty.out("script: out of memory\r\n"),
+        else => {
+            tty.out("script error: ");
+            tty.out(interp.err_msg);
+            tty.out("\r\n");
+        },
+    }
 }
 
 fn repl() noreturn {
@@ -182,10 +222,10 @@ fn consRead(max: u64) u64 {
 }
 
 const command_names = [_][]const u8{
-    "ls",    "tree", "cat",  "open",  "write",    "save",  "stat",
-    "mkdir", "rm",   "mv",   "ln",    "readlink", "sync",  "df",
-    "ps",    "mem",  "svc",  "start", "stop",     "nodes", "rspawn",
-    "rand",  "run",  "help", "exit",  "clear",
+    "ls",    "tree", "cat",  "open",  "write",    "save",   "stat",
+    "mkdir", "rm",   "mv",   "ln",    "readlink", "sync",   "df",
+    "ps",    "mem",  "svc",  "start", "stop",     "nodes",  "rspawn",
+    "rand",  "run",  "help", "exit",  "clear",    "source",
 };
 
 /// Tab completion: command names in command position, paths elsewhere
@@ -366,7 +406,12 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     }
     if (is(name, "run")) {
         if (args.len < 1) return it.fail("run: image name expected", .{});
-        try cmdRun(it, try pathArg(it, args[0]), if (args.len > 1) try pathArg(it, args[1]) else "");
+        return try cmdRun(it, try pathArg(it, args[0]), if (args.len > 1) try pathArg(it, args[1]) else "");
+    }
+    if (is(name, "source")) {
+        if (args.len < 1) return it.fail("source: path expected", .{});
+        const text = try readFile(it, try pathArg(it, args[0]));
+        try it.evalScript(text, &it.out); // its output joins this line's
         return .nothing;
     }
     return null;
@@ -377,7 +422,10 @@ const help_text =
     \\  ls [p] | tree [p] [--depth n] | stat p | cat p | write p text | save p
     \\  mkdir p | rm p | mv a b | ln p target | readlink p | df | sync
     \\  ps | mem | svc | start N | stop N | nodes | rspawn N I | rand
-    \\  run NAME [path]        a program from img/ in its own domain
+    \\  run NAME [path]        a program from img/ in its own domain; its result is a value
+    \\  source p               run a script in this session (startup: conf/msh/startup.msh)
+    \\  x | to-data | save p   write a value as data; open p | from-data reads it back
+    \\  def name [a b] { .. }  a function ($in is the pipeline input)
     \\language:
     \\  x | where size > 4kb | sort-by name --desc | select name size
     \\  x | get col | first n | last n | reverse | len | keys | lines
@@ -651,7 +699,7 @@ fn rspawn(it: *mshl.Interp, node: u64, image: u64) mshl.Error!Value {
 // is read through msh's view, verified against its digest, and spawned
 // from msh's stage.
 
-fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void {
+fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value {
     var digest: [shared.img_digest_hex_len]u8 = undefined;
     if (!indexLookup(name, &digest)) return it.fail("run: no such image in img/index: {s}", .{name});
     var img_path: [4 + shared.img_digest_hex_len]u8 = undefined;
@@ -703,7 +751,9 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void 
         return it.fail("run: spawn refused ({t})", .{sp.err});
     }
     const bch = ch.data[1];
-    var ok = boot.giveCap(bch, .console, cons_chan) and boot.giveCap(bch, .console_buf, cons_shm_h);
+    // A clean result buffer: the program's value comes back through it.
+    @memset(@as([*]u8, @ptrFromInt(run_out_va))[0 .. run_out_pages * 4096], 0);
+    var ok = boot.giveCap(bch, .console, cons_chan) and boot.giveCap(bch, .console_buf, cons_shm_h) and boot.giveCap(bch, .out, run_out_h);
     if (ok and view != 0) ok = boot.giveCap(bch, .view, view);
     if (ok) {
         const w = shared.strToWords(path);
@@ -728,6 +778,13 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void 
     _ = usys.capDrop(sp.data[0]);
     _ = usys.capDrop(bch);
     if (view != 0) _ = usys.capDrop(view);
+    // Whatever the program wrote back is its value; nothing = nothing.
+    const out_bytes = @as([*]const u8, @ptrFromInt(run_out_va));
+    var n: usize = 0;
+    while (n < run_out_pages * 4096 and out_bytes[n] != 0) n += 1;
+    if (n == 0) return .nothing;
+    const text = try it.arena.dupe(u8, out_bytes[0..n]);
+    return try mshl.tableize(it.arena, try it.parseData(text));
 }
 
 /// img/index: "name digest" lines.

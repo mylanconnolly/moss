@@ -1,0 +1,4 @@
+# msh startup: runs in the session's interpreter before the first prompt.
+# Write conf/msh/startup.msh on the volume to replace it.
+cat boot/etc/motd
+def alive { ps | where state == alive }
