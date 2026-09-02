@@ -76,9 +76,11 @@ export fn kmain(dtb_pa: u64) noreturn {
     }
 
     sched.registerCpu(0);
-    // Image table order must match shared.ImageId.
     const blobs = @import("user_blobs");
-    domain.init(&.{ blobs.hello, blobs.pingpong, blobs.root, blobs.init, blobs.services, blobs.sandbox, blobs.blk, blobs.fs, blobs.net, blobs.fabric, blobs.cons, blobs.shell, blobs.rng });
+    // The kernel embeds exactly one thing: the boot archive. Every program
+    // image lives inside it at img/<name>; the boot drivers below read it
+    // the same way userspace spawners do.
+    domain.init();
     domain.setSystemBlob(blobs.bootfs);
     irq.init();
     domain.startReaper();
@@ -178,11 +180,10 @@ export fn kmain(dtb_pa: u64) noreturn {
 /// nothing leaked — then spawn the same image with an empty manifest and
 /// watch authority be refused.
 fn domainTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     log.info("domain-test: spawning 'hello' (debug_log granted)", .{});
-    const hello = domain.spawn("hello", blobs.hello, .{
+    const hello = domain.spawn("hello", .{ .blob = img(.hello) }, .{
         .grant_debug_log = true,
     }) catch |e| std.debug.panic("spawn hello: {t}", .{e});
 
@@ -196,7 +197,7 @@ fn domainTestWorker(_: u64) void {
     });
 
     log.info("domain-test: spawning 'sneaky' (same binary, empty manifest)", .{});
-    const sneaky = domain.spawn("sneaky", blobs.hello, .{}) catch |e|
+    const sneaky = domain.spawn("sneaky", .{ .blob = img(.hello) }, .{}) catch |e|
         std.debug.panic("spawn sneaky: {t}", .{e});
     while (!domain.drained(sneaky)) sched.sleep(1);
     domain.finishTeardown(sneaky);
@@ -223,7 +224,6 @@ fn domainTestWorker(_: u64) void {
 /// fault-as-message to a supervisor, kernel-side notification smoke test,
 /// and the usual nothing-leaked accounting at the end.
 fn ipcTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     // Notification smoke test, kernel-side: signal from a helper thread.
@@ -239,7 +239,7 @@ fn ipcTestWorker(_: u64) void {
     // Fault-as-message: crasher faults, the supervisor (this thread) gets
     // the message and pronounces the verdict.
     const fault_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const crasher = domain.spawn("crasher", blobs.pingpong, .{
+    const crasher = domain.spawn("crasher", .{ .blob = img(.pingpong) }, .{
         .grant_debug_log = true,
         .supervisor = fault_ch,
         .arg = 3,
@@ -262,12 +262,12 @@ fn ipcTestWorker(_: u64) void {
 
     // The RPC pair: calc serves side A, askr calls on side B.
     const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const calc = domain.spawn("calc", blobs.pingpong, .{
+    const calc = domain.spawn("calc", .{ .blob = img(.pingpong) }, .{
         .grant_debug_log = true,
         .grant_channel_a = ch,
         .arg = 1,
     }) catch |e| std.debug.panic("spawn calc: {t}", .{e});
-    const askr = domain.spawn("askr", blobs.pingpong, .{
+    const askr = domain.spawn("askr", .{ .blob = img(.pingpong) }, .{
         .grant_debug_log = true,
         .grant_channel_b = ch,
         .arg = 2,
@@ -303,13 +303,13 @@ fn ipcTestWorker(_: u64) void {
 /// the whole tree has finished. Everything else — init, lazy activation,
 /// supervision, re-wiring — happens in userspace.
 fn initTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     log.info("init-test: starting userspace root task", .{});
-    const root = domain.spawn("root", blobs.root, .{
+    const root = domain.spawn("root", .{ .blob = img(.root) }, .{
         .grant_debug_log = true,
         .grant_spawner = true,
+        .grant_bootfs = true,
         // Roomy: the whole userspace tree's usage cascades into these.
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
@@ -336,7 +336,6 @@ fn initTestWorker(_: u64) void {
 /// child cannot detect), nesting (grandchild from the child's budget
 /// slice), subtree revocation in one call, and setup/teardown benchmarks.
 fn sandboxTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     // Benchmark: spawn + revoke of a minimal domain must stay cheap.
@@ -345,7 +344,7 @@ fn sandboxTestWorker(_: u64) void {
             : [v] "=r" (-> u64),
         );
         const t0 = cycles();
-        const bench = domain.spawn("bench", blobs.sandbox, .{
+        const bench = domain.spawn("bench", .{ .blob = img(.sandbox) }, .{
             .arg = 5, // sleeper
             .auto_reap = true,
         }) catch |e| std.debug.panic("spawn bench: {t}", .{e});
@@ -362,10 +361,11 @@ fn sandboxTestWorker(_: u64) void {
     }
 
     log.info("sandbox-test: starting sandbox parent", .{});
-    const parent = domain.spawn("parent", blobs.sandbox, .{
+    const parent = domain.spawn("parent", .{ .blob = img(.sandbox) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_spawner = true,
+        .grant_bootfs = true,
         .kobj_limit = 4 << 20,
         .user_limit = 16 << 20,
         .auto_reap = true,
@@ -391,14 +391,14 @@ fn sandboxTestWorker(_: u64) void {
 /// exhaust init's restart budget and escalate up the tree (init exits 77,
 /// root retries init once, then gives up and reports 77).
 fn flapTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     log.info("flap-test: starting root with the flap-drill topology", .{});
-    const root = domain.spawn("root", blobs.root, .{
+    const root = domain.spawn("root", .{ .blob = img(.root) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_spawner = true,
+        .grant_bootfs = true,
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
@@ -423,12 +423,11 @@ fn flapTestWorker(_: u64) void {
 /// IRQ range, channel, log. QEMU virt: virtio-mmio slots at 0x0a000000
 /// (32 x 0x200), IRQs SPI 16.. (intid 48..).
 fn blkTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     log.info("blk-test: starting userspace virtio-blk driver", .{});
-    const drv = domain.spawn("blkdrv", blobs.blk, .{
+    const drv = domain.spawn("blkdrv", .{ .blob = img(.blk) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = ch,
@@ -437,7 +436,7 @@ fn blkTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
 
-    const user = domain.spawn("blkuser", blobs.blk, .{
+    const user = domain.spawn("blkuser", .{ .blob = img(.blk) }, .{
         .arg = 2,
         .grant_debug_log = true,
         .grant_channel_b = ch,
@@ -466,12 +465,11 @@ fn blkTestWorker(_: u64) void {
 /// view (rw) and populates the disk; bob gets a derived read-only view of
 /// disk/pub and must be unable to see, write, or escape anything else.
 fn fsTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     // The storage stack: driver, then the FS service on top of it.
     const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const drv = domain.spawn("blkdrv", blobs.blk, .{
+    const drv = domain.spawn("blkdrv", .{ .blob = img(.blk) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = blk_ch,
@@ -481,11 +479,11 @@ fn fsTestWorker(_: u64) void {
     }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
 
     const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const fssvc = domain.spawn("fssvc", blobs.fs, .{
+    const fssvc = domain.spawn("fssvc", .{ .blob = img(.fs) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = fs_ch,
-        .grant_blob = blobs.bootfs,
+        .grant_bootfs = true,
         .user_limit = 4 << 20, // mossfs core: caches + overlay live in BSS
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
@@ -526,7 +524,7 @@ fn fsTestWorker(_: u64) void {
     }, 0);
     std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
     log.info("fs-test: alice gets the root view (rw)", .{});
-    const alice = domain.spawn("alice", blobs.fs, .{
+    const alice = domain.spawn("alice", .{ .blob = img(.fs) }, .{
         .arg = 2,
         .grant_debug_log = true,
         .user_limit = 4 << 20, // the fs image carries the mossfs BSS for every role
@@ -545,7 +543,7 @@ fn fsTestWorker(_: u64) void {
     }, 0);
     std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
     log.info("fs-test: bob gets a read-only view of data/pub", .{});
-    const bob = domain.spawn("bob", blobs.fs, .{
+    const bob = domain.spawn("bob", .{ .blob = img(.fs) }, .{
         .arg = 3,
         .grant_debug_log = true,
         .user_limit = 4 << 20, // the fs image carries the mossfs BSS for every role
@@ -581,12 +579,11 @@ fn fsTestWorker(_: u64) void {
 /// (the runner drives the console over a socket chardev). PASS when msh
 /// exits cleanly and nothing leaked.
 fn shellTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     // Storage: driver, then the FS service (encrypted volume, fs-test key).
     const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const blkdrv = domain.spawn("blkdrv", blobs.blk, .{
+    const blkdrv = domain.spawn("blkdrv", .{ .blob = img(.blk) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = blk_ch,
@@ -596,11 +593,11 @@ fn shellTestWorker(_: u64) void {
     }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
 
     const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const fssvc = domain.spawn("fssvc", blobs.fs, .{
+    const fssvc = domain.spawn("fssvc", .{ .blob = img(.fs) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = fs_ch,
-        .grant_blob = blobs.bootfs,
+        .grant_bootfs = true,
         .user_limit = 4 << 20,
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
@@ -610,7 +607,7 @@ fn shellTestWorker(_: u64) void {
 
     // The network + a single-node fabric (msh's nodes/rspawn commands).
     const shellnet_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const shellnet = domain.spawn("netsvc", blobs.net, .{
+    const shellnet = domain.spawn("netsvc", .{ .blob = img(.net) }, .{
         .arg = 1 | (1 << 8), // cluster addressing, node 1
         .grant_debug_log = true,
         .grant_channel_a = shellnet_ch,
@@ -619,17 +616,18 @@ fn shellTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
     const shellfab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const shellfab = domain.spawn("fabsvc", blobs.fabric, .{
+    const shellfab = domain.spawn("fabsvc", .{ .blob = img(.fabric) }, .{
         .arg = 1 | (1 << 8),
         .grant_debug_log = true,
         .grant_channel_a = shellfab_ch,
         .grant_spawner = true,
+        .grant_bootfs = true, // remote spawns load their images from it
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
 
     // Console driver (virtio-console, device id 3).
     const cons_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const consdrv = domain.spawn("consdrv", blobs.cons, .{
+    const consdrv = domain.spawn("consdrv", .{ .blob = img(.cons) }, .{
         .grant_debug_log = true,
         .grant_channel_a = cons_ch,
         .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
@@ -697,11 +695,11 @@ fn shellTestWorker(_: u64) void {
 
     // init, serving a granted front channel (no demo worker).
     const front_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const initd = domain.spawn("init", blobs.init, .{
+    const initd = domain.spawn("init", .{ .blob = img(.init) }, .{
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_channel_a = front_ch,
-        .grant_blob = blobs.bootfs,
+        .grant_bootfs = true,
         .kobj_limit = 4 << 20,
         .user_limit = 24 << 20, // its services' budgets nest inside
         .auto_reap = true,
@@ -709,7 +707,7 @@ fn shellTestWorker(_: u64) void {
 
     // msh: serves its boot channel; we feed it cons, fs view, init front.
     const boot_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const msh = domain.spawn("msh", blobs.shell, .{
+    const msh = domain.spawn("msh", .{ .blob = img(.shell) }, .{
         .grant_debug_log = true,
         .grant_spawner = true, // gates ps/mem introspection
         .grant_channel_a = boot_ch,
@@ -797,12 +795,11 @@ fn shellTestWorker(_: u64) void {
 /// TCP through slirp), and a sandboxed child holding an allowlist view can
 /// reach only its allowlisted destination.
 fn netTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     log.info("net-test: starting userspace netsvc (driver + dual-stack tcp)", .{});
-    const svc = domain.spawn("netsvc", blobs.net, .{
+    const svc = domain.spawn("netsvc", .{ .blob = img(.net) }, .{
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = net_ch,
@@ -816,7 +813,7 @@ fn netTestWorker(_: u64) void {
     // Unrestricted views for the echo pair, via derive.
     const srv_view = deriveNetView(net_ch, 0, 0, 0);
     const cli_view = deriveNetView(net_ch, 0, 0, 0);
-    const srv = domain.spawn("echosrv", blobs.net, .{
+    const srv = domain.spawn("echosrv", .{ .blob = img(.net) }, .{
         .arg = 2,
         .grant_debug_log = true,
         .grant_channel_b = @ptrFromInt(srv_view.obj),
@@ -824,7 +821,7 @@ fn netTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn echosrv: {t}", .{e});
     sched.sleep(3);
-    const cli = domain.spawn("echocli", blobs.net, .{
+    const cli = domain.spawn("echocli", .{ .blob = img(.net) }, .{
         .arg = 3,
         .grant_debug_log = true,
         .grant_channel_b = @ptrFromInt(cli_view.obj),
@@ -841,7 +838,7 @@ fn netTestWorker(_: u64) void {
     // The sandboxed child: allowlist = the wire echo destination only.
     const v4w = shared.v4Words(shared.net_echo_ip4);
     const box_view = deriveNetView(net_ch, v4w[0], v4w[1], shared.net_echo_port);
-    const box = domain.spawn("boxed", blobs.net, .{
+    const box = domain.spawn("boxed", .{ .blob = img(.net) }, .{
         .arg = 4,
         .grant_debug_log = true,
         .grant_channel_b = @ptrFromInt(box_view.obj),
@@ -871,8 +868,7 @@ fn netTestWorker(_: u64) void {
 /// until then, and the services spawned next depend on it).
 /// `reseed_ticks` = 0 takes the driver's default.
 fn spawnRngd(reseed_ticks: u64) *domain.Domain {
-    const blobs = @import("user_blobs");
-    const d = domain.spawn("rngd", blobs.rng, .{
+    const d = domain.spawn("rngd", .{ .blob = img(.rng) }, .{
         .arg = 1 | (reseed_ticks << 8),
         .grant_debug_log = true,
         .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
@@ -897,11 +893,10 @@ fn spawnRngd(reseed_ticks: u64) *domain.Domain {
 /// reseed clock delivers more entropy; (5) the kernel itself can draw;
 /// then the usual teardown bar: pmem byte-identical.
 fn rngTestWorker(_: u64) void {
-    const blobs = @import("user_blobs");
     const frames_before = pmem.stats().free_bytes;
 
     log.info("rng-test: probing the pool before any entropy driver exists", .{});
-    const early = domain.spawn("rngprobe", blobs.rng, .{
+    const early = domain.spawn("rngprobe", .{ .blob = img(.rng) }, .{
         .arg = 3,
         .grant_debug_log = true,
         .auto_reap = true,
@@ -914,7 +909,7 @@ fn rngTestWorker(_: u64) void {
     const seeds0 = rng.seedCount();
     log.info("rng-test: pool seeded by rngd ({d} seed so far)", .{seeds0});
 
-    const probe = domain.spawn("rngprobe", blobs.rng, .{
+    const probe = domain.spawn("rngprobe", .{ .blob = img(.rng) }, .{
         .arg = 2,
         .grant_debug_log = true,
         .auto_reap = true,
@@ -987,7 +982,6 @@ fn fabricTestWorker(arg: u64) void {
     const node = arg & 0xff;
     const drill = (arg >> 8) & 0xff;
     const badkey = (arg >> 16) & 0xff;
-    const blobs = @import("user_blobs");
     log.info("fabric-test: node {d} coming up (drill={d})", .{ node, drill });
 
     // Entropy: handshake nonces come from getrandom; no pool, no fabric.
@@ -995,7 +989,7 @@ fn fabricTestWorker(arg: u64) void {
 
     // The network, in cluster mode.
     const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    _ = domain.spawn("netsvc", blobs.net, .{
+    _ = domain.spawn("netsvc", .{ .blob = img(.net) }, .{
         .arg = 1 | (node << 8),
         .grant_debug_log = true,
         .grant_channel_a = net_ch,
@@ -1007,11 +1001,12 @@ fn fabricTestWorker(arg: u64) void {
 
     // The fabric service, wired to a net view.
     const fab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    _ = domain.spawn("fabsvc", blobs.fabric, .{
+    _ = domain.spawn("fabsvc", .{ .blob = img(.fabric) }, .{
         .arg = 1 | (node << 8),
         .grant_debug_log = true,
         .grant_channel_a = fab_ch,
         .grant_spawner = true,
+        .grant_bootfs = true, // remote spawns load their images from it
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
     // Identity: the root of trust certifies this node, then the net is
@@ -1096,7 +1091,9 @@ fn fabricTestWorker(arg: u64) void {
                     denied = rep == .fab_err and rep.fab_err.code == @intFromEnum(shared.FabErr.denied);
                 }
             }
-            if (!denied) std.debug.panic("fabric-test: unauthorized spawn was NOT refused", .{});
+            if (!denied) std.debug.panic("fabric-test: unauthorized spawn was NOT refused (err {t}, words {x} {x})", .{
+                res.err, res.msg.data[0], res.msg.data[1],
+            });
             log.info("fabric-test: node 3 spawn refused on certificate grounds (no spawn authority)", .{});
         }
         var t: u64 = 0;
@@ -1182,9 +1179,8 @@ fn memberUp(fab_ch: *ipc.Channel, pb: [*]u8, node: u64) bool {
 const FabRoot = struct { d: *domain.Domain, ch: *ipc.Channel, buf: *ipc.Shm, pb: [*]u8 };
 
 fn spawnFabroot(bad_root: bool) FabRoot {
-    const blobs = @import("user_blobs");
     const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const d = domain.spawn("fabroot", blobs.fabric, .{
+    const d = domain.spawn("fabroot", .{ .blob = img(.fabric) }, .{
         .arg = 3,
         .grant_debug_log = true,
         .grant_channel_a = ch,
@@ -1331,6 +1327,13 @@ fn deriveNetView(net_ch: *ipc.Channel, hi: u64, lo: u64, port: u64) struct { obj
     }, 0);
     std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
     return .{ .obj = res.msg.cap_obj, .badge = res.msg.cap_badge };
+}
+
+/// A program image out of the boot archive (img/<name>) for the kernel's
+/// own boot drivers. Userspace spawners stage the same entries themselves.
+fn img(id: shared.ImageId) []const u8 {
+    return domain.bootImage(shared.imagePath(id)) orelse
+        std.debug.panic("boot archive lacks {s}", .{shared.imagePath(id)});
 }
 
 fn cycles() u64 {

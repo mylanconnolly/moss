@@ -73,10 +73,11 @@ pub fn replyRaw(channel: u64, w: [4]u64, send_cap: u64) shared.Errno {
     return syscall6(.reply, channel, w[0], w[1], w[2], w[3], send_cap).err;
 }
 
+/// image_h: an shm cap holding a staged MOSS image (see loader.zig).
 /// limits: kobj KB | user KB << 32 (0 = defaults); the child's budgets are
 /// a slice of the caller's.
-pub fn spawn(spawner: u64, image: shared.ImageId, arg: u64, chan: u64, flags: u64, limits: u64) IpcResult {
-    return syscall6(.spawn, spawner, @intFromEnum(image), arg, chan, flags, limits);
+pub fn spawn(spawner: u64, image_h: u64, arg: u64, chan: u64, flags: u64, limits: u64) IpcResult {
+    return syscall6(.spawn, spawner, image_h, arg, chan, flags, limits);
 }
 
 pub fn kbLimits(kobj_kb: u64, user_kb: u64) u64 {

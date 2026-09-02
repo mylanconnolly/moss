@@ -41,6 +41,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "fs"
+        \\        .space  14
         \\.global _ustart
         \\_ustart:
         \\        b       umain
@@ -65,7 +67,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64)
 // ------------------------------------------------------------ the service
 
 const max_views = 16;
-const max_boot = 16;
+const max_boot = 40; // etc/, conf/, and every img/ entry
 const max_fds = 8;
 const max_path = 256;
 const max_target = 200; // symlink target length cap

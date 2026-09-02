@@ -27,6 +27,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "blk"
+        \\        .space  13
         \\.global _ustart
         \\_ustart:
         \\        b       umain

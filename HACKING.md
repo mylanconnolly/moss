@@ -37,10 +37,14 @@ is a panic the caller provoked).
 
 **A user program**: new file in `user/` with the MOSS header stanza (copy
 the `comptime { asm(...) }` block and the `uPanic` handler from any
-existing one; entry args are x0=log handle, x1=channel handle, x2=arg,
-x3/x4=blob va/len) → add to `user_progs` in `build.zig` **and** to
-`shared.ImageId` **and** to the `domain.init` image table in
-`kernel/main.zig` — the three lists must stay in the same order.
+existing one, and put the program's own name in the `.ascii` field — it
+is the child's domain name and must match the catalog; entry args are
+x0=log handle, x1=channel handle, x2=arg, x3/x4=boot archive va/len) →
+add to `user_progs` in `build.zig` and to the `shared.ImageId` catalog,
+both by name (nothing is order-coupled: the image becomes `img/<name>`
+in the boot archive). To spawn it from userspace, stage it with
+`loader.Stage.load(...)` from the granted archive and pass the stage's
+shm handle to `usys.spawn`; kernel boot drivers use `img(.name)`.
 
 **A service**: serve one channel; scope per-client state by **badge**
 (mint scoped caps with `chanMint`, hand them out in replies). Blocking is
@@ -95,8 +99,10 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 - Handle-slot conventions for spawn grants are fixed by insert order in
   `domain.spawn`: log→chan→spawner→mmio→irq→entropy; user programs
   hardcode the slots they expect (documented per program).
-- The three image lists (build.zig, shared.ImageId, kernel image table)
-  are order-coupled.
+- The kernel embeds exactly one blob, the boot archive; `spawn` takes an
+  shm cap holding a staged image, never an index. An shm mapping is for
+  life (it refs the object until teardown; there is no unmap), so keep
+  one buffer per purpose rather than mapping per operation.
 - `shared/` may not import kernel or user code and may not allocate; it is
   the ABI and compiles for every target.
 - Kernel W^X, no ambient authority, no kernel channel bypasses — see the
@@ -106,6 +112,11 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 
 - Blocking-op polling and single-outstanding fabric exchanges are v0
   choices; async rings are the upgrade path.
+- netsvc listeners keep a 4-deep accept backlog; a SYN past it is
+  dropped and the client's SYN retransmit retries. A five-second fabric
+  timeout with nothing logged on either side was once an orphaned
+  connection from the old one-slot design — if that shape ever returns,
+  look at accept before anything else.
 - The fabric check is a 3-node dynamic-membership drill: node 1's QEMU
   hosts the L2 hub (hubport netdevs bridging two socket listeners —
   mcast netdevs don't deliver cross-process on macOS), node 2 boots with

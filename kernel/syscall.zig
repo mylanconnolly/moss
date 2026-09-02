@@ -131,11 +131,12 @@ fn sysDmaAlloc(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const spawner_h: shared.Handle = @bitCast(frame.regs[0]);
     _ = d.captable.?.lookup(spawner_h, .spawner) orelse return errno(.bad_handle);
-    const image = domain.imageById(frame.regs[1]) orelse return errno(.bad_arg);
-    const name = if (std.enums.fromInt(shared.ImageId, frame.regs[1])) |id|
-        @tagName(id)
-    else
-        "user";
+    // The image is whatever the caller staged in its shm buffer: the
+    // kernel has no table and no paths, only a copy. The caller's cap
+    // keeps the buffer alive across the (synchronous) copy.
+    const image_h: shared.Handle = @bitCast(frame.regs[1]);
+    const image_obj = d.captable.?.lookup(image_h, .shm) orelse return errno(.bad_handle);
+    const image: domain.ImageSource = .{ .shm = @ptrFromInt(image_obj) };
     const flags = frame.regs[4];
 
     const limits = frame.regs[5];
@@ -147,9 +148,7 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         .watcher = d.death_watch,
         .parent = d,
     };
-    if (flags & shared.SpawnFlags.grant_bootfs != 0 and domain.systemBlob().len > 0) {
-        manifest.grant_blob = domain.systemBlob();
-    }
+    if (flags & shared.SpawnFlags.grant_bootfs != 0) manifest.grant_bootfs = true;
     if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
     if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
     if (frame.regs[3] != 0) {
@@ -167,7 +166,7 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         }
     }
 
-    const child = domain.spawn(name, image, manifest) catch |e| {
+    const child = domain.spawn(null, image, manifest) catch |e| {
         if (manifest.grant_channel_a) |ch| ipc.unrefSide(ch, .a);
         if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b);
         return errno(switch (e) {
@@ -456,7 +455,10 @@ fn sysShmMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const handle: shared.Handle = @bitCast(frame.regs[0]);
     const obj = d.captable.?.lookup(handle, .shm) orelse return errno(.bad_handle);
     const s: *ipc.Shm = @ptrFromInt(obj);
-    const va = domain.mapShm(d, s) catch return errno(.no_space);
+    const va = domain.mapShm(d, s) catch |e| return errno(switch (e) {
+        domain.Error.NoMapSlots => .no_space,
+        else => .no_space,
+    });
     frame.regs[1] = va;
     frame.regs[2] = s.npages; // so services can bound IO by the real window
     return errno(.ok);

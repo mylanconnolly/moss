@@ -33,6 +33,7 @@ pub const Error = error{
     QuotaExceeded,
     NoThreadSlots,
     CapTableFull,
+    NoMapSlots,
 };
 
 pub const State = enum {
@@ -53,9 +54,10 @@ pub const Manifest = struct {
     grant_channel_b: ?*ipc.Channel = null,
     /// Badge for the granted channel_b cap (view identity etc.).
     grant_channel_b_badge: u64 = 0,
-    /// Read-only blob copied into the address space; its va/len arrive in
-    /// x3/x4 at entry (the boot filesystem image, service configs, ...).
-    grant_blob: ?[]const u8 = null,
+    /// Map the boot archive (read-only, shared: every holder sees the
+    /// same frames, no copy, no user-memory charge); its va/len arrive in
+    /// x3/x4 at entry. Spawners read program images out of it.
+    grant_bootfs: bool = false,
     /// Faults become messages on this channel (side A held by the
     /// supervisor); without one, a faulting domain is killed outright.
     supervisor: ?*ipc.Channel = null,
@@ -84,6 +86,11 @@ pub const Domain = struct {
     id: u32 = 0,
     asid: u16 = 0,
     name: []const u8 = "",
+    /// Backing for names taken from an image header (points into self).
+    name_buf: [16]u8 = @splat(0),
+    /// Every shm this domain has mapped holds a ref until teardown, so a
+    /// dropped cap can never free frames that are still mapped here.
+    mapped_shms: [max_mapped_shms]?*ipc.Shm = @splat(null),
     kobj: kalloc.Account = .{ .limit = 0 },
     user_mem: kalloc.Account = .{ .limit = 0 },
     ttbr0_pa: u64 = 0,
@@ -115,14 +122,45 @@ pub const Domain = struct {
 var domains: [max_domains]Domain = @splat(.{});
 var next_domain_id: u32 = 1;
 
-/// Embedded user images, indexed by shared.ImageId. Registered by kmain.
-var images: []const []const u8 = &.{};
+pub const max_mapped_shms = 16;
 
-pub fn init(image_table: []const []const u8) void {
+pub fn init() void {
     sched.user_thread_reaped = &onThreadReaped;
     ipc.domain_ctl_release = &onCtlReleased;
-    images = image_table;
 }
+
+/// Where a program image comes from: a kernel-visible byte slice (the
+/// boot drivers reading the archive) or an shm buffer a spawner staged
+/// (the syscall path). The loader only ever copies, page by page.
+pub const ImageSource = union(enum) {
+    blob: []const u8,
+    shm: *ipc.Shm,
+
+    fn len(self: ImageSource) usize {
+        return switch (self) {
+            .blob => |b| b.len,
+            .shm => |s| s.npages * mem.page_size,
+        };
+    }
+
+    /// Copy bytes [off, off+dst.len) of the image into dst (in bounds).
+    fn read(self: ImageSource, off: usize, dst: []u8) void {
+        switch (self) {
+            .blob => |b| @memcpy(dst, b[off..][0..dst.len]),
+            .shm => |s| {
+                var done: usize = 0;
+                while (done < dst.len) {
+                    const at = off + done;
+                    const page = mem.physToPtr([*]const u8, s.pages[at / mem.page_size]);
+                    const in_page = at % mem.page_size;
+                    const n = @min(dst.len - done, mem.page_size - in_page);
+                    @memcpy(dst[done .. done + n], page[in_page .. in_page + n]);
+                    done += n;
+                }
+            },
+        }
+    }
+};
 
 /// Fill `buf` with shared.DomainRec records for every live slot (the
 /// domain_list syscall's worker). Returns the record count.
@@ -151,11 +189,6 @@ pub fn fillRecs(buf: []u8) usize {
         n += 1;
     }
     return n;
-}
-
-pub fn imageById(id: u64) ?[]const u8 {
-    if (id >= images.len) return null;
-    return images[@intCast(id)];
 }
 
 fn onCtlReleased(obj: u64) void {
@@ -205,11 +238,13 @@ fn onThreadReaped(ctx: *anyopaque) void {
 
 /// Spawn a domain from a flat MOSS image and a manifest: blank address
 /// space, image + stack mapped W^X, cap table populated only with what the
-/// manifest grants, one thread started at the image entry.
-pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Domain {
+/// manifest grants, one thread started at the image entry. `name` null
+/// takes the image's self-declared name (the syscall path); the kernel's
+/// own drivers may override it for readable logs.
+pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*Domain {
     const d = allocSlot() orelse return Error.NoDomainSlots;
     errdefer abortSpawn(d);
-    d.name = name;
+    d.name = name orelse "?";
     d.kobj = .{ .limit = manifest.kobj_limit };
     d.user_mem = .{ .limit = manifest.user_limit };
     if (manifest.parent) |p| {
@@ -219,14 +254,24 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     }
 
     // Header check.
-    if (image.len < @sizeOf(shared.UserImageHeader)) return Error.BadImage;
+    if (image.len() < @sizeOf(shared.UserImageHeader)) return Error.BadImage;
     var header: shared.UserImageHeader = undefined;
-    @memcpy(std.mem.asBytes(&header), image[0..@sizeOf(shared.UserImageHeader)]);
+    image.read(0, std.mem.asBytes(&header));
     if (header.magic != shared.UserImageHeader.expected_magic) return Error.BadImage;
     if (header.text_size > header.mem_size or header.load_size > header.mem_size)
         return Error.BadImage;
-    if (header.load_size < image.len) return Error.BadImage;
     if (header.mem_size > (64 << 20)) return Error.BadImage;
+    // objcopy trims trailing zero padding, so an archive image may be
+    // shorter than load_size: the missing tail is zeros (fresh pages).
+    const avail = @min(header.load_size, image.len());
+    if (header.text_size % mem.page_size != 0 or header.load_size % mem.page_size != 0 or
+        header.mem_size % mem.page_size != 0) return Error.BadImage;
+    if (name == null) {
+        const hn = header.nameSlice();
+        if (hn.len == 0) return Error.BadImage;
+        @memcpy(d.name_buf[0..hn.len], hn);
+        d.name = d.name_buf[0..hn.len];
+    }
 
     // Address space root.
     const root_page = try kalloc.allocPage(&d.kobj);
@@ -238,9 +283,9 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     var off: u64 = 0;
     while (off < header.mem_size) : (off += mem.page_size) {
         const page = try kalloc.allocPage(&d.user_mem);
-        if (off < image.len) {
-            const n = @min(image.len - off, mem.page_size);
-            @memcpy(page[0..n], image[off..][0..n]);
+        if (off < avail) {
+            const n = @min(avail - off, mem.page_size);
+            image.read(@intCast(off), page[0..n]);
         }
         const perms: mmu.UserPerms = if (off < header.text_size) .code else .data;
         mmu.mapUserPage(
@@ -301,24 +346,24 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
     if (manifest.grant_entropy) {
         _ = table.insert(.entropy, 0) orelse return Error.CapTableFull;
     }
-    if (manifest.grant_blob) |blob| {
+    if (manifest.grant_bootfs and system_blob_len > 0) {
+        // Shared read-only frames: the archive is immutable, so every
+        // holder maps the kernel's one copy (unowned: teardown leaves it).
         const blob_base = d.shm_map_next;
-        var boff: u64 = 0;
-        while (boff < blob.len) : (boff += mem.page_size) {
-            const page = kalloc.allocPage(&d.user_mem) catch return Error.QuotaExceeded;
-            const n = @min(blob.len - boff, mem.page_size);
-            @memcpy(page[0..n], blob[boff..][0..n]);
-            mmu.mapUserPage(
+        const npages = mem.alignUp(system_blob_len, mem.page_size) / mem.page_size;
+        for (0..npages) |i| {
+            mmu.mapUserPageTagged(
                 d.ttbr0_pa,
-                blob_base + boff,
-                mem.virtToPhys(@intFromPtr(page)),
+                blob_base + i * mem.page_size,
+                system_blob_pa + i * mem.page_size,
                 .rodata,
                 &d.kobj,
+                false,
             ) catch return Error.QuotaExceeded;
         }
-        d.shm_map_next = blob_base + mem.alignUp(blob.len, mem.page_size);
+        d.shm_map_next = blob_base + npages * mem.page_size;
         d.blob_va = blob_base;
-        d.blob_len = blob.len;
+        d.blob_len = system_blob_len;
     }
     d.init_arg = manifest.arg;
     d.supervisor = manifest.supervisor;
@@ -328,7 +373,7 @@ pub fn spawn(name: []const u8, image: []const u8, manifest: Manifest) Error!*Dom
 
     d.state = .alive;
     d.threads_alive.store(1, .release);
-    _ = sched.spawn(name, userThreadEntry, @intFromPtr(d), .{
+    _ = sched.spawn(d.name, userThreadEntry, @intFromPtr(d), .{
         .user_ttbr0 = d.ttbr0_pa,
         .asid = d.asid,
         .user_ctx = d,
@@ -360,6 +405,7 @@ fn abortSpawn(d: *Domain) void {
         d.watcher = null;
         ipc.unrefNotification(n);
     }
+    releaseMappedShms(d);
     if (d.kobj.balance() != 0 or d.user_mem.balance() != 0)
         std.debug.panic("domain {s} teardown leak: kobj={d}B user={d}B", .{
             d.name, d.kobj.balance(), d.user_mem.balance(),
@@ -407,6 +453,7 @@ pub fn finishTeardown(d: *Domain) void {
     mmu.destroyUserSpace(d.ttbr0_pa, &d.user_mem, &d.kobj, d.asid);
     kalloc.freePage(&d.kobj, @ptrCast(d.captable.?));
     d.captable = null;
+    releaseMappedShms(d);
     const kobj_left = d.kobj.balance();
     const user_left = d.user_mem.balance();
     if (kobj_left != 0 or user_left != 0) {
@@ -431,8 +478,18 @@ fn allocSlot() ?*Domain {
 /// Kernel-thread entry for a domain's initial thread: drop to EL0 at the
 /// image entry, with the manifest's initial handle (or 0) in x0.
 /// Map an shm object into the calling domain's window; the mapping is
-/// tagged unowned so teardown leaves the frames to the shm object.
+/// tagged unowned so teardown leaves the frames to the shm object, and
+/// the domain holds a ref on the object for as long as the mapping
+/// exists (there is no unmap; teardown releases it).
 pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
+    var slot: ?*?*ipc.Shm = null;
+    for (&d.mapped_shms) |*m| {
+        if (m.* == null) {
+            slot = m;
+            break;
+        }
+    }
+    const held = slot orelse return Error.NoMapSlots;
     const base = d.shm_map_next;
     for (0..s.npages) |i| {
         try mmu.mapUserPageTagged(
@@ -445,6 +502,8 @@ pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
         );
     }
     d.shm_map_next = base + s.npages * mem.page_size;
+    ipc.refShm(s);
+    held.* = s;
     return base;
 }
 
@@ -539,13 +598,40 @@ fn enterUser(entry: u64, sp: u64, args: [5]u64) noreturn {
     unreachable;
 }
 
-/// The system boot blob (bootfs archive), grantable via SpawnFlags.
-var system_blob: []const u8 = &.{};
+/// Mapping refs come off only once the address space is gone (after
+/// destroyUserSpace), so no frame is ever freed while still mapped.
+fn releaseMappedShms(d: *Domain) void {
+    for (&d.mapped_shms) |*m| {
+        if (m.*) |s| {
+            ipc.unrefShm(s);
+            m.* = null;
+        }
+    }
+}
+
+/// The boot archive (bootfs MARC): the one blob the kernel embeds. Copied
+/// once at boot into page-aligned contiguous frames so every domain that
+/// is granted it maps the same physical pages read-only.
+var system_blob_pa: u64 = 0;
+var system_blob_len: usize = 0;
 
 pub fn setSystemBlob(blob: []const u8) void {
-    system_blob = blob;
+    const npages = mem.alignUp(blob.len, mem.page_size) / mem.page_size;
+    const pa = pmem.allocContiguous(@intCast(npages)) orelse @panic("boot archive: out of frames");
+    const dst = mem.physToPtr([*]u8, pa);
+    @memset(dst[0 .. npages * mem.page_size], 0);
+    @memcpy(dst[0..blob.len], blob);
+    system_blob_pa = pa;
+    system_blob_len = blob.len;
 }
 
 pub fn systemBlob() []const u8 {
-    return system_blob;
+    if (system_blob_len == 0) return &.{};
+    return mem.physToPtr([*]const u8, system_blob_pa)[0..system_blob_len];
+}
+
+/// A program image out of the boot archive, for the kernel's own boot
+/// drivers (userspace spawners read the same archive themselves).
+pub fn bootImage(path: []const u8) ?[]const u8 {
+    return shared.marcFind(systemBlob(), path);
 }

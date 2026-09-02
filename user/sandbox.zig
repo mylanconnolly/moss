@@ -18,6 +18,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const loader = @import("loader.zig");
 
 comptime {
     asm (
@@ -29,6 +30,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "sandbox"
+        \\        .space  9
         \\.global _ustart
         \\_ustart:
         \\        b       umain
@@ -47,7 +50,22 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 const spawner_with_log: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
 const spawner_no_log: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
 
-export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
+// Roles that spawn hold the boot archive (x3/x4) and stage images from it.
+var boot_va: u64 = 0;
+var boot_len: u64 = 0;
+var stage: loader.Stage = undefined;
+
+fn stageImage() u64 {
+    if (!stage.load(boot_va, boot_len, .sandbox)) usys.exit(170);
+    return stage.handle;
+}
+
+export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
+    boot_va = blob_va;
+    boot_len = blob_len;
+    if (role == 1 or role == 4) {
+        stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(171);
+    }
     switch (role) {
         1 => parent(log_h),
         2 => steadylog(log_h, chan_h),
@@ -64,14 +82,14 @@ fn parent(log_h: u64) noreturn {
     // The real service.
     const chan_l = usys.chanCreate();
     if (chan_l.err != .ok) usys.exit(140);
-    if (usys.spawn(spawner_with_log, .sandbox, 2, chan_l.data[0], shared.SpawnFlags.grant_log |
+    if (usys.spawn(spawner_with_log, stageImage(), 2, chan_l.data[0], shared.SpawnFlags.grant_log |
         shared.SpawnFlags.chan_side_a, usys.kbLimits(512, 2 << 10)).err != .ok) usys.exit(141);
     _ = usys.capDrop(chan_l.data[0]); // service owns its serving side alone
 
     // The proxy, configured with the upstream cap over its own channel.
     const chan_p = usys.chanCreate();
     if (chan_p.err != .ok) usys.exit(142);
-    if (usys.spawn(spawner_with_log, .sandbox, 3, chan_p.data[0], shared.SpawnFlags.grant_log |
+    if (usys.spawn(spawner_with_log, stageImage(), 3, chan_p.data[0], shared.SpawnFlags.grant_log |
         shared.SpawnFlags.chan_side_a, usys.kbLimits(512, 2 << 10)).err != .ok) usys.exit(143);
     _ = usys.capDrop(chan_p.data[0]);
     switch (usys.callTyped(shared.ProxyCfg, shared.ProxyCfgReply, chan_p.data[1], .upstream, chan_l.data[1])) {
@@ -81,8 +99,9 @@ fn parent(log_h: u64) noreturn {
 
     // The child sees exactly one thing: the proxy's channel. It could not
     // name the real service if it tried — there is no name to use.
-    if (usys.spawn(spawner_with_log, .sandbox, 4, chan_p.data[1], shared.SpawnFlags.grant_spawner,
-        usys.kbLimits(512, 3 << 10)).err != .ok) usys.exit(145);
+    // The child gets the archive too: its nested spawn stages from it.
+    if (usys.spawn(spawner_with_log, stageImage(), 4, chan_p.data[1], shared.SpawnFlags.grant_spawner |
+        shared.SpawnFlags.grant_bootfs, usys.kbLimits(512, 3 << 10)).err != .ok) usys.exit(145);
     _ = usys.log(log_h, "parent: sandbox live (real svc + proxy + child); awaiting revocation");
 
     while (true) usys.sleep(100);
@@ -143,7 +162,7 @@ fn proxy(log_h: u64, chan_h: u64) noreturn {
 fn child(log_chan: u64) noreturn {
     // Nested sandbox: a grandchild from our own budget slice, granted
     // nothing at all.
-    if (usys.spawn(spawner_no_log, .sandbox, 5, 0, 0, usys.kbLimits(256, 1 << 10)).err != .ok) {
+    if (usys.spawn(spawner_no_log, stageImage(), 5, 0, 0, usys.kbLimits(256, 1 << 10)).err != .ok) {
         usys.exit(160);
     }
 

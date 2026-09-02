@@ -16,6 +16,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const loader = @import("loader.zig");
 
 comptime {
     asm (
@@ -27,6 +28,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "init"
+        \\        .space  12
         \\.global _ustart
         \\_ustart:
         \\        b       umain
@@ -146,11 +149,17 @@ const Instance = struct {
 
 var instances: [8]Instance = @splat(.{});
 var glog: u64 = 0;
+var stage: loader.Stage = undefined;
+var boot_va: u64 = 0;
+var boot_len: u64 = 0;
 
 const svc_limits = usys.kbLimits(1 << 10, 4 << 10); // 1MB kobj, 4MB user per service
 
 export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
+    boot_va = blob_va;
+    boot_len = blob_len;
+    stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(118);
 
     const notif = usys.notifyCreate();
     if (notif.err != .ok) usys.exit(110);
@@ -176,7 +185,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     const front_a = front.data[0];
     const front_b = front.data[1];
 
-    const worker = usys.spawn(spawner, .services, 3, front_b, shared.SpawnFlags.grant_log, svc_limits);
+    if (!stage.load(boot_va, boot_len, .services)) usys.exit(119);
+    const worker = usys.spawn(spawner, stage.handle, 3, front_b, shared.SpawnFlags.grant_log, svc_limits);
     if (worker.err != .ok) usys.exit(113);
 
     var workers_done = false;
@@ -305,9 +315,13 @@ fn activate(idx: usize) bool {
 
     const ch = usys.chanCreate();
     if (ch.err != .ok) return false;
+    if (!stage.load(boot_va, boot_len, entry.image)) {
+        _ = usys.log(glog, "init: service image missing from the boot archive");
+        return false;
+    }
     const r = usys.spawn(
         spawner,
-        entry.image,
+        stage.handle,
         entry.arg,
         ch.data[0],
         shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a,
@@ -393,7 +407,8 @@ fn flapDrill(notif: u64) noreturn {
 }
 
 fn spawnFlapper() u64 {
-    const r = usys.spawn(spawner, .services, 4, 0, shared.SpawnFlags.grant_log, svc_limits);
+    if (!stage.load(boot_va, boot_len, .services)) usys.exit(119);
+    const r = usys.spawn(spawner, stage.handle, 4, 0, shared.SpawnFlags.grant_log, svc_limits);
     if (r.err != .ok) usys.exit(116);
     return r.data[0];
 }

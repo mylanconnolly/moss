@@ -116,6 +116,47 @@ non-inline function makes the compiler restore the *old* values right
 after your asm (ABI-mandated epilogue) — the probe must be `inline` or
 it corrupts itself and frames the kernel.
 
+**The loader (as built):** the kernel holds no image table and no paths.
+`spawn` names an image by an **shm capability** the caller has staged it
+into, and the loader is a page-by-page copy from that buffer into fresh
+pages — the same routine the kernel's own boot drivers use with a byte
+slice out of the boot archive (`ImageSource` is a two-way union; static
+linking makes a copy the entire loader). Images are self-describing: the
+MOSS header carries the program's name (written by each program's entry
+stanza), which becomes the child's domain name and which the staging
+side checks against the catalog entry, so a mislabeled archive is
+refused rather than run. The archive itself — packed at build time by
+`tools/mkmarc` from every program image plus `etc/` and `conf/` — is the
+one blob the kernel embeds; at boot it is copied once into page-aligned
+contiguous frames, and a `grant_bootfs` manifest maps those frames
+**shared and read-only** into the holder (no copy, no user-memory
+charge, unowned so teardown leaves them). Spawners stage through one
+reusable 256K buffer (`user/loader.zig`): the kernel's copy is complete
+when spawn returns, so the buffer is free again immediately, and no
+per-spawn map/unmap churn exists. Budgets: staged pages sit in the shm
+account, not the child's; the child's image pages are charged to the
+child, whose budget is a slice of the spawner's — so init's and the
+fabric's slices bound the programs they start, as intended.
+
+Lessons paid for: (1) objcopy trims trailing zero padding, so an archive
+image is usually shorter than its header's load_size — the missing tail
+is zeros, not an error. (2) A domain could drop an shm cap it still had
+mapped, and the object's last ref freed frames that stayed mapped in
+that domain: a use-after-free waiting for the first stage-and-drop
+pattern. Mappings now hold a ref on the object until teardown (after the
+address space is gone), which also means there is no unmap and no VA
+reuse — a mapping is for life, so services keep one buffer per purpose.
+(3) netsvc's listener kept a single pending connection; a second SYN
+before accept overwrote it, orphaning an *established* socket whose data
+the server would never read while the client saw every send succeed.
+The fabric drill hit this when the imposter's redials landed in node 3's
+join window: node 3's first dial timed out, its redial joined, and its
+spawn request went out on the stale first socket — a five-second
+timeout with nothing logged anywhere. Listeners now keep a FIFO backlog
+(a SYN past it is dropped for the client's retransmit to retry), and the
+fabric closes a half-open attempt before dialing the same node again;
+RPC only ever travels on an authenticated peer.
+
 Because a fresh domain holds *nothing*, the empty sandbox is the zero value.
 Sandboxing is not a mode; it is the absence of grants.
 
@@ -278,7 +319,7 @@ capability views make unrepresentable).
 | Path | Lifecycle | Contents |
 |---|---|---|
 | `boot/` | immutable, from the boot image | system identity (`boot/etc/`) and boot-time config (`boot/conf/` — init's topology lives at `boot/conf/init.topology`); later: verified/signed |
-| `img/` | immutable, content-addressed (future) | service and application images once they move out of the kernel's embedded table |
+| `img/` | immutable | program images: today `boot/img/<name>` in the boot archive (the kernel embeds no image table); later content-addressed on the volume |
 | `conf/` | admin-written, service-read | per-service configuration: `conf/<service>/...` |
 | `state/` | service-owned, survives reboot | each service's private mutable state: `state/<service>/` |
 | `data/` | user/application payload | the only tree where sharing between services is expected, always via explicit view grants |

@@ -205,6 +205,33 @@ The pooling story stops being theory.
   (originally an HMAC over the cycle counter, until the entropy work
   below landed); attach_net refuses the network while the kernel pool
   is unseeded.
+- ✅ **Images out of the kernel: the boot archive is the program store**
+  (done). The kernel embeds exactly one blob — the boot archive (MARC),
+  packed at build time by `tools/mkmarc` from every program image
+  (`img/<name>`) plus `etc/` and `conf/` — and holds no image table.
+  `spawn` takes an **shm capability holding a staged MOSS image**; the
+  kernel's loader is a copy from that buffer into fresh pages (static
+  linking makes that the whole loader — no relocation, no symbols, no
+  paths in the kernel). Images are self-describing: the header carries
+  the program's name, which becomes the child's domain name and must
+  match the catalog entry it was staged from. Spawners hold the archive
+  as a **shared read-only mapping** of the kernel's one page-aligned
+  copy (no per-holder copy, no user-memory charge) and stage through one
+  reusable buffer (`user/loader.zig`): root stages init, init stages its
+  services, the fabric stages remote spawns, the sandbox parent stages
+  its children. The kernel's boot drivers read the same archive
+  (`bootImage`). `shared.ImageId` survives as the catalog — a compact
+  name for the fabric wire, certificate image masks, and init's
+  topology — coupled to nothing in the kernel; the three order-coupled
+  image lists are gone. Two latent bugs surfaced and were fixed on the
+  way: an shm cap dropped while mapped freed frames the domain still
+  mapped (mappings now hold a ref until teardown), and netsvc's listener
+  kept a single pending connection, so a burst of SYNs orphaned
+  established sockets nobody would read (a real backlog now; the fabric
+  also tears down a half-open dial before redialing). Next along this
+  line: `img/` on the encrypted volume with content-addressed names, a
+  read-only introspection cap so tools need not hold spawn authority,
+  and `run` in msh for programs that earn their own domain.
 - ✅ **Entropy: virtio-rng + getrandom/rng_seed** (done): the kernel
   carries a ChaCha8 fast-key-erasure CSPRNG (`kernel/rng.zig`) that it
   never seeds itself — hardware entropy enters only through `rng_seed`,

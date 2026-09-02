@@ -21,6 +21,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "services"
+        \\        .space  8
         \\.global _ustart
         \\_ustart:
         \\        b       umain

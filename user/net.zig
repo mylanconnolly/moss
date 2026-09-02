@@ -32,6 +32,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "net"
+        \\        .space  13
         \\.global _ustart
         \\_ustart:
         \\        b       umain
@@ -588,6 +590,7 @@ const F_PSH: u8 = 8;
 const F_ACK: u8 = 16;
 
 const max_socks = 16;
+const backlog_len = 4;
 const rx_cap = 2048;
 const una_cap = 640;
 
@@ -609,7 +612,11 @@ const Sock = struct {
     rexmits: u32 = 0,
     rx: [rx_cap]u8 = undefined,
     rx_len: usize = 0,
-    pending: i32 = -1,
+    /// Listener backlog: accepted-but-not-yet-taken connections, FIFO.
+    /// One slot was a bug: a second SYN overwrote the first, orphaning an
+    /// established socket whose data nobody would ever read.
+    backlog: [backlog_len]u8 = @splat(0),
+    backlog_n: u8 = 0,
     peer_closed: bool = false,
 };
 
@@ -763,6 +770,8 @@ fn tcpInput(src: Addr, seg: []const u8) void {
     if (flags & F_SYN != 0 and flags & F_ACK == 0) {
         for (&socks) |*l| {
             if (!l.used or l.state != .listen or l.lport != dport) continue;
+            // Backlog full: drop the SYN; the client's SYN retransmit retries.
+            if (l.backlog_n == backlog_len) return;
             const ci = sockAlloc() orelse return;
             const c = &socks[ci];
             c.badge = l.badge;
@@ -773,7 +782,8 @@ fn tcpInput(src: Addr, seg: []const u8) void {
             c.rcv_nxt = seq +% 1;
             c.snd_nxt = @truncate(usys.cycles());
             tcpSendTracked(c, F_SYN | F_ACK, "");
-            l.pending = @intCast(ci);
+            l.backlog[l.backlog_n] = @intCast(ci);
+            l.backlog_n += 1;
             return;
         }
     }
@@ -971,11 +981,22 @@ fn opStatus(badge: u64, idx: u64) shared.NetResp {
 fn opAccept(badge: u64, idx: u64) shared.NetResp {
     const l = sockOf(badge, idx) orelse return nerr(.bad);
     if (l.state != .listen) return nerr(.bad);
-    if (l.pending < 0) return nerr(.would_block);
-    const ci: u64 = @intCast(l.pending);
+    // Heads that never completed (SYN|ACK retransmits exhausted) are
+    // discarded so they cannot block the queue behind them.
+    while (l.backlog_n > 0 and socks[l.backlog[0]].state == .closed) {
+        socks[l.backlog[0]] = .{};
+        backlogPop(l);
+    }
+    if (l.backlog_n == 0) return nerr(.would_block);
+    const ci: u64 = l.backlog[0];
     if (socks[ci].state != .established) return nerr(.would_block);
-    l.pending = -1;
+    backlogPop(l);
     return .{ .num = .{ .n = ci } };
+}
+
+fn backlogPop(l: *Sock) void {
+    for (1..l.backlog_n) |i| l.backlog[i - 1] = l.backlog[i];
+    l.backlog_n -= 1;
 }
 
 fn opSend(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {

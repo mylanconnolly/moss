@@ -9,6 +9,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const loader = @import("loader.zig");
 
 comptime {
     asm (
@@ -20,6 +21,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "root"
+        \\        .space  12
         \\.global _ustart
         \\_ustart:
         \\        b       umain
@@ -35,8 +38,15 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 const spawner: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
 const max_init_restarts = 1;
 
-export fn umain(log_h: u64, _: u64, arg: u64) callconv(.c) noreturn {
+var stage: loader.Stage = undefined;
+var blob_va: u64 = 0;
+var blob_len: u64 = 0;
+
+export fn umain(log_h: u64, _: u64, arg: u64, bva: u64, blen: u64) callconv(.c) noreturn {
     _ = usys.log(log_h, "root: up; starting init");
+    blob_va = bva;
+    blob_len = blen;
+    stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(104);
 
     const notif = usys.notifyCreate();
     if (notif.err != .ok) usys.exit(100);
@@ -66,9 +76,13 @@ export fn umain(log_h: u64, _: u64, arg: u64) callconv(.c) noreturn {
 }
 
 fn spawnInit(log_h: u64, arg: u64) u64 {
+    if (!stage.load(blob_va, blob_len, .init)) {
+        _ = usys.log(log_h, "root: init image missing from the boot archive");
+        usys.exit(105);
+    }
     const r = usys.spawn(
         spawner,
-        .init,
+        stage.handle,
         arg,
         0,
         shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs,

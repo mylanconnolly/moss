@@ -1,23 +1,5 @@
 const std = @import("std");
 
-const MarcEntry = struct { path: []const u8, data: []const u8 };
-
-/// Assemble a MARC boot-filesystem archive: "MARC" magic, then per entry
-/// { path_len u32 LE, data_len u32 LE, path, data }.
-fn buildMarc(b: *std.Build, entries: []const MarcEntry) []const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(b.allocator, "MARC") catch @panic("OOM");
-    for (entries) |e| {
-        var hdr: [8]u8 = undefined;
-        std.mem.writeInt(u32, hdr[0..4], @intCast(e.path.len), .little);
-        std.mem.writeInt(u32, hdr[4..8], @intCast(e.data.len), .little);
-        out.appendSlice(b.allocator, &hdr) catch @panic("OOM");
-        out.appendSlice(b.allocator, e.path) catch @panic("OOM");
-        out.appendSlice(b.allocator, e.data) catch @panic("OOM");
-    }
-    return out.items;
-}
-
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const host_target = b.standardTargetOptions(.{});
@@ -161,10 +143,10 @@ pub fn build(b: *std.Build) void {
     kernel_mod.addImport("shared", shared_mod);
     kernel_mod.addOptions("build_options", build_opts);
 
-    // User programs: freestanding flat MOSS images, embedded in the kernel
-    // until a filesystem exists (Phase 9).
-    // Order here is cosmetic; the kernel's image table order must match
-    // shared.ImageId.
+    // User programs: freestanding flat MOSS images. Each becomes an
+    // img/<name> entry of the boot archive (the ONE blob the kernel embeds);
+    // the kernel holds no image table, so nothing here is order-coupled —
+    // a program is listed here and in the shared.ImageId catalog, by name.
     const user_progs = [_]struct { name: []const u8, src: []const u8 }{
         .{ .name = "hello", .src = "user/hello.zig" },
         .{ .name = "pingpong", .src = "user/pingpong.zig" },
@@ -180,8 +162,32 @@ pub fn build(b: *std.Build) void {
         .{ .name = "shell", .src = "user/shell.zig" },
         .{ .name = "rng", .src = "user/rng.zig" },
     };
+    // The boot archive is packed at build time by tools/mkmarc from the
+    // program images plus the literal boot files below, laid out per the
+    // standard hierarchy (identity in etc/, boot config in conf/, images
+    // in img/).
+    const mkmarc = b.addExecutable(.{
+        .name = "mkmarc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mkmarc.zig"),
+            .target = host_target,
+            .optimize = .Debug,
+        }),
+    });
+    const pack = b.addRunArtifact(mkmarc);
+    const marc_out = pack.addOutputFileArg("bootfs.marc");
+    const boot_files = b.addWriteFiles();
+    for ([_]struct { path: []const u8, data: []const u8 }{
+        .{ .path = "etc/motd", .data = "Welcome to moss.\n" },
+        .{ .path = "etc/version", .data = "moss 0.0.0\n" },
+        // Init's service topology: "service image arg max_restarts", numeric
+        // per shared.ServiceId / shared.ImageId.
+        .{ .path = "conf/init.topology", .data = "0 4 1 5\n1 4 2 5\n" },
+    }) |f| {
+        pack.addPrefixedFileArg(b.fmt("{s}=", .{f.path}), boot_files.add(f.path, f.data));
+    }
+
     const user_blobs = b.addWriteFiles();
-    var blobs_zig: std.ArrayList(u8) = .empty;
     for (user_progs) |p| {
         const prog_mod = b.createModule(.{
             .root_source_file = b.path(p.src),
@@ -201,28 +207,13 @@ pub fn build(b: *std.Build) void {
             .format = .bin,
             .basename = b.fmt("{s}.bin", .{p.name}),
         });
-        _ = user_blobs.addCopyFile(prog_bin.getOutput(), b.fmt("{s}.bin", .{p.name}));
-        blobs_zig.appendSlice(
-            b.allocator,
-            b.fmt("pub const {s} = @embedFile(\"{s}.bin\");\n", .{ p.name, p.name }),
-        ) catch @panic("OOM");
+        pack.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
     }
-    // The boot filesystem: a MARC archive assembled right here, laid out
-    // per the standard hierarchy (identity in etc/, boot config in conf/).
-    const bootfs = buildMarc(b, &.{
-        .{ .path = "etc/motd", .data = "Welcome to moss.\n" },
-        .{ .path = "etc/version", .data = "moss 0.0.0\n" },
-        // Init's service topology: "service image arg max_restarts", numeric
-        // per shared.ServiceId / shared.ImageId.
-        .{ .path = "conf/init.topology", .data = "0 4 1 5\n1 4 2 5\n" },
-    });
-    _ = user_blobs.add("bootfs.marc", bootfs);
-    blobs_zig.appendSlice(
-        b.allocator,
+    _ = user_blobs.addCopyFile(marc_out, "bootfs.marc");
+    const user_blobs_src = user_blobs.add(
+        "user_blobs.zig",
         "pub const bootfs = @embedFile(\"bootfs.marc\");\n",
-    ) catch @panic("OOM");
-
-    const user_blobs_src = user_blobs.add("user_blobs.zig", blobs_zig.items);
+    );
     kernel_mod.addAnonymousImport("user_blobs", .{
         .root_source_file = user_blobs_src,
     });

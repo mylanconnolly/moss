@@ -45,7 +45,11 @@ pub const Syscall = enum(u64) {
     shm_create = 11,
     /// shm_map(handle) -> x1 = va
     shm_map = 12,
-    /// spawn(spawner, image, arg, chan, flags) -> x1 = domain_ctl handle
+    /// spawn(spawner, image_shm, arg, chan, flags, limits) -> x1 =
+    /// domain_ctl handle. The image is a MOSS image staged in an shm
+    /// buffer the caller holds; the kernel copies it into the child (no
+    /// kernel image table, no path lookup). The child's name comes from
+    /// the image header.
     spawn = 13,
     /// chan_create() -> x1 = side A handle, x2 = side B handle
     chan_create = 14,
@@ -197,8 +201,12 @@ pub const Errno = enum(u64) {
     _,
 };
 
-/// Images the kernel can spawn, indexed into its embedded blob table until
-/// a filesystem exists (Phase 9). Order must match the kernel's table.
+/// The catalog of program images. The kernel holds no image table: every
+/// program lives in the boot archive at `img/<name>` (imagePath), and a
+/// spawner stages the bytes it wants to run into a shared buffer the
+/// kernel copies from (see spawn). The numbering exists so the fabric
+/// wire, certificate image masks, and init's topology can name an image
+/// compactly; it couples to nothing in the kernel.
 pub const ImageId = enum(u64) {
     hello = 0,
     pingpong = 1,
@@ -760,16 +768,77 @@ pub fn wordsToStr(buf: *[24]u8, w: [3]u64) []const u8 {
 
 /// Header at the start of a flat user image ("MOSS" magic). Written by the
 /// user program's entry assembly from linker-script symbols; read by the
-/// kernel loader. All sizes are from the image base, 4K-aligned.
+/// kernel loader. All sizes are from the image base, 4K-aligned. The name
+/// makes an image self-describing: it is the child's domain name and
+/// must match the catalog entry it was staged from.
 pub const UserImageHeader = extern struct {
     magic: u32,
     version: u32,
     text_size: u64,
     load_size: u64,
     mem_size: u64,
+    name: [16]u8, // NUL-padded
 
     pub const expected_magic: u32 = 0x53534f4d; // "MOSS" little-endian
+
+    pub fn nameSlice(h: *const UserImageHeader) []const u8 {
+        var n: usize = 0;
+        while (n < h.name.len and h.name[n] != 0) n += 1;
+        return h.name[0..n];
+    }
 };
+
+comptime {
+    std.debug.assert(@sizeOf(UserImageHeader) == 48);
+}
+
+/// Where the catalog entry lives in the boot archive.
+pub fn imagePath(id: ImageId) []const u8 {
+    switch (id) {
+        inline else => |t| return "img/" ++ @tagName(t),
+    }
+}
+
+/// Look a path up in a MARC archive. Pure and allocation-free: usable by
+/// the kernel's boot drivers, init, fssvc, and any spawner alike.
+pub fn marcFind(blob: []const u8, path: []const u8) ?[]const u8 {
+    if (blob.len < 4 or !std.mem.eql(u8, blob[0..4], marc_magic)) return null;
+    var off: usize = 4;
+    while (off + 8 <= blob.len) {
+        const plen = std.mem.readInt(u32, blob[off..][0..4], .little);
+        const dlen = std.mem.readInt(u32, blob[off + 4 ..][0..4], .little);
+        off += 8;
+        if (off + plen + dlen > blob.len) return null;
+        const p = blob[off .. off + plen];
+        const data = blob[off + plen .. off + plen + dlen];
+        off += plen + dlen;
+        if (std.mem.eql(u8, p, path)) return data;
+    }
+    return null;
+}
+
+test "marcFind walks an archive and misses cleanly" {
+    var buf: [64]u8 = undefined;
+    var n: usize = 0;
+    @memcpy(buf[0..4], marc_magic);
+    n = 4;
+    for ([_]struct { p: []const u8, d: []const u8 }{
+        .{ .p = "etc/motd", .d = "hi\n" },
+        .{ .p = "img/hello", .d = "MOSS" },
+    }) |e| {
+        std.mem.writeInt(u32, buf[n..][0..4], @intCast(e.p.len), .little);
+        std.mem.writeInt(u32, buf[n + 4 ..][0..4], @intCast(e.d.len), .little);
+        n += 8;
+        @memcpy(buf[n .. n + e.p.len], e.p);
+        n += e.p.len;
+        @memcpy(buf[n .. n + e.d.len], e.d);
+        n += e.d.len;
+    }
+    try std.testing.expectEqualStrings("MOSS", marcFind(buf[0..n], imagePath(.hello)).?);
+    try std.testing.expectEqualStrings("hi\n", marcFind(buf[0..n], "etc/motd").?);
+    try std.testing.expect(marcFind(buf[0..n], "img/nope") == null);
+    try std.testing.expect(marcFind("junk", "etc/motd") == null);
+}
 
 /// Entry convention for user programs: x0 holds the debug-log capability
 /// handle (as bits), or 0 when the manifest granted none.

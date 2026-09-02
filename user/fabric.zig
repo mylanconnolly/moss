@@ -32,6 +32,7 @@ const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 
+const loader = @import("loader.zig");
 const fabcert = @import("mosslib").fabcert;
 const Aead = std.crypto.aead.aegis.Aegis128L;
 const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
@@ -48,6 +49,8 @@ comptime {
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
+        \\        .ascii  "fabric"
+        \\        .space  10
         \\.global _ustart
         \\_ustart:
         \\        b       umain
@@ -62,9 +65,13 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 
 const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 
-export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     switch (arg & 0xff) {
-        1 => fabsvc(log_h, chan_h, (arg >> 8) & 0xff),
+        1 => {
+            boot_va = blob_va;
+            boot_len = blob_len;
+            fabsvc(log_h, chan_h, (arg >> 8) & 0xff);
+        },
         2 => remoteEcho(log_h, chan_h),
         3 => fabroot(log_h, chan_h),
         else => usys.exit(250),
@@ -282,6 +289,10 @@ var cluster_pk: [32]u8 = @splat(0);
 var my_cert: [fabcert.cert_len]u8 = @splat(0);
 var have_identity = false; // seed + cluster key staged
 var have_cert = false; // certificate verified; the fabric may open
+// Remote spawns load their images from the boot archive we were granted.
+var boot_va: u64 = 0;
+var boot_len: u64 = 0;
+var stage: ?loader.Stage = null;
 
 /// Revocations we hold: certs of `node` below min_serial are refused.
 const Revoked = struct {
@@ -900,7 +911,8 @@ fn pumpPeer(p: *Peer) void {
             break;
         };
         if (p.rxlen + n > rxbuf_cap) {
-            p.dead = true;
+            _ = usys.log(glog, "fabsvc: peer overran the frame buffer; dropped");
+            peerFailed(p);
             break;
         }
         @memcpy(p.rx[p.rxlen .. p.rxlen + n], buf[0..n]);
@@ -910,12 +922,14 @@ fn pumpPeer(p: *Peer) void {
     while (p.rxlen >= 4) {
         const flen = leu16(p.rx[0..2]);
         if (flen < 4 or flen > rxbuf_cap) {
-            p.dead = true;
+            _ = usys.log(glog, "fabsvc: malformed frame length; peer dropped");
+            peerFailed(p);
             return;
         }
         if (p.rxlen < flen) return;
         if (p.rx[3] != shared.fabric_ver) {
-            p.dead = true; // version mismatch: drop the peer, loudly simple
+            _ = usys.log(glog, "fabsvc: wire version mismatch; peer dropped");
+            peerFailed(p);
             return;
         }
         const ftype = p.rx[2];
@@ -1111,11 +1125,18 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             for (&rsessions, 0..) |*rs, i| {
                 if (!allowed) break;
                 if (rs.used) continue;
+                if (stage == null) stage = loader.Stage.init(loader.Stage.default_pages);
+                const st = &(stage orelse break);
+                const id = std.enums.fromInt(shared.ImageId, image) orelse break;
+                if (!st.load(boot_va, boot_len, id)) {
+                    _ = usys.log(glog, "fabsvc: requested image missing from the boot archive");
+                    break;
+                }
                 const ch = usys.chanCreate();
                 if (ch.err != .ok) break;
                 const sp = usys.spawn(
                     spawner,
-                    @enumFromInt(image),
+                    st.handle,
                     arg,
                     ch.data[0],
                     shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a,
@@ -1211,6 +1232,11 @@ fn peerByNode(node: u64) ?*Peer {
 fn doConnectPeer(node: u64) shared.FabResp {
     if (peerByNode(node)) |p| {
         if (p.greeted) return .ok;
+        // A half-open attempt from an earlier dial must not linger beside
+        // a fresh one: the stale socket would be a dead letterbox that
+        // peerByNode could still hand to a caller. Close it first.
+        _ = ncall(.{ .tcp_close = .{ .sock = p.sock } });
+        p.dead = true;
     }
     const words = shared.v4Words(shared.nodeIp4(node));
     const sock = nnum(ncall(.{ .tcp_connect = .{
@@ -1265,6 +1291,12 @@ fn doConnectPeer(node: u64) shared.FabResp {
     return ferr(.timeout);
 }
 
+/// An authenticated peer for `node` — the only kind RPC may travel on.
+fn greetedPeer(node: u64) ?*Peer {
+    const p = peerByNode(node) orelse return null;
+    return if (p.greeted) p else null;
+}
+
 /// Pick the least-loaded live member for a placement spawn (never self).
 fn placeNode() ?u64 {
     var best: ?u64 = null;
@@ -1288,7 +1320,7 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
         }
     else
         node_arg;
-    const p = peerByNode(node) orelse {
+    const p = greetedPeer(node) orelse {
         freply(ferr(.no_peer));
         return;
     };
@@ -1362,7 +1394,7 @@ fn forwardCall(badge: u64, words: [4]u64) void {
     }.f;
     if (badge - 1 >= max_sessions or !sessions[badge - 1].used) return fail(.no_peer);
     const sess = &sessions[badge - 1];
-    const p = peerByNode(sess.node) orelse return fail(.disconnected);
+    const p = greetedPeer(sess.node) orelse return fail(.disconnected);
 
     got_call_resp = false;
     var req: [44]u8 = undefined;
