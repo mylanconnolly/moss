@@ -33,6 +33,11 @@ pub const CapType = enum(u8) {
     /// Read-only introspection (domain_list, sysinfo) without spawn
     /// authority — the ledger, not the power to change it.
     introspect,
+    /// Authority to create virtual machines (vm_create).
+    hypervisor,
+    /// One virtual machine (object = index into vm.vms): run it, set
+    /// its vCPU; dropping the last cap tears it down.
+    vm,
 };
 
 pub const Entry = struct {

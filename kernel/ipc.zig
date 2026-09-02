@@ -567,13 +567,16 @@ pub fn unrefShm(s: *Shm) void {
 /// Registered by domain.zig (import-cycle firewall): releases one
 /// domain_ctl reference.
 pub var domain_ctl_release: ?*const fn (u64) void = null;
+/// Registered by vm.zig's owner (main): tears a VM down when its cap dies.
+pub var vm_release: ?*const fn (u64) void = null;
 
 /// Release one cap's reference to whatever kernel object it names. Called
 /// for each entry when a domain's cap table is torn down, and by explicit
 /// cap deletion (cap_drop).
 pub fn releaseCap(cap_type: cap.CapType, obj: u64) void {
     switch (cap_type) {
-        .empty, .debug_log, .spawner, .device, .entropy, .introspect => {},
+        .empty, .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor => {},
+        .vm => if (vm_release) |f| f(obj),
         .channel_a => unrefSide(@ptrFromInt(obj), .a),
         .channel_b => unrefSide(@ptrFromInt(obj), .b),
         .notification => unrefNotification(@ptrFromInt(obj)),

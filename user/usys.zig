@@ -151,6 +151,20 @@ pub fn deviceInfo(handle: u64) IpcResult {
     return syscall6(.device_info, handle, 0, 0, 0, 0, 0);
 }
 
+/// vm_create(hypervisor, pages): data[0] = vm handle, data[1] = guest RAM va.
+pub fn vmCreate(hyp: u64, pages: u64) IpcResult {
+    return syscall6(.vm_create, hyp, pages, 0, 0, 0, 0);
+}
+
+/// vm_run(vm, resume_value): data[0] = VmExit, data[1..4] = details.
+pub fn vmRun(vm: u64, resume_value: u64) IpcResult {
+    return syscall6(.vm_run, vm, resume_value, 0, 0, 0, 0);
+}
+
+pub fn vmSet(vm: u64, pc: u64, x0: u64) shared.Errno {
+    return @enumFromInt(syscall3(.vm_set, vm, pc, x0));
+}
+
 pub fn irqBind(handle: u64, notif: u64, offset: u64) shared.Errno {
     return @enumFromInt(syscall3(.irq_bind, handle, notif, offset));
 }

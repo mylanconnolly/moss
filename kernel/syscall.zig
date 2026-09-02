@@ -18,6 +18,7 @@ const rng = @import("rng.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 const smmu = @import("smmu.zig");
+const vm = @import("vm.zig");
 const trap = @import("trap.zig");
 
 pub fn dispatch(frame: *trap.TrapFrame) void {
@@ -54,6 +55,9 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .cap_drop => sysCapDrop(d, frame.regs[0]),
         .mmio_map => sysMmioMap(d, frame),
         .device_info => sysDeviceInfo(d, frame),
+        .vm_create => sysVmCreate(d, frame),
+        .vm_run => sysVmRun(d, frame),
+        .vm_set => sysVmSet(d, frame),
         .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
         .dma_alloc => sysDmaAlloc(d, frame),
@@ -91,6 +95,54 @@ fn sysMmioMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     frame.regs[2] = pages * 4096;
     frame.regs[3] = cfg;
     frame.regs[4] = dev.bar_index;
+    return errno(.ok);
+}
+
+fn sysVmCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    _ = d.captable.?.lookup(h, .hypervisor) orelse return errno(.denied);
+    const pages = frame.regs[1];
+    if (pages == 0 or pages > vm.max_ram_pages) return errno(.bad_arg);
+    const m = vm.create(@ptrCast(d), &d.kobj, &d.user_mem, pages) catch |e| return errno(switch (e) {
+        vm.Error.NotHost => .bad_state,
+        vm.Error.NoVms, vm.Error.OutOfFrames => .no_space,
+    });
+    const va = domain.mapFrames(d, m.ram_pa, pages, .data) catch {
+        vm.destroy(m);
+        return errno(.no_space);
+    };
+    const vh = d.captable.?.insert(.vm, vm.indexOf(m)) orelse {
+        vm.destroy(m);
+        return errno(.no_space);
+    };
+    frame.regs[1] = @bitCast(vh);
+    frame.regs[2] = va;
+    return errno(.ok);
+}
+
+fn lookupVm(d: *domain.Domain, handle_bits: u64) ?*vm.Vm {
+    const h: shared.Handle = @bitCast(handle_bits);
+    const idx = d.captable.?.lookup(h, .vm) orelse return null;
+    const m = vm.byIndex(idx) orelse return null;
+    if (m.owner != @as(*anyopaque, @ptrCast(d))) return null;
+    return m;
+}
+
+fn sysVmRun(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
+    const exit = vm.run(m, frame.regs[1]);
+    frame.regs[1] = @intFromEnum(exit.kind);
+    frame.regs[2] = exit.a;
+    frame.regs[3] = exit.b;
+    frame.regs[4] = exit.c;
+    frame.regs[5] = exit.d;
+    return errno(.ok);
+}
+
+fn sysVmSet(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
+    m.vcpu.pc = frame.regs[1];
+    m.vcpu.regs[0] = frame.regs[2];
     return errno(.ok);
 }
 
@@ -400,7 +452,7 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
     if (handle.slot < cap.slots) {
         const e = &d.captable.?.entries[handle.slot];
         if (e.generation == handle.generation) switch (e.cap_type) {
-            .debug_log, .spawner, .device, .entropy, .introspect => {
+            .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor => {
                 msg.cap_type = @intFromEnum(e.cap_type);
                 msg.cap_obj = e.object;
                 return null;

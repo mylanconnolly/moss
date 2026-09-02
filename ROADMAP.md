@@ -476,7 +476,27 @@ The pooling story stops being theory.
   revocation serials are the only clock); ML-DSA is a drop-in for the
   signatures if post-quantum ever matters here.
 - Time-partitioning opt-in for side-channel-sensitive domains.
-- EL2: Moss as hypervisor, partitioning one box into pool nodes — the pooling story from both directions.
+- ✅ **EL2: Moss as hypervisor** (first cut, 2026-09-02): the kernel
+  boots as a VHE host when entered at EL2 (nothing else changes: E2H
+  redirects every EL1-named register; PSCI conduit and timer line are
+  chosen at run time; the per-core pointer moves to TPIDR_EL2), and
+  `kernel/vm.zig` runs an EL1 guest in its own stage-2 world through a
+  **hypervisor capability**: `vm_create` (RAM at IPA 0x40000000, mapped
+  into the VMM), `vm_set`, `vm_run` — every exit (stage-2 MMIO fault
+  with the decoded access, WFI, HVC, trapped SMC/PSCI, a host interrupt)
+  returns to the VMM's syscall by rewriting the exception frame so its
+  `eret` lands in the host resume stub. The guest gets the virtual
+  counter/timer (its PPI 27 fires at the host, which masks it and
+  injects a virtual interrupt through ICH_LR0) and the virtual GICv3
+  CPU interface. The `vm` test: a userspace VMM (`user/vmm.zig`) loads a
+  bare-metal guest (`guest/hello.zig`) from the boot archive and runs
+  it — hello over a trapped UART, three timer ticks, PSCI power-off —
+  nothing leaked. HVF cannot host it (Apple's nested EL2 has no VHE), so
+  guests are TCG-only until real hardware. **Not yet the pooling
+  story:** a Moss kernel as a guest needs a PCIe/virtio device story
+  (emulated virtio-pci in the VMM, or passthrough with SMMU stage 2),
+  GICD/GICR emulation, multiple vCPUs, and PSCI CPU_ON; those are the
+  next cuts, on the same skeleton.
 - virtio-gpu and input devices (the graphical console).
 - ✅ **Developer shell and tooling** (done): **msh**, an interactive shell
   over a new virtio-console driver (moss's third virtio device class),

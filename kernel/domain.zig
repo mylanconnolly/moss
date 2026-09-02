@@ -18,6 +18,7 @@ const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
 const smmu = @import("smmu.zig");
+const vm = @import("vm.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 
@@ -72,6 +73,8 @@ pub const Manifest = struct {
     /// Every enumerated PCI device (root's boot grant; it forwards them
     /// to init, which hands each to the unit that drives it).
     grant_devices: bool = false,
+    /// Authority to create virtual machines.
+    grant_hypervisor: bool = false,
     /// Grant the right to seed the kernel entropy pool (the rng driver).
     grant_entropy: bool = false,
     /// Grant read-only introspection (domain_list/sysinfo) — what a
@@ -186,6 +189,7 @@ pub const max_mapped_shms = 16;
 pub fn init() void {
     sched.user_thread_reaped = &onThreadReaped;
     ipc.domain_ctl_release = &onCtlReleased;
+    ipc.vm_release = &onVmReleased;
 }
 
 /// Where a program image comes from: a kernel-visible byte slice (the
@@ -248,6 +252,10 @@ pub fn fillRecs(buf: []u8) usize {
         n += 1;
     }
     return n;
+}
+
+fn onVmReleased(idx: u64) void {
+    if (vm.byIndex(idx)) |m| vm.destroy(m);
 }
 
 fn onCtlReleased(obj: u64) void {
@@ -404,6 +412,9 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
         for (0..pci.count) |i| {
             _ = table.insert(.device, i) orelse return Error.CapTableFull;
         }
+    }
+    if (manifest.grant_hypervisor) {
+        _ = table.insert(.hypervisor, 0) orelse return Error.CapTableFull;
     }
     if (manifest.grant_bootfs and system_blob_len > 0) {
         // Shared read-only frames: the archive is immutable, so every
@@ -572,13 +583,19 @@ pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
 /// Map an MMIO window (device attributes, unowned: teardown must never
 /// hand MMIO addresses to the frame allocator).
 pub fn mapMmio(d: *Domain, base_pa: u64, pages: u64) !u64 {
+    return mapFrames(d, base_pa, pages, .device);
+}
+
+/// Map frames some other object owns (device windows, a VM's RAM) into
+/// the domain, unowned: teardown leaves them to their owner.
+pub fn mapFrames(d: *Domain, base_pa: u64, pages: u64, perms: mmu.UserPerms) !u64 {
     const base = d.shm_map_next;
     for (0..pages) |i| {
         try mmu.mapUserPageTagged(
             d.ttbr0_pa,
             base + i * mem.page_size,
             base_pa + i * mem.page_size,
-            .device,
+            perms,
             &d.kobj,
             false,
         );

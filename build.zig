@@ -52,6 +52,11 @@ pub fn build(b: *std.Build) void {
         "flap-test",
         "Run the supervision-restart drill: budget exhaustion escalates up the tree",
     ) orelse false;
+    const vm_test = b.option(
+        bool,
+        "vm-test",
+        "Run the VM drill: a userspace VMM runs a bare-metal EL1 guest in a stage-2 world",
+    ) orelse false;
     const smmu_test = b.option(
         bool,
         "smmu-test",
@@ -100,6 +105,10 @@ pub fn build(b: *std.Build) void {
         // all hand-written, aligned assembly — would fault on unaligned
         // access to Device-typed memory.
         .cpu_features_sub = std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon }),
+        // Assembler vocabulary for the EL2 host: the stage-2 registers
+        // (VTTBR/VTCR/HPFAR, the VMALLS12 invalidations) sit behind this
+        // feature; code generation is unaffected.
+        .cpu_features_add = std.Target.aarch64.featureSet(&.{.el2vmsa}),
     });
 
     // Userspace gets the vector unit: trap.init sets CPACR_EL1.FPEN and
@@ -134,6 +143,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "flap_test", flap_test);
     build_opts.addOption(bool, "blk_test", blk_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
+    build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "fs_test", fs_test);
     build_opts.addOption(bool, "net_test", net_test);
     build_opts.addOption(bool, "fabric_test", fabric_test);
@@ -169,6 +179,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "rng", .src = "user/rng.zig" },
         .{ .name = "ps", .src = "user/ps.zig" },
         .{ .name = "ls", .src = "user/ls.zig" },
+        .{ .name = "vmm", .src = "user/vmm.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -226,6 +237,20 @@ pub fn build(b: *std.Build) void {
         });
         pack.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
     }
+    // A guest: bare-metal EL1 code the VMM loads into a VM's RAM. Raw
+    // binary, linked at the guest's RAM base, no MOSS header.
+    const guest_mod = b.createModule(.{
+        .root_source_file = b.path("guest/hello.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSmall,
+        .code_model = .small,
+    });
+    const guest = b.addExecutable(.{ .name = "guest-hello.elf", .root_module = guest_mod });
+    guest.setLinkerScript(b.path("guest/guest.ld"));
+    guest.entry = .{ .symbol_name = "_start" };
+    const guest_bin = b.addObjCopy(guest.getEmittedBin(), .{ .format = .bin, .basename = "guest-hello.bin" });
+    pack.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
+
     _ = user_blobs.addCopyFile(marc_out, "bootfs.marc");
     const user_blobs_src = user_blobs.add(
         "user_blobs.zig",
@@ -486,12 +511,12 @@ pub fn build(b: *std.Build) void {
         "panic_test", "fault_test", "sched_test",   "domain_test",
         "ipc_test",   "init_test",  "sandbox_test", "flap_test",
         "blk_test",   "fs_test",    "net_test",     "fabric_test",
-        "shell_test", "rng_test",   "smmu_test",
+        "shell_test", "rng_test",   "smmu_test",    "vm_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc", "init",
         "sandbox", "flap",  "blk",   "fs",     "net", "fabric",
-        "shell",   "rng",   "smmu",
+        "shell",   "rng",   "smmu",  "vm",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();

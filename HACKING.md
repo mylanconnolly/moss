@@ -260,6 +260,14 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   which blocks on `rng.isSeeded()`), and fabsvc refuses attach_net with
   no_entropy otherwise. `-Drng-test` is the drill; `rand` in msh is the
   quickest manual poke.
+- EL2 host rules: the per-core pointer is TPIDR_EL2 at EL2 (TPIDR_EL1 is
+  the one register VHE does not redirect, and a guest owns it); guest
+  EL1 registers are reached by encoding (`S3_5_Cn_Cm_op2`, the EL1
+  register's encoding with op1=5) because the assembler gates the
+  `_EL12` names behind a v8.1 target; stage-2 registers need the
+  `el2vmsa` assembler feature (set on the kernel target). Anything that
+  runs while a core is in a guest must first restore HCR_EL2 (vm.guestExit
+  does, before anything else).
 - PAN is off (SCTLR.SPAN, PSTATE.PAN=0 at boot: the kernel reads user
   buffers through the live mapping after range checks); no cap transfer across nodes beyond
   spawn-time grants. All recorded in DESIGN.md "as built" sections.

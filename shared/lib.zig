@@ -113,8 +113,39 @@ pub const Syscall = enum(u64) {
     /// device_info(device_handle) -> x1 = DeviceKind, x2 = requester id
     /// (bus<<8|slot<<3|fn), x3 = BAR bytes
     device_info = 32,
+    /// vm_create(hypervisor_handle, ram_pages) -> x1 = vm handle, x2 = the
+    /// guest RAM mapped into the caller (RW). The guest sees it at IPA
+    /// vm_ram_ipa.
+    vm_create = 33,
+    /// vm_run(vm_handle, resume_value) -> x1 = VmExit, x2..x5 = exit
+    /// details; `resume_value` completes a pending mmio_read.
+    vm_run = 34,
+    /// vm_set(vm_handle, pc, x0): the vCPU's entry point and first argument.
+    vm_set = 35,
     _,
 };
+
+/// Why a guest stopped (vm_run's x1).
+pub const VmExit = enum(u64) {
+    none = 0,
+    /// x2 = IPA, x3 = size, x4 = register index (the next vm_run's
+    /// resume_value is the loaded value).
+    mmio_read = 1,
+    /// x2 = IPA, x3 = size, x4 = value.
+    mmio_write = 2,
+    /// x2 = 0 for WFI, 1 for WFE.
+    wfi = 3,
+    /// x2..x5 = the guest's x0..x3.
+    hvc = 4,
+    /// PSCI SYSTEM_OFF/RESET (x2 = function id).
+    poweroff = 5,
+    /// x2 = ESR, x3 = address: something the hypervisor does not handle.
+    fault = 6,
+    /// A host interrupt; just run again.
+    interrupted = 7,
+};
+
+pub const vm_ram_ipa: u64 = 0x4000_0000;
 
 pub const SpawnFlags = struct {
     pub const grant_log: u64 = 1 << 0;
@@ -245,6 +276,7 @@ pub const ImageId = enum(u64) {
     rng = 12,
     ps = 13,
     ls = 14,
+    vmm = 15,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over

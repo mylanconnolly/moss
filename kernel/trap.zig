@@ -16,6 +16,7 @@ const sched = @import("sched.zig");
 const smmu = @import("smmu.zig");
 const syscall = @import("syscall.zig");
 const timer = @import("timer.zig");
+const vm = @import("vm.zig");
 
 pub const TrapFrame = extern struct {
     regs: [31]u64,
@@ -149,6 +150,9 @@ const Kind = enum(u64) {
 };
 
 export fn trapHandler(frame: *TrapFrame, kind_raw: u64) callconv(.c) void {
+    // An exception taken while this core was in a guest is a guest exit,
+    // whatever it is; vm.guestExit hands host interrupts back to us.
+    if (sched.thisCpu().vcpu != null) return vm.guestExit(frame, kind_raw);
     const kind: Kind = @enumFromInt(kind_raw);
     switch (kind) {
         .cur_spx_irq, .lower64_irq => handleIrq(),
@@ -157,11 +161,13 @@ export fn trapHandler(frame: *TrapFrame, kind_raw: u64) callconv(.c) void {
     }
 }
 
-fn handleIrq() void {
+pub fn handleIrq() void {
     const intid = gic.acknowledge();
     if (intid == gic.spurious_intid) return;
     if (intid == timer.intid) {
         timer.handleIrq();
+    } else if (intid == 27) {
+        vm.onVirtualTimer(); // a guest's virtual timer, fired at the host
     } else if (intid == gic.resched_sgi) {
         // just here for the preempt below
     } else if (!(intid >= 32 and (smmu.handleIrq(intid) or irq.deliver(intid)))) {

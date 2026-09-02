@@ -23,6 +23,7 @@ const smmu = @import("smmu.zig");
 const smp = @import("smp.zig");
 const timer = @import("timer.zig");
 const trap = @import("trap.zig");
+const vm = @import("vm.zig");
 
 comptime {
     _ = @import("boot.zig");
@@ -168,6 +169,9 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.vm_test) {
+        _ = sched.spawn("vm-test", vmTestWorker, 0, .{}) catch @panic("spawn vm-test");
+    }
     if (build_options.smmu_test) {
         _ = sched.spawn("smmu-test", smmuTestWorker, 0, .{}) catch @panic("spawn smmu-test");
     }
@@ -717,6 +721,41 @@ fn smmuTestWorker(_: u64) void {
         std.debug.panic("smmu-test: FAIL — canary intact {}, fault matched {} (count {d}, sid {d}, addr 0x{x}), pmem delta {d}B", .{
             intact, faulted, smmu.fault_count, smmu.last_fault_sid, smmu.last_fault_addr, frames_before -% frames_after,
         });
+    }
+}
+
+/// The VM drill: a userspace VMM, handed the hypervisor capability and
+/// the boot archive, builds a VM, loads the bare-metal guest image into
+/// it and runs it at EL1 in its own stage-2 world. The guest's UART
+/// stores trap to the VMM (log lines), its virtual timer ticks are
+/// injected through the vGIC, and its PSCI power-off ends the run. PASS
+/// when the VMM exits 0 (it saw three ticks and the power-off) and the
+/// leak bar holds.
+fn vmTestWorker(_: u64) void {
+    const frames_before = pmem.stats().free_bytes;
+    if (currentEl() != 2) std.debug.panic("vm-test: FAIL — the kernel is not an EL2 host", .{});
+    log.info("vm-test: starting the VMM", .{});
+    const vmm = domain.spawn("vmm", .{ .blob = img(.vmm) }, .{
+        .grant_debug_log = true,
+        .grant_bootfs = true,
+        .grant_hypervisor = true,
+        .auto_reap = true,
+        .kobj_limit = 4 << 20,
+        .user_limit = 32 << 20,
+    }) catch |e| std.debug.panic("spawn vmm: {t}", .{e});
+    var waited: u64 = 0;
+    while (vmm.state != .dead) : (waited += 1) {
+        if (waited == 300) std.debug.panic("vm-test: FAIL — the guest never powered off", .{});
+        sched.sleep(1);
+    }
+    if (vmm.exit_code != 0) std.debug.panic("vm-test: FAIL — vmm exit {d}", .{vmm.exit_code});
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    if (frames_after == frames_before) {
+        log.info("vm-test: PASS — an EL1 guest ran in its own stage-2 world: MMIO trapped to the VMM, virtual timer ticks injected through the vGIC, PSCI power-off honoured, nothing leaked", .{});
+        psci.systemOff();
+    } else {
+        std.debug.panic("vm-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
 }
 

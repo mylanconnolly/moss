@@ -1192,6 +1192,65 @@ mapping after explicit range checks, so boot sets `SCTLR.SPAN` and
 clears `PSTATE.PAN` — PAN as defence in depth (toggling it around user
 copies) stays on the list.
 
+## Virtual machines
+
+**As built (2026-09-02, first cut).** `kernel/vm.zig` runs an EL1 guest
+in its own stage-2 world; a userspace VMM owns it through the
+**hypervisor capability**. `vm_create(hyp, pages)` allocates contiguous
+frames (charged to the VMM's user account), builds a stage-2 table
+(39-bit IPA, three levels, 4K pages, charged to its kernel-object
+account) mapping them at IPA 0x40000000, and maps the same frames into
+the VMM (unowned) so it can load the guest; `vm_set` names the entry
+point; `vm_run` runs until an exit and reports it in x1..x5. A `vm` cap
+is the object; dropping the last one (or teardown) waits for a run in
+flight, invalidates the VMID's TLB entries, and returns tables and RAM.
+
+Entering a guest is what VHE makes cheap: the guest's EL1 state goes in
+through the `_EL12`/`_EL02` names (registers the host never uses for
+itself), VTTBR_EL2 points at the VM's tables, the vGIC list registers
+carry whatever is pending, HCR_EL2 drops TGE and raises VM (plus
+IMO/FMO/AMO, DC so stage-1-off memory is still cacheable, TWI, TSC), and
+an `eret` to EL1h lands in the guest. The host's callee-saved registers
+are parked in the vCPU first. Every exception the guest raises arrives
+at the host's ordinary vector table as "from a lower EL": the trap
+handler sees the core's `vcpu` pointer set and hands the frame to
+`vm.guestExit`, which restores the host's HCR before anything else,
+saves the guest (GPRs from the frame, EL1 registers, ICH state), decides
+the exit — a stage-2 data abort becomes `mmio_read`/`mmio_write` with
+the decoded size, register and IPA (HPFAR + FAR); WFI, HVC, a trapped
+SMC (the little PSCI we speak: VERSION answered in place, SYSTEM_OFF an
+exit); a host interrupt is handled right there (`trap.handleIrq`,
+scheduler and all, on the VMM thread's kernel stack) and reported as
+`interrupted` — and then **rewrites the frame** so the trap's own `eret`
+returns into `__guest_resume` at EL2h, which restores the parked host
+context and returns from `__guest_enter`. A pending MMIO read completes
+on the next `vm_run`, whose argument is the value.
+
+The guest's clock is the virtual timer: CNTVOFF 0, CNTV_* live in the
+EL1 registers, and its interrupt (PPI 27) fires physically at the host,
+which masks the timer (IMASK) so the line drops and marks the vCPU;
+the next entry puts a pending virtual PPI 27 into a free ICH_LR, and
+the guest's ICC accesses — virtual under IMO — take it from there. No
+distributor is emulated: list-register injection needs none, and a
+guest that only uses the CPU interface (ours) never touches GICD/GICR.
+The vector unit is saved around a run; the host's per-core pointer moved
+to TPIDR_EL2 because TPIDR_EL1 is the one register VHE does not redirect
+and a guest owns it — found the first time a guest exited with the
+host's pointer nulled.
+
+The drill: `user/vmm.zig` takes the hypervisor cap and the boot archive,
+builds an 8M VM, copies `img/guest-hello` (`guest/hello.zig`: a
+bare-metal EL1 program with its own vectors, linked at the RAM base,
+raw binary) into it and runs the loop: UART stores (IPA 0x09000000)
+become `guest>` log lines, WFI sleeps a tick, PSCI power-off ends it.
+The guest says hello, counts three ticks, powers off; the VMM exits 0
+only then. What this is not yet: the pooling story. A Moss kernel as a
+guest needs devices (emulated virtio-pci in the VMM, or passthrough
+with the SMMU's stage 2), GICD/GICR emulation, several vCPUs and PSCI
+CPU_ON; the skeleton — exits as messages to a userspace monitor, VM
+memory as an owned object, the cap as the authority — is the one those
+build on. Guests run under TCG only: HVF's nested EL2 has no VHE.
+
 ## Zig conventions
 
 - Version pinned in `build.zig.zon`; bumps are deliberate, standalone commits.

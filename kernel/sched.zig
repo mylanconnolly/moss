@@ -166,6 +166,10 @@ pub const PerCpu = struct {
     online: bool = false,
     ticks: u64 = 0, // debug
     lock: lock.SpinLock = .{},
+    /// The vCPU this core is running right now (a *vm.Vcpu), and the
+    /// one it ran last (whose virtual timer may still fire here).
+    vcpu: ?*anyopaque = null,
+    last_vcpu: ?*anyopaque = null,
 };
 
 var cpus: [max_cpus]PerCpu = undefined;
@@ -181,7 +185,17 @@ var global_ticks: u64 = 0;
 /// a user context has been fully reaped.
 pub var user_thread_reaped: ?*const fn (*anyopaque) void = null;
 
+/// The per-core pointer lives in TPIDR_EL1 at EL1 and in TPIDR_EL2 as
+/// the EL2 host — TPIDR_EL1 is one of the few registers VHE does not
+/// redirect, and a guest at EL1 owns it.
+pub var host_el2: bool = false;
+
 pub fn thisCpu() *PerCpu {
+    if (host_el2) {
+        return @ptrFromInt(asm ("mrs %[v], tpidr_el2"
+            : [v] "=r" (-> u64),
+        ));
+    }
     return @ptrFromInt(asm ("mrs %[v], tpidr_el1"
         : [v] "=r" (-> u64),
     ));
@@ -199,6 +213,16 @@ pub fn registerCpu(cpu_id: u32) void {
     const cpu = &cpus[cpu_id];
     cpu.* = .{ .id = cpu_id, .current = idle, .idle = idle, .online = true };
     threads_lock.unlockRestore(daif);
+    const el = asm ("mrs %[el], CurrentEL"
+        : [el] "=r" (-> u64),
+    ) >> 2;
+    if (el == 2) {
+        host_el2 = true;
+        asm volatile ("msr tpidr_el2, %[v]"
+            :
+            : [v] "r" (@intFromPtr(cpu)),
+        );
+    }
     asm volatile ("msr tpidr_el1, %[v]"
         :
         : [v] "r" (@intFromPtr(cpu)),
@@ -773,6 +797,18 @@ export fn schedThreadRun(entry_raw: u64, arg: u64) callconv(.c) noreturn {
 extern fn __context_switch(prev: *Context, next: *Context) void;
 extern fn __fp_save(st: *FpState) void;
 extern fn __fp_restore(st: *const FpState) void;
+
+/// Save/restore the current user thread's vector state around something
+/// that clobbers it (a guest run).
+pub fn fpSaveCurrent() void {
+    const t = thisCpu().current;
+    if (t.user_ttbr0 != 0) __fp_save(&t.fp);
+}
+
+pub fn fpRestoreCurrent() void {
+    const t = thisCpu().current;
+    if (t.user_ttbr0 != 0) __fp_restore(&t.fp);
+}
 extern const __thread_trampoline: anyopaque;
 
 comptime {
