@@ -26,6 +26,8 @@ pub const IpcResult = struct {
     cap: u64,
     /// recv only: the badge of the cap the caller invoked.
     badge: u64 = 0,
+    /// recv only: the reply token (deferred replies name their caller).
+    token: u64 = 0,
 };
 
 /// Synchronous call: send a typed message (+ optional cap), block for the
@@ -70,7 +72,23 @@ pub fn callRaw(channel: u64, w: [4]u64, send_cap: u64) IpcResult {
 }
 
 pub fn replyRaw(channel: u64, w: [4]u64, send_cap: u64) shared.Errno {
-    return syscall6(.reply, channel, w[0], w[1], w[2], w[3], send_cap).err;
+    return syscall7(.reply, channel, w[0], w[1], w[2], w[3], send_cap, 0).err;
+}
+
+/// Reply to a specific pending caller (its recv token), for servers that
+/// hold several calls open.
+pub fn replyRawTo(channel: u64, w: [4]u64, send_cap: u64, token: u64) shared.Errno {
+    return syscall7(.reply, channel, w[0], w[1], w[2], w[3], send_cap, token).err;
+}
+
+pub fn replyTypedTo(comptime Rep: type, channel: u64, rep: Rep, send_cap: u64, token: u64) shared.Errno {
+    const words = shared.encodeMsg(Rep, rep);
+    return syscall7(.reply, channel, words[0], words[1], words[2], words[3], send_cap, token).err;
+}
+
+/// timer_arm: signal `notif` with `bits` every `period` ticks (0 disarms).
+pub fn timerArm(notif: u64, period: u64, bits: u64) shared.Errno {
+    return @enumFromInt(syscall3(.timer_arm, notif, period, bits));
 }
 
 /// image_h: an shm cap holding a staged MOSS image (see loader.zig).
@@ -206,6 +224,11 @@ fn syscall3(nr: shared.Syscall, a0: u64, a1: u64, a2: u64) u64 {
 }
 
 fn syscall6(nr: shared.Syscall, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) IpcResult {
+    return syscall7(nr, a0, a1, a2, a3, a4, a5, 0);
+}
+
+/// x0..x6 in, x0..x7 out: the reply token rides x6 in and x7 out.
+fn syscall7(nr: shared.Syscall, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) IpcResult {
     var r0: u64 = undefined;
     var r1: u64 = undefined;
     var r2: u64 = undefined;
@@ -213,6 +236,7 @@ fn syscall6(nr: shared.Syscall, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
     var r4: u64 = undefined;
     var r5: u64 = undefined;
     var r6: u64 = undefined;
+    var r7: u64 = undefined;
     asm volatile ("svc #0"
         : [r0] "={x0}" (r0),
           [r1] "={x1}" (r1),
@@ -221,6 +245,7 @@ fn syscall6(nr: shared.Syscall, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
           [r4] "={x4}" (r4),
           [r5] "={x5}" (r5),
           [r6] "={x6}" (r6),
+          [r7] "={x7}" (r7),
         : [nr] "{x8}" (@intFromEnum(nr)),
           [a0] "{x0}" (a0),
           [a1] "{x1}" (a1),
@@ -228,6 +253,7 @@ fn syscall6(nr: shared.Syscall, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
           [a3] "{x3}" (a3),
           [a4] "{x4}" (a4),
           [a5] "{x5}" (a5),
+          [a6] "{x6}" (a6),
         : .{ .memory = true });
-    return .{ .err = @enumFromInt(r0), .data = .{ r1, r2, r3, r4 }, .cap = r5, .badge = r6 };
+    return .{ .err = @enumFromInt(r0), .data = .{ r1, r2, r3, r4 }, .cap = r5, .badge = r6, .token = r7 };
 }

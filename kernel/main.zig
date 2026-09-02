@@ -258,7 +258,8 @@ fn ipcTestWorker(_: u64) void {
     {
         var msg: ipc.Msg = .{};
         var badge: u64 = 0;
-        const e = ipc.recv(fault_ch, &msg, &badge);
+        var token: u64 = 0;
+        const e = ipc.recv(fault_ch, &msg, &badge, &token);
         std.debug.assert(e == .ok);
         const fm = shared.decodeMsg(shared.FaultMsg, msg.data).?;
         log.info("ipc-test: supervisor got fault message from crasher: esr=0x{x} far=0x{x} elr=0x{x}", .{

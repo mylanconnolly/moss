@@ -21,6 +21,7 @@
 //! release the lock. No logging while holding the big lock.
 
 const std = @import("std");
+const ipc = @import("ipc.zig");
 const cap = @import("cap.zig");
 const gic = @import("gic.zig");
 const kalloc = @import("kalloc.zig");
@@ -345,6 +346,7 @@ pub fn onTick(is_timekeeper: bool) void {
 
     if (is_timekeeper) {
         global_ticks += 1;
+        ipc.timerTickLocked(global_ticks);
         var it = sleepers.first;
         while (it) |node| {
             const next = node.next;
@@ -381,10 +383,10 @@ pub fn debugDump() void {
     for (&threads) |*t| {
         if (t.state == .unused) continue;
         log.info("thread {s}#{d}: {t} in_recv={} list={} slot={} cpu={?d} q={?d}", .{
-            t.name,              t.id,
-            t.state,             t.in_recv,
+            t.name,               t.id,
+            t.state,              t.in_recv,
             t.block_list != null, t.block_slot != null,
-            t.on_cpu,            t.queued_on,
+            t.on_cpu,             t.queued_on,
         });
     }
     for (&cpus) |*c| {

@@ -47,9 +47,16 @@ pub const Channel = struct {
     callers: std.DoublyLinkedList = .{},
     /// Server thread blocked in recv(), if any.
     server_waiting: ?*sched.Thread = null,
-    /// Client whose call was delivered and now awaits reply().
-    processing: ?*sched.Thread = null,
+    /// Clients whose calls were delivered and now await reply(): a server
+    /// may hold several open (deferred replies), each named by the token
+    /// recv returned — slot + 1 in the low byte, a serial above it so a
+    /// stale token can never answer a later caller in a reused slot.
+    pending: [max_pending]?*sched.Thread = @splat(null),
+    pending_serial: [max_pending]u32 = @splat(0),
+    serial: u32 = 0,
 };
+
+pub const max_pending = 8;
 
 pub const Notification = struct {
     active: bool = false,
@@ -137,9 +144,10 @@ pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
 }
 
 /// Server side: block until a call arrives; its words land in the returned
-/// Msg (badge_out gets the caller's cap badge) and the caller is parked in
-/// `processing` until reply().
-pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64) shared.Errno {
+/// Msg (badge_out gets the caller's cap badge, token_out the reply token)
+/// and the caller is parked in a pending slot until reply(). With every
+/// slot occupied, recv reports busy: reply to something first.
+pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Errno {
     const daif = sched.acquire();
     defer sched.release(daif);
     while (true) {
@@ -150,12 +158,22 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64) shared.Errno {
             if (n.bits != 0) return .interrupted;
         }
         if (!ch.a_open) return .peer_dead;
-        if (ch.processing != null) return .busy;
+        var free: ?usize = null;
+        for (&ch.pending, 0..) |p, i| {
+            if (p == null) {
+                free = i;
+                break;
+            }
+        }
+        const slot = free orelse return .busy;
         if (ch.callers.popFirst()) |node| {
             const caller: *sched.Thread = @alignCast(@fieldParentPtr("node", node));
             caller.block_list = null;
-            ch.processing = caller;
-            caller.block_slot = &ch.processing;
+            ch.pending[slot] = caller;
+            caller.block_slot = &ch.pending[slot];
+            ch.serial +%= 1;
+            if (ch.serial == 0) ch.serial = 1;
+            ch.pending_serial[slot] = ch.serial;
             out.* = .{
                 .data = caller.ipc_data,
                 .cap_type = caller.ipc_cap_type,
@@ -163,6 +181,7 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64) shared.Errno {
                 .cap_badge = caller.ipc_cap_badge,
             };
             badge_out.* = caller.ipc_badge;
+            token_out.* = (@as(u64, ch.serial) << 8) | (slot + 1);
             return .ok;
         }
         if (!ch.b_open) return .peer_dead;
@@ -177,14 +196,37 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64) shared.Errno {
     }
 }
 
+/// Reply to the oldest pending caller (the one-at-a-time server's reply).
 pub fn reply(ch: *Channel, msg: Msg) shared.Errno {
+    return replyTo(ch, msg, 0);
+}
+
+/// Reply to the caller named by `token` (0 = whichever pending caller
+/// was delivered first). A stale or unknown token is bad_state; a client
+/// that died mid-call reports peer_dead when its side is gone.
+pub fn replyTo(ch: *Channel, msg: Msg, token: u64) shared.Errno {
     const daif = sched.acquire();
     defer sched.release(daif);
-    const client = ch.processing orelse {
+    var slot: ?usize = null;
+    if (token == 0) {
+        // Oldest = the lowest serial among the pending.
+        var best: u32 = 0;
+        for (ch.pending, 0..) |p, i| {
+            if (p != null and (slot == null or ch.pending_serial[i] < best)) {
+                slot = i;
+                best = ch.pending_serial[i];
+            }
+        }
+    } else {
+        const i: usize = @intCast((token & 0xff) -% 1);
+        if (i < max_pending and ch.pending[i] != null and ch.pending_serial[i] == @as(u32, @truncate(token >> 8))) slot = i;
+    }
+    const i = slot orelse {
         // The client may have died mid-call; that is a distinct outcome.
         return if (!ch.b_open) .peer_dead else .bad_state;
     };
-    ch.processing = null;
+    const client = ch.pending[i].?;
+    ch.pending[i] = null;
     client.block_slot = null;
     client.ipc_data = msg.data;
     client.ipc_cap_type = msg.cap_type;
@@ -212,11 +254,13 @@ fn closeSide(ch: *Channel, side: Side) void {
             t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
             sched.wakeLocked(t);
         }
-        if (ch.processing) |t| {
-            ch.processing = null;
-            t.block_slot = null;
-            t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
-            sched.wakeLocked(t);
+        for (&ch.pending) |*p| {
+            if (p.*) |t| {
+                p.* = null;
+                t.block_slot = null;
+                t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
+                sched.wakeLocked(t);
+            }
         }
     }
     // A server waiting on a dead client side wakes with peer_dead.
@@ -335,6 +379,66 @@ pub fn wait(n: *Notification) struct { err: shared.Errno, bits: u64 } {
 /// notification is freed, so IRQ bindings never outlive their target.
 pub var notif_freed_hook: ?*const fn (*Notification) void = null;
 
+// ------------------------------------------------------------------ timers
+//
+// A timer is a notification the timekeeper signals on a period: the
+// same shape as an IRQ (notification bits on an event) and the same
+// wake path (a bound thread's recv is interrupted). Services that need
+// a clock — heartbeats, timeouts — arm one instead of being polled.
+
+const Timer = struct {
+    n: ?*Notification = null,
+    period: u64 = 0,
+    next: u64 = 0,
+    bits: u64 = 0,
+};
+
+const max_timers = 16;
+var timers: [max_timers]Timer = @splat(.{});
+
+/// Arm (or, with period 0, disarm) the timer on `n`: every `period`
+/// ticks the notification is signaled with `bits`. One timer per
+/// notification; re-arming replaces it. The timer holds no ref — a
+/// notification freed under it is disarmed.
+pub fn armTimer(n: *Notification, period: u64, bits: u64, now: u64) bool {
+    const daif = sched.acquire();
+    defer sched.release(daif);
+    var free: ?*Timer = null;
+    for (&timers) |*t| {
+        if (t.n == n) {
+            if (period == 0) {
+                t.* = .{};
+                return true;
+            }
+            t.period = period;
+            t.next = now + period;
+            t.bits = bits;
+            return true;
+        }
+        if (t.n == null and free == null) free = t;
+    }
+    if (period == 0) return true;
+    const t = free orelse return false;
+    t.* = .{ .n = n, .period = period, .next = now + period, .bits = bits };
+    return true;
+}
+
+/// The timekeeper's tick, big lock held.
+pub fn timerTickLocked(now: u64) void {
+    for (&timers) |*t| {
+        const n = t.n orelse continue;
+        if (now < t.next) continue;
+        t.next = now + t.period;
+        signalLocked(n, t.bits);
+    }
+}
+
+fn timerNotifFreed(n: *Notification) void {
+    for (&timers) |*t| {
+        if (t.n == n) t.* = .{};
+    }
+}
+
 pub fn unrefNotification(n: *Notification) void {
     const daif = sched.acquire();
     defer sched.release(daif);
@@ -347,6 +451,7 @@ pub fn unrefNotification(n: *Notification) void {
             t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
             sched.wakeLocked(t);
         }
+        timerNotifFreed(n);
         if (notif_freed_hook) |f| f(n);
         n.* = .{};
     }
@@ -413,4 +518,3 @@ pub fn releaseCap(cap_type: cap.CapType, obj: u64) void {
         .domain_ctl => if (domain_ctl_release) |f| f(obj),
     }
 }
-

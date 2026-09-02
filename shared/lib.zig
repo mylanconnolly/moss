@@ -33,9 +33,11 @@ pub const Syscall = enum(u64) {
     exit = 4,
     /// call(channel, w0..w3, cap) -> reply w0..w3, cap
     call = 5,
-    /// recv(channel) -> msg w0..w3, cap
+    /// recv(channel) -> msg w0..w3, cap; x6 = caller badge, x7 = reply
+    /// token. A server may recv again before replying (up to 8 callers
+    /// pending) — deferred replies, each answered by its token.
     recv = 6,
-    /// reply(channel, w0..w3, cap)
+    /// reply(channel, w0..w3, cap; x6 = token, 0 = the oldest pending)
     reply = 7,
     notify_create = 8,
     notify_signal = 9,
@@ -94,6 +96,11 @@ pub const Syscall = enum(u64) {
     /// rng_max_request bytes of hardware entropy into the kernel pool.
     /// The entropy cap gates it (the virtio-rng driver holds one).
     rng_seed = 28,
+    /// timer_arm(notification, period_ticks, bits): signal the
+    /// notification with `bits` every `period_ticks` (100ms ticks); 0
+    /// disarms. A clock as a notification — the same wake path as an
+    /// IRQ, so a serving thread's recv is interrupted on time.
+    timer_arm = 29,
     _,
 };
 

@@ -60,6 +60,7 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .sysinfo => sysSysinfo(d, frame),
         .getrandom => sysGetrandom(d, frame.regs[0], frame.regs[1]),
         .rng_seed => sysRngSeed(d, frame.regs[0], frame.regs[1], frame.regs[2]),
+        .timer_arm => sysTimerArm(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         _ => errno(.nosys),
     };
 }
@@ -332,10 +333,12 @@ fn sysRecv(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const ch: *ipc.Channel = @ptrFromInt(obj);
     var msg: ipc.Msg = .{};
     var badge: u64 = 0;
-    const e = ipc.recv(ch, &msg, &badge);
+    var token: u64 = 0;
+    const e = ipc.recv(ch, &msg, &badge, &token);
     if (e != .ok) return errno(e);
     deliver(d, msg, frame);
     frame.regs[6] = badge;
+    frame.regs[7] = token;
     return errno(.ok);
 }
 
@@ -362,7 +365,10 @@ fn sysReply(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     if (frame.regs[5] != 0) {
         if (attachCap(d, frame.regs[5], &msg)) |e| return errno(e);
     }
-    return errno(ipc.reply(ch, msg));
+    // x6: the reply token from recv (0 = the oldest pending caller).
+    const e = ipc.replyTo(ch, msg, frame.regs[6]);
+    if (e != .ok) dropAttachment(msg);
+    return errno(e);
 }
 
 /// Resolve a handle the sender wants to attach; the object gains a ref that
@@ -433,6 +439,16 @@ fn dropAttachment(msg: ipc.Msg) void {
 }
 
 // ---------------------------------------------------- notifications & shm
+
+/// timer_arm(notification, period_ticks, bits): a periodic signal on the
+/// caller's notification (0 = disarm).
+fn sysTimerArm(d: *domain.Domain, handle_bits: u64, period: u64, bits: u64) u64 {
+    const handle: shared.Handle = @bitCast(handle_bits);
+    const obj = d.captable.?.lookup(handle, .notification) orelse return errno(.bad_handle);
+    if (period > 60 * 60 * 10) return errno(.bad_arg);
+    if (!ipc.armTimer(@ptrFromInt(obj), period, bits, sched.uptimeTicks())) return errno(.no_space);
+    return errno(.ok);
+}
 
 fn sysNotifyCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const n = ipc.createNotification() catch return errno(.no_space);
