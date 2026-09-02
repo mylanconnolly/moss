@@ -286,6 +286,25 @@ IRQ-delivery-as-message, and explicit DMA grants shaped like an IOMMU is
 present (identity-stubbed under QEMU until the SMMU lands). Drivers run under
 manifests like any other process and are as sandboxable as anything else.
 
+**Device capabilities (as built, boot-orchestration stage 1):** the
+kernel mints the virtio-mmio window and its SPI range from the
+devicetree's `virtio,mmio` nodes at boot (`dt.virtioWindow`, tested on
+the host against a synthetic tree) — no address or interrupt number is
+a constant in kernel code any more. Authority capabilities (log,
+spawner, mmio, irq, entropy, introspect) are plain object words with no
+refcount, and they travel in messages exactly like shm and channel caps:
+delegation is copying. So a driver no longer needs the kernel's manifest
+to hand it a device — whoever holds the device cap (root, then init)
+gives it away over the program's **boot channel**. The boot protocol
+(`shared.BootReq`) is the one setup handshake every program starts
+with: `cap{tag}` with the cap attached (tags say what a cap is FOR:
+console, view, mmio, irq, entropy, disk, net, init, fabric, ...),
+`secret{off,len}` for key material staged in the `buf` cap (copied out
+and zeroized), `arg` text, then `go`. `user/boot.zig` takes it; the
+run tools moved onto it, and rngd is the first driver handed its
+device this way — by the kernel's boot driver today, by init once
+orchestration moves.
+
 **As built (Phase 7):** an `mmio` cap names a physical window (mapped with
 device attributes via mmio_map); an `irq` cap names an SPI range, and
 irq_bind routes a line to a notification — delivery masks the line (level

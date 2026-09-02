@@ -366,10 +366,23 @@ fn sysReply(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 }
 
 /// Resolve a handle the sender wants to attach; the object gains a ref that
-/// the receiver's new cap (or a failed delivery) later releases. Only
-/// shareable object caps may travel for now.
+/// the receiver's new cap (or a failed delivery) later releases. Refcounted
+/// objects (shm, notifications, channel ends) travel with a ref; authority
+/// caps (log, spawner, devices, entropy, introspection) are plain words the
+/// receiver simply gains — delegation is copying, as with any capability.
 fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
     const handle: shared.Handle = @bitCast(handle_bits);
+    if (handle.slot < cap.slots) {
+        const e = &d.captable.?.entries[handle.slot];
+        if (e.generation == handle.generation) switch (e.cap_type) {
+            .debug_log, .spawner, .mmio, .irq, .entropy, .introspect => {
+                msg.cap_type = @intFromEnum(e.cap_type);
+                msg.cap_obj = e.object;
+                return null;
+            },
+            else => {},
+        };
+    }
     if (d.captable.?.lookup(handle, .shm)) |obj| {
         ipc.refShm(@ptrFromInt(obj));
         msg.cap_type = @intFromEnum(cap.CapType.shm);

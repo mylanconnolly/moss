@@ -43,6 +43,9 @@ pub const State = enum {
     dead,
 };
 
+pub const MmioGrant = struct { base: u64, pages: u64 };
+pub const IrqGrant = struct { base: u32, count: u32 };
+
 /// The unit file, the sandbox, and (later) the remote-spawn request: what a
 /// domain may consume and what it holds. Nothing not named here is granted.
 pub const Manifest = struct {
@@ -68,8 +71,8 @@ pub const Manifest = struct {
     /// Driver grants: an MMIO window and/or an SPI range. Handle slots
     /// follow the fixed insert order (log, channel, spawner, mmio, irq,
     /// entropy).
-    grant_mmio: ?struct { base: u64, pages: u64 } = null,
-    grant_irq: ?struct { base: u32, count: u32 } = null,
+    grant_mmio: ?MmioGrant = null,
+    grant_irq: ?IrqGrant = null,
     /// Grant the right to seed the kernel entropy pool (the rng driver).
     grant_entropy: bool = false,
     /// Grant read-only introspection (domain_list/sysinfo) — what a

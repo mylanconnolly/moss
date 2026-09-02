@@ -6,7 +6,7 @@
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const tty = @import("tty.zig");
-const run = @import("runtool.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -35,8 +35,8 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 const introspect_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 
 export fn umain(_: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
-    const setup = run.takeSetup(chan_h);
-    _ = setup;
+    const setup = boot.take(chan_h);
+    tty.attach(&setup);
     var recs: [16 * shared.DomainRec.size]u8 = undefined;
     const r = usys.domainList(introspect_h, &recs);
     if (r.err != .ok) {

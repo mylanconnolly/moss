@@ -7,7 +7,7 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
 const tty = @import("tty.zig");
-const run = @import("runtool.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -34,14 +34,15 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 }
 
 export fn umain(_: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
-    const setup = run.takeSetup(chan_h);
-    if (setup.view == 0) {
+    const setup = boot.take(chan_h);
+    tty.attach(&setup);
+    if (!setup.has(.view)) {
         tty.out("ls: no view granted\r\n");
         usys.exit(1);
     }
-    const b = fsc.attachBuf(setup.view);
+    const b = fsc.attachBuf(setup.cap(.view));
     const buf: [*]u8 = @ptrFromInt(b.va);
-    const n = fsc.fsList(setup.view, buf, "") orelse {
+    const n = fsc.fsList(setup.cap(.view), buf, "") orelse {
         tty.out("ls: cannot list the view\r\n");
         usys.exit(1);
     };

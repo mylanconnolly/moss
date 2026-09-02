@@ -49,6 +49,17 @@ export fn kmain(dtb_pa: u64) noreturn {
         boot_node = parseNodeArg(args);
         if (boot_node != 0) log.info("bootargs: node id {d}", .{boot_node});
     }
+    // The device capabilities come from the tree, not from constants: the
+    // virtio-mmio window and its SPI range are what root (and, for now,
+    // the boot drivers) hand to userspace drivers.
+    if (fdt.virtioWindow()) |vw| {
+        devices = vw;
+        log.info("devicetree: virtio-mmio window 0x{x} + {d} pages, intids {d}..{d}", .{
+            vw.mmio_base, vw.mmio_pages, vw.irq_base, vw.irq_base + vw.irq_count - 1,
+        });
+    } else {
+        log.warn("devicetree: no virtio-mmio transports; userspace drivers will find no devices", .{});
+    }
 
     pmem.init(regions);
     pmem.reserve(
@@ -431,8 +442,8 @@ fn blkTestWorker(_: u64) void {
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = ch,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
 
@@ -473,8 +484,8 @@ fn fsTestWorker(_: u64) void {
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = blk_ch,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
 
@@ -587,8 +598,8 @@ fn shellTestWorker(_: u64) void {
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = blk_ch,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
 
@@ -611,8 +622,8 @@ fn shellTestWorker(_: u64) void {
         .arg = 1 | (1 << 8), // cluster addressing, node 1
         .grant_debug_log = true,
         .grant_channel_a = shellnet_ch,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
     const shellfab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
@@ -630,8 +641,8 @@ fn shellTestWorker(_: u64) void {
     const consdrv = domain.spawn("consdrv", .{ .blob = img(.cons) }, .{
         .grant_debug_log = true,
         .grant_channel_a = cons_ch,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn consdrv: {t}", .{e});
 
@@ -809,8 +820,8 @@ fn netTestWorker(_: u64) void {
         .arg = 1,
         .grant_debug_log = true,
         .grant_channel_a = net_ch,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
     sched.sleep(5);
@@ -874,14 +885,21 @@ fn netTestWorker(_: u64) void {
 /// until then, and the services spawned next depend on it).
 /// `reseed_ticks` = 0 takes the driver's default.
 fn spawnRngd(reseed_ticks: u64) *domain.Domain {
+    // The driver is handed its device over its boot channel — the same
+    // protocol init will speak once orchestration moves to userspace.
+    const boot_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     const d = domain.spawn("rngd", .{ .blob = img(.rng) }, .{
         .arg = 1 | (reseed_ticks << 8),
         .grant_debug_log = true,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
-        .grant_entropy = true,
+        .grant_channel_a = boot_ch,
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn rngd: {t}", .{e});
+    giveCap(boot_ch, .mmio, .mmio, mmioCapObj());
+    giveCap(boot_ch, .irq, .irq, irqCapObj());
+    giveCap(boot_ch, .entropy, .entropy, 0);
+    const go = ipc.call(boot_ch, .{ .data = shared.encodeMsg(shared.BootReq, .go) }, 0);
+    std.debug.assert(go.err == .ok);
+    ipc.unrefSide(boot_ch, .b);
     var waited: u64 = 0;
     while (!rng.isSeeded()) : (waited += 1) {
         if (d.state == .dead) std.debug.panic("rngd died before seeding: exit {d}", .{d.exit_code});
@@ -889,6 +907,16 @@ fn spawnRngd(reseed_ticks: u64) *domain.Domain {
         sched.sleep(1);
     }
     return d;
+}
+
+/// Hand a program one capability over its boot channel (BootReq.cap).
+fn giveCap(boot_ch: *ipc.Channel, tag: shared.CapTag, ct: cap.CapType, obj: u64) void {
+    const res = ipc.call(boot_ch, .{
+        .data = shared.encodeMsg(shared.BootReq, .{ .cap = .{ .tag = @intFromEnum(tag) } }),
+        .cap_type = @intFromEnum(ct),
+        .cap_obj = obj,
+    }, 0);
+    std.debug.assert(res.err == .ok);
 }
 
 /// The entropy drill: (1) the pool is fail-closed — a probe spawned
@@ -955,6 +983,29 @@ var boot_node: u64 = 0;
 var boot_drill: u64 = 0;
 var boot_badkey: u64 = 0;
 
+/// The virtio-mmio device window from the devicetree (zero if none).
+var devices: dt.VirtioWindow = .{ .mmio_base = 0, .mmio_pages = 0, .irq_base = 0, .irq_count = 0 };
+
+fn devMmio() ?domain.MmioGrant {
+    if (devices.mmio_pages == 0) return null;
+    return .{ .base = devices.mmio_base, .pages = devices.mmio_pages };
+}
+
+fn devIrq() ?domain.IrqGrant {
+    if (devices.irq_count == 0) return null;
+    return .{ .base = devices.irq_base, .count = devices.irq_count };
+}
+
+/// The device capability object words (the same encoding the cap table
+/// holds), for handing devices to a program over its boot channel.
+fn mmioCapObj() u64 {
+    return devices.mmio_base | (devices.mmio_pages << 48);
+}
+
+fn irqCapObj() u64 {
+    return @as(u64, devices.irq_base) | (@as(u64, devices.irq_count) << 32);
+}
+
 fn parseArgNum(args: []const u8, comptime key: []const u8) u64 {
     var i: usize = 0;
     outer: while (i + key.len < args.len + 1) : (i += 1) {
@@ -999,8 +1050,8 @@ fn fabricTestWorker(arg: u64) void {
         .arg = 1 | (node << 8),
         .grant_debug_log = true,
         .grant_channel_a = net_ch,
-        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
-        .grant_irq = .{ .base = 48, .count = 32 },
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
     sched.sleep(3);

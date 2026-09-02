@@ -63,12 +63,17 @@ values, syntax, an operator) belongs in `lib/mshl.zig` with a host test
 beside it — `zig test lib/mshl.zig` runs in a second; the QEMU check is
 for integration.
 
-**A run tool** (a program msh starts in its own domain): new image as
-above, `runtool.takeSetup(chan_h)` first thing (it collects the console,
-optional view, and argument over the boot channel and wires `tty`), then
-do the work and exit. If it needs a kernel cap (introspect, at slot 2
-after log and channel) or a view, add its kind to `run_kinds` in msh.
-The shell check drives it with a `run NAME` step.
+**A program that needs more than log + one channel** (a driver, a
+service, a run tool): call `boot.take(chan_h)` first thing — it serves
+the boot channel until `go`, collecting caps by tag (`setup.cap(.mmio)`,
+`.view`, `.disk`, ...), secret bytes, and argument text; `tty.attach`
+wires the console from it. The spawner gives caps with `boot.giveCap`
+(userspace) or `giveCap` (kernel boot drivers); authority caps (log,
+spawner, mmio, irq, entropy, introspect) travel in messages like any
+other cap. Run tools that need a kernel cap or a view are named in
+`run_kinds` in msh until unit files land. The shell check drives a tool
+with a `run NAME` step; a driver's device grant is exercised by its own
+test (rngd in the rng test).
 
 **An OS test**: write a driver in `kernel/main.zig` gated on a new
 build option; make it log a unique `"<name>-test: PASS ..."` line and then

@@ -229,6 +229,28 @@ The pooling story stops being theory.
   kept a single pending connection, so a burst of SYNs orphaned
   established sockets nobody would read (a real backlog now; the fabric
   also tears down a half-open dial before redialing).
+- **Boot orchestration into userspace** (in progress; stage 1 of 3
+  done). The end state: the kernel spawns root with log, spawner, the
+  boot archive, and the device capabilities; root forwards them to init;
+  init spawns every driver and service from **unit files** (mshl data
+  literals under `boot/conf/units/`) that name the image, budget, spawn
+  grants, and `give` lines — `give disk unit blk` is the whole
+  dependency model, capability wiring driving lazy activation, no
+  ordering anywhere. ✅ Stage 1: device authority became ordinary
+  capabilities — the kernel mints the virtio-mmio window and SPI range
+  from the **devicetree** (`dt.virtioWindow`, host-tested) instead of
+  constants, authority caps (log, spawner, mmio, irq, entropy,
+  introspect) travel in messages like any other cap, and one **boot
+  protocol** (`shared.BootReq`: `cap{tag}` + attachment, `secret`,
+  `arg`, `go`; `user/boot.zig` on the receiving side) replaces the
+  run-tool handshake and is how rngd now receives its device from
+  whoever spawned it. Stage 2: every driver and service takes its setup
+  through the boot protocol (fssvc's attach_buf/set_key/attach_disk and
+  the fabric's attach_buf/set_identity/set_cert/attach_net become tagged
+  caps and secrets), the kernel boot drivers updated mechanically.
+  Stage 3: unit files, init as orchestrator, root forwarding device
+  caps, the shell boot reduced to "spawn root", and msh's `run` reading
+  a unit file instead of its kind table.
 - ✅ **msh v2: a structured shell language, line editor, and typed
   pipelines** (done). The shell got the OS's own thinking: pipelines
   carry VALUES (records and tables straight from typed IPC), never bytes

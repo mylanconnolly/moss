@@ -22,6 +22,7 @@ const fsc = @import("fsclient.zig");
 const loader = @import("loader.zig");
 const tty = @import("tty.zig");
 const lineedit = @import("lineedit.zig");
+const boot = @import("boot.zig");
 const mshl = @import("mosslib").mshl;
 const Value = mshl.Value;
 
@@ -691,14 +692,14 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void 
         if (view != 0) _ = usys.capDrop(view);
         return it.fail("run: spawn refused ({t})", .{sp.err});
     }
-    const boot = ch.data[1];
-    var ok = runSend(boot, .console, cons_chan) and runSend(boot, .console_buf, cons_shm_h);
-    if (ok and view != 0) ok = runSend(boot, .view, view);
+    const bch = ch.data[1];
+    var ok = boot.giveCap(bch, .console, cons_chan) and boot.giveCap(bch, .console_buf, cons_shm_h);
+    if (ok and view != 0) ok = boot.giveCap(bch, .view, view);
     if (ok) {
         const w = shared.strToWords(path);
-        ok = runSend(boot, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0);
+        ok = boot.give(bch, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0);
     }
-    if (ok) ok = runSend(boot, .go, 0);
+    if (ok) ok = boot.give(bch, .go, 0);
     if (!ok) tty.out("run: the program did not take its setup\r\n");
 
     // The console is the tool's until it exits.
@@ -715,15 +716,8 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void 
         usys.sleep(1);
     }
     _ = usys.capDrop(sp.data[0]);
-    _ = usys.capDrop(boot);
+    _ = usys.capDrop(bch);
     if (view != 0) _ = usys.capDrop(view);
-}
-
-fn runSend(boot: u64, req: shared.RunReq, cap: u64) bool {
-    return switch (usys.callTyped(shared.RunReq, shared.RunResp, boot, req, cap)) {
-        .ok => true,
-        .err => false,
-    };
 }
 
 /// img/index: "name digest" lines.

@@ -110,3 +110,15 @@ pub fn digits(v: u64) usize {
     while (x >= 10) : (x /= 10) n += 1;
     return n;
 }
+
+/// Wire the console from a boot setup (console channel + its buffer).
+/// Exits if either is missing: a console program without a console has
+/// nothing to do.
+pub fn attach(setup: *const @import("boot.zig").Setup) void {
+    const chan = setup.cap(.console);
+    const buf_cap = setup.cap(.console_buf);
+    if (chan == 0 or buf_cap == 0) usys.exit(203);
+    const m = usys.shmMap(buf_cap);
+    if (m.err != .ok) usys.exit(202);
+    init(chan, m.data[0]);
+}

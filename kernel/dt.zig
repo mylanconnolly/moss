@@ -1,12 +1,25 @@
-//! Minimal flattened devicetree (FDT) parsing: just enough to find RAM.
-//! Pure code over a byte buffer — no MMIO, no allocation — so it also runs
-//! in host-side unit tests.
+//! Minimal flattened devicetree (FDT) parsing: RAM, bootargs, and the
+//! virtio-mmio transports (the device window and SPI range the kernel
+//! mints device capabilities from). Pure code over a byte buffer — no
+//! MMIO, no allocation — so it also runs in host-side unit tests.
 
 const std = @import("std");
 
 pub const MemRegion = struct {
     base: u64,
     size: u64,
+};
+
+/// The virtio-mmio transports as one window: every "virtio,mmio" node's
+/// reg lies in [mmio_base, mmio_base + mmio_pages*4K) and its SPI in
+/// [irq_base, irq_base + irq_count) as GIC intids. These are the two
+/// device capabilities the kernel mints at boot; a driver scans the
+/// window for its device id and binds the slot's interrupt.
+pub const VirtioWindow = struct {
+    mmio_base: u64,
+    mmio_pages: u64,
+    irq_base: u32,
+    irq_count: u32,
 };
 
 pub const Error = error{
@@ -102,6 +115,79 @@ pub const Fdt = struct {
         }
     }
 
+    /// Walk the top-level "virtio,mmio" nodes: the span of their reg
+    /// windows and SPIs. Null when the tree has none. Assumes the root's
+    /// 2/2 address/size cells and 3-cell GIC interrupt specifiers
+    /// (type, number, flags; type 0 = SPI, intid = number + 32).
+    pub fn virtioWindow(self: Fdt) ?VirtioWindow {
+        var lo: u64 = std.math.maxInt(u64);
+        var hi: u64 = 0;
+        var spi_lo: u32 = std.math.maxInt(u32);
+        var spi_hi: u32 = 0;
+        var found = false;
+        var depth: i32 = 0;
+        var pos: usize = self.struct_off;
+        // Per node: seen while inside it, applied at end-node when the
+        // compatible string matched.
+        var is_virtio = false;
+        var reg_base: u64 = 0;
+        var reg_size: u64 = 0;
+        var spi: ?u32 = null;
+        while (true) {
+            const tok = self.word(&pos) catch return null;
+            switch (tok) {
+                tok_begin_node => {
+                    _ = self.nodeName(&pos) catch return null;
+                    depth += 1;
+                    if (depth == 2) {
+                        is_virtio = false;
+                        reg_size = 0;
+                        spi = null;
+                    }
+                },
+                tok_end_node => {
+                    if (depth == 2 and is_virtio and reg_size > 0) {
+                        found = true;
+                        lo = @min(lo, reg_base);
+                        hi = @max(hi, reg_base + reg_size);
+                        if (spi) |s| {
+                            spi_lo = @min(spi_lo, s);
+                            spi_hi = @max(spi_hi, s);
+                        }
+                    }
+                    depth -= 1;
+                    if (depth <= 0) break;
+                },
+                tok_prop => {
+                    const len = self.word(&pos) catch return null;
+                    const name_off = self.word(&pos) catch return null;
+                    const data = self.bytes(&pos, len) catch return null;
+                    const name = self.string(name_off) catch return null;
+                    if (depth != 2) continue;
+                    if (std.mem.eql(u8, name, "compatible")) {
+                        is_virtio = std.mem.indexOf(u8, data, "virtio,mmio") != null;
+                    } else if (std.mem.eql(u8, name, "reg") and data.len >= 16) {
+                        reg_base = be64(data[0..8]);
+                        reg_size = be64(data[8..16]);
+                    } else if (std.mem.eql(u8, name, "interrupts") and data.len >= 12) {
+                        if (be32(data[0..4]) == 0) spi = be32(data[4..8]) + 32;
+                    }
+                },
+                tok_nop => {},
+                else => break,
+            }
+        }
+        if (!found) return null;
+        const base = lo & ~@as(u64, 0xfff);
+        const end = std.mem.alignForward(u64, hi, 0x1000);
+        return .{
+            .mmio_base = base,
+            .mmio_pages = (end - base) / 0x1000,
+            .irq_base = if (spi_lo == std.math.maxInt(u32)) 0 else spi_lo,
+            .irq_count = if (spi_lo == std.math.maxInt(u32)) 0 else spi_hi - spi_lo + 1,
+        };
+    }
+
     /// The /chosen bootargs string (QEMU -append), if present.
     pub fn bootargs(self: Fdt) ?[]const u8 {
         var depth: i32 = 0;
@@ -194,8 +280,9 @@ test "parses memory regions from a synthetic FDT" {
         }
     };
 
-    // Strings block: "reg" at 0, "#address-cells" at 4, "#size-cells" at 19.
-    const strings = "reg\x00#address-cells\x00#size-cells\x00";
+    // Strings block: "reg" at 0, "#address-cells" at 4, "#size-cells" at 19,
+    // "compatible" at 31, "interrupts" at 42.
+    const strings = "reg\x00#address-cells\x00#size-cells\x00compatible\x00interrupts\x00";
 
     // Header (40 bytes), then struct block, then strings block.
     try blob.appendSlice(a, &[_]u8{0} ** 40);
@@ -221,6 +308,29 @@ test "parses memory regions from a synthetic FDT" {
     try w.word(&blob, a, 0);
     try w.word(&blob, a, 0x20000000);
     try w.word(&blob, a, tok_end_node);
+    // Two virtio-mmio transports, 0x200 apart, SPIs 16 and 17.
+    for ([_]u32{ 0x0a000000, 0x0a000200 }, [_]u32{ 16, 17 }) |base, spi| {
+        try w.word(&blob, a, tok_begin_node);
+        try w.str(&blob, a, "virtio_mmio@a000000");
+        try w.word(&blob, a, tok_prop); // compatible = "virtio,mmio"
+        try w.word(&blob, a, 12);
+        try w.word(&blob, a, 31);
+        try w.str(&blob, a, "virtio,mmio");
+        try w.word(&blob, a, tok_prop); // reg = <0 base 0 0x200>
+        try w.word(&blob, a, 16);
+        try w.word(&blob, a, 0);
+        try w.word(&blob, a, 0);
+        try w.word(&blob, a, base);
+        try w.word(&blob, a, 0);
+        try w.word(&blob, a, 0x200);
+        try w.word(&blob, a, tok_prop); // interrupts = <0 spi 1>
+        try w.word(&blob, a, 12);
+        try w.word(&blob, a, 42);
+        try w.word(&blob, a, 0);
+        try w.word(&blob, a, spi);
+        try w.word(&blob, a, 1);
+        try w.word(&blob, a, tok_end_node);
+    }
     try w.word(&blob, a, tok_end_node);
     try w.word(&blob, a, tok_end);
 
@@ -239,4 +349,10 @@ test "parses memory regions from a synthetic FDT" {
     try std.testing.expectEqual(@as(usize, 1), found.len);
     try std.testing.expectEqual(@as(u64, 0x40000000), found[0].base);
     try std.testing.expectEqual(@as(u64, 0x20000000), found[0].size);
+
+    const vw = fdt.virtioWindow().?;
+    try std.testing.expectEqual(@as(u64, 0x0a000000), vw.mmio_base);
+    try std.testing.expectEqual(@as(u64, 1), vw.mmio_pages);
+    try std.testing.expectEqual(@as(u32, 48), vw.irq_base);
+    try std.testing.expectEqual(@as(u32, 2), vw.irq_count);
 }

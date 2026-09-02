@@ -330,24 +330,48 @@ pub const InitReply = union(enum(u64)) {
 pub const img_digest_hex_len: usize = 32;
 pub const img_index_path = "img/index";
 
-// --------------------------------------------------------------- run tools
+// ----------------------------------------------------------- boot protocol
 //
-// A program `run` by msh serves a boot channel and receives its whole
-// world as messages before `go`: the console (channel + byte buffer,
-// shared with msh, which waits silently until the tool exits), an
-// optional filesystem view, and up to 24 bytes of argument text. Kernel
-// caps (introspection) arrive as spawn grants at fixed slots.
+// How a program receives its world. Spawn grants only what fits in flags
+// (log, spawner, bootfs, introspect) plus one channel; everything else —
+// device caps, other services' channels, buffers, views, secrets,
+// arguments — arrives as typed messages on that boot channel before
+// `go`. The spawner (init, msh, a boot driver) is whoever holds the caps;
+// the program need not know who. Tags name what a cap is FOR; the
+// program maps tags to its own state. This is the one setup protocol:
+// drivers, services, and run tools all start by taking it.
 
-pub const RunReq = union(enum(u64)) {
-    console: void, // + console channel cap
-    console_buf: void, // + the console byte buffer (shm cap)
-    view: void, // + a filesystem view cap
-    arg: struct { a: u64, b: u64, c: u64 }, // strToWords text
+pub const CapTag = enum(u64) {
+    console = 1, // a console channel
+    console_buf = 2, // the console's byte buffer (shm)
+    view = 3, // a filesystem view
+    mmio = 4, // a device MMIO window
+    irq = 5, // a device interrupt range
+    entropy = 6, // the right to seed the kernel pool
+    buf = 7, // a shared buffer the program should map (service staging)
+    disk = 8, // a block service channel
+    net = 9, // a network view
+    init = 10, // an init front channel (re-wiring, service control)
+    fabric = 11, // the fabric service's channel
+    spawner = 12, // spawn authority
+};
+
+pub const cap_tag_count = 13;
+
+pub const BootReq = union(enum(u64)) {
+    /// + cap attachment: what it is for.
+    cap: struct { tag: u64 },
+    /// Secret material at buf[off..off+len] of the `buf` cap (the
+    /// program copies it out and zeroizes the buffer).
+    secret: struct { off: u64, len: u64 },
+    /// Up to 24 bytes of argument text.
+    arg: struct { a: u64, b: u64, c: u64 },
     go: void,
 };
 
-pub const RunResp = union(enum(u64)) {
+pub const BootResp = union(enum(u64)) {
     ok: void,
+    refused: void,
 };
 
 /// The logging service protocol: 24 bytes of text packed into the words.

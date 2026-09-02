@@ -16,6 +16,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -41,17 +42,28 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-// rngd's grant slots (insert order log -> mmio -> irq -> entropy; it is
-// spawned without a channel).
-const mmio_h: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
-const irq_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
-const entropy_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
+// rngd receives its device caps over its boot channel (shared.BootReq):
+// the MMIO window, the interrupt range, and the entropy cap — whoever
+// spawned it decided it gets a device; it only learns what each is for.
+var mmio_h: u64 = 0;
+var irq_h: u64 = 0;
+var entropy_h: u64 = 0;
 
 const default_reseed_ticks: u64 = 300; // 30s on the 100ms tick
 
-export fn umain(log_h: u64, _: u64, arg: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     switch (arg & 0xff) {
-        1 => rngd(log_h, (arg >> 8) & 0xffff),
+        1 => {
+            const setup = boot.take(chan_h);
+            mmio_h = setup.cap(.mmio);
+            irq_h = setup.cap(.irq);
+            entropy_h = setup.cap(.entropy);
+            if (mmio_h == 0 or irq_h == 0 or entropy_h == 0) {
+                _ = usys.log(log_h, "rngd: not handed a device (mmio, irq, entropy); exiting");
+                usys.exit(169);
+            }
+            rngd(log_h, (arg >> 8) & 0xffff);
+        },
         2 => probeSeeded(log_h),
         3 => probeUnseeded(log_h),
         else => usys.exit(250),
@@ -284,8 +296,10 @@ fn probeSeeded(log_h: u64) noreturn {
     const text: [*]u8 = @ptrFromInt(shared.user_image_base);
     if (usys.getrandom(text[0..16]) != .fault) usys.exit(187);
 
-    // Seeding needs the entropy cap; this domain holds only a log cap.
-    if (usys.rngSeed(entropy_h, &a) != .bad_handle) usys.exit(188);
+    // Seeding needs the entropy cap; this domain holds only a log cap
+    // (slot 3 is what a driver's table would hold — empty here).
+    const bogus_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
+    if (usys.rngSeed(bogus_h, &a) != .bad_handle) usys.exit(188);
     if (usys.rngSeed(0, &a) != .bad_handle) usys.exit(189);
 
     // A full-size draw looks like noise: distinct byte values and a
