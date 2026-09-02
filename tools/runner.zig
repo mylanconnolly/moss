@@ -54,6 +54,7 @@ const specs = [_]Spec{
 const check_dir = "zig-out/check";
 const cluster_port = "31901";
 const cluster_port2 = "31902";
+const cluster_port3 = "31904"; // the imposter's hub port
 const shell_port: u16 = 31903;
 const poll_ms = 100;
 
@@ -174,6 +175,8 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s3,listen=127.0.0.1:{s}", .{cluster_port2}),
         "-netdev", "hubport,id=h3,hubid=0,netdev=s3",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s9,listen=127.0.0.1:{s}", .{cluster_port3}),
+        "-netdev", "hubport,id=h9,hubid=0,netdev=s9",
         "-append", "node=1",
     });
     var c1 = try spawnQemu(args1.items);
@@ -184,6 +187,11 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     defer c2.kill(io);
     var c3 = try spawnQemu(try joinerArgs(log3, bin, cluster_port2, "node=3"));
     defer c3.kill(io);
+    // The imposter: wrong fabric key; the handshake must refuse it.
+    const log9 = try std.fmt.allocPrint(gpa, "{s}/{s}-node9.log", .{ check_dir, spec.name });
+    cwd.deleteFile(io, log9) catch {};
+    var c9 = try spawnQemu(try joinerArgs(log9, bin, cluster_port3, "node=9 badkey=1"));
+    defer c9.kill(io);
 
     // Stage: wait for the death marker, then relaunch node 2 (the rejoin).
     var c2b: ?std.process.Child = null;
@@ -215,6 +223,11 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const n3 = cwd.readFileAlloc(io, log3, gpa, .limited(1 << 20)) catch "";
     if (std.mem.indexOf(u8, n3, "full mesh") == null) {
         reportFailure(spec.name, "node 3 never reached full mesh (gossip)", log3);
+        return false;
+    }
+    const n9 = cwd.readFileAlloc(io, log9, gpa, .limited(1 << 20)) catch "";
+    if (std.mem.indexOf(u8, n9, "wrong-key join rejected") == null) {
+        reportFailure(spec.name, "imposter was not rejected", log9);
         return false;
     }
     return true;

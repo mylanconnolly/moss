@@ -502,7 +502,7 @@ pub const TcpState = enum(u64) {
 // node N is 10.77.0.N / fdcc::N.
 
 pub const fabric_port: u64 = 7100;
-pub const fabric_ver: u8 = 2; // v2: membership gossip, heartbeats, placement
+pub const fabric_ver: u8 = 3; // v3: authenticated + encrypted transport (fabric key)
 
 pub fn nodeIp4(node: u64) u32 {
     return 0x0A4D_0000 | @as(u32, @intCast(node));
@@ -517,7 +517,11 @@ pub const FabReq = union(enum(u64)) {
     connect_peer: struct { node: u64 },
     /// node 0 = placement: the least-loaded live member is chosen.
     remote_spawn: struct { node: u64, image: u64, arg: u64 },
-    attach_buf: void, // + shm cap: buffer for members listings
+    attach_buf: void, // + shm cap: buffer for members listings + key staging
+    /// Badge-0 only, BEFORE attach_net: 32 bytes of fabric key material in
+    /// the attached buffer (zeroized by the service after reading). The
+    /// fabric is fail-closed: without a key it refuses to listen or dial.
+    set_key: struct { off: u64, len: u64 },
     /// Fill the attached buffer with fab_member_size-byte records
     /// {node u16, up u8, pad u8, free_mb u16, pad u16}; reply num{n}.
     members: void,
@@ -538,6 +542,7 @@ pub const FabErr = enum(u64) {
     disconnected = 3,
     refused = 4,
     no_space = 5,
+    no_key = 6, // fail-closed: the fabric key was never staged
 };
 
 /// Badged-session error reply sentinel: word0 = this, word1 = FabErr code.
@@ -551,12 +556,30 @@ pub const fw_spawn_req: u8 = 3;
 pub const fw_spawn_ack: u8 = 4;
 pub const fw_call_req: u8 = 5;
 pub const fw_call_resp: u8 = 6;
-// v2: membership + liveness. hello_ack grew a payload:
-// [node u16][free_mb u16][n u8][{node u16, up u8} x n] — gossip at join.
+// v2+: membership + liveness frames.
 pub const fw_ping: u8 = 7; // [free_mb u16] heartbeat + load advertisement
 pub const fw_pong: u8 = 8; // [free_mb u16]
 pub const fw_member_up: u8 = 9; // [node u16]
 pub const fw_member_down: u8 = 10; // [node u16]
+// v3: the authenticated handshake and sealed transport. The handshake is
+// mutual challenge-response over a 256-bit fabric key (the key never
+// crosses the wire; the wire version is inside every MAC, so downgrade
+// attempts break authentication):
+//   dialer   -> fw_hello     [node u16][nonce 16]
+//   acceptor -> fw_hello_ack [node u16][nonce 16][mac16("ack" transcript)]
+//   dialer   -> fw_auth      [mac16("auth" transcript)]
+// then HKDF(fabric key, both nonces) derives per-direction AEGIS-128L
+// session keys and EVERY subsequent frame travels as fw_sealed
+// [ciphertext of a whole inner frame][tag 16] with counter nonces (TCP
+// orders the stream). Membership gossip rides a sealed fw_members frame:
+// [free_mb u16][n u8][{node u16, up u8} x n].
+// HONESTY: a shared cluster key is symmetric trust — any member can
+// impersonate any other (an Erlang-cookie-shaped domain, minus the
+// plaintext handshake and plus transport encryption). Per-node identity
+// keys are the desired end-state (see ROADMAP).
+pub const fw_auth: u8 = 11;
+pub const fw_sealed: u8 = 12;
+pub const fw_members: u8 = 13;
 
 // QEMU slirp constants (static config; DHCP/SLAAC are not Phase 10
 // problems). v4 net 10.0.2.0/24, v6 prefix fec0::/64.

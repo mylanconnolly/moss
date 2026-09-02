@@ -351,7 +351,10 @@ fn abortSpawn(d: *Domain) void {
         d.watcher = null;
         ipc.unrefNotification(n);
     }
-    std.debug.assert(d.kobj.balance() == 0 and d.user_mem.balance() == 0);
+    if (d.kobj.balance() != 0 or d.user_mem.balance() != 0)
+        std.debug.panic("domain {s} teardown leak: kobj={d}B user={d}B", .{
+            d.name, d.kobj.balance(), d.user_mem.balance(),
+        });
     d.state = .unused;
 }
 

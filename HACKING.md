@@ -109,7 +109,14 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
   drill=1 and powers off, and the RUNNER relaunches it when node 1 logs
   the death — the rejoin path is exercised on every check. Debug with
   the per-node logs in zig-out/check/fabric-node*.log plus pcap filters
-  per netdev.
+  per netdev. A fourth node (node 9, badkey=1) is the imposter: its join
+  must be refused by the v3 handshake.
+- The fabric is fail-closed: a boot driver must attach_buf + set_key (32
+  bytes) to fabsvc BEFORE attach_net, or it refuses the network. Wire
+  frames after the handshake are AEGIS-sealed — pcaps show ciphertext;
+  to read a session, log on the fabsvc side of the seal. Give every
+  service its OWN shm staging buffer: an shm cap handed to two services
+  against one ref underflows at the second teardown.
 - mossfs v3 (CoW, checksums, txg commits, LZ4 compression, XTS
   encryption) is the disk backend; its core (`user/mossfs.zig`) is a pure
   library over `lib/` static modules, so debug it on the host:

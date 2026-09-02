@@ -156,7 +156,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     }
 
     if (build_options.fabric_test) {
-        _ = sched.spawn("boot-watch", fabricTestWorker, boot_node | (boot_drill << 8), .{}) catch |e| {
+        _ = sched.spawn("boot-watch", fabricTestWorker, boot_node | (boot_drill << 8) | (boot_badkey << 16), .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -651,10 +651,28 @@ fn shellTestWorker(_: u64) void {
     }, 0);
     std.debug.assert(res.err == .ok);
 
-    // Wire the fabric to a net view.
+    // Wire the fabric to a net view (fabric key first: fail-closed). The
+    // fabric gets its OWN staging buffer: an shm cap delivered to a service
+    // is unref'd by that service's teardown, so one buffer must never be
+    // handed to two services against a single ref.
+    const fabbuf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const fb = mem.physToPtr([*]u8, fabbuf.pages[0]);
+    ipc.refShm(fabbuf);
     {
+        const fabric_key = "moss-fabric-key--0123456789abcde";
+        var r2 = ipc.call(shellfab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .attach_buf),
+            .cap_type = @intFromEnum(cap.CapType.shm),
+            .cap_obj = @intFromPtr(fabbuf),
+        }, 0);
+        std.debug.assert(r2.err == .ok);
+        @memcpy(fb[0..32], fabric_key);
+        r2 = ipc.call(shellfab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
+        }, 0);
+        std.debug.assert(r2.err == .ok);
         const nview = deriveNetView(shellnet_ch, 0, 0, 0);
-        const r2 = ipc.call(shellfab_ch, .{
+        r2 = ipc.call(shellfab_ch, .{
             .data = shared.encodeMsg(shared.FabReq, .attach_net),
             .cap_type = @intFromEnum(cap.CapType.channel_b),
             .cap_obj = nview.obj,
@@ -739,6 +757,7 @@ fn shellTestWorker(_: u64) void {
     while (shellnet.state != .dead) sched.sleep(1);
     ipc.unrefSide(shellnet_ch, .b);
     ipc.unrefSide(shellfab_ch, .b);
+    ipc.unrefShm(fabbuf);
     domain.destroy(consdrv);
     while (consdrv.state != .dead) sched.sleep(1);
     domain.destroy(fssvc);
@@ -836,6 +855,7 @@ fn netTestWorker(_: u64) void {
 
 var boot_node: u64 = 0;
 var boot_drill: u64 = 0;
+var boot_badkey: u64 = 0;
 
 fn parseArgNum(args: []const u8, comptime key: []const u8) u64 {
     var i: usize = 0;
@@ -855,6 +875,7 @@ fn parseArgNum(args: []const u8, comptime key: []const u8) u64 {
 
 fn parseNodeArg(args: []const u8) u64 {
     boot_drill = parseArgNum(args, "drill=");
+    boot_badkey = parseArgNum(args, "badkey=");
     return parseArgNum(args, "node=");
 }
 
@@ -868,6 +889,7 @@ fn parseNodeArg(args: []const u8) u64 {
 fn fabricTestWorker(arg: u64) void {
     const node = arg & 0xff;
     const drill = (arg >> 8) & 0xff;
+    const badkey = (arg >> 16) & 0xff;
     const blobs = @import("user_blobs");
     log.info("fabric-test: node {d} coming up (drill={d})", .{ node, drill });
 
@@ -892,14 +914,50 @@ fn fabricTestWorker(arg: u64) void {
         .grant_spawner = true,
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
-    const view = deriveNetView(net_ch, 0, 0, 0);
+    // Stage the fabric key (the cluster secret), then hand over the net.
+    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
+    ipc.refShm(pathbuf);
     var res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .attach_buf),
+        .cap_type = @intFromEnum(cap.CapType.shm),
+        .cap_obj = @intFromPtr(pathbuf),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    const fabric_key = "moss-fabric-key--0123456789abcde";
+    comptime std.debug.assert(fabric_key.len == 32);
+    @memcpy(pb[0..32], fabric_key);
+    if (badkey != 0) pb[0] ^= 0xff; // the imposter drill's wrong key
+    res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    const view = deriveNetView(net_ch, 0, 0, 0);
+    res = ipc.call(fab_ch, .{
         .data = shared.encodeMsg(shared.FabReq, .attach_net),
         .cap_type = @intFromEnum(cap.CapType.channel_b),
         .cap_obj = view.obj,
         .cap_badge = view.badge,
     }, 0);
     std.debug.assert(res.err == .ok);
+
+    if (node == 9) {
+        // The imposter: wrong key, join must be REFUSED by the handshake.
+        for (0..10) |_| {
+            res = ipc.call(fab_ch, .{
+                .data = shared.encodeMsg(shared.FabReq, .{ .connect_peer = .{ .node = 1 } }),
+            }, 0);
+            if (res.err == .ok) {
+                if (shared.decodeMsg(shared.FabResp, res.msg.data)) |rep| {
+                    if (rep == .ok) std.debug.panic("fabric-test: WRONG-KEY JOIN ACCEPTED", .{});
+                }
+            }
+            fabPump(fab_ch, 2);
+        }
+        log.info("fabric-test: wrong-key join rejected (as designed)", .{});
+        psci.systemOff();
+    }
 
     if (node != 1) {
         // Joiners: node 3 waits so it must learn node 2 by GOSSIP, not by
@@ -933,16 +991,6 @@ fn fabricTestWorker(arg: u64) void {
     }
 
     // ------------------------------------------------ node 1: the verifier
-    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
-    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
-    ipc.refShm(pathbuf);
-    res = ipc.call(fab_ch, .{
-        .data = shared.encodeMsg(shared.FabReq, .attach_buf),
-        .cap_type = @intFromEnum(cap.CapType.shm),
-        .cap_obj = @intFromPtr(pathbuf),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-
     // Stage A: both nodes join; the membership converges by gossip.
     if (!waitMember(fab_ch, pb, 2, true, 600) or !waitMember(fab_ch, pb, 3, true, 600))
         std.debug.panic("fabric-test: membership never converged", .{});

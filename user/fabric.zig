@@ -17,8 +17,13 @@
 //!                     neither knows nor cares that its clients are on
 //!                     another machine.
 
+const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
+
+const Aead = std.crypto.aead.aegis.Aegis128L;
+const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
 
 comptime {
     asm (
@@ -36,7 +41,7 @@ comptime {
     );
 }
 
-pub const panic = @import("std").debug.FullPanic(uPanic);
+pub const panic = std.debug.FullPanic(uPanic);
 
 fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
@@ -86,9 +91,16 @@ const Peer = struct {
     used: bool = false,
     node: u64 = 0, // 0 until hello
     sock: u64 = 0,
-    greeted: bool = false,
+    greeted: bool = false, // fully authenticated + session keys live
     dead: bool = false,
     born: u64 = 0, // tick when accepted/dialed (reaps silent strangers)
+    dialer: bool = false, // we initiated this connection
+    nonce_mine: [16]u8 = @splat(0),
+    nonce_theirs: [16]u8 = @splat(0),
+    tx_key: [16]u8 = @splat(0),
+    rx_key: [16]u8 = @splat(0),
+    tx_ctr: u64 = 0,
+    rx_ctr: u64 = 0,
     rx: [rxbuf_cap]u8 = undefined,
     rxlen: usize = 0,
 };
@@ -132,6 +144,9 @@ var my_node: u64 = 0;
 var glog: u64 = 0;
 var tick: u64 = 0; // the local poll clock
 var last_ping: u64 = 0;
+var fabric_key: [32]u8 = @splat(0);
+var have_key = false;
+var nonce_ctr: u64 = 0;
 var mesh_logged = false;
 
 // One outstanding wire exchange at a time (v0 serializes).
@@ -162,10 +177,28 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
         };
         switch (req) {
             .attach_net => {
+                if (!have_key) {
+                    _ = usys.log(glog, "fabsvc: NO FABRIC KEY — refusing the network (fail closed)");
+                    freply(ferr(.no_key));
+                    continue;
+                }
                 if (r.cap != 0) {
                     net_chan = r.cap;
                     netAttach();
                 }
+                freply(.ok);
+            },
+            .set_key => |sk| {
+                if (fab_buf == 0 or sk.len != 32 or sk.off + sk.len > 4096) {
+                    freply(ferr(.refused));
+                    continue;
+                }
+                const src: [*]volatile u8 = @ptrFromInt(fab_buf + sk.off);
+                for (0..32) |i| {
+                    fabric_key[i] = src[i];
+                    src[i] = 0; // the key lives only here
+                }
+                have_key = true;
                 freply(.ok);
             },
             .attach_buf => {
@@ -330,6 +363,85 @@ fn doMembers() shared.FabResp {
     return .{ .num = .{ .n = n } };
 }
 
+// ----------------------------------------------------------- handshake
+//
+// Mutual challenge-response over the fabric key; per-connection AEGIS
+// session keys from HKDF over both nonces. The key never crosses the
+// wire; the wire version sits inside every MAC (downgrade = auth fail).
+
+/// Handshake nonce: unique + unpredictable to non-key-holders. No RNG
+/// syscall exists yet (virtio-rng is a noted evolution); cycles + a
+/// counter under an HMAC of the fabric key is honest for this purpose.
+fn mkNonce() [16]u8 {
+    nonce_ctr += 1;
+    var msg: [24]u8 = undefined;
+    puleu64(msg[0..8], usys.cycles());
+    puleu64(msg[8..16], my_node);
+    puleu64(msg[16..24], nonce_ctr);
+    var mac: [Hmac.mac_length]u8 = undefined;
+    Hmac.create(&mac, &msg, &fabric_key);
+    return mac[0..16].*;
+}
+
+/// Transcript MAC: label || ver || dialer node || acceptor node ||
+/// dialer nonce || acceptor nonce, truncated to 16 bytes.
+fn transcriptMac(label: []const u8, dialer_node: u64, acceptor_node: u64, dialer_nonce: *const [16]u8, acceptor_nonce: *const [16]u8) [16]u8 {
+    var h = Hmac.init(&fabric_key);
+    h.update(label);
+    h.update(&.{shared.fabric_ver});
+    var n: [4]u8 = undefined;
+    puleu16(n[0..2], @intCast(dialer_node));
+    puleu16(n[2..4], @intCast(acceptor_node));
+    h.update(&n);
+    h.update(dialer_nonce);
+    h.update(acceptor_nonce);
+    var mac: [Hmac.mac_length]u8 = undefined;
+    h.final(&mac);
+    return mac[0..16].*;
+}
+
+fn macEql(a: *const [16]u8, b: []const u8) bool {
+    if (b.len < 16) return false;
+    var diff: u8 = 0;
+    for (a, b[0..16]) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
+/// Directional session keys: HKDF(fabric key, salt = both nonces).
+fn deriveSession(p: *Peer) void {
+    var salt: [32]u8 = undefined;
+    const dn = if (p.dialer) &p.nonce_mine else &p.nonce_theirs;
+    const an = if (p.dialer) &p.nonce_theirs else &p.nonce_mine;
+    @memcpy(salt[0..16], dn);
+    @memcpy(salt[16..32], an);
+    const prk = Hkdf.extract(&salt, &fabric_key);
+    var d2a: [16]u8 = undefined;
+    var a2d: [16]u8 = undefined;
+    Hkdf.expand(&d2a, "moss-fabric-d2a", prk);
+    Hkdf.expand(&a2d, "moss-fabric-a2d", prk);
+    p.tx_key = if (p.dialer) d2a else a2d;
+    p.rx_key = if (p.dialer) a2d else d2a;
+    p.tx_ctr = 0;
+    p.rx_ctr = 0;
+}
+
+fn ctrNonce(ctr: u64) [16]u8 {
+    var n: [16]u8 = @splat(0);
+    puleu64(n[0..8], ctr);
+    return n;
+}
+
+/// Wrap an inner frame as fw_sealed: [outer hdr][ciphertext][tag16].
+fn sealFrame(p: *Peer, inner: []const u8, out: []u8) usize {
+    const olen = 4 + inner.len + 16;
+    frameHdr(out[0..4], @intCast(olen), shared.fw_sealed);
+    var tag: [16]u8 = undefined;
+    Aead.encrypt(out[4 .. 4 + inner.len], &tag, inner, "", ctrNonce(p.tx_ctr), p.tx_key);
+    @memcpy(out[4 + inner.len .. olen], &tag);
+    p.tx_ctr += 1;
+    return olen;
+}
+
 // ------------------------------------------------------- net plumbing
 
 fn netAttach() void {
@@ -367,10 +479,16 @@ fn wouldBlock(resp: shared.NetResp) bool {
     };
 }
 
-/// Send one wire frame on a peer's socket, retrying past stop-and-wait.
-/// Failure (hard error or retries exhausted) is a PEER FAILURE: membership
+/// Send one wire frame on a peer's socket, retrying past stop-and-wait;
+/// authenticated peers get it sealed (AEGIS + counter nonce). Failure
+/// (hard error or retries exhausted) is a PEER FAILURE: membership
 /// learns immediately, not on the next silent timeout.
 fn sendFrame(p: *Peer, frame: []const u8) bool {
+    if (p.greeted) {
+        var sealed: [rxbuf_cap]u8 = undefined;
+        const n = sealFrame(p, frame, &sealed);
+        return sendFrameN(p, sealed[0..n], 30);
+    }
     return sendFrameN(p, frame, 30);
 }
 
@@ -394,11 +512,20 @@ fn sendFrameN(p: *Peer, frame: []const u8, retries: u64) bool {
 /// (a healthy peer mid-exchange must not be failed for it); hard errors
 /// fail the peer. Silent death is the last_heard timeout's job.
 fn tryPing(p: *Peer, frame: []const u8) void {
+    var sealed: [rxbuf_cap]u8 = undefined;
+    const n = sealFrame(p, frame, &sealed); // pings only go to authed peers
     const buf: [*]u8 = @ptrFromInt(net_buf);
-    @memcpy(buf[0..frame.len], frame);
-    const resp = ncall(.{ .tcp_send = .{ .sock = p.sock, .len = frame.len } });
+    @memcpy(buf[0..n], sealed[0..n]);
+    const resp = ncall(.{ .tcp_send = .{ .sock = p.sock, .len = n } });
     if (nnum(resp) != null) return;
-    if (!wouldBlock(resp)) peerFailed(p);
+    // Counter burned but unheard is fine: the receiver only steps rx_ctr
+    // on frames it actually decrypts... it is NOT fine — a skipped
+    // counter desyncs the stream. Roll it back: nothing was sent.
+    if (wouldBlock(resp)) {
+        p.tx_ctr -= 1;
+        return;
+    }
+    peerFailed(p);
 }
 
 /// One place a peer dies: close, membership down, broadcast. Setting
@@ -464,7 +591,36 @@ fn pumpPeer(p: *Peer) void {
             p.dead = true; // version mismatch: drop the peer, loudly simple
             return;
         }
-        handleFrame(p, p.rx[2], p.rx[4..flen]);
+        const ftype = p.rx[2];
+        if (ftype == shared.fw_sealed) {
+            if (!p.greeted or flen < 4 + 16) {
+                peerFailed(p);
+                return;
+            }
+            const clen = flen - 4 - 16;
+            var inner: [rxbuf_cap]u8 = undefined;
+            var tag: [16]u8 = undefined;
+            @memcpy(&tag, p.rx[4 + clen .. flen]);
+            Aead.decrypt(inner[0..clen], p.rx[4 .. 4 + clen], tag, "", ctrNonce(p.rx_ctr), p.rx_key) catch {
+                _ = usys.log(glog, "fabsvc: sealed frame failed authentication; dropping peer");
+                peerFailed(p);
+                return;
+            };
+            p.rx_ctr += 1;
+            // The plaintext is itself a complete frame.
+            if (clen < 4 or leu16(inner[0..2]) != clen or inner[3] != shared.fabric_ver) {
+                peerFailed(p);
+                return;
+            }
+            handleFrame(p, inner[2], inner[4..clen]);
+        } else if (!p.greeted and (ftype == shared.fw_hello or ftype == shared.fw_hello_ack or ftype == shared.fw_auth)) {
+            handleFrame(p, ftype, p.rx[4..flen]);
+        } else {
+            // Plaintext outside the handshake (or handshake replays after
+            // auth) are protocol violations.
+            peerFailed(p);
+            return;
+        }
         const rest = p.rxlen - flen;
         for (0..rest) |i| p.rx[i] = p.rx[flen + i];
         p.rxlen = rest;
@@ -482,7 +638,7 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
     heard(p);
     switch (ftype) {
         shared.fw_hello => {
-            if (body.len < 2) return;
+            if (body.len < 18) return;
             const node = leu16(body[0..2]);
             // Rejoin / duplicate: a fresh connection for a node we already
             // track replaces the old one (the old socket is stale).
@@ -493,25 +649,62 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
                 }
             }
             p.node = node;
-            p.greeted = true;
-            _ = memberUpsert(node, true);
-            if (memberByNode(node)) |m| m.last_heard = tick;
-            sendHelloAck(p);
-            broadcastMember(shared.fw_member_up, node);
-            _ = usys.log(glog, "fabsvc: peer joined (hello); acked with member view");
+            p.dialer = false;
+            @memcpy(&p.nonce_theirs, body[2..18]);
+            p.nonce_mine = mkNonce();
+            // Challenge back: prove WE hold the key; they prove with auth.
+            var ack: [38]u8 = undefined;
+            frameHdr(ack[0..4], 38, shared.fw_hello_ack);
+            puleu16(ack[4..6], @intCast(my_node));
+            @memcpy(ack[6..22], &p.nonce_mine);
+            const mac = transcriptMac("ack", p.node, my_node, &p.nonce_theirs, &p.nonce_mine);
+            @memcpy(ack[22..38], &mac);
+            _ = sendFrame(p, &ack);
         },
         shared.fw_hello_ack => {
-            if (body.len < 5) return;
+            // Dialer side: verify the acceptor's proof, send ours, go live.
+            if (body.len < 34 or !p.dialer) return;
             p.node = leu16(body[0..2]);
+            @memcpy(&p.nonce_theirs, body[2..18]);
+            const want = transcriptMac("ack", my_node, p.node, &p.nonce_mine, &p.nonce_theirs);
+            if (!macEql(&want, body[18..34])) {
+                _ = usys.log(glog, "fabsvc: peer failed authentication; dropped");
+                peerFailed(p);
+                return;
+            }
+            var auth: [20]u8 = undefined;
+            frameHdr(auth[0..4], 20, shared.fw_auth);
+            const mac = transcriptMac("auth", my_node, p.node, &p.nonce_mine, &p.nonce_theirs);
+            @memcpy(auth[4..20], &mac);
+            _ = sendFrame(p, &auth); // still plaintext: they derive on receipt
+            deriveSession(p);
             p.greeted = true;
             _ = memberUpsert(p.node, true);
-            if (memberByNode(p.node)) |m| {
-                m.last_heard = tick;
-                m.free_mb = leu16(body[2..4]);
+            if (memberByNode(p.node)) |m| m.last_heard = tick;
+        },
+        shared.fw_auth => {
+            // Acceptor side: the dialer's proof completes the join.
+            if (body.len < 16 or p.dialer) return;
+            const want = transcriptMac("auth", p.node, my_node, &p.nonce_theirs, &p.nonce_mine);
+            if (!macEql(&want, body[0..16])) {
+                _ = usys.log(glog, "fabsvc: peer failed authentication; dropped");
+                peerFailed(p);
+                return;
             }
-            // The gossip payload: the acker's member view.
-            const n = body[4];
-            var off: usize = 5;
+            deriveSession(p);
+            p.greeted = true;
+            _ = memberUpsert(p.node, true);
+            if (memberByNode(p.node)) |m| m.last_heard = tick;
+            broadcastMember(shared.fw_member_up, p.node);
+            sendMembersFrame(p);
+            _ = usys.log(glog, "fabsvc: peer joined (authenticated); sent member view");
+        },
+        shared.fw_members => {
+            // The acceptor's member view, sealed: gossip at join.
+            if (body.len < 3) return;
+            if (memberByNode(p.node)) |m| m.free_mb = leu16(body[0..2]);
+            const n = body[2];
+            var off: usize = 3;
             for (0..n) |_| {
                 if (off + 3 > body.len) break;
                 const node = leu16(body[off .. off + 2][0..2]);
@@ -620,23 +813,22 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
     }
 }
 
-/// hello_ack: [node u16][free_mb u16][n u8][{node u16, up u8} x n].
-fn sendHelloAck(p: *Peer) void {
-    var ack: [9 + max_members * 3]u8 = undefined;
-    puleu16(ack[4..6], @intCast(my_node));
-    puleu16(ack[6..8], @intCast(@min(selfFreeMb(), 0xffff)));
+/// Sealed member-view gossip: [free_mb u16][n u8][{node u16, up u8} x n].
+fn sendMembersFrame(p: *Peer) void {
+    var f: [7 + max_members * 3]u8 = undefined;
+    puleu16(f[4..6], @intCast(@min(selfFreeMb(), 0xffff)));
     var n: u8 = 0;
-    var off: usize = 9;
+    var off: usize = 7;
     for (&members) |*m| {
         if (!m.used or m.node == p.node) continue;
-        puleu16(ack[off .. off + 2][0..2], @intCast(m.node));
-        ack[off + 2] = @intFromBool(m.up);
+        puleu16(f[off .. off + 2][0..2], @intCast(m.node));
+        f[off + 2] = @intFromBool(m.up);
         off += 3;
         n += 1;
     }
-    ack[8] = n;
-    frameHdr(ack[0..4], @intCast(off), shared.fw_hello_ack);
-    _ = sendFrame(p, ack[0..off]);
+    f[6] = n;
+    frameHdr(f[0..4], @intCast(off), shared.fw_members);
+    _ = sendFrame(p, f[0..off]);
 }
 
 // ------------------------------------------------------------ operations
@@ -686,9 +878,12 @@ fn doConnectPeer(node: u64) shared.FabResp {
     }
     if (!found) return ferr(.no_space);
 
-    var hello: [6]u8 = undefined;
-    frameHdr(hello[0..4], 6, shared.fw_hello);
+    p.dialer = true;
+    p.nonce_mine = mkNonce();
+    var hello: [22]u8 = undefined;
+    frameHdr(hello[0..4], 22, shared.fw_hello);
     puleu16(hello[4..6], @intCast(my_node));
+    @memcpy(hello[6..22], &p.nonce_mine);
     if (!sendFrame(p, &hello)) return ferr(.disconnected);
     for (0..50) |_| {
         pumpAll();

@@ -599,12 +599,64 @@ relaunches node 2 after its drill poweroff, so the check proves join,
 gossip (node 3's own full-mesh view), placement, death detection with no
 call in flight, rejoin, and respawn on the rejoined node.
 
+**Fabric security (as built, wire v3).** Before this, port 7100 was the
+one ambient-authority hole in the system: anyone on the segment could
+join, lie in gossip, read everything, and — worst — send fw_spawn_req,
+which the receiver executed with its spawner capability: code execution
+by packet. Now the fabric is **fail-closed**: fabsvc refuses to listen or
+dial until its root of trust stages a 256-bit fabric key (set_key over
+the attached buffer, zeroized after the copy; the key exists only in
+fabsvc's memory and never crosses the wire). Joining is a mutual
+challenge-response handshake — hello carries a 16-byte nonce; the
+acceptor answers with its nonce and an HMAC-SHA256 (truncated to 16
+bytes) over the transcript {label, wire version, dialer node, acceptor
+node, dialer nonce, acceptor nonce}; the dialer verifies and returns its
+own proof with a different label. Nothing secret is compared in
+plaintext, replays die with the nonces, and because the wire version is
+inside the MAC a downgrade attempt is an authentication failure, not a
+negotiation. HKDF over (fabric key, both nonces) then derives two
+AEGIS-128L session keys, one per direction, and every later frame —
+gossip, heartbeats, spawn requests, forwarded calls — travels as
+fw_sealed: an AEAD-wrapped whole inner frame with a counter nonce (TCP
+orders the stream; a burned counter on a would_block ping is rolled
+back so the streams never desync). AEGIS rides the hardware AES path.
+
+Threat-model honesty, in order of importance:
+- **A shared cluster key is symmetric trust.** Every member can
+  impersonate every other member, and revoking one node means rekeying
+  the cluster. This is the trust domain an Erlang cookie draws — we kept
+  the domain and fixed the mechanism (no plaintext handshake, real
+  transport encryption). **The desired end-state is per-node identity:**
+  a keypair per node, a cluster trust root that signs identities, and
+  per-link authorization of what a peer may do (spawn which images,
+  gossip membership) as capabilities — so a compromised node is a
+  revocable identity, not a rekey. The transcript MACs are shaped to be
+  replaced by signatures without changing frame layouts; see ROADMAP.
+- Handshake nonces are an HMAC over the cycle counter and a per-boot
+  counter under the fabric key: unique and unpredictable to non-key-
+  holders, but not from a hardware RNG (none is wired; virtio-rng is the
+  evolution, and per-node keypairs will require it).
+- Membership *claims* are authenticated (only key-holders can gossip)
+  but not *verified* (a member's node id is asserted, not proven — the
+  per-node-identity item again).
+- The check's fabric drill runs an imposter node with a flipped key
+  byte; its join must be refused by the handshake (asserted from its
+  own log), and the plaintext-vs-sealed gate drops any peer that sends
+  plaintext outside the handshake.
+
 v0 honesty notes that remain: one outstanding wire exchange at a time, no
 cap transfer across nodes beyond spawn-time grants, polling-driven
 pumping (the node driver — or the shell boot — ticks the fabric), death
 of in-flight calls is an error-sentinel reply, and node id → 10.77.0.N
 addressing is static (dynamic addressing is a separate concern). Each a
 known evolution point, none an ABI change.
+
+A teardown lesson from wiring the fabric into the shell boot: an shm
+cap delivered to a service is unref'd by *that service's* teardown, so
+one buffer handed to two services against a single ref underflows the
+refcount at the second teardown. Every service gets its own staging
+buffer; and finishTeardown's bare assert became a named panic (domain,
+kobj and user balances) so the next leak says who.
 
 ## Security posture
 
