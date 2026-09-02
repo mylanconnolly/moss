@@ -481,8 +481,7 @@ is the barrier ack).
   itself a CoW tree keyed by object id. `nlink` is reserved but always 1:
   hardlinks are deferred deliberately — a second dirent to the same
   object would defeat subtree-view exclusivity, and that wants its own
-  design pass. Directories are packed 64B dirents (linear scan; hashed
-  dirs are a format-versioned v3 option).
+  design pass. Directories are packed 64B dirents (linear within one block; hashed past it since format v4 — below).
 - **Symlinks** store their target verbatim and resolve *relative to the
   containing directory* under the same component rules as any path (no
   "..", no absolute targets, 8 follows max, stat/delete/readlink do not
@@ -506,6 +505,25 @@ is the barrier ack).
   explicit barrier. A crash loses recent unsynced acks, never structure.
   (Run QEMU disks with default writeback cache — never `cache=unsafe`,
   which drops the FLUSH barriers the design depends on.)
+
+**Hashed directories (as built, format v4):** a directory that fits one
+block is a flat array of 64-byte entries scanned in insertion order —
+what every small directory is, and what a v3 volume's directories all
+are (it mounts unchanged and is written as v4). The first entry that
+would not fit converts the directory to extendible hashing over the
+name's xxhash64: block 0 becomes a header {depth, bucket count, a table
+of 2^depth bucket block numbers indexed by the hash's top `depth`
+bits}; every other block is a bucket {local depth, 63 entries}. Lookup
+is one hash, one table read, one bucket scan. A full bucket splits on
+its next hash bit, doubling the table when its local depth equals the
+global one; buckets are ordinary blocks of the directory object, so
+CoW, checksums, and transaction groups cover a split like any write —
+the crash sweep across a conversion proves every cut leaves either the
+old directory or the new one, never a torn table. Entry index = byte
+offset / 64 in both layouts, so removal is one zeroed entry either way.
+Listing order is bucket order past one block (nothing may rely on
+insertion order there; the shell has `sort-by`). Limit: 512 buckets,
+about 32K entries; a two-level table is the evolution.
 
 The protocol grew delete, rename (atomic within a txg; directory moves
 across parents are refused pending an ancestry walk), truncate, stat,

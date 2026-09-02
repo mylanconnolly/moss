@@ -64,7 +64,12 @@ pub const gt_per_block = block_size / gt_entry_size; // 28
 const bits_per_bblock: u64 = block_size * 8; // sectors covered per bitmap block
 
 const sb_magic = "MOS3";
-const fs_version: u32 = 3;
+/// v4 adds hashed directories (a dnode flag + the HDIR layout). A v3
+/// volume mounts unchanged (all its directories are linear) and is
+/// written as v4 from then on; only directories that outgrow one block
+/// take the new layout.
+const fs_version: u32 = 4;
+const fs_version_min: u32 = 3;
 
 pub const DevError = error{IoError};
 
@@ -138,10 +143,14 @@ pub const BlockPtr = struct {
 
 pub const ObjType = enum(u8) { free = 0, file = 1, dir = 2, symlink = 3 };
 
+/// Dnode flags (byte 4).
+pub const dn_flag_hashed: u8 = 1; // directory data is the HDIR layout
+
 pub const Dnode = struct {
     typ: ObjType = .free,
     level: u8 = 0, // height of the indirect tree (0 = directs only)
     nlink: u16 = 1, // reserved for a future hardlink design; always 1
+    flags: u8 = 0,
     size: u64 = 0,
     mtime: u64 = 0,
     direct: [3]BlockPtr = @splat(.{}),
@@ -219,6 +228,7 @@ fn putDnode(b: []u8, d: *const Dnode) void {
     b[0] = @intFromEnum(d.typ);
     b[1] = d.level;
     puU(u16, b[2..4], d.nlink);
+    b[4] = d.flags;
     puU(u64, b[8..16], d.size);
     puU(u64, b[16..24], d.mtime);
     for (0..3) |i| putPtr(b[24 + i * 16 ..], d.direct[i]);
@@ -230,6 +240,7 @@ fn getDnode(b: []const u8) Dnode {
     d.typ = std.enums.fromInt(ObjType, b[0]) orelse .free;
     d.level = b[1];
     d.nlink = leU(u16, b[2..4]);
+    d.flags = b[4];
     d.size = leU(u64, b[8..16]);
     d.mtime = leU(u64, b[16..24]);
     for (0..3) |i| d.direct[i] = getPtr(b[24 + i * 16 ..]);
@@ -823,11 +834,81 @@ pub const Fs = struct {
     }
 
     // -------------------------------------------------------- directories
+    //
+    // A directory that fits one block is a flat array of 64-byte entries
+    // scanned in order (insertion order, and what every small directory
+    // is). The first entry that would not fit converts it to a HASHED
+    // directory — extendible hashing over the name's xxhash64: block 0 is
+    // a header {magic, depth, bucket count, a table of 2^depth bucket
+    // block numbers indexed by the hash's top `depth` bits}; every other
+    // block is a bucket {local depth, 63 entries}. Lookup is one hash,
+    // one table read, one bucket scan; a full bucket splits on its next
+    // hash bit (doubling the table when its local depth equals the
+    // global one). Buckets are ordinary blocks of the directory object,
+    // so CoW, checksums, and txg commits cover them as they cover data.
+    // Entry `index` = byte offset / 64 in both layouts, so removal is one
+    // zeroed entry either way. Listing order is bucket order for hashed
+    // directories (nothing may rely on insertion order past one block).
 
     pub const DirentRef = struct { obj: u32, typ: ObjType, index: u64 };
 
+    const linear_max = block_size / dirent_size; // 64
+    const hdir_magic = "HDIR";
+    const hdir_max_depth = 9; // 512 buckets: ~32K entries per directory
+    const bucket_hdr = 64;
+    const bucket_entries = (block_size - bucket_hdr) / dirent_size; // 63
+    const hdir_table_off = 16;
+
+    fn nameHash(name: []const u8) u64 {
+        return std.hash.XxHash64.hash(0x64697268, name);
+    }
+
+    fn slotOf(h: u64, depth: u8) usize {
+        if (depth == 0) return 0;
+        const shift: u6 = @intCast(64 - @as(u32, depth));
+        return @intCast(h >> shift);
+    }
+
+    /// The hash bit a bucket at local depth `ld` splits on (MSB = bit 63).
+    fn splitBit(h: u64, ld: u8) u1 {
+        const shift: u6 = @intCast(63 - @as(u32, ld));
+        return @intCast((h >> shift) & 1);
+    }
+
+    const HdirHeader = struct {
+        depth: u8,
+        nbuckets: u32,
+        table: [1 << hdir_max_depth]u32,
+
+        fn slots(h: *const HdirHeader) usize {
+            return @as(usize, 1) << @intCast(h.depth);
+        }
+
+        fn write(h: *const HdirHeader, blk: *[block_size]u8) void {
+            @memset(blk, 0);
+            @memcpy(blk[0..4], hdir_magic);
+            blk[4] = h.depth;
+            puU(u32, blk[8..12], h.nbuckets);
+            for (0..h.slots()) |i| puU(u32, blk[hdir_table_off + i * 4 ..], h.table[i]);
+        }
+    };
+
+    fn hdirReadHeader(fs: *Fs, dir: u32) Error!HdirHeader {
+        var blk: [block_size]u8 = undefined;
+        try fs.readFileBlock(dir, 0, &blk);
+        if (!std.mem.eql(u8, blk[0..4], hdir_magic) or blk[4] > hdir_max_depth) return Error.Corrupt;
+        var h: HdirHeader = .{ .depth = blk[4], .nbuckets = leU(u32, blk[8..12]), .table = undefined };
+        for (0..h.slots()) |i| h.table[i] = leU(u32, blk[hdir_table_off + i * 4 ..]);
+        return h;
+    }
+
+    fn isHashed(dn: *const Dnode) bool {
+        return dn.flags & dn_flag_hashed != 0;
+    }
+
     pub fn dirLookup(fs: *Fs, dir: u32, name: []const u8) Error!?DirentRef {
         const dn = try fs.dnodeOf(dir);
+        if (isHashed(&dn)) return fs.hdirLookup(dir, name);
         var buf: [block_size]u8 = undefined;
         var index: u64 = 0;
         var off: u64 = 0;
@@ -849,6 +930,25 @@ pub const Fs = struct {
         return null;
     }
 
+    fn hdirLookup(fs: *Fs, dir: u32, name: []const u8) Error!?DirentRef {
+        const hdr = try fs.hdirReadHeader(dir);
+        const h = nameHash(name);
+        const b = hdr.table[slotOf(h, hdr.depth)];
+        var buf: [block_size]u8 = undefined;
+        try fs.readFileBlock(dir, b, &buf);
+        for (0..bucket_entries) |i| {
+            const e = buf[bucket_hdr + i * dirent_size ..];
+            if (e[4] != 0 and e[5] == name.len and std.mem.eql(u8, e[8 .. 8 + name.len], name)) {
+                return .{
+                    .obj = leU(u32, e[0..4]),
+                    .typ = std.enums.fromInt(ObjType, e[4]) orelse .free,
+                    .index = (@as(u64, b) * block_size + bucket_hdr) / dirent_size + i,
+                };
+            }
+        }
+        return null;
+    }
+
     pub fn dirAdd(fs: *Fs, dir: u32, name: []const u8, obj: u32, typ: ObjType, now: u64) Error!void {
         if (name.len == 0 or name.len > max_name) return Error.TooLarge;
         var ent: [dirent_size]u8 = @splat(0);
@@ -858,6 +958,7 @@ pub const Fs = struct {
         @memcpy(ent[8 .. 8 + name.len], name);
 
         const dn = try fs.dnodeOf(dir);
+        if (isHashed(&dn)) return fs.hdirAdd(dir, &ent, nameHash(name), now);
         var buf: [block_size]u8 = undefined;
         var off: u64 = 0;
         while (off < dn.size) : (off += block_size) {
@@ -870,7 +971,102 @@ pub const Fs = struct {
                 }
             }
         }
+        if (dn.size == linear_max * dirent_size) {
+            // One full block: the directory becomes hashed from here on.
+            try fs.hdirConvert(dir, &buf, now);
+            return fs.hdirAdd(dir, &ent, nameHash(name), now);
+        }
         _ = try fs.writeObj(dir, dn.size, &ent, now);
+    }
+
+    /// Turn a full one-block linear directory (its block in `linear`) into
+    /// a hashed one: header at block 0, two buckets at blocks 1 and 2
+    /// split on the hash's top bit.
+    fn hdirConvert(fs: *Fs, dir: u32, linear: *[block_size]u8, now: u64) Error!void {
+        var buckets: [2][block_size]u8 = undefined;
+        @memset(&buckets[0], 0);
+        @memset(&buckets[1], 0);
+        buckets[0][0] = 1;
+        buckets[1][0] = 1;
+        var fill: [2]usize = .{ 0, 0 };
+        for (0..linear_max) |i| {
+            const e = linear[i * dirent_size ..][0..dirent_size];
+            if (e[4] == 0) continue;
+            const which: usize = splitBit(nameHash(e[8 .. 8 + e[5]]), 0);
+            @memcpy(buckets[which][bucket_hdr + fill[which] * dirent_size ..][0..dirent_size], e);
+            fill[which] += 1;
+        }
+        var hdr: HdirHeader = .{ .depth = 1, .nbuckets = 2, .table = undefined };
+        hdr.table[0] = 1;
+        hdr.table[1] = 2;
+        var blk: [block_size]u8 = undefined;
+        hdr.write(&blk);
+        _ = try fs.writeObj(dir, 0, &blk, now);
+        _ = try fs.writeObj(dir, block_size, &buckets[0], now);
+        _ = try fs.writeObj(dir, 2 * block_size, &buckets[1], now);
+        const e = try fs.dnodeSlot(dir);
+        e.dn.flags |= dn_flag_hashed;
+    }
+
+    fn hdirAdd(fs: *Fs, dir: u32, ent: *const [dirent_size]u8, h: u64, now: u64) Error!void {
+        var guard: usize = 0;
+        while (guard < hdir_max_depth + 2) : (guard += 1) {
+            var hdr = try fs.hdirReadHeader(dir);
+            const b = hdr.table[slotOf(h, hdr.depth)];
+            var buf: [block_size]u8 = undefined;
+            try fs.readFileBlock(dir, b, &buf);
+            for (0..bucket_entries) |i| {
+                if (buf[bucket_hdr + i * dirent_size + 4] == 0) {
+                    _ = try fs.writeObj(dir, @as(u64, b) * block_size + bucket_hdr + i * dirent_size, ent, now);
+                    return;
+                }
+            }
+            try fs.hdirSplit(dir, &hdr, b, &buf, now);
+        }
+        return Error.TooLarge;
+    }
+
+    /// Split bucket `b` (its block in `buf`) on its next hash bit; the
+    /// table doubles first when the bucket is already at global depth.
+    fn hdirSplit(fs: *Fs, dir: u32, hdr: *HdirHeader, b: u32, buf: *[block_size]u8, now: u64) Error!void {
+        const ld = buf[0];
+        if (ld == hdr.depth) {
+            if (hdr.depth == hdir_max_depth) return Error.TooLarge;
+            var i = hdr.slots();
+            while (i > 0) {
+                i -= 1;
+                hdr.table[2 * i] = hdr.table[i];
+                hdr.table[2 * i + 1] = hdr.table[i];
+            }
+            hdr.depth += 1;
+        }
+        const nb: u32 = hdr.nbuckets + 1;
+        hdr.nbuckets = nb;
+        var newb: [block_size]u8 = undefined;
+        @memset(&newb, 0);
+        newb[0] = ld + 1;
+        buf[0] = ld + 1;
+        var fill: usize = 0;
+        for (0..bucket_entries) |i| {
+            const e = buf[bucket_hdr + i * dirent_size ..][0..dirent_size];
+            if (e[4] == 0) continue;
+            if (splitBit(nameHash(e[8 .. 8 + e[5]]), ld) == 1) {
+                @memcpy(newb[bucket_hdr + fill * dirent_size ..][0..dirent_size], e);
+                fill += 1;
+                @memset(e, 0);
+            }
+        }
+        // Table slots that pointed at b and carry the split bit now point
+        // at the new bucket.
+        const shift: u6 = @intCast(hdr.depth - ld - 1);
+        for (0..hdr.slots()) |i| {
+            if (hdr.table[i] == b and (i >> shift) & 1 == 1) hdr.table[i] = nb;
+        }
+        var blk: [block_size]u8 = undefined;
+        hdr.write(&blk);
+        _ = try fs.writeObj(dir, 0, &blk, now);
+        _ = try fs.writeObj(dir, @as(u64, b) * block_size, buf, now);
+        _ = try fs.writeObj(dir, @as(u64, nb) * block_size, &newb, now);
     }
 
     pub fn dirRemove(fs: *Fs, dir: u32, name: []const u8, now: u64) Error!bool {
@@ -880,40 +1076,59 @@ pub const Fs = struct {
         return true;
     }
 
-    pub fn dirIsEmpty(fs: *Fs, dir: u32) Error!bool {
+    /// Visit every live entry in the directory (either layout).
+    fn dirEach(fs: *Fs, dir: u32, ctx: anytype, comptime visit: fn (@TypeOf(ctx), []const u8) bool) Error!void {
         const dn = try fs.dnodeOf(dir);
         var buf: [block_size]u8 = undefined;
+        if (isHashed(&dn)) {
+            const hdr = try fs.hdirReadHeader(dir);
+            var b: u32 = 1;
+            while (b <= hdr.nbuckets) : (b += 1) {
+                try fs.readFileBlock(dir, b, &buf);
+                for (0..bucket_entries) |i| {
+                    const e = buf[bucket_hdr + i * dirent_size ..][0..dirent_size];
+                    if (e[4] != 0 and !visit(ctx, e)) return;
+                }
+            }
+            return;
+        }
         var off: u64 = 0;
         while (off < dn.size) : (off += block_size) {
             try fs.readFileBlock(dir, off / block_size, &buf);
             const in_blk: usize = @intCast(@min(dn.size - off, block_size) / dirent_size);
             for (0..in_blk) |i| {
-                if (buf[i * dirent_size + 4] != 0) return false;
+                const e = buf[i * dirent_size ..][0..dirent_size];
+                if (e[4] != 0 and !visit(ctx, e)) return;
             }
         }
-        return true;
+    }
+
+    pub fn dirIsEmpty(fs: *Fs, dir: u32) Error!bool {
+        var any = false;
+        try fs.dirEach(dir, &any, struct {
+            fn v(flag: *bool, _: []const u8) bool {
+                flag.* = true;
+                return false;
+            }
+        }.v);
+        return !any;
     }
 
     /// Fill `out` with "name\n" per live entry; returns bytes written.
     pub fn dirList(fs: *Fs, dir: u32, out: []u8) Error!usize {
-        const dn = try fs.dnodeOf(dir);
-        var buf: [block_size]u8 = undefined;
-        var n: usize = 0;
-        var off: u64 = 0;
-        while (off < dn.size) : (off += block_size) {
-            try fs.readFileBlock(dir, off / block_size, &buf);
-            const in_blk: usize = @intCast(@min(dn.size - off, block_size) / dirent_size);
-            for (0..in_blk) |i| {
-                const e = buf[i * dirent_size ..];
-                if (e[4] == 0) continue;
+        const Ctx = struct { out: []u8, n: usize = 0 };
+        var ctx: Ctx = .{ .out = out };
+        try fs.dirEach(dir, &ctx, struct {
+            fn v(c: *Ctx, e: []const u8) bool {
                 const nl = e[5];
-                if (n + nl + 1 > out.len) return n;
-                @memcpy(out[n .. n + nl], e[8 .. 8 + nl]);
-                out[n + nl] = '\n';
-                n += nl + 1;
+                if (c.n + nl + 1 > c.out.len) return false;
+                @memcpy(c.out[c.n .. c.n + nl], e[8 .. 8 + nl]);
+                c.out[c.n + nl] = '\n';
+                c.n += nl + 1;
+                return true;
             }
-        }
-        return n;
+        }.v);
+        return ctx.n;
     }
 
     // ------------------------------------------------------- allocation
@@ -1570,7 +1785,8 @@ pub const Fs = struct {
         for (0..sb_slots) |slot| {
             dev.read(slot * spb, spb, &blk) catch continue;
             if (!std.mem.eql(u8, blk[0..4], sb_magic)) continue;
-            if (leU(u32, blk[4..8]) != fs_version) continue;
+            const ver = leU(u32, blk[4..8]);
+            if (ver < fs_version_min or ver > fs_version) continue;
             const sc = std.hash.XxHash64.hash(0x5342, blk[0 .. block_size - 8]);
             if (sc != leU(u64, blk[block_size - 8 ..])) continue;
             const txg = leU(u64, blk[8..16]);
@@ -1996,6 +2212,64 @@ test "directories: add, lookup, remove, list, emptiness" {
     try testing.expectEqualStrings("sub\n", out[0..n]);
 }
 
+test "hashed directories: conversion, splits, lookup, remove, list, remount" {
+    var rd: RamDev = undefined;
+    const dev = freshDev(&rd);
+    try fmtDev(dev);
+    try t_fs.mount(dev);
+
+    const d = try t_fs.allocObject(.dir, 1);
+    try t_fs.dirAdd(root_obj, "big", d, .dir, 1);
+    // Well past one block and through several splits.
+    const count: u32 = 700;
+    var name: [16]u8 = undefined;
+    for (0..count) |i| {
+        const n = std.fmt.bufPrint(&name, "entry-{d}", .{i}) catch unreachable;
+        try t_fs.dirAdd(d, n, @intCast(1000 + i), .file, 2);
+        if (i % 50 == 0) try t_fs.maybeCommit(2);
+    }
+    try testing.expect(Fs.isHashed(&(try t_fs.dnodeOf(d))));
+    for (0..count) |i| {
+        const n = std.fmt.bufPrint(&name, "entry-{d}", .{i}) catch unreachable;
+        const ref = (try t_fs.dirLookup(d, n)) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(u32, @intCast(1000 + i)), ref.obj);
+    }
+    try testing.expect((try t_fs.dirLookup(d, "entry-700")) == null);
+    try testing.expect((try t_fs.dirLookup(d, "entry")) == null);
+    // Remove every third; the rest stay findable, the removed do not.
+    for (0..count) |i| {
+        if (i % 3 != 0) continue;
+        const n = std.fmt.bufPrint(&name, "entry-{d}", .{i}) catch unreachable;
+        try testing.expect(try t_fs.dirRemove(d, n, 3));
+    }
+    try t_fs.sync(3);
+    try t_fs2.mount(dev);
+    var live: usize = 0;
+    for (0..count) |i| {
+        const n = std.fmt.bufPrint(&name, "entry-{d}", .{i}) catch unreachable;
+        const found = try t_fs2.dirLookup(d, n);
+        if (i % 3 == 0) try testing.expect(found == null) else {
+            try testing.expect(found != null);
+            live += 1;
+        }
+    }
+    // The listing has exactly the live names, each once.
+    var out: [16384]u8 = undefined;
+    const n = try t_fs2.dirList(d, &out);
+    var lines: usize = 0;
+    var it = std.mem.splitScalar(u8, out[0..n], '\n');
+    while (it.next()) |l| {
+        if (l.len > 0) lines += 1;
+    }
+    try testing.expectEqual(live, lines);
+    try testing.expect(!try t_fs2.dirIsEmpty(d));
+    // Re-adding a removed name lands in a free slot.
+    try t_fs2.dirAdd(d, "entry-0", 5000, .file, 4);
+    try testing.expectEqual(@as(u32, 5000), (try t_fs2.dirLookup(d, "entry-0")).?.obj);
+    // Small directories stay linear, in insertion order.
+    try testing.expect(!Fs.isHashed(&(try t_fs2.dnodeOf(root_obj))));
+}
+
 test "corruption is detected, never returned" {
     var rd: RamDev = undefined;
     const dev = freshDev(&rd);
@@ -2223,6 +2497,70 @@ test "crash injection sweep (plaintext)" {
     try crashSweep();
 }
 
+/// The same sweep across a directory's conversion to hashed and its
+/// first split: every cut leaves either the 64-entry linear directory
+/// or the converted one with 66 entries — never a torn table.
+fn dirSweep() !void {
+    var rd: RamDev = undefined;
+    var dev = freshDev(&rd);
+    try fmtDev(dev);
+    try mountKeyed(&t_fs, dev);
+    const d = try t_fs.allocObject(.dir, 1);
+    try t_fs.dirAdd(root_obj, "d", d, .dir, 1);
+    var name: [16]u8 = undefined;
+    for (0..64) |i| {
+        const n = std.fmt.bufPrint(&name, "n{d}", .{i}) catch unreachable;
+        try t_fs.dirAdd(d, n, @intCast(100 + i), .file, 1);
+    }
+    try t_fs.sync(1);
+    @memcpy(&t_snap, &t_storage);
+
+    rd.wlog_len = 0;
+    try t_fs.dirAdd(d, "n64", 164, .file, 2);
+    try t_fs.dirAdd(d, "n65", 165, .file, 2);
+    try t_fs.sync(2);
+    const total_writes = rd.wlog_len;
+
+    for (0..2) |tear| {
+        var cut: usize = 0;
+        while (cut <= total_writes) : (cut += 1) {
+            @memcpy(&t_storage, &t_snap);
+            rd = .{ .secs = &t_storage };
+            rd.cut_after = cut;
+            rd.tear_final = tear == 1 and cut > 0;
+            dev = rd.dev();
+            try mountKeyed(&t_fs2, dev);
+            t_fs2.dirAdd(d, "n64", 164, .file, 2) catch {};
+            t_fs2.dirAdd(d, "n65", 165, .file, 2) catch {};
+            t_fs2.sync(2) catch {};
+
+            rd.cut_after = null;
+            rd.tear_final = false;
+            try mountKeyed(&t_fs, dev);
+            const dn = try t_fs.dnodeOf(d);
+            const has64 = (try t_fs.dirLookup(d, "n64")) != null;
+            const has65 = (try t_fs.dirLookup(d, "n65")) != null;
+            try testing.expect(has64 == has65);
+            try testing.expect(Fs.isHashed(&dn) == has64);
+            for (0..64) |i| {
+                const n = std.fmt.bufPrint(&name, "n{d}", .{i}) catch unreachable;
+                try testing.expectEqual(@as(u32, @intCast(100 + i)), (try t_fs.dirLookup(d, n)).?.obj);
+            }
+        }
+    }
+}
+
+test "crash injection sweep across a directory conversion (plaintext)" {
+    t_key = null;
+    try dirSweep();
+}
+
+test "crash injection sweep across a directory conversion (encrypted)" {
+    t_key = &test_master_key;
+    defer t_key = null;
+    try dirSweep();
+}
+
 test "crash injection sweep (encrypted)" {
     t_key = &test_master_key;
     defer t_key = null;
@@ -2239,22 +2577,25 @@ fn modelRun() !void {
     try fmtDev(dev);
     try mountKeyed(&t_fs, dev);
 
+    // 96 slots: the root directory outgrows one block and goes hashed
+    // under the randomized churn, so both layouts see the model.
+    const model_slots = 96;
     const Model = struct {
-        used: [16]bool = @splat(false),
-        obj: [16]u32 = undefined,
-        content: [16][96]u8 = undefined,
-        len: [16]usize = @splat(0),
+        used: [model_slots]bool = @splat(false),
+        obj: [model_slots]u32 = undefined,
+        content: [model_slots][96]u8 = undefined,
+        len: [model_slots]usize = @splat(0),
     };
     var model: Model = .{};
     var prng = std.Random.DefaultPrng.init(0x6d6f5353);
     const rand = prng.random();
 
     var now: u64 = 10;
-    for (0..600) |_| {
+    for (0..1500) |_| {
         now += 1;
-        const slot = rand.uintLessThan(usize, 16);
+        const slot = rand.uintLessThan(usize, model_slots);
         const op = rand.uintLessThan(u8, 5);
-        const name: [1]u8 = .{'a' + @as(u8, @intCast(slot))};
+        const name: [2]u8 = .{ 'a' + @as(u8, @intCast(slot / 10)), '0' + @as(u8, @intCast(slot % 10)) };
         switch (op) {
             0 => { // create or overwrite
                 if (!model.used[slot]) {
@@ -2301,8 +2642,8 @@ fn modelRun() !void {
             try mountKeyed(&t_fs2, dev);
             break :blk &t_fs2;
         };
-        for (0..16) |slot| {
-            const name: [1]u8 = .{'a' + @as(u8, @intCast(slot))};
+        for (0..model_slots) |slot| {
+            const name: [2]u8 = .{ 'a' + @as(u8, @intCast(slot / 10)), '0' + @as(u8, @intCast(slot % 10)) };
             const found = try f.dirLookup(root_obj, &name);
             if (!model.used[slot]) {
                 try testing.expect(found == null);

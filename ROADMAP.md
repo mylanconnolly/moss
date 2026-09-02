@@ -477,8 +477,24 @@ The pooling story stops being theory.
   cut point + torn final writes), corruption flips, superblock-election
   and model-based randomized-op tests against it on the host. Scoping
   notes: torn-write detection-only (CoW makes them harmless);
-  cross-parent directory rename refused (no ancestry walk yet); linear
-  dirents (hashed dirs are a format-versioned evolution).
+  cross-parent directory rename refused (no ancestry walk yet). ✅
+  **Hashed directories** (done, format v4; a v3 volume mounts unchanged
+  and is written as v4): a directory that fits one block stays a linear
+  array in insertion order; the first entry that would not fit converts
+  it to extendible hashing over the name's xxhash64 — a header block
+  with a table of bucket block numbers indexed by the hash's top bits,
+  63-entry buckets that split on their next bit (doubling the table
+  when needed), all ordinary blocks of the directory object so CoW,
+  checksums, and txg commits cover them. Lookup is one hash, one table
+  read, one bucket scan; listing order is bucket order past one block.
+  Host tests: 700 entries through several splits with removals and a
+  remount, a crash-injection sweep across the conversion on plaintext
+  and encrypted volumes (every cut leaves the old or the new directory,
+  never a torn table), and the randomized model with a root directory
+  that outgrows a block. Limit: 512 buckets (~32K entries; a two-level
+  table is the next step). Hardlinks remain deferred: they let one
+  file appear under two views, which the view-exclusivity design has
+  to answer first.
 - ✅ **mossfs v3 — compression + encryption** (done): format rev on v2, no
   migration. Per-block LZ4 (data blocks; stored only when it saves ≥1
   sector) over sector-granular, byte-aligned allocation (bitmap bit =
