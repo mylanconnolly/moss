@@ -33,6 +33,7 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 
 const loader = @import("loader.zig");
+const boot = @import("boot.zig");
 const fabcert = @import("mosslib").fabcert;
 const Aead = std.crypto.aead.aegis.Aegis128L;
 const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
@@ -112,6 +113,15 @@ var root_buf: u64 = 0;
 /// node's identity seed, and fabsvc never sees the root key.
 fn fabroot(log_h: u64, chan_h: u64) noreturn {
     glog = log_h;
+    // Boot: the staging buffer and the root seed (secret, 32 bytes).
+    var setup = boot.take(chan_h);
+    root_buf = setup.buf_va;
+    if (setup.secret().len == 32 and root_buf != 0) {
+        root_kp = Ed25519.KeyPair.generateDeterministic(setup.secret()[0..32].*) catch usys.exit(161);
+        have_root = true;
+        _ = usys.log(glog, "fabroot: root of trust loaded");
+    }
+    setup.wipeSecret();
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
@@ -121,33 +131,6 @@ fn fabroot(log_h: u64, chan_h: u64) noreturn {
             continue;
         };
         switch (req) {
-            .attach_buf => {
-                if (r.cap != 0) {
-                    const m = usys.shmMap(r.cap);
-                    if (m.err == .ok) root_buf = m.data[0];
-                }
-                rreply(chan_h, .ok);
-            },
-            .set_root => |sr| {
-                if (root_buf == 0 or sr.len != 32 or sr.off + sr.len > 4096) {
-                    rreply(chan_h, ferr(.refused));
-                    continue;
-                }
-                const src: [*]volatile u8 = @ptrFromInt(root_buf + sr.off);
-                var seed: [32]u8 = undefined;
-                for (0..32) |i| {
-                    seed[i] = src[i];
-                    src[i] = 0; // the root seed lives only in the keypair
-                }
-                root_kp = Ed25519.KeyPair.generateDeterministic(seed) catch {
-                    rreply(chan_h, ferr(.refused));
-                    continue;
-                };
-                @memset(&seed, 0);
-                have_root = true;
-                _ = usys.log(glog, "fabroot: root of trust loaded");
-                rreply(chan_h, .ok);
-            },
             .cluster_key => {
                 if (!have_root or root_buf == 0) {
                     rreply(chan_h, ferr(.no_identity));
@@ -321,6 +304,21 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     my_node = node;
     _ = memberUpsert(my_node, true);
 
+    // Boot: the staging buffer, our identity (secret: seed 32 + cluster
+    // key 32 — the public key goes back into the buffer for the root of
+    // trust to certify), and a network view. The network stays closed
+    // until the certificate arrives (set_cert).
+    var setup = boot.take(chan_h);
+    fab_buf = setup.buf_va;
+    if (setup.secret().len == shared.fab_identity_len and fab_buf != 0) {
+        const sec = setup.secret();
+        @memcpy(&cluster_pk, sec[32..64]);
+        identity = Ed25519.KeyPair.generateDeterministic(sec[0..32].*) catch usys.exit(162);
+        have_identity = true;
+    }
+    setup.wipeSecret();
+    net_chan = setup.cap(.net);
+
     while (true) {
         const r = usys.recvMsg(serve_a);
         if (r.err == .peer_dead) usys.exit(0);
@@ -334,51 +332,18 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             continue;
         };
         switch (req) {
-            .attach_net => {
-                if (!have_cert) {
-                    _ = usys.log(glog, "fabsvc: NO IDENTITY/CERTIFICATE — refusing the network (fail closed)");
+            .identity_key => {
+                if (!have_identity or fab_buf == 0) {
                     freply(ferr(.no_identity));
                     continue;
                 }
-                var probe: [16]u8 = undefined;
-                if (usys.getrandom(&probe) != .ok) {
-                    _ = usys.log(glog, "fabsvc: NO ENTROPY — kernel pool unseeded; refusing the network (fail closed)");
-                    freply(ferr(.no_entropy));
-                    continue;
-                }
-                if (r.cap != 0) {
-                    net_chan = r.cap;
-                    netAttach();
-                }
-                freply(.ok);
-            },
-            .set_identity => |si| {
-                if (fab_buf == 0 or si.len != shared.fab_identity_len or si.off + si.len > 4096) {
-                    freply(ferr(.refused));
-                    continue;
-                }
-                const src: [*]volatile u8 = @ptrFromInt(fab_buf + si.off);
-                var seed: [32]u8 = undefined;
-                for (0..32) |i| {
-                    seed[i] = src[i];
-                    src[i] = 0; // the seed lives only in the keypair
-                }
-                for (0..32) |i| cluster_pk[i] = src[32 + i];
-                identity = Ed25519.KeyPair.generateDeterministic(seed) catch {
-                    freply(ferr(.refused));
-                    continue;
-                };
-                @memset(&seed, 0);
-                have_identity = true;
-                have_cert = false;
-                // Hand back the public half for the root to certify.
                 const out: [*]volatile u8 = @ptrFromInt(fab_buf);
                 const pk = identity.public_key.toBytes();
                 for (0..32) |i| out[i] = pk[i];
                 freply(.{ .num = .{ .n = 32 } });
             },
             .set_cert => |sc| {
-                if (!have_identity or fab_buf == 0 or sc.len != fabcert.cert_len or sc.off + sc.len > 4096) {
+                if (!have_identity or have_cert or fab_buf == 0 or sc.len != fabcert.cert_len or sc.off + sc.len > 4096) {
                     freply(ferr(.refused));
                     continue;
                 }
@@ -396,6 +361,19 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                 }
                 have_cert = true;
                 _ = usys.log(glog, "fabsvc: identity certified by the trust root");
+                // Certified: the network may open — given a view and entropy.
+                if (net_chan == 0) {
+                    _ = usys.log(glog, "fabsvc: NO NETWORK VIEW — certified but isolated");
+                    freply(ferr(.no_peer));
+                    continue;
+                }
+                var probe: [16]u8 = undefined;
+                if (usys.getrandom(&probe) != .ok) {
+                    _ = usys.log(glog, "fabsvc: NO ENTROPY — kernel pool unseeded; refusing the network (fail closed)");
+                    freply(ferr(.no_entropy));
+                    continue;
+                }
+                netAttach();
                 freply(.ok);
             },
             .revoke => |rv| {

@@ -364,6 +364,9 @@ pub const BootReq = union(enum(u64)) {
     /// Secret material at buf[off..off+len] of the `buf` cap (the
     /// program copies it out and zeroizes the buffer).
     secret: struct { off: u64, len: u64 },
+    /// Non-secret setup bytes at buf[off..off+len] (a certificate, a
+    /// config record); copied out, the buffer left as is.
+    data: struct { off: u64, len: u64 },
     /// Up to 24 bytes of argument text.
     arg: struct { a: u64, b: u64, c: u64 },
     go: void,
@@ -463,13 +466,10 @@ pub const fs_buf_pages: u64 = 8;
 pub const fs_max_io: u64 = fs_buf_pages * 4096;
 
 pub const FsReq = union(enum(u64)) {
-    attach_buf: void, // + shm cap: this view's path/data buffer
-    /// Root handshake: hand the FS its disk (+ blk channel cap). On an
-    /// encrypted volume, set_key must have arrived first.
-    attach_disk: void,
-    /// Badge-0 only, before attach_disk: 32 bytes of master key material
-    /// in the view buffer (zeroized by the service after reading).
-    set_key: struct { off: u64, len: u64 },
+    /// + shm cap: this view's path/data buffer. (Badge 0's buffer, the
+    /// volume key, and the disk arrive over the boot channel: BootReq
+    /// `buf`, `secret` (32 bytes), `disk`.)
+    attach_buf: void,
     /// create: 0 = open existing, 1 = create file (or open existing),
     /// 2 = create directory (ok if it exists), 3 = create file, O_EXCL
     open: struct { path_off: u64, path_len: u64, create: u64 },
@@ -614,25 +614,26 @@ pub fn nodeIp4(node: u64) u32 {
 
 /// Local control protocol for the fabric service (badge 0). Badged calls
 /// are not FabReq: their words forward verbatim to the remote peer.
+/// Boot (BootReq): `buf` (staging buffer), `secret` = fab_identity_len
+/// bytes {identity seed 32, cluster key 32}, and `net` (a network view).
+/// Certification is then the service-level setup: identity_key hands
+/// the PUBLIC key back for the root of trust to sign, set_cert installs
+/// the certificate — it can only exist after the key does — and the
+/// fabric opens the network at that point and not before (fail-closed).
 pub const FabReq = union(enum(u64)) {
-    attach_net: void, // + net view cap; also starts the listener
+    /// Badge-0 only: leave this node's identity public key at buf[0..32]
+    /// for the root of trust to certify. -> num{32}.
+    identity_key: void,
     poll: void, // pump TCP + heartbeats (the driver's tick keeps it breathing)
     /// Join the fabric: dial this seed; membership gossip does the rest.
     connect_peer: struct { node: u64 },
     /// node 0 = placement: the least-loaded live member is chosen.
     remote_spawn: struct { node: u64, image: u64, arg: u64 },
-    attach_buf: void, // + shm cap: buffer for members listings + identity staging
-    /// Badge-0 only, BEFORE attach_net: this node's identity — a
-    /// fab_identity_len record {identity seed, cluster key} in the
-    /// attached buffer (the seed is zeroized after reading). The reply
-    /// leaves the identity PUBLIC key at buf[0..32] (num{32}) for the
-    /// root of trust to certify.
-    set_identity: struct { off: u64, len: u64 },
-    /// Badge-0 only, BEFORE attach_net: the fab_cert_len certificate the
-    /// root issued for this node. Verified under the cluster key and
-    /// checked to name this node and this identity key — refused here
-    /// rather than at the first handshake. The fabric is fail-closed:
-    /// without identity + certificate it refuses to listen or dial.
+    attach_buf: void, // + shm cap: buffer for members listings (clients)
+    /// Badge-0 only, once: the fab_cert_len certificate the root issued
+    /// for this node. Verified under the cluster key and checked to name
+    /// this node and this identity key — refused here rather than at the
+    /// first handshake. Accepting it opens the network.
     set_cert: struct { off: u64, len: u64 },
     /// Badge-0 only: a fab_rev_len revocation record signed by the root
     /// of trust, in the attached buffer. Verified, applied (matching live
@@ -664,13 +665,11 @@ pub const FabErr = enum(u64) {
 };
 
 /// The root of trust (fabric role 3, "fabroot"): the one holder of the
-/// cluster's root signing key. Boot orchestration asks it for the cluster
-/// key, node certificates, and revocations; fabsvc never sees the root
-/// key. Replies are FabResp; byte artifacts land at buf[0].
+/// cluster's root signing key. Boot: `buf` + `secret` (the 32-byte root
+/// seed). Orchestration then asks it for the cluster key, node
+/// certificates, and revocations; fabsvc never sees the root key.
+/// Replies are FabResp; byte artifacts land at buf[0].
 pub const RootReq = union(enum(u64)) {
-    attach_buf: void, // + shm cap
-    /// 32 bytes of root seed in the buffer (zeroized after reading).
-    set_root: struct { off: u64, len: u64 },
     cluster_key: void, // -> 32 bytes at buf[0]; num{32}
     /// Certificate for `node`, whose identity PUBLIC key sits at
     /// buf[0..32] (the root never sees a node's secret): flags_serial =

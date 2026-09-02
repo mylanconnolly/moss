@@ -21,6 +21,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -46,18 +47,30 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-const mmio_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
-const irq_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
+// The device arrives over the boot channel (BootReq cap{mmio}, cap{irq}).
+var mmio_h: u64 = 0;
+var irq_h: u64 = 0;
 
 export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     // arg: low byte = role; byte 1 = cluster node id (0 = slirp mode).
     switch (arg & 0xff) {
-        1 => netsvc(log_h, chan_h, (arg >> 8) & 0xff),
+        1 => {
+            takeDevice(chan_h);
+            netsvc(log_h, chan_h, (arg >> 8) & 0xff);
+        },
         2 => echosrv(log_h, chan_h),
         3 => echocli(log_h, chan_h),
         4 => boxed(log_h, chan_h),
         else => usys.exit(250),
     }
+}
+
+/// The boot handshake: whoever spawned us hands over the device.
+fn takeDevice(chan_h: u64) void {
+    const setup = boot.take(chan_h);
+    mmio_h = setup.cap(.mmio);
+    irq_h = setup.cap(.irq);
+    if (mmio_h == 0 or irq_h == 0) usys.exit(169);
 }
 
 // ------------------------------------------------------------- addresses

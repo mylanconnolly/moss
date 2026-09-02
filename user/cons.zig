@@ -12,6 +12,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -37,10 +38,16 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-const mmio_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
-const irq_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
+// The device arrives over the boot channel (BootReq cap{mmio}, cap{irq});
+// the same channel then serves the console client.
+var mmio_h: u64 = 0;
+var irq_h: u64 = 0;
 
 export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
+    const setup = boot.take(chan_h);
+    mmio_h = setup.cap(.mmio);
+    irq_h = setup.cap(.irq);
+    if (mmio_h == 0 or irq_h == 0) usys.exit(169);
     consdrv(log_h, chan_h);
 }
 

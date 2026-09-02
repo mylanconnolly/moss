@@ -438,14 +438,7 @@ fn blkTestWorker(_: u64) void {
 
     const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     log.info("blk-test: starting userspace virtio-blk driver", .{});
-    const drv = domain.spawn("blkdrv", .{ .blob = img(.blk) }, .{
-        .arg = 1,
-        .grant_debug_log = true,
-        .grant_channel_a = ch,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
+    const drv = spawnDevice("blkdrv", .blk, 1, ch);
 
     const user = domain.spawn("blkuser", .{ .blob = img(.blk) }, .{
         .arg = 2,
@@ -480,54 +473,15 @@ fn fsTestWorker(_: u64) void {
 
     // The storage stack: driver, then the FS service on top of it.
     const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const drv = domain.spawn("blkdrv", .{ .blob = img(.blk) }, .{
-        .arg = 1,
-        .grant_debug_log = true,
-        .grant_channel_a = blk_ch,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
+    const drv = spawnDevice("blkdrv", .blk, 1, blk_ch);
 
     const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const fssvc = domain.spawn("fssvc", .{ .blob = img(.fs) }, .{
-        .arg = 1,
-        .grant_debug_log = true,
-        .grant_channel_a = fs_ch,
-        .grant_bootfs = true,
-        .user_limit = 4 << 20, // mossfs core: caches + overlay live in BSS
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
-
-    // A path buffer for the kernel's own root view (badge 0).
+    // The kernel's own root view buffer (badge 0), the test volume key
+    // (encrypted + compressed: the full v3 path), and the disk.
     const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
     const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
-    ipc.refShm(pathbuf);
-    var res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .attach_buf),
-        .cap_type = @intFromEnum(cap.CapType.shm),
-        .cap_obj = @intFromPtr(pathbuf),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-
-    // Stage the volume key (badge-0 handshake): the test volume is
-    // encrypted + compressed, exercising the full v3 path.
-    const test_key = "moss-fs-test-key-0123456789abcde";
-    comptime std.debug.assert(test_key.len == 32);
-    @memcpy(pb[0..32], test_key);
-    res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-
-    // Hand the FS its disk: an attach_disk carrying the blk channel cap.
-    ipc.refSide(blk_ch, .b);
-    res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .attach_disk),
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = @intFromPtr(blk_ch),
-    }, 0);
-    std.debug.assert(res.err == .ok);
+    const fssvc = spawnFs(fs_ch, pathbuf, pb, "moss-fs-test-key-0123456789abcde", blk_ch);
+    var res: ipc.CallResult = undefined;
 
     // Alice: the whole root view, read-write.
     res = ipc.call(fs_ch, .{
@@ -594,38 +548,20 @@ fn shellTestWorker(_: u64) void {
 
     // Storage: driver, then the FS service (encrypted volume, fs-test key).
     const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const blkdrv = domain.spawn("blkdrv", .{ .blob = img(.blk) }, .{
-        .arg = 1,
-        .grant_debug_log = true,
-        .grant_channel_a = blk_ch,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn blkdrv: {t}", .{e});
+    const blkdrv = spawnDevice("blkdrv", .blk, 1, blk_ch);
 
     const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const fssvc = domain.spawn("fssvc", .{ .blob = img(.fs) }, .{
-        .arg = 1,
-        .grant_debug_log = true,
-        .grant_channel_a = fs_ch,
-        .grant_bootfs = true,
-        .user_limit = 4 << 20,
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
+    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
+    const fssvc = spawnFs(fs_ch, pathbuf, pb, "moss-fs-test-key-0123456789abcde", blk_ch);
+    var res: ipc.CallResult = undefined;
 
     // Entropy first: the fabric refuses the network until the pool is live.
     const rngd = spawnRngd(0);
 
     // The network + a single-node fabric (msh's nodes/rspawn commands).
     const shellnet_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const shellnet = domain.spawn("netsvc", .{ .blob = img(.net) }, .{
-        .arg = 1 | (1 << 8), // cluster addressing, node 1
-        .grant_debug_log = true,
-        .grant_channel_a = shellnet_ch,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
+    const shellnet = spawnDevice("netsvc", .net, 1 | (1 << 8), shellnet_ch); // cluster addressing, node 1
     const shellfab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     const shellfab = domain.spawn("fabsvc", .{ .blob = img(.fabric) }, .{
         .arg = 1 | (1 << 8),
@@ -638,63 +574,16 @@ fn shellTestWorker(_: u64) void {
 
     // Console driver (virtio-console, device id 3).
     const cons_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const consdrv = domain.spawn("consdrv", .{ .blob = img(.cons) }, .{
-        .grant_debug_log = true,
-        .grant_channel_a = cons_ch,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn consdrv: {t}", .{e});
+    const consdrv = spawnDevice("consdrv", .cons, 0, cons_ch);
 
-    // FS handshake: badge-0 buffer, key, disk (same flow as fs-test).
-    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
-    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
-    ipc.refShm(pathbuf);
-    var res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .attach_buf),
-        .cap_type = @intFromEnum(cap.CapType.shm),
-        .cap_obj = @intFromPtr(pathbuf),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-    const shell_key = "moss-fs-test-key-0123456789abcde";
-    @memcpy(pb[0..32], shell_key);
-    res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-    ipc.refSide(blk_ch, .b);
-    res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .attach_disk),
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = @intFromPtr(blk_ch),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-
-    // Wire the fabric to a net view (identity first: fail-closed). The
-    // fabric gets its OWN staging buffer: an shm cap delivered to a service
-    // is unref'd by that service's teardown, so one buffer must never be
-    // handed to two services against a single ref.
+    // The fabric: its staging buffer, identity, and net view arrive over
+    // its boot channel; certification (the one service-level setup step)
+    // opens the network. The fabric gets its OWN staging buffer: an shm
+    // cap delivered to a service is unref'd by that service's teardown.
     const fabbuf = ipc.createShm(1) orelse @panic("shm pool empty");
     const fb = mem.physToPtr([*]u8, fabbuf.pages[0]);
-    ipc.refShm(fabbuf);
     const root = spawnFabroot(false);
-    {
-        var r2 = ipc.call(shellfab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .attach_buf),
-            .cap_type = @intFromEnum(cap.CapType.shm),
-            .cap_obj = @intFromPtr(fabbuf),
-        }, 0);
-        std.debug.assert(r2.err == .ok);
-        certifyFabric(root, shellfab_ch, fb, 1, shared.fab_flag_gossip | shared.fab_flag_spawn, ~@as(u64, 0));
-        const nview = deriveNetView(shellnet_ch, 0, 0, 0);
-        r2 = ipc.call(shellfab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .attach_net),
-            .cap_type = @intFromEnum(cap.CapType.channel_b),
-            .cap_obj = nview.obj,
-            .cap_badge = nview.badge,
-        }, 0);
-        std.debug.assert(r2.err == .ok);
-    }
+    certifyFabric(root, shellfab_ch, fabbuf, fb, 1, shared.fab_flag_gossip | shared.fab_flag_spawn, ~@as(u64, 0), deriveNetView(shellnet_ch, 0, 0, 0));
 
     // The shell's filesystem view: the whole root, read-write.
     res = ipc.call(fs_ch, .{
@@ -732,30 +621,11 @@ fn shellTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn msh: {t}", .{e});
 
-    ipc.refSide(cons_ch, .b);
-    res = ipc.call(boot_ch, .{
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = @intFromPtr(cons_ch),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-    res = ipc.call(boot_ch, .{
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = view_obj,
-        .cap_badge = view_badge,
-    }, 0);
-    std.debug.assert(res.err == .ok);
-    ipc.refSide(front_ch, .b);
-    res = ipc.call(boot_ch, .{
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = @intFromPtr(front_ch),
-    }, 0);
-    std.debug.assert(res.err == .ok);
-    ipc.refSide(shellfab_ch, .b);
-    res = ipc.call(boot_ch, .{
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = @intFromPtr(shellfab_ch),
-    }, 0);
-    std.debug.assert(res.err == .ok);
+    bootGiveChan(boot_ch, .console, cons_ch);
+    bootGive(boot_ch, .view, .channel_b, view_obj, view_badge);
+    bootGiveChan(boot_ch, .init, front_ch);
+    bootGiveChan(boot_ch, .fabric, shellfab_ch);
+    bootGo(boot_ch);
     log.info("shell: system up — msh on the console", .{});
 
     // The human (or the runner's script) drives; we keep the single-node
@@ -816,14 +686,7 @@ fn netTestWorker(_: u64) void {
 
     const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     log.info("net-test: starting userspace netsvc (driver + dual-stack tcp)", .{});
-    const svc = domain.spawn("netsvc", .{ .blob = img(.net) }, .{
-        .arg = 1,
-        .grant_debug_log = true,
-        .grant_channel_a = net_ch,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
+    const svc = spawnDevice("netsvc", .net, 1, net_ch);
     sched.sleep(5);
     if (svc.state == .dead) std.debug.panic("netsvc died at init: exit {d}", .{svc.exit_code});
 
@@ -894,11 +757,10 @@ fn spawnRngd(reseed_ticks: u64) *domain.Domain {
         .grant_channel_a = boot_ch,
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn rngd: {t}", .{e});
-    giveCap(boot_ch, .mmio, .mmio, mmioCapObj());
-    giveCap(boot_ch, .irq, .irq, irqCapObj());
-    giveCap(boot_ch, .entropy, .entropy, 0);
-    const go = ipc.call(boot_ch, .{ .data = shared.encodeMsg(shared.BootReq, .go) }, 0);
-    std.debug.assert(go.err == .ok);
+    bootGive(boot_ch, .mmio, .mmio, mmioCapObj(), 0);
+    bootGive(boot_ch, .irq, .irq, irqCapObj(), 0);
+    bootGive(boot_ch, .entropy, .entropy, 0, 0);
+    bootGo(boot_ch);
     ipc.unrefSide(boot_ch, .b);
     var waited: u64 = 0;
     while (!rng.isSeeded()) : (waited += 1) {
@@ -909,14 +771,76 @@ fn spawnRngd(reseed_ticks: u64) *domain.Domain {
     return d;
 }
 
-/// Hand a program one capability over its boot channel (BootReq.cap).
-fn giveCap(boot_ch: *ipc.Channel, tag: shared.CapTag, ct: cap.CapType, obj: u64) void {
+// ------------------------------------------------------- boot protocol
+//
+// The kernel's boot drivers speak the same BootReq messages init will:
+// caps by tag, secrets and data staged in the program's buffer, go.
+
+fn bootGive(boot_ch: *ipc.Channel, tag: shared.CapTag, ct: cap.CapType, obj: u64, badge: u64) void {
     const res = ipc.call(boot_ch, .{
         .data = shared.encodeMsg(shared.BootReq, .{ .cap = .{ .tag = @intFromEnum(tag) } }),
         .cap_type = @intFromEnum(ct),
         .cap_obj = obj,
+        .cap_badge = badge,
     }, 0);
     std.debug.assert(res.err == .ok);
+}
+
+/// Hand over the B side of a channel (takes a ref for the receiver).
+fn bootGiveChan(boot_ch: *ipc.Channel, tag: shared.CapTag, ch: *ipc.Channel) void {
+    ipc.refSide(ch, .b);
+    bootGive(boot_ch, tag, .channel_b, @intFromPtr(ch), 0);
+}
+
+/// Hand over a shared buffer (takes a ref for the receiver).
+fn bootGiveShm(boot_ch: *ipc.Channel, tag: shared.CapTag, s: *ipc.Shm) void {
+    ipc.refShm(s);
+    bootGive(boot_ch, tag, .shm, @intFromPtr(s), 0);
+}
+
+fn bootSecret(boot_ch: *ipc.Channel, off: u64, len: u64) void {
+    const res = ipc.call(boot_ch, .{ .data = shared.encodeMsg(shared.BootReq, .{ .secret = .{ .off = off, .len = len } }) }, 0);
+    std.debug.assert(res.err == .ok);
+}
+
+fn bootGo(boot_ch: *ipc.Channel) void {
+    const res = ipc.call(boot_ch, .{ .data = shared.encodeMsg(shared.BootReq, .go) }, 0);
+    std.debug.assert(res.err == .ok);
+}
+
+/// Spawn a driver (log + its service channel) and hand it the device
+/// window and interrupt range over that channel, then go.
+fn spawnDevice(name: []const u8, id: shared.ImageId, arg: u64, ch: *ipc.Channel) *domain.Domain {
+    const d = domain.spawn(name, .{ .blob = img(id) }, .{
+        .arg = arg,
+        .grant_debug_log = true,
+        .grant_channel_a = ch,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn {s}: {t}", .{ name, e });
+    bootGive(ch, .mmio, .mmio, mmioCapObj(), 0);
+    bootGive(ch, .irq, .irq, irqCapObj(), 0);
+    bootGo(ch);
+    return d;
+}
+
+/// Spawn the filesystem service and hand it its root buffer, the volume
+/// key, and the disk; returns the service. The key is staged through the
+/// buffer and wiped by the service.
+fn spawnFs(fs_ch: *ipc.Channel, pathbuf: *ipc.Shm, pb: [*]u8, key: *const [32]u8, blk_ch: *ipc.Channel) *domain.Domain {
+    const fssvc = domain.spawn("fssvc", .{ .blob = img(.fs) }, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = fs_ch,
+        .grant_bootfs = true,
+        .user_limit = 4 << 20, // mossfs core: caches + overlay live in BSS
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
+    bootGiveShm(fs_ch, .buf, pathbuf);
+    @memcpy(pb[0..32], key);
+    bootSecret(fs_ch, 0, 32);
+    bootGiveChan(fs_ch, .disk, blk_ch);
+    bootGo(fs_ch);
+    return fssvc;
 }
 
 /// The entropy drill: (1) the pool is fail-closed — a probe spawned
@@ -1046,14 +970,7 @@ fn fabricTestWorker(arg: u64) void {
 
     // The network, in cluster mode.
     const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    _ = domain.spawn("netsvc", .{ .blob = img(.net) }, .{
-        .arg = 1 | (node << 8),
-        .grant_debug_log = true,
-        .grant_channel_a = net_ch,
-        .grant_mmio = devMmio(),
-        .grant_irq = devIrq(),
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
+    _ = spawnDevice("netsvc", .net, 1 | (node << 8), net_ch);
     sched.sleep(3);
 
     // The fabric service, wired to a net view.
@@ -1066,31 +983,17 @@ fn fabricTestWorker(arg: u64) void {
         .grant_bootfs = true, // remote spawns load their images from it
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
-    // Identity: the root of trust certifies this node, then the net is
-    // handed over. The imposter's root is a DIFFERENT key, so its
-    // certificate must be refused by every real member. Node 3's
-    // certificate carries no spawn authority (the authorization drill).
+    // Identity: the root of trust certifies this node over the fabric's
+    // boot channel, then certification opens the network. The imposter's
+    // root is a DIFFERENT key, so its certificate must be refused by
+    // every real member. Node 3's certificate carries no spawn authority
+    // (the authorization drill).
     const root = spawnFabroot(badkey != 0);
     const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
     const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
-    ipc.refShm(pathbuf);
-    var res = ipc.call(fab_ch, .{
-        .data = shared.encodeMsg(shared.FabReq, .attach_buf),
-        .cap_type = @intFromEnum(cap.CapType.shm),
-        .cap_obj = @intFromPtr(pathbuf),
-    }, 0);
-    std.debug.assert(res.err == .ok);
     const flags: u64 = if (node == 3) shared.fab_flag_gossip else shared.fab_flag_gossip | shared.fab_flag_spawn;
-    certifyFabric(root, fab_ch, pb, node, flags, ~@as(u64, 0));
-
-    const view = deriveNetView(net_ch, 0, 0, 0);
-    res = ipc.call(fab_ch, .{
-        .data = shared.encodeMsg(shared.FabReq, .attach_net),
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = view.obj,
-        .cap_badge = view.badge,
-    }, 0);
-    std.debug.assert(res.err == .ok);
+    certifyFabric(root, fab_ch, pathbuf, pb, node, flags, ~@as(u64, 0), deriveNetView(net_ch, 0, 0, 0));
+    var res: ipc.CallResult = undefined;
 
     if (node == 9) {
         // The imposter: a certificate from the wrong root of trust; the
@@ -1273,21 +1176,13 @@ fn spawnFabroot(bad_root: bool) FabRoot {
     }) catch |e| std.debug.panic("spawn fabroot: {t}", .{e});
     const buf = ipc.createShm(1) orelse @panic("shm pool empty");
     const pb = mem.physToPtr([*]u8, buf.pages[0]);
-    ipc.refShm(buf);
-    var res = ipc.call(ch, .{
-        .data = shared.encodeMsg(shared.RootReq, .attach_buf),
-        .cap_type = @intFromEnum(cap.CapType.shm),
-        .cap_obj = @intFromPtr(buf),
-    }, 0);
-    std.debug.assert(res.err == .ok);
+    bootGiveShm(ch, .buf, buf);
     const root_seed = "moss-root-of-trust-seed-01234567";
     comptime std.debug.assert(root_seed.len == 32);
     @memcpy(pb[0..32], root_seed);
     if (bad_root) pb[0] ^= 0xff;
-    res = ipc.call(ch, .{
-        .data = shared.encodeMsg(shared.RootReq, .{ .set_root = .{ .off = 0, .len = 32 } }),
-    }, 0);
-    std.debug.assert(res.err == .ok);
+    bootSecret(ch, 0, 32);
+    bootGo(ch);
     return .{ .d = d, .ch = ch, .buf = buf, .pb = pb };
 }
 
@@ -1297,23 +1192,29 @@ fn rootNum(res: ipc.CallResult, want: u64) void {
     if (rep != .num or rep.num.n != want) @panic("root: refused");
 }
 
-/// Certify fabsvc's identity: fabsvc derives its keypair from a node seed
-/// and exports the PUBLIC key; fabroot signs it into a certificate with
-/// the node's authorizations; fabsvc verifies and installs it. The boot
-/// driver is the out-of-band channel between the two — neither service
-/// ever sees the other's secret. `fb` is fabsvc's attached buffer.
-fn certifyFabric(root: FabRoot, fab_ch: *ipc.Channel, fb: [*]u8, node: u64, flags: u64, image_mask: u64) void {
+/// Boot and certify fabsvc: over its boot channel it receives its staging
+/// buffer, its identity (seed + cluster key, secret — it derives the
+/// keypair and leaves the PUBLIC key in the buffer), and a net view;
+/// fabroot signs that key into a certificate with the node's
+/// authorizations; set_cert installs it and opens the network. The boot
+/// driver is the out-of-band channel — neither service sees the other's
+/// secret. `buf`/`fb` are fabsvc's staging buffer and its kernel pointer.
+fn certifyFabric(root: FabRoot, fab_ch: *ipc.Channel, buf: *ipc.Shm, fb: [*]u8, node: u64, flags: u64, image_mask: u64, net_view: NetView) void {
     rootNum(ipc.call(root.ch, .{
         .data = shared.encodeMsg(shared.RootReq, .cluster_key),
     }, 0), 32);
+    bootGiveShm(fab_ch, .buf, buf);
     var node_seed: [32]u8 = "moss-node-identity-seed-00000000".*;
     node_seed[31] = @intCast(node);
     @memcpy(fb[0..32], &node_seed);
     @memcpy(fb[32..64], root.pb[0..32]);
+    bootSecret(fab_ch, 0, shared.fab_identity_len);
+    bootGive(fab_ch, .net, .channel_b, net_view.obj, net_view.badge);
+    bootGo(fab_ch);
+    // Ask for the identity's public key; the root certifies it.
     rootNum(ipc.call(fab_ch, .{
-        .data = shared.encodeMsg(shared.FabReq, .{ .set_identity = .{ .off = 0, .len = shared.fab_identity_len } }),
+        .data = shared.encodeMsg(shared.FabReq, .identity_key),
     }, 0), 32);
-    // fabsvc left its public key at fb[0..32]; the root certifies it.
     @memcpy(root.pb[0..32], fb[0..32]);
     rootNum(ipc.call(root.ch, .{
         .data = shared.encodeMsg(shared.RootReq, .{
@@ -1330,7 +1231,7 @@ fn certifyFabric(root: FabRoot, fab_ch: *ipc.Channel, fb: [*]u8, node: u64, flag
     }, 0);
     std.debug.assert(res.err == .ok);
     const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse @panic("fabsvc: bad reply");
-    if (rep != .ok) @panic("fabsvc refused its own certificate");
+    if (rep != .ok) @panic("fabsvc refused its certificate or the network");
 }
 
 /// Revoke a node's identity: a root-signed record, handed to the local
@@ -1404,7 +1305,9 @@ fn remoteSpawnRpc(fab_ch: *ipc.Channel, node: u64) ?u64 {
     return landed;
 }
 
-fn deriveNetView(net_ch: *ipc.Channel, hi: u64, lo: u64, port: u64) struct { obj: u64, badge: u64 } {
+const NetView = struct { obj: u64, badge: u64 };
+
+fn deriveNetView(net_ch: *ipc.Channel, hi: u64, lo: u64, port: u64) NetView {
     const res = ipc.call(net_ch, .{
         .data = shared.encodeMsg(shared.NetReq, .{
             .derive = .{ .ip_hi = hi, .ip_lo = lo, .port = port },

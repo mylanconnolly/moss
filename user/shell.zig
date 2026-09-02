@@ -10,10 +10,9 @@
 //! command below turns a typed reply into a value; the language does the
 //! rest (where/sort-by/select/get, let/if/for/while, redirection).
 //!
-//! Startup handshake: msh serves its spawn channel; the boot driver
-//! calls in four messages, each carrying one cap, in fixed order —
-//! console channel, fs view, init front, fabric — then msh prints the
-//! banner and hands the console to the line editor.
+//! Startup: msh takes its world over its boot channel (BootReq caps
+//! tagged console, view, init, fabric), then prints the banner and hands
+//! the console to the line editor.
 
 const std = @import("std");
 const shared = @import("shared");
@@ -77,18 +76,14 @@ var host_ctx: u8 = 0;
 export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     glog = log_h;
 
-    // Cap intake: four calls from the boot driver, one cap each.
-    var caps: [4]u64 = undefined;
-    for (&caps) |*c| {
-        const r = usys.recvMsg(boot_chan);
-        if (r.err != .ok or r.cap == 0) usys.exit(140);
-        c.* = r.cap;
-        _ = usys.replyRaw(boot_chan, .{ 0, 0, 0, 0 }, 0);
-    }
-    cons_chan = caps[0];
-    fs_chan = caps[1];
-    init_chan = caps[2];
-    fab_chan = caps[3];
+    // Our world arrives over the boot channel: console, fs view, init
+    // front, fabric.
+    const setup = boot.take(boot_chan);
+    cons_chan = setup.cap(.console);
+    fs_chan = setup.cap(.view);
+    init_chan = setup.cap(.init);
+    fab_chan = setup.cap(.fabric);
+    if (cons_chan == 0 or fs_chan == 0 or init_chan == 0 or fab_chan == 0) usys.exit(140);
 
     // Console byte buffer.
     const s = usys.shmCreate(1);

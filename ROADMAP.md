@@ -244,11 +244,19 @@ The pooling story stops being theory.
   protocol** (`shared.BootReq`: `cap{tag}` + attachment, `secret`,
   `arg`, `go`; `user/boot.zig` on the receiving side) replaces the
   run-tool handshake and is how rngd now receives its device from
-  whoever spawned it. Stage 2: every driver and service takes its setup
-  through the boot protocol (fssvc's attach_buf/set_key/attach_disk and
-  the fabric's attach_buf/set_identity/set_cert/attach_net become tagged
-  caps and secrets), the kernel boot drivers updated mechanically.
-  Stage 3: unit files, init as orchestrator, root forwarding device
+  whoever spawned it. ✅ Stage 2: every driver and service takes its
+  setup through the boot protocol — blk, net, and cons receive their
+  device as `mmio` + `irq` caps; fssvc its root buffer, the volume key
+  (a `secret`), and the disk channel; fabroot its buffer and the root
+  seed; fabsvc its buffer, identity material, and net view — and the
+  per-service setup requests are gone from the ABI (FsReq lost set_key
+  and attach_disk, RootReq lost attach_buf and set_root, FabReq lost
+  attach_net and set_identity). The one service-level setup step that
+  remains is the fabric's certification (identity_key → root signs →
+  set_cert opens the network), because a certificate can only exist
+  after the key does. The kernel boot drivers speak the protocol through
+  a handful of helpers (spawnDevice, spawnFs, certifyFabric); msh takes
+  its console, view, init, and fabric caps the same way. Stage 3: unit files, init as orchestrator, root forwarding device
   caps, the shell boot reduced to "spawn root", and msh's `run` reading
   a unit file instead of its kind table.
 - ✅ **msh v2: a structured shell language, line editor, and typed

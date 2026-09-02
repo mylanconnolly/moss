@@ -300,10 +300,23 @@ gives it away over the program's **boot channel**. The boot protocol
 with: `cap{tag}` with the cap attached (tags say what a cap is FOR:
 console, view, mmio, irq, entropy, disk, net, init, fabric, ...),
 `secret{off,len}` for key material staged in the `buf` cap (copied out
-and zeroized), `arg` text, then `go`. `user/boot.zig` takes it; the
-run tools moved onto it, and rngd is the first driver handed its
-device this way — by the kernel's boot driver today, by init once
-orchestration moves.
+and zeroized), `arg` text, then `go`. `user/boot.zig` takes it, and every
+program now starts with it: the block, net, and console drivers receive
+`mmio` + `irq`; fssvc its root buffer, the volume key as a `secret`, and
+the disk channel; fabroot its buffer and the root seed; fabsvc its
+buffer, identity material, and net view; msh its console, view, init,
+and fabric channels. The per-service setup requests left the ABI with
+that. What remains service-level is only what cannot be a boot
+message: the fabric's certification (`identity_key` hands the public
+key back, the root signs it, `set_cert` installs it and opens the
+network), because a certificate can only exist after the key does.
+
+Lesson paid for by exactly that step: the first cut had fabsvc write
+its public key into the shared buffer as a side effect of taking its
+secret, and the spawner read the buffer the moment `go` was
+acknowledged — before the service had run. A shared buffer is not a
+reply. Anything a program hands back is a request with a reply, never a
+promise about buffer contents after an ack.
 
 **As built (Phase 7):** an `mmio` cap names a physical window (mapped with
 device attributes via mmio_map); an `irq` cap names an SPI range, and

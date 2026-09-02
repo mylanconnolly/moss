@@ -28,6 +28,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const boot = @import("boot.zig");
 const mossfs = @import("mossfs.zig");
 const fsc = @import("fsclient.zig");
 
@@ -114,6 +115,22 @@ fn fssvc(log_h: u64, chan_h: u64, blob_va: u64, blob_len: u64) noreturn {
     parseBoot(blob_va, blob_len);
     views[0] = .{ .used = true, .ro = false, .kind = .uroot }; // badge 0: root of trust
 
+    // Boot: the root view's buffer, the volume key (32 bytes, secret),
+    // and the disk — from whoever spawned us. Without a disk we serve
+    // the boot archive alone.
+    var setup = boot.take(chan_h);
+    views[0].buf = setup.buf_va;
+    views[0].buf_pages = setup.buf_pages;
+    if (setup.secret().len == 32) {
+        pending_key = setup.secret()[0..32].*;
+        setup.wipeSecret();
+    }
+    if (setup.has(.disk)) {
+        _ = setupDisk(setup.cap(.disk));
+    } else {
+        _ = usys.log(glog, "fssvc: no disk handed over; serving bootfs only");
+    }
+
     while (true) {
         const r = usys.recvMsg(serve_a);
         if (r.err == .peer_dead) usys.exit(0);
@@ -127,14 +144,6 @@ fn fssvc(log_h: u64, chan_h: u64, blob_va: u64, blob_len: u64) noreturn {
             continue;
         };
         switch (req) {
-            .attach_disk => {
-                if (disk_ok or r.badge != 0 or r.cap == 0) {
-                    reply(ferr(.denied));
-                } else {
-                    reply(setupDisk(r.cap));
-                }
-            },
-            .set_key => |sk| reply(doSetKey(v, r.badge, sk.off, sk.len)),
             .attach_buf => {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
@@ -351,20 +360,6 @@ fn devFlush(_: *anyopaque) mossfs.DevError!void {
         .ok => |rep| if (rep != .ok) return error.IoError,
         .err => return error.IoError,
     }
-}
-
-/// Badge-0-only: stage the volume master key (32 bytes in the view
-/// buffer, zeroized here after the copy — the key lives only in our BSS).
-fn doSetKey(v: *View, badge: u64, off: u64, len: u64) shared.FsResp {
-    if (badge != 0 or disk_ok) return ferr(.denied);
-    if (len != 32) return ferr(.bad_key);
-    const src = viewPath(v, off, len) orelse return ferr(.bad_path);
-    var key: [32]u8 = undefined;
-    @memcpy(&key, src);
-    const wipe: [*]volatile u8 = @ptrFromInt(v.buf + off);
-    for (0..len) |i| wipe[i] = 0;
-    pending_key = key;
-    return .ok;
 }
 
 fn setupDisk(chan: u64) shared.FsResp {

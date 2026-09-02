@@ -148,12 +148,13 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
   the end (node 2 must learn it by gossip; node 3's rejoins must be
   refused). Certificate/revocation encoding is `lib/fabcert.zig` — test
   it on the host with `zig test lib/lib.zig`.
-- The fabric is fail-closed: a boot driver must give fabsvc an identity
-  BEFORE attach_net — attach_buf, set_identity (seed + cluster key;
-  reply leaves the public key in the buffer), have fabroot `issue` a
-  certificate over that key, set_cert — or it refuses the network. The
-  kernel helpers `spawnFabroot` / `certifyFabric` / `fabRevoke` are the
-  whole flow. Wire frames after the handshake are AEGIS-sealed — pcaps
+- The fabric is fail-closed: fabsvc takes its buffer, identity material
+  (seed + cluster key, a boot `secret`), and net view over its boot
+  channel, then `identity_key` hands its public key back, fabroot
+  `issue`s a certificate over it, and `set_cert` installs it — only
+  then does it open the network. The kernel helpers `spawnFabroot` /
+  `certifyFabric` / `fabRevoke` are the whole flow; `spawnDevice` and
+  `spawnFs` are the driver and filesystem equivalents. Wire frames after the handshake are AEGIS-sealed — pcaps
   show ciphertext; to read a session, log on the fabsvc side of the
   seal. Give every service its OWN shm staging buffer: an shm cap handed
   to two services against one ref underflows at the second teardown.

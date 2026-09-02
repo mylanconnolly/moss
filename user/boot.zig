@@ -7,12 +7,16 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 
 pub const max_secret = 256;
+pub const max_data = 256;
 
 pub const Setup = struct {
     caps: [shared.cap_tag_count]u64 = @splat(0),
     buf_va: u64 = 0, // the `buf` cap, mapped
+    buf_pages: u64 = 0,
     secret_buf: [max_secret]u8 = @splat(0),
     secret_len: usize = 0,
+    data_buf: [max_data]u8 = @splat(0),
+    data_len: usize = 0,
     arg_buf: [24]u8 = @splat(0),
     arg_len: usize = 0,
 
@@ -30,6 +34,10 @@ pub const Setup = struct {
 
     pub fn secret(s: *const Setup) []const u8 {
         return s.secret_buf[0..s.secret_len];
+    }
+
+    pub fn data(s: *const Setup) []const u8 {
+        return s.data_buf[0..s.data_len];
     }
 
     /// Wipe the secret once it has been used.
@@ -57,7 +65,10 @@ pub fn take(chan_h: u64) Setup {
                     s.caps[c.tag] = r.cap;
                     if (c.tag == @intFromEnum(shared.CapTag.buf)) {
                         const m = usys.shmMap(r.cap);
-                        if (m.err == .ok) s.buf_va = m.data[0] else ok = false;
+                        if (m.err == .ok) {
+                            s.buf_va = m.data[0];
+                            s.buf_pages = m.data[1];
+                        } else ok = false;
                     }
                 } else ok = false;
             },
@@ -71,6 +82,15 @@ pub fn take(chan_h: u64) Setup {
                         src[i] = 0; // the secret now lives only here
                     }
                     s.secret_len = sec.len;
+                }
+            },
+            .data => |dat| {
+                if (s.buf_va == 0 or dat.len > max_data or dat.off + dat.len > s.buf_pages * 4096) {
+                    ok = false;
+                } else {
+                    const src: [*]const volatile u8 = @ptrFromInt(s.buf_va + dat.off);
+                    for (0..dat.len) |i| s.data_buf[i] = src[i];
+                    s.data_len = dat.len;
                 }
             },
             .arg => |a| {
