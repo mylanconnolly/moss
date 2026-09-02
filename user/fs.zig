@@ -453,7 +453,7 @@ fn setupDisk(chan: u64) shared.FsResp {
     const now = nowSec();
     if (fresh) {
         // The standard hierarchy exists from the first format.
-        for ([_][]const u8{ "conf", "state", "data", "volatile" }) |name| {
+        for ([_][]const u8{ "conf", "img", "state", "data", "volatile" }) |name| {
             const o = mfs.allocObject(.dir, now) catch usys.exit(212);
             mfs.dirAdd(mossfs.root_obj, name, o, .dir, now) catch usys.exit(213);
         }

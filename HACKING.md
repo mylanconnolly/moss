@@ -57,6 +57,13 @@ polled (`would_block`) so one loop serves everyone; a bound notification
 another service), and extend `shell_script` in `tools/runner.zig` so the
 scripted console session covers it.
 
+**A run tool** (a program msh starts in its own domain): new image as
+above, `runtool.takeSetup(chan_h)` first thing (it collects the console,
+optional view, and argument over the boot channel and wires `tty`), then
+do the work and exit. If it needs a kernel cap (introspect, at slot 2
+after log and channel) or a view, add its kind to `run_kinds` in msh.
+The shell check drives it with a `run NAME` step.
+
 **An OS test**: write a driver in `kernel/main.zig` gated on a new
 build option; make it log a unique `"<name>-test: PASS ..."` line and then
 call `psci.systemOff()` (panic on failure — the harness treats panics as
@@ -97,8 +104,8 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 - Sentinels must not collide with valid values (sockets and slots start at
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in
-  `domain.spawn`: log→chan→spawner→mmio→irq→entropy; user programs
-  hardcode the slots they expect (documented per program).
+  `domain.spawn`: log→chan→spawner→mmio→irq→entropy→introspect; user
+  programs hardcode the slots they expect (documented per program).
 - The kernel embeds exactly one blob, the boot archive; `spawn` takes an
   shm cap holding a staged image, never an index. An shm mapping is for
   life (it refs the object until teardown; there is no unmap), so keep

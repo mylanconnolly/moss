@@ -72,6 +72,9 @@ pub const Manifest = struct {
     grant_irq: ?struct { base: u32, count: u32 } = null,
     /// Grant the right to seed the kernel entropy pool (the rng driver).
     grant_entropy: bool = false,
+    /// Grant read-only introspection (domain_list/sysinfo) — what a
+    /// spawner cap also carries, without the power to spawn.
+    grant_introspect: bool = false,
     /// Parent in the domain tree (the spawning domain, for syscall spawns).
     parent: ?*Domain = null,
     /// Kernel reaper auto-finishes teardown and signals the watcher; off
@@ -345,6 +348,9 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     }
     if (manifest.grant_entropy) {
         _ = table.insert(.entropy, 0) orelse return Error.CapTableFull;
+    }
+    if (manifest.grant_introspect) {
+        _ = table.insert(.introspect, 0) orelse return Error.CapTableFull;
     }
     if (manifest.grant_bootfs and system_blob_len > 0) {
         // Shared read-only frames: the archive is immutable, so every

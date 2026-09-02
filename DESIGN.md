@@ -157,6 +157,28 @@ timeout with nothing logged anywhere. Listeners now keep a FIFO backlog
 fabric closes a half-open attempt before dialing the same node again;
 RPC only ever travels on an authenticated peer.
 
+**Programs as files (as built):** `img/` on the volume is content-
+addressed — a program lives at `img/<digest>` and `img/index` maps
+catalog names to digests — so an image can never change under its name,
+identical images are one file, and a loader verifies what it staged
+before it spawns. Init is the installer (at the shell boot it receives a
+view of `img/` alone and writes what is missing); fssvc knows nothing
+about programs; msh only reads. `run NAME [path]` in msh reads the image
+through msh's own view into its stage, checks the digest, spawns a fresh
+domain, and feeds it its world over a boot channel — the console
+(channel + the byte buffer msh already shares with the driver, so the
+tool writes where msh writes and msh waits silently), an optional view,
+argument text — then `go`. What a program is handed is decided by its
+kind: `ps` gets the **introspect** capability (a new cap type carrying
+domain_list/sysinfo without spawn authority — the ledger, not the power
+to change it; a spawner cap still implies it), `ls` gets a read-only
+view whose root is the requested path. That is the point of running
+them as programs rather than builtins: each holds exactly what it needs
+and could not reach anything else if it tried, and the shell script
+proves it on every check. msh keeps its builtins (it holds a spawner
+anyway); the tool table in msh is the manifest for now — a manifest
+file beside each image is the evolution.
+
 Because a fresh domain holds *nothing*, the empty sandbox is the zero value.
 Sandboxing is not a mode; it is the absence of grants.
 
@@ -319,7 +341,7 @@ capability views make unrepresentable).
 | Path | Lifecycle | Contents |
 |---|---|---|
 | `boot/` | immutable, from the boot image | system identity (`boot/etc/`) and boot-time config (`boot/conf/` — init's topology lives at `boot/conf/init.topology`); later: verified/signed |
-| `img/` | immutable | program images: today `boot/img/<name>` in the boot archive (the kernel embeds no image table); later content-addressed on the volume |
+| `img/` | immutable, content-addressed | program images as `img/<digest>` (SHA-256[0..16] hex) plus `img/index` (name → digest); installed from `boot/img/` by init at boot, read by msh's `run` |
 | `conf/` | admin-written, service-read | per-service configuration: `conf/<service>/...` |
 | `state/` | service-owned, survives reboot | each service's private mutable state: `state/<service>/` |
 | `data/` | user/application payload | the only tree where sharing between services is expected, always via explicit view grants |

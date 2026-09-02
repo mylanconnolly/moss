@@ -228,10 +228,30 @@ The pooling story stops being theory.
   mapped (mappings now hold a ref until teardown), and netsvc's listener
   kept a single pending connection, so a burst of SYNs orphaned
   established sockets nobody would read (a real backlog now; the fabric
-  also tears down a half-open dial before redialing). Next along this
-  line: `img/` on the encrypted volume with content-addressed names, a
-  read-only introspection cap so tools need not hold spawn authority,
-  and `run` in msh for programs that earn their own domain.
+  also tears down a half-open dial before redialing).
+- ✅ **Programs as files: the content-addressed `img/` store, the
+  introspect cap, and `run`** (done). At the shell boot, init — the
+  thing that already holds the archive and the catalog — installs every
+  program into a view of `img/` alone as `img/<digest>` (hex of
+  SHA-256[0..16]; present files are skipped, the name is the content)
+  and writes `img/index` (name → digest). msh's `run NAME [path]` reads
+  the image through its own filesystem view, verifies it against its
+  digest before anything else, spawns it from msh's stage into a fresh
+  domain, hands it the console over a boot channel (RunReq: console
+  channel + byte buffer, optional view, 24 bytes of argument, go), and
+  waits silently until it exits. A new `introspect` capability carries
+  domain_list/sysinfo without spawn authority, so `ps` as a program
+  holds exactly a log cap, its boot channel, and the ledger; `ls` as a
+  program holds a read-only view whose root IS the requested path — it
+  cannot name its parent because no such name exists in its domain.
+  Both render through `user/tty.zig` (shared with msh's builtins; the
+  ps table is one function). The shell check installs the store on a
+  fresh volume every run and drives `ls img`, `run ps`, `run ls
+  data/smoke`, and `run nope`. Residuals: msh carries a small
+  name→manifest table (ps gets introspect, ls gets a view) — a manifest
+  file beside each image is the evolution; the store is populated from
+  the boot archive only (no other source of programs yet); `run`
+  arguments are 24 bytes.
 - ✅ **Entropy: virtio-rng + getrandom/rng_seed** (done): the kernel
   carries a ChaCha8 fast-key-erasure CSPRNG (`kernel/rng.zig`) that it
   never seeds itself — hardware entropy enters only through `rng_seed`,

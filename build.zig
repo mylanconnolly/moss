@@ -161,6 +161,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "cons", .src = "user/cons.zig" },
         .{ .name = "shell", .src = "user/shell.zig" },
         .{ .name = "rng", .src = "user/rng.zig" },
+        .{ .name = "ps", .src = "user/ps.zig" },
+        .{ .name = "ls", .src = "user/ls.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the

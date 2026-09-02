@@ -317,6 +317,10 @@ const shell_script = [_]struct { send: []const u8, expect: []const u8 }{
     .{ .send = "rm data/smoke/l", .expect = "ok" },
     .{ .send = "sync", .expect = "ok" },
     .{ .send = "rand", .expect = "rand: " },
+    .{ .send = "ls img", .expect = "index" },
+    .{ .send = "run ps", .expect = "no spawn authority held" },
+    .{ .send = "run ls data/smoke", .expect = "hi.txt" },
+    .{ .send = "run nope", .expect = "no such image" },
 };
 
 fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {

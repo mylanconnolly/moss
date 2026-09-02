@@ -104,6 +104,9 @@ pub const SpawnFlags = struct {
     pub const chan_side_a: u64 = 1 << 2;
     /// Grant the system boot blob (bootfs archive); va/len arrive in x3/x4.
     pub const grant_bootfs: u64 = 1 << 3;
+    /// Grant read-only introspection (domain_list, sysinfo) WITHOUT spawn
+    /// authority — for tools that look but never create.
+    pub const grant_introspect: u64 = 1 << 4;
 };
 
 /// Domain lifecycle as reported by domain_stat.
@@ -221,6 +224,8 @@ pub const ImageId = enum(u64) {
     cons = 10,
     shell = 11,
     rng = 12,
+    ps = 13,
+    ls = 14,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -300,6 +305,10 @@ pub const InitRequest = union(enum(u64)) {
     /// Deliberate stop: the instance is destroyed and supervision will
     /// not restart it (connect starts it again).
     stop: struct { service: u64 },
+    /// Install the boot archive's programs into the attached `img/` view
+    /// (+ view cap): content-addressed `img/<digest>` files plus the
+    /// `img/index` catalog. Idempotent — present images are skipped.
+    install: void,
 };
 
 pub const InitReply = union(enum(u64)) {
@@ -307,6 +316,38 @@ pub const InitReply = union(enum(u64)) {
     failed: struct { err: u64 },
     svc_status: struct { up: u64, restarts: u64, max_restarts: u64 },
     stopped: void,
+    installed: struct { n: u64 },
+};
+
+// ------------------------------------------------------------ image store
+//
+// `img/` on the volume is content-addressed: a program lives at
+// img/<digest>, digest = hex of SHA-256(image)[0..16] (32 chars), so an
+// image can never change under its name and a loader verifies what it
+// stages before it spawns. `img/index` maps catalog names to digests, one
+// "name digest" line each — the only text in the store, at the admin
+// boundary like conf/.
+pub const img_digest_hex_len: usize = 32;
+pub const img_index_path = "img/index";
+
+// --------------------------------------------------------------- run tools
+//
+// A program `run` by msh serves a boot channel and receives its whole
+// world as messages before `go`: the console (channel + byte buffer,
+// shared with msh, which waits silently until the tool exits), an
+// optional filesystem view, and up to 24 bytes of argument text. Kernel
+// caps (introspection) arrive as spawn grants at fixed slots.
+
+pub const RunReq = union(enum(u64)) {
+    console: void, // + console channel cap
+    console_buf: void, // + the console byte buffer (shm cap)
+    view: void, // + a filesystem view cap
+    arg: struct { a: u64, b: u64, c: u64 }, // strToWords text
+    go: void,
+};
+
+pub const RunResp = union(enum(u64)) {
+    ok: void,
 };
 
 /// The logging service protocol: 24 bytes of text packed into the words.

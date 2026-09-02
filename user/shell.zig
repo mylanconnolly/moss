@@ -15,6 +15,11 @@
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
+const loader = @import("loader.zig");
+const tty = @import("tty.zig");
+const Line = tty.Line;
+const out = tty.out;
+const digits = tty.digits;
 
 comptime {
     asm (
@@ -45,6 +50,8 @@ const spawner_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 
 var cons_chan: u64 = 0;
 var cons_buf: u64 = 0; // 1-page byte buffer shared with the console driver
+var cons_shm_h: u64 = 0; // its cap: run tools get the same buffer
+var run_stage: loader.Stage = undefined;
 var fs_chan: u64 = 0;
 var fs_buf: [*]u8 = undefined;
 var init_chan: u64 = 0;
@@ -74,10 +81,13 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     const m = usys.shmMap(s.data[0]);
     if (m.err != .ok) usys.exit(142);
     cons_buf = m.data[0];
+    cons_shm_h = s.data[0];
     switch (usys.callTyped(shared.ConsReq, shared.ConsResp, cons_chan, .setup, s.data[0])) {
         .ok => {},
         .err => usys.exit(143),
     }
+    tty.init(cons_chan, cons_buf);
+    run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(147);
 
     // Filesystem view buffer.
     const b = fsc.attachBuf(fs_chan);
@@ -162,74 +172,6 @@ fn consRead(max: u64) u64 {
 
 // ------------------------------------------------------------ line output
 
-fn out(s: []const u8) void {
-    var off: usize = 0;
-    while (off < s.len) {
-        const chunk = @min(s.len - off, 2048);
-        const dst: [*]volatile u8 = @ptrFromInt(cons_buf);
-        for (0..chunk) |i| dst[i] = s[off + i];
-        switch (usys.callTyped(shared.ConsReq, shared.ConsResp, cons_chan, .{
-            .write = .{ .len = chunk },
-        }, 0)) {
-            .ok => {},
-            .err => usys.exit(146),
-        }
-        off += chunk;
-    }
-}
-
-const Line = struct {
-    buf: [256]u8 = undefined,
-    n: usize = 0,
-
-    fn str(l: *Line, s: []const u8) *Line {
-        const k = @min(s.len, l.buf.len - l.n);
-        @memcpy(l.buf[l.n .. l.n + k], s[0..k]);
-        l.n += k;
-        return l;
-    }
-
-    fn num(l: *Line, v: u64) *Line {
-        var ds: [20]u8 = undefined;
-        var d: usize = 0;
-        var x = v;
-        while (true) {
-            ds[d] = '0' + @as(u8, @intCast(x % 10));
-            d += 1;
-            x /= 10;
-            if (x == 0) break;
-        }
-        while (d > 0) {
-            d -= 1;
-            _ = l.str(ds[d .. d + 1]);
-        }
-        return l;
-    }
-
-    fn hex(l: *Line, bytes: []const u8) *Line {
-        const digits_ = "0123456789abcdef";
-        for (bytes) |b| {
-            _ = l.str(&[_]u8{ digits_[b >> 4], digits_[b & 15] });
-        }
-        return l;
-    }
-
-    /// Right-pad with spaces to column `col` (from line start).
-    fn pad(l: *Line, col: usize) *Line {
-        while (l.n < col and l.n < l.buf.len) {
-            l.buf[l.n] = ' ';
-            l.n += 1;
-        }
-        return l;
-    }
-
-    fn flush(l: *Line) void {
-        _ = l.str("\r\n");
-        out(l.buf[0..l.n]);
-        l.n = 0;
-    }
-};
-
 // -------------------------------------------------------------- dispatch
 
 fn dispatch(cmd: []const u8) void {
@@ -257,6 +199,7 @@ fn dispatch(cmd: []const u8) void {
     if (eq(c0, "df")) return cmdDf();
     if (eq(c0, "sync")) return cmdSync();
     if (eq(c0, "rand")) return cmdRand();
+    if (eq(c0, "run") and argc >= 2) return cmdRun(args[1], if (argc >= 3) args[2] else "");
     if (eq(c0, "exit")) {
         out("bye\r\n");
         usys.exit(0);
@@ -274,7 +217,133 @@ fn cmdHelp() void {
         "  ls [p] | cat p | write p text... | mkdir p | rm p\r\n" ++
         "  mv a b | ln p target | readlink p | stat p | df | sync\r\n" ++
         "  rand                  16 bytes from the kernel CSPRNG (getrandom)\r\n" ++
+        "  run NAME [path]       run a program from img/ in its own domain\r\n" ++
         "  exit\r\n");
+}
+
+// -------------------------------------------------------------------- run
+//
+// `run NAME [path]`: a program from the content-addressed img/ store gets
+// its own domain with exactly what its kind needs — the console, and for
+// a path-taking tool a view of that path alone — then msh waits for it to
+// exit. The image is read through msh's view, verified against its
+// digest, and spawned from msh's stage. Manifest knowledge lives here
+// for now (a manifest file per image is the evolution).
+
+const RunKind = struct { name: []const u8, introspect: bool = false, view: bool = false, ro: bool = true };
+const run_kinds = [_]RunKind{
+    .{ .name = "ps", .introspect = true },
+    .{ .name = "ls", .view = true },
+};
+
+fn cmdRun(name: []const u8, path: []const u8) void {
+    var digest: [shared.img_digest_hex_len]u8 = undefined;
+    if (!indexLookup(name, &digest)) return out("run: no such image in img/index\r\n");
+    var img_path: [4 + shared.img_digest_hex_len]u8 = undefined;
+    @memcpy(img_path[0..4], "img/");
+    @memcpy(img_path[4..], &digest);
+    const len = readIntoStage(&img_path) orelse return out("run: image unreadable\r\n");
+    if (!run_stage.verify(len, &digest)) return out("run: image does not match its digest; refusing\r\n");
+
+    var kind: RunKind = .{ .name = name };
+    for (run_kinds) |k| {
+        if (eq(k.name, name)) kind = k;
+    }
+    var view: u64 = 0;
+    if (kind.view) {
+        view = fsc.fsDerive(fs_chan, fs_buf, path, kind.ro) orelse return out("run: no such path\r\n");
+    }
+
+    // The tool serves side A of its boot channel; we feed it caps on B.
+    const ch = usys.chanCreate();
+    if (ch.err != .ok) return out("run: out of channels\r\n");
+    var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
+    if (kind.introspect) flags |= shared.SpawnFlags.grant_introspect;
+    const sp = usys.spawn(spawner_h, run_stage.handle, 0, ch.data[0], flags, usys.kbLimits(512, 2 << 10));
+    _ = usys.capDrop(ch.data[0]);
+    if (sp.err != .ok) {
+        _ = usys.capDrop(ch.data[1]);
+        if (view != 0) _ = usys.capDrop(view);
+        return out("run: spawn refused\r\n");
+    }
+    const boot = ch.data[1];
+    var ok = runSend(boot, .console, cons_chan) and runSend(boot, .console_buf, cons_shm_h);
+    if (ok and view != 0) ok = runSend(boot, .view, view);
+    if (ok) {
+        const w = shared.strToWords(path);
+        ok = runSend(boot, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0);
+    }
+    if (ok) ok = runSend(boot, .go, 0);
+    if (!ok) out("run: the program did not take its setup\r\n");
+
+    // The console is the tool's until it exits.
+    while (true) {
+        const st = usys.domainStat(sp.data[0]);
+        if (st.err != .ok or st.data[0] == @intFromEnum(shared.DomainState.dead)) {
+            if (st.err == .ok and st.data[1] != 0) {
+                var l: Line = .{};
+                _ = l.str("run: ").str(name).str(" exited with code ").num(st.data[1]);
+                l.flush();
+            }
+            break;
+        }
+        usys.sleep(1);
+    }
+    _ = usys.capDrop(sp.data[0]);
+    _ = usys.capDrop(boot);
+    if (view != 0) _ = usys.capDrop(view);
+}
+
+fn runSend(boot: u64, req: shared.RunReq, cap: u64) bool {
+    return switch (usys.callTyped(shared.RunReq, shared.RunResp, boot, req, cap)) {
+        .ok => true,
+        .err => false,
+    };
+}
+
+/// img/index: "name digest" lines.
+fn indexLookup(name: []const u8, digest: *[shared.img_digest_hex_len]u8) bool {
+    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, shared.img_index_path, 0)) {
+        .fd => |fd| fd,
+        .err => return false,
+    };
+    defer fsc.fsClose(fs_chan, fd);
+    const n = fsc.fsRead(fs_chan, fd, shared.fs_max_io) orelse return false;
+    var text: [4096]u8 = undefined;
+    const m = @min(n, text.len);
+    @memcpy(text[0..m], fs_buf[0..m]);
+    var lines = text[0..m];
+    while (lines.len > 0) {
+        var eol: usize = 0;
+        while (eol < lines.len and lines[eol] != '\n') eol += 1;
+        const line = lines[0..eol];
+        lines = if (eol == lines.len) "" else lines[eol + 1 ..];
+        var sp: usize = 0;
+        while (sp < line.len and line[sp] != ' ') sp += 1;
+        if (sp == line.len or line.len - sp - 1 != shared.img_digest_hex_len) continue;
+        if (eq(line[0..sp], name)) {
+            @memcpy(digest, line[sp + 1 ..]);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Read a file through the view buffer into the run stage; returns its length.
+fn readIntoStage(path: []const u8) ?usize {
+    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 0)) {
+        .fd => |fd| fd,
+        .err => return null,
+    };
+    defer fsc.fsClose(fs_chan, fd);
+    var off: usize = 0;
+    while (off < run_stage.bytes) {
+        const n = fsc.fsReadAt(fs_chan, fd, off, @min(shared.fs_max_io, run_stage.bytes - off)) orelse return null;
+        if (n == 0) break;
+        @memcpy(run_stage.slice(off + n)[off..], fs_buf[0..n]);
+        off += n;
+    }
+    return off;
 }
 
 // --------------------------------------------------------- introspection
@@ -283,24 +352,7 @@ fn cmdPs() void {
     var recs: [16 * shared.DomainRec.size]u8 = undefined;
     const r = usys.domainList(spawner_h, &recs);
     if (r.err != .ok) return out("ps: introspection denied\r\n");
-    var l: Line = .{};
-    _ = l.str("  ID NAME             ST     THR  KOBJ KB (used/max)  USER KB (used/max)");
-    l.flush();
-    for (0..r.data[0]) |i| {
-        const rec = shared.DomainRec.decode(recs[i * shared.DomainRec.size ..][0..shared.DomainRec.size]);
-        const w = digits(rec.id);
-        if (w < 4) _ = l.pad(4 - w);
-        _ = l.num(rec.id).str(" ").str(rec.nameSlice());
-        _ = l.pad(21).str(switch (rec.state) {
-            .alive => "alive",
-            .dying => "dying",
-            .dead => "dead",
-        });
-        _ = l.pad(28).num(rec.threads);
-        _ = l.pad(33).num(rec.kobj_kb >> 32).str("/").num(rec.kobj_kb & 0xffff_ffff);
-        _ = l.pad(53).num(rec.user_kb >> 32).str("/").num(rec.user_kb & 0xffff_ffff);
-        l.flush();
-    }
+    tty.domainTable(&recs, r.data[0]);
 }
 
 fn cmdMem() void {
@@ -606,11 +658,4 @@ fn atoi(s: []const u8) ?u64 {
         v = v * 10 + (c - '0');
     }
     return v;
-}
-
-fn digits(v: u64) usize {
-    var d: usize = 1;
-    var x = v;
-    while (x >= 10) : (x /= 10) d += 1;
-    return d;
 }

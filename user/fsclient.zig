@@ -156,7 +156,6 @@ pub fn fsSync(chan: u64) bool {
     }
 }
 
-
 pub const Statfs = struct { free_blocks: u64, total_blocks: u64, encrypted: bool };
 
 pub fn fsStatfs(chan: u64) ?Statfs {
@@ -188,4 +187,27 @@ pub fn fsReadAt(chan: u64, fd: u64, off: u64, len: u64) ?u64 {
 
 pub fn fsClose(chan: u64, fd: u64) void {
     _ = usys.callTyped(shared.FsReq, shared.FsResp, chan, .{ .close = .{ .fd = fd } }, 0);
+}
+
+/// Positioned write: data lands at buf[0..len] and goes to fd at `off`.
+pub fn fsWriteAt(chan: u64, buf: [*]u8, fd: u64, off: u64, data: []const u8) bool {
+    @memcpy(buf[0..data.len], data);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
+        .write = .{ .fd = fd, .off = off, .len = data.len },
+    }, 0)) {
+        .ok => |rep| return rep == .num,
+        .err => return false,
+    }
+}
+
+/// Derive a narrower view (subtree, optionally read-only); the reply's
+/// attached cap is the new view — it needs its own attachBuf.
+pub fn fsDerive(chan: u64, buf: [*]u8, path: []const u8, ro: bool) ?u64 {
+    @memcpy(buf[1024 .. 1024 + path.len], path);
+    switch (usys.callTypedCap(shared.FsReq, shared.FsResp, chan, .{
+        .derive = .{ .path_off = 1024, .path_len = path.len, .ro = @intFromBool(ro) },
+    }, 0)) {
+        .ok => |ok| return if (ok.rep == .ok and ok.cap != 0) ok.cap else null,
+        .err => return null,
+    }
 }

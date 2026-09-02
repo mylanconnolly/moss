@@ -30,6 +30,9 @@ pub const CapType = enum(u8) {
     irq,
     /// Authority to seed the kernel entropy pool (rng_seed).
     entropy,
+    /// Read-only introspection (domain_list, sysinfo) without spawn
+    /// authority — the ledger, not the power to change it.
+    introspect,
 };
 
 pub const Entry = struct {

@@ -149,6 +149,7 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         .parent = d,
     };
     if (flags & shared.SpawnFlags.grant_bootfs != 0) manifest.grant_bootfs = true;
+    if (flags & shared.SpawnFlags.grant_introspect != 0) manifest.grant_introspect = true;
     if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
     if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
     if (frame.regs[3] != 0) {
@@ -219,12 +220,19 @@ fn sysDomainStat(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     return errno(.ok);
 }
 
-/// domain_list(spawner, buf, len): typed DomainRec records for every live
-/// domain — the whole tree. Spawn authority is the gate: the right to
-/// create domains carries the right to see the ledger.
+/// The introspection gate: a spawner cap (the right to create domains
+/// carries the right to see the ledger) or a read-only introspect cap
+/// (the ledger alone — what a `ps` tool holds).
+fn introspectOk(d: *domain.Domain, handle_bits: u64) bool {
+    const h: shared.Handle = @bitCast(handle_bits);
+    if (d.captable.?.lookup(h, .spawner) != null) return true;
+    return d.captable.?.lookup(h, .introspect) != null;
+}
+
+/// domain_list(cap, buf, len): typed DomainRec records for every live
+/// domain — the whole tree.
 fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
-    _ = d.captable.?.lookup(h, .spawner) orelse return errno(.bad_handle);
+    if (!introspectOk(d, frame.regs[0])) return errno(.bad_handle);
     const ptr = frame.regs[1];
     const len = frame.regs[2];
     if (len == 0 or len > 64 * 1024) return errno(.bad_arg);
@@ -259,10 +267,9 @@ fn sysRngSeed(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     return errno(.ok);
 }
 
-/// sysinfo(spawner): pmem free/total bytes, online cores, uptime ticks.
+/// sysinfo(cap): pmem free/total bytes, online cores, uptime ticks.
 fn sysSysinfo(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
-    _ = d.captable.?.lookup(h, .spawner) orelse return errno(.bad_handle);
+    if (!introspectOk(d, frame.regs[0])) return errno(.bad_handle);
     const st = pmem.stats();
     frame.regs[1] = st.free_bytes;
     frame.regs[2] = st.total_bytes;

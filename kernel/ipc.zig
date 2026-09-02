@@ -405,7 +405,7 @@ pub var domain_ctl_release: ?*const fn (u64) void = null;
 /// cap deletion (cap_drop).
 pub fn releaseCap(cap_type: cap.CapType, obj: u64) void {
     switch (cap_type) {
-        .empty, .debug_log, .spawner, .mmio, .irq, .entropy => {},
+        .empty, .debug_log, .spawner, .mmio, .irq, .entropy, .introspect => {},
         .channel_a => unrefSide(@ptrFromInt(obj), .a),
         .channel_b => unrefSide(@ptrFromInt(obj), .b),
         .notification => unrefNotification(@ptrFromInt(obj)),

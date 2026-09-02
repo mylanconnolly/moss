@@ -14,9 +14,11 @@
 //! channel grant spawner sits at slot 1 (demo boot), with one it shifts
 //! to slot 2 (shell boot, serveFront mode).
 
+const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const loader = @import("loader.zig");
+const fsc = @import("fsclient.zig");
 
 comptime {
     asm (
@@ -292,6 +294,16 @@ fn handleRequest(front_a: u64, r: usys.IpcResult) void {
                 .max_restarts = topology[idx].max_restarts,
             } }, 0);
         },
+        .install => {
+            if (r.cap == 0) {
+                _ = usys.replyTyped(shared.InitReply, front_a, .{
+                    .failed = .{ .err = @intFromEnum(shared.Errno.bad_arg) },
+                }, 0);
+                return;
+            }
+            const n = installImages(r.cap);
+            _ = usys.replyTyped(shared.InitReply, front_a, .{ .installed = .{ .n = n } }, 0);
+        },
         .stop => |q| {
             const idx = findService(q.service) orelse {
                 _ = usys.replyTyped(shared.InitReply, front_a, .{
@@ -306,6 +318,58 @@ fn handleRequest(front_a: u64, r: usys.IpcResult) void {
             _ = usys.replyTyped(shared.InitReply, front_a, .stopped, 0);
         },
     }
+}
+
+/// The image store installer: every program in the boot archive lands in
+/// the granted `img/` view as a content-addressed file (skipped when
+/// already present — the name IS the content), and `index` maps catalog
+/// names to digests. Init is the installer because init is the thing
+/// that already holds the archive and knows the catalog; fssvc knows
+/// nothing about programs and msh only reads.
+fn installImages(view: u64) u64 {
+    const b = fsc.attachBuf(view);
+    const buf: [*]u8 = @ptrFromInt(b.va);
+    const blob = @as([*]const u8, @ptrFromInt(boot_va))[0..boot_len];
+    var index: [2048]u8 = undefined;
+    var ilen: usize = 0;
+    var installed: u64 = 0;
+    inline for (std.enums.values(shared.ImageId)) |id| {
+        if (shared.marcFind(blob, shared.imagePath(id))) |image| {
+            const digest = loader.digestHex(image);
+            if (fsc.fsStat(view, buf, &digest) == null) {
+                if (writeFile(view, buf, &digest, image)) installed += 1;
+            }
+            const name = @tagName(id);
+            @memcpy(index[ilen .. ilen + name.len], name);
+            ilen += name.len;
+            index[ilen] = ' ';
+            ilen += 1;
+            @memcpy(index[ilen .. ilen + digest.len], &digest);
+            ilen += digest.len;
+            index[ilen] = '\n';
+            ilen += 1;
+        }
+    }
+    _ = writeFile(view, buf, "index", index[0..ilen]);
+    _ = fsc.fsSync(view);
+    if (installed > 0) _ = usys.log(glog, "init: installed images into img/ (content-addressed)");
+    return installed;
+}
+
+fn writeFile(view: u64, buf: [*]u8, path: []const u8, data: []const u8) bool {
+    const fd = switch (fsc.fsOpen(view, buf, path, 1)) {
+        .fd => |fd| fd,
+        .err => return false,
+    };
+    defer fsc.fsClose(view, fd);
+    if (!fsc.fsTruncate(view, fd, 0)) return false;
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = @min(shared.fs_max_io, data.len - off);
+        if (!fsc.fsWriteAt(view, buf, fd, off, data[off .. off + n])) return false;
+        off += n;
+    }
+    return true;
 }
 
 /// Channel activation: first use starts the service.

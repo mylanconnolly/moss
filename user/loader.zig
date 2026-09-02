@@ -7,8 +7,22 @@
 //! Static linking makes this the whole loader: no relocation, no symbol
 //! resolution, nothing in the kernel but a copy.
 
+const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
+
+/// The content address of an image: hex of SHA-256(bytes)[0..16].
+pub fn digestHex(bytes: []const u8) [shared.img_digest_hex_len]u8 {
+    var sum: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &sum, .{});
+    var out: [shared.img_digest_hex_len]u8 = undefined;
+    const digits = "0123456789abcdef";
+    for (sum[0 .. shared.img_digest_hex_len / 2], 0..) |b, i| {
+        out[i * 2] = digits[b >> 4];
+        out[i * 2 + 1] = digits[b & 15];
+    }
+    return out;
+}
 
 pub const Stage = struct {
     handle: u64,
@@ -47,5 +61,22 @@ pub const Stage = struct {
         const dst = @as([*]u8, @ptrFromInt(self.va))[0..image.len];
         @memcpy(dst, image);
         return true;
+    }
+
+    /// The staged bytes (for a loader that filled the stage itself).
+    pub fn slice(self: *Stage, len: usize) []u8 {
+        return @as([*]u8, @ptrFromInt(self.va))[0..len];
+    }
+
+    /// Content-addressed check: the staged image must hash to the name
+    /// it was loaded under, and carry a MOSS header. Anything else is
+    /// refused before it can run.
+    pub fn verify(self: *Stage, len: usize, digest: []const u8) bool {
+        if (len < @sizeOf(shared.UserImageHeader) or len > self.bytes) return false;
+        const bytes = self.slice(len);
+        const hdr: *align(1) const shared.UserImageHeader = @ptrCast(bytes.ptr);
+        if (hdr.magic != shared.UserImageHeader.expected_magic) return false;
+        const have = digestHex(bytes);
+        return std.mem.eql(u8, &have, digest);
     }
 };

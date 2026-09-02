@@ -705,6 +705,32 @@ fn shellTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn init: {t}", .{e});
 
+    // The image store: init installs the archive's programs into img/
+    // (content-addressed) through a view of that directory alone, so
+    // msh's `run` loads programs as files. Older volumes may predate the
+    // directory; the root view creates it (idempotent) before deriving.
+    {
+        @memcpy(pb[0..3], "img");
+        res = ipc.call(fs_ch, .{
+            .data = shared.encodeMsg(shared.FsReq, .{ .open = .{ .path_off = 0, .path_len = 3, .create = 2 } }),
+        }, 0);
+        std.debug.assert(res.err == .ok);
+        res = ipc.call(fs_ch, .{
+            .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 3, .ro = 0 } }),
+        }, 0);
+        std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
+        const img_view = ipc.call(front_ch, .{
+            .data = shared.encodeMsg(shared.InitRequest, .install),
+            .cap_type = @intFromEnum(cap.CapType.channel_b),
+            .cap_obj = res.msg.cap_obj,
+            .cap_badge = res.msg.cap_badge,
+        }, 0);
+        std.debug.assert(img_view.err == .ok);
+        const rep = shared.decodeMsg(shared.InitReply, img_view.msg.data) orelse @panic("init: bad install reply");
+        if (rep != .installed) @panic("init refused to install the image store");
+        log.info("shell: image store ready ({d} images installed this boot)", .{rep.installed.n});
+    }
+
     // msh: serves its boot channel; we feed it cons, fs view, init front.
     const boot_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     const msh = domain.spawn("msh", .{ .blob = img(.shell) }, .{
