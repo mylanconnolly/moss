@@ -10,6 +10,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -54,6 +55,7 @@ fn flapper(log_h: u64) noreturn {
 const crash_every = 4;
 
 fn logsvc(log_h: u64, chan_h: u64) noreturn {
+    _ = boot.take(chan_h); // a unit: init hands us nothing, but says go
     _ = usys.log(log_h, "logsvc: serving");
     var relayed: u64 = 0;
     var buf: [24]u8 = undefined;
@@ -81,6 +83,7 @@ fn logsvc(log_h: u64, chan_h: u64) noreturn {
 }
 
 fn greeter(log_h: u64, chan_h: u64) noreturn {
+    _ = boot.take(chan_h);
     _ = usys.log(log_h, "greeter: serving");
     while (true) {
         const r = usys.recvMsg(chan_h);

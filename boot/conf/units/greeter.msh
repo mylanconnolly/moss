@@ -1,0 +1,2 @@
+# Demo service.
+{ image: services, arg: 2, restart: { max: 5 } }

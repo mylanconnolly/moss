@@ -91,6 +91,7 @@ and the full mossfs suite.
 
 | Path | Contents |
 |---|---|
+| `boot/` | The boot tree packed into the archive: `etc/` identity, `conf/units/*.msh` unit files, test key material |
 | `kernel/` | The microkernel (aarch64-freestanding, boots as an arm64 Image; embeds only the boot archive) |
 | `shared/` | The ABI/IDL: types that compile identically for kernel, userspace, and host tests |
 | `user/` | Userspace: root task, init, services, drivers, demo programs |

@@ -4,12 +4,15 @@
 //! the system's resource ledger with it — so the ledger-holder does nothing
 //! else.
 //!
-//! Grant layout (fresh table, insert order log→spawner): log handle arrives
-//! in x0; the spawner cap sits at slot 1, generation 1.
+//! Grant layout (fresh table, insert order log→spawner→mmio→irq→entropy):
+//! log arrives in x0; spawner at slot 1; the device capabilities the
+//! kernel minted from the devicetree at slots 2, 3, 4. Root forwards the
+//! devices to init over init's boot channel — root never uses them.
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const loader = @import("loader.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -36,6 +39,9 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 }
 
 const spawner: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
+const mmio_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
+const irq_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
+const entropy_h: u64 = @bitCast(shared.Handle{ .slot = 4, .generation = 1 });
 const max_init_restarts = 1;
 
 var stage: loader.Stage = undefined;
@@ -80,17 +86,29 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
         _ = usys.log(log_h, "root: init image missing from the boot archive");
         usys.exit(105);
     }
+    const ch = usys.chanCreate();
+    if (ch.err != .ok) usys.exit(106);
     const r = usys.spawn(
         spawner,
         stage.handle,
         arg,
-        0,
-        shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs,
-        usys.kbLimits(8 << 10, 24 << 10), // init's slice: 8MB kobj, 24MB user
+        ch.data[0],
+        shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs | shared.SpawnFlags.chan_side_a,
+        usys.kbLimits(12 << 10, 40 << 10), // init's slice: 12MB kobj, 40MB user (its units nest inside)
     );
+    _ = usys.capDrop(ch.data[0]);
     if (r.err != .ok) {
         _ = usys.log(log_h, "root: failed to spawn init");
         usys.exit(103);
     }
+    // The devices go to init, which hands them to drivers per unit file.
+    const b = ch.data[1];
+    var ok = boot.giveCap(b, .mmio, mmio_h) and boot.giveCap(b, .irq, irq_h) and boot.giveCap(b, .entropy, entropy_h);
+    ok = ok and boot.give(b, .go, 0);
+    if (!ok) {
+        _ = usys.log(log_h, "root: init did not take its boot setup");
+        usys.exit(107);
+    }
+    _ = usys.capDrop(b);
     return r.data[0];
 }

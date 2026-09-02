@@ -1,0 +1,13 @@
+# The entropy driver: virtio-rng seeding the kernel pool. Started first;
+# getrandom is fail-closed until it has.
+{
+  image:   rng
+  arg:     1
+  start:   eager
+  give: [
+    { tag: mmio,    device: mmio }
+    { tag: irq,     device: irq }
+    { tag: entropy, device: entropy }
+  ]
+  restart: { max: 5 }
+}

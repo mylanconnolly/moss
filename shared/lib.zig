@@ -881,6 +881,35 @@ pub fn marcFind(blob: []const u8, path: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Walk every entry of a MARC archive.
+pub const MarcIter = struct {
+    blob: []const u8,
+    off: usize,
+
+    pub const Entry = struct { path: []const u8, data: []const u8 };
+
+    pub fn next(it: *MarcIter) ?Entry {
+        if (it.off + 8 > it.blob.len) return null;
+        const plen = std.mem.readInt(u32, it.blob[it.off..][0..4], .little);
+        const dlen = std.mem.readInt(u32, it.blob[it.off + 4 ..][0..4], .little);
+        const start = it.off + 8;
+        if (start + plen + dlen > it.blob.len) return null;
+        it.off = start + plen + dlen;
+        return .{ .path = it.blob[start .. start + plen], .data = it.blob[start + plen .. start + plen + dlen] };
+    }
+};
+
+pub fn marcIter(blob: []const u8) MarcIter {
+    if (blob.len < 4 or !std.mem.eql(u8, blob[0..4], marc_magic)) return .{ .blob = blob, .off = blob.len };
+    return .{ .blob = blob, .off = 4 };
+}
+
+/// Unit files: `conf/units/<name>.msh` in the boot archive (served at
+/// boot/conf/units/ by fssvc) — mshl data literals init reads to spawn
+/// and wire every program (see boot/conf/units/ and DESIGN).
+pub const unit_dir = "conf/units/";
+pub const unit_ext = ".msh";
+
 test "marcFind walks an archive and misses cleanly" {
     var buf: [64]u8 = undefined;
     var n: usize = 0;

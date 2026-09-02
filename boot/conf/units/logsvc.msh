@@ -1,0 +1,2 @@
+# Demo service (crashes every 4th message; init restarts it).
+{ image: services, arg: 1, restart: { max: 5 } }

@@ -305,7 +305,7 @@ const Step = struct { send: []const u8, expect: []const u8, raw: bool = false };
 const shell_script = [_]Step{
     .{ .send = "help", .expect = "commands" },
     .{ .send = "clear", .expect = "\x1b[2J" },
-    .{ .send = "ps", .expect = "fssvc" },
+    .{ .send = "ps", .expect = "shell" },
     .{ .send = "mem", .expect = "free_mb" },
     .{ .send = "df", .expect = "encrypted: true" },
     .{ .send = "mkdir data/smoke", .expect = "" },

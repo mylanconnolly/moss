@@ -1,0 +1,9 @@
+# The fabric's root of trust: holds the cluster's root signing key.
+{
+  image: fabric
+  arg:   3
+  give: [
+    { tag: buf, shm: 1 }
+    { secret: conf/fabric/root.seed }
+  ]
+}

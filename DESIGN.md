@@ -237,6 +237,37 @@ auditing, and virtualization stop being guarantees and become special cases.
 
 ## Init and supervision
 
+**As built (unit files):** every program init can start is a **unit** —
+`boot/conf/units/<name>.msh`, an mshl data literal read by the strict
+data parser (literals only; a command in a unit file is a syntax error).
+A unit names its image, budget, spawn grants, and `give` lines: what it
+is handed over its boot channel before `go` — a device (`device: mmio`,
+from the caps the kernel minted from the devicetree and root forwarded
+to init), another unit's channel (`unit: blk`, activating that unit
+first: capability wiring IS the dependency model and there is no
+ordering anywhere), a shared buffer (`shm: 1`), a secret from the
+archive (`secret: conf/fs.key`, staged through the unit's buffer and
+wiped by the receiver), a filesystem view (`fs: "", ro: false`, derived
+through the filesystem unit's control channel), a network view, or
+init's own front channel (`self: true`). `start: eager` units start at
+boot and pull in everything they need; `essential: true` means the
+system follows the unit's exit; `certify` runs the fabric's
+certification against a root-of-trust unit; `install: true` installs
+the program store once the filesystem is up. Supervision is unchanged
+in shape — one-for-one, a restart budget, linear backoff — and a
+restarted unit is re-wired the same way it was started. The kernel's
+part of the shell boot is now one manifest: spawn root with log, spawn
+authority, the archive, and the devices, then hold the leak bar when
+the system has shut itself down.
+
+Lessons paid for: a give entry with an unknown tag was dropped
+silently, so a typo in a unit file produced a filesystem formatted
+without its key and a fabric that could not certify; secrets are bytes,
+not capabilities, and now need no tag at all, and an unrecognized entry
+is reported. And every unit must take the boot handshake even when it
+is handed nothing — init says `go` to everyone, and a service that
+starts serving its own protocol first never answers.
+
 Two layers. The **root task** receives all boot caps from the kernel and stays
 tiny and near-finished: it starts the **init service**, supervises only it,
 and retains enough caps to restart it. Init itself is an ordinary, restartable

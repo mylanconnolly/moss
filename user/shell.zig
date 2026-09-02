@@ -645,17 +645,11 @@ fn rspawn(it: *mshl.Interp, node: u64, image: u64) mshl.Error!Value {
 // -------------------------------------------------------------------- run
 //
 // `run NAME [path]`: a program from the content-addressed img/ store gets
-// its own domain with exactly what its kind needs — the console, and for
-// a path-taking tool a view of that path alone — then msh waits for it to
-// exit. The image is read through msh's view, verified against its
-// digest, and spawned from msh's stage. Manifest knowledge lives here
-// for now (a manifest file per image is the evolution).
-
-const RunKind = struct { name: []const u8, introspect: bool = false, view: bool = false, ro: bool = true };
-const run_kinds = [_]RunKind{
-    .{ .name = "ps", .introspect = true },
-    .{ .name = "ls", .view = true },
-};
+// its own domain with exactly what its unit file (boot/conf/units/NAME.msh)
+// says — kernel grants, and a view of the argument path for a tool that
+// takes one — plus the console, then msh waits for it to exit. The image
+// is read through msh's view, verified against its digest, and spawned
+// from msh's stage.
 
 fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void {
     var digest: [shared.img_digest_hex_len]u8 = undefined;
@@ -666,20 +660,41 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!void 
     const len = readIntoStage(&img_path) orelse return it.fail("run: image unreadable", .{});
     if (!run_stage.verify(len, &digest)) return it.fail("run: image does not match its digest; refusing", .{});
 
-    var kind: RunKind = .{ .name = name };
-    for (run_kinds) |k| {
-        if (is(k.name, name)) kind = k;
-    }
+    // The unit file says what the program is handed: kernel grants and
+    // views (a view path of `arg` is the run argument). The console is
+    // always ours to give.
+    var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
     var view: u64 = 0;
-    if (kind.view) {
-        view = fsc.fsDerive(fs_chan, fs_buf, path, kind.ro) orelse return it.fail("run: no such path: {s}", .{path});
+    {
+        var unit_path: [64]u8 = undefined;
+        const prefix = "boot/" ++ shared.unit_dir;
+        @memcpy(unit_path[0..prefix.len], prefix);
+        @memcpy(unit_path[prefix.len .. prefix.len + name.len], name);
+        @memcpy(unit_path[prefix.len + name.len .. prefix.len + name.len + shared.unit_ext.len], shared.unit_ext);
+        const text = try readFile(it, unit_path[0 .. prefix.len + name.len + shared.unit_ext.len]);
+        const unit = try it.parseData(text);
+        if (unit != .record) return it.fail("run: {s}: unit file is not a record", .{name});
+        if (unit.record.get("grant")) |g| {
+            if (g == .list) for (g.list) |item| {
+                if (item == .str and is(item.str, "introspect")) flags |= shared.SpawnFlags.grant_introspect;
+            };
+        }
+        if (unit.record.get("give")) |g| {
+            if (g == .list) for (g.list) |item| {
+                if (item != .record) continue;
+                const fs_path = item.record.get("fs") orelse continue;
+                if (fs_path != .str) continue;
+                const p = if (is(fs_path.str, "arg")) path else fs_path.str;
+                var ro = true;
+                if (item.record.get("ro")) |r| ro = r.truthy();
+                view = fsc.fsDerive(fs_chan, fs_buf, p, ro) orelse return it.fail("run: no such path: {s}", .{p});
+            };
+        }
     }
 
     // The tool serves side A of its boot channel; we feed it caps on B.
     const ch = usys.chanCreate();
     if (ch.err != .ok) return it.fail("run: out of channels", .{});
-    var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
-    if (kind.introspect) flags |= shared.SpawnFlags.grant_introspect;
     const sp = usys.spawn(spawner_h, run_stage.handle, 0, ch.data[0], flags, usys.kbLimits(512, 2 << 10));
     _ = usys.capDrop(ch.data[0]);
     if (sp.err != .ok) {

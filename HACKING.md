@@ -46,6 +46,17 @@ in the boot archive). To spawn it from userspace, stage it with
 `loader.Stage.load(...)` from the granted archive and pass the stage's
 shm handle to `usys.spawn`; kernel boot drivers use `img(.name)`.
 
+**A unit** (anything init starts): a file `boot/conf/units/<name>.msh` —
+an mshl record with `image`, optional `arg`/`budget`/`grant`/`restart`,
+`give` lines (`{ tag: mmio, device: mmio }`, `{ tag: disk, unit: blk }`,
+`{ tag: buf, shm: 1 }`, `{ secret: conf/x.key }`, `{ tag: view, fs: p,
+ro: true }`, `{ tag: net, netview: net }`, `{ tag: init, self: true }`),
+and `start: eager` / `essential: true` / `certify` / `install` as
+needed — added to the boot-file list in `build.zig`. The program takes
+it all with `boot.take`. A run tool's unit is what `run` reads for its
+grants and views (`fs: arg` = the run argument). Services reachable by
+`connect` are units named after `shared.ServiceId`.
+
 **A service**: serve one channel; scope per-client state by **badge**
 (mint scoped caps with `chanMint`, hand them out in replies). Blocking is
 polled (`would_block`) so one loop serves everyone; a bound notification
@@ -148,6 +159,11 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
   the end (node 2 must learn it by gossip; node 3's rejoins must be
   refused). Certificate/revocation encoding is `lib/fabcert.zig` — test
   it on the host with `zig test lib/lib.zig`.
+- The shell boot is root → init → units (`zig build run-shell` and the
+  shell check alike); read `boot/conf/units/` before the kernel when a
+  service is missing, and `zig-out/shell-kernel.log` for init's "give
+  failed"/"could not wire" lines. The other OS tests keep their kernel
+  boot drivers and orchestrate their own topologies.
 - The fabric is fail-closed: fabsvc takes its buffer, identity material
   (seed + cluster key, a boot `secret`), and net view over its boot
   channel, then `identity_key` hands its public key back, fabroot

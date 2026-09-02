@@ -229,8 +229,8 @@ The pooling story stops being theory.
   kept a single pending connection, so a burst of SYNs orphaned
   established sockets nobody would read (a real backlog now; the fabric
   also tears down a half-open dial before redialing).
-- **Boot orchestration into userspace** (in progress; stage 1 of 3
-  done). The end state: the kernel spawns root with log, spawner, the
+- ✅ **Boot orchestration into userspace** (done, three stages). The
+  end state, now built: the kernel spawns root with log, spawner, the
   boot archive, and the device capabilities; root forwards them to init;
   init spawns every driver and service from **unit files** (mshl data
   literals under `boot/conf/units/`) that name the image, budget, spawn
@@ -256,9 +256,33 @@ The pooling story stops being theory.
   set_cert opens the network), because a certificate can only exist
   after the key does. The kernel boot drivers speak the protocol through
   a handful of helpers (spawnDevice, spawnFs, certifyFabric); msh takes
-  its console, view, init, and fabric caps the same way. Stage 3: unit files, init as orchestrator, root forwarding device
-  caps, the shell boot reduced to "spawn root", and msh's `run` reading
-  a unit file instead of its kind table.
+  its console, view, init, and fabric caps the same way. ✅ Stage 3:
+  **unit files and init as the orchestrator.** `boot/conf/units/*.msh`
+  are mshl data literals (record literals joined the language; a strict
+  `parseData` entry point accepts literals and nothing else) naming the
+  image, budget, spawn grants, and `give` lines: a device (from the
+  caps root forwards to init at boot), another unit's channel
+  (activating it first — capability wiring is the dependency model, no
+  ordering anywhere), a shared buffer, a secret from the archive, a
+  filesystem view, a network view, init's own front channel. `start:
+  eager` units start at boot and pull in the rest; `essential: true`
+  means the system follows the unit's exit; `certify` runs the fabric's
+  certification against a root-of-trust unit; `install: true` installs
+  the program store once the filesystem is up. The kernel's shell boot
+  is now "spawn root with log, spawner, the archive, and the devices";
+  root forwards the devices to init; init starts rngd and msh eagerly
+  and msh's unit pulls in cons, fs (and blk), fabsvc (and net, fabroot,
+  certification); when msh exits, init revokes everything and exits,
+  root follows, and the kernel holds the leak bar. `run` reads the
+  program's unit file for its grants and views instead of a table in
+  msh. Services are units named after ServiceId (the demo and flap
+  drills run through the same init). The old init.topology is gone;
+  the boot tree lives in the repo at boot/ and is packed as is.
+  Residuals: the per-subsystem kernel test drivers still orchestrate
+  their own topologies (they assert kernel state directly; migrating
+  them to units with a drill program is the evolution); unit files carry
+  test key material beside them; `run` arguments reach a unit only as a
+  view path.
 - ✅ **msh v2: a structured shell language, line editor, and typed
   pipelines** (done). The shell got the OS's own thinking: pipelines
   carry VALUES (records and tables straight from typed IPC), never bytes

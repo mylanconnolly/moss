@@ -1,0 +1,15 @@
+# The shell: the console, the whole filesystem (rw), init's front channel,
+# and the fabric. Essential: when it exits, the system shuts down.
+{
+  image:     shell
+  budget:    { user: 8mb }
+  grant:     [log, spawner]
+  start:     eager
+  essential: true
+  give: [
+    { tag: console, unit: cons }
+    { tag: view,    fs: "", ro: false }
+    { tag: init,    self: true }
+    { tag: fabric,  unit: fabsvc }
+  ]
+}

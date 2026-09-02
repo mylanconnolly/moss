@@ -1,0 +1,9 @@
+# The block driver (virtio-blk). Activated by whoever needs a disk.
+{
+  image: blk
+  arg:   1
+  give: [
+    { tag: mmio, device: mmio }
+    { tag: irq,  device: irq }
+  ]
+}

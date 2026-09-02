@@ -322,6 +322,9 @@ fn initTestWorker(_: u64) void {
         .grant_spawner = true,
         .grant_bootfs = true,
         // Roomy: the whole userspace tree's usage cascades into these.
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
+        .grant_entropy = true,
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
@@ -410,6 +413,9 @@ fn flapTestWorker(_: u64) void {
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
+        .grant_entropy = true,
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
@@ -546,133 +552,36 @@ fn fsTestWorker(_: u64) void {
 fn shellTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
 
-    // Storage: driver, then the FS service (encrypted volume, fs-test key).
-    const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const blkdrv = spawnDevice("blkdrv", .blk, 1, blk_ch);
-
-    const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
-    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
-    const fssvc = spawnFs(fs_ch, pathbuf, pb, "moss-fs-test-key-0123456789abcde", blk_ch);
-    var res: ipc.CallResult = undefined;
-
-    // Entropy first: the fabric refuses the network until the pool is live.
-    const rngd = spawnRngd(0);
-
-    // The network + a single-node fabric (msh's nodes/rspawn commands).
-    const shellnet_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const shellnet = spawnDevice("netsvc", .net, 1 | (1 << 8), shellnet_ch); // cluster addressing, node 1
-    const shellfab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const shellfab = domain.spawn("fabsvc", .{ .blob = img(.fabric) }, .{
-        .arg = 1 | (1 << 8),
-        .grant_debug_log = true,
-        .grant_channel_a = shellfab_ch,
-        .grant_spawner = true,
-        .grant_bootfs = true, // remote spawns load their images from it
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
-
-    // Console driver (virtio-console, device id 3).
-    const cons_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const consdrv = spawnDevice("consdrv", .cons, 0, cons_ch);
-
-    // The fabric: its staging buffer, identity, and net view arrive over
-    // its boot channel; certification (the one service-level setup step)
-    // opens the network. The fabric gets its OWN staging buffer: an shm
-    // cap delivered to a service is unref'd by that service's teardown.
-    const fabbuf = ipc.createShm(1) orelse @panic("shm pool empty");
-    const fb = mem.physToPtr([*]u8, fabbuf.pages[0]);
-    const root = spawnFabroot(false);
-    certifyFabric(root, shellfab_ch, fabbuf, fb, 1, shared.fab_flag_gossip | shared.fab_flag_spawn, ~@as(u64, 0), deriveNetView(shellnet_ch, 0, 0, 0));
-
-    // The shell's filesystem view: the whole root, read-write.
-    res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 0, .ro = 0 } }),
-    }, 0);
-    std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
-    const view_obj = res.msg.cap_obj;
-    const view_badge = res.msg.cap_badge;
-
-    // init, serving a granted front channel (no demo worker).
-    const front_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const initd = domain.spawn("init", .{ .blob = img(.init) }, .{
+    // The whole system is userspace: root gets the boot grants — log,
+    // spawn authority, the boot archive, and the device capabilities —
+    // and init starts every driver and service from the unit files in
+    // boot/conf/units. The kernel's only remaining job is to spawn root
+    // and, when the system has shut itself down, hold the leak bar.
+    log.info("shell: spawning root (system mode)", .{});
+    const root = domain.spawn("root", .{ .blob = img(.root) }, .{
+        .arg = 2,
         .grant_debug_log = true,
         .grant_spawner = true,
-        .grant_channel_a = front_ch,
         .grant_bootfs = true,
-        .kobj_limit = 4 << 20,
-        .user_limit = 24 << 20, // its services' budgets nest inside
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn init: {t}", .{e});
+        .grant_mmio = devMmio(),
+        .grant_irq = devIrq(),
+        .grant_entropy = true,
+        .kobj_limit = 24 << 20,
+        .user_limit = 96 << 20,
+    }) catch |e| std.debug.panic("spawn root: {t}", .{e});
 
-    // The image store: init installs the archive's programs into img/
-    // (content-addressed) so msh's `run` loads programs as files. A
-    // volume that cannot take the store is reported, not fatal: msh still
-    // boots, and `run` reports the missing index.
-    installImageStore(fs_ch, pb, front_ch);
+    while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);
+    domain.finishTeardown(root);
+    const code = root.exit_code;
 
-    // msh: serves its boot channel; we feed it cons, fs view, init front.
-    const boot_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const msh = domain.spawn("msh", .{ .blob = img(.shell) }, .{
-        .grant_debug_log = true,
-        .grant_spawner = true, // gates ps/mem introspection and `run`
-        .grant_channel_a = boot_ch,
-        .user_limit = 8 << 20, // the interpreter's arenas live in its BSS
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn msh: {t}", .{e});
-
-    bootGiveChan(boot_ch, .console, cons_ch);
-    bootGive(boot_ch, .view, .channel_b, view_obj, view_badge);
-    bootGiveChan(boot_ch, .init, front_ch);
-    bootGiveChan(boot_ch, .fabric, shellfab_ch);
-    bootGo(boot_ch);
-    log.info("shell: system up — msh on the console", .{});
-
-    // The human (or the runner's script) drives; we keep the single-node
-    // fabric breathing while we wait for msh to exit.
-    while (msh.state != .dead) {
-        _ = ipc.call(shellfab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .poll),
-        }, 0);
-        sched.sleep(2);
-    }
-    const msh_code = msh.exit_code;
-
-    // Teardown, inside out: init exits on front-channel death, then the
-    // drivers and the FS.
-    ipc.unrefSide(front_ch, .b);
-    while (initd.state != .dead) sched.sleep(1);
-    domain.destroy(shellfab);
-    while (shellfab.state != .dead) sched.sleep(1);
-    domain.destroy(shellnet);
-    while (shellnet.state != .dead) sched.sleep(1);
-    domain.destroy(root.d);
-    while (root.d.state != .dead) sched.sleep(1);
-    ipc.unrefSide(root.ch, .b);
-    ipc.unrefShm(root.buf);
-    ipc.unrefSide(shellnet_ch, .b);
-    ipc.unrefSide(shellfab_ch, .b);
-    ipc.unrefShm(fabbuf);
-    domain.destroy(consdrv);
-    while (consdrv.state != .dead) sched.sleep(1);
-    domain.destroy(fssvc);
-    while (fssvc.state != .dead) sched.sleep(1);
-    domain.destroy(blkdrv);
-    while (blkdrv.state != .dead) sched.sleep(1);
-    domain.destroy(rngd);
-    while (rngd.state != .dead) sched.sleep(1);
-    ipc.unrefSide(fs_ch, .b);
-    ipc.unrefSide(boot_ch, .b);
-    ipc.unrefShm(pathbuf);
-
-    sched.sleep(3);
+    sched.sleep(5);
     const frames_after = pmem.stats().free_bytes;
-    if (msh_code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
-        log.info("shell-test: PASS — an interactive capability shell, nothing leaked", .{});
+    if (code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
+        log.info("shell-test: PASS — a userspace-orchestrated system booted, served a console session, and shut down clean", .{});
         psci.systemOff();
     } else {
-        std.debug.panic("shell-test: FAIL — msh exit {d}, pmem delta {d}B", .{
-            msh_code, frames_before -% frames_after,
+        std.debug.panic("shell-test: FAIL — root exit {d}, pmem delta {d}B, shm {d}B", .{
+            code, frames_before -% frames_after, ipc.shm_account.balance(),
         });
     }
 }
@@ -1115,34 +1024,6 @@ fn fabricTestWorker(arg: u64) void {
     fabPump(fab_ch, 100); // node 3's rejoin attempts must hit the refusal
     log.info("fabric-test: PASS — join, gossip, placement, death, rejoin, respawn, authorization, revocation", .{});
     psci.systemOff();
-}
-
-/// Image store setup for the shell boot: init gets the root-of-trust
-/// view (the one view that sees everything — its by design) and
-/// installs the archive's programs under img/, creating the directory
-/// on a volume that predates it. Every step reports its typed error and
-/// gives up rather than taking the boot down with an assert.
-fn installImageStore(fs_ch: *ipc.Channel, pb: [*]u8, front_ch: *ipc.Channel) void {
-    _ = pb;
-    const res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 0, .ro = 0 } }),
-    }, 0);
-    if (res.err != .ok or res.msg.cap_type == 0) {
-        if (shared.decodeMsg(shared.FsResp, res.msg.data)) |rep| {
-            if (rep == .fs_err) return log.warn("shell: image store skipped: root view refused (fs error {d})", .{rep.fs_err.code});
-        }
-        return log.warn("shell: image store skipped: root view failed ({t})", .{res.err});
-    }
-    const img_view = ipc.call(front_ch, .{
-        .data = shared.encodeMsg(shared.InitRequest, .install),
-        .cap_type = @intFromEnum(cap.CapType.channel_b),
-        .cap_obj = res.msg.cap_obj,
-        .cap_badge = res.msg.cap_badge,
-    }, 0);
-    if (img_view.err != .ok) return log.warn("shell: image store skipped: init unreachable ({t})", .{img_view.err});
-    const rep = shared.decodeMsg(shared.InitReply, img_view.msg.data) orelse return log.warn("shell: image store skipped: bad reply from init", .{});
-    if (rep != .installed) return log.warn("shell: image store skipped: init refused to install", .{});
-    log.info("shell: image store ready ({d} images installed this boot)", .{rep.installed.n});
 }
 
 /// One-shot membership query: is `node` up in this fabric's view?

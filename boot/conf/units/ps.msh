@@ -1,0 +1,2 @@
+# `run ps`: looks at the ledger, holds no spawn authority.
+{ image: ps, grant: [log, introspect] }

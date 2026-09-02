@@ -17,8 +17,17 @@
 //!   primary  := number[unit] | string | '$'var | word | '(' pipeline ')'
 //!             | '[' expr,* ']' | 'true' | 'false' | 'null'
 //!   postfix  := primary ('.' name | '.' index)*
+//!   record   := '{' (word ':' expr (',' | newline)*)* '}'   (a '{' followed
+//!               by `word:` is a record; otherwise it is a block)
 //! Inside `where`, a bare word naming a column of the current row is that
 //! column; elsewhere a bare word is a string. Strings interpolate "$var".
+//!
+//! DATA FILES (unit files, config) are the literal subset of the same
+//! syntax — numbers with units, strings, bare words, true/false/null,
+//! lists, records, comments — parsed by `parseData`, which accepts
+//! literals and nothing else: no commands, no variables, no evaluation.
+//! A `.msh` file is a program or a record depending only on which entry
+//! point reads it.
 
 const std = @import("std");
 
@@ -137,6 +146,49 @@ pub const Interp = struct {
         return v;
     }
 
+    /// Parse `src` as DATA: one literal value (usually a record), nothing
+    /// executable. The result lives in the arena.
+    pub fn parseData(self: *Interp, src: []const u8) Error!Value {
+        var p = Parser{ .it = self, .lex = Lexer{ .src = src } };
+        p.setExpr(true);
+        // Leading separators.
+        while (p.peekAt() == .newline or p.peekAt() == .semi) _ = p.take();
+        const node = try p.expr();
+        while (p.peekAt() == .newline or p.peekAt() == .semi) _ = p.take();
+        if (p.peekAt() != .eof) return p.syntax("data: one value expected", .{});
+        return self.literal(node);
+    }
+
+    /// Reduce a literal-only tree to a value; anything else is refused.
+    fn literal(self: *Interp, n: *Node) Error!Value {
+        switch (n.*) {
+            .lit => |v| return v,
+            .word => |w| return .{ .str = w },
+            .list => |items| {
+                const vals = try self.arena.alloc(Value, items.len);
+                for (items, 0..) |item, i| vals[i] = try self.literal(item);
+                return .{ .list = vals };
+            },
+            .record => |fields| {
+                const keys = try self.arena.alloc([]const u8, fields.len);
+                const vals = try self.arena.alloc(Value, fields.len);
+                for (fields, 0..) |f, i| {
+                    keys[i] = f.key;
+                    vals[i] = try self.literal(f.value);
+                }
+                return .{ .record = .{ .keys = keys, .vals = vals } };
+            },
+            .unop => |u| {
+                if (u.op == .neg) {
+                    const v = try self.literal(u.operand);
+                    if (v == .int) return .{ .int = -v.int };
+                }
+                return self.fail("data: literal expected", .{});
+            },
+            else => return self.fail("data: literal expected (no commands, variables, or operators)", .{}),
+        }
+    }
+
     pub fn fail(self: *Interp, comptime fmt: []const u8, args: anytype) Error {
         self.err_msg = std.fmt.allocPrint(self.arena, fmt, args) catch "error";
         return Error.Runtime;
@@ -253,6 +305,15 @@ pub const Interp = struct {
                 const vals = try self.arena.alloc(Value, items.len);
                 for (items, 0..) |item, i| vals[i] = try self.evalNode(item);
                 return .{ .list = vals };
+            },
+            .record => |fields| {
+                const keys = try self.arena.alloc([]const u8, fields.len);
+                const vals = try self.arena.alloc(Value, fields.len);
+                for (fields, 0..) |f, i| {
+                    keys[i] = f.key;
+                    vals[i] = try self.evalNode(f.value);
+                }
+                return .{ .record = .{ .keys = keys, .vals = vals } };
             },
             .binop => |b| return self.evalBinop(b),
             .unop => |u| {
@@ -915,11 +976,13 @@ pub const Node = union(enum) {
     interp: []const StrPart,
     field: struct { base: *Node, name: []const u8 },
     list: []const *Node,
+    record: []const Field,
     binop: BinOp,
     unop: struct { op: enum { not, neg }, operand: *Node },
 };
 
 const Pipeline = struct { stages: []const *Node, redirect: ?[]const u8 };
+const Field = struct { key: []const u8, value: *Node };
 const Call = struct { name: []const u8, args: []const *Node };
 const BinOp = struct { op: Op, lhs: *Node, rhs: *Node };
 const StrPart = union(enum) { text: []const u8, var_: []const u8 };
@@ -1330,12 +1393,53 @@ const Parser = struct {
                 return p.mk(.{ .list = items.items });
             },
             .lbrace => {
+                // `{ word: ...` is a record literal; anything else a block.
+                if (p.recordAhead()) return p.recordLit();
                 p.peeked = false;
                 p.lex.pos = p.tok_start;
                 return p.block();
             },
             else => return p.syntax("expression expected", .{}),
         }
+    }
+
+    /// After a consumed '{': does a `word:` follow (past newlines)?
+    fn recordAhead(p: *Parser) bool {
+        var i = p.lex.pos;
+        const src = p.lex.src;
+        while (i < src.len and (src[i] == ' ' or src[i] == '\t' or src[i] == '\r' or src[i] == '\n')) i += 1;
+        if (i >= src.len) return false;
+        if (src[i] == '}') return false;
+        while (i < src.len and Lexer.isWordChar(src[i]) and src[i] != ':') i += 1;
+        return i < src.len and src[i] == ':';
+    }
+
+    fn recordLit(p: *Parser) Error!*Node {
+        var fields: std.ArrayList(Field) = .empty;
+        while (true) {
+            p.setExpr(true);
+            const t = p.peekAt();
+            switch (t) {
+                .rbrace => {
+                    _ = p.take();
+                    break;
+                },
+                .comma, .newline, .semi => {
+                    _ = p.take();
+                    continue;
+                },
+                .word => |w| {
+                    _ = p.take();
+                    if (w.len < 2 or w[w.len - 1] != ':') return p.syntax("record: 'key:' expected, got '{s}'", .{w});
+                    const key = w[0 .. w.len - 1];
+                    const value = try p.expr();
+                    try fields.append(p.a(), .{ .key = key, .value = value });
+                },
+                .eof => return p.syntax("'}}' expected", .{}),
+                else => return p.syntax("record: 'key:' expected", .{}),
+            }
+        }
+        return p.mk(.{ .record = fields.items });
     }
 };
 
@@ -1489,6 +1593,48 @@ test "errors carry messages" {
     try std.testing.expectError(Error.Runtime, it.run("1 / 0"));
     try std.testing.expectError(Error.Runtime, it.run("$nope"));
     try std.testing.expectEqualStrings("unknown variable $nope", it.err_msg);
+}
+
+test "record literals and the strict data parser" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var host = TestHost{};
+    var it = testInterp(&host, arena_state.allocator());
+    // At the prompt, a record is a value like any other.
+    try expectOut(&it, "{ a: 1, b: two }", "a: 1\nb: two\n");
+    try expectOut(&it, "{ a: 1, b: two }.b", "two\n");
+    try expectOut(&it, "{ x: (1 + 2) }.x", "3\n");
+    try expectOut(&it, "if true { echo block }", "block\n"); // braces still block
+
+    // A unit file: the literal subset only.
+    const unit =
+        \\# the filesystem service
+        \\{
+        \\  image:  fs
+        \\  arg:    1
+        \\  budget: { kobj: 1mb, user: 4mb }
+        \\  grant:  [log, bootfs]
+        \\  give: [
+        \\    { tag: buf,  shm: 1 }
+        \\    { tag: key,  secret: conf/fs.key }
+        \\    { tag: disk, unit: blk }
+        \\  ]
+        \\  restart: { policy: one-for-one, max: 5 }
+        \\}
+    ;
+    const v = try it.parseData(unit);
+    try std.testing.expect(v == .record);
+    try std.testing.expectEqualStrings("fs", v.record.get("image").?.str);
+    try std.testing.expectEqual(@as(i64, 4 * 1024 * 1024), v.record.get("budget").?.record.get("user").?.int);
+    try std.testing.expectEqual(@as(usize, 3), v.record.get("give").?.list.len);
+    try std.testing.expectEqualStrings("blk", v.record.get("give").?.list[2].record.get("unit").?.str);
+    try std.testing.expectEqualStrings("log", v.record.get("grant").?.list[0].str);
+
+    // Not data: refused, never evaluated.
+    try std.testing.expectError(Error.Runtime, it.parseData("{ a: (ls | len) }"));
+    try std.testing.expectError(Error.Runtime, it.parseData("{ a: $x }"));
+    try std.testing.expectError(Error.Syntax, it.parseData("{ a: 1 } { b: 2 }"));
+    try std.testing.expectError(Error.Syntax, it.parseData("echo hi"));
 }
 
 test "records render as key: value lines; tables align" {

@@ -178,15 +178,21 @@ pub fn build(b: *std.Build) void {
     });
     const pack = b.addRunArtifact(mkmarc);
     const marc_out = pack.addOutputFileArg("bootfs.marc");
-    const boot_files = b.addWriteFiles();
-    for ([_]struct { path: []const u8, data: []const u8 }{
-        .{ .path = "etc/motd", .data = "Welcome to moss.\n" },
-        .{ .path = "etc/version", .data = "moss 0.0.0\n" },
-        // Init's service topology: "service image arg max_restarts", numeric
-        // per shared.ServiceId / shared.ImageId.
-        .{ .path = "conf/init.topology", .data = "0 4 1 5\n1 4 2 5\n" },
+    // The boot tree: boot/ in the repo, laid out as the archive serves it
+    // (etc/ identity, conf/ boot configuration: unit files under
+    // conf/units/, test key material beside them).
+    for ([_][]const u8{
+        "etc/motd",               "etc/version",
+        "conf/fs.key",            "conf/fabric/root.seed",
+        "conf/fabric/node1.seed", "conf/units/rngd.msh",
+        "conf/units/blk.msh",     "conf/units/fs.msh",
+        "conf/units/net.msh",     "conf/units/fabroot.msh",
+        "conf/units/fabsvc.msh",  "conf/units/cons.msh",
+        "conf/units/msh.msh",     "conf/units/logsvc.msh",
+        "conf/units/greeter.msh", "conf/units/ps.msh",
+        "conf/units/ls.msh",
     }) |f| {
-        pack.addPrefixedFileArg(b.fmt("{s}=", .{f.path}), boot_files.add(f.path, f.data));
+        pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
     }
 
     const user_blobs = b.addWriteFiles();
@@ -240,11 +246,11 @@ pub fn build(b: *std.Build) void {
     // base system (fabric handshakes refuse to run without it), and the
     // modern (v2) virtio-mmio transport is what every driver speaks.
     const qemu_common = [_][]const u8{
-        "-smp",        "4",
-        "-m",          "512M",
-        "-nographic",
-        "-global",     "virtio-mmio.force-legacy=false",
-        "-device",     "virtio-rng-device",
+        "-smp",                           "4",
+        "-m",                             "512M",
+        "-nographic",                     "-global",
+        "virtio-mmio.force-legacy=false", "-device",
+        "virtio-rng-device",
     };
 
     const run_qemu = b.addSystemCommand(&.{
@@ -464,15 +470,15 @@ pub fn build(b: *std.Build) void {
     const run_check = b.addRunArtifact(runner);
 
     const all_test_opts = [_][]const u8{
-        "panic_test",  "fault_test", "sched_test", "domain_test",
-        "ipc_test",    "init_test",  "sandbox_test", "flap_test",
-        "blk_test",    "fs_test",    "net_test",   "fabric_test",
-        "shell_test",  "rng_test",
+        "panic_test", "fault_test", "sched_test",   "domain_test",
+        "ipc_test",   "init_test",  "sandbox_test", "flap_test",
+        "blk_test",   "fs_test",    "net_test",     "fabric_test",
+        "shell_test", "rng_test",
     };
     const variants = [_][]const u8{
-        "panic", "fault", "sched", "domain", "ipc",  "init",
-        "sandbox", "flap", "blk",  "fs",     "net",  "fabric",
-        "shell", "rng",
+        "panic",   "fault", "sched", "domain", "ipc", "init",
+        "sandbox", "flap",  "blk",   "fs",     "net", "fabric",
+        "shell",   "rng",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();

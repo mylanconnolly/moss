@@ -1,0 +1,8 @@
+# The console driver (virtio-console).
+{
+  image: cons
+  give: [
+    { tag: mmio, device: mmio }
+    { tag: irq,  device: irq }
+  ]
+}

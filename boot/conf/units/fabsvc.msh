@@ -1,0 +1,12 @@
+# The fabric service for node 1 (arg = 1 | node << 8). Its identity is
+# certified by fabroot after boot; only then does it open the network.
+{
+  image:   fabric
+  arg:     257
+  grant:   [log, spawner, bootfs]
+  give: [
+    { tag: buf, shm: 1 }
+    { tag: net, netview: net }
+  ]
+  certify: { root: fabroot, seed: conf/fabric/node1.seed, node: 1, gossip: true, spawn: true }
+}
