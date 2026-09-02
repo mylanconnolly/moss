@@ -8,8 +8,7 @@
 //!
 //! The generator is pure integer code (the kernel is FP-free; std's
 //! ChaCha vectors lower to scalar ops without NEON) and lives under its
-//! own spinlock, never the scheduler's — a getrandom never touches the
-//! big lock.
+//! own spinlock — a getrandom never touches a scheduler or IPC lock.
 
 const std = @import("std");
 const lock = @import("lock.zig");

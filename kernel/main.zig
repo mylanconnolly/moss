@@ -299,6 +299,15 @@ fn ipcTestWorker(_: u64) void {
         askr.exit_code,
     });
 
+    // The scaling benchmark: call/reply pairs pinned one per core. How
+    // far three cores get past one is the scheduler lock's fingerprint.
+    const one = ipcBench(1);
+    const three = ipcBench(@min(3, sched.onlineCount() - 1));
+    log.info("ipc-test: bench call/reply — 1 core: {d} kops/s, 3 cores: {d} kops/s total ({d}.{d}x)", .{
+        one / 1000, three / 1000, three / @max(one, 1), (three * 10 / @max(one, 1)) % 10,
+    });
+    sched.sleep(3); // let the bench threads be reaped before the leak bar
+
     const frames_after = pmem.stats().free_bytes;
     const shm_left = ipc.shm_account.balance();
     if (frames_after == frames_before and shm_left == 0 and askr.exit_code == 7) {
@@ -1128,6 +1137,61 @@ fn cycles() u64 {
     return asm volatile ("mrs %[v], cntpct_el0"
         : [v] "=r" (-> u64),
     );
+}
+
+// ---------------------------------------------------------- ipc bench
+
+const bench_rounds: u64 = 60_000;
+var bench_done: std.atomic.Value(u32) = .init(0);
+var bench_end: [3]std.atomic.Value(u64) = .{ .init(0), .init(0), .init(0) };
+var bench_chs: [3]*ipc.Channel = undefined;
+
+fn benchServer(arg: u64) void {
+    const ch = bench_chs[arg];
+    var msg: ipc.Msg = .{};
+    var badge: u64 = 0;
+    var token: u64 = 0;
+    for (0..bench_rounds) |_| {
+        if (ipc.recv(ch, &msg, &badge, &token) != .ok) return;
+        _ = ipc.replyTo(ch, msg, token);
+    }
+}
+
+fn benchClient(arg: u64) void {
+    const idx: usize = @intCast(arg);
+    const ch = bench_chs[idx];
+    for (0..bench_rounds) |i| {
+        const res = ipc.call(ch, .{ .data = .{ i, 0, 0, 0 } }, 0);
+        if (res.err != .ok) break;
+    }
+    bench_end[idx].store(cycles(), .release);
+    _ = bench_done.fetchAdd(1, .acq_rel);
+}
+
+/// `pairs` call/reply pairs, pair i pinned to core i+1, all at once.
+/// Returns round trips per second across all pairs.
+fn ipcBench(pairs: u32) u64 {
+    const freq = asm ("mrs %[v], cntfrq_el0"
+        : [v] "=r" (-> u64),
+    );
+    for (0..pairs) |i| bench_chs[i] = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    bench_done.store(0, .release);
+    const t0 = cycles();
+    for (0..pairs) |i| {
+        const core: u32 = @intCast(1 + i);
+        _ = sched.spawn("bench-srv", benchServer, i, .{ .affinity = core }) catch @panic("spawn");
+        _ = sched.spawn("bench-cli", benchClient, i, .{ .affinity = core }) catch @panic("spawn");
+    }
+    while (bench_done.load(.acquire) < pairs) sched.sleep(1);
+    // Each client stamps its own finish: no tick quantization.
+    var t1: u64 = 0;
+    for (0..pairs) |i| t1 = @max(t1, bench_end[i].load(.acquire));
+    for (0..pairs) |i| {
+        ipc.unrefSide(bench_chs[i], .a);
+        ipc.unrefSide(bench_chs[i], .b);
+    }
+    const elapsed = @max(t1 - t0, 1);
+    return bench_rounds * pairs * freq / elapsed;
 }
 
 fn notifHelper(arg: u64) void {

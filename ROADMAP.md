@@ -34,7 +34,7 @@ the Phase 12+ pool below is the open frontier.
 | Supervision | OTP-style supervision trees: crash-only services, restart strategies (one-for-one / all-for-one), restart budgets with backoff and escalation. Restart = domain revoke + respawn from manifest; dependents observe channel death and re-wire through init. Supervisors nest with domains. | Domain teardown makes restarts provably leak-free; crash-only means no separate graceful-shutdown protocol to get wrong. |
 | Orchestration | A unit file, a sandbox manifest, and a remote-spawn request are the **same artifact**. Node-local init and the multi-node fabric are the same operation at different radii (fabric adds placement + cap proxying). | Cluster orchestration becomes an extension of init, not a k8s-shaped bolt-on. |
 | Drivers | Userspace, virtio-first (blk, net, gpu, input). Driver interface = MMIO-mapping caps, IRQ-delivery-as-message, explicit DMA memory grants; IOMMU story designed in, stubbed initially. | Useful in VMs/cloud for ~5% of the effort of real hardware; real NICs/NVMe arrive later through the same interface. |
-| SMP | Structural from day one: per-core run queues and per-core kernel state, no global "current thread". A big kernel lock is acceptable early; the *structures* are not allowed to assume one core. | Retrofitting SMP is the classic hobby-OS death. |
+| SMP | Structural from day one: per-core run queues and per-core kernel state, no global "current thread". A big kernel lock is acceptable early; the *structures* are not allowed to assume one core. (Retired 2026-09-02: per-core run-queue, per-thread and per-object locks; DESIGN "Locking".) | Retrofitting SMP is the classic hobby-OS death. |
 | Distribution stance | **No single system image.** Explicit-but-ergonomic distribution: cap delegation across nodes, remote channels, remote spawn — via a userspace fabric service per node. Membership/consensus/discovery live in userspace where they can iterate. | Transparent SSI has failed everywhere it was tried; the network's latency and partial failure must be legible to software. |
 | Security posture | W^X unconditional, NX everywhere, separate address spaces per domain, kernel/user page-table hygiene from the start. Side channels: no cross-domain SMT sharing; seL4-style time partitioning as a later opt-in. Documented honestly — caps don't fix microarchitecture. | Cheaper to be born safe. |
 | Network addressing | **IPv6-native ABI**: every address in every protocol is 128 bits; IPv4 destinations travel v4-mapped (`::ffff:a.b.c.d`). There is no IPv4-only code path to depend on — the stack speaks both families on the wire (ARP for v4, NDP/ICMPv6 for v6), but the system's idea of an address is IPv6. Filters/allowlists compare full 128-bit addresses. | v4-only ABIs are the next legacy trap; v4-mapped addressing is the proven dual-stack shape and costs nothing. |
@@ -77,7 +77,7 @@ Repo scaffolding and the ten-thousand-times loop.
 ## Phase 2 — Threads and scheduling ✅
 
 - Kernel threads, context switch, sleep/wake.
-- Per-core run queues and per-core state (structures SMP-honest from the start); big kernel lock for now.
+- Per-core run queues and per-core state (structures SMP-honest from the start); big kernel lock at first, split into per-core/per-thread/per-object locks in Phase 12.
 - SMP bring-up via PSCI; `-smp 4` in the run target.
 - Preemptive round-robin; CPU budget accounting stubs on the scheduler path.
 
@@ -175,6 +175,23 @@ The pooling story stops being theory.
 
 - x86_64 port (the HAL's honesty test) and UEFI boot for real aarch64 hardware.
 - Real IOMMU (SMMU) backing the DMA-grant API.
+- ✅ **Kernel: the big lock retired** (done): per-core run-queue locks,
+  per-thread locks, per-channel/notification locks, leaf locks for the
+  object tables, timers, IRQ bindings, sleepers and the thread table
+  (discipline and lock order in DESIGN "Locking"). Blocking is a
+  handshake — the object lock is released only once the thread holds its
+  run-queue lock and has raised `switching` — so wakeups are never lost
+  and a thread is never run or reaped mid-switch; teardown peeks, locks
+  in order, verifies and retries. The ipc test carries a permanent
+  call/reply benchmark (one pinned pair per core): three cores went from
+  1.4x of one core to ~3x under both TCG and HVF (5–7 Mops/s on an M3
+  Max), after cache-line padding of the per-core and per-object structs
+  — the split alone bought 1.8x. Three bugs recorded in DESIGN: the
+  first benchmark measured the tick; the first cut raised `switching`
+  too late (a soak-run instruction abort into a thread stack); and a
+  supervisor's recv lost a death signaled between its bits peek and its
+  park (a 1-in-80 fs-drill hang) until the peek-and-park was made one
+  step under the notification's lock.
 - ✅ **Dynamic fabric membership + load-aware placement** (done): nodes
   join by dialing any seed; the hello_ack carries the acker's member
   view (gossip) and member_up/down broadcasts keep the mesh converging —

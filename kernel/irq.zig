@@ -2,18 +2,22 @@
 //! the line (level-triggered sources must not storm) and signaling the
 //! notification; the driver handles the device, then irq_ack re-enables.
 //!
-//! Bindings share the scheduler's big lock with the notification state, so
-//! delivery, binding, and notification teardown cannot race.
+//! Bindings have their own lock, taken inside a notification's (teardown
+//! severs bindings under both). Delivery reads the binding under the lock
+//! and signals after releasing it, so it never holds irq_lock while
+//! taking the notification's — a signal that lands on a notification
+//! freed in that window is dropped by signal() itself.
 
 const std = @import("std");
 const gic = @import("gic.zig");
 const ipc = @import("ipc.zig");
-const sched = @import("sched.zig");
+const lock = @import("lock.zig");
 
 const spi_base = 32;
 const max_spis = 256;
 
 var bindings: [max_spis]?*ipc.Notification = @splat(null);
+var irq_lock: lock.SpinLock = .{};
 
 pub fn init() void {
     ipc.notif_freed_hook = &onNotificationFreed;
@@ -30,8 +34,8 @@ pub const Error = error{
 pub fn bind(intid: u32, n: *ipc.Notification) Error!void {
     if (intid < spi_base or intid >= spi_base + max_spis) return Error.OutOfRange;
     {
-        const daif = sched.acquire();
-        defer sched.release(daif);
+        const daif = irq_lock.lockIrqSave();
+        defer irq_lock.unlockRestore(daif);
         if (bindings[intid - spi_base] != null) return Error.Busy;
         bindings[intid - spi_base] = n;
     }
@@ -47,18 +51,24 @@ pub fn ack(intid: u32) Error!void {
 /// delivered.
 pub fn deliver(intid: u32) bool {
     if (intid < spi_base or intid >= spi_base + max_spis) return false;
-    const daif = sched.acquire();
-    defer sched.release(daif);
-    const n = bindings[intid - spi_base] orelse return false;
+    const daif = irq_lock.lockIrqSave();
+    const n = bindings[intid - spi_base] orelse {
+        irq_lock.unlockRestore(daif);
+        return false;
+    };
     gic.disableSpi(intid);
-    ipc.signalLocked(n, 1);
+    irq_lock.unlockRestore(daif);
+    ipc.signal(n, 1);
     return true;
 }
 
-/// Called by notification teardown WITH THE BIG LOCK HELD: sever any
-/// bindings so a dead notification is never signaled, and mask the lines —
-/// an unbound level-triggered device would interrupt-storm to nowhere.
+/// Called by notification teardown with the notification's lock held:
+/// sever any bindings so a dead notification is never signaled, and mask
+/// the lines — an unbound level-triggered device would interrupt-storm to
+/// nowhere.
 fn onNotificationFreed(n: *ipc.Notification) void {
+    irq_lock.lock();
+    defer irq_lock.unlock();
     for (&bindings, 0..) |*b, i| {
         if (b.* == n) {
             b.* = null;

@@ -15,10 +15,22 @@
 //! kernel thread disables TTBR0 walks entirely (TCR.EPD0) so no stale user
 //! mappings are ever reachable from kernel-only contexts.
 //!
-//! Rules for this module: schedule() is entered with the big lock held and
-//! IRQs masked; every resume point after a context switch (schedule's return
-//! or the new-thread trampoline) must reap any exited predecessor and
-//! release the lock. No logging while holding the big lock.
+//! Locking (no big lock): every core's run queue has its own lock, every
+//! thread its own, sleepers theirs, and IPC objects theirs. A thread's
+//! state is protected by the run-queue lock of the core it is queued on
+//! or running on, and by its own lock while it is blocked or sleeping;
+//! anyone else who wants to change it takes the thread lock first to
+//! discover which. Order, outer to inner: IPC object → thread → run
+//! queue → sleepers; the thread table lock is a leaf for slot alloc and
+//! free. A blocking thread releases the object lock only after it holds
+//! its run-queue lock, so a waker can never slip between "not yet in the
+//! wait list" and "switched away"; a thread still switching away carries
+//! `switching`, and whoever dequeues or frees it waits for that to clear.
+//! schedule() is entered with the local run-queue lock held and IRQs
+//! masked and always returns with the lock released — directly, or via
+//! finishSwitch() at the resume point (schedule's return or the
+//! new-thread trampoline), which also reaps an exited predecessor. No
+//! logging while holding any of these.
 
 const std = @import("std");
 const ipc = @import("ipc.zig");
@@ -115,6 +127,16 @@ pub const Thread = struct {
     /// to avoid an import cycle). recv checks its latched bits before
     /// blocking so a signal can never be lost between recvs.
     bound_notif: ?*anyopaque = null,
+    /// The lock of the object this thread is blocked on (a channel's or a
+    /// notification's): whoever wants to unlink it — teardown, a bound
+    /// notification's interrupt — takes that first, then the thread.
+    block_lock: ?*lock.SpinLock = null,
+    /// Linked into the sleepers list (under sleepers_lock).
+    in_sleepers: bool = false,
+    /// Set by the core switching away from this thread until its
+    /// registers are saved (cleared by finishSwitch on the other side).
+    switching: std.atomic.Value(bool) = .init(false),
+    lock: lock.SpinLock = .{},
     node: std.DoublyLinkedList.Node = .{},
 };
 
@@ -128,20 +150,26 @@ pub const SpawnOpts = struct {
 };
 
 pub const PerCpu = struct {
-    id: u32,
+    /// Cache-line aligned: each core hammers its own lock and queue, and a
+    /// neighbour's line bouncing between cores would cost the scaling.
+    id: u32 align(128),
     current: *Thread,
     idle: *Thread,
     queue: std.DoublyLinkedList = .{},
-    reap: ?*Thread = null,
+    /// The thread this core last switched away from; finishSwitch clears
+    /// its `switching` (or reaps it) on the other side of the switch.
+    prev: ?*Thread = null,
     need_resched: bool = false,
     online: bool = false,
     ticks: u64 = 0, // debug
+    lock: lock.SpinLock = .{},
 };
 
 var cpus: [max_cpus]PerCpu = undefined;
 var threads: [max_threads]Thread = @splat(.{});
+var threads_lock: lock.SpinLock = .{};
 var sleepers: std.DoublyLinkedList = .{};
-var big_lock: lock.SpinLock = .{};
+var sleepers_lock: lock.SpinLock = .{};
 var next_thread_id: u32 = 1;
 var balance_next: u32 = 0;
 var global_ticks: u64 = 0;
@@ -159,7 +187,7 @@ pub fn thisCpu() *PerCpu {
 /// Register the calling core: its current execution context becomes the
 /// core's idle thread. Called once per core before that core enables IRQs.
 pub fn registerCpu(cpu_id: u32) void {
-    const daif = big_lock.lockIrqSave();
+    const daif = threads_lock.lockIrqSave();
     const idle = allocThreadSlotLocked() catch @panic("no thread slot for idle");
     idle.name = "idle";
     idle.state = .running;
@@ -167,7 +195,7 @@ pub fn registerCpu(cpu_id: u32) void {
     idle.on_cpu = cpu_id;
     const cpu = &cpus[cpu_id];
     cpu.* = .{ .id = cpu_id, .current = idle, .idle = idle, .online = true };
-    big_lock.unlockRestore(daif);
+    threads_lock.unlockRestore(daif);
     asm volatile ("msr tpidr_el1, %[v]"
         :
         : [v] "r" (@intFromPtr(cpu)),
@@ -192,10 +220,11 @@ pub fn spawn(name: []const u8, entry: *const fn (u64) void, arg: u64, opts: Spaw
     try opts.stack_account.charge(stack_pages * mem.page_size);
     errdefer opts.stack_account.credit(stack_pages * mem.page_size);
 
-    const daif = big_lock.lockIrqSave();
-    defer big_lock.unlockRestore(daif);
-
-    const t = try allocThreadSlotLocked();
+    const daif = threads_lock.lockIrqSave();
+    const t = allocThreadSlotLocked() catch |e| {
+        threads_lock.unlockRestore(daif);
+        return e;
+    };
     t.name = name;
     t.affinity = opts.affinity;
     t.stack_pa = stack_pa;
@@ -210,42 +239,73 @@ pub fn spawn(name: []const u8, entry: *const fn (u64) void, arg: u64, opts: Spaw
     t.ctx.regs[0] = @intFromPtr(entry); // x19
     t.ctx.regs[1] = arg; // x20
     t.ctx.regs[11] = @intFromPtr(&__thread_trampoline); // x30
+    threads_lock.unlock();
+    t.lock.lock();
     enqueueLocked(t);
+    t.lock.unlock();
+    restoreIrqs(daif);
     return t;
+}
+
+fn restoreIrqs(daif: u64) void {
+    asm volatile ("msr daif, %[v]"
+        :
+        : [v] "r" (daif),
+    );
+}
+
+fn maskIrqs() u64 {
+    const daif = asm ("mrs %[v], daif"
+        : [v] "=r" (-> u64),
+    );
+    asm volatile ("msr daifset, #2");
+    return daif;
 }
 
 /// Give up the CPU voluntarily; the thread re-enters its queue (possibly on
 /// another core, if unpinned).
 pub fn yield() void {
-    const daif = big_lock.lockIrqSave();
-    defer big_lock.unlockRestore(daif);
+    const daif = maskIrqs();
+    thisCpu().lock.lock();
     scheduleLocked();
+    restoreIrqs(daif);
 }
 
 /// Sleep for at least `ticks` timer ticks.
 pub fn sleep(ticks: u64) void {
-    const daif = big_lock.lockIrqSave();
-    defer big_lock.unlockRestore(daif);
+    const daif = maskIrqs();
     const cpu = thisCpu();
     const t = cpu.current;
     std.debug.assert(t != cpu.idle); // the idle thread never sleeps
+    t.lock.lock();
+    cpu.lock.lock();
     // Teardown race: destroyThreadsOf may have marked this (then-running)
     // thread exited from another core while it was entering this syscall.
     // Overwriting that with .sleeping would resurrect it into the sleepers
     // list and the domain would never drain. Die here instead.
     if (t.state == .exited) {
+        t.lock.unlock();
         scheduleLocked(); // never returns: exited threads are reaped
         unreachable;
     }
     t.state = .sleeping;
     t.wake_tick = global_ticks + ticks;
+    // Raised before anyone can find us asleep: a tick that wakes us onto
+    // another core must wait for this core to save our registers.
+    t.switching.store(true, .release);
+    sleepers_lock.lock();
     sleepers.append(&t.node);
+    t.in_sleepers = true;
+    sleepers_lock.unlock();
+    t.lock.unlock();
     scheduleLocked();
+    restoreIrqs(daif);
 }
 
 pub fn exit() noreturn {
-    _ = big_lock.lockIrqSave(); // this context never resumes
+    _ = maskIrqs(); // this context never resumes
     const cpu = thisCpu();
+    cpu.lock.lock();
     cpu.current.state = .exited;
     scheduleLocked();
     unreachable;
@@ -258,120 +318,253 @@ pub fn exit() noreturn {
 /// are reaped (each reap invokes user_thread_reaped). Returns how many were
 /// freed on the spot.
 pub fn destroyThreadsOf(ctx: *anyopaque) u32 {
-    const daif = big_lock.lockIrqSave();
-    defer big_lock.unlockRestore(daif);
-    const self_cpu = thisCpu().id;
+    const daif = maskIrqs();
+    defer restoreIrqs(daif);
     var freed: u32 = 0;
     for (&threads) |*t| {
-        if (t.state == .unused or t.user_ctx != ctx) continue;
-        switch (t.state) {
-            .ready => {
-                cpus[t.queued_on.?].queue.remove(&t.node);
-                freeThreadLocked(t);
-                freed += 1;
-            },
-            .sleeping => {
-                sleepers.remove(&t.node);
-                freeThreadLocked(t);
-                freed += 1;
-            },
-            .blocked => {
-                if (t.block_list) |l| l.remove(&t.node);
-                if (t.block_slot) |s| s.* = null;
-                freeThreadLocked(t);
-                freed += 1;
-            },
-            .running => {
-                t.state = .exited;
-                const c = t.on_cpu.?;
-                cpus[c].need_resched = true;
-                if (c != self_cpu) gic.sendSgi(c);
-            },
-            .exited, .unused => {},
-        }
+        if (@atomicLoad(State, &t.state, .acquire) == .unused or t.user_ctx != ctx) continue;
+        if (destroyOne(t, ctx)) freed += 1;
     }
     return freed;
 }
 
-/// Expose the big lock to IPC: channel state and scheduling share one lock
-/// (the big-kernel-lock era), so wait/wake transitions are race-free.
-pub fn acquire() u64 {
-    return big_lock.lockIrqSave();
+/// Tear down one thread of a dying domain. Every step peeks without
+/// locks, then takes the locks in order and re-verifies; a transition
+/// caught mid-flight (a stale object lock, a thread between queue and
+/// core) is simply retried. Returns true if the thread was freed here
+/// (a running thread is only marked; its core reaps it).
+fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
+    const self_cpu = thisCpu().id;
+    while (true) {
+        // Blocked threads are unlinked under the object's lock, which is
+        // taken before the thread's; read the object first, verify after.
+        const bl = @atomicLoad(?*lock.SpinLock, &t.block_lock, .acquire);
+        if (bl) |l| l.lock();
+        t.lock.lock();
+        if (t.user_ctx != ctx or t.state == .exited or t.state == .unused) {
+            t.lock.unlock();
+            if (bl) |l| l.unlock();
+            return false;
+        }
+        if (t.block_lock != bl) {
+            t.lock.unlock();
+            if (bl) |l| l.unlock();
+            std.atomic.spinLoopHint();
+            continue;
+        }
+        switch (t.state) {
+            .blocked => {
+                if (t.block_list) |l| l.remove(&t.node);
+                if (t.block_slot) |sl| sl.* = null;
+                t.block_list = null;
+                t.block_slot = null;
+                t.block_lock = null;
+                t.lock.unlock();
+                bl.?.unlock();
+                waitSwitched(t);
+                freeThread(t);
+                return true;
+            },
+            .sleeping => {
+                sleepers_lock.lock();
+                const ours = t.in_sleepers;
+                if (ours) {
+                    sleepers.remove(&t.node);
+                    t.in_sleepers = false;
+                } else {
+                    // The tick has it in hand: it will see exited and
+                    // free it.
+                    t.state = .exited;
+                }
+                sleepers_lock.unlock();
+                t.lock.unlock();
+                if (!ours) return false;
+                waitSwitched(t);
+                freeThread(t);
+                return true;
+            },
+            .ready, .running => {
+                // Its run queue's (or core's) lock serializes with that
+                // core's pick and preempt.
+                if (t.queued_on) |q| {
+                    const rq = &cpus[q];
+                    rq.lock.lock();
+                    if (t.queued_on == q) {
+                        rq.queue.remove(&t.node);
+                        t.queued_on = null;
+                        t.state = .exited;
+                        rq.lock.unlock();
+                        t.lock.unlock();
+                        waitSwitched(t);
+                        freeThread(t);
+                        return true;
+                    }
+                    rq.lock.unlock();
+                } else if (t.on_cpu) |c| {
+                    const rq = &cpus[c];
+                    rq.lock.lock();
+                    if (rq.current == t) {
+                        t.state = .exited;
+                        rq.need_resched = true;
+                        rq.lock.unlock();
+                        t.lock.unlock();
+                        if (c != self_cpu) gic.sendSgi(c);
+                        return false;
+                    }
+                    rq.lock.unlock();
+                }
+                // Between a queue and a core: let it land, then retry.
+                t.lock.unlock();
+                std.atomic.spinLoopHint();
+                continue;
+            },
+            .exited, .unused => unreachable,
+        }
+    }
 }
 
-pub fn release(daif: u64) void {
-    big_lock.unlockRestore(daif);
-}
-
-/// Park the current thread on a wait queue or single-waiter slot. Big lock
-/// held. Returns when someone wakes the thread; its mailbox then holds the
+/// Park the current thread on a wait queue or single-waiter slot of the
+/// object whose lock `obj` the caller holds (IRQs masked), plus an
+/// optional outer lock `outer` the caller also holds (a bound
+/// notification's, taken before the channel's: the latched-bits peek and
+/// the park must be one atomic step against signal). Both are released
+/// here, after the run-queue lock is held, and are NOT held on return.
+/// Returns when someone wakes the thread; its mailbox then holds the
 /// operation's outcome.
-pub fn blockCurrentLocked(list: ?*std.DoublyLinkedList, slot: ?*?*Thread) void {
-    const t = thisCpu().current;
-    std.debug.assert(t != thisCpu().idle);
+pub fn block(list: ?*std.DoublyLinkedList, slot: ?*?*Thread, obj: *lock.SpinLock, outer: ?*lock.SpinLock) void {
+    const cpu = thisCpu();
+    const t = cpu.current;
+    std.debug.assert(t != cpu.idle);
+    t.lock.lock();
+    cpu.lock.lock();
     // Same teardown race as sleep(): a concurrent destroy may have marked
     // this thread exited; parking it would overwrite that and leak it into
     // an IPC wait structure. Die instead.
     if (t.state == .exited) {
+        t.lock.unlock();
+        obj.unlock();
+        if (outer) |o| o.unlock();
         scheduleLocked(); // never returns
         unreachable;
     }
     t.state = .blocked;
     t.block_list = list;
     t.block_slot = slot;
+    t.block_lock = obj;
+    // Raised before the object lock is released: a waker on another core
+    // may enqueue us the instant it sees us blocked, and whoever dequeues
+    // us must not run us until this core has saved our registers.
+    t.switching.store(true, .release);
     if (list) |l| l.append(&t.node);
-    if (slot) |s| s.* = t;
+    if (slot) |sl| sl.* = t;
+    t.lock.unlock();
+    // From here a waker can find us; it waits for `switching` to clear
+    // before running us anywhere.
+    obj.unlock();
+    if (outer) |o| o.unlock();
     scheduleLocked();
     t.block_list = null;
     t.block_slot = null;
+    t.block_lock = null;
 }
 
 /// Wake a blocked thread the caller has already unlinked (popped from its
-/// queue / cleared from its slot). Big lock held.
-pub fn wakeLocked(t: *Thread) void {
+/// queue / cleared from its slot), holding the object's lock.
+pub fn wake(t: *Thread) void {
+    t.lock.lock();
     std.debug.assert(t.state == .blocked);
     t.block_list = null;
     t.block_slot = null;
+    t.block_lock = null;
     enqueueLocked(t);
+    t.lock.unlock();
+}
+
+/// A bound notification interrupting a thread blocked in recv: with the
+/// notification's lock held, take the object it blocks on, then the
+/// thread, and verify before unlinking. Returns false when the thread was
+/// not (or no longer) blocked in recv — the latched bits will be seen at
+/// its next recv.
+pub fn interruptRecv(t: *Thread, status: u64) bool {
+    if (!@atomicLoad(bool, &t.in_recv, .acquire)) return false;
+    const bl = @atomicLoad(?*lock.SpinLock, &t.block_lock, .acquire) orelse return false;
+    bl.lock();
+    t.lock.lock();
+    const ok = t.state == .blocked and t.in_recv and t.block_lock == bl and t.block_slot != null;
+    if (ok) {
+        t.block_slot.?.* = null;
+        t.block_list = null;
+        t.block_slot = null;
+        t.block_lock = null;
+        t.ipc_status = status;
+        enqueueLocked(t);
+    }
+    t.lock.unlock();
+    bl.unlock();
+    return ok;
+}
+
+fn waitSwitched(t: *Thread) void {
+    while (t.switching.load(.acquire)) std.atomic.spinLoopHint();
 }
 
 /// Timer-tick hook, called from IRQ context (IRQs masked) on every core.
 /// Core 0 additionally advances global time and wakes due sleepers.
 pub fn onTick(is_timekeeper: bool) void {
-    const daif = big_lock.lockIrqSave();
-    defer big_lock.unlockRestore(daif);
     const cpu = thisCpu();
     cpu.current.cpu_ticks += 1;
     cpu.ticks += 1;
 
     if (is_timekeeper) {
         global_ticks += 1;
-        ipc.timerTickLocked(global_ticks);
+        ipc.timerTick(global_ticks);
+        // Take the due sleepers off the list first (sleepers lock alone),
+        // then wake each under its own lock — never both at once.
+        var due: [max_threads]*Thread = undefined;
+        var n: usize = 0;
+        sleepers_lock.lock();
         var it = sleepers.first;
         while (it) |node| {
             const next = node.next;
             const t: *Thread = @alignCast(@fieldParentPtr("node", node));
             if (t.wake_tick <= global_ticks) {
                 sleepers.remove(node);
-                t.state = .ready;
-                enqueueLocked(t);
+                t.in_sleepers = false;
+                due[n] = t;
+                n += 1;
             }
             it = next;
+        }
+        sleepers_lock.unlock();
+        for (due[0..n]) |t| {
+            t.lock.lock();
+            if (t.state == .sleeping) {
+                enqueueLocked(t);
+                t.lock.unlock();
+            } else {
+                // Torn down while in our hand: nobody else will free it.
+                t.lock.unlock();
+                waitSwitched(t);
+                freeThread(t);
+            }
         }
     }
 
     // Round-robin: preempt whenever someone else is waiting for this core.
+    cpu.lock.lock();
     if (cpu.queue.first != null) cpu.need_resched = true;
+    cpu.lock.unlock();
 }
 
 /// Called by the trap handler after EOI when returning from an interrupt.
 pub fn preemptIfNeeded() void {
     const cpu = thisCpu();
-    if (!cpu.need_resched) return;
-    const daif = big_lock.lockIrqSave();
-    defer big_lock.unlockRestore(daif);
+    if (!@atomicLoad(bool, &cpu.need_resched, .acquire)) return;
+    const daif = maskIrqs();
+    cpu.lock.lock();
     cpu.need_resched = false;
     scheduleLocked();
+    restoreIrqs(daif);
 }
 
 pub fn currentName() []const u8 {
@@ -407,7 +600,7 @@ pub fn ticksOfCurrent() u64 {
 fn allocThreadSlotLocked() Error!*Thread {
     for (&threads) |*t| {
         if (t.state == .unused) {
-            t.* = .{ .id = next_thread_id, .state = .ready };
+            t.* = .{ .id = next_thread_id, .state = .ready, .lock = t.lock };
             next_thread_id += 1;
             return t;
         }
@@ -415,69 +608,100 @@ fn allocThreadSlotLocked() Error!*Thread {
     return Error.NoThreadSlots;
 }
 
+/// Put a thread (its lock held, on no queue) onto a run queue: its pinned
+/// core, or the next online core round-robin — which also makes unpinned
+/// threads migrate, exercising SMP paths.
 fn enqueueLocked(t: *Thread) void {
     t.state = .ready;
     const target = t.affinity orelse blk: {
-        // Round-robin across online cores on every enqueue.
         var tries: u32 = 0;
         while (tries < max_cpus) : (tries += 1) {
-            const c = balance_next % max_cpus;
-            balance_next +%= 1;
+            const c = @atomicRmw(u32, &balance_next, .Add, 1, .monotonic) % max_cpus;
             if (cpus[c].online) break :blk c;
         }
         break :blk 0;
     };
+    const rq = &cpus[target];
+    rq.lock.lock();
     t.queued_on = target;
-    cpus[target].queue.append(&t.node);
+    rq.queue.append(&t.node);
     // Kick the target so wakeups run in microseconds, not at the next
     // 100ms tick: another core gets an SGI (leaving wfi -> preempt path);
     // our own core is handled at the next preempt point (IRQ exit or
     // syscall return).
-    cpus[target].need_resched = true;
-    if (&cpus[target] != thisCpu()) {
-        gic.sendSgi(target);
-    }
+    rq.need_resched = true;
+    rq.lock.unlock();
+    if (rq != thisCpu()) gic.sendSgi(target);
 }
 
-/// Core scheduling decision. Big lock held, IRQs masked.
+/// Core scheduling decision. Local run-queue lock held, IRQs masked;
+/// returns with the lock released.
 fn scheduleLocked() void {
     const cpu = thisCpu();
     const prev = cpu.current;
 
-    const next: *Thread = if (cpu.queue.popFirst()) |node|
-        @as(*Thread, @alignCast(@fieldParentPtr("node", node)))
-    else if (prev.state == .running)
-        return // nothing else to run, keep going
-    else
-        cpu.idle;
+    const next: *Thread = if (cpu.queue.popFirst()) |node| blk: {
+        const t: *Thread = @alignCast(@fieldParentPtr("node", node));
+        t.queued_on = null;
+        break :blk t;
+    } else if (prev.state == .running) {
+        prev.switching.store(false, .release);
+        cpu.lock.unlock();
+        return; // nothing else to run, keep going
+    } else cpu.idle;
 
-    if (next == prev) return;
+    if (next == prev) {
+        // Woken before we managed to leave: carry on.
+        prev.state = .running;
+        prev.switching.store(false, .release);
+        cpu.lock.unlock();
+        return;
+    }
+    // Woken while still switching away on another core: let that core
+    // finish saving it before we run it here.
+    waitSwitched(next);
 
     switch (prev.state) {
-        .running => {
-            prev.on_cpu = null;
-            if (prev != cpu.idle) enqueueLocked(prev);
+        // Preempted: back onto the local queue (migration happens on
+        // wakeups, where the target core's lock is taken in order).
+        .running => if (prev != cpu.idle) {
+            prev.state = .ready;
+            prev.queued_on = cpu.id;
+            cpu.queue.append(&prev.node);
         },
-        .exited => {
-            prev.on_cpu = null;
-            cpu.reap = prev;
-        },
-        .sleeping, .blocked => prev.on_cpu = null,
-        .ready, .unused => {},
+        .exited, .sleeping, .blocked, .ready, .unused => {},
     }
+    prev.switching.store(true, .release);
+    prev.on_cpu = null;
     next.state = .running;
-    next.queued_on = null;
     next.on_cpu = cpu.id;
     cpu.current = next;
+    cpu.prev = prev;
     programUserSpace(next);
     // Vector state travels with user threads (see FpState). Exited
     // threads skip the save — their state is about to be reaped.
     if (prev.user_ttbr0 != 0 and prev.state != .exited) __fp_save(&prev.fp);
     if (next.user_ttbr0 != 0) __fp_restore(&next.fp);
     __context_switch(&prev.ctx, &next.ctx);
-    // We are back on this thread, possibly much later, still under the big
-    // lock taken by whoever switched to us.
-    reapLocked();
+    // We are back on this thread, possibly much later, holding the
+    // run-queue lock of whichever core switched to us.
+    finishSwitch();
+}
+
+/// The other side of a switch, on the new thread: the predecessor is now
+/// fully off this core — reap it if it exited, else let others run it —
+/// and the run-queue lock taken before the switch is released.
+fn finishSwitch() void {
+    const cpu = thisCpu();
+    if (cpu.prev) |p| {
+        cpu.prev = null;
+        if (p.state == .exited) {
+            reap(p);
+        } else {
+            p.switching.store(false, .release);
+        }
+    }
+    cpu.lock.unlock();
 }
 
 /// Program TTBR0 for the incoming thread: its domain's tables (walks
@@ -507,29 +731,29 @@ fn programUserSpace(t: *Thread) void {
     }
 }
 
-fn freeThreadLocked(t: *Thread) void {
+/// Free a thread nobody can reach any more (off every queue and object,
+/// registers saved). The slot is recycled under the table lock; the lock
+/// word survives so a late unlock by a racing peek cannot clobber it.
+fn freeThread(t: *Thread) void {
     pmem.freeContiguous(t.stack_pa, stack_pages);
     t.stack_account.credit(stack_pages * mem.page_size);
-    t.* = .{};
+    threads_lock.lock();
+    t.* = .{ .lock = t.lock };
+    threads_lock.unlock();
 }
 
-fn reapLocked() void {
-    const cpu = thisCpu();
-    if (cpu.reap) |dead| {
-        cpu.reap = null;
-        const ctx = dead.user_ctx;
-        freeThreadLocked(dead);
-        if (ctx) |c| {
-            if (user_thread_reaped) |cb| cb(c);
-        }
+fn reap(dead: *Thread) void {
+    const ctx = dead.user_ctx;
+    freeThread(dead);
+    if (ctx) |c| {
+        if (user_thread_reaped) |cb| cb(c);
     }
 }
 
-/// First code run by a new thread, called from the trampoline with the big
-/// lock still held and IRQs masked.
+/// First code run by a new thread, called from the trampoline with the
+/// run-queue lock still held and IRQs masked.
 export fn schedThreadStart() callconv(.c) void {
-    reapLocked();
-    big_lock.unlock();
+    finishSwitch();
     asm volatile ("msr daifclr, #2");
 }
 

@@ -22,7 +22,7 @@ tested; Phase 12+ items are the open pool.
   there first, deliberately, never silently in code.
 - DESIGN.md: per-subsystem "as built" sections + paid-for lessons.
 - HACKING.md: how to add syscalls/programs/services/tests; debugging
-  recipes; the sharp-edge list (asm→C-ABI only, no logging under the big
+  recipes; the sharp-edge list (asm→C-ABI only, no logging under any sched/IPC
   lock, sentinel-vs-index bugs, image-list order coupling, idle-context
   starvation, doorbell draining).
 

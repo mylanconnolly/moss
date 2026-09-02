@@ -9,16 +9,23 @@
 //! completes with Errno.peer_dead. Failure is in the vocabulary, from the
 //! first version.
 //!
-//! All channel state shares the scheduler's big lock, so wait/wake
-//! transitions cannot race with teardown. Blocked threads are parked either
-//! on a channel's caller queue or in a single-waiter slot; sched teardown
-//! knows how to unlink both.
+//! Every object carries its own lock (taken with IRQs masked: signals
+//! arrive from interrupt context). Blocked threads are parked either on a
+//! channel's caller queue or in a single-waiter slot, under the object's
+//! lock, which sched.block releases only once the thread is safely on its
+//! way out; a thread remembers that lock (block_lock) so teardown and
+//! bound-notification interrupts can unlink it in the same order:
+//! notification → channel → thread → run queue. Slot allocation for all
+//! three tables is under objs_lock; timers and IRQ bindings have theirs,
+//! taken inside a notification's — which is why the tick and IRQ delivery
+//! collect their targets first and signal after letting go.
 
 const std = @import("std");
 const cap = @import("cap.zig");
 const kalloc = @import("kalloc.zig");
 const mem = @import("mem.zig");
 const pmem = @import("pmem.zig");
+const lock = @import("lock.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 
@@ -38,7 +45,9 @@ pub const Msg = struct {
 };
 
 pub const Channel = struct {
-    active: bool = false,
+    /// Cache-line aligned so channels driven from different cores never
+    /// share a line (see PerCpu).
+    active: bool align(128) = false,
     refs_a: u32 = 0,
     refs_b: u32 = 0,
     a_open: bool = false,
@@ -54,12 +63,13 @@ pub const Channel = struct {
     pending: [max_pending]?*sched.Thread = @splat(null),
     pending_serial: [max_pending]u32 = @splat(0),
     serial: u32 = 0,
+    lock: lock.SpinLock = .{},
 };
 
 pub const max_pending = 8;
 
 pub const Notification = struct {
-    active: bool = false,
+    active: bool align(128) = false,
     refs: u32 = 0,
     bits: u64 = 0,
     waiter: ?*sched.Thread = null,
@@ -67,6 +77,7 @@ pub const Notification = struct {
     /// blocked in recv interrupts the recv (Errno.interrupted) so one
     /// thread can both serve a channel and supervise.
     bound: ?*sched.Thread = null,
+    lock: lock.SpinLock = .{},
 };
 
 pub const Shm = struct {
@@ -79,6 +90,9 @@ pub const Shm = struct {
 var channels: [max_channels]Channel = @splat(.{});
 var notifications: [max_notifications]Notification = @splat(.{});
 var shms: [max_shms]Shm = @splat(.{});
+var objs_lock: lock.SpinLock = .{};
+var shm_lock: lock.SpinLock = .{};
+var timers_lock: lock.SpinLock = .{};
 
 /// Shared-memory pages are charged here for now; per-domain accounting for
 /// objects that outlive their creator arrives with real object lifetimes in
@@ -92,13 +106,16 @@ pub const Error = error{NoObjects};
 /// Create a channel; both refcounts start at the caller's ownership (the
 /// caller then hands sides out via manifest grants or keeps them).
 pub fn createChannel(refs_a: u32, refs_b: u32) Error!*Channel {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = objs_lock.lockIrqSave();
+    defer objs_lock.unlockRestore(daif);
     for (&channels) |*ch| {
-        if (!ch.active) {
-            ch.* = .{ .active = true, .refs_a = refs_a, .refs_b = refs_b, .a_open = true, .b_open = true };
-            return ch;
-        }
+        if (@atomicLoad(bool, &ch.active, .acquire)) continue;
+        // A freeing side may still hold the lock for an instant.
+        ch.lock.lock();
+        defer ch.lock.unlock();
+        if (ch.active) continue;
+        ch.* = .{ .active = true, .refs_a = refs_a, .refs_b = refs_b, .a_open = true, .b_open = true, .lock = ch.lock };
+        return ch;
     }
     return Error.NoObjects;
 }
@@ -112,9 +129,11 @@ pub const CallResult = struct {
 /// or the peer's death. `caller_badge` is the badge minted into the cap the
 /// caller invoked (0 for unbadged/kernel callers); recv delivers it.
 pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
-    const daif = sched.acquire();
-    defer sched.release(daif);
-    if (!ch.a_open or !ch.b_open) return .{ .err = .peer_dead };
+    const daif = ch.lock.lockIrqSave();
+    if (!ch.a_open or !ch.b_open) {
+        ch.lock.unlockRestore(daif);
+        return .{ .err = .peer_dead };
+    }
 
     const t = sched.thisCpu().current;
     t.ipc_data = msg.data;
@@ -126,9 +145,10 @@ pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
 
     if (ch.server_waiting) |server| {
         ch.server_waiting = null;
-        sched.wakeLocked(server);
+        sched.wake(server);
     }
-    sched.blockCurrentLocked(&ch.callers, null);
+    sched.block(&ch.callers, null, &ch.lock, null); // releases ch.lock
+    restoreIrqs(daif);
 
     // Woken: either the server replied (mailbox holds the reply) or the
     // channel died under us.
@@ -148,16 +168,31 @@ pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
 /// and the caller is parked in a pending slot until reply(). With every
 /// slot occupied, recv reports busy: reply to something first.
 pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Errno {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = maskIrqs();
+    defer restoreIrqs(daif);
+    // A bound notification's lock is held from the latched-bits peek until
+    // the thread is parked (block releases it): a signal either lands
+    // before the peek and is seen, or after the park and interrupts it.
+    // Without this a death signaled between the two was lost for good.
+    const bound: ?*Notification = if (sched.thisCpu().current.bound_notif) |bn| @ptrCast(@alignCast(bn)) else null;
+    const outer: ?*lock.SpinLock = if (bound) |n| &n.lock else null;
     while (true) {
+        if (outer) |o| o.lock();
+        ch.lock.lock();
         // A signal that arrived while this thread was busy between recvs
         // must not be lost: surface latched bound-notification bits first.
-        if (sched.thisCpu().current.bound_notif) |bn| {
-            const n: *Notification = @ptrCast(@alignCast(bn));
-            if (n.bits != 0) return .interrupted;
+        if (bound) |n| {
+            if (n.bits != 0) {
+                ch.lock.unlock();
+                outer.?.unlock();
+                return .interrupted;
+            }
         }
-        if (!ch.a_open) return .peer_dead;
+        if (!ch.a_open) {
+            ch.lock.unlock();
+            if (outer) |o| o.unlock();
+            return .peer_dead;
+        }
         var free: ?usize = null;
         for (&ch.pending, 0..) |p, i| {
             if (p == null) {
@@ -165,7 +200,11 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Er
                 break;
             }
         }
-        const slot = free orelse return .busy;
+        const slot = free orelse {
+            ch.lock.unlock();
+            if (outer) |o| o.unlock();
+            return .busy;
+        };
         if (ch.callers.popFirst()) |node| {
             const caller: *sched.Thread = @alignCast(@fieldParentPtr("node", node));
             caller.block_list = null;
@@ -182,18 +221,39 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Er
             };
             badge_out.* = caller.ipc_badge;
             token_out.* = (@as(u64, ch.serial) << 8) | (slot + 1);
+            ch.lock.unlock();
+            if (outer) |o| o.unlock();
             return .ok;
         }
-        if (!ch.b_open) return .peer_dead;
+        if (!ch.b_open) {
+            ch.lock.unlock();
+            if (outer) |o| o.unlock();
+            return .peer_dead;
+        }
         const t = sched.thisCpu().current;
         t.ipc_status = @intFromEnum(shared.Errno.ok);
         t.in_recv = true;
-        sched.blockCurrentLocked(null, &ch.server_waiting);
+        sched.block(null, &ch.server_waiting, &ch.lock, outer); // releases both
         t.in_recv = false;
         if (t.ipc_status != @intFromEnum(shared.Errno.ok)) {
             return @enumFromInt(t.ipc_status);
         }
     }
+}
+
+fn maskIrqs() u64 {
+    const daif = asm ("mrs %[v], daif"
+        : [v] "=r" (-> u64),
+    );
+    asm volatile ("msr daifset, #2");
+    return daif;
+}
+
+fn restoreIrqs(daif: u64) void {
+    asm volatile ("msr daif, %[v]"
+        :
+        : [v] "r" (daif),
+    );
 }
 
 /// Reply to the oldest pending caller (the one-at-a-time server's reply).
@@ -205,8 +265,8 @@ pub fn reply(ch: *Channel, msg: Msg) shared.Errno {
 /// was delivered first). A stale or unknown token is bad_state; a client
 /// that died mid-call reports peer_dead when its side is gone.
 pub fn replyTo(ch: *Channel, msg: Msg, token: u64) shared.Errno {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = ch.lock.lockIrqSave();
+    defer ch.lock.unlockRestore(daif);
     var slot: ?usize = null;
     if (token == 0) {
         // Oldest = the lowest serial among the pending.
@@ -233,15 +293,13 @@ pub fn replyTo(ch: *Channel, msg: Msg, token: u64) shared.Errno {
     client.ipc_cap_obj = msg.cap_obj;
     client.ipc_cap_badge = msg.cap_badge;
     client.ipc_status = @intFromEnum(shared.Errno.ok);
-    sched.wakeLocked(client);
+    sched.wake(client);
     return .ok;
 }
 
-/// A side's last cap died: close it and complete every in-flight operation
-/// on the other side with peer_dead. Big lock taken inside.
-fn closeSide(ch: *Channel, side: Side) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+/// A side's last cap died (channel lock held): close it and complete every
+/// in-flight operation on the other side with peer_dead.
+fn closeSideLocked(ch: *Channel, side: Side) void {
     switch (side) {
         .a => ch.a_open = false,
         .b => ch.b_open = false,
@@ -252,14 +310,14 @@ fn closeSide(ch: *Channel, side: Side) void {
             const t: *sched.Thread = @alignCast(@fieldParentPtr("node", node));
             t.block_list = null;
             t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
-            sched.wakeLocked(t);
+            sched.wake(t);
         }
         for (&ch.pending) |*p| {
             if (p.*) |t| {
                 p.* = null;
                 t.block_slot = null;
                 t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
-                sched.wakeLocked(t);
+                sched.wake(t);
             }
         }
     }
@@ -268,18 +326,18 @@ fn closeSide(ch: *Channel, side: Side) void {
         if (ch.server_waiting) |t| {
             ch.server_waiting = null;
             t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
-            sched.wakeLocked(t);
+            sched.wake(t);
         }
     }
     if (ch.refs_a == 0 and ch.refs_b == 0) {
-        ch.* = .{};
+        ch.* = .{ .lock = ch.lock }; // the lock word stays ours to release
     }
 }
 
 /// A cap to a side was duplicated (cap transfer, spawn grant).
 pub fn refSide(ch: *Channel, side: Side) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = ch.lock.lockIrqSave();
+    defer ch.lock.unlockRestore(daif);
     switch (side) {
         .a => ch.refs_a += 1,
         .b => ch.refs_b += 1,
@@ -287,42 +345,40 @@ pub fn refSide(ch: *Channel, side: Side) void {
 }
 
 pub fn unrefSide(ch: *Channel, side: Side) void {
-    const last = blk: {
-        const daif = sched.acquire();
-        defer sched.release(daif);
-        const refs = switch (side) {
-            .a => &ch.refs_a,
-            .b => &ch.refs_b,
-        };
-        std.debug.assert(refs.* > 0);
-        refs.* -= 1;
-        break :blk refs.* == 0;
+    const daif = ch.lock.lockIrqSave();
+    defer ch.lock.unlockRestore(daif);
+    const refs = switch (side) {
+        .a => &ch.refs_a,
+        .b => &ch.refs_b,
     };
-    if (last) closeSide(ch, side);
+    std.debug.assert(refs.* > 0);
+    refs.* -= 1;
+    if (refs.* == 0) closeSideLocked(ch, side);
 }
 
 // ----------------------------------------------------------- notifications
 
 pub fn createNotification() Error!*Notification {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = objs_lock.lockIrqSave();
+    defer objs_lock.unlockRestore(daif);
     for (&notifications) |*n| {
-        if (!n.active) {
-            n.* = .{ .active = true, .refs = 1 };
-            return n;
-        }
+        if (@atomicLoad(bool, &n.active, .acquire)) continue;
+        n.lock.lock();
+        defer n.lock.unlock();
+        if (n.active) continue;
+        n.* = .{ .active = true, .refs = 1, .lock = n.lock };
+        return n;
     }
     return Error.NoObjects;
 }
 
+/// Signal: latch the bits, wake a waiter, or interrupt a bound thread
+/// blocked in recv (the bits stay latched for its follow-up notify_wait).
+/// A notification freed under a late IRQ/timer signal drops it.
 pub fn signal(n: *Notification, bits: u64) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
-    signalLocked(n, bits);
-}
-
-/// Signal with the big lock already held (IRQ delivery).
-pub fn signalLocked(n: *Notification, bits: u64) void {
+    const daif = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(daif);
+    if (!n.active) return;
     n.bits |= bits;
     if (n.waiter) |t| {
         n.waiter = null;
@@ -330,53 +386,50 @@ pub fn signalLocked(n: *Notification, bits: u64) void {
         t.ipc_data[0] = n.bits;
         t.ipc_status = @intFromEnum(shared.Errno.ok);
         n.bits = 0;
-        sched.wakeLocked(t);
+        sched.wake(t);
         return;
     }
-    // Interrupt a bound thread blocked in recv; the bits stay latched for
-    // its follow-up notify_wait.
     if (n.bound) |t| {
-        if (t.state == .blocked and t.in_recv and t.block_slot != null) {
-            t.block_slot.?.* = null;
-            t.block_slot = null;
-            t.ipc_status = @intFromEnum(shared.Errno.interrupted);
-            sched.wakeLocked(t);
-        }
+        _ = sched.interruptRecv(t, @intFromEnum(shared.Errno.interrupted));
     }
 }
 
 pub fn refNotification(n: *Notification) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(daif);
     n.refs += 1;
 }
 
 /// Bind `t` for recv interruption (see Notification.bound).
 pub fn bindNotification(n: *Notification, t: *sched.Thread) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(daif);
     n.bound = t;
     t.bound_notif = n;
 }
 
 /// Block until any bits are signaled; returns and clears them.
 pub fn wait(n: *Notification) struct { err: shared.Errno, bits: u64 } {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = n.lock.lockIrqSave();
     if (n.bits != 0) {
         const bits = n.bits;
         n.bits = 0;
+        n.lock.unlockRestore(daif);
         return .{ .err = .ok, .bits = bits };
     }
-    if (n.waiter != null) return .{ .err = .busy, .bits = 0 };
+    if (n.waiter != null) {
+        n.lock.unlockRestore(daif);
+        return .{ .err = .busy, .bits = 0 };
+    }
     const t = sched.thisCpu().current;
     t.ipc_status = @intFromEnum(shared.Errno.ok);
-    sched.blockCurrentLocked(null, &n.waiter);
+    sched.block(null, &n.waiter, &n.lock, null); // releases n.lock
+    restoreIrqs(daif);
     return .{ .err = @enumFromInt(t.ipc_status), .bits = t.ipc_data[0] };
 }
 
-/// Registered by irq.zig; called with the big lock held when a
-/// notification is freed, so IRQ bindings never outlive their target.
+/// Registered by irq.zig; called with the notification's lock held when
+/// it is freed, so IRQ bindings never outlive their target.
 pub var notif_freed_hook: ?*const fn (*Notification) void = null;
 
 // ------------------------------------------------------------------ timers
@@ -401,8 +454,8 @@ var timers: [max_timers]Timer = @splat(.{});
 /// notification; re-arming replaces it. The timer holds no ref — a
 /// notification freed under it is disarmed.
 pub fn armTimer(n: *Notification, period: u64, bits: u64, now: u64) bool {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = timers_lock.lockIrqSave();
+    defer timers_lock.unlockRestore(daif);
     var free: ?*Timer = null;
     for (&timers) |*t| {
         if (t.n == n) {
@@ -423,25 +476,35 @@ pub fn armTimer(n: *Notification, period: u64, bits: u64, now: u64) bool {
     return true;
 }
 
-/// The timekeeper's tick, big lock held.
-pub fn timerTickLocked(now: u64) void {
+/// The timekeeper's tick (IRQ context). Due timers are collected under
+/// the timers lock and signaled after it is released: a notification's
+/// lock is never taken inside it (teardown takes them the other way).
+pub fn timerTick(now: u64) void {
+    var due: [max_timers]struct { n: *Notification, bits: u64 } = undefined;
+    var count: usize = 0;
+    timers_lock.lock();
     for (&timers) |*t| {
         const n = t.n orelse continue;
         if (now < t.next) continue;
         t.next = now + t.period;
-        signalLocked(n, t.bits);
+        due[count] = .{ .n = n, .bits = t.bits };
+        count += 1;
     }
+    timers_lock.unlock();
+    for (due[0..count]) |d| signal(d.n, d.bits);
 }
 
 fn timerNotifFreed(n: *Notification) void {
+    timers_lock.lock();
+    defer timers_lock.unlock();
     for (&timers) |*t| {
         if (t.n == n) t.* = .{};
     }
 }
 
 pub fn unrefNotification(n: *Notification) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(daif);
     std.debug.assert(n.refs > 0);
     n.refs -= 1;
     if (n.refs == 0) {
@@ -449,11 +512,11 @@ pub fn unrefNotification(n: *Notification) void {
             n.waiter = null;
             t.block_slot = null;
             t.ipc_status = @intFromEnum(shared.Errno.peer_dead);
-            sched.wakeLocked(t);
+            sched.wake(t);
         }
         timerNotifFreed(n);
         if (notif_freed_hook) |f| f(n);
-        n.* = .{};
+        n.* = .{ .lock = n.lock };
     }
 }
 
@@ -461,8 +524,8 @@ pub fn unrefNotification(n: *Notification) void {
 
 pub fn createShm(npages: u32) ?*Shm {
     if (npages == 0 or npages > shm_max_pages) return null;
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = shm_lock.lockIrqSave();
+    defer shm_lock.unlockRestore(daif);
     for (&shms) |*s| {
         if (!s.active) {
             s.* = .{ .active = true, .refs = 1, .npages = npages };
@@ -481,14 +544,14 @@ pub fn createShm(npages: u32) ?*Shm {
 }
 
 pub fn refShm(s: *Shm) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = shm_lock.lockIrqSave();
+    defer shm_lock.unlockRestore(daif);
     s.refs += 1;
 }
 
 pub fn unrefShm(s: *Shm) void {
-    const daif = sched.acquire();
-    defer sched.release(daif);
+    const daif = shm_lock.lockIrqSave();
+    defer shm_lock.unlockRestore(daif);
     std.debug.assert(s.refs > 0);
     s.refs -= 1;
     if (s.refs == 0) {

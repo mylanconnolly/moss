@@ -44,6 +44,93 @@ through the live TTBR0 mapping after explicit range checks (revisit on
 v8.1+). Syscall ABI: x8 = number, x0..x5 args, x0 = result — numbers and
 errnos defined in `shared/` like everything else that crosses the boundary.
 
+### Locking (as built, 2026-09-02)
+
+The kernel started under one big lock shared by the scheduler and IPC —
+the structures were per-core from day one, the serialization was not.
+Now every core's run queue has its own lock, every thread its own,
+sleepers theirs, and each channel and notification theirs; slot
+allocation for the object tables, timers, IRQ bindings, shm and the
+thread table are leaves. The discipline that makes this sound:
+
+- A thread's state is protected by the run-queue lock of the core it is
+  queued on or running on, and by its own lock while blocked or sleeping.
+  Anyone else who wants to change it (a waker, teardown, a bound
+  notification's interrupt) takes the thread lock first to discover
+  which, then that lock, and re-verifies. Lock order, outer to inner:
+  notification → channel → thread → run queue → sleepers.
+- Blocking is a handshake: `sched.block(list, slot, obj_lock, outer)` marks the
+  thread blocked under thread + run-queue locks, then releases the object
+  lock, then switches. A waker can therefore find the thread the instant
+  it is parked, but never before it is committed to leaving — no lost
+  wakeups, no double enqueue. The thread carries `block_lock` (the object
+  it waits on) so teardown can unlink it in order.
+- A thread being switched away from carries `switching` until the other
+  side of the switch (`finishSwitch`, run by the incoming thread) clears
+  it; whoever dequeues or frees a thread waits for that first, so a
+  thread woken on core B while still saving registers on core A is never
+  run — or reaped — early. `schedule()` is entered with the run-queue
+  lock held and always returns with it released, either directly or via
+  `finishSwitch`.
+- Preemption puts the running thread back on the *local* queue; migration
+  happens on wakeups, where the target core's lock is taken in order.
+- Teardown (`destroyThreadsOf`) peeks without locks, locks in order,
+  verifies, and retries anything caught mid-transition (a thread between
+  queue and core, a stale object lock). A running thread is only marked;
+  its core reaps it at the next switch.
+- The tick and IRQ delivery collect their targets under the timers / IRQ
+  lock and signal after releasing it, because notification teardown
+  takes those locks the other way round. A signal that lands on a
+  notification freed in that window is dropped by `signal` itself.
+- Freed objects keep their lock word (`.{ .lock = x.lock }`) so the
+  freer's own unlock, and a late unlock by a racing peek, cannot clobber
+  a fresh owner.
+
+**Measured** (ipc test's built-in call/reply benchmark: one server+client
+pair per core, pairs pinned, 60k round trips each, M3 Max):
+
+| | 1 core | 3 cores | scaling |
+|---|---|---|---|
+| TCG, big lock | 302–308 kops/s | 435–436 kops/s | 1.4x |
+| TCG, split locks | 200–245 kops/s | 672–734 kops/s | 2.9–3.5x |
+| HVF, big lock | 1.6–2.4 Mops/s | 3.1–3.2 Mops/s | 1.3–1.8x |
+| HVF, split locks, no padding | 2.1–2.4 Mops/s | 4.1–4.5 Mops/s | 1.8–1.9x |
+| HVF, split + cache-line padding | 1.7–2.2 Mops/s | 5.0–7.1 Mops/s | 2.5–3.5x |
+
+Four lessons bought here. First, the initial benchmark reported a
+perfect 3.0x *under the big lock* — because 4000 rounds finished inside
+one 100ms tick and the driver's wait loop slept in ticks, so it measured
+the tick, not the IPC. Every client now stamps its own finish with the
+cycle counter, and runs last long enough to matter. Second, splitting the
+lock bought HVF only 1.8x until `PerCpu`, `Channel` and `Notification`
+were padded to a cache line: adjacent per-core structs shared lines, and
+the lock traffic of one core evicted its neighbour's. TCG's single-core
+number dips (each extra atomic is a helper call there); real hardware's
+does not. Third — caught by the fabric drill on the first soak run, as a
+kernel instruction abort with PC pointing into a thread stack — the
+first cut raised `switching` inside `schedule()`, i.e. *after* `block()`
+had released the object lock. A waker on another core could see the
+thread blocked, enqueue it, and have its core pop and run it while the
+original core had not yet saved its registers: the thread resumed with a
+garbage context and returned into its own stack. The flag now goes up
+before the thread is published as blocked or asleep, and the two
+"never actually left" paths in `schedule()` take it down. Under the big
+lock this ordering was free; it is the one thing a fine-grained
+scheduler has to get right by hand. Fourth — a 1-in-80 hang of the fs
+drill's second boot, init never seeing alice's death — the supervisor
+pattern (a notification bound to a thread that serves a channel) has
+two steps in recv: peek the latched bits, then park. Under the big lock
+they were one atomic step against `signal`; split, a death signaled
+between them found the thread neither aware nor yet blocked, and the
+bits sat latched behind a recv that would never return. recv now holds
+the bound notification's lock from the peek until `sched.block` has
+published the thread (block takes an optional outer lock to release),
+so a signal lands either before the peek or after the park. Rule of
+thumb from both: whatever a waker checks must be published under the
+lock the waker holds, before the sleeper lets go of it. The "no logging
+under the big lock" rule is now "no logging under any scheduler or IPC
+lock".
+
 ## Domains
 
 The domain is the unit of spawn, quota, sandboxing, and teardown — the
@@ -84,7 +171,7 @@ nudges its core — but that thread may concurrently be entering sleep() or
 an IPC block on another core, and blindly setting .sleeping/.blocked there
 overwrote the death mark, resurrecting the thread into the sleepers list
 or a wait queue so its domain never drained. Every voluntary state
-transition now checks for a pending kill under the big lock and dies
+transition now checks for a pending kill under its locks and dies
 instead of parking. The race was as old as SMP teardown itself; today's
 faster userspace merely widened the window until a 45-second suite could
 hit it.
@@ -399,8 +486,8 @@ so it stands where the counter does (the only two ambient reads in the
 ABI). It is fail-closed — `bad_state` until the boot seed has landed, so a
 service that starts before rngd gets an honest error, never a weak number
 — bounded to 256 bytes per call (a bound on time under the pool lock, not
-a throughput limit; the pool has its own spinlock and never touches the
-big lock), and it writes only into user-WRITABLE ranges. Every QEMU
+a throughput limit; the pool has its own spinlock, outside the
+scheduler's), and it writes only into user-WRITABLE ranges. Every QEMU
 configuration carries a `virtio-rng-device`; the shell and fabric boots
 start rngd before anything that needs a nonce. msh's `rand` prints a draw.
 

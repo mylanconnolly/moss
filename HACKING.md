@@ -128,8 +128,18 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   probe, make it `inline` — clobbering callee-saved v8-v15 in an outlined
   function makes the compiler's epilogue restore stale values right after
   your asm.
-- All scheduler/IPC state shares the big kernel lock; **never log while
-  holding it** (the logger has its own lock).
+- Scheduler and IPC locks are fine-grained (DESIGN "Locking"): order is
+  notification → channel → thread → run queue → sleepers, IRQs masked
+  under all of them, and **never log while holding any** (the logger has
+  its own lock). Park a thread only through `sched.block(list, slot,
+  &obj.lock)` with the object lock held — it releases that lock itself —
+  and wake only what you have already unlinked under that same lock.
+  Anything a waker checks before giving up (a thread's blocked state, a
+  latched bit) must be published under the lock the waker holds before
+  the sleeper releases it — recv holds its bound notification's lock
+  from the bits peek through the park for exactly this reason.
+  Never take a notification or timers/IRQ lock while holding a channel or
+  thread lock.
 - Enqueueing a thread kicks the target core (SGI); do long-running work
   from a spawned thread, not from kmain's idle context — idle, once
   displaced by non-yielding threads, does not come back.
