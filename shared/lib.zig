@@ -524,7 +524,16 @@ pub const TcpState = enum(u64) {
 // node N is 10.77.0.N / fdcc::N.
 
 pub const fabric_port: u64 = 7100;
-pub const fabric_ver: u8 = 3; // v3: authenticated + encrypted transport (fabric key)
+pub const fabric_ver: u8 = 4; // v4: per-node identities (certs + signed DH)
+
+/// set_identity record: [identity seed 32][cluster key 32]; set_cert
+/// then delivers the fab_cert_len certificate (lib/fabcert.zig layout).
+pub const fab_identity_len: u64 = 32 + 32;
+pub const fab_cert_len: u64 = 112;
+pub const fab_rev_len: u64 = 72;
+/// Certificate authorization flags (mirrored in lib/fabcert.zig).
+pub const fab_flag_gossip: u64 = 1 << 0;
+pub const fab_flag_spawn: u64 = 1 << 1;
 
 pub fn nodeIp4(node: u64) u32 {
     return 0x0A4D_0000 | @as(u32, @intCast(node));
@@ -539,11 +548,23 @@ pub const FabReq = union(enum(u64)) {
     connect_peer: struct { node: u64 },
     /// node 0 = placement: the least-loaded live member is chosen.
     remote_spawn: struct { node: u64, image: u64, arg: u64 },
-    attach_buf: void, // + shm cap: buffer for members listings + key staging
-    /// Badge-0 only, BEFORE attach_net: 32 bytes of fabric key material in
-    /// the attached buffer (zeroized by the service after reading). The
-    /// fabric is fail-closed: without a key it refuses to listen or dial.
-    set_key: struct { off: u64, len: u64 },
+    attach_buf: void, // + shm cap: buffer for members listings + identity staging
+    /// Badge-0 only, BEFORE attach_net: this node's identity — a
+    /// fab_identity_len record {identity seed, cluster key} in the
+    /// attached buffer (the seed is zeroized after reading). The reply
+    /// leaves the identity PUBLIC key at buf[0..32] (num{32}) for the
+    /// root of trust to certify.
+    set_identity: struct { off: u64, len: u64 },
+    /// Badge-0 only, BEFORE attach_net: the fab_cert_len certificate the
+    /// root issued for this node. Verified under the cluster key and
+    /// checked to name this node and this identity key — refused here
+    /// rather than at the first handshake. The fabric is fail-closed:
+    /// without identity + certificate it refuses to listen or dial.
+    set_cert: struct { off: u64, len: u64 },
+    /// Badge-0 only: a fab_rev_len revocation record signed by the root
+    /// of trust, in the attached buffer. Verified, applied (matching live
+    /// peers are dropped), and gossiped to every peer.
+    revoke: struct { off: u64, len: u64 },
     /// Fill the attached buffer with fab_member_size-byte records
     /// {node u16, up u8, pad u8, free_mb u16, pad u16}; reply num{n}.
     members: void,
@@ -564,8 +585,27 @@ pub const FabErr = enum(u64) {
     disconnected = 3,
     refused = 4,
     no_space = 5,
-    no_key = 6, // fail-closed: the fabric key was never staged
+    no_identity = 6, // fail-closed: no identity/certificate was staged
     no_entropy = 7, // fail-closed: the kernel pool is unseeded (no rngd)
+    denied = 8, // the peer's certificate does not authorize the request
+};
+
+/// The root of trust (fabric role 3, "fabroot"): the one holder of the
+/// cluster's root signing key. Boot orchestration asks it for the cluster
+/// key, node certificates, and revocations; fabsvc never sees the root
+/// key. Replies are FabResp; byte artifacts land at buf[0].
+pub const RootReq = union(enum(u64)) {
+    attach_buf: void, // + shm cap
+    /// 32 bytes of root seed in the buffer (zeroized after reading).
+    set_root: struct { off: u64, len: u64 },
+    cluster_key: void, // -> 32 bytes at buf[0]; num{32}
+    /// Certificate for `node`, whose identity PUBLIC key sits at
+    /// buf[0..32] (the root never sees a node's secret): flags_serial =
+    /// flags | serial << 8, image_mask = images the holder may request.
+    /// -> fab_cert_len bytes at buf[0].
+    issue: struct { node: u64, flags_serial: u64, image_mask: u64 },
+    /// Revocation record: certs of `node` below min_serial are refused.
+    revoke: struct { node: u64, min_serial: u64 }, // -> fab_rev_len bytes
 };
 
 /// Badged-session error reply sentinel: word0 = this, word1 = FabErr code.
@@ -584,25 +624,33 @@ pub const fw_ping: u8 = 7; // [free_mb u16] heartbeat + load advertisement
 pub const fw_pong: u8 = 8; // [free_mb u16]
 pub const fw_member_up: u8 = 9; // [node u16]
 pub const fw_member_down: u8 = 10; // [node u16]
-// v3: the authenticated handshake and sealed transport. The handshake is
-// mutual challenge-response over a 256-bit fabric key (the key never
-// crosses the wire; the wire version is inside every MAC, so downgrade
-// attempts break authentication):
-//   dialer   -> fw_hello     [node u16][nonce 16]
-//   acceptor -> fw_hello_ack [node u16][nonce 16][mac16("ack" transcript)]
-//   dialer   -> fw_auth      [mac16("auth" transcript)]
-// then HKDF(fabric key, both nonces) derives per-direction AEGIS-128L
-// session keys and EVERY subsequent frame travels as fw_sealed
-// [ciphertext of a whole inner frame][tag 16] with counter nonces (TCP
-// orders the stream). Membership gossip rides a sealed fw_members frame:
-// [free_mb u16][n u8][{node u16, up u8} x n].
-// HONESTY: a shared cluster key is symmetric trust — any member can
-// impersonate any other (an Erlang-cookie-shaped domain, minus the
-// plaintext handshake and plus transport encryption). Per-node identity
-// keys are the desired end-state (see ROADMAP).
+// v4: per-node identities. Each node holds an Ed25519 identity key and a
+// certificate signed by the cluster's root of trust (lib/fabcert.zig:
+// node id, identity key, authorization flags + image mask, serial). The
+// handshake is a signed ephemeral Diffie-Hellman — no shared secret
+// exists anywhere:
+//   dialer   -> fw_hello     [node u16][nonce 16][eph X25519 pk 32][cert 112]
+//   acceptor -> fw_hello_ack [node u16][nonce 16][eph pk 32][cert 112]
+//                            [sig64: identity key over the "ack" transcript]
+//   dialer   -> fw_auth      [sig64: identity key over the "auth" transcript]
+// Each side verifies the peer's certificate under the cluster key (node
+// id must match the claim; serial must clear any revocation it knows),
+// then the transcript signature under the certified identity key. The
+// transcript covers the wire version, both node ids, nonces, ephemeral
+// keys, and certificates, so downgrade or substitution breaks the
+// signature. HKDF(X25519 shared secret, both nonces) derives per-
+// direction AEGIS-128L session keys (forward secrecy: identity keys only
+// sign) and EVERY subsequent frame travels as fw_sealed [ciphertext of a
+// whole inner frame][tag 16] with counter nonces (TCP orders the stream).
+// Membership gossip rides a sealed fw_members frame [free_mb u16][n u8]
+// [{node u16, up u8} x n] and is believed only from peers whose cert
+// carries the gossip flag; spawn requests need the spawn flag and the
+// image bit. fw_revoke carries a root-signed revocation record (72
+// bytes); it is verified, applied, and re-gossiped once.
 pub const fw_auth: u8 = 11;
 pub const fw_sealed: u8 = 12;
 pub const fw_members: u8 = 13;
+pub const fw_revoke: u8 = 14;
 
 // QEMU slirp constants (static config; DHCP/SLAAC are not Phase 10
 // problems). v4 net 10.0.2.0/24, v6 prefix fec0::/64.

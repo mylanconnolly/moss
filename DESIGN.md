@@ -633,51 +633,93 @@ relaunches node 2 after its drill poweroff, so the check proves join,
 gossip (node 3's own full-mesh view), placement, death detection with no
 call in flight, rejoin, and respawn on the rejoined node.
 
-**Fabric security (as built, wire v3).** Before this, port 7100 was the
-one ambient-authority hole in the system: anyone on the segment could
-join, lie in gossip, read everything, and — worst — send fw_spawn_req,
-which the receiver executed with its spawner capability: code execution
-by packet. Now the fabric is **fail-closed**: fabsvc refuses to listen or
-dial until its root of trust stages a 256-bit fabric key (set_key over
-the attached buffer, zeroized after the copy; the key exists only in
-fabsvc's memory and never crosses the wire). Joining is a mutual
-challenge-response handshake — hello carries a 16-byte nonce; the
-acceptor answers with its nonce and an HMAC-SHA256 (truncated to 16
-bytes) over the transcript {label, wire version, dialer node, acceptor
-node, dialer nonce, acceptor nonce}; the dialer verifies and returns its
-own proof with a different label. Nothing secret is compared in
-plaintext, replays die with the nonces, and because the wire version is
-inside the MAC a downgrade attempt is an authentication failure, not a
-negotiation. HKDF over (fabric key, both nonces) then derives two
-AEGIS-128L session keys, one per direction, and every later frame —
-gossip, heartbeats, spawn requests, forwarded calls — travels as
-fw_sealed: an AEAD-wrapped whole inner frame with a counter nonce (TCP
-orders the stream; a burned counter on a would_block ping is rolled
-back so the streams never desync). AEGIS rides the hardware AES path.
+**Fabric security (as built, wire v4: per-node identities).** Before
+any of this, port 7100 was the one ambient-authority hole in the system:
+anyone on the segment could join, lie in gossip, read everything, and —
+worst — send fw_spawn_req, which the receiver executed with its spawner
+capability: code execution by packet. v3 closed it with a shared cluster
+key (mutual HMAC challenge-response, sealed transport); v4 replaces the
+shared key with identities, keeping the transport.
 
-Threat-model honesty, in order of importance:
-- **A shared cluster key is symmetric trust.** Every member can
-  impersonate every other member, and revoking one node means rekeying
-  the cluster. This is the trust domain an Erlang cookie draws — we kept
-  the domain and fixed the mechanism (no plaintext handshake, real
-  transport encryption). **The desired end-state is per-node identity:**
-  a keypair per node, a cluster trust root that signs identities, and
-  per-link authorization of what a peer may do (spawn which images,
-  gossip membership) as capabilities — so a compromised node is a
-  revocable identity, not a rekey. The transcript MACs are shaped to be
-  replaced by signatures without changing frame layouts; see ROADMAP.
-- Handshake nonces are 16 bytes from getrandom (the kernel pool seeded
-  by the virtio-rng driver — see Entropy under Drivers). attach_net
-  probes the pool and refuses the network with no_entropy while it is
-  unseeded, the same fail-closed gate as a missing key; a refusal after
-  that exits the service rather than handshaking with weak nonces.
-- Membership *claims* are authenticated (only key-holders can gossip)
-  but not *verified* (a member's node id is asserted, not proven — the
-  per-node-identity item again).
-- The check's fabric drill runs an imposter node with a flipped key
-  byte; its join must be refused by the handshake (asserted from its
-  own log), and the plaintext-vs-sealed gate drops any peer that sends
-  plaintext outside the handshake.
+*Trust artifacts* (`lib/fabcert.zig`, pure and host-tested): the cluster
+has one **root of trust**, an Ed25519 keypair whose public half — the
+cluster key — every node is configured with (public material, not a
+secret). Each node has its own Ed25519 **identity**, and a
+**certificate** the root signed over {node id, identity key,
+authorization flags, image mask, serial}. A **revocation** is a
+root-signed {node, minimum serial}. Signatures are domain-separated by
+label so no artifact can be replayed as another.
+
+*Custody*: the root key lives in **fabroot** (fabric role 3), a separate
+domain — the code-sharing decision's "a capability service holds the
+secret" made literal. It certifies identity *public* keys handed to it
+and signs revocations; it never sees a node's identity seed. fabsvc
+generates its keypair from a seed (set_identity, zeroized after the
+copy), exports the public key, and installs the certificate the root
+returns (set_cert — verified under the cluster key and checked to name
+this node and this key, so a mis-issued certificate fails at boot, not
+at the first handshake). The boot driver is the out-of-band channel
+between the two services; neither sees the other's secret, and the
+fabric is **fail-closed** until both steps are done.
+
+*Handshake*: signed ephemeral Diffie-Hellman. hello carries the node id,
+a nonce, a fresh X25519 ephemeral key, and the certificate; hello_ack
+answers with the acceptor's, plus an identity-key signature over the
+transcript {wire version, both ids, both nonces, both ephemeral keys,
+both certificates}; auth is the dialer's signature over the same bytes
+under a different label. Each side verifies the peer's certificate
+under the cluster key (the id must match the claim; the serial must
+clear every revocation it holds) and the signature under the certified
+key. Session keys come from HKDF(X25519 shared secret, both nonces) —
+identity keys only ever sign, so a stolen identity key cannot decrypt
+past sessions — and every later frame travels fw_sealed as before. The
+certificate is checked before anything else changes on the acceptor, so
+a stranger claiming a live peer's id cannot evict it.
+
+*Authorization is the certificate*: membership gossip (member_up/down
+and the join-time member view) is believed only from a peer whose
+certificate carries the gossip flag (its own liveness and load are
+always taken — it speaks for itself); a spawn request needs the spawn
+flag and that image's bit, and a refusal is a typed `denied`, not a
+timeout. *Revocation* is applied where it lands (live peers below the
+bar are dropped, membership updated), gossiped once to every peer (a
+record already held is not re-broadcast, which bounds the flood), and
+enforced at every later handshake. A compromised node is thus a
+revocable identity; it returns only with a fresh key and a fresh
+certificate at a serial that clears the bar. No cluster rekey exists,
+because no cluster secret exists.
+
+The check's fabric drill proves each claim from the nodes' own logs: an
+imposter whose certificate comes from a different root is refused; node
+3's certificate has no spawn authority and its spawn is refused on
+certificate grounds; node 1 revokes node 3 mid-life, node 2 receives the
+revocation by gossip and cuts its own link, and node 3's rejoin attempts
+are refused at the handshake.
+
+Threat-model honesty:
+- Identity seeds are handed in by the boot driver each boot from fixed
+  test material; persisting a node's seed in `state/fabric/` on the
+  encrypted volume is the evolution, and nothing in the protocol cares
+  where the seed comes from. The root seed in the check is likewise a
+  fixed constant every node's boot driver knows — a test artifact; the
+  architecture (root key only in fabroot, fabsvc never sees it) is what
+  the drill exercises.
+- Certificates carry no expiry: no protocol may assume a shared clock,
+  so revocation serials are the only clock. Live nodes learn a
+  revocation by gossip; a node that was down while one circulated learns
+  it at its next join (both handshake sides hand the newcomer every
+  record they hold). Records live in memory, so a whole-cluster restart
+  forgets them until the root re-issues — persisting them beside the
+  identity seed is part of the same `state/fabric/` evolution.
+- Handshake nonces and ephemeral keys are 16/32 bytes from getrandom
+  (the kernel pool seeded by the virtio-rng driver — see Entropy under
+  Drivers). attach_net probes the pool and refuses the network with
+  no_entropy while it is unseeded, the same fail-closed gate as a
+  missing certificate; a refusal after that exits the service rather
+  than handshaking with weak material.
+- The plaintext-vs-sealed gate drops any peer that sends plaintext
+  outside the handshake; a burned counter on a would_block ping is
+  rolled back so the streams never desync.
 
 v0 honesty notes that remain: one outstanding wire exchange at a time, no
 cap transfer across nodes beyond spawn-time grants, polling-driven

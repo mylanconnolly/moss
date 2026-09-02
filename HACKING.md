@@ -112,14 +112,22 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
   drill=1 and powers off, and the RUNNER relaunches it when node 1 logs
   the death — the rejoin path is exercised on every check. Debug with
   the per-node logs in zig-out/check/fabric-node*.log plus pcap filters
-  per netdev. A fourth node (node 9, badkey=1) is the imposter: its join
-  must be refused by the v3 handshake.
-- The fabric is fail-closed: a boot driver must attach_buf + set_key (32
-  bytes) to fabsvc BEFORE attach_net, or it refuses the network. Wire
-  frames after the handshake are AEGIS-sealed — pcaps show ciphertext;
-  to read a session, log on the fabsvc side of the seal. Give every
-  service its OWN shm staging buffer: an shm cap handed to two services
-  against one ref underflows at the second teardown.
+  per netdev. A fourth node (node 9, badkey=1) is the imposter: its
+  certificate comes from a different root of trust and its join must be
+  refused by the v4 handshake. Node 3's certificate has no spawn
+  authority (its spawn must be `denied`), and node 1 revokes node 3 at
+  the end (node 2 must learn it by gossip; node 3's rejoins must be
+  refused). Certificate/revocation encoding is `lib/fabcert.zig` — test
+  it on the host with `zig test lib/lib.zig`.
+- The fabric is fail-closed: a boot driver must give fabsvc an identity
+  BEFORE attach_net — attach_buf, set_identity (seed + cluster key;
+  reply leaves the public key in the buffer), have fabroot `issue` a
+  certificate over that key, set_cert — or it refuses the network. The
+  kernel helpers `spawnFabroot` / `certifyFabric` / `fabRevoke` are the
+  whole flow. Wire frames after the handshake are AEGIS-sealed — pcaps
+  show ciphertext; to read a session, log on the fabsvc side of the
+  seal. Give every service its OWN shm staging buffer: an shm cap handed
+  to two services against one ref underflows at the second teardown.
 - mossfs v3 (CoW, checksums, txg commits, LZ4 compression, XTS
   encryption) is the disk backend; its core (`user/mossfs.zig`) is a pure
   library over `lib/` static modules, so debug it on the host:

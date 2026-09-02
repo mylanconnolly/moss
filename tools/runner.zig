@@ -49,7 +49,7 @@ const specs = [_]Spec{
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS" },
     .{ .name = "rng", .pass = "rng-test: PASS", .extra = "rngprobe: unseeded pool refuses getrandom" },
     .{ .name = "shell", .kind = .shell, .pass = "shell-test: PASS", .timeout_s = 120 },
-    .{ .name = "fabric", .kind = .cluster, .pass = "fabric-test: PASS", .timeout_s = 120 },
+    .{ .name = "fabric", .kind = .cluster, .pass = "fabric-test: PASS", .extra = "fabsvc: revoked identity refused", .timeout_s = 150 },
 };
 
 const check_dir = "zig-out/check";
@@ -226,8 +226,22 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "node 3 never reached full mesh (gossip)", log3);
         return false;
     }
+    if (std.mem.indexOf(u8, n3, "spawn refused on certificate grounds") == null) {
+        reportFailure(spec.name, "node 3's unauthorized spawn was not refused", log3);
+        return false;
+    }
+    if (std.mem.indexOf(u8, n3, "rejoin attempt refused") == null) {
+        reportFailure(spec.name, "node 3 was not refused after revocation", log3);
+        return false;
+    }
+    // The revocation must have reached node 2 by gossip (its rejoin log).
+    const n2b = cwd.readFileAlloc(io, log2b, gpa, .limited(1 << 20)) catch "";
+    if (std.mem.indexOf(u8, n2b, "revocation accepted from trust root") == null) {
+        reportFailure(spec.name, "revocation never reached node 2 by gossip", log2b);
+        return false;
+    }
     const n9 = cwd.readFileAlloc(io, log9, gpa, .limited(1 << 20)) catch "";
-    if (std.mem.indexOf(u8, n9, "wrong-key join rejected") == null) {
+    if (std.mem.indexOf(u8, n9, "untrusted identity rejected") == null) {
         reportFailure(spec.name, "imposter was not rejected", log9);
         return false;
     }

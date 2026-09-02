@@ -16,14 +16,27 @@
 //!                     CalcRequest server on its granted channel; it
 //!                     neither knows nor cares that its clients are on
 //!                     another machine.
+//!   3 "fabroot"     — the root of trust: the one holder of the cluster's
+//!                     root signing key. Mints node certificates and
+//!                     revocations for boot orchestration (RootReq);
+//!                     fabsvc never sees the root key.
+//!
+//! Security (v4): every node has an Ed25519 identity and a root-issued
+//! certificate (lib/fabcert.zig) naming its node id, key, and what it
+//! may do to peers. Joining is a signed ephemeral-DH handshake; there is
+//! no shared secret anywhere, so a compromised node is a revocable
+//! identity (a root-signed revocation gossips through the mesh), not a
+//! cluster rekey.
 
 const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 
+const fabcert = @import("mosslib").fabcert;
 const Aead = std.crypto.aead.aegis.Aegis128L;
-const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
 const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
+const Ed25519 = fabcert.Ed25519;
+const X25519 = std.crypto.dh.X25519;
 
 comptime {
     asm (
@@ -53,6 +66,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     switch (arg & 0xff) {
         1 => fabsvc(log_h, chan_h, (arg >> 8) & 0xff),
         2 => remoteEcho(log_h, chan_h),
+        3 => fabroot(log_h, chan_h),
         else => usys.exit(250),
     }
 }
@@ -78,6 +92,113 @@ fn remoteEcho(log_h: u64, chan_h: u64) noreturn {
     }
 }
 
+// --------------------------------------------------------------- fabroot
+
+var root_kp: Ed25519.KeyPair = undefined;
+var have_root = false;
+var root_buf: u64 = 0;
+
+/// The root of trust: a capability service holding the cluster's root
+/// signing key (per the code-sharing decision: where custody matters, a
+/// service holds the secret). It mints certificates over identity
+/// PUBLIC keys handed to it and signs revocations; it never sees a
+/// node's identity seed, and fabsvc never sees the root key.
+fn fabroot(log_h: u64, chan_h: u64) noreturn {
+    glog = log_h;
+    while (true) {
+        const r = usys.recvMsg(chan_h);
+        if (r.err == .peer_dead) usys.exit(0);
+        if (r.err != .ok) usys.exit(160);
+        const req = shared.decodeMsg(shared.RootReq, r.data) orelse {
+            rreply(chan_h, ferr(.refused));
+            continue;
+        };
+        switch (req) {
+            .attach_buf => {
+                if (r.cap != 0) {
+                    const m = usys.shmMap(r.cap);
+                    if (m.err == .ok) root_buf = m.data[0];
+                }
+                rreply(chan_h, .ok);
+            },
+            .set_root => |sr| {
+                if (root_buf == 0 or sr.len != 32 or sr.off + sr.len > 4096) {
+                    rreply(chan_h, ferr(.refused));
+                    continue;
+                }
+                const src: [*]volatile u8 = @ptrFromInt(root_buf + sr.off);
+                var seed: [32]u8 = undefined;
+                for (0..32) |i| {
+                    seed[i] = src[i];
+                    src[i] = 0; // the root seed lives only in the keypair
+                }
+                root_kp = Ed25519.KeyPair.generateDeterministic(seed) catch {
+                    rreply(chan_h, ferr(.refused));
+                    continue;
+                };
+                @memset(&seed, 0);
+                have_root = true;
+                _ = usys.log(glog, "fabroot: root of trust loaded");
+                rreply(chan_h, .ok);
+            },
+            .cluster_key => {
+                if (!have_root or root_buf == 0) {
+                    rreply(chan_h, ferr(.no_identity));
+                    continue;
+                }
+                const out: [*]volatile u8 = @ptrFromInt(root_buf);
+                const pk = root_kp.public_key.toBytes();
+                for (0..32) |i| out[i] = pk[i];
+                rreply(chan_h, .{ .num = .{ .n = 32 } });
+            },
+            .issue => |q| {
+                if (!have_root or root_buf == 0) {
+                    rreply(chan_h, ferr(.no_identity));
+                    continue;
+                }
+                const buf: [*]volatile u8 = @ptrFromInt(root_buf);
+                var node_pk: [32]u8 = undefined;
+                for (0..32) |i| node_pk[i] = buf[i];
+                var cert: [fabcert.cert_len]u8 = undefined;
+                fabcert.issue(root_kp, .{
+                    .node = @intCast(q.node & 0xffff),
+                    .flags = @intCast(q.flags_serial & 0xff),
+                    .image_mask = q.image_mask,
+                    .serial = @intCast((q.flags_serial >> 8) & 0xffff_ffff),
+                    .node_pk = node_pk,
+                }, &cert) catch {
+                    rreply(chan_h, ferr(.refused));
+                    continue;
+                };
+                for (0..fabcert.cert_len) |i| buf[i] = cert[i];
+                rreply(chan_h, .{ .num = .{ .n = fabcert.cert_len } });
+            },
+            .revoke => |q| {
+                if (!have_root or root_buf == 0) {
+                    rreply(chan_h, ferr(.no_identity));
+                    continue;
+                }
+                var rec: [fabcert.rev_len]u8 = undefined;
+                fabcert.issueRevocation(root_kp, .{
+                    .node = @intCast(q.node & 0xffff),
+                    .min_serial = @intCast(q.min_serial & 0xffff_ffff),
+                }, &rec) catch {
+                    rreply(chan_h, ferr(.refused));
+                    continue;
+                };
+                const buf: [*]volatile u8 = @ptrFromInt(root_buf);
+                for (0..fabcert.rev_len) |i| buf[i] = rec[i];
+                _ = usys.log(glog, "fabroot: revocation signed");
+                rreply(chan_h, .{ .num = .{ .n = fabcert.rev_len } });
+            },
+        }
+    }
+}
+
+fn rreply(chan_h: u64, resp: shared.FabResp) void {
+    _ = usys.replyTyped(shared.FabResp, chan_h, resp, 0);
+}
+
 // ---------------------------------------------------------------- fabsvc
 
 const max_peers = 6;
@@ -97,6 +218,16 @@ const Peer = struct {
     dialer: bool = false, // we initiated this connection
     nonce_mine: [16]u8 = @splat(0),
     nonce_theirs: [16]u8 = @splat(0),
+    // Ephemeral X25519 for this connection (secret wiped once derived).
+    eph_sk: [32]u8 = @splat(0),
+    eph_pk: [32]u8 = @splat(0),
+    eph_theirs: [32]u8 = @splat(0),
+    // The peer's certified identity and authorizations.
+    cert_theirs: [fabcert.cert_len]u8 = @splat(0),
+    pk_theirs: [32]u8 = @splat(0),
+    flags_theirs: u8 = 0,
+    mask_theirs: u64 = 0,
+    serial_theirs: u32 = 0,
     tx_key: [16]u8 = @splat(0),
     rx_key: [16]u8 = @splat(0),
     tx_ctr: u64 = 0,
@@ -144,14 +275,31 @@ var my_node: u64 = 0;
 var glog: u64 = 0;
 var tick: u64 = 0; // the local poll clock
 var last_ping: u64 = 0;
-var fabric_key: [32]u8 = @splat(0);
-var have_key = false;
+// This node's identity: its signing keypair, the cluster key (the root
+// of trust's public key), and the certificate the root issued for it.
+var identity: Ed25519.KeyPair = undefined;
+var cluster_pk: [32]u8 = @splat(0);
+var my_cert: [fabcert.cert_len]u8 = @splat(0);
+var have_identity = false; // seed + cluster key staged
+var have_cert = false; // certificate verified; the fabric may open
+
+/// Revocations we hold: certs of `node` below min_serial are refused.
+const Revoked = struct {
+    used: bool = false,
+    node: u64 = 0,
+    min_serial: u32 = 0,
+    rec: [fabcert.rev_len]u8 = @splat(0), // the signed record, for re-gossip at join
+};
+var revoked: [max_members]Revoked = @splat(.{});
 var mesh_logged = false;
 
 // One outstanding wire exchange at a time (v0 serializes).
 var got_spawn_ack = false;
 var spawn_ack_session: u32 = 0;
-var spawn_ack_ok = false;
+var spawn_ack_code: u8 = 0; // 1 = spawned, 2 = unauthorized, 0 = failed
+
+/// hello / hello_ack body prefix: [node u16][nonce 16][eph pk 32][cert].
+const hello_len = 2 + 16 + 32 + fabcert.cert_len;
 var got_call_resp = false;
 var call_resp_ok = false;
 var call_resp_words: [4]u64 = @splat(0);
@@ -176,9 +324,9 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
         };
         switch (req) {
             .attach_net => {
-                if (!have_key) {
-                    _ = usys.log(glog, "fabsvc: NO FABRIC KEY — refusing the network (fail closed)");
-                    freply(ferr(.no_key));
+                if (!have_cert) {
+                    _ = usys.log(glog, "fabsvc: NO IDENTITY/CERTIFICATE — refusing the network (fail closed)");
+                    freply(ferr(.no_identity));
                     continue;
                 }
                 var probe: [16]u8 = undefined;
@@ -193,17 +341,65 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                 }
                 freply(.ok);
             },
-            .set_key => |sk| {
-                if (fab_buf == 0 or sk.len != 32 or sk.off + sk.len > 4096) {
+            .set_identity => |si| {
+                if (fab_buf == 0 or si.len != shared.fab_identity_len or si.off + si.len > 4096) {
                     freply(ferr(.refused));
                     continue;
                 }
-                const src: [*]volatile u8 = @ptrFromInt(fab_buf + sk.off);
+                const src: [*]volatile u8 = @ptrFromInt(fab_buf + si.off);
+                var seed: [32]u8 = undefined;
                 for (0..32) |i| {
-                    fabric_key[i] = src[i];
-                    src[i] = 0; // the key lives only here
+                    seed[i] = src[i];
+                    src[i] = 0; // the seed lives only in the keypair
                 }
-                have_key = true;
+                for (0..32) |i| cluster_pk[i] = src[32 + i];
+                identity = Ed25519.KeyPair.generateDeterministic(seed) catch {
+                    freply(ferr(.refused));
+                    continue;
+                };
+                @memset(&seed, 0);
+                have_identity = true;
+                have_cert = false;
+                // Hand back the public half for the root to certify.
+                const out: [*]volatile u8 = @ptrFromInt(fab_buf);
+                const pk = identity.public_key.toBytes();
+                for (0..32) |i| out[i] = pk[i];
+                freply(.{ .num = .{ .n = 32 } });
+            },
+            .set_cert => |sc| {
+                if (!have_identity or fab_buf == 0 or sc.len != fabcert.cert_len or sc.off + sc.len > 4096) {
+                    freply(ferr(.refused));
+                    continue;
+                }
+                const src: [*]volatile u8 = @ptrFromInt(fab_buf + sc.off);
+                for (0..fabcert.cert_len) |i| my_cert[i] = src[i];
+                const c = fabcert.verify(&my_cert, cluster_pk) catch {
+                    _ = usys.log(glog, "fabsvc: our certificate does not verify under the cluster key; refused");
+                    freply(ferr(.refused));
+                    continue;
+                };
+                if (c.node != my_node or !std.mem.eql(u8, &c.node_pk, &identity.public_key.toBytes())) {
+                    _ = usys.log(glog, "fabsvc: certificate names another node or key; refused");
+                    freply(ferr(.refused));
+                    continue;
+                }
+                have_cert = true;
+                _ = usys.log(glog, "fabsvc: identity certified by the trust root");
+                freply(.ok);
+            },
+            .revoke => |rv| {
+                if (fab_buf == 0 or rv.len != fabcert.rev_len or rv.off + rv.len > 4096) {
+                    freply(ferr(.refused));
+                    continue;
+                }
+                const src: [*]volatile u8 = @ptrFromInt(fab_buf + rv.off);
+                var rec: [fabcert.rev_len]u8 = undefined;
+                for (0..fabcert.rev_len) |i| rec[i] = src[i];
+                if (!applyRevocation(&rec)) {
+                    freply(ferr(.refused));
+                    continue;
+                }
+                gossipRevocation(&rec, null);
                 freply(.ok);
             },
             .attach_buf => {
@@ -370,9 +566,12 @@ fn doMembers() shared.FabResp {
 
 // ----------------------------------------------------------- handshake
 //
-// Mutual challenge-response over the fabric key; per-connection AEGIS
-// session keys from HKDF over both nonces. The key never crosses the
-// wire; the wire version sits inside every MAC (downgrade = auth fail).
+// Signed ephemeral Diffie-Hellman under root-issued certificates: each
+// side presents its certificate and proves its identity key over a
+// transcript of the whole exchange; session keys come from X25519 over
+// per-connection ephemeral keys (identity keys only ever sign — forward
+// secrecy). No shared secret exists anywhere. The wire version sits in
+// the transcript, so a downgrade breaks the signature.
 
 /// Handshake nonce: 16 bytes from the kernel CSPRNG (getrandom, seeded
 /// by the virtio-rng driver). attach_net already proved the pool is
@@ -386,38 +585,96 @@ fn mkNonce() [16]u8 {
     return n;
 }
 
-/// Transcript MAC: label || ver || dialer node || acceptor node ||
-/// dialer nonce || acceptor nonce, truncated to 16 bytes.
-fn transcriptMac(label: []const u8, dialer_node: u64, acceptor_node: u64, dialer_nonce: *const [16]u8, acceptor_nonce: *const [16]u8) [16]u8 {
-    var h = Hmac.init(&fabric_key);
-    h.update(label);
-    h.update(&.{shared.fabric_ver});
-    var n: [4]u8 = undefined;
-    puleu16(n[0..2], @intCast(dialer_node));
-    puleu16(n[2..4], @intCast(acceptor_node));
-    h.update(&n);
-    h.update(dialer_nonce);
-    h.update(acceptor_nonce);
-    var mac: [Hmac.mac_length]u8 = undefined;
-    h.final(&mac);
-    return mac[0..16].*;
+/// A fresh ephemeral X25519 keypair for one connection.
+fn mkEphemeral(p: *Peer) void {
+    var seed: [32]u8 = undefined;
+    if (usys.getrandom(&seed) != .ok) {
+        _ = usys.log(glog, "fabsvc: getrandom refused mid-life; no handshake without entropy");
+        usys.exit(158);
+    }
+    const kp = X25519.KeyPair.generateDeterministic(seed) catch usys.exit(159);
+    @memset(&seed, 0);
+    p.eph_sk = kp.secret_key;
+    p.eph_pk = kp.public_key;
 }
 
-fn macEql(a: *const [16]u8, b: []const u8) bool {
-    if (b.len < 16) return false;
-    var diff: u8 = 0;
-    for (a, b[0..16]) |x, y| diff |= x ^ y;
-    return diff == 0;
+const hs_max = 1 + 4 + 32 + 64 + 2 * fabcert.cert_len;
+const hs_ack = "moss-fabric-hs-ack";
+const hs_auth = "moss-fabric-hs-auth";
+
+/// The signed transcript: ver || dialer node || acceptor node || dialer
+/// nonce || acceptor nonce || dialer eph || acceptor eph || dialer cert
+/// || acceptor cert — dialer-first whichever side we are, so both sides
+/// sign and verify identical bytes. (The label is prepended by the
+/// signing primitive; it separates ack from auth from certificates.)
+fn transcript(p: *Peer, out: *[hs_max]u8) []const u8 {
+    var n: usize = 0;
+    n = put(out, n, &.{shared.fabric_ver});
+    var ids: [4]u8 = undefined;
+    puleu16(ids[0..2], @intCast(if (p.dialer) my_node else p.node));
+    puleu16(ids[2..4], @intCast(if (p.dialer) p.node else my_node));
+    n = put(out, n, &ids);
+    n = put(out, n, if (p.dialer) &p.nonce_mine else &p.nonce_theirs);
+    n = put(out, n, if (p.dialer) &p.nonce_theirs else &p.nonce_mine);
+    n = put(out, n, if (p.dialer) &p.eph_pk else &p.eph_theirs);
+    n = put(out, n, if (p.dialer) &p.eph_theirs else &p.eph_pk);
+    n = put(out, n, if (p.dialer) &my_cert else &p.cert_theirs);
+    n = put(out, n, if (p.dialer) &p.cert_theirs else &my_cert);
+    return out[0..n];
 }
 
-/// Directional session keys: HKDF(fabric key, salt = both nonces).
-fn deriveSession(p: *Peer) void {
+fn put(out: []u8, at: usize, bytes: []const u8) usize {
+    @memcpy(out[at .. at + bytes.len], bytes);
+    return at + bytes.len;
+}
+
+fn signTranscript(label: []const u8, p: *Peer) [64]u8 {
+    var buf: [hs_max]u8 = undefined;
+    return fabcert.signLabeled(identity, label, transcript(p, &buf)) catch usys.exit(157);
+}
+
+fn verifyTranscript(label: []const u8, p: *Peer, sig: []const u8) bool {
+    var buf: [hs_max]u8 = undefined;
+    fabcert.verifyLabeled(p.pk_theirs, label, transcript(p, &buf), sig) catch return false;
+    return true;
+}
+
+/// Admit a peer's certificate: signed by our root, naming the node it
+/// claims to be, clearing every revocation we hold. On success the
+/// peer's identity key and authorizations are recorded on the slot.
+fn acceptCert(p: *Peer, node: u64, bytes: []const u8) bool {
+    if (bytes.len < fabcert.cert_len) return false;
+    @memcpy(&p.cert_theirs, bytes[0..fabcert.cert_len]);
+    const c = fabcert.verify(&p.cert_theirs, cluster_pk) catch {
+        _ = usys.log(glog, "fabsvc: certificate not signed by our trust root; refused");
+        return false;
+    };
+    if (c.node != node) {
+        _ = usys.log(glog, "fabsvc: certificate names another node; refused");
+        return false;
+    }
+    if (isRevoked(node, c.serial)) {
+        _ = usys.log(glog, "fabsvc: revoked identity refused");
+        return false;
+    }
+    p.pk_theirs = c.node_pk;
+    p.flags_theirs = c.flags;
+    p.mask_theirs = c.image_mask;
+    p.serial_theirs = c.serial;
+    return true;
+}
+
+/// Directional session keys: HKDF(X25519 shared secret, salt = both
+/// nonces). The ephemeral secret is wiped here; nothing can re-derive.
+fn deriveSession(p: *Peer) bool {
+    const secret = X25519.scalarmult(p.eph_sk, p.eph_theirs) catch return false;
+    @memset(&p.eph_sk, 0);
     var salt: [32]u8 = undefined;
     const dn = if (p.dialer) &p.nonce_mine else &p.nonce_theirs;
     const an = if (p.dialer) &p.nonce_theirs else &p.nonce_mine;
     @memcpy(salt[0..16], dn);
     @memcpy(salt[16..32], an);
-    const prk = Hkdf.extract(&salt, &fabric_key);
+    const prk = Hkdf.extract(&salt, &secret);
     var d2a: [16]u8 = undefined;
     var a2d: [16]u8 = undefined;
     Hkdf.expand(&d2a, "moss-fabric-d2a", prk);
@@ -426,6 +683,73 @@ fn deriveSession(p: *Peer) void {
     p.rx_key = if (p.dialer) a2d else d2a;
     p.tx_ctr = 0;
     p.rx_ctr = 0;
+    return true;
+}
+
+// ---------------------------------------------------------- revocation
+
+fn isRevoked(node: u64, serial: u32) bool {
+    for (&revoked) |*r| {
+        if (r.used and r.node == node and serial < r.min_serial) return true;
+    }
+    return false;
+}
+
+/// Verify and apply a revocation record. Returns true when it was NEWS
+/// (raised the bar for that node): the caller gossips it on. A record we
+/// already hold is not re-broadcast, which bounds the flood.
+fn applyRevocation(rec: *const [fabcert.rev_len]u8) bool {
+    const r = fabcert.verifyRevocation(rec, cluster_pk) catch {
+        _ = usys.log(glog, "fabsvc: revocation not signed by our trust root; ignored");
+        return false;
+    };
+    var slot: ?*Revoked = null;
+    for (&revoked) |*e| {
+        if (e.used and e.node == r.node) slot = e;
+    }
+    if (slot == null) {
+        for (&revoked) |*e| {
+            if (!e.used) {
+                e.* = .{ .used = true, .node = r.node, .min_serial = 0 };
+                slot = e;
+                break;
+            }
+        }
+    }
+    const e = slot orelse return false;
+    if (r.min_serial <= e.min_serial) return false;
+    e.min_serial = r.min_serial;
+    e.rec = rec.*;
+    _ = usys.log(glog, "fabsvc: revocation accepted from trust root");
+    for (&peers) |*p| {
+        if (p.used and !p.dead and p.greeted and p.node == r.node and p.serial_theirs < r.min_serial) {
+            _ = usys.log(glog, "fabsvc: identity revoked by trust root; peer dropped");
+            peerFailed(p);
+        }
+    }
+    return true;
+}
+
+/// At join, both sides hand the newcomer every revocation they hold, so
+/// a node that was down while one circulated learns it before it can be
+/// fooled by a revoked peer. Already-held records are not news there.
+fn sendRevocations(p: *Peer) void {
+    for (&revoked) |*e| {
+        if (!e.used or e.min_serial == 0) continue;
+        var f: [4 + fabcert.rev_len]u8 = undefined;
+        frameHdr(f[0..4], f.len, shared.fw_revoke);
+        @memcpy(f[4..], &e.rec);
+        _ = sendFrame(p, &f);
+    }
+}
+
+fn gossipRevocation(rec: *const [fabcert.rev_len]u8, except: ?*Peer) void {
+    var f: [4 + fabcert.rev_len]u8 = undefined;
+    frameHdr(f[0..4], f.len, shared.fw_revoke);
+    @memcpy(f[4..], rec);
+    for (&peers) |*p| {
+        if (p.used and !p.dead and p.greeted and p != except) _ = sendFrame(p, &f);
+    }
 }
 
 fn ctrNonce(ctr: u64) [16]u8 {
@@ -641,10 +965,18 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
     heard(p);
     switch (ftype) {
         shared.fw_hello => {
-            if (body.len < 18) return;
+            // [node u16][nonce 16][eph pk 32][cert 112]
+            if (body.len < hello_len) return;
             const node = leu16(body[0..2]);
-            // Rejoin / duplicate: a fresh connection for a node we already
-            // track replaces the old one (the old socket is stale).
+            // The certificate is checked BEFORE anything else changes: a
+            // stranger claiming a live peer's id must not evict it.
+            if (!acceptCert(p, node, body[50..hello_len])) {
+                peerFailed(p);
+                return;
+            }
+            // Rejoin / duplicate: a fresh authentic connection for a node
+            // we already track replaces the old one (the old socket is
+            // stale).
             for (&peers) |*old| {
                 if (old.used and old != p and old.node == node) {
                     _ = ncall(.{ .tcp_close = .{ .sock = old.sock } });
@@ -654,58 +986,79 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             p.node = node;
             p.dialer = false;
             @memcpy(&p.nonce_theirs, body[2..18]);
+            @memcpy(&p.eph_theirs, body[18..50]);
             p.nonce_mine = mkNonce();
-            // Challenge back: prove WE hold the key; they prove with auth.
-            var ack: [38]u8 = undefined;
-            frameHdr(ack[0..4], 38, shared.fw_hello_ack);
+            mkEphemeral(p);
+            // Our identity + proof over the transcript; they prove with auth.
+            var ack: [4 + hello_len + 64]u8 = undefined;
+            frameHdr(ack[0..4], ack.len, shared.fw_hello_ack);
             puleu16(ack[4..6], @intCast(my_node));
             @memcpy(ack[6..22], &p.nonce_mine);
-            const mac = transcriptMac("ack", p.node, my_node, &p.nonce_theirs, &p.nonce_mine);
-            @memcpy(ack[22..38], &mac);
+            @memcpy(ack[22..54], &p.eph_pk);
+            @memcpy(ack[54 .. 54 + fabcert.cert_len], &my_cert);
+            const sig = signTranscript(hs_ack, p);
+            @memcpy(ack[4 + hello_len ..], &sig);
             _ = sendFrame(p, &ack);
         },
         shared.fw_hello_ack => {
-            // Dialer side: verify the acceptor's proof, send ours, go live.
-            if (body.len < 34 or !p.dialer) return;
-            p.node = leu16(body[0..2]);
+            // Dialer side: verify the acceptor's certificate and proof,
+            // send ours, go live.
+            if (body.len < hello_len + 64 or !p.dialer) return;
+            if (leu16(body[0..2]) != p.node) {
+                _ = usys.log(glog, "fabsvc: acceptor claims a different node id; dropped");
+                peerFailed(p);
+                return;
+            }
             @memcpy(&p.nonce_theirs, body[2..18]);
-            const want = transcriptMac("ack", my_node, p.node, &p.nonce_mine, &p.nonce_theirs);
-            if (!macEql(&want, body[18..34])) {
+            @memcpy(&p.eph_theirs, body[18..50]);
+            if (!acceptCert(p, p.node, body[50..hello_len]) or
+                !verifyTranscript(hs_ack, p, body[hello_len .. hello_len + 64]))
+            {
                 _ = usys.log(glog, "fabsvc: peer failed authentication; dropped");
                 peerFailed(p);
                 return;
             }
-            var auth: [20]u8 = undefined;
-            frameHdr(auth[0..4], 20, shared.fw_auth);
-            const mac = transcriptMac("auth", my_node, p.node, &p.nonce_mine, &p.nonce_theirs);
-            @memcpy(auth[4..20], &mac);
+            var auth: [4 + 64]u8 = undefined;
+            frameHdr(auth[0..4], auth.len, shared.fw_auth);
+            const sig = signTranscript(hs_auth, p);
+            @memcpy(auth[4..], &sig);
             _ = sendFrame(p, &auth); // still plaintext: they derive on receipt
-            deriveSession(p);
+            if (!deriveSession(p)) {
+                peerFailed(p);
+                return;
+            }
             p.greeted = true;
             _ = memberUpsert(p.node, true);
             if (memberByNode(p.node)) |m| m.last_heard = tick;
+            sendRevocations(p);
         },
         shared.fw_auth => {
             // Acceptor side: the dialer's proof completes the join.
-            if (body.len < 16 or p.dialer) return;
-            const want = transcriptMac("auth", p.node, my_node, &p.nonce_theirs, &p.nonce_mine);
-            if (!macEql(&want, body[0..16])) {
+            if (body.len < 64 or p.dialer) return;
+            if (!verifyTranscript(hs_auth, p, body[0..64])) {
                 _ = usys.log(glog, "fabsvc: peer failed authentication; dropped");
                 peerFailed(p);
                 return;
             }
-            deriveSession(p);
+            if (!deriveSession(p)) {
+                peerFailed(p);
+                return;
+            }
             p.greeted = true;
             _ = memberUpsert(p.node, true);
             if (memberByNode(p.node)) |m| m.last_heard = tick;
             broadcastMember(shared.fw_member_up, p.node);
             sendMembersFrame(p);
+            sendRevocations(p);
             _ = usys.log(glog, "fabsvc: peer joined (authenticated); sent member view");
         },
         shared.fw_members => {
-            // The acceptor's member view, sealed: gossip at join.
+            // The acceptor's member view, sealed: gossip at join. Believed
+            // only from a peer certified to gossip (its own liveness and
+            // load are always taken — those it speaks for itself).
             if (body.len < 3) return;
             if (memberByNode(p.node)) |m| m.free_mb = leu16(body[0..2]);
+            if (p.flags_theirs & fabcert.flag_gossip == 0) return;
             const n = body[2];
             var off: usize = 3;
             for (0..n) |_| {
@@ -731,12 +1084,12 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             }
         },
         shared.fw_member_up => {
-            if (body.len < 2) return;
+            if (body.len < 2 or p.flags_theirs & fabcert.flag_gossip == 0) return;
             const node = leu16(body[0..2]);
             if (node != my_node) _ = memberUpsert(node, true);
         },
         shared.fw_member_down => {
-            if (body.len < 2) return;
+            if (body.len < 2 or p.flags_theirs & fabcert.flag_gossip == 0) return;
             const node = leu16(body[0..2]);
             // Trust it only when we cannot see the node ourselves — our own
             // heartbeat is the authority for peers we are connected to.
@@ -748,9 +1101,15 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             const image = leu16(body[0..2]);
             const arg = leu64(body[2..10]);
             const req_id = leu32(body[10..14]);
+            // Authorization is the peer's certificate: the spawn flag and
+            // the image bit, both signed by the root of trust.
+            const allowed = p.flags_theirs & fabcert.flag_spawn != 0 and
+                image < 64 and (p.mask_theirs >> @intCast(image)) & 1 != 0;
+            if (!allowed) _ = usys.log(glog, "fabsvc: refused spawn: peer's certificate does not authorize that image");
             var sid: u32 = 0;
             var ok = false;
             for (&rsessions, 0..) |*rs, i| {
+                if (!allowed) break;
                 if (rs.used) continue;
                 const ch = usys.chanCreate();
                 if (ch.err != .ok) break;
@@ -774,14 +1133,20 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             frameHdr(ack[0..4], 13, shared.fw_spawn_ack);
             puleu32(ack[4..8], req_id);
             puleu32(ack[8..12], sid);
-            ack[12] = if (ok) 1 else 0;
+            ack[12] = if (ok) 1 else if (!allowed) 2 else 0;
             _ = sendFrame(p, &ack);
         },
         shared.fw_spawn_ack => {
             if (body.len < 9) return;
             spawn_ack_session = leu32(body[4..8]);
-            spawn_ack_ok = body[8] != 0;
+            spawn_ack_code = body[8];
             got_spawn_ack = true;
+        },
+        shared.fw_revoke => {
+            // A root-signed revocation, forwarded by a peer: verify, apply,
+            // and pass it on once if it was news.
+            if (body.len < fabcert.rev_len) return;
+            if (applyRevocation(body[0..fabcert.rev_len])) gossipRevocation(body[0..fabcert.rev_len], p);
         },
         shared.fw_call_req => {
             // [session u32][seq u32][4 x u64] -> call the local child.
@@ -883,10 +1248,13 @@ fn doConnectPeer(node: u64) shared.FabResp {
 
     p.dialer = true;
     p.nonce_mine = mkNonce();
-    var hello: [22]u8 = undefined;
-    frameHdr(hello[0..4], 22, shared.fw_hello);
+    mkEphemeral(p);
+    var hello: [4 + hello_len]u8 = undefined;
+    frameHdr(hello[0..4], hello.len, shared.fw_hello);
     puleu16(hello[4..6], @intCast(my_node));
     @memcpy(hello[6..22], &p.nonce_mine);
+    @memcpy(hello[22..54], &p.eph_pk);
+    @memcpy(hello[54..], &my_cert);
     if (!sendFrame(p, &hello)) return ferr(.disconnected);
     for (0..50) |_| {
         pumpAll();
@@ -943,8 +1311,16 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
         }
         usys.sleep(1);
     }
-    if (!got_spawn_ack or !spawn_ack_ok) {
+    if (!got_spawn_ack) {
         freply(ferr(.timeout));
+        return;
+    }
+    if (spawn_ack_code == 2) {
+        freply(ferr(.denied));
+        return;
+    }
+    if (spawn_ack_code != 1) {
+        freply(ferr(.refused));
         return;
     }
     // Bind a local badge to the remote session and hand out the cap: the

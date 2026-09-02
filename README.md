@@ -9,7 +9,8 @@ an automated test suite: from boot-to-banner, through user-mode capabilities
 and domains, IPC with typed comptime-generated stubs, a userspace init with
 supervision, interposition sandboxing, userspace virtio drivers, async
 rings, a filesystem with per-process namespace views, dual-stack TCP/IP,
-and a two-node fabric doing cross-VM RPC with node-kill recovery.
+and a multi-node fabric doing cross-VM RPC with node-kill recovery under
+per-node cryptographic identities.
 
 ## The three documents
 
@@ -78,7 +79,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
-| fabric | Dynamic membership: join, gossip, placement, death detection, rejoin | `zig build run-cluster -Dfabric-test` |
+| fabric | Per-node identities (root-signed certs, signed DH, sealed transport): join, gossip, placement, death, rejoin, imposter refused, spawn authorization, revocation | `zig build run-cluster -Dfabric-test` |
 | shell | msh scripted console session: ps/mem/svc + file ops on the encrypted volume | `zig build run-shell` (interactive) |
 
 Host-side unit tests (`zig build test`) cover the shared ABI: handles,

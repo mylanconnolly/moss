@@ -661,26 +661,22 @@ fn shellTestWorker(_: u64) void {
     }, 0);
     std.debug.assert(res.err == .ok);
 
-    // Wire the fabric to a net view (fabric key first: fail-closed). The
+    // Wire the fabric to a net view (identity first: fail-closed). The
     // fabric gets its OWN staging buffer: an shm cap delivered to a service
     // is unref'd by that service's teardown, so one buffer must never be
     // handed to two services against a single ref.
     const fabbuf = ipc.createShm(1) orelse @panic("shm pool empty");
     const fb = mem.physToPtr([*]u8, fabbuf.pages[0]);
     ipc.refShm(fabbuf);
+    const root = spawnFabroot(false);
     {
-        const fabric_key = "moss-fabric-key--0123456789abcde";
         var r2 = ipc.call(shellfab_ch, .{
             .data = shared.encodeMsg(shared.FabReq, .attach_buf),
             .cap_type = @intFromEnum(cap.CapType.shm),
             .cap_obj = @intFromPtr(fabbuf),
         }, 0);
         std.debug.assert(r2.err == .ok);
-        @memcpy(fb[0..32], fabric_key);
-        r2 = ipc.call(shellfab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
-        }, 0);
-        std.debug.assert(r2.err == .ok);
+        certifyFabric(root, shellfab_ch, fb, 1, shared.fab_flag_gossip | shared.fab_flag_spawn, ~@as(u64, 0));
         const nview = deriveNetView(shellnet_ch, 0, 0, 0);
         r2 = ipc.call(shellfab_ch, .{
             .data = shared.encodeMsg(shared.FabReq, .attach_net),
@@ -765,6 +761,10 @@ fn shellTestWorker(_: u64) void {
     while (shellfab.state != .dead) sched.sleep(1);
     domain.destroy(shellnet);
     while (shellnet.state != .dead) sched.sleep(1);
+    domain.destroy(root.d);
+    while (root.d.state != .dead) sched.sleep(1);
+    ipc.unrefSide(root.ch, .b);
+    ipc.unrefShm(root.buf);
     ipc.unrefSide(shellnet_ch, .b);
     ipc.unrefSide(shellfab_ch, .b);
     ipc.unrefShm(fabbuf);
@@ -1014,7 +1014,11 @@ fn fabricTestWorker(arg: u64) void {
         .grant_spawner = true,
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
-    // Stage the fabric key (the cluster secret), then hand over the net.
+    // Identity: the root of trust certifies this node, then the net is
+    // handed over. The imposter's root is a DIFFERENT key, so its
+    // certificate must be refused by every real member. Node 3's
+    // certificate carries no spawn authority (the authorization drill).
+    const root = spawnFabroot(badkey != 0);
     const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
     const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
     ipc.refShm(pathbuf);
@@ -1024,14 +1028,8 @@ fn fabricTestWorker(arg: u64) void {
         .cap_obj = @intFromPtr(pathbuf),
     }, 0);
     std.debug.assert(res.err == .ok);
-    const fabric_key = "moss-fabric-key--0123456789abcde";
-    comptime std.debug.assert(fabric_key.len == 32);
-    @memcpy(pb[0..32], fabric_key);
-    if (badkey != 0) pb[0] ^= 0xff; // the imposter drill's wrong key
-    res = ipc.call(fab_ch, .{
-        .data = shared.encodeMsg(shared.FabReq, .{ .set_key = .{ .off = 0, .len = 32 } }),
-    }, 0);
-    std.debug.assert(res.err == .ok);
+    const flags: u64 = if (node == 3) shared.fab_flag_gossip else shared.fab_flag_gossip | shared.fab_flag_spawn;
+    certifyFabric(root, fab_ch, pb, node, flags, ~@as(u64, 0));
 
     const view = deriveNetView(net_ch, 0, 0, 0);
     res = ipc.call(fab_ch, .{
@@ -1043,7 +1041,8 @@ fn fabricTestWorker(arg: u64) void {
     std.debug.assert(res.err == .ok);
 
     if (node == 9) {
-        // The imposter: wrong key, join must be REFUSED by the handshake.
+        // The imposter: a certificate from the wrong root of trust; the
+        // join must be REFUSED by the handshake.
         for (0..10) |_| {
             res = ipc.call(fab_ch, .{
                 .data = shared.encodeMsg(shared.FabReq, .{ .connect_peer = .{ .node = 1 } }),
@@ -1055,7 +1054,7 @@ fn fabricTestWorker(arg: u64) void {
             }
             fabPump(fab_ch, 2);
         }
-        log.info("fabric-test: wrong-key join rejected (as designed)", .{});
+        log.info("fabric-test: untrusted identity rejected (as designed)", .{});
         psci.systemOff();
     }
 
@@ -1080,12 +1079,44 @@ fn fabricTestWorker(arg: u64) void {
         }
         if (!joined) std.debug.panic("fabric-test: node {d} could not join via seed", .{node});
         log.info("fabric-test: node {d} joined the fabric via seed 1", .{node});
+        if (node == 3) {
+            // Authorization drill: node 3's certificate has no spawn
+            // authority, so node 1 must refuse its spawn request on
+            // certificate grounds — a typed denial, not a timeout.
+            res = ipc.call(fab_ch, .{
+                .data = shared.encodeMsg(shared.FabReq, .{ .remote_spawn = .{
+                    .node = 1,
+                    .image = @intFromEnum(shared.ImageId.fabric),
+                    .arg = 2,
+                } }),
+            }, 0);
+            var denied = false;
+            if (res.err == .ok) {
+                if (shared.decodeMsg(shared.FabResp, res.msg.data)) |rep| {
+                    denied = rep == .fab_err and rep.fab_err.code == @intFromEnum(shared.FabErr.denied);
+                }
+            }
+            if (!denied) std.debug.panic("fabric-test: unauthorized spawn was NOT refused", .{});
+            log.info("fabric-test: node 3 spawn refused on certificate grounds (no spawn authority)", .{});
+        }
         var t: u64 = 0;
         while (true) : (t += 1) {
             fabPump(fab_ch, 1);
             if (drill == 1 and t == 120) {
                 log.info("fabric-test: node {d} powering off mid-life (drill)", .{node});
                 psci.systemOff();
+            }
+            // Node 3 keeps trying to come back once cut off: after its
+            // revocation every attempt must be refused at the handshake.
+            if (node == 3 and t % 30 == 0 and !memberUp(fab_ch, pb, 1)) {
+                res = ipc.call(fab_ch, .{
+                    .data = shared.encodeMsg(shared.FabReq, .{ .connect_peer = .{ .node = 1 } }),
+                }, 0);
+                var ok = false;
+                if (res.err == .ok) {
+                    if (shared.decodeMsg(shared.FabResp, res.msg.data)) |rep| ok = rep == .ok;
+                }
+                if (!ok) log.info("fabric-test: node 3 rejoin attempt refused", .{});
             }
         }
     }
@@ -1115,8 +1146,125 @@ fn fabricTestWorker(arg: u64) void {
     // Stage E: the rejoined node hosts work again.
     landed = remoteSpawnRpc(fab_ch, 2) orelse
         std.debug.panic("fabric-test: post-rejoin spawn failed", .{});
-    log.info("fabric-test: PASS — join, gossip, placement, death, rejoin, respawn", .{});
+    log.info("fabric-test: rejoined node hosts work again", .{});
+
+    // Stage F: revoke node 3's identity through the root of trust. The
+    // fabric must drop it (membership), gossip the revocation to node 2,
+    // and refuse node 3's every attempt to come back — no cluster rekey.
+    fabRevoke(root, fab_ch, pb, 3, 2);
+    if (!waitMember(fab_ch, pb, 3, false, 300))
+        std.debug.panic("fabric-test: node 3 still a member after revocation", .{});
+    log.info("fabric-test: node 3 revoked by the trust root; dropped from membership", .{});
+    fabPump(fab_ch, 100); // node 3's rejoin attempts must hit the refusal
+    log.info("fabric-test: PASS — join, gossip, placement, death, rejoin, respawn, authorization, revocation", .{});
     psci.systemOff();
+}
+
+/// One-shot membership query: is `node` up in this fabric's view?
+fn memberUp(fab_ch: *ipc.Channel, pb: [*]u8, node: u64) bool {
+    const res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .members),
+    }, 0);
+    if (res.err != .ok) return false;
+    const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse return false;
+    if (rep != .num) return false;
+    for (0..@intCast(rep.num.n)) |i| {
+        const rec = pb[i * shared.fab_member_size ..];
+        const rnode = @as(u64, rec[0]) | (@as(u64, rec[1]) << 8);
+        if (rnode == node) return rec[2] != 0;
+    }
+    return false;
+}
+
+/// The root of trust for one boot: fabroot, a separate domain holding the
+/// cluster's root signing key (the imposter drill flips a seed byte — a
+/// different root). Kept alive as the admin's key-custody service.
+const FabRoot = struct { d: *domain.Domain, ch: *ipc.Channel, buf: *ipc.Shm, pb: [*]u8 };
+
+fn spawnFabroot(bad_root: bool) FabRoot {
+    const blobs = @import("user_blobs");
+    const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const d = domain.spawn("fabroot", blobs.fabric, .{
+        .arg = 3,
+        .grant_debug_log = true,
+        .grant_channel_a = ch,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn fabroot: {t}", .{e});
+    const buf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const pb = mem.physToPtr([*]u8, buf.pages[0]);
+    ipc.refShm(buf);
+    var res = ipc.call(ch, .{
+        .data = shared.encodeMsg(shared.RootReq, .attach_buf),
+        .cap_type = @intFromEnum(cap.CapType.shm),
+        .cap_obj = @intFromPtr(buf),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    const root_seed = "moss-root-of-trust-seed-01234567";
+    comptime std.debug.assert(root_seed.len == 32);
+    @memcpy(pb[0..32], root_seed);
+    if (bad_root) pb[0] ^= 0xff;
+    res = ipc.call(ch, .{
+        .data = shared.encodeMsg(shared.RootReq, .{ .set_root = .{ .off = 0, .len = 32 } }),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    return .{ .d = d, .ch = ch, .buf = buf, .pb = pb };
+}
+
+fn rootNum(res: ipc.CallResult, want: u64) void {
+    std.debug.assert(res.err == .ok);
+    const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse @panic("root: bad reply");
+    if (rep != .num or rep.num.n != want) @panic("root: refused");
+}
+
+/// Certify fabsvc's identity: fabsvc derives its keypair from a node seed
+/// and exports the PUBLIC key; fabroot signs it into a certificate with
+/// the node's authorizations; fabsvc verifies and installs it. The boot
+/// driver is the out-of-band channel between the two — neither service
+/// ever sees the other's secret. `fb` is fabsvc's attached buffer.
+fn certifyFabric(root: FabRoot, fab_ch: *ipc.Channel, fb: [*]u8, node: u64, flags: u64, image_mask: u64) void {
+    rootNum(ipc.call(root.ch, .{
+        .data = shared.encodeMsg(shared.RootReq, .cluster_key),
+    }, 0), 32);
+    var node_seed: [32]u8 = "moss-node-identity-seed-00000000".*;
+    node_seed[31] = @intCast(node);
+    @memcpy(fb[0..32], &node_seed);
+    @memcpy(fb[32..64], root.pb[0..32]);
+    rootNum(ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .{ .set_identity = .{ .off = 0, .len = shared.fab_identity_len } }),
+    }, 0), 32);
+    // fabsvc left its public key at fb[0..32]; the root certifies it.
+    @memcpy(root.pb[0..32], fb[0..32]);
+    rootNum(ipc.call(root.ch, .{
+        .data = shared.encodeMsg(shared.RootReq, .{
+            .issue = .{
+                .node = node,
+                .flags_serial = flags | (1 << 8), // serial 1
+                .image_mask = image_mask,
+            },
+        }),
+    }, 0), shared.fab_cert_len);
+    @memcpy(fb[0..shared.fab_cert_len], root.pb[0..shared.fab_cert_len]);
+    const res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .{ .set_cert = .{ .off = 0, .len = shared.fab_cert_len } }),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse @panic("fabsvc: bad reply");
+    if (rep != .ok) @panic("fabsvc refused its own certificate");
+}
+
+/// Revoke a node's identity: a root-signed record, handed to the local
+/// fabsvc, which applies it and gossips it through the mesh.
+fn fabRevoke(root: FabRoot, fab_ch: *ipc.Channel, fb: [*]u8, node: u64, min_serial: u64) void {
+    rootNum(ipc.call(root.ch, .{
+        .data = shared.encodeMsg(shared.RootReq, .{ .revoke = .{ .node = node, .min_serial = min_serial } }),
+    }, 0), shared.fab_rev_len);
+    @memcpy(fb[0..shared.fab_rev_len], root.pb[0..shared.fab_rev_len]);
+    const res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .{ .revoke = .{ .off = 0, .len = shared.fab_rev_len } }),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+    const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse @panic("fabsvc: bad reply");
+    if (rep != .ok) @panic("fabsvc refused the revocation");
 }
 
 /// Pump the fabric for `ticks` driver ticks.
