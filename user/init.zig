@@ -320,24 +320,35 @@ fn handleRequest(front_a: u64, r: usys.IpcResult) void {
     }
 }
 
-/// The image store installer: every program in the boot archive lands in
-/// the granted `img/` view as a content-addressed file (skipped when
-/// already present — the name IS the content), and `index` maps catalog
-/// names to digests. Init is the installer because init is the thing
-/// that already holds the archive and knows the catalog; fssvc knows
-/// nothing about programs and msh only reads.
+/// The image store installer: every program in the boot archive lands
+/// under img/ in the granted (root) view as a content-addressed file
+/// (skipped when already present — the name IS the content), and
+/// img/index maps catalog names to digests. Init is the installer
+/// because init is the thing that already holds the archive and knows
+/// the catalog, and its view is the one that sees everything by design;
+/// fssvc knows nothing about programs and msh only reads. A volume that
+/// predates img/ gets the directory created here.
 fn installImages(view: u64) u64 {
     const b = fsc.attachBuf(view);
     const buf: [*]u8 = @ptrFromInt(b.va);
     const blob = @as([*]const u8, @ptrFromInt(boot_va))[0..boot_len];
+    // Present on every volume: the hierarchy upgrade at mount adds img/ to
+    // volumes that predate it, and top-level names cannot be created here.
+    if (!fsc.fsMkdir(view, buf, "img")) {
+        _ = usys.log(glog, "init: no img/ tier on this volume; store not installed");
+        return 0;
+    }
     var index: [2048]u8 = undefined;
     var ilen: usize = 0;
     var installed: u64 = 0;
     inline for (std.enums.values(shared.ImageId)) |id| {
         if (shared.marcFind(blob, shared.imagePath(id))) |image| {
             const digest = loader.digestHex(image);
-            if (fsc.fsStat(view, buf, &digest) == null) {
-                if (writeFile(view, buf, &digest, image)) installed += 1;
+            var path: [4 + shared.img_digest_hex_len]u8 = undefined;
+            @memcpy(path[0..4], "img/");
+            @memcpy(path[4..], &digest);
+            if (fsc.fsStat(view, buf, &path) == null) {
+                if (writeFile(view, buf, &path, image)) installed += 1;
             }
             const name = @tagName(id);
             @memcpy(index[ilen .. ilen + name.len], name);
@@ -350,7 +361,7 @@ fn installImages(view: u64) u64 {
             ilen += 1;
         }
     }
-    _ = writeFile(view, buf, "index", index[0..ilen]);
+    _ = writeFile(view, buf, shared.img_index_path, index[0..ilen]);
     _ = fsc.fsSync(view);
     if (installed > 0) _ = usys.log(glog, "init: installed images into img/ (content-addressed)");
     return installed;
@@ -359,7 +370,16 @@ fn installImages(view: u64) u64 {
 fn writeFile(view: u64, buf: [*]u8, path: []const u8, data: []const u8) bool {
     const fd = switch (fsc.fsOpen(view, buf, path, 1)) {
         .fd => |fd| fd,
-        .err => return false,
+        .err => |e| {
+            var line: [64]u8 = undefined;
+            const msg = "init: install: cannot create file (";
+            @memcpy(line[0..msg.len], msg);
+            const en = @tagName(e);
+            @memcpy(line[msg.len .. msg.len + en.len], en);
+            line[msg.len + en.len] = ')';
+            _ = usys.log(glog, line[0 .. msg.len + en.len + 1]);
+            return false;
+        },
     };
     defer fsc.fsClose(view, fd);
     if (!fsc.fsTruncate(view, fd, 0)) return false;

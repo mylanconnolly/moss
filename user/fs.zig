@@ -453,7 +453,7 @@ fn setupDisk(chan: u64) shared.FsResp {
     const now = nowSec();
     if (fresh) {
         // The standard hierarchy exists from the first format.
-        for ([_][]const u8{ "conf", "img", "state", "data", "volatile" }) |name| {
+        for (std_hierarchy) |name| {
             const o = mfs.allocObject(.dir, now) catch usys.exit(212);
             mfs.dirAdd(mossfs.root_obj, name, o, .dir, now) catch usys.exit(213);
         }
@@ -462,10 +462,21 @@ fn setupDisk(chan: u64) shared.FsResp {
         } else {
             _ = usys.log(glog, "fssvc: formatted fresh mossfs (std hierarchy)");
         }
-    } else if (mfs.enc) {
-        _ = usys.log(glog, "fssvc: existing mossfs found (encrypted, key verified)");
     } else {
-        _ = usys.log(glog, "fssvc: existing mossfs found");
+        if (mfs.enc) {
+            _ = usys.log(glog, "fssvc: existing mossfs found (encrypted, key verified)");
+        } else {
+            _ = usys.log(glog, "fssvc: existing mossfs found");
+        }
+        // Top-level names are the hierarchy, never created through the
+        // protocol — so a volume formatted before a tier existed gets it
+        // here, from the one place allowed to shape the root.
+        for (std_hierarchy) |name| {
+            if ((mfs.dirLookup(mossfs.root_obj, name) catch null) != null) continue;
+            const o = mfs.allocObject(.dir, now) catch usys.exit(212);
+            mfs.dirAdd(mossfs.root_obj, name, o, .dir, now) catch usys.exit(213);
+            _ = usys.log(glog, "fssvc: hierarchy upgraded: added a missing top-level tier");
+        }
     }
 
     // volatile/ starts every boot empty — that is its contract.
@@ -473,6 +484,9 @@ fn setupDisk(chan: u64) shared.FsResp {
     mfs.sync(now) catch usys.exit(214);
     return .ok;
 }
+
+/// The root's fixed children (boot/ is the archive overlay, not on disk).
+const std_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile" };
 
 /// True when superblock sectors 0..63 are entirely zero (blank disk).
 fn sbRegionZero(dev: mossfs.BlockDev) bool {

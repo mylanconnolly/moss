@@ -706,30 +706,10 @@ fn shellTestWorker(_: u64) void {
     }) catch |e| std.debug.panic("spawn init: {t}", .{e});
 
     // The image store: init installs the archive's programs into img/
-    // (content-addressed) through a view of that directory alone, so
-    // msh's `run` loads programs as files. Older volumes may predate the
-    // directory; the root view creates it (idempotent) before deriving.
-    {
-        @memcpy(pb[0..3], "img");
-        res = ipc.call(fs_ch, .{
-            .data = shared.encodeMsg(shared.FsReq, .{ .open = .{ .path_off = 0, .path_len = 3, .create = 2 } }),
-        }, 0);
-        std.debug.assert(res.err == .ok);
-        res = ipc.call(fs_ch, .{
-            .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 3, .ro = 0 } }),
-        }, 0);
-        std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
-        const img_view = ipc.call(front_ch, .{
-            .data = shared.encodeMsg(shared.InitRequest, .install),
-            .cap_type = @intFromEnum(cap.CapType.channel_b),
-            .cap_obj = res.msg.cap_obj,
-            .cap_badge = res.msg.cap_badge,
-        }, 0);
-        std.debug.assert(img_view.err == .ok);
-        const rep = shared.decodeMsg(shared.InitReply, img_view.msg.data) orelse @panic("init: bad install reply");
-        if (rep != .installed) @panic("init refused to install the image store");
-        log.info("shell: image store ready ({d} images installed this boot)", .{rep.installed.n});
-    }
+    // (content-addressed) so msh's `run` loads programs as files. A
+    // volume that cannot take the store is reported, not fatal: msh still
+    // boots, and `run` reports the missing index.
+    installImageStore(fs_ch, pb, front_ch);
 
     // msh: serves its boot channel; we feed it cons, fs view, init front.
     const boot_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
@@ -1181,6 +1161,34 @@ fn fabricTestWorker(arg: u64) void {
     fabPump(fab_ch, 100); // node 3's rejoin attempts must hit the refusal
     log.info("fabric-test: PASS — join, gossip, placement, death, rejoin, respawn, authorization, revocation", .{});
     psci.systemOff();
+}
+
+/// Image store setup for the shell boot: init gets the root-of-trust
+/// view (the one view that sees everything — its by design) and
+/// installs the archive's programs under img/, creating the directory
+/// on a volume that predates it. Every step reports its typed error and
+/// gives up rather than taking the boot down with an assert.
+fn installImageStore(fs_ch: *ipc.Channel, pb: [*]u8, front_ch: *ipc.Channel) void {
+    _ = pb;
+    const res = ipc.call(fs_ch, .{
+        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 0, .ro = 0 } }),
+    }, 0);
+    if (res.err != .ok or res.msg.cap_type == 0) {
+        if (shared.decodeMsg(shared.FsResp, res.msg.data)) |rep| {
+            if (rep == .fs_err) return log.warn("shell: image store skipped: root view refused (fs error {d})", .{rep.fs_err.code});
+        }
+        return log.warn("shell: image store skipped: root view failed ({t})", .{res.err});
+    }
+    const img_view = ipc.call(front_ch, .{
+        .data = shared.encodeMsg(shared.InitRequest, .install),
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = res.msg.cap_obj,
+        .cap_badge = res.msg.cap_badge,
+    }, 0);
+    if (img_view.err != .ok) return log.warn("shell: image store skipped: init unreachable ({t})", .{img_view.err});
+    const rep = shared.decodeMsg(shared.InitReply, img_view.msg.data) orelse return log.warn("shell: image store skipped: bad reply from init", .{});
+    if (rep != .installed) return log.warn("shell: image store skipped: init refused to install", .{});
+    log.info("shell: image store ready ({d} images installed this boot)", .{rep.installed.n});
 }
 
 /// One-shot membership query: is `node` up in this fabric's view?

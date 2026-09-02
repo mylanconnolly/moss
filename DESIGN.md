@@ -179,6 +179,16 @@ proves it on every check. msh keeps its builtins (it holds a spawner
 anyway); the tool table in msh is the manifest for now — a manifest
 file beside each image is the evolution.
 
+Lesson paid for by `zig build run-shell` on a volume from before `img/`
+existed: the root's children ARE the hierarchy — fssvc refuses to create
+or remove top-level names through the protocol, from any view, by
+design — so a tier added after a volume was formatted can only be added
+by fssvc itself. Mount now upgrades an existing volume by creating any
+missing standard tier (logged), the installer runs through init's root
+view (the one view that sees everything, by design), and the boot
+driver's image-store setup reports a typed error and carries on instead
+of asserting: an old disk must never cost the console.
+
 Because a fresh domain holds *nothing*, the empty sandbox is the zero value.
 Sandboxing is not a mode; it is the absence of grants.
 

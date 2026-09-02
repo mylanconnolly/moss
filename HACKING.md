@@ -177,6 +177,13 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
   serving with a loud log line — auto-format touches only all-zero disks.
 - QEMU disks must keep the default writeback cache; `cache=unsafe` drops
   the FLUSH barriers mossfs's crash consistency depends on.
+- `run-shell` keeps `zig-out/shell-disk.img` across runs (the check uses
+  a fresh disk). Top-level directories are the hierarchy and cannot be
+  made through the protocol; fssvc adds a missing standard tier at mount
+  (`fssvc: hierarchy upgraded`), so a new tier needs a `std_hierarchy`
+  entry in `user/fs.zig`, nothing else. The boot driver's image-store
+  setup warns and continues on any refusal — if `run` says there is no
+  index, read `zig-out/shell-kernel.log` first.
 - Every QEMU config carries `-device virtio-rng-device` (and
   `force-legacy=false`, now in the common args): rngd is part of the
   base system. getrandom is fail-closed — a service that needs random
