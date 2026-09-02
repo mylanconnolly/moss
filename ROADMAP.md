@@ -194,6 +194,35 @@ The pooling story stops being theory.
   rejoin → respawn on the rejoined node. Scoping: node id → 10.77.0.N
   addressing stays static (dynamic addressing is a separate concern);
   remote channels do not survive a peer's reboot (they fail cleanly).
+- ✅ **Fabric security v1: cluster key + sealed transport** (done, wire
+  v3): the fabric is fail-closed — fabsvc refuses to listen or dial
+  until its root of trust stages a 256-bit **fabric key** (set_key over
+  the attached buffer, zeroized after reading; the key never crosses the
+  wire). Joining is a **mutual challenge-response** handshake (hello
+  carries a nonce; each side proves the key by HMAC over the transcript
+  — both nonces, both node ids, and the wire version, so downgrade
+  attempts fail authentication). HKDF over the key and both nonces then
+  derives per-connection, per-direction **AEGIS-128L** session keys and
+  every subsequent frame — membership gossip, heartbeats, spawn, calls —
+  travels sealed (AEAD, counter nonces over the ordered TCP stream). The
+  check's fabric drill includes an **imposter node with a wrong key**
+  that must be refused by the handshake. Handshake nonces come from an
+  HMAC over the cycle counter and a per-boot counter under the fabric
+  key (no RNG syscall yet; virtio-rng is the noted evolution).
+- **Per-node identity keys — the desired end-state for fabric security.**
+  A shared cluster key is **symmetric trust**: any member can impersonate
+  any other member, and revoking one node means rekeying the cluster —
+  the same trust domain an Erlang cookie draws, minus its plaintext
+  handshake and plus transport encryption. The end-state is a keypair
+  per node (its identity), a cluster-level trust root that signs member
+  identities (join = present a signed identity; no shared secret), and
+  per-link authorization of *what* a peer may do (which images it may
+  spawn, whether it may gossip membership) expressed as capabilities —
+  so that a compromised node is a revocable identity rather than a
+  cluster rekey. std.crypto already carries Ed25519 and ML-DSA; the
+  handshake transcript is designed to carry signatures in place of the
+  HMAC proofs without changing the frame shapes. Depends on a real RNG
+  (virtio-rng) for key generation.
 - Time-partitioning opt-in for side-channel-sensitive domains.
 - EL2: Moss as hypervisor, partitioning one box into pool nodes — the pooling story from both directions.
 - virtio-gpu and input devices (the graphical console).
