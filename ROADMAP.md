@@ -175,7 +175,25 @@ The pooling story stops being theory.
 
 - x86_64 port (the HAL's honesty test) and UEFI boot for real aarch64 hardware.
 - Real IOMMU (SMMU) backing the DMA-grant API.
-- Dynamic fabric membership; smarter placement ("any node with 4 free cores").
+- ✅ **Dynamic fabric membership + load-aware placement** (done): nodes
+  join by dialing any seed; the hello_ack carries the acker's member
+  view (gossip) and member_up/down broadcasts keep the mesh converging —
+  the LOWER node id dials a learned member, so meshes form without
+  coordination. Liveness is heartbeat pings on each node's own poll
+  clock (no shared clock anywhere); a silent or unsendable peer becomes
+  a membership down event immediately and is gossiped. Rejoin is just
+  hello again: the stale peer entry is replaced and the member comes
+  back up. Heartbeats carry free-memory adverts; remote_spawn{node=0}
+  places on the least-loaded live member and reports where it landed.
+  Wire protocol v2 (v1 peers dropped loudly). msh shows it all: `nodes`
+  and `rspawn N I`. The check's fabric spec is the full drill — three
+  nodes on one L2 segment (node 1's QEMU hosts a hub of socket
+  listeners; mcast sockets do not deliver cross-process on macOS), join
+  → gossip (node 3's own full-mesh log) → placement → node 2's drill
+  poweroff detected purely via membership → the runner relaunches it →
+  rejoin → respawn on the rejoined node. Scoping: node id → 10.77.0.N
+  addressing stays static (dynamic addressing is a separate concern);
+  remote channels do not survive a peer's reboot (they fail cleanly).
 - Time-partitioning opt-in for side-channel-sensitive domains.
 - EL2: Moss as hypervisor, partitioning one box into pool nodes — the pooling story from both directions.
 - virtio-gpu and input devices (the graphical console).

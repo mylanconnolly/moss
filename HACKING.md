@@ -103,6 +103,13 @@ failures). Add the option to `build.zig` (both the `-D` flag and the
 
 - Blocking-op polling and single-outstanding fabric exchanges are v0
   choices; async rings are the upgrade path.
+- The fabric check is a 3-node dynamic-membership drill: node 1's QEMU
+  hosts the L2 hub (hubport netdevs bridging two socket listeners —
+  mcast netdevs don't deliver cross-process on macOS), node 2 boots with
+  drill=1 and powers off, and the RUNNER relaunches it when node 1 logs
+  the death — the rejoin path is exercised on every check. Debug with
+  the per-node logs in zig-out/check/fabric-node*.log plus pcap filters
+  per netdev.
 - mossfs v3 (CoW, checksums, txg commits, LZ4 compression, XTS
   encryption) is the disk backend; its core (`user/mossfs.zig`) is a pure
   library over `lib/` static modules, so debug it on the host:

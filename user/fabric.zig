@@ -75,9 +75,12 @@ fn remoteEcho(log_h: u64, chan_h: u64) noreturn {
 
 // ---------------------------------------------------------------- fabsvc
 
-const max_peers = 4;
+const max_peers = 6;
 const max_sessions = 8;
+const max_members = 8;
 const rxbuf_cap = 512;
+const ping_every = 5; // polls between heartbeats
+const dead_after = 40; // silent polls before a peer is declared dead
 
 const Peer = struct {
     used: bool = false,
@@ -85,14 +88,27 @@ const Peer = struct {
     sock: u64 = 0,
     greeted: bool = false,
     dead: bool = false,
+    born: u64 = 0, // tick when accepted/dialed (reaps silent strangers)
     rx: [rxbuf_cap]u8 = undefined,
     rxlen: usize = 0,
 };
 
-/// A-side: badge -> where the remote service lives.
+/// The membership view: what this node believes about the fabric. All
+/// liveness is counted on OUR poll tick — no shared clock anywhere.
+const Member = struct {
+    used: bool = false,
+    node: u64 = 0,
+    up: bool = false,
+    free_mb: u64 = 0,
+    last_heard: u64 = 0,
+};
+
+/// A-side: badge -> the remote service's home. Keyed by NODE (not peer
+/// slot) so a peer slot recycled by rejoin can never misroute a stale
+/// session; calls to a rebooted node fail cleanly instead.
 const Session = struct {
     used: bool = false,
-    peer: usize = 0,
+    node: u64 = 0,
     remote_id: u32 = 0,
 };
 
@@ -103,15 +119,20 @@ const RSession = struct {
 };
 
 var peers: [max_peers]Peer = @splat(.{});
+var members: [max_members]Member = @splat(.{});
 var sessions: [max_sessions]Session = @splat(.{});
 var rsessions: [max_sessions]RSession = @splat(.{});
 var serve_a: u64 = 0;
 var net_chan: u64 = 0;
 var net_buf: u64 = 0;
+var fab_buf: u64 = 0; // client shm for members listings
 const no_sock: u64 = 0xffff_ffff_ffff_ffff;
 var lsock: u64 = no_sock; // sockets are small indices; 0 is valid!
 var my_node: u64 = 0;
 var glog: u64 = 0;
+var tick: u64 = 0; // the local poll clock
+var last_ping: u64 = 0;
+var mesh_logged = false;
 
 // One outstanding wire exchange at a time (v0 serializes).
 var got_spawn_ack = false;
@@ -125,6 +146,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     glog = log_h;
     serve_a = chan_h;
     my_node = node;
+    _ = memberUpsert(my_node, true);
 
     while (true) {
         const r = usys.recvMsg(serve_a);
@@ -146,8 +168,18 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                 }
                 freply(.ok);
             },
+            .attach_buf => {
+                if (r.cap != 0) {
+                    const m = usys.shmMap(r.cap);
+                    if (m.err == .ok) fab_buf = m.data[0];
+                }
+                freply(.ok);
+            },
+            .members => freply(doMembers()),
             .poll => {
+                tick += 1;
                 pumpAll();
+                heartbeat();
                 freply(.ok);
             },
             .connect_peer => |q| freply(doConnectPeer(q.node)),
@@ -162,6 +194,140 @@ fn freply(resp: shared.FabResp) void {
 
 fn ferr(code: shared.FabErr) shared.FabResp {
     return .{ .fab_err = .{ .code = @intFromEnum(code) } };
+}
+
+// ----------------------------------------------------------- membership
+
+fn memberByNode(node: u64) ?*Member {
+    for (&members) |*m| {
+        if (m.used and m.node == node) return m;
+    }
+    return null;
+}
+
+fn memberUpsert(node: u64, up: bool) ?*Member {
+    if (memberByNode(node)) |m| {
+        if (up and !m.up) {
+            m.up = true;
+            m.last_heard = tick;
+            if (node != my_node) _ = usys.log(glog, "fabsvc: member back up");
+            logMesh();
+        }
+        return m;
+    }
+    for (&members) |*m| {
+        if (m.used) continue;
+        m.* = .{ .used = true, .node = node, .up = up, .last_heard = tick };
+        if (node != my_node and up) logMesh();
+        return m;
+    }
+    return null;
+}
+
+fn memberDown(node: u64) void {
+    if (node == my_node) return;
+    if (memberByNode(node)) |m| {
+        if (m.up) {
+            m.up = false;
+            _ = usys.log(glog, "fabsvc: member down");
+        }
+    }
+}
+
+fn upCount() u64 {
+    var n: u64 = 0;
+    for (&members) |*m| {
+        if (m.used and m.up) n += 1;
+    }
+    return n;
+}
+
+/// The gossip proof marker: this node's own view reached a full mesh.
+fn logMesh() void {
+    if (!mesh_logged and upCount() >= 3) {
+        mesh_logged = true;
+        _ = usys.log(glog, "fabsvc: full mesh (3+ members up)");
+    }
+}
+
+fn selfFreeMb() u64 {
+    const r = usys.sysInfo(spawner);
+    if (r.err != .ok) return 0;
+    return r.data[0] >> 20;
+}
+
+/// Heartbeats, death detection, and dialing learned members — all on the
+/// local poll clock.
+fn heartbeat() void {
+    if (tick - last_ping >= ping_every) {
+        last_ping = tick;
+        if (memberByNode(my_node)) |m| m.free_mb = selfFreeMb();
+        var ping: [6]u8 = undefined;
+        frameHdr(ping[0..4], 6, shared.fw_ping);
+        puleu16(ping[4..6], @intCast(@min(selfFreeMb(), 0xffff)));
+        for (&peers) |*p| {
+            if (p.used and !p.dead and p.greeted) tryPing(p, &ping);
+        }
+    }
+    // Death detection: a greeted peer silent too long, or a stranger that
+    // never said hello.
+    for (&peers) |*p| {
+        if (!p.used or p.dead) continue;
+        if (p.greeted) {
+            const m = memberByNode(p.node) orelse continue;
+            if (tick - m.last_heard > dead_after) peerFailed(p);
+        } else if (tick - p.born > dead_after) {
+            p.dead = true;
+        }
+    }
+    dialMissing();
+    reapDeadPeers();
+}
+
+/// The mesh rule: the LOWER node id dials a learned member it has no
+/// connection to (the joiner's dial to its seed is the bootstrap
+/// exception). One attempt per poll keeps the serve loop responsive.
+fn dialMissing() void {
+    for (&members) |*m| {
+        if (!m.used or !m.up or m.node == my_node) continue;
+        if (my_node > m.node) continue;
+        if (peerByNode(m.node) != null) continue;
+        _ = doConnectPeer(m.node);
+        return;
+    }
+}
+
+fn reapDeadPeers() void {
+    for (&peers) |*p| {
+        if (p.used and p.dead) p.* = .{};
+    }
+}
+
+fn broadcastMember(ftype: u8, node: u64) void {
+    var f: [6]u8 = undefined;
+    frameHdr(f[0..4], 6, ftype);
+    puleu16(f[4..6], @intCast(node));
+    for (&peers) |*p| {
+        if (p.used and !p.dead and p.greeted and p.node != node) _ = sendFrame(p, &f);
+    }
+}
+
+fn doMembers() shared.FabResp {
+    if (fab_buf == 0) return ferr(.refused);
+    const out: [*]u8 = @ptrFromInt(fab_buf);
+    var n: u64 = 0;
+    for (&members) |*m| {
+        if (!m.used) continue;
+        const rec = out[n * shared.fab_member_size ..];
+        puleu16(rec[0..2], @intCast(m.node));
+        rec[2] = @intFromBool(m.up);
+        rec[3] = 0;
+        puleu16(rec[4..6], @intCast(@min(m.free_mb, 0xffff)));
+        rec[6] = 0;
+        rec[7] = 0;
+        n += 1;
+    }
+    return .{ .num = .{ .n = n } };
 }
 
 // ------------------------------------------------------- net plumbing
@@ -202,20 +368,50 @@ fn wouldBlock(resp: shared.NetResp) bool {
 }
 
 /// Send one wire frame on a peer's socket, retrying past stop-and-wait.
+/// Failure (hard error or retries exhausted) is a PEER FAILURE: membership
+/// learns immediately, not on the next silent timeout.
 fn sendFrame(p: *Peer, frame: []const u8) bool {
+    return sendFrameN(p, frame, 30);
+}
+
+fn sendFrameN(p: *Peer, frame: []const u8, retries: u64) bool {
     const buf: [*]u8 = @ptrFromInt(net_buf);
     @memcpy(buf[0..frame.len], frame);
-    for (0..100) |_| {
+    for (0..retries) |_| {
         const resp = ncall(.{ .tcp_send = .{ .sock = p.sock, .len = frame.len } });
         if (nnum(resp) != null) return true;
         if (!wouldBlock(resp)) {
-            p.dead = true;
+            peerFailed(p);
             return false;
         }
-        usys.sleep(1);
+        if (retries > 1) usys.sleep(1);
     }
-    p.dead = true;
+    peerFailed(p);
     return false;
+}
+
+/// Best-effort ping: skip while stop-and-wait has a segment in flight
+/// (a healthy peer mid-exchange must not be failed for it); hard errors
+/// fail the peer. Silent death is the last_heard timeout's job.
+fn tryPing(p: *Peer, frame: []const u8) void {
+    const buf: [*]u8 = @ptrFromInt(net_buf);
+    @memcpy(buf[0..frame.len], frame);
+    const resp = ncall(.{ .tcp_send = .{ .sock = p.sock, .len = frame.len } });
+    if (nnum(resp) != null) return;
+    if (!wouldBlock(resp)) peerFailed(p);
+}
+
+/// One place a peer dies: close, membership down, broadcast. Setting
+/// p.dead FIRST keeps the broadcast from recursing into this peer.
+fn peerFailed(p: *Peer) void {
+    if (p.dead) return;
+    p.dead = true;
+    _ = ncall(.{ .tcp_close = .{ .sock = p.sock } });
+    if (p.greeted) {
+        _ = usys.log(glog, "fabsvc: peer lost; membership updated");
+        memberDown(p.node);
+        broadcastMember(shared.fw_member_down, p.node);
+    }
 }
 
 /// Pump every peer: accept newcomers, read frames, dispatch.
@@ -224,10 +420,9 @@ fn pumpAll() void {
     if (lsock != no_sock) {
         const resp = ncall(.{ .tcp_accept = .{ .sock = lsock } });
         if (nnum(resp)) |sock| {
-            _ = usys.log(glog, "fabsvc: accepted inbound peer");
             for (&peers) |*p| {
                 if (!p.used) {
-                    p.* = .{ .used = true, .sock = sock };
+                    p.* = .{ .used = true, .sock = sock, .born = tick };
                     break;
                 }
             }
@@ -244,7 +439,10 @@ fn pumpPeer(p: *Peer) void {
     while (true) {
         const resp = ncall(.{ .tcp_recv = .{ .sock = p.sock, .len = 256 } });
         const n = nnum(resp) orelse {
-            if (!wouldBlock(resp)) p.dead = true; // closed / reset
+            if (!wouldBlock(resp)) {
+                // TCP-level death is instant membership news.
+                peerFailed(p);
+            }
             break;
         };
         if (p.rxlen + n > rxbuf_cap) {
@@ -270,25 +468,83 @@ fn pumpPeer(p: *Peer) void {
         const rest = p.rxlen - flen;
         for (0..rest) |i| p.rx[i] = p.rx[flen + i];
         p.rxlen = rest;
+        if (p.dead) return;
     }
 }
 
+/// Every frame from a known peer refreshes its liveness.
+fn heard(p: *Peer) void {
+    if (!p.greeted) return;
+    if (memberByNode(p.node)) |m| m.last_heard = tick;
+}
+
 fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
+    heard(p);
     switch (ftype) {
         shared.fw_hello => {
             if (body.len < 2) return;
-            p.node = leu16(body[0..2]);
+            const node = leu16(body[0..2]);
+            // Rejoin / duplicate: a fresh connection for a node we already
+            // track replaces the old one (the old socket is stale).
+            for (&peers) |*old| {
+                if (old.used and old != p and old.node == node) {
+                    _ = ncall(.{ .tcp_close = .{ .sock = old.sock } });
+                    old.dead = true;
+                }
+            }
+            p.node = node;
             p.greeted = true;
-            var ack: [6]u8 = undefined;
-            frameHdr(ack[0..4], 6, shared.fw_hello_ack);
-            puleu16(ack[4..6], @intCast(my_node));
-            _ = sendFrame(p, &ack);
-            _ = usys.log(glog, "fabsvc: peer said hello; acked");
+            _ = memberUpsert(node, true);
+            if (memberByNode(node)) |m| m.last_heard = tick;
+            sendHelloAck(p);
+            broadcastMember(shared.fw_member_up, node);
+            _ = usys.log(glog, "fabsvc: peer joined (hello); acked with member view");
         },
         shared.fw_hello_ack => {
-            if (body.len < 2) return;
+            if (body.len < 5) return;
             p.node = leu16(body[0..2]);
             p.greeted = true;
+            _ = memberUpsert(p.node, true);
+            if (memberByNode(p.node)) |m| {
+                m.last_heard = tick;
+                m.free_mb = leu16(body[2..4]);
+            }
+            // The gossip payload: the acker's member view.
+            const n = body[4];
+            var off: usize = 5;
+            for (0..n) |_| {
+                if (off + 3 > body.len) break;
+                const node = leu16(body[off .. off + 2][0..2]);
+                const up = body[off + 2] != 0;
+                if (node != my_node) _ = memberUpsert(node, up);
+                off += 3;
+            }
+        },
+        shared.fw_ping => {
+            if (body.len >= 2) {
+                if (memberByNode(p.node)) |m| m.free_mb = leu16(body[0..2]);
+            }
+            var pong: [6]u8 = undefined;
+            frameHdr(pong[0..4], 6, shared.fw_pong);
+            puleu16(pong[4..6], @intCast(@min(selfFreeMb(), 0xffff)));
+            _ = sendFrame(p, &pong);
+        },
+        shared.fw_pong => {
+            if (body.len >= 2) {
+                if (memberByNode(p.node)) |m| m.free_mb = leu16(body[0..2]);
+            }
+        },
+        shared.fw_member_up => {
+            if (body.len < 2) return;
+            const node = leu16(body[0..2]);
+            if (node != my_node) _ = memberUpsert(node, true);
+        },
+        shared.fw_member_down => {
+            if (body.len < 2) return;
+            const node = leu16(body[0..2]);
+            // Trust it only when we cannot see the node ourselves — our own
+            // heartbeat is the authority for peers we are connected to.
+            if (node != my_node and peerByNode(node) == null) memberDown(node);
         },
         shared.fw_spawn_req => {
             // [image u16][arg u64][req u32] -> spawn locally, proxy child.
@@ -364,6 +620,25 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
     }
 }
 
+/// hello_ack: [node u16][free_mb u16][n u8][{node u16, up u8} x n].
+fn sendHelloAck(p: *Peer) void {
+    var ack: [9 + max_members * 3]u8 = undefined;
+    puleu16(ack[4..6], @intCast(my_node));
+    puleu16(ack[6..8], @intCast(@min(selfFreeMb(), 0xffff)));
+    var n: u8 = 0;
+    var off: usize = 9;
+    for (&members) |*m| {
+        if (!m.used or m.node == p.node) continue;
+        puleu16(ack[off .. off + 2][0..2], @intCast(m.node));
+        ack[off + 2] = @intFromBool(m.up);
+        off += 3;
+        n += 1;
+    }
+    ack[8] = n;
+    frameHdr(ack[0..4], @intCast(off), shared.fw_hello_ack);
+    _ = sendFrame(p, ack[0..off]);
+}
+
 // ------------------------------------------------------------ operations
 
 fn peerByNode(node: u64) ?*Peer {
@@ -399,12 +674,11 @@ fn doConnectPeer(node: u64) shared.FabResp {
         _ = ncall(.{ .tcp_close = .{ .sock = sock } });
         return ferr(.timeout);
     }
-    _ = usys.log(glog, "fabsvc: tcp established to peer");
     var p: *Peer = undefined;
     var found = false;
     for (&peers) |*slot| {
         if (!slot.used) {
-            slot.* = .{ .used = true, .sock = sock, .node = node };
+            slot.* = .{ .used = true, .sock = sock, .node = node, .born = tick };
             p = slot;
             found = true;
             break;
@@ -425,7 +699,29 @@ fn doConnectPeer(node: u64) shared.FabResp {
     return ferr(.timeout);
 }
 
-fn doRemoteSpawn(node: u64, image: u64, arg: u64) void {
+/// Pick the least-loaded live member for a placement spawn (never self).
+fn placeNode() ?u64 {
+    var best: ?u64 = null;
+    var best_free: u64 = 0;
+    for (&members) |*m| {
+        if (!m.used or !m.up or m.node == my_node) continue;
+        if (peerByNode(m.node) == null) continue;
+        if (best == null or m.free_mb > best_free) {
+            best = m.node;
+            best_free = m.free_mb;
+        }
+    }
+    return best;
+}
+
+fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
+    const node = if (node_arg == 0)
+        placeNode() orelse {
+            freply(ferr(.no_peer));
+            return;
+        }
+    else
+        node_arg;
     const p = peerByNode(node) orelse {
         freply(ferr(.no_peer));
         return;
@@ -457,13 +753,9 @@ fn doRemoteSpawn(node: u64, image: u64, arg: u64) void {
     // caller receives an ordinary-looking channel to a remote service.
     var badge: u64 = 0;
     var found = false;
-    for (&sessions, 0..) |*s, i| {
-        if (!s.used) {
-            var pidx: usize = 0;
-            for (&peers, 0..) |*pp, j| {
-                if (pp == p) pidx = j;
-            }
-            s.* = .{ .used = true, .peer = pidx, .remote_id = spawn_ack_session };
+    for (&sessions, 0..) |*se, i| {
+        if (!se.used) {
+            se.* = .{ .used = true, .node = node, .remote_id = spawn_ack_session };
             badge = i + 1;
             found = true;
             break;
@@ -479,7 +771,7 @@ fn doRemoteSpawn(node: u64, image: u64, arg: u64) void {
         freply(ferr(.no_space));
         return;
     }
-    _ = usys.replyTyped(shared.FabResp, serve_a, .spawned, minted.data[1]);
+    _ = usys.replyTyped(shared.FabResp, serve_a, .{ .spawned = .{ .node = node } }, minted.data[1]);
     _ = usys.capDrop(minted.data[1]);
 }
 
@@ -496,8 +788,7 @@ fn forwardCall(badge: u64, words: [4]u64) void {
     }.f;
     if (badge - 1 >= max_sessions or !sessions[badge - 1].used) return fail(.no_peer);
     const sess = &sessions[badge - 1];
-    const p = &peers[sess.peer];
-    if (!p.used or p.dead) return fail(.disconnected);
+    const p = peerByNode(sess.node) orelse return fail(.disconnected);
 
     got_call_resp = false;
     var req: [44]u8 = undefined;
@@ -517,7 +808,7 @@ fn forwardCall(badge: u64, words: [4]u64) void {
         usys.sleep(1);
     }
     // The node-kill drill lands here: a peer that vanishes mid-RPC.
-    p.dead = true;
+    peerFailed(p);
     return fail(.timeout);
 }
 

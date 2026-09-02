@@ -156,7 +156,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     }
 
     if (build_options.fabric_test) {
-        _ = sched.spawn("boot-watch", fabricTestWorker, boot_node, .{}) catch |e| {
+        _ = sched.spawn("boot-watch", fabricTestWorker, boot_node | (boot_drill << 8), .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
@@ -598,6 +598,25 @@ fn shellTestWorker(_: u64) void {
         .auto_reap = true,
     }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
 
+    // The network + a single-node fabric (msh's nodes/rspawn commands).
+    const shellnet_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const shellnet = domain.spawn("netsvc", blobs.net, .{
+        .arg = 1 | (1 << 8), // cluster addressing, node 1
+        .grant_debug_log = true,
+        .grant_channel_a = shellnet_ch,
+        .grant_mmio = .{ .base = 0x0a00_0000, .pages = 4 },
+        .grant_irq = .{ .base = 48, .count = 32 },
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn netsvc: {t}", .{e});
+    const shellfab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const shellfab = domain.spawn("fabsvc", blobs.fabric, .{
+        .arg = 1 | (1 << 8),
+        .grant_debug_log = true,
+        .grant_channel_a = shellfab_ch,
+        .grant_spawner = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
+
     // Console driver (virtio-console, device id 3).
     const cons_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     const consdrv = domain.spawn("consdrv", blobs.cons, .{
@@ -631,6 +650,18 @@ fn shellTestWorker(_: u64) void {
         .cap_obj = @intFromPtr(blk_ch),
     }, 0);
     std.debug.assert(res.err == .ok);
+
+    // Wire the fabric to a net view.
+    {
+        const nview = deriveNetView(shellnet_ch, 0, 0, 0);
+        const r2 = ipc.call(shellfab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .attach_net),
+            .cap_type = @intFromEnum(cap.CapType.channel_b),
+            .cap_obj = nview.obj,
+            .cap_badge = nview.badge,
+        }, 0);
+        std.debug.assert(r2.err == .ok);
+    }
 
     // The shell's filesystem view: the whole root, read-write.
     res = ipc.call(fs_ch, .{
@@ -680,16 +711,34 @@ fn shellTestWorker(_: u64) void {
         .cap_obj = @intFromPtr(front_ch),
     }, 0);
     std.debug.assert(res.err == .ok);
+    ipc.refSide(shellfab_ch, .b);
+    res = ipc.call(boot_ch, .{
+        .cap_type = @intFromEnum(cap.CapType.channel_b),
+        .cap_obj = @intFromPtr(shellfab_ch),
+    }, 0);
+    std.debug.assert(res.err == .ok);
     log.info("shell: system up — msh on the console", .{});
 
-    // The human (or the runner's script) drives; we wait for msh to exit.
-    while (msh.state != .dead) sched.sleep(5);
+    // The human (or the runner's script) drives; we keep the single-node
+    // fabric breathing while we wait for msh to exit.
+    while (msh.state != .dead) {
+        _ = ipc.call(shellfab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .poll),
+        }, 0);
+        sched.sleep(2);
+    }
     const msh_code = msh.exit_code;
 
     // Teardown, inside out: init exits on front-channel death, then the
     // drivers and the FS.
     ipc.unrefSide(front_ch, .b);
     while (initd.state != .dead) sched.sleep(1);
+    domain.destroy(shellfab);
+    while (shellfab.state != .dead) sched.sleep(1);
+    domain.destroy(shellnet);
+    while (shellnet.state != .dead) sched.sleep(1);
+    ipc.unrefSide(shellnet_ch, .b);
+    ipc.unrefSide(shellfab_ch, .b);
     domain.destroy(consdrv);
     while (consdrv.state != .dead) sched.sleep(1);
     domain.destroy(fssvc);
@@ -786,9 +835,9 @@ fn netTestWorker(_: u64) void {
 }
 
 var boot_node: u64 = 0;
+var boot_drill: u64 = 0;
 
-fn parseNodeArg(args: []const u8) u64 {
-    const key = "node=";
+fn parseArgNum(args: []const u8, comptime key: []const u8) u64 {
     var i: usize = 0;
     outer: while (i + key.len < args.len + 1) : (i += 1) {
         for (key, 0..) |c, j| {
@@ -804,14 +853,23 @@ fn parseNodeArg(args: []const u8) u64 {
     return 0;
 }
 
-/// Phase 11 exit-criterion driver, parameterized by node id (from
-/// bootargs). Node 1 is the initiator: hello with node 2, remote-spawn a
-/// service THERE, RPC to it through the proxied channel, and survive node
-/// 2's death mid-conversation. Node 2 serves reactively and then powers
-/// off — the node-kill drill.
-fn fabricTestWorker(node: u64) void {
+fn parseNodeArg(args: []const u8) u64 {
+    boot_drill = parseArgNum(args, "drill=");
+    return parseArgNum(args, "node=");
+}
+
+/// The dynamic-membership drill, parameterized by node id + drill flag
+/// (bootargs "node=N drill=D"). Node 1 is the seed and verifier; nodes 2
+/// and 3 join it and the membership gossips them together. Node 2 (with
+/// drill=1) powers off mid-life; the runner relaunches it with drill=0
+/// and node 1 must see the death AND the rejoin purely through the
+/// fabric's own liveness — then place a spawn by load and spawn on the
+/// rejoined node. Staged markers narrate for the runner.
+fn fabricTestWorker(arg: u64) void {
+    const node = arg & 0xff;
+    const drill = (arg >> 8) & 0xff;
     const blobs = @import("user_blobs");
-    log.info("fabric-test: node {d} coming up", .{node});
+    log.info("fabric-test: node {d} coming up (drill={d})", .{ node, drill });
 
     // The network, in cluster mode.
     const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
@@ -844,85 +902,129 @@ fn fabricTestWorker(node: u64) void {
     std.debug.assert(res.err == .ok);
 
     if (node != 1) {
-        // Node 2+: pump the fabric for 90 ticks, then die abruptly.
-        for (0..90) |_| {
-            _ = ipc.call(fab_ch, .{
-                .data = shared.encodeMsg(shared.FabReq, .poll),
+        // Joiners: node 3 waits so it must learn node 2 by GOSSIP, not by
+        // being around for its hello.
+        if (node == 3) fabPump(fab_ch, 30);
+        var joined = false;
+        for (0..60) |_| {
+            res = ipc.call(fab_ch, .{
+                .data = shared.encodeMsg(shared.FabReq, .{ .connect_peer = .{ .node = 1 } }),
             }, 0);
-            sched.sleep(1);
-        }
-        log.info("fabric-test: node {d} powering off mid-conversation (drill)", .{node});
-        psci.systemOff();
-    }
-
-    // Node 1: the initiator.
-    var hello_ok = false;
-    for (0..60) |_| {
-        res = ipc.call(fab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .{ .connect_peer = .{ .node = 2 } }),
-        }, 0);
-        if (res.err == .ok) {
-            if (shared.decodeMsg(shared.FabResp, res.msg.data)) |rep| {
-                if (rep == .ok) {
-                    hello_ok = true;
-                    break;
+            if (res.err == .ok) {
+                if (shared.decodeMsg(shared.FabResp, res.msg.data)) |rep| {
+                    if (rep == .ok) {
+                        joined = true;
+                        break;
+                    }
                 }
             }
+            fabPump(fab_ch, 2);
         }
-        sched.sleep(3);
+        if (!joined) std.debug.panic("fabric-test: node {d} could not join via seed", .{node});
+        log.info("fabric-test: node {d} joined the fabric via seed 1", .{node});
+        var t: u64 = 0;
+        while (true) : (t += 1) {
+            fabPump(fab_ch, 1);
+            if (drill == 1 and t == 120) {
+                log.info("fabric-test: node {d} powering off mid-life (drill)", .{node});
+                psci.systemOff();
+            }
+        }
     }
-    if (!hello_ok) std.debug.panic("fabric-test: no hello from node 2", .{});
-    log.info("fabric-test: cross-VM hello with node 2 complete", .{});
 
-    // Remote spawn: run remote-echo ON NODE 2 from node 1's manifest.
+    // ------------------------------------------------ node 1: the verifier
+    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
+    ipc.refShm(pathbuf);
     res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.FabReq, .attach_buf),
+        .cap_type = @intFromEnum(cap.CapType.shm),
+        .cap_obj = @intFromPtr(pathbuf),
+    }, 0);
+    std.debug.assert(res.err == .ok);
+
+    // Stage A: both nodes join; the membership converges by gossip.
+    if (!waitMember(fab_ch, pb, 2, true, 600) or !waitMember(fab_ch, pb, 3, true, 600))
+        std.debug.panic("fabric-test: membership never converged", .{});
+    log.info("fabric-test: membership complete — nodes 1,2,3 up (join + gossip)", .{});
+
+    // Stage B: placement — "run this anywhere" picks a live loaded node.
+    var landed = remoteSpawnRpc(fab_ch, 0) orelse
+        std.debug.panic("fabric-test: placement spawn failed", .{});
+    log.info("fabric-test: placement spawn landed on node {d}; RPC verified", .{landed});
+
+    // Stage C: node 2's drill poweroff must surface as membership, with no
+    // call in flight — the heartbeats alone carry the news.
+    if (!waitMember(fab_ch, pb, 2, false, 900))
+        std.debug.panic("fabric-test: node 2 death never detected", .{});
+    log.info("fabric-test: node 2 death detected via membership", .{});
+
+    // Stage D: the runner relaunches node 2; it must rejoin.
+    if (!waitMember(fab_ch, pb, 2, true, 900))
+        std.debug.panic("fabric-test: node 2 never rejoined", .{});
+    log.info("fabric-test: node 2 rejoined the fabric", .{});
+
+    // Stage E: the rejoined node hosts work again.
+    landed = remoteSpawnRpc(fab_ch, 2) orelse
+        std.debug.panic("fabric-test: post-rejoin spawn failed", .{});
+    log.info("fabric-test: PASS — join, gossip, placement, death, rejoin, respawn", .{});
+    psci.systemOff();
+}
+
+/// Pump the fabric for `ticks` driver ticks.
+fn fabPump(fab_ch: *ipc.Channel, ticks: u64) void {
+    for (0..ticks) |_| {
+        _ = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .poll),
+        }, 0);
+        sched.sleep(1);
+    }
+}
+
+/// Poll the fabric's member view until `node` reaches `want_up`.
+fn waitMember(fab_ch: *ipc.Channel, pb: [*]u8, node: u64, want_up: bool, ticks: u64) bool {
+    for (0..ticks) |_| {
+        fabPump(fab_ch, 1);
+        const res = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .members),
+        }, 0);
+        if (res.err != .ok) continue;
+        const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse continue;
+        if (rep != .num) continue;
+        const n = rep.num.n;
+        for (0..@intCast(n)) |i| {
+            const rec = pb[i * shared.fab_member_size ..];
+            const rnode = @as(u64, rec[0]) | (@as(u64, rec[1]) << 8);
+            const up = rec[2] != 0;
+            if (rnode == node and up == want_up) return true;
+        }
+    }
+    return false;
+}
+
+/// remote_spawn (node 0 = placement) + one verified RPC through the
+/// proxied channel. Returns the node the spawn landed on.
+fn remoteSpawnRpc(fab_ch: *ipc.Channel, node: u64) ?u64 {
+    const res = ipc.call(fab_ch, .{
         .data = shared.encodeMsg(shared.FabReq, .{ .remote_spawn = .{
-            .node = 2,
+            .node = node,
             .image = @intFromEnum(shared.ImageId.fabric),
             .arg = 2,
         } }),
     }, 0);
-    std.debug.assert(res.err == .ok);
-    const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse
-        @panic("fabric-test: bad spawn reply");
-    if (rep != .spawned or res.msg.cap_type == 0)
-        std.debug.panic("fabric-test: remote spawn failed", .{});
-    const remote_badge = res.msg.cap_badge;
-    log.info("fabric-test: remote-echo spawned on node 2; got proxied channel", .{});
-
-    // Cross-VM typed RPC through the proxied channel until the peer dies.
-    var rpcs: u64 = 0;
-    var observed_death = false;
-    for (0..200) |i| {
-        const call_res = ipc.call(fab_ch, .{
-            .data = shared.encodeMsg(shared.CalcRequest, .{ .add = .{ .a = i, .b = 1000 } }),
-        }, remote_badge);
-        if (call_res.err != .ok) break;
-        if (call_res.msg.data[0] == shared.fabric_err_sentinel) {
-            log.info("fabric-test: peer died mid-RPC (fabric error {d}); observed and recovering", .{
-                call_res.msg.data[1],
-            });
-            observed_death = true;
-            break;
-        }
-        const crep = shared.decodeMsg(shared.CalcReply, call_res.msg.data) orelse break;
-        switch (crep) {
-            .sum => |v| {
-                if (v.value != i + 1000) std.debug.panic("fabric-test: bad RPC result", .{});
-                rpcs += 1;
-                if (rpcs == 1) log.info("fabric-test: first cross-VM RPC verified ({d}+1000={d})", .{ i, v.value });
-            },
-            .hi => {},
-        }
-        sched.sleep(3);
-    }
-
-    if (rpcs > 0 and observed_death) {
-        log.info("fabric-test: PASS — {d} cross-VM RPCs, remote spawn, node-kill observed and survived", .{rpcs});
-    } else {
-        std.debug.panic("fabric-test: FAIL — rpcs={d} death_observed={}", .{ rpcs, observed_death });
-    }
-    psci.systemOff();
+    if (res.err != .ok) return null;
+    const rep = shared.decodeMsg(shared.FabResp, res.msg.data) orelse return null;
+    if (rep != .spawned or res.msg.cap_type == 0) return null;
+    const landed = rep.spawned.node;
+    const badge = res.msg.cap_badge;
+    const call_res = ipc.call(fab_ch, .{
+        .data = shared.encodeMsg(shared.CalcRequest, .{ .add = .{ .a = 40, .b = 2 } }),
+    }, badge);
+    if (call_res.err != .ok) return null;
+    if (call_res.msg.data[0] == shared.fabric_err_sentinel) return null;
+    const crep = shared.decodeMsg(shared.CalcReply, call_res.msg.data) orelse return null;
+    if (crep != .sum or crep.sum.value != 42) return null;
+    return landed;
 }
 
 fn deriveNetView(net_ch: *ipc.Channel, hi: u64, lo: u64, port: u64) struct { obj: u64, badge: u64 } {

@@ -560,23 +560,51 @@ MCU-class devices (no MMU) never run the kernel; they run a tiny leaf-node
 runtime speaking Moss protocols over serial/USB/network and appear in the pool
 as typed channels.
 
-**As built (Phase 11, fabric v0):** each node's fabric service serves one
-channel; peers speak a versioned wire protocol over TCP (frames
-[len][type][ver], hello/spawn/call), membership is a static table (node N =
-10.77.0.N on a private segment, cluster netsvc mode). A *remote channel* is
-a badged cap on the local fabric service: badged calls forward verbatim as
-call_req frames and return the peer's reply words — the same four typed
-message words that cross local channels, so remote services are
-indistinguishable to callers (the remote-echo server literally runs
-unmodified CalcRequest-serving code). Remote spawn ships {image, arg} to
-the peer, which spawns under a local manifest and proxies the child's
-channel back. Peer death surfaces as an error-sentinel reply on in-flight
-calls (fabric error codes; the drill kills a node via PSCI SYSTEM_OFF
-mid-RPC and the survivor recovers). v0 honesty notes: one outstanding wire
-exchange at a time, no cap transfer across nodes beyond spawn-time grants,
-polling-driven pumping (the node driver ticks the fabric), and death is an
-error reply rather than a full channel-death notification — each a known
-evolution point, none an ABI change.
+**As built (Phase 11 fabric v0 + dynamic membership, wire v2):** each
+node's fabric service serves one channel; peers speak a versioned wire
+protocol over TCP (frames [len][type][ver]; a version-mismatched peer is
+dropped loudly). A *remote channel* is a badged cap on the local fabric
+service: badged calls forward verbatim as call_req frames and return the
+peer's reply words — the same four typed message words that cross local
+channels, so remote services are indistinguishable to callers (the
+remote-echo server literally runs unmodified CalcRequest-serving code).
+Remote spawn ships {image, arg} to the peer, which spawns under a local
+manifest and proxies the child's channel back.
+
+**Membership is dynamic**: a node joins by dialing any seed
+(connect_peer); the hello_ack carries the acker's member view — gossip at
+join — and member_up/down broadcasts keep everyone current. The mesh
+converges without coordination via one rule: **the lower node id dials a
+learned member** (the joiner's dial to its seed is the bootstrap
+exception); a fresh hello from a node already tracked replaces the stale
+peer entry, which is exactly the rejoin path. **Liveness never assumes a
+shared clock**: each node heartbeats on its own poll tick, and a peer
+that goes silent — or whose socket errors, or to whom a frame cannot be
+sent — becomes a membership down event immediately and is broadcast.
+Heartbeats carry free-memory adverts; remote_spawn{node=0} places on the
+least-loaded live member and reports where the spawn landed. Sessions
+are keyed by node id (never peer slot), so a slot recycled by rejoin can
+never misroute a stale remote channel — calls to a rebooted peer fail
+cleanly instead (its rsessions died with it).
+
+Lessons paid for: a failed *send* must update membership on the spot —
+the first cut only marked the peer struct dead, so a vanished node was
+never gossiped down and the death stage hung; and a best-effort ping must
+treat would_block as "skip" (a healthy peer mid-stop-and-wait exchange is
+not dead) while hard errors fail the peer. Test-harness note: mcast
+socket netdevs do not deliver between QEMU processes on this macOS host,
+so the 3-node check's L2 segment is a hub inside node 1's QEMU (hubport
+netdevs bridging its NIC to two socket listeners) — and the runner
+relaunches node 2 after its drill poweroff, so the check proves join,
+gossip (node 3's own full-mesh view), placement, death detection with no
+call in flight, rejoin, and respawn on the rejoined node.
+
+v0 honesty notes that remain: one outstanding wire exchange at a time, no
+cap transfer across nodes beyond spawn-time grants, polling-driven
+pumping (the node driver — or the shell boot — ticks the fabric), death
+of in-flight calls is an error-sentinel reply, and node id → 10.77.0.N
+addressing is static (dynamic addressing is a separate concern). Each a
+known evolution point, none an ABI change.
 
 ## Security posture
 

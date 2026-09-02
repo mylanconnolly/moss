@@ -46,13 +46,15 @@ var cons_buf: u64 = 0; // 1-page byte buffer shared with the console driver
 var fs_chan: u64 = 0;
 var fs_buf: [*]u8 = undefined;
 var init_chan: u64 = 0;
+var fab_chan: u64 = 0;
+var fab_buf: u64 = 0; // attached lazily on first `nodes`
 var glog: u64 = 0;
 
 export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     glog = log_h;
 
-    // Cap intake: three calls from the boot driver, one cap each.
-    var caps: [3]u64 = undefined;
+    // Cap intake: four calls from the boot driver, one cap each.
+    var caps: [4]u64 = undefined;
     for (&caps) |*c| {
         const r = usys.recvMsg(boot_chan);
         if (r.err != .ok or r.cap == 0) usys.exit(140);
@@ -62,6 +64,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     cons_chan = caps[0];
     fs_chan = caps[1];
     init_chan = caps[2];
+    fab_chan = caps[3];
 
     // Console byte buffer.
     const s = usys.shmCreate(1);
@@ -228,6 +231,8 @@ fn dispatch(cmd: []const u8) void {
     if (eq(c0, "ps")) return cmdPs();
     if (eq(c0, "mem")) return cmdMem();
     if (eq(c0, "svc")) return cmdSvc();
+    if (eq(c0, "nodes")) return cmdNodes();
+    if (eq(c0, "rspawn") and argc >= 3) return cmdRspawn(args[1], args[2]);
     if (eq(c0, "start") and argc >= 2) return cmdStart(args[1]);
     if (eq(c0, "stop") and argc >= 2) return cmdStop(args[1]);
     if (eq(c0, "ls")) return cmdLs(if (argc >= 2) args[1] else "");
@@ -253,6 +258,8 @@ fn cmdHelp() void {
         "  ps                    domains: state, threads, budgets\r\n" ++
         "  mem                   physical memory, cores, uptime\r\n" ++
         "  svc | start N | stop N   services via init\r\n" ++
+        "  nodes                 fabric membership (id, state, free MB)\r\n" ++
+        "  rspawn N I            spawn image I on node N (0 = least loaded)\r\n" ++
         "  ls [p] | cat p | write p text... | mkdir p | rm p\r\n" ++
         "  mv a b | ln p target | readlink p | stat p | df | sync\r\n" ++
         "  exit\r\n");
@@ -347,6 +354,82 @@ fn cmdStop(arg: []const u8) void {
             else => out("stop: failed\r\n"),
         },
         .err => out("stop: init unreachable\r\n"),
+    }
+}
+
+// ----------------------------------------------------------------- fabric
+
+fn fabAttach() bool {
+    if (fab_buf != 0) return true;
+    const s = usys.shmCreate(1);
+    if (s.err != .ok) return false;
+    const m = usys.shmMap(s.data[0]);
+    if (m.err != .ok) return false;
+    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .attach_buf, s.data[0])) {
+        .ok => {},
+        .err => return false,
+    }
+    fab_buf = m.data[0];
+    return true;
+}
+
+fn cmdNodes() void {
+    if (!fabAttach()) return out("nodes: fabric unreachable\r\n");
+    const n = switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .members, 0)) {
+        .ok => |rep| switch (rep) {
+            .num => |x| x.n,
+            else => return out("nodes: bad reply\r\n"),
+        },
+        .err => return out("nodes: fabric unreachable\r\n"),
+    };
+    var l: Line = .{};
+    _ = l.str("  ID STATE  FREE MB");
+    l.flush();
+    const recs: [*]const u8 = @ptrFromInt(fab_buf);
+    for (0..n) |i| {
+        const rec = recs[i * shared.fab_member_size ..];
+        const id = @as(u64, rec[0]) | (@as(u64, rec[1]) << 8);
+        const up = rec[2] != 0;
+        const free = @as(u64, rec[4]) | (@as(u64, rec[5]) << 8);
+        _ = l.pad(3).num(id);
+        _ = l.pad(5).str(if (up) "up" else "down");
+        _ = l.pad(12).num(free);
+        l.flush();
+    }
+}
+
+fn cmdRspawn(node_s: []const u8, image_s: []const u8) void {
+    const node = atoi(node_s) orelse return out("rspawn: bad node\r\n");
+    const image = atoi(image_s) orelse return out("rspawn: bad image id\r\n");
+    switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{
+        .remote_spawn = .{ .node = node, .image = image, .arg = 2 },
+    }, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .spawned => |sp| {
+                if (ok.cap == 0) return out("rspawn: no channel\r\n");
+                // Prove the remote channel with a typed RPC through it.
+                const r = usys.callRaw(ok.cap, shared.encodeMsg(shared.CalcRequest, .{
+                    .add = .{ .a = 40, .b = 2 },
+                }), 0);
+                var l: Line = .{};
+                if (r.err == .ok and r.data[0] != shared.fabric_err_sentinel) {
+                    if (shared.decodeMsg(shared.CalcReply, r.data)) |crep| {
+                        if (crep == .sum) {
+                            _ = l.str("spawned on node ").num(sp.node)
+                                .str("; remote says 40+2=").num(crep.sum.value);
+                            l.flush();
+                            _ = usys.capDrop(ok.cap);
+                            return;
+                        }
+                    }
+                }
+                _ = l.str("spawned on node ").num(sp.node).str(" but the RPC failed");
+                l.flush();
+                _ = usys.capDrop(ok.cap);
+            },
+            else => out("rspawn: failed\r\n"),
+        },
+        .err => out("rspawn: fabric unreachable\r\n"),
     }
 }
 

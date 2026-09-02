@@ -53,6 +53,7 @@ const specs = [_]Spec{
 
 const check_dir = "zig-out/check";
 const cluster_port = "31901";
+const cluster_port2 = "31902";
 const shell_port: u16 = 31903;
 const poll_ms = 100;
 
@@ -150,37 +151,84 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     return verdict.ok;
 }
 
+/// The dynamic-membership drill: three nodes on one L2 segment (node 1's
+/// QEMU hosts the hub — hubport netdevs bridge its NIC to two socket
+/// listeners, since mcast sockets do not deliver between processes on
+/// this host). Node 2 boots with drill=1 and powers off mid-life; when
+/// node 1 reports the death through the fabric's own membership, the
+/// runner RELAUNCHES node 2 (drill=0) and node 1 must see the rejoin and
+/// spawn on it again. The gossip proof is node 3's own "full mesh" log.
 fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
     const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
-    cwd.deleteFile(io, log1) catch {};
-    cwd.deleteFile(io, log2) catch {};
+    const log2b = try std.fmt.allocPrint(gpa, "{s}/{s}-node2-rejoin.log", .{ check_dir, spec.name });
+    const log3 = try std.fmt.allocPrint(gpa, "{s}/{s}-node3.log", .{ check_dir, spec.name });
+    for ([_][]const u8{ log1, log2, log2b, log3 }) |l| cwd.deleteFile(io, l) catch {};
 
     var args1: std.ArrayList([]const u8) = .empty;
     try appendBase(&args1, log1, bin);
     try args1.appendSlice(gpa, &.{
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,listen=127.0.0.1:{s}", .{cluster_port}),
-        "-device", "virtio-net-device,netdev=n0",
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-device,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{cluster_port}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s3,listen=127.0.0.1:{s}", .{cluster_port2}),
+        "-netdev", "hubport,id=h3,hubid=0,netdev=s3",
         "-append", "node=1",
     });
-    var args2: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args2, log2, bin);
-    try args2.appendSlice(gpa, &.{
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{cluster_port}),
-        "-device", "virtio-net-device,netdev=n0",
-        "-append", "node=2",
-    });
-
     var c1 = try spawnQemu(args1.items);
     defer c1.kill(io);
     sleepMs(1000);
-    var c2 = try spawnQemu(args2.items);
-    defer c2.kill(io);
 
-    // The verdict lives in node 1's log.
+    var c2 = try spawnQemu(try joinerArgs(log2, bin, cluster_port, "node=2 drill=1"));
+    defer c2.kill(io);
+    var c3 = try spawnQemu(try joinerArgs(log3, bin, cluster_port2, "node=3"));
+    defer c3.kill(io);
+
+    // Stage: wait for the death marker, then relaunch node 2 (the rejoin).
+    var c2b: ?std.process.Child = null;
+    defer if (c2b) |*c| c.kill(io);
+    const death_deadline = 600; // polls
+    var seen_death = false;
+    for (0..death_deadline) |_| {
+        sleepMs(poll_ms);
+        polls.* += 1;
+        const content = cwd.readFileAlloc(io, log1, gpa, .limited(1 << 20)) catch "";
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null) break;
+        if (std.mem.indexOf(u8, content, "node 2 death detected") != null) {
+            seen_death = true;
+            break;
+        }
+    }
+    if (!seen_death) {
+        reportFailure(spec.name, "death never detected", log1);
+        return false;
+    }
+    c2b = try spawnQemu(try joinerArgs(log2b, bin, cluster_port, "node=2 drill=0"));
+
+    // The verdict lives in node 1's log; the gossip proof in node 3's.
     const verdict = watch(log1, spec, spec.extra, polls);
-    if (!verdict.ok) reportFailure(spec.name, verdict.why, log1);
-    return verdict.ok;
+    if (!verdict.ok) {
+        reportFailure(spec.name, verdict.why, log1);
+        return false;
+    }
+    const n3 = cwd.readFileAlloc(io, log3, gpa, .limited(1 << 20)) catch "";
+    if (std.mem.indexOf(u8, n3, "full mesh") == null) {
+        reportFailure(spec.name, "node 3 never reached full mesh (gossip)", log3);
+        return false;
+    }
+    return true;
+}
+
+fn joinerArgs(log_path: []const u8, bin: []const u8, port: []const u8, append: []const u8) ![]const []const u8 {
+    var args: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args, log_path, bin);
+    try args.appendSlice(gpa, &.{
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{port}),
+        "-device", "virtio-net-device,netdev=n0",
+        "-append", append,
+    });
+    return args.items;
 }
 
 /// The scripted developer-console session: boot the shell topology with
@@ -236,6 +284,8 @@ const shell_script = [_]struct { send: []const u8, expect: []const u8 }{
     .{ .send = "start 1", .expect = "started" },
     .{ .send = "svc", .expect = "up" },
     .{ .send = "stop 1", .expect = "stopped" },
+    .{ .send = "nodes", .expect = "up" },
+    .{ .send = "rspawn 9 9", .expect = "rspawn: failed" },
     .{ .send = "rm data/smoke/l", .expect = "ok" },
     .{ .send = "sync", .expect = "ok" },
 };
@@ -254,6 +304,8 @@ fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
         "-device", "virtio-serial-device",
         "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{shell_port}),
         "-device",  "virtconsole,chardev=c0",
+        "-netdev",  "user,id=un0",
+        "-device",  "virtio-net-device,netdev=un0",
     });
 
     var child = try spawnQemu(args.items);

@@ -502,7 +502,7 @@ pub const TcpState = enum(u64) {
 // node N is 10.77.0.N / fdcc::N.
 
 pub const fabric_port: u64 = 7100;
-pub const fabric_ver: u8 = 1;
+pub const fabric_ver: u8 = 2; // v2: membership gossip, heartbeats, placement
 
 pub fn nodeIp4(node: u64) u32 {
     return 0x0A4D_0000 | @as(u32, @intCast(node));
@@ -512,16 +512,25 @@ pub fn nodeIp4(node: u64) u32 {
 /// are not FabReq: their words forward verbatim to the remote peer.
 pub const FabReq = union(enum(u64)) {
     attach_net: void, // + net view cap; also starts the listener
-    poll: void, // pump TCP (the driver's tick keeps the fabric breathing)
+    poll: void, // pump TCP + heartbeats (the driver's tick keeps it breathing)
+    /// Join the fabric: dial this seed; membership gossip does the rest.
     connect_peer: struct { node: u64 },
+    /// node 0 = placement: the least-loaded live member is chosen.
     remote_spawn: struct { node: u64, image: u64, arg: u64 },
+    attach_buf: void, // + shm cap: buffer for members listings
+    /// Fill the attached buffer with fab_member_size-byte records
+    /// {node u16, up u8, pad u8, free_mb u16, pad u16}; reply num{n}.
+    members: void,
 };
 
 pub const FabResp = union(enum(u64)) {
     ok: void,
-    spawned: void, // + remote-channel cap attached
+    spawned: struct { node: u64 }, // + remote-channel cap; node = where
+    num: struct { n: u64 },
     fab_err: struct { code: u64 },
 };
+
+pub const fab_member_size: usize = 8;
 
 pub const FabErr = enum(u64) {
     no_peer = 1,
@@ -542,6 +551,12 @@ pub const fw_spawn_req: u8 = 3;
 pub const fw_spawn_ack: u8 = 4;
 pub const fw_call_req: u8 = 5;
 pub const fw_call_resp: u8 = 6;
+// v2: membership + liveness. hello_ack grew a payload:
+// [node u16][free_mb u16][n u8][{node u16, up u8} x n] — gossip at join.
+pub const fw_ping: u8 = 7; // [free_mb u16] heartbeat + load advertisement
+pub const fw_pong: u8 = 8; // [free_mb u16]
+pub const fw_member_up: u8 = 9; // [node u16]
+pub const fw_member_down: u8 = 10; // [node u16]
 
 // QEMU slirp constants (static config; DHCP/SLAAC are not Phase 10
 // problems). v4 net 10.0.2.0/24, v6 prefix fec0::/64.

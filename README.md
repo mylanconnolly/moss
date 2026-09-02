@@ -77,7 +77,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | blk | Userspace virtio-blk; sync channels vs async rings, raced | `zig build run-blk -Dblk-test` |
 | fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
-| fabric | Cross-VM RPC, remote spawn, node-kill recovery | `zig build run-cluster -Dfabric-test` |
+| fabric | Dynamic membership: join, gossip, placement, death detection, rejoin | `zig build run-cluster -Dfabric-test` |
 | shell | msh scripted console session: ps/mem/svc + file ops on the encrypted volume | `zig build run-shell` (interactive) |
 
 Host-side unit tests (`zig build test`) cover the shared ABI: handles,
