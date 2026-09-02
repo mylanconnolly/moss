@@ -1,0 +1,3 @@
+# The network drill (profile net): an echo server on an unrestricted view.
+{ image: net, arg: 2, profiles: [net], oneshot: true,
+  give: [ { tag: net, netview: net } ] }

@@ -58,9 +58,9 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
             takeDevice(chan_h);
             netsvc(log_h, chan_h, (arg >> 8) & 0xff);
         },
-        2 => echosrv(log_h, chan_h),
-        3 => echocli(log_h, chan_h),
-        4 => boxed(log_h, chan_h),
+        2 => echosrv(log_h, boot.take(chan_h).cap(.net)),
+        3 => echocli(log_h, boot.take(chan_h).cap(.net)),
+        4 => boxed(log_h, boot.take(chan_h).cap(.net)),
         else => usys.exit(250),
     }
 }

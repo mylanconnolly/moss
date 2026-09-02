@@ -61,7 +61,7 @@ const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 
 // ------------------------------------------------------------------ units
 
-const max_units = 16;
+const max_units = 32;
 const max_gives = 8;
 
 const GiveKind = enum { unit, device, shm, secret, view, netview, self_init };
@@ -72,7 +72,31 @@ const Give = struct {
     name: []const u8 = "", // unit name, device name, archive path, fs path
     pages: u64 = 1,
     ro: bool = true,
+    allow: u32 = 0, // netview: a one-destination allowlist (v4), 0 = none
+    port: u64 = 0,
 };
+
+fn parseV4(s: []const u8) ?u32 {
+    var v: u32 = 0;
+    var octets: usize = 0;
+    var cur: u32 = 0;
+    var have = false;
+    for (s) |c| {
+        if (c == '.') {
+            if (!have) return null;
+            v = (v << 8) | cur;
+            octets += 1;
+            cur = 0;
+            have = false;
+        } else if (c >= '0' and c <= '9') {
+            cur = cur * 10 + (c - '0');
+            if (cur > 255) return null;
+            have = true;
+        } else return null;
+    }
+    if (!have or octets != 3) return null;
+    return (v << 8) | cur;
+}
 
 const Certify = struct {
     root: []const u8,
@@ -91,9 +115,14 @@ const Unit = struct {
     gives: [max_gives]Give = undefined,
     ngives: usize = 0,
     max_restarts: u64 = 0,
-    eager: bool = false,
+    /// Eager under these profiles (bit per shared.BootProfile).
+    profiles: u64 = 0,
     essential: bool = false,
     install: bool = false,
+    /// One-shot (a drill step): exit 0 starts the units that wait on it
+    /// (`after: name`); a non-zero exit takes the system down.
+    oneshot: bool = false,
+    after: []const u8 = "",
     certify: ?Certify = null,
     // The instance.
     ctl: u64 = 0,
@@ -137,7 +166,10 @@ fn loadUnits() void {
     var it = shared.marcIter(archive());
     while (it.next()) |e| {
         if (!std.mem.startsWith(u8, e.path, shared.unit_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
-        if (nunits == max_units) break;
+        if (nunits == max_units) {
+            logLine("init: TOO MANY UNITS; ignoring ", e.path);
+            continue;
+        }
         const name = e.path[shared.unit_dir.len .. e.path.len - shared.unit_ext.len];
         fba.reset();
         const v = interp.parseData(e.data) catch {
@@ -202,6 +234,8 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             } else if (gr.get("netview")) |x| {
                 give.kind = .netview;
                 give.name = str(x) orelse continue;
+                if (gr.get("allow")) |al| give.allow = parseV4(str(al) orelse "") orelse continue;
+                if (gr.get("port")) |pt| give.port = @intCast(int(pt) orelse 0);
             } else if (gr.get("self") != null) {
                 give.kind = .self_init;
             } else continue;
@@ -214,8 +248,15 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             if (rs.record.get("max")) |m| u.max_restarts = @intCast(int(m) orelse 0);
         }
     }
-    if (r.get("start")) |s| u.eager = std.mem.eql(u8, str(s) orelse "", "eager");
+    if (r.get("profiles")) |pl| {
+        if (pl == .list) for (pl.list) |item| {
+            const pn = str(item) orelse continue;
+            if (std.meta.stringToEnum(shared.BootProfile, pn)) |bp| u.profiles |= @as(u64, 1) << @intCast(@intFromEnum(bp));
+        };
+    }
     if (r.get("essential")) |e| u.essential = e.truthy();
+    if (r.get("oneshot")) |e| u.oneshot = e.truthy();
+    if (r.get("after")) |a| u.after = str(a) orelse "";
     if (r.get("install")) |e| u.install = e.truthy();
     if (r.get("certify")) |c| {
         if (c == .record) {
@@ -367,8 +408,9 @@ fn giveOne(u: *Unit, g: Give) bool {
         .netview => {
             const net = unitByName(g.name) orelse return false;
             if (!ensureUp(net)) return false;
+            const words = if (g.allow != 0) shared.v4Words(g.allow) else [2]u64{ 0, 0 };
             switch (usys.callTypedCap(shared.NetReq, shared.NetResp, net.chan_b, .{
-                .derive = .{ .ip_hi = 0, .ip_lo = 0, .port = 0 },
+                .derive = .{ .ip_hi = words[0], .ip_lo = words[1], .port = if (g.allow != 0) g.port else 0 },
             }, 0)) {
                 .ok => |ok| {
                     if (ok.cap == 0) return false;
@@ -467,6 +509,19 @@ fn superviseDeaths() void {
             logLine("init: essential unit exited; shutting down: ", u.name);
             shutdown(st.data[1]);
         }
+        if (u.oneshot) {
+            if (st.data[1] != 0) {
+                logLine("init: drill step failed: ", u.name);
+                shutdown(st.data[1]);
+            }
+            logLine("init: step done: ", u.name);
+            for (units[0..nunits]) |*next| {
+                if (!next.up and next.ctl == 0 and std.mem.eql(u8, next.after, u.name)) {
+                    if (!ensureUp(next)) logLine("init: step failed to start: ", next.name);
+                }
+            }
+            continue;
+        }
         if (u.restarts >= u.max_restarts) {
             logLine("init: unit exceeded its restart budget; leaving it down: ", u.name);
             continue;
@@ -515,17 +570,18 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     front_a = front.data[0];
     front_b = front.data[1];
 
-    if (arg == 2) system(notif.data[0]);
+    if (arg & 0xff == 2) system(notif.data[0], arg >> 8);
     demo(notif.data[0]);
 }
 
 /// The system boot: eager units start (pulling in everything they
 /// need); init then serves its front channel forever, or until an
 /// essential unit exits.
-fn system(notif: u64) noreturn {
-    _ = usys.log(glog, "init: system boot; starting eager units");
+fn system(notif: u64, profile: u64) noreturn {
+    _ = usys.log(glog, "init: system boot; starting the profile's eager units");
+    const bit = @as(u64, 1) << @intCast(profile & 63);
     for (units[0..nunits]) |*u| {
-        if (u.eager and !ensureUp(u)) logLine("init: eager unit failed to start: ", u.name);
+        if (u.profiles & bit != 0 and u.after.len == 0 and !ensureUp(u)) logLine("init: eager unit failed to start: ", u.name);
     }
     _ = usys.log(glog, "init: system up");
     while (true) {

@@ -52,7 +52,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
             takeDevice(chan_h);
             blkdrv(log_h, chan_h);
         },
-        2 => blkuser(log_h, chan_h),
+        2 => blkuser(log_h, boot.take(chan_h).cap(.disk)),
         else => usys.exit(250),
     }
 }

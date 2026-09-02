@@ -86,11 +86,16 @@ other cap. Run tools that need a kernel cap or a view are named in
 with a `run NAME` step; a driver's device grant is exercised by its own
 test (rngd in the rng test).
 
-**An OS test**: write a driver in `kernel/main.zig` gated on a new
-build option; make it log a unique `"<name>-test: PASS ..."` line and then
-call `psci.systemOff()` (panic on failure — the harness treats panics as
-failures). Add the option to `build.zig` (both the `-D` flag and the
-`variants`/`all_test_opts` lists) and a `Spec` to `tools/runner.zig`.
+**An OS test**: prefer a unit-file drill — a profile in
+`shared.BootProfile`, drill units under `boot/conf/units/` (`profiles:
+[x]`, `oneshot: true`, `after:` for steps, `essential: true` on the last),
+a kernel worker that is just `systemDrill("x")`, and a `Spec` in
+`tools/runner.zig` with `.append = "profile=x"`; a non-zero step exit
+fails the boot with that code. Write a kernel-side driver only when the
+test must assert kernel state (log a unique `"<name>-test: PASS ..."`
+line, then `psci.systemOff()`; panics are failures). Either way, add
+the option to `build.zig` (the `-D` flag and the `variants`/
+`all_test_opts` lists).
 
 ## Debugging techniques that have paid off
 

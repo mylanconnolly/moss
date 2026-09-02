@@ -1,0 +1,3 @@
+# The network drill: the client speaks TCP over v4-mapped, v6, and the wire.
+{ image: net, arg: 3, profiles: [net], oneshot: true,
+  give: [ { tag: net, netview: net } ] }

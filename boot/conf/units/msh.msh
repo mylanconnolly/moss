@@ -4,7 +4,7 @@
   image:     shell
   budget:    { user: 8mb }
   grant:     [log, spawner]
-  start:     eager
+  profiles:  [system]
   essential: true
   give: [
     { tag: console, unit: cons }

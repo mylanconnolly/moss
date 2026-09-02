@@ -48,6 +48,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     if (fdt.bootargs()) |args| {
         boot_node = parseNodeArg(args);
         if (boot_node != 0) log.info("bootargs: node id {d}", .{boot_node});
+        boot_profile = parseProfile(args);
     }
     // The device capabilities come from the tree, not from constants: the
     // virtio-mmio window and its SPI range are what root (and, for now,
@@ -436,112 +437,18 @@ fn flapTestWorker(_: u64) void {
     }
 }
 
-/// Phase 7 exit-criterion driver: a userspace virtio-blk driver serving a
-/// userspace client over IPC — the kernel only wires caps: MMIO window,
-/// IRQ range, channel, log. QEMU virt: virtio-mmio slots at 0x0a000000
-/// (32 x 0x200), IRQs SPI 16.. (intid 48..).
+/// The blk drill: a system boot under profile "blk" — root, init, and the
+/// unit files do everything; the kernel spawns root and holds the leak
+/// bar when the drill's essential unit has exited.
 fn blkTestWorker(_: u64) void {
-    const frames_before = pmem.stats().free_bytes;
-
-    const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    log.info("blk-test: starting userspace virtio-blk driver", .{});
-    const drv = spawnDevice("blkdrv", .blk, 1, ch);
-
-    const user = domain.spawn("blkuser", .{ .blob = img(.blk) }, .{
-        .arg = 2,
-        .grant_debug_log = true,
-        .grant_channel_b = ch,
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn blkuser: {t}", .{e});
-
-    while (user.state != .dead) sched.sleep(2);
-    log.info("blk-test: client exited with code {d}", .{user.exit_code});
-    domain.destroy(drv);
-    while (drv.state != .dead) sched.sleep(1);
-
-    sched.sleep(3);
-    const frames_after = pmem.stats().free_bytes;
-    if (user.exit_code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
-        log.info("blk-test: PASS — real disk I/O through a sandboxed userspace driver, nothing leaked", .{});
-        psci.systemOff();
-    } else {
-        std.debug.panic("blk-test: FAIL — client exit {d}, pmem delta {d}B", .{
-            user.exit_code, frames_before -% frames_after,
-        });
-    }
+    systemDrill("blk");
 }
 
-/// Phase 9 exit-criterion driver: filesystem service on the virtio-blk
-/// driver, per-process namespaces as badged view caps. Alice gets the root
-/// view (rw) and populates the disk; bob gets a derived read-only view of
-/// disk/pub and must be unable to see, write, or escape anything else.
+/// The fs drill: a system boot under profile "fs" — root, init, and the
+/// unit files do everything; the kernel spawns root and holds the leak
+/// bar when the drill's essential unit has exited.
 fn fsTestWorker(_: u64) void {
-    const frames_before = pmem.stats().free_bytes;
-
-    // The storage stack: driver, then the FS service on top of it.
-    const blk_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    const drv = spawnDevice("blkdrv", .blk, 1, blk_ch);
-
-    const fs_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    // The kernel's own root view buffer (badge 0), the test volume key
-    // (encrypted + compressed: the full v3 path), and the disk.
-    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
-    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
-    const fssvc = spawnFs(fs_ch, pathbuf, pb, "moss-fs-test-key-0123456789abcde", blk_ch);
-    var res: ipc.CallResult = undefined;
-
-    // Alice: the whole root view, read-write.
-    res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = 0, .ro = 0 } }),
-    }, 0);
-    std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
-    log.info("fs-test: alice gets the root view (rw)", .{});
-    const alice = domain.spawn("alice", .{ .blob = img(.fs) }, .{
-        .arg = 2,
-        .grant_debug_log = true,
-        .user_limit = 4 << 20, // the fs image carries the mossfs BSS for every role
-        .grant_channel_b = @ptrFromInt(res.msg.cap_obj),
-        .grant_channel_b_badge = res.msg.cap_badge,
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn alice: {t}", .{e});
-    while (alice.state != .dead) sched.sleep(2);
-    if (alice.exit_code != 0) std.debug.panic("alice failed: {d}", .{alice.exit_code});
-
-    // Bob: only data/pub, and only to look at.
-    const p = "data/pub";
-    @memcpy(pb[0..p.len], p);
-    res = ipc.call(fs_ch, .{
-        .data = shared.encodeMsg(shared.FsReq, .{ .derive = .{ .path_off = 0, .path_len = p.len, .ro = 1 } }),
-    }, 0);
-    std.debug.assert(res.err == .ok and res.msg.cap_type != 0);
-    log.info("fs-test: bob gets a read-only view of data/pub", .{});
-    const bob = domain.spawn("bob", .{ .blob = img(.fs) }, .{
-        .arg = 3,
-        .grant_debug_log = true,
-        .user_limit = 4 << 20, // the fs image carries the mossfs BSS for every role
-        .grant_channel_b = @ptrFromInt(res.msg.cap_obj),
-        .grant_channel_b_badge = res.msg.cap_badge,
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn bob: {t}", .{e});
-    while (bob.state != .dead) sched.sleep(2);
-    if (bob.exit_code != 0) std.debug.panic("bob failed: {d}", .{bob.exit_code});
-
-    // Teardown, inside out: the FS first, then its driver.
-    domain.destroy(fssvc);
-    while (fssvc.state != .dead) sched.sleep(1);
-    domain.destroy(drv);
-    while (drv.state != .dead) sched.sleep(1);
-    ipc.unrefSide(fs_ch, .b);
-    ipc.unrefShm(pathbuf);
-
-    sched.sleep(3);
-    const frames_after = pmem.stats().free_bytes;
-    if (frames_after == frames_before) {
-        log.info("fs-test: PASS — disjoint namespaces on real storage, nothing leaked", .{});
-        psci.systemOff();
-    } else {
-        std.debug.panic("fs-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
-    }
+    systemDrill("fs");
 }
 
 /// Developer-tooling boot: the storage stack, the virtio-console driver,
@@ -551,16 +458,20 @@ fn fsTestWorker(_: u64) void {
 /// (the runner drives the console over a socket chardev). PASS when msh
 /// exits cleanly and nothing leaked.
 fn shellTestWorker(_: u64) void {
+    systemDrill("shell");
+}
+
+/// A system boot: root gets the boot grants — log, spawn authority, the
+/// boot archive, and the device capabilities — plus the profile from
+/// the boot arguments, and init starts that profile's eager units from
+/// boot/conf/units. The kernel's only remaining job is to spawn root
+/// and, when the system has shut itself down, hold the leak bar.
+fn systemDrill(comptime name: []const u8) void {
     const frames_before = pmem.stats().free_bytes;
 
-    // The whole system is userspace: root gets the boot grants — log,
-    // spawn authority, the boot archive, and the device capabilities —
-    // and init starts every driver and service from the unit files in
-    // boot/conf/units. The kernel's only remaining job is to spawn root
-    // and, when the system has shut itself down, hold the leak bar.
-    log.info("shell: spawning root (system mode)", .{});
+    log.info(name ++ ": spawning root (profile {t})", .{boot_profile});
     const root = domain.spawn("root", .{ .blob = img(.root) }, .{
-        .arg = 2,
+        .arg = 2 | (@intFromEnum(boot_profile) << 8),
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
@@ -578,78 +489,20 @@ fn shellTestWorker(_: u64) void {
     sched.sleep(5);
     const frames_after = pmem.stats().free_bytes;
     if (code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
-        log.info("shell-test: PASS — a userspace-orchestrated system booted, served a console session, and shut down clean", .{});
+        log.info(name ++ "-test: PASS — the system booted from unit files, ran its drill, and shut down clean", .{});
         psci.systemOff();
     } else {
-        std.debug.panic("shell-test: FAIL — root exit {d}, pmem delta {d}B, shm {d}B", .{
+        std.debug.panic(name ++ "-test: FAIL — root exit {d}, pmem delta {d}B, shm {d}B", .{
             code, frames_before -% frames_after, ipc.shm_account.balance(),
         });
     }
 }
 
-/// Phase 10 exit-criterion driver: two processes speak TCP through the
-/// userspace net service (loopback over v4-mapped AND IPv6, plus real wire
-/// TCP through slirp), and a sandboxed child holding an allowlist view can
-/// reach only its allowlisted destination.
+/// The net drill: a system boot under profile "net" — root, init, and the
+/// unit files do everything; the kernel spawns root and holds the leak
+/// bar when the drill's essential unit has exited.
 fn netTestWorker(_: u64) void {
-    const frames_before = pmem.stats().free_bytes;
-
-    const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
-    log.info("net-test: starting userspace netsvc (driver + dual-stack tcp)", .{});
-    const svc = spawnDevice("netsvc", .net, 1, net_ch);
-    sched.sleep(5);
-    if (svc.state == .dead) std.debug.panic("netsvc died at init: exit {d}", .{svc.exit_code});
-
-    // Unrestricted views for the echo pair, via derive.
-    const srv_view = deriveNetView(net_ch, 0, 0, 0);
-    const cli_view = deriveNetView(net_ch, 0, 0, 0);
-    const srv = domain.spawn("echosrv", .{ .blob = img(.net) }, .{
-        .arg = 2,
-        .grant_debug_log = true,
-        .grant_channel_b = @ptrFromInt(srv_view.obj),
-        .grant_channel_b_badge = srv_view.badge,
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn echosrv: {t}", .{e});
-    sched.sleep(3);
-    const cli = domain.spawn("echocli", .{ .blob = img(.net) }, .{
-        .arg = 3,
-        .grant_debug_log = true,
-        .grant_channel_b = @ptrFromInt(cli_view.obj),
-        .grant_channel_b_badge = cli_view.badge,
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn echocli: {t}", .{e});
-
-    while (cli.state != .dead) sched.sleep(2);
-    if (cli.exit_code != 0) std.debug.panic("echocli failed: {d}", .{cli.exit_code});
-    while (srv.state != .dead) sched.sleep(2);
-    if (srv.exit_code != 0) std.debug.panic("echosrv failed: {d}", .{srv.exit_code});
-    log.info("net-test: both echo processes finished clean", .{});
-
-    // The sandboxed child: allowlist = the wire echo destination only.
-    const v4w = shared.v4Words(shared.net_echo_ip4);
-    const box_view = deriveNetView(net_ch, v4w[0], v4w[1], shared.net_echo_port);
-    const box = domain.spawn("boxed", .{ .blob = img(.net) }, .{
-        .arg = 4,
-        .grant_debug_log = true,
-        .grant_channel_b = @ptrFromInt(box_view.obj),
-        .grant_channel_b_badge = box_view.badge,
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn boxed: {t}", .{e});
-    while (box.state != .dead) sched.sleep(2);
-    if (box.exit_code != 0) std.debug.panic("boxed failed: {d}", .{box.exit_code});
-
-    domain.destroy(svc);
-    while (svc.state != .dead) sched.sleep(1);
-    ipc.unrefSide(net_ch, .b);
-
-    sched.sleep(3);
-    const frames_after = pmem.stats().free_bytes;
-    if (frames_after == frames_before and ipc.shm_account.balance() == 0) {
-        log.info("net-test: PASS — dual-stack tcp via userspace netsvc, allowlist enforced, nothing leaked", .{});
-        psci.systemOff();
-    } else {
-        std.debug.panic("net-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
-    }
+    systemDrill("net");
 }
 
 /// The entropy driver: virtio-rng behind the standard driver grants plus
@@ -733,26 +586,6 @@ fn spawnDevice(name: []const u8, id: shared.ImageId, arg: u64, ch: *ipc.Channel)
     return d;
 }
 
-/// Spawn the filesystem service and hand it its root buffer, the volume
-/// key, and the disk; returns the service. The key is staged through the
-/// buffer and wiped by the service.
-fn spawnFs(fs_ch: *ipc.Channel, pathbuf: *ipc.Shm, pb: [*]u8, key: *const [32]u8, blk_ch: *ipc.Channel) *domain.Domain {
-    const fssvc = domain.spawn("fssvc", .{ .blob = img(.fs) }, .{
-        .arg = 1,
-        .grant_debug_log = true,
-        .grant_channel_a = fs_ch,
-        .grant_bootfs = true,
-        .user_limit = 4 << 20, // mossfs core: caches + overlay live in BSS
-        .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn fssvc: {t}", .{e});
-    bootGiveShm(fs_ch, .buf, pathbuf);
-    @memcpy(pb[0..32], key);
-    bootSecret(fs_ch, 0, 32);
-    bootGiveChan(fs_ch, .disk, blk_ch);
-    bootGo(fs_ch);
-    return fssvc;
-}
-
 /// The entropy drill: (1) the pool is fail-closed — a probe spawned
 /// before any driver exists gets bad_state; (2) the userspace virtio-rng
 /// driver seeds it through the entropy cap; (3) a probe verifies
@@ -816,6 +649,20 @@ fn rngTestWorker(_: u64) void {
 var boot_node: u64 = 0;
 var boot_drill: u64 = 0;
 var boot_badkey: u64 = 0;
+var boot_profile: shared.BootProfile = .system;
+
+/// `profile=<name>` in the boot arguments selects which units init starts.
+fn parseProfile(args: []const u8) shared.BootProfile {
+    const key = "profile=";
+    var i: usize = 0;
+    while (i + key.len <= args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i .. i + key.len], key)) continue;
+        var end = i + key.len;
+        while (end < args.len and args[end] != ' ') end += 1;
+        return std.meta.stringToEnum(shared.BootProfile, args[i + key.len .. end]) orelse .system;
+    }
+    return .system;
+}
 
 /// The virtio-mmio device window from the devicetree (zero if none).
 var devices: dt.VirtioWindow = .{ .mmio_base = 0, .mmio_pages = 0, .irq_base = 0, .irq_count = 0 };

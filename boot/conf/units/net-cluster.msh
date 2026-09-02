@@ -1,0 +1,10 @@
+# The network service in cluster addressing as node 1 (arg = 1 | node << 8),
+# for the fabric under the system profile.
+{
+  image: net
+  arg:   257
+  give: [
+    { tag: mmio, device: mmio }
+    { tag: irq,  device: irq }
+  ]
+}

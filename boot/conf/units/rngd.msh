@@ -3,7 +3,7 @@
 {
   image:   rng
   arg:     1
-  start:   eager
+  profiles: [system]
   give: [
     { tag: mmio,    device: mmio }
     { tag: irq,     device: irq }

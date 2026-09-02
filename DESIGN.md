@@ -266,9 +266,14 @@ init's own front channel (`self: true`). `start: eager` units start at
 boot and pull in everything they need; `essential: true` means the
 system follows the unit's exit; `certify` runs the fabric's
 certification against a root-of-trust unit; `install: true` installs
-the program store once the filesystem is up. Supervision is unchanged
-in shape — one-for-one, a restart budget, linear backoff — and a
-restarted unit is re-wired the same way it was started. The kernel's
+the program store once the filesystem is up. A unit lists
+the boot **profiles** it is eager under (`profiles: [system, net]`; the
+kernel reads `profile=` from the boot arguments), which is how one
+archive serves the interactive system and every drill. A `oneshot`
+unit is a step: exit 0 starts the units that name it in `after`, a
+non-zero exit takes the system down with that code. Supervision is
+unchanged in shape — one-for-one, a restart budget, linear backoff —
+and a restarted unit is re-wired the same way it was started. The kernel's
 part of the shell boot is now one manifest: spawn root with log, spawn
 authority, the archive, and the devices, then hold the leak bar when
 the system has shut itself down.

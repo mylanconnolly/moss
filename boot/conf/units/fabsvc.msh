@@ -6,7 +6,7 @@
   grant:   [log, spawner, bootfs]
   give: [
     { tag: buf, shm: 1 }
-    { tag: net, netview: net }
+    { tag: net, netview: net-cluster }
   ]
   certify: { root: fabroot, seed: conf/fabric/node1.seed, node: 1, gossip: true, spawn: true }
 }

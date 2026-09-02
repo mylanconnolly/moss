@@ -303,11 +303,19 @@ The pooling story stops being theory.
   msh. Services are units named after ServiceId (the demo and flap
   drills run through the same init). The old init.topology is gone;
   the boot tree lives in the repo at boot/ and is packed as is.
-  Residuals: the per-subsystem kernel test drivers still orchestrate
-  their own topologies (they assert kernel state directly; migrating
-  them to units with a drill program is the evolution); unit files carry
-  test key material beside them; `run` arguments reach a unit only as a
-  view path.
+  ✅ **Drills as unit files** (done): the block, filesystem, and network
+  tests are boot **profiles** — `profile=blk|fs|net` in the boot
+  arguments, passed kernel → root → init — and a unit lists the profiles
+  it is eager under (`profiles: [net]`). Drill steps are `oneshot`
+  units: exit 0 starts the units that wait on them (`after: fs-alice`),
+  a non-zero exit takes the system down with that code; the last step is
+  `essential`. Net views can carry a one-destination allowlist (`allow:
+  10.0.2.100, port: 9000`). The kernel side of those three tests is one
+  function: spawn root under the profile, hold the leak bar. The rng and
+  fabric tests keep their kernel drivers — one asserts the kernel pool
+  directly, the other is the three-node harness. Residuals: unit files
+  carry test key material beside them; `run` arguments reach a unit only
+  as a view path.
 - ✅ **msh v2: a structured shell language, line editor, and typed
   pipelines** (done). The shell got the OS's own thinking: pipelines
   carry VALUES (records and tables straight from typed IPC), never bytes

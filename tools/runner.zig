@@ -25,6 +25,8 @@ const Spec = struct {
     panic_is_failure: bool = true,
     /// Second run on the same disk (persistence); this marker must appear.
     second_run_extra: ?[]const u8 = null,
+    /// Boot arguments (QEMU -append): the unit-file drills pick a profile.
+    append: ?[]const u8 = null,
     timeout_s: u64 = 90,
 };
 
@@ -37,7 +39,7 @@ const specs = [_]Spec{
     .{ .name = "init", .pass = "init-test: PASS" },
     .{ .name = "sandbox", .pass = "sandbox-test: PASS" },
     .{ .name = "flap", .pass = "flap-test: PASS" },
-    .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS" },
+    .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
     .{
         .name = "fs",
         .kind = .blk,
@@ -45,8 +47,9 @@ const specs = [_]Spec{
         .extra = "formatted fresh mossfs (std hierarchy, encrypted)",
         .always_extra = "alice: v2 ops verified",
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
+        .append = "profile=fs",
     },
-    .{ .name = "net", .kind = .net, .pass = "net-test: PASS" },
+    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .append = "profile=net" },
     .{ .name = "rng", .pass = "rng-test: PASS", .extra = "rngprobe: unseeded pool refuses getrandom" },
     .{ .name = "shell", .kind = .shell, .pass = "shell-test: PASS", .timeout_s = 120 },
     .{ .name = "fabric", .kind = .cluster, .pass = "fabric-test: PASS", .extra = "fabsvc: revoked identity refused", .timeout_s = 150 },
@@ -137,6 +140,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
 
     var args: std.ArrayList([]const u8) = .empty;
     try appendBase(&args, log_path, bin);
+    if (spec.append) |a| try args.appendSlice(gpa, &.{ "-append", a });
     switch (spec.kind) {
         .blk => try appendDisk(&args, disk),
         .net => try args.appendSlice(gpa, &.{
@@ -354,7 +358,7 @@ fn runShell(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try appendBase(&args, log_path, bin);
     try appendDisk(&args, disk);
     try args.appendSlice(gpa, &.{
-        "-device", "virtio-serial-device",
+        "-device",  "virtio-serial-device",
         "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{shell_port}),
         "-device",  "virtconsole,chardev=c0",
         "-netdev",  "user,id=un0",

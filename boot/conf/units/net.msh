@@ -1,8 +1,9 @@
-# The network service (virtio-net + dual-stack TCP), cluster addressing
-# as node 1 (arg = 1 | node << 8).
+# The network service (virtio-net + dual-stack TCP). Slirp addressing
+# (arg 1) for the drills; the system profile's fabric uses cluster
+# addressing as node 1 (see net-cluster.msh).
 {
   image: net
-  arg:   257
+  arg:   1
   give: [
     { tag: mmio, device: mmio }
     { tag: irq,  device: irq }

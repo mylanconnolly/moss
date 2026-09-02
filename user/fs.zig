@@ -59,8 +59,8 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     switch (role) {
         1 => fssvc(log_h, chan_h, blob_va, blob_len),
-        2 => alice(log_h, chan_h),
-        3 => bob(log_h, chan_h),
+        2 => alice(log_h, boot.take(chan_h).cap(.view)),
+        3 => bob(log_h, boot.take(chan_h).cap(.view)),
         else => usys.exit(250),
     }
 }

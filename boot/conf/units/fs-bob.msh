@@ -1,0 +1,4 @@
+# The filesystem drill, step 2: bob gets a read-only view of data/pub
+# alone and must be unable to see, write, or escape anything else.
+{ image: fs, arg: 3, budget: { user: 4mb }, after: fs-alice, oneshot: true, essential: true,
+  give: [ { tag: view, fs: data/pub, ro: true } ] }
