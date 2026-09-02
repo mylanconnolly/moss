@@ -499,7 +499,10 @@ fn deliver(d: *domain.Domain, msg: ipc.Msg, frame: *trap.TrapFrame) void {
             frame.regs[5] = @bitCast(h);
             // Receiving a device binds its DMA to this address space: the
             // last holder handed the cap is the one whose memory it sees.
-            if (ct == .device) smmu.attach(msg.cap_obj, d.ttbr0_pa, d.asid, @ptrCast(d));
+            if (ct == .device) {
+                domain.ensureMsiDoorbell(d);
+                smmu.attach(msg.cap_obj, d.ttbr0_pa, d.asid, @ptrCast(d));
+            }
         } else {
             dropAttachment(msg); // table full: the grant is dropped, not leaked
         }

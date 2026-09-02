@@ -189,9 +189,11 @@ The pooling story stops being theory.
   translated, then a rogue handed the disk that asks it to DMA into a
   kernel page — refused, 128 events recorded against that stream and
   sector, canary intact. Every other test now runs behind the SMMU
-  too, under TCG and HVF. Residuals: five or more endpoints share INTx
-  lines (MSI-X via the ITS when needed); SMMU stage 2 is what a guest
-  passthrough would use (see EL2).
+  too, under TCG and HVF. Since the same day, device interrupts are
+  MSI-X through the ITS (LPIs; the doorbell reached through the SMMU
+  as privileged DMA), so INTx line sharing no longer caps the number
+  of endpoints. Residual: SMMU stage 2 is what a guest passthrough
+  uses (see EL2).
 - ✅ **Kernel: the big lock retired** (done): per-core run-queue locks,
   per-thread locks, per-channel/notification locks, leaf locks for the
   object tables, timers, IRQ bindings, sleepers and the thread table

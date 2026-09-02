@@ -9,6 +9,7 @@ const dt = @import("dt.zig");
 const gic = @import("gic.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
+const its = @import("its.zig");
 const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
@@ -58,6 +59,7 @@ export fn kmain(dtb_pa: u64) noreturn {
     pcie_host = fdt.pcieHost();
     if (pcie_host == null) log.warn("devicetree: no PCIe host; userspace drivers will find no devices", .{});
     smmu_info = fdt.smmu();
+    its_reg = fdt.findReg("arm,gic-v3-its");
 
     pmem.init(regions);
     pmem.reserve(
@@ -96,7 +98,9 @@ export fn kmain(dtb_pa: u64) noreturn {
     irq.init();
     domain.startReaper();
     gic.initDistributor();
+    if (its_reg) |r| its.init(r.base, r.size) else log.warn("devicetree: no ITS; devices stay on INTx", .{});
     gic.initCore(0);
+    pci.setupMsi();
     timer.initCore(0);
     smp.bringUp();
     trap.enableIrqs();
@@ -780,6 +784,7 @@ fn parseProfile(args: []const u8) shared.BootProfile {
 /// The PCIe host bridge from the devicetree (null if none).
 var pcie_host: ?dt.PcieHost = null;
 var smmu_info: ?dt.Smmu = null;
+var its_reg: ?dt.Reg = null;
 
 /// Hand a device of the given kind (the first enumerated) to a program
 /// over its boot channel, filed under its kind.

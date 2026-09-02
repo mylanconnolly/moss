@@ -11,6 +11,7 @@
 const std = @import("std");
 const cap = @import("cap.zig");
 const ipc = @import("ipc.zig");
+const its = @import("its.zig");
 const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
@@ -115,6 +116,7 @@ pub const Domain = struct {
     blob_va: u64 = 0,
     blob_len: u64 = 0,
     shm_map_next: u64 = shm_window_base,
+    msi_doorbell_mapped: bool = false,
     supervisor: ?*ipc.Channel = null,
     threads_alive: std.atomic.Value(u32) = .init(0),
     exit_code: u64 = 0,
@@ -586,8 +588,19 @@ pub fn mapMmio(d: *Domain, base_pa: u64, pages: u64) !u64 {
     return mapFrames(d, base_pa, pages, .device);
 }
 
+/// A device this domain holds signals interrupts by writing the ITS
+/// doorbell; that write is DMA through the domain's tables, so the
+/// doorbell page is mapped at its own address, privileged-only.
+pub fn ensureMsiDoorbell(d: *Domain) void {
+    if (d.msi_doorbell_mapped or !its.active) return;
+    const pa = its.doorbellPage();
+    mmu.mapUserPageTagged(d.ttbr0_pa, pa, pa, .msi_doorbell, &d.kobj, false) catch return;
+    asm volatile ("dsb ishst");
+    d.msi_doorbell_mapped = true;
+}
+
 /// Map frames some other object owns (device windows, a VM's RAM) into
-/// the domain, unowned: teardown leaves them to their owner.
+/// the domain, unowned: teardown leaves their frames to their owner.
 pub fn mapFrames(d: *Domain, base_pa: u64, pages: u64, perms: mmu.UserPerms) !u64 {
     const base = d.shm_map_next;
     for (0..pages) |i| {

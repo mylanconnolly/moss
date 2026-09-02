@@ -12,6 +12,8 @@ pub const MemRegion = struct {
 
 /// The PCIe host bridge: the kernel enumerates its bus 0 at boot and
 /// mints one device capability per endpoint (see pci.zig).
+pub const Reg = struct { base: u64, size: u64 };
+
 pub const PcieHost = struct {
     ecam_base: u64,
     ecam_size: u64,
@@ -221,6 +223,62 @@ pub const Fdt = struct {
             }
         }
         return if (found) out else null;
+    }
+
+    /// The reg window of the first node, at any depth, whose compatible
+    /// list names `compat` — assuming 2/2 address/size cells all the way
+    /// down (true of the GIC's `its@` child on QEMU virt).
+    pub fn findReg(self: Fdt, compat: []const u8) ?Reg {
+        var depth: i32 = 0;
+        var pos: usize = self.struct_off;
+        var match = false;
+        var base: u64 = 0;
+        var size: u64 = 0;
+        // Properties may precede or follow `compatible` within a node, so
+        // a node's reg is remembered until its end.
+        var have_reg = false;
+        var stack_match: [16]bool = @splat(false);
+        var stack_reg: [16]struct { b: u64, s: u64, ok: bool } = undefined;
+        while (true) {
+            const tok = self.word(&pos) catch return null;
+            switch (tok) {
+                tok_begin_node => {
+                    _ = self.nodeName(&pos) catch return null;
+                    if (depth >= 0 and depth < 16) {
+                        stack_match[@intCast(depth)] = match;
+                        stack_reg[@intCast(depth)] = .{ .b = base, .s = size, .ok = have_reg };
+                    }
+                    depth += 1;
+                    match = false;
+                    have_reg = false;
+                },
+                tok_end_node => {
+                    if (match and have_reg) return .{ .base = base, .size = size };
+                    depth -= 1;
+                    if (depth <= 0) break;
+                    match = stack_match[@intCast(depth)];
+                    base = stack_reg[@intCast(depth)].b;
+                    size = stack_reg[@intCast(depth)].s;
+                    have_reg = stack_reg[@intCast(depth)].ok;
+                },
+                tok_prop => {
+                    const len = self.word(&pos) catch return null;
+                    const name_off = self.word(&pos) catch return null;
+                    const data = self.bytes(&pos, len) catch return null;
+                    const name = self.string(name_off) catch return null;
+                    if (std.mem.eql(u8, name, "compatible")) {
+                        if (std.mem.indexOf(u8, data, compat) != null) match = true;
+                    } else if (std.mem.eql(u8, name, "reg") and data.len >= 16) {
+                        base = be64(data[0..8]);
+                        size = be64(data[8..16]);
+                        have_reg = true;
+                    }
+                },
+                tok_nop => {},
+                else => break,
+            }
+        }
+        return null;
     }
 
     /// The /chosen bootargs string (QEMU -append), if present.

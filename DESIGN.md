@@ -437,9 +437,23 @@ the config page (a driver reads the capability list itself), `irq_bind`
 routes the line, `device_info` says what it is. Kinds are the virtio
 device ids (`shared.DeviceKind`: net, blk, console, rng), so root can
 forward what it was granted without knowing anything, and init files
-each cap by kind for unit files' `{ tag: device, device: blk }`. Five
-or more endpoints would share INTx lines (four per bus); MSI-X through
-the ITS is the answer when that day comes. Authority capabilities (log,
+each cap by kind for unit files' `{ tag: device, device: blk }`.
+Interrupts are MSI-X through the **ITS** (`kernel/its.zig`, as built
+2026-09-02): after the ITS is up (device and collection tables, a
+command queue, a shared LPI configuration table, a per-core pending
+table and collection), every device with an MSI-X capability gets
+entry 0 of its table pointed at GITS_TRANSLATER with event 0, the
+capability enabled, and an LPI routed to it (MAPD, MAPTI, INV, SYNC);
+its `intid` becomes that LPI, and the four INTx wires stop limiting how
+many endpoints a boot may carry — six is what the pool-node topology
+needs. LPIs are messages: `irq.deliver` does not mask them and
+`irq_ack` is a no-op; the virtio-pci transport points the config and
+every queue at vector 0. The MSI write is DMA, so it goes through the
+SMMU: the doorbell page is mapped into a holder's tables at its own
+address, privileged-only (a driver's code cannot ring it), and the
+stream entry marks the device's transactions privileged. INTx remains
+the fallback for a device without MSI-X or a machine without an ITS —
+and is what a guest will see for a passed-through device. Authority capabilities (log,
 spawner, device, entropy, introspect) are plain object words with no
 refcount, and they travel in messages exactly like shm and channel caps:
 delegation is copying. So a driver never needs the kernel's manifest to

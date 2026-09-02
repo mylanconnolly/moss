@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const dt = @import("dt.zig");
+const its = @import("its.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
 const mmu = @import("mmu.zig");
@@ -27,8 +28,13 @@ pub const Device = struct {
     bar_index: u8,
     bar_pa: u64,
     bar_len: u64,
-    /// INTx as a GIC SPI intid (0 = none).
+    /// The device's interrupt as a GIC intid: an LPI when it has MSI-X
+    /// and the ITS is present, else its INTx SPI (0 = none).
     intid: u32,
+    /// MSI-X capability offset in config space (0 = none), and the BAR
+    /// holding its table.
+    msix_cap: u16 = 0,
+    msix_table_pa: u64 = 0,
     /// Requester id: bus << 8 | slot << 3 | function.
     sid: u32,
 };
@@ -116,16 +122,22 @@ fn probe(slot: u8) void {
     // what makes the latter safe to hand to userspace.
     cfg(u16, slot, 4).* = cfg(u16, slot, 4).* | 0x6;
 
-    // The BAR the virtio common configuration lives in.
+    // The BAR the virtio common configuration lives in, and MSI-X.
     var bar_index: u8 = 0xff;
+    var msix_cap: u16 = 0;
+    var msix_table_pa: u64 = 0;
     if (cfg(u16, slot, 6).* & 0x10 != 0) {
         var ptr: u64 = cfg(u8, slot, 0x34).* & 0xfc;
         var guard: u32 = 0;
         while (ptr != 0 and guard < 48) : (guard += 1) {
             const id = cfg(u8, slot, ptr).*;
-            if (id == 0x09 and cfg(u8, slot, ptr + 3).* == 1) {
+            if (id == 0x09 and cfg(u8, slot, ptr + 3).* == 1 and bar_index == 0xff) {
                 bar_index = cfg(u8, slot, ptr + 4).*;
-                break;
+            } else if (id == 0x11) {
+                msix_cap = @intCast(ptr);
+                const tab = cfg(u32, slot, ptr + 4).*;
+                const bir = tab & 7;
+                if (bir < 6 and bars[bir].len != 0) msix_table_pa = bars[bir].pa + (tab & ~@as(u32, 7));
             }
             ptr = cfg(u8, slot, ptr + 1).* & 0xfc;
         }
@@ -147,10 +159,38 @@ fn probe(slot: u8) void {
         .bar_pa = if (bar_index < 6) bars[bar_index].pa else 0,
         .bar_len = if (bar_index < 6) bars[bar_index].len else 0,
         .intid = intid,
+        .msix_cap = msix_cap,
+        .msix_table_pa = msix_table_pa,
         .sid = @as(u32, slot) << 3,
     };
     count += 1;
     log.info("pci: 00:{d}.0 {x:0>4}:{x:0>4} {t} bar{d}=0x{x}+{d}K intid={d} sid={d}", .{
         slot, vendor, device, kind, devices[count - 1].bar_index, devices[count - 1].bar_pa, devices[count - 1].bar_len >> 10, intid, devices[count - 1].sid,
     });
+}
+
+/// After the ITS is up: every device with MSI-X gets entry 0 of its table
+/// pointed at the ITS doorbell with event 0, the capability enabled, and
+/// an LPI routed to it. The INTx line stays as the fallback for a device
+/// without MSI-X (or a machine without an ITS).
+pub fn setupMsi() void {
+    if (!its.active) return;
+    for (devices[0..count]) |*d| {
+        if (d.msix_cap == 0 or d.msix_table_pa == 0) continue;
+        const lpi = its.route(d.sid) orelse {
+            log.warn("pci: 00:{d}.0 no LPI left; staying on INTx {d}", .{ d.slot, d.intid });
+            continue;
+        };
+        mmu.mapDeviceLive(d.msix_table_pa & ~@as(u64, 0xfff), mem.page_size) catch @panic("pci: msix map");
+        const entry = mem.physToPtr([*]volatile u32, d.msix_table_pa);
+        entry[0] = @truncate(its.translater());
+        entry[1] = @truncate(its.translater() >> 32);
+        entry[2] = 0; // event id
+        entry[3] = 0; // unmasked
+        // Message control: enable, function mask clear.
+        const mc = cfg(u16, d.slot, d.msix_cap + 2);
+        mc.* = (mc.* | 0x8000) & ~@as(u16, 0x4000);
+        log.info("pci: 00:{d}.0 msi-x -> lpi {d} (was intx {d})", .{ d.slot, lpi, d.intid });
+        d.intid = lpi;
+    }
 }

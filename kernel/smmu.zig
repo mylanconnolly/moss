@@ -208,10 +208,12 @@ pub fn attach(idx: u64, ttbr0_pa: u64, asid: u16, who: *anyopaque) void {
     cd[7] = 0;
     asm volatile ("dsb ish");
     const ste = mem.physToPtr([*]volatile u64, strtab_pa + @as(u64, dev.sid) * 64);
-    // dw1 first: S1CIR/S1COR WB, S1CSH inner, NS-EL1. S1STALLD stays 0:
-    // QEMU's model rejects the entry otherwise (the CD's S=0 already
-    // makes faults terminate rather than stall).
-    ste[1] = (1 << 2) | (1 << 4) | (3 << 6);
+    // dw1 first: S1CIR/S1COR WB, S1CSH inner, NS-EL1, PRIVCFG = privileged
+    // (the device may reach the privileged-only ITS doorbell page; every
+    // user page is accessible to privileged transactions too). S1STALLD
+    // stays 0: QEMU's model rejects the entry otherwise (the CD's S=0
+    // already makes faults terminate rather than stall).
+    ste[1] = (1 << 2) | (1 << 4) | (3 << 6) | (@as(u64, 3) << 48);
     ste[2] = 0;
     ste[3] = 0;
     asm volatile ("dsb ish");

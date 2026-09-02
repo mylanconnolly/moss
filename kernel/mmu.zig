@@ -169,6 +169,10 @@ pub const UserPerms = enum {
     data, // RW (EL0+EL1), XN everywhere
     rodata, // R (EL0), no execute anywhere (blob grants)
     device, // MMIO for userspace drivers: Device-nGnRnE, RW, XN
+    /// The ITS doorbell in a driver domain's tables: reachable by the
+    /// domain's devices (privileged transactions, see smmu.attach), not
+    /// by its code (AP = privileged only).
+    msi_doorbell,
 
     fn bits(self: UserPerms) u64 {
         return switch (self) {
@@ -176,6 +180,7 @@ pub const UserPerms = enum {
             .data => attr_normal | sh_inner | af | ng | ap_el0 | pxn | uxn,
             .rodata => attr_normal | sh_inner | af | ng | ap_el0 | ap_ro | pxn | uxn,
             .device => attr_device | af | ng | ap_el0 | pxn | uxn,
+            .msi_doorbell => attr_device | af | ng | pxn | uxn,
         };
     }
 };

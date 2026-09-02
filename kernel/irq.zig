@@ -11,13 +11,27 @@
 const std = @import("std");
 const gic = @import("gic.zig");
 const ipc = @import("ipc.zig");
+const its = @import("its.zig");
 const lock = @import("lock.zig");
 
 const spi_base = 32;
 const max_spis = 256;
+const lpi_base = its.lpi_base;
+const max_lpis = its.max_lpis;
 
 var bindings: [max_spis]?*ipc.Notification = @splat(null);
+var lpi_bindings: [max_lpis]?*ipc.Notification = @splat(null);
 var irq_lock: lock.SpinLock = .{};
+
+fn slot(intid: u32) ?*?*ipc.Notification {
+    if (intid >= spi_base and intid < spi_base + max_spis) return &bindings[intid - spi_base];
+    if (intid >= lpi_base and intid < lpi_base + max_lpis) return &lpi_bindings[intid - lpi_base];
+    return null;
+}
+
+fn isLpi(intid: u32) bool {
+    return intid >= lpi_base;
+}
 
 pub fn init() void {
     ipc.notif_freed_hook = &onNotificationFreed;
@@ -32,31 +46,34 @@ pub const Error = error{
 /// the notification's caps all die it is freed, and onNotificationFreed
 /// severs the binding under the same lock delivery uses.
 pub fn bind(intid: u32, n: *ipc.Notification) Error!void {
-    if (intid < spi_base or intid >= spi_base + max_spis) return Error.OutOfRange;
+    const s = slot(intid) orelse return Error.OutOfRange;
     {
         const daif = irq_lock.lockIrqSave();
         defer irq_lock.unlockRestore(daif);
-        if (bindings[intid - spi_base] != null) return Error.Busy;
-        bindings[intid - spi_base] = n;
+        if (s.* != null) return Error.Busy;
+        s.* = n;
     }
-    gic.enableSpi(intid);
+    if (!isLpi(intid)) gic.enableSpi(intid);
 }
 
+/// Re-enable a level line after the driver serviced the device; LPIs are
+/// messages, nothing to re-enable.
 pub fn ack(intid: u32) Error!void {
-    if (intid < spi_base or intid >= spi_base + max_spis) return Error.OutOfRange;
-    gic.enableSpi(intid);
+    if (slot(intid) == null) return Error.OutOfRange;
+    if (!isLpi(intid)) gic.enableSpi(intid);
 }
 
-/// From the trap handler (IRQs masked): true if the SPI was bound and
-/// delivered.
+/// From the trap handler (IRQs masked): true if the interrupt was bound
+/// and delivered. A level-triggered SPI is masked until acked; an LPI
+/// is an edge and just delivered.
 pub fn deliver(intid: u32) bool {
-    if (intid < spi_base or intid >= spi_base + max_spis) return false;
+    const s = slot(intid) orelse return false;
     const daif = irq_lock.lockIrqSave();
-    const n = bindings[intid - spi_base] orelse {
+    const n = s.* orelse {
         irq_lock.unlockRestore(daif);
         return false;
     };
-    gic.disableSpi(intid);
+    if (!isLpi(intid)) gic.disableSpi(intid);
     irq_lock.unlockRestore(daif);
     ipc.signal(n, 1);
     return true;
@@ -74,6 +91,9 @@ fn onNotificationFreed(n: *ipc.Notification) void {
             b.* = null;
             gic.disableSpi(@intCast(spi_base + i));
         }
+    }
+    for (&lpi_bindings) |*b| {
+        if (b.* == n) b.* = null;
     }
 }
 

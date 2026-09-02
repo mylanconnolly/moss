@@ -2,6 +2,7 @@
 //! from 0x080a0000 with a 0x20000 stride (linear by core index on virt).
 //! CPU interface via ICC system registers. Group 1 only.
 
+const its = @import("its.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
 
@@ -24,6 +25,10 @@ fn gicrRd(cpu: u32, offset: u64) *volatile u32 {
     return mem.physToPtr(*volatile u32, gicr_base + cpu * gicr_stride + offset);
 }
 
+pub fn redistributorBase(cpu: u32) u64 {
+    return gicr_base + cpu * gicr_stride;
+}
+
 fn gicrSgi(cpu: u32, offset: u64) *volatile u32 {
     return mem.physToPtr(*volatile u32, gicr_base + cpu * gicr_stride + 0x1_0000 + offset);
 }
@@ -39,6 +44,7 @@ pub fn initCore(cpu: u32) void {
     // Wake this core's redistributor.
     gicrRd(cpu, 0x14).* = gicrRd(cpu, 0x14).* & ~gicr_waker_processor_sleep;
     while (gicrRd(cpu, 0x14).* & gicr_waker_children_asleep != 0) {}
+    its.initRedistributor(cpu);
 
     // SGIs/PPIs: group 1, highest priority.
     gicrSgi(cpu, 0x80).* = 0xffff_ffff; // IGROUPR0
