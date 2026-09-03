@@ -364,7 +364,15 @@ released the cap in its mailbox — a call's attachment nobody received
 — so a session logged out while attaching its buffer left the buffer
 one ref nobody held. `block`'s death releases the mailbox first, with
 every lock dropped (a cap release may take a channel lock, which comes
-before the run-queue lock). A dying sleeper caught in the tick's hand is *reaped*, not
+before the run-queue lock). And the last window closed by design
+rather than by a failure: when a domain is revoked from another core,
+its running threads die at their safe points while the revoker is
+still walking the cap table, and the last death drains the domain —
+so the reaper could reclaim the table under the revoker. `drained`
+now also requires nobody to be inside `destroy` (a `destroying` flag
+held for its duration), and `finishTeardown` panics if it ever finds
+one there. Self-exit was never exposed: the exiting thread is reaped
+only after its own `destroy` returns. A dying sleeper caught in the tick's hand is *reaped*, not
 merely freed, so its domain's thread count reaches zero. And
 `destroyOne` returns "not freed" for a thread that exited on its own
 core between its guard and its switch (above). The range checks that

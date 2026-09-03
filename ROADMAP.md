@@ -582,7 +582,10 @@ The pooling story stops being theory.
   slot reused under a live ctl cap, the reaper reading a slot after
   freeing it (stealing a fresh domain's death watch), a killed thread
   reaped mid-syscall (kills now wait for a safe point), and a dying
-  sleeper freed without being counted. Drills hang loudly now — 60s
+  sleeper freed without being counted — and, closed by design, the
+  reaper reclaiming a cap table another core was still walking in
+  `destroy` (a domain is drained only once nobody is inside it). Drills
+  hang loudly now — 60s
   without shutdown dumps every thread, domain, notification and a
   lock-free trace ring of lifecycle events, then panics.
 - ✅ **Client death per badge, and unmap** (2026-09-03): a service

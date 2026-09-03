@@ -234,7 +234,9 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   window table's `Mapping.state` is the pattern).
 - After `finishTeardown` a ctl-governed domain's slot may belong to
   someone else the next instant: read what you need first (the reaper
-  learned this by stealing a fresh domain's death watch).
+  learned this by stealing a fresh domain's death watch). A domain is
+  `drained` only when its threads are gone AND nobody is inside
+  `destroy()` — never reclaim on the thread count alone.
 - Sentinels must not collide with valid values (sockets and slots start at
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in

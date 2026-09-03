@@ -149,6 +149,12 @@ pub const Domain = struct {
     /// spawned has no ctl cap and stays dead — they read its state and
     /// exit code afterwards.
     ctl_governed: bool = false,
+    /// Someone is inside destroy(): threads being killed and caps being
+    /// released. A domain does not count as drained until they are done,
+    /// or the reaper could free the cap table under the revoker's feet —
+    /// the killed threads die at their safe points while the revoker is
+    /// still walking the table, and the last death drains the domain.
+    destroying: std.atomic.Value(bool) = .init(false),
     parent: ?*Domain = null,
     /// Start records for extra user threads (thread_create).
     starts: [max_domain_threads]ThreadStart = @splat(.{}),
@@ -644,6 +650,8 @@ pub fn destroy(d: *Domain) void {
     // and only one of them may walk the threads and the cap table.
     if (@cmpxchgStrong(State, &d.state, .alive, .dying, .acq_rel, .acquire) != null) return;
     trace.record(.destroy, d.id, 0);
+    d.destroying.store(true, .release);
+    defer d.destroying.store(false, .release);
     // The subtree dies with the parent: one revocation, transitively.
     for (&domains) |*c| {
         if (c.parent == d and c.state == .alive) destroy(c);
@@ -682,14 +690,17 @@ pub fn debugDump() void {
     }
 }
 
+/// Nothing of the domain runs any more, and nobody is still inside
+/// destroy(): only then may finishTeardown reclaim it.
 pub fn drained(d: *const Domain) bool {
-    return d.threads_alive.load(.acquire) == 0;
+    return d.threads_alive.load(.acquire) == 0 and !d.destroying.load(.acquire);
 }
 
 /// Reclaim address space, page tables, and cap table; verify both quota
 /// accounts return to zero. Call only after destroy() and drained().
 pub fn finishTeardown(d: *Domain) void {
     std.debug.assert(d.state == .dying and drained(d));
+    if (d.destroying.load(.acquire)) std.debug.panic("domain {s}: finishTeardown while destroy() is still running", .{d.name});
     mmu.destroyUserSpace(d.ttbr0_pa, &d.user_mem, &d.kobj, d.asid);
     kalloc.freePage(&d.kobj, @ptrCast(d.captable.?));
     d.captable = null;
