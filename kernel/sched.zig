@@ -67,7 +67,7 @@ const Context = extern struct {
 /// entirely and user FP registers survive syscalls untouched in hardware.
 /// Zero-initialized at spawn: a fresh thread restores zeros and can never
 /// observe another domain's vector registers.
-const FpState = extern struct {
+pub const FpState = extern struct {
     v: [32][16]u8 align(16) = @splat(@splat(0)),
     fpsr: u64 = 0,
     fpcr: u64 = 0,
@@ -808,6 +808,15 @@ pub fn fpSaveCurrent() void {
 pub fn fpRestoreCurrent() void {
     const t = thisCpu().current;
     if (t.user_ttbr0 != 0) __fp_restore(&t.fp);
+}
+
+/// A guest's vector state, kept per vCPU (vm.zig).
+pub fn fpSave(st: *FpState) void {
+    __fp_save(st);
+}
+
+pub fn fpRestore(st: *const FpState) void {
+    __fp_restore(st);
 }
 extern const __thread_trampoline: anyopaque;
 

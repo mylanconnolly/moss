@@ -12,6 +12,7 @@ const std = @import("std");
 const gic = @import("gic.zig");
 const ipc = @import("ipc.zig");
 const its = @import("its.zig");
+const vm = @import("vm.zig");
 const lock = @import("lock.zig");
 
 const spi_base = 32;
@@ -19,11 +20,19 @@ const max_spis = 256;
 const lpi_base = its.lpi_base;
 const max_lpis = its.max_lpis;
 
-var bindings: [max_spis]?*ipc.Notification = @splat(null);
-var lpi_bindings: [max_lpis]?*ipc.Notification = @splat(null);
+/// Where an interrupt goes: a notification (a driver in this kernel's
+/// userspace) or a guest (injected as a virtual SPI by vm.zig).
+const Target = union(enum) {
+    none,
+    notif: *ipc.Notification,
+    guest: struct { token: *anyopaque, vintid: u32 },
+};
+
+var bindings: [max_spis]Target = @splat(.none);
+var lpi_bindings: [max_lpis]Target = @splat(.none);
 var irq_lock: lock.SpinLock = .{};
 
-fn slot(intid: u32) ?*?*ipc.Notification {
+fn slot(intid: u32) ?*Target {
     if (intid >= spi_base and intid < spi_base + max_spis) return &bindings[intid - spi_base];
     if (intid >= lpi_base and intid < lpi_base + max_lpis) return &lpi_bindings[intid - lpi_base];
     return null;
@@ -50,10 +59,29 @@ pub fn bind(intid: u32, n: *ipc.Notification) Error!void {
     {
         const daif = irq_lock.lockIrqSave();
         defer irq_lock.unlockRestore(daif);
-        if (s.* != null) return Error.Busy;
-        s.* = n;
+        if (s.* != .none) return Error.Busy;
+        s.* = .{ .notif = n };
     }
     if (!isLpi(intid)) gic.enableSpi(intid);
+}
+
+/// Route `intid` into a guest as virtual SPI `vintid` (a passed-through
+/// device's interrupt; replaces whatever binding the host held).
+pub fn bindGuest(intid: u32, token: *anyopaque, vintid: u32) Error!void {
+    const s = slot(intid) orelse return Error.OutOfRange;
+    {
+        const daif = irq_lock.lockIrqSave();
+        defer irq_lock.unlockRestore(daif);
+        s.* = .{ .guest = .{ .token = token, .vintid = vintid } };
+    }
+    if (!isLpi(intid)) gic.enableSpi(intid);
+}
+
+pub fn unbindGuest(intid: u32, token: *anyopaque) void {
+    const s = slot(intid) orelse return;
+    const daif = irq_lock.lockIrqSave();
+    defer irq_lock.unlockRestore(daif);
+    if (s.* == .guest and s.guest.token == token) s.* = .none;
 }
 
 /// Re-enable a level line after the driver serviced the device; LPIs are
@@ -69,12 +97,18 @@ pub fn ack(intid: u32) Error!void {
 pub fn deliver(intid: u32) bool {
     const s = slot(intid) orelse return false;
     const daif = irq_lock.lockIrqSave();
-    const n = s.* orelse {
+    const target = s.*;
+    if (target == .none) {
         irq_lock.unlockRestore(daif);
         return false;
-    };
+    }
     if (!isLpi(intid)) gic.disableSpi(intid);
     irq_lock.unlockRestore(daif);
+    if (target == .guest) {
+        vm.injectSpi(target.guest.token, target.guest.vintid);
+        return true;
+    }
+    const n = target.notif;
     ipc.signal(n, 1);
     return true;
 }
@@ -87,13 +121,13 @@ fn onNotificationFreed(n: *ipc.Notification) void {
     irq_lock.lock();
     defer irq_lock.unlock();
     for (&bindings, 0..) |*b, i| {
-        if (b.* == n) {
-            b.* = null;
+        if (b.* == .notif and b.notif == n) {
+            b.* = .none;
             gic.disableSpi(@intCast(spi_base + i));
         }
     }
     for (&lpi_bindings) |*b| {
-        if (b.* == n) b.* = null;
+        if (b.* == .notif and b.notif == n) b.* = .none;
     }
 }
 

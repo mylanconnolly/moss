@@ -11,7 +11,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode };
 
 const Spec = struct {
     name: []const u8,
@@ -43,6 +43,7 @@ const specs = [_]Spec{
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
+    .{ .name = "vmnode", .kind = .vmnode, .pass = "vmnode-test: PASS", .extra = "fabric-test: node 2 joined the fabric via seed 1", .timeout_s = 180 },
     .{
         .name = "fs",
         .kind = .blk,
@@ -156,6 +157,15 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         .net => try args.appendSlice(gpa, &.{
             "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
             "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+        }),
+        // Two NICs on one hub (host node 1, guest node 2) and a second
+        // entropy device for the guest.
+        .vmnode => try args.appendSlice(gpa, &.{
+            "-netdev", "hubport,id=h1,hubid=0",
+            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+            "-netdev", "hubport,id=h2,hubid=0",
+            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h2",
+            "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),
         else => {},
     }

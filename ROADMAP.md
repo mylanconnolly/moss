@@ -494,11 +494,30 @@ The pooling story stops being theory.
   bare-metal guest (`guest/hello.zig`) from the boot archive and runs
   it — hello over a trapped UART, three timer ticks, PSCI power-off —
   nothing leaked. HVF cannot host it (Apple's nested EL2 has no VHE), so
-  guests are TCG-only until real hardware. **Not yet the pooling
-  story:** a Moss kernel as a guest needs a PCIe/virtio device story
-  (emulated virtio-pci in the VMM, or passthrough with SMMU stage 2),
-  GICD/GICR emulation, multiple vCPUs, and PSCI CPU_ON; those are the
-  next cuts, on the same skeleton.
+  guests are TCG-only until real hardware.
+  ✅ **The pooling story** (same day, second and third cuts): a **moss
+  kernel as a guest** (`guest` test: the VMM writes it a devicetree,
+  emulates a PL011 and the GICv3 distributor/redistributor as trapped
+  MMIO, answers PSCI over HVC; the guest boots its own archive, runs
+  root/init/a unit, powers off), then **device passthrough** and a
+  **VM as a fabric node** (`vmnode` test): the machine's second NIC and
+  entropy device are handed to the VMM, which presents them to the
+  guest on an emulated PCIe bus (config space from the real device,
+  BARs virtual and placed by the guest, only the virtio BAR shown);
+  `vm_attach_device` maps the BAR into the guest's stage 2, binds the
+  device's SMMU stream to **stage-2 translation through the guest's
+  tables** (the guest's DMA addresses are IPAs, and nothing else is
+  reachable), and routes its LPI into the guest as a virtual SPI (the
+  guest sees wired INTx; MSI-X stays the host's). The guest runs the
+  same joiner path a physical node does — rngd, netsvc in cluster
+  mode, root of trust, fabric service — joins node 1 as node 2, and a
+  remote spawn placed on it answers an RPC: one box, two pool nodes.
+  A vCPU idling in WFI sleeps in the kernel on a per-VM notification
+  that timer fires and device interrupts signal. Residuals: one vCPU
+  per VM (PSCI CPU_ON refused), the GIC shadow is a register file with
+  no distributor semantics (enough for a guest that only uses the CPU
+  interface), passthrough needs MSI-X on the device (a wired-INTx
+  device would need level emulation), and everything is TCG-only.
 - virtio-gpu and input devices (the graphical console).
 - ✅ **Developer shell and tooling** (done): **msh**, an interactive shell
   over a new virtio-console driver (moss's third virtio device class),

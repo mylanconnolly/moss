@@ -58,8 +58,16 @@ pub fn init(h: dt.PcieHost) void {
 }
 
 pub fn byKind(kind: shared.DeviceKind) ?usize {
+    return nthByKind(kind, 0);
+}
+
+/// The n-th (0-based) enumerated device of a kind.
+pub fn nthByKind(kind: shared.DeviceKind, nth: usize) ?usize {
+    var seen: usize = 0;
     for (devices[0..count], 0..) |d, i| {
-        if (d.kind == kind) return i;
+        if (d.kind != kind) continue;
+        if (seen == nth) return i;
+        seen += 1;
     }
     return null;
 }

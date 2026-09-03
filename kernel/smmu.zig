@@ -225,6 +225,49 @@ pub fn attach(idx: u64, ttbr0_pa: u64, asid: u16, who: *anyopaque) void {
     holder[idx] = who;
 }
 
+/// Bind device `idx`'s stream to a guest: stage-2 translation through
+/// the VM's tables (39-bit IPA, start level 1, 4K, 40-bit PA), stage 1
+/// bypassed — the guest's own DMA addresses are IPAs, and only the
+/// guest's memory is reachable. `who` is the VM.
+pub fn attachStage2(idx: u64, s2_root: u64, vmid: u16, who: *anyopaque) void {
+    if (!active or idx >= pci.count) return;
+    const daif = cmd_lock.lockIrqSave();
+    defer cmd_lock.unlockRestore(daif);
+    const dev = &pci.devices[idx];
+    const ste = mem.physToPtr([*]volatile u64, strtab_pa + @as(u64, dev.sid) * 64);
+    ste[1] = 0;
+    // S2VMID, S2T0SZ 25, S2SL0 1, WB RA/WA, inner shareable, 4K, 40-bit PA,
+    // AArch64 tables, access-flag faults off, record faults.
+    ste[2] = @as(u64, vmid) | (@as(u64, 25) << 32) | (@as(u64, 1) << 38) | (@as(u64, 1) << 40) |
+        (@as(u64, 1) << 42) | (@as(u64, 3) << 44) | (@as(u64, 2) << 48) | (@as(u64, 1) << 51) |
+        (@as(u64, 1) << 53) | (@as(u64, 1) << 58);
+    ste[3] = s2_root & 0x000f_ffff_ffff_fff0;
+    asm volatile ("dsb ish");
+    ste[0] = 1 | (0b110 << 1); // valid, stage 1 bypass / stage 2 translate
+    asm volatile ("dsb ish");
+    issue(.{ 0x03 | (@as(u64, dev.sid) << 32), 1 });
+    sync();
+    holder[idx] = who;
+    log.info("smmu: stream {d} -> stage 2, vmid {d}", .{ dev.sid, vmid });
+}
+
+/// Unbind a guest's device: STE invalid, the VMID's stage-2 TLB entries
+/// dropped, before the VM's tables go away.
+pub fn detachStage2(idx: u64, vmid: u16, who: *anyopaque) void {
+    if (!active or idx >= pci.count) return;
+    const daif = cmd_lock.lockIrqSave();
+    defer cmd_lock.unlockRestore(daif);
+    if (holder[idx] != who) return;
+    holder[idx] = null;
+    const dev = &pci.devices[idx];
+    const ste = mem.physToPtr([*]volatile u64, strtab_pa + @as(u64, dev.sid) * 64);
+    ste[0] = 0;
+    asm volatile ("dsb ish");
+    issue(.{ 0x03 | (@as(u64, dev.sid) << 32), 1 });
+    issue(.{ 0x28 | (@as(u64, vmid) << 32), 0 }); // TLBI_S12_VMALL
+    sync();
+}
+
 /// Unbind device `idx` if `who` is its holder: the STE goes invalid and
 /// the ASID's TLB entries are dropped before the tables can go away.
 pub fn detachIfHolder(idx: u64, who: *anyopaque, asid: u16) void {

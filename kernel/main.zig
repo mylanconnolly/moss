@@ -180,8 +180,16 @@ export fn kmain(dtb_pa: u64) noreturn {
         _ = sched.spawn("guest-test", vmTestWorker, 1, .{}) catch @panic("spawn guest-test");
     }
     if (build_options.guest_kernel) {
-        // This kernel IS the guest: boot the guest profile and report.
-        _ = sched.spawn("boot-watch", guestKernelWorker, 0, .{}) catch @panic("spawn boot-watch");
+        // This kernel IS the guest: a fabric node when its VMM named one
+        // (`node=` in the devicetree it wrote), else the guest profile.
+        if (boot_node != 0) {
+            _ = sched.spawn("boot-watch", fabricTestWorker, boot_node, .{}) catch @panic("spawn boot-watch");
+        } else {
+            _ = sched.spawn("boot-watch", guestKernelWorker, 0, .{}) catch @panic("spawn boot-watch");
+        }
+    }
+    if (build_options.vmnode_test) {
+        _ = sched.spawn("vmnode-test", vmnodeTestWorker, 0, .{}) catch @panic("spawn vmnode-test");
     }
     if (build_options.smmu_test) {
         _ = sched.spawn("smmu-test", smmuTestWorker, 0, .{}) catch @panic("spawn smmu-test");
@@ -747,18 +755,15 @@ fn vmTestWorker(which: u64) void {
     const name: []const u8 = if (which == 1) "guest-test" else "vm-test";
     if (currentEl() != 2) std.debug.panic("{s}: FAIL — the kernel is not an EL2 host", .{name});
     log.info("{s}: starting the VMM ({s})", .{ name, if (which == 1) "a moss kernel as the guest" else "the bare-metal guest" });
-    const vmm = domain.spawn("vmm", .{ .blob = img(.vmm) }, .{
-        .arg = which,
-        .grant_debug_log = true,
-        .grant_bootfs = true,
-        .grant_hypervisor = true,
-        .auto_reap = true,
-        .kobj_limit = 4 << 20,
-        .user_limit = 96 << 20,
-    }) catch |e| std.debug.panic("spawn vmm: {t}", .{e});
+    const vmm = spawnVmm(which);
     var waited: u64 = 0;
     while (vmm.state != .dead) : (waited += 1) {
-        if (waited == 600) std.debug.panic("{s}: FAIL — the guest never powered off", .{name});
+        if (waited == 600) {
+            log.warn("{s}: vm stats: entries {d}, wfi {d}, waits {d}, timer fires {d} injected {d} unmasks {d}, spi injected {d}", .{
+                name, vm.stat_entries, vm.stat_wfi, vm.stat_waits, vm.stat_timer_fires, vm.stat_timer_injected, vm.stat_unmasks, vm.stat_spi_injected,
+            });
+            std.debug.panic("{s}: FAIL — the guest never powered off", .{name});
+        }
         sched.sleep(1);
     }
     if (vmm.exit_code != 0) std.debug.panic("{s}: FAIL — vmm exit {d}", .{ name, vmm.exit_code });
@@ -778,6 +783,85 @@ fn vmTestWorker(which: u64) void {
 /// off through PSCI — which the hypervisor turns into the VMM's exit.
 fn guestKernelWorker(_: u64) void {
     systemDrill("guest");
+}
+
+/// The VMM: log, the boot archive (guest images), the hypervisor cap
+/// (slot 2, after log and its boot channel), and over the boot channel
+/// whatever devices the guest is to own — none for the first two
+/// guests, the second rng and net for a pool node.
+fn spawnVmm(which: u64) *domain.Domain {
+    const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const vmm = domain.spawn("vmm", .{ .blob = img(.vmm) }, .{
+        .arg = which,
+        .grant_debug_log = true,
+        .grant_channel_a = ch,
+        .grant_bootfs = true,
+        .grant_hypervisor = true,
+        .auto_reap = true,
+        .kobj_limit = 8 << 20,
+        .user_limit = 192 << 20,
+    }) catch |e| std.debug.panic("spawn vmm: {t}", .{e});
+    if (which == 2) {
+        bootGiveDeviceNth(ch, .rng, 1);
+        bootGiveDeviceNth(ch, .net, 1);
+    }
+    bootGo(ch);
+    ipc.unrefSide(ch, .b);
+    return vmm;
+}
+
+/// The pool-node drill: this machine is fabric node 1, and a VM on it
+/// is node 2. Node 1 comes up as in the fabric drill (entropy, the
+/// network in cluster mode, root of trust, fabric service, certified
+/// with spawn authority). The VMM gets the machine's second entropy
+/// device and second NIC passed through — BARs in the guest's stage 2,
+/// DMA through it by the SMMU, interrupts injected — and boots a moss
+/// kernel told `node=2`, which runs the same joiner path a physical
+/// node does. PASS when node 2 appears in node 1's membership and a
+/// remote spawn placed on it answers an RPC: one box, two pool nodes.
+fn vmnodeTestWorker(_: u64) void {
+    const frames_before = pmem.stats().free_bytes;
+    if (currentEl() != 2) std.debug.panic("vmnode-test: FAIL — the kernel is not an EL2 host", .{});
+    if (pci.nthByKind(.net, 1) == null or pci.nthByKind(.rng, 1) == null)
+        std.debug.panic("vmnode-test: FAIL — the guest needs a second NIC and a second entropy device on the bus", .{});
+    log.info("vmnode-test: node 1 coming up", .{});
+    _ = spawnRngd(0);
+    const net_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    _ = spawnDevice("netsvc", .net, 1 | (1 << 8), net_ch, .net);
+    sched.sleep(3);
+    const fab_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    _ = domain.spawn("fabsvc", .{ .blob = img(.fabric) }, .{
+        .arg = 1 | (1 << 8),
+        .grant_debug_log = true,
+        .grant_channel_a = fab_ch,
+        .grant_spawner = true,
+        .grant_bootfs = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
+    const root = spawnFabroot(false);
+    const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
+    const pb = mem.physToPtr([*]u8, pathbuf.pages[0]);
+    certifyFabric(root, fab_ch, pathbuf, pb, 1, shared.fab_flag_gossip | shared.fab_flag_spawn, ~@as(u64, 0), deriveNetView(net_ch, 0, 0, 0));
+
+    log.info("vmnode-test: starting the VMM with the second NIC and entropy device passed through; the guest is node 2", .{});
+    const vmm = spawnVmm(2);
+
+    if (!waitMember(fab_ch, pb, 2, true, 1200)) {
+        if (vmm.state == .dead) log.warn("vmnode-test: the VMM died with exit {d}", .{vmm.exit_code});
+        log.warn("vmnode-test: vm stats: entries {d}, wfi {d}, waits {d}, timer fires {d} injected {d} unmasks {d}, spi injected {d}", .{
+            vm.stat_entries, vm.stat_wfi, vm.stat_waits, vm.stat_timer_fires, vm.stat_timer_injected, vm.stat_unmasks, vm.stat_spi_injected,
+        });
+        std.debug.panic("vmnode-test: FAIL — the guest never joined the fabric", .{});
+    }
+    log.info("vmnode-test: the guest joined the fabric as node 2 — a VM is a pool node", .{});
+    const placed = remoteSpawnRpc(fab_ch, 2) orelse std.debug.panic("vmnode-test: FAIL — spawn on the guest node failed", .{});
+    if (placed.node != 2) std.debug.panic("vmnode-test: FAIL — spawn landed on node {d}", .{placed.node});
+    log.info("vmnode-test: remote spawn landed on node 2 (inside the VM) and answered an RPC", .{});
+    // The VM stays up (a pool node is not a drill that ends), so the
+    // leak bar is the other VM tests' job.
+    _ = frames_before;
+    log.info("vmnode-test: PASS — one box, two pool nodes: a moss guest with passed-through devices joined the fabric and ran a remote spawn", .{});
+    psci.systemOff();
 }
 
 var boot_node: u64 = 0;
@@ -806,7 +890,11 @@ var its_reg: ?dt.Reg = null;
 /// Hand a device of the given kind (the first enumerated) to a program
 /// over its boot channel, filed under its kind.
 fn bootGiveDevice(boot_ch: *ipc.Channel, kind: shared.DeviceKind) void {
-    const idx = pci.byKind(kind) orelse std.debug.panic("no {t} device on the bus", .{kind});
+    bootGiveDeviceNth(boot_ch, kind, 0);
+}
+
+fn bootGiveDeviceNth(boot_ch: *ipc.Channel, kind: shared.DeviceKind, nth: usize) void {
+    const idx = pci.nthByKind(kind, nth) orelse std.debug.panic("no {t} device #{d} on the bus", .{ kind, nth });
     const res = ipc.call(boot_ch, .{
         .data = shared.encodeMsg(shared.BootReq, .{ .cap = .{ .tag = @intFromEnum(shared.CapTag.device), .kind = @intFromEnum(kind) } }),
         .cap_type = @intFromEnum(cap.CapType.device),

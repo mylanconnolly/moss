@@ -61,7 +61,7 @@ pub const Dev = struct {
     notify_off: [max_queues]u16 = @splat(0),
     /// The kernel enabled MSI-X (vector 0 -> the device's LPI); the
     /// driver points the config and every queue at that vector.
-    has_msix: bool = false,
+    msix_ctrl: u16 = 0, // the MSI-X message control word, 0 without the capability
 
     /// Map the device and locate its virtio structures; null when the
     /// cap is not a device or the device is not a modern virtio function
@@ -76,7 +76,7 @@ pub const Dev = struct {
         var guard: u32 = 0;
         while (ptr != 0 and guard < 48) : (guard += 1) {
             const id = d.cfgRead8(ptr);
-            if (id == cap_msix and d.cfgRead16(ptr + 2) & 0x8000 != 0) d.has_msix = true;
+            if (id == cap_msix) d.msix_ctrl = d.cfgRead16(ptr + 2);
             if (id == 0x09) {
                 const ctype = d.cfgRead8(ptr + 3);
                 const bar = d.cfgRead8(ptr + 4);
@@ -99,6 +99,12 @@ pub const Dev = struct {
         }
         if (d.common == 0 or d.notify_base == 0 or d.isr == 0) return null;
         return d;
+    }
+
+    /// MSI-X enabled by the kernel: the driver points config and queues
+    /// at vector 0.
+    pub fn hasMsix(d: *const Dev) bool {
+        return d.msix_ctrl & 0x8000 != 0;
     }
 
     // ---- PCI configuration space
@@ -156,7 +162,7 @@ pub const Dev = struct {
         d.c32(c_driver_feature).* = hi;
         d.setStatus(status_ack | status_driver | status_features_ok);
         if (d.status() & status_features_ok == 0) return null;
-        if (d.has_msix) d.c16(c_msix_config).* = 0;
+        if (d.hasMsix()) d.c16(c_msix_config).* = 0;
         return .{ .lo = lo, .hi = hi };
     }
 
@@ -178,7 +184,7 @@ pub const Dev = struct {
         d.c32(c_queue_device).* = @truncate(device);
         d.c32(c_queue_device + 4).* = @truncate(device >> 32);
         d.notify_off[idx] = d.c16(c_queue_notify_off).*;
-        if (d.has_msix) d.c16(c_queue_msix_vector).* = 0;
+        if (d.hasMsix()) d.c16(c_queue_msix_vector).* = 0;
         d.c16(c_queue_enable).* = 1;
         return true;
     }

@@ -1258,12 +1258,75 @@ bare-metal EL1 program with its own vectors, linked at the RAM base,
 raw binary) into it and runs the loop: UART stores (IPA 0x09000000)
 become `guest>` log lines, WFI sleeps a tick, PSCI power-off ends it.
 The guest says hello, counts three ticks, powers off; the VMM exits 0
-only then. What this is not yet: the pooling story. A Moss kernel as a
-guest needs devices (emulated virtio-pci in the VMM, or passthrough
-with the SMMU's stage 2), GICD/GICR emulation, several vCPUs and PSCI
-CPU_ON; the skeleton — exits as messages to a userspace monitor, VM
-memory as an owned object, the cap as the authority — is the one those
-build on. Guests run under TCG only: HVF's nested EL2 has no VHE.
+only then.
+
+**A moss kernel as a guest (as built, 2026-09-02).** The VMM's second
+mode loads `img/moss-guest` — the same kernel, built to boot the
+`guest` profile from its own archive (which lacks only the guest kernel
+itself), packed into the host's archive — by the Linux Image protocol at
+RAM+0x80000, writes it a flattened devicetree (memory, `chosen`
+bootargs, PSCI with `method = "hvc"`, and for a pool node the PCIe host
+below), and emulates what a kernel boot touches: a PL011 whose data
+register becomes `guest|` log lines, and the GICv3 distributor and one
+redistributor as a plain register file (writes remembered, reads given
+back, WAKER reporting the core awake) — enough for a guest that takes
+its interrupts through the (virtual) CPU interface, which needs no
+distributor semantics for list-register injection. PSCI over HVC is
+answered in the hypervisor like the trapped SMC: VERSION, SYSTEM_OFF an
+exit, CPU_ON refused with INVALID_PARAMETERS so the guest's SMP
+bring-up stops at one core without complaint. The EL1 kernel ticks on
+the virtual timer (PPI 27) precisely so that a hypervisor can hand it
+the real one; a vCPU idling in WFI sleeps in the kernel on a per-VM
+notification that timer fires and device interrupts signal (`vm.run`
+loops; the VMM never sees the idle).
+
+**Device passthrough and the pool node (as built, 2026-09-02).** The
+VMM's third mode is handed devices over its boot channel and presents
+them to the guest on an emulated PCIe bus (ECAM at IPA 0x3f000000, a
+32-bit MMIO window, INTx base SPI 3 in the guest's devicetree): config
+space reads come from the real device's config page (the cap's), the
+command register is read-only, only the virtio BAR exists and it is
+virtual — sized from the real one, placed by the guest — and when the
+guest writes its address the VMM calls `vm_attach_device`. That maps
+the BAR's pages into the guest's stage 2 (device attributes), binds
+the device's SMMU stream to **stage 2** (`smmu.attachStage2`: STE
+config 0b110, VTTB = the VM's tables, VMID = the VM's, S2R recording
+faults), and routes the device's LPI into the guest (`irq.bindGuest`
+→ `vm.injectSpi`: a pending bit, the VM's notification, an SGI to the
+core running the vCPU; the next entry puts the virtual SPI in a free
+list register, no duplicate while the guest holds one — a virtio driver
+drains its device anyway). The guest sees wired INTx (its devicetree's
+INTx rotation, the same formula its kernel uses) while the real device
+keeps the host's MSI-X: the guest's transport sees the capability
+enabled and points config and queues at vector 0, whose message the
+host routed to an LPI. The MSI write is DMA too, so the ITS doorbell
+page is in every VM's stage 2 at itself. The guest kernel's DMA
+addresses are IPAs (it finds no SMMU in its devicetree), which is
+exactly what stage 2 translates: a passed-through device reaches the
+guest's memory and nothing else. The `vmnode` test: node 1 comes up on
+the machine's first NIC and entropy device; the VMM gets the second of
+each; the guest, told `node=2`, runs the same joiner path a physical
+node does, joins node 1, and a remote spawn placed on it answers an
+RPC. One box, two pool nodes.
+
+Lessons, each bought by a symptom: (1) VMPIDR_EL2 must be set — a
+kernel guest parks every core but affinity 0, and it read the physical
+core the VMM thread landed on. (2) HCR_EL2.DC forces the guest's stage
+1 off; the high-half kernel entry became an address-size fault on a
+"physical" address of 0xffffff80.... (3) Masking a fired virtual timer
+with IMASK needs the host to lift the mask once the guest has moved its
+compare value — a kernel rearms the countdown and never rewrites the
+control register — and to do it at *exit*, on the core the timer lives
+on: the first cut unmasked at entry only, and the vCPU's idle wait
+blocked with the timer masked, four ticks in sixty seconds. (4) SP_EL0
+must be restored on entry: a guest interrupted in user code otherwise
+resumes on the VMM's user stack — two services died at PC 0 at once,
+and a struct copied by value lost a field. (5) The guest's vector
+registers are per-vCPU state; the VMM's own NEON between runs clobbered
+them mid-memcpy. (6) QEMU's virtio completes a request synchronously
+with the kick, so a passthrough can *seem* to work with no interrupt
+path at all; the LPI-to-SPI injection was proven only by a driver that
+waited. Guests run under TCG only: HVF's nested EL2 has no VHE.
 
 ## Zig conventions
 

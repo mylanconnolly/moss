@@ -58,6 +58,7 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .vm_create => sysVmCreate(d, frame),
         .vm_run => sysVmRun(d, frame),
         .vm_set => sysVmSet(d, frame),
+        .vm_attach_device => sysVmAttachDevice(d, frame),
         .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
         .dma_alloc => sysDmaAlloc(d, frame),
@@ -136,6 +137,16 @@ fn sysVmRun(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     frame.regs[3] = exit.b;
     frame.regs[4] = exit.c;
     frame.regs[5] = exit.d;
+    return errno(.ok);
+}
+
+fn sysVmAttachDevice(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
+    const dh: shared.Handle = @bitCast(frame.regs[1]);
+    const idx = d.captable.?.lookup(dh, .device) orelse return errno(.bad_handle);
+    const bar_ipa = frame.regs[2];
+    if (bar_ipa % 4096 != 0 or frame.regs[3] < 32 or frame.regs[3] >= 96) return errno(.bad_arg);
+    vm.attachDevice(m, idx, bar_ipa, @intCast(frame.regs[3])) catch return errno(.no_space);
     return errno(.ok);
 }
 

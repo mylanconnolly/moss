@@ -122,6 +122,11 @@ pub const Syscall = enum(u64) {
     vm_run = 34,
     /// vm_set(vm_handle, pc, x0): the vCPU's entry point and first argument.
     vm_set = 35,
+    /// vm_attach_device(vm_handle, device_handle, bar_ipa, vintid): pass a
+    /// device through to the guest — its BAR mapped at bar_ipa in the
+    /// guest's stage 2, its DMA translated through the guest's stage 2 by
+    /// the SMMU, its interrupt injected as virtual SPI `vintid`.
+    vm_attach_device = 36,
     _,
 };
 

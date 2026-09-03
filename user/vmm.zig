@@ -15,6 +15,7 @@
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const boot = @import("boot.zig");
 
 comptime {
     asm (
@@ -40,11 +41,37 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-// Grants: log in x0, the hypervisor cap at slot 1, the archive in x3/x4.
-const hyp_h: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
+// Grants: log in x0, the boot channel in x1, the hypervisor cap at slot
+// 2, the archive in x3/x4; devices to pass through arrive over the boot
+// channel.
+const hyp_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 const uart_base: u64 = 0x0900_0000;
 const gicd_base: u64 = 0x0800_0000;
 const gicr_base: u64 = 0x080a_0000;
+/// The guest's PCIe: ECAM and a 32-bit MMIO window, as its devicetree says.
+const ecam_base: u64 = 0x3f00_0000;
+const intx_base: u32 = 3; // INTA of slot 0 is SPI 3, rotating per slot
+
+/// A device passed through: its real config space (read through the
+/// cap's config page), a virtual BAR the guest places, and the virtual
+/// SPI its interrupts arrive on. Only the virtio BAR is shown; the
+/// others (the MSI-X table's) read as absent. MSI-X itself stays
+/// visible and enabled: the guest's transport then points the queues at
+/// vector 0, whose message the host already routed to an LPI that the
+/// hypervisor injects here.
+const PtDev = struct {
+    dev_h: u64 = 0,
+    cfg: u64 = 0, // config page va
+    bar_index: u64 = 0,
+    bar_len: u64 = 0,
+    bar_low: u32 = 0, // what the guest wrote (address or all-ones)
+    bar_high: u32 = 0,
+    attached: bool = false,
+    slot: u8 = 0,
+};
+var ptdevs: [2]PtDev = @splat(.{});
+var nptdevs: usize = 0;
+var vm_handle: u64 = 0;
 
 var log_h: u64 = 0;
 var line: [256]u8 = undefined;
@@ -59,22 +86,39 @@ var moss_guest = false;
 var gicd: [0x1_0000]u8 align(8) = @splat(0);
 var gicr: [0x2_0000]u8 align(8) = @splat(0);
 
-export fn umain(log_handle: u64, _: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
+export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     log_h = log_handle;
-    moss_guest = arg == 1;
+    moss_guest = arg >= 1;
+    const setup = boot.take(chan_h);
+    _ = usys.capDrop(chan_h);
+    if (arg == 2) {
+        // A pool node: the devices its spawner handed over, in slots 1, 2.
+        for ([_]shared.DeviceKind{ .rng, .net }) |k| {
+            const h = setup.device(k);
+            if (h == 0) {
+                _ = usys.log(log_h, "vmm: a pool node needs an entropy device and a NIC to pass through");
+                usys.exit(137);
+            }
+            const mm = usys.mmioMap(h);
+            if (mm.err != .ok) usys.exit(138);
+            ptdevs[nptdevs] = .{ .dev_h = h, .cfg = mm.data[2], .bar_index = mm.data[3], .bar_len = mm.data[1], .slot = @intCast(nptdevs + 1) };
+            nptdevs += 1;
+        }
+    }
     const blob: []const u8 = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
     const image = shared.marcFind(blob, if (moss_guest) "img/moss-guest" else "img/guest-hello") orelse {
         _ = usys.log(log_h, "vmm: guest image missing from the boot archive");
         usys.exit(130);
     };
 
-    const ram_pages: u64 = if (moss_guest) 16384 else 2048; // 64M / 8M
+    const ram_pages: u64 = if (moss_guest) 32768 else 2048; // 128M / 8M
     const c = usys.vmCreate(hyp_h, ram_pages);
     if (c.err != .ok) {
         _ = usys.log(log_h, "vmm: vm_create refused");
         usys.exit(131);
     }
     const vm_h = c.data[0];
+    vm_handle = vm_h;
     const ram: [*]u8 = @ptrFromInt(c.data[1]);
     var entry: u64 = shared.vm_ram_ipa;
     var x0: u64 = 0;
@@ -82,7 +126,7 @@ export fn umain(log_handle: u64, _: u64, arg: u64, blob_va: u64, blob_len: u64) 
         // Linux Image protocol: text at RAM + 0x80000, DTB pointer in x0.
         @memcpy(ram[0x80000 .. 0x80000 + image.len], image);
         const dtb_off = ram_pages * 4096 - 0x1_0000;
-        const n = writeDtb(ram[dtb_off .. dtb_off + 0x1000], ram_pages * 4096);
+        const n = writeDtb(ram[dtb_off .. dtb_off + 0x1000], ram_pages * 4096, arg == 2);
         if (n == 0) usys.exit(136);
         entry = shared.vm_ram_ipa + 0x80000;
         x0 = shared.vm_ram_ipa + dtb_off;
@@ -140,9 +184,88 @@ fn mmioWrite(ipa: u64, size: u64, v: u64) void {
         var val = v;
         if (ipa - gicr_base == 0x14) val &= ~@as(u64, 4); // WAKER: children awake
         store(&gicr, ipa - gicr_base, size, val);
+    } else if (ipa >= ecam_base and ipa < ecam_base + 0x100_0000) {
+        ecamWrite(ipa - ecam_base, size, v);
     } else {
-        _ = usys.log(log_h, "vmm: guest wrote an address it does not have; ignored");
+        var msg: [96]u8 = undefined;
+        var n: usize = 0;
+        n = put(&msg, n, "vmm: guest wrote an address it does not have (0x");
+        n = putHex(&msg, n, ipa);
+        n = put(&msg, n, "); ignored");
+        _ = usys.log(log_h, msg[0..n]);
     }
+}
+
+// ------------------------------------------------ PCI config emulation
+
+fn ptBySlot(slot: u64) ?*PtDev {
+    for (ptdevs[0..nptdevs]) |*p| {
+        if (p.slot == slot) return p;
+    }
+    return null;
+}
+
+fn cfgRead32(p: *const PtDev, off: u64) u32 {
+    return @as(*volatile u32, @ptrFromInt(p.cfg + (off & ~@as(u64, 3)))).*;
+}
+
+/// Config space of the emulated bus: the passed-through devices' real
+/// registers, except their BARs (virtual: sized from the real one, placed
+/// by the guest) and the command register (writes ignored — the host set
+/// it up).
+fn ecamRead(off: u64, size: u64) u64 {
+    const slot = off >> 15;
+    const reg = off & 0xfff;
+    const p = ptBySlot(slot) orelse return if (size == 8) 0xffff_ffff_ffff_ffff else (@as(u64, 1) << @intCast(size * 8)) - 1;
+    var word: u32 = cfgRead32(p, reg);
+    if (reg >= 0x10 and reg < 0x28) {
+        const bar = (reg - 0x10) / 4;
+        if (bar == p.bar_index) {
+            const size_mask: u32 = @truncate(~(p.bar_len - 1));
+            word = if (p.bar_low == 0xffff_ffff) size_mask | (cfgRead32(p, reg) & 0xf) else p.bar_low | (cfgRead32(p, reg) & 0xf);
+        } else if (bar == p.bar_index + 1 and cfgRead32(p, 0x10 + p.bar_index * 4) & 0x4 != 0) {
+            word = if (p.bar_low == 0xffff_ffff) 0xffff_ffff else p.bar_high;
+        } else {
+            word = 0;
+        }
+    }
+    const shift: u6 = @intCast((reg & 3) * 8);
+    const v: u64 = @as(u64, word) >> shift;
+    return v & ((@as(u64, 1) << @intCast(size * 8)) - 1);
+}
+
+fn ecamWrite(off: u64, size: u64, v: u64) void {
+    const slot = off >> 15;
+    const reg = off & 0xfff;
+    const p = ptBySlot(slot) orelse return;
+    if (size != 4 or reg < 0x10 or reg >= 0x28) return; // only BARs take effect
+    const bar = (reg - 0x10) / 4;
+    if (bar == p.bar_index) {
+        p.bar_low = @truncate(v);
+        // An address, not the sizing pattern nor the flag bits alone.
+        if (p.bar_low != 0xffff_ffff and (p.bar_low & ~@as(u32, 0xf)) != 0 and !p.attached) attach(p);
+    } else if (bar == p.bar_index + 1) {
+        p.bar_high = @truncate(v);
+    }
+}
+
+/// The guest placed the BAR: map it there in the guest's stage 2, route
+/// the device's DMA through that stage 2, and its interrupt to the SPI
+/// the guest's devicetree gives this slot.
+fn attach(p: *PtDev) void {
+    const ipa = (@as(u64, p.bar_high) << 32) | (p.bar_low & ~@as(u32, 0xf));
+    const vintid: u64 = 32 + intx_base + ((@as(u64, p.slot) + 1 - 1) % 4);
+    if (usys.vmAttachDevice(vm_handle, p.dev_h, ipa, vintid) != .ok) {
+        _ = usys.log(log_h, "vmm: passing a device through failed");
+        usys.exit(139);
+    }
+    p.attached = true;
+    var msg: [96]u8 = undefined;
+    var n: usize = 0;
+    n = put(&msg, n, "vmm: device passed through to the guest: BAR at IPA 0x");
+    n = putHex(&msg, n, ipa);
+    n = put(&msg, n, ", DMA and interrupt routed");
+    _ = usys.log(log_h, msg[0..n]);
 }
 
 fn mmioRead(ipa: u64, size: u64) u64 {
@@ -152,6 +275,8 @@ fn mmioRead(ipa: u64, size: u64) u64 {
         return load(&gicd, ipa - gicd_base, size);
     } else if (ipa >= gicr_base and ipa < gicr_base + gicr.len) {
         return load(&gicr, ipa - gicr_base, size);
+    } else if (ipa >= ecam_base and ipa < ecam_base + 0x100_0000) {
+        return ecamRead(ipa - ecam_base, size);
     }
     return 0;
 }
@@ -191,9 +316,11 @@ fn uartByte(b: u8) void {
 // ---------------------------------------------------------- devicetree
 
 /// A flattened devicetree for the moss guest: memory, bootargs, PSCI
-/// over HVC. Returns the bytes written (0 = the buffer was too small).
-fn writeDtb(buf: []u8, ram_bytes: u64) usize {
-    const strings = "#address-cells\x00#size-cells\x00reg\x00device_type\x00bootargs\x00compatible\x00method\x00";
+/// over HVC, and for a pool node the PCIe host (ECAM, MMIO window, INTx
+/// base) its passed-through devices sit behind. Returns the bytes
+/// written (0 = the buffer was too small).
+fn writeDtb(buf: []u8, ram_bytes: u64, node: bool) usize {
+    const strings = "#address-cells\x00#size-cells\x00reg\x00device_type\x00bootargs\x00compatible\x00method\x00ranges\x00interrupt-map\x00";
     const s_addr = 0;
     const s_size = 15;
     const s_reg = 27;
@@ -201,6 +328,8 @@ fn writeDtb(buf: []u8, ram_bytes: u64) usize {
     const s_bootargs = 43;
     const s_compat = 52;
     const s_method = 63;
+    const s_ranges = 70;
+    const s_intmap = 77;
     var w = Writer{ .buf = buf, .pos = 40 };
     w.word(1); // BEGIN_NODE
     w.str("");
@@ -219,8 +348,25 @@ fn writeDtb(buf: []u8, ram_bytes: u64) usize {
     w.word(2); // END_NODE
     w.word(1);
     w.str("chosen");
-    w.propStr(s_bootargs, "profile=guest");
+    w.propStr(s_bootargs, if (node) "node=2" else "profile=guest");
     w.word(2);
+    if (node) {
+        w.word(1);
+        w.str("pcie@3f000000");
+        w.propStr(s_compat, "pci-host-ecam-generic");
+        w.prop(s_reg, 16);
+        w.word(0);
+        w.word(@truncate(ecam_base));
+        w.word(0);
+        w.word(0x100_0000);
+        // One range: 32-bit memory, 0x10000000 + 0x2eff0000, identity.
+        w.prop(s_ranges, 28);
+        for ([_]u32{ 0x0200_0000, 0, 0x1000_0000, 0, 0x1000_0000, 0, 0x2eff_0000 }) |c| w.word(c);
+        // One interrupt-map entry: slot 0 INTA -> SPI intx_base.
+        w.prop(s_intmap, 40);
+        for ([_]u32{ 0, 0, 0, 1, 0, 0, 0, 0, intx_base, 4 }) |c| w.word(c);
+        w.word(2);
+    }
     w.word(1);
     w.str("psci");
     w.propStr(s_compat, "arm,psci-1.0");

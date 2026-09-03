@@ -33,13 +33,29 @@ const lock = @import("lock.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
 const pmem = @import("pmem.zig");
+const ipc = @import("ipc.zig");
+const irq = @import("irq.zig");
+const its = @import("its.zig");
+const pci = @import("pci.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
+const smmu = @import("smmu.zig");
 const trap = @import("trap.zig");
 
 pub const max_vms = 4;
 pub const ram_ipa: u64 = 0x4000_0000;
-pub const max_ram_pages = 16384; // 64M
+pub const max_ram_pages = 32768; // 128M
+pub const max_vm_devices = 4;
+
+/// Counters for the drills' post-mortems.
+pub var stat_entries: u64 = 0;
+pub var stat_timer_fires: u64 = 0;
+pub var stat_timer_injected: u64 = 0;
+pub var stat_spi_injected: u64 = 0;
+pub var stat_waits: u64 = 0;
+pub var stat_wfi: u64 = 0;
+pub var stat_unmasks: u64 = 0;
+pub var stat_spi_delivered: u64 = 0;
 const vtimer_ppi: u32 = 27;
 
 pub const Exit = struct {
@@ -85,8 +101,11 @@ pub const Vcpu = extern struct {
     tpidr_el0: u64 = 0,
     tpidrro_el0: u64 = 0,
     vmcr: u64 = 0,
+    ap1r0: u64 = 0,
     lr: [4]u64 = @splat(0),
     timer_pending: bool = false,
+    /// Virtual SPIs 32..95 waiting for a list register (bit = vintid-32).
+    spi_pending: u64 = 0,
     /// The host masked the guest's virtual timer (IMASK) when it fired;
     /// the mask lifts at the next entry once the guest has moved the
     /// compare value (its handler rearmed it) — a kernel guest never
@@ -101,6 +120,9 @@ pub const Vcpu = extern struct {
     exit_b: u64 = 0,
     exit_c: u64 = 0,
     exit_d: u64 = 0,
+    /// The guest's vector registers: live while it runs, kept here across
+    /// exits — the VMM's own code between runs uses NEON too.
+    fp: sched.FpState = .{},
 };
 
 pub const Vm = struct {
@@ -114,8 +136,17 @@ pub const Vm = struct {
     running: std.atomic.Value(bool) = .init(false),
     kobj: ?*kalloc.Account = null,
     user_mem: ?*kalloc.Account = null,
+    /// Signaled whenever something becomes injectable (timer, device):
+    /// what a vCPU idling in WFI waits for.
+    notif: ?*ipc.Notification = null,
+    /// The core a run is on, to kick it when a device interrupt arrives.
+    run_core: u32 = 0,
+    devices: [max_vm_devices]VmDevice = @splat(.{}),
+    ndevices: usize = 0,
     vcpu: Vcpu = .{},
 };
+
+pub const VmDevice = struct { idx: u64 = 0, bar_ipa: u64 = 0, vintid: u32 = 0, intid: u32 = 0 };
 
 var vms: [max_vms]Vm = @splat(.{});
 var vms_lock: lock.SpinLock = .{};
@@ -157,15 +188,50 @@ pub fn create(owner: *anyopaque, kobj: *kalloc.Account, user_mem: *kalloc.Accoun
     vm.s2_root = mem.virtToPhys(@intFromPtr(root));
     errdefer freeTables(vm);
     for (0..pages) |i| {
-        s2Map(vm, ram_ipa + i * mem.page_size, pa + i * mem.page_size) catch return Error.OutOfFrames;
+        s2Map(vm, ram_ipa + i * mem.page_size, pa + i * mem.page_size, s2_page) catch return Error.OutOfFrames;
     }
+    // A passed-through device signals by writing the ITS doorbell — DMA
+    // through the guest's stage 2, so the doorbell is there, at itself.
+    if (its.active) s2Map(vm, its.doorbellPage(), its.doorbellPage(), s2_device) catch return Error.OutOfFrames;
+    vm.notif = ipc.createNotification() catch return Error.OutOfFrames;
     asm volatile ("dsb ish");
     return vm;
 }
 
+/// Pass device `idx` through: its BAR at `bar_ipa` in the guest's stage
+/// 2, its DMA through the guest's stage 2, its interrupt as virtual SPI
+/// `vintid`.
+pub fn attachDevice(vm: *Vm, idx: u64, bar_ipa: u64, vintid: u32) Error!void {
+    if (vm.ndevices == max_vm_devices or idx >= pci.count) return Error.OutOfFrames;
+    const dev = &pci.devices[idx];
+    const pages = (dev.bar_len + mem.page_size - 1) / mem.page_size;
+    for (0..pages) |i| {
+        s2Map(vm, bar_ipa + i * mem.page_size, dev.bar_pa + i * mem.page_size, s2_device) catch return Error.OutOfFrames;
+    }
+    asm volatile ("dsb ish");
+    smmu.attachStage2(idx, vm.s2_root, vm.vmid, @ptrCast(vm));
+    irq.bindGuest(dev.intid, @ptrCast(vm), vintid) catch return Error.OutOfFrames;
+    vm.devices[vm.ndevices] = .{ .idx = idx, .bar_ipa = bar_ipa, .vintid = vintid, .intid = dev.intid };
+    vm.ndevices += 1;
+}
+
+/// A passed-through device's interrupt (from irq.deliver, IRQs masked):
+/// pend the virtual SPI, wake an idling vCPU, kick a running one.
+pub fn injectSpi(token: *anyopaque, vintid: u32) void {
+    const vm: *Vm = @ptrCast(@alignCast(token));
+    if (vintid < 32 or vintid >= 96) return;
+    if (stat_spi_delivered < 3) log.info("vm: device interrupt -> guest spi {d}", .{vintid});
+    stat_spi_delivered += 1;
+    _ = @atomicRmw(u64, &vm.vcpu.spi_pending, .Or, @as(u64, 1) << @intCast(vintid - 32), .acq_rel);
+    if (vm.notif) |n| ipc.signal(n, 1);
+    if (vm.running.load(.acquire) and vm.run_core != sched.thisCpu().id) gic.sendSgi(vm.run_core);
+}
+
 // Stage-2 descriptors: normal WB (MemAttr 0b1111), RW (S2AP 0b11), inner
-// shareable, accessed; executable (XN = 0).
+// shareable, accessed; executable (XN = 0). Device pages: Device-nGnRnE
+// (MemAttr 0), execute-never.
 const s2_page: u64 = 3 | (0b1111 << 2) | (0b11 << 6) | (0b11 << 8) | (1 << 10);
+const s2_device: u64 = 3 | (0b11 << 6) | (1 << 10) | (@as(u64, 1) << 54);
 
 fn s2Entry(table_pa: u64, idx: u64) *volatile u64 {
     return &mem.physToPtr([*]volatile u64, table_pa)[idx];
@@ -181,10 +247,10 @@ fn s2Walk(vm: *Vm, table_pa: u64, idx: u64) !u64 {
 }
 
 /// 39-bit IPA space (VTCR.T0SZ = 25), three levels from level 1.
-fn s2Map(vm: *Vm, ipa: u64, pa: u64) !void {
+fn s2Map(vm: *Vm, ipa: u64, pa: u64, desc: u64) !void {
     const l2 = try s2Walk(vm, vm.s2_root, (ipa >> 30) & 0x1ff);
     const l3 = try s2Walk(vm, l2, (ipa >> 21) & 0x1ff);
-    s2Entry(l3, (ipa >> 12) & 0x1ff).* = pa | s2_page;
+    s2Entry(l3, (ipa >> 12) & 0x1ff).* = pa | desc;
 }
 
 fn freeTables(vm: *Vm) void {
@@ -210,6 +276,14 @@ fn freeTables(vm: *Vm) void {
 pub fn destroy(vm: *Vm) void {
     if (!vm.active) return;
     while (vm.running.load(.acquire)) std.atomic.spinLoopHint();
+    for (vm.devices[0..vm.ndevices]) |d| {
+        irq.unbindGuest(d.intid, @ptrCast(vm));
+        smmu.detachStage2(d.idx, vm.vmid, @ptrCast(vm));
+    }
+    if (vm.notif) |n| {
+        vm.notif = null;
+        ipc.unrefNotification(n);
+    }
     // Stage-2 TLB entries for this VMID: gone before the frames are.
     asm volatile (
         \\dsb ish
@@ -323,13 +397,33 @@ fn loadVgic(v: *Vcpu) void {
             for (&v.lr) |*lr| {
                 if ((lr.* >> 62) == 0) {
                     lr.* = (@as(u64, 1) << 62) | (@as(u64, 1) << 60) | @as(u64, vtimer_ppi); // pending, group 1
+                    stat_timer_injected += 1;
                     break;
                 }
             }
         }
         v.timer_pending = false;
     }
+    // Device interrupts: one list register each, no duplicates while the
+    // guest still has that one in hand (it drains its device anyway).
+    while (@atomicLoad(u64, &v.spi_pending, .acquire) != 0) {
+        const bit: u6 = @intCast(@ctz(@atomicLoad(u64, &v.spi_pending, .acquire)));
+        const vintid: u64 = 32 + @as(u64, bit);
+        var present = false;
+        var free: ?*u64 = null;
+        for (&v.lr) |*lr| {
+            if (lr.* & 0xffff_ffff == vintid and (lr.* >> 62) != 0) present = true;
+            if ((lr.* >> 62) == 0 and free == null) free = lr;
+        }
+        if (!present) {
+            const lr = free orelse break; // no room: stays pending
+            lr.* = (@as(u64, 1) << 62) | (@as(u64, 1) << 60) | vintid;
+            stat_spi_injected += 1;
+        }
+        _ = @atomicRmw(u64, &v.spi_pending, .And, ~(@as(u64, 1) << bit), .acq_rel);
+    }
     msr("ich_vmcr_el2", v.vmcr);
+    msr("ich_ap1r0_el2", v.ap1r0);
     msr("ich_lr0_el2", v.lr[0]);
     msr("ich_lr1_el2", v.lr[1]);
     msr("ich_lr2_el2", v.lr[2]);
@@ -339,6 +433,7 @@ fn loadVgic(v: *Vcpu) void {
 
 fn saveVgic(v: *Vcpu) void {
     v.vmcr = mrs("ich_vmcr_el2");
+    v.ap1r0 = mrs("ich_ap1r0_el2");
     v.lr[0] = mrs("ich_lr0_el2");
     v.lr[1] = mrs("ich_lr1_el2");
     v.lr[2] = mrs("ich_lr2_el2");
@@ -370,6 +465,17 @@ pub fn run(vm: *Vm, resume_value: u64) Exit {
     while (true) {
         v.exit_kind = 0;
         enterOnce(vm);
+        if (v.exit_kind == @intFromEnum(shared.VmExit.wfi)) {
+            stat_wfi += 1;
+            // Idle: sleep until something is injectable, then go again.
+            // The bits latch, so a signal between the check and the wait
+            // is not lost.
+            if (!v.timer_pending and @atomicLoad(u64, &v.spi_pending, .acquire) == 0) {
+                if (vm.notif) |n| _ = ipc.wait(n);
+                stat_waits += 1;
+            }
+            continue;
+        }
         if (v.exit_kind != 0) break; // .none means "handled in the kernel, go again"
     }
     return .{ .kind = @enumFromInt(v.exit_kind), .a = v.exit_a, .b = v.exit_b, .c = v.exit_c, .d = v.exit_d };
@@ -380,8 +486,10 @@ fn enterOnce(vm: *Vm) void {
     const daif = maskIrqs();
     const cpu = sched.thisCpu();
     gic.enableLocalInterrupt(cpu.id, vtimer_ppi);
+    stat_entries += 1;
 
     sched.fpSaveCurrent();
+    sched.fpRestore(&v.fp);
     msr("vtcr_el2", vtcr);
     msr("vttbr_el2", vm.s2_root | (@as(u64, vm.vmid) << 48));
     // What the guest reads as MIDR/MPIDR: the real part, vCPU 0 — not
@@ -401,11 +509,13 @@ fn enterOnce(vm: *Vm) void {
     if (v.host_masked and v.cntv_cval != v.masked_cval) {
         v.cntv_ctl &= ~@as(u64, 1 << 1);
         v.host_masked = false;
+        stat_unmasks += 1;
     }
     loadGuestSysregs(v);
     loadVgic(v);
     cpu.vcpu = @ptrCast(v);
     cpu.last_vcpu = @ptrCast(v);
+    vm.run_core = cpu.id;
     vm.running.store(true, .release);
     msr("hcr_el2", hcr_guest);
     asm volatile ("isb");
@@ -426,6 +536,12 @@ pub fn guestExit(frame: *trap.TrapFrame, kind_raw: u64) void {
     msr("hcr_el2", hcr_host);
     asm volatile ("isb");
     const vm: *Vm = @fieldParentPtr("vcpu", v);
+    // The guest's vector registers go to the vCPU and the host thread's
+    // come back before anything here could run other code (a context
+    // switch in the interrupt path would otherwise file the guest's
+    // registers as the VMM's).
+    sched.fpSave(&v.fp);
+    sched.fpRestoreCurrent();
 
     v.regs = frame.regs;
     v.pc = frame.elr;
@@ -433,6 +549,15 @@ pub fn guestExit(frame: *trap.TrapFrame, kind_raw: u64) void {
     v.sp_el0 = frame.sp_el0;
     saveGuestSysregs(v);
     saveVgic(v);
+    // The guest rearmed its timer since the host masked it: unmask now,
+    // in the hardware on this core, where the timer lives — the host may
+    // block waiting for the next fire before any further entry.
+    if (v.host_masked and v.cntv_cval != v.masked_cval) {
+        v.cntv_ctl &= ~@as(u64, 1 << 1);
+        msr("S3_5_C14_C3_1", v.cntv_ctl);
+        v.host_masked = false;
+        stat_unmasks += 1;
+    }
     vm.running.store(false, .release);
 
     switch (kind_raw) {
@@ -498,9 +623,9 @@ fn decodeSync(v: *Vcpu) void {
                 setExit(v, .mmio_read, ipa, size, srt, 0);
             }
         },
-        0x01 => { // WFI/WFE: a wait with its interrupt already here is no wait
+        0x01 => { // WFI/WFE: run() decides whether there is anything to wait for
             v.pc += 4;
-            if (!v.timer_pending) setExit(v, .wfi, esr & 1, 0, 0, 0);
+            setExit(v, .wfi, esr & 1, 0, 0, 0);
         },
         0x16 => { // HVC: PSCI when it looks like PSCI, else the VMM's
             if (!psci(v)) setExit(v, .hvc, v.regs[0], v.regs[1], v.regs[2], v.regs[3]);
@@ -518,6 +643,7 @@ fn decodeSync(v: *Vcpu) void {
 /// The guest's virtual timer fired (physically, at the host): mask it so
 /// the line drops, and inject a virtual PPI 27 at the next entry.
 pub fn onVirtualTimer() void {
+    stat_timer_fires += 1;
     const ctl = mrs("S3_5_C14_C3_1") | (1 << 1); // IMASK
     msr("S3_5_C14_C3_1", ctl);
     const cpu = sched.thisCpu();
@@ -527,6 +653,8 @@ pub fn onVirtualTimer() void {
         v.host_masked = true;
         v.masked_cval = mrs("S3_5_C14_C3_2");
         v.timer_pending = true;
+        const vm: *Vm = @fieldParentPtr("vcpu", v);
+        if (vm.notif) |n| ipc.signal(n, 1);
     }
 }
 
@@ -551,6 +679,7 @@ comptime {
     const o_pc = @offsetOf(Vcpu, "pc");
     const o_pstate = @offsetOf(Vcpu, "pstate");
     const o_host = @offsetOf(Vcpu, "host");
+    const o_sp_el0 = @offsetOf(Vcpu, "sp_el0");
     asm (std.fmt.comptimePrint(
             \\.section .text, "ax"
             \\.global __guest_enter
@@ -569,6 +698,8 @@ comptime {
             \\        msr     elr_el2, x1
             \\        ldr     x1, [x0, #{d}]
             \\        msr     spsr_el2, x1
+            \\        ldr     x1, [x0, #{d}]
+            \\        msr     sp_el0, x1              // the guest EL0 stack, when it was there
             \\        add     x1, x0, #{d}
             \\        ldp     x2, x3, [x1, #16]
             \\        ldp     x4, x5, [x1, #32]
@@ -602,5 +733,5 @@ comptime {
             \\        ldr     x2, [x1, #96]
             \\        mov     sp, x2
             \\        ret
-        , .{ o_host, o_pc, o_pstate, o_regs, o_host }));
+        , .{ o_host, o_pc, o_pstate, o_sp_el0, o_regs, o_host }));
 }

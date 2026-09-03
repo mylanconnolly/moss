@@ -165,6 +165,10 @@ pub fn vmSet(vm: u64, pc: u64, x0: u64) shared.Errno {
     return @enumFromInt(syscall3(.vm_set, vm, pc, x0));
 }
 
+pub fn vmAttachDevice(vm: u64, dev: u64, bar_ipa: u64, vintid: u64) shared.Errno {
+    return syscall6(.vm_attach_device, vm, dev, bar_ipa, vintid, 0, 0).err;
+}
+
 pub fn irqBind(handle: u64, notif: u64, offset: u64) shared.Errno {
     return @enumFromInt(syscall3(.irq_bind, handle, notif, offset));
 }
