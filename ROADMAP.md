@@ -526,6 +526,14 @@ The pooling story stops being theory.
   a moss guest routes them), passthrough needs MSI-X on the device (a
   wired-INTx device would need level emulation), and everything is
   TCG-only.
+- ✅ **PAN as a safeguard** (2026-09-02): kernel access to user memory
+  goes through `kernel/uaccess.zig` only; PAN is detected (not
+  assumed), armed on every core and by every exception entry, and
+  opened just inside the copy helpers, so a kernel bug that
+  dereferences a user pointer elsewhere is a fault report rather than
+  an exploit primitive. The `pan` drill provokes and expects the
+  refusal. On ARMv8.0 the range checks stand alone, as before; on
+  x86_64 the same boundary becomes SMAP.
 - virtio-gpu and input devices (the graphical console).
 - ✅ **Developer shell and tooling** (done): **msh**, an interactive shell
   over a new virtio-console driver (moss's third virtio device class),

@@ -29,7 +29,7 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 (`brew install qemu`).
 
 ```sh
-zig build check      # the whole test suite: 18 OS tests under QEMU + host unit tests (~80s)
+zig build check      # the whole test suite: 19 OS tests under QEMU + host unit tests (~80s)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 ```
@@ -69,6 +69,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | Test | Proves | Manual invocation |
 |---|---|---|
 | panic, fault | Panic handler; decoded fault reports | `zig build run -Dpanic-test` / `-Dfault-test` |
+| pan | PAN as a safeguard: a syscall touches a range-checked user buffer outside a uaccess window and the CPU refuses it | `zig build run -Dpan-test` |
 | sched | SMP: pinned + migrating threads under load | `zig build run -Dsched-test` |
 | domain | Spawn/revoke/leak-check; no ambient authority | `zig build run -Ddomain-test` |
 | ipc | Typed RPC, cap grants, fault-as-message, peer death | `zig build run -Dipc-test` |

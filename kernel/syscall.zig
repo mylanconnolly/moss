@@ -20,6 +20,8 @@ const shared = @import("shared");
 const smmu = @import("smmu.zig");
 const vm = @import("vm.zig");
 const trap = @import("trap.zig");
+const uaccess = @import("uaccess.zig");
+const build_options = @import("build_options");
 
 pub fn dispatch(frame: *trap.TrapFrame) void {
     const t = sched.thisCpu().current;
@@ -320,8 +322,11 @@ fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const len = frame.regs[2];
     if (len == 0 or len > 64 * 1024) return errno(.bad_arg);
     if (!userRangeWritable(d, ptr, len)) return errno(.fault);
-    const buf = @as([*]u8, @ptrFromInt(ptr))[0..len];
-    frame.regs[1] = domain.fillRecs(buf);
+    frame.regs[1] = uaccess.withUserBuffer(ptr, len, {}, struct {
+        fn f(_: void, buf: []u8) u64 {
+            return domain.fillRecs(buf);
+        }
+    }.f);
     return errno(.ok);
 }
 
@@ -333,8 +338,12 @@ fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 fn sysGetrandom(d: *domain.Domain, ptr: u64, len: u64) u64 {
     if (len == 0 or len > shared.rng_max_request) return errno(.bad_arg);
     if (!userRangeWritable(d, ptr, len)) return errno(.fault);
-    const buf = @as([*]u8, @ptrFromInt(ptr))[0..len];
-    rng.fill(buf) catch return errno(.bad_state);
+    // Drawn into a kernel buffer, then copied out: the pool never writes
+    // through a user pointer itself.
+    var tmp: [shared.rng_max_request]u8 = undefined;
+    rng.fill(tmp[0..len]) catch return errno(.bad_state);
+    uaccess.copyToUser(ptr, tmp[0..len]);
+    @memset(tmp[0..len], 0);
     return errno(.ok);
 }
 
@@ -345,8 +354,10 @@ fn sysRngSeed(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     _ = d.captable.?.lookup(h, .entropy) orelse return errno(.bad_handle);
     if (len < shared.rng_min_seed or len > shared.rng_max_request) return errno(.bad_arg);
     if (!userRangeOk(d, ptr, len)) return errno(.fault);
-    const bytes = @as([*]const u8, @ptrFromInt(ptr))[0..len];
-    rng.seed(bytes);
+    var tmp: [shared.rng_max_request]u8 = undefined;
+    uaccess.copyFromUser(tmp[0..len], ptr);
+    rng.seed(tmp[0..len]);
+    @memset(tmp[0..len], 0);
     return errno(.ok);
 }
 
@@ -594,10 +605,16 @@ fn sysLog(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     _ = d.captable.?.lookup(handle, .debug_log) orelse return errno(.bad_handle);
     if (len == 0 or len > 256) return errno(.bad_arg);
     if (!userRangeOk(d, ptr, len)) return errno(.fault);
-    // No PAN on ARMv8.0 (and TTBR0 is live during this exception), so the
-    // kernel can read the buffer through the user mapping directly.
-    const bytes = @as([*]const u8, @ptrFromInt(ptr))[0..len];
-    log.print("[{s}] {s}\n", .{ d.name, bytes });
+    if (build_options.pan_test) {
+        // The drill: a range-checked, perfectly mapped user byte, touched
+        // with the window closed. PAN must refuse it.
+        log.info("pan-test: touching the caller's buffer outside a uaccess window", .{});
+        _ = uaccess.touchOutsideWindow(ptr);
+        log.warn("pan-test: the access went through — no PAN on this CPU", .{});
+    }
+    var line: [256]u8 = undefined;
+    uaccess.copyFromUser(line[0..len], ptr);
+    log.print("[{s}] {s}\n", .{ d.name, line[0..len] });
     return errno(.ok);
 }
 

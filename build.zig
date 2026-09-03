@@ -57,6 +57,11 @@ pub fn build(b: *std.Build) void {
         "guest-test",
         "Run the guest drill: a userspace VMM boots a moss kernel as an EL1 guest",
     ) orelse false;
+    const pan_test = b.option(
+        bool,
+        "pan-test",
+        "Run the PAN drill: a syscall touches user memory outside a uaccess window and must fault",
+    ) orelse false;
     const vmnode_test = b.option(
         bool,
         "vmnode-test",
@@ -156,6 +161,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
     build_opts.addOption(bool, "vmnode_test", vmnode_test);
+    build_opts.addOption(bool, "pan_test", pan_test);
     build_opts.addOption(bool, "guest_kernel", false);
     build_opts.addOption(bool, "fs_test", fs_test);
     build_opts.addOption(bool, "net_test", net_test);
@@ -284,7 +290,7 @@ pub fn build(b: *std.Build) void {
         "ipc_test",   "init_test",   "sandbox_test", "flap_test",
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
-        "guest_test", "vmnode_test",
+        "guest_test", "vmnode_test", "pan_test",
     }) |on| gopts.addOption(bool, on, false);
     gopts.addOption(bool, "guest_kernel", true);
     const gmod = b.createModule(.{
@@ -562,12 +568,13 @@ pub fn build(b: *std.Build) void {
         "ipc_test",   "init_test",   "sandbox_test", "flap_test",
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
-        "guest_test", "vmnode_test",
+        "guest_test", "vmnode_test", "pan_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc",   "init",
         "sandbox", "flap",  "blk",   "fs",     "net",   "fabric",
         "shell",   "rng",   "smmu",  "vm",     "guest", "vmnode",
+        "pan",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();

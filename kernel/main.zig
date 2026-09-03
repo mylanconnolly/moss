@@ -173,6 +173,9 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.pan_test) {
+        _ = sched.spawn("pan-test", panTestWorker, 0, .{}) catch @panic("spawn pan-test");
+    }
     if (build_options.vm_test) {
         _ = sched.spawn("vm-test", vmTestWorker, 0, .{}) catch @panic("spawn vm-test");
     }
@@ -783,6 +786,23 @@ fn vmTestWorker(which: u64) void {
 /// off through PSCI — which the hypervisor turns into the VMM's exit.
 fn guestKernelWorker(_: u64) void {
     systemDrill("guest");
+}
+
+/// The PAN drill: a domain logs a line; the log syscall (built with the
+/// drill flag) touches the caller's range-checked buffer with the
+/// uaccess window closed. With PAN the kernel faults — the expected
+/// end of this boot, reported as such. Without PAN (an ARMv8.0 CPU)
+/// the access goes through and the boot ends cleanly, saying so.
+fn panTestWorker(_: u64) void {
+    log.info("pan-test: a syscall will touch user memory outside a uaccess window; PAN must refuse it", .{});
+    const hello = domain.spawn("hello", .{ .blob = img(.hello) }, .{
+        .grant_debug_log = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn hello: {t}", .{e});
+    sched.sleep(20);
+    _ = hello;
+    log.info("pan-test: no fault — this CPU has no PAN; range checks alone (ARMv8.0 behaviour)", .{});
+    psci.systemOff();
 }
 
 /// The VMM: log, the boot archive (guest images), the hypervisor cap

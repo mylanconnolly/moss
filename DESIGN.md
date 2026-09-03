@@ -39,9 +39,17 @@ depend on it.
 TLB-tagged with the domain's ASID (retired with `tlbi aside1is` at teardown).
 Kernel-only threads run with TTBR0 walks disabled (TCR.EPD0), so stale user
 mappings are unreachable outside the owning domain's threads. User mappings
-are W^X and non-global; ARMv8.0 has no PAN, so syscalls may read user buffers
-through the live TTBR0 mapping after explicit range checks (revisit on
-v8.1+). Syscall ABI: x8 = number, x0..x5 args, x0 = result — numbers and
+are W^X and non-global. Kernel access to user memory goes through one
+door, `kernel/uaccess.zig`: every syscall range-checks the pointer
+against the domain's image, stack and shm window, then copies through a
+window that is the only place the hardware is told to allow it — PAN
+(ARMv8.1+, detected at boot from ID_AA64MMFR1_EL1, armed on every core
+and by every exception entry) makes any other privileged touch of a
+user page a fault report rather than a read or write on the caller's
+behalf; on an ARMv8.0 CPU the window is a no-op and the range checks
+stand alone, as they always did. The `pan` drill touches a
+range-checked, mapped user byte with the window closed and expects the
+refusal. The same boundary is where x86_64's SMAP will go. Syscall ABI: x8 = number, x0..x5 args, x0 = result — numbers and
 errnos defined in `shared/` like everything else that crosses the boundary.
 
 ### Locking (as built, 2026-09-02)
@@ -1200,11 +1208,8 @@ HVF cannot host it: Apple's nested virtualization exposes an EL2
 without VHE (ID_AA64MMFR1.VH = 0; the E2H bit reads back clear), and a
 high-half kernel has no TTBR1 at a non-VHE EL2. `run-hvf` therefore
 boots at EL1 as before; guests are a TCG-only affair until real
-hardware. The move to a v8.2 CPU model also brought PAN, which the
-design had deferred: syscalls read user buffers through the live user
-mapping after explicit range checks, so boot sets `SCTLR.SPAN` and
-clears `PSTATE.PAN` — PAN as defence in depth (toggling it around user
-copies) stays on the list.
+hardware. The move to a v8.2 CPU model also brought PAN; it is on (see
+"Kernel model" and `kernel/uaccess.zig`).
 
 ## Virtual machines
 

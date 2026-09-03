@@ -105,15 +105,10 @@ comptime {
         \\        dsb     ish
         \\        isb
         \\        mrs     x2, sctlr_el1
-        \\        ldr     x3, =0x801005                   // SPAN | M | C | I
+        \\        ldr     x3, =0x1005                     // M | C | I (SPAN stays 0: exception entry arms PAN)
         \\        orr     x2, x2, x3
         \\        msr     sctlr_el1, x2
         \\        isb
-        \\        // PAN (ARMv8.1+): off. Syscalls read user buffers through the
-        \\        // live user mapping after explicit range checks; SPAN above
-        \\        // keeps exception entry from re-arming it. (`msr pan, #0`, as
-        \\        // an encoding: the assembler wants the extension named.)
-        \\        .inst   0xd500409f
         \\
         \\        // High half from here on.
         \\        ldr     x1, =__boot_stack_top
@@ -151,11 +146,10 @@ comptime {
         \\        dsb     ish
         \\        isb
         \\        mrs     x2, sctlr_el1
-        \\        ldr     x3, =0x801005                   // SPAN | M | C | I
+        \\        ldr     x3, =0x1005
         \\        orr     x2, x2, x3
         \\        msr     sctlr_el1, x2
         \\        isb
-        \\        .inst   0xd500409f                      // msr pan, #0
         \\        ldr     x1, =__secondary_stack
         \\        ldr     x1, [x1]
         \\        mov     sp, x1

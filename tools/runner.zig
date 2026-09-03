@@ -33,6 +33,7 @@ const Spec = struct {
 const specs = [_]Spec{
     .{ .name = "panic", .pass = "KERNEL PANIC: panic test requested", .panic_is_failure = false },
     .{ .name = "fault", .pass = "!! EXCEPTION: cur_spx_sync", .extra = "far=0xffffff7fdead0000", .panic_is_failure = false },
+    .{ .name = "pan", .pass = "privileged access to user memory refused (PAN)", .extra = "pan-test: touching the caller's buffer outside a uaccess window", .panic_is_failure = false },
     .{ .name = "sched", .pass = "sched-test: PASS" },
     .{ .name = "domain", .pass = "domain-test: PASS" },
     .{ .name = "ipc", .pass = "ipc-test: PASS" },

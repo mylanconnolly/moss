@@ -268,6 +268,10 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   `el2vmsa` assembler feature (set on the kernel target). Anything that
   runs while a core is in a guest must first restore HCR_EL2 (vm.guestExit
   does, before anything else).
-- PAN is off (SCTLR.SPAN, PSTATE.PAN=0 at boot: the kernel reads user
-  buffers through the live mapping after range checks); no cap transfer across nodes beyond
+- User memory is touched ONLY through `kernel/uaccess.zig`
+  (`copyFromUser`/`copyToUser`/`withUserBuffer`), after the syscall's
+  range check: PAN is armed everywhere else and a stray dereference of
+  a user pointer is a kernel fault ("privileged access to user memory
+  refused"). No PAN toggling anywhere else, and never hold a window
+  across a log call or a block; no cap transfer across nodes beyond
   spawn-time grants. All recorded in DESIGN.md "as built" sections.

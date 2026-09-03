@@ -16,6 +16,7 @@ const sched = @import("sched.zig");
 const smmu = @import("smmu.zig");
 const syscall = @import("syscall.zig");
 const timer = @import("timer.zig");
+const uaccess = @import("uaccess.zig");
 const vm = @import("vm.zig");
 
 pub const TrapFrame = extern struct {
@@ -114,6 +115,7 @@ pub fn init() void {
         :
         : [addr] "r" (@intFromPtr(&__vectors)),
     );
+    uaccess.enable();
     // FPEN = 0b11: FP/SIMD untrapped at EL0 and EL1. Userspace owns the
     // vector unit (NEON + hardware AES); the kernel is compiled without
     // FP features and touches the registers only in the scheduler's
@@ -223,6 +225,11 @@ fn reportFault(frame: *TrapFrame, kind: Kind) noreturn {
         esr, ec, esr & 0x1ffffff, far,
     });
     log.print("!! elr=0x{x:0>16} spsr=0x{x:0>16}\n", .{ frame.elr, frame.spsr });
+    // A permission fault (DFSC 0b0011xx) with PSTATE.PAN set: the kernel
+    // reached into user memory outside a uaccess window.
+    if (ec == 0x25 and (esr & 0x3c) == 0x0c and frame.spsr & (1 << 22) != 0) {
+        log.print("!! privileged access to user memory refused (PAN): a kernel path touched a user page outside a uaccess window\n", .{});
+    }
     // The top of the current thread's stack: a foreign exception frame
     // there (an SPSR-looking word, an ELR) names whoever ran on it.
     const cur = sched.thisCpu().current;
