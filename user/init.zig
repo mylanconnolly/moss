@@ -916,21 +916,42 @@ fn installImages(view: u64) u64 {
             writeManifest(view, buf, @tagName(id), &digest);
         }
     }
+    // Units that say `run: true` are programs the shell may run under
+    // their unit's name (image, arg, grants, gives): a manifest each,
+    // pointing at the image's digest.
+    var it = shared.marcIter(blob);
+    while (it.next()) |e| {
+        if (!std.mem.startsWith(u8, e.path, shared.unit_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
+        const uname = e.path[shared.unit_dir.len .. e.path.len - shared.unit_ext.len];
+        var scratch: [12 << 10]u8 = undefined;
+        var sfba = std.heap.FixedBufferAllocator.init(&scratch);
+        var mi = mshl.Interp.init(sfba.allocator(), sfba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
+        const v = mi.parseData(e.data) catch continue;
+        if (v != .record) continue;
+        const runnable = if (v.record.get("run")) |r| r.truthy() else false;
+        if (!runnable) continue;
+        const image_name = str(v.record.get("image")) orelse continue;
+        const id = std.meta.stringToEnum(shared.ImageId, image_name) orelse continue;
+        if (std.mem.eql(u8, image_name, uname)) continue; // written above, under the image's own name
+        const image = shared.marcFind(blob, shared.imagePath(id)) orelse continue;
+        const digest = loader.digestHex(image);
+        writeManifest(view, buf, uname, &digest);
+    }
     _ = fsc.fsSync(view);
     if (installed > 0) _ = usys.log(glog, "init: installed images into img/ (content-addressed)");
     return installed;
 }
 
 /// The manifest is a record like a unit file's, with the image named by
-/// its digest: `{ image: "<digest>", grant: [..], give: [..] }`. A
-/// program without a unit file gets the digest alone — it is handed a
-/// log cap and its console, nothing else.
+/// its digest: `{ image: "<digest>", grant: [..], give: [..], arg: N }`.
+/// A program without a unit file gets the digest alone — it is handed
+/// a log cap and its console, nothing else.
 fn writeManifest(view: u64, buf: [*]u8, name: []const u8, digest: *const [shared.img_digest_hex_len]u8) void {
     var scratch: [12 << 10]u8 = undefined;
     var sfba = std.heap.FixedBufferAllocator.init(&scratch);
     const a = sfba.allocator();
-    var keys: [3][]const u8 = undefined;
-    var vals: [3]Value = undefined;
+    var keys: [4][]const u8 = undefined;
+    var vals: [4]Value = undefined;
     keys[0] = "image";
     vals[0] = .{ .str = digest };
     var n: usize = 1;
@@ -947,6 +968,11 @@ fn writeManifest(view: u64, buf: [*]u8, name: []const u8, digest: *const [shared
                 }
                 if (v.record.get("give")) |g| {
                     keys[n] = "give";
+                    vals[n] = g;
+                    n += 1;
+                }
+                if (v.record.get("arg")) |g| {
+                    keys[n] = "arg";
                     vals[n] = g;
                     n += 1;
                 }

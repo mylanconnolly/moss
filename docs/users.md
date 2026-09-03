@@ -25,15 +25,15 @@ capabilities.
 | `/etc/passwd`, `/etc/shadow` | one record per user, `conf/users/<name>.msh`, readable only by the session manager |
 | a password hash | the identity's seed, sealed under a key derived from the passphrase; login unseals it and checks the key it regenerates |
 | groups, mode bits, ACLs | views: a program can name only what it was handed |
-| root, sudo, setuid | nobody: the records view and the home tier belong to the session manager, the admin step writes records through its own view |
+| root, sudo, setuid | nobody: the records view and the home tier belong to the session manager; `apply` writes records through its own view of `conf/` |
 | a login process | a thread of the session manager per console |
 | a session | a domain tree spawned under the record's budgets |
 | logout | destroying that domain tree |
 
 ### A user is a key
 
-A user record is an mshl data literal, written by an admin step (or,
-later, an installer) into `conf/users/<name>.msh`:
+A user record is an mshl data literal, written by `apply` (below) into
+`conf/users/<name>.msh`:
 
 ```
 { key: "…64 hex…", salt: "…32 hex…", sealed: "…96 hex…",
@@ -225,11 +225,68 @@ flowchart LR
   M --> E["effective\ntheme: light (user)\ntab_width: 4 (system)\ntelemetry: false (locked)"]
 ```
 
+### The desired state, and `apply`
+
+Nothing about users is configured by hand. `conf/system.msh` describes
+what the system should look like — the users that exist, each with a
+*bootstrap* passphrase, budgets and the seal's scrypt cost, and the
+system layer of every program's settings — and `apply` makes the
+volume match it:
+
+```
+{
+  users: [
+    { name: alice, passphrase: "alice-pass", budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
+  ]
+  settings: { editor: { theme: dark, tab_width: 4, telemetry: false } }
+}
+```
+
+The boot archive ships a copy as the default; a copy on the volume at
+`conf/system.msh` takes precedence. `apply` is idempotent: a user who
+already has a record is kept exactly as is — the passphrase in the
+file is used only to create a record that does not exist, and nothing
+in this file can change one — and a settings file is rewritten only
+when its content differs. It runs as the first step of the `users` and
+`login` profiles (so a fresh disk boots to a multi-user system with no
+manual step: the volume formats, the store installs, the users appear,
+the prompt comes up) and from the system shell as `run apply`, where
+its value is a table of what it did:
+
+```
+run apply
+ kind      name    action
+ user      alice   created
+ user      bob     created
+ settings  editor  written
+```
+
+```mermaid
+flowchart TD
+  A["apply starts (a unit step, or run apply)"] --> B{"conf/system.msh
+on the volume?"}
+  B -- yes --> C["parse it"]
+  B -- no --> D["parse the archive's boot/conf/system.msh"]
+  C --> E["for each user"]
+  D --> E
+  E --> F{"record exists?"}
+  F -- yes --> G["kept"]
+  F -- no --> H["seed and salt from the kernel pool,
+seal under the passphrase, write the record: created"]
+  G --> I["for each settings entry"]
+  H --> I
+  I --> J{"file content equal?"}
+  J -- yes --> K["kept"]
+  J -- no --> L["write conf/app/NAME.msh: written"]
+  K --> M["sync, return the table"]
+  L --> M
+```
+
 ### What the drills prove
 
-The `users` drill boots the system profile `users`: the admin step
-writes alice's and bob's records (seeds and salts from the kernel's
-entropy pool) and the system settings file; the driver then has a wrong
+The `users` drill boots the system profile `users`: `apply` creates
+alice's and bob's records from the archive's desired state (seeds and
+salts from the kernel's entropy pool) and the system settings file; the driver then has a wrong
 passphrase and an unknown user refused with the same answer, opens both
 sessions at once, and waits for each to exit clean. Each session, from
 inside, writes into its home, finds that `..` is an error and that
@@ -327,9 +384,12 @@ when every console has had a session and none is open.
   mounts per shell.
 - No fabric logins: the identity is built to sign challenges across
   nodes, but nothing asks it to yet (stage 3).
-- No installer and no desired-state `apply` tool: records are written
-  by the drill's admin step, and a deployment would write the same
-  files by hand (stage 3).
+- `apply` creates and keeps; it never rewrites or removes a record, so a
+  passphrase change or a user's removal is a manual edit of
+  `conf/users/`. Its KDF work area bounds the cost a record may ask
+  for (about 2 MB: `ln` up to 11 with `r` 8).
+- The passphrases in a desired-state file are bootstrap material in
+  plain text; the archive's copy carries the drills' test users.
 - A home volume's 8 MB capacity is reported, not enforced (see
   [Filesystems and views](filesystem.md)).
 - One seat per virtio-console device; a device's MULTIPORT feature
@@ -351,10 +411,11 @@ when every console has had a session and none is open.
 - ROADMAP.md — "Users and sessions, stage 1" and its residuals.
 - HACKING.md — adding a unit file; `give` lines including `session:
   true` and `index:`.
-- Source — `user/users.zig` (manager, console threads, admin step,
+- Source — `user/users.zig` (manager, console threads, `apply`,
   session program, drill), `lib/usercred.zig` (records, unlock, home
   key; host-tested), `lib/settings.zig` (merge; host-tested),
   `shared/lib.zig` (`SessReq`, `SessResp`, `CapTag`), `user/init.zig`
   (session mode, `loadSessionUnits`), `boot/conf/units/usersvc.msh`,
-  `usersvc-login.msh`, `useradmin.msh`, `users-drill.msh`,
+  `usersvc-login.msh`, `apply.msh`, `users-drill.msh`,
+  `boot/conf/system.msh` (the desired state),
   `boot/conf/session/msh.msh`, `tools/runner.zig` (the login script).

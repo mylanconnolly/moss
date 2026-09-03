@@ -933,12 +933,17 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     // always ours to give.
     var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
     var view: u64 = 0;
+    var run_arg: u64 = 0;
     {
         const unit = prog.manifest;
         if (unit.record.get("grant")) |g| {
             if (g == .list) for (g.list) |item| {
                 if (item == .str and is(item.str, "introspect")) flags |= shared.SpawnFlags.grant_introspect;
+                if (item == .str and is(item.str, "bootfs")) flags |= shared.SpawnFlags.grant_bootfs;
             };
+        }
+        if (unit.record.get("arg")) |g| {
+            if (g == .int) run_arg = @intCast(@max(g.int, 0));
         }
         if (unit.record.get("give")) |g| {
             if (g == .list) for (g.list) |item| {
@@ -957,7 +962,7 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     // The tool serves side A of its boot channel; we feed it caps on B.
     const ch = usys.chanCreate();
     if (ch.err != .ok) return it.fail("run: out of channels", .{});
-    const sp = usys.spawn(spawner_h, run_stage.handle, 0, ch.data[0], flags, usys.kbLimits(512, 2 << 10));
+    const sp = usys.spawn(spawner_h, run_stage.handle, run_arg, ch.data[0], flags, usys.kbLimits(1 << 10, 8 << 10));
     _ = usys.capDrop(ch.data[0]);
     if (sp.err != .ok) {
         _ = usys.capDrop(ch.data[1]);

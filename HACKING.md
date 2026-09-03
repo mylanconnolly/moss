@@ -65,7 +65,9 @@ receiver's second of that tag), and `profiles: [system, ...]` (the
 profiles under which the unit starts at boot — there is no `start:`
 key; a unit with no `profiles` starts only when something `give`s its
 channel or an `after:` step names it) / `essential: true`
-/ `certify` / `install` as needed — added to the boot-file list in
+/ `certify` / `install` / `run: true` (the unit is also a program the
+shell can `run` under its name: init writes a manifest for it into the
+store) as needed — added to the boot-file list in
 `build.zig`. A step that starts `after:` another must list the
 `profiles` it belongs to, or it never starts. The program takes
 it all with `boot.take`. A run tool's unit file becomes its manifest in
@@ -114,9 +116,11 @@ test (rngd in the rng test).
 key, hex), `salt` and `sealed` (the seed under the passphrase, hex),
 `kdf: { ln, r, p }` (scrypt cost; the custodian's work area must cover
 `128 * 2^ln * r` bytes) and `budget` (kobj/user/cpu, as in a unit).
-`lib/usercred.zig` makes and unlocks them; `useradmin` (users role 2)
-shows how an admin step writes one from a passphrase, and an installer
-will do the same. The session manager is the `usersvc` unit; a client
+`lib/usercred.zig` makes and unlocks them; `apply` (users role 2, the
+`apply` unit, `run apply` from the shell) writes one from the passphrase
+in `conf/system.msh` when no record exists — the desired-state file
+(users, budgets, kdf cost, the settings layer; the archive's copy is
+the default, the volume's wins). The session manager is the `usersvc` unit; a client
 attaches a buffer, sends `SessReq.login` with the name and passphrase in
 it, and gets a session id to `wait` on or `logout`. A session is handed
 its home view (tag `view`) and the settings layer (tag `conf`); a

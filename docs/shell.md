@@ -152,7 +152,11 @@ no `out` (run some other way) renders text for a human instead. A
 non-zero exit is reported as a line; a missing program, an unreadable
 image or a digest mismatch is an error and nothing is spawned.
 `install NAME` copies a program from the system store into the shell's
-own store, image verified on the way.
+own store, image verified on the way. A manifest may carry `arg` (the
+program's role, as in a unit file) and grant `bootfs` besides
+`introspect`; a run tool gets 1 MB of kernel-object and 8 MB of user
+memory. `run apply` makes the volume match `conf/system.msh` (see
+[Users and sessions](users.md)) and returns what it did as a table.
 
 In a user session the shell also holds a badged channel to the session
 manager, and four commands use it: `share PATH NAME USER [rw]` derives

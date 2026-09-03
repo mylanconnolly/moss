@@ -1440,13 +1440,26 @@ with a manifest and a drill (`users` test) like everything else.
   strict parser as unit files and user records: one syntax for config,
   shell and (later) automation. No settings daemon.
 - **No root.** Administrative authority is holding the caps: the
-  records view and the home tier are `usersvc`'s, the admin step
-  (`useradmin`) writes records through a rw view of `conf/users`. There
-  is no setuid, no sudo, and no ambient home directory.
+  records view and the home tier are `usersvc`'s; `apply` writes
+  records through a rw view of `conf/`. There is no setuid, no sudo,
+  and no ambient home directory.
 
-The drill (`profile=users`): the admin step writes alice's and bob's
-records (seeds and salts from the kernel pool) and the system settings
-file; the driver then has the wrong passphrase and an unknown user
+**The desired state (as built, 2026-09-03):** `conf/system.msh` — the
+archive's copy as the default, the volume's taking precedence — lists
+the users (name, a bootstrap passphrase, budgets, the seal's kdf cost)
+and the system settings layer; `apply` (users role 2) makes the volume
+match it idempotently: a user with a record is kept as is (the
+passphrase is used only to create a record that does not exist), a
+settings file is rewritten only when it differs, and every action is a
+row of the table it returns. It is the first step of the users and
+login profiles and a program the shell runs (`run apply`): a unit file
+saying `run: true` becomes a manifest in the store under the unit's
+name, and `run` honors a manifest's `arg` and a `bootfs` grant. A
+fresh disk boots to a multi-user system with no manual step.
+
+The drill (`profile=users`): `apply` creates alice's and bob's records
+from the archive's desired state (seeds and salts from the kernel
+pool) and the system settings file; the driver then has the wrong passphrase and an unknown user
 refused, opens both sessions at once, waits for each to exit clean, and
 through its own read-only view of `home/` finds each home to be one
 file — the volume — in which the session's plaintext appears nowhere.

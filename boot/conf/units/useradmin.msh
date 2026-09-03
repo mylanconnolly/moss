@@ -1,7 +1,0 @@
-# The users drill, step 1 (profile users): the admin writes two user
-# records and the system settings layer. Needs the kernel pool seeded.
-{ image: users, arg: 2, budget: { user: 6mb }, profiles: [users, login], oneshot: true,
-  give: [
-    { tag: view, fs: conf/users, ro: false, mkdir: true }
-    { tag: conf, fs: conf/app,   ro: false, mkdir: true }
-  ] }

@@ -1,0 +1,21 @@
+# The system's desired state: what `apply` makes true. It runs as the
+# first step of the users and login profiles, and from the shell as
+# `run apply`; a copy at conf/system.msh on the volume takes precedence
+# over this one, which ships in the boot archive as the default.
+#
+# users: a record is created for a user who has none — the passphrase
+# is bootstrap material used only then (an existing record is never
+# rewritten by apply; nothing here can change a passphrase). Budgets
+# are the session's; kdf.ln the scrypt cost of the seal (11 here for
+# the drills' speed; 12 is the library default).
+# settings: the system layer of each program's configuration, written
+# to conf/app/<name>.msh when it differs from what is there.
+{
+  users: [
+    { name: alice, passphrase: "alice-pass", budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
+    { name: bob,   passphrase: "bob-pass",   budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
+  ]
+  settings: {
+    editor: { theme: dark, tab_width: 4, telemetry: false }
+  }
+}

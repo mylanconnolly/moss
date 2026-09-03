@@ -136,7 +136,10 @@ The remaining keys: `arg` (the program's personality word), `budget`
 (`kobj`, `user`, `cpu` as permille of a core or `"25%"`), `cores` (a
 partition reserved for the unit alone), `grant` (`log`, `spawner`,
 `bootfs`, `introspect`), `restart: { max: N }`, `profiles`,
-`essential`, `oneshot`, `after`, `certify` (the fabric's certification
+`essential`, `oneshot`, `after`, `run` (`run: true`: the unit is also a
+program the shell can run under its name — init writes a manifest for
+it into the store with its image's digest, `arg`, grants and gives),
+`certify` (the fabric's certification
 against a root-of-trust unit), and `install` (install the program store
 through this filesystem unit once it is up).
 

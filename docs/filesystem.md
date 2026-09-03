@@ -37,7 +37,7 @@ graph TD
 | Tier | Lifecycle | Who writes | Who reads |
 |---|---|---|---|
 | `boot/` | immutable, from the boot archive | nobody (built in) | init, and whoever is granted it |
-| `conf/` | survives reboot | the admin (or an admin step) | the service the file is for |
+| `conf/` | survives reboot | the admin, and `apply` from `conf/system.msh` | the service the file is for |
 | `img/` | immutable content, survives reboot | init at boot (the installer) | shells, to run programs |
 | `state/` | survives reboot | the owning service | the owning service |
 | `data/` | survives reboot | granted case by case | granted case by case |
@@ -149,8 +149,11 @@ characters — the name *is* the content), and beside it a manifest
 
 `image` is the digest; `grant` lists kernel authorities the program is
 handed (`introspect` lets `ps` read the domain ledger without spawn
-authority); `give` lists views, where the path `arg` means "the
-argument the user typed". Init installs the system store at boot from
+authority; `bootfs` the boot archive); `give` lists views, where the
+path `arg` means "the argument the user typed"; `arg` is the role the
+image is started with. A unit file that says `run: true` gets a
+manifest under the unit's name too (`apply` is the users image's role
+2 that way). Init installs the system store at boot from
 the boot archive, writing each image once (present ones are skipped)
 and a manifest built from the program's unit file, when it has one.
 

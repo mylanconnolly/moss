@@ -8,7 +8,7 @@
   budget:    { user: 40mb }
   grant:     [log, spawner, bootfs]
   profiles:  [login]
-  after:     useradmin
+  after:     apply
   essential: true
   give: [
     { tag: view,    fs: conf/users, ro: true,  mkdir: true }

@@ -1,0 +1,7 @@
+# The desired-state tool: makes the volume match conf/system.msh (the
+# volume's copy, else the archive's) — user records created for users
+# without one, the system settings layer written where it differs.
+# The first step of the users and login profiles; `run: true` makes it
+# a program the shell can run (`run apply`), with the same manifest.
+{ image: users, arg: 2, budget: { user: 6mb }, grant: [log, bootfs], profiles: [users, login], oneshot: true, run: true,
+  give: [ { tag: view, fs: conf, ro: false } ] }

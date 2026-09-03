@@ -195,11 +195,11 @@ is a plan.
   behind the HAL boundary first: the ITS, SMMU, VHE and vGIC work is
   deeply aarch64-shaped. PAN's counterpart there is SMAP.
 - **Users, stage 3, remaining:** fabric logins (needs notifications
-  crossing nodes and dynamic addressing, below); the desired-state
-  `apply` tool and an installer (records and the settings layer are
-  written by an admin step today). Sharing landed (2026-09-03) as
-  per-session, in-memory offers; standing grants that survive a logout
-  are a later step.
+  crossing nodes and dynamic addressing, below). Sharing landed
+  (2026-09-03) as per-session, in-memory offers — standing grants that
+  survive a logout are a later step; `apply` landed the same day and
+  only creates and keeps — changing a passphrase or removing a user is
+  a manual edit of `conf/users/`.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
@@ -749,6 +749,19 @@ is a plan.
   its own settings and store views — one badge, one buffer on the
   service, so two sessions trampled each other's attached buffer and a
   dead session's lingered; each session gets views derived for it now.
+  ✅ **The desired state, and `apply`** (2026-09-03): `conf/system.msh`
+  (the archive's copy as the default, the volume's taking precedence)
+  lists users — name, bootstrap passphrase, budgets, kdf cost — and the
+  system settings layer; `apply` (users role 2, the first step of the
+  users and login profiles, and `run apply` from the shell) makes the
+  volume match it idempotently and returns its actions as a table. A
+  unit file with `run: true` is a program the shell can run under its
+  name (init writes its manifest, with `arg`), and `run` honors `arg`
+  and a `bootfs` grant. A fresh disk boots to a multi-user system with
+  no manual step; the shell drill runs apply twice. Bug found: the
+  role read the archive before its entry point recorded where it was,
+  and a drill step accepted the resulting "exited with code 255"
+  because it matched on a digit.
 - ✅ **The gate hardened** (2026-09-03): the check runs the kernel-heavy
   drills a second time under a **ReleaseSafe kernel** (`+rs` rows), has
   a soak mode (`-Dsoak=N`) and a filter (`-Donly=a,b`). The first

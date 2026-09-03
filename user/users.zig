@@ -10,7 +10,11 @@
 //!                   layer — nothing else. The unlocked key stays here for
 //!                   the session's lifetime; `wait`/`logout` destroy the
 //!                   domain, which is the whole logout.
-//!   2 "useradmin" — the admin step of the drill: writes two user records
+//!   2 "apply"     — the desired-state tool: makes the volume match
+//!                   conf/system.msh (users created for those without a
+//!                   record, the settings layer written where it differs);
+//!                   the drills' admin step, and `run apply` from the shell.
+//!                   (was: "useradmin" — the admin step of the drill: writes two user records
 //!                   (fresh seeds and salts from the kernel pool, sealed
 //!                   under compiled-in test passphrases) and the system
 //!                   settings file. Records are mshl data, like unit
@@ -37,6 +41,7 @@ const boot = @import("boot.zig");
 const fsc = @import("fsclient.zig");
 const loader = @import("loader.zig");
 const mosslib = @import("mosslib");
+const result = @import("result.zig");
 const mshl = mosslib.mshl;
 const usercred = mosslib.usercred;
 const settings = mosslib.settings;
@@ -68,9 +73,11 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 
 export fn umain(log_h: u64, chan_h: u64, role: u64, bva: u64, blen: u64) callconv(.c) noreturn {
     glog = log_h;
+    blob_va = bva; // the archive, for roles granted bootfs (apply reads its default from it)
+    blob_len = blen;
     switch (role & 0xff) {
         1 => usersvc(chan_h, bva, blen, role),
-        2 => useradmin(chan_h),
+        2 => apply(chan_h),
         3 => session(chan_h),
         4 => drill(chan_h),
         else => usys.exit(250),
@@ -94,11 +101,6 @@ fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const Value, _: ?V
 const drill_kdf: usercred.Kdf = .{ .ln = 11, .r = 8, .p = 1 };
 
 /// The drill's users: name, passphrase.
-const test_users = [_]struct { name: []const u8, pass: []const u8 }{
-    .{ .name = "alice", .pass = "alice-pass" },
-    .{ .name = "bob", .pass = "bob-pass" },
-};
-
 const max_name = 16;
 
 /// A user name is a directory name and a domain argument: short, plain.
@@ -796,38 +798,181 @@ fn maybeFinish() void {
     usys.exit(0);
 }
 
-// -------------------------------------------------------------- useradmin
+// ------------------------------------------------------------------ apply
+//
+// The desired-state tool. `conf/system.msh` — the volume's copy, else
+// the archive's — says which users exist (with a bootstrap passphrase
+// and budgets) and what the system settings layer holds; apply makes
+// it so, idempotently: a user with a record is kept as is (nothing
+// here can change a passphrase), a settings file is rewritten only
+// when it differs. Every action is a row of the value it returns to
+// the shell: { kind, name, action }.
 
-fn useradmin(chan_h: u64) noreturn {
+var apply_heap: [96 << 10]u8 = undefined;
+
+fn apply(chan_h: u64) noreturn {
     const setup = boot.take(chan_h);
-    const uv = setup.cap(.view);
-    const av = setup.cap(.conf);
-    if (uv == 0 or av == 0) usys.exit(190);
-    const ubuf: [*]u8 = @ptrFromInt(fsc.attachBuf(uv).va);
-    const abuf: [*]u8 = @ptrFromInt(fsc.attachBuf(av).va);
+    const cv = setup.cap(.view); // conf/, read-write
+    if (cv == 0) usys.exit(190);
+    const cbuf: [*]u8 = @ptrFromInt(fsc.attachBuf(cv).va);
 
-    for (test_users) |u| {
-        var seed: [usercred.seed_len]u8 = undefined;
-        var salt: [usercred.salt_len]u8 = undefined;
-        randomOrDie(&seed);
-        randomOrDie(&salt);
-        var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
-        const rec = usercred.create(fba.allocator(), &seed, &salt, u.pass, drill_kdf) catch usys.exit(191);
-        @memset(&seed, 0);
-        var text: [1024]u8 = undefined;
-        const rendered = renderRecord(&text, rec);
-        var path: [max_name + 4]u8 = undefined;
-        @memcpy(path[0..u.name.len], u.name);
-        @memcpy(path[u.name.len .. u.name.len + 4], ".msh");
-        if (!writeFile(uv, ubuf, path[0 .. u.name.len + 4], rendered)) usys.exit(192);
-        var line: [96]u8 = undefined;
-        var hex: [16]u8 = undefined;
-        _ = usys.log(glog, cat3(&line, "useradmin: created user ", u.name, " (key ", usercred.hexEncode(&hex, rec.pk[0..8]), "...)"));
+    var text_buf: [8192]u8 = undefined;
+    const text = readInto(cv, cbuf, "system.msh", &text_buf) orelse
+        (shared.marcFind(@as([*]const u8, @ptrFromInt(blob_va))[0..blob_len], "conf/system.msh") orelse {
+            _ = usys.log(glog, "apply: no desired state: neither conf/system.msh nor the archive's");
+            usys.exit(195);
+        });
+    var fba = std.heap.FixedBufferAllocator.init(&apply_heap);
+    const a = fba.allocator();
+    var interp = mshl.Interp.init(a, a, .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
+    const desired = interp.parseData(text) catch {
+        _ = usys.log(glog, "apply: conf/system.msh does not parse");
+        usys.exit(196);
+    };
+    if (desired != .record) usys.exit(196);
+
+    var res = result.Result.init();
+    var rows: std.ArrayList([]const Value) = .empty;
+    var created: u64 = 0;
+    var written: u64 = 0;
+
+    if (desired.record.get("users")) |users| {
+        if (users != .list) usys.exit(196);
+        _ = fsc.fsMkdir(cv, cbuf, "users");
+        for (users.list) |u| {
+            if (u != .record) continue;
+            const name = str(u.record.get("name")) orelse continue;
+            if (!nameOk(name)) {
+                logName("apply: bad user name: ", name);
+                continue;
+            }
+            var path: [max_name + 10]u8 = undefined;
+            const p = cat3(&path, "users/", name, ".msh", "", "");
+            if (fsc.fsStat(cv, cbuf, p) != null) {
+                row(&res, &rows, "user", name, "kept");
+                continue;
+            }
+            const pass = str(u.record.get("passphrase")) orelse {
+                logName("apply: no passphrase to create a record for ", name);
+                row(&res, &rows, "user", name, "no passphrase");
+                continue;
+            };
+            var kdf: usercred.Kdf = .{ .ln = 11 };
+            if (u.record.get("kdf")) |k| {
+                if (k == .record) {
+                    if (int(k.record.get("ln"))) |ln| kdf.ln = @intCast(@min(@max(ln, 1), 63));
+                    if (int(k.record.get("r"))) |r| kdf.r = @intCast(@max(r, 1));
+                    if (int(k.record.get("p"))) |pp| kdf.p = @intCast(@max(pp, 1));
+                }
+            }
+            if (kdf.memoryBytes() + (64 << 10) > kdf_heap_len) {
+                logName("apply: kdf cost beyond this tool's memory for ", name);
+                row(&res, &rows, "user", name, "kdf too costly");
+                continue;
+            }
+            var budget: Budget = .{ .kobj_kb = 2 << 10, .user_kb = 12 << 10, .cpu_permille = 500 };
+            if (u.record.get("budget")) |b| {
+                if (b == .record) {
+                    if (int(b.record.get("kobj"))) |x| budget.kobj_kb = @intCast(@max(@divTrunc(x, 1024), 0));
+                    if (int(b.record.get("user"))) |x| budget.user_kb = @intCast(@max(@divTrunc(x, 1024), 0));
+                    if (int(b.record.get("cpu"))) |x| budget.cpu_permille = @intCast(@max(x, 0));
+                }
+            }
+            var seed: [usercred.seed_len]u8 = undefined;
+            var salt: [usercred.salt_len]u8 = undefined;
+            randomOrDie(&seed);
+            randomOrDie(&salt);
+            var kfba = std.heap.FixedBufferAllocator.init(&kdf_heap);
+            const rec = usercred.create(kfba.allocator(), &seed, &salt, pass, kdf) catch {
+                @memset(&seed, 0);
+                usys.exit(191);
+            };
+            @memset(&seed, 0);
+            var rtext: [1024]u8 = undefined;
+            const rendered = renderRecord(&rtext, rec, budget);
+            if (!writeFile(cv, cbuf, p, rendered)) usys.exit(192);
+            var line: [96]u8 = undefined;
+            var hex: [16]u8 = undefined;
+            _ = usys.log(glog, cat3(&line, "apply: created user ", name, " (key ", usercred.hexEncode(&hex, rec.pk[0..8]), "...)"));
+            row(&res, &rows, "user", name, "created");
+            created += 1;
+        }
     }
-    if (!writeFile(av, abuf, "editor.msh", "{ theme: dark, tab_width: 4, telemetry: false }\n")) usys.exit(193);
-    if (!fsc.fsSync(uv)) usys.exit(194);
-    _ = usys.log(glog, "useradmin: records and the system settings layer written");
+
+    if (desired.record.get("settings")) |wanted| {
+        if (wanted != .record) usys.exit(196);
+        _ = fsc.fsMkdir(cv, cbuf, "app");
+        for (wanted.record.keys, wanted.record.vals) |key, val| {
+            if (!nameOk(key)) continue;
+            var out: std.ArrayList(u8) = .empty;
+            mshl.writeData(val, a, &out) catch usys.exit(196);
+            out.append(a, '\n') catch usys.exit(196);
+            var path: [max_name + 10]u8 = undefined;
+            const p = cat3(&path, "app/", key, ".msh", "", "");
+            var cur: [4096]u8 = undefined;
+            if (readInto(cv, cbuf, p, &cur)) |existing| {
+                if (std.mem.eql(u8, existing, out.items)) {
+                    row(&res, &rows, "settings", key, "kept");
+                    continue;
+                }
+            }
+            if (!writeFile(cv, cbuf, p, out.items)) usys.exit(193);
+            logName("apply: settings written: ", key);
+            row(&res, &rows, "settings", key, "written");
+            written += 1;
+        }
+    }
+
+    if (!fsc.fsSync(cv)) usys.exit(194);
+    var line: [96]u8 = undefined;
+    var nb: [24]u8 = undefined;
+    var nb2: [24]u8 = undefined;
+    _ = usys.log(glog, cat3(&line, "apply: done: users created ", decimal(&nb, created), ", settings written ", decimal(&nb2, written), ""));
+    _ = res.deliver(&setup, .{ .table = .{ .cols = &.{ "kind", "name", "action" }, .rows = rows.items } });
     usys.exit(0);
+}
+
+fn row(res: *result.Result, rows: *std.ArrayList([]const Value), kind: []const u8, name: []const u8, action: []const u8) void {
+    const a = res.allocator();
+    const r = a.alloc(Value, 3) catch usys.exit(197);
+    r[0] = .{ .str = kind };
+    r[1] = .{ .str = a.dupe(u8, name) catch usys.exit(197) };
+    r[2] = .{ .str = action };
+    rows.append(a, r) catch usys.exit(197);
+}
+
+fn decimal(out: *[24]u8, v: u64) []const u8 {
+    var tmp: [24]u8 = undefined;
+    var n: usize = 0;
+    var x = v;
+    if (x == 0) {
+        out[0] = '0';
+        return out[0..1];
+    }
+    while (x > 0) : (x /= 10) {
+        tmp[n] = @intCast('0' + x % 10);
+        n += 1;
+    }
+    for (0..n) |i| out[i] = tmp[n - 1 - i];
+    return out[0..n];
+}
+
+/// A whole file into `buf`, or null when it is absent or too big.
+fn readInto(view: u64, vbuf: [*]u8, path: []const u8, buf: []u8) ?[]const u8 {
+    const fd = switch (fsc.fsOpen(view, vbuf, path, 0)) {
+        .fd => |fd| fd,
+        .err => return null,
+    };
+    defer fsc.fsClose(view, fd);
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = fsc.fsReadAt(view, fd, off, @min(shared.fs_max_io, buf.len - off)) orelse return null;
+        if (n == 0) break;
+        @memcpy(buf[off .. off + n], vbuf[0..n]);
+        off += n;
+    }
+    if (off == buf.len) return null;
+    return buf[0..off];
 }
 
 fn randomOrDie(out: []u8) void {
@@ -839,7 +984,7 @@ fn randomOrDie(out: []u8) void {
 }
 
 /// A record as data: the same syntax as a unit file, hex for the bytes.
-fn renderRecord(out: *[1024]u8, rec: usercred.Record) []const u8 {
+fn renderRecord(out: *[1024]u8, rec: usercred.Record, budget: Budget) []const u8 {
     var n: usize = 0;
     var hex: [2 * usercred.sealed_len]u8 = undefined;
     n = putStr(out, n, "{ key: \"");
@@ -854,7 +999,13 @@ fn renderRecord(out: *[1024]u8, rec: usercred.Record) []const u8 {
     n = putNum(out, n, rec.kdf.r);
     n = putStr(out, n, ", p: ");
     n = putNum(out, n, rec.kdf.p);
-    n = putStr(out, n, " },\n  budget: { kobj: 2mb, user: 12mb, cpu: 500 } }\n");
+    n = putStr(out, n, " },\n  budget: { kobj: ");
+    n = putNum(out, n, budget.kobj_kb);
+    n = putStr(out, n, "kb, user: ");
+    n = putNum(out, n, budget.user_kb);
+    n = putStr(out, n, "kb, cpu: ");
+    n = putNum(out, n, budget.cpu_permille);
+    n = putStr(out, n, " } }\n");
     return out[0..n];
 }
 
