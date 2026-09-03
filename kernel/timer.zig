@@ -1,7 +1,9 @@
-//! Physical generic timer, per core: fixed 100ms tick driving preemption
+//! Generic timer, per core: fixed 100ms tick driving preemption
 //! everywhere; core 0 is the timekeeper (uptime, sleeper wakeups). At EL1
-//! it is CNTP (PPI 30); as the EL2 host the same CNTP_* names reach the
-//! hypervisor physical timer, whose line is PPI 26.
+//! it is the virtual timer, CNTV (PPI 27) — the one a hypervisor can
+//! hand a guest without trapping, and identical to the physical one when
+//! there is no hypervisor (offset zero). As the EL2 host it is CNTHP,
+//! reached through the CNTP_* names under VHE, PPI 26.
 
 const log = @import("log.zig");
 const gic = @import("gic.zig");
@@ -17,7 +19,7 @@ pub fn initCore(cpu: u32) void {
         const el = asm ("mrs %[el], CurrentEL"
             : [el] "=r" (-> u64),
         ) >> 2;
-        intid = if (el == 2) 26 else 30;
+        intid = if (el == 2) 26 else 27;
         const freq = asm ("mrs %[v], cntfrq_el0"
             : [v] "=r" (-> u64),
         );
@@ -28,12 +30,21 @@ pub fn initCore(cpu: u32) void {
     }
     gic.enableLocalInterrupt(cpu, @intCast(intid));
     rearm();
-    asm volatile (
-        \\msr cntp_ctl_el0, %[one]
-        \\isb
-        :
-        : [one] "r" (@as(u64, 1)),
-    );
+    if (intid == 26) {
+        asm volatile (
+            \\msr cntp_ctl_el0, %[one]
+            \\isb
+            :
+            : [one] "r" (@as(u64, 1)),
+        );
+    } else {
+        asm volatile (
+            \\msr cntv_ctl_el0, %[one]
+            \\isb
+            :
+            : [one] "r" (@as(u64, 1)),
+        );
+    }
     // Let EL0 read the counters (cntvct/cntpct): userspace benchmarks and
     // timeouts need a clock that doesn't cost a syscall.
     asm volatile (
@@ -59,8 +70,15 @@ pub fn handleIrq() void {
 }
 
 fn rearm() void {
-    asm volatile ("msr cntp_tval_el0, %[v]"
-        :
-        : [v] "r" (interval),
-    );
+    if (intid == 26) {
+        asm volatile ("msr cntp_tval_el0, %[v]"
+            :
+            : [v] "r" (interval),
+        );
+    } else {
+        asm volatile ("msr cntv_tval_el0, %[v]"
+            :
+            : [v] "r" (interval),
+        );
+    }
 }

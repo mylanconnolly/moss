@@ -42,6 +42,7 @@ const specs = [_]Spec{
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
+    .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
     .{
         .name = "fs",
         .kind = .blk,

@@ -52,6 +52,11 @@ pub fn build(b: *std.Build) void {
         "flap-test",
         "Run the supervision-restart drill: budget exhaustion escalates up the tree",
     ) orelse false;
+    const guest_test = b.option(
+        bool,
+        "guest-test",
+        "Run the guest drill: a userspace VMM boots a moss kernel as an EL1 guest",
+    ) orelse false;
     const vm_test = b.option(
         bool,
         "vm-test",
@@ -144,6 +149,8 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "blk_test", blk_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
+    build_opts.addOption(bool, "guest_test", guest_test);
+    build_opts.addOption(bool, "guest_kernel", false);
     build_opts.addOption(bool, "fs_test", fs_test);
     build_opts.addOption(bool, "net_test", net_test);
     build_opts.addOption(bool, "fabric_test", fabric_test);
@@ -195,6 +202,10 @@ pub fn build(b: *std.Build) void {
     });
     const pack = b.addRunArtifact(mkmarc);
     const marc_out = pack.addOutputFileArg("bootfs.marc");
+    // The guest kernel's archive: the same tree minus the guest kernel
+    // itself (which the host archive carries as img/moss-guest).
+    const pack_guest = b.addRunArtifact(mkmarc);
+    const marc_guest_out = pack_guest.addOutputFileArg("bootfs-guest.marc");
     // The boot tree: boot/ in the repo, laid out as the archive serves it
     // (etc/ identity, conf/ boot configuration: unit files under
     // conf/units/, test key material beside them).
@@ -211,8 +222,10 @@ pub fn build(b: *std.Build) void {
         "conf/units/fs-alice.msh",    "conf/units/fs-bob.msh",
         "conf/units/net-echosrv.msh", "conf/units/net-echocli.msh",
         "conf/units/net-boxed.msh",   "conf/msh/startup.msh",
+        "conf/units/guest-hello.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
+        pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
     }
 
     const user_blobs = b.addWriteFiles();
@@ -236,6 +249,7 @@ pub fn build(b: *std.Build) void {
             .basename = b.fmt("{s}.bin", .{p.name}),
         });
         pack.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
+        pack_guest.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
     }
     // A guest: bare-metal EL1 code the VMM loads into a VM's RAM. Raw
     // binary, linked at the guest's RAM base, no MOSS header.
@@ -250,6 +264,36 @@ pub fn build(b: *std.Build) void {
     guest.entry = .{ .symbol_name = "_start" };
     const guest_bin = b.addObjCopy(guest.getEmittedBin(), .{ .format = .bin, .basename = "guest-hello.bin" });
     pack.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
+    pack_guest.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
+
+    // The guest kernel: this very kernel, built to boot the guest profile
+    // and report, embedding the guest archive; the host archive carries
+    // its raw Image as img/moss-guest for the VMM to load.
+    const guest_blobs = b.addWriteFiles();
+    _ = guest_blobs.addCopyFile(marc_guest_out, "bootfs.marc");
+    const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
+    const gopts = b.addOptions();
+    for ([_][]const u8{
+        "panic_test", "fault_test", "sched_test",   "domain_test",
+        "ipc_test",   "init_test",  "sandbox_test", "flap_test",
+        "blk_test",   "fs_test",    "net_test",     "fabric_test",
+        "shell_test", "rng_test",   "smmu_test",    "vm_test",
+        "guest_test",
+    }) |on| gopts.addOption(bool, on, false);
+    gopts.addOption(bool, "guest_kernel", true);
+    const gmod = b.createModule(.{
+        .root_source_file = b.path("kernel/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    gmod.addImport("shared", shared_mod);
+    gmod.addOptions("build_options", gopts);
+    gmod.addAnonymousImport("user_blobs", .{ .root_source_file = guest_blobs_src });
+    const gkernel = b.addExecutable(.{ .name = "moss-guest.elf", .root_module = gmod });
+    gkernel.setLinkerScript(b.path("kernel/linker.ld"));
+    const gkernel_bin = b.addObjCopy(gkernel.getEmittedBin(), .{ .format = .bin, .basename = "moss-guest.bin" });
+    pack.addPrefixedFileArg("img/moss-guest=", gkernel_bin.getOutput());
 
     _ = user_blobs.addCopyFile(marc_out, "bootfs.marc");
     const user_blobs_src = user_blobs.add(
@@ -512,11 +556,12 @@ pub fn build(b: *std.Build) void {
         "ipc_test",   "init_test",  "sandbox_test", "flap_test",
         "blk_test",   "fs_test",    "net_test",     "fabric_test",
         "shell_test", "rng_test",   "smmu_test",    "vm_test",
+        "guest_test",
     };
     const variants = [_][]const u8{
-        "panic",   "fault", "sched", "domain", "ipc", "init",
-        "sandbox", "flap",  "blk",   "fs",     "net", "fabric",
-        "shell",   "rng",   "smmu",  "vm",
+        "panic",   "fault", "sched", "domain", "ipc",   "init",
+        "sandbox", "flap",  "blk",   "fs",     "net",   "fabric",
+        "shell",   "rng",   "smmu",  "vm",     "guest",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();
@@ -524,6 +569,7 @@ pub fn build(b: *std.Build) void {
         for (all_test_opts) |on| {
             vopts.addOption(bool, on, std.mem.eql(u8, on, enabled));
         }
+        vopts.addOption(bool, "guest_kernel", false);
         const vmod = b.createModule(.{
             .root_source_file = b.path("kernel/main.zig"),
             .target = kernel_target,

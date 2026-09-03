@@ -87,6 +87,12 @@ pub const Vcpu = extern struct {
     vmcr: u64 = 0,
     lr: [4]u64 = @splat(0),
     timer_pending: bool = false,
+    /// The host masked the guest's virtual timer (IMASK) when it fired;
+    /// the mask lifts at the next entry once the guest has moved the
+    /// compare value (its handler rearmed it) — a kernel guest never
+    /// rewrites CNTV_CTL, so nobody else would clear it.
+    host_masked: bool = false,
+    masked_cval: u64 = 0,
     pending_read: bool = false,
     pending_read_reg: u8 = 0,
     pending_read_size: u8 = 0,
@@ -229,10 +235,12 @@ pub fn indexOf(vm: *Vm) u64 {
 // ------------------------------------------------------------ registers
 
 const hcr_host: u64 = (1 << 34) | (1 << 31) | (1 << 27); // E2H | RW | TGE
-// VM | SWIO | FMO | IMO | AMO | DC | TWI | TSC | RW | E2H: stage 2 on,
-// interrupts to the host and virtual to the guest, stage-1-off memory
-// still cacheable, WFI and SMC trapped.
-const hcr_guest: u64 = 1 | (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 12) | (1 << 13) | (1 << 19) | (1 << 31) | (1 << 34);
+// VM | SWIO | FMO | IMO | AMO | TWI | TSC | RW | E2H: stage 2 on,
+// interrupts to the host and virtual to the guest, WFI and SMC trapped.
+// Not DC: it would force the guest's stage 1 off, and a kernel guest
+// links in the high half (the first fetch after its MMU came on was an
+// address-size fault on a "physical" address of 0xffffff80...).
+const hcr_guest: u64 = 1 | (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 13) | (1 << 19) | (1 << 31) | (1 << 34);
 // T0SZ 25, start level 1, WB RA/WA, inner shareable, 4K, 40-bit PA.
 const vtcr: u64 = 25 | (1 << 6) | (1 << 8) | (1 << 10) | (3 << 12) | (2 << 16);
 
@@ -376,6 +384,11 @@ fn enterOnce(vm: *Vm) void {
     sched.fpSaveCurrent();
     msr("vtcr_el2", vtcr);
     msr("vttbr_el2", vm.s2_root | (@as(u64, vm.vmid) << 48));
+    // What the guest reads as MIDR/MPIDR: the real part, vCPU 0 — not
+    // whichever physical core the VMM thread landed on (a kernel parks
+    // every core but affinity 0 at boot).
+    msr("vpidr_el2", mrs("midr_el1"));
+    msr("vmpidr_el2", 0x8000_0000);
     msr("cntvoff_el2", 0);
     if (vm.first_run) {
         vm.first_run = false;
@@ -384,6 +397,10 @@ fn enterOnce(vm: *Vm) void {
             \\tlbi vmalls12e1is
             \\dsb ish
         );
+    }
+    if (v.host_masked and v.cntv_cval != v.masked_cval) {
+        v.cntv_ctl &= ~@as(u64, 1 << 1);
+        v.host_masked = false;
     }
     loadGuestSysregs(v);
     loadVgic(v);
@@ -432,6 +449,22 @@ pub fn guestExit(frame: *trap.TrapFrame, kind_raw: u64) void {
     frame.regs[0] = @intFromPtr(v);
 }
 
+/// The little PSCI a guest kernel needs: VERSION, SYSTEM_OFF/RESET as an
+/// exit, and CPU_ON refused (one vCPU, for now) — answered in place.
+/// False when x0 is not a PSCI function id.
+fn psci(v: *Vcpu) bool {
+    const fid = v.regs[0];
+    const base = fid & 0xffff_ffe0;
+    if (base != 0x8400_0000 and base != 0xc400_0000) return false;
+    switch (fid) {
+        0x8400_0008, 0x8400_0009 => setExit(v, .poweroff, fid, 0, 0, 0),
+        0x8400_0000 => v.regs[0] = 0x0001_0002, // PSCI 1.2
+        0x8400_0003, 0xc400_0003 => v.regs[0] = @bitCast(@as(i64, -2)), // CPU_ON: INVALID_PARAMETERS (no such core)
+        else => v.regs[0] = @bitCast(@as(i64, -1)), // NOT_SUPPORTED
+    }
+    return true;
+}
+
 fn setExit(v: *Vcpu, kind: shared.VmExit, a: u64, b: u64, c: u64, d: u64) void {
     v.exit_kind = @intFromEnum(kind);
     v.exit_a = a;
@@ -465,20 +498,20 @@ fn decodeSync(v: *Vcpu) void {
                 setExit(v, .mmio_read, ipa, size, srt, 0);
             }
         },
-        0x01 => { // WFI/WFE
+        0x01 => { // WFI/WFE: a wait with its interrupt already here is no wait
             v.pc += 4;
-            setExit(v, .wfi, esr & 1, 0, 0, 0);
+            if (!v.timer_pending) setExit(v, .wfi, esr & 1, 0, 0, 0);
         },
-        0x16 => setExit(v, .hvc, v.regs[0], v.regs[1], v.regs[2], v.regs[3]),
-        0x17 => { // SMC: PSCI, the little we speak
+        0x16 => { // HVC: PSCI when it looks like PSCI, else the VMM's
+            if (!psci(v)) setExit(v, .hvc, v.regs[0], v.regs[1], v.regs[2], v.regs[3]);
+        },
+        0x17 => { // SMC (trapped): PSCI or nothing
             v.pc += 4;
-            switch (v.regs[0]) {
-                0x8400_0008, 0x8400_0009 => setExit(v, .poweroff, v.regs[0], 0, 0, 0),
-                0x8400_0000 => v.regs[0] = 0x0001_0002, // PSCI_VERSION 1.2, keep going
-                else => v.regs[0] = @bitCast(@as(i64, -1)), // NOT_SUPPORTED
-            }
+            if (!psci(v)) v.regs[0] = @bitCast(@as(i64, -1)); // NOT_SUPPORTED
         },
-        else => setExit(v, .fault, esr, mrs("far_el2"), 0, 0),
+        // Anything else: report it with the guest's own ELR_EL1/ESR_EL1 too,
+        // which say where the guest was and what it was handling.
+        else => setExit(v, .fault, esr, v.elr, v.esr, mrs("far_el2")),
     }
 }
 
@@ -491,6 +524,8 @@ pub fn onVirtualTimer() void {
     if (cpu.last_vcpu) |p| {
         const v: *Vcpu = @ptrCast(@alignCast(p));
         v.cntv_ctl = ctl;
+        v.host_masked = true;
+        v.masked_cval = mrs("S3_5_C14_C3_2");
         v.timer_pending = true;
     }
 }

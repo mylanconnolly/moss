@@ -176,6 +176,13 @@ export fn kmain(dtb_pa: u64) noreturn {
     if (build_options.vm_test) {
         _ = sched.spawn("vm-test", vmTestWorker, 0, .{}) catch @panic("spawn vm-test");
     }
+    if (build_options.guest_test) {
+        _ = sched.spawn("guest-test", vmTestWorker, 1, .{}) catch @panic("spawn guest-test");
+    }
+    if (build_options.guest_kernel) {
+        // This kernel IS the guest: boot the guest profile and report.
+        _ = sched.spawn("boot-watch", guestKernelWorker, 0, .{}) catch @panic("spawn boot-watch");
+    }
     if (build_options.smmu_test) {
         _ = sched.spawn("smmu-test", smmuTestWorker, 0, .{}) catch @panic("spawn smmu-test");
     }
@@ -735,32 +742,42 @@ fn smmuTestWorker(_: u64) void {
 /// injected through the vGIC, and its PSCI power-off ends the run. PASS
 /// when the VMM exits 0 (it saw three ticks and the power-off) and the
 /// leak bar holds.
-fn vmTestWorker(_: u64) void {
+fn vmTestWorker(which: u64) void {
     const frames_before = pmem.stats().free_bytes;
-    if (currentEl() != 2) std.debug.panic("vm-test: FAIL — the kernel is not an EL2 host", .{});
-    log.info("vm-test: starting the VMM", .{});
+    const name: []const u8 = if (which == 1) "guest-test" else "vm-test";
+    if (currentEl() != 2) std.debug.panic("{s}: FAIL — the kernel is not an EL2 host", .{name});
+    log.info("{s}: starting the VMM ({s})", .{ name, if (which == 1) "a moss kernel as the guest" else "the bare-metal guest" });
     const vmm = domain.spawn("vmm", .{ .blob = img(.vmm) }, .{
+        .arg = which,
         .grant_debug_log = true,
         .grant_bootfs = true,
         .grant_hypervisor = true,
         .auto_reap = true,
         .kobj_limit = 4 << 20,
-        .user_limit = 32 << 20,
+        .user_limit = 96 << 20,
     }) catch |e| std.debug.panic("spawn vmm: {t}", .{e});
     var waited: u64 = 0;
     while (vmm.state != .dead) : (waited += 1) {
-        if (waited == 300) std.debug.panic("vm-test: FAIL — the guest never powered off", .{});
+        if (waited == 600) std.debug.panic("{s}: FAIL — the guest never powered off", .{name});
         sched.sleep(1);
     }
-    if (vmm.exit_code != 0) std.debug.panic("vm-test: FAIL — vmm exit {d}", .{vmm.exit_code});
+    if (vmm.exit_code != 0) std.debug.panic("{s}: FAIL — vmm exit {d}", .{ name, vmm.exit_code });
     sched.sleep(3);
     const frames_after = pmem.stats().free_bytes;
-    if (frames_after == frames_before) {
-        log.info("vm-test: PASS — an EL1 guest ran in its own stage-2 world: MMIO trapped to the VMM, virtual timer ticks injected through the vGIC, PSCI power-off honoured, nothing leaked", .{});
-        psci.systemOff();
+    if (frames_after != frames_before) std.debug.panic("{s}: FAIL — {d}B unaccounted", .{ name, frames_before -% frames_after });
+    if (which == 1) {
+        log.info("guest-test: PASS — a moss kernel booted at EL1 inside a moss VM: devicetree from the VMM, PL011 and GIC emulated as trapped MMIO, virtual timer, PSCI over HVC, its userspace ran and it powered off; nothing leaked", .{});
     } else {
-        std.debug.panic("vm-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
+        log.info("vm-test: PASS — an EL1 guest ran in its own stage-2 world: MMIO trapped to the VMM, virtual timer ticks injected through the vGIC, PSCI power-off honoured, nothing leaked", .{});
     }
+    psci.systemOff();
+}
+
+/// This kernel is a guest: the system boot under the profile its VMM
+/// named (`guest`: one program that says hello and exits), then power
+/// off through PSCI — which the hypervisor turns into the VMM's exit.
+fn guestKernelWorker(_: u64) void {
+    systemDrill("guest");
 }
 
 var boot_node: u64 = 0;

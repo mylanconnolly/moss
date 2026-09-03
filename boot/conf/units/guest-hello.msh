@@ -1,0 +1,3 @@
+# The guest profile's whole userspace: one program that says hello from
+# EL0 inside a VM and exits, ending the guest's boot.
+{ image: services, arg: 5, profiles: [guest], oneshot: true, essential: true }

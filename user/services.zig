@@ -42,8 +42,17 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
         2 => greeter(log_h, chan_h),
         3 => worker(log_h, chan_h),
         4 => flapper(log_h),
+        5 => guestHello(log_h, chan_h),
         else => usys.exit(250),
     }
+}
+
+/// The guest profile's one program: proof that a whole moss userspace —
+/// root, init, unit files, capabilities — runs inside a VM.
+fn guestHello(log_h: u64, chan_h: u64) noreturn {
+    _ = boot.take(chan_h);
+    _ = usys.log(log_h, "guest-hello: hello from EL0, inside a moss guest of moss");
+    usys.exit(0);
 }
 
 /// The drill's subject: dies on arrival, every single time.
