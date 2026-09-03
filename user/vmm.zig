@@ -163,21 +163,18 @@ fn runLoop(vcpu: u64) void {
             .mmio_write => mmioWrite(r.data[1], r.data[2], r.data[3]),
             .mmio_read => value = mmioRead(r.data[1], r.data[2]),
             .wfi => usys.sleep(1),
-            .hvc => _ = usys.log(log_h, "vmm: guest hypercall (ignored)"),
+            .hvc, .smc => {
+                // The guest's firmware interface is this program: PSCI on
+                // this architecture. The answer rides the resume value
+                // into the guest's x0; power-off ends the VM.
+                // x5 of a vm_run result (the guest's x3) rides the cap slot.
+                const ans = psci(r.data[1], r.data[2], r.data[3], r.cap) orelse {
+                    _ = usys.log(log_h, "vmm: guest asked PSCI to power off; VM done");
+                    return;
+                };
+                value = ans;
+            },
             .interrupted => {},
-            .cpu_on => {
-                // PSCI CPU_ON: a new vCPU, its own thread.
-                const idx = r.data[1];
-                if (idx >= max_vcpus or usys.threadCreate(vcpuThread, idx, &vcpu_stacks[idx]) != .ok) {
-                    _ = usys.log(log_h, "vmm: could not start a vCPU thread");
-                    usys.exit(140);
-                }
-                _ = usys.log(log_h, "vmm: guest brought a vCPU online");
-            },
-            .poweroff => {
-                _ = usys.log(log_h, "vmm: guest asked PSCI to power off; VM done");
-                return;
-            },
             .fault, .none => {
                 var msg: [160]u8 = undefined;
                 var n: usize = 0;
@@ -192,6 +189,48 @@ fn runLoop(vcpu: u64) void {
                 usys.exit(134);
             },
         }
+    }
+}
+
+// ---------------------------------------------------------------- PSCI
+
+const psci_version: u64 = 0x8400_0000;
+const psci_cpu_on32: u64 = 0x8400_0003;
+const psci_cpu_on64: u64 = 0xc400_0003;
+const psci_system_off: u64 = 0x8400_0008;
+const psci_system_reset: u64 = 0x8400_0009;
+const psci_ok: u64 = 0;
+const psci_not_supported: u64 = @bitCast(@as(i64, -1));
+const psci_invalid: u64 = @bitCast(@as(i64, -2));
+const psci_already_on: u64 = @bitCast(@as(i64, -4));
+
+/// Answer a PSCI call, or null for a power-off. CPU_ON asks the kernel
+/// to reset and online the vCPU, then runs it on a thread of its own.
+fn psci(fid: u64, x1: u64, x2: u64, x3: u64) ?u64 {
+    switch (fid) {
+        psci_version => return 0x0001_0002, // PSCI 1.2
+        psci_system_off, psci_system_reset => return null,
+        psci_cpu_on32, psci_cpu_on64 => {
+            const idx = x1 & 0xff;
+            if ((x1 >> 8) != 0 or idx >= max_vcpus) return psci_invalid;
+            switch (usys.vmCpuOn(vm_handle, idx, x2, x3)) {
+                .ok => {},
+                .busy => return psci_already_on,
+                else => return psci_invalid,
+            }
+            if (usys.threadCreate(vcpuThread, idx, &vcpu_stacks[idx]) != .ok) {
+                _ = usys.log(log_h, "vmm: could not start a vCPU thread");
+                usys.exit(140);
+            }
+            _ = usys.log(log_h, "vmm: guest brought a vCPU online");
+            return psci_ok;
+        },
+        else => {
+            if (fid & 0xffff_ffe0 != psci_version and fid & 0xffff_ffe0 != 0xc400_0000) {
+                _ = usys.log(log_h, "vmm: guest hypercall outside PSCI (refused)");
+            }
+            return psci_not_supported;
+        },
     }
 }
 

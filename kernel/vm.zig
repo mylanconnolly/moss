@@ -129,6 +129,9 @@ pub const Vcpu = extern struct {
     pending_read: bool = false,
     pending_read_reg: u8 = 0,
     pending_read_size: u8 = 0,
+    /// The pending completion is an MMIO load (advance the PC past it)
+    /// rather than a hypercall (already past).
+    pending_advance: bool = false,
     exit_kind: u64 = 0,
     exit_a: u64 = 0,
     exit_b: u64 = 0,
@@ -552,7 +555,7 @@ pub fn run(vm: *Vm, vcpu: u64, resume_value: u64) Exit {
                 else => resume_value,
             };
         }
-        v.pc += 4;
+        if (v.pending_advance) v.pc += 4;
     }
     while (true) {
         v.exit_kind = 0;
@@ -665,35 +668,25 @@ pub fn guestExit(frame: *trap.TrapFrame, kind_raw: u64) void {
     frame.regs[0] = @intFromPtr(v);
 }
 
-/// The little PSCI a guest kernel needs: VERSION, SYSTEM_OFF/RESET as an
-/// exit, and CPU_ON refused (one vCPU, for now) — answered in place.
-/// False when x0 is not a PSCI function id.
-fn psci(v: *Vcpu) bool {
-    const fid = v.regs[0];
-    const base = fid & 0xffff_ffe0;
-    if (base != 0x8400_0000 and base != 0xc400_0000) return false;
-    switch (fid) {
-        0x8400_0008, 0x8400_0009 => setExit(v, .poweroff, fid, 0, 0, 0),
-        0x8400_0000 => v.regs[0] = 0x0001_0002, // PSCI 1.2
-        0x8400_0003, 0xc400_0003 => v.regs[0] = cpuOn(vmOf(v), v, v.regs[1], v.regs[2], v.regs[3]),
-        else => v.regs[0] = @bitCast(@as(i64, -1)), // NOT_SUPPORTED
-    }
-    return true;
+fn answerInX0(v: *Vcpu) void {
+    v.pending_read = true;
+    v.pending_read_reg = 0;
+    v.pending_read_size = 8;
+    v.pending_advance = false;
 }
 
-/// PSCI CPU_ON: bring vCPU `mpidr`'s Aff0 online at `entry` with `ctx`
-/// in x0, and hand the caller a cpu_on exit so its VMM runs it.
-fn cpuOn(vm: *Vm, caller: *Vcpu, mpidr: u64, entry: u64, ctx: u64) u64 {
-    const idx = mpidr & 0xff;
-    if (idx >= vm.nvcpus or (mpidr >> 8) != 0) return @bitCast(@as(i64, -2)); // INVALID_PARAMETERS
+pub const CpuOnError = error{ NoSuchVcpu, AlreadyOn };
+
+/// The mechanics of CPU_ON (the VMM's syscall): reset vCPU `idx` at
+/// `entry` with `ctx` in x0 and mark it online; the VMM then runs it.
+pub fn vcpuOn(vm: *Vm, idx: u64, entry: u64, ctx: u64) CpuOnError!void {
+    if (idx >= vm.nvcpus) return CpuOnError.NoSuchVcpu;
     const t = &vm.vcpus[idx];
-    if (t.online) return @bitCast(@as(i64, -4)); // ALREADY_ON
+    if (t.online) return CpuOnError.AlreadyOn;
     resetVcpu(vm, t, idx);
     t.pc = entry;
     t.regs[0] = ctx;
     t.online = true;
-    setExit(caller, .cpu_on, idx, 0, 0, 0);
-    return 0;
 }
 
 fn setExit(v: *Vcpu, kind: shared.VmExit, a: u64, b: u64, c: u64, d: u64) void {
@@ -726,6 +719,7 @@ fn decodeSync(v: *Vcpu) void {
                 v.pending_read = true;
                 v.pending_read_reg = srt;
                 v.pending_read_size = @intCast(size);
+                v.pending_advance = true;
                 setExit(v, .mmio_read, ipa, size, srt, 0);
             }
         },
@@ -733,12 +727,17 @@ fn decodeSync(v: *Vcpu) void {
             v.pc += 4;
             setExit(v, .wfi, esr & 1, 0, 0, 0);
         },
-        0x16 => { // HVC: PSCI when it looks like PSCI, else the VMM's
-            if (!psci(v)) setExit(v, .hvc, v.regs[0], v.regs[1], v.regs[2], v.regs[3]);
+        // HVC and trapped SMC: the VMM's to answer — PSCI, or whatever the
+        // guest speaks (x86's INIT/SIPI, RISC-V's SBI: the same shape).
+        // The reply lands in x0 through the resume value.
+        0x16 => {
+            answerInX0(v);
+            setExit(v, .hvc, v.regs[0], v.regs[1], v.regs[2], v.regs[3]);
         },
-        0x17 => { // SMC (trapped): PSCI or nothing
+        0x17 => {
             v.pc += 4;
-            if (!psci(v)) v.regs[0] = @bitCast(@as(i64, -1)); // NOT_SUPPORTED
+            answerInX0(v);
+            setExit(v, .smc, v.regs[0], v.regs[1], v.regs[2], v.regs[3]);
         },
         0x18 => { // a trapped system register: ICC_SGI1R_EL1 (op0 3, op1 0, CRn 12, CRm 11, op2 5)
             const op0 = (esr >> 20) & 3;

@@ -529,7 +529,11 @@ The pooling story stops being theory.
   has its own idle wait, vGIC state and redistributor shadow, and the
   timekeeper watches the timer deadline of every descheduled vCPU
   (whose hardware timer another vCPU may have taken). The moss guest
-  boots all four cores in both VM drills. Residuals: the GIC shadow is
+  boots all four cores in both VM drills. PSCI policy moved from the
+  kernel to the VMM the same day (`hvc`/`smc` exits answered through
+  the resume value; the kernel keeps `vm_cpu_on`), so the guest\'s
+  firmware interface is a program\'s — and an x86 or RISC-V port changes
+  only the exit decoder. Residuals: the GIC shadow is
   a register file with no distributor semantics (SPIs go to vCPU 0, as
   a moss guest routes them), passthrough needs MSI-X on the device (a
   wired-INTx device would need level emulation), and everything is

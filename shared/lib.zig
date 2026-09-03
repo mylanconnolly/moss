@@ -138,6 +138,11 @@ pub const Syscall = enum(u64) {
     /// routed for it (0 without an ITS), x3 = the doorbell address the
     /// device's MSI-X entry must target. The ECAM holder's authority.
     device_register = 38,
+    /// vm_cpu_on(vm_handle, vcpu, entry, context): reset that vCPU at
+    /// `entry` with `context` in x0 and mark it online — the mechanics
+    /// of PSCI CPU_ON; the policy (answering the guest) is the VMM's.
+    /// busy = already online, bad_arg = no such vCPU.
+    vm_cpu_on = 39,
     _,
 };
 
@@ -162,16 +167,18 @@ pub const VmExit = enum(u64) {
     mmio_write = 2,
     /// x2 = 0 for WFI, 1 for WFE.
     wfi = 3,
-    /// x2..x5 = the guest's x0..x3.
+    /// A hypercall (HVC): x2..x5 = the guest's x0..x3. The next vm_run's
+    /// resume_value becomes the guest's x0 — the VMM answers it (PSCI
+    /// included: the kernel speaks none of it).
     hvc = 4,
-    /// PSCI SYSTEM_OFF/RESET (x2 = function id).
-    poweroff = 5,
-    /// x2 = ESR, x3 = address: something the hypervisor does not handle.
+    /// x2 = ESR, x3 = the guest's ELR, x4 = its ESR: something the
+    /// hypervisor does not handle.
     fault = 6,
     /// A host interrupt; just run again.
     interrupted = 7,
-    /// The guest brought vCPU x2 online (PSCI CPU_ON): run it on a thread.
-    cpu_on = 8,
+    /// A trapped SMC, answered like an HVC (x2..x5 = x0..x3, resume_value
+    /// -> x0).
+    smc = 9,
 };
 
 pub const vm_ram_ipa: u64 = 0x4000_0000;

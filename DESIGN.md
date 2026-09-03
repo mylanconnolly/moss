@@ -1411,6 +1411,24 @@ physical counter; EL1PCTEN (bit 10) does, and a user program's
 boot the moss guest on four cores; the pool node got faster for it.
 Guests run under TCG only: HVF's nested EL2 has no VHE.
 
+**PSCI is the VMM's (as built, 2026-09-02).** A guest's firmware
+interface — on this architecture PSCI: VERSION, CPU_ON, SYSTEM_OFF —
+is not answered by the kernel any more. An HVC, and a trapped SMC,
+reach the VMM as `hvc`/`smc` exits carrying x0..x3, and the next
+`vm_run`'s resume value becomes the guest's x0, the same completion
+path an MMIO load uses. The kernel keeps one mechanism, `vm_cpu_on`:
+reset a vCPU at an entry with a context in x0 and mark it online. The
+VMM decides what CPU_ON means (a vCPU quota, a thread of its own),
+what power-off means (the VM ends), and what to say to everything else
+(NOT_SUPPORTED). This restores the interposition ideal at the VM
+boundary — the monitor is the authority — and it is what portability
+wants: PSCI over HVC is ARM's spelling of "start this processor at
+this address"; x86 spells it INIT/SIPI through a local APIC the VMM
+emulates, RISC-V spells it SBI over `ecall`. A port changes the exit
+decoder's few lines, not policy in the kernel, and a foreign guest's
+further requests (suspend, affinity, reset) land in a program that can
+be changed without touching the kernel.
+
 ## Zig conventions
 
 - Version pinned in `build.zig.zon`; bumps are deliberate, standalone commits.

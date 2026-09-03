@@ -187,6 +187,10 @@ pub fn deviceRegister(ecam: u64, sid: u64, kind: u64, bar_pa: u64, bar_len: u64,
     return syscall6(.device_register, ecam, sid, kind, bar_pa, bar_len, pin_bar);
 }
 
+pub fn vmCpuOn(vm: u64, vcpu: u64, entry: u64, ctx: u64) shared.Errno {
+    return syscall6(.vm_cpu_on, vm, vcpu, entry, ctx, 0, 0).err;
+}
+
 pub fn vmAttachDevice(vm: u64, dev: u64, bar_ipa: u64, vintid: u64) shared.Errno {
     return syscall6(.vm_attach_device, vm, dev, bar_ipa, vintid, 0, 0).err;
 }

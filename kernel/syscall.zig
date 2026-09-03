@@ -63,6 +63,7 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .vm_set => sysVmSet(d, frame),
         .vm_attach_device => sysVmAttachDevice(d, frame),
         .window_map => sysWindowMap(d, frame),
+        .vm_cpu_on => sysVmCpuOn(d, frame),
         .device_register => sysDeviceRegister(d, frame),
         .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
@@ -153,6 +154,15 @@ fn sysVmAttachDevice(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const bar_ipa = frame.regs[2];
     if (bar_ipa % 4096 != 0 or frame.regs[3] < 32 or frame.regs[3] >= 96) return errno(.bad_arg);
     vm.attachDevice(m, idx, bar_ipa, @intCast(frame.regs[3])) catch return errno(.no_space);
+    return errno(.ok);
+}
+
+fn sysVmCpuOn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
+    vm.vcpuOn(m, frame.regs[1], frame.regs[2], frame.regs[3]) catch |e| return errno(switch (e) {
+        vm.CpuOnError.NoSuchVcpu => .bad_arg,
+        vm.CpuOnError.AlreadyOn => .busy,
+    });
     return errno(.ok);
 }
 
