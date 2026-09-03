@@ -890,9 +890,11 @@ fn unitForService(id: u64) ?*Unit {
 
 /// Every program in the boot archive lands under img/ in the given view
 /// as a content-addressed file (skipped when present — the name IS the
-/// content), and img/index maps catalog names to digests. Init is the
-/// installer because it holds the archive and the catalog; fssvc knows
-/// nothing about programs and msh only reads.
+/// content), with its manifest beside it: `img/<name>.msh` names the
+/// digest and what the program is handed (grant, give — from the
+/// archive's unit file of the same name, when there is one). Init is
+/// the installer because it holds the archive and the catalog; fssvc
+/// knows nothing about programs and msh only reads.
 fn installImages(view: u64) u64 {
     const b = fsc.attachBuf(view);
     const buf: [*]u8 = @ptrFromInt(b.va);
@@ -901,8 +903,6 @@ fn installImages(view: u64) u64 {
         _ = usys.log(glog, "init: no img/ tier on this volume; store not installed");
         return 0;
     }
-    var index: [2048]u8 = undefined;
-    var ilen: usize = 0;
     var installed: u64 = 0;
     inline for (std.enums.values(shared.ImageId)) |id| {
         if (shared.marcFind(blob, shared.imagePath(id))) |image| {
@@ -913,21 +913,60 @@ fn installImages(view: u64) u64 {
             if (fsc.fsStat(view, buf, &path) == null) {
                 if (writeFile(view, buf, &path, image)) installed += 1;
             }
-            const name = @tagName(id);
-            @memcpy(index[ilen .. ilen + name.len], name);
-            ilen += name.len;
-            index[ilen] = ' ';
-            ilen += 1;
-            @memcpy(index[ilen .. ilen + digest.len], &digest);
-            ilen += digest.len;
-            index[ilen] = '\n';
-            ilen += 1;
+            writeManifest(view, buf, @tagName(id), &digest);
         }
     }
-    _ = writeFile(view, buf, shared.img_index_path, index[0..ilen]);
     _ = fsc.fsSync(view);
     if (installed > 0) _ = usys.log(glog, "init: installed images into img/ (content-addressed)");
     return installed;
+}
+
+/// The manifest is a record like a unit file's, with the image named by
+/// its digest: `{ image: "<digest>", grant: [..], give: [..] }`. A
+/// program without a unit file gets the digest alone — it is handed a
+/// log cap and its console, nothing else.
+fn writeManifest(view: u64, buf: [*]u8, name: []const u8, digest: *const [shared.img_digest_hex_len]u8) void {
+    var scratch: [12 << 10]u8 = undefined;
+    var sfba = std.heap.FixedBufferAllocator.init(&scratch);
+    const a = sfba.allocator();
+    var keys: [3][]const u8 = undefined;
+    var vals: [3]Value = undefined;
+    keys[0] = "image";
+    vals[0] = .{ .str = digest };
+    var n: usize = 1;
+    var unit_path: [64]u8 = undefined;
+    const up = cat3(&unit_path, shared.unit_dir, name, shared.unit_ext);
+    if (shared.marcFind(archive(), up)) |text| {
+        var mi = mshl.Interp.init(a, a, .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
+        if (mi.parseData(text)) |v| {
+            if (v == .record) {
+                if (v.record.get("grant")) |g| {
+                    keys[n] = "grant";
+                    vals[n] = g;
+                    n += 1;
+                }
+                if (v.record.get("give")) |g| {
+                    keys[n] = "give";
+                    vals[n] = g;
+                    n += 1;
+                }
+            }
+        } else |_| {}
+    }
+    const rec: Value = .{ .record = .{ .keys = keys[0..n], .vals = vals[0..n] } };
+    var out: std.ArrayList(u8) = .empty;
+    mshl.writeData(rec, a, &out) catch return;
+    out.append(a, '\n') catch return;
+    var mpath: [64]u8 = undefined;
+    const mp = cat3(&mpath, "img/", name, shared.img_manifest_ext);
+    _ = writeFile(view, buf, mp, out.items);
+}
+
+fn cat3(out: []u8, a: []const u8, b: []const u8, c: []const u8) []const u8 {
+    @memcpy(out[0..a.len], a);
+    @memcpy(out[a.len .. a.len + b.len], b);
+    @memcpy(out[a.len + b.len .. a.len + b.len + c.len], c);
+    return out[0 .. a.len + b.len + c.len];
 }
 
 fn writeFile(view: u64, buf: [*]u8, path: []const u8, data: []const u8) bool {

@@ -415,7 +415,7 @@ pub const InitRequest = union(enum(u64)) {
     stop: struct { service: u64 },
     /// Install the boot archive's programs into the attached `img/` view
     /// (+ view cap): content-addressed `img/<digest>` files plus the
-    /// `img/index` catalog. Idempotent — present images are skipped.
+    /// manifests beside them (`img/<name>.msh`). Idempotent — present images are skipped.
     install: void,
 };
 
@@ -462,11 +462,15 @@ pub const SessResp = union(enum(u64)) {
 // `img/` on the volume is content-addressed: a program lives at
 // img/<digest>, digest = hex of SHA-256(image)[0..16] (32 chars), so an
 // image can never change under its name and a loader verifies what it
-// stages before it spawns. `img/index` maps catalog names to digests, one
+// stages before it spawns. A manifest `img/<name>.msh` maps a name to its digest, one
 // "name digest" line each — the only text in the store, at the admin
 // boundary like conf/.
 pub const img_digest_hex_len: usize = 32;
-pub const img_index_path = "img/index";
+/// A program's manifest sits beside its image in a store: `img/<name>.msh`,
+/// an mshl record `{ image: "<digest>", grant: [...], give: [...] }` —
+/// the digest names the content, the rest says what the program is
+/// handed when run.
+pub const img_manifest_ext = ".msh";
 
 // ----------------------------------------------------------- boot protocol
 //
@@ -505,9 +509,13 @@ pub const CapTag = enum(u64) {
     conf = 17,
     /// The home tier (`home/`), for the session manager alone.
     home = 18,
+    /// A program store: a read-only view whose root is an `img/`
+    /// directory (the system's), so a shell can run programs it does
+    /// not hold in its own store.
+    store = 19,
 };
 
-pub const cap_tag_count = 19;
+pub const cap_tag_count = 20;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver

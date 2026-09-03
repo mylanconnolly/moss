@@ -416,11 +416,11 @@ const shell_script = [_]Step{
     .{ .send = "rm data/smoke/l", .expect = "" },
     .{ .send = "sync", .expect = "" },
     .{ .send = "rand | len", .expect = "32" },
-    .{ .send = "ls img", .expect = "index" },
+    .{ .send = "ls img | get name", .expect = "ps.msh" },
     // Programs return values: their tables compose with the language.
     .{ .send = "run ps | where name == shell | get name", .expect = "shell" },
     .{ .send = "run ls data/smoke | get name", .expect = "hi.txt" },
-    .{ .send = "run nope", .expect = "no such image" },
+    .{ .send = "run nope", .expect = "no such program" },
     // Functions, data files, scripts (the startup script defined `alive`).
     .{ .send = "def twice [x] { $x * 2 }; twice 21", .expect = "42" },
     .{ .send = "alive | where name == fs | len", .expect = "1" },
@@ -555,6 +555,13 @@ const login_script = [_]LoginStep{
     .{ .con = 0, .send = "alice", .expect = "passphrase: ", .prompt = "" },
     .{ .con = 0, .send = "alice-pass", .expect = "moss shell" },
     .{ .con = 0, .send = "cat notes/a.txt", .expect = "alice was here" },
+    // Programs: the system store serves a session; `install` copies one
+    // into the home's own store, which `run` then finds first.
+    .{ .con = 0, .send = "run ps | where name == shell | get name", .expect = "shell" },
+    .{ .con = 0, .send = "ls img | len", .expect = "0" },
+    .{ .con = 0, .send = "install ps", .expect = "installed ps into your store" },
+    .{ .con = 0, .send = "ls img | get name", .expect = "ps.msh" },
+    .{ .con = 0, .send = "run ps | where name == shell | len", .expect = "2" },
     .{ .con = 1, .send = "ps | where name == shell | len", .expect = "2" },
     .{ .con = 0, .send = "exit", .expect = "bye", .prompt = login_prompt },
     // The last logout ends the drill: the manager exits, no prompt follows.

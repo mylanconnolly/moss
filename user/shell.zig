@@ -65,6 +65,14 @@ var run_stage: loader.Stage = undefined;
 // The result buffer run programs write their value into (data literal).
 var run_out_h: u64 = 0;
 var run_out_va: u64 = 0;
+/// The program stores `run` consults, in order: the user's own — `img/`
+/// in the filesystem this shell holds (a home, or the system volume)
+/// — then the system's, a read-only view handed over as `store`. A
+/// session gets the system store from the manager; the home's img/ is
+/// the user's to fill (`install`).
+const Store = struct { chan: u64, buf: [*]u8, name: []const u8 };
+var own_store: ?Store = null;
+var sys_store: ?Store = null;
 const run_out_pages: u64 = 8;
 
 // The interpreter's memory: a per-line arena (reset before every line)
@@ -115,6 +123,13 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     // Filesystem view buffer.
     const b = fsc.attachBuf(fs_chan);
     fs_buf = @ptrFromInt(b.va);
+    if (fsc.fsDerive(fs_chan, fs_buf, "img", false)) |v| {
+        own_store = .{ .chan = v, .buf = @ptrFromInt(fsc.attachBuf(v).va), .name = "your store" };
+    }
+    const store_chan = setup.cap(.store);
+    if (store_chan != 0) {
+        sys_store = .{ .chan = store_chan, .buf = @ptrFromInt(fsc.attachBuf(store_chan).va), .name = "the system store" };
+    }
 
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
     vars_fba = std.heap.FixedBufferAllocator.init(&heap_vars);
@@ -226,7 +241,7 @@ const command_names = [_][]const u8{
     "ls",    "tree", "cat",  "open",  "write",    "save",   "stat",
     "mkdir", "rm",   "mv",   "ln",    "readlink", "sync",   "df",
     "ps",    "mem",  "svc",  "start", "stop",     "nodes",  "rspawn",
-    "rand",  "run",  "help", "exit",  "clear",    "source",
+    "rand",  "run",  "help", "exit",  "clear",    "source", "install",
 };
 
 /// Tab completion: command names in command position, paths elsewhere
@@ -407,8 +422,12 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
         return .{ .str = try a.dupe(u8, &hex) };
     }
     if (is(name, "run")) {
-        if (args.len < 1) return it.fail("run: image name expected", .{});
+        if (args.len < 1) return it.fail("run: program name expected", .{});
         return try cmdRun(it, try pathArg(it, args[0]), if (args.len > 1) try pathArg(it, args[1]) else "");
+    }
+    if (is(name, "install")) {
+        if (args.len < 1) return it.fail("install: program name expected", .{});
+        return try cmdInstall(it, try pathArg(it, args[0]));
     }
     if (is(name, "source")) {
         if (args.len < 1) return it.fail("source: path expected", .{});
@@ -424,7 +443,8 @@ const help_text =
     \\  ls [p] | tree [p] [--depth n] | stat p | cat p | write p text | save p
     \\  mkdir p | rm p | mv a b | ln p target | readlink p | df | sync
     \\  ps | mem | svc | start N | stop N | nodes | rspawn N I | rand
-    \\  run NAME [path]        a program from img/ in its own domain; its result is a value
+    \\  run NAME [path]        a program from your store (img/) or the system's, in its own domain; its result is a value
+    \\  install NAME           copy a program from the system store into your own (img/)
     \\  source p               run a script in this session (startup: conf/msh/startup.msh)
     \\  x | to-data | save p   write a value as data; open p | from-data reads it back
     \\  def name [a b] { .. }  a function ($in is the pipeline input)
@@ -496,35 +516,43 @@ fn treeInto(it: *mshl.Interp, text: *std.ArrayList(u8), path: []const u8, indent
 }
 
 fn readFile(it: *mshl.Interp, path: []const u8) mshl.Error![]const u8 {
-    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 0)) {
+    return readFileVia(it, fs_chan, fs_buf, path);
+}
+
+fn readFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8) mshl.Error![]const u8 {
+    const fd = switch (fsc.fsOpen(chan, buf, path, 0)) {
         .fd => |f| f,
         .err => |e| return it.fail("cannot open {s}: {t}", .{ path, e }),
     };
-    defer fsc.fsClose(fs_chan, fd);
+    defer fsc.fsClose(chan, fd);
     var out: std.ArrayList(u8) = .empty;
     var off: u64 = 0;
     while (true) {
-        const n = fsc.fsReadAt(fs_chan, fd, off, shared.fs_max_io) orelse return it.fail("read error on {s}", .{path});
+        const n = fsc.fsReadAt(chan, fd, off, shared.fs_max_io) orelse return it.fail("read error on {s}", .{path});
         if (n == 0) break;
-        try out.appendSlice(it.arena, fs_buf[0..n]);
+        try out.appendSlice(it.arena, buf[0..n]);
         off += n;
     }
     return out.items;
 }
 
 fn writeFile(it: *mshl.Interp, path: []const u8, text: []const u8) mshl.Error!void {
-    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 1)) {
+    return writeFileVia(it, fs_chan, fs_buf, path, text);
+}
+
+fn writeFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8, text: []const u8) mshl.Error!void {
+    const fd = switch (fsc.fsOpen(chan, buf, path, 1)) {
         .fd => |f| f,
         .err => |e| return it.fail("cannot open {s}: {t}", .{ path, e }),
     };
-    defer fsc.fsClose(fs_chan, fd);
+    defer fsc.fsClose(chan, fd);
     var off: usize = 0;
     while (off < text.len) {
         const n = @min(shared.fs_max_io, text.len - off);
-        if (!fsc.fsWriteAt(fs_chan, fs_buf, fd, off, text[off .. off + n])) return it.fail("write failed on {s}", .{path});
+        if (!fsc.fsWriteAt(chan, buf, fd, off, text[off .. off + n])) return it.fail("write failed on {s}", .{path});
         off += n;
     }
-    if (!fsc.fsTruncate(fs_chan, fd, text.len)) return it.fail("truncate failed on {s}", .{path});
+    if (!fsc.fsTruncate(chan, fd, text.len)) return it.fail("truncate failed on {s}", .{path});
 }
 
 fn statRecord(it: *mshl.Interp, name: []const u8, st: fsc.StatOut) mshl.Error!Value {
@@ -702,29 +730,43 @@ fn rspawn(it: *mshl.Interp, node: u64, image: u64) mshl.Error!Value {
 // is read through msh's view, verified against its digest, and spawned
 // from msh's stage.
 
-fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value {
-    var digest: [shared.img_digest_hex_len]u8 = undefined;
-    if (!indexLookup(name, &digest)) return it.fail("run: no such image in img/index: {s}", .{name});
-    var img_path: [4 + shared.img_digest_hex_len]u8 = undefined;
-    @memcpy(img_path[0..4], "img/");
-    @memcpy(img_path[4..], &digest);
-    const len = readIntoStage(&img_path) orelse return it.fail("run: image unreadable", .{});
-    if (!run_stage.verify(len, &digest)) return it.fail("run: image does not match its digest; refusing", .{});
+/// A program found in a store: which store, its digest, its manifest.
+const Program = struct { store: Store, digest: [shared.img_digest_hex_len]u8, manifest: Value };
 
-    // The unit file says what the program is handed: kernel grants and
+/// `img/<name>.msh` in the user's own store, then the system's.
+fn findProgram(it: *mshl.Interp, name: []const u8) mshl.Error!?Program {
+    const stores = [_]?Store{ own_store, sys_store };
+    for (stores) |maybe| {
+        const st = maybe orelse continue;
+        var mpath: [64]u8 = undefined;
+        if (name.len + shared.img_manifest_ext.len > mpath.len) return it.fail("run: name too long", .{});
+        @memcpy(mpath[0..name.len], name);
+        @memcpy(mpath[name.len .. name.len + shared.img_manifest_ext.len], shared.img_manifest_ext);
+        const mp = mpath[0 .. name.len + shared.img_manifest_ext.len];
+        const text = readFileVia(it, st.chan, st.buf, mp) catch continue;
+        const v = try it.parseData(text);
+        if (v != .record) return it.fail("run: {s}: the manifest in {s} is not a record", .{ name, st.name });
+        const img = v.record.get("image") orelse return it.fail("run: {s}: manifest names no image", .{name});
+        if (img != .str or img.str.len != shared.img_digest_hex_len) return it.fail("run: {s}: manifest image is not a digest", .{name});
+        var p: Program = .{ .store = st, .digest = undefined, .manifest = v };
+        @memcpy(&p.digest, img.str);
+        return p;
+    }
+    return null;
+}
+
+fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value {
+    const prog = (try findProgram(it, name)) orelse return it.fail("run: no such program: {s} (not in your store, nor the system's)", .{name});
+    const len = readIntoStageVia(prog.store.chan, prog.store.buf, &prog.digest) orelse return it.fail("run: image unreadable in {s}", .{prog.store.name});
+    if (!run_stage.verify(len, &prog.digest)) return it.fail("run: image does not match its digest; refusing", .{});
+
+    // The manifest says what the program is handed: kernel grants and
     // views (a view path of `arg` is the run argument). The console is
     // always ours to give.
     var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
     var view: u64 = 0;
     {
-        var unit_path: [64]u8 = undefined;
-        const prefix = "boot/" ++ shared.unit_dir;
-        @memcpy(unit_path[0..prefix.len], prefix);
-        @memcpy(unit_path[prefix.len .. prefix.len + name.len], name);
-        @memcpy(unit_path[prefix.len + name.len .. prefix.len + name.len + shared.unit_ext.len], shared.unit_ext);
-        const text = try readFile(it, unit_path[0 .. prefix.len + name.len + shared.unit_ext.len]);
-        const unit = try it.parseData(text);
-        if (unit != .record) return it.fail("run: {s}: unit file is not a record", .{name});
+        const unit = prog.manifest;
         if (unit.record.get("grant")) |g| {
             if (g == .list) for (g.list) |item| {
                 if (item == .str and is(item.str, "introspect")) flags |= shared.SpawnFlags.grant_introspect;
@@ -790,42 +832,50 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     return try mshl.tableize(it.arena, try it.parseData(text));
 }
 
-/// img/index: "name digest" lines.
-fn indexLookup(name: []const u8, digest: *[shared.img_digest_hex_len]u8) bool {
-    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, shared.img_index_path, 0)) {
-        .fd => |fd| fd,
-        .err => return false,
-    };
-    defer fsc.fsClose(fs_chan, fd);
-    const n = fsc.fsRead(fs_chan, fd, shared.fs_max_io) orelse return false;
-    var text: [4096]u8 = undefined;
-    const m = @min(n, text.len);
-    @memcpy(text[0..m], fs_buf[0..m]);
-    var lines = std.mem.splitScalar(u8, text[0..m], '\n');
-    while (lines.next()) |line| {
-        var sp: usize = 0;
-        while (sp < line.len and line[sp] != ' ') sp += 1;
-        if (sp == line.len or line.len - sp - 1 != shared.img_digest_hex_len) continue;
-        if (is(line[0..sp], name)) {
-            @memcpy(digest, line[sp + 1 ..]);
-            return true;
-        }
+/// `install NAME`: the program's image and manifest, copied from the
+/// system store into the user's own — the image verified against its
+/// digest on the way, present images skipped (the name IS the content).
+/// From then on `run NAME` finds it in the user's store first.
+fn cmdInstall(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
+    const own = own_store orelse return it.fail("install: this shell has no store of its own (no img/ here)", .{});
+    const sys = sys_store orelse return it.fail("install: no system store to install from", .{});
+    var mpath: [64]u8 = undefined;
+    if (name.len + shared.img_manifest_ext.len > mpath.len) return it.fail("install: name too long", .{});
+    @memcpy(mpath[0..name.len], name);
+    @memcpy(mpath[name.len .. name.len + shared.img_manifest_ext.len], shared.img_manifest_ext);
+    const mp = mpath[0 .. name.len + shared.img_manifest_ext.len];
+    const text = readFileVia(it, sys.chan, sys.buf, mp) catch return it.fail("install: no such program in the system store: {s}", .{name});
+    const v = try it.parseData(text);
+    if (v != .record) return it.fail("install: {s}: the manifest is not a record", .{name});
+    const img = v.record.get("image") orelse return it.fail("install: {s}: manifest names no image", .{name});
+    if (img != .str or img.str.len != shared.img_digest_hex_len) return it.fail("install: {s}: manifest image is not a digest", .{name});
+    var digest: [shared.img_digest_hex_len]u8 = undefined;
+    @memcpy(&digest, img.str);
+    const len = readIntoStageVia(sys.chan, sys.buf, &digest) orelse return it.fail("install: image unreadable in the system store", .{});
+    if (!run_stage.verify(len, &digest)) return it.fail("install: image does not match its digest; refusing", .{});
+    if (fsc.fsStat(own.chan, own.buf, &digest) == null) {
+        try writeFileVia(it, own.chan, own.buf, &digest, run_stage.slice(len));
     }
-    return false;
+    try writeFileVia(it, own.chan, own.buf, mp, text);
+    var l: tty.Line = .{};
+    _ = l.str("installed ").str(name).str(" into your store");
+    l.flush();
+    return .nothing;
 }
 
-/// Read a file through the view buffer into the run stage; returns its length.
-fn readIntoStage(path: []const u8) ?usize {
-    const fd = switch (fsc.fsOpen(fs_chan, fs_buf, path, 0)) {
+/// Read a store's image `<digest>` through that store's buffer into the
+/// run stage; returns its length.
+fn readIntoStageVia(chan: u64, buf: [*]u8, digest: *const [shared.img_digest_hex_len]u8) ?usize {
+    const fd = switch (fsc.fsOpen(chan, buf, digest, 0)) {
         .fd => |fd| fd,
         .err => return null,
     };
-    defer fsc.fsClose(fs_chan, fd);
+    defer fsc.fsClose(chan, fd);
     var off: usize = 0;
     while (off < run_stage.bytes) {
-        const n = fsc.fsReadAt(fs_chan, fd, off, @min(shared.fs_max_io, run_stage.bytes - off)) orelse return null;
+        const n = fsc.fsReadAt(chan, fd, off, @min(shared.fs_max_io, run_stage.bytes - off)) orelse return null;
         if (n == 0) break;
-        @memcpy(run_stage.slice(off + n)[off..], fs_buf[0..n]);
+        @memcpy(run_stage.slice(off + n)[off..], buf[0..n]);
         off += n;
     }
     return off;

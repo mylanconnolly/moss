@@ -1,6 +1,8 @@
 # A session's template unit: msh on the session's console, holding the
-# home as its whole filesystem, and the session's own init for service
-# control. A user's own conf/units/ in the home replaces this template.
+# home as its whole filesystem, the system program store (read-only,
+# from the manager) beside the home's own img/, and the session's own
+# init for service control. A user's own conf/units/ in the home
+# replaces this template.
 {
   image:     shell
   budget:    { user: 8mb }
@@ -10,6 +12,7 @@
   give: [
     { tag: console, session: true }
     { tag: view,    fs: "", ro: false }
+    { tag: store,   session: true }
     { tag: init,    self: true }
   ]
 }

@@ -12,7 +12,12 @@ rings, a filesystem with per-process namespace views, dual-stack TCP/IP,
 and a multi-node fabric doing cross-VM RPC with node-kill recovery under
 per-node cryptographic identities.
 
-## The three documents
+## The documents
+
+**[docs/](docs/README.md)** explains the system in layers — a plain
+version first, then the mechanism with diagrams, then the detail and the
+known limits — grounded in the code of the same commit. The three
+working documents it points into:
 
 - **[ROADMAP.md](ROADMAP.md)** — the plan of record: locked decisions with
   rationale, phased milestones with exit criteria, invariants no change may
@@ -100,7 +105,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | vmnode | The pooling story: a moss guest with a passed-through NIC and entropy device (SMMU stage 2, LPIs injected as SPIs) joins the fabric as node 2 and takes a remote spawn | `zig build run -Dvmnode-test` |
 | fs | Namespace views (badged caps) on real storage; persistence; reclamation on client death (a hundred views come and go through one domain, two dozen held to the grave, the next client fits) | `zig build run-blk -Dfs-test` |
 | users | Users as keys, sessions as domains, homes as encrypted volumes: passphrase-unlocked identities in a custodian's care, two sessions at once under their own budgets, wrong passphrase and unknown user refused, each home a volume keyed from its identity with the system volume holding only ciphertext, work persisting across logins, layered settings with a locked key | `zig build run-blk -Dusers-test` |
-| login | Console login: two users at two consoles at once, each session an init instance with msh holding the home as its whole filesystem; a refused passphrase, the other's files unnameable, out and back in, seats freed | `zig build run-login` (interactive) |
+| login | Console login: two users at two consoles at once, each session an init instance with msh holding the home as its whole filesystem; a refused passphrase, the other's files unnameable, out and back in, `run` from the system store and `install` into the home's own, seats freed | `zig build run-login` (interactive) |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
 | fabric | Per-node identities (root-signed certs, signed DH, sealed transport): join, gossip, placement, death, rejoin, imposter refused, spawn authorization, revocation | `zig build run-cluster -Dfabric-test` |

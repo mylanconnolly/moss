@@ -400,8 +400,10 @@ fabric closes a half-open attempt before dialing the same node again;
 RPC only ever travels on an authenticated peer.
 
 **Programs as files (as built):** `img/` on the volume is content-
-addressed — a program lives at `img/<digest>` and `img/index` maps
-catalog names to digests — so an image can never change under its name,
+addressed — a program lives at `img/<digest>`, and its manifest beside
+it, `img/<name>.msh`, names the digest and what the program is handed
+(`{ image: "<digest>", grant: [..], give: [..] }`, built by init from
+the program's unit file) — so an image can never change under its name,
 identical images are one file, and a loader verifies what it staged
 before it spawns. Init is the installer (at the shell boot it receives a
 view of `img/` alone and writes what is missing); fssvc knows nothing
@@ -801,7 +803,7 @@ capability views make unrepresentable).
 | Path | Lifecycle | Contents |
 |---|---|---|
 | `boot/` | immutable, from the boot image | system identity (`boot/etc/`) and boot-time config (`boot/conf/` — init's topology lives at `boot/conf/init.topology`); later: verified/signed |
-| `img/` | immutable, content-addressed | program images as `img/<digest>` (SHA-256[0..16] hex) plus `img/index` (name → digest); installed from `boot/img/` by init at boot, read by msh's `run` |
+| `img/` | immutable, content-addressed | program images as `img/<digest>` (SHA-256[0..16] hex) plus a manifest `img/<name>.msh` beside each (digest, grants, gives); installed from `boot/img/` by init at boot, read by msh's `run`; the same layout in a home is the user's own store |
 | `conf/` | admin-written, service-read | per-service configuration: `conf/<service>/...` |
 | `state/` | service-owned, survives reboot | each service's private mutable state: `state/<service>/` |
 | `data/` | user/application payload | the only tree where sharing between services is expected, always via explicit view grants |
@@ -1419,8 +1421,8 @@ with a manifest and a drill (`users` test) like everything else.
   root. The system volume only ever holds ciphertext; the plaintext
   exists in one domain, spawned for the session and destroyed with it.
   A home volume has the lifecycle tiers at the user's radius (`conf/`
-  is the user settings layer, `img/` a program store to come), and its
-  root is the user's to shape. A session's filesystem *is* that view:
+  is the user settings layer, `img/` the user's own program store), and
+  its root is the user's to shape. A session's filesystem *is* that view:
   the other homes, the credential store and the system settings are
   unnameable from inside it, not forbidden (`..` is `bad_path`,
   `conf/users/...` is `not_found`). Logout is a durability barrier —
@@ -1496,8 +1498,14 @@ three radii, as the orchestration decision says. The user's `exit` ends
 msh, the essential unit, so init shuts the session down; the manager
 sees the domain die, wipes the key, rebinds its console buffer and
 prompts again — the seat is free. msh's fabric is optional now (a
-session has none), and `run` needs an `img/` the home lacks (residual:
-a per-user program store). The `login` drill drives both consoles over
+session has none). **Programs in a session (2026-09-03):** msh consults
+two stores — its own, `img/` in the filesystem it holds (the home's,
+empty until the user fills it), then the system's, a read-only view of
+the system `img/` the manager hands every session as the `store` cap —
+and `install NAME` copies a program from the system store into the
+user's own, image verified against its digest, after which `run` finds
+the user's copy first. Manifests travel with images (`img/<name>.msh`),
+so `run` no longer needs `boot/` in its view. The `login` drill drives both consoles over
 TCP: a refused passphrase, alice and bob in at once, each home the
 whole filesystem (`..` is an error, the other's files unnameable), both
 shells visible from either, alice out and back in to find her file,
@@ -1515,8 +1523,8 @@ design working, not a fault to chase.
 
 What this does not do, deliberately: sharing by revocable delegation
 and fabric logins (stage 3, with the desired-state `apply` tool and the
-installer), a per-user program store (`img/` in the home is empty, so
-`run` in a session has nothing to run yet), a capacity a home volume
+installer), any source of programs but the system store (a user's own
+store is filled by `install` alone), a capacity a home volume
 actually enforces (it reports 8 MB; the file grows on demand within the
 system volume), and MULTIPORT virtio-console (more seats on one
 device) — the seat model is the same either way.

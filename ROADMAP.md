@@ -420,11 +420,17 @@ The pooling story stops being theory.
   Both render through `user/tty.zig` (shared with msh's builtins; the
   ps table is one function). The shell check installs the store on a
   fresh volume every run and drives `ls img`, `run ps`, `run ls
-  data/smoke`, and `run nope`. Residuals: msh carries a small
-  name→manifest table (ps gets introspect, ls gets a view) — a manifest
-  file beside each image is the evolution; the store is populated from
-  the boot archive only (no other source of programs yet); `run`
-  arguments are 24 bytes.
+  data/smoke`, and `run nope`. ✅ **Manifests beside images, and a
+  per-user store** (2026-09-03): `img/index` and msh's built-in
+  name→manifest table are gone — each program's manifest sits beside it
+  as `img/<name>.msh` (digest, grants, gives; init builds it from the
+  unit file), a shell consults its own store (`img/` in its filesystem)
+  and then the system store (a read-only `store` cap), a session gets
+  the system store from the manager and its home's `img/` as its own,
+  and `install NAME` copies a program into it. The login drill runs
+  `ps` from the system store inside a session, installs it, and runs
+  the home's copy. Residuals: the system store is the only source of
+  programs; `run` arguments are 24 bytes.
 - ✅ **Entropy: virtio-rng + getrandom/rng_seed** (done): the kernel
   carries a ChaCha8 fast-key-erasure CSPRNG (`kernel/rng.zig`) that it
   never seeds itself — hardware entropy enters only through `rng_seed`,
@@ -567,8 +573,7 @@ The pooling story stops being theory.
   filesystem service spawned per session and destroyed with it — the
   system volume holds ciphertext only, and the drill scans it to prove
   so. Residuals: revocable sharing / fabric logins / the desired-state
-  `apply` tool and installer (stage 3), a per-user program store (`run`
-  in a session), and an enforced home capacity.
+  `apply` tool and installer (stage 3) and an enforced home capacity.
 - ✅ **The gate hardened** (2026-09-03): the check runs the kernel-heavy
   drills a second time under a **ReleaseSafe kernel** (`+rs` rows), has
   a soak mode (`-Dsoak=N`) and a filter (`-Donly=a,b`). The first

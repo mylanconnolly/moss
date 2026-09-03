@@ -139,6 +139,7 @@ var users_buf: [*]u8 = undefined;
 var home_view: u64 = 0;
 var home_buf: [*]u8 = undefined;
 var app_view: u64 = 0;
+var store_view: u64 = 0;
 var client_va: u64 = 0;
 var client_pages: u64 = 0;
 var stage: loader.Stage = undefined;
@@ -154,6 +155,7 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     users_view = setup.cap(.view);
     home_view = setup.cap(.home);
     app_view = setup.cap(.conf);
+    store_view = setup.cap(.store); // the system program store, for every session
     if (users_view == 0 or home_view == 0 or app_view == 0) usys.exit(180);
     users_buf = @ptrFromInt(fsc.attachBuf(users_view).va);
     home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
@@ -397,6 +399,7 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     defer _ = usys.capDrop(b);
     const w = shared.strToWords(name);
     var ok = boot.giveCap(b, .view, view) and boot.giveCap(b, .conf, app_view);
+    if (ok and store_view != 0) ok = boot.giveCap(b, .store, store_view);
     if (ok and console != 0) ok = boot.giveCap(b, .console, console);
     if (ok) ok = boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
     if (!ok) {

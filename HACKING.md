@@ -65,8 +65,9 @@ receiver's second of that tag), and `start: eager` / `essential: true`
 / `certify` / `install` as needed — added to the boot-file list in
 `build.zig`. A step that starts `after:` another must list the
 `profiles` it belongs to, or it never starts. The program takes
-it all with `boot.take`. A run tool's unit is what `run` reads for its
-grants and views (`fs: arg` = the run argument). Services reachable by
+it all with `boot.take`. A run tool's unit file becomes its manifest in
+the store (`img/<name>.msh`: digest, `grant`, `give`; `fs: arg` = the
+run argument) when init installs the images. Services reachable by
 `connect` are units named after `shared.ServiceId`.
 
 **A service**: serve one channel; scope per-client state by **badge**
