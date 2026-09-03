@@ -100,8 +100,12 @@ and the full mossfs suite.
 
 | Path | Contents |
 |---|---|
-| `boot/` | The boot tree packed into the archive: `etc/` identity, `conf/units/*.msh` unit files, test key material |
+| `boot/` | The boot tree packed into the archive: `etc/` identity, `conf/units/*.msh` unit files, test key material (`conf/fs.key`, `conf/fabric/root.seed` are fixed placeholder strings for the drills, not secrets; the drill users' passphrases are compiled into `user/users.zig`) |
 | `kernel/` | The microkernel (aarch64-freestanding, boots as an arm64 Image; embeds only the boot archive) |
 | `shared/` | The ABI/IDL: types that compile identically for kernel, userspace, and host tests |
 | `user/` | Userspace: root task, init, services, drivers, demo programs |
 | `tools/` | Host-side tooling (`runner.zig` = the `check` harness, `mkmarc.zig` packs the boot archive, `bench.zig`) |
+
+## License
+
+MIT — see `LICENSE`.
