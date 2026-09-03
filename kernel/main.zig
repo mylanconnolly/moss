@@ -100,7 +100,6 @@ export fn kmain(dtb_pa: u64) noreturn {
     gic.initDistributor();
     if (its_reg) |r| its.init(r.base, r.size) else log.warn("devicetree: no ITS; devices stay on INTx", .{});
     gic.initCore(0);
-    pci.setupMsi();
     timer.initCore(0);
     smp.bringUp();
     trap.enableIrqs();
@@ -363,7 +362,7 @@ fn initTestWorker(_: u64) void {
         .grant_spawner = true,
         .grant_bootfs = true,
         // Roomy: the whole userspace tree's usage cascades into these.
-        .grant_devices = true,
+        .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
@@ -453,7 +452,7 @@ fn flapTestWorker(_: u64) void {
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
-        .grant_devices = true,
+        .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 16 << 20,
         .user_limit = 48 << 20,
@@ -512,7 +511,7 @@ fn systemDrill(comptime name: []const u8) void {
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
-        .grant_devices = true,
+        .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 24 << 20,
         .user_limit = 96 << 20,
@@ -692,6 +691,7 @@ var smmu_canary: [4096]u8 align(4096) = @splat(0);
 fn smmuTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
     if (!smmu.active) std.debug.panic("smmu-test: FAIL — no SMMU in front of the bus", .{});
+    ensureDevices();
     const blk_idx = pci.byKind(.blk) orelse std.debug.panic("smmu-test: FAIL — no virtio-blk on the bus", .{});
 
     log.info("smmu-test: block drill with every DMA translated", .{});
@@ -700,7 +700,7 @@ fn smmuTestWorker(_: u64) void {
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
-        .grant_devices = true,
+        .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 24 << 20,
         .user_limit = 96 << 20,
@@ -927,6 +927,7 @@ fn spawnVmm(which: u64) *domain.Domain {
 fn vmnodeTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
     if (currentEl() != 2) std.debug.panic("vmnode-test: FAIL — the kernel is not an EL2 host", .{});
+    ensureDevices();
     if (pci.nthByKind(.net, 1) == null or pci.nthByKind(.rng, 1) == null)
         std.debug.panic("vmnode-test: FAIL — the guest needs a second NIC and a second entropy device on the bus", .{});
     log.info("vmnode-test: node 1 coming up", .{});
@@ -992,6 +993,35 @@ var pcie_host: ?dt.PcieHost = null;
 var smmu_info: ?dt.Smmu = null;
 var its_reg: ?dt.Reg = null;
 
+/// The kernel's own drills need the device table filled: spawn the
+/// enumerator once (told to register and exit) with the platform
+/// windows over its boot channel, and wait for it.
+var devices_ready = false;
+
+fn ensureDevices() void {
+    if (devices_ready) return;
+    devices_ready = true;
+    if (!pci.have_host) return;
+    const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+    const d = domain.spawn("pcisvc", .{ .blob = img(.pcisvc) }, .{
+        .arg = 1,
+        .grant_debug_log = true,
+        .grant_channel_a = ch,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn pcisvc: {t}", .{e});
+    bootGive(ch, .ecam, .window, 0, 0);
+    bootGive(ch, .mmio, .window, 1, 0);
+    bootGo(ch);
+    ipc.unrefSide(ch, .b);
+    var waited: u64 = 0;
+    while (d.state != .dead) : (waited += 1) {
+        if (waited == 100) std.debug.panic("pcisvc never finished", .{});
+        sched.sleep(1);
+    }
+    if (d.exit_code != 0) std.debug.panic("pcisvc exit {d}", .{d.exit_code});
+    log.info("pci: {d} device(s) registered by pcisvc", .{pci.count});
+}
+
 /// Hand a device of the given kind (the first enumerated) to a program
 /// over its boot channel, filed under its kind.
 fn bootGiveDevice(boot_ch: *ipc.Channel, kind: shared.DeviceKind) void {
@@ -999,6 +1029,7 @@ fn bootGiveDevice(boot_ch: *ipc.Channel, kind: shared.DeviceKind) void {
 }
 
 fn bootGiveDeviceNth(boot_ch: *ipc.Channel, kind: shared.DeviceKind, nth: usize) void {
+    ensureDevices();
     const idx = pci.nthByKind(kind, nth) orelse std.debug.panic("no {t} device #{d} on the bus", .{ kind, nth });
     const res = ipc.call(boot_ch, .{
         .data = shared.encodeMsg(shared.BootReq, .{ .cap = .{ .tag = @intFromEnum(shared.CapTag.device), .kind = @intFromEnum(kind) } }),

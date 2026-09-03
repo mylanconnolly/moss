@@ -175,6 +175,18 @@ pub fn vmSet(vm: u64, pc: u64, x0: u64) shared.Errno {
     return @enumFromInt(syscall3(.vm_set, vm, pc, x0));
 }
 
+/// window_map(window, page_offset, pages): data[0] = va (0 for an
+/// enquiry with pages 0), data[1] = base pa, data[2] = size.
+pub fn windowMap(window: u64, page_off: u64, pages: u64) IpcResult {
+    return syscall6(.window_map, window, page_off, pages, 0, 0, 0);
+}
+
+/// device_register(ecam, sid, kind, bar_pa, bar_len, pin|bar_index<<8):
+/// data[0] = device handle, data[1] = LPI (0 = none), data[2] = doorbell.
+pub fn deviceRegister(ecam: u64, sid: u64, kind: u64, bar_pa: u64, bar_len: u64, pin_bar: u64) IpcResult {
+    return syscall6(.device_register, ecam, sid, kind, bar_pa, bar_len, pin_bar);
+}
+
 pub fn vmAttachDevice(vm: u64, dev: u64, bar_ipa: u64, vintid: u64) shared.Errno {
     return syscall6(.vm_attach_device, vm, dev, bar_ipa, vintid, 0, 0).err;
 }

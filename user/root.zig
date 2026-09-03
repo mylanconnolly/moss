@@ -4,11 +4,12 @@
 //! the system's resource ledger with it — so the ledger-holder does nothing
 //! else.
 //!
-//! Grant layout (fresh table, insert order log→spawner→entropy→devices):
-//! log arrives in x0; spawner at slot 1; entropy at slot 2; then one
-//! device capability per PCI endpoint the kernel enumerated, from slot 3
-//! until the first empty slot. Root forwards them all to init over
-//! init's boot channel, each filed by kind — root never uses them.
+//! Grant layout (fresh table, insert order log→spawner→entropy→windows):
+//! log arrives in x0; spawner at slot 1; entropy at slot 2; the ECAM and
+//! MMIO windows at slots 3 and 4 (when the machine has a PCI host). Root
+//! hands the windows to the enumerator (pcisvc), collects the device
+//! capabilities it registers, and forwards them to init over init's
+//! boot channel, each filed by kind — root never uses them.
 
 const shared = @import("shared");
 const usys = @import("usys.zig");
@@ -41,7 +42,11 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 
 const spawner: u64 = @bitCast(shared.Handle{ .slot = 1, .generation = 1 });
 const entropy_h: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
-const first_device_slot = 3;
+const ecam_h: u64 = @bitCast(shared.Handle{ .slot = 3, .generation = 1 });
+const mmio_h: u64 = @bitCast(shared.Handle{ .slot = 4, .generation = 1 });
+const max_devices = 16;
+var devices: [max_devices]struct { cap: u64, kind: u64 } = undefined;
+var ndevices: usize = 0;
 const max_init_restarts = 1;
 
 var stage: loader.Stage = undefined;
@@ -58,6 +63,7 @@ export fn umain(log_h: u64, _: u64, arg: u64, bva: u64, blen: u64) callconv(.c) 
     if (notif.err != .ok) usys.exit(100);
     if (usys.watchDeaths(notif.data[0]) != .ok) usys.exit(101);
 
+    enumerate(log_h);
     var restarts: u64 = 0;
     var init_ctl = spawnInit(log_h, arg);
     while (true) {
@@ -104,12 +110,9 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
     // The devices go to init, which hands them to drivers per unit file.
     const b = ch.data[1];
     var ok = boot.giveCap(b, .entropy, entropy_h);
-    var slot: u32 = first_device_slot;
-    while (ok) : (slot += 1) {
-        const h: u64 = @bitCast(shared.Handle{ .slot = @intCast(slot), .generation = 1 });
-        const info = usys.deviceInfo(h);
-        if (info.err != .ok) break;
-        ok = boot.giveDevice(b, h, info.data[0]);
+    for (devices[0..ndevices]) |dev| {
+        if (!ok) break;
+        ok = boot.giveDevice(b, dev.cap, dev.kind);
     }
     ok = ok and boot.give(b, .go, 0);
     if (!ok) {
@@ -118,4 +121,37 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
     }
     _ = usys.capDrop(b);
     return r.data[0];
+}
+
+/// Firmware's job, in a program: spawn the enumerator with the platform
+/// windows and collect the device capabilities it registers. A machine
+/// without a PCI host has no windows, and no devices.
+fn enumerate(log_h: u64) void {
+    if (usys.windowMap(ecam_h, 0, 0).err != .ok) return;
+    if (!stage.load(blob_va, blob_len, .pcisvc)) {
+        _ = usys.log(log_h, "root: pcisvc image missing from the boot archive");
+        usys.exit(108);
+    }
+    const ch = usys.chanCreate();
+    if (ch.err != .ok) usys.exit(109);
+    const r = usys.spawn(spawner, stage.handle, 0, ch.data[0], shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a, usys.kbLimits(1 << 10, 2 << 10));
+    _ = usys.capDrop(ch.data[0]);
+    if (r.err != .ok) usys.exit(110);
+    const b = ch.data[1];
+    if (!(boot.giveCap(b, .ecam, ecam_h) and boot.giveCap(b, .mmio, mmio_h) and boot.give(b, .go, 0))) usys.exit(111);
+    while (ndevices < max_devices) {
+        switch (usys.callTypedCap(shared.PciReq, shared.PciResp, b, .next, 0)) {
+            .ok => |ok| switch (ok.rep) {
+                .device => |dv| {
+                    if (ok.cap == 0) break;
+                    devices[ndevices] = .{ .cap = ok.cap, .kind = dv.kind };
+                    ndevices += 1;
+                },
+                .done => break,
+            },
+            .err => break,
+        }
+    }
+    _ = usys.capDrop(b);
+    _ = usys.capDrop(r.data[0]);
 }

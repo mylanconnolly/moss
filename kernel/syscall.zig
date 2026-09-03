@@ -11,6 +11,7 @@ const cap = @import("cap.zig");
 const domain = @import("domain.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
+const its = @import("its.zig");
 const log = @import("log.zig");
 const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
@@ -61,6 +62,8 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .vm_run => sysVmRun(d, frame),
         .vm_set => sysVmSet(d, frame),
         .vm_attach_device => sysVmAttachDevice(d, frame),
+        .window_map => sysWindowMap(d, frame),
+        .device_register => sysDeviceRegister(d, frame),
         .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
         .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
         .dma_alloc => sysDmaAlloc(d, frame),
@@ -157,6 +160,44 @@ fn sysVmSet(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
     m.vcpus[0].pc = frame.regs[1];
     m.vcpus[0].regs[0] = frame.regs[2];
+    return errno(.ok);
+}
+
+fn sysWindowMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    const idx = d.captable.?.lookup(h, .window) orelse return errno(.bad_handle);
+    if (idx >= pci.windows.len) return errno(.bad_handle);
+    const w = pci.windows[idx];
+    const off = frame.regs[1];
+    const pages = frame.regs[2];
+    if (pages != 0) {
+        if (pages > 4096 or (off + pages) * 4096 > w.size) return errno(.bad_arg);
+        const va = domain.mapMmio(d, w.base + off * 4096, pages) catch return errno(.no_space);
+        frame.regs[1] = va;
+    } else {
+        frame.regs[1] = 0;
+    }
+    frame.regs[2] = w.base;
+    frame.regs[3] = w.size;
+    return errno(.ok);
+}
+
+fn sysDeviceRegister(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.regs[0]);
+    const widx = d.captable.?.lookup(h, .window) orelse return errno(.bad_handle);
+    if (widx != 0) return errno(.denied); // the ECAM holder registers
+    const kind_raw = frame.regs[2];
+    if (kind_raw >= shared.device_kind_count) return errno(.bad_arg);
+    const pin: u8 = @truncate(frame.regs[5] & 0xff);
+    const bar_index: u8 = @truncate((frame.regs[5] >> 8) & 0xff);
+    const reg = pci.register(@intCast(frame.regs[1] & 0xffff), @enumFromInt(kind_raw), bar_index, frame.regs[3], frame.regs[4], pin) catch |e| return errno(switch (e) {
+        pci.Error.TableFull => .no_space,
+        else => .bad_arg,
+    });
+    const dh = d.captable.?.insert(.device, reg.idx) orelse return errno(.no_space);
+    frame.regs[1] = @bitCast(dh);
+    frame.regs[2] = reg.lpi;
+    frame.regs[3] = if (reg.lpi != 0) its.translater() else 0;
     return errno(.ok);
 }
 
@@ -478,7 +519,7 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
     if (handle.slot < cap.slots) {
         const e = &d.captable.?.entries[handle.slot];
         if (e.generation == handle.generation) switch (e.cap_type) {
-            .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor => {
+            .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor, .window => {
                 msg.cap_type = @intFromEnum(e.cap_type);
                 msg.cap_obj = e.object;
                 return null;

@@ -1,26 +1,23 @@
-//! PCIe host: what firmware would have done, and the table behind device
-//! capabilities. At boot the kernel walks bus 0 of the ECAM window from
-//! the devicetree, assigns every memory BAR out of the host's 32-bit MMIO
-//! window (nobody else has: we boot straight from -kernel), enables
-//! memory decoding and bus mastering, and records each endpoint — its
-//! config page, the BAR its virtio registers live in, its INTx line, and
-//! its stream id (the requester id the SMMU sees). A device capability
-//! names an entry here; holding it is holding the device.
+//! The device table behind device capabilities, and the platform windows
+//! behind the enumerator. The kernel does not walk the PCI bus: it hands
+//! the ECAM window (bus 0) and the 32-bit MMIO window from the
+//! devicetree to root as `window` capabilities, and a userspace
+//! enumerator (user/pcisvc.zig — firmware's job, done by a program)
+//! sizes and places BARs, programs MSI-X, and registers each endpoint
+//! here through `device_register`. What the kernel keeps is what only it
+//! can do: the table a device capability names, the LPI it routes
+//! through the ITS, and the requester id the SMMU keys its stream on.
 
 const std = @import("std");
 const dt = @import("dt.zig");
 const its = @import("its.zig");
 const log = @import("log.zig");
-const mem = @import("mem.zig");
-const mmu = @import("mmu.zig");
 const shared = @import("shared");
 
 pub const max_devices = 16;
 
 pub const Device = struct {
     slot: u8,
-    vendor: u16,
-    device: u16,
     kind: shared.DeviceKind,
     /// The function's 4K page of configuration space (ECAM).
     cfg_pa: u64,
@@ -28,13 +25,9 @@ pub const Device = struct {
     bar_index: u8,
     bar_pa: u64,
     bar_len: u64,
-    /// The device's interrupt as a GIC intid: an LPI when it has MSI-X
-    /// and the ITS is present, else its INTx SPI (0 = none).
+    /// The device's interrupt as a GIC intid: an LPI when the ITS routed
+    /// one (the enumerator then programs MSI-X), else its INTx SPI.
     intid: u32,
-    /// MSI-X capability offset in config space (0 = none), and the BAR
-    /// holding its table.
-    msix_cap: u16 = 0,
-    msix_table_pa: u64 = 0,
     /// Requester id: bus << 8 | slot << 3 | function.
     sid: u32,
 };
@@ -42,26 +35,64 @@ pub const Device = struct {
 pub var devices: [max_devices]Device = undefined;
 pub var count: usize = 0;
 
-var host: dt.PcieHost = undefined;
-var mmio_next: u64 = 0;
+/// The platform windows a `window` capability names: 0 = ECAM (bus 0),
+/// 1 = the 32-bit MMIO window BARs are placed in.
+pub const Window = struct { base: u64 = 0, size: u64 = 0 };
+pub var windows: [2]Window = @splat(.{});
+pub var have_host = false;
 
-const virtio_vendor = 0x1af4;
-const virtio_modern_base = 0x1040;
+var host: dt.PcieHost = undefined;
 
 pub fn init(h: dt.PcieHost) void {
     host = h;
-    // Bus 0 only: 32 slots x 8 functions x 4K of config space.
-    mmu.mapDeviceLive(h.ecam_base, 1 << 20) catch @panic("pci: cannot map ECAM");
-    mmio_next = h.mmio_base;
-    for (0..32) |slot| probe(@intCast(slot));
-    if (count == 0) log.warn("pci: no endpoints on bus 0", .{});
+    have_host = true;
+    windows[0] = .{ .base = h.ecam_base, .size = 1 << 20 };
+    windows[1] = .{ .base = h.mmio_base, .size = h.mmio_size };
+    log.info("pci: host bridge — ECAM 0x{x} (bus 0), MMIO window 0x{x}+{d}M, INTx from SPI {d}; enumeration is userspace's", .{
+        h.ecam_base, h.mmio_base, h.mmio_size >> 20, h.intx_base,
+    });
+}
+
+pub const Error = error{ NoHost, TableFull, BadDevice };
+
+/// Register an endpoint the enumerator found: its requester id, kind,
+/// the BAR its virtio structures live in, and its INTx pin (0 = none).
+/// Returns the table index and the LPI routed for it (0 without an
+/// ITS). Registering a requester id again returns the existing entry.
+pub fn register(sid: u32, kind: shared.DeviceKind, bar_index: u8, bar_pa: u64, bar_len: u64, pin: u8) Error!struct { idx: usize, lpi: u32 } {
+    if (!have_host) return Error.NoHost;
+    if (sid >= 256 or pin > 4 or bar_index >= 6) return Error.BadDevice;
+    if (bar_len != 0 and (bar_pa < windows[1].base or bar_pa + bar_len > windows[1].base + windows[1].size)) return Error.BadDevice;
+    for (devices[0..count], 0..) |d, i| {
+        if (d.sid == sid) return .{ .idx = i, .lpi = if (d.intid >= its.lpi_base) d.intid else 0 };
+    }
+    if (count == max_devices) return Error.TableFull;
+    const slot: u8 = @intCast(sid >> 3);
+    var intid: u32 = if (pin == 0) 0 else 32 + host.intx_base + ((@as(u32, slot) + pin - 1) % 4);
+    var lpi: u32 = 0;
+    if (its.route(sid)) |l| {
+        lpi = l;
+        intid = l;
+    }
+    devices[count] = .{
+        .slot = slot,
+        .kind = kind,
+        .cfg_pa = windows[0].base + (@as(u64, slot) << 15),
+        .bar_index = bar_index,
+        .bar_pa = bar_pa,
+        .bar_len = bar_len,
+        .intid = intid,
+        .sid = sid,
+    };
+    count += 1;
+    return .{ .idx = count - 1, .lpi = lpi };
 }
 
 pub fn byKind(kind: shared.DeviceKind) ?usize {
     return nthByKind(kind, 0);
 }
 
-/// The n-th (0-based) enumerated device of a kind.
+/// The n-th (0-based) registered device of a kind.
 pub fn nthByKind(kind: shared.DeviceKind, nth: usize) ?usize {
     var seen: usize = 0;
     for (devices[0..count], 0..) |d, i| {
@@ -70,135 +101,4 @@ pub fn nthByKind(kind: shared.DeviceKind, nth: usize) ?usize {
         seen += 1;
     }
     return null;
-}
-
-fn cfg(comptime T: type, slot: u8, off: u64) *volatile T {
-    return mem.physToPtr(*volatile T, host.ecam_base + (@as(u64, slot) << 15) + off);
-}
-
-fn probe(slot: u8) void {
-    const vendor = cfg(u16, slot, 0).*;
-    if (vendor == 0xffff) return;
-    const device = cfg(u16, slot, 2).*;
-    const class = cfg(u32, slot, 8).* >> 16;
-    const header = cfg(u8, slot, 0xe).* & 0x7f;
-    if (header != 0 or class == 0x0600) return; // bridges, the host bridge
-    if (count == max_devices) {
-        log.warn("pci: 00:{d}.0 ignored (device table full)", .{slot});
-        return;
-    }
-
-    // BARs: size by writing all-ones, then place, size-aligned, in the
-    // 32-bit window. 64-bit BARs take two slots; I/O BARs are ignored.
-    var bars: [6]struct { pa: u64, len: u64 } = @splat(.{ .pa = 0, .len = 0 });
-    var i: u64 = 0;
-    while (i < 6) {
-        const off = 0x10 + i * 4;
-        const r = cfg(u32, slot, off);
-        const orig = r.*;
-        r.* = 0xffff_ffff;
-        const mask = r.*;
-        r.* = orig;
-        if (mask == 0 or mask & 1 != 0) {
-            i += 1;
-            continue;
-        }
-        const is64 = (mask >> 1) & 3 == 2;
-        var size_mask: u64 = mask & ~@as(u32, 0xf);
-        if (is64) {
-            const rh = cfg(u32, slot, off + 4);
-            const origh = rh.*;
-            rh.* = 0xffff_ffff;
-            size_mask |= @as(u64, rh.*) << 32;
-            rh.* = origh;
-        } else {
-            size_mask |= 0xffff_ffff_0000_0000;
-        }
-        const size = ~size_mask + 1;
-        const pa = std.mem.alignForward(u64, mmio_next, @max(size, mem.page_size));
-        if (pa + size > host.mmio_base + host.mmio_size) {
-            log.warn("pci: 00:{d}.0 BAR{d} ({d}K) does not fit the MMIO window", .{ slot, i, size >> 10 });
-            return;
-        }
-        r.* = @truncate(pa);
-        if (is64) cfg(u32, slot, off + 4).* = @truncate(pa >> 32);
-        mmio_next = pa + size;
-        bars[i] = .{ .pa = pa, .len = size };
-        i += if (is64) 2 else 1;
-    }
-    // Memory decoding + bus mastering (DMA); the SMMU, when present, is
-    // what makes the latter safe to hand to userspace.
-    cfg(u16, slot, 4).* = cfg(u16, slot, 4).* | 0x6;
-
-    // The BAR the virtio common configuration lives in, and MSI-X.
-    var bar_index: u8 = 0xff;
-    var msix_cap: u16 = 0;
-    var msix_table_pa: u64 = 0;
-    if (cfg(u16, slot, 6).* & 0x10 != 0) {
-        var ptr: u64 = cfg(u8, slot, 0x34).* & 0xfc;
-        var guard: u32 = 0;
-        while (ptr != 0 and guard < 48) : (guard += 1) {
-            const id = cfg(u8, slot, ptr).*;
-            if (id == 0x09 and cfg(u8, slot, ptr + 3).* == 1 and bar_index == 0xff) {
-                bar_index = cfg(u8, slot, ptr + 4).*;
-            } else if (id == 0x11) {
-                msix_cap = @intCast(ptr);
-                const tab = cfg(u32, slot, ptr + 4).*;
-                const bir = tab & 7;
-                if (bir < 6 and bars[bir].len != 0) msix_table_pa = bars[bir].pa + (tab & ~@as(u32, 7));
-            }
-            ptr = cfg(u8, slot, ptr + 1).* & 0xfc;
-        }
-    }
-    const pin = cfg(u8, slot, 0x3d).*;
-    const intid: u32 = if (pin == 0) 0 else 32 + host.intx_base + ((@as(u32, slot) + pin - 1) % 4);
-    const kind: shared.DeviceKind = if (vendor == virtio_vendor and device >= virtio_modern_base and device < virtio_modern_base + shared.device_kind_count)
-        @enumFromInt(device - virtio_modern_base)
-    else
-        .none;
-
-    devices[count] = .{
-        .slot = slot,
-        .vendor = vendor,
-        .device = device,
-        .kind = kind,
-        .cfg_pa = host.ecam_base + (@as(u64, slot) << 15),
-        .bar_index = if (bar_index < 6) bar_index else 0,
-        .bar_pa = if (bar_index < 6) bars[bar_index].pa else 0,
-        .bar_len = if (bar_index < 6) bars[bar_index].len else 0,
-        .intid = intid,
-        .msix_cap = msix_cap,
-        .msix_table_pa = msix_table_pa,
-        .sid = @as(u32, slot) << 3,
-    };
-    count += 1;
-    log.info("pci: 00:{d}.0 {x:0>4}:{x:0>4} {t} bar{d}=0x{x}+{d}K intid={d} sid={d}", .{
-        slot, vendor, device, kind, devices[count - 1].bar_index, devices[count - 1].bar_pa, devices[count - 1].bar_len >> 10, intid, devices[count - 1].sid,
-    });
-}
-
-/// After the ITS is up: every device with MSI-X gets entry 0 of its table
-/// pointed at the ITS doorbell with event 0, the capability enabled, and
-/// an LPI routed to it. The INTx line stays as the fallback for a device
-/// without MSI-X (or a machine without an ITS).
-pub fn setupMsi() void {
-    if (!its.active) return;
-    for (devices[0..count]) |*d| {
-        if (d.msix_cap == 0 or d.msix_table_pa == 0) continue;
-        const lpi = its.route(d.sid) orelse {
-            log.warn("pci: 00:{d}.0 no LPI left; staying on INTx {d}", .{ d.slot, d.intid });
-            continue;
-        };
-        mmu.mapDeviceLive(d.msix_table_pa & ~@as(u64, 0xfff), mem.page_size) catch @panic("pci: msix map");
-        const entry = mem.physToPtr([*]volatile u32, d.msix_table_pa);
-        entry[0] = @truncate(its.translater());
-        entry[1] = @truncate(its.translater() >> 32);
-        entry[2] = 0; // event id
-        entry[3] = 0; // unmasked
-        // Message control: enable, function mask clear.
-        const mc = cfg(u16, d.slot, d.msix_cap + 2);
-        mc.* = (mc.* | 0x8000) & ~@as(u16, 0x4000);
-        log.info("pci: 00:{d}.0 msi-x -> lpi {d} (was intx {d})", .{ d.slot, lpi, d.intid });
-        d.intid = lpi;
-    }
 }

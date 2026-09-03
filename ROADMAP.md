@@ -542,6 +542,13 @@ The pooling story stops being theory.
   an exploit primitive. The `pan` drill provokes and expects the
   refusal. On ARMv8.0 the range checks stand alone, as before; on
   x86_64 the same boundary becomes SMAP.
+- ✅ **PCI enumeration out of the kernel** (2026-09-02): the kernel
+  mints window capabilities (ECAM, MMIO) from the devicetree and keeps
+  the device table, ITS routing and SMMU binding; a userspace `pcisvc`
+  walks the bus, places BARs, programs MSI-X and registers endpoints
+  through `device_register`. Root runs it before init; the kernel's
+  drills spawn it to fill the table; the moss guest runs it against
+  the VMM's emulated bus. The trusted kernel is ~250 lines smaller.
 - virtio-gpu and input devices (the graphical console).
 - ✅ **Developer shell and tooling** (done): **msh**, an interactive shell
   over a new virtio-console driver (moss's third virtio device class),

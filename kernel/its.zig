@@ -27,6 +27,10 @@ var cmdq_pa: u64 = 0;
 var cmdq_write: u64 = 0; // byte offset
 var prop_pa: u64 = 0;
 var next_lpi: u32 = 0;
+/// One interrupt translation table page per routable device, allocated
+/// at init: routing happens at registration time, after the drills'
+/// leak baselines, and must not move the frame count.
+var itt_pool_pa: u64 = 0;
 var pta = false; // GITS_TYPER.PTA: RDbase is an address, not a processor number
 
 const r_ctlr = 0x0;
@@ -83,6 +87,8 @@ pub fn init(its_base: u64, size: u64) void {
     // one byte per LPI, disabled until routed.
     prop_pa = pmem.allocContiguous(2) orelse @panic("its: no frames");
     @memset(mem.physToPtr([*]u8, prop_pa)[0 .. 2 * mem.page_size], 0);
+    itt_pool_pa = pmem.allocContiguous(max_lpis) orelse @panic("its: no frames");
+    @memset(mem.physToPtr([*]u8, itt_pool_pa)[0 .. max_lpis * mem.page_size], 0);
     asm volatile ("dsb ish");
 
     reg32(r_ctlr).* = 1; // Enabled
@@ -131,8 +137,8 @@ fn wait() void {
 pub fn route(device_id: u32) ?u32 {
     if (!active or next_lpi == max_lpis) return null;
     const lpi = lpi_base + next_lpi;
+    const itt = itt_pool_pa + @as(u64, next_lpi) * mem.page_size;
     next_lpi += 1;
-    const itt = pmem.allocZeroed() orelse return null;
     // Enabled, priority 0x80 (PMR is open; any priority delivers).
     mem.physToPtr([*]volatile u8, prop_pa)[lpi - lpi_base] = 0x81;
     asm volatile ("dsb ish");

@@ -575,7 +575,7 @@ pub var vm_release: ?*const fn (u64) void = null;
 /// cap deletion (cap_drop).
 pub fn releaseCap(cap_type: cap.CapType, obj: u64) void {
     switch (cap_type) {
-        .empty, .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor => {},
+        .empty, .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor, .window => {},
         .vm => if (vm_release) |f| f(obj),
         .channel_a => unrefSide(@ptrFromInt(obj), .a),
         .channel_b => unrefSide(@ptrFromInt(obj), .b),

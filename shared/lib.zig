@@ -130,7 +130,26 @@ pub const Syscall = enum(u64) {
     /// guest's stage 2, its DMA translated through the guest's stage 2 by
     /// the SMMU, its interrupt injected as virtual SPI `vintid`.
     vm_attach_device = 36,
+    /// window_map(window_handle, page_offset, pages) -> x1 = va (0 when
+    /// pages = 0: an enquiry), x2 = the window's physical base, x3 = size.
+    window_map = 37,
+    /// device_register(ecam_window_handle, requester_id, kind, bar_pa,
+    /// bar_len, pin | bar_index << 8) -> x1 = device handle, x2 = the LPI
+    /// routed for it (0 without an ITS), x3 = the doorbell address the
+    /// device's MSI-X entry must target. The ECAM holder's authority.
+    device_register = 38,
     _,
+};
+
+/// The enumerator's service: `next` hands over the next device cap.
+pub const PciReq = union(enum(u64)) {
+    next: void,
+};
+
+pub const PciResp = union(enum(u64)) {
+    /// + cap attachment: a device, of this DeviceKind.
+    device: struct { kind: u64 },
+    done: void,
 };
 
 /// Why a guest stopped (vm_run's x1).
@@ -293,6 +312,7 @@ pub const ImageId = enum(u64) {
     ps = 13,
     ls = 14,
     vmm = 15,
+    pcisvc = 16,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -424,9 +444,13 @@ pub const CapTag = enum(u64) {
     /// there as an mshl data literal (NUL-terminated) and msh returns it
     /// as the command's value — structured output, no text to re-parse.
     out = 13,
+    /// The platform's PCI config space window (bus 0), for the enumerator.
+    ecam = 14,
+    /// The platform's 32-bit MMIO window BARs are placed in.
+    mmio = 15,
 };
 
-pub const cap_tag_count = 14;
+pub const cap_tag_count = 16;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver

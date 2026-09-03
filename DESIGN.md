@@ -467,16 +467,30 @@ its DMA identity), IRQ-delivery-as-message, and explicit DMA grants
 shaped like an IOMMU is present. Drivers run under manifests like any
 other process and are as sandboxable as anything else.
 
-**PCI and device capabilities (as built, 2026-09-02):** devices are
-virtio over PCI, modern transport only. The kernel does at boot what
-firmware would have: `dt.pcieHost` finds the host bridge (ECAM window,
-32-bit MMIO range, the INTx→SPI base; host-tested against a synthetic
-tree), `pci.init` walks bus 0, sizes and places every memory BAR in the
-MMIO window, enables decoding and bus mastering, and records each
-endpoint — its 4K config page, the BAR its virtio capabilities live in,
-its INTx line as a GIC intid (QEMU virt rotates INTA..D per slot from
-SPI 3), and its requester id, the stream id the SMMU will key on. A
-`device` cap is an index into that table; `mmio_map` maps the BAR and
+**PCI and device capabilities (as built, 2026-09-02; enumeration moved
+to userspace the same day):** devices are virtio over PCI, modern
+transport only. The kernel does not walk the bus. `dt.pcieHost` finds
+the host bridge (ECAM window, 32-bit MMIO range, the INTx→SPI base;
+host-tested against a synthetic tree) and the kernel mints two
+**window capabilities** from it for root — the ECAM window (bus 0) and
+the MMIO window — which `window_map` maps in parts. Root hands them to
+`pcisvc` (`user/pcisvc.zig`: firmware's job, done by a program), which
+walks bus 0, sizes and places every memory BAR in the MMIO window,
+enables decoding and bus mastering, finds the BAR the virtio structures
+live in and the MSI-X capability, and registers each endpoint through
+`device_register` — the ECAM holder's authority — naming its requester
+id, kind, BAR and INTx pin. The kernel keeps what only it can do: the
+device table a `device` cap names (config page, BAR, requester id — the
+SMMU's stream id), the INTx intid it derives from the pin and the
+devicetree's rotation (QEMU virt: INTA..D per slot from SPI 3), and the
+LPI it routes through the ITS, whose number and doorbell address it
+hands back so pcisvc programs the MSI-X entry itself. pcisvc then serves
+the device caps to root (`PciReq.next` until `done`), which forwards
+them to init; the kernel's own drills spawn it told to register and
+exit. Registering a requester id twice returns the existing entry, so a
+drill's enumerator and root's agree. Trust: the ECAM holder can describe
+devices however it likes, and it is root's delegate — the level that
+dispenses every device anyway. A `device` cap is an index into that table; `mmio_map` maps the BAR and
 the config page (a driver reads the capability list itself), `irq_bind`
 routes the line, `device_info` says what it is. Kinds are the virtio
 device ids (`shared.DeviceKind`: net, blk, console, rng), so root can

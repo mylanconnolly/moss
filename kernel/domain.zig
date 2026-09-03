@@ -78,9 +78,9 @@ pub const Manifest = struct {
     grant_spawner: bool = false,
     /// Handle slots follow the fixed insert order (log, channel, spawner,
     /// entropy, introspect, devices).
-    /// Every enumerated PCI device (root's boot grant; it forwards them
-    /// to init, which hands each to the unit that drives it).
-    grant_devices: bool = false,
+    /// The platform windows (ECAM, MMIO) — root's boot grant; it hands
+    /// them to the enumerator and forwards the devices that registers.
+    grant_windows: bool = false,
     /// Authority to create virtual machines.
     grant_hypervisor: bool = false,
     /// Grant the right to seed the kernel entropy pool (the rng driver).
@@ -503,10 +503,9 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     if (manifest.grant_introspect) {
         _ = table.insert(.introspect, 0) orelse return Error.CapTableFull;
     }
-    if (manifest.grant_devices) {
-        for (0..pci.count) |i| {
-            _ = table.insert(.device, i) orelse return Error.CapTableFull;
-        }
+    if (manifest.grant_windows and pci.have_host) {
+        _ = table.insert(.window, 0) orelse return Error.CapTableFull;
+        _ = table.insert(.window, 1) orelse return Error.CapTableFull;
     }
     if (manifest.grant_hypervisor) {
         _ = table.insert(.hypervisor, 0) orelse return Error.CapTableFull;

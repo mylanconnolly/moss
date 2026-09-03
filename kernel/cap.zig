@@ -24,6 +24,9 @@ pub const CapType = enum(u8) {
     spawner,
     /// Control over one spawned domain (stat, destroy).
     domain_ctl,
+    /// A platform window (object = index into pci.windows): the ECAM or
+    /// MMIO window, for the enumerator; window_map maps parts of it.
+    window,
     /// A device (object = index into pci.devices): its MMIO BAR and
     /// config page, its interrupt line, and — with the SMMU in front —
     /// the DMA identity that binds the device to the holder's memory.
