@@ -100,7 +100,7 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
         arg,
         ch.data[0],
         shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs | shared.SpawnFlags.chan_side_a,
-        usys.kbLimits(12 << 10, 40 << 10), // init's slice: 12MB kobj, 40MB user (its units nest inside)
+        usys.kbLimits(12 << 10, 64 << 10), // init's slice: 12MB kobj, 64MB user (its units nest inside)
     );
     _ = usys.capDrop(ch.data[0]);
     if (r.err != .ok) {

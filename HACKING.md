@@ -92,6 +92,20 @@ other cap. Run tools that need a kernel cap or a view are named in
 with a `run NAME` step; a driver's device grant is exercised by its own
 test (rngd in the rng test).
 
+**A user**: a record `conf/users/<name>.msh` — `key` (Ed25519 public
+key, hex), `salt` and `sealed` (the seed under the passphrase, hex),
+`kdf: { ln, r, p }` (scrypt cost; the custodian's work area must cover
+`128 * 2^ln * r` bytes) and `budget` (kobj/user/cpu, as in a unit).
+`lib/usercred.zig` makes and unlocks them; `useradmin` (users role 2)
+shows how an admin step writes one from a passphrase, and an installer
+will do the same. The session manager is the `usersvc` unit; a client
+attaches a buffer, sends `SessReq.login` with the name and passphrase in
+it, and gets a session id to `wait` on or `logout`. A session is handed
+its home view (tag `view`) and the settings layer (tag `conf`); a
+program that reads settings merges `conf/<svc>.msh` with
+`conf/<svc>.msh` in the home through `lib/settings.zig`, naming its
+locked keys.
+
 **An OS test**: prefer a unit-file drill — a profile in
 `shared.BootProfile`, drill units under `boot/conf/units/` (`profiles:
 [x]`, `oneshot: true`, `after:` for steps, `essential: true` on the last),
@@ -175,6 +189,13 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 
 ## Known scoping notes (deliberate, tracked)
 
+- Kernel object pools are static: 64 channels, 64 notifications, 64
+  shared buffers (`kernel/ipc.zig`). A service that maps a client's
+  buffer (fssvc for every view) keeps it pinned after the client dies —
+  the kernel refs the mapping, not the client — so a burst of short
+  sessions drains the shm pool until the service itself restarts. If a
+  program exits 210 (attachBuf's shmCreate refused), look here first.
+  The fix is for the service to learn of the death and detach.
 - A service that needs a clock arms a timer notification (`timerArm`);
   one that waits on sockets asks netsvc to `watch` them with its
   notification; bind the notification and the recv is interrupted on

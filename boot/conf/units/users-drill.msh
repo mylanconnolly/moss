@@ -1,0 +1,7 @@
+# The users drill, step 2: logins refused and granted, two sessions at
+# once, and each home holding only its own user's work.
+{ image: users, arg: 4, budget: { user: 6mb }, after: useradmin, oneshot: true, essential: true,
+  give: [
+    { tag: sess, unit: usersvc }
+    { tag: view, fs: home, ro: true }
+  ] }

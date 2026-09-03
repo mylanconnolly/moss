@@ -320,6 +320,7 @@ pub const ImageId = enum(u64) {
     ls = 14,
     vmm = 15,
     pcisvc = 16,
+    users = 17,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -413,6 +414,36 @@ pub const InitReply = union(enum(u64)) {
     installed: struct { n: u64 },
 };
 
+// ----------------------------------------------------------------- users
+//
+// Users are a userspace notion: a user is an Ed25519 identity kept in a
+// record (`conf/users/<name>.msh`, lib/usercred.zig), a session is a
+// domain the session manager (usersvc) spawns under the user's budgets
+// with a view of the user's home and nothing else, and logging out is
+// destroying that domain. The manager holds the unlocked identity for
+// the session's lifetime (custody); the session never sees the seed.
+// Names and passphrases travel through the client's attached buffer.
+
+pub const SessReq = union(enum(u64)) {
+    attach_buf: void, // + shm cap
+    /// Authenticate and start a session; the reply names it.
+    login: struct { name: u64, pass: u64 }, // each word: off | len<<32
+    /// Block until the session's domain exits; it is torn down on reply.
+    wait: struct { sid: u64 },
+    /// Destroy the session now.
+    logout: struct { sid: u64 },
+};
+
+pub const SessResp = union(enum(u64)) {
+    ok: void,
+    session: struct { sid: u64 },
+    exited: struct { code: u64 },
+    /// Unknown user, wrong passphrase, or a record that will not parse:
+    /// one answer, so the response never says which.
+    denied: void,
+    sess_err: struct { code: u64 },
+};
+
 // ------------------------------------------------------------ image store
 //
 // `img/` on the volume is content-addressed: a program lives at
@@ -455,9 +486,15 @@ pub const CapTag = enum(u64) {
     ecam = 14,
     /// The platform's 32-bit MMIO window BARs are placed in.
     mmio = 15,
+    /// The session manager's channel (usersvc: login, wait, logout).
+    sess = 16,
+    /// A settings view: the system layer of a program's configuration.
+    conf = 17,
+    /// The home tier (`home/`), for the session manager alone.
+    home = 18,
 };
 
-pub const cap_tag_count = 16;
+pub const cap_tag_count = 19;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -1039,7 +1076,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// eager under (`profiles: [system, blk]`). The kernel reads `profile=`
 /// from the boot arguments and passes it to root, root to init, so one
 /// archive serves the interactive system and every unit-file drill.
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5 };
 
 /// Unit files: `conf/units/<name>.msh` in the boot archive (served at
 /// boot/conf/units/ by fssvc) — mshl data literals init reads to spawn

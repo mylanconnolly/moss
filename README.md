@@ -29,7 +29,7 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 (`brew install qemu`).
 
 ```sh
-zig build check      # the whole test suite: 20 OS tests under QEMU + host unit tests (~85s)
+zig build check      # the whole test suite: 21 OS tests under QEMU + host unit tests (~90s)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 ```
@@ -83,6 +83,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | guest | A moss kernel as a guest of moss: booted by the VMM from a devicetree it wrote, PL011 and GIC emulated, PSCI over HVC; runs its userspace and powers off | `zig build run -Dguest-test` |
 | vmnode | The pooling story: a moss guest with a passed-through NIC and entropy device (SMMU stage 2, LPIs injected as SPIs) joins the fabric as node 2 and takes a remote spawn | `zig build run -Dvmnode-test` |
 | fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
+| users | Users as keys, sessions as domains, homes as views: passphrase-unlocked identities in a custodian's care, two sessions at once under their own budgets, wrong passphrase and unknown user refused, homes isolated, layered settings with a locked key | `zig build run-blk -Dusers-test` |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
 | fabric | Per-node identities (root-signed certs, signed DH, sealed transport): join, gossip, placement, death, rejoin, imposter refused, spawn authorization, revocation | `zig build run-cluster -Dfabric-test` |
@@ -90,7 +91,8 @@ PASS marker and power off. Individual tests can still be run by hand:
 
 Host-side unit tests (`zig build test`) cover the shared ABI (handles,
 typed message codecs, rings, the boot archive), the devicetree parser,
-the `lib/` modules (lz4, xts, fabric certificates, the msh language),
+the `lib/` modules (lz4, xts, fabric certificates, user credentials,
+layered settings, the msh language),
 and the full mossfs suite.
 
 ## Layout

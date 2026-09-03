@@ -29,9 +29,9 @@ const lock = @import("lock.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 
-const max_channels = 16;
-const max_notifications = 16;
-const max_shms = 16;
+const max_channels = 64;
+const max_notifications = 64;
+const max_shms = 64;
 pub const shm_max_pages = 64; // 256K: the blk data window needs 8 x 32K slots
 
 pub const Side = enum { a, b };

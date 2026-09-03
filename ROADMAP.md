@@ -40,6 +40,7 @@ the Phase 12+ pool below is the open frontier.
 | Network addressing | **IPv6-native ABI**: every address in every protocol is 128 bits; IPv4 destinations travel v4-mapped (`::ffff:a.b.c.d`). There is no IPv4-only code path to depend on — the stack speaks both families on the wire (ARP for v4, NDP/ICMPv6 for v6), but the system's idea of an address is IPv6. Filters/allowlists compare full 128-bit addresses. | v4-only ABIs are the next legacy trap; v4-mapped addressing is the proven dual-stack shape and costs nothing. |
 | Word size | 64-bit only, permanently. The application/microcontroller divide is MMU vs. MPU, not word size: no-MMU hardware (Pico 2 / RP2350 class) cannot express per-domain address spaces at all, and 32-bit would break load-bearing design elements — the linear direct map doesn't fit in a 32-bit address space (hello highmem/kmap), generational handles lose generation width, and the IPC ABI forks. The 64-bit budget market is already the budget market ($5 RV64 Milk-V Duo, $15 aarch64 Pi Zero 2 W); new 32-bit application-class silicon serves vendor-BSP embedded lines that would never adopt a new OS. MCU-class devices join the pool as **fabric leaf nodes** instead (see Phase 12). | No second OS wearing the same name; no design pressure from hardware the architecture can't serve. |
 | Language/toolchain | Zig, version pinned (currently 0.16.0). `build.zig` is the entire build: kernel, userspace, image packing, `zig build run`, `zig build run-cluster`. Comptime Zig types are the IDL — IPC protocols defined once in `shared/`, marshaling/stubs generated at comptime. | No Make, no shell scripts, no separate IDL compiler, ABI type-checked from one source of truth. |
+| Users | **A user is a key, a session is a domain tree, a home is a view.** No uid/gid, no passwd/shadow, no setuid/sudo, no groups or ACLs: a user record is an Ed25519 identity with its seed sealed under a passphrase-derived key; the session manager (userspace) unseals it, keeps the key in custody, and spawns the session under the record's budgets with a rw view of `home/<user>` and a settings view — logout is destroying that domain. Sharing is delegating a derived view. Settings are mshl data in two layers (`conf/<svc>.msh`, `home/<user>/conf/<svc>.msh`) merged per program with schema-declared locked keys. Admin authority is holding the caps, never a bit on a process. | Every legacy user mechanism is a number standing in for a capability or a way around not having one; the kernel already provides isolation, budgets and total teardown, so users are composition. |
 | Code sharing | **Static linking only — no dynamic loader, ever.** Shared functionality lives in `lib/`: pure, freestanding-safe, host-testable Zig modules (lz4, xts, ...) compiled into each program that imports them. Where key custody matters, a capability *service* holds the secret instead of a library. Code-page dedup, if ever needed, comes from content-addressed images (`img/`), not load-time linking. | Relocation machinery, symbol versioning, and loader attack surface bought nothing at moss's scale; static modules keep every binary analyzable and every ABI a comptime-checked Zig type. |
 
 ### Non-goals (permanently, unless revisited here)
@@ -546,6 +547,21 @@ The pooling story stops being theory.
   an exploit primitive. The `pan` drill provokes and expects the
   refusal. On ARMv8.0 the range checks stand alone, as before; on
   x86_64 the same boundary becomes SMAP.
+- ✅ **Users and sessions, stage 1** (2026-09-03): user records as
+  data (`conf/users/<name>.msh`: Ed25519 public key, scrypt salt and
+  cost, the seed sealed under the passphrase; `lib/usercred.zig`), a
+  session manager and key custodian (`usersvc`) that unseals on login
+  and spawns the session as a domain under the record's budgets with a
+  rw view of `home/<user>` (a new hierarchy tier) and a settings view,
+  layered settings with locked keys (`lib/settings.zig`), and the
+  `users` drill: refused logins, two sessions at once, homes holding
+  only their owner's work, clean teardown. Residuals: interactive login
+  from the console (one console client today), per-user encrypted home
+  volumes (stage 2), revocable sharing / fabric logins / the
+  desired-state `apply` tool and installer (stage 3), and buffers a
+  service maps for a view outliving the view's dead client (the kernel
+  shm pool is 64 now; reclamation needs the service to learn of the
+  death).
 - ✅ **PCI enumeration out of the kernel** (2026-09-02): the kernel
   mints window capabilities (ECAM, MMIO) from the devicetree and keeps
   the device table, ITS routing and SMMU binding; a userspace `pcisvc`

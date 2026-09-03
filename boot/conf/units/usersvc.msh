@@ -1,0 +1,14 @@
+# The session manager and key custodian: user records (ro), the home
+# tier (rw), the system settings layer (ro), and spawn authority for the
+# sessions it opens — each a domain under its user's budgets.
+{
+  image:  users
+  arg:    1
+  budget: { user: 16mb }
+  grant:  [log, spawner, bootfs]
+  give: [
+    { tag: view, fs: conf/users, ro: true,  mkdir: true }
+    { tag: home, fs: home,       ro: false }
+    { tag: conf, fs: conf/app,   ro: true,  mkdir: true }
+  ]
+}

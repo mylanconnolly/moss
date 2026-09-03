@@ -160,6 +160,12 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.users_test) {
+        _ = sched.spawn("boot-watch", usersTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
     if (build_options.shell_test) {
         _ = sched.spawn("boot-watch", shellTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -487,6 +493,14 @@ fn fsTestWorker(_: u64) void {
     systemDrill("fs");
 }
 
+/// The users drill: a system boot under profile "users" — the admin step
+/// writes user records, then the drill logs in as two users at once
+/// through the session manager; the kernel holds the leak bar after the
+/// sessions (domains) and the drill have exited.
+fn usersTestWorker(_: u64) void {
+    systemDrill("users");
+}
+
 /// Developer-tooling boot: the storage stack, the virtio-console driver,
 /// init (serving its front channel), and msh — the interactive shell —
 /// wired together by capability grants. Used by both `zig build
@@ -514,7 +528,7 @@ fn systemDrill(comptime name: []const u8) void {
         .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 24 << 20,
-        .user_limit = 96 << 20,
+        .user_limit = 128 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
 
     while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);

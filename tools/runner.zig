@@ -56,6 +56,14 @@ const specs = [_]Spec{
         .append = "profile=fs",
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .append = "profile=net" },
+    .{
+        .name = "users",
+        .kind = .blk,
+        .pass = "users-test: PASS",
+        .extra = "users-drill: homes isolated",
+        .always_extra = "telemetry false (locked by the system layer)",
+        .append = "profile=users",
+    },
     .{ .name = "rng", .pass = "rng-test: PASS", .extra = "rngprobe: unseeded pool refuses getrandom" },
     .{
         .name = "shell",

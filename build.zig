@@ -107,6 +107,11 @@ pub fn build(b: *std.Build) void {
         "shell-test",
         "Boot the developer shell topology (use run-shell for a live console)",
     ) orelse false;
+    const users_test = b.option(
+        bool,
+        "users-test",
+        "Run the users drill: key identities, passphrase-unlocked sessions as domains, isolated homes, layered settings",
+    ) orelse false;
     const rng_test = b.option(
         bool,
         "rng-test",
@@ -174,6 +179,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "fabric_test", fabric_test);
     build_opts.addOption(bool, "shell_test", shell_test);
     build_opts.addOption(bool, "rng_test", rng_test);
+    build_opts.addOption(bool, "users_test", users_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -206,6 +212,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ls", .src = "user/ls.zig" },
         .{ .name = "vmm", .src = "user/vmm.zig" },
         .{ .name = "pcisvc", .src = "user/pcisvc.zig" },
+        .{ .name = "users", .src = "user/users.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -241,7 +248,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/fs-alice.msh",    "conf/units/fs-bob.msh",
         "conf/units/net-echosrv.msh", "conf/units/net-echocli.msh",
         "conf/units/net-boxed.msh",   "conf/msh/startup.msh",
-        "conf/units/guest-hello.msh",
+        "conf/units/guest-hello.msh", "conf/units/usersvc.msh",
+        "conf/units/useradmin.msh",   "conf/units/users-drill.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -298,6 +306,7 @@ pub fn build(b: *std.Build) void {
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
+        "users_test",
     }) |on| gopts.addOption(bool, on, false);
     gopts.addOption(bool, "guest_kernel", true);
     const gmod = b.createModule(.{
@@ -576,12 +585,13 @@ pub fn build(b: *std.Build) void {
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
+        "users_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc",   "init",
         "sandbox", "flap",  "blk",   "fs",     "net",   "fabric",
         "shell",   "rng",   "smmu",  "vm",     "guest", "vmnode",
-        "pan",     "cpu",
+        "pan",     "cpu",   "users",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();

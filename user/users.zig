@@ -1,0 +1,608 @@
+//! Users, by x2. A user is not a kernel concept: the kernel has domains,
+//! budgets and capabilities, and everything below composes them.
+//!   1 "usersvc"   — the session manager and key custodian. Holds a view
+//!                   of the user records (conf/users, ro), the home tier
+//!                   (home/, rw) and the system settings layer (conf/app,
+//!                   ro), plus spawn authority. `login` unseals a record's
+//!                   identity with the passphrase (lib/usercred.zig) and
+//!                   spawns a SESSION: a domain under the user's budgets
+//!                   handed a rw view of home/<name> and the settings
+//!                   layer — nothing else. The unlocked key stays here for
+//!                   the session's lifetime; `wait`/`logout` destroy the
+//!                   domain, which is the whole logout.
+//!   2 "useradmin" — the admin step of the drill: writes two user records
+//!                   (fresh seeds and salts from the kernel pool, sealed
+//!                   under compiled-in test passphrases) and the system
+//!                   settings file. Records are mshl data, like unit
+//!                   files; an installer writes the same thing.
+//!   3 "session"   — what a login runs: writes into its home, proves that
+//!                   nothing above the home is nameable, and computes its
+//!                   effective settings from the system and user layers
+//!                   with a locked key (lib/settings.zig).
+//!   4 "drill"     — the users drill: refused logins (wrong passphrase,
+//!                   unknown user), two sessions open at once, and, after
+//!                   both ended, each home holding exactly its own user's
+//!                   work.
+
+const std = @import("std");
+const shared = @import("shared");
+const usys = @import("usys.zig");
+const boot = @import("boot.zig");
+const fsc = @import("fsclient.zig");
+const loader = @import("loader.zig");
+const mosslib = @import("mosslib");
+const mshl = mosslib.mshl;
+const usercred = mosslib.usercred;
+const settings = mosslib.settings;
+const Value = mshl.Value;
+
+comptime {
+    asm (
+        \\.section .text.uhdr, "ax"
+        \\.global __uhdr
+        \\__uhdr:
+        \\        .ascii  "MOSS"
+        \\        .word   0
+        \\        .quad   __utext_size
+        \\        .quad   __uload_size
+        \\        .quad   __umem_size
+        \\        .ascii  "users"
+        \\        .space  11
+        \\.global _ustart
+        \\_ustart:
+        \\        b       umain
+    );
+}
+
+pub const panic = std.debug.FullPanic(uPanic);
+
+fn uPanic(_: []const u8, _: ?usize) noreturn {
+    usys.exit(255);
+}
+
+export fn umain(log_h: u64, chan_h: u64, role: u64, bva: u64, blen: u64) callconv(.c) noreturn {
+    glog = log_h;
+    switch (role) {
+        1 => usersvc(chan_h, bva, blen),
+        2 => useradmin(chan_h),
+        3 => session(chan_h),
+        4 => drill(chan_h),
+        else => usys.exit(250),
+    }
+}
+
+var glog: u64 = 0;
+
+// The KDF's work area: 128 * 2^ln * r bytes. Static, so it sizes every
+// role's domain (BSS is mapped at spawn) — the drill's records use ln 11
+// (2 MiB); a deployment raises the cost and this area together.
+const kdf_heap_len = (2 << 20) + (64 << 10);
+var kdf_heap: [kdf_heap_len]u8 = undefined;
+var text_heap: [64 << 10]u8 = undefined; // the data parser's arena
+var host_ctx: u8 = 0;
+
+fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const Value, _: ?Value) mshl.Error!?Value {
+    return null;
+}
+
+const drill_kdf: usercred.Kdf = .{ .ln = 11, .r = 8, .p = 1 };
+
+/// The drill's users: name, passphrase.
+const test_users = [_]struct { name: []const u8, pass: []const u8 }{
+    .{ .name = "alice", .pass = "alice-pass" },
+    .{ .name = "bob", .pass = "bob-pass" },
+};
+
+const max_name = 16;
+
+/// A user name is a directory name and a domain argument: short, plain.
+fn nameOk(name: []const u8) bool {
+    if (name.len == 0 or name.len > max_name) return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-' or c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// ------------------------------------------------------------ the service
+
+const max_sessions = 4;
+
+const Session = struct {
+    used: bool = false,
+    ctl: u64 = 0,
+    name: [max_name]u8 = @splat(0),
+    name_len: usize = 0,
+    /// The user's identity, unlocked for the session's lifetime.
+    kp: usercred.Ed25519.KeyPair = undefined,
+};
+
+const Budget = struct { kobj_kb: u64 = 1 << 10, user_kb: u64 = 4 << 10, cpu_permille: u64 = 0 };
+
+var sessions: [max_sessions]Session = @splat(.{});
+var svc_chan: u64 = 0;
+var users_view: u64 = 0;
+var users_buf: [*]u8 = undefined;
+var home_view: u64 = 0;
+var home_buf: [*]u8 = undefined;
+var app_view: u64 = 0;
+var client_va: u64 = 0;
+var client_pages: u64 = 0;
+var stage: loader.Stage = undefined;
+var blob_va: u64 = 0;
+var blob_len: u64 = 0;
+const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
+
+fn usersvc(chan_h: u64, va: u64, len: u64) noreturn {
+    svc_chan = chan_h;
+    blob_va = va;
+    blob_len = len;
+    const setup = boot.take(chan_h);
+    users_view = setup.cap(.view);
+    home_view = setup.cap(.home);
+    app_view = setup.cap(.conf);
+    if (users_view == 0 or home_view == 0 or app_view == 0) usys.exit(180);
+    users_buf = @ptrFromInt(fsc.attachBuf(users_view).va);
+    home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
+    stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(181);
+    _ = usys.log(glog, "usersvc: up; sessions are domains, identities are keys");
+
+    while (true) {
+        const r = usys.recvMsg(chan_h);
+        if (r.err == .peer_dead) usys.exit(0);
+        if (r.err != .ok) usys.exit(182);
+        const req = shared.decodeMsg(shared.SessReq, r.data) orelse {
+            reply(.{ .sess_err = .{ .code = 1 } });
+            continue;
+        };
+        switch (req) {
+            .attach_buf => {
+                if (r.cap != 0) {
+                    const m = usys.shmMap(r.cap);
+                    if (m.err == .ok) {
+                        client_va = m.data[0];
+                        client_pages = m.data[1];
+                    }
+                }
+                reply(.ok);
+            },
+            .login => |l| reply(login(l.name, l.pass)),
+            .wait => |w| {
+                const s = sessionOf(w.sid) orelse {
+                    reply(.{ .sess_err = .{ .code = 2 } });
+                    continue;
+                };
+                var code: u64 = 0;
+                while (true) {
+                    const st = usys.domainStat(s.ctl);
+                    if (st.err != .ok) break;
+                    if (st.data[0] == @intFromEnum(shared.DomainState.dead)) {
+                        code = st.data[1];
+                        break;
+                    }
+                    usys.sleep(2);
+                }
+                close(s);
+                reply(.{ .exited = .{ .code = code } });
+            },
+            .logout => |lo| {
+                const s = sessionOf(lo.sid) orelse {
+                    reply(.{ .sess_err = .{ .code = 2 } });
+                    continue;
+                };
+                close(s);
+                reply(.ok);
+            },
+        }
+    }
+}
+
+fn reply(resp: shared.SessResp) void {
+    _ = usys.replyTyped(shared.SessResp, svc_chan, resp, 0);
+}
+
+fn sessionOf(sid: u64) ?*Session {
+    if (sid >= max_sessions or !sessions[sid].used) return null;
+    return &sessions[sid];
+}
+
+/// Logout is one operation: the domain tree goes, and the key with it.
+fn close(s: *Session) void {
+    _ = usys.domainDestroy(s.ctl);
+    _ = usys.capDrop(s.ctl);
+    @memset(std.mem.asBytes(&s.kp), 0);
+    logName("usersvc: session closed for ", s.name[0..s.name_len]);
+    s.* = .{};
+}
+
+/// A client word: off | len<<32 into the attached buffer.
+fn clientSlice(word: u64) ?[]u8 {
+    const off = word & 0xffff_ffff;
+    const len = word >> 32;
+    if (client_va == 0 or len > 256 or off + len > client_pages * 4096) return null;
+    return @as([*]u8, @ptrFromInt(client_va))[off .. off + len];
+}
+
+fn login(name_w: u64, pass_w: u64) shared.SessResp {
+    const name_src = clientSlice(name_w) orelse return .denied;
+    const pass_src = clientSlice(pass_w) orelse return .denied;
+    var name_buf: [max_name]u8 = undefined;
+    var pass: [256]u8 = undefined;
+    defer @memset(&pass, 0);
+    if (!nameOk(name_src)) return refuse("usersvc: login refused (bad name)");
+    @memcpy(name_buf[0..name_src.len], name_src);
+    const name = name_buf[0..name_src.len];
+    @memcpy(pass[0..pass_src.len], pass_src);
+    @memset(pass_src, 0); // the passphrase now lives only here
+    const phrase = pass[0..pass_src.len];
+
+    var slot: usize = 0;
+    while (slot < max_sessions and sessions[slot].used) slot += 1;
+    if (slot == max_sessions) return .{ .sess_err = .{ .code = 3 } };
+
+    var budget: Budget = .{};
+    const rec = readRecord(name, &budget) orelse return refuse("usersvc: login refused");
+    var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
+    const kp = usercred.unlock(fba.allocator(), &rec, phrase) catch return refuse("usersvc: login refused");
+
+    const s = &sessions[slot];
+    s.* = .{ .used = true, .kp = kp, .name_len = name.len };
+    @memcpy(s.name[0..name.len], name);
+    if (!spawnSession(s, budget)) {
+        @memset(std.mem.asBytes(&s.kp), 0);
+        s.* = .{};
+        return .{ .sess_err = .{ .code = 4 } };
+    }
+    logName("usersvc: session opened for ", name);
+    return .{ .session = .{ .sid = slot } };
+}
+
+/// One answer for every refusal, after a pause: the reply never says
+/// whether the name or the passphrase was wrong, and guessing is slow.
+fn refuse(msg: []const u8) shared.SessResp {
+    usys.sleep(20);
+    _ = usys.log(glog, msg);
+    return .denied;
+}
+
+/// `<name>.msh` through the records view, parsed as data.
+fn readRecord(name: []const u8, budget: *Budget) ?usercred.Record {
+    var path: [max_name + 4]u8 = undefined;
+    @memcpy(path[0..name.len], name);
+    @memcpy(path[name.len .. name.len + 4], ".msh");
+    var text: [2048]u8 = undefined;
+    const n = readFile(users_view, users_buf, path[0 .. name.len + 4], &text) orelse return null;
+    var fba = std.heap.FixedBufferAllocator.init(&text_heap);
+    var interp = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
+    const v = interp.parseData(text[0..n]) catch return null;
+    if (v != .record) return null;
+    const r = v.record;
+    var rec: usercred.Record = .{ .pk = undefined, .salt = undefined, .sealed = undefined, .kdf = .{} };
+    _ = usercred.hexDecode(&rec.pk, str(r.get("key")) orelse return null) orelse return null;
+    _ = usercred.hexDecode(&rec.salt, str(r.get("salt")) orelse return null) orelse return null;
+    _ = usercred.hexDecode(&rec.sealed, str(r.get("sealed")) orelse return null) orelse return null;
+    if (r.get("kdf")) |k| {
+        if (k != .record) return null;
+        rec.kdf.ln = @intCast(@min(int(k.record.get("ln")) orelse 12, 63));
+        rec.kdf.r = @intCast(@max(int(k.record.get("r")) orelse 8, 1));
+        rec.kdf.p = @intCast(@max(int(k.record.get("p")) orelse 1, 1));
+    }
+    if (rec.kdf.memoryBytes() + (64 << 10) > kdf_heap_len) return null; // a cost this custodian cannot pay
+    if (r.get("budget")) |b| {
+        if (b == .record) {
+            if (int(b.record.get("kobj"))) |x| budget.kobj_kb = @intCast(@divTrunc(x, 1024));
+            if (int(b.record.get("user"))) |x| budget.user_kb = @intCast(@divTrunc(x, 1024));
+            if (int(b.record.get("cpu"))) |x| budget.cpu_permille = @intCast(@max(x, 0));
+        }
+    }
+    return rec;
+}
+
+/// The session: the users image (role 3) under the record's budgets,
+/// handed a rw view of home/<name> and the settings layer, and its name.
+fn spawnSession(s: *Session, budget: Budget) bool {
+    const name = s.name[0..s.name_len];
+    if (!fsc.fsMkdir(home_view, home_buf, name)) return false;
+    const view = fsc.fsDerive(home_view, home_buf, name, false) orelse return false;
+    defer _ = usys.capDrop(view); // the session's copy is the only one left
+    if (!stage.load(blob_va, blob_len, .users)) return false;
+    const ch = usys.chanCreate();
+    if (ch.err != .ok) return false;
+    const r = usys.spawnCpu(spawner, stage.handle, 3, ch.data[0], shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a, usys.kbLimits(budget.kobj_kb, budget.user_kb), usys.cpuBudget(budget.cpu_permille, 0));
+    _ = usys.capDrop(ch.data[0]);
+    if (r.err != .ok) {
+        _ = usys.capDrop(ch.data[1]);
+        return false;
+    }
+    s.ctl = r.data[0];
+    const b = ch.data[1];
+    defer _ = usys.capDrop(b);
+    const w = shared.strToWords(name);
+    const ok = boot.giveCap(b, .view, view) and boot.giveCap(b, .conf, app_view) and
+        boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
+    if (!ok) {
+        _ = usys.domainDestroy(s.ctl);
+        _ = usys.capDrop(s.ctl);
+        return false;
+    }
+    return true;
+}
+
+// -------------------------------------------------------------- useradmin
+
+fn useradmin(chan_h: u64) noreturn {
+    const setup = boot.take(chan_h);
+    const uv = setup.cap(.view);
+    const av = setup.cap(.conf);
+    if (uv == 0 or av == 0) usys.exit(190);
+    const ubuf: [*]u8 = @ptrFromInt(fsc.attachBuf(uv).va);
+    const abuf: [*]u8 = @ptrFromInt(fsc.attachBuf(av).va);
+
+    for (test_users) |u| {
+        var seed: [usercred.seed_len]u8 = undefined;
+        var salt: [usercred.salt_len]u8 = undefined;
+        randomOrDie(&seed);
+        randomOrDie(&salt);
+        var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
+        const rec = usercred.create(fba.allocator(), &seed, &salt, u.pass, drill_kdf) catch usys.exit(191);
+        @memset(&seed, 0);
+        var text: [1024]u8 = undefined;
+        const rendered = renderRecord(&text, rec);
+        var path: [max_name + 4]u8 = undefined;
+        @memcpy(path[0..u.name.len], u.name);
+        @memcpy(path[u.name.len .. u.name.len + 4], ".msh");
+        if (!writeFile(uv, ubuf, path[0 .. u.name.len + 4], rendered)) usys.exit(192);
+        var line: [96]u8 = undefined;
+        var hex: [16]u8 = undefined;
+        _ = usys.log(glog, cat3(&line, "useradmin: created user ", u.name, " (key ", usercred.hexEncode(&hex, rec.pk[0..8]), "...)"));
+    }
+    if (!writeFile(av, abuf, "editor.msh", "{ theme: dark, tab_width: 4, telemetry: false }\n")) usys.exit(193);
+    if (!fsc.fsSync(uv)) usys.exit(194);
+    _ = usys.log(glog, "useradmin: records and the system settings layer written");
+    usys.exit(0);
+}
+
+fn randomOrDie(out: []u8) void {
+    var tries: usize = 0;
+    while (usys.getrandom(out) != .ok) : (tries += 1) {
+        if (tries == 100) usys.exit(195); // the pool never seeded
+        usys.sleep(1);
+    }
+}
+
+/// A record as data: the same syntax as a unit file, hex for the bytes.
+fn renderRecord(out: *[1024]u8, rec: usercred.Record) []const u8 {
+    var n: usize = 0;
+    var hex: [2 * usercred.sealed_len]u8 = undefined;
+    n = put(out, n, "{ key: \"");
+    n = put(out, n, usercred.hexEncode(&hex, &rec.pk));
+    n = put(out, n, "\", salt: \"");
+    n = put(out, n, usercred.hexEncode(&hex, &rec.salt));
+    n = put(out, n, "\", sealed: \"");
+    n = put(out, n, usercred.hexEncode(&hex, &rec.sealed));
+    n = put(out, n, "\",\n  kdf: { ln: ");
+    n = putNum(out, n, rec.kdf.ln);
+    n = put(out, n, ", r: ");
+    n = putNum(out, n, rec.kdf.r);
+    n = put(out, n, ", p: ");
+    n = putNum(out, n, rec.kdf.p);
+    n = put(out, n, " },\n  budget: { kobj: 1mb, user: 6mb, cpu: 500 } }\n");
+    return out[0..n];
+}
+
+// ---------------------------------------------------------------- session
+
+const editor_locked = [_][]const u8{"telemetry"};
+
+fn session(chan_h: u64) noreturn {
+    const setup = boot.take(chan_h);
+    const name = setup.arg();
+    const home = setup.cap(.view);
+    const conf = setup.cap(.conf);
+    if (home == 0 or conf == 0 or name.len == 0) usys.exit(160);
+    const hbuf: [*]u8 = @ptrFromInt(fsc.attachBuf(home).va);
+    const cbuf: [*]u8 = @ptrFromInt(fsc.attachBuf(conf).va);
+    var line: [160]u8 = undefined;
+
+    // Work in the home.
+    if (!fsc.fsMkdir(home, hbuf, "notes")) usys.exit(161);
+    var secret: [64]u8 = undefined;
+    const secret_text = cat3(&secret, name, "'s secret", "", "", "");
+    if (!writeFile(home, hbuf, "notes/secret.txt", secret_text)) usys.exit(162);
+
+    // Nothing above the home has a name here: the credential store, the
+    // other homes, the system settings are unreachable, not forbidden.
+    switch (fsc.fsOpen(home, hbuf, "../bob/notes/secret.txt", 0)) {
+        .fd => usys.exit(163),
+        .err => |e| if (e != .bad_path) usys.exit(164),
+    }
+    switch (fsc.fsOpen(home, hbuf, "conf/users/alice.msh", 0)) {
+        .fd => usys.exit(165),
+        .err => |e| if (e != .not_found) usys.exit(166),
+    }
+    _ = usys.log(glog, cat3(&line, "session(", name, "): nothing above the home is nameable (bad_path), the credential store is not here (not_found)", "", ""));
+
+    // Settings: the system layer through the conf view, the user layer
+    // in the home — this user turns telemetry on and picks a theme; the
+    // schema locks telemetry, so only the theme takes.
+    if (!fsc.fsMkdir(home, hbuf, "conf")) usys.exit(167);
+    if (!writeFile(home, hbuf, "conf/editor.msh", "{ theme: light, telemetry: true }\n")) usys.exit(168);
+    var sys_text: [512]u8 = undefined;
+    var usr_text: [512]u8 = undefined;
+    const sn = readFile(conf, cbuf, "editor.msh", &sys_text) orelse usys.exit(169);
+    const un = readFile(home, hbuf, "conf/editor.msh", &usr_text) orelse usys.exit(170);
+    var fba = std.heap.FixedBufferAllocator.init(&text_heap);
+    var interp = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
+    const sys = interp.parseData(sys_text[0..sn]) catch usys.exit(171);
+    const usr = interp.parseData(usr_text[0..un]) catch usys.exit(172);
+    if (sys != .record or usr != .record) usys.exit(173);
+    const eff = settings.merge(fba.allocator(), sys.record, usr.record, &editor_locked) catch usys.exit(174);
+    const theme = str(eff.get("theme")) orelse usys.exit(175);
+    const width = int(eff.get("tab_width")) orelse usys.exit(176);
+    const telemetry = eff.get("telemetry") orelse usys.exit(177);
+    if (!std.mem.eql(u8, theme, "light") or width != 4 or telemetry != .bool or telemetry.bool) usys.exit(178);
+    _ = usys.log(glog, cat3(&line, "session(", name, "): effective settings: theme light (user), tab_width 4 (system), telemetry false (locked by the system layer)", "", ""));
+    if (!fsc.fsSync(home)) usys.exit(179);
+    usys.exit(0);
+}
+
+// ------------------------------------------------------------------ drill
+
+var client_buf_va: u64 = 0;
+var sess_chan: u64 = 0;
+
+fn drill(chan_h: u64) noreturn {
+    const setup = boot.take(chan_h);
+    sess_chan = setup.cap(.sess);
+    const home = setup.cap(.view);
+    if (sess_chan == 0 or home == 0) usys.exit(140);
+    const s = usys.shmCreate(1);
+    if (s.err != .ok) usys.exit(141);
+    const m = usys.shmMap(s.data[0]);
+    if (m.err != .ok) usys.exit(142);
+    client_buf_va = m.data[0];
+    switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .attach_buf, s.data[0])) {
+        .ok => |rep| if (rep != .ok) usys.exit(143),
+        .err => usys.exit(144),
+    }
+
+    // Refusals first: the wrong passphrase and a user that does not exist
+    // get the same answer.
+    if (tryLogin("alice", "wrong-pass") != .denied) usys.exit(145);
+    _ = usys.log(glog, "users-drill: wrong passphrase refused");
+    if (tryLogin("mallory", "alice-pass") != .denied) usys.exit(146);
+    _ = usys.log(glog, "users-drill: unknown user refused");
+
+    // Two sessions at once, each a domain under its user's budgets.
+    const a = switch (tryLogin("alice", "alice-pass")) {
+        .session => |x| x.sid,
+        else => usys.exit(147),
+    };
+    const b = switch (tryLogin("bob", "bob-pass")) {
+        .session => |x| x.sid,
+        else => usys.exit(148),
+    };
+    if (a == b) usys.exit(149);
+    _ = usys.log(glog, "users-drill: two sessions open at once (alice, bob)");
+    if (waitSession(a) != 0) usys.exit(150);
+    if (waitSession(b) != 0) usys.exit(151);
+    _ = usys.log(glog, "users-drill: both sessions exited clean and were torn down");
+
+    // Each home holds exactly its own user's work (the drill's own view
+    // of the home tier, read-only).
+    const hbuf: [*]u8 = @ptrFromInt(fsc.attachBuf(home).va);
+    var text: [128]u8 = undefined;
+    const an = readFile(home, hbuf, "alice/notes/secret.txt", &text) orelse usys.exit(152);
+    if (!std.mem.eql(u8, text[0..an], "alice's secret")) usys.exit(153);
+    const bn = readFile(home, hbuf, "bob/notes/secret.txt", &text) orelse usys.exit(154);
+    if (!std.mem.eql(u8, text[0..bn], "bob's secret")) usys.exit(155);
+    const listed = fsc.fsList(home, hbuf, "alice/notes") orelse usys.exit(156);
+    if (!std.mem.eql(u8, hbuf[0..listed], "secret.txt\n")) usys.exit(157);
+    _ = usys.log(glog, "users-drill: homes isolated: alice's and bob's sessions each wrote only their own");
+
+    // A session logged out early is gone too.
+    const c = switch (tryLogin("alice", "alice-pass")) {
+        .session => |x| x.sid,
+        else => usys.exit(158),
+    };
+    switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .logout = .{ .sid = c } }, 0)) {
+        .ok => |rep| if (rep != .ok) usys.exit(159),
+        .err => usys.exit(159),
+    }
+    _ = usys.log(glog, "users-drill: PASS — identities are keys, sessions are domains, homes are views: two users at once, nothing shared");
+    usys.exit(0);
+}
+
+fn tryLogin(name: []const u8, pass: []const u8) shared.SessResp {
+    const buf: [*]u8 = @ptrFromInt(client_buf_va);
+    @memcpy(buf[0..name.len], name);
+    @memcpy(buf[64 .. 64 + pass.len], pass);
+    defer @memset(buf[0..320], 0);
+    return switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .login = .{
+        .name = @as(u64, name.len) << 32,
+        .pass = 64 | @as(u64, pass.len) << 32,
+    } }, 0)) {
+        .ok => |rep| rep,
+        .err => .{ .sess_err = .{ .code = 99 } },
+    };
+}
+
+fn waitSession(sid: u64) u64 {
+    return switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .wait = .{ .sid = sid } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .exited => |e| e.code,
+            else => 255,
+        },
+        .err => 255,
+    };
+}
+
+// -------------------------------------------------------------- utilities
+
+fn readFile(view: u64, buf: [*]u8, path: []const u8, out: []u8) ?usize {
+    const fd = switch (fsc.fsOpen(view, buf, path, 0)) {
+        .fd => |fd| fd,
+        .err => return null,
+    };
+    defer fsc.fsClose(view, fd);
+    const n = fsc.fsRead(view, fd, out.len) orelse return null;
+    if (n > out.len) return null;
+    @memcpy(out[0..n], buf[0..n]);
+    return n;
+}
+
+fn writeFile(view: u64, buf: [*]u8, path: []const u8, data: []const u8) bool {
+    const fd = switch (fsc.fsOpen(view, buf, path, 1)) {
+        .fd => |fd| fd,
+        .err => return false,
+    };
+    defer fsc.fsClose(view, fd);
+    if (!fsc.fsTruncate(view, fd, 0)) return false;
+    return fsc.fsWriteAt(view, buf, fd, 0, data);
+}
+
+fn str(v: ?Value) ?[]const u8 {
+    const x = v orelse return null;
+    return if (x == .str) x.str else null;
+}
+
+fn int(v: ?Value) ?i64 {
+    const x = v orelse return null;
+    return if (x == .int) x.int else null;
+}
+
+fn put(out: []u8, n: usize, s: []const u8) usize {
+    const k = @min(s.len, out.len - n);
+    @memcpy(out[n .. n + k], s[0..k]);
+    return n + k;
+}
+
+fn putNum(out: []u8, n: usize, v: u64) usize {
+    var ds: [20]u8 = undefined;
+    var d: usize = 0;
+    var x = v;
+    while (true) {
+        ds[d] = '0' + @as(u8, @intCast(x % 10));
+        d += 1;
+        x /= 10;
+        if (x == 0) break;
+    }
+    var m = n;
+    while (d > 0) {
+        d -= 1;
+        m = put(out, m, ds[d .. d + 1]);
+    }
+    return m;
+}
+
+fn cat3(out: []u8, a: []const u8, b: []const u8, c: []const u8, d: []const u8, e: []const u8) []const u8 {
+    var n: usize = 0;
+    for ([_][]const u8{ a, b, c, d, e }) |s| n = put(out, n, s);
+    return out[0..n];
+}
+
+fn logName(prefix: []const u8, name: []const u8) void {
+    var line: [96]u8 = undefined;
+    _ = usys.log(glog, cat3(&line, prefix, name, "", "", ""));
+}

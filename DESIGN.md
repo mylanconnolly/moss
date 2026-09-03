@@ -654,6 +654,7 @@ capability views make unrepresentable).
 | `state/` | service-owned, survives reboot | each service's private mutable state: `state/<service>/` |
 | `data/` | user/application payload | the only tree where sharing between services is expected, always via explicit view grants |
 | `volatile/` | cleared every boot | per-service scratch: `volatile/<service>/` — the FS service empties it at every mount |
+| `home/` | user-owned, survives reboot | one subtree per user, `home/<user>/` — reachable only through the view a session is handed; user settings live at `home/<user>/conf/` |
 
 Default grant policy — the hierarchy *is* the default cap topology: a
 service named X conventionally receives `state/X` (rw), `volatile/X` (rw),
@@ -1202,6 +1203,83 @@ one buffer handed to two services against a single ref underflows the
 refcount at the second teardown. Every service gets its own staging
 buffer; and finishTeardown's bare assert became a named panic (domain,
 kobj and user balances) so the next leak says who.
+
+## Users and sessions
+
+**As built (stage 1, 2026-09-03):** a user is not a kernel concept. The
+kernel has domains, budgets and capabilities; users, sessions, settings
+and logins are userspace composition of those, and every piece is a unit
+with a manifest and a drill (`users` test) like everything else.
+
+- **A user is a key.** A user record — `conf/users/<name>.msh`, an
+  mshl data literal like a unit file, admin-written — holds an Ed25519
+  identity's public key, a scrypt salt and cost, the identity's 32-byte
+  seed **sealed** under a passphrase-derived key (AEGIS-256), and the
+  session's budgets. No uid, no group, no mode bits, no password hash to
+  compare: logging in is unsealing the seed and checking that the key it
+  regenerates is the one on record (`lib/usercred.zig`, pure and
+  host-tested). The KDF cost lives in the record, so a deployment picks
+  its own; the drill uses ln 11 (2 MiB) so the custodian's domain stays
+  small, and the custodian refuses a record whose cost it cannot pay.
+- **A session is a domain tree.** `usersvc` (`user/users.zig` role 1)
+  is the session manager and key custodian: it holds a view of the
+  records (ro), the `home/` tier (rw), the system settings layer (ro)
+  and spawn authority. `SessReq.login` (name and passphrase through the
+  client's attached buffer, wiped after use) authenticates and spawns a
+  session under the record's budgets — kobj, user memory, CPU share —
+  handed exactly two capabilities: a rw view of `home/<name>` and the
+  settings view. The unlocked identity stays in the manager for the
+  session's lifetime (custody: the session never sees its seed) and is
+  wiped on `wait`/`logout`, which destroy the domain — total, transitive
+  teardown is the whole logout. Every refusal (unknown user, wrong
+  passphrase, unparsable record) is one answer after a pause.
+- **Storage is isolated by view.** `home/` is a hierarchy tier now
+  (fssvc creates it on format and upgrades older volumes). A session's
+  filesystem *is* its home view: the other homes, the credential store
+  and the system settings are unnameable from inside it, not forbidden
+  (`..` is `bad_path`, `conf/users/...` is `not_found` in its own
+  subtree). Sharing between users, when it arrives, is a derived view
+  handed over — delegation, not ACLs.
+- **Settings are data in layers.** The system layer is
+  `conf/<svc>.msh` (here `conf/app/editor.msh`), the user layer
+  `home/<user>/conf/<svc>.msh`; a program merges the two for its own
+  keys with `lib/settings.zig`, and its schema says which keys are
+  **locked** — a locked key keeps the system value whatever the user
+  layer says, so a setting a user may not change is not overridable
+  rather than merely discouraged. Both layers are mshl read by the same
+  strict parser as unit files and user records: one syntax for config,
+  shell and (later) automation. No settings daemon.
+- **No root.** Administrative authority is holding the caps: the
+  records view and the home tier are `usersvc`'s, the admin step
+  (`useradmin`) writes records through a rw view of `conf/users`. There
+  is no setuid, no sudo, and no ambient home directory.
+
+The drill (`profile=users`): the admin step writes alice's and bob's
+records (seeds and salts from the kernel pool) and the system settings
+file; the driver then has the wrong passphrase and an unknown user
+refused, opens both sessions at once, waits for each to exit clean, and
+through its own read-only view of `home/` finds each home holding
+exactly its owner's work. Each session proved from inside that nothing
+above its home is nameable and computed its effective settings: theme
+from the user layer, tab width from the system, telemetry locked. A
+third session is logged out early. The leak bar holds after all of it.
+
+Lessons paid for: the drill first died at exit 210 — `createShm` had
+no free slot. The kernel's shared-buffer pool was 16 objects, and a
+filesystem view's buffer stays pinned by fssvc's mapping after its
+client domain dies, so two users' worth of views drained it (pool now
+64; the pinned-buffer reclamation is a recorded residual). And a
+program's static KDF work area is BSS mapped at spawn, so it sizes
+every role's domain — budgets in unit files and records must include
+it.
+
+What stage 1 does not do, deliberately: interactive login from the
+console (the console driver serves one client; several consoles or
+MULTIPORT ports come next), per-user encrypted home *volumes* (stage 2:
+a mossfs volume per user keyed from the unlocked identity, served by a
+per-session fssvc, so the system volume never holds the plaintext),
+sharing by revocable delegation and fabric logins (stage 3, with the
+desired-state `apply` tool and the installer).
 
 ## Security posture
 

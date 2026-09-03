@@ -67,7 +67,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64)
 
 // ------------------------------------------------------------ the service
 
-const max_views = 16;
+const max_views = 32;
 const max_boot = 40; // etc/, conf/, and every img/ entry
 const max_fds = 8;
 const max_path = 256;
@@ -481,7 +481,7 @@ fn setupDisk(chan: u64) shared.FsResp {
 }
 
 /// The root's fixed children (boot/ is the archive overlay, not on disk).
-const std_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile" };
+const std_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile", "home" };
 
 /// True when superblock sectors 0..63 are entirely zero (blank disk).
 fn sbRegionZero(dev: mossfs.BlockDev) bool {
