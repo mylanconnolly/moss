@@ -61,7 +61,7 @@ const specs = [_]Spec{
         .kind = .blk,
         .pass = "users-test: PASS",
         .extra = "users-drill: homes isolated",
-        .always_extra = "telemetry false (locked by the system layer)",
+        .always_extra = "the home persisted across sessions",
         .append = "profile=users",
     },
     .{
@@ -490,8 +490,10 @@ const login_script = [_]LoginStep{
     .{ .con = 1, .send = "write b.txt \"bob was here\"", .expect = "" },
     .{ .con = 0, .send = "ls | get name", .expect = "notes" },
     .{ .con = 1, .send = "ls | get name", .expect = "b.txt" },
-    .{ .con = 0, .send = "ls | len", .expect = "1" },
-    .{ .con = 1, .send = "ls | len", .expect = "1" },
+    .{ .con = 0, .send = "ls | where name == notes | len", .expect = "1" },
+    .{ .con = 1, .send = "ls | where name == b.txt | len", .expect = "1" },
+    .{ .con = 0, .send = "ls | where name == b.txt | len", .expect = "0" },
+    .{ .con = 0, .send = "df", .expect = "encrypted: true" },
     .{ .con = 0, .send = "cat ../b.txt", .expect = "error" },
     .{ .con = 1, .send = "cat notes/a.txt", .expect = "error" },
     // Both shells alive at once, seen from either.
@@ -691,5 +693,5 @@ fn appendDisk(args: *std.ArrayList([]const u8), disk: []const u8) !void {
 fn makeDisk(path: []const u8) !void {
     const f = try cwd.createFile(io, path, .{ .truncate = true });
     defer f.close(io);
-    try f.setLength(io, 4 * 1024 * 1024);
+    try f.setLength(io, 16 * 1024 * 1024);
 }

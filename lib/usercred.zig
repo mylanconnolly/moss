@@ -83,6 +83,18 @@ pub fn unlock(allocator: std.mem.Allocator, rec: *const Record, passphrase: []co
     return kp;
 }
 
+/// The key of the user's home volume, derived from the identity: the
+/// same identity always opens the same volume, and nothing but the
+/// unlocked identity can derive it (HKDF over the seed, labeled).
+pub fn homeKey(kp: Ed25519.KeyPair) [32]u8 {
+    const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
+    const sk = kp.secret_key.toBytes();
+    const prk = Hkdf.extract("moss-home-volume-v1", sk[0..seed_len]);
+    var out: [32]u8 = undefined;
+    Hkdf.expand(&out, "home", prk);
+    return out;
+}
+
 // -------------------------------------------------------------- hex I/O
 //
 // Records travel as mshl data literals with hex-string fields; these are
@@ -146,6 +158,20 @@ test "the wrong passphrase, a tampered seal, and a swapped key are refused" {
     t = rec;
     t.pk[0] ^= 1; // a record claiming another identity for this seed
     try std.testing.expectError(Error.BadKey, unlock(a, &t, "hunter2"));
+}
+
+test "the home key follows the identity, not the passphrase" {
+    const a = std.testing.allocator;
+    const seed: [32]u8 = @splat(0x55);
+    const salt: [16]u8 = @splat(0x66);
+    const rec1 = try create(a, &seed, &salt, "one", test_kdf);
+    const rec2 = try create(a, &seed, &salt, "two", test_kdf);
+    const k1 = homeKey(try unlock(a, &rec1, "one"));
+    const k2 = homeKey(try unlock(a, &rec2, "two"));
+    try std.testing.expectEqualSlices(u8, &k1, &k2);
+    try std.testing.expect(!std.mem.eql(u8, &k1, &seed));
+    const other = try create(a, &[_]u8{0x56} ** 32, &salt, "one", test_kdf);
+    try std.testing.expect(!std.mem.eql(u8, &k1, &homeKey(try unlock(a, &other, "one"))));
 }
 
 test "hex round-trips and refuses bad input" {

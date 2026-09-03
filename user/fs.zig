@@ -14,6 +14,10 @@
 //!               makes data/pub for bob.
 //!   3 "bob"   — a derived view of data/pub, read-only: sees note.txt and
 //!               nothing else; every escape and write attempt must fail.
+//!   4 "homefs" — a user's HOME VOLUME: the same service over a mossfs
+//!               volume kept in a file on the system volume, keyed from
+//!               the user's identity; spawned per session by the session
+//!               manager and destroyed with it (see "home volumes").
 //!
 //! Durability model: ops are acknowledged when applied in memory; a
 //! transaction group commits them in batches (and between ops only), and
@@ -61,6 +65,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64)
         1 => fssvc(log_h, chan_h, blob_va, blob_len),
         2 => alice(log_h, boot.take(chan_h).cap(.view)),
         3 => bob(log_h, boot.take(chan_h).cap(.view)),
+        4 => homefs(log_h, chan_h),
         else => usys.exit(250),
     }
 }
@@ -130,7 +135,11 @@ fn fssvc(log_h: u64, chan_h: u64, blob_va: u64, blob_len: u64) noreturn {
     } else {
         _ = usys.log(glog, "fssvc: no disk handed over; serving bootfs only");
     }
+    serve();
+}
 
+/// The view protocol, for every client badge, forever.
+fn serve() noreturn {
     while (true) {
         const r = usys.recvMsg(serve_a);
         if (r.err == .peer_dead) usys.exit(0);
@@ -408,7 +417,12 @@ fn setupDisk(chan: u64) shared.FsResp {
         .flushFn = devFlush,
         .nsecs = sectors,
     };
+    return attachVolume(dev, sectors);
+}
 
+/// Mount (or format) the volume behind `dev`, check its key, and shape
+/// its root: shared by the disk-backed service and the file-backed one.
+fn attachVolume(dev: mossfs.BlockDev, sectors: u64) shared.FsResp {
     // Mount; format only a genuinely blank disk (all-zero superblock
     // region) — a garbage or wrong-format disk is NEVER auto-wiped: the
     // service stays up serving bootfs so an operator can intervene.
@@ -448,17 +462,21 @@ fn setupDisk(chan: u64) shared.FsResp {
     const now = nowSec();
     if (fresh) {
         // The standard hierarchy exists from the first format.
-        for (std_hierarchy) |name| {
+        for (hierarchy) |name| {
             const o = mfs.allocObject(.dir, now) catch usys.exit(212);
             mfs.dirAdd(mossfs.root_obj, name, o, .dir, now) catch usys.exit(213);
         }
-        if (mfs.enc) {
+        if (is_home) {
+            _ = usys.log(glog, "homefs: formatted a fresh home volume (encrypted)");
+        } else if (mfs.enc) {
             _ = usys.log(glog, "fssvc: formatted fresh mossfs (std hierarchy, encrypted)");
         } else {
             _ = usys.log(glog, "fssvc: formatted fresh mossfs (std hierarchy)");
         }
     } else {
-        if (mfs.enc) {
+        if (is_home) {
+            _ = usys.log(glog, "homefs: home volume opened (key verified)");
+        } else if (mfs.enc) {
             _ = usys.log(glog, "fssvc: existing mossfs found (encrypted, key verified)");
         } else {
             _ = usys.log(glog, "fssvc: existing mossfs found");
@@ -466,7 +484,7 @@ fn setupDisk(chan: u64) shared.FsResp {
         // Top-level names are the hierarchy, never created through the
         // protocol — so a volume formatted before a tier existed gets it
         // here, from the one place allowed to shape the root.
-        for (std_hierarchy) |name| {
+        for (hierarchy) |name| {
             if ((mfs.dirLookup(mossfs.root_obj, name) catch null) != null) continue;
             const o = mfs.allocObject(.dir, now) catch usys.exit(212);
             mfs.dirAdd(mossfs.root_obj, name, o, .dir, now) catch usys.exit(213);
@@ -482,6 +500,78 @@ fn setupDisk(chan: u64) shared.FsResp {
 
 /// The root's fixed children (boot/ is the archive overlay, not on disk).
 const std_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile", "home" };
+/// A home volume: the same lifecycle tiers at the user's radius (its
+/// conf/ is the user settings layer, its img/ a program store).
+const home_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile" };
+var hierarchy: []const []const u8 = &std_hierarchy;
+var is_home = false;
+
+// ------------------------------------------------------------ home volumes
+//
+// A home volume is a mossfs volume in a FILE on the system volume
+// (`home/<name>/vol`), reached through a view of that directory: the
+// block device is the file, one read/write per sector run. Encrypted
+// with the key derived from the user's identity, so the system volume
+// holds ciphertext and this service, spawned per session and destroyed
+// with it, is the only holder of the plaintext.
+
+/// Capacity a home volume reports (the file grows as blocks are written).
+const home_capacity_secs: u64 = 16384; // 8 MB
+var file_view: u64 = 0;
+var file_buf: [*]u8 = undefined;
+var file_fd: u64 = 0;
+
+fn homefs(log_h: u64, chan_h: u64) noreturn {
+    glog = log_h;
+    serve_a = chan_h;
+    hierarchy = &home_hierarchy;
+    is_home = true;
+    views[0] = .{ .used = true, .ro = false, .kind = .uroot };
+    var setup = boot.take(chan_h);
+    views[0].buf = setup.buf_va;
+    views[0].buf_pages = setup.buf_pages;
+    if (setup.secret().len == 32) {
+        pending_key = setup.secret()[0..32].*;
+        setup.wipeSecret();
+    }
+    const backing = setup.cap(.view);
+    if (backing == 0 or pending_key == null) usys.exit(230);
+    _ = setupFile(backing);
+    serve();
+}
+
+fn setupFile(view: u64) shared.FsResp {
+    file_view = view;
+    file_buf = @ptrFromInt(fsc.attachBuf(view).va);
+    file_fd = switch (fsc.fsOpen(view, file_buf, "vol", 1)) {
+        .fd => |fd| fd,
+        .err => usys.exit(231),
+    };
+    const dev: mossfs.BlockDev = .{
+        .ctx = @ptrCast(&dev_ctx_dummy),
+        .readFn = fileRead,
+        .writeFn = fileWrite,
+        .flushFn = fileFlush,
+        .nsecs = home_capacity_secs,
+    };
+    return attachVolume(dev, home_capacity_secs);
+}
+
+/// Past the file's end reads as zeros: a fresh volume file is blank.
+fn fileRead(_: *anyopaque, sector: u64, count: u64, dst: []u8) mossfs.DevError!void {
+    const n = fsc.fsReadAt(file_view, file_fd, sector * mossfs.sector_size, count * mossfs.sector_size) orelse return error.IoError;
+    const k = @min(n, dst.len);
+    @memcpy(dst[0..k], file_buf[0..k]);
+    @memset(dst[k..], 0);
+}
+
+fn fileWrite(_: *anyopaque, sector: u64, _: u64, src: []const u8) mossfs.DevError!void {
+    if (!fsc.fsWriteAt(file_view, file_buf, file_fd, sector * mossfs.sector_size, src)) return error.IoError;
+}
+
+fn fileFlush(_: *anyopaque) mossfs.DevError!void {
+    if (!fsc.fsSync(file_view)) return error.IoError;
+}
 
 /// True when superblock sectors 0..63 are entirely zero (blank disk).
 fn sbRegionZero(dev: mossfs.BlockDev) bool {
@@ -665,8 +755,9 @@ fn resolveParent(v: *View, path: []const u8, scratch: *[64]u8) union(enum) { dir
     switch (resolve(v, parent_path, scratch, true)) {
         .disk => |dk| return if (dk.typ == .dir) .{ .dir = dk.obj } else .{ .resp = ferr(.bad_path) },
         // Top-level names in the system namespace are the standard
-        // hierarchy — never created or removed through the protocol.
-        .uroot => return .{ .resp = ferr(.denied) },
+        // hierarchy — never created or removed through the protocol. A
+        // home volume's root is its user's (the tiers return on mount).
+        .uroot => return if (is_home and disk_ok) .{ .dir = mossfs.root_obj } else .{ .resp = ferr(.denied) },
         .boot_dir, .boot_file => return .{ .resp = ferr(.denied) },
         .bad => return .{ .resp = ferr(.bad_path) },
         .missing => return .{ .resp = ferr(.not_found) },

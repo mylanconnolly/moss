@@ -561,12 +561,16 @@ The pooling story stops being theory.
   `index:`), and a session opened there is an init instance running the
   user's own units (or the archive's `conf/session/` template: msh with
   the home as its whole filesystem) — the `login` drill logs two users
-  in over two TCP consoles at once. Residuals: per-user encrypted home
-  volumes (stage 2), revocable sharing / fabric logins / the
-  desired-state `apply` tool and installer (stage 3), a per-user program
-  store (`run` in a session), and buffers a service maps for a view
-  outliving the view's dead client (the kernel shm pool is 64 now;
-  reclamation needs the service to learn of the death).
+  in over two TCP consoles at once. Then **home volumes** (stage 2): each
+  user's home is its own encrypted mossfs volume in a file on the system
+  volume, keyed from the unlocked identity and served by a home
+  filesystem service spawned per session and destroyed with it — the
+  system volume holds ciphertext only, and the drill scans it to prove
+  so. Residuals: revocable sharing / fabric logins / the desired-state
+  `apply` tool and installer (stage 3), a per-user program store (`run`
+  in a session), an enforced home capacity, and buffers a service maps
+  for a view outliving the view's dead client (the kernel shm pool is
+  64 now; reclamation needs the service to learn of the death).
 - ✅ **PCI enumeration out of the kernel** (2026-09-02): the kernel
   mints window capabilities (ECAM, MMIO) from the devicetree and keeps
   the device table, ITS routing and SMMU binding; a userspace `pcisvc`

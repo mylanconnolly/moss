@@ -28,6 +28,7 @@ const pmem = @import("pmem.zig");
 const lock = @import("lock.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
+const log = @import("log.zig");
 
 const max_channels = 64;
 const max_notifications = 64;
@@ -85,6 +86,8 @@ pub const Shm = struct {
     refs: u32 = 0,
     npages: u32 = 0,
     pages: [shm_max_pages]u64 = @splat(0),
+    /// Who created it (for the leak bar's report).
+    creator: [16]u8 = @splat(0),
 };
 
 var channels: [max_channels]Channel = @splat(.{});
@@ -151,16 +154,22 @@ pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
     restoreIrqs(daif);
 
     // Woken: either the server replied (mailbox holds the reply) or the
-    // channel died under us.
-    if (t.ipc_status != @intFromEnum(shared.Errno.ok)) {
-        return .{ .err = @enumFromInt(t.ipc_status) };
-    }
-    return .{ .err = .ok, .msg = .{
+    // channel died under us. Either way the mailbox's cap — the reply's,
+    // or our own if nobody ever received it — travels out with the
+    // result, and its ref is the caller's to deliver or drop: nothing
+    // stays behind in the thread.
+    const out: Msg = .{
         .data = t.ipc_data,
         .cap_type = t.ipc_cap_type,
         .cap_obj = t.ipc_cap_obj,
         .cap_badge = t.ipc_cap_badge,
-    } };
+    };
+    t.ipc_cap_type = 0;
+    t.ipc_cap_obj = 0;
+    if (t.ipc_status != @intFromEnum(shared.Errno.ok)) {
+        return .{ .err = @enumFromInt(t.ipc_status), .msg = out };
+    }
+    return .{ .err = .ok, .msg = out };
 }
 
 /// Server side: block until a call arrives; its words land in the returned
@@ -219,6 +228,10 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Er
                 .cap_obj = caller.ipc_cap_obj,
                 .cap_badge = caller.ipc_cap_badge,
             };
+            // The attached cap's ref now rides the message (delivered or
+            // dropped by the receiver); the caller no longer holds it.
+            caller.ipc_cap_type = 0;
+            caller.ipc_cap_obj = 0;
             badge_out.* = caller.ipc_badge;
             token_out.* = (@as(u64, ch.serial) << 8) | (slot + 1);
             ch.lock.unlock();
@@ -523,12 +536,27 @@ pub fn unrefNotification(n: *Notification) void {
 // ------------------------------------------------------------------- shm
 
 pub fn createShm(npages: u32) ?*Shm {
+    return createShmBy(npages, "kernel");
+}
+
+/// Every still-active shared buffer: what the leak bar reports.
+pub fn dumpShms() void {
+    for (&shms, 0..) |*s, i| {
+        if (!s.active) continue;
+        const n = std.mem.indexOfScalar(u8, &s.creator, 0) orelse 16;
+        log.warn("shm[{d}]: {d} pages, {d} refs, created by {s}", .{ i, s.npages, s.refs, s.creator[0..n] });
+    }
+}
+
+pub fn createShmBy(npages: u32, creator: []const u8) ?*Shm {
     if (npages == 0 or npages > shm_max_pages) return null;
     const daif = shm_lock.lockIrqSave();
     defer shm_lock.unlockRestore(daif);
     for (&shms) |*s| {
         if (!s.active) {
             s.* = .{ .active = true, .refs = 1, .npages = npages };
+            const k = @min(creator.len, 16);
+            @memcpy(s.creator[0..k], creator[0..k]);
             for (0..npages) |i| {
                 const page = kalloc.allocPage(&shm_account) catch {
                     for (0..i) |j| kalloc.freePage(&shm_account, mem.physToPtr([*]u8, s.pages[j]));
@@ -552,7 +580,7 @@ pub fn refShm(s: *Shm) void {
 pub fn unrefShm(s: *Shm) void {
     const daif = shm_lock.lockIrqSave();
     defer shm_lock.unlockRestore(daif);
-    std.debug.assert(s.refs > 0);
+    if (s.refs == 0) std.debug.panic("unrefShm: no ref to drop ({d} pages, created by {s})", .{ s.npages, s.creator });
     s.refs -= 1;
     if (s.refs == 0) {
         for (0..s.npages) |i| {

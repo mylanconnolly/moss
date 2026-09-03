@@ -379,6 +379,23 @@ the holder cannot distinguish. Therefore **no kernel fast path may ever bypass
 a channel** — the moment one service gets a kernel shortcut, filtering,
 auditing, and virtualization stop being guarantees and become special cases.
 
+**Lesson paid for (in-transit caps, 2026-09-03):** a cap attached to a
+call lives in the caller's thread mailbox until a server's recv copies
+it out, and its ref was released only by that receiver's delivery. Two
+paths skipped delivery: a client torn down while parked in a caller
+queue (the session manager exiting while a console thread's `setup`
+call, buffer attached, waited on a driver still busy with a dead
+shell), and a call completed with `peer_dead` before anyone received
+it. Each leaked exactly one shared-buffer page, and only when shutdown
+timing lined up — the login drill failed its leak bar three runs in
+four, then passed seven in a row after an unrelated edit. Now recv
+clears the caller's mailbox cap as it copies it (the ref rides the
+message), `call` hands the mailbox's cap back with the result whether
+the reply came or the peer died (the syscall delivers or drops it), and
+thread teardown releases whatever is still in the mailbox. The IPC test
+runs both paths deterministically, and the leak bar names every
+still-active buffer with its creator.
+
 ## Init and supervision
 
 **As built (unit files):** every program init can start is a **unit** —
@@ -1233,13 +1250,28 @@ with a manifest and a drill (`users` test) like everything else.
   wiped on `wait`/`logout`, which destroy the domain — total, transitive
   teardown is the whole logout. Every refusal (unknown user, wrong
   passphrase, unparsable record) is one answer after a pause.
-- **Storage is isolated by view.** `home/` is a hierarchy tier now
-  (fssvc creates it on format and upgrades older volumes). A session's
-  filesystem *is* its home view: the other homes, the credential store
-  and the system settings are unnameable from inside it, not forbidden
-  (`..` is `bad_path`, `conf/users/...` is `not_found` in its own
-  subtree). Sharing between users, when it arrives, is a derived view
-  handed over — delegation, not ACLs.
+- **Storage is isolated by view, and by key.** `home/` is a hierarchy
+  tier (fssvc creates it on format and upgrades older volumes), and
+  each user's home is **its own encrypted mossfs volume** kept in one
+  file there, `home/<name>/vol`. The volume's key is derived from the
+  unlocked identity (HKDF over the seed, `usercred.homeKey`), so the
+  same identity always opens the same volume and nothing else can. At
+  login the manager spawns a **home filesystem service** for the
+  session — `user/fs.zig` role 4, the same service over a file-backed
+  block device (one view read or write per sector run; past the file's
+  end reads as zeros, so a fresh file is a blank disk) — stages the key
+  to it as a secret, and hands the session a view of that service's
+  root. The system volume only ever holds ciphertext; the plaintext
+  exists in one domain, spawned for the session and destroyed with it.
+  A home volume has the lifecycle tiers at the user's radius (`conf/`
+  is the user settings layer, `img/` a program store to come), and its
+  root is the user's to shape. A session's filesystem *is* that view:
+  the other homes, the credential store and the system settings are
+  unnameable from inside it, not forbidden (`..` is `bad_path`,
+  `conf/users/...` is `not_found`). Logout is a durability barrier —
+  the manager syncs the volume before destroying its service — and
+  sharing between users, when it arrives, is a derived view handed
+  over: delegation, not ACLs.
 - **Settings are data in layers.** The system layer is
   `conf/<svc>.msh` (here `conf/app/editor.msh`), the user layer
   `home/<user>/conf/<svc>.msh`; a program merges the two for its own
@@ -1258,11 +1290,22 @@ The drill (`profile=users`): the admin step writes alice's and bob's
 records (seeds and salts from the kernel pool) and the system settings
 file; the driver then has the wrong passphrase and an unknown user
 refused, opens both sessions at once, waits for each to exit clean, and
-through its own read-only view of `home/` finds each home holding
-exactly its owner's work. Each session proved from inside that nothing
-above its home is nameable and computed its effective settings: theme
-from the user layer, tab width from the system, telemetry locked. A
-third session is logged out early. The leak bar holds after all of it.
+through its own read-only view of `home/` finds each home to be one
+file — the volume — in which the session's plaintext appears nowhere.
+Each session proved from inside that nothing above its home is nameable
+and computed its effective settings: theme from the user layer, tab
+width from the system, telemetry locked. Alice logs in again and her
+session finds its earlier work: the volume reopened with the key her
+login derived. A further session is logged out early. The leak bar
+holds after all of it.
+
+Lessons paid for (home volumes): fssvc refuses to create top-level
+entries because a volume root's children are the hierarchy — and every
+home session died at its first `mkdir` until that rule was scoped to
+the system volume. And a file written through msh and left unsynced was
+gone on the next login: the manager had destroyed the home service
+before its last transaction group committed. Crash-only holds — nothing
+was damaged — but a logout is not a crash, so it syncs first.
 
 Lessons paid for: the drill first died at exit 210 — `createShm` had
 no free slot. The kernel's shared-buffer pool was 16 objects, and a
@@ -1313,13 +1356,13 @@ buffers after its driver's domain is revoked at shutdown; the SMMU
 refuses each write (`C_BAD_STE`) and the log shows the refusals — the
 design working, not a fault to chase.
 
-What this stage does not do, deliberately: per-user encrypted home
-*volumes* (stage 2: a mossfs volume per user keyed from the unlocked
-identity, served by a per-session fssvc, so the system volume never
-holds the plaintext), sharing by revocable delegation and fabric logins
-(stage 3, with the desired-state `apply` tool and the installer), and
-MULTIPORT virtio-console (more seats on one device) — the seat model
-is the same either way.
+What this does not do, deliberately: sharing by revocable delegation
+and fabric logins (stage 3, with the desired-state `apply` tool and the
+installer), a per-user program store (`img/` in the home is empty, so
+`run` in a session has nothing to run yet), a capacity a home volume
+actually enforces (it reports 8 MB; the file grows on demand within the
+system volume), and MULTIPORT virtio-console (more seats on one
+device) — the seat model is the same either way.
 
 ## Security posture
 

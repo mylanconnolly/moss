@@ -411,6 +411,13 @@ fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
                 t.lock.unlock();
                 bl.?.unlock();
                 waitSwitched(t);
+                // A cap it sent that nobody received (parked in a caller
+                // queue, or a reply nobody will collect): its ref dies here.
+                if (t.ipc_cap_type != 0) {
+                    ipc.releaseCap(@enumFromInt(t.ipc_cap_type), t.ipc_cap_obj);
+                    t.ipc_cap_type = 0;
+                    t.ipc_cap_obj = 0;
+                }
                 freeThread(t);
                 return true;
             },

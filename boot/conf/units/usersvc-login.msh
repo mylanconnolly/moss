@@ -5,7 +5,7 @@
 {
   image:     users
   arg:       769
-  budget:    { user: 32mb }
+  budget:    { user: 40mb }
   grant:     [log, spawner, bootfs]
   profiles:  [login]
   after:     useradmin

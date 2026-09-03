@@ -632,7 +632,7 @@ fn sysNotifyWait(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 fn sysShmCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const npages = frame.regs[0];
     if (npages == 0 or npages > ipc.shm_max_pages) return errno(.bad_arg);
-    const s = ipc.createShm(@intCast(npages)) orelse return errno(.no_space);
+    const s = ipc.createShmBy(@intCast(npages), d.name) orelse return errno(.no_space);
     const h = d.captable.?.insert(.shm, @intFromPtr(s)) orelse {
         ipc.unrefShm(s);
         return errno(.no_space);

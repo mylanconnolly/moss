@@ -108,7 +108,13 @@ it, and gets a session id to `wait` on or `logout`. A session is handed
 its home view (tag `view`) and the settings layer (tag `conf`); a
 program that reads settings merges `conf/<svc>.msh` with
 `conf/<svc>.msh` in the home through `lib/settings.zig`, naming its
-locked keys. A session opened at a console is `init` in mode 3: its
+locked keys. A session's home is an encrypted mossfs volume in
+`home/<name>/vol` on the system volume, served by `fs` role 4 (a
+file-backed block device: `fileRead`/`fileWrite`/`fileFlush` in
+`user/fs.zig`) that the manager spawns per session with the key from
+`usercred.homeKey` and syncs before destroying at logout; the check
+disk is 16 MB so two homes fit beside the program store. A session
+opened at a console is `init` in mode 3: its
 units come from `conf/units/` in the home, else `boot/conf/session/`;
 `zig build run-login` boots the multi-user system with seat 0 on your
 terminal and seat 1 on `nc 127.0.0.1 31905`.
@@ -140,6 +146,12 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   `-d guest_errors,unimp -D <file>` (the SMMU's "not allowed yet"
   messages live there) or `-trace 'smmuv3_*' -trace 'smmu_*'` to see
   every translation, event and command.
+- A leak bar that fails by exactly one shm page, sometimes: the kernel
+  dumps every still-active shared buffer with its page count, refs and
+  creating domain (`ipc.dumpShms`) before the panic. A buffer whose
+  creator is dead with refs left is a ref that skipped its release —
+  look at what that domain was doing when it died (a call with a cap
+  attached that nobody received, once).
 
 - **Read the fault dump.** ESR class is decoded for you; `far` is the bad
   address; `elr` locates the code (`objdump -d zig-out/bin/moss-kernel.elf`

@@ -340,6 +340,41 @@ fn ipcTestWorker(_: u64) void {
         askr.exit_code,
     });
 
+    // In-transit caps die with their sender: a client parked in a call
+    // with a shared buffer attached, torn down before anyone receives;
+    // then one whose server side dies under the call. The shm account
+    // must be zero after both — a ref left in a dead thread's mailbox
+    // once leaked a page per unanswered logout.
+    {
+        const ch2 = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+        const parked = domain.spawn("parked", .{ .blob = img(.pingpong) }, .{
+            .grant_debug_log = true,
+            .grant_channel_b = ch2,
+            .arg = 4,
+        }) catch |e| std.debug.panic("spawn parked: {t}", .{e});
+        sched.sleep(5);
+        domain.destroy(parked);
+        while (!domain.drained(parked)) sched.sleep(1);
+        domain.finishTeardown(parked);
+        ipc.unrefSide(ch2, .a); // a grant transfers the side's ref; ours was A
+        const ch3 = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+        const orphan = domain.spawn("orphan", .{ .blob = img(.pingpong) }, .{
+            .grant_debug_log = true,
+            .grant_channel_b = ch3,
+            .arg = 4,
+        }) catch |e| std.debug.panic("spawn orphan: {t}", .{e});
+        sched.sleep(5);
+        ipc.unrefSide(ch3, .a); // the server side dies under the call
+        while (!(orphan.state == .dying and domain.drained(orphan))) sched.sleep(1);
+        domain.finishTeardown(orphan);
+        sched.sleep(2);
+        if (orphan.exit_code != 0 or ipc.shm_account.balance() != 0) {
+            ipc.dumpShms();
+            std.debug.panic("ipc-test: FAIL — in-transit cap leaked: orphan exit {d}, shm {d}B", .{ orphan.exit_code, ipc.shm_account.balance() });
+        }
+        log.info("ipc-test: in-transit caps released — sender torn down mid-call, server death under a call", .{});
+    }
+
     // The scaling benchmark: call/reply pairs pinned one per core. How
     // far three cores get past one is the scheduler lock's fingerprint.
     const one = ipcBench(1);
@@ -555,6 +590,7 @@ fn systemDrill(comptime name: []const u8) void {
         log.info(name ++ "-test: PASS — the system booted from unit files, ran its drill, and shut down clean", .{});
         psci.systemOff();
     } else {
+        ipc.dumpShms();
         std.debug.panic(name ++ "-test: FAIL — root exit {d}, pmem delta {d}B, shm {d}B", .{
             code, frames_before -% frames_after, ipc.shm_account.balance(),
         });

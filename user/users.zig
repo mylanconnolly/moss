@@ -118,6 +118,11 @@ const max_sessions = 4;
 const Session = struct {
     used: bool = false,
     ctl: u64 = 0,
+    /// The session's home filesystem service (its volume's only key
+    /// holder) and the buffer we share with it.
+    fs_ctl: u64 = 0,
+    fs_buf_h: u64 = 0,
+    fs_chan: u64 = 0,
     name: [max_name]u8 = @splat(0),
     name_len: usize = 0,
     /// The user's identity, unlocked for the session's lifetime.
@@ -241,10 +246,22 @@ fn sessionOf(sid: u64) ?*Session {
     return &sessions[sid];
 }
 
-/// Logout is one operation: the domain tree goes, and the key with it.
+/// Logout is one operation: the domain tree goes, and the key with it;
+/// the home volume's service goes too, and its key with that.
 fn close(s: *Session) void {
     _ = usys.domainDestroy(s.ctl);
     _ = usys.capDrop(s.ctl);
+    if (s.fs_chan != 0) {
+        // Logout is a durability barrier: what the session was told is
+        // written reaches the disk before its filesystem service goes.
+        _ = fsc.fsSync(s.fs_chan);
+        _ = usys.capDrop(s.fs_chan);
+    }
+    if (s.fs_ctl != 0) {
+        _ = usys.domainDestroy(s.fs_ctl);
+        _ = usys.capDrop(s.fs_ctl);
+    }
+    if (s.fs_buf_h != 0) _ = usys.capDrop(s.fs_buf_h);
     @memset(std.mem.asBytes(&s.kp), 0);
     logName("usersvc: session closed for ", s.name[0..s.name_len]);
     s.* = .{};
@@ -345,8 +362,7 @@ fn readRecord(name: []const u8, budget: *Budget) ?usercred.Record {
 /// otherwise the session program (role 3).
 fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     const name = s.name[0..s.name_len];
-    if (!fsc.fsMkdir(home_view, home_buf, name)) return false;
-    const view = fsc.fsDerive(home_view, home_buf, name, false) orelse return false;
+    const view = openHome(s) orelse return false;
     defer _ = usys.capDrop(view); // the session's copy is the only one left
     const image: shared.ImageId = if (console != 0) .init else .users;
     const arg: u64 = 3;
@@ -374,6 +390,50 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
         return false;
     }
     return true;
+}
+
+/// The user's home volume: a mossfs volume in `home/<name>/vol` on the
+/// system volume, served by a home filesystem service spawned for this
+/// session and keyed from the unlocked identity. Returns the session's
+/// root view of it. The system volume only ever sees ciphertext.
+fn openHome(s: *Session) ?u64 {
+    const name = s.name[0..s.name_len];
+    if (!fsc.fsMkdir(home_view, home_buf, name)) return null;
+    const voldir = fsc.fsDerive(home_view, home_buf, name, false) orelse return null;
+    defer _ = usys.capDrop(voldir);
+    // The service's root-view buffer, shared with us: the key is staged
+    // through it, and derive requests travel through it.
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return null;
+    const sm = usys.shmMap(sh.data[0]);
+    if (sm.err != .ok) return null;
+    s.fs_buf_h = sh.data[0];
+    const fbuf: [*]u8 = @ptrFromInt(sm.data[0]);
+    if (!stage.load(blob_va, blob_len, .fs)) return null;
+    const ch = usys.chanCreate();
+    if (ch.err != .ok) return null;
+    const r = usys.spawn(spawner, stage.handle, 4, ch.data[0], shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a, usys.kbLimits(1 << 10, 4 << 10));
+    _ = usys.capDrop(ch.data[0]);
+    if (r.err != .ok) {
+        _ = usys.capDrop(ch.data[1]);
+        return null;
+    }
+    s.fs_ctl = r.data[0];
+    const b = ch.data[1];
+    s.fs_chan = b; // kept for the logout sync
+    var key = usercred.homeKey(s.kp);
+    defer @memset(&key, 0);
+    var ok = boot.giveCap(b, .buf, s.fs_buf_h);
+    if (ok) {
+        const dst: [*]volatile u8 = @ptrFromInt(sm.data[0]);
+        for (key, 0..) |kb, i| dst[i] = kb;
+        ok = boot.give(b, .{ .secret = .{ .off = 0, .len = 32 } }, 0);
+        for (0..32) |i| dst[i] = 0;
+    }
+    if (ok) ok = boot.giveCap(b, .view, voldir) and boot.give(b, .go, 0);
+    if (!ok) return null;
+    // The session's view of its own home: the volume's root.
+    return fsc.fsDerive(b, fbuf, "", false);
 }
 
 // --------------------------------------------------------------- consoles
@@ -575,7 +635,15 @@ fn session(chan_h: u64) noreturn {
     const cbuf: [*]u8 = @ptrFromInt(fsc.attachBuf(conf).va);
     var line: [160]u8 = undefined;
 
-    // Work in the home.
+    // Work in the home — and notice earlier work: the volume persists
+    // across sessions, opened each time with the key the login derives.
+    switch (fsc.fsOpen(home, hbuf, "notes/secret.txt", 0)) {
+        .fd => |fd| {
+            fsc.fsClose(home, fd);
+            _ = usys.log(glog, cat3(&line, "session(", name, "): earlier work found: the home persisted across sessions", "", ""));
+        },
+        .err => {},
+    }
     if (!fsc.fsMkdir(home, hbuf, "notes")) usys.exit(161);
     var secret: [64]u8 = undefined;
     const secret_text = cat3(&secret, name, "'s secret", "", "", "");
@@ -659,17 +727,25 @@ fn drill(chan_h: u64) noreturn {
     if (waitSession(b) != 0) usys.exit(151);
     _ = usys.log(glog, "users-drill: both sessions exited clean and were torn down");
 
-    // Each home holds exactly its own user's work (the drill's own view
-    // of the home tier, read-only).
+    // Through the drill's own view of the home tier (read-only), each
+    // home is one file: the user's volume, and it is ciphertext — the
+    // session's plaintext appears nowhere on the system volume.
     const hbuf: [*]u8 = @ptrFromInt(fsc.attachBuf(home).va);
-    var text: [128]u8 = undefined;
-    const an = readFile(home, hbuf, "alice/notes/secret.txt", &text) orelse usys.exit(152);
-    if (!std.mem.eql(u8, text[0..an], "alice's secret")) usys.exit(153);
-    const bn = readFile(home, hbuf, "bob/notes/secret.txt", &text) orelse usys.exit(154);
-    if (!std.mem.eql(u8, text[0..bn], "bob's secret")) usys.exit(155);
-    const listed = fsc.fsList(home, hbuf, "alice/notes") orelse usys.exit(156);
-    if (!std.mem.eql(u8, hbuf[0..listed], "secret.txt\n")) usys.exit(157);
-    _ = usys.log(glog, "users-drill: homes isolated: alice's and bob's sessions each wrote only their own");
+    for ([_][]const u8{ "alice", "bob" }) |who| {
+        const listed = fsc.fsList(home, hbuf, who) orelse usys.exit(152);
+        if (!std.mem.eql(u8, hbuf[0..listed], "vol\n")) usys.exit(153);
+    }
+    if (!volumeFree(home, hbuf, "alice/vol", "alice's secret")) usys.exit(154);
+    if (!volumeFree(home, hbuf, "bob/vol", "bob's secret")) usys.exit(155);
+    _ = usys.log(glog, "users-drill: homes isolated: each home is one encrypted volume, and the system volume holds only ciphertext");
+
+    // Alice again: her volume opens with the key her login derives and
+    // her earlier work is there (the session logs it).
+    const again = switch (tryLogin("alice", "alice-pass")) {
+        .session => |x| x.sid,
+        else => usys.exit(156),
+    };
+    if (waitSession(again) != 0) usys.exit(157);
 
     // A session logged out early is gone too.
     const c = switch (tryLogin("alice", "alice-pass")) {
@@ -682,6 +758,27 @@ fn drill(chan_h: u64) noreturn {
     }
     _ = usys.log(glog, "users-drill: PASS — identities are keys, sessions are domains, homes are views: two users at once, nothing shared");
     usys.exit(0);
+}
+
+/// True when `needle` occurs nowhere in the file (scanned in windows
+/// that overlap by the needle's length).
+fn volumeFree(view: u64, buf: [*]u8, path: []const u8, needle: []const u8) bool {
+    const fd = switch (fsc.fsOpen(view, buf, path, 0)) {
+        .fd => |fd| fd,
+        .err => return false,
+    };
+    defer fsc.fsClose(view, fd);
+    var off: u64 = 0;
+    var total: u64 = 0;
+    while (true) {
+        const n = fsc.fsReadAt(view, fd, off, shared.fs_max_io) orelse return false;
+        if (n == 0) break;
+        if (std.mem.indexOf(u8, buf[0..n], needle) != null) return false;
+        total += n;
+        if (n < needle.len) break;
+        off += n - (needle.len - 1);
+    }
+    return total > 0;
 }
 
 fn tryLogin(name: []const u8, pass: []const u8) shared.SessResp {

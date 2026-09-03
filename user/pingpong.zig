@@ -6,6 +6,10 @@
 //!                 handles peer_dead, proves it can carry on, exits 7.
 //!   3 "crasher" — dereferences an unmapped address; the fault becomes a
 //!                 message to the supervisor channel.
+//!   4 "sender"  — attaches a fresh shared buffer to a call nobody
+//!                 answers: torn down mid-call, or completed with
+//!                 peer_dead when the server side dies (then exits 0).
+//!                 Either way the buffer's ref must not outlive it.
 //!
 //! Everything speaks through the typed stubs in usys/shared — the same
 //! protocol types the kernel test driver decodes.
@@ -42,6 +46,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
         1 => calc(log_h, chan_h),
         2 => askr(log_h, chan_h),
         3 => crasher(log_h),
+        4 => sender(log_h, chan_h),
         else => usys.exit(250),
     }
 }
@@ -238,4 +243,16 @@ fn lineCat(buf: []u8, prefix: []const u8, s: []const u8) []const u8 {
         i += 1;
     }
     return buf[0..i];
+}
+
+fn sender(log_h: u64, chan_h: u64) noreturn {
+    const s = usys.shmCreate(1);
+    if (s.err != .ok) usys.exit(8);
+    _ = usys.log(log_h, "sender: calling with a buffer attached; nobody will answer");
+    const r = usys.callRaw(chan_h, .{ 1, 2, 3, 4 }, s.data[0]);
+    if (r.err == .peer_dead) {
+        _ = usys.log(log_h, "sender: peer_dead; the buffer's ref came back with it");
+        usys.exit(0);
+    }
+    usys.exit(9);
 }
