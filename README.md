@@ -36,21 +36,36 @@ zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silico
 
 ## Architecture at a glance
 
-```
-        node 1                                node 2
-  ┌───────────────────────────────┐    ┌──────────────────┐
-  │ apps      services   drivers  │    │                   │
-  │ ┌─────┐  ┌────────┐ ┌──────┐  │    │  fabric peer      │
-  │ │alice│  │fssvc   │ │blkdrv│  │    │  (remote spawn,   │
-  │ │boxed│  │netsvc  │ │      │  │TCP │   proxied         │
-  │ └──┬──┘  │fabsvc ─┼─┼──────┼──┼────┼──▶ channels)      │
-  │    │caps │init,...│ │ EL0  │  │    │                   │
-  │ ┌──▼─────┴────────┴─┴──────┐  │    └──────────────────┘
-  │ │ microkernel (EL2/EL1): caps, │  │
-  │ │ domains, IPC, sched, MMU │  │      Everything above the
-  │ └──────────────────────────┘  │      kernel line is an
-  └───────────────────────────────┘      ordinary sandboxed
-                                         userspace process.
+```mermaid
+flowchart LR
+  subgraph n1["node 1"]
+    direction TB
+    subgraph user["userspace, EL0 — every box an ordinary sandboxed process"]
+      direction LR
+      subgraph apps["apps"]
+        alice["alice"]
+        boxed["boxed"]
+      end
+      subgraph services["services"]
+        init["init"]
+        fssvc["fssvc"]
+        netsvc["netsvc"]
+        fabsvc["fabsvc"]
+      end
+      subgraph drivers["drivers"]
+        blkdrv["blkdrv"]
+        netdrv["netdrv"]
+        consdrv["consdrv"]
+      end
+      apps ~~~ services ~~~ drivers
+    end
+    kernel["microkernel, EL2/EL1<br/>caps · domains · IPC · sched · MMU"]
+    user -- "every interaction a channel, every authority a cap" --> kernel
+  end
+  subgraph n2["node 2"]
+    peer["fabric peer<br/>remote spawn, proxied channels"]
+  end
+  n1 -- "fabsvc to fabric peer: TCP, sealed" --> n2
 ```
 
 The kernel provides exactly: address spaces, threads, domains (the unit of
