@@ -9,11 +9,15 @@ const usys = @import("usys.zig");
 pub const max_secret = 256;
 pub const max_data = 256;
 pub const max_device_kinds = 8;
+/// How many caps of one tag (or devices of one kind) a program can be
+/// handed: the cap message's `kind` word is the index for ordinary
+/// tags; devices are filed by kind and take the next free index.
+pub const max_index = 4;
 
 pub const Setup = struct {
-    caps: [shared.cap_tag_count]u64 = @splat(0),
+    caps: [shared.cap_tag_count][max_index]u64 = @splat(@splat(0)),
     /// Device caps filed by kind (a program may be handed several).
-    devices: [max_device_kinds]u64 = @splat(0),
+    devices: [max_device_kinds][max_index]u64 = @splat(@splat(0)),
     buf_va: u64 = 0, // the `buf` cap, mapped
     buf_pages: u64 = 0,
     secret_buf: [max_secret]u8 = @splat(0),
@@ -24,7 +28,12 @@ pub const Setup = struct {
     arg_len: usize = 0,
 
     pub fn cap(s: *const Setup, tag: shared.CapTag) u64 {
-        return s.caps[@intFromEnum(tag)];
+        return s.caps[@intFromEnum(tag)][0];
+    }
+
+    /// The i-th cap of a tag (a program handed two consoles, say).
+    pub fn capAt(s: *const Setup, tag: shared.CapTag, i: usize) u64 {
+        return if (i < max_index) s.caps[@intFromEnum(tag)][i] else 0;
     }
 
     pub fn has(s: *const Setup, tag: shared.CapTag) bool {
@@ -32,7 +41,11 @@ pub const Setup = struct {
     }
 
     pub fn device(s: *const Setup, kind: shared.DeviceKind) u64 {
-        return s.devices[@intFromEnum(kind)];
+        return s.devices[@intFromEnum(kind)][0];
+    }
+
+    pub fn deviceAt(s: *const Setup, kind: shared.DeviceKind, i: usize) u64 {
+        return if (i < max_index) s.devices[@intFromEnum(kind)][i] else 0;
     }
 
     pub fn arg(s: *const Setup) []const u8 {
@@ -69,8 +82,17 @@ pub fn take(chan_h: u64) Setup {
         switch (req) {
             .cap => |c| {
                 if (c.tag < shared.cap_tag_count and r.cap != 0) {
-                    s.caps[c.tag] = r.cap;
-                    if (c.tag == @intFromEnum(shared.CapTag.device) and c.kind < max_device_kinds) s.devices[c.kind] = r.cap;
+                    if (c.tag == @intFromEnum(shared.CapTag.device)) {
+                        // Filed by kind, in arrival order.
+                        if (c.kind < max_device_kinds) {
+                            var i: usize = 0;
+                            while (i < max_index and s.devices[c.kind][i] != 0) i += 1;
+                            if (i < max_index) s.devices[c.kind][i] = r.cap else ok = false;
+                        } else ok = false;
+                        s.caps[c.tag][0] = r.cap;
+                    } else if (c.kind < max_index) {
+                        s.caps[c.tag][c.kind] = r.cap;
+                    } else ok = false;
                     if (c.tag == @intFromEnum(shared.CapTag.buf)) {
                         const m = usys.shmMap(r.cap);
                         if (m.err == .ok) {
@@ -124,6 +146,11 @@ pub fn give(boot_chan: u64, req: shared.BootReq, cap: u64) bool {
 
 pub fn giveCap(boot_chan: u64, tag: shared.CapTag, cap: u64) bool {
     return give(boot_chan, .{ .cap = .{ .tag = @intFromEnum(tag), .kind = 0 } }, cap);
+}
+
+/// Hand over the i-th cap of a tag.
+pub fn giveCapAt(boot_chan: u64, tag: shared.CapTag, i: u64, cap: u64) bool {
+    return give(boot_chan, .{ .cap = .{ .tag = @intFromEnum(tag), .kind = i } }, cap);
 }
 
 /// Hand over a device cap, filed under its kind.

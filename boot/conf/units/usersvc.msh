@@ -4,7 +4,7 @@
 {
   image:  users
   arg:    1
-  budget: { user: 16mb }
+  budget: { user: 32mb }
   grant:  [log, spawner, bootfs]
   give: [
     { tag: view, fs: conf/users, ro: true,  mkdir: true }

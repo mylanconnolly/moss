@@ -23,6 +23,12 @@
 //!                   unknown user), two sessions open at once, and, after
 //!                   both ended, each home holding exactly its own user's
 //!                   work.
+//! usersvc's x2 also carries flags: bit 8 = run a login prompt on every
+//! console it was handed (a session opened there is an init instance —
+//! mode 3 — with the console, the home view and the settings view, so
+//! msh in it holds the console until the user leaves); bit 9 = the login
+//! drill: exit 0 once every console has had a session end and none is
+//! open, so the boot can report.
 
 const std = @import("std");
 const shared = @import("shared");
@@ -62,8 +68,8 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 
 export fn umain(log_h: u64, chan_h: u64, role: u64, bva: u64, blen: u64) callconv(.c) noreturn {
     glog = log_h;
-    switch (role) {
-        1 => usersvc(chan_h, bva, blen),
+    switch (role & 0xff) {
+        1 => usersvc(chan_h, bva, blen, role),
         2 => useradmin(chan_h),
         3 => session(chan_h),
         4 => drill(chan_h),
@@ -134,7 +140,7 @@ var blob_va: u64 = 0;
 var blob_len: u64 = 0;
 const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 
-fn usersvc(chan_h: u64, va: u64, len: u64) noreturn {
+fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     svc_chan = chan_h;
     blob_va = va;
     blob_len = len;
@@ -147,6 +153,21 @@ fn usersvc(chan_h: u64, va: u64, len: u64) noreturn {
     home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
     stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(181);
     _ = usys.log(glog, "usersvc: up; sessions are domains, identities are keys");
+    if (flags & 0x100 != 0) {
+        login_drill = flags & 0x200 != 0;
+        for (0..max_consoles) |i| {
+            const cap = setup.capAt(.console, i);
+            if (cap == 0) continue;
+            console_caps[ncons] = cap;
+            if (usys.threadCreate(consoleThread, ncons, &console_stacks[ncons]) != .ok) usys.exit(183);
+            ncons += 1;
+        }
+        var line: [64]u8 = undefined;
+        var n = put(&line, 0, "usersvc: login prompts on ");
+        n = putNum(&line, n, ncons);
+        n = put(&line, n, " consoles");
+        _ = usys.log(glog, line[0..n]);
+    }
 
     while (true) {
         const r = usys.recvMsg(chan_h);
@@ -167,15 +188,24 @@ fn usersvc(chan_h: u64, va: u64, len: u64) noreturn {
                 }
                 reply(.ok);
             },
-            .login => |l| reply(login(l.name, l.pass)),
+            .login => |l| {
+                lock();
+                const res = login(l.name, l.pass);
+                unlock();
+                reply(res);
+            },
             .wait => |w| {
+                lock();
                 const s = sessionOf(w.sid) orelse {
+                    unlock();
                     reply(.{ .sess_err = .{ .code = 2 } });
                     continue;
                 };
+                const ctl = s.ctl;
+                unlock();
                 var code: u64 = 0;
                 while (true) {
-                    const st = usys.domainStat(s.ctl);
+                    const st = usys.domainStat(ctl);
                     if (st.err != .ok) break;
                     if (st.data[0] == @intFromEnum(shared.DomainState.dead)) {
                         code = st.data[1];
@@ -183,10 +213,14 @@ fn usersvc(chan_h: u64, va: u64, len: u64) noreturn {
                     }
                     usys.sleep(2);
                 }
-                close(s);
+                lock();
+                if (sessionOf(w.sid)) |still| close(still);
+                unlock();
                 reply(.{ .exited = .{ .code = code } });
             },
             .logout => |lo| {
+                lock();
+                defer unlock();
                 const s = sessionOf(lo.sid) orelse {
                     reply(.{ .sess_err = .{ .code = 2 } });
                     continue;
@@ -224,18 +258,24 @@ fn clientSlice(word: u64) ?[]u8 {
     return @as([*]u8, @ptrFromInt(client_va))[off .. off + len];
 }
 
+/// The protocol's login: name and passphrase from the client's buffer.
 fn login(name_w: u64, pass_w: u64) shared.SessResp {
     const name_src = clientSlice(name_w) orelse return .denied;
     const pass_src = clientSlice(pass_w) orelse return .denied;
-    var name_buf: [max_name]u8 = undefined;
     var pass: [256]u8 = undefined;
     defer @memset(&pass, 0);
+    @memcpy(pass[0..pass_src.len], pass_src);
+    @memset(pass_src, 0); // the passphrase now lives only here
+    return authenticate(name_src, pass[0..pass_src.len], 0);
+}
+
+/// Authenticate and open a session (with `console`, an init instance
+/// on that console; without, the session program). Caller holds the lock.
+fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.SessResp {
+    var name_buf: [max_name]u8 = undefined;
     if (!nameOk(name_src)) return refuse("usersvc: login refused (bad name)");
     @memcpy(name_buf[0..name_src.len], name_src);
     const name = name_buf[0..name_src.len];
-    @memcpy(pass[0..pass_src.len], pass_src);
-    @memset(pass_src, 0); // the passphrase now lives only here
-    const phrase = pass[0..pass_src.len];
 
     var slot: usize = 0;
     while (slot < max_sessions and sessions[slot].used) slot += 1;
@@ -249,7 +289,7 @@ fn login(name_w: u64, pass_w: u64) shared.SessResp {
     const s = &sessions[slot];
     s.* = .{ .used = true, .kp = kp, .name_len = name.len };
     @memcpy(s.name[0..name.len], name);
-    if (!spawnSession(s, budget)) {
+    if (!spawnSession(s, budget, console)) {
         @memset(std.mem.asBytes(&s.kp), 0);
         s.* = .{};
         return .{ .sess_err = .{ .code = 4 } };
@@ -299,17 +339,23 @@ fn readRecord(name: []const u8, budget: *Budget) ?usercred.Record {
     return rec;
 }
 
-/// The session: the users image (role 3) under the record's budgets,
-/// handed a rw view of home/<name> and the settings layer, and its name.
-fn spawnSession(s: *Session, budget: Budget) bool {
+/// The session, under the record's budgets, handed a rw view of
+/// home/<name>, the settings layer and its name: on a console, an init
+/// instance (mode 3) that runs the session's units with that console;
+/// otherwise the session program (role 3).
+fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     const name = s.name[0..s.name_len];
     if (!fsc.fsMkdir(home_view, home_buf, name)) return false;
     const view = fsc.fsDerive(home_view, home_buf, name, false) orelse return false;
     defer _ = usys.capDrop(view); // the session's copy is the only one left
-    if (!stage.load(blob_va, blob_len, .users)) return false;
+    const image: shared.ImageId = if (console != 0) .init else .users;
+    const arg: u64 = 3;
+    var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
+    if (console != 0) flags |= shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs;
+    if (!stage.load(blob_va, blob_len, image)) return false;
     const ch = usys.chanCreate();
     if (ch.err != .ok) return false;
-    const r = usys.spawnCpu(spawner, stage.handle, 3, ch.data[0], shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a, usys.kbLimits(budget.kobj_kb, budget.user_kb), usys.cpuBudget(budget.cpu_permille, 0));
+    const r = usys.spawnCpu(spawner, stage.handle, arg, ch.data[0], flags, usys.kbLimits(budget.kobj_kb, budget.user_kb), usys.cpuBudget(budget.cpu_permille, 0));
     _ = usys.capDrop(ch.data[0]);
     if (r.err != .ok) {
         _ = usys.capDrop(ch.data[1]);
@@ -319,14 +365,138 @@ fn spawnSession(s: *Session, budget: Budget) bool {
     const b = ch.data[1];
     defer _ = usys.capDrop(b);
     const w = shared.strToWords(name);
-    const ok = boot.giveCap(b, .view, view) and boot.giveCap(b, .conf, app_view) and
-        boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
+    var ok = boot.giveCap(b, .view, view) and boot.giveCap(b, .conf, app_view);
+    if (ok and console != 0) ok = boot.giveCap(b, .console, console);
+    if (ok) ok = boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
     if (!ok) {
         _ = usys.domainDestroy(s.ctl);
         _ = usys.capDrop(s.ctl);
         return false;
     }
     return true;
+}
+
+// --------------------------------------------------------------- consoles
+//
+// Console login: one thread per console the manager was handed, each
+// running prompt, passphrase, session, wait, prompt again. While a
+// session is open the console is its shell's; the thread only watches
+// the session's domain.
+
+const max_consoles = boot.max_index;
+var console_caps: [max_consoles]u64 = @splat(0);
+var console_stacks: [max_consoles][32 << 10]u8 align(16) = undefined;
+var console_done: [max_consoles]bool = @splat(false);
+var ncons: usize = 0;
+var login_drill = false;
+var svc_lock = std.atomic.Value(bool).init(false);
+
+fn lock() void {
+    while (svc_lock.swap(true, .acquire)) usys.yield();
+}
+
+fn unlock() void {
+    svc_lock.store(false, .release);
+}
+
+const Console = struct {
+    chan: u64,
+    shm_h: u64,
+    buf: [*]volatile u8,
+
+    /// (Re)bind our byte buffer: a shell that had the console bound its own.
+    fn bind(c: *Console) void {
+        _ = usys.callTyped(shared.ConsReq, shared.ConsResp, c.chan, .setup, c.shm_h);
+    }
+
+    fn write(c: *Console, s: []const u8) void {
+        var off: usize = 0;
+        while (off < s.len) {
+            const chunk = @min(s.len - off, 2048);
+            for (0..chunk) |i| c.buf[i] = s[off + i];
+            _ = usys.callTyped(shared.ConsReq, shared.ConsResp, c.chan, .{ .write = .{ .len = chunk } }, 0);
+            off += chunk;
+        }
+    }
+
+    /// A line, with backspace; echoed only when asked (never a passphrase).
+    fn readLine(c: *Console, out: []u8, echo: bool) usize {
+        var n: usize = 0;
+        while (true) {
+            const got = switch (usys.callTyped(shared.ConsReq, shared.ConsResp, c.chan, .{ .read = .{ .max = 64 } }, 0)) {
+                .ok => |rep| switch (rep) {
+                    .n => |x| x.n,
+                    else => return n,
+                },
+                .err => return n,
+            };
+            for (0..got) |i| {
+                const b = c.buf[i];
+                if (b == '\r' or b == '\n') return n;
+                if (b == 0x7f or b == 0x08) {
+                    if (n > 0) {
+                        n -= 1;
+                        if (echo) c.write("\x08 \x08");
+                    }
+                } else if (n < out.len and b >= 0x20) {
+                    out[n] = b;
+                    n += 1;
+                    if (echo) c.write(&[_]u8{b});
+                }
+            }
+        }
+    }
+};
+
+fn consoleThread(i: u64) callconv(.c) void {
+    const s = usys.shmCreate(1);
+    if (s.err != .ok) usys.exit(184);
+    const m = usys.shmMap(s.data[0]);
+    if (m.err != .ok) usys.exit(185);
+    var c: Console = .{ .chan = console_caps[i], .shm_h = s.data[0], .buf = @ptrFromInt(m.data[0]) };
+    while (true) {
+        c.bind();
+        c.write("\r\nmoss login: ");
+        var name: [64]u8 = undefined;
+        const nl = c.readLine(&name, true);
+        c.write("\r\npassphrase: ");
+        var pass: [256]u8 = undefined;
+        const pl = c.readLine(&pass, false);
+        c.write("\r\n");
+        lock();
+        const res = authenticate(name[0..nl], pass[0..pl], c.chan);
+        unlock();
+        @memset(&pass, 0);
+        switch (res) {
+            .session => |x| {
+                // The console is the session's shell's now; watch the domain.
+                lock();
+                const ctl = if (sessionOf(x.sid)) |sess| sess.ctl else 0;
+                unlock();
+                while (ctl != 0) {
+                    const st = usys.domainStat(ctl);
+                    if (st.err != .ok or st.data[0] == @intFromEnum(shared.DomainState.dead)) break;
+                    usys.sleep(5);
+                }
+                lock();
+                if (sessionOf(x.sid)) |sess| close(sess);
+                console_done[i] = true;
+                unlock();
+                if (login_drill) maybeFinish();
+            },
+            else => c.write("login refused\r\n"),
+        }
+    }
+}
+
+/// The login drill's end: every console has had a session, none is open.
+fn maybeFinish() void {
+    lock();
+    defer unlock();
+    for (console_done[0..ncons]) |d| if (!d) return;
+    for (sessions) |s| if (s.used) return;
+    _ = usys.log(glog, "usersvc: every console had its session and logged out; drill done");
+    usys.exit(0);
 }
 
 // -------------------------------------------------------------- useradmin
@@ -387,7 +557,7 @@ fn renderRecord(out: *[1024]u8, rec: usercred.Record) []const u8 {
     n = putNum(out, n, rec.kdf.r);
     n = put(out, n, ", p: ");
     n = putNum(out, n, rec.kdf.p);
-    n = put(out, n, " },\n  budget: { kobj: 1mb, user: 6mb, cpu: 500 } }\n");
+    n = put(out, n, " },\n  budget: { kobj: 2mb, user: 12mb, cpu: 500 } }\n");
     return out[0..n];
 }
 

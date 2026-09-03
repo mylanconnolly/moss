@@ -160,6 +160,12 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.login_test) {
+        _ = sched.spawn("boot-watch", loginTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
     if (build_options.users_test) {
         _ = sched.spawn("boot-watch", usersTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -499,6 +505,14 @@ fn fsTestWorker(_: u64) void {
 /// sessions (domains) and the drill have exited.
 fn usersTestWorker(_: u64) void {
     systemDrill("users");
+}
+
+/// The login drill: a system boot under profile "login" — the session
+/// manager runs a login prompt on two consoles and the runner logs two
+/// users in at once, each getting an init instance with msh on its home;
+/// the manager exits when both have logged out.
+fn loginTestWorker(_: u64) void {
+    systemDrill("login");
 }
 
 /// Developer-tooling boot: the storage stack, the virtio-console driver,

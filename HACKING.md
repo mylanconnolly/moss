@@ -51,9 +51,13 @@ an mshl record with `image`, optional `arg`/`budget` (`kobj`, `user`,
 `cpu` in permille of a core or `"25%"`)/`cores` (a partition)/`grant`/`restart`,
 `give` lines (`{ tag: device, device: blk }`, `{ tag: disk, unit: blk }`,
 `{ tag: buf, shm: 1 }`, `{ secret: conf/x.key }`, `{ tag: view, fs: p,
-ro: true }`, `{ tag: net, netview: net }`, `{ tag: init, self: true }`),
-and `start: eager` / `essential: true` / `certify` / `install` as
-needed — added to the boot-file list in `build.zig`. The program takes
+ro: true }`, `{ tag: net, netview: net }`, `{ tag: init, self: true }`,
+`{ tag: console, session: true }` for one of a session's own caps; add
+`index: 1` to pick the second device of a kind or to file a cap as the
+receiver's second of that tag), and `start: eager` / `essential: true`
+/ `certify` / `install` as needed — added to the boot-file list in
+`build.zig`. A step that starts `after:` another must list the
+`profiles` it belongs to, or it never starts. The program takes
 it all with `boot.take`. A run tool's unit is what `run` reads for its
 grants and views (`fs: arg` = the run argument). Services reachable by
 `connect` are units named after `shared.ServiceId`.
@@ -104,7 +108,10 @@ it, and gets a session id to `wait` on or `logout`. A session is handed
 its home view (tag `view`) and the settings layer (tag `conf`); a
 program that reads settings merges `conf/<svc>.msh` with
 `conf/<svc>.msh` in the home through `lib/settings.zig`, naming its
-locked keys.
+locked keys. A session opened at a console is `init` in mode 3: its
+units come from `conf/units/` in the home, else `boot/conf/session/`;
+`zig build run-login` boots the multi-user system with seat 0 on your
+terminal and seat 1 on `nc 127.0.0.1 31905`.
 
 **An OS test**: prefer a unit-file drill — a profile in
 `shared.BootProfile`, drill units under `boot/conf/units/` (`profiles:

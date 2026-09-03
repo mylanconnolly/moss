@@ -1076,7 +1076,12 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// eager under (`profiles: [system, blk]`). The kernel reads `profile=`
 /// from the boot arguments and passes it to root, root to init, so one
 /// archive serves the interactive system and every unit-file drill.
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5 };
+/// `login` boots the multi-user system: a login prompt on every
+/// console; `session` is what a session's init starts (its units live in
+/// the user's home, else the archive's conf/session/ template).
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7 };
+/// A session's unit template in the boot archive.
+pub const session_unit_dir = "conf/session/";
 
 /// Unit files: `conf/units/<name>.msh` in the boot archive (served at
 /// boot/conf/units/ by fssvc) — mshl data literals init reads to spawn

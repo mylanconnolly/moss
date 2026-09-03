@@ -1,0 +1,15 @@
+# A session's template unit: msh on the session's console, holding the
+# home as its whole filesystem, and the session's own init for service
+# control. A user's own conf/units/ in the home replaces this template.
+{
+  image:     shell
+  budget:    { user: 8mb }
+  grant:     [log, spawner]
+  profiles:  [session]
+  essential: true
+  give: [
+    { tag: console, session: true }
+    { tag: view,    fs: "", ro: false }
+    { tag: init,    self: true }
+  ]
+}

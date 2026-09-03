@@ -29,7 +29,7 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 (`brew install qemu`).
 
 ```sh
-zig build check      # the whole test suite: 21 OS tests under QEMU + host unit tests (~90s)
+zig build check      # the whole test suite: 22 OS tests under QEMU + host unit tests (~100s)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 ```
@@ -84,6 +84,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | vmnode | The pooling story: a moss guest with a passed-through NIC and entropy device (SMMU stage 2, LPIs injected as SPIs) joins the fabric as node 2 and takes a remote spawn | `zig build run -Dvmnode-test` |
 | fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
 | users | Users as keys, sessions as domains, homes as views: passphrase-unlocked identities in a custodian's care, two sessions at once under their own budgets, wrong passphrase and unknown user refused, homes isolated, layered settings with a locked key | `zig build run-blk -Dusers-test` |
+| login | Console login: two users at two consoles at once, each session an init instance with msh holding the home as its whole filesystem; a refused passphrase, the other's files unnameable, out and back in, seats freed | `zig build run-login` (interactive) |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
 | fabric | Per-node identities (root-signed certs, signed DH, sealed transport): join, gossip, placement, death, rejoin, imposter refused, spawn authorization, revocation | `zig build run-cluster -Dfabric-test` |

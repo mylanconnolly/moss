@@ -555,13 +555,18 @@ The pooling story stops being theory.
   rw view of `home/<user>` (a new hierarchy tier) and a settings view,
   layered settings with locked keys (`lib/settings.zig`), and the
   `users` drill: refused logins, two sessions at once, homes holding
-  only their owner's work, clean teardown. Residuals: interactive login
-  from the console (one console client today), per-user encrypted home
+  only their owner's work, clean teardown. Same day, **console login**:
+  the `login` profile puts a prompt on every console (a seat is a
+  virtio-console device; units pick devices and caps of one kind by
+  `index:`), and a session opened there is an init instance running the
+  user's own units (or the archive's `conf/session/` template: msh with
+  the home as its whole filesystem) — the `login` drill logs two users
+  in over two TCP consoles at once. Residuals: per-user encrypted home
   volumes (stage 2), revocable sharing / fabric logins / the
-  desired-state `apply` tool and installer (stage 3), and buffers a
-  service maps for a view outliving the view's dead client (the kernel
-  shm pool is 64 now; reclamation needs the service to learn of the
-  death).
+  desired-state `apply` tool and installer (stage 3), a per-user program
+  store (`run` in a session), and buffers a service maps for a view
+  outliving the view's dead client (the kernel shm pool is 64 now;
+  reclamation needs the service to learn of the death).
 - ✅ **PCI enumeration out of the kernel** (2026-09-02): the kernel
   mints window capabilities (ECAM, MMIO) from the devicetree and keeps
   the device table, ITS routing and SMMU binding; a userspace `pcisvc`

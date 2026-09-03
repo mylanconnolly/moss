@@ -87,7 +87,8 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     fs_chan = setup.cap(.view);
     init_chan = setup.cap(.init);
     fab_chan = setup.cap(.fabric);
-    if (cons_chan == 0 or fs_chan == 0 or init_chan == 0 or fab_chan == 0) usys.exit(140);
+    // The fabric is optional: a user session has none.
+    if (cons_chan == 0 or fs_chan == 0 or init_chan == 0) usys.exit(140);
 
     // Console byte buffer.
     const s = usys.shmCreate(1);
@@ -388,6 +389,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     }
     if (is(name, "nodes")) return try nodesTable(it);
     if (is(name, "rspawn")) {
+        if (fab_chan == 0) return it.fail("rspawn: no fabric in this session", .{});
         if (args.len < 2) return it.fail("rspawn: node and image id expected", .{});
         return try rspawn(it, @intCast(try intOf(it, args[0])), @intCast(try intOf(it, args[1])));
     }
@@ -628,6 +630,7 @@ fn svcControl(it: *mshl.Interp, op: []const u8, id: u64) mshl.Error!Value {
 
 fn fabAttach() bool {
     if (fab_buf != 0) return true;
+    if (fab_chan == 0) return false;
     const s = usys.shmCreate(1);
     if (s.err != .ok) return false;
     const m = usys.shmMap(s.data[0]);

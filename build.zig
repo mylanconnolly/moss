@@ -112,6 +112,11 @@ pub fn build(b: *std.Build) void {
         "users-test",
         "Run the users drill: key identities, passphrase-unlocked sessions as domains, isolated homes, layered settings",
     ) orelse false;
+    const login_test = b.option(
+        bool,
+        "login-test",
+        "Run the login drill: two users log in on two consoles at once, each session an init instance with msh on its home",
+    ) orelse false;
     const rng_test = b.option(
         bool,
         "rng-test",
@@ -180,6 +185,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "shell_test", shell_test);
     build_opts.addOption(bool, "rng_test", rng_test);
     build_opts.addOption(bool, "users_test", users_test);
+    build_opts.addOption(bool, "login_test", login_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -250,6 +256,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/net-boxed.msh",   "conf/msh/startup.msh",
         "conf/units/guest-hello.msh", "conf/units/usersvc.msh",
         "conf/units/useradmin.msh",   "conf/units/users-drill.msh",
+        "conf/units/cons1.msh",       "conf/units/usersvc-login.msh",
+        "conf/session/msh.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -306,7 +314,7 @@ pub fn build(b: *std.Build) void {
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-        "users_test",
+        "users_test", "login_test",
     }) |on| gopts.addOption(bool, on, false);
     gopts.addOption(bool, "guest_kernel", true);
     const gmod = b.createModule(.{
@@ -451,6 +459,50 @@ pub fn build(b: *std.Build) void {
     const run_shell_step = b.step("run-shell", "Interactive msh console on your terminal (kernel log: zig-out/shell-kernel.log; exit with the `exit` command).");
     run_shell_step.dependOn(&run_shell.step);
 
+    // run-login: the multi-user boot. Seat 0 is your terminal, seat 1 a
+    // TCP console (`nc 127.0.0.1 31905`); log in as alice / alice-pass or
+    // bob / bob-pass (the drill's records, written at boot).
+    const run_login = b.addSystemCommand(&.{
+        "qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
+        "-cpu",
+        "cortex-a76",
+        "-drive",
+        "if=none,file=zig-out/shell-disk.img,format=raw,id=hd",
+        "-device",
+        "virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=hd",
+        "-nic",
+        "none",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
+        "-device",
+        "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
+        "-chardev",
+        "stdio,id=c0,signal=off",
+        "-device",
+        "virtconsole,chardev=c0",
+        "-device",
+        "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
+        "-chardev",
+        "socket,id=c1,host=127.0.0.1,port=31905,server=on,wait=off",
+        "-device",
+        "virtconsole,chardev=c1",
+        "-display",
+        "none",
+        "-serial",
+        "file:zig-out/login-kernel.log",
+        "-smp",
+        "4",
+        "-m",
+        "512M",
+        "-append",
+        "profile=login",
+    });
+    run_login.step.dependOn(&mkdisk_sh.step);
+    const run_login_step = b.step("run-login", "Multi-user boot: a login prompt on your terminal and on a TCP console at 127.0.0.1:31905 (kernel log: zig-out/login-kernel.log).");
+    run_login_step.dependOn(&run_login.step);
+
     // run-net: virtio-net over slirp (v4 + v6), with a guestfwd echo server
     // (cat) at 10.0.2.100:9000.
     const run_net = b.addSystemCommand(&.{
@@ -585,13 +637,13 @@ pub fn build(b: *std.Build) void {
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-        "users_test",
+        "users_test", "login_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc",   "init",
         "sandbox", "flap",  "blk",   "fs",     "net",   "fabric",
         "shell",   "rng",   "smmu",  "vm",     "guest", "vmnode",
-        "pan",     "cpu",   "users",
+        "pan",     "cpu",   "users", "login",
     };
     for (variants) |vn| {
         const vopts = b.addOptions();
@@ -624,6 +676,10 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, vn, "shell")) {
             run_shell.addArg("-kernel");
             run_shell.addFileArg(vbin.getOutput());
+        }
+        if (std.mem.eql(u8, vn, "login")) {
+            run_login.addArg("-kernel");
+            run_login.addFileArg(vbin.getOutput());
         }
     }
     const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests)");

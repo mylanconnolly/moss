@@ -1,0 +1,7 @@
+# The second console (a second virtio-console device): another seat.
+{
+  image: cons
+  give: [
+    { tag: device, device: console, index: 1 }
+  ]
+}

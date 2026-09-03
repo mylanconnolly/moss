@@ -20,7 +20,13 @@
 //! notification interrupts init's blocked recv, the dead unit is respawned
 //! and re-wired, and dependents holding init's front channel re-request
 //! their dependency. Modes (x2): 0 = the Phase 5 demo (a worker drives
-//! lazily-started services), 1 = the flap drill, 2 = the system boot.
+//! lazily-started services), 1 = the flap drill, 2 = the system boot,
+//! 3 = a user SESSION: the same orchestrator at another radius. The
+//! session manager hands it the user's home view, console and settings
+//! view over the boot channel; its units come from `conf/units/` in the
+//! home (the user's own) or the archive's `conf/session/` template, views
+//! it gives derive from the home, and `{ tag: console, session: true }`
+//! hands a unit one of the session's own caps.
 //!
 //! Grant layout (insert order log→chan→spawner): log in x0, the boot
 //! channel from root in x1 (device caps arrive on it), spawner at slot 2.
@@ -64,7 +70,7 @@ const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 const max_units = 32;
 const max_gives = 8;
 
-const GiveKind = enum { unit, device, shm, secret, view, netview, self_init };
+const GiveKind = enum { unit, device, shm, secret, view, netview, self_init, session_cap };
 
 const Give = struct {
     tag: shared.CapTag,
@@ -75,6 +81,9 @@ const Give = struct {
     allow: u32 = 0, // netview: a one-destination allowlist (v4), 0 = none
     port: u64 = 0,
     mkdir: bool = false, // view: create the directory first (idempotent)
+    /// Which of several: the i-th device of a kind, or the index the
+    /// receiver files the cap under (a program handed two consoles).
+    index: u64 = 0,
 };
 
 fn parseV4(s: []const u8) ?u32 {
@@ -150,8 +159,19 @@ var boot_va: u64 = 0;
 var boot_len: u64 = 0;
 var front_a: u64 = 0;
 var front_b: u64 = 0;
-var devices: [boot.max_device_kinds]u64 = @splat(0); // device caps by kind, from root
+var devices: [boot.max_device_kinds][boot.max_index]u64 = @splat(@splat(0)); // device caps by kind, from root
 var entropy_cap: u64 = 0;
+// Session mode: the home view (views derive from it), the session's own
+// caps by tag (handed on with `session: true`), and the unit files read
+// from the home (they must outlive the parser's arena).
+var session_mode = false;
+var session_home: u64 = 0;
+var session_home_buf: [*]u8 = undefined;
+var session_caps: [shared.cap_tag_count]u64 = @splat(0);
+var session_text: [32 << 10]u8 = undefined;
+var session_text_len: usize = 0;
+/// The boot profile's bit: `after` steps start only under a profile they list.
+var profile_bit: u64 = 0;
 
 // The unit parser's memory: a small arena, reset per file.
 var heap: [256 << 10]u8 = undefined;
@@ -270,7 +290,10 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 if (gr.get("port")) |pt| give.port = @intCast(int(pt) orelse 0);
             } else if (gr.get("self") != null) {
                 give.kind = .self_init;
+            } else if (gr.get("session") != null) {
+                give.kind = .session_cap;
             } else continue;
+            if (gr.get("index")) |ix| give.index = @intCast(@max(int(ix) orelse 0, 0));
             u.gives[u.ngives] = give;
             u.ngives += 1;
         };
@@ -398,7 +421,7 @@ fn giveOne(u: *Unit, g: Give) bool {
         .unit => {
             const dep = unitByName(g.name) orelse return false;
             if (!ensureUp(dep)) return false;
-            return boot.giveCap(u.chan_b, g.tag, dep.chan_b);
+            return boot.giveCapAt(u.chan_b, g.tag, g.index, dep.chan_b);
         },
         .device => {
             // `device: entropy` is the one non-PCI "device": the kernel
@@ -408,7 +431,8 @@ fn giveOne(u: *Unit, g: Give) bool {
                 return boot.giveCap(u.chan_b, g.tag, entropy_cap);
             }
             const kind = std.meta.stringToEnum(shared.DeviceKind, g.name) orelse return false;
-            const cap = devices[@intFromEnum(kind)];
+            if (g.index >= boot.max_index) return false;
+            const cap = devices[@intFromEnum(kind)][g.index];
             if (cap == 0) return false;
             return boot.giveDevice(u.chan_b, cap, @intFromEnum(kind));
         },
@@ -434,12 +458,19 @@ fn giveOne(u: *Unit, g: Give) bool {
             return boot.give(u.chan_b, .{ .secret = .{ .off = 0, .len = bytes.len } }, 0);
         },
         .view => {
-            const fs = unitByName("fs") orelse return false;
-            if (!ensureUp(fs) or fs.buf_va == 0) return false;
-            // A path of `arg` means the unit's argument text (run tools).
+            // A session's views derive from its home; the system's from
+            // the filesystem unit's root view.
+            var chan: u64 = session_home;
+            var buf: [*]u8 = session_home_buf;
+            if (!session_mode) {
+                const fs = unitByName("fs") orelse return false;
+                if (!ensureUp(fs) or fs.buf_va == 0) return false;
+                chan = fs.chan_b;
+                buf = @ptrFromInt(fs.buf_va);
+            }
             const path = g.name;
-            if (g.mkdir and !fsc.fsMkdir(fs.chan_b, @ptrFromInt(fs.buf_va), path)) return false;
-            const view = fsc.fsDerive(fs.chan_b, @ptrFromInt(fs.buf_va), path, g.ro) orelse return false;
+            if (g.mkdir and !fsc.fsMkdir(chan, buf, path)) return false;
+            const view = fsc.fsDerive(chan, buf, path, g.ro) orelse return false;
             const ok = boot.giveCap(u.chan_b, g.tag, view);
             _ = usys.capDrop(view);
             return ok;
@@ -461,7 +492,71 @@ fn giveOne(u: *Unit, g: Give) bool {
             }
         },
         .self_init => return boot.giveCap(u.chan_b, g.tag, front_b),
+        .session_cap => {
+            const cap = session_caps[@intFromEnum(g.tag)];
+            if (cap == 0) return false;
+            return boot.giveCap(u.chan_b, g.tag, cap);
+        },
     }
+}
+
+/// Session mode: the units are the user's own (`conf/units/` in the
+/// home) when there are any, else the archive's template.
+fn loadSessionUnits() void {
+    const count = fsc.fsList(session_home, session_home_buf, shared.unit_dir[0 .. shared.unit_dir.len - 1]) orelse 0;
+    var names: [1024]u8 = undefined;
+    const k = @min(count, names.len);
+    @memcpy(names[0..k], session_home_buf[0..k]);
+    var it = std.mem.splitScalar(u8, names[0..k], '\n');
+    while (it.next()) |fname| {
+        if (!std.mem.endsWith(u8, fname, shared.unit_ext) or nunits == max_units) continue;
+        var path: [96]u8 = undefined;
+        const p = joinPath(@ptrCast(&path), shared.unit_dir[0 .. shared.unit_dir.len - 1], fname);
+        const name = fname[0 .. fname.len - shared.unit_ext.len];
+        const text = readHome(p) orelse continue;
+        const kept_name = keep(name) orelse continue;
+        fba.reset();
+        const v = interp.parseData(text) catch {
+            logLine("init: unit file refused: ", name);
+            continue;
+        };
+        if (parseUnit(kept_name, v)) |u| {
+            units[nunits] = u;
+            nunits += 1;
+        } else logLine("init: unit file invalid: ", name);
+    }
+    if (nunits > 0) return;
+    var ai = shared.marcIter(archive());
+    while (ai.next()) |e| {
+        if (!std.mem.startsWith(u8, e.path, shared.session_unit_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
+        if (nunits == max_units) break;
+        const name = e.path[shared.session_unit_dir.len .. e.path.len - shared.unit_ext.len];
+        fba.reset();
+        const v = interp.parseData(e.data) catch continue;
+        if (parseUnit(name, v)) |u| {
+            units[nunits] = u;
+            nunits += 1;
+        }
+    }
+}
+
+/// Read a whole small file from the home into the persistent text area.
+fn readHome(path: []const u8) ?[]const u8 {
+    const fd = switch (fsc.fsOpen(session_home, session_home_buf, path, 0)) {
+        .fd => |fd| fd,
+        .err => return null,
+    };
+    defer fsc.fsClose(session_home, fd);
+    const n = fsc.fsRead(session_home, fd, 4096) orelse return null;
+    return keep(session_home_buf[0..n]);
+}
+
+fn keep(text: []const u8) ?[]const u8 {
+    if (session_text_len + text.len > session_text.len) return null;
+    const out = session_text[session_text_len .. session_text_len + text.len];
+    @memcpy(out, text);
+    session_text_len += text.len;
+    return out;
 }
 
 /// Before go: the identity secret — the node's seed (restored from its
@@ -613,7 +708,7 @@ fn superviseDeaths() void {
             }
             logLine("init: step done: ", u.name);
             for (units[0..nunits]) |*next| {
-                if (!next.up and next.ctl == 0 and std.mem.eql(u8, next.after, u.name)) {
+                if (!next.up and next.ctl == 0 and std.mem.eql(u8, next.after, u.name) and next.profiles & profile_bit != 0) {
                     if (!ensureUp(next)) logLine("init: step failed to start: ", next.name);
                 }
             }
@@ -649,7 +744,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     fba = std.heap.FixedBufferAllocator.init(&heap);
     interp = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
 
-    // Root hands over the devices on our boot channel.
+    // Root hands over the devices on our boot channel; a session manager
+    // hands over the session's world.
     const setup = boot.take(chan_h);
     devices = setup.devices;
     entropy_cap = setup.cap(.entropy);
@@ -662,13 +758,24 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     // arg 1: the flapping-service drill instead of the normal topology.
     if (arg == 1) flapDrill(notif.data[0]);
 
-    loadUnits();
+    if (arg & 0xff == 3) {
+        session_mode = true;
+        session_home = setup.cap(.view);
+        if (session_home == 0) usys.exit(120);
+        session_home_buf = @ptrFromInt(fsc.attachBuf(session_home).va);
+        inline for (std.enums.values(shared.CapTag)) |t| session_caps[@intFromEnum(t)] = setup.cap(t);
+        loadSessionUnits();
+        logLine("init: session for ", setup.arg());
+    } else {
+        loadUnits();
+    }
     const front = usys.chanCreate();
     if (front.err != .ok) usys.exit(112);
     front_a = front.data[0];
     front_b = front.data[1];
 
     if (arg & 0xff == 2) system(notif.data[0], arg >> 8);
+    if (arg & 0xff == 3) system(notif.data[0], @intFromEnum(shared.BootProfile.session));
     demo(notif.data[0]);
 }
 
@@ -678,6 +785,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
 fn system(notif: u64, profile: u64) noreturn {
     _ = usys.log(glog, "init: system boot; starting the profile's eager units");
     const bit = @as(u64, 1) << @intCast(profile & 63);
+    profile_bit = bit;
     for (units[0..nunits]) |*u| {
         if (u.profiles & bit != 0 and u.after.len == 0 and !ensureUp(u)) logLine("init: eager unit failed to start: ", u.name);
     }

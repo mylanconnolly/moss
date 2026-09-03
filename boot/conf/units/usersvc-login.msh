@@ -1,0 +1,20 @@
+# The multi-user boot (profile login): the session manager with a login
+# prompt on every console (x2 bit 8), and the drill's end condition
+# (bit 9: exit 0 once every console has had a session end and none is
+# open). Started after the admin step wrote the user records.
+{
+  image:     users
+  arg:       769
+  budget:    { user: 32mb }
+  grant:     [log, spawner, bootfs]
+  profiles:  [login]
+  after:     useradmin
+  essential: true
+  give: [
+    { tag: view,    fs: conf/users, ro: true,  mkdir: true }
+    { tag: home,    fs: home,       ro: false }
+    { tag: conf,    fs: conf/app,   ro: true,  mkdir: true }
+    { tag: console, unit: cons }
+    { tag: console, unit: cons1, index: 1 }
+  ]
+}

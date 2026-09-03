@@ -11,7 +11,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login };
 
 const Spec = struct {
     name: []const u8,
@@ -63,6 +63,14 @@ const specs = [_]Spec{
         .extra = "users-drill: homes isolated",
         .always_extra = "telemetry false (locked by the system layer)",
         .append = "profile=users",
+    },
+    .{
+        .name = "login",
+        .kind = .login,
+        .pass = "login-test: PASS",
+        .extra = "usersvc: every console had its session and logged out",
+        .append = "profile=login",
+        .timeout_s = 120,
     },
     .{ .name = "rng", .pass = "rng-test: PASS", .extra = "rngprobe: unseeded pool refuses getrandom" },
     .{
@@ -144,6 +152,7 @@ fn specByName(name: []const u8) ?Spec {
 fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .cluster) return runCluster(spec, bin, polls);
     if (spec.kind == .shell) return runShell(spec, bin, polls);
+    if (spec.kind == .login) return runLogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
     if (spec.kind == .blk) try makeDisk(disk);
@@ -454,6 +463,113 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
     sockSend(sock, "exit\r");
 
     const verdict = watch(log_path, spec, extra, polls);
+    if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
+    return verdict.ok;
+}
+
+/// The multi-user drill: two virtio-console devices on two TCP chardevs,
+/// two users logging in at once, each in its own session — an init
+/// instance with msh holding the user's home as its whole filesystem.
+/// Steps name their console; a step's `expect` must appear, then the
+/// prompt it names (the login prompt, or msh's).
+const LoginStep = struct { con: u8, send: []const u8, expect: []const u8, prompt: []const u8 = "msh> " };
+
+const login_prompt = "moss login: ";
+
+const login_script = [_]LoginStep{
+    // Alice, wrong passphrase first, then in.
+    .{ .con = 0, .send = "alice", .expect = "passphrase: ", .prompt = "" },
+    .{ .con = 0, .send = "wrong-pass", .expect = "login refused", .prompt = login_prompt },
+    .{ .con = 0, .send = "alice", .expect = "passphrase: ", .prompt = "" },
+    .{ .con = 0, .send = "alice-pass", .expect = "moss shell" },
+    // Bob, on the other console, while alice is in.
+    .{ .con = 1, .send = "bob", .expect = "passphrase: ", .prompt = "" },
+    .{ .con = 1, .send = "bob-pass", .expect = "moss shell" },
+    // Each works in a home that is its whole filesystem.
+    .{ .con = 0, .send = "mkdir notes; write notes/a.txt \"alice was here\"", .expect = "" },
+    .{ .con = 1, .send = "write b.txt \"bob was here\"", .expect = "" },
+    .{ .con = 0, .send = "ls | get name", .expect = "notes" },
+    .{ .con = 1, .send = "ls | get name", .expect = "b.txt" },
+    .{ .con = 0, .send = "ls | len", .expect = "1" },
+    .{ .con = 1, .send = "ls | len", .expect = "1" },
+    .{ .con = 0, .send = "cat ../b.txt", .expect = "error" },
+    .{ .con = 1, .send = "cat notes/a.txt", .expect = "error" },
+    // Both shells alive at once, seen from either.
+    .{ .con = 0, .send = "ps | where name == shell | len", .expect = "2" },
+    .{ .con = 1, .send = "nodes", .expect = "error" },
+    // Alice leaves; her session is torn down and the seat is free again.
+    .{ .con = 0, .send = "exit", .expect = "bye", .prompt = login_prompt },
+    .{ .con = 0, .send = "alice", .expect = "passphrase: ", .prompt = "" },
+    .{ .con = 0, .send = "alice-pass", .expect = "moss shell" },
+    .{ .con = 0, .send = "cat notes/a.txt", .expect = "alice was here" },
+    .{ .con = 1, .send = "ps | where name == shell | len", .expect = "2" },
+    .{ .con = 0, .send = "exit", .expect = "bye", .prompt = login_prompt },
+    // The last logout ends the drill: the manager exits, no prompt follows.
+    .{ .con = 1, .send = "exit", .expect = "bye", .prompt = "" },
+};
+
+fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
+    cwd.deleteFile(io, disk) catch {};
+    try makeDisk(disk);
+    const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}-1.log", .{ check_dir, spec.name });
+    cwd.deleteFile(io, log_path) catch {};
+
+    const ports = [2]u16{ shell_port + 1, shell_port + 2 };
+    var args: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args, log_path, bin);
+    try appendDisk(&args, disk);
+    if (spec.append) |a| try args.appendSlice(gpa, &.{ "-append", a });
+    for (ports, 0..) |port, i| {
+        try args.appendSlice(gpa, &.{
+            "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
+            "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c{d},host=127.0.0.1,port={d},server=on,wait=off", .{ i, port }),
+            "-device",  try std.fmt.allocPrint(gpa, "virtconsole,chardev=c{d}", .{i}),
+        });
+    }
+    var child = try spawnQemu(args.items);
+    defer child.kill(io);
+
+    var taps: [2]*ConsoleTap = undefined;
+    for (ports, 0..) |port, i| {
+        var fd: ?std.posix.fd_t = null;
+        for (0..50) |_| {
+            fd = tcpConnect(port) catch {
+                sleepMs(100);
+                polls.* += 1;
+                continue;
+            };
+            break;
+        }
+        const sock = fd orelse {
+            reportFailure(spec.name, "console socket never accepted", log_path);
+            return false;
+        };
+        taps[i] = try gpa.create(ConsoleTap);
+        taps[i].* = .{ .fd = sock };
+        const th = try std.Thread.spawn(.{}, ConsoleTap.readerLoop, .{taps[i]});
+        th.detach();
+    }
+    for (taps) |tap| {
+        if (!waitFor(tap, login_prompt, 600, polls)) {
+            reportFailure(spec.name, "no login prompt", log_path);
+            return false;
+        }
+    }
+    for (&login_script) |step| {
+        const tap = taps[step.con];
+        tap.clear();
+        sockSend(tap.fd, step.send);
+        sockSend(tap.fd, "\r");
+        const got = step.expect.len == 0 or waitFor(tap, step.expect, 600, polls);
+        const prompted = step.prompt.len == 0 or waitFor(tap, step.prompt, 600, polls);
+        if (!(got and prompted)) {
+            std.debug.print("[FAIL] {s}: console {d} step '{s}' missing '{s}' / '{s}'\n", .{ spec.name, step.con, step.send, step.expect, step.prompt });
+            reportFailure(spec.name, "login script step failed", log_path);
+            return false;
+        }
+    }
+    const verdict = watch(log_path, spec, spec.extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
     return verdict.ok;
 }

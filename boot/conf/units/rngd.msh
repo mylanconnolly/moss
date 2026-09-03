@@ -3,7 +3,7 @@
 {
   image:   rng
   arg:     1
-  profiles: [system, users]
+  profiles: [system, users, login]
   give: [
     { tag: device, device: rng }
     { tag: entropy, device: entropy }

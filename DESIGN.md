@@ -1273,13 +1273,53 @@ program's static KDF work area is BSS mapped at spawn, so it sizes
 every role's domain — budgets in unit files and records must include
 it.
 
-What stage 1 does not do, deliberately: interactive login from the
-console (the console driver serves one client; several consoles or
-MULTIPORT ports come next), per-user encrypted home *volumes* (stage 2:
-a mossfs volume per user keyed from the unlocked identity, served by a
-per-session fssvc, so the system volume never holds the plaintext),
-sharing by revocable delegation and fabric logins (stage 3, with the
-desired-state `apply` tool and the installer).
+**Console login (as built, 2026-09-03):** the `login` boot profile
+puts a login prompt on every console. A seat is a virtio-console
+device — two `virtio-serial-pci` devices are two seats; the boot setup
+files several devices of one kind in arrival order and a unit picks one
+with `index:` (`cons1` is the console driver on device 1), and a program
+can be handed several caps of one tag the same way (`{ tag: console,
+unit: cons1, index: 1 }`). `usersvc` runs one thread per console:
+prompt, passphrase (never echoed), then the same `authenticate` the
+protocol uses, under one lock — the KDF work area and the session table
+are shared. A session opened at a console is **an init instance** (mode
+3): the manager spawns `init` under the record's budgets with spawn
+authority and the archive, and hands it the console, the home view and
+the settings view over the boot channel. That init loads its units from
+`conf/units/` in the home — the user's own topology — or, when there
+are none, the archive's `conf/session/` template (msh on the session's
+console with the home as its whole filesystem and the session's own
+init for service control); views it gives derive from the home, and
+`{ tag: X, session: true }` hands a unit one of the session's own caps.
+Node init, session init and fabric placement are one orchestrator at
+three radii, as the orchestration decision says. The user's `exit` ends
+msh, the essential unit, so init shuts the session down; the manager
+sees the domain die, wipes the key, rebinds its console buffer and
+prompts again — the seat is free. msh's fabric is optional now (a
+session has none), and `run` needs an `img/` the home lacks (residual:
+a per-user program store). The `login` drill drives both consoles over
+TCP: a refused passphrase, alice and bob in at once, each home the
+whole filesystem (`..` is an error, the other's files unnameable), both
+shells visible from either, alice out and back in to find her file,
+then both out; the manager's drill flag ends the boot when every seat
+has had a session and none is open.
+
+Lessons paid for: `after:` steps started regardless of profile — the
+users drill's driver came up under the login profile the moment the
+admin step finished, and its exit shut the system down. A step now
+starts only under a profile it lists, which every drill unit states
+explicitly. The console device keeps DMAing into its posted receive
+buffers after its driver's domain is revoked at shutdown; the SMMU
+refuses each write (`C_BAD_STE`) and the log shows the refusals — the
+design working, not a fault to chase.
+
+What this stage does not do, deliberately: per-user encrypted home
+*volumes* (stage 2: a mossfs volume per user keyed from the unlocked
+identity, served by a per-session fssvc, so the system volume never
+holds the plaintext), sharing by revocable delegation and fabric logins
+(stage 3, with the desired-state `apply` tool and the installer), and
+MULTIPORT virtio-console (more seats on one device) — the seat model
+is the same either way.
 
 ## Security posture
 
