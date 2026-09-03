@@ -50,6 +50,7 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .notify_wait => sysNotifyWait(d, frame),
         .shm_create => sysShmCreate(d, frame),
         .shm_map => sysShmMap(d, frame),
+        .shm_unmap => sysShmUnmap(d, frame.regs[0]),
         .spawn => sysSpawn(d, frame),
         .chan_create => sysChanCreate(d, frame),
         .domain_stat => sysDomainStat(d, frame),
@@ -295,19 +296,19 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         if (flags & shared.SpawnFlags.chan_side_a != 0) {
             const obj = d.captable.?.lookup(chan_h, .channel_a) orelse return errno(.bad_handle);
             const ch: *ipc.Channel = @ptrFromInt(obj);
-            ipc.refSide(ch, .a);
+            ipc.refSide(ch, .a, 0);
             manifest.grant_channel_a = ch;
         } else {
             const obj = d.captable.?.lookup(chan_h, .channel_b) orelse return errno(.bad_handle);
             const ch: *ipc.Channel = @ptrFromInt(obj);
-            ipc.refSide(ch, .b);
+            ipc.refSide(ch, .b, 0);
             manifest.grant_channel_b = ch;
         }
     }
 
     const child = domain.spawn(null, image, manifest) catch |e| {
-        if (manifest.grant_channel_a) |ch| ipc.unrefSide(ch, .a);
-        if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b);
+        if (manifest.grant_channel_a) |ch| ipc.unrefSide(ch, .a, 0);
+        if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b, 0);
         return errno(switch (e) {
             domain.Error.QuotaExceeded => .no_space,
             domain.Error.BadImage => .bad_arg,
@@ -328,14 +329,14 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 fn sysChanCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const ch = ipc.createChannel(1, 1) catch return errno(.no_space);
     const ha = d.captable.?.insert(.channel_a, @intFromPtr(ch)) orelse {
-        ipc.unrefSide(ch, .a);
-        ipc.unrefSide(ch, .b);
+        ipc.unrefSide(ch, .a, 0);
+        ipc.unrefSide(ch, .b, 0);
         return errno(.no_space);
     };
     const hb = d.captable.?.insert(.channel_b, @intFromPtr(ch)) orelse {
         _ = d.captable.?.remove(ha);
-        ipc.unrefSide(ch, .a);
-        ipc.unrefSide(ch, .b);
+        ipc.unrefSide(ch, .a, 0);
+        ipc.unrefSide(ch, .b, 0);
         return errno(.no_space);
     };
     frame.regs[1] = @bitCast(ha);
@@ -375,6 +376,8 @@ fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const ptr = frame.regs[1];
     const len = frame.regs[2];
     if (len == 0 or len > 64 * 1024) return errno(.bad_arg);
+    domain.uaccessEnter(d);
+    defer domain.uaccessLeave(d);
     if (!userRangeWritable(d, ptr, len)) return errno(.fault);
     frame.regs[1] = uaccess.withUserBuffer(ptr, len, {}, struct {
         fn f(_: void, buf: []u8) u64 {
@@ -391,6 +394,8 @@ fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 /// same standing as the counter). Fail-closed before the first seed.
 fn sysGetrandom(d: *domain.Domain, ptr: u64, len: u64) u64 {
     if (len == 0 or len > shared.rng_max_request) return errno(.bad_arg);
+    domain.uaccessEnter(d);
+    defer domain.uaccessLeave(d);
     if (!userRangeWritable(d, ptr, len)) return errno(.fault);
     // Drawn into a kernel buffer, then copied out: the pool never writes
     // through a user pointer itself.
@@ -407,6 +412,8 @@ fn sysRngSeed(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     const h: shared.Handle = @bitCast(handle_bits);
     _ = d.captable.?.lookup(h, .entropy) orelse return errno(.bad_handle);
     if (len < shared.rng_min_seed or len > shared.rng_max_request) return errno(.bad_arg);
+    domain.uaccessEnter(d);
+    defer domain.uaccessLeave(d);
     if (!userRangeOk(d, ptr, len)) return errno(.fault);
     var tmp: [shared.rng_max_request]u8 = undefined;
     uaccess.copyFromUser(tmp[0..len], ptr);
@@ -449,9 +456,10 @@ fn sysCapDrop(d: *domain.Domain, handle_bits: u64) u64 {
     if (e.generation != h.generation or e.cap_type == .empty) return errno(.bad_handle);
     const ct = e.cap_type;
     const obj = e.object;
+    const badge = e.badge;
     _ = d.captable.?.remove(h);
     if (ct == .device) smmu.detachIfHolder(obj, @ptrCast(d), d.asid);
-    ipc.releaseCap(ct, obj);
+    ipc.releaseCap(ct, obj, badge);
     return errno(.ok);
 }
 
@@ -483,22 +491,24 @@ fn sysRecv(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     var badge: u64 = 0;
     var token: u64 = 0;
     const e = ipc.recv(ch, &msg, &badge, &token);
+    frame.regs[6] = badge; // client_dead names the dead identity here too
     if (e != .ok) return errno(e);
     deliver(d, msg, frame);
-    frame.regs[6] = badge;
     frame.regs[7] = token;
     return errno(.ok);
 }
 
 /// chan_mint(chan_a, badge) -> badged channel_b handle. Only the serving
-/// side can mint identities for its own channel.
+/// side can mint identities for its own channel; the identity is
+/// refcounted on its own so recv reports client_dead when its last cap
+/// dies (no_space when the badge table is full).
 fn sysChanMint(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const handle: shared.Handle = @bitCast(frame.regs[0]);
     const obj = d.captable.?.lookup(handle, .channel_a) orelse return errno(.bad_handle);
     const ch: *ipc.Channel = @ptrFromInt(obj);
-    ipc.refSide(ch, .b);
+    ipc.mintBadge(ch, frame.regs[1]) catch return errno(.no_space);
     const h = d.captable.?.insertBadged(.channel_b, obj, frame.regs[1]) orelse {
-        ipc.unrefSide(ch, .b);
+        ipc.unrefSide(ch, .b, frame.regs[1]);
         return errno(.no_space);
     };
     frame.regs[2] = @bitCast(h);
@@ -550,14 +560,14 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
         return null;
     }
     if (d.captable.?.lookupBadge(handle, .channel_b)) |lb| {
-        ipc.refSide(@ptrFromInt(lb.obj), .b);
+        ipc.refSide(@ptrFromInt(lb.obj), .b, lb.badge);
         msg.cap_type = @intFromEnum(cap.CapType.channel_b);
         msg.cap_obj = lb.obj;
         msg.cap_badge = lb.badge; // the badge travels with the cap
         return null;
     }
     if (d.captable.?.lookup(handle, .channel_a)) |obj| {
-        ipc.refSide(@ptrFromInt(obj), .a);
+        ipc.refSide(@ptrFromInt(obj), .a, 0);
         msg.cap_type = @intFromEnum(cap.CapType.channel_a);
         msg.cap_obj = obj;
         return null;
@@ -588,7 +598,7 @@ fn deliver(d: *domain.Domain, msg: ipc.Msg, frame: *trap.TrapFrame) void {
 
 fn dropAttachment(msg: ipc.Msg) void {
     if (msg.cap_type != 0) {
-        ipc.releaseCap(@enumFromInt(msg.cap_type), msg.cap_obj);
+        ipc.releaseCap(@enumFromInt(msg.cap_type), msg.cap_obj, msg.cap_badge);
     }
 }
 
@@ -654,10 +664,19 @@ fn sysShmMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     return errno(.ok);
 }
 
+/// shm_unmap(va): the window at va goes and its ref on the buffer with
+/// it — how a service lets go of a dead client's buffer.
+fn sysShmUnmap(d: *domain.Domain, va: u64) u64 {
+    domain.unmapShm(d, va) catch return errno(.bad_arg);
+    return errno(.ok);
+}
+
 fn sysLog(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     const handle: shared.Handle = @bitCast(handle_bits);
     _ = d.captable.?.lookup(handle, .debug_log) orelse return errno(.bad_handle);
     if (len == 0 or len > 256) return errno(.bad_arg);
+    domain.uaccessEnter(d);
+    defer domain.uaccessLeave(d);
     if (!userRangeOk(d, ptr, len)) return errno(.fault);
     if (build_options.pan_test) {
         // The drill: a range-checked, perfectly mapped user byte, touched
@@ -692,13 +711,16 @@ fn sysExit(d: *domain.Domain, code: u64) noreturn {
 }
 
 /// A user range the kernel may READ through the live TTBR0 mapping.
+/// Window ranges must lie inside one live mapping: a buffer can be
+/// unmapped, so the copy that follows runs with the window pinned
+/// (uaccessEnter before the check, uaccessLeave after the copy) and an
+/// unmap on another core waits for it.
 fn userRangeOk(d: *domain.Domain, ptr: u64, len: u64) bool {
     const end = ptr +% len;
     if (end < ptr) return false;
     const in_image = ptr >= shared.user_image_base and end <= d.image_end_va;
     const in_stack = ptr >= d.stack_base and end <= d.stack_top;
-    const in_shm = ptr >= domain.shm_window_base and end <= d.shm_map_next;
-    return in_image or in_stack or in_shm;
+    return in_image or in_stack or domain.windowRangeOk(d, ptr, len, false);
 }
 
 /// A user range the kernel may WRITE: like userRangeOk minus the
@@ -710,10 +732,7 @@ fn userRangeWritable(d: *domain.Domain, ptr: u64, len: u64) bool {
     if (end < ptr) return false;
     const in_data = ptr >= d.text_end_va and end <= d.image_end_va;
     const in_stack = ptr >= d.stack_base and end <= d.stack_top;
-    const in_shm = ptr >= domain.shm_window_base and end <= d.shm_map_next;
-    const blob_end = d.blob_va + d.blob_len;
-    const hits_blob = d.blob_len != 0 and ptr < blob_end and end > d.blob_va;
-    return in_data or in_stack or (in_shm and !hits_blob);
+    return in_data or in_stack or domain.windowRangeOk(d, ptr, len, true);
 }
 
 fn errno(e: shared.Errno) u64 {

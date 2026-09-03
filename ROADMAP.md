@@ -568,9 +568,23 @@ The pooling story stops being theory.
   system volume holds ciphertext only, and the drill scans it to prove
   so. Residuals: revocable sharing / fabric logins / the desired-state
   `apply` tool and installer (stage 3), a per-user program store (`run`
-  in a session), an enforced home capacity, and buffers a service maps
-  for a view outliving the view's dead client (the kernel shm pool is
-  64 now; reclamation needs the service to learn of the death).
+  in a session), and an enforced home capacity.
+- ✅ **Client death per badge, and unmap** (2026-09-03): a service
+  serving many badged clients on one channel now hears of each one's
+  death — a badge is refcounted on its own, and `recv` reports the
+  last cap's death as `client_dead` with the badge — and `shm_unmap`
+  lets it release the client's buffer (the domain's window is a
+  first-fit table, kernel copies pin it and their range checks consult
+  it). fssvc and netsvc free the view, its buffer and, for netsvc, its
+  sockets; the fabric frees the session slot. The fs drill runs a
+  hundred clients through one domain and holds two dozen to the grave;
+  the kernel IPC test proves the reporting, including the wake of a
+  server parked in recv. Closes the residual that had the shm pool
+  raised to 64 as a stopgap: sessions no longer drain it. Bug found on
+  the way (DESIGN "Locking"): a thread exiting on its own core while
+  its domain was destroyed from another hit an `unreachable` in thread
+  teardown; `destroy` now claims a domain atomically and teardown
+  tolerates a thread that died under it.
 - ✅ **PCI enumeration out of the kernel** (2026-09-02): the kernel
   mints window capabilities (ECAM, MMIO) from the devicetree and keeps
   the device table, ITS routing and SMMU binding; a userspace `pcisvc`

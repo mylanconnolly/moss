@@ -205,9 +205,11 @@ fn blkdrv(log_h: u64, chan_h: u64) noreturn {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
                     if (m.err == .ok) {
+                        if (shm_va != 0) _ = usys.shmUnmap(shm_va); // a restarted client's window replaces the old
                         shm_va = m.data[0];
                         shm_len = m.data[1] * 4096;
                     }
+                    _ = usys.capDrop(r.cap);
                 }
                 _ = usys.replyTyped(shared.BlkResp, chan_h, .ok, 0);
             },

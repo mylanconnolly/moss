@@ -18,6 +18,15 @@
 //!               volume kept in a file on the system volume, keyed from
 //!               the user's identity; spawned per session by the session
 //!               manager and destroyed with it (see "home volumes").
+//!   5 "churn"  — the reclamation drill: views and buffers come and go
+//!               by the hundred, then two dozen are held to the grave.
+//!   6 "churn2" — after churn's death, holds two dozen more at once:
+//!               only possible if the dead client's were reclaimed.
+//!
+//! A client is a badge. When the last cap carrying a view's badge dies
+//! (cap_drop, or the holder's teardown) the kernel reports it to the
+//! serve loop as client_dead, and the view's buffer is unmapped and its
+//! slot freed — a service keeps nothing for a client that is gone.
 //!
 //! Durability model: ops are acknowledged when applied in memory; a
 //! transaction group commits them in batches (and between ops only), and
@@ -66,6 +75,8 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64)
         2 => alice(log_h, boot.take(chan_h).cap(.view)),
         3 => bob(log_h, boot.take(chan_h).cap(.view)),
         4 => homefs(log_h, chan_h),
+        5 => churn(log_h, boot.take(chan_h).cap(.view), false),
+        6 => churn(log_h, boot.take(chan_h).cap(.view), true),
         else => usys.exit(250),
     }
 }
@@ -143,6 +154,10 @@ fn serve() noreturn {
     while (true) {
         const r = usys.recvMsg(serve_a);
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .client_dead) {
+            releaseView(r.badge);
+            continue;
+        }
         if (r.err != .ok) usys.exit(200);
         const req = shared.decodeMsg(shared.FsReq, r.data) orelse {
             _ = usys.replyTyped(shared.FsResp, serve_a, ferr(.bad_path), 0);
@@ -157,9 +172,11 @@ fn serve() noreturn {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
                     if (m.err == .ok) {
+                        if (v.buf != 0) _ = usys.shmUnmap(v.buf); // re-attached: the old one goes
                         v.buf = m.data[0];
                         v.buf_pages = m.data[1];
                     }
+                    _ = usys.capDrop(r.cap); // the mapping keeps its own ref
                 }
                 _ = usys.replyTyped(shared.FsResp, serve_a, .ok, 0);
             },
@@ -195,6 +212,17 @@ fn viewOf(badge: u64) ?*View {
     if (badge >= max_views) return null;
     if (!views[badge].used) return null;
     return &views[badge];
+}
+
+/// A client identity died — the last cap carrying this view's badge is
+/// gone, so nobody can ever call through it again: its buffer is
+/// unmapped (the last ref on a buffer the client created goes with it),
+/// its open files are forgotten, and the badge is free to mint again.
+fn releaseView(badge: u64) void {
+    if (badge == 0) return; // the root view's holders are the side itself
+    const v = viewOf(badge) orelse return;
+    if (v.buf != 0) _ = usys.shmUnmap(v.buf);
+    v.* = .{};
 }
 
 fn parseBoot(blob_va: u64, blob_len: u64) void {
@@ -1121,6 +1149,69 @@ fn doDerive(v: *View, path_off: u64, path_len: u64, want_ro: bool) void {
     }
     _ = usys.replyTyped(shared.FsResp, serve_a, .ok, minted.data[1]);
     _ = usys.capDrop(minted.data[1]); // the transferred copy carries the ref
+}
+
+/// One client's whole life: a view derived, a fresh buffer attached to
+/// it, a read through it. What it holds is what release lets go of.
+const Client = struct { view: u64, shm: u64, va: u64 };
+
+fn clientOpen(fs_chan: u64, buf: [*]u8) Client {
+    const v = fsc.fsDerive(fs_chan, buf, "data/pub", true) orelse usys.exit(180);
+    const s = usys.shmCreate(shared.fs_buf_pages);
+    if (s.err != .ok) usys.exit(181);
+    const m = usys.shmMap(s.data[0]);
+    if (m.err != .ok) usys.exit(182);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, v, .attach_buf, s.data[0])) {
+        .ok => {},
+        .err => usys.exit(183),
+    }
+    const vb: [*]u8 = @ptrFromInt(m.data[0]);
+    switch (fsc.fsOpen(v, vb, "note.txt", 0)) {
+        .fd => |fd| {
+            const n = fsc.fsRead(v, fd, 64) orelse usys.exit(184);
+            if (!eq(vb[0..n], "hello from alice")) usys.exit(185);
+            fsc.fsClose(v, fd);
+        },
+        .err => usys.exit(186),
+    }
+    return .{ .view = v, .shm = s.data[0], .va = m.data[0] };
+}
+
+/// The buffer unmapped and both caps dropped: the service hears of the
+/// view's death and lets its side go; the buffer's frames return.
+fn clientRelease(log_h: u64, c: Client) void {
+    if (usys.shmUnmap(c.va) != .ok) usys.exit(187);
+    // Gone means gone: the kernel refuses to copy through the hole
+    // (a fault, not a panic), and a second unmap names nothing.
+    const hole: [*]const u8 = @ptrFromInt(c.va);
+    if (usys.log(log_h, hole[0..8]) != .fault) usys.exit(188);
+    if (usys.shmUnmap(c.va) != .bad_arg) usys.exit(189);
+    _ = usys.capDrop(c.shm);
+    _ = usys.capDrop(c.view);
+}
+
+/// Roles 5 and 6: reclamation on client death. A hundred clients come
+/// and go through one domain — more than the kernel's shared-buffer
+/// pool (64), this domain's window table (64) or the service's view
+/// table (32) hold — so every one must be released as it dies. Then
+/// role 5 opens two dozen and exits holding them: its teardown is the
+/// release. Role 6, started after that death, opens two dozen at once,
+/// which the view table can only fit if the dead client's are gone.
+fn churn(log_h: u64, fs_chan: u64, second: bool) noreturn {
+    const b = fsc.attachBuf(fs_chan);
+    const buf: [*]u8 = @ptrFromInt(b.va);
+    const cycles = 100;
+    for (0..cycles) |_| clientRelease(log_h, clientOpen(fs_chan, buf));
+    if (!second) _ = usys.log(log_h, "churn: 100 clients came and went through one domain — every buffer unmapped, every view dropped");
+    const held = 24;
+    var kept: [held]Client = undefined;
+    for (&kept) |*k| k.* = clientOpen(fs_chan, buf);
+    if (second) {
+        _ = usys.log(log_h, "churn2: 24 views at once after the churner died holding 24 — the dead client's were reclaimed");
+    } else {
+        _ = usys.log(log_h, "churn: exiting with 24 views and buffers held — teardown is the release");
+    }
+    usys.exit(0);
 }
 
 fn alice(log_h: u64, fs_chan: u64) noreturn {

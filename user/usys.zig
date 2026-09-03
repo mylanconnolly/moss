@@ -253,8 +253,14 @@ pub fn shmCreate(pages: u64) IpcResult {
     return syscall6(.shm_create, pages, 0, 0, 0, 0, 0);
 }
 
+/// shm_map: data[0] = va, data[1] = pages.
 pub fn shmMap(handle: u64) IpcResult {
     return syscall6(.shm_map, handle, 0, 0, 0, 0, 0);
+}
+
+/// Undo an shm_map: the window at `va` is gone and its ref released.
+pub fn shmUnmap(va: u64) shared.Errno {
+    return @enumFromInt(syscall3(.shm_unmap, va, 0, 0));
 }
 
 /// domain_list: data[0] = DomainRec count written into buf.

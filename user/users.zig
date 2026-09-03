@@ -122,6 +122,7 @@ const Session = struct {
     /// holder) and the buffer we share with it.
     fs_ctl: u64 = 0,
     fs_buf_h: u64 = 0,
+    fs_buf_va: u64 = 0,
     fs_chan: u64 = 0,
     name: [max_name]u8 = @splat(0),
     name_len: usize = 0,
@@ -187,9 +188,11 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
                     if (m.err == .ok) {
+                        if (client_va != 0) _ = usys.shmUnmap(client_va);
                         client_va = m.data[0];
                         client_pages = m.data[1];
                     }
+                    _ = usys.capDrop(r.cap);
                 }
                 reply(.ok);
             },
@@ -251,20 +254,31 @@ fn sessionOf(sid: u64) ?*Session {
 fn close(s: *Session) void {
     _ = usys.domainDestroy(s.ctl);
     _ = usys.capDrop(s.ctl);
-    if (s.fs_chan != 0) {
-        // Logout is a durability barrier: what the session was told is
-        // written reaches the disk before its filesystem service goes.
-        _ = fsc.fsSync(s.fs_chan);
-        _ = usys.capDrop(s.fs_chan);
-    }
+    // Logout is a durability barrier: what the session was told is
+    // written reaches the disk before its filesystem service goes.
+    if (s.fs_chan != 0) _ = fsc.fsSync(s.fs_chan);
+    releaseHome(s);
+    @memset(std.mem.asBytes(&s.kp), 0);
+    logName("usersvc: session closed for ", s.name[0..s.name_len]);
+    s.* = .{};
+}
+
+/// The home service, our view of it and the buffer shared with it go —
+/// at logout, or when a login fails after the home was opened. The
+/// buffer is unmapped, not merely dropped: a manager that kept a
+/// mapping per login would run out of window after 64 of them.
+fn releaseHome(s: *Session) void {
+    if (s.fs_chan != 0) _ = usys.capDrop(s.fs_chan);
     if (s.fs_ctl != 0) {
         _ = usys.domainDestroy(s.fs_ctl);
         _ = usys.capDrop(s.fs_ctl);
     }
+    if (s.fs_buf_va != 0) _ = usys.shmUnmap(s.fs_buf_va);
     if (s.fs_buf_h != 0) _ = usys.capDrop(s.fs_buf_h);
-    @memset(std.mem.asBytes(&s.kp), 0);
-    logName("usersvc: session closed for ", s.name[0..s.name_len]);
-    s.* = .{};
+    s.fs_chan = 0;
+    s.fs_ctl = 0;
+    s.fs_buf_va = 0;
+    s.fs_buf_h = 0;
 }
 
 /// A client word: off | len<<32 into the attached buffer.
@@ -307,6 +321,7 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
     s.* = .{ .used = true, .kp = kp, .name_len = name.len };
     @memcpy(s.name[0..name.len], name);
     if (!spawnSession(s, budget, console)) {
+        releaseHome(s);
         @memset(std.mem.asBytes(&s.kp), 0);
         s.* = .{};
         return .{ .sess_err = .{ .code = 4 } };
@@ -408,6 +423,7 @@ fn openHome(s: *Session) ?u64 {
     const sm = usys.shmMap(sh.data[0]);
     if (sm.err != .ok) return null;
     s.fs_buf_h = sh.data[0];
+    s.fs_buf_va = sm.data[0];
     const fbuf: [*]u8 = @ptrFromInt(sm.data[0]);
     if (!stage.load(blob_va, blob_len, .fs)) return null;
     const ch = usys.chanCreate();

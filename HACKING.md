@@ -63,7 +63,10 @@ grants and views (`fs: arg` = the run argument). Services reachable by
 `connect` are units named after `shared.ServiceId`.
 
 **A service**: serve one channel; scope per-client state by **badge**
-(mint scoped caps with `chanMint`, hand them out in replies). Blocking is
+(mint scoped caps with `chanMint`, hand them out in replies, drop your
+own copy). When the last cap carrying a badge dies, `recv` returns
+`client_dead` with the badge: unmap that client's buffer (`shmUnmap`),
+free its slot, and only then may the badge be minted again. Blocking is
 polled (`would_block`) so one loop serves everyone; a bound notification
 (`notifyBind`) can interrupt your blocked `recv` — drain it with
 `notifyWait` after every `interrupted` or the latched bits will spin you.
@@ -198,9 +201,12 @@ the option to `build.zig` (the `-D` flag and the `variants`/
   `domain.spawn`: log→chan→spawner→mmio→irq→entropy→introspect; user
   programs hardcode the slots they expect (documented per program).
 - The kernel embeds exactly one blob, the boot archive; `spawn` takes an
-  shm cap holding a staged image, never an index. An shm mapping is for
-  life (it refs the object until teardown; there is no unmap), so keep
-  one buffer per purpose rather than mapping per operation.
+  shm cap holding a staged image, never an index. An shm mapping refs
+  the object until `shm_unmap` or teardown; a service maps a client's
+  buffer once per client and unmaps it when the client's badge dies
+  (`client_dead`) or a new buffer is attached — and drops the cap handle
+  once mapped, since the mapping keeps its own ref. Keep one buffer per
+  purpose rather than mapping per operation.
 - `shared/` may not import kernel or user code and may not allocate; it is
   the ABI and compiles for every target.
 - Kernel W^X, no ambient authority, no kernel channel bypasses — see the
@@ -209,12 +215,12 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 ## Known scoping notes (deliberate, tracked)
 
 - Kernel object pools are static: 64 channels, 64 notifications, 64
-  shared buffers (`kernel/ipc.zig`). A service that maps a client's
-  buffer (fssvc for every view) keeps it pinned after the client dies —
-  the kernel refs the mapping, not the client — so a burst of short
-  sessions drains the shm pool until the service itself restarts. If a
-  program exits 210 (attachBuf's shmCreate refused), look here first.
-  The fix is for the service to learn of the death and detach.
+  shared buffers, 256 client badges (`kernel/ipc.zig`); a domain's
+  window holds 64 mappings. If a program exits 210 (attachBuf's
+  shmCreate refused), some service is keeping dead clients' buffers:
+  it must handle `client_dead` (unmap, free the slot) — every server
+  that mints badges gets that recv result, and one that treats every
+  non-ok recv as fatal will exit on the first client to leave.
 - A service that needs a clock arms a timer notification (`timerArm`);
   one that waits on sockets asks netsvc to `watch` them with its
   notification; bind the notification and the recv is interrupted on

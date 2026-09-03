@@ -252,6 +252,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/ps.msh",          "conf/units/ls.msh",
         "conf/units/net-cluster.msh", "conf/units/blk-drill.msh",
         "conf/units/fs-alice.msh",    "conf/units/fs-bob.msh",
+        "conf/units/fs-churn.msh",    "conf/units/fs-churn2.msh",
         "conf/units/net-echosrv.msh", "conf/units/net-echocli.msh",
         "conf/units/net-boxed.msh",   "conf/msh/startup.msh",
         "conf/units/guest-hello.msh", "conf/units/usersvc.msh",

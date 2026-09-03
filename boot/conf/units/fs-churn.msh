@@ -1,0 +1,5 @@
+# The filesystem drill, step 3: a hundred clients come and go through
+# one domain, then two dozen are held to the grave — the service and
+# the kernel must reclaim every view and buffer as its client dies.
+{ image: fs, arg: 5, budget: { user: 4mb }, profiles: [fs], after: fs-bob, oneshot: true,
+  give: [ { tag: view, fs: "", ro: false } ] }

@@ -22,6 +22,7 @@ const smmu = @import("smmu.zig");
 const vm = @import("vm.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
+const lock = @import("lock.zig");
 
 const max_domains = 16;
 const user_stack_pages = 24; // mossfs's CoW rebuild keeps 4K frames per tree level; ReleaseSafe inlining stacks several
@@ -38,6 +39,7 @@ pub const Error = error{
     NoThreadSlots,
     CapTableFull,
     NoMapSlots,
+    BadMapping,
     CoresBusy,
 };
 
@@ -104,9 +106,16 @@ pub const Domain = struct {
     name: []const u8 = "",
     /// Backing for names taken from an image header (points into self).
     name_buf: [16]u8 = @splat(0),
-    /// Every shm this domain has mapped holds a ref until teardown, so a
-    /// dropped cap can never free frames that are still mapped here.
-    mapped_shms: [max_mapped_shms]?*ipc.Shm = @splat(null),
+    /// The window: every mapping in [shm_window_base, ...) — shm buffers
+    /// (each holding a ref on its object for as long as it is mapped, so
+    /// a dropped cap can never free frames still mapped here), the boot
+    /// archive, DMA and device frames. First-fit placement, so an
+    /// unmapped buffer's addresses are reused. The kernel's own copies
+    /// consult it (windowRangeOk) and pin it (uaccess_users) while they
+    /// run, so an unmap on another core waits for them.
+    mappings: [max_mappings]?Mapping = @splat(null),
+    windows_lock: lock.SpinLock = .{},
+    uaccess_users: std.atomic.Value(u32) = .init(0),
     kobj: kalloc.Account = .{ .limit = 0 },
     user_mem: kalloc.Account = .{ .limit = 0 },
     cpu: CpuAccount = .{},
@@ -124,7 +133,6 @@ pub const Domain = struct {
     init_arg: u64 = 0,
     blob_va: u64 = 0,
     blob_len: u64 = 0,
-    shm_map_next: u64 = shm_window_base,
     msi_doorbell_mapped: bool = false,
     supervisor: ?*ipc.Channel = null,
     threads_alive: std.atomic.Value(u32) = .init(0),
@@ -196,7 +204,17 @@ fn extraThreadEntry(arg: u64) void {
 var domains: [max_domains]Domain = @splat(.{});
 var next_domain_id: u32 = 1;
 
-pub const max_mapped_shms = 16;
+pub const max_mappings = 64;
+
+/// One mapping in the window. `shm` is set for buffers (the only kind
+/// that is ever unmapped); `writable` tells the kernel's copies whether
+/// a store there is allowed (the archive is read-only to EL1 too).
+pub const Mapping = struct {
+    va: u64,
+    npages: u64,
+    shm: ?*ipc.Shm,
+    writable: bool,
+};
 
 pub fn init() void {
     sched.user_thread_reaped = &onThreadReaped;
@@ -513,8 +531,8 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     if (manifest.grant_bootfs and system_blob_len > 0) {
         // Shared read-only frames: the archive is immutable, so every
         // holder maps the kernel's one copy (unowned: teardown leaves it).
-        const blob_base = d.shm_map_next;
         const npages = mem.alignUp(system_blob_len, mem.page_size) / mem.page_size;
+        const blob_base = reserveWindow(d, npages, null, false) catch return Error.NoMapSlots;
         for (0..npages) |i| {
             mmu.mapUserPageTagged(
                 d.ttbr0_pa,
@@ -525,7 +543,6 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
                 false,
             ) catch return Error.QuotaExceeded;
         }
-        d.shm_map_next = blob_base + npages * mem.page_size;
         d.blob_va = blob_base;
         d.blob_len = system_blob_len;
     }
@@ -585,8 +602,10 @@ fn abortSpawn(d: *Domain) void {
 /// running on other cores die at their next preemption; once drained()
 /// reports true, finishTeardown() reclaims the rest.
 pub fn destroy(d: *Domain) void {
-    if (d.state != .alive) return;
-    d.state = .dying;
+    // One claimant: a domain exiting on its own core and a parent (or
+    // holder of its ctl cap) revoking it on another may arrive together,
+    // and only one of them may walk the threads and the cap table.
+    if (@cmpxchgStrong(State, &d.state, .alive, .dying, .acq_rel, .acquire) != null) return;
     // The subtree dies with the parent: one revocation, transitively.
     for (&domains) |*c| {
         if (c.parent == d and c.state == .alive) destroy(c);
@@ -599,7 +618,7 @@ pub fn destroy(d: *Domain) void {
     for (&d.captable.?.entries) |*e| {
         if (e.cap_type != .empty) {
             if (e.cap_type == .device) smmu.detachIfHolder(e.object, @ptrCast(d), d.asid);
-            ipc.releaseCap(e.cap_type, e.object);
+            ipc.releaseCap(e.cap_type, e.object, e.badge);
             e.cap_type = .empty;
             e.generation +%= 1;
         }
@@ -607,7 +626,7 @@ pub fn destroy(d: *Domain) void {
     // A supervised domain counts as a live client of its fault channel.
     if (d.supervisor) |ch| {
         d.supervisor = null;
-        ipc.unrefSide(ch, .b);
+        ipc.unrefSide(ch, .b, 0);
     }
 }
 
@@ -646,34 +665,121 @@ fn allocSlot() ?*Domain {
 
 /// Kernel-thread entry for a domain's initial thread: drop to EL0 at the
 /// image entry, with the manifest's initial handle (or 0) in x0.
-/// Map an shm object into the calling domain's window; the mapping is
-/// tagged unowned so teardown leaves the frames to the shm object, and
-/// the domain holds a ref on the object for as long as the mapping
-/// exists (there is no unmap; teardown releases it).
-pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
-    var slot: ?*?*ipc.Shm = null;
-    for (&d.mapped_shms) |*m| {
+/// Reserve `npages` of the window: the lowest address where nothing is
+/// mapped (first fit over the table), recorded before any page is
+/// mapped so two threads mapping at once never collide.
+fn reserveWindow(d: *Domain, npages: u64, s: ?*ipc.Shm, writable: bool) !u64 {
+    const bytes = npages * mem.page_size;
+    const daif = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(daif);
+    var free: ?*?Mapping = null;
+    for (&d.mappings) |*m| {
         if (m.* == null) {
-            slot = m;
+            free = m;
             break;
         }
     }
-    const held = slot orelse return Error.NoMapSlots;
-    const base = d.shm_map_next;
+    const slot = free orelse return Error.NoMapSlots;
+    var base: u64 = shm_window_base;
+    var moved = true;
+    while (moved) {
+        moved = false;
+        for (&d.mappings) |*m| {
+            const x = m.* orelse continue;
+            const x_end = x.va + x.npages * mem.page_size;
+            if (base < x_end and base + bytes > x.va) {
+                base = x_end;
+                moved = true;
+            }
+        }
+    }
+    slot.* = .{ .va = base, .npages = npages, .shm = s, .writable = writable };
+    return base;
+}
+
+fn forgetWindow(d: *Domain, va: u64) void {
+    const daif = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(daif);
+    for (&d.mappings) |*m| {
+        if (m.*) |x| {
+            if (x.va == va) m.* = null;
+        }
+    }
+}
+
+/// Map an shm object into the calling domain's window; the mapping is
+/// tagged unowned so teardown leaves the frames to the shm object, and
+/// the domain holds a ref on the object for as long as the mapping
+/// exists (unmapShm or teardown releases it).
+pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
+    const base = try reserveWindow(d, s.npages, s, true);
     for (0..s.npages) |i| {
-        try mmu.mapUserPageTagged(
+        mmu.mapUserPageTagged(
             d.ttbr0_pa,
             base + i * mem.page_size,
             s.pages[i],
             .data,
             &d.kobj,
             false,
-        );
+        ) catch |e| {
+            mmu.unmapUserPages(d.ttbr0_pa, base, i, d.asid);
+            forgetWindow(d, base);
+            return e;
+        };
     }
-    d.shm_map_next = base + s.npages * mem.page_size;
     ipc.refShm(s);
-    held.* = s;
     return base;
+}
+
+/// Undo mapShm at `va`: the entry leaves the table first (so no new
+/// kernel copy can be aimed at it), in-flight copies are waited out,
+/// then the pages go and the mapping's ref is released — the frames can
+/// only be freed once nothing maps them, on any core or in any device.
+pub fn unmapShm(d: *Domain, va: u64) !void {
+    var found: ?Mapping = null;
+    {
+        const daif = d.windows_lock.lockIrqSave();
+        defer d.windows_lock.unlockRestore(daif);
+        for (&d.mappings) |*m| {
+            const x = m.* orelse continue;
+            if (x.va == va and x.shm != null) {
+                found = x;
+                m.* = null;
+                break;
+            }
+        }
+    }
+    const x = found orelse return Error.BadMapping;
+    while (d.uaccess_users.load(.acquire) != 0) sched.yield();
+    mmu.unmapUserPages(d.ttbr0_pa, x.va, x.npages, d.asid);
+    smmu.invalidateAsid(d.asid);
+    ipc.unrefShm(x.shm.?);
+}
+
+/// Is [ptr, ptr+len) inside one live window mapping (writable, if the
+/// caller means to store)? Call with the window pinned (uaccessEnter)
+/// or the answer may be stale by the time the copy runs.
+pub fn windowRangeOk(d: *Domain, ptr: u64, len: u64, writable: bool) bool {
+    const end = ptr +% len;
+    if (end < ptr) return false;
+    const daif = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(daif);
+    for (&d.mappings) |*m| {
+        const x = m.* orelse continue;
+        if (ptr >= x.va and end <= x.va + x.npages * mem.page_size) return !writable or x.writable;
+    }
+    return false;
+}
+
+/// Pin the window against unmap while a kernel copy runs: increment
+/// BEFORE the range check, so an unmap that removed the mapping first
+/// is seen by the check, and one that comes later waits for the copy.
+pub fn uaccessEnter(d: *Domain) void {
+    _ = d.uaccess_users.fetchAdd(1, .acq_rel);
+}
+
+pub fn uaccessLeave(d: *Domain) void {
+    _ = d.uaccess_users.fetchSub(1, .acq_rel);
 }
 
 /// Map an MMIO window (device attributes, unowned: teardown must never
@@ -696,7 +802,7 @@ pub fn ensureMsiDoorbell(d: *Domain) void {
 /// Map frames some other object owns (device windows, a VM's RAM) into
 /// the domain, unowned: teardown leaves their frames to their owner.
 pub fn mapFrames(d: *Domain, base_pa: u64, pages: u64, perms: mmu.UserPerms) !u64 {
-    const base = d.shm_map_next;
+    const base = try reserveWindow(d, pages, null, true);
     for (0..pages) |i| {
         try mmu.mapUserPageTagged(
             d.ttbr0_pa,
@@ -707,7 +813,6 @@ pub fn mapFrames(d: *Domain, base_pa: u64, pages: u64, perms: mmu.UserPerms) !u6
             false,
         );
     }
-    d.shm_map_next = base + pages * mem.page_size;
     return base;
 }
 
@@ -722,7 +827,7 @@ pub fn mapDma(d: *Domain, npages: u64) !struct { va: u64, dev: u64 } {
     errdefer d.user_mem.credit(npages * mem.page_size);
     const bytes = mem.physToPtr([*]u8, pa);
     @memset(bytes[0 .. npages * mem.page_size], 0);
-    const base = d.shm_map_next;
+    const base = try reserveWindow(d, npages, null, true);
     for (0..npages) |i| {
         try mmu.mapUserPage(
             d.ttbr0_pa,
@@ -732,7 +837,6 @@ pub fn mapDma(d: *Domain, npages: u64) !struct { va: u64, dev: u64 } {
             &d.kobj,
         );
     }
-    d.shm_map_next = base + npages * mem.page_size;
     asm volatile ("dsb ishst"); // the SMMU walks these tables too
     return .{ .va = base, .dev = if (smmu.active) base else pa };
 }
@@ -789,9 +893,9 @@ fn enterUser(entry: u64, sp: u64, args: [5]u64) noreturn {
 /// Mapping refs come off only once the address space is gone (after
 /// destroyUserSpace), so no frame is ever freed while still mapped.
 fn releaseMappedShms(d: *Domain) void {
-    for (&d.mapped_shms) |*m| {
-        if (m.*) |s| {
-            ipc.unrefShm(s);
+    for (&d.mappings) |*m| {
+        if (m.*) |x| {
+            if (x.shm) |s| ipc.unrefShm(s);
             m.* = null;
         }
     }

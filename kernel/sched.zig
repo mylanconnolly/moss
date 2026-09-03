@@ -414,7 +414,7 @@ fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
                 // A cap it sent that nobody received (parked in a caller
                 // queue, or a reply nobody will collect): its ref dies here.
                 if (t.ipc_cap_type != 0) {
-                    ipc.releaseCap(@enumFromInt(t.ipc_cap_type), t.ipc_cap_obj);
+                    ipc.releaseCap(@enumFromInt(t.ipc_cap_type), t.ipc_cap_obj, t.ipc_cap_badge);
                     t.ipc_cap_type = 0;
                     t.ipc_cap_obj = 0;
                 }
@@ -479,7 +479,16 @@ fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
                 std.atomic.spinLoopHint();
                 continue;
             },
-            .exited, .unused => unreachable,
+            // Read as running by the guard, then gone: the thread called
+            // exit() on its own core in between (its state moves under
+            // that core's run-queue lock, not this thread lock) and may
+            // already be reaped and recycled. Its core reaps and counts
+            // it; there is nothing left for us to free.
+            .exited, .unused => {
+                t.lock.unlock();
+                if (bl) |l| l.unlock();
+                return false;
+            },
         }
     }
 }

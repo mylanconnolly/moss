@@ -139,6 +139,21 @@ lock the waker holds, before the sleeper lets go of it. The "no logging
 under the big lock" rule is now "no logging under any scheduler or IPC
 lock".
 
+A fifth, bought by client-death reporting (2026-09-03): a running
+thread's state belongs to its core's run-queue lock, so `destroyOne`'s
+guard (under the thread lock) can read `running` and its switch, a few
+instructions later, find `exited` — or `unused`, the slot already
+reaped and recycled — because the thread called `exit()` on its own
+core in between. That arm was `unreachable`, and it fired once the
+session manager's logout made it likely: dropping the home service's
+last channel cap and destroying its domain in the same breath, against
+a service that was already awake collecting its dead clients and so
+reached `peer_dead` → `exit` at the same instant. Now the arm returns
+"not freed" (the exiting core reaps and counts it), and `destroy`
+claims a domain with one compare-and-swap, so a domain exiting on its
+own core and a holder revoking it on another can never both walk its
+threads and cap table.
+
 ## Domains
 
 The domain is the unit of spawn, quota, sandboxing, and teardown — the
@@ -274,9 +289,31 @@ image is usually shorter than its header's load_size — the missing tail
 is zeros, not an error. (2) A domain could drop an shm cap it still had
 mapped, and the object's last ref freed frames that stayed mapped in
 that domain: a use-after-free waiting for the first stage-and-drop
-pattern. Mappings now hold a ref on the object until teardown (after the
-address space is gone), which also means there is no unmap and no VA
-reuse — a mapping is for life, so services keep one buffer per purpose.
+pattern. Mappings hold a ref on the object for as long as they exist —
+originally until teardown, with no unmap and no VA reuse, so services
+kept one buffer per purpose. **Unmap (2026-09-03):** `shm_unmap(va)`
+undoes an `shm_map`. The domain's window is a table of mappings
+(buffers, the archive, DMA and device frames; 64 entries, first-fit
+placement so a freed range is reused and page-table pages are not
+burnt by a service that maps a buffer per client). Order matters:
+the entry leaves the table first, so no new kernel copy can be aimed
+at it; copies in flight are waited out (`uaccess_users`, pinned by
+every syscall that copies, incremented before its range check); then
+the pages are unmapped with the ASID's TLB and SMMU entries retired
+on every core; only then is the mapping's ref released, so a frame
+is never freed while anything still maps it. The range checks that
+gate kernel copies now consult the table — a hole in the window is a
+`fault`, not a kernel data abort the caller provoked. Services unmap
+a dead client's buffer (client_dead, above) and a re-attached view's
+old one, and drop the shm cap handle once mapped (the mapping keeps
+its own ref; the handle only ate a cap slot). The fs drill's `churn`
+step runs a hundred clients through one domain — more than the shm
+pool, the window table or fssvc's view table hold — unmapping and
+dropping as it goes, checks that the kernel refuses to copy through
+the hole and refuses a second unmap, then exits holding two dozen;
+`churn2` opens two dozen more at once, which the view table fits only
+because the dead client's went. With reclamation disabled the drill
+fails at the first churn step (exit 180: the view table full).
 (3) netsvc's listener kept a single pending connection; a second SYN
 before accept overwrote it, orphaning an *established* socket whose data
 the server would never read while the client saw every send succeed.
@@ -395,6 +432,30 @@ the reply came or the peer died (the syscall delivers or drops it), and
 thread teardown releases whatever is still in the mailbox. The IPC test
 runs both paths deterministically, and the leak bar names every
 still-active buffer with its creator.
+
+**Client identities (as built, 2026-09-03).** A side's refcount says
+when the *last* client is gone; a service serving many badged clients
+on one channel (fssvc's views, netsvc's views, the fabric's sessions)
+never heard of one client's death while the others lived, so whatever
+it kept for that client — above all the buffer it had mapped — stayed
+for the service's lifetime. Now a badge is an object of its own: a
+`Badge` entry (channel, badge, refs) created by `chan_mint`, ref'd by
+every cap transfer of a badged cap and released by every cap_drop,
+dropped attachment and teardown — the same paths that count the side,
+with the badge threaded through `refSide`/`unrefSide`/`releaseCap`.
+When an identity's last cap dies the entry turns dead and the channel's
+server is woken; its next `recv` returns **`Errno.client_dead` with
+the badge in x6**, before serving anyone, and every remaining death is
+reported before the side's own `peer_dead`. Badge 0 is unbadged and
+untracked. The server's contract: on client_dead, release what the
+badge named and only then mint that badge again. Lock discipline: the
+badge table's lock is a leaf (taken under a channel's lock in recv and
+channel teardown; released before the channel's lock is taken in
+unrefSide). The IPC test proves it in the kernel — a copy's death is
+not news, the last cap's wakes a parked server with the badge, a
+second client keeps the side open, and after the last client
+client_dead precedes peer_dead, badge table empty — and the fs drill's
+churn steps prove the whole path from userspace (below, Domains).
 
 ## Init and supervision
 
@@ -1311,7 +1372,9 @@ Lessons paid for: the drill first died at exit 210 — `createShm` had
 no free slot. The kernel's shared-buffer pool was 16 objects, and a
 filesystem view's buffer stays pinned by fssvc's mapping after its
 client domain dies, so two users' worth of views drained it (pool now
-64; the pinned-buffer reclamation is a recorded residual). And a
+64; since then a view's death is reported to the service — see
+"Client identities" under IPC — and it unmaps the buffer, so sessions
+may come and go without bound). And a
 program's static KDF work area is BSS mapped at spawn, so it sizes
 every role's domain — budgets in unit files and records must include
 it.

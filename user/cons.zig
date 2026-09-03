@@ -133,9 +133,11 @@ fn consdrv(log_h: u64, chan_h: u64) noreturn {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
                     if (m.err == .ok) {
+                        if (shm_va != 0) _ = usys.shmUnmap(shm_va); // a new client's buffer replaces the last one's
                         shm_va = m.data[0];
                         shm_len = m.data[1] * 4096;
                     }
+                    _ = usys.capDrop(r.cap);
                 }
                 _ = usys.replyTyped(shared.ConsResp, chan_h, .ok, 0);
             },

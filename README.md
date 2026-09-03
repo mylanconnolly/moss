@@ -82,7 +82,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | vm | The hypervisor: a userspace VMM runs a bare-metal EL1 guest in its own stage-2 world — trapped MMIO, vGIC-injected timer ticks, PSCI power-off | `zig build run -Dvm-test` |
 | guest | A moss kernel as a guest of moss: booted by the VMM from a devicetree it wrote, PL011 and GIC emulated, PSCI over HVC; runs its userspace and powers off | `zig build run -Dguest-test` |
 | vmnode | The pooling story: a moss guest with a passed-through NIC and entropy device (SMMU stage 2, LPIs injected as SPIs) joins the fabric as node 2 and takes a remote spawn | `zig build run -Dvmnode-test` |
-| fs | Namespace views (badged caps) on real storage; persistence | `zig build run-blk -Dfs-test` |
+| fs | Namespace views (badged caps) on real storage; persistence; reclamation on client death (a hundred views come and go through one domain, two dozen held to the grave, the next client fits) | `zig build run-blk -Dfs-test` |
 | users | Users as keys, sessions as domains, homes as encrypted volumes: passphrase-unlocked identities in a custodian's care, two sessions at once under their own budgets, wrong passphrase and unknown user refused, each home a volume keyed from its identity with the system volume holding only ciphertext, work persisting across logins, layered settings with a locked key | `zig build run-blk -Dusers-test` |
 | login | Console login: two users at two consoles at once, each session an init instance with msh holding the home as its whole filesystem; a refused passphrase, the other's files unnameable, out and back in, seats freed | `zig build run-login` (interactive) |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |

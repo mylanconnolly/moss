@@ -866,6 +866,10 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             continue;
         }
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .client_dead) {
+            releaseView(r.badge);
+            continue;
+        }
         if (r.err != .ok) usys.exit(179);
         netTick();
         const req = shared.decodeMsg(shared.NetReq, r.data) orelse {
@@ -880,7 +884,11 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             .attach_buf => {
                 if (r.cap != 0) {
                     const m = usys.shmMap(r.cap);
-                    if (m.err == .ok) v.buf = m.data[0];
+                    if (m.err == .ok) {
+                        if (v.buf != 0) _ = usys.shmUnmap(v.buf);
+                        v.buf = m.data[0];
+                    }
+                    _ = usys.capDrop(r.cap); // the mapping keeps its own ref
                 }
                 nreply(.ok);
             },
@@ -1022,6 +1030,17 @@ fn opPing(v: *NetView, hi: u64, lo: u64) shared.NetResp {
     const dst = addrFromWords(hi, lo);
     if (isV4Mapped(dst)) ping4(v4Of(dst)) else ping6(dst);
     return .ok;
+}
+
+/// A client identity died: its sockets close as if it had asked (a FIN
+/// where a connection stands), its buffer is unmapped, its slot freed.
+fn releaseView(badge: u64) void {
+    if (badge == 0 or badge >= max_views or !views[badge].used) return;
+    for (&socks, 0..) |*s, i| {
+        if (s.used and s.badge == badge) _ = opClose(badge, i);
+    }
+    if (views[badge].buf != 0) _ = usys.shmUnmap(views[badge].buf);
+    views[badge] = .{};
 }
 
 fn opDerive(v: *NetView, hi: u64, lo: u64, port: u64) void {

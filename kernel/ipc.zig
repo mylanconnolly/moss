@@ -64,10 +64,33 @@ pub const Channel = struct {
     pending: [max_pending]?*sched.Thread = @splat(null),
     pending_serial: [max_pending]u32 = @splat(0),
     serial: u32 = 0,
+    /// Badged identities on this side B whose last cap died and whose
+    /// death the server has not collected yet (see Badge): recv reports
+    /// them, one per call, as Errno.client_dead before serving anyone.
+    deaths_pending: u32 = 0,
     lock: lock.SpinLock = .{},
 };
 
 pub const max_pending = 8;
+
+/// A client identity: one badge on one channel's B side, refcounted
+/// apart from the side so the server learns when THAT client is gone —
+/// a side closes only when every cap naming it has died, and a service
+/// serving many badged clients on one channel would otherwise never hear
+/// of one client's death while the others live. Minted by chan_mint,
+/// copied by every cap transfer, released by cap_drop and teardown like
+/// the side ref it rides with; when the last cap carrying it dies the
+/// entry turns dead and the channel's server is woken to collect it
+/// (recv → client_dead, badge in x6). Badge 0 is "unbadged": never
+/// tracked, its holders' death is the side's.
+pub const Badge = struct {
+    ch: ?*Channel = null,
+    badge: u64 = 0,
+    refs: u32 = 0,
+    dead: bool = false,
+};
+
+const max_badges = 256;
 
 pub const Notification = struct {
     active: bool align(128) = false,
@@ -93,8 +116,11 @@ pub const Shm = struct {
 var channels: [max_channels]Channel = @splat(.{});
 var notifications: [max_notifications]Notification = @splat(.{});
 var shms: [max_shms]Shm = @splat(.{});
+var badges: [max_badges]Badge = @splat(.{});
 var objs_lock: lock.SpinLock = .{};
 var shm_lock: lock.SpinLock = .{};
+/// A leaf: taken under a channel's lock, never held while taking one.
+var badges_lock: lock.SpinLock = .{};
 var timers_lock: lock.SpinLock = .{};
 
 /// Shared-memory pages are charged here for now; per-domain accounting for
@@ -201,6 +227,19 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Er
             ch.lock.unlock();
             if (outer) |o| o.unlock();
             return .peer_dead;
+        }
+        // A client identity that died is reported before anyone is
+        // served: the server frees what it kept for that badge, and the
+        // badge may be minted again only after this.
+        if (ch.deaths_pending > 0) {
+            if (takeDeadBadge(ch)) |b| {
+                ch.deaths_pending -= 1;
+                badge_out.* = b;
+                ch.lock.unlock();
+                if (outer) |o| o.unlock();
+                return .client_dead;
+            }
+            ch.deaths_pending = 0;
         }
         var free: ?usize = null;
         for (&ch.pending, 0..) |p, i| {
@@ -343,12 +382,25 @@ fn closeSideLocked(ch: *Channel, side: Side) void {
         }
     }
     if (ch.refs_a == 0 and ch.refs_b == 0) {
+        purgeBadges(ch); // every badge ref was a side ref: all dead by now
         ch.* = .{ .lock = ch.lock }; // the lock word stays ours to release
     }
 }
 
-/// A cap to a side was duplicated (cap transfer, spawn grant).
-pub fn refSide(ch: *Channel, side: Side) void {
+/// A cap to a side was duplicated (cap transfer, spawn grant). `badge`
+/// is the cap's badge (side B; 0 = unbadged): a badged copy also refs
+/// the client identity, which chan_mint must have created.
+pub fn refSide(ch: *Channel, side: Side, badge: u64) void {
+    if (side == .b and badge != 0) {
+        const daif = badges_lock.lockIrqSave();
+        defer badges_lock.unlockRestore(daif);
+        const b = findBadge(ch, badge) orelse std.debug.panic("refSide: badge {d} was never minted", .{badge});
+        b.refs += 1;
+    }
+    refSideOnly(ch, side);
+}
+
+fn refSideOnly(ch: *Channel, side: Side) void {
     const daif = ch.lock.lockIrqSave();
     defer ch.lock.unlockRestore(daif);
     switch (side) {
@@ -357,9 +409,33 @@ pub fn refSide(ch: *Channel, side: Side) void {
     }
 }
 
-pub fn unrefSide(ch: *Channel, side: Side) void {
+/// A cap to a side died (cap_drop, teardown, a dropped attachment). A
+/// badged cap's death that is the identity's last wakes the server to
+/// collect it; a side's last ref closes the side.
+pub fn unrefSide(ch: *Channel, side: Side, badge: u64) void {
+    var died = false;
+    if (side == .b and badge != 0) {
+        const daif = badges_lock.lockIrqSave();
+        defer badges_lock.unlockRestore(daif);
+        const b = findBadge(ch, badge) orelse std.debug.panic("unrefSide: badge {d} was never minted", .{badge});
+        std.debug.assert(b.refs > 0);
+        b.refs -= 1;
+        if (b.refs == 0) {
+            b.dead = true;
+            died = true;
+        }
+    }
     const daif = ch.lock.lockIrqSave();
     defer ch.lock.unlockRestore(daif);
+    if (died) {
+        ch.deaths_pending += 1;
+        // The server, if parked in recv, loops around and finds it (its
+        // mailbox status is still ok).
+        if (ch.server_waiting) |t| {
+            ch.server_waiting = null;
+            sched.wake(t);
+        }
+    }
     const refs = switch (side) {
         .a => &ch.refs_a,
         .b => &ch.refs_b,
@@ -367,6 +443,76 @@ pub fn unrefSide(ch: *Channel, side: Side) void {
     std.debug.assert(refs.* > 0);
     refs.* -= 1;
     if (refs.* == 0) closeSideLocked(ch, side);
+}
+
+// ---------------------------------------------------------------- badges
+
+/// The serving side mints a client identity on its own channel: the
+/// identity's first ref, or one more if the same badge is minted again
+/// (both caps are the same client). Fails when the badge table is full.
+pub fn mintBadge(ch: *Channel, badge: u64) Error!void {
+    if (badge != 0) {
+        const daif = badges_lock.lockIrqSave();
+        defer badges_lock.unlockRestore(daif);
+        const b = findBadge(ch, badge) orelse allocBadge(ch, badge) orelse return Error.NoObjects;
+        b.refs += 1;
+    }
+    refSideOnly(ch, .b);
+}
+
+/// The live entry for (channel, badge); badges_lock held. A dead entry
+/// still waiting to be collected is not it: the server must not have
+/// minted the badge again before hearing of the death, and if it did,
+/// the new identity is a new entry.
+fn findBadge(ch: *Channel, badge: u64) ?*Badge {
+    for (&badges) |*b| {
+        if (b.ch == ch and b.badge == badge and !b.dead) return b;
+    }
+    return null;
+}
+
+fn allocBadge(ch: *Channel, badge: u64) ?*Badge {
+    for (&badges) |*b| {
+        if (b.ch == null) {
+            b.* = .{ .ch = ch, .badge = badge };
+            return b;
+        }
+    }
+    return null;
+}
+
+/// Collect one dead badge of this channel (channel lock held).
+fn takeDeadBadge(ch: *Channel) ?u64 {
+    badges_lock.lock();
+    defer badges_lock.unlock();
+    for (&badges) |*b| {
+        if (b.ch == ch and b.dead) {
+            const badge = b.badge;
+            b.* = .{};
+            return badge;
+        }
+    }
+    return null;
+}
+
+/// The channel is being freed: forget every identity on it.
+fn purgeBadges(ch: *Channel) void {
+    badges_lock.lock();
+    defer badges_lock.unlock();
+    for (&badges) |*b| {
+        if (b.ch == ch) b.* = .{};
+    }
+}
+
+/// Identities in the table (live or awaiting collection): the leak bar.
+pub fn badgeCount() usize {
+    const daif = badges_lock.lockIrqSave();
+    defer badges_lock.unlockRestore(daif);
+    var n: usize = 0;
+    for (&badges) |*b| {
+        if (b.ch != null) n += 1;
+    }
+    return n;
 }
 
 // ----------------------------------------------------------- notifications
@@ -599,14 +745,15 @@ pub var domain_ctl_release: ?*const fn (u64) void = null;
 pub var vm_release: ?*const fn (u64) void = null;
 
 /// Release one cap's reference to whatever kernel object it names. Called
-/// for each entry when a domain's cap table is torn down, and by explicit
-/// cap deletion (cap_drop).
-pub fn releaseCap(cap_type: cap.CapType, obj: u64) void {
+/// for each entry when a domain's cap table is torn down, by explicit
+/// cap deletion (cap_drop), and for an attachment nobody took. `badge`
+/// is the cap's (a badged channel_b cap also holds its client identity).
+pub fn releaseCap(cap_type: cap.CapType, obj: u64, badge: u64) void {
     switch (cap_type) {
         .empty, .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor, .window => {},
         .vm => if (vm_release) |f| f(obj),
-        .channel_a => unrefSide(@ptrFromInt(obj), .a),
-        .channel_b => unrefSide(@ptrFromInt(obj), .b),
+        .channel_a => unrefSide(@ptrFromInt(obj), .a, 0),
+        .channel_b => unrefSide(@ptrFromInt(obj), .b, badge),
         .notification => unrefNotification(@ptrFromInt(obj)),
         .shm => unrefShm(@ptrFromInt(obj)),
         .domain_ctl => if (domain_ctl_release) |f| f(obj),

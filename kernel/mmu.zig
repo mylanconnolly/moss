@@ -213,6 +213,40 @@ pub fn mapUserPageTagged(
     entryAt(l3, l3Index(va)).* = pa | perms.bits() | tag | valid | table_or_page;
 }
 
+/// Unmap `npages` user pages at `va` (an shm window: every entry must be
+/// present and unowned). The entries are cleared and their TLB entries
+/// retired on every core before the caller lets the frames go; the
+/// intermediate tables stay for the next mapping at the same address
+/// (teardown reclaims them).
+pub fn unmapUserPages(root_pa_user: u64, va: u64, npages: u64, asid: u16) void {
+    for (0..npages) |i| {
+        const a = va + i * mem.page_size;
+        const l2 = lookupUser(root_pa_user, l1Index(a)) orelse @panic("unmapUserPages: no L2");
+        const l3 = lookupUser(l2, l2Index(a)) orelse @panic("unmapUserPages: no L3");
+        const e = entryAt(l3, l3Index(a));
+        std.debug.assert(e.* & valid != 0 and e.* & sw_unowned != 0);
+        e.* = 0;
+    }
+    asm volatile ("dsb ishst");
+    for (0..npages) |i| {
+        const a = va + i * mem.page_size;
+        asm volatile ("tlbi vale1is, %[v]"
+            :
+            : [v] "r" ((@as(u64, asid) << 48) | ((a >> 12) & 0xfff_ffff_ffff)),
+        );
+    }
+    asm volatile (
+        \\dsb ish
+        \\isb
+    );
+}
+
+fn lookupUser(table_pa: u64, index: usize) ?u64 {
+    const entry = entryAt(table_pa, index);
+    if (entry.* & valid == 0) return null;
+    return entry.* & 0x0000_ffff_ffff_f000;
+}
+
 fn walkUser(table_pa: u64, index: usize, account: *kalloc.Account) !u64 {
     const entry = entryAt(table_pa, index);
     if (entry.* & valid != 0) {

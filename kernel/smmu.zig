@@ -285,6 +285,17 @@ pub fn detachIfHolder(idx: u64, who: *anyopaque, asid: u16) void {
     sync();
 }
 
+/// A domain's page tables changed under a live stream (an shm window
+/// unmapped): retire whatever the SMMU cached for its ASID before the
+/// frames are reused.
+pub fn invalidateAsid(asid: u16) void {
+    if (!active) return;
+    const daif = cmd_lock.lockIrqSave();
+    defer cmd_lock.unlockRestore(daif);
+    issue(.{ 0x11 | (@as(u64, asid) << 48), 0 }); // TLBI_NH_ASID
+    sync();
+}
+
 // ------------------------------------------------------------- events
 
 /// From the trap handler: true if `intid` was one of ours.

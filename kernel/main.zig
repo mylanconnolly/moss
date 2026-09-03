@@ -312,7 +312,7 @@ fn ipcTestWorker(_: u64) void {
         while (!domain.drained(crasher)) sched.sleep(1);
         domain.finishTeardown(crasher);
     }
-    ipc.unrefSide(fault_ch, .a);
+    ipc.unrefSide(fault_ch, .a, 0);
 
     // The RPC pair: calc serves side A, askr calls on side B.
     const ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
@@ -356,7 +356,7 @@ fn ipcTestWorker(_: u64) void {
         domain.destroy(parked);
         while (!domain.drained(parked)) sched.sleep(1);
         domain.finishTeardown(parked);
-        ipc.unrefSide(ch2, .a); // a grant transfers the side's ref; ours was A
+        ipc.unrefSide(ch2, .a, 0); // a grant transfers the side's ref; ours was A
         const ch3 = ipc.createChannel(1, 1) catch @panic("channel pool empty");
         const orphan = domain.spawn("orphan", .{ .blob = img(.pingpong) }, .{
             .grant_debug_log = true,
@@ -364,7 +364,7 @@ fn ipcTestWorker(_: u64) void {
             .arg = 4,
         }) catch |e| std.debug.panic("spawn orphan: {t}", .{e});
         sched.sleep(5);
-        ipc.unrefSide(ch3, .a); // the server side dies under the call
+        ipc.unrefSide(ch3, .a, 0); // the server side dies under the call
         while (!(orphan.state == .dying and domain.drained(orphan))) sched.sleep(1);
         domain.finishTeardown(orphan);
         sched.sleep(2);
@@ -373,6 +373,43 @@ fn ipcTestWorker(_: u64) void {
             std.debug.panic("ipc-test: FAIL — in-transit cap leaked: orphan exit {d}, shm {d}B", .{ orphan.exit_code, ipc.shm_account.balance() });
         }
         log.info("ipc-test: in-transit caps released — sender torn down mid-call, server death under a call", .{});
+    }
+
+    // Client identities: a badge minted on a channel is refcounted on its
+    // own, and the server hears of THAT client's death — while other
+    // clients and the side live on — as client_dead naming the badge,
+    // waking it if it is parked in recv. Every remaining death is
+    // reported before the side's own.
+    {
+        const chb = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+        ipc.mintBadge(chb, 7) catch @panic("badge pool empty");
+        ipc.refSide(chb, .b, 7); // a copy of client 7's cap
+        ipc.mintBadge(chb, 9) catch @panic("badge pool empty");
+        ipc.unrefSide(chb, .b, 7); // one copy dies: client 7 lives on
+        if (chb.deaths_pending != 0) @panic("ipc-test: a death reported while a copy of the cap lives");
+        const helper = sched.spawn("badge-recv", badgeRecvHelper, @intFromPtr(chb), .{}) catch
+            @panic("spawn badge-recv");
+        _ = helper;
+        sched.sleep(3); // the helper is parked in recv by now
+        ipc.unrefSide(chb, .b, 7); // client 7's last cap
+        sched.sleep(3);
+        if (badge_recv_err != .client_dead or badge_recv_badge != 7) {
+            std.debug.panic("ipc-test: FAIL — parked server got {t} badge {d}, expected client_dead 7", .{ badge_recv_err, badge_recv_badge });
+        }
+        if (!chb.b_open) @panic("ipc-test: side closed while client 9 lives");
+        ipc.unrefSide(chb, .b, 9); // client 9's last cap...
+        ipc.unrefSide(chb, .b, 0); // ...and our own unbadged ref: the side closes
+        var msg: ipc.Msg = .{};
+        var badge: u64 = 0;
+        var token: u64 = 0;
+        const e1 = ipc.recv(chb, &msg, &badge, &token);
+        const e2 = ipc.recv(chb, &msg, &badge, &token);
+        if (e1 != .client_dead or badge != 9 or e2 != .peer_dead) {
+            std.debug.panic("ipc-test: FAIL — after the last client: {t} (badge {d}) then {t}, expected client_dead 9 then peer_dead", .{ e1, badge, e2 });
+        }
+        ipc.unrefSide(chb, .a, 0);
+        if (ipc.badgeCount() != 0) std.debug.panic("ipc-test: FAIL — {d} badge entries left after the channel died", .{ipc.badgeCount()});
+        log.info("ipc-test: client identities — a badge's last cap reported as client_dead (a parked server woken), the side outliving it until every client is gone", .{});
     }
 
     // The scaling benchmark: call/reply pairs pinned one per core. How
@@ -622,7 +659,7 @@ fn spawnRngd(reseed_ticks: u64) *domain.Domain {
     bootGiveDevice(boot_ch, .rng);
     bootGive(boot_ch, .entropy, .entropy, 0, 0);
     bootGo(boot_ch);
-    ipc.unrefSide(boot_ch, .b);
+    ipc.unrefSide(boot_ch, .b, 0);
     var waited: u64 = 0;
     while (!rng.isSeeded()) : (waited += 1) {
         if (d.state == .dead) std.debug.panic("rngd died before seeding: exit {d}", .{d.exit_code});
@@ -649,7 +686,7 @@ fn bootGive(boot_ch: *ipc.Channel, tag: shared.CapTag, ct: cap.CapType, obj: u64
 
 /// Hand over the B side of a channel (takes a ref for the receiver).
 fn bootGiveChan(boot_ch: *ipc.Channel, tag: shared.CapTag, ch: *ipc.Channel) void {
-    ipc.refSide(ch, .b);
+    ipc.refSide(ch, .b, 0);
     bootGive(boot_ch, tag, .channel_b, @intFromPtr(ch), 0);
 }
 
@@ -787,7 +824,7 @@ fn smmuTestWorker(_: u64) void {
     }) catch |e| std.debug.panic("spawn rogue: {t}", .{e});
     bootGiveDevice(ch, .blk);
     bootGo(ch);
-    ipc.unrefSide(ch, .b);
+    ipc.unrefSide(ch, .b, 0);
     while (rogue.state != .dead) sched.sleep(1);
     sched.sleep(3);
 
@@ -975,7 +1012,7 @@ fn spawnVmm(which: u64) *domain.Domain {
         bootGiveDeviceNth(ch, .net, 1);
     }
     bootGo(ch);
-    ipc.unrefSide(ch, .b);
+    ipc.unrefSide(ch, .b, 0);
     return vmm;
 }
 
@@ -1076,7 +1113,7 @@ fn ensureDevices() void {
     bootGive(ch, .ecam, .window, 0, 0);
     bootGive(ch, .mmio, .window, 1, 0);
     bootGo(ch);
-    ipc.unrefSide(ch, .b);
+    ipc.unrefSide(ch, .b, 0);
     var waited: u64 = 0;
     while (d.state != .dead) : (waited += 1) {
         if (waited == 100) std.debug.panic("pcisvc never finished", .{});
@@ -1275,7 +1312,7 @@ fn fabricTestWorker(arg: u64) void {
             .arg = 1,
             .auto_reap = true,
         }) catch |e| std.debug.panic("spawn calc: {t}", .{e});
-        ipc.refSide(calc_ch, .b);
+        ipc.refSide(calc_ch, .b, 0);
         const xres = ipc.call(fab_ch, .{
             .data = shared.encodeMsg(shared.CalcRequest, .greet),
             .cap_type = @intFromEnum(cap.CapType.channel_b),
@@ -1290,7 +1327,7 @@ fn fabricTestWorker(arg: u64) void {
         log.info("fabric-test: capability crossed the wire and called back: 1+2=3", .{});
         domain.destroy(calc);
         while (calc.state != .dead) sched.sleep(1);
-        ipc.unrefSide(calc_ch, .b);
+        ipc.unrefSide(calc_ch, .b, 0);
     }
 
     // Stage B3: exchanges pipeline. Three callers hammer the remote
@@ -1595,11 +1632,24 @@ fn ipcBench(pairs: u32) u64 {
     var t1: u64 = 0;
     for (0..pairs) |i| t1 = @max(t1, bench_end[i].load(.acquire));
     for (0..pairs) |i| {
-        ipc.unrefSide(bench_chs[i], .a);
-        ipc.unrefSide(bench_chs[i], .b);
+        ipc.unrefSide(bench_chs[i], .a, 0);
+        ipc.unrefSide(bench_chs[i], .b, 0);
     }
     const elapsed = @max(t1 - t0, 1);
     return bench_rounds * pairs * freq / elapsed;
+}
+
+var badge_recv_err: shared.Errno = .ok;
+var badge_recv_badge: u64 = 0;
+
+/// A server parked in recv: the death of a client identity must wake it.
+fn badgeRecvHelper(arg: u64) void {
+    const ch: *ipc.Channel = @ptrFromInt(arg);
+    var msg: ipc.Msg = .{};
+    var badge: u64 = 0;
+    var token: u64 = 0;
+    badge_recv_err = ipc.recv(ch, &msg, &badge, &token);
+    badge_recv_badge = badge;
 }
 
 fn notifHelper(arg: u64) void {

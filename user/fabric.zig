@@ -421,6 +421,13 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             continue;
         }
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .client_dead) {
+            // The local holder of a remote channel is gone: its session
+            // slot is free again (the peer's export stays that node's
+            // business; nothing crosses the wire for this).
+            if (r.badge != 0 and r.badge - 1 < max_sessions) sessions[r.badge - 1] = .{};
+            continue;
+        }
         if (r.err != .ok) usys.exit(151);
         if (r.badge != 0) {
             forwardCall(r.badge, r.data, r.cap, r.token);

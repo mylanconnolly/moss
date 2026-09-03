@@ -35,7 +35,9 @@ pub const Syscall = enum(u64) {
     call = 5,
     /// recv(channel) -> msg w0..w3, cap; x6 = caller badge, x7 = reply
     /// token. A server may recv again before replying (up to 8 callers
-    /// pending) — deferred replies, each answered by its token.
+    /// pending) — deferred replies, each answered by its token. Errno
+    /// client_dead (x6 = the badge) reports a minted identity whose
+    /// last cap died: free what was kept for it.
     recv = 6,
     /// reply(channel, w0..w3, cap; x6 = token, 0 = the oldest pending)
     reply = 7,
@@ -45,7 +47,8 @@ pub const Syscall = enum(u64) {
     notify_wait = 10,
     /// shm_create(pages) -> x1 = handle
     shm_create = 11,
-    /// shm_map(handle) -> x1 = va
+    /// shm_map(handle) -> x1 = va, x2 = pages. The mapping holds a ref
+    /// on the buffer until shm_unmap or teardown.
     shm_map = 12,
     /// spawn(spawner, image_shm, arg, chan, flags, limits) -> x1 =
     /// domain_ctl handle. The image is a MOSS image staged in an shm
@@ -143,6 +146,11 @@ pub const Syscall = enum(u64) {
     /// of PSCI CPU_ON; the policy (answering the guest) is the VMM's.
     /// busy = already online, bad_arg = no such vCPU.
     vm_cpu_on = 39,
+    /// shm_unmap(va): undo an shm_map at `va` — the pages leave this
+    /// address space and the mapping's ref on the buffer is released.
+    /// bad_arg when `va` is not the base of one of this domain's shm
+    /// mappings.
+    shm_unmap = 40,
     _,
 };
 
@@ -293,6 +301,11 @@ pub const Errno = enum(u64) {
     /// A bound notification fired while this thread was blocked in recv;
     /// drain it with notify_wait, then resume receiving.
     interrupted = 10,
+    /// recv only: the last cap carrying a badge this server minted is
+    /// gone (x6 = the badge). The side is still open — other clients
+    /// live on — but this one will never call again: release its
+    /// buffer and state, then the badge may be minted afresh.
+    client_dead = 11,
     _,
 };
 

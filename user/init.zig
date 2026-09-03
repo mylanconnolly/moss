@@ -439,12 +439,19 @@ fn giveOne(u: *Unit, g: Give) bool {
         .shm => {
             const s = usys.shmCreate(g.pages);
             if (s.err != .ok) return false;
+            if (g.tag != .buf) {
+                // Nothing to stage through it: the unit's copy is the only one.
+                const gave = boot.giveCap(u.chan_b, g.tag, s.data[0]);
+                _ = usys.capDrop(s.data[0]);
+                return gave;
+            }
             const m = usys.shmMap(s.data[0]);
             if (m.err != .ok) return false;
-            if (g.tag == .buf) {
-                u.buf_h = s.data[0];
-                u.buf_va = m.data[0];
-            }
+            // A restarted unit gets a fresh buffer; the last life's goes.
+            if (u.buf_va != 0) _ = usys.shmUnmap(u.buf_va);
+            if (u.buf_h != 0) _ = usys.capDrop(u.buf_h);
+            u.buf_h = s.data[0];
+            u.buf_va = m.data[0];
             return boot.giveCap(u.chan_b, g.tag, s.data[0]);
         },
         .secret => {
