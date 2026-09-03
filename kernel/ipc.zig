@@ -429,6 +429,7 @@ pub fn unrefSide(ch: *Channel, side: Side, badge: u64) void {
     const daif = ch.lock.lockIrqSave();
     defer ch.lock.unlockRestore(daif);
     if (died) {
+        trace.record(.badge_dead, channelIndex(ch), badge);
         ch.deaths_pending += 1;
         // The server, if parked in recv, loops around and finds it (its
         // mailbox status is still ok).
@@ -755,6 +756,7 @@ pub fn createShmBy(npages: u32, creator: []const u8) ?*Shm {
             s.* = .{ .active = true, .refs = 1, .npages = npages };
             const k = @min(creator.len, 16);
             @memcpy(s.creator[0..k], creator[0..k]);
+            trace.record(.shm_create, (@intFromPtr(s) - @intFromPtr(&shms[0])) / @sizeOf(Shm), npages);
             for (0..npages) |i| {
                 const page = kalloc.allocPage(&shm_account) catch {
                     for (0..i) |j| kalloc.freePage(&shm_account, mem.physToPtr([*]u8, s.pages[j]));
@@ -773,6 +775,7 @@ pub fn refShm(s: *Shm) void {
     const daif = shm_lock.lockIrqSave();
     defer shm_lock.unlockRestore(daif);
     s.refs += 1;
+    trace.record(.shm_ref, (@intFromPtr(s) - @intFromPtr(&shms[0])) / @sizeOf(Shm), s.refs);
 }
 
 pub fn unrefShm(s: *Shm) void {
@@ -780,7 +783,9 @@ pub fn unrefShm(s: *Shm) void {
     defer shm_lock.unlockRestore(daif);
     if (s.refs == 0) std.debug.panic("unrefShm: no ref to drop ({d} pages, created by {s})", .{ s.npages, s.creator });
     s.refs -= 1;
+    trace.record(.shm_unref, (@intFromPtr(s) - @intFromPtr(&shms[0])) / @sizeOf(Shm), s.refs);
     if (s.refs == 0) {
+        trace.record(.shm_free, (@intFromPtr(s) - @intFromPtr(&shms[0])) / @sizeOf(Shm), 0);
         for (0..s.npages) |i| {
             kalloc.freePage(&shm_account, mem.physToPtr([*]u8, s.pages[i]));
         }

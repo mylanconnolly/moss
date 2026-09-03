@@ -550,6 +550,21 @@ const login_script = [_]LoginStep{
     // Both shells alive at once, seen from either.
     .{ .con = 0, .send = "ps | where name == shell | len", .expect = "2" },
     .{ .con = 1, .send = "nodes", .expect = "error" },
+    // Sharing: alice offers her notes to bob read-only; bob lists the
+    // offer, accepts it, reads through it, cannot write through it;
+    // alice withdraws it and bob's next read fails.
+    .{ .con = 0, .send = "share notes shared bob", .expect = "" },
+    .{ .con = 0, .send = "share notes shared bob", .expect = "error" },
+    .{ .con = 1, .send = "shares | get name", .expect = "shared" },
+    .{ .con = 1, .send = "cat @shared/a.txt", .expect = "error" },
+    .{ .con = 1, .send = "accept shared", .expect = "" },
+    .{ .con = 1, .send = "cat @shared/a.txt", .expect = "alice was here" },
+    .{ .con = 1, .send = "ls @shared | get name", .expect = "a.txt" },
+    .{ .con = 1, .send = "write @shared/x.txt \"no\"", .expect = "error" },
+    .{ .con = 1, .send = "shares | where accepted == true | len", .expect = "1" },
+    .{ .con = 0, .send = "unshare shared", .expect = "" },
+    .{ .con = 1, .send = "cat @shared/a.txt", .expect = "error" },
+    .{ .con = 1, .send = "shares | len", .expect = "0" },
     // Alice leaves; her session is torn down and the seat is free again.
     .{ .con = 0, .send = "exit", .expect = "bye", .prompt = login_prompt },
     .{ .con = 0, .send = "alice", .expect = "passphrase: ", .prompt = "" },

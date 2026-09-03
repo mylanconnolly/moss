@@ -101,6 +101,12 @@ const ViewKind = enum { uroot, boot, disk };
 
 const View = struct {
     used: bool = false,
+    /// Withdrawn: every call fails until the holder's last cap dies and
+    /// client_dead frees the slot (never reused before, so a stale cap
+    /// cannot alias the next view minted here).
+    revoked: bool = false,
+    /// The badge that derived this view (0: the root).
+    parent: u64 = 0,
     ro: bool = false,
     kind: ViewKind = .uroot,
     boot_prefix: [48]u8 = undefined,
@@ -184,7 +190,8 @@ fn serve() noreturn {
             .read => |io| reply(doRead(v, io.fd, io.off, io.len)),
             .write => |io| reply(doWrite(v, io.fd, io.off, io.len)),
             .list => |l| reply(doList(v, l.path_off, l.path_len)),
-            .derive => |dv| doDerive(v, dv.path_off, dv.path_len, dv.ro != 0),
+            .derive => |dv| doDerive(v, r.badge, dv.path_off, dv.path_len, dv.ro != 0),
+            .revoke => |rv| reply(doRevoke(r.badge, rv.badge)),
             .delete => |d| reply(doDelete(v, d.path_off, d.path_len)),
             .rename => |rn| reply(doRename(v, rn.from, rn.to)),
             .truncate => |t| reply(doTruncate(v, t.fd, t.len)),
@@ -210,8 +217,22 @@ fn ferr(code: shared.FsErr) shared.FsResp {
 
 fn viewOf(badge: u64) ?*View {
     if (badge >= max_views) return null;
-    if (!views[badge].used) return null;
+    if (!views[badge].used or views[badge].revoked) return null;
     return &views[badge];
+}
+
+/// Withdraw a view: the root may revoke any, a view only those it
+/// derived. Its buffer goes now; the slot waits for client_dead.
+fn doRevoke(caller: u64, badge: u64) shared.FsResp {
+    if (badge == 0 or badge >= max_views or !views[badge].used) return ferr(.bad_fd);
+    const v = &views[badge];
+    if (caller != 0 and v.parent != caller) return ferr(.denied);
+    if (v.buf != 0) _ = usys.shmUnmap(v.buf);
+    v.buf = 0;
+    v.buf_pages = 0;
+    v.revoked = true;
+    for (&v.fds) |*fd| fd.used = false;
+    return .ok;
 }
 
 /// A client identity died — the last cap carrying this view's badge is
@@ -1109,7 +1130,7 @@ fn doList(v: *View, path_off: u64, path_len: u64) shared.FsResp {
     return .{ .num = .{ .n = n } };
 }
 
-fn doDerive(v: *View, path_off: u64, path_len: u64, want_ro: bool) void {
+fn doDerive(v: *View, caller: u64, path_off: u64, path_len: u64, want_ro: bool) void {
     const fail = struct {
         fn f(code: shared.FsErr) void {
             _ = usys.replyTyped(shared.FsResp, serve_a, .{
@@ -1142,12 +1163,13 @@ fn doDerive(v: *View, path_off: u64, path_len: u64, want_ro: bool) void {
             nv.* = .{ .used = true, .kind = .disk, .obj = dk.obj, .ro = v.ro or want_ro };
         },
     }
+    nv.parent = caller;
     const minted = usys.chanMint(serve_a, slot);
     if (minted.err != .ok) {
         nv.used = false;
         return fail(.no_space);
     }
-    _ = usys.replyTyped(shared.FsResp, serve_a, .ok, minted.data[1]);
+    _ = usys.replyTyped(shared.FsResp, serve_a, .{ .view = .{ .badge = slot } }, minted.data[1]);
     _ = usys.capDrop(minted.data[1]); // the transferred copy carries the ref
 }
 

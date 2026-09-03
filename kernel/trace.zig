@@ -24,6 +24,15 @@ pub const Event = enum(u8) {
     no_watcher,
     /// A domain was spawned (a = domain id, b = 1 if it has a watcher).
     spawn,
+    /// A client identity's last cap died (a = channel index, b = badge);
+    /// the server is told at its next recv.
+    badge_dead,
+    /// Shared buffers: created (a = index, b = pages), a ref taken or
+    /// dropped (a = index, b = refs after), freed (a = index).
+    shm_create,
+    shm_ref,
+    shm_unref,
+    shm_free,
 };
 
 const Entry = struct {

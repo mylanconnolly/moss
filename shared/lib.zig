@@ -445,6 +445,21 @@ pub const SessReq = union(enum(u64)) {
     wait: struct { sid: u64 },
     /// Destroy the session now.
     logout: struct { sid: u64 },
+    // Sharing between users (from a session's own badged sess cap; the
+    // badge names the caller, never a word in the message). A share is
+    // a view the owner derived from its home, offered under a name to
+    // one user; it lives while both sessions do.
+    /// + view cap: offer it as `name` to `user`. `badge` is the view's
+    /// badge on the owner's home filesystem (derive's answer), so the
+    /// manager can revoke it through the owner's root view later.
+    share: struct { name: u64, user: u64, badge: u64 }, // name/user: off | len<<32
+    /// Withdraw an offer: the holder's calls fail from now on.
+    unshare: struct { name: u64 },
+    /// List offers made to me and by me: an mshl table literal lands in
+    /// my buffer; the reply is `data { len }`.
+    shares: void,
+    /// Take an offer made to me: the reply attaches the view cap.
+    accept: struct { name: u64 },
 };
 
 pub const SessResp = union(enum(u64)) {
@@ -454,6 +469,8 @@ pub const SessResp = union(enum(u64)) {
     /// Unknown user, wrong passphrase, or a record that will not parse:
     /// one answer, so the response never says which.
     denied: void,
+    /// A data literal of `len` bytes waits in the caller's buffer.
+    data: struct { len: u64 },
     sess_err: struct { code: u64 },
 };
 
@@ -649,9 +666,15 @@ pub const FsReq = union(enum(u64)) {
     read: struct { fd: u64, off: u64, len: u64 }, // data lands in buf[0..n]
     write: struct { fd: u64, off: u64, len: u64 }, // data taken from buf[0..n]
     list: struct { path_off: u64, path_len: u64 }, // names -> buf, '\n'-separated
-    /// Derive a narrower view (readOnlyView and friends); the reply
-    /// attaches a freshly minted badged channel cap.
+    /// Derive a narrower view (readOnlyView and friends); the reply is
+    /// `view { badge }` with a freshly minted badged channel cap attached.
     derive: struct { path_off: u64, path_len: u64, ro: u64 },
+    /// Withdraw a view: from then on every call through it fails with
+    /// bad_fd, whoever holds it. Allowed from the root view, or from the
+    /// view that derived it. The slot is reused only once the holder's
+    /// last cap dies (client_dead), so a stale cap can never alias a
+    /// later view.
+    revoke: struct { badge: u64 },
     /// Remove a file, symlink, or empty directory. Final symlinks are
     /// removed, never followed.
     delete: struct { path_off: u64, path_len: u64 },
@@ -674,6 +697,9 @@ pub const FsReq = union(enum(u64)) {
 
 pub const FsResp = union(enum(u64)) {
     ok: void,
+    /// derive's answer: the new view's badge (its name for `revoke`),
+    /// with the view cap attached.
+    view: struct { badge: u64 },
     num: struct { n: u64 },
     stat: struct { typ: u64, size: u64, mtime: u64 }, // typ: FsType
     statfs: struct { free_blocks: u64, total_blocks: u64, encrypted: u64 },

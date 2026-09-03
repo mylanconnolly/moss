@@ -1522,9 +1522,31 @@ buffers after its driver's domain is revoked at shutdown; the SMMU
 refuses each write (`C_BAD_STE`) and the log shows the refusals — the
 design working, not a fault to chase.
 
-What this does not do, deliberately: sharing by revocable delegation
-and fabric logins (stage 3, with the desired-state `apply` tool and the
-installer), any source of programs but the system store (a user's own
+**Sharing (as built, 2026-09-03):** a session derives a view of a path
+in its home — `derive` now answers with the view's badge as well as the
+cap — and offers it under a name to one user over its own badged
+channel to the manager (minted at spawn with the session's slot as the
+badge: requests name their caller by badge, and a session's badge may
+only share while the unbadged channel the drills hold may open and end
+sessions). The manager keeps the cap in an offer table until the
+target's session accepts, when the cap crosses to it and the manager
+drops its copy; msh mounts it as `@name` and routes any `@`-prefixed
+path to that view. `unshare` revokes the view at the source through
+the owner's root view (`FsReq.revoke`, allowed from the root or the
+view that derived the badge): the service marks the slot revoked, so
+every call fails whoever holds a copy, and reuses it only once
+client_dead says the last cap is gone — a stale cap can never alias
+the next view minted there. Offers live while the owner's session
+does. Lesson paid for: the manager used to hand each session a *copy*
+of its own settings-layer and store views — the same badge, hence the
+same one attached buffer on the service, so a second session's attach
+replaced the first's and a dead session's buffer lingered until the
+manager died. A view handed to a session is derived for that session.
+
+What this does not do, deliberately: standing shares that survive a
+logout (offers are per session, in memory), fabric logins (stage 3,
+with the desired-state `apply` tool and the installer), any source of
+programs but the system store (a user's own
 store is filled by `install` alone), a capacity a home volume
 actually enforces (it reports 8 MB; the file grows on demand within the
 system volume), and MULTIPORT virtio-console (more seats on one

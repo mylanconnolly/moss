@@ -54,7 +54,10 @@ symlink resolves relative to its own directory under the same rules, so
 a link cannot point out of the view either. A view can **derive** a
 narrower view — a subdirectory, or the same root read-only — and
 privilege only ever shrinks: deriving read-write from a read-only view
-yields a read-only one.
+yields a read-only one. A view can also be **revoked** by the view that
+derived it (or by the root): from then on every call through it fails,
+whoever holds a copy, and the service reuses the slot only once the
+last copy has died.
 
 The hierarchy is therefore also the default *capability topology*. Init
 hands each service the views its unit file names, and by convention a
@@ -223,8 +226,11 @@ into the user's own, after which `run NAME` finds the user's copy first.
 ## Known limits and bugs
 
 - A home volume's 8 MB capacity is reported, not enforced.
-- No sharing between users yet: revocable delegation of a view from one
-  home to another session is stage 3 of the users work (ROADMAP).
+- Sharing between users is per session and in memory: a view of one
+  home reaches another user's shell through the session manager
+  (`share`, `accept`, `@name/…`, `unshare` — see docs/users.md) and is
+  revoked at the source; nothing about an offer survives the owner's
+  logout.
 - A user's own store is filled only by `install` from the system store;
   there is no other source of programs (no download, no build).
 - Hard links are deferred until the view-exclusivity design answers how

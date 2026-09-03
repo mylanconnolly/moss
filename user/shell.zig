@@ -73,6 +73,34 @@ var run_out_va: u64 = 0;
 const Store = struct { chan: u64, buf: [*]u8, name: []const u8 };
 var own_store: ?Store = null;
 var sys_store: ?Store = null;
+/// The session manager's channel (a session's own badged copy), for
+/// sharing; absent in the system shell.
+var sess_chan: u64 = 0;
+var sess_buf: [*]u8 = undefined;
+/// Views other users shared and this shell accepted, addressed as
+/// `@name/path`. A revoked or dead share fails its calls; `accept`
+/// again replaces a dead mount of the same name.
+const max_mounts = 8;
+const Mount = struct { used: bool = false, name: [16]u8 = @splat(0), len: usize = 0, chan: u64 = 0, buf: [*]u8 = undefined };
+var mounts: [max_mounts]Mount = @splat(.{});
+
+/// Where a path lives: this shell's filesystem, or a mounted share.
+const Target = struct { chan: u64, buf: [*]u8, path: []const u8 };
+
+fn targetOf(path: []const u8) ?Target {
+    if (path.len == 0 or path[0] != '@') return .{ .chan = fs_chan, .buf = fs_buf, .path = path };
+    var end: usize = 1;
+    while (end < path.len and path[end] != '/') end += 1;
+    const name = path[1..end];
+    for (&mounts) |*m| {
+        if (m.used and is(m.name[0..m.len], name)) return .{ .chan = m.chan, .buf = m.buf, .path = if (end < path.len) path[end + 1 ..] else "" };
+    }
+    return null;
+}
+
+fn target(it: *mshl.Interp, path: []const u8) mshl.Error!Target {
+    return targetOf(path) orelse it.fail("no such share: {s} (`shares` lists offers; `accept NAME` mounts one)", .{path});
+}
 const run_out_pages: u64 = 8;
 
 // The interpreter's memory: a per-line arena (reset before every line)
@@ -129,6 +157,17 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     const store_chan = setup.cap(.store);
     if (store_chan != 0) {
         sys_store = .{ .chan = store_chan, .buf = @ptrFromInt(fsc.attachBuf(store_chan).va), .name = "the system store" };
+    }
+    sess_chan = setup.cap(.sess);
+    if (sess_chan != 0) {
+        const sh = usys.shmCreate(1);
+        const sm = if (sh.err == .ok) usys.shmMap(sh.data[0]) else sh;
+        if (sh.err != .ok or sm.err != .ok) usys.exit(150);
+        sess_buf = @ptrFromInt(sm.data[0]);
+        switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .attach_buf, sh.data[0])) {
+            .ok => {},
+            .err => usys.exit(151),
+        }
     }
 
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
@@ -238,10 +277,11 @@ fn consRead(max: u64) u64 {
 }
 
 const command_names = [_][]const u8{
-    "ls",    "tree", "cat",  "open",  "write",    "save",   "stat",
-    "mkdir", "rm",   "mv",   "ln",    "readlink", "sync",   "df",
-    "ps",    "mem",  "svc",  "start", "stop",     "nodes",  "rspawn",
-    "rand",  "run",  "help", "exit",  "clear",    "source", "install",
+    "ls",    "tree",    "cat",    "open",   "write",    "save",   "stat",
+    "mkdir", "rm",      "mv",     "ln",     "readlink", "sync",   "df",
+    "ps",    "mem",     "svc",    "start",  "stop",     "nodes",  "rspawn",
+    "rand",  "run",     "help",   "exit",   "clear",    "source", "install",
+    "share", "unshare", "shares", "accept",
 };
 
 /// Tab completion: command names in command position, paths elsewhere
@@ -261,16 +301,17 @@ fn edComplete(_: *anyopaque, word: []const u8, first: bool, out: *[lineedit.max_
     const dir = if (slash) |i| word[0..i] else "";
     const prefix = if (slash) |i| word[i + 1 ..] else word;
     const dir_prefix = if (slash) |i| word[0 .. i + 1] else "";
-    const count = fsc.fsList(fs_chan, fs_buf, dir) orelse return 0;
+    const t = targetOf(dir) orelse return 0;
+    const count = fsc.fsList(t.chan, t.buf, t.path) orelse return 0;
     var names: [4096]u8 = undefined;
     const k = @min(count, names.len);
-    @memcpy(names[0..k], fs_buf[0..k]);
+    @memcpy(names[0..k], t.buf[0..k]);
     var it = std.mem.splitScalar(u8, names[0..k], '\n');
     while (it.next()) |name| {
         if (name.len == 0 or !startsWith(name, prefix)) continue;
         var full: [256]u8 = undefined;
-        const fl = joinPath(&full, dir, name);
-        const st = fsc.fsStat(fs_chan, fs_buf, full[0..fl]);
+        const fl = joinPath(&full, t.path, name);
+        const st = fsc.fsStat(t.chan, t.buf, full[0..fl]);
         const is_dir = st != null and st.?.typ == @intFromEnum(shared.FsType.dir);
         n = addCandidate(out, lens, n, name, "", dir_prefix, is_dir);
         if (n == lineedit.max_candidates) break;
@@ -346,37 +387,45 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     if (is(name, "stat")) {
         if (args.len < 1) return it.fail("stat: path expected", .{});
         const path = try pathArg(it, args[0]);
-        const st = fsc.fsStat(fs_chan, fs_buf, path) orelse return it.fail("stat: {s}: not found", .{path});
+        const t = try target(it, path);
+        const st = fsc.fsStat(t.chan, t.buf, t.path) orelse return it.fail("stat: {s}: not found", .{path});
         return try statRecord(it, baseName(path), st);
     }
     if (is(name, "mkdir")) {
         if (args.len < 1) return it.fail("mkdir: path expected", .{});
         const path = try pathArg(it, args[0]);
-        if (!fsc.fsMkdir(fs_chan, fs_buf, path)) return it.fail("mkdir: {s}: failed", .{path});
+        const t = try target(it, path);
+        if (!fsc.fsMkdir(t.chan, t.buf, t.path)) return it.fail("mkdir: {s}: failed", .{path});
         return .nothing;
     }
     if (is(name, "rm")) {
         if (args.len < 1) return it.fail("rm: path expected", .{});
         const path = try pathArg(it, args[0]);
-        return switch (fsc.fsDelete(fs_chan, fs_buf, path)) {
+        const t = try target(it, path);
+        return switch (fsc.fsDelete(t.chan, t.buf, t.path)) {
             .ok => .nothing,
             .err => |e| it.fail("rm: {s}: {t}", .{ path, e }),
         };
     }
     if (is(name, "mv")) {
         if (args.len < 2) return it.fail("mv: from and to expected", .{});
-        if (!fsc.fsRename(fs_chan, fs_buf, try pathArg(it, args[0]), try pathArg(it, args[1]))) return it.fail("mv: failed", .{});
+        const from = try target(it, try pathArg(it, args[0]));
+        const to = try target(it, try pathArg(it, args[1]));
+        if (from.chan != to.chan) return it.fail("mv: both paths must be in the same filesystem", .{});
+        if (!fsc.fsRename(from.chan, from.buf, from.path, to.path)) return it.fail("mv: failed", .{});
         return .nothing;
     }
     if (is(name, "ln")) {
         if (args.len < 2) return it.fail("ln: path and target expected", .{});
-        if (!fsc.fsSymlink(fs_chan, fs_buf, try pathArg(it, args[0]), try pathArg(it, args[1]))) return it.fail("ln: failed", .{});
+        const t = try target(it, try pathArg(it, args[0]));
+        if (!fsc.fsSymlink(t.chan, t.buf, t.path, try pathArg(it, args[1]))) return it.fail("ln: failed", .{});
         return .nothing;
     }
     if (is(name, "readlink")) {
         if (args.len < 1) return it.fail("readlink: path expected", .{});
-        const n = fsc.fsReadlink(fs_chan, fs_buf, try pathArg(it, args[0])) orelse return it.fail("readlink: failed", .{});
-        return .{ .str = try a.dupe(u8, fs_buf[0..@min(n, 256)]) };
+        const t = try target(it, try pathArg(it, args[0]));
+        const n = fsc.fsReadlink(t.chan, t.buf, t.path) orelse return it.fail("readlink: failed", .{});
+        return .{ .str = try a.dupe(u8, t.buf[0..@min(n, 256)]) };
     }
     if (is(name, "sync")) {
         if (!fsc.fsSync(fs_chan)) return it.fail("sync: failed", .{});
@@ -429,6 +478,20 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
         if (args.len < 1) return it.fail("install: program name expected", .{});
         return try cmdInstall(it, try pathArg(it, args[0]));
     }
+    if (is(name, "share")) {
+        if (args.len < 3) return it.fail("share: PATH NAME USER [rw] expected", .{});
+        const rw = args.len > 3 and args[3] == .str and is(args[3].str, "rw");
+        return try cmdShare(it, try pathArg(it, args[0]), try pathArg(it, args[1]), try pathArg(it, args[2]), rw);
+    }
+    if (is(name, "unshare")) {
+        if (args.len < 1) return it.fail("unshare: NAME expected", .{});
+        return try cmdUnshare(it, try pathArg(it, args[0]));
+    }
+    if (is(name, "shares")) return try cmdShares(it);
+    if (is(name, "accept")) {
+        if (args.len < 1) return it.fail("accept: NAME expected", .{});
+        return try cmdAccept(it, try pathArg(it, args[0]));
+    }
     if (is(name, "source")) {
         if (args.len < 1) return it.fail("source: path expected", .{});
         const text = try readFile(it, try pathArg(it, args[0]));
@@ -445,6 +508,9 @@ const help_text =
     \\  ps | mem | svc | start N | stop N | nodes | rspawn N I | rand
     \\  run NAME [path]        a program from your store (img/) or the system's, in its own domain; its result is a value
     \\  install NAME           copy a program from the system store into your own (img/)
+    \\  share PATH NAME USER [rw]  offer a view of PATH in your home to USER as NAME
+    \\  unshare NAME | shares  withdraw an offer (holders lose it) | list offers to and by you
+    \\  accept NAME            mount an offer made to you: paths @NAME/...
     \\  source p               run a script in this session (startup: conf/msh/startup.msh)
     \\  x | to-data | save p   write a value as data; open p | from-data reads it back
     \\  def name [a b] { .. }  a function ($in is the pipeline input)
@@ -459,17 +525,19 @@ const help_text =
 
 // ------------------------------------------------------------ filesystem
 
-fn lsTable(it: *mshl.Interp, path: []const u8) mshl.Error!Value {
+fn lsTable(it: *mshl.Interp, path_arg: []const u8) mshl.Error!Value {
     const a = it.arena;
-    const count = fsc.fsList(fs_chan, fs_buf, path) orelse return it.fail("ls: {s}: cannot list", .{path});
-    const names = try a.dupe(u8, fs_buf[0..count]);
+    const t = try target(it, path_arg);
+    const path = t.path;
+    const count = fsc.fsList(t.chan, t.buf, path) orelse return it.fail("ls: {s}: cannot list", .{path_arg});
+    const names = try a.dupe(u8, t.buf[0..count]);
     var rows: std.ArrayList([]const Value) = .empty;
     var split = std.mem.splitScalar(u8, names, '\n');
     while (split.next()) |name| {
         if (name.len == 0) continue;
         var full: [256]u8 = undefined;
         const fl = joinPath(&full, path, name);
-        const st = fsc.fsStat(fs_chan, fs_buf, full[0..fl]) orelse continue;
+        const st = fsc.fsStat(t.chan, t.buf, full[0..fl]) orelse continue;
         const row = try a.alloc(Value, 4);
         row[0] = .{ .str = name };
         row[1] = .{ .str = typeName(st.typ) };
@@ -480,11 +548,13 @@ fn lsTable(it: *mshl.Interp, path: []const u8) mshl.Error!Value {
     return .{ .table = .{ .cols = &.{ "name", "type", "size", "mtime" }, .rows = rows.items } };
 }
 
-fn treeInto(it: *mshl.Interp, text: *std.ArrayList(u8), path: []const u8, indent: []const u8, depth: usize) mshl.Error!void {
+fn treeInto(it: *mshl.Interp, text: *std.ArrayList(u8), path_arg: []const u8, indent: []const u8, depth: usize) mshl.Error!void {
     const a = it.arena;
     if (depth == 0) return;
-    const count = fsc.fsList(fs_chan, fs_buf, path) orelse return;
-    const names = try a.dupe(u8, fs_buf[0..count]);
+    const t = try target(it, path_arg);
+    const path = t.path;
+    const count = fsc.fsList(t.chan, t.buf, path) orelse return;
+    const names = try a.dupe(u8, t.buf[0..count]);
     var total: usize = 0;
     var split = std.mem.splitScalar(u8, names, '\n');
     while (split.next()) |n| {
@@ -498,7 +568,7 @@ fn treeInto(it: *mshl.Interp, text: *std.ArrayList(u8), path: []const u8, indent
         const last = i == total;
         var full: [256]u8 = undefined;
         const fl = joinPath(&full, path, name);
-        const st = fsc.fsStat(fs_chan, fs_buf, full[0..fl]);
+        const st = fsc.fsStat(t.chan, t.buf, full[0..fl]);
         try text.appendSlice(a, indent);
         try text.appendSlice(a, if (last) "└── " else "├── ");
         try text.appendSlice(a, name);
@@ -516,7 +586,8 @@ fn treeInto(it: *mshl.Interp, text: *std.ArrayList(u8), path: []const u8, indent
 }
 
 fn readFile(it: *mshl.Interp, path: []const u8) mshl.Error![]const u8 {
-    return readFileVia(it, fs_chan, fs_buf, path);
+    const t = try target(it, path);
+    return readFileVia(it, t.chan, t.buf, t.path);
 }
 
 fn readFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8) mshl.Error![]const u8 {
@@ -537,7 +608,8 @@ fn readFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8) mshl.E
 }
 
 fn writeFile(it: *mshl.Interp, path: []const u8, text: []const u8) mshl.Error!void {
-    return writeFileVia(it, fs_chan, fs_buf, path, text);
+    const t = try target(it, path);
+    return writeFileVia(it, t.chan, t.buf, t.path, text);
 }
 
 fn writeFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8, text: []const u8) mshl.Error!void {
@@ -730,6 +802,102 @@ fn rspawn(it: *mshl.Interp, node: u64, image: u64) mshl.Error!Value {
 // is read through msh's view, verified against its digest, and spawned
 // from msh's stage.
 
+// ------------------------------------------------------------- sharing
+//
+// A share is a view of a path in this home, derived here (a badged cap
+// on the home filesystem, with the badge learned from the reply) and
+// handed to the session manager with a name and a user. The other
+// user's shell lists offers, accepts one — the cap comes back to it —
+// and mounts it as `@NAME`. `unshare` asks the home filesystem, through
+// the manager, to withdraw the view: the holder's calls fail from then
+// on, whatever copies of the cap exist.
+
+fn sessWord(off: usize, s: []const u8) u64 {
+    @memcpy(sess_buf[off .. off + s.len], s);
+    return @as(u64, off) | (@as(u64, s.len) << 32);
+}
+
+fn sessErr(it: *mshl.Interp, what: []const u8, resp: shared.SessResp) mshl.Error {
+    return switch (resp) {
+        .sess_err => |e| switch (e.code) {
+            2 => it.fail("{s}: no such share", .{what}),
+            5 => it.fail("{s}: not allowed from here", .{what}),
+            6 => it.fail("{s}: bad name, or no such user", .{what}),
+            7 => it.fail("{s}: you already share something by that name", .{what}),
+            8 => it.fail("{s}: already accepted", .{what}),
+            else => it.fail("{s}: refused ({d})", .{ what, e.code }),
+        },
+        .denied => it.fail("{s}: denied", .{what}),
+        else => it.fail("{s}: unexpected answer", .{what}),
+    };
+}
+
+fn cmdShare(it: *mshl.Interp, path: []const u8, name: []const u8, user: []const u8, rw: bool) mshl.Error!Value {
+    if (sess_chan == 0) return it.fail("share: no session manager here (not a user session)", .{});
+    if (path.len > 0 and path[0] == '@') return it.fail("share: only paths in your own home can be shared", .{});
+    if (name.len == 0 or name.len > 16 or user.len == 0 or user.len > 16) return it.fail("share: NAME and USER are at most 16 characters", .{});
+    const d = fsc.fsDeriveBadged(fs_chan, fs_buf, path, !rw) orelse return it.fail("share: no such path: {s}", .{path});
+    const nw = sessWord(0, name);
+    const uw = sessWord(64, user);
+    const res = usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .share = .{ .name = nw, .user = uw, .badge = d.badge } }, d.cap);
+    _ = usys.capDrop(d.cap); // the manager's copy (or nobody's) carries on
+    switch (res) {
+        .ok => |rep| if (rep != .ok) return sessErr(it, "share", rep),
+        .err => |e| return it.fail("share: {t}", .{e}),
+    }
+    return .nothing;
+}
+
+fn cmdUnshare(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
+    if (sess_chan == 0) return it.fail("unshare: no session manager here", .{});
+    if (name.len == 0 or name.len > 16) return it.fail("unshare: NAME is at most 16 characters", .{});
+    switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .unshare = .{ .name = sessWord(0, name) } }, 0)) {
+        .ok => |rep| if (rep != .ok) return sessErr(it, "unshare", rep),
+        .err => |e| return it.fail("unshare: {t}", .{e}),
+    }
+    return .nothing;
+}
+
+fn cmdShares(it: *mshl.Interp) mshl.Error!Value {
+    if (sess_chan == 0) return it.fail("shares: no session manager here", .{});
+    switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .shares, 0)) {
+        .ok => |rep| switch (rep) {
+            .data => |d| {
+                const text = try it.arena.dupe(u8, sess_buf[0..@min(d.len, 4096)]);
+                return try mshl.tableize(it.arena, try it.parseData(text));
+            },
+            else => return sessErr(it, "shares", rep),
+        },
+        .err => |e| return it.fail("shares: {t}", .{e}),
+    }
+}
+
+fn cmdAccept(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
+    if (sess_chan == 0) return it.fail("accept: no session manager here", .{});
+    if (name.len == 0 or name.len > 16) return it.fail("accept: NAME is at most 16 characters", .{});
+    // A mount by that name, dead or alive, goes first: its cap is dropped
+    // (the owner's filesystem hears of it); its buffer stays mapped.
+    var slot: ?*Mount = null;
+    for (&mounts) |*m| {
+        if (m.used and is(m.name[0..m.len], name)) {
+            _ = usys.capDrop(m.chan);
+            m.used = false;
+        }
+        if (!m.used and slot == null) slot = m;
+    }
+    const m = slot orelse return it.fail("accept: no room for another share (at most {d})", .{max_mounts});
+    switch (usys.callTypedCap(shared.SessReq, shared.SessResp, sess_chan, .{ .accept = .{ .name = sessWord(0, name) } }, 0)) {
+        .ok => |ok| {
+            if (ok.rep != .ok) return sessErr(it, "accept", ok.rep);
+            if (ok.cap == 0) return it.fail("accept: the manager sent no view", .{});
+            m.* = .{ .used = true, .len = name.len, .chan = ok.cap, .buf = @ptrFromInt(fsc.attachBuf(ok.cap).va) };
+            @memcpy(m.name[0..name.len], name);
+        },
+        .err => |e| return it.fail("accept: {t}", .{e}),
+    }
+    return .nothing;
+}
+
 /// A program found in a store: which store, its digest, its manifest.
 const Program = struct { store: Store, digest: [shared.img_digest_hex_len]u8, manifest: Value };
 
@@ -780,7 +948,8 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
                 const p = if (is(fs_path.str, "arg")) path else fs_path.str;
                 var ro = true;
                 if (item.record.get("ro")) |r| ro = r.truthy();
-                view = fsc.fsDerive(fs_chan, fs_buf, p, ro) orelse return it.fail("run: no such path: {s}", .{p});
+                const t = try target(it, p);
+                view = fsc.fsDerive(t.chan, t.buf, t.path, ro) orelse return it.fail("run: no such path: {s}", .{p});
             };
         }
     }

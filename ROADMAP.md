@@ -194,11 +194,12 @@ is a plan.
 - **The x86_64 port** — the HAL's honesty test. Audit what actually sits
   behind the HAL boundary first: the ITS, SMMU, VHE and vGIC work is
   deeply aarch64-shaped. PAN's counterpart there is SMAP.
-- **Users, stage 3:** revocable sharing (delegating a view from one
-  home to another session); fabric logins (needs notifications crossing
-  nodes and dynamic addressing, below); the desired-state `apply` tool
-  and an installer (records and the settings layer are written by an
-  admin step today).
+- **Users, stage 3, remaining:** fabric logins (needs notifications
+  crossing nodes and dynamic addressing, below); the desired-state
+  `apply` tool and an installer (records and the settings layer are
+  written by an admin step today). Sharing landed (2026-09-03) as
+  per-session, in-memory offers; standing grants that survive a logout
+  are a later step.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
@@ -730,8 +731,24 @@ is a plan.
   volume, keyed from the unlocked identity and served by a home
   filesystem service spawned per session and destroyed with it — the
   system volume holds ciphertext only, and the drill scans it to prove
-  so. Residuals: revocable sharing / fabric logins / the desired-state
-  `apply` tool and installer (stage 3) and an enforced home capacity.
+  so. Residuals: fabric logins / the desired-state `apply` tool and
+  installer (stage 3) and an enforced home capacity.
+  ✅ **Sharing between users** (2026-09-03): a session derives a view
+  of a path in its home and offers it, under a name, to one user
+  through the session manager — every session now holds its own badged
+  channel to the manager, so requests name their caller by badge and a
+  session can only share, never open or end sessions. The other user's
+  shell lists offers, accepts one (the cap comes to it) and mounts it
+  as `@name`; `unshare` revokes the view at the source (a new `revoke`
+  in the view protocol, allowed from the root or the deriving view;
+  the slot waits for the holder's last cap to die before reuse, so a
+  stale cap never aliases a later view; `derive` now answers with the
+  badge). The login drill shares alice's notes with bob read-only,
+  reads through the mount, is refused a write, and reads nothing after
+  the withdrawal. Bug found: the manager handed every session a copy of
+  its own settings and store views — one badge, one buffer on the
+  service, so two sessions trampled each other's attached buffer and a
+  dead session's lingered; each session gets views derived for it now.
 - ✅ **The gate hardened** (2026-09-03): the check runs the kernel-heavy
   drills a second time under a **ReleaseSafe kernel** (`+rs` rows), has
   a soak mode (`-Dsoak=N`) and a filter (`-Donly=a,b`). The first

@@ -139,9 +139,37 @@ var users_buf: [*]u8 = undefined;
 var home_view: u64 = 0;
 var home_buf: [*]u8 = undefined;
 var app_view: u64 = 0;
+var app_buf: [*]u8 = undefined;
 var store_view: u64 = 0;
-var client_va: u64 = 0;
-var client_pages: u64 = 0;
+var store_buf: [*]u8 = undefined;
+/// One attached buffer per caller identity: badge 0 (the drill or an
+/// admin holding the unbadged channel) and one per session (badge =
+/// its slot + 1, minted at spawn).
+const ClientBuf = struct { va: u64 = 0, pages: u64 = 0 };
+var client_bufs: [max_sessions + 1]ClientBuf = @splat(.{});
+
+// ------------------------------------------------------------- sharing
+//
+// A share is a view the owner's session derived from its home, offered
+// under a name to one user; the manager brokers it and revokes it
+// through the owner's root view. It lives while the owner's session
+// does (the home service dies with the session, and the view with it).
+const max_shares = 8;
+const Share = struct {
+    used: bool = false,
+    name: [max_name]u8 = @splat(0),
+    name_len: usize = 0,
+    from: [max_name]u8 = @splat(0),
+    from_len: usize = 0,
+    to: [max_name]u8 = @splat(0),
+    to_len: usize = 0,
+    /// The view's badge on the owner's home filesystem: revoke's name for it.
+    fs_badge: u64 = 0,
+    /// The offered cap, held here until accepted (0 afterwards).
+    cap: u64 = 0,
+    accepted: bool = false,
+};
+var shares: [max_shares]Share = @splat(.{});
 var stage: loader.Stage = undefined;
 var blob_va: u64 = 0;
 var blob_len: u64 = 0;
@@ -156,6 +184,8 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     home_view = setup.cap(.home);
     app_view = setup.cap(.conf);
     store_view = setup.cap(.store); // the system program store, for every session
+    app_buf = @ptrFromInt(fsc.attachBuf(app_view).va);
+    if (store_view != 0) store_buf = @ptrFromInt(fsc.attachBuf(store_view).va);
     if (users_view == 0 or home_view == 0 or app_view == 0) usys.exit(180);
     users_buf = @ptrFromInt(fsc.attachBuf(users_view).va);
     home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
@@ -180,23 +210,67 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .client_dead) {
+            // A session's badged channel died with it: its buffer goes.
+            if (r.badge <= max_sessions and client_bufs[r.badge].va != 0) {
+                _ = usys.shmUnmap(client_bufs[r.badge].va);
+                client_bufs[r.badge] = .{};
+            }
+            continue;
+        }
         if (r.err != .ok) usys.exit(182);
         const req = shared.decodeMsg(shared.SessReq, r.data) orelse {
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
             reply(.{ .sess_err = .{ .code = 1 } });
             continue;
         };
+        const badge = r.badge;
+        // Badge 0 (the unbadged channel: the drill, an admin) may open
+        // and end sessions; a session (its own badge) may only share.
+        const admin_only = switch (req) {
+            .login, .wait, .logout => true,
+            else => false,
+        };
+        if ((admin_only and badge != 0) or (!admin_only and req != .attach_buf and badge == 0)) {
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
+            reply(.{ .sess_err = .{ .code = 5 } });
+            continue;
+        }
         switch (req) {
             .attach_buf => {
-                if (r.cap != 0) {
+                if (r.cap != 0 and badge <= max_sessions) {
                     const m = usys.shmMap(r.cap);
                     if (m.err == .ok) {
-                        if (client_va != 0) _ = usys.shmUnmap(client_va);
-                        client_va = m.data[0];
-                        client_pages = m.data[1];
+                        if (client_bufs[badge].va != 0) _ = usys.shmUnmap(client_bufs[badge].va);
+                        client_bufs[badge] = .{ .va = m.data[0], .pages = m.data[1] };
                     }
                     _ = usys.capDrop(r.cap);
-                }
+                } else if (r.cap != 0) _ = usys.capDrop(r.cap);
                 reply(.ok);
+            },
+            .share => |sh| {
+                lock();
+                const res = doShare(badge, sh.name, sh.user, sh.badge, r.cap);
+                unlock();
+                if (res != .ok and r.cap != 0) _ = usys.capDrop(r.cap);
+                reply(res);
+            },
+            .unshare => |us| {
+                lock();
+                const res = doUnshare(badge, us.name);
+                unlock();
+                reply(res);
+            },
+            .shares => {
+                lock();
+                const res = doShares(badge);
+                unlock();
+                reply(res);
+            },
+            .accept => |ac| {
+                lock();
+                doAccept(badge, ac.name);
+                unlock();
             },
             .login => |l| {
                 lock();
@@ -260,6 +334,7 @@ fn close(s: *Session) void {
     // written reaches the disk before its filesystem service goes.
     if (s.fs_chan != 0) _ = fsc.fsSync(s.fs_chan);
     releaseHome(s);
+    forgetShares(s.name[0..s.name_len]);
     @memset(std.mem.asBytes(&s.kp), 0);
     logName("usersvc: session closed for ", s.name[0..s.name_len]);
     s.* = .{};
@@ -284,17 +359,141 @@ fn releaseHome(s: *Session) void {
 }
 
 /// A client word: off | len<<32 into the attached buffer.
-fn clientSlice(word: u64) ?[]u8 {
+fn clientSlice(badge: u64, word: u64) ?[]u8 {
+    if (badge > max_sessions) return null;
+    const cb = client_bufs[badge];
     const off = word & 0xffff_ffff;
     const len = word >> 32;
-    if (client_va == 0 or len > 256 or off + len > client_pages * 4096) return null;
-    return @as([*]u8, @ptrFromInt(client_va))[off .. off + len];
+    if (cb.va == 0 or len > 256 or off + len > cb.pages * 4096) return null;
+    return @as([*]u8, @ptrFromInt(cb.va))[off .. off + len];
+}
+
+/// The session behind a badge (1..max_sessions), if it is open.
+fn callerSession(badge: u64) ?*Session {
+    if (badge == 0 or badge > max_sessions or !sessions[badge - 1].used) return null;
+    return &sessions[badge - 1];
+}
+
+fn shareNameOk(name: []const u8) bool {
+    return nameOk(name);
+}
+
+fn userExists(name: []const u8) bool {
+    if (!nameOk(name)) return false;
+    var path: [max_name + 4]u8 = undefined;
+    @memcpy(path[0..name.len], name);
+    @memcpy(path[name.len .. name.len + 4], ".msh");
+    return fsc.fsStat(users_view, users_buf, path[0 .. name.len + 4]) != null;
+}
+
+fn findShare(from: []const u8, name: []const u8) ?*Share {
+    for (&shares) |*sh| {
+        if (sh.used and std.mem.eql(u8, sh.from[0..sh.from_len], from) and std.mem.eql(u8, sh.name[0..sh.name_len], name)) return sh;
+    }
+    return null;
+}
+
+fn findOffer(to: []const u8, name: []const u8) ?*Share {
+    for (&shares) |*sh| {
+        if (sh.used and std.mem.eql(u8, sh.to[0..sh.to_len], to) and std.mem.eql(u8, sh.name[0..sh.name_len], name)) return sh;
+    }
+    return null;
+}
+
+/// `share`: record the offer and keep the cap until someone accepts.
+fn doShare(badge: u64, name_w: u64, user_w: u64, fs_badge: u64, cap: u64) shared.SessResp {
+    const me = callerSession(badge) orelse return .{ .sess_err = .{ .code = 5 } };
+    const name = clientSlice(badge, name_w) orelse return .{ .sess_err = .{ .code = 6 } };
+    const user = clientSlice(badge, user_w) orelse return .{ .sess_err = .{ .code = 6 } };
+    if (cap == 0 or !shareNameOk(name) or !userExists(user)) return .{ .sess_err = .{ .code = 6 } };
+    const owner = me.name[0..me.name_len];
+    if (findShare(owner, name) != null) return .{ .sess_err = .{ .code = 7 } };
+    for (&shares) |*sh| {
+        if (sh.used) continue;
+        sh.* = .{ .used = true, .name_len = name.len, .from_len = owner.len, .to_len = user.len, .fs_badge = fs_badge, .cap = cap };
+        @memcpy(sh.name[0..name.len], name);
+        @memcpy(sh.from[0..owner.len], owner);
+        @memcpy(sh.to[0..user.len], user);
+        return .ok;
+    }
+    return .{ .sess_err = .{ .code = 3 } };
+}
+
+/// `unshare`: the owner's home filesystem withdraws the view (every
+/// call through it fails from now on), and the offer is forgotten.
+fn doUnshare(badge: u64, name_w: u64) shared.SessResp {
+    const me = callerSession(badge) orelse return .{ .sess_err = .{ .code = 5 } };
+    const name = clientSlice(badge, name_w) orelse return .{ .sess_err = .{ .code = 6 } };
+    const sh = findShare(me.name[0..me.name_len], name) orelse return .{ .sess_err = .{ .code = 2 } };
+    if (sh.cap != 0) _ = usys.capDrop(sh.cap);
+    _ = fsc.fsRevoke(me.fs_chan, sh.fs_badge);
+    sh.* = .{};
+    return .ok;
+}
+
+/// `shares`: what I offered and what was offered to me, as a data
+/// literal in my buffer.
+fn doShares(badge: u64) shared.SessResp {
+    const me = callerSession(badge) orelse return .{ .sess_err = .{ .code = 5 } };
+    const cb = client_bufs[badge];
+    if (cb.va == 0) return .{ .sess_err = .{ .code = 6 } };
+    const out = @as([*]u8, @ptrFromInt(cb.va))[0 .. cb.pages * 4096];
+    const mine = me.name[0..me.name_len];
+    var n: usize = 0;
+    n = putStr(out, n, "[\n");
+    for (&shares) |*sh| {
+        if (!sh.used) continue;
+        const from = sh.from[0..sh.from_len];
+        const to = sh.to[0..sh.to_len];
+        if (!std.mem.eql(u8, from, mine) and !std.mem.eql(u8, to, mine)) continue;
+        n = putStr(out, n, "  { name: \"");
+        n = putStr(out, n, sh.name[0..sh.name_len]);
+        n = putStr(out, n, "\", from: \"");
+        n = putStr(out, n, from);
+        n = putStr(out, n, "\", to: \"");
+        n = putStr(out, n, to);
+        n = putStr(out, n, if (sh.accepted) "\", accepted: true }\n" else "\", accepted: false }\n");
+    }
+    n = putStr(out, n, "]\n");
+    return .{ .data = .{ .len = n } };
+}
+
+fn putStr(out: []u8, n: usize, s: []const u8) usize {
+    if (n + s.len > out.len) return n;
+    @memcpy(out[n .. n + s.len], s);
+    return n + s.len;
+}
+
+/// `accept`: hand the offered cap to the caller; ours goes with it.
+fn doAccept(badge: u64, name_w: u64) void {
+    const me = callerSession(badge) orelse return reply(.{ .sess_err = .{ .code = 5 } });
+    const name = clientSlice(badge, name_w) orelse return reply(.{ .sess_err = .{ .code = 6 } });
+    const sh = findOffer(me.name[0..me.name_len], name) orelse return reply(.{ .sess_err = .{ .code = 2 } });
+    if (sh.accepted or sh.cap == 0) return reply(.{ .sess_err = .{ .code = 8 } });
+    _ = usys.replyTyped(shared.SessResp, svc_chan, .ok, sh.cap);
+    _ = usys.capDrop(sh.cap); // the transferred copy carries the ref
+    sh.cap = 0;
+    sh.accepted = true;
+}
+
+/// A session ended: its offers die with its home service, and what it
+/// accepted died with its domain.
+fn forgetShares(user: []const u8) void {
+    for (&shares) |*sh| {
+        if (!sh.used) continue;
+        const owned = std.mem.eql(u8, sh.from[0..sh.from_len], user);
+        const taken = sh.accepted and std.mem.eql(u8, sh.to[0..sh.to_len], user);
+        if (owned or taken) {
+            if (sh.cap != 0) _ = usys.capDrop(sh.cap);
+            sh.* = .{};
+        }
+    }
 }
 
 /// The protocol's login: name and passphrase from the client's buffer.
 fn login(name_w: u64, pass_w: u64) shared.SessResp {
-    const name_src = clientSlice(name_w) orelse return .denied;
-    const pass_src = clientSlice(pass_w) orelse return .denied;
+    const name_src = clientSlice(0, name_w) orelse return .denied;
+    const pass_src = clientSlice(0, pass_w) orelse return .denied;
     var pass: [256]u8 = undefined;
     defer @memset(&pass, 0);
     @memcpy(pass[0..pass_src.len], pass_src);
@@ -398,8 +597,27 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     const b = ch.data[1];
     defer _ = usys.capDrop(b);
     const w = shared.strToWords(name);
-    var ok = boot.giveCap(b, .view, view) and boot.giveCap(b, .conf, app_view);
-    if (ok and store_view != 0) ok = boot.giveCap(b, .store, store_view);
+    // The settings layer and the system store are views of the session's
+    // own — derived per session, never copies of ours: a view's badge
+    // carries one attached buffer on the service, so two sessions on
+    // one badge would trample each other's, and a dead session's would
+    // linger until the badge died with us.
+    const conf_view = fsc.fsDerive(app_view, app_buf, "", true) orelse return false;
+    defer _ = usys.capDrop(conf_view);
+    const sess_store: u64 = if (store_view != 0) (fsc.fsDerive(store_view, store_buf, "", true) orelse return false) else 0;
+    defer if (sess_store != 0) {
+        _ = usys.capDrop(sess_store);
+    };
+    var ok = boot.giveCap(b, .view, view) and boot.giveCap(b, .conf, conf_view);
+    if (ok and sess_store != 0) ok = boot.giveCap(b, .store, sess_store);
+    // The session's own channel to us, badged with its slot: sharing
+    // requests name their caller by badge, never by a word they send.
+    if (ok) {
+        const sid = (@intFromPtr(s) - @intFromPtr(&sessions[0])) / @sizeOf(Session);
+        const minted = usys.chanMint(svc_chan, sid + 1);
+        ok = minted.err == .ok and boot.giveCap(b, .sess, minted.data[1]);
+        if (minted.err == .ok) _ = usys.capDrop(minted.data[1]);
+    }
     if (ok and console != 0) ok = boot.giveCap(b, .console, console);
     if (ok) ok = boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
     if (!ok) {
@@ -624,19 +842,19 @@ fn randomOrDie(out: []u8) void {
 fn renderRecord(out: *[1024]u8, rec: usercred.Record) []const u8 {
     var n: usize = 0;
     var hex: [2 * usercred.sealed_len]u8 = undefined;
-    n = put(out, n, "{ key: \"");
-    n = put(out, n, usercred.hexEncode(&hex, &rec.pk));
-    n = put(out, n, "\", salt: \"");
-    n = put(out, n, usercred.hexEncode(&hex, &rec.salt));
-    n = put(out, n, "\", sealed: \"");
-    n = put(out, n, usercred.hexEncode(&hex, &rec.sealed));
-    n = put(out, n, "\",\n  kdf: { ln: ");
+    n = putStr(out, n, "{ key: \"");
+    n = putStr(out, n, usercred.hexEncode(&hex, &rec.pk));
+    n = putStr(out, n, "\", salt: \"");
+    n = putStr(out, n, usercred.hexEncode(&hex, &rec.salt));
+    n = putStr(out, n, "\", sealed: \"");
+    n = putStr(out, n, usercred.hexEncode(&hex, &rec.sealed));
+    n = putStr(out, n, "\",\n  kdf: { ln: ");
     n = putNum(out, n, rec.kdf.ln);
-    n = put(out, n, ", r: ");
+    n = putStr(out, n, ", r: ");
     n = putNum(out, n, rec.kdf.r);
-    n = put(out, n, ", p: ");
+    n = putStr(out, n, ", p: ");
     n = putNum(out, n, rec.kdf.p);
-    n = put(out, n, " },\n  budget: { kobj: 2mb, user: 12mb, cpu: 500 } }\n");
+    n = putStr(out, n, " },\n  budget: { kobj: 2mb, user: 12mb, cpu: 500 } }\n");
     return out[0..n];
 }
 
@@ -884,7 +1102,7 @@ fn putNum(out: []u8, n: usize, v: u64) usize {
 
 fn cat3(out: []u8, a: []const u8, b: []const u8, c: []const u8, d: []const u8, e: []const u8) []const u8 {
     var n: usize = 0;
-    for ([_][]const u8{ a, b, c, d, e }) |s| n = put(out, n, s);
+    for ([_][]const u8{ a, b, c, d, e }) |s| n = putStr(out, n, s);
     return out[0..n];
 }
 

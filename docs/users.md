@@ -161,6 +161,50 @@ the volume key in plaintext); and zero the unlocked key pair in the
 manager. Nothing of the session survives but the ciphertext of its
 volume.
 
+### Sharing between users
+
+A user shares a part of their home by handing out a view of it — a
+capability, not a permission bit — and takes it back by revoking that
+view at the source. The session manager brokers the exchange; it never
+sees the files.
+
+```mermaid
+sequenceDiagram
+  participant A as alice's msh
+  participant HA as alice's home service
+  participant M as usersvc
+  participant B as bob's msh
+  A->>HA: derive a view of notes (read-only)
+  HA-->>A: the view cap, and its badge
+  A->>M: share "shared" for bob (the view cap attached, the badge named)
+  M->>M: keep the cap under {from alice, to bob, name, badge}
+  B->>M: shares
+  M-->>B: [ { name: shared, from: alice, to: bob, accepted: false } ]
+  B->>M: accept shared
+  M-->>B: the view cap (the manager drops its copy)
+  B->>HA: cat @shared/a.txt  (calls through the view)
+  A->>M: unshare shared
+  M->>HA: revoke that badge (through alice's root view)
+  B->>HA: cat @shared/a.txt
+  HA-->>B: bad_fd — the view is withdrawn, whoever holds it
+```
+
+Every session holds its own **badged** channel to the manager (minted
+at spawn with the session's slot as the badge), so a sharing request
+names its caller by badge and never by a word in the message; the
+unbadged channel the drills hold can open and end sessions, a session's
+badge can only share. Offers live in the manager's table (8 at a time)
+while the owner's session does: at logout the home service dies and
+every view of it with it, and the manager forgets the owner's offers
+and whatever that user had accepted.
+
+The shell mounts an accepted view as `@name`: `ls @shared`, `cat
+@shared/a.txt`, `write @shared/x.txt "…"` (refused when the share is
+read-only — and the owner may share read-write with a fourth word,
+`rw`). A revoked or dead share simply fails its calls; `accept` of the
+same name again replaces the mount. Sharing is per session pair and
+lives in memory: nothing about an offer is written to disk.
+
 ### Settings in layers
 
 A program's settings are two mshl records merged by `lib/settings.zig`:
@@ -276,8 +320,11 @@ when every console has had a session and none is open.
 
 ## Known limits and bugs
 
-- No sharing between users: revocable delegation of a view from one
-  session to another is stage 3 of the users work, not built.
+- Shares are not persistent: an offer lives in the manager's memory
+  while the owner's session does; there is no standing grant that
+  survives a logout, and no sharing to a user who is not logged in when
+  the offer is withdrawn is remembered. At most 8 offers at once, 8
+  mounts per shell.
 - No fabric logins: the identity is built to sign challenges across
   nodes, but nothing asks it to yet (stage 3).
 - No installer and no desired-state `apply` tool: records are written

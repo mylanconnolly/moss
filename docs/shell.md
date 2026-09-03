@@ -154,6 +154,14 @@ image or a digest mismatch is an error and nothing is spawned.
 `install NAME` copies a program from the system store into the shell's
 own store, image verified on the way.
 
+In a user session the shell also holds a badged channel to the session
+manager, and four commands use it: `share PATH NAME USER [rw]` derives
+a view of a path in the home and offers it; `shares` lists offers made
+to and by this user as a table; `accept NAME` takes an offer and mounts
+it as `@NAME`, so `ls @NAME`, `cat @NAME/file` and the rest work on it;
+`unshare NAME` withdraws an offer at the source. A path beginning with
+`@` names a mount; `mv` refuses to cross between a mount and the home.
+
 ### Startup, the prompt, and the editor
 
 ```mermaid
@@ -260,6 +268,8 @@ and in a session ends the session.
   value round-trips as data.
 - A run argument is 24 bytes of text; a longer path cannot be passed.
 - The system store is the only source of programs for `install`.
+- At most 8 mounted shares; a mount's buffer stays mapped after the
+  share dies or is replaced (the cap is dropped, the page is not).
 - A session's shell has no fabric: `nodes` and `rspawn` are errors
   there. `rspawn`'s image argument is a catalog number, not a name.
 - 32 variables and 16 functions per session; a 512-character line; 16

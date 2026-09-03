@@ -203,11 +203,31 @@ pub fn fsWriteAt(chan: u64, buf: [*]u8, fd: u64, off: u64, data: []const u8) boo
 /// Derive a narrower view (subtree, optionally read-only); the reply's
 /// attached cap is the new view — it needs its own attachBuf.
 pub fn fsDerive(chan: u64, buf: [*]u8, path: []const u8, ro: bool) ?u64 {
+    const d = fsDeriveBadged(chan, buf, path, ro) orelse return null;
+    return d.cap;
+}
+
+/// Derive, and learn the new view's badge — its name for `revoke`.
+pub fn fsDeriveBadged(chan: u64, buf: [*]u8, path: []const u8, ro: bool) ?struct { cap: u64, badge: u64 } {
     @memcpy(buf[1024 .. 1024 + path.len], path);
     switch (usys.callTypedCap(shared.FsReq, shared.FsResp, chan, .{
         .derive = .{ .path_off = 1024, .path_len = path.len, .ro = @intFromBool(ro) },
     }, 0)) {
-        .ok => |ok| return if (ok.rep == .ok and ok.cap != 0) ok.cap else null,
+        .ok => |ok| {
+            if (ok.cap == 0) return null;
+            return switch (ok.rep) {
+                .view => |vw| .{ .cap = ok.cap, .badge = vw.badge },
+                else => .{ .cap = ok.cap, .badge = 0 },
+            };
+        },
         .err => return null,
     }
+}
+
+/// Withdraw a view derived through `chan` (or any, from the root view).
+pub fn fsRevoke(chan: u64, badge: u64) bool {
+    return switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{ .revoke = .{ .badge = badge } }, 0)) {
+        .ok => |rep| rep == .ok,
+        .err => false,
+    };
 }
