@@ -35,13 +35,18 @@ detail below it.
 
 | Page | What it covers |
 |---|---|
+| [The kernel](kernel.md) | What the kernel provides and refuses to; domains, capabilities, budgets, threads and scheduling, teardown, memory, the EL2 host, the security posture. |
+| [IPC and services](ipc.md) | Channels, notifications, shared buffers, capability transfer, badges and client identities, peer death, rings, threads, typed protocols, the boot protocol. |
+| [Boot and init](boot.md) | The boot sequence, the boot archive, root and init, unit files and `give` lines, profiles and drills, supervision, shutdown. |
+| [Devices and drivers](drivers.md) | Drivers as sandboxed programs: PCI enumeration, virtio, MSI-X through the ITS, DMA through the SMMU, the console, entropy, the block driver's transports. |
 | [Filesystems and views](filesystem.md) | The tiers of the system volume, what a view is, what a program and a user session can see, home volumes, program stores and manifests, and where `run` finds a program. |
-
-Pages still to write (each will follow the shape above): the kernel
-model (domains, capabilities, budgets); IPC and how services are reached;
-boot and init (unit files, profiles, supervision); users and sessions;
-the fabric (multi-node); the hypervisor; storage (mossfs); networking;
-the shell language (mshl); the test gate and how to debug a failure.
+| [Storage](storage.md) | The block driver, fssvc's data path, and mossfs: copy-on-write, checksums, transaction groups, compression, encryption, hashed directories, the host test suite, baselines. |
+| [Networking](networking.md) | netsvc over virtio-net, the IPv6-native dual stack, network views and allowlists, sockets and doorbells, what the drills prove. |
+| [Users and sessions](users.md) | Identities as keys, user records, login as unsealing, the session manager, sessions as domains, console login, logout, layered settings. |
+| [The fabric](fabric.md) | Pooling machines: node identities and the root of trust, the join handshake and sealed transport, membership and placement, proxied channels and cap transfer. |
+| [The hypervisor](hypervisor.md) | moss as an EL2 host: the VM syscalls, the userspace VMM, guest timers and vCPUs, device passthrough, a moss guest as a fabric node. |
+| [The shell](shell.md) | msh and the mshl language: pipelines of values, verbs, functions, data files, the line editor, `run` and `install`. |
+| [Testing and debugging](testing.md) | The gate, its drills, the ReleaseSafe rows, soak and filter, the hang watchdog and trace ring, the debugging recipes that have paid off. |
 
 ## Diagrams
 

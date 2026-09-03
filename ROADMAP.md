@@ -336,8 +336,10 @@ The pooling story stops being theory.
   caps root forwards to init at boot), another unit's channel
   (activating it first — capability wiring is the dependency model, no
   ordering anywhere), a shared buffer, a secret from the archive, a
-  filesystem view, a network view, init's own front channel. `start:
-  eager` units start at boot and pull in the rest; `essential: true`
+  filesystem view, a network view, init's own front channel. Units
+  listing the boot's profile in `profiles:` start at boot and pull in
+  the rest (the key was first written up as `start: eager`; the parser
+  only ever knew `profiles`); `essential: true`
   means the system follows the unit's exit; `certify` runs the fabric's
   certification against a root-of-trust unit; `install: true` installs
   the program store once the filesystem is up. The kernel's shell boot

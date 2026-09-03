@@ -547,8 +547,9 @@ ordering anywhere), a shared buffer (`shm: 1`), a secret from the
 archive (`secret: conf/fs.key`, staged through the unit's buffer and
 wiped by the receiver), a filesystem view (`fs: "", ro: false`, derived
 through the filesystem unit's control channel), a network view, or
-init's own front channel (`self: true`). `start: eager` units start at
-boot and pull in everything they need; `essential: true` means the
+init's own front channel (`self: true`). Units whose `profiles:` list
+the boot's profile start at boot and pull in everything they need
+(there is no `start:` key); `essential: true` means the
 system follows the unit's exit; `certify` runs the fabric's
 certification against a root-of-trust unit; `install: true` installs
 the program store once the filesystem is up. A unit lists

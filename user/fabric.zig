@@ -8,10 +8,13 @@
 //!                     frames and return the peer's reply words. Remote
 //!                     spawn ships {image, arg, grants} to the peer, which
 //!                     spawns locally (its own init-style manifest path)
-//!                     and proxies the child's channel back. Membership is
-//!                     a static table (node N = 10.77.0.N). The fabric has
-//!                     no thread of its own beyond the serve loop: the
-//!                     node driver's poll tick keeps TCP breathing.
+//!                     and proxies the child's channel back. Addressing is
+//!                     static (node N = 10.77.0.N); membership is dynamic
+//!                     (dial any seed, gossip, heartbeats). The serve
+//!                     thread alone touches peers and the wire; inbound
+//!                     remote calls run on a small worker pool, and a
+//!                     timer notification plus socket doorbells wake the
+//!                     serve loop — nothing polls.
 //!   2 "remote-echo" — the remotely-spawned service: an ordinary
 //!                     CalcRequest server on its granted channel; it
 //!                     neither knows nor cares that its clients are on

@@ -22,9 +22,10 @@
 //!
 //! Host state a guest could disturb — the vector unit — is saved around
 //! the run; the host's per-core pointer lives in TPIDR_EL2, so TPIDR_EL1
-//! (which VHE does not redirect) is the guest's. No DMA reaches a guest yet
-//! (that is the SMMU's stage 2, a later step), so a guest's RAM is
-//! plain frames owned by the VM object and charged to the VMM.
+//! (which VHE does not redirect) is the guest's. A guest's RAM is plain
+//! frames owned by the VM object and charged to the VMM; a passed-through
+//! device's DMA reaches it through the SMMU's stage 2 (vm_attach_device
+//! binds the stream to the guest's tables, so its DMA addresses are IPAs).
 
 const std = @import("std");
 const gic = @import("gic.zig");

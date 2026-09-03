@@ -61,7 +61,10 @@ an mshl record with `image`, optional `arg`/`budget` (`kobj`, `user`,
 ro: true }`, `{ tag: net, netview: net }`, `{ tag: init, self: true }`,
 `{ tag: console, session: true }` for one of a session's own caps; add
 `index: 1` to pick the second device of a kind or to file a cap as the
-receiver's second of that tag), and `start: eager` / `essential: true`
+receiver's second of that tag), and `profiles: [system, ...]` (the
+profiles under which the unit starts at boot — there is no `start:`
+key; a unit with no `profiles` starts only when something `give`s its
+channel or an `after:` step names it) / `essential: true`
 / `certify` / `install` as needed — added to the boot-file list in
 `build.zig`. A step that starts `after:` another must list the
 `profiles` it belongs to, or it never starts. The program takes
@@ -241,7 +244,7 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 - Sentinels must not collide with valid values (sockets and slots start at
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in
-  `domain.spawn`: log→chan→spawner→mmio→irq→entropy→introspect; user
+  `domain.spawn`: log→chan→spawner→entropy→introspect→windows→hypervisor; user
   programs hardcode the slots they expect (documented per program).
 - The kernel embeds exactly one blob, the boot archive; `spawn` takes an
   shm cap holding a staged image, never an index. An shm mapping refs
