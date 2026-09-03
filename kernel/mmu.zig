@@ -311,7 +311,7 @@ pub fn activate() void {
         :
         : [root] "r" (root_pa),
     );
-    const tcr = asm ("mrs %[v], tcr_el1"
+    const tcr = asm volatile ("mrs %[v], tcr_el1"
         : [v] "=r" (-> u64),
     );
     asm volatile (

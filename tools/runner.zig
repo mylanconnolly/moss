@@ -3,7 +3,12 @@
 //! markers, and enforces timeouts. Tests power themselves off (PSCI) after
 //! reporting, so the normal case is a clean QEMU exit within seconds.
 //!
-//! Invoked by `zig build check` with (name, kernel.bin) argument pairs.
+//! Invoked by `zig build check` with (name, kernel.bin) argument pairs,
+//! after optional flags: `--repeat N` runs every test N times (a soak for
+//! intermittent failures; the first failure stops that test and leaves
+//! its log), `--only a,b` runs only the named tests. A name may carry a
+//! `+rs` suffix — the same spec booting a ReleaseSafe kernel; logs and
+//! disks take the full label so the two passes never share files.
 //! To add a test: give it a self-terminating driver with a unique
 //! "<name>-test: PASS" line, add the build variant in build.zig, and a Spec
 //! here.
@@ -103,8 +108,19 @@ pub fn main(init: std.process.Init) !u8 {
     var arg_it = std.process.Args.Iterator.init(init.minimal.args);
     while (arg_it.next()) |a| try argv_list.append(gpa, try gpa.dupe(u8, a));
     const argv = argv_list.items;
-    if (argv.len < 3 or (argv.len - 1) % 2 != 0) {
-        std.debug.print("usage: runner <name> <kernel.bin> ...\n", .{});
+    var repeat: u32 = 1;
+    var only: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < argv.len and std.mem.startsWith(u8, argv[i], "--")) : (i += 2) {
+        if (i + 1 >= argv.len) break;
+        if (std.mem.eql(u8, argv[i], "--repeat")) {
+            repeat = std.fmt.parseInt(u32, argv[i + 1], 10) catch 0;
+        } else if (std.mem.eql(u8, argv[i], "--only")) {
+            only = argv[i + 1];
+        } else break;
+    }
+    if (repeat == 0 or argv.len - i < 2 or (argv.len - i) % 2 != 0) {
+        std.debug.print("usage: runner [--repeat N] [--only a,b] <name> <kernel.bin> ...\n", .{});
         return 2;
     }
     cwd.createDirPath(io, check_dir) catch {};
@@ -112,26 +128,43 @@ pub fn main(init: std.process.Init) !u8 {
     var failures: u32 = 0;
     var ran: u32 = 0;
     var total_polls: u64 = 0;
-    var i: usize = 1;
-    while (i + 1 < argv.len + 1 and i + 1 <= argv.len) : (i += 2) {
-        const name = argv[i];
+    while (i + 1 < argv.len) : (i += 2) {
+        const label = argv[i];
         const bin = argv[i + 1];
-        const spec = specByName(name) orelse {
-            std.debug.print("[FAIL] {s}: no spec for this test\n", .{name});
+        const base = if (std.mem.endsWith(u8, label, "+rs")) label[0 .. label.len - 3] else label;
+        if (only) |list| {
+            if (!listed(list, label) and !listed(list, base)) continue;
+        }
+        var spec = specByName(base) orelse {
+            std.debug.print("[FAIL] {s}: no spec for this test\n", .{label});
             failures += 1;
             continue;
         };
+        spec.name = label; // logs and disks per label: the +rs pass keeps its own
         ran += 1;
         var polls: u64 = 0;
-        const ok = runSpec(spec, bin, &polls) catch |e| blk: {
-            std.debug.print("[FAIL] {s}: runner error {t}\n", .{ name, e });
-            break :blk false;
-        };
+        var ok = true;
+        var runs: u32 = 0;
+        while (ok and runs < repeat) : (runs += 1) {
+            ok = runSpec(spec, bin, &polls) catch |e| blk: {
+                std.debug.print("[FAIL] {s}: runner error {t}\n", .{ label, e });
+                break :blk false;
+            };
+        }
         total_polls += polls;
         if (ok) {
-            std.debug.print("[ ok ] {s:<8} {d}.{d}s\n", .{ name, polls / 10, polls % 10 });
+            if (repeat > 1) {
+                std.debug.print("[ ok ] {s:<10} {d}.{d}s  x{d}\n", .{ label, polls / 10, polls % 10, repeat });
+            } else {
+                std.debug.print("[ ok ] {s:<10} {d}.{d}s\n", .{ label, polls / 10, polls % 10 });
+            }
         } else {
+            if (runs > 1) std.debug.print("[FAIL] {s}: failed on run {d} of {d}\n", .{ label, runs, repeat });
             failures += 1;
+            // Keep the evidence: the next run of this label would overwrite
+            // its log, and a failure that took ten runs to show is not
+            // worth losing to an eager rerun.
+            keepFailedLog(label);
         }
     }
     if (failures == 0) {
@@ -140,6 +173,24 @@ pub fn main(init: std.process.Init) !u8 {
     }
     std.debug.print("check: {d} of {d} FAILED\n", .{ failures, ran });
     return 1;
+}
+
+/// Copy `<label>-1.log` to `<label>-failed.log` (overwriting an older
+/// keepsake), so a rerun cannot erase the failing run's serial log.
+fn keepFailedLog(label: []const u8) void {
+    const src = std.fmt.allocPrint(gpa, "{s}/{s}-1.log", .{ check_dir, label }) catch return;
+    const dst = std.fmt.allocPrint(gpa, "{s}/{s}-failed.log", .{ check_dir, label }) catch return;
+    cwd.copyFile(src, cwd, dst, io, .{}) catch return;
+    std.debug.print("       (log kept as {s})\n", .{dst});
+}
+
+/// Is `name` one of the comma-separated entries of `list`?
+fn listed(list: []const u8, name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, std.mem.trim(u8, entry, " "), name)) return true;
+    }
+    return false;
 }
 
 fn specByName(name: []const u8) ?Spec {

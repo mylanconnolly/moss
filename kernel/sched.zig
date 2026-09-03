@@ -135,6 +135,15 @@ pub const Thread = struct {
     block_slot: ?*?*Thread = null,
     /// Blocked inside recv, interruptible by a bound notification.
     in_recv: bool = false,
+    /// Inside a syscall (set by the trap handler around dispatch). A kill
+    /// requested from another core waits for the syscall to finish: a
+    /// thread switched out and reaped mid-syscall leaks whatever the
+    /// syscall held between allocating and publishing it.
+    in_syscall: bool = false,
+    /// Teardown asked this running thread to die; it does so at the next
+    /// safe point — syscall exit, an interrupt from user mode, block, or
+    /// sleep — never in the middle of kernel work.
+    kill_pending: bool = false,
     /// The notification bound to this thread (an *ipc.Notification; opaque
     /// to avoid an import cycle). recv checks its latched bits before
     /// blocking so a signal can never be lost between recvs.
@@ -213,11 +222,11 @@ pub var host_el2: bool = false;
 
 pub fn thisCpu() *PerCpu {
     if (host_el2) {
-        return @ptrFromInt(asm ("mrs %[v], tpidr_el2"
+        return @ptrFromInt(asm volatile ("mrs %[v], tpidr_el2"
             : [v] "=r" (-> u64),
         ));
     }
-    return @ptrFromInt(asm ("mrs %[v], tpidr_el1"
+    return @ptrFromInt(asm volatile ("mrs %[v], tpidr_el1"
         : [v] "=r" (-> u64),
     ));
 }
@@ -304,7 +313,7 @@ fn restoreIrqs(daif: u64) void {
 }
 
 fn maskIrqs() u64 {
-    const daif = asm ("mrs %[v], daif"
+    const daif = asm volatile ("mrs %[v], daif"
         : [v] "=r" (-> u64),
     );
     asm volatile ("msr daifset, #2");
@@ -332,7 +341,8 @@ pub fn sleep(ticks: u64) void {
     // thread exited from another core while it was entering this syscall.
     // Overwriting that with .sleeping would resurrect it into the sleepers
     // list and the domain would never drain. Die here instead.
-    if (t.state == .exited) {
+    if (t.state == .exited or t.kill_pending) {
+        t.state = .exited;
         t.lock.unlock();
         scheduleLocked(); // never returns: exited threads are reaped
         unreachable;
@@ -355,6 +365,7 @@ pub fn exit() noreturn {
     _ = maskIrqs(); // this context never resumes
     const cpu = thisCpu();
     cpu.lock.lock();
+    cpu.current.in_syscall = false;
     cpu.current.state = .exited;
     scheduleLocked();
     unreachable;
@@ -445,6 +456,15 @@ fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
                 if (t.queued_on) |q| {
                     const rq = &cpus[q];
                     rq.lock.lock();
+                    if (t.queued_on == q and t.in_syscall) {
+                        // Preempted in the middle of a syscall: let it
+                        // run to the syscall's end, where it dies.
+                        t.kill_pending = true;
+                        rq.need_resched = true;
+                        rq.lock.unlock();
+                        t.lock.unlock();
+                        return false;
+                    }
                     if (t.queued_on == q) {
                         switch (t.park) {
                             .none => rq.queue.remove(&t.node),
@@ -465,7 +485,10 @@ fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
                     const rq = &cpus[c];
                     rq.lock.lock();
                     if (rq.current == t) {
-                        t.state = .exited;
+                        // Running: it dies at its next safe point (the
+                        // core is nudged so that comes soon), and its
+                        // core reaps and counts it.
+                        t.kill_pending = true;
                         rq.need_resched = true;
                         rq.lock.unlock();
                         t.lock.unlock();
@@ -510,10 +533,23 @@ pub fn block(list: ?*std.DoublyLinkedList, slot: ?*?*Thread, obj: *lock.SpinLock
     // Same teardown race as sleep(): a concurrent destroy may have marked
     // this thread exited; parking it would overwrite that and leak it into
     // an IPC wait structure. Die instead.
-    if (t.state == .exited) {
+    if (t.state == .exited or t.kill_pending) {
+        t.state = .exited;
         t.lock.unlock();
         obj.unlock();
         if (outer) |o| o.unlock();
+        // Dying with a cap in the mailbox (a call's attachment nobody
+        // received): its ref must go, and releasing it may take a
+        // channel lock, which comes before the run-queue lock in the
+        // order — so let go of everything first. IRQs are masked, so
+        // this core cannot preempt us in between.
+        cpu.lock.unlock();
+        if (t.ipc_cap_type != 0) {
+            ipc.releaseCap(@enumFromInt(t.ipc_cap_type), t.ipc_cap_obj, t.ipc_cap_badge);
+            t.ipc_cap_type = 0;
+            t.ipc_cap_obj = 0;
+        }
+        cpu.lock.lock();
         scheduleLocked(); // never returns
         unreachable;
     }
@@ -617,10 +653,12 @@ pub fn onTick(is_timekeeper: bool) void {
                 enqueueLocked(t);
                 t.lock.unlock();
             } else {
-                // Torn down while in our hand: nobody else will free it.
+                // Torn down while in our hand (destroyOne saw it off the
+                // sleepers list and left it to us, uncounted): reap, not
+                // merely free — its domain is waiting for the count.
                 t.lock.unlock();
                 waitSwitched(t);
-                freeThread(t);
+                reap(t);
             }
         }
     }
@@ -684,12 +722,26 @@ pub fn isIdle(t: *Thread) bool {
 /// Called by the trap handler after EOI when returning from an interrupt.
 pub fn preemptIfNeeded() void {
     const cpu = thisCpu();
+    const cur = cpu.current;
+    if (cur.kill_pending and !cur.in_syscall) {
+        // The safe point: at EL0 (an interrupt from user code) or on the
+        // way back there (syscall exit). Die here; the next thread reaps.
+        _ = maskIrqs();
+        cpu.lock.lock();
+        cur.state = .exited;
+        scheduleLocked();
+        unreachable;
+    }
     if (!@atomicLoad(bool, &cpu.need_resched, .acquire)) return;
     const daif = maskIrqs();
     cpu.lock.lock();
     cpu.need_resched = false;
     scheduleLocked();
     restoreIrqs(daif);
+}
+
+pub fn globalTicks() u64 {
+    return @atomicLoad(u64, &global_ticks, .monotonic);
 }
 
 pub fn currentName() []const u8 {
@@ -700,10 +752,14 @@ pub fn currentName() []const u8 {
 pub fn debugDump() void {
     for (&threads) |*t| {
         if (t.state == .unused) continue;
-        log.info("thread {s}#{d}: {t} in_recv={} list={} slot={} cpu={?d} q={?d}", .{
+        var nb: [16]u8 = undefined;
+        const on: []const u8 = if (t.block_lock) |l| ipc.describeLock(l, &nb) else "-";
+        log.info("thread {s}#{d}: {t} in_recv={} list={} slot={} on={s} w0=0x{x} badge={d} wake={d} cpu={?d} q={?d}", .{
             t.name,               t.id,
             t.state,              t.in_recv,
             t.block_list != null, t.block_slot != null,
+            on,                   t.ipc_data[0],
+            t.ipc_badge,          t.wake_tick,
             t.on_cpu,             t.queued_on,
         });
     }
@@ -924,7 +980,7 @@ fn finishSwitch() void {
 /// TCR.EPD0 — kernel-only contexts can never reach stale user mappings).
 fn programUserSpace(t: *Thread) void {
     const epd0: u64 = 1 << 7;
-    const tcr = asm ("mrs %[v], tcr_el1"
+    const tcr = asm volatile ("mrs %[v], tcr_el1"
         : [v] "=r" (-> u64),
     );
     if (t.user_ttbr0 != 0) {

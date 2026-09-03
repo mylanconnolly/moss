@@ -23,7 +23,7 @@ pub const SpinLock = struct {
     /// Mask IRQs on this core, then take the lock. Returns the saved DAIF
     /// state for unlockRestore.
     pub fn lockIrqSave(self: *SpinLock) u64 {
-        const daif = asm ("mrs %[v], daif"
+        const daif = asm volatile ("mrs %[v], daif"
             : [v] "=r" (-> u64),
         );
         asm volatile ("msr daifset, #2");

@@ -29,6 +29,7 @@ const lock = @import("lock.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 const log = @import("log.zig");
+const trace = @import("trace.zig");
 
 const max_channels = 64;
 const max_notifications = 64;
@@ -294,7 +295,7 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Er
 }
 
 fn maskIrqs() u64 {
-    const daif = asm ("mrs %[v], daif"
+    const daif = asm volatile ("mrs %[v], daif"
         : [v] "=r" (-> u64),
     );
     asm volatile ("msr daifset, #2");
@@ -546,11 +547,19 @@ pub fn signal(n: *Notification, bits: u64) void {
         t.ipc_status = @intFromEnum(shared.Errno.ok);
         n.bits = 0;
         sched.wake(t);
+        trace.record(.signal, notifIndex(n), 1);
         return;
     }
     if (n.bound) |t| {
-        _ = sched.interruptRecv(t, @intFromEnum(shared.Errno.interrupted));
+        const woke = sched.interruptRecv(t, @intFromEnum(shared.Errno.interrupted));
+        trace.record(.signal, notifIndex(n), if (woke) 2 else 3);
+        return;
     }
+    trace.record(.signal, notifIndex(n), 0);
+}
+
+pub fn notifIndex(n: *const Notification) u64 {
+    return (@intFromPtr(n) - @intFromPtr(&notifications[0])) / @sizeOf(Notification);
 }
 
 pub fn refNotification(n: *Notification) void {
@@ -676,6 +685,49 @@ pub fn unrefNotification(n: *Notification) void {
         timerNotifFreed(n);
         if (notif_freed_hook) |f| f(n);
         n.* = .{ .lock = n.lock };
+    }
+}
+
+pub fn channelIndex(ch: *const Channel) u64 {
+    return (@intFromPtr(ch) - @intFromPtr(&channels[0])) / @sizeOf(Channel);
+}
+
+/// Debug: name the object a blocked thread's block_lock belongs to
+/// ("chan#3", "notif#7"), for the scheduler dump.
+pub fn describeLock(l: *const lock.SpinLock, buf: []u8) []const u8 {
+    for (&channels, 0..) |*ch, i| {
+        if (&ch.lock == l) return std.fmt.bufPrint(buf, "chan#{d}", .{i}) catch "chan";
+    }
+    for (&notifications, 0..) |*n, i| {
+        if (&n.lock == l) return std.fmt.bufPrint(buf, "notif#{d}", .{i}) catch "notif";
+    }
+    return "?";
+}
+
+/// Debug: every live notification — latched bits, refs, who waits on it
+/// and who is bound to it (a death signal that never woke anyone shows
+/// as bits latched under a bound thread parked elsewhere).
+pub fn debugDumpNotifications() void {
+    for (&notifications, 0..) |*n, i| {
+        if (!n.active) continue;
+        log.info("notif#{d}: bits=0x{x} refs={d} waiter={s} bound={s}", .{
+            i,                                n.bits,
+            n.refs,                           if (n.waiter) |t| t.name else "-",
+            if (n.bound) |t| t.name else "-",
+        });
+    }
+    for (&channels, 0..) |*ch, i| {
+        if (!ch.active) continue;
+        var pending: u32 = 0;
+        for (ch.pending) |p| {
+            if (p != null) pending += 1;
+        }
+        log.info("chan#{d}: refs a={d} b={d} open a={} b={} server_waiting={s} pending={d} deaths={d}", .{
+            i,         ch.refs_a,
+            ch.refs_b, ch.a_open,
+            ch.b_open, if (ch.server_waiting) |t| t.name else "-",
+            pending,   ch.deaths_pending,
+        });
     }
 }
 

@@ -15,8 +15,15 @@ done without rediscovering the sharp edges.
   the kernel follows `-Doptimize` (Debug default — ReleaseFast kernel is
   untested territory). Benchmark numbers are meaningless from a Debug
   userspace; that mistake cost a 5x mystery once.
-- `zig build check` is the gate: 14 OS tests under QEMU plus host unit
-  tests, ~55s. Run it before committing. Logs land in `zig-out/check/`.
+- `zig build check` is the gate: 22 OS tests under QEMU plus host unit
+  tests, then the kernel-heavy drills once more under a **ReleaseSafe
+  kernel** (the `+rs` rows) — about two minutes. Run it before
+  committing. Logs land in `zig-out/check/` (`<name>-1.log`,
+  `<name>+rs-1.log`). `-Donly=fs,ipc+rs` runs just those; `-Dsoak=10`
+  runs each test ten times and stops at the first failure, leaving its
+  log (also copied to `<label>-failed.log`, which a rerun does not
+  overwrite) — the way to chase an intermittent one. `-Doptimize=ReleaseSafe`
+  runs the whole suite optimized.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
   echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),
@@ -159,8 +166,27 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 - **Read the fault dump.** ESR class is decoded for you; `far` is the bad
   address; `elr` locates the code (`objdump -d zig-out/bin/moss-kernel.elf`
   and search). Most bugs in this repo's history fell to the dump alone.
-- `sched.debugDump()` and `irq.debugDump()` print thread states, queues,
-  and GIC line state — wire them into a watchdog loop when something hangs.
+- **A hang dumps itself.** Every system drill (`systemDrill` in
+  kernel/main.zig) panics after 60s without shutdown, first printing
+  every thread (state, the channel or notification it blocks on, its
+  request word and badge), every domain (state, live threads, ctl refs,
+  parent) and every bound IRQ line — `sched.debugDump()`,
+  `domain.debugDump()`, `irq.debugDump()`. Read the dump before anything
+  else: a caller parked on `chan#N` with the server of `chan#N` in recv
+  is a dropped reply; a domain `dying` with threads_alive>0 and no
+  thread of that name is a lost reap; a manager polling a domain that is
+  not in the list was the slot-reuse bug. Wire the same three calls
+  into any new driver that waits.
+- **The trace ring** (`kernel/trace.zig`): lifecycle events (spawn,
+  destroy, reaper signal, domain_stat, every notification signal and
+  the path it took) recorded lock-free, printed by the hang watchdog
+  after the dumps. When a dump shows the end state but not how it got
+  there, add a `trace.record` at the suspect step — it costs nothing in
+  the race's window, where a log line would move the race.
+- `QEMU -d int -D file` lists every exception with its CPU ("Taking
+  exception 5 [IRQ] on CPU 2"): the quickest way to see that one core
+  takes no interrupts at all, which is how the non-volatile `mrs daif`
+  was found.
 - QEMU `-d int -D log` traces exceptions; an ESR of `0x...21` is an
   alignment fault, `0x...04`/`0x...46` translation faults.
 - For networking, `-object filter-dump,id=d0,netdev=n0,file=x.pcap` gives a
@@ -173,6 +199,12 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 
 - Assembly may only call `export`/`callconv(.c)` functions. Zig's
   unspecified convention has hidden parameters in Debug builds.
+- `asm volatile` for every read of CPU state that can change (DAIF,
+  TPIDR, ESR/FAR, TCR, the counters); plain `asm` only for constants
+  (CNTFRQ, CurrentEL, ID registers). A non-volatile read is pure to the
+  optimizer and moves: a ReleaseSafe kernel once saved DAIF *after*
+  masking it and never took an interrupt on core 0 again. The check runs
+  the kernel-heavy drills ReleaseSafe (`+rs`) to keep this honest.
 - The kernel is FP-free by build flags; the scheduler's __fp_save/__fp_restore
   stubs are the only EL1 vector instructions (`.arch_extension` admits
   them). Userspace has NEON + hardware AES; the vector unit is per-thread
@@ -195,6 +227,14 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 - Enqueueing a thread kicks the target core (SGI); do long-running work
   from a spawned thread, not from kmain's idle context — idle, once
   displaced by non-yielding threads, does not come back.
+- A thread killed from another core dies at a **safe point** (syscall
+  exit, an interrupt from EL0, block, sleep), never mid-syscall: a
+  syscall may hold an object between allocating and publishing it.
+  Still, prefer publishing under the lock that teardown takes (the
+  window table's `Mapping.state` is the pattern).
+- After `finishTeardown` a ctl-governed domain's slot may belong to
+  someone else the next instant: read what you need first (the reaper
+  learned this by stealing a fresh domain's death watch).
 - Sentinels must not collide with valid values (sockets and slots start at
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in

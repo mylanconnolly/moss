@@ -57,7 +57,7 @@ export fn secondaryEntry() callconv(.c) noreturn {
     mmu.activate();
     trap.init();
 
-    const mpidr = asm ("mrs %[v], mpidr_el1"
+    const mpidr = asm volatile ("mrs %[v], mpidr_el1"
         : [v] "=r" (-> u64),
     );
     const cpu: u32 = @intCast(mpidr & 0xff);

@@ -7,6 +7,11 @@ pub fn build(b: *std.Build) void {
     // in userspace and Debug costs them ~2-5x, while ReleaseSafe keeps
     // every bounds/overflow check. The kernel follows -Doptimize (Debug
     // by default) — it has no hot loops that matter yet.
+    // check: `-Dsoak=N` runs every OS test N times (intermittent failures
+    // surface under repetition); `-Donly=a,b` runs only those tests (the
+    // `+rs` rows are the ReleaseSafe kernel pass, e.g. `ipc+rs`).
+    const soak = b.option(u32, "soak", "check: run each OS test this many times") orelse 1;
+    const only = b.option([]const u8, "only", "check: run only these OS tests (comma-separated; `name+rs` = ReleaseSafe pass)");
     const user_optimize = b.option(
         std.builtin.OptimizeMode,
         "user-optimize",
@@ -631,6 +636,8 @@ pub fn build(b: *std.Build) void {
     //   zig build -D<name>-test && zig-out/bin/moss-check <name> zig-out/bin/moss-kernel.bin
     b.installArtifact(runner);
     const run_check = b.addRunArtifact(runner);
+    if (soak > 1) run_check.addArgs(&.{ "--repeat", b.fmt("{d}", .{soak}) });
+    if (only) |o| run_check.addArgs(&.{ "--only", o });
 
     const all_test_opts = [_][]const u8{
         "panic_test", "fault_test",  "sched_test",   "domain_test",
@@ -646,42 +653,68 @@ pub fn build(b: *std.Build) void {
         "shell",   "rng",   "smmu",  "vm",     "guest", "vmnode",
         "pan",     "cpu",   "users", "login",
     };
-    for (variants) |vn| {
-        const vopts = b.addOptions();
-        const enabled = b.fmt("{s}_test", .{vn});
-        for (all_test_opts) |on| {
-            vopts.addOption(bool, on, std.mem.eql(u8, on, enabled));
+    // The same drills once more under a ReleaseSafe kernel (the `+rs`
+    // rows): the optimizer reorders and merges what a Debug build leaves
+    // in source order, so a race or a non-volatile register read shows up
+    // here and nowhere else. The kernel-heavy drills, kept short.
+    const release_variants = [_][]const u8{
+        "sched", "domain", "ipc", "sandbox", "fs", "users",
+    };
+    const Variant = struct {
+        fn add(
+            bb: *std.Build,
+            run: *std.Build.Step.Run,
+            vn: []const u8,
+            label: []const u8,
+            opt: std.builtin.OptimizeMode,
+            target: std.Build.ResolvedTarget,
+            shared: *std.Build.Module,
+            blobs: std.Build.LazyPath,
+            test_opts: []const []const u8,
+        ) std.Build.LazyPath {
+            const vopts = bb.addOptions();
+            const enabled = bb.fmt("{s}_test", .{vn});
+            for (test_opts) |on| {
+                vopts.addOption(bool, on, std.mem.eql(u8, on, enabled));
+            }
+            vopts.addOption(bool, "guest_kernel", false);
+            const vmod = bb.createModule(.{
+                .root_source_file = bb.path("kernel/main.zig"),
+                .target = target,
+                .optimize = opt,
+                .code_model = .small,
+            });
+            vmod.addImport("shared", shared);
+            vmod.addOptions("build_options", vopts);
+            vmod.addAnonymousImport("user_blobs", .{ .root_source_file = blobs });
+            const vexe = bb.addExecutable(.{
+                .name = bb.fmt("moss-check-{s}.elf", .{label}),
+                .root_module = vmod,
+            });
+            vexe.setLinkerScript(bb.path("kernel/linker.ld"));
+            const vbin = bb.addObjCopy(vexe.getEmittedBin(), .{
+                .format = .bin,
+                .basename = bb.fmt("moss-check-{s}.bin", .{label}),
+            });
+            run.addArg(label);
+            run.addFileArg(vbin.getOutput());
+            return vbin.getOutput();
         }
-        vopts.addOption(bool, "guest_kernel", false);
-        const vmod = b.createModule(.{
-            .root_source_file = b.path("kernel/main.zig"),
-            .target = kernel_target,
-            .optimize = optimize,
-            .code_model = .small,
-        });
-        vmod.addImport("shared", shared_mod);
-        vmod.addOptions("build_options", vopts);
-        vmod.addAnonymousImport("user_blobs", .{ .root_source_file = user_blobs_src });
-        const vexe = b.addExecutable(.{
-            .name = b.fmt("moss-check-{s}.elf", .{vn}),
-            .root_module = vmod,
-        });
-        vexe.setLinkerScript(b.path("kernel/linker.ld"));
-        const vbin = b.addObjCopy(vexe.getEmittedBin(), .{
-            .format = .bin,
-            .basename = b.fmt("moss-check-{s}.bin", .{vn}),
-        });
-        run_check.addArg(vn);
-        run_check.addFileArg(vbin.getOutput());
+    };
+    for (variants) |vn| {
+        const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts);
         // Plain `zig build run-shell` boots this variant — no flag needed.
         if (std.mem.eql(u8, vn, "shell")) {
             run_shell.addArg("-kernel");
-            run_shell.addFileArg(vbin.getOutput());
+            run_shell.addFileArg(vbin);
         }
         if (std.mem.eql(u8, vn, "login")) {
             run_login.addArg("-kernel");
-            run_login.addFileArg(vbin.getOutput());
+            run_login.addFileArg(vbin);
         }
+    }
+    for (release_variants) |vn| {
+        _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts);
     }
     const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests)");
     check_step.dependOn(test_step);

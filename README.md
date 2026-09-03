@@ -29,7 +29,8 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 (`brew install qemu`).
 
 ```sh
-zig build check      # the whole test suite: 22 OS tests under QEMU + host unit tests (~100s)
+zig build check      # the whole test suite: 22 OS tests under QEMU (+6 again on a ReleaseSafe kernel) + host unit tests (~2 min)
+zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (intermittent failures)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 ```

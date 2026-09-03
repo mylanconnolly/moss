@@ -13,6 +13,7 @@ const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
 const its = @import("its.zig");
 const log = @import("log.zig");
+const trace = @import("trace.zig");
 const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
 const rng = @import("rng.zig");
@@ -316,6 +317,7 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
             else => .no_space,
         });
     };
+    child.ctl_governed = true;
     _ = child.ctl_refs.fetchAdd(1, .acq_rel);
     const h = d.captable.?.insert(.domain_ctl, @intFromPtr(child)) orelse {
         _ = child.ctl_refs.fetchSub(1, .acq_rel);
@@ -348,6 +350,7 @@ fn sysDomainStat(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const h: shared.Handle = @bitCast(frame.regs[0]);
     const obj = d.captable.?.lookup(h, .domain_ctl) orelse return errno(.bad_handle);
     const child: *domain.Domain = @ptrFromInt(obj);
+    trace.record(.domain_stat, child.id, @intFromEnum(child.state));
     frame.regs[1] = switch (child.state) {
         .alive => @intFromEnum(shared.DomainState.alive),
         .dying => @intFromEnum(shared.DomainState.dying),

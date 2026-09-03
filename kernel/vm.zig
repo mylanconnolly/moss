@@ -778,7 +778,7 @@ pub fn onVirtualTimer() void {
 }
 
 fn maskIrqs() u64 {
-    const daif = asm ("mrs %[v], daif"
+    const daif = asm volatile ("mrs %[v], daif"
         : [v] "=r" (-> u64),
     );
     asm volatile ("msr daifset, #2");

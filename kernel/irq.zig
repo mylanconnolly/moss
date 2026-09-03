@@ -135,15 +135,15 @@ fn onNotificationFreed(n: *ipc.Notification) void {
 pub fn debugDump() void {
     const log = @import("log.zig");
     for (&bindings, 0..) |b, i| {
-        if (b == null) continue;
+        if (b == .none) continue;
         const intid: u32 = @intCast(spi_base + i);
         const reg = intid / 32;
         const bit = @as(u32, 1) << @intCast(intid % 32);
         const enabled = gic.gicdRead(0x100 + reg * 4) & bit != 0;
         const pending = gic.gicdRead(0x200 + reg * 4) & bit != 0;
         const active = gic.gicdRead(0x300 + reg * 4) & bit != 0;
-        log.info("irq[{d}]: enabled={} pending={} active={} bits={x}", .{
-            intid, enabled, pending, active, b.?.bits,
+        log.info("irq[{d}]: enabled={} pending={} active={} target={s}", .{
+            intid, enabled, pending, active, @tagName(b),
         });
     }
 }

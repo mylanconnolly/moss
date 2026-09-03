@@ -23,6 +23,7 @@ const vm = @import("vm.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 const lock = @import("lock.zig");
+const trace = @import("trace.zig");
 
 const max_domains = 16;
 const user_stack_pages = 24; // mossfs's CoW rebuild keeps 4K frames per tree level; ReleaseSafe inlining stacks several
@@ -143,6 +144,11 @@ pub const Domain = struct {
     death_watch: ?*ipc.Notification = null,
     /// Outstanding domain_ctl caps; a dead slot is reusable only at zero.
     ctl_refs: std.atomic.Value(u32) = .init(0),
+    /// A ctl cap was minted for it (spawn syscall): its slot recycles
+    /// once dead and unreferenced. A domain the kernel's own drivers
+    /// spawned has no ctl cap and stays dead — they read its state and
+    /// exit code afterwards.
+    ctl_governed: bool = false,
     parent: ?*Domain = null,
     /// Start records for extra user threads (thread_create).
     starts: [max_domain_threads]ThreadStart = @splat(.{}),
@@ -203,6 +209,8 @@ fn extraThreadEntry(arg: u64) void {
 
 var domains: [max_domains]Domain = @splat(.{});
 var next_domain_id: u32 = 1;
+/// Slot allocation and release (spawners run on every core).
+var slots_lock: lock.SpinLock = .{};
 
 pub const max_mappings = 64;
 
@@ -214,6 +222,13 @@ pub const Mapping = struct {
     npages: u64,
     shm: ?*ipc.Shm,
     writable: bool,
+    /// Buffers only. A thread of a domain being revoked can be reaped
+    /// at any tick, mid-syscall; the table must tell teardown the
+    /// truth at every instant: `reserved` = pages going in, no ref
+    /// taken yet; `live` = mapped and ref'd; `unmapping` = pages going
+    /// out, ref still held. The ref changes hands only under the
+    /// window lock (IRQs masked: no reap between the two steps).
+    state: enum { reserved, live, unmapping } = .live,
 };
 
 pub fn init() void {
@@ -366,7 +381,18 @@ fn onVmReleased(idx: u64) void {
 
 fn onCtlReleased(obj: u64) void {
     const d: *Domain = @ptrFromInt(obj);
-    _ = d.ctl_refs.fetchSub(1, .acq_rel);
+    if (d.ctl_refs.fetchSub(1, .acq_rel) == 1) releaseSlotIfUnreferenced(d);
+}
+
+/// A dead domain's slot is free only once nothing names it: a ctl cap is
+/// a raw reference, and a slot reused under one would let its holder
+/// read a stranger's state (a session manager once polled a dead
+/// session's ctl and saw the next spawn, alive, forever). Called by
+/// whichever comes last — the teardown or the last ctl drop.
+fn releaseSlotIfUnreferenced(d: *Domain) void {
+    const daif = slots_lock.lockIrqSave();
+    defer slots_lock.unlockRestore(daif);
+    if (d.state == .dead and d.ctl_refs.load(.acquire) == 0) d.state = .unused;
 }
 
 pub fn slotIndex(d: *const Domain) u6 {
@@ -386,10 +412,20 @@ fn reaperLoop(_: u64) void {
             // Children must finish first: their credits cascade into the
             // parent's accounts, which the parent's teardown verifies.
             if (d.state == .dying and d.auto_reap and drained(d) and !hasUnfinishedChildren(d)) {
+                // Everything needed after the teardown is taken BEFORE
+                // it: finishTeardown may free the slot, and a spawn on
+                // another core can own it the next instant. The first
+                // cut read d.watcher afterwards and once found — and
+                // signaled, and nulled — the watcher of the domain that
+                // had just been spawned into the same slot.
+                const watcher = d.watcher;
+                const id = d.id;
+                const bit = @as(u64, 1) << slotIndex(d);
+                d.watcher = null;
                 finishTeardown(d);
-                if (d.watcher) |n| {
-                    d.watcher = null;
-                    ipc.signal(n, @as(u64, 1) << slotIndex(d));
+                if (watcher) |n| {
+                    trace.record(.reaper_signal, id, bit);
+                    ipc.signal(n, bit);
                     ipc.unrefNotification(n);
                 }
             }
@@ -551,6 +587,7 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     d.auto_reap = manifest.auto_reap;
     d.watcher = manifest.watcher;
     if (manifest.watcher) |n| ipc.refNotification(n);
+    trace.record(.spawn, d.id, @intFromBool(manifest.watcher != null));
 
     d.state = .alive;
     d.threads_alive.store(1, .release);
@@ -606,6 +643,7 @@ pub fn destroy(d: *Domain) void {
     // holder of its ctl cap) revoking it on another may arrive together,
     // and only one of them may walk the threads and the cap table.
     if (@cmpxchgStrong(State, &d.state, .alive, .dying, .acq_rel, .acquire) != null) return;
+    trace.record(.destroy, d.id, 0);
     // The subtree dies with the parent: one revocation, transitively.
     for (&domains) |*c| {
         if (c.parent == d and c.state == .alive) destroy(c);
@@ -630,6 +668,20 @@ pub fn destroy(d: *Domain) void {
     }
 }
 
+/// Debug: every domain slot in use — for the hang watchdog, beside the
+/// thread dump: a dying domain that never drains names its leak.
+pub fn debugDump() void {
+    for (&domains) |*d| {
+        if (d.state == .unused) continue;
+        log.info("domain {s}#{d}: {t} threads_alive={d} ctl_refs={d} auto_reap={} parent={s} exit={d}", .{
+            d.name,                            d.id,
+            d.state,                           d.threads_alive.load(.acquire),
+            d.ctl_refs.load(.acquire),         d.auto_reap,
+            if (d.parent) |p| p.name else "-", d.exit_code,
+        });
+    }
+}
+
 pub fn drained(d: *const Domain) bool {
     return d.threads_alive.load(.acquire) == 0;
 }
@@ -650,11 +702,17 @@ pub fn finishTeardown(d: *Domain) void {
         });
     }
     d.state = .dead;
+    // Only domains governed by ctl caps recycle their slot; a domain the
+    // kernel's own drivers spawned and tore down stays dead, so its
+    // state and exit code remain theirs to read afterwards.
+    if (d.ctl_governed) releaseSlotIfUnreferenced(d);
 }
 
 fn allocSlot() ?*Domain {
+    const daif = slots_lock.lockIrqSave();
+    defer slots_lock.unlockRestore(daif);
     for (&domains, 0..) |*d, i| {
-        if (d.state == .unused or d.state == .dead) {
+        if (d.state == .unused) {
             d.* = .{ .id = next_domain_id, .asid = @intCast(i + 1), .state = .unused };
             next_domain_id += 1;
             return d;
@@ -693,7 +751,7 @@ fn reserveWindow(d: *Domain, npages: u64, s: ?*ipc.Shm, writable: bool) !u64 {
             }
         }
     }
-    slot.* = .{ .va = base, .npages = npages, .shm = s, .writable = writable };
+    slot.* = .{ .va = base, .npages = npages, .shm = s, .writable = writable, .state = if (s != null) .reserved else .live };
     return base;
 }
 
@@ -727,7 +785,16 @@ pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
             return e;
         };
     }
+    // Ref and publish as one step: reaped before it, the entry says
+    // "reserved" and teardown leaves the ref alone; after it, "live".
+    const daif = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(daif);
     ipc.refShm(s);
+    for (&d.mappings) |*m| {
+        if (m.*) |*x| {
+            if (x.va == base) x.state = .live;
+        }
+    }
     return base;
 }
 
@@ -741,11 +808,12 @@ pub fn unmapShm(d: *Domain, va: u64) !void {
         const daif = d.windows_lock.lockIrqSave();
         defer d.windows_lock.unlockRestore(daif);
         for (&d.mappings) |*m| {
-            const x = m.* orelse continue;
-            if (x.va == va and x.shm != null) {
-                found = x;
-                m.* = null;
-                break;
+            if (m.*) |*x| {
+                if (x.va == va and x.shm != null and x.state == .live) {
+                    x.state = .unmapping; // no new copy can be aimed at it
+                    found = x.*;
+                    break;
+                }
             }
         }
     }
@@ -753,6 +821,16 @@ pub fn unmapShm(d: *Domain, va: u64) !void {
     while (d.uaccess_users.load(.acquire) != 0) sched.yield();
     mmu.unmapUserPages(d.ttbr0_pa, x.va, x.npages, d.asid);
     smmu.invalidateAsid(d.asid);
+    // Forget and unref as one step (see Mapping.state): reaped before
+    // it, teardown releases the ref of an "unmapping" entry; after it,
+    // there is nothing left to release.
+    const daif = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(daif);
+    for (&d.mappings) |*m| {
+        if (m.*) |y| {
+            if (y.va == va) m.* = null;
+        }
+    }
     ipc.unrefShm(x.shm.?);
 }
 
@@ -766,6 +844,7 @@ pub fn windowRangeOk(d: *Domain, ptr: u64, len: u64, writable: bool) bool {
     defer d.windows_lock.unlockRestore(daif);
     for (&d.mappings) |*m| {
         const x = m.* orelse continue;
+        if (x.state != .live) continue;
         if (ptr >= x.va and end <= x.va + x.npages * mem.page_size) return !writable or x.writable;
     }
     return false;
@@ -895,7 +974,11 @@ fn enterUser(entry: u64, sp: u64, args: [5]u64) noreturn {
 fn releaseMappedShms(d: *Domain) void {
     for (&d.mappings) |*m| {
         if (m.*) |x| {
-            if (x.shm) |s| ipc.unrefShm(s);
+            // A reserved buffer never took its ref (its thread was reaped
+            // between reserving and mapping); live and unmapping did.
+            if (x.shm) |s| {
+                if (x.state != .reserved) ipc.unrefShm(s);
+            }
             m.* = null;
         }
     }

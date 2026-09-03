@@ -184,18 +184,22 @@ pub fn handleIrq() void {
 /// Synchronous exception from EL0: a syscall, or a fault that kills the
 /// domain (fault-as-message to a supervisor arrives with IPC in Phase 4).
 fn handleUserSync(frame: *TrapFrame) void {
-    const esr = asm ("mrs %[v], esr_el1"
+    const esr = asm volatile ("mrs %[v], esr_el1"
         : [v] "=r" (-> u64),
     );
     const ec: u8 = @truncate(esr >> 26);
     if (ec == 0x15) {
+        const t = sched.thisCpu().current;
+        t.in_syscall = true;
         syscall.dispatch(frame);
+        t.in_syscall = false;
         // A syscall may have made someone runnable on this core (e.g. a
-        // reply waking a caller): honor it before returning to EL0.
+        // reply waking a caller), or teardown may have asked this thread
+        // to die: both are honored here, before returning to EL0.
         sched.preemptIfNeeded();
         return;
     }
-    const far = asm ("mrs %[v], far_el1"
+    const far = asm volatile ("mrs %[v], far_el1"
         : [v] "=r" (-> u64),
     );
     const t = sched.thisCpu().current;
@@ -212,10 +216,10 @@ fn handleUserSync(frame: *TrapFrame) void {
 }
 
 fn reportFault(frame: *TrapFrame, kind: Kind) noreturn {
-    const esr = asm ("mrs %[v], esr_el1"
+    const esr = asm volatile ("mrs %[v], esr_el1"
         : [v] "=r" (-> u64),
     );
-    const far = asm ("mrs %[v], far_el1"
+    const far = asm volatile ("mrs %[v], far_el1"
         : [v] "=r" (-> u64),
     );
     const ec: u8 = @truncate(esr >> 26);

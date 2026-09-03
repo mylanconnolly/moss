@@ -569,6 +569,22 @@ The pooling story stops being theory.
   so. Residuals: revocable sharing / fabric logins / the desired-state
   `apply` tool and installer (stage 3), a per-user program store (`run`
   in a session), and an enforced home capacity.
+- ✅ **The gate hardened** (2026-09-03): the check runs the kernel-heavy
+  drills a second time under a **ReleaseSafe kernel** (`+rs` rows), has
+  a soak mode (`-Dsoak=N`) and a filter (`-Donly=a,b`). The first
+  optimized boot found a bug the Debug kernel had hidden for the
+  project's whole life: a non-volatile `mrs daif` reordered past its
+  `msr daifset`, so every unlock restored interrupts masked and core 0
+  never took an interrupt again (DESIGN "Zig conventions"). Every read
+  of mutable CPU state is `asm volatile` now; all 22 drills pass
+  optimized. The new rows and the soak then found four teardown bugs
+  in a day (DESIGN "Users and sessions", "Domains"): a dead domain's
+  slot reused under a live ctl cap, the reaper reading a slot after
+  freeing it (stealing a fresh domain's death watch), a killed thread
+  reaped mid-syscall (kills now wait for a safe point), and a dying
+  sleeper freed without being counted. Drills hang loudly now — 60s
+  without shutdown dumps every thread, domain, notification and a
+  lock-free trace ring of lifecycle events, then panics.
 - ✅ **Client death per badge, and unmap** (2026-09-03): a service
   serving many badged clients on one channel now hears of each one's
   death — a badge is refcounted on its own, and `recv` reports the

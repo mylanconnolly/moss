@@ -301,7 +301,73 @@ at it; copies in flight are waited out (`uaccess_users`, pinned by
 every syscall that copies, incremented before its range check); then
 the pages are unmapped with the ASID's TLB and SMMU entries retired
 on every core; only then is the mapping's ref released, so a frame
-is never freed while anything still maps it. The range checks that
+is never freed while anything still maps it. One more rule, bought
+by the new ReleaseSafe gate row on its first day, before kills learned
+to wait for a safe point (see "Users and sessions"): the window table
+must tell teardown the truth at every instant, so a thread reaped
+between two steps of a map or unmap leaves nothing ambiguous. Each buffer mapping carries a state — `reserved` (pages
+going in, no ref yet), `live`, `unmapping` (pages going out, ref still
+held) — and the ref changes hands only under the window lock with
+IRQs masked, where no reap can land between the two steps. The first
+cut removed the entry, did the work, then dropped the ref; a home
+filesystem service reaped between those steps (the session manager
+destroys it the moment the session ends, while it is still collecting
+the session's dead views) left one buffer with a ref nobody held, and
+`users+rs` failed its leak bar once in about ten runs.
+
+The same row then hung — and the hang watchdog the gate gained that
+day (60s without shutdown: every thread, domain and IRQ line dumped,
+then a panic) named it: the session manager sleeping in its poll of a
+dead session's `domain_stat`, the drill parked in its `wait` call, and
+no session domain anywhere in the list. A domain slot in state `dead`
+was reusable by the next spawn while a ctl cap still pointed at it, so
+the manager was polling bob's home service, alive, under alice's
+handle. Debug timing had always let the poll win the race; the
+optimized kernel let alice finish before bob spawned. Slots are now
+free only once `unused`, which a dead domain becomes when its last ctl
+ref drops (or at teardown, if none is held), under a slot lock — and
+allocation itself is under that lock, which it never was.
+
+Then a third hang, in the Debug row, on the first run after a build
+(a fresh disk image shifts the boot's timing), and this one needed a
+better tool than a dump of the end state: `kernel/trace.zig`, a ring
+of lifecycle events (spawn, destroy, the reaper's signal, domain_stat,
+every notification signal and which path it took) recorded without
+locks or logging and printed only by the hang watchdog. Logging in a
+race's window moves the race — forty instrumented runs never hung —
+and the ring does not. It showed the reaper signaling "useradmin's
+death" *at the tick useradmin was spawned*: the reaper finished the
+dead pcisvc's teardown, which freed its slot; init's spawn took that
+slot and installed its watcher; the reaper, resuming, read `d.watcher`
+after the teardown, signaled it, nulled it, and dropped its ref —
+stealing the new domain's death watch. When useradmin really died,
+nobody heard. The reaper now takes everything it needs before the
+teardown and never touches the slot after; and only a domain that ever
+had a ctl cap recycles its slot — one the kernel's own drivers spawned
+has none and stays dead, so its state and exit code remain theirs to
+read (the first cut recycled those too, and six kernel drills stopped
+seeing their children die).
+
+The same afternoon closed three more teardown truths. A running
+thread marked dead by another core used to be reaped at its next
+preemption, which the IRQ path takes in kernel mode too — so a thread
+could be switched out and freed *in the middle of a syscall*, leaking
+whatever that syscall held between allocating and publishing it (a
+session logged out the instant after logging in leaked its fresh view
+buffer that way, one ref, nobody's). A kill is now `kill_pending`,
+honored only at a safe point: syscall exit, an interrupt from user
+mode, or the moment the thread tries to block or sleep — never inside
+kernel work; a thread found preempted mid-syscall is left on its queue
+to finish. One consequence needed its own fix: a killed thread that
+reaches `block` now dies there routinely, and that path had never
+released the cap in its mailbox — a call's attachment nobody received
+— so a session logged out while attaching its buffer left the buffer
+one ref nobody held. `block`'s death releases the mailbox first, with
+every lock dropped (a cap release may take a channel lock, which comes
+before the run-queue lock). A dying sleeper caught in the tick's hand is *reaped*, not
+merely freed, so its domain's thread count reaches zero. And
+`destroyOne` returns "not freed" for a thread that exited on its own
+core between its guard and its switch (above). The range checks that
 gate kernel copies now consult the table — a hole in the window is a
 `fault`, not a kernel data abort the caller provoked. Services unmap
 a dead client's buffer (client_dead, above) and a re-attached view's
@@ -1069,6 +1135,26 @@ the first prompt. A script renders every top-level statement's value as
 it goes, the way the prompt does — the first cut rendered only the
 last, and a startup script ending in a `def` printed nothing.
 
+### The gate (as built, 2026-09-03)
+
+`zig build check` builds one kernel per drill and boots each under QEMU
+(`tools/runner.zig`), scoring serial markers. Two things make it a
+harder gate than "every test once, Debug": the kernel-heavy drills
+(sched, domain, ipc, sandbox, fs, users) boot **a second time under a
+ReleaseSafe kernel** — the `+rs` rows, separate logs and disks — because
+the optimizer reorders and merges what a Debug build leaves in source
+order, so a data race or a non-volatile system-register read shows up
+there and nowhere else (the first optimized boot found one: see "Zig
+conventions"); and the runner takes `--repeat N` (`-Dsoak=N`), running
+each drill N times and stopping at the first failure with its log kept,
+because the bugs that matter most here — a one-in-four teardown race, a
+one-in-eighty recv hang — are only visible under repetition. `--only
+a,b` (`-Donly=…`) runs a subset without rebuilding anything else. The
+whole gate is about two minutes; `-Doptimize=ReleaseSafe` runs all 22
+drills optimized (they pass; the IPC benchmark runs ~3x faster per core
+under TCG that way, and its three-core scaling drops to ~1x — the
+syscall is no longer the bottleneck the lock contention hides behind).
+
 ## Networking
 
 **As built (Phase 10):** the net service is one userspace process holding
@@ -1674,3 +1760,16 @@ be changed without touching the kernel.
   an error-trace pointer in x0). The thread trampoline learned this the hard
   way; entry points reached from asm go through C-ABI shims like
   `schedThreadRun`.
+- An `asm` expression without `volatile` is a pure function of its inputs
+  to the optimizer: it may be moved past other code, merged with an
+  identical read, or hoisted. That is right for constants (CNTFRQ,
+  CurrentEL, ID registers) and wrong for anything the machine changes
+  under you — DAIF, the per-core pointer in TPIDR, ESR/FAR, TCR — which
+  must be `asm volatile`. Lesson paid for (2026-09-03), found the day a
+  ReleaseSafe kernel first ran the suite: `lockIrqSave`'s `mrs daif` was
+  moved *after* its `msr daifset`, so every unlock restored interrupts
+  masked; core 0 took not a single interrupt after boot while the
+  secondaries (whose idle path unmasked explicitly) ticked on, and the
+  Debug kernel — which never reorders — had hidden it for the project's
+  whole life. The gate now runs the kernel-heavy drills under a
+  ReleaseSafe kernel as well (`+rs` in the check output).

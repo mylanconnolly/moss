@@ -23,6 +23,7 @@ const sched_test = @import("sched_test.zig");
 const smmu = @import("smmu.zig");
 const smp = @import("smp.zig");
 const timer = @import("timer.zig");
+const trace = @import("trace.zig");
 const trap = @import("trap.zig");
 const vm = @import("vm.zig");
 
@@ -617,7 +618,22 @@ fn systemDrill(comptime name: []const u8) void {
         .user_limit = 128 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
 
-    while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);
+    // A hang is a failure with a dump, not a runner timeout on a silent
+    // log: past the deadline, every thread and core is printed.
+    const hang_ticks = 60 * timer.ticks_per_second;
+    var waited: u64 = 0;
+    while (!(root.state == .dying and domain.drained(root))) {
+        sched.sleep(2);
+        waited += 2;
+        if (waited > hang_ticks) {
+            sched.debugDump();
+            domain.debugDump();
+            ipc.debugDumpNotifications();
+            irq.debugDump();
+            trace.dump();
+            std.debug.panic(name ++ "-test: HANG — the system has not shut down after 60s", .{});
+        }
+    }
     domain.finishTeardown(root);
     const code = root.exit_code;
 
@@ -628,6 +644,7 @@ fn systemDrill(comptime name: []const u8) void {
         psci.systemOff();
     } else {
         ipc.dumpShms();
+        trace.dump();
         std.debug.panic(name ++ "-test: FAIL — root exit {d}, pmem delta {d}B, shm {d}B", .{
             code, frames_before -% frames_after, ipc.shm_account.balance(),
         });
