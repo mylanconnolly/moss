@@ -52,6 +52,8 @@ pub const Syscall = enum(u64) {
     /// buffer the caller holds; the kernel copies it into the child (no
     /// kernel image table, no path lookup). The child's name comes from
     /// the image header.
+    /// x6 = CPU: permille of one core per period (low 16 bits) | partition
+    /// core mask << 16 (reserved for the child alone); 0 = neither.
     spawn = 13,
     /// chan_create() -> x1 = side A handle, x2 = side B handle
     chan_create = 14,
@@ -185,8 +187,11 @@ pub const DomainRec = struct {
     exit_code: u64,
     kobj_kb: u64, // used KB << 32 | limit KB
     user_kb: u64, // used KB << 32 | limit KB
+    /// Last period's CPU spend in permille of one core << 32 | the
+    /// domain's permille limit (0 = none) | its partition core mask << 16.
+    cpu: u64,
 
-    pub const size = 48;
+    pub const size = 56;
 
     pub fn encode(r: *const DomainRec, out: *[size]u8) void {
         std.mem.writeInt(u32, out[0..4], r.id, .little);
@@ -198,6 +203,7 @@ pub const DomainRec = struct {
         std.mem.writeInt(u64, out[24..32], r.exit_code, .little);
         std.mem.writeInt(u64, out[32..40], r.kobj_kb, .little);
         std.mem.writeInt(u64, out[40..48], r.user_kb, .little);
+        std.mem.writeInt(u64, out[48..56], r.cpu, .little);
     }
 
     pub fn decode(b: *const [size]u8) DomainRec {
@@ -209,6 +215,7 @@ pub const DomainRec = struct {
             .exit_code = std.mem.readInt(u64, b[24..32], .little),
             .kobj_kb = std.mem.readInt(u64, b[32..40], .little),
             .user_kb = std.mem.readInt(u64, b[40..48], .little),
+            .cpu = std.mem.readInt(u64, b[48..56], .little),
         };
     }
 
@@ -230,6 +237,7 @@ test "DomainRec codec round trip" {
         .exit_code = 0,
         .kobj_kb = (123 << 32) | 1024,
         .user_kb = (2048 << 32) | 4096,
+        .cpu = (250 << 32) | 500,
     };
     var buf: [DomainRec.size]u8 = undefined;
     r.encode(&buf);

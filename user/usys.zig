@@ -112,6 +112,16 @@ pub fn spawn(spawner: u64, image_h: u64, arg: u64, chan: u64, flags: u64, limits
     return syscall6(.spawn, spawner, image_h, arg, chan, flags, limits);
 }
 
+/// spawn with a CPU budget/partition too: `cpu` = permille of one core
+/// per period | core mask << 16 (see shared.Syscall.spawn).
+pub fn spawnCpu(spawner: u64, image_h: u64, arg: u64, chan: u64, flags: u64, limits: u64, cpu: u64) IpcResult {
+    return syscall7(.spawn, spawner, image_h, arg, chan, flags, limits, cpu);
+}
+
+pub fn cpuBudget(permille: u64, cores: u64) u64 {
+    return (permille & 0xffff) | (cores << 16);
+}
+
 pub fn kbLimits(kobj_kb: u64, user_kb: u64) u64 {
     return kobj_kb | (user_kb << 32);
 }

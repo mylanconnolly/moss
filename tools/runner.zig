@@ -35,6 +35,7 @@ const specs = [_]Spec{
     .{ .name = "fault", .pass = "!! EXCEPTION: cur_spx_sync", .extra = "far=0xffffff7fdead0000", .panic_is_failure = false },
     .{ .name = "pan", .pass = "privileged access to user memory refused (PAN)", .extra = "pan-test: touching the caller's buffer outside a uaccess window", .panic_is_failure = false },
     .{ .name = "sched", .pass = "sched-test: PASS" },
+    .{ .name = "cpu", .pass = "cpu-test: PASS", .extra = "a second reservation of core 3 refused", .timeout_s = 90 },
     .{ .name = "domain", .pass = "domain-test: PASS" },
     .{ .name = "ipc", .pass = "ipc-test: PASS" },
     .{ .name = "init", .pass = "init-test: PASS" },

@@ -477,7 +477,15 @@ The pooling story stops being theory.
   they come from); certificates carry no expiry (no shared clock —
   revocation serials are the only clock); ML-DSA is a drop-in for the
   signatures if post-quantum ever matters here.
-- Time-partitioning opt-in for side-channel-sensitive domains.
+- ✅ **CPU budgets and time partitioning** (2026-09-02): the third
+  budget the Domains decision named is built — a hierarchical
+  `CpuAccount` charged from the cycle counter, a limit in permille of a
+  core per period, threads parked until the period resets, overruns
+  carried as debt — and the opt-in partition: a core mask reserved for
+  one domain alone, refused to a second. The `cpu` drill measures a
+  quarter-core domain, an unlimited sibling, and an island on core 3.
+  Honest scope: a cap, not a guarantee; and a partition keeps other
+  domains' code off the core, not the tick or the shared caches.
 - ✅ **EL2: Moss as hypervisor** (first cut, 2026-09-02): the kernel
   boots as a VHE host when entered at EL2 (nothing else changes: E2H
   redirects every EL1-named register; PSCI conduit and timer line are

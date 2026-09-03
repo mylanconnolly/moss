@@ -173,6 +173,9 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.cpu_test) {
+        _ = sched.spawn("cpu-test", cpuTestWorker, 0, .{}) catch @panic("spawn cpu-test");
+    }
     if (build_options.pan_test) {
         _ = sched.spawn("pan-test", panTestWorker, 0, .{}) catch @panic("spawn pan-test");
     }
@@ -786,6 +789,88 @@ fn vmTestWorker(which: u64) void {
 /// off through PSCI — which the hypervisor turns into the VMM's exit.
 fn guestKernelWorker(_: u64) void {
     systemDrill("guest");
+}
+
+/// The CPU drill, the third budget and the partition: three domains
+/// of two spinning threads each. "quarter" may spend a quarter of a
+/// core per period; "greedy" has no limit of its own; "island" owns
+/// core 3 exclusively. Three periods later: quarter's last period is
+/// near 250 permille, greedy's is well over a core, island's is one
+/// core, and every sample of core 3 ran island (or idle) while island
+/// never ran elsewhere. Then teardown and the leak bar.
+fn cpuTestWorker(_: u64) void {
+    const frames_before = pmem.stats().free_bytes;
+    log.info("cpu-test: a quarter-core budget, an unlimited sibling, and a partition on core 3", .{});
+    const quarter = domain.spawn("quarter", .{ .blob = img(.services) }, .{
+        .arg = 6,
+        .grant_debug_log = true,
+        .auto_reap = true,
+        .cpu_permille = 250,
+    }) catch |e| std.debug.panic("spawn quarter: {t}", .{e});
+    const greedy = domain.spawn("greedy", .{ .blob = img(.services) }, .{
+        .arg = 6,
+        .grant_debug_log = true,
+        .auto_reap = true,
+    }) catch |e| std.debug.panic("spawn greedy: {t}", .{e});
+    const island = domain.spawn("island", .{ .blob = img(.services) }, .{
+        .arg = 6,
+        .grant_debug_log = true,
+        .auto_reap = true,
+        .cores = 1 << 3,
+    }) catch |e| std.debug.panic("spawn island: {t}", .{e});
+    if (domain.spawn("squatter", .{ .blob = img(.services) }, .{ .arg = 6, .grant_debug_log = true, .auto_reap = true, .cores = 1 << 3 })) |_| {
+        std.debug.panic("cpu-test: FAIL — a second domain reserved core 3", .{});
+    } else |e| {
+        if (e != domain.Error.CoresBusy) std.debug.panic("cpu-test: FAIL — wrong refusal {t}", .{e});
+        log.info("cpu-test: a second reservation of core 3 refused", .{});
+    }
+
+    // Three and a half periods, sampling placement every tick.
+    const t0 = cycles();
+    var bad_placement: u64 = 0;
+    var island_seen_on_3: u64 = 0;
+    for (0..35) |_| {
+        sched.sleep(1);
+        var c: u32 = 1;
+        while (c < 4) : (c += 1) {
+            const t = sched.currentOn(c);
+            const owner: ?*anyopaque = t.user_ctx;
+            if (c == 3) {
+                if (owner == @as(*anyopaque, @ptrCast(island))) {
+                    island_seen_on_3 += 1;
+                } else if (owner != null or !sched.isIdle(t)) {
+                    bad_placement += 1;
+                }
+            } else if (owner == @as(*anyopaque, @ptrCast(island))) {
+                bad_placement += 1;
+            }
+        }
+    }
+    const elapsed = cycles() - t0;
+    const q = domain.cpuPermilleAvg(quarter, elapsed);
+    const g = domain.cpuPermilleAvg(greedy, elapsed);
+    const i = domain.cpuPermilleAvg(island, elapsed);
+    log.info("cpu-test: averaged — quarter {d}‰ (last period {d}‰), greedy {d}‰, island {d}‰ of a core; island on core 3 in {d} samples, misplacements {d}", .{
+        q, domain.cpuPermilleUsed(quarter), g, i, island_seen_on_3, bad_placement,
+    });
+
+    domain.destroy(quarter);
+    domain.destroy(greedy);
+    domain.destroy(island);
+    while (quarter.state != .dead or greedy.state != .dead or island.state != .dead) sched.sleep(1);
+    sched.sleep(3);
+    const frames_after = pmem.stats().free_bytes;
+    const budget_ok = q >= 150 and q <= 380;
+    const greedy_ok = g >= 1000;
+    const island_ok = i >= 850 and i <= 1100 and island_seen_on_3 >= 25 and bad_placement == 0;
+    if (budget_ok and greedy_ok and island_ok and frames_after == frames_before) {
+        log.info("cpu-test: PASS — the CPU budget held a domain to its share, an unlimited sibling took the rest, and a partition kept a core to one domain; nothing leaked", .{});
+        psci.systemOff();
+    } else {
+        std.debug.panic("cpu-test: FAIL — budget {} (q={d}), greedy {} (g={d}), island {} (i={d} on3={d} bad={d}), pmem delta {d}B", .{
+            budget_ok, q, greedy_ok, g, island_ok, i, island_seen_on_3, bad_placement, frames_before -% frames_after,
+        });
+    }
 }
 
 /// The PAN drill: a domain logs a line; the log syscall (built with the

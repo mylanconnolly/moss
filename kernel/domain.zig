@@ -38,6 +38,7 @@ pub const Error = error{
     NoThreadSlots,
     CapTableFull,
     NoMapSlots,
+    CoresBusy,
 };
 
 pub const State = enum {
@@ -52,6 +53,12 @@ pub const State = enum {
 pub const Manifest = struct {
     kobj_limit: usize = 1 << 20,
     user_limit: usize = 1 << 20,
+    /// CPU budget: permille of one core per period (0 = no limit of its
+    /// own; the parent's still bounds it). 1000 = one core, 4000 = four.
+    cpu_permille: u64 = 0,
+    /// A partition: a mask of cores reserved for this domain alone (its
+    /// threads run only there; nothing else is placed there). 0 = none.
+    cores: u64 = 0,
     grant_debug_log: bool = false,
     /// Grant one channel end (its handle arrives in x1 at entry).
     grant_channel_a: ?*ipc.Channel = null,
@@ -102,6 +109,8 @@ pub const Domain = struct {
     mapped_shms: [max_mapped_shms]?*ipc.Shm = @splat(null),
     kobj: kalloc.Account = .{ .limit = 0 },
     user_mem: kalloc.Account = .{ .limit = 0 },
+    cpu: CpuAccount = .{},
+    cores: u64 = 0,
     ttbr0_pa: u64 = 0,
     captable: ?*cap.Table = null,
     entry_va: u64 = 0,
@@ -157,6 +166,7 @@ pub fn createThread(d: *Domain, entry: u64, sp: u64, x0: u64, x1: u64) Error!voi
     ts.* = .{ .used = true, .d = d, .entry = entry, .sp = sp, .x0 = x0, .x1 = x1 };
     _ = d.threads_alive.fetchAdd(1, .acq_rel);
     _ = sched.spawn(d.name, extraThreadEntry, @intFromPtr(ts), .{
+        .cpu_mask = d.cores,
         .user_ttbr0 = d.ttbr0_pa,
         .asid = d.asid,
         .user_ctx = d,
@@ -191,6 +201,9 @@ pub const max_mapped_shms = 16;
 pub fn init() void {
     sched.user_thread_reaped = &onThreadReaped;
     ipc.domain_ctl_release = &onCtlReleased;
+    sched.cpu_charge = &chargeCpu;
+    sched.cpu_over_budget = &cpuOverBudget;
+    sched.cpu_period_reset = &cpuPeriodReset;
     ipc.vm_release = &onVmReleased;
 }
 
@@ -229,6 +242,78 @@ pub const ImageSource = union(enum) {
 
 /// Fill `buf` with shared.DomainRec records for every live slot (the
 /// domain_list syscall's worker). Returns the record count.
+/// The third budget: CPU time, as cycles spent in the current period,
+/// charged up the parent chain like the memory accounts. A domain is
+/// over budget when any account in its chain with a limit has spent it;
+/// the scheduler then parks its threads until the period resets.
+pub const CpuAccount = struct {
+    limit: u64 = 0, // cycles per period; 0 = unlimited here
+    permille: u64 = 0,
+    used: std.atomic.Value(u64) = .init(0),
+    /// What the last completed period spent, for introspection.
+    last: u64 = 0,
+    total: std.atomic.Value(u64) = .init(0),
+    parent: ?*CpuAccount = null,
+
+    fn charge(self: *CpuAccount, cyc: u64) void {
+        _ = self.used.fetchAdd(cyc, .monotonic);
+        _ = self.total.fetchAdd(cyc, .monotonic);
+        if (self.parent) |p| p.charge(cyc);
+    }
+
+    fn over(self: *const CpuAccount) bool {
+        if (self.limit != 0 and self.used.load(.monotonic) >= self.limit) return true;
+        return if (self.parent) |p| p.over() else false;
+    }
+};
+
+var cntfrq: u64 = 0;
+
+fn cpuLimitCycles(permille: u64) u64 {
+    if (permille == 0) return 0;
+    if (cntfrq == 0) cntfrq = asm ("mrs %[v], cntfrq_el0"
+        : [v] "=r" (-> u64),
+    );
+    // One period is cpu_period_ticks x 100ms.
+    return cntfrq * sched.cpu_period_ticks / 10 * permille / 1000;
+}
+
+fn chargeCpu(ctx: *anyopaque, cyc: u64) void {
+    const d: *Domain = @ptrCast(@alignCast(ctx));
+    d.cpu.charge(cyc);
+}
+
+fn cpuOverBudget(ctx: *anyopaque) bool {
+    const d: *Domain = @ptrCast(@alignCast(ctx));
+    return d.cpu.over();
+}
+
+fn cpuPeriodReset() void {
+    for (&domains) |*d| {
+        if (d.state == .unused) continue;
+        // A domain that overran (enforcement is tick-grained: a thread
+        // per core can run a whole tick past its limit) starts the next
+        // period in debt, so its average converges on the limit.
+        const spent = d.cpu.used.load(.monotonic);
+        d.cpu.last = spent;
+        const carry = if (d.cpu.limit != 0 and spent > d.cpu.limit) spent - d.cpu.limit else 0;
+        d.cpu.used.store(carry, .monotonic);
+    }
+}
+
+/// Lifetime spend as permille of one core over `elapsed` cycles.
+pub fn cpuPermilleAvg(d: *const Domain, elapsed: u64) u64 {
+    if (elapsed == 0) return 0;
+    return d.cpu.total.load(.monotonic) * 1000 / elapsed;
+}
+
+/// Last period's spend as permille of one core.
+pub fn cpuPermilleUsed(d: *const Domain) u64 {
+    const per_period = cpuLimitCycles(1000);
+    if (per_period == 0) return 0;
+    return d.cpu.last * 1000 / per_period;
+}
+
 pub fn fillRecs(buf: []u8) usize {
     var n: usize = 0;
     for (&domains) |*d| {
@@ -249,6 +334,7 @@ pub fn fillRecs(buf: []u8) usize {
             .exit_code = d.exit_code,
             .kobj_kb = ((d.kobj.balance() / 1024) << 32) | (d.kobj.limit / 1024),
             .user_kb = ((d.user_mem.balance() / 1024) << 32) | (d.user_mem.limit / 1024),
+            .cpu = (cpuPermilleUsed(d) << 32) | d.cpu.permille | (d.cores << 16),
         };
         rec.encode(buf[n * shared.DomainRec.size ..][0..shared.DomainRec.size]);
         n += 1;
@@ -316,10 +402,17 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     d.name = name orelse "?";
     d.kobj = .{ .limit = manifest.kobj_limit };
     d.user_mem = .{ .limit = manifest.user_limit };
+    d.cpu = .{ .limit = cpuLimitCycles(manifest.cpu_permille), .permille = manifest.cpu_permille };
+    d.cores = manifest.cores;
+    if (d.cores != 0 and !sched.reserveCores(d.cores, @ptrCast(d))) {
+        d.* = .{ .id = d.id, .asid = d.asid, .state = .unused };
+        return Error.CoresBusy;
+    }
     if (manifest.parent) |p| {
         d.parent = p;
         d.kobj.parent = &p.kobj;
         d.user_mem.parent = &p.user_mem;
+        d.cpu.parent = &p.cpu;
     }
 
     // Header check.
@@ -446,6 +539,7 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     d.state = .alive;
     d.threads_alive.store(1, .release);
     _ = sched.spawn(d.name, userThreadEntry, @intFromPtr(d), .{
+        .cpu_mask = d.cores,
         .user_ttbr0 = d.ttbr0_pa,
         .asid = d.asid,
         .user_ctx = d,
@@ -478,6 +572,7 @@ fn abortSpawn(d: *Domain) void {
         ipc.unrefNotification(n);
     }
     releaseMappedShms(d);
+    if (d.cores != 0) sched.releaseCores(@ptrCast(d));
     if (d.kobj.balance() != 0 or d.user_mem.balance() != 0)
         std.debug.panic("domain {s} teardown leak: kobj={d}B user={d}B", .{
             d.name, d.kobj.balance(), d.user_mem.balance(),

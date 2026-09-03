@@ -113,6 +113,10 @@ const Unit = struct {
     arg: u64 = 0,
     kobj_kb: u64 = 1 << 10,
     user_kb: u64 = 4 << 10,
+    /// CPU budget in permille of one core per period (0 = none of its
+    /// own) and a partition: cores reserved for this unit alone.
+    cpu_permille: u64 = 0,
+    cores: u64 = 0,
     flags: u64 = shared.SpawnFlags.grant_log,
     gives: [max_gives]Give = undefined,
     ngives: usize = 0,
@@ -196,10 +200,33 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
     const image = std.meta.stringToEnum(shared.ImageId, image_name) orelse return null;
     var u: Unit = .{ .name = name, .image = image };
     if (r.get("arg")) |a| u.arg = @intCast(int(a) orelse 0);
+    if (r.get("cores")) |cs| {
+        if (cs == .list) {
+            for (cs.list) |c| {
+                if (int(c)) |n| {
+                    if (n >= 0 and n < 64) u.cores |= @as(u64, 1) << @intCast(n);
+                }
+            }
+        }
+    }
     if (r.get("budget")) |b| {
         if (b == .record) {
             if (b.record.get("kobj")) |k| u.kobj_kb = @intCast(@divTrunc(int(k) orelse 0, 1024));
             if (b.record.get("user")) |k| u.user_kb = @intCast(@divTrunc(int(k) orelse 0, 1024));
+            // cpu: 500 (permille of one core) or "50%".
+            if (b.record.get("cpu")) |k| {
+                if (int(k)) |n| {
+                    u.cpu_permille = @intCast(@max(n, 0));
+                } else if (str(k)) |txt| {
+                    if (txt.len > 1 and txt[txt.len - 1] == '%') {
+                        var pct: u64 = 0;
+                        for (txt[0 .. txt.len - 1]) |ch| {
+                            if (ch >= '0' and ch <= '9') pct = pct * 10 + (ch - '0');
+                        }
+                        u.cpu_permille = pct * 10;
+                    }
+                }
+            }
         }
     }
     if (r.get("grant")) |g| {
@@ -328,7 +355,7 @@ fn activate(u: *Unit) bool {
     }
     const ch = usys.chanCreate();
     if (ch.err != .ok) return false;
-    const r = usys.spawn(spawner, stage.handle, u.arg, ch.data[0], u.flags | shared.SpawnFlags.chan_side_a, usys.kbLimits(u.kobj_kb, u.user_kb));
+    const r = usys.spawnCpu(spawner, stage.handle, u.arg, ch.data[0], u.flags | shared.SpawnFlags.chan_side_a, usys.kbLimits(u.kobj_kb, u.user_kb), usys.cpuBudget(u.cpu_permille, u.cores));
     _ = usys.capDrop(ch.data[0]); // the unit owns its serving side alone
     if (r.err != .ok) {
         _ = usys.capDrop(ch.data[1]);

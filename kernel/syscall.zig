@@ -237,6 +237,8 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     if (flags & shared.SpawnFlags.grant_introspect != 0) manifest.grant_introspect = true;
     if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
     if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
+    manifest.cpu_permille = frame.regs[6] & 0xffff;
+    manifest.cores = (frame.regs[6] >> 16) & 0xff;
     if (frame.regs[3] != 0) {
         const chan_h: shared.Handle = @bitCast(frame.regs[3]);
         if (flags & shared.SpawnFlags.chan_side_a != 0) {
@@ -258,6 +260,7 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         return errno(switch (e) {
             domain.Error.QuotaExceeded => .no_space,
             domain.Error.BadImage => .bad_arg,
+            domain.Error.CoresBusy => .busy,
             else => .no_space,
         });
     };

@@ -95,6 +95,14 @@ pub const Thread = struct {
     /// Pinned core, or null to balance round-robin on every enqueue —
     /// which also makes unpinned threads migrate, exercising SMP paths.
     affinity: ?u32 = null,
+    /// A domain partition: the cores this thread may be placed on (0 =
+    /// any core not reserved by another domain).
+    cpu_mask: u64 = 0,
+    /// Cycle count when this thread was last dispatched, for charging.
+    run_start: u64 = 0,
+    /// Parked on a core's throttled list (its domain is over budget) or
+    /// its evict list (it may no longer be placed on that core).
+    park: Park = .none,
     stack_pa: u64 = 0,
     stack_account: *kalloc.Account = &kalloc.kernel_account,
     /// CPU budget accounting stub: consumed timer ticks. Domains attach
@@ -144,8 +152,11 @@ pub const Thread = struct {
     node: std.DoublyLinkedList.Node = .{},
 };
 
+pub const Park = enum(u8) { none, throttled, evicted };
+
 pub const SpawnOpts = struct {
     affinity: ?u32 = null,
+    cpu_mask: u64 = 0,
     user_ttbr0: u64 = 0,
     asid: u16 = 0,
     user_ctx: ?*anyopaque = null,
@@ -160,6 +171,15 @@ pub const PerCpu = struct {
     current: *Thread,
     idle: *Thread,
     queue: std.DoublyLinkedList = .{},
+    /// Threads of domains over their CPU budget, parked until the period
+    /// resets (under this core's lock, like the queue).
+    throttled: std.DoublyLinkedList = .{},
+    /// Threads that may no longer run on this core (a partition claimed
+    /// it): re-placed elsewhere at this core's next tick.
+    evict: std.DoublyLinkedList = .{},
+    /// A partition: this core is reserved for one domain's threads
+    /// (and the idle thread); nothing else is placed here.
+    reserved_by: ?*anyopaque = null,
     /// The thread this core last switched away from; finishSwitch clears
     /// its `switching` (or reaps it) on the other side of the switch.
     prev: ?*Thread = null,
@@ -267,6 +287,7 @@ pub fn spawn(name: []const u8, entry: *const fn (u64) void, arg: u64, opts: Spaw
     t.ctx.regs[0] = @intFromPtr(entry); // x19
     t.ctx.regs[1] = arg; // x20
     t.ctx.regs[11] = @intFromPtr(&__thread_trampoline); // x30
+    t.cpu_mask = opts.cpu_mask;
     threads_lock.unlock();
     t.lock.lock();
     enqueueLocked(t);
@@ -418,7 +439,12 @@ fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
                     const rq = &cpus[q];
                     rq.lock.lock();
                     if (t.queued_on == q) {
-                        rq.queue.remove(&t.node);
+                        switch (t.park) {
+                            .none => rq.queue.remove(&t.node),
+                            .throttled => rq.throttled.remove(&t.node),
+                            .evicted => rq.evict.remove(&t.node),
+                        }
+                        t.park = .none;
                         t.queued_on = null;
                         t.state = .exited;
                         rq.lock.unlock();
@@ -542,11 +568,15 @@ pub fn onTick(is_timekeeper: bool) void {
     const cpu = thisCpu();
     cpu.current.cpu_ticks += 1;
     cpu.ticks += 1;
+    // Charge the running thread's domain up to now, so a long run shows
+    // in its account before it is switched away.
+    chargeRun(cpu.current, cycles());
 
     if (is_timekeeper) {
         global_ticks += 1;
         ipc.timerTick(global_ticks);
         vm.tick();
+        if (global_ticks % cpu_period_ticks == 0) periodReset();
         // Take the due sleepers off the list first (sleepers lock alone),
         // then wake each under its own lock — never both at once.
         var due: [max_threads]*Thread = undefined;
@@ -579,10 +609,60 @@ pub fn onTick(is_timekeeper: bool) void {
         }
     }
 
-    // Round-robin: preempt whenever someone else is waiting for this core.
+    // Evicted threads: off this core's lock first, then re-placed under
+    // their own (thread → run queue, in order).
+    var evicted: [max_threads]*Thread = undefined;
+    var ne: usize = 0;
     cpu.lock.lock();
-    if (cpu.queue.first != null) cpu.need_resched = true;
+    while (cpu.evict.popFirst()) |node| {
+        evicted[ne] = @alignCast(@fieldParentPtr("node", node));
+        ne += 1;
+    }
+    // Round-robin: preempt whenever someone else is waiting for this core,
+    // when the running domain has spent its budget, or when the running
+    // thread no longer belongs here.
+    const cur = cpu.current;
+    if (cpu.queue.first != null or (cur != cpu.idle and (overBudget(cur) or (cur.affinity == null and !placeable(cur, cpu.id))))) cpu.need_resched = true;
     cpu.lock.unlock();
+    for (evicted[0..ne]) |t| {
+        t.lock.lock();
+        t.queued_on = null;
+        enqueueLocked(t);
+        t.lock.unlock();
+    }
+}
+
+/// A new budget period: every domain's spent cycles go to zero, and
+/// every parked thread goes back on its core's queue.
+fn periodReset() void {
+    if (cpu_period_reset) |f| f();
+    for (&cpus, 0..) |cpu, i| {
+        if (!cpu.online) continue;
+        const rq = &cpus[i];
+        rq.lock.lock();
+        var woke = false;
+        while (rq.throttled.popFirst()) |node| {
+            const t: *Thread = @alignCast(@fieldParentPtr("node", node));
+            t.park = .none;
+            rq.queue.append(node);
+            woke = true;
+        }
+        if (woke) rq.need_resched = true;
+        rq.lock.unlock();
+        if (woke and rq != thisCpu()) gic.sendSgi(@intCast(i));
+    }
+}
+
+/// The thread running on core `c` right now (a racy peek, for drills).
+pub fn currentOn(c: u32) *Thread {
+    return cpus[c].current;
+}
+
+pub fn isIdle(t: *Thread) bool {
+    for (&cpus) |*cpu| {
+        if (cpu.online and cpu.idle == t) return true;
+    }
+    return false;
 }
 
 /// Called by the trap handler after EOI when returning from an interrupt.
@@ -642,11 +722,12 @@ fn allocThreadSlotLocked() Error!*Thread {
 /// threads migrate, exercising SMP paths.
 fn enqueueLocked(t: *Thread) void {
     t.state = .ready;
+    t.park = .none;
     const target = t.affinity orelse blk: {
         var tries: u32 = 0;
         while (tries < max_cpus) : (tries += 1) {
             const c = @atomicRmw(u32, &balance_next, .Add, 1, .monotonic) % max_cpus;
-            if (cpus[c].online) break :blk c;
+            if (placeable(t, c)) break :blk c;
         }
         break :blk 0;
     };
@@ -663,17 +744,95 @@ fn enqueueLocked(t: *Thread) void {
     if (rq != thisCpu()) gic.sendSgi(target);
 }
 
+/// May thread `t` be placed on core `c`: online, inside the thread's
+/// partition mask if it has one, and not another domain's reserved core.
+fn placeable(t: *Thread, c: u32) bool {
+    const cpu = &cpus[c];
+    if (!cpu.online) return false;
+    if (t.cpu_mask != 0 and (t.cpu_mask >> @intCast(c)) & 1 == 0) return false;
+    if (cpu.reserved_by) |who| {
+        if (t.user_ctx != who) return false;
+    }
+    return true;
+}
+
+/// Reserve `mask`'s cores for domain `who`, exclusively: nothing else is
+/// placed there from now on (threads already there drain at their next
+/// switch). Core 0 (the timekeeper, the kernel's own threads) cannot be
+/// reserved; a core already reserved cannot be reserved again.
+pub fn reserveCores(mask: u64, who: *anyopaque) bool {
+    var c: u32 = 0;
+    while (c < max_cpus) : (c += 1) {
+        if ((mask >> @intCast(c)) & 1 == 0) continue;
+        if (c == 0 or !cpus[c].online or cpus[c].reserved_by != null) return false;
+    }
+    c = 0;
+    while (c < max_cpus) : (c += 1) {
+        if ((mask >> @intCast(c)) & 1 != 0) cpus[c].reserved_by = who;
+    }
+    return true;
+}
+
+pub fn releaseCores(who: *anyopaque) void {
+    for (&cpus) |*cpu| {
+        if (cpu.reserved_by == who) cpu.reserved_by = null;
+    }
+}
+
+/// CPU budgets (domain.zig registers these): charge a domain for cycles
+/// its thread ran; ask whether it is over budget; reset every period.
+pub var cpu_charge: ?*const fn (*anyopaque, u64) void = null;
+pub var cpu_over_budget: ?*const fn (*anyopaque) bool = null;
+pub var cpu_period_reset: ?*const fn () void = null;
+pub const cpu_period_ticks: u64 = 10; // 1s at the 100ms tick
+
+fn cycles() u64 {
+    return asm volatile ("mrs %[v], cntpct_el0"
+        : [v] "=r" (-> u64),
+    );
+}
+
+fn chargeRun(t: *Thread, now: u64) void {
+    if (t.user_ctx) |d| {
+        if (cpu_charge) |f| f(d, now -% t.run_start);
+    }
+    t.run_start = now;
+}
+
+fn overBudget(t: *Thread) bool {
+    const d = t.user_ctx orelse return false;
+    const f = cpu_over_budget orelse return false;
+    return f(d);
+}
+
 /// Core scheduling decision. Local run-queue lock held, IRQs masked;
 /// returns with the lock released.
 fn scheduleLocked() void {
     const cpu = thisCpu();
     const prev = cpu.current;
+    const now = cycles();
 
-    const next: *Thread = if (cpu.queue.popFirst()) |node| blk: {
-        const t: *Thread = @alignCast(@fieldParentPtr("node", node));
-        t.queued_on = null;
-        break :blk t;
-    } else if (prev.state == .running) {
+    // The next runnable thread whose domain has budget left; the others
+    // wait on the throttled list for the period to reset.
+    const picked: ?*Thread = blk: {
+        while (cpu.queue.popFirst()) |node| {
+            const t: *Thread = @alignCast(@fieldParentPtr("node", node));
+            if (t.affinity == null and !placeable(t, cpu.id)) {
+                t.park = .evicted;
+                cpu.evict.append(&t.node);
+                continue;
+            }
+            if (overBudget(t)) {
+                t.park = .throttled;
+                cpu.throttled.append(&t.node);
+                continue;
+            }
+            t.queued_on = null;
+            break :blk t;
+        }
+        break :blk null;
+    };
+    const next: *Thread = if (picked) |t| t else if (prev.state == .running and !(prev != cpu.idle and overBudget(prev))) {
         prev.switching.store(false, .release);
         cpu.lock.unlock();
         return; // nothing else to run, keep going
@@ -690,13 +849,24 @@ fn scheduleLocked() void {
     // finish saving it before we run it here.
     waitSwitched(next);
 
+    chargeRun(prev, now);
+    next.run_start = now;
     switch (prev.state) {
         // Preempted: back onto the local queue (migration happens on
-        // wakeups, where the target core's lock is taken in order).
+        // wakeups, where the target core's lock is taken in order) — or
+        // parked, if its domain has spent its budget.
         .running => if (prev != cpu.idle) {
             prev.state = .ready;
             prev.queued_on = cpu.id;
-            cpu.queue.append(&prev.node);
+            if (prev.affinity == null and !placeable(prev, cpu.id)) {
+                prev.park = .evicted;
+                cpu.evict.append(&prev.node);
+            } else if (overBudget(prev)) {
+                prev.park = .throttled;
+                cpu.throttled.append(&prev.node);
+            } else {
+                cpu.queue.append(&prev.node);
+            }
         },
         .exited, .sleeping, .blocked, .ready, .unused => {},
     }

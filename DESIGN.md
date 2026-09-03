@@ -163,6 +163,42 @@ reaper's polling cadence (one 100ms tick per dependency layer), not by
 work; the destroy call itself is ~hundreds of microseconds. Event-driven
 reaping is a cheap future win if latency ever matters.
 
+**The third budget: CPU (as built, 2026-09-02).** Every domain carries a
+`CpuAccount` beside its two memory accounts, chained to its parent's the
+same way. The scheduler charges it from the cycle counter whenever a
+thread of the domain is switched away and at every tick while one runs
+(so a long run shows before it ends), walking the chain so a parent's
+limit bounds its subtree. A limit is permille of one core per period —
+1000 is a core, 4000 the whole machine, 0 no limit of its own — and the
+period is ten ticks (1s). When any account in a thread's chain has spent
+its limit, the scheduler parks the thread on its core's throttled list
+instead of running it (at pick, and when a running thread is preempted
+or ticks over); the timekeeper's period reset returns every parked
+thread to its queue. Enforcement is tick-grained — a thread per core can
+run one whole tick past the limit — so an overrun is carried into the
+next period as debt, and the long-run average converges on the limit:
+the drill's quarter-core domain of two spinners averages 279‰ with
+single periods swinging to 365‰. The budget is a cap, not a guarantee;
+a guarantee would need priorities the design has not asked for.
+
+**Partitions (the time-partitioning opt-in).** A manifest may name a
+core mask reserved for the domain alone: its threads carry the mask and
+are placed only there; nothing else is placed on a reserved core, and a
+second reservation of the same core is refused (`CoresBusy`). Core 0
+cannot be reserved — it is the timekeeper's and the kernel's own. What a
+partition does not remove is the tick interrupt on that core and the
+core's share of caches with its neighbours: caps do not fix
+microarchitecture, and the honest claim is "no other domain's code runs
+on this core", which the drill checks by sampling every core every tick
+for three periods (35 of 35 samples of core 3 ran the island; it never
+ran elsewhere). One lesson: a preempted thread went back onto its core's
+*local* queue, so the reservation only governed fresh placements and a
+kernel thread that happened to be on core 3 squatted there; the pick and
+the preempt path now evict a thread that may no longer be placed on the
+core, and the core's next tick re-places it under the thread's own lock.
+Unit files say `budget: { cpu: 250 }` (or `"25%"`) and `cores: [3]`;
+`ps` shows last period's spend and the limit.
+
 A lesson recorded in code: a notification bound to a thread must have its
 latched bits checked *inside recv before blocking* — the interrupt-on-signal
 path alone loses signals that arrive while the supervisor is busy between

@@ -47,7 +47,8 @@ in the boot archive). To spawn it from userspace, stage it with
 shm handle to `usys.spawn`; kernel boot drivers use `img(.name)`.
 
 **A unit** (anything init starts): a file `boot/conf/units/<name>.msh` —
-an mshl record with `image`, optional `arg`/`budget`/`grant`/`restart`,
+an mshl record with `image`, optional `arg`/`budget` (`kobj`, `user`,
+`cpu` in permille of a core or `"25%"`)/`cores` (a partition)/`grant`/`restart`,
 `give` lines (`{ tag: device, device: blk }`, `{ tag: disk, unit: blk }`,
 `{ tag: buf, shm: 1 }`, `{ secret: conf/x.key }`, `{ tag: view, fs: p,
 ro: true }`, `{ tag: net, netview: net }`, `{ tag: init, self: true }`),
