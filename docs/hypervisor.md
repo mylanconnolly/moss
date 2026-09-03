@@ -295,8 +295,6 @@ flowchart TB
 - The bare-metal guest's UART and the moss guest's PL011 are write-only
   as emulated; a `mmio_read` of the flag register reports "TX not full,
   RX empty" and every other register reads as zero.
-- `vm.zig`'s header comment still says no DMA reaches a guest; stage-2
-  passthrough superseded that and the comment is stale.
 
 ## Dig deeper
 

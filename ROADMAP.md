@@ -9,7 +9,8 @@ milestones, each with a concrete exit criterion. Change decisions here before
 changing them in code.
 
 **Status:** phases 0–11 are complete (✅) and covered by `zig build check`;
-the Phase 12+ pool below is the open frontier.
+"Phase 12 and beyond" holds the frontier as one consolidated **Open**
+list, followed by the story of what has **Landed** since.
 
 ---
 
@@ -172,9 +173,164 @@ The pooling story stops being theory.
 
 **Exit:** cross-VM typed RPC hello; a *remote sandboxed spawn* runs a child on node B under node A's manifest; node-kill recovery test passes.
 
-## Phase 12 and beyond (unordered)
+## Phase 12 and beyond
 
-- x86_64 port (the HAL's honesty test) and UEFI boot for real aarch64 hardware.
+Two lists. **Open** is the frontier: every arc not yet started and every
+residual the finished work left behind, consolidated here from the
+narrative entries and from the "Known limits" sections of `docs/`, and
+kept current — an item leaves this list only when it lands or is
+retired with a note. **Landed** is the story of what was built, entry
+by entry as it happened, with the bugs each piece found; nothing there
+is a plan.
+
+### Open
+
+**Arcs**
+
+- **Real aarch64 hardware via UEFI.** The strongest reason is the
+  hypervisor: every VM drill runs only under TCG (Apple's Hypervisor
+  framework exposes no nested EL2 with VHE), so EL2, stage-2 SMMU and
+  device passthrough have never met silicon.
+- **The x86_64 port** — the HAL's honesty test. Audit what actually sits
+  behind the HAL boundary first: the ITS, SMMU, VHE and vGIC work is
+  deeply aarch64-shaped. PAN's counterpart there is SMAP.
+- **Users, stage 3:** revocable sharing (delegating a view from one
+  home to another session); fabric logins (needs notifications crossing
+  nodes and dynamic addressing, below); the desired-state `apply` tool
+  and an installer (records and the settings layer are written by an
+  admin step today).
+- **virtio-gpu and input devices** — the graphical console.
+- **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
+- POSIX personality as a userspace layer, if ever warranted.
+
+**Kernel**
+
+- Every pool is static and small: 16 domains, 64 threads, 64 channels,
+  64 notifications, 64 shared buffers, 256 client badges, 16 devices,
+  64 LPIs, 64 window mappings per domain. Shared-buffer pages are
+  charged to one global account rather than the creating domain.
+- Budgets are caps, not guarantees; a CPU partition keeps other domains'
+  code off a core, not the tick or the shared caches.
+- Reaping is polled once per tick; event-driven reaping is a cheap win
+  if latency ever matters.
+- `getrandom` is not interposable (randomness is not authority); a
+  domain that must see deterministic randomness is a future manifest
+  option, not a proxy.
+- `dma_alloc` pages are never freed before the domain dies.
+- The hang watchdog (dumps, trace ring) exists only in the system
+  drills; the kernel-driven drills rely on the runner's timeout.
+- Side channels are not addressed beyond the stated stance.
+
+**IPC**
+
+- Notifications and shared buffers do not cross the fabric (shm by
+  design; notifications not yet).
+- A call cannot be cancelled except by the caller's death; a server's
+  `recv` waits on one channel only (no select — services multiplex
+  with bound notifications and worker threads); one waiter per
+  notification.
+- The async ring transport exists for the block path only.
+
+**Boot and init**
+
+- Unit files carry test key material beside them (`conf/fs.key`,
+  `conf/fabric/root.seed`).
+- A `run` argument reaches a program only as the path of a view, and
+  is 24 bytes of text.
+- Restart budgets are per boot and never replenish.
+- The session template is the archive's; a home's `conf/units/`
+  replaces it wholesale.
+
+**Devices**
+
+- Bus 0 only: no bridges, no 64-bit BARs placed outside the 32-bit
+  window.
+- One interrupt line per device (`irq_bind` accepts offset 0 only).
+- No MULTIPORT virtio-console: more seats mean more devices.
+- Legacy and transitional virtio devices are not supported (by design).
+
+**Storage and filesystems**
+
+- Hard links are deferred until the view-exclusivity design answers how
+  one file may appear under two views; rename across parent
+  directories is refused (no ancestry walk).
+- A directory holds at most 512 hash buckets (about 32 K entries); a
+  two-level table is the next step.
+- Rollback of up to eight transaction groups by zeroing newer
+  superblock slots is possible for someone with the disk (no external
+  anti-rollback state); MAC tags are 64-bit by format; plaintext
+  allocation metadata leaks fill and churn patterns; torn writes are
+  detected, not repaired.
+- A home volume's 8 MB capacity is reported, not enforced.
+- 32 views per filesystem service, 8 open files per view, 8-page view
+  buffers (32 KB per operation).
+- `save` (and `>`) writes rendered text; `to-data` is the data form.
+- Whole-stack throughput headroom, in likely order: the Debug kernel's
+  syscall and IPC paths, per-block XTS/MAC call overheads in fssvc's one
+  thread, read pipelining beyond one readahead window.
+
+**Networking**
+
+- A minimal stack by design: stop-and-wait with one segment in flight,
+  no congestion control, no UDP, no TCP options.
+- Blocking is polling plus a doorbell; rings as the wakeup path are not
+  built.
+- 16 sockets and 8 views per service.
+- Unit-file allowlists are IPv4 (`allow:` is parsed with `parseV4`);
+  IPv6 filtering is reachable only through `derive` directly.
+- Cluster addressing is static: node N is `10.77.0.N`.
+
+**Users and sessions**
+
+- At most 4 sessions open at once and 4 consoles; names up to 16
+  bytes; the KDF cost a record may ask for is bounded by the manager's
+  static work area.
+- The record format carries no version and no expiry.
+- A user's own program store is filled only by `install` from the
+  system store; there is no other source of programs (no download, no
+  build).
+- A session's shell has no fabric (`nodes`, `rspawn` are errors).
+
+**Fabric**
+
+- Static addressing (dynamic addressing is a separate concern).
+- Certificates carry no expiry: with no shared clock, revocation
+  serials are the only clock.
+- The multi-node drill's nodes have no disk, so their identity seeds
+  are composed by the kernel driver each boot.
+- One remote spawn in flight per node; a remote child's budget is
+  fixed by the receiving node.
+- Small static tables: 6 peers, 8 members, sessions, exports and
+  in-flight exchanges.
+- ML-DSA is a drop-in for the signatures if post-quantum ever matters.
+
+**Hypervisor**
+
+- TCG only (above).
+- The emulated GIC is a register file with no distributor semantics:
+  SPIs go to vCPU 0, as a moss guest routes them.
+- A passed-through device must use MSI-X; a wired-INTx device would
+  need level emulation.
+- At most 4 vCPUs and 128 MB per VM, 4 VMs; the UART emulations are
+  write-only.
+
+**Shell**
+
+- Interpreter limits: 32 variables and 16 functions per session, a
+  512-character line, 16 lines of history; strings interpolate `$var`
+  only; no globbing, no job control.
+
+**Testing**
+
+- The gate is serial and binds fixed TCP ports (31901–31905), so two
+  cannot run on one machine at once.
+- Timing races have no deterministic replay; the soak and the trace
+  ring are the tools. `-Dsoak` repeats whole drills, not steps.
+- Host unit tests cover the pure libraries and the ABI, not the
+  kernel; kernel code is tested only under QEMU.
+
+### Landed (the story, with the bugs each piece found)
+
 - ✅ **Real IOMMU (SMMU) backing the DMA-grant API** (done, 2026-09-02):
   an SMMUv3 in front of the PCIe bus, stage-1 translation, with a
   device's DMA translated through the **holder's own page tables** —
@@ -618,7 +774,6 @@ The pooling story stops being theory.
   through `device_register`. Root runs it before init; the kernel's
   drills spawn it to fill the table; the moss guest runs it against
   the VMM's emulated bus. The trusted kernel is ~250 lines smaller.
-- virtio-gpu and input devices (the graphical console).
 - ✅ **Developer shell and tooling** (done): **msh**, an interactive shell
   over a new virtio-console driver (moss's third virtio device class),
   holding exactly the caps a console needs — console channel, fs view,
@@ -706,8 +861,6 @@ The pooling story stops being theory.
   distinct patterns around blocking syscalls and verify bit-exact
   survival across context switches. Remaining whole-stack ceiling is
   the 2KB view-buffer protocol chunking (tracked below).
-- **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
-- POSIX personality as a userspace layer, if ever warranted.
 
 ---
 

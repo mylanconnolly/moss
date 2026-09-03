@@ -2,7 +2,9 @@
 
 Clean-slate capability-based microkernel OS in Zig (0.16.0, pinned via
 mise), aarch64 on QEMU virt. Phases 0–11 of ROADMAP.md are complete and
-tested; Phase 12+ items are the open pool.
+tested; ROADMAP.md's "Open" list (under Phase 12 and beyond) is the
+frontier — every unstarted arc and every residual, kept current; the
+"Landed" entries below it are the story, not a plan.
 
 ## Commands
 

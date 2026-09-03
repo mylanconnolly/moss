@@ -260,6 +260,10 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 
 ## Known scoping notes (deliberate, tracked)
 
+The complete, current list of residuals is ROADMAP.md's **Open** section
+(under "Phase 12 and beyond"); these are the ones that change how you
+debug.
+
 - Kernel object pools are static: 64 channels, 64 notifications, 64
   shared buffers, 256 client badges (`kernel/ipc.zig`); a domain's
   window holds 64 mappings. If a program exits 210 (attachBuf's
