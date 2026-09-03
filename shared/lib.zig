@@ -113,11 +113,12 @@ pub const Syscall = enum(u64) {
     /// device_info(device_handle) -> x1 = DeviceKind, x2 = requester id
     /// (bus<<8|slot<<3|fn), x3 = BAR bytes
     device_info = 32,
-    /// vm_create(hypervisor_handle, ram_pages) -> x1 = vm handle, x2 = the
-    /// guest RAM mapped into the caller (RW). The guest sees it at IPA
-    /// vm_ram_ipa.
+    /// vm_create(hypervisor_handle, ram_pages, vcpus) -> x1 = vm handle,
+    /// x2 = the guest RAM mapped into the caller (RW). The guest sees it
+    /// at IPA vm_ram_ipa; vCPU 0 runs first, the others come online by
+    /// PSCI CPU_ON (a cpu_on exit tells the VMM to run them).
     vm_create = 33,
-    /// vm_run(vm_handle, resume_value) -> x1 = VmExit, x2..x5 = exit
+    /// vm_run(vm_handle, vcpu, resume_value) -> x1 = VmExit, x2..x5 = exit
     /// details; `resume_value` completes a pending mmio_read.
     vm_run = 34,
     /// vm_set(vm_handle, pc, x0): the vCPU's entry point and first argument.
@@ -148,6 +149,8 @@ pub const VmExit = enum(u64) {
     fault = 6,
     /// A host interrupt; just run again.
     interrupted = 7,
+    /// The guest brought vCPU x2 online (PSCI CPU_ON): run it on a thread.
+    cpu_on = 8,
 };
 
 pub const vm_ram_ipa: u64 = 0x4000_0000;

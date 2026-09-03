@@ -84,7 +84,9 @@ var moss_guest = false;
 // it asks. Nothing else is needed for a guest that only takes its
 // interrupts through the (real, virtual) CPU interface.
 var gicd: [0x1_0000]u8 align(8) = @splat(0);
-var gicr: [0x2_0000]u8 align(8) = @splat(0);
+const max_vcpus = 4;
+var gicr: [max_vcpus][0x2_0000]u8 align(8) = @splat(@splat(0));
+var vcpu_stacks: [max_vcpus][32 * 1024]u8 align(16) = undefined;
 
 export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     log_h = log_handle;
@@ -112,7 +114,7 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
     };
 
     const ram_pages: u64 = if (moss_guest) 32768 else 2048; // 128M / 8M
-    const c = usys.vmCreate(hyp_h, ram_pages);
+    const c = usys.vmCreate(hyp_h, ram_pages, if (moss_guest) max_vcpus else 1);
     if (c.err != .ok) {
         _ = usys.log(log_h, "vmm: vm_create refused");
         usys.exit(131);
@@ -137,9 +139,23 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
     }
     if (usys.vmSet(vm_h, entry, x0) != .ok) usys.exit(132);
 
+    runLoop(0);
+    _ = usys.capDrop(vm_h);
+    if (!moss_guest and ticks_seen != 3) usys.exit(135);
+    usys.exit(0);
+}
+
+/// A vCPU's thread (vCPU 0 is the main one): the exit loop until the
+/// guest powers off.
+fn vcpuThread(idx: u64) callconv(.c) void {
+    runLoop(idx);
+    usys.exit(0); // power-off from any vCPU ends the VMM
+}
+
+fn runLoop(vcpu: u64) void {
     var value: u64 = 0;
     while (true) {
-        const r = usys.vmRun(vm_h, value);
+        const r = usys.vmRun(vm_handle, vcpu, value);
         if (r.err != .ok) usys.exit(133);
         value = 0;
         const kind: shared.VmExit = @enumFromInt(r.data[0]);
@@ -149,9 +165,18 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
             .wfi => usys.sleep(1),
             .hvc => _ = usys.log(log_h, "vmm: guest hypercall (ignored)"),
             .interrupted => {},
+            .cpu_on => {
+                // PSCI CPU_ON: a new vCPU, its own thread.
+                const idx = r.data[1];
+                if (idx >= max_vcpus or usys.threadCreate(vcpuThread, idx, &vcpu_stacks[idx]) != .ok) {
+                    _ = usys.log(log_h, "vmm: could not start a vCPU thread");
+                    usys.exit(140);
+                }
+                _ = usys.log(log_h, "vmm: guest brought a vCPU online");
+            },
             .poweroff => {
                 _ = usys.log(log_h, "vmm: guest asked PSCI to power off; VM done");
-                break;
+                return;
             },
             .fault, .none => {
                 var msg: [160]u8 = undefined;
@@ -168,9 +193,6 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
             },
         }
     }
-    _ = usys.capDrop(vm_h);
-    if (!moss_guest and ticks_seen != 3) usys.exit(135);
-    usys.exit(0);
 }
 
 // ------------------------------------------------------------- devices
@@ -180,10 +202,12 @@ fn mmioWrite(ipa: u64, size: u64, v: u64) void {
         if (ipa - uart_base == 0) uartByte(@truncate(v));
     } else if (ipa >= gicd_base and ipa < gicd_base + gicd.len) {
         store(&gicd, ipa - gicd_base, size, v);
-    } else if (ipa >= gicr_base and ipa < gicr_base + gicr.len) {
+    } else if (ipa >= gicr_base and ipa < gicr_base + max_vcpus * 0x2_0000) {
+        const cpu = (ipa - gicr_base) / 0x2_0000;
+        const off = (ipa - gicr_base) % 0x2_0000;
         var val = v;
-        if (ipa - gicr_base == 0x14) val &= ~@as(u64, 4); // WAKER: children awake
-        store(&gicr, ipa - gicr_base, size, val);
+        if (off == 0x14) val &= ~@as(u64, 4); // WAKER: children awake
+        store(&gicr[cpu], off, size, val);
     } else if (ipa >= ecam_base and ipa < ecam_base + 0x100_0000) {
         ecamWrite(ipa - ecam_base, size, v);
     } else {
@@ -273,8 +297,8 @@ fn mmioRead(ipa: u64, size: u64) u64 {
         return if (ipa - uart_base == 0x18) 0x10 else 0; // FR: RX empty, TX not full
     } else if (ipa >= gicd_base and ipa < gicd_base + gicd.len) {
         return load(&gicd, ipa - gicd_base, size);
-    } else if (ipa >= gicr_base and ipa < gicr_base + gicr.len) {
-        return load(&gicr, ipa - gicr_base, size);
+    } else if (ipa >= gicr_base and ipa < gicr_base + max_vcpus * 0x2_0000) {
+        return load(&gicr[(ipa - gicr_base) / 0x2_0000], (ipa - gicr_base) % 0x2_0000, size);
     } else if (ipa >= ecam_base and ipa < ecam_base + 0x100_0000) {
         return ecamRead(ipa - ecam_base, size);
     }

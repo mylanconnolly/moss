@@ -513,11 +513,19 @@ The pooling story stops being theory.
   mode, root of trust, fabric service — joins node 1 as node 2, and a
   remote spawn placed on it answers an RPC: one box, two pool nodes.
   A vCPU idling in WFI sleeps in the kernel on a per-VM notification
-  that timer fires and device interrupts signal. Residuals: one vCPU
-  per VM (PSCI CPU_ON refused), the GIC shadow is a register file with
-  no distributor semantics (enough for a guest that only uses the CPU
-  interface), passthrough needs MSI-X on the device (a wired-INTx
-  device would need level emulation), and everything is TCG-only.
+  that timer fires and device interrupts signal.
+  ✅ **Several vCPUs** (same day): a VM has up to four; PSCI CPU_ON
+  brings one online at the guest's entry with a `cpu_on` exit that
+  tells the VMM to run it on a thread of its own, the trapped
+  ICC_SGI1R write becomes SGIs pended on the targeted vCPUs, each vCPU
+  has its own idle wait, vGIC state and redistributor shadow, and the
+  timekeeper watches the timer deadline of every descheduled vCPU
+  (whose hardware timer another vCPU may have taken). The moss guest
+  boots all four cores in both VM drills. Residuals: the GIC shadow is
+  a register file with no distributor semantics (SPIs go to vCPU 0, as
+  a moss guest routes them), passthrough needs MSI-X on the device (a
+  wired-INTx device would need level emulation), and everything is
+  TCG-only.
 - virtio-gpu and input devices (the graphical console).
 - ✅ **Developer shell and tooling** (done): **msh**, an interactive shell
   over a new virtio-console driver (moss's third virtio device class),

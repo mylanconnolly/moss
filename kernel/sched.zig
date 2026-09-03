@@ -33,6 +33,7 @@
 //! logging while holding any of these.
 
 const std = @import("std");
+const vm = @import("vm.zig");
 const ipc = @import("ipc.zig");
 const cap = @import("cap.zig");
 const gic = @import("gic.zig");
@@ -545,6 +546,7 @@ pub fn onTick(is_timekeeper: bool) void {
     if (is_timekeeper) {
         global_ticks += 1;
         ipc.timerTick(global_ticks);
+        vm.tick();
         // Take the due sleepers off the list first (sleepers lock alone),
         // then wake each under its own lock — never both at once.
         var due: [max_threads]*Thread = undefined;

@@ -46,6 +46,7 @@ pub const max_vms = 4;
 pub const ram_ipa: u64 = 0x4000_0000;
 pub const max_ram_pages = 32768; // 128M
 pub const max_vm_devices = 4;
+pub const max_vcpus = 4;
 
 /// Counters for the drills' post-mortems.
 pub var stat_entries: u64 = 0;
@@ -73,6 +74,19 @@ const HostCtx = extern struct {
 };
 
 pub const Vcpu = extern struct {
+    /// The VM (as an address) and this vCPU's index — its MPIDR Aff0.
+    vm: u64 = 0,
+    idx: u64 = 0,
+    online: bool = false,
+    running: u32 = 0,
+    /// The core a run is on, to kick it when something becomes injectable.
+    run_core: u32 = 0,
+    /// Signaled whenever something becomes injectable for this vCPU
+    /// (timer, device, SGI): what a vCPU idling in WFI waits for. An
+    /// *ipc.Notification as an address.
+    notif: u64 = 0,
+    /// SGIs 0..15 waiting for a list register.
+    sgi_pending: u64 = 0,
     regs: [31]u64 = @splat(0),
     pc: u64 = 0,
     pstate: u64 = 0x3c5, // EL1h, DAIF masked
@@ -133,17 +147,12 @@ pub const Vm = struct {
     s2_root: u64 = 0,
     vmid: u16 = 0,
     first_run: bool = true,
-    running: std.atomic.Value(bool) = .init(false),
     kobj: ?*kalloc.Account = null,
     user_mem: ?*kalloc.Account = null,
-    /// Signaled whenever something becomes injectable (timer, device):
-    /// what a vCPU idling in WFI waits for.
-    notif: ?*ipc.Notification = null,
-    /// The core a run is on, to kick it when a device interrupt arrives.
-    run_core: u32 = 0,
     devices: [max_vm_devices]VmDevice = @splat(.{}),
     ndevices: usize = 0,
-    vcpu: Vcpu = .{},
+    nvcpus: u64 = 1,
+    vcpus: [max_vcpus]Vcpu = @splat(.{}),
 };
 
 pub const VmDevice = struct { idx: u64 = 0, bar_ipa: u64 = 0, vintid: u32 = 0, intid: u32 = 0 };
@@ -161,13 +170,13 @@ fn atEl2() bool {
 
 /// Create a VM with `pages` of RAM at IPA 0x40000000, owned by `owner`
 /// (RAM charged to its user account, tables to its kernel-object one).
-pub fn create(owner: *anyopaque, kobj: *kalloc.Account, user_mem: *kalloc.Account, pages: u64) Error!*Vm {
+pub fn create(owner: *anyopaque, kobj: *kalloc.Account, user_mem: *kalloc.Account, pages: u64, nvcpus: u64) Error!*Vm {
     if (!atEl2()) return Error.NotHost;
     const daif = vms_lock.lockIrqSave();
     var slot: ?*Vm = null;
     for (&vms, 0..) |*v, i| {
         if (!v.active) {
-            v.* = .{ .active = true, .owner = owner, .vmid = @intCast(i + 1), .kobj = kobj, .user_mem = user_mem };
+            v.* = .{ .active = true, .owner = owner, .vmid = @intCast(i + 1), .kobj = kobj, .user_mem = user_mem, .nvcpus = @max(1, @min(nvcpus, max_vcpus)) };
             slot = v;
             break;
         }
@@ -193,9 +202,27 @@ pub fn create(owner: *anyopaque, kobj: *kalloc.Account, user_mem: *kalloc.Accoun
     // A passed-through device signals by writing the ITS doorbell — DMA
     // through the guest's stage 2, so the doorbell is there, at itself.
     if (its.active) s2Map(vm, its.doorbellPage(), its.doorbellPage(), s2_device) catch return Error.OutOfFrames;
-    vm.notif = ipc.createNotification() catch return Error.OutOfFrames;
+    for (vm.vcpus[0..vm.nvcpus], 0..) |*v, i| {
+        resetVcpu(vm, v, i);
+        v.notif = @intFromPtr(ipc.createNotification() catch return Error.OutOfFrames);
+    }
+    vm.vcpus[0].online = true;
     asm volatile ("dsb ish");
     return vm;
+}
+
+/// A vCPU at reset (its notification survives).
+fn resetVcpu(vm: *Vm, v: *Vcpu, idx: usize) void {
+    const notif = v.notif;
+    v.* = .{ .vm = @intFromPtr(vm), .idx = idx, .notif = notif };
+}
+
+fn vcpuNotif(v: *Vcpu) ?*ipc.Notification {
+    return if (v.notif == 0) null else @ptrFromInt(v.notif);
+}
+
+fn vmOf(v: *Vcpu) *Vm {
+    return @ptrFromInt(v.vm);
 }
 
 /// Pass device `idx` through: its BAR at `bar_ipa` in the guest's stage
@@ -222,9 +249,55 @@ pub fn injectSpi(token: *anyopaque, vintid: u32) void {
     if (vintid < 32 or vintid >= 96) return;
     if (stat_spi_delivered < 3) log.info("vm: device interrupt -> guest spi {d}", .{vintid});
     stat_spi_delivered += 1;
-    _ = @atomicRmw(u64, &vm.vcpu.spi_pending, .Or, @as(u64, 1) << @intCast(vintid - 32), .acq_rel);
-    if (vm.notif) |n| ipc.signal(n, 1);
-    if (vm.running.load(.acquire) and vm.run_core != sched.thisCpu().id) gic.sendSgi(vm.run_core);
+    // SPIs go to vCPU 0, as a moss guest routes them (IROUTER 0).
+    const v = &vm.vcpus[0];
+    _ = @atomicRmw(u64, &v.spi_pending, .Or, @as(u64, 1) << @intCast(vintid - 32), .acq_rel);
+    wake(v);
+}
+
+/// Something became injectable for `v`: wake an idle wait, kick a run.
+fn wake(v: *Vcpu) void {
+    if (vcpuNotif(v)) |n| ipc.signal(n, 1);
+    if (@atomicLoad(u32, &v.running, .acquire) != 0 and v.run_core != sched.thisCpu().id) gic.sendSgi(v.run_core);
+}
+
+/// A guest write to ICC_SGI1R_EL1 (trapped: the virtual CPU interface
+/// has no SGI generation): pend the SGI on every targeted vCPU. Target
+/// list bit i = Aff0 i; IRM = everyone but the sender.
+fn sgi(vm: *Vm, sender: *Vcpu, val: u64) void {
+    const intid: u6 = @intCast((val >> 24) & 0xf);
+    const irm = (val >> 40) & 1 != 0;
+    const list = val & 0xffff;
+    for (vm.vcpus[0..vm.nvcpus], 0..) |*v, i| {
+        if (!v.online) continue;
+        const targeted = if (irm) v != sender else (list >> @intCast(i)) & 1 != 0;
+        if (!targeted) continue;
+        _ = @atomicRmw(u64, &v.sgi_pending, .Or, @as(u64, 1) << intid, .acq_rel);
+        wake(v);
+    }
+}
+
+/// The timekeeper's tick: a descheduled vCPU's timer may not be the one
+/// loaded in any core's hardware (another vCPU took that core), so its
+/// deadline is watched here — pended and the vCPU woken when it passes.
+pub fn tick() void {
+    const now = asm volatile ("mrs %[v], cntpct_el0"
+        : [v] "=r" (-> u64),
+    );
+    for (&vms) |*vm| {
+        if (!vm.active) continue;
+        for (vm.vcpus[0..vm.nvcpus]) |*v| {
+            if (!v.online or @atomicLoad(u32, &v.running, .acquire) != 0 or v.timer_pending) continue;
+            if ((v.cntv_ctl & 3) == 1 and now >= v.cntv_cval) {
+                v.cntv_ctl |= 1 << 1;
+                v.host_masked = true;
+                v.masked_cval = v.cntv_cval;
+                v.timer_pending = true;
+                stat_timer_fires += 1;
+                wake(v);
+            }
+        }
+    }
 }
 
 // Stage-2 descriptors: normal WB (MemAttr 0b1111), RW (S2AP 0b11), inner
@@ -275,14 +348,16 @@ fn freeTables(vm: *Vm) void {
 /// returns tables and RAM to the owner's accounts.
 pub fn destroy(vm: *Vm) void {
     if (!vm.active) return;
-    while (vm.running.load(.acquire)) std.atomic.spinLoopHint();
+    for (vm.vcpus[0..vm.nvcpus]) |*v| {
+        while (@atomicLoad(u32, &v.running, .acquire) != 0) std.atomic.spinLoopHint();
+    }
     for (vm.devices[0..vm.ndevices]) |d| {
         irq.unbindGuest(d.intid, @ptrCast(vm));
         smmu.detachStage2(d.idx, vm.vmid, @ptrCast(vm));
     }
-    if (vm.notif) |n| {
-        vm.notif = null;
-        ipc.unrefNotification(n);
+    for (vm.vcpus[0..vm.nvcpus]) |*v| {
+        if (vcpuNotif(v)) |n| ipc.unrefNotification(n);
+        v.notif = 0;
     }
     // Stage-2 TLB entries for this VMID: gone before the frames are.
     asm volatile (
@@ -404,8 +479,24 @@ fn loadVgic(v: *Vcpu) void {
         }
         v.timer_pending = false;
     }
-    // Device interrupts: one list register each, no duplicates while the
-    // guest still has that one in hand (it drains its device anyway).
+    // SGIs from other vCPUs, then device interrupts: one list register
+    // each, no duplicates while the guest still has that one in hand (a
+    // driver drains its device anyway).
+    while (@atomicLoad(u64, &v.sgi_pending, .acquire) != 0) {
+        const bit: u6 = @intCast(@ctz(@atomicLoad(u64, &v.sgi_pending, .acquire)));
+        const vintid: u64 = bit;
+        var present = false;
+        var free: ?*u64 = null;
+        for (&v.lr) |*lr| {
+            if (lr.* & 0xffff_ffff == vintid and (lr.* >> 62) != 0) present = true;
+            if ((lr.* >> 62) == 0 and free == null) free = lr;
+        }
+        if (!present) {
+            const lr = free orelse break;
+            lr.* = (@as(u64, 1) << 62) | (@as(u64, 1) << 60) | vintid;
+        }
+        _ = @atomicRmw(u64, &v.sgi_pending, .And, ~(@as(u64, 1) << bit), .acq_rel);
+    }
     while (@atomicLoad(u64, &v.spi_pending, .acquire) != 0) {
         const bit: u6 = @intCast(@ctz(@atomicLoad(u64, &v.spi_pending, .acquire)));
         const vintid: u64 = 32 + @as(u64, bit);
@@ -448,8 +539,9 @@ extern const __guest_resume: anyopaque;
 
 /// Run the guest until it exits. `resume_value` completes a pending MMIO
 /// read from the previous exit. Called in the VMM's syscall context.
-pub fn run(vm: *Vm, resume_value: u64) Exit {
-    const v = &vm.vcpu;
+pub fn run(vm: *Vm, vcpu: u64, resume_value: u64) Exit {
+    const v = &vm.vcpus[vcpu];
+    if (!v.online) return .{ .kind = .fault, .a = 0, .b = 0, .c = 0, .d = 0 };
     if (v.pending_read) {
         v.pending_read = false;
         if (v.pending_read_reg < 31) {
@@ -464,14 +556,15 @@ pub fn run(vm: *Vm, resume_value: u64) Exit {
     }
     while (true) {
         v.exit_kind = 0;
-        enterOnce(vm);
+        enterOnce(vm, v);
         if (v.exit_kind == @intFromEnum(shared.VmExit.wfi)) {
             stat_wfi += 1;
             // Idle: sleep until something is injectable, then go again.
             // The bits latch, so a signal between the check and the wait
             // is not lost.
-            if (!v.timer_pending and @atomicLoad(u64, &v.spi_pending, .acquire) == 0) {
-                if (vm.notif) |n| _ = ipc.wait(n);
+            if (!v.timer_pending and @atomicLoad(u64, &v.spi_pending, .acquire) == 0 and @atomicLoad(u64, &v.sgi_pending, .acquire) == 0) {
+                stat_waits += 1;
+                if (vcpuNotif(v)) |n| _ = ipc.wait(n);
                 stat_waits += 1;
             }
             continue;
@@ -481,8 +574,7 @@ pub fn run(vm: *Vm, resume_value: u64) Exit {
     return .{ .kind = @enumFromInt(v.exit_kind), .a = v.exit_a, .b = v.exit_b, .c = v.exit_c, .d = v.exit_d };
 }
 
-fn enterOnce(vm: *Vm) void {
-    const v = &vm.vcpu;
+fn enterOnce(vm: *Vm, v: *Vcpu) void {
     const daif = maskIrqs();
     const cpu = sched.thisCpu();
     gic.enableLocalInterrupt(cpu.id, vtimer_ppi);
@@ -496,7 +588,7 @@ fn enterOnce(vm: *Vm) void {
     // whichever physical core the VMM thread landed on (a kernel parks
     // every core but affinity 0 at boot).
     msr("vpidr_el2", mrs("midr_el1"));
-    msr("vmpidr_el2", 0x8000_0000);
+    msr("vmpidr_el2", 0x8000_0000 | v.idx);
     msr("cntvoff_el2", 0);
     if (vm.first_run) {
         vm.first_run = false;
@@ -515,8 +607,8 @@ fn enterOnce(vm: *Vm) void {
     loadVgic(v);
     cpu.vcpu = @ptrCast(v);
     cpu.last_vcpu = @ptrCast(v);
-    vm.run_core = cpu.id;
-    vm.running.store(true, .release);
+    v.run_core = cpu.id;
+    @atomicStore(u32, &v.running, 1, .release);
     msr("hcr_el2", hcr_guest);
     asm volatile ("isb");
     __guest_enter(v);
@@ -535,7 +627,6 @@ pub fn guestExit(frame: *trap.TrapFrame, kind_raw: u64) void {
     cpu.vcpu = null;
     msr("hcr_el2", hcr_host);
     asm volatile ("isb");
-    const vm: *Vm = @fieldParentPtr("vcpu", v);
     // The guest's vector registers go to the vCPU and the host thread's
     // come back before anything here could run other code (a context
     // switch in the interrupt path would otherwise file the guest's
@@ -558,7 +649,7 @@ pub fn guestExit(frame: *trap.TrapFrame, kind_raw: u64) void {
         v.host_masked = false;
         stat_unmasks += 1;
     }
-    vm.running.store(false, .release);
+    @atomicStore(u32, &v.running, 0, .release);
 
     switch (kind_raw) {
         9 => { // lower64_irq: a host interrupt; handle it as usual
@@ -584,10 +675,25 @@ fn psci(v: *Vcpu) bool {
     switch (fid) {
         0x8400_0008, 0x8400_0009 => setExit(v, .poweroff, fid, 0, 0, 0),
         0x8400_0000 => v.regs[0] = 0x0001_0002, // PSCI 1.2
-        0x8400_0003, 0xc400_0003 => v.regs[0] = @bitCast(@as(i64, -2)), // CPU_ON: INVALID_PARAMETERS (no such core)
+        0x8400_0003, 0xc400_0003 => v.regs[0] = cpuOn(vmOf(v), v, v.regs[1], v.regs[2], v.regs[3]),
         else => v.regs[0] = @bitCast(@as(i64, -1)), // NOT_SUPPORTED
     }
     return true;
+}
+
+/// PSCI CPU_ON: bring vCPU `mpidr`'s Aff0 online at `entry` with `ctx`
+/// in x0, and hand the caller a cpu_on exit so its VMM runs it.
+fn cpuOn(vm: *Vm, caller: *Vcpu, mpidr: u64, entry: u64, ctx: u64) u64 {
+    const idx = mpidr & 0xff;
+    if (idx >= vm.nvcpus or (mpidr >> 8) != 0) return @bitCast(@as(i64, -2)); // INVALID_PARAMETERS
+    const t = &vm.vcpus[idx];
+    if (t.online) return @bitCast(@as(i64, -4)); // ALREADY_ON
+    resetVcpu(vm, t, idx);
+    t.pc = entry;
+    t.regs[0] = ctx;
+    t.online = true;
+    setExit(caller, .cpu_on, idx, 0, 0, 0);
+    return 0;
 }
 
 fn setExit(v: *Vcpu, kind: shared.VmExit, a: u64, b: u64, c: u64, d: u64) void {
@@ -634,6 +740,21 @@ fn decodeSync(v: *Vcpu) void {
             v.pc += 4;
             if (!psci(v)) v.regs[0] = @bitCast(@as(i64, -1)); // NOT_SUPPORTED
         },
+        0x18 => { // a trapped system register: ICC_SGI1R_EL1 (op0 3, op1 0, CRn 12, CRm 11, op2 5)
+            const op0 = (esr >> 20) & 3;
+            const op2 = (esr >> 17) & 7;
+            const op1 = (esr >> 14) & 7;
+            const crn = (esr >> 10) & 0xf;
+            const rt: u8 = @intCast((esr >> 5) & 0x1f);
+            const crm = (esr >> 1) & 0xf;
+            const write = esr & 1 == 0;
+            if (op0 == 3 and op1 == 0 and crn == 12 and crm == 11 and op2 == 5 and write) {
+                sgi(vmOf(v), v, if (rt == 31) 0 else v.regs[rt]);
+                v.pc += 4;
+            } else {
+                setExit(v, .fault, esr, v.elr, v.esr, 0);
+            }
+        },
         // Anything else: report it with the guest's own ELR_EL1/ESR_EL1 too,
         // which say where the guest was and what it was handling.
         else => setExit(v, .fault, esr, v.elr, v.esr, mrs("far_el2")),
@@ -653,8 +774,7 @@ pub fn onVirtualTimer() void {
         v.host_masked = true;
         v.masked_cval = mrs("S3_5_C14_C3_2");
         v.timer_pending = true;
-        const vm: *Vm = @fieldParentPtr("vcpu", v);
-        if (vm.notif) |n| ipc.signal(n, 1);
+        if (vcpuNotif(v)) |n| ipc.signal(n, 1);
     }
 }
 

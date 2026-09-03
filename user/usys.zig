@@ -152,13 +152,13 @@ pub fn deviceInfo(handle: u64) IpcResult {
 }
 
 /// vm_create(hypervisor, pages): data[0] = vm handle, data[1] = guest RAM va.
-pub fn vmCreate(hyp: u64, pages: u64) IpcResult {
-    return syscall6(.vm_create, hyp, pages, 0, 0, 0, 0);
+pub fn vmCreate(hyp: u64, pages: u64, vcpus: u64) IpcResult {
+    return syscall6(.vm_create, hyp, pages, vcpus, 0, 0, 0);
 }
 
-/// vm_run(vm, resume_value): data[0] = VmExit, data[1..4] = details.
-pub fn vmRun(vm: u64, resume_value: u64) IpcResult {
-    return syscall6(.vm_run, vm, resume_value, 0, 0, 0, 0);
+/// vm_run(vm, vcpu, resume_value): data[0] = VmExit, data[1..4] = details.
+pub fn vmRun(vm: u64, vcpu: u64, resume_value: u64) IpcResult {
+    return syscall6(.vm_run, vm, vcpu, resume_value, 0, 0, 0);
 }
 
 pub fn vmSet(vm: u64, pc: u64, x0: u64) shared.Errno {

@@ -42,8 +42,8 @@ const specs = [_]Spec{
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
-    .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
-    .{ .name = "vmnode", .kind = .vmnode, .pass = "vmnode-test: PASS", .extra = "fabric-test: node 2 joined the fabric via seed 1", .timeout_s = 180 },
+    .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
+    .{ .name = "vmnode", .kind = .vmnode, .pass = "vmnode-test: PASS", .extra = "fabric-test: node 2 joined the fabric via seed 1", .always_extra = "guest| [info ] smp: 4 cores online", .timeout_s = 180 },
     .{
         .name = "fs",
         .kind = .blk,

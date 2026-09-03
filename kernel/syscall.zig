@@ -104,7 +104,7 @@ fn sysVmCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     _ = d.captable.?.lookup(h, .hypervisor) orelse return errno(.denied);
     const pages = frame.regs[1];
     if (pages == 0 or pages > vm.max_ram_pages) return errno(.bad_arg);
-    const m = vm.create(@ptrCast(d), &d.kobj, &d.user_mem, pages) catch |e| return errno(switch (e) {
+    const m = vm.create(@ptrCast(d), &d.kobj, &d.user_mem, pages, frame.regs[2]) catch |e| return errno(switch (e) {
         vm.Error.NotHost => .bad_state,
         vm.Error.NoVms, vm.Error.OutOfFrames => .no_space,
     });
@@ -131,7 +131,8 @@ fn lookupVm(d: *domain.Domain, handle_bits: u64) ?*vm.Vm {
 
 fn sysVmRun(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
-    const exit = vm.run(m, frame.regs[1]);
+    if (frame.regs[1] >= m.nvcpus) return errno(.bad_arg);
+    const exit = vm.run(m, frame.regs[1], frame.regs[2]);
     frame.regs[1] = @intFromEnum(exit.kind);
     frame.regs[2] = exit.a;
     frame.regs[3] = exit.b;
@@ -152,8 +153,8 @@ fn sysVmAttachDevice(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 
 fn sysVmSet(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
-    m.vcpu.pc = frame.regs[1];
-    m.vcpu.regs[0] = frame.regs[2];
+    m.vcpus[0].pc = frame.regs[1];
+    m.vcpus[0].regs[0] = frame.regs[2];
     return errno(.ok);
 }
 

@@ -46,12 +46,15 @@ pub fn initCore(cpu: u32) void {
         );
     }
     // Let EL0 read the counters (cntvct/cntpct): userspace benchmarks and
-    // timeouts need a clock that doesn't cost a syscall.
+    // timeouts need a clock that doesn't cost a syscall. As the EL2 host
+    // this is CNTHCTL_EL2, where EL1PCTEN (bit 10) also lets a guest's
+    // EL1/EL0 read the physical counter without a trap (its timer stays
+    // the virtual one; the physical timer registers keep trapping).
     asm volatile (
         \\msr cntkctl_el1, %[v]
         \\isb
         :
-        : [v] "r" (@as(u64, 0b11)),
+        : [v] "r" (@as(u64, 0b11 | (1 << 10))),
     );
 }
 

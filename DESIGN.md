@@ -1326,7 +1326,35 @@ registers are per-vCPU state; the VMM's own NEON between runs clobbered
 them mid-memcpy. (6) QEMU's virtio completes a request synchronously
 with the kick, so a passthrough can *seem* to work with no interrupt
 path at all; the LPI-to-SPI injection was proven only by a driver that
-waited. Guests run under TCG only: HVF's nested EL2 has no VHE.
+waited.
+
+**Several vCPUs (as built, 2026-09-02).** A VM has up to four vCPUs,
+each a `Vcpu` with its own registers, EL1 state, vGIC state (VMCR,
+AP1R0, list registers), pending timer/SGI/SPI bits, notification for
+its idle wait, and vector registers; `vm_run` names the vCPU. vCPU 0
+runs first. PSCI CPU_ON from the guest resets the target vCPU with the
+requested entry and context in x0, marks it online, answers SUCCESS to
+the caller and hands the caller a `cpu_on` exit — the VMM starts a
+thread that runs `vm_run` for the new vCPU (the guest's own SMP
+bring-up then sees it check in, exactly as a physical secondary does:
+same `_secondary_start`, same devicetree-less loop until CPU_ON says
+INVALID_PARAMETERS). Each vCPU reads its index as MPIDR Aff0
+(VMPIDR_EL2). SGIs: the virtual CPU interface has no SGI generation,
+so a guest write to ICC_SGI1R_EL1 traps (EC 0x18); the hypervisor
+decodes the target list (bit i = Aff0 i, IRM = all but self), pends the
+SGI on each targeted vCPU, wakes an idle one and kicks a running one
+with a host SGI, and the next entry fills a list register. Device SPIs
+go to vCPU 0, as a moss guest routes them. The redistributor shadow in
+the VMM is per vCPU. One thing the second core exposed: a vCPU's
+virtual timer lives in whichever core's CNTV registers it was last
+loaded into, and another vCPU may take that core, so the timekeeper's
+tick watches every descheduled vCPU's deadline and pends its timer
+when it passes. Another: CNTHCTL_EL2 as written for the host's own
+EL0 (E2H layout bits 0,1) does not let a *guest's* EL1/EL0 read the
+physical counter; EL1PCTEN (bit 10) does, and a user program's
+`cycles()` inside the guest was the first to trap. Both VM drills
+boot the moss guest on four cores; the pool node got faster for it.
+Guests run under TCG only: HVF's nested EL2 has no VHE.
 
 ## Zig conventions
 
