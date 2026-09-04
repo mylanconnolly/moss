@@ -1235,6 +1235,30 @@ listen–connect–accept over loopback in one program (the loopback
 handshake completes inside `connect`), then a closed peer and a
 refused destination as `err` values — it passed on the first boot.
 
+**mshl v3, stage 3b (as built, 2026-09-04): the stack upgraded.** TCP
+in netsvc is windowed now: a 4 KB send ring per socket (`tcp_send`
+queues whole or answers `would_block` — a partial send would tear a
+message for every client that assumes all-or-nothing, and they all
+do), segments of the peer's MSS (the SYN option parsed, 1440 announced)
+sent while the peer's advertised window has room, cumulative ACKs
+freeing the ring, an 8 KB receive buffer whose free space is the
+window we advertise. Retransmission is per connection with backoff
+(200 ms doubling to 3.2 s, eight retries) and resends whichever is the
+oldest unacknowledged thing — SYN, first in-flight segment, FIN. A
+closed connection lingers in the stack, unaddressable, until its FIN
+is acknowledged, so a program may close and move on and its last bytes
+still arrive. Tables grew to 32 sockets, 16 views, backlogs of 8. The
+loopback lesson held and gained a corollary: an emit runs the peer,
+whose ACK runs our input, which wants to send more — `tcpOutput` is
+guarded per socket so the nested call returns to the outer loop. The
+language's network commands wait on a doorbell now, one notification
+per host hung on every socket, instead of ticking. Bug found: giving
+the socket table a non-zero default (the MSS) moved 400 KB of it from
+`.bss` into the image, past the 256 KB stage init loads images
+through, which reports "image missing from the boot archive" for one
+that does not fit — so the table is zero-initialized and `sockAlloc`
+sets the defaults, and a misleading message has a story behind it.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU
@@ -1259,9 +1283,11 @@ syscall is no longer the bottleneck the lock contention hides behind).
 
 **As built (Phase 10):** the net service is one userspace process holding
 the virtio-net driver and a deliberately tiny dual-stack TCP/IP: ARP (v4)
-and NDP/ICMPv6 (v6) resolve the slirp gateways at startup; TCP is
-stop-and-wait (one unacked segment per socket), in-order receive, fixed
-windows, no options — enough for the fabric protocol, not an RFC museum.
+and NDP/ICMPv6 (v6) resolve the slirp gateways at startup; TCP was
+stop-and-wait (one unacked segment per socket) until the mshl v3 network
+step below made it windowed; receive is in-order, there is no congestion
+control — enough for the fabric protocol and a script's, not an RFC
+museum.
 The ABI is IPv6-native: addresses are always 128 bits (two words), IPv4
 rides v4-mapped, and there is no v4-only path to fossilize. Local
 destinations (own addresses, ::1, 127/8) short-circuit through the stack,

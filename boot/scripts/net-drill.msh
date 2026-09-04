@@ -16,6 +16,25 @@ match (from-bytes (recv $a)?) {
   ok $other => (err "loopback mismatch: $other")?
   err $e => (err "loopback: $e")?
 }
+# Bulk: more than one segment in flight, both ways — the window at work.
+def recv-all [s, want] {
+  if $want <= 0 { ok (to-bytes "") } else {
+    let b = (recv $s)?
+    let rest = (recv-all $s ($want - ($b | len)))?
+    ok ($b + $rest)
+  }
+}
+let big = (range 0 500 | map { "0123456789" } | join "")
+let w = (connect 10.0.2.100 9000)?
+send $w $big
+let back = (from-bytes (recv-all $w ($big | len))?)?
+if $back != $big { (err "bulk wire echo mismatch")? }
+close $w
+echo "script: bulk wire echo ok"
+send $c $big
+let back2 = (from-bytes (recv-all $a ($big | len))?)?
+if $back2 != $big { (err "bulk loopback mismatch")? }
+echo "script: bulk loopback ok"
 # A closed peer is an err, not a hang; a refused view is an err too.
 close $c
 match (recv $a) { ok _ => (err "data after close")?; err $e => echo "script: after close: $e" }

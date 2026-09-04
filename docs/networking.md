@@ -115,8 +115,8 @@ sequenceDiagram
   N-->>C: doorbell rings
   C->>N: tcp_status(sock) → established
   C->>N: tcp_send(sock, len) data in the buffer
-  N->>P: PSH+ACK (one segment in flight)
-  P->>N: ACK
+  N->>P: PSH+ACK … PSH+ACK (as many segments as the peer's window allows)
+  P->>N: ACK (cumulative)
   P->>N: data
   N->>P: ACK
   N-->>C: doorbell rings
@@ -125,14 +125,23 @@ sequenceDiagram
   N->>P: FIN+ACK
 ```
 
-TCP is stop-and-wait: a socket keeps one unacknowledged segment, and a
-`tcp_send` while it is outstanding answers `would_block`. Receive is
-in-order only; a segment that is not the next expected byte is
-dropped and the sender's retransmission covers it. Windows are fixed
-and there are no TCP options. Retransmission is driven by the tick and
-by every interrupt: a segment older than a fifth of a second goes out
-again, and after eight retries the socket is closed and its doorbell
-rung.
+TCP is windowed. Each socket has a 4 KB send ring: `tcp_send` queues
+its payload whole (or answers `would_block` when the ring cannot take
+all of it — never a torn message) and the stack sends as many segments
+as the peer's advertised window allows, each at most the MSS the peer
+announced in its SYN (we announce 1440 and accept up to that; 536
+without an option). A cumulative ACK frees the ring and opens the
+window for more. Receive is in-order only, into an 8 KB buffer whose
+free space is the window we advertise; a segment that is not the next
+expected byte is dropped and the sender's retransmission covers it.
+Retransmission is per connection, driven by the tick and by every
+interrupt: the oldest unacknowledged thing — the SYN, the first
+in-flight segment, or the FIN — goes out again when its timer expires,
+starting at a fifth of a second and doubling to a ceiling of 3.2 s;
+after eight retries the socket is closed and its doorbell rung. A
+closed socket lingers in the stack, unreachable by its client, until
+its FIN is acknowledged or gives up, so queued data and the FIN behind
+it are delivered even when the program has moved on.
 
 ```mermaid
 stateDiagram-v2
@@ -143,8 +152,11 @@ stateDiagram-v2
   syn_rcvd --> established: ACK arrives (the listener's doorbell rings)
   syn_sent --> established: SYN+ACK arrives (ACK sent)
   established --> close_wait: FIN arrives (peer_closed)
-  established --> closed: RST, tcp_close (FIN sent), or 8 retransmits
-  close_wait --> closed: tcp_close (FIN sent), RST, or 8 retransmits
+  established --> closed: RST, or 8 retransmits
+  established --> lingering: tcp_close (queued data, then the FIN; the client's number is gone)
+  close_wait --> closed: RST, or 8 retransmits
+  close_wait --> lingering: tcp_close
+  lingering --> [*]: the FIN acknowledged, or 8 retransmits
   syn_sent --> closed: RST or 8 retransmits
   syn_rcvd --> closed: RST or 8 retransmits
 ```
@@ -187,15 +199,21 @@ dead peer: `recv` on a socket whose peer closed with nothing buffered
 is `err closed`. Addresses are dotted IPv4 (carried v4-mapped) or IPv6
 with one `::`. `send` moves a string or bytes in 512-byte pieces;
 `recv` returns up to 2048 bytes (`recv $s 100` asks for fewer).
-Waiting — for the handshake, for data, for a connection to accept —
-is polling with a tick's sleep, bounded at about thirty seconds, after
-which the result is `err "timed out"`.
+Waiting — for the handshake, for data, for room to send, for a
+connection to accept — is a doorbell: the host hangs one notification
+on every socket it makes (`watch`) and sleeps on it whenever the
+service answers `would_block`, so a waiting script costs nothing and
+wakes the moment something happens. `connect` and `send` end when the
+stack gives up on the peer (an `err`); `accept` and `recv` wait as long
+as it takes.
 
 The network drill's third step is such a script (`scripts/net-drill.msh`,
 run by `mshrun` from the boot archive with only a network view): it
 echoes through the wire, then listens, connects to itself over
-loopback, accepts, sends and receives, then proves a closed peer and a
-refused destination are errors as values.
+loopback, accepts, sends and receives, then pushes 5000 bytes through
+the wire echo and through loopback with a recursive `recv-all` (the
+window at work: more than one segment in flight each way), then
+proves a closed peer and a refused destination are errors as values.
 
 ### What the drill proves
 
@@ -211,8 +229,8 @@ process on the host, an echo. Three oneshot units run in order:
    by pinging the v6 gateway and watching `ping_check` count the reply.
 3. `net-script` (unrestricted view, an mshl script under `mshrun`)
    does the wire echo and a listen/connect/accept loop over loopback
-   from the language, and checks that a closed peer and a refused
-   destination come back as `err` values.
+   from the language, moves 5000 bytes each way, and checks that a
+   closed peer and a refused destination come back as `err` values.
 4. `boxed` (filtered view: `10.0.2.100:9000` only) reaches the echo,
    and is refused on the v4 gateway, the v6 gateway, loopback, listen,
    ping, and derive.
@@ -223,19 +241,36 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 
 ## In detail
 
-- **Tables.** 16 sockets and 8 views per service. A listener's backlog
-  holds 4 connections. Each socket has a 2048-byte receive buffer and a
-  640-byte buffer for the one segment in flight; a `tcp_send` moves at
-  most 512 bytes, a `tcp_recv` at most 2048.
+- **Tables.** 32 sockets and 16 views per service. A listener's
+  backlog holds 8 connections. Each socket has an 8 KB receive buffer
+  (its free space is the advertised window) and a 4 KB send ring
+  (unacknowledged and unsent bytes); a `tcp_send` queues at most 4096
+  bytes, all or `would_block`, and a `tcp_recv` returns at most 4096.
+  The socket table is zero-initialized so it lives in `.bss`: a
+  default that is not zero would put 400 KB in the image, which is
+  exactly what happened once — and init's 256 KB loader stage reports
+  an image that does not fit as "missing from the boot archive".
+- **Segments.** MSS 1440 announced and accepted (the option is parsed
+  from the peer's SYN; 536 without one); a segment is at most that
+  plus 20 bytes of header, and the driver's frame is 2048 bytes.
 - **Ports.** Listening ports are 1–65535 as asked; connecting sockets
   take ephemeral ports from 40000 upward, wrapping back to 40000.
 - **Sequence numbers** start from the low bits of the cycle counter.
   A listener's children inherit its badge, so the accepting view owns
   them.
 - **Retransmission.** The scan runs on every drain (interrupt or
-  tick): an unacknowledged segment older than `cycleHz / 5` is resent;
-  `rexmits > 8` closes the socket. A SYN+ACK that gives up leaves a
-  closed child at the head of the backlog, which `tcp_accept` discards.
+  tick): a socket with anything unacknowledged whose timer (`rto`,
+  `cycleHz / 5` at first, doubled per retry up to 16×) has expired
+  resends its oldest unacknowledged thing — the SYN or SYN+ACK in the
+  handshake states, else the first in-flight segment from the send
+  ring, else the FIN; the ninth expiry closes the socket. A SYN+ACK
+  that gives up leaves a closed child at the head of the backlog,
+  which `tcp_accept` discards. A fresh ACK that advances resets the
+  count and the timeout.
+- **Loopback reentrancy.** On loopback an emit runs the peer, whose
+  ACK runs our input, which would send more: `tcpOutput` is guarded
+  per socket, so the nested call returns and the outer loop re-reads
+  the window it changed.
 - **Loopback ordering.** Emitting to a local address runs the peer's
   processing synchronously, inside the send, so all bookkeeping for a
   segment is done before it is emitted — the ACK may have cleared the
@@ -265,19 +300,22 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 
 ## Known limits and bugs
 
-- The stack is minimal by design: stop-and-wait with one segment in
-  flight, in-order receive, fixed windows, no options, no congestion
-  control, no UDP. It is the fabric's transport and a drill's, not a
-  general-purpose host stack.
-- Blocking is polling: `would_block` plus a doorbell. The async ring
-  transport as a wakeup path for network I/O is planned, not built.
-  The language's `connect`/`accept`/`recv`/`send` poll with a tick's
-  sleep and give up after about thirty seconds; they do not use
-  doorbells yet.
+- The stack is small by design: a send window bounded by the peer's
+  advertised window and our 4 KB ring, no congestion control, no
+  window scaling, no selective acknowledgement, in-order receive (a
+  lost segment stalls delivery until it is retransmitted), no
+  TIME_WAIT, no UDP. It is the fabric's transport and a script's, not
+  a general-purpose host stack.
+- Blocking is `would_block` plus a doorbell; the async ring transport
+  as a wakeup path for network I/O is planned, not built. The
+  language's `accept` and `recv` wait on the doorbell for as long as
+  it takes — a server's `accept` with no client never returns — and
+  `connect` and `send` until the stack gives up (about 16 s of
+  retransmission), then answer `err`.
 - The language has no `ping`, no `derive` (a script's view is what its
   manifest gave it), and no UDP because the stack has none; a socket
   value cannot cross to another program (no channel surface yet).
-- Sixteen sockets and eight views per service are static pools.
+- Thirty-two sockets and sixteen views per service are static pools.
 - A filtered view allows one destination, IPv4 by way of a unit file
   (`allow:` takes a dotted v4 address); an IPv6 allowlist can be made
   through `derive` directly but not from a unit file.

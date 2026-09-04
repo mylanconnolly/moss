@@ -8,8 +8,11 @@
 //! than failing the line: the network is the first host surface built
 //! the way the language decisions say.
 //!
-//! Waiting is polling with a tick's sleep between tries (netsvc never
-//! blocks; doorbells are the fabric's way and a later step here).
+//! Waiting is by doorbell: one notification the host hands netsvc as
+//! every socket's bell (`watch`), slept on between tries. netsvc rings
+//! it on any change — data, a connection to accept, the peer closing,
+//! a retransmission giving up — so a wait costs nothing while nothing
+//! happens and ends the moment something does.
 
 const std = @import("std");
 const shared = @import("shared");
@@ -21,6 +24,8 @@ pub const Net = struct {
     chan: u64,
     buf: [*]u8 = undefined,
     attached: bool = false,
+    /// The doorbell every socket of this host rings.
+    bell: u64 = 0,
 
     pub fn init(chan: u64) Net {
         return .{ .chan = chan };
@@ -37,13 +42,25 @@ pub const Net = struct {
             .ok => |rep| if (rep != .ok) return false,
             .err => return false,
         }
+        const b = usys.notifyCreate();
+        if (b.err != .ok) return false;
+        n.bell = b.data[0];
         n.attached = true;
         return true;
     }
+
+    /// Hang the bell on a socket, then sleep on it whenever an operation
+    /// answers would_block.
+    fn watch(n: *Net, sock: u64) void {
+        _ = usys.callTyped(shared.NetReq, shared.NetResp, n.chan, .{ .watch = .{ .sock = sock } }, n.bell);
+    }
+
+    fn wait(n: *Net) void {
+        _ = usys.notifyWait(n.bell);
+    }
 };
 
-const max_wait_ticks = 3000; // ~30 s at 100 Hz
-const piece = 512; // netsvc's tcp_send limit
+const piece = shared.net_max_send;
 
 fn ncall(n: *Net, req: shared.NetReq) ?shared.NetResp {
     return switch (usys.callTyped(shared.NetReq, shared.NetResp, n.chan, req, 0)) {
@@ -118,9 +135,10 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
             .net_err => |e| return try errResult(it, errName(e.code)),
             .ok => return it.fail("connect: unexpected reply", .{}),
         };
-        // The handshake: established, or closed (refused, or gave up).
-        var waited: usize = 0;
-        while (waited < max_wait_ticks) : (waited += 1) {
+        // The handshake: established, or closed (refused, or the SYN
+        // retransmits gave up — netsvc rings the bell either way).
+        n.watch(sock);
+        while (true) {
             const st = ncall(n, .{ .tcp_status = .{ .sock = sock } }) orelse break;
             const code = switch (st) {
                 .num => |x| x.n,
@@ -128,10 +146,10 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
             };
             if (code == @intFromEnum(shared.TcpState.established)) return try okResult(it, try it.newHandle("socket", sock, n, dropSock));
             if (code == @intFromEnum(shared.TcpState.closed)) break;
-            usys.sleep(1);
+            n.wait();
         }
         _ = ncall(n, .{ .tcp_close = .{ .sock = sock } });
-        return try errResult(it, if (waited == max_wait_ticks) "timed out" else "refused");
+        return try errResult(it, "refused");
     }
     if (is(u8, name, "listen")) {
         if (args.len != 1) return it.fail("listen: PORT expected", .{});
@@ -139,7 +157,10 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
         if (!n.attach()) return it.fail("listen: cannot attach a buffer to the network view", .{});
         const rep = ncall(n, .{ .tcp_listen = .{ .port = port } }) orelse return it.fail("listen: the network service did not answer", .{});
         return switch (rep) {
-            .num => |x| try okResult(it, try it.newHandle("listener", x.n, n, dropSock)),
+            .num => |x| blk: {
+                n.watch(x.n);
+                break :blk try okResult(it, try it.newHandle("listener", x.n, n, dropSock));
+            },
             .net_err => |e| try errResult(it, errName(e.code)),
             .ok => it.fail("listen: unexpected reply", .{}),
         };
@@ -147,17 +168,18 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     if (is(u8, name, "accept")) {
         const lv = input orelse (if (args.len > 0) args[0] else return it.fail("accept: a listener expected", .{}));
         const l = try sockArg(it, lv, "accept", "listener");
-        var waited: usize = 0;
-        while (waited < max_wait_ticks) : (waited += 1) {
+        while (true) {
             const rep = ncall(n, .{ .tcp_accept = .{ .sock = l } }) orelse return it.fail("accept: the network service did not answer", .{});
             switch (rep) {
-                .num => |x| return try okResult(it, try it.newHandle("socket", x.n, n, dropSock)),
+                .num => |x| {
+                    n.watch(x.n);
+                    return try okResult(it, try it.newHandle("socket", x.n, n, dropSock));
+                },
                 .net_err => |e| if (e.code != @intFromEnum(shared.NetErr.would_block)) return try errResult(it, errName(e.code)),
                 .ok => {},
             }
-            usys.sleep(1);
+            n.wait();
         }
-        return try errResult(it, "timed out");
     }
     if (is(u8, name, "send")) {
         if (args.len != 2) return it.fail("send: SOCKET DATA expected", .{});
@@ -168,21 +190,15 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
             else => return it.fail("send: a string or bytes expected, got a {s}", .{args[1].typeName()}),
         };
         var off: usize = 0;
-        var waited: usize = 0;
         while (off < data.len) {
             const len = @min(piece, data.len - off);
             @memcpy(n.buf[0..len], data[off .. off + len]);
             const rep = ncall(n, .{ .tcp_send = .{ .sock = s, .len = len } }) orelse return it.fail("send: the network service did not answer", .{});
             switch (rep) {
-                .num => |x| {
-                    off += x.n;
-                    waited = 0;
-                },
+                .num => |x| off += x.n,
                 .net_err => |e| {
                     if (e.code != @intFromEnum(shared.NetErr.would_block)) return try errResult(it, errName(e.code));
-                    if (waited == max_wait_ticks) return try errResult(it, "timed out");
-                    waited += 1;
-                    usys.sleep(1);
+                    n.wait(); // the bell rings when an ACK frees room
                 },
                 .ok => {},
             }
@@ -192,18 +208,16 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     if (is(u8, name, "recv")) {
         const sv = input orelse (if (args.len > 0) args[0] else return it.fail("recv: a socket expected", .{}));
         const s = try sockArg(it, sv, "recv", "socket");
-        const max: u64 = if (args.len > 1 and args[1] == .int and args[1].int > 0) @min(@as(u64, @intCast(args[1].int)), 2048) else 2048;
-        var waited: usize = 0;
-        while (waited < max_wait_ticks) : (waited += 1) {
+        const max: u64 = if (args.len > 1 and args[1] == .int and args[1].int > 0) @min(@as(u64, @intCast(args[1].int)), shared.net_max_recv) else shared.net_max_recv;
+        while (true) {
             const rep = ncall(n, .{ .tcp_recv = .{ .sock = s, .len = max } }) orelse return it.fail("recv: the network service did not answer", .{});
             switch (rep) {
                 .num => |x| return try okResult(it, .{ .bytes = try it.arena.dupe(u8, n.buf[0..x.n]) }),
                 .net_err => |e| if (e.code != @intFromEnum(shared.NetErr.would_block)) return try errResult(it, errName(e.code)),
                 .ok => {},
             }
-            usys.sleep(1);
+            n.wait();
         }
-        return try errResult(it, "timed out");
     }
     if (is(u8, name, "close")) {
         const sv = input orelse (if (args.len > 0) args[0] else return it.fail("close: a socket or listener expected", .{}));

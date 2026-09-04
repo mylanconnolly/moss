@@ -781,6 +781,11 @@ pub fn v4Words(ip: u32) [2]u64 {
     return .{ 0, 0x0000_ffff_0000_0000 | @as(u64, ip) };
 }
 
+/// The most a tcp_send queues at once (it is all or would_block) and
+/// the most a tcp_recv returns; both within the view's one-page buffer.
+pub const net_max_send: u64 = 4096;
+pub const net_max_recv: u64 = 4096;
+
 pub const NetResp = union(enum(u64)) {
     ok: void,
     num: struct { n: u64 },

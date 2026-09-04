@@ -303,7 +303,7 @@ fn etherInput(frame: []const u8) void {
 }
 
 fn ethSend(dst_mac: []const u8, ethertype: u16, payload: []const u8) void {
-    var frame: [14 + 40 + 20 + una_cap]u8 = undefined;
+    var frame: [14 + 40 + seg_max + 4]u8 = undefined;
     @memcpy(frame[0..6], dst_mac);
     @memcpy(frame[6..12], &mac);
     frame[12] = @truncate(ethertype >> 8);
@@ -543,27 +543,54 @@ const F_RST: u8 = 4;
 const F_PSH: u8 = 8;
 const F_ACK: u8 = 16;
 
-const max_socks = 16;
-const backlog_len = 4;
-const rx_cap = 2048;
-const una_cap = 640;
+const max_socks = 32;
+const backlog_len = 8;
+/// Receive buffer: also the window we advertise (free space in it).
+const rx_cap = 8192;
+/// Send buffer: unacknowledged and not-yet-sent bytes, in order.
+const snd_cap = 4096;
+/// The largest segment we send or accept (1500 MTU minus v6 + TCP
+/// headers, and what we announce in the SYN's MSS option).
+const mss_max = 1440;
+const mss_default = 536;
+const seg_max = 20 + mss_max;
+const max_rexmits = 8;
 
 const Sock = struct {
     used: bool = false,
+    /// The stack keeps a socket after its client closed it (FIN sent)
+    /// until the FIN is acknowledged or retransmission gives up; the
+    /// client's number is gone the moment it closed.
+    lingering: bool = false,
     badge: u64 = 0,
     state: shared.TcpState = .closed,
     lport: u16 = 0,
     raddr: Addr = @splat(0),
     rport: u16 = 0,
+    /// Send side. Bytes [snd_una, snd_end) live in snd_buf (a ring at
+    /// snd_head); [snd_una, snd_nxt) are in flight, [snd_nxt, snd_end)
+    /// wait for the window.
+    snd_buf: [snd_cap]u8 = undefined,
+    snd_head: usize = 0,
+    snd_una: u32 = 0,
     snd_nxt: u32 = 0,
-    rcv_nxt: u32 = 0,
-    una_buf: [una_cap]u8 = undefined,
-    una_len: usize = 0,
-    una_seq: u32 = 0,
-    una_flags: u8 = 0,
-    una_active: bool = false,
+    snd_end: u32 = 0,
+    /// The peer's advertised window (no scaling), and its MSS. Zero
+    /// defaults keep the table in .bss (sockAlloc sets them).
+    snd_wnd: u32 = 0,
+    mss: u32 = 0,
+    /// Control segments in flight: the SYN (syn_sent, syn_rcvd) and the
+    /// FIN, which take one sequence number each.
+    fin_sent: bool = false,
+    fin_seq: u32 = 0,
+    /// The oldest unacknowledged thing was (re)sent at `sent_at`;
+    /// `rexmits` retries so far, `rto` the current timeout.
     sent_at: u64 = 0,
     rexmits: u32 = 0,
+    rto: u64 = 0,
+    in_output: bool = false,
+    /// Receive side: in-order bytes the client has not taken yet.
+    rcv_nxt: u32 = 0,
     rx: [rx_cap]u8 = undefined,
     rx_len: usize = 0,
     /// Listener backlog: accepted-but-not-yet-taken connections, FIFO.
@@ -574,6 +601,23 @@ const Sock = struct {
     peer_closed: bool = false,
     /// Doorbell: a client's notification, rung on every change.
     bell: u64 = 0,
+
+    fn inFlight(s: *const Sock) u32 {
+        return s.snd_nxt -% s.snd_una;
+    }
+
+    fn queued(s: *const Sock) u32 {
+        return s.snd_end -% s.snd_una;
+    }
+
+    fn unsent(s: *const Sock) u32 {
+        return s.snd_end -% s.snd_nxt;
+    }
+
+    /// Anything the peer has yet to acknowledge, control included.
+    fn unacked(s: *const Sock) bool {
+        return s.state == .syn_sent or s.state == .syn_rcvd or s.inFlight() != 0 or (s.fin_sent and s.snd_una != s.fin_seq +% 1);
+    }
 };
 
 fn ring(s: *Sock) void {
@@ -586,28 +630,49 @@ var next_eph: u16 = 40000;
 fn sockAlloc() ?usize {
     for (&socks, 0..) |*s, i| {
         if (!s.used) {
-            s.* = .{ .used = true };
+            s.* = .{ .used = true, .snd_wnd = mss_default, .mss = mss_default };
             return i;
         }
     }
     return null;
 }
 
+/// Sequence-number order, modulo 2^32.
+fn seqLt(a: u32, b: u32) bool {
+    return @as(i32, @bitCast(a -% b)) < 0;
+}
+
+fn seqLe(a: u32, b: u32) bool {
+    return @as(i32, @bitCast(a -% b)) <= 0;
+}
+
+fn rtoInitial() u64 {
+    return usys.cycleHz() / 5; // 200 ms
+}
+
+fn armTimer(s: *Sock) void {
+    s.sent_at = usys.cycles();
+    if (s.rto == 0) s.rto = rtoInitial();
+}
+
 /// Build one TCP segment for either family; loopback feeds the stack.
-fn tcpEmit(s: *Sock, seq: u32, flags: u8, payload: []const u8) void {
-    var t: [20 + una_cap]u8 = undefined;
-    const tcp_len = 20 + payload.len;
+/// `opts` are TCP options (the SYN's MSS), already padded to 4 bytes.
+fn tcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8) void {
+    var t: [seg_max + 4]u8 = undefined;
+    const doff = 20 + opts.len;
+    const tcp_len = doff + payload.len;
     pbe16(t[0..2], s.lport);
     pbe16(t[2..4], s.rport);
     pbe32(t[4..8], seq);
     pbe32(t[8..12], if (flags & F_ACK != 0) s.rcv_nxt else 0);
-    t[12] = 5 << 4;
+    t[12] = @intCast((doff / 4) << 4);
     t[13] = flags;
-    pbe16(t[14..16], rx_cap);
+    pbe16(t[14..16], @intCast(rx_cap - s.rx_len));
     t[16] = 0;
     t[17] = 0;
     pbe16(t[18..20], 0);
-    @memcpy(t[20 .. 20 + payload.len], payload);
+    @memcpy(t[20..doff], opts);
+    @memcpy(t[doff .. doff + payload.len], payload);
 
     const v4 = isV4Mapped(s.raddr);
     const local = isLocalAddr(s.raddr);
@@ -640,7 +705,7 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, payload: []const u8) void {
         return;
     }
     if (v4) {
-        var pkt: [20 + 20 + una_cap]u8 = undefined;
+        var pkt: [20 + seg_max + 4]u8 = undefined;
         const total = 20 + tcp_len;
         pkt[0] = 0x45;
         pkt[1] = 0;
@@ -661,7 +726,7 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, payload: []const u8) void {
         @memcpy(pkt[20 .. 20 + tcp_len], t[0..tcp_len]);
         if (have_gw4) ethSend(&gw_mac, 0x0800, pkt[0..total]);
     } else {
-        var pkt: [40 + 20 + una_cap]u8 = undefined;
+        var pkt: [40 + seg_max + 4]u8 = undefined;
         pkt[0] = 0x60;
         pkt[1] = 0;
         pkt[2] = 0;
@@ -676,39 +741,128 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, payload: []const u8) void {
     }
 }
 
-fn tcpSendTracked(s: *Sock, flags: u8, payload: []const u8) void {
-    // ALL bookkeeping before emitting: on loopback, tcpEmit synchronously
-    // runs the peer's processing — including the ACK that clears una — so
-    // anything written after emit would clobber a completed exchange.
-    const seq = s.snd_nxt;
-    s.una_seq = seq;
-    s.una_flags = flags;
-    s.una_len = payload.len;
-    @memcpy(s.una_buf[0..payload.len], payload);
-    s.una_active = true;
-    s.sent_at = usys.cycles();
-    s.rexmits = 0;
-    s.snd_nxt +%= @intCast(payload.len);
-    if (flags & (F_SYN | F_FIN) != 0) s.snd_nxt +%= 1;
-    tcpEmit(s, seq, flags, payload);
+/// The MSS option we announce.
+fn mssOption() [4]u8 {
+    return .{ 2, 4, mss_max >> 8, mss_max & 0xff };
 }
 
+/// Send the SYN (or SYN+ACK): tracked by state, retransmitted by the
+/// scan. ALL bookkeeping before emitting: on loopback, tcpEmit
+/// synchronously runs the peer's processing — including the reply
+/// that moves this socket along — so anything written after emit would
+/// clobber a completed exchange.
+fn tcpSendSyn(s: *Sock, flags: u8) void {
+    const seq = s.snd_nxt;
+    s.snd_una = seq;
+    s.snd_nxt = seq +% 1;
+    s.snd_end = s.snd_nxt;
+    s.rexmits = 0;
+    s.rto = 0;
+    armTimer(s);
+    tcpEmit(s, seq, flags, &mssOption(), "");
+}
+
+/// Send the FIN once everything queued has gone out.
+fn tcpSendFin(s: *Sock) void {
+    if (s.fin_sent) return;
+    s.fin_sent = true;
+    s.fin_seq = s.snd_nxt;
+    s.snd_nxt +%= 1;
+    s.snd_end = s.snd_nxt;
+    if (s.inFlight() == 1) {
+        s.rexmits = 0;
+        s.rto = 0;
+        armTimer(s);
+    }
+    tcpEmit(s, s.fin_seq, F_FIN | F_ACK, "", "");
+}
+
+/// A slice of the send ring starting at sequence `seq`, at most `len`
+/// bytes, copied out (the ring may wrap).
+fn sndSlice(s: *Sock, seq: u32, len: usize, out: []u8) []const u8 {
+    const off: usize = @intCast(seq -% s.snd_una);
+    const n = @min(len, out.len);
+    for (0..n) |i| out[i] = s.snd_buf[(s.snd_head + off + i) % snd_cap];
+    return out[0..n];
+}
+
+/// Send what the window allows: segments of at most `mss` while the
+/// peer's window has room. Reentrant-safe: on loopback an emit runs
+/// the peer, whose ACK can call back in here; the inner call returns
+/// and the outer loop re-reads the state it changed.
+fn tcpOutput(s: *Sock) void {
+    if (s.in_output) return;
+    if (s.state != .established and s.state != .close_wait) return;
+    s.in_output = true;
+    defer s.in_output = false;
+    var scratch: [mss_max]u8 = undefined;
+    while (true) {
+        const pending = s.unsent();
+        if (pending == 0) break;
+        if (s.fin_sent and s.snd_nxt == s.fin_seq) break; // only the FIN is left
+        const window = @max(s.snd_wnd, 1);
+        const flight = s.inFlight();
+        if (flight >= window) break;
+        var len: u32 = @min(pending, window - flight);
+        len = @min(len, s.mss);
+        if (s.fin_sent) len = @min(len, s.fin_seq -% s.snd_nxt);
+        if (len == 0) break;
+        const seq = s.snd_nxt;
+        const data = sndSlice(s, seq, len, &scratch);
+        s.snd_nxt +%= len;
+        if (flight == 0) {
+            s.rexmits = 0;
+            s.rto = 0;
+            armTimer(s);
+        }
+        tcpEmit(s, seq, F_PSH | F_ACK, "", data);
+    }
+}
+
+/// Retransmit the oldest unacknowledged thing on every socket whose
+/// timer expired, doubling the timeout each time; give up after
+/// max_rexmits and close (the doorbell rings).
 fn retransmitScan() void {
-    const thresh = usys.cycleHz() / 5;
     const now = usys.cycles();
     for (&socks) |*s| {
-        if (!s.used or !s.una_active) continue;
-        if (now - s.sent_at < thresh) continue;
-        if (s.rexmits > 8) {
-            s.state = .closed;
-            s.una_active = false;
-            ring(s);
+        if (!s.used or !s.unacked()) continue;
+        if (now - s.sent_at < s.rto) continue;
+        if (s.rexmits >= max_rexmits) {
+            sockDead(s);
             continue;
         }
         s.rexmits += 1;
+        s.rto = @min(s.rto * 2, rtoInitial() * 16);
         s.sent_at = now;
-        tcpEmit(s, s.una_seq, s.una_flags, s.una_buf[0..s.una_len]);
+        switch (s.state) {
+            .syn_sent => tcpEmit(s, s.snd_una, F_SYN, &mssOption(), ""),
+            .syn_rcvd => tcpEmit(s, s.snd_una, F_SYN | F_ACK, &mssOption(), ""),
+            else => {
+                if (s.inFlight() != 0 and !(s.fin_sent and s.snd_una == s.fin_seq)) {
+                    var scratch: [mss_max]u8 = undefined;
+                    const len: u32 = @min(@min(s.inFlight(), s.mss), if (s.fin_sent) s.fin_seq -% s.snd_una else s.mss);
+                    const data = sndSlice(s, s.snd_una, len, &scratch);
+                    tcpEmit(s, s.snd_una, F_PSH | F_ACK, "", data);
+                } else if (s.fin_sent) {
+                    tcpEmit(s, s.fin_seq, F_FIN | F_ACK, "", "");
+                }
+            },
+        }
     }
+}
+
+/// The connection is gone (RST, or retransmission gave up): the client
+/// learns `closed`; a lingering socket is simply freed.
+fn sockDead(s: *Sock) void {
+    if (s.lingering) {
+        s.* = .{};
+        return;
+    }
+    s.state = .closed;
+    s.snd_nxt = s.snd_una;
+    s.snd_end = s.snd_una;
+    s.fin_sent = false;
+    ring(s);
 }
 
 fn tcpInput(src: Addr, seg: []const u8) void {
@@ -719,13 +873,14 @@ fn tcpInput(src: Addr, seg: []const u8) void {
     const ack = be32(seg[8..12]);
     const doff: usize = @as(usize, seg[12] >> 4) * 4;
     const flags = seg[13];
-    if (doff > seg.len) return;
+    const wnd = be16(seg[14..16]);
+    if (doff < 20 or doff > seg.len) return;
     const payload = seg[doff..];
 
     for (&socks) |*s| {
         if (!s.used or s.state == .listen or s.state == .closed) continue;
         if (s.lport != dport or s.rport != sport or !addrEq(s.raddr, src)) continue;
-        sockInput(s, seq, ack, flags, payload);
+        sockInput(s, seq, ack, flags, wnd, seg[20..doff], payload);
         return;
     }
     if (flags & F_SYN != 0 and flags & F_ACK == 0) {
@@ -741,41 +896,75 @@ fn tcpInput(src: Addr, seg: []const u8) void {
             c.raddr = src;
             c.rport = sport;
             c.rcv_nxt = seq +% 1;
+            c.snd_wnd = wnd;
+            c.mss = peerMss(seg[20..doff]);
             c.snd_nxt = @truncate(usys.cycles());
-            tcpSendTracked(c, F_SYN | F_ACK, "");
             l.backlog[l.backlog_n] = @intCast(ci);
             l.backlog_n += 1;
+            tcpSendSyn(c, F_SYN | F_ACK);
             ring(l);
             return;
         }
     }
 }
 
-fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, payload: []const u8) void {
-    defer ring(s);
+/// The peer's MSS option, if it sent one; capped at what we send.
+fn peerMss(opts: []const u8) u32 {
+    var i: usize = 0;
+    while (i < opts.len) {
+        const kind = opts[i];
+        if (kind == 0) break;
+        if (kind == 1) {
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= opts.len) break;
+        const len = opts[i + 1];
+        if (len < 2 or i + len > opts.len) break;
+        if (kind == 2 and len == 4) {
+            const m = be16(opts[i + 2 .. i + 4]);
+            return @min(@max(m, 64), mss_max);
+        }
+        i += len;
+    }
+    return mss_default;
+}
+
+fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, wnd: u16, opts: []const u8, payload: []const u8) void {
+    defer if (!s.lingering) ring(s);
     if (flags & F_RST != 0) {
-        s.state = .closed;
-        s.una_active = false;
+        sockDead(s);
         return;
     }
-    if (flags & F_ACK != 0 and s.una_active and ack == s.snd_nxt) {
-        s.una_active = false;
-        if (s.state == .syn_rcvd) {
-            s.state = .established;
-            // The listener's client waits on accept; the newly
-            // established socket is what it will take.
-            for (&socks) |*l| {
-                if (l.used and l.state == .listen and l.lport == s.lport) ring(l);
+    if (flags & F_ACK != 0) {
+        // A cumulative ACK: drop what it covers from the send ring.
+        if (seqLt(s.snd_una, ack) and seqLe(ack, s.snd_nxt)) {
+            var covered: u32 = ack -% s.snd_una;
+            if (s.state == .syn_sent or s.state == .syn_rcvd) covered -= 1; // the SYN
+            if (s.fin_sent and ack == s.fin_seq +% 1) covered -= 1; // the FIN
+            s.snd_head = (s.snd_head + covered) % snd_cap;
+            s.snd_una = ack;
+            s.rexmits = 0;
+            s.rto = 0;
+            if (s.unacked()) armTimer(s);
+            if (s.state == .syn_rcvd) {
+                s.state = .established;
+                // The listener's client waits on accept; the newly
+                // established socket is what it will take.
+                for (&socks) |*l| {
+                    if (l.used and l.state == .listen and l.lport == s.lport) ring(l);
+                }
             }
         }
+        s.snd_wnd = wnd;
     }
     switch (s.state) {
         .syn_sent => {
-            if (flags & F_SYN != 0 and flags & F_ACK != 0) {
+            if (flags & F_SYN != 0 and flags & F_ACK != 0 and ack == s.snd_nxt) {
                 s.rcv_nxt = seq +% 1;
-                s.una_active = false;
+                s.mss = peerMss(opts);
                 s.state = .established;
-                tcpEmit(s, s.snd_nxt, F_ACK, "");
+                tcpEmit(s, s.snd_nxt, F_ACK, "", "");
             }
             return;
         },
@@ -785,7 +974,11 @@ fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, payload: []const u8) void 
     var advance = false;
     if (payload.len > 0 and seq == s.rcv_nxt) {
         const room = rx_cap - s.rx_len;
-        if (payload.len <= room) {
+        if (s.lingering) {
+            // Nobody will read it; acknowledge and drop.
+            s.rcv_nxt +%= @intCast(payload.len);
+            advance = true;
+        } else if (payload.len <= room) {
             @memcpy(s.rx[s.rx_len .. s.rx_len + payload.len], payload);
             s.rx_len += payload.len;
             s.rcv_nxt +%= @intCast(payload.len);
@@ -799,13 +992,22 @@ fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, payload: []const u8) void 
         advance = true;
     }
     if (advance or payload.len > 0) {
-        tcpEmit(s, s.snd_nxt, F_ACK, "");
+        tcpEmit(s, s.snd_nxt, F_ACK, "", "");
     }
+    // A lingering socket is done once its FIN is acknowledged and the
+    // peer has closed too (or just acknowledged: a half-open peer may
+    // never close, and the socket is not worth keeping for it).
+    if (s.lingering and s.fin_sent and s.snd_una == s.fin_seq +% 1) {
+        s.* = .{};
+        return;
+    }
+    // The ACK may have opened the window.
+    tcpOutput(s);
 }
 
 // ---------------------------------------------------------- serving views
 
-const max_views = 8;
+const max_views = 16;
 const NetView = struct {
     used: bool = false,
     filtered: bool = false,
@@ -918,7 +1120,7 @@ fn nerr(code: shared.NetErr) shared.NetResp {
 fn sockOf(badge: u64, idx: u64) ?*Sock {
     if (idx >= max_socks) return null;
     const s = &socks[idx];
-    if (!s.used or s.badge != badge) return null;
+    if (!s.used or s.lingering or s.badge != badge) return null;
     return s;
 }
 
@@ -948,7 +1150,7 @@ fn opConnect(v: *NetView, badge: u64, hi: u64, lo: u64, port: u64) shared.NetRes
     s.raddr = dst;
     s.rport = @intCast(port);
     s.snd_nxt = @truncate(usys.cycles());
-    tcpSendTracked(s, F_SYN, "");
+    tcpSendSyn(s, F_SYN);
     return .{ .num = .{ .n = i } };
 }
 
@@ -978,19 +1180,27 @@ fn backlogPop(l: *Sock) void {
     l.backlog_n -= 1;
 }
 
+/// Queue the payload whole (or would_block: a partial send would leave
+/// a client that assumes all-or-nothing with a torn message) and send
+/// what the window allows.
 fn opSend(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     const s = sockOf(badge, idx) orelse return nerr(.bad);
     if (s.state != .established and s.state != .close_wait) return nerr(.closed);
-    if (v.buf == 0 or len == 0 or len > 512) return nerr(.bad);
-    if (s.una_active) return nerr(.would_block);
+    if (v.buf == 0 or len == 0 or len > shared.net_max_send) return nerr(.bad);
+    if (s.fin_sent) return nerr(.closed);
+    const free = snd_cap - s.queued();
+    if (len > free) return nerr(.would_block);
     const src = @as([*]const u8, @ptrFromInt(v.buf))[0..len];
-    tcpSendTracked(s, F_PSH | F_ACK, src);
+    const tail = (s.snd_head + s.queued()) % snd_cap;
+    for (src, 0..) |c, i| s.snd_buf[(tail + i) % snd_cap] = c;
+    s.snd_end +%= @intCast(len);
+    tcpOutput(s);
     return .{ .num = .{ .n = len } };
 }
 
 fn opRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     const s = sockOf(badge, idx) orelse return nerr(.bad);
-    if (v.buf == 0 or len == 0 or len > 2048) return nerr(.bad);
+    if (v.buf == 0 or len == 0 or len > shared.net_max_recv) return nerr(.bad);
     if (s.rx_len == 0) {
         if (s.peer_closed or s.state == .closed) return nerr(.closed);
         return nerr(.would_block);
@@ -1015,11 +1225,20 @@ fn opWatch(badge: u64, idx: u64, bell: u64) shared.NetResp {
     return .ok;
 }
 
+/// The client is done with the socket. A connection sends its FIN and
+/// lingers in the stack, unaddressable, until the FIN is acknowledged
+/// (queued data goes first, the FIN after it) or retransmission gives
+/// up; anything else is freed on the spot.
 fn opClose(badge: u64, idx: u64) shared.NetResp {
     const s = sockOf(badge, idx) orelse return nerr(.bad);
     if (s.bell != 0) _ = usys.capDrop(s.bell);
+    s.bell = 0;
     if (s.state == .established or s.state == .close_wait) {
-        tcpEmit(s, s.snd_nxt, F_FIN | F_ACK, "");
+        s.lingering = true;
+        s.badge = 0;
+        s.rx_len = 0;
+        tcpSendFin(s);
+        return .ok;
     }
     s.* = .{};
     return .ok;
@@ -1037,7 +1256,7 @@ fn opPing(v: *NetView, hi: u64, lo: u64) shared.NetResp {
 fn releaseView(badge: u64) void {
     if (badge == 0 or badge >= max_views or !views[badge].used) return;
     for (&socks, 0..) |*s, i| {
-        if (s.used and s.badge == badge) _ = opClose(badge, i);
+        if (s.used and !s.lingering and s.badge == badge) _ = opClose(badge, i);
     }
     if (views[badge].buf != 0) _ = usys.shmUnmap(views[badge].buf);
     views[badge] = .{};
