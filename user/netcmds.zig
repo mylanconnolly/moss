@@ -33,7 +33,7 @@ pub const Net = struct {
 
     pub fn attach(n: *Net) bool {
         if (n.attached) return true;
-        const s = usys.shmCreate(1);
+        const s = usys.shmCreate(shared.net_buf_pages);
         if (s.err != .ok) return false;
         const m = usys.shmMap(s.data[0]);
         if (m.err != .ok) return false;

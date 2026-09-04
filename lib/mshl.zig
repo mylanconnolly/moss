@@ -293,6 +293,13 @@ pub const Interp = struct {
     scope: ?*Scope = null,
     /// The running function's locals, or null at a top level.
     frame: ?*Frame = null,
+    /// Frames of calls that returned, kept for the next call: calls nest
+    /// last-in first-out, so a line's frames cost its deepest nesting,
+    /// not its number of calls (a `map` over ten thousand items reused
+    /// one frame, once this existed).
+    free_frames: std.ArrayList(*Frame) = .empty,
+    /// Frames ever created in this line (a statistic for the tests).
+    frames_made: usize = 0,
     /// Rendered output of the last evaluation.
     out: std.ArrayList(u8) = .empty,
     /// The message behind the last Syntax/Runtime error.
@@ -327,6 +334,7 @@ pub const Interp = struct {
     /// until the next call.
     pub fn run(self: *Interp, src: []const u8) Error!Value {
         self.out = .empty;
+        self.free_frames = .empty; // the host reset the arena: the pool went with it
         self.reclaim();
         var p = Parser{ .it = self, .lex = Lexer{ .src = src } };
         const prog = try p.program();
@@ -361,6 +369,7 @@ pub const Interp = struct {
     /// rendered (a host that shows output as it happens — a script
     /// that serves forever still says it started).
     pub fn evalScriptEach(self: *Interp, src: []const u8, out: *std.ArrayList(u8), sink: ?*const fn (text: []const u8) void) Error!Value {
+        if (self.frame == null) self.free_frames = .empty;
         var p = Parser{ .it = self, .lex = Lexer{ .src = src } };
         const prog = try p.program();
         var last: Value = .nothing;
@@ -975,8 +984,8 @@ pub const Interp = struct {
     pub fn callValue(self: *Interp, fv: Value, args: []const Value, input: ?Value, names: ?[]const []const u8) Error!Value {
         if (fv != .func) return self.fail("cannot call a {s}", .{fv.typeName()});
         const cl = fv.func;
-        const fr = try self.arena.create(Frame);
-        fr.* = .{ .input = input };
+        const fr = try self.allocFrame(input);
+        errdefer self.releaseFrame(fr);
         for (cl.captures) |c| try fr.set(self.arena, c.name, c.value);
         try fr.set(self.arena, "in", input orelse .nothing);
         if (cl.implicit) {
@@ -998,6 +1007,7 @@ pub const Interp = struct {
             self.frame = saved_frame;
             self.scope = saved_scope;
             self.row = saved_row;
+            self.releaseFrame(fr);
         }
         return self.evalNode(cl.body) catch |e| {
             if (e == Error.Runtime and self.propagating) {
@@ -1006,6 +1016,24 @@ pub const Interp = struct {
             }
             return e;
         };
+    }
+
+    fn allocFrame(self: *Interp, input: ?Value) Error!*Frame {
+        if (self.free_frames.pop()) |fr| {
+            fr.input = input;
+            return fr;
+        }
+        const fr = try self.arena.create(Frame);
+        fr.* = .{ .input = input };
+        self.frames_made += 1;
+        return fr;
+    }
+
+    fn releaseFrame(self: *Interp, fr: *Frame) void {
+        fr.names.clearRetainingCapacity();
+        fr.vals.clearRetainingCapacity();
+        fr.input = null;
+        self.free_frames.append(self.arena, fr) catch {}; // lost to the arena, not leaked
     }
 
     fn evalCallv(self: *Interp, c: Callv, input: ?Value) Error!Value {
@@ -1212,11 +1240,14 @@ pub const Interp = struct {
         // `$it` binds in a frame: the running function's, or one for the
         // duration (the session's names stay visible through it).
         const saved_frame = self.frame;
-        defer self.frame = saved_frame;
+        var temp: ?*Frame = null;
+        defer {
+            self.frame = saved_frame;
+            if (temp) |t| self.releaseFrame(t);
+        }
         if (self.frame == null) {
-            const fr = try self.arena.create(Frame);
-            fr.* = .{ .input = null };
-            self.frame = fr;
+            temp = try self.allocFrame(null);
+            self.frame = temp;
         }
         switch (in) {
             .table => |t| {
@@ -3361,6 +3392,20 @@ test "memory: boxes are counted exactly and released when unbound" {
     // Rebinding inside a loop over the old value: the box outlives the
     // statement, not the line (the leak check at deinit is the proof).
     try expectOut(it, "let big = (range 0 100); for x in $big { let big = [$x] }; $big", "99\n");
+}
+
+test "calls reuse frames: ten thousand block calls cost one frame's worth" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    it.frames_made = 0;
+    try expectOut(it, "range 0 10000 | map { $it * 2 } | reduce 0 { $acc + $it }", "99990000\n");
+    // Two verbs, each one frame reused ten thousand times.
+    try std.testing.expect(it.frames_made <= 2);
+    it.frames_made = 0;
+    try expectOut(it, "def depth [n] { if $n == 0 { 0 } else { 1 + (depth ($n - 1)) } }; depth 50", "50\n");
+    try std.testing.expectEqual(@as(usize, 51), it.frames_made); // nesting costs frames; repetition does not
 }
 
 test "handles: a host capability as a value, dropped at the last use" {

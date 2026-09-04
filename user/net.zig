@@ -19,6 +19,7 @@
 //!                 that works; v4 gateway, v6 gateway, loopback, listen,
 //!                 and derive are all refused.
 
+const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const virtio = @import("virtio.zig");
@@ -546,12 +547,16 @@ const F_RST: u8 = 4;
 const F_PSH: u8 = 8;
 const F_ACK: u8 = 16;
 
-const max_socks = 32;
+/// 16 sockets of 96 KB: a fabric node holds a handful of links and a
+/// few sessions; a script, a few sockets.
+const max_socks = 16;
 const backlog_len = 8;
-/// Receive buffer: also the window we advertise (free space in it).
-const rx_cap = 8192;
-/// Send buffer: unacknowledged and not-yet-sent bytes, in order.
-const snd_cap = 4096;
+/// Receive buffer: also the window we advertise (free space in it) —
+/// two full exchanges of the fabric's bulk transport.
+const rx_cap = 65536;
+/// Send buffer: unacknowledged and not-yet-sent bytes, in order; one
+/// whole tcp_send (net_max_send) fits when it is empty.
+const snd_cap = 32768;
 /// The largest segment we send or accept (1500 MTU minus v6 + TCP
 /// headers, and what we announce in the SYN's MSS option).
 const mss_max = 1440;
@@ -578,7 +583,6 @@ const Sock = struct {
     /// Send side. Bytes [snd_una, snd_end) live in snd_buf (a ring at
     /// snd_head); [snd_una, snd_nxt) are in flight, [snd_nxt, snd_end)
     /// wait for the window.
-    snd_buf: [snd_cap]u8 = undefined,
     snd_head: usize = 0,
     snd_una: u32 = 0,
     snd_nxt: u32 = 0,
@@ -602,7 +606,6 @@ const Sock = struct {
     closed_at: u64 = 0,
     /// Receive side: in-order bytes the client has not taken yet.
     rcv_nxt: u32 = 0,
-    rx: [rx_cap]u8 = undefined,
     rx_len: usize = 0,
     /// Listener backlog: accepted-but-not-yet-taken connections, FIFO.
     /// One slot was a bug: a second SYN overwrote the first, orphaning an
@@ -636,6 +639,23 @@ fn ring(s: *Sock) void {
 }
 
 var socks: [max_socks]Sock = @splat(.{});
+/// The buffers live beside the table, not in it: a Sock stays a few
+/// hundred bytes, so resetting one is not a 96 KB copy through the
+/// stack (which is exactly what a struct literal of a big record is).
+var snd_bufs: [max_socks][snd_cap]u8 = undefined;
+var rx_bufs: [max_socks][rx_cap]u8 = undefined;
+
+fn sockIdx(s: *const Sock) usize {
+    return (@intFromPtr(s) - @intFromPtr(&socks[0])) / @sizeOf(Sock);
+}
+
+fn sndBuf(s: *const Sock) *[snd_cap]u8 {
+    return &snd_bufs[sockIdx(s)];
+}
+
+fn rxBuf(s: *const Sock) *[rx_cap]u8 {
+    return &rx_bufs[sockIdx(s)];
+}
 var next_eph: u16 = 40000;
 
 fn sockAlloc() ?usize {
@@ -678,7 +698,10 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8)
     pbe32(t[8..12], if (flags & F_ACK != 0) s.rcv_nxt else 0);
     t[12] = @intCast((doff / 4) << 4);
     t[13] = flags;
-    pbe16(t[14..16], @intCast(rx_cap - s.rx_len));
+    // The window field is 16 bits (no scaling): a 64 KB buffer advertises
+    // at most 65535 — the checked cast that first caught this panicked the
+    // whole service, silently.
+    pbe16(t[14..16], @intCast(@min(rx_cap - s.rx_len, 65535)));
     t[16] = 0;
     t[17] = 0;
     pbe16(t[18..20], 0);
@@ -793,7 +816,7 @@ fn tcpSendFin(s: *Sock) void {
 fn sndSlice(s: *Sock, seq: u32, len: usize, out: []u8) []const u8 {
     const off: usize = @intCast(seq -% s.snd_una);
     const n = @min(len, out.len);
-    for (0..n) |i| out[i] = s.snd_buf[(s.snd_head + off + i) % snd_cap];
+    for (0..n) |i| out[i] = sndBuf(s)[(s.snd_head + off + i) % snd_cap];
     return out[0..n];
 }
 
@@ -995,7 +1018,7 @@ fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, wnd: u16, opts: []const u8
             s.rcv_nxt +%= @intCast(payload.len);
             advance = true;
         } else if (payload.len <= room) {
-            @memcpy(s.rx[s.rx_len .. s.rx_len + payload.len], payload);
+            @memcpy(rxBuf(s)[s.rx_len .. s.rx_len + payload.len], payload);
             s.rx_len += payload.len;
             s.rcv_nxt +%= @intCast(payload.len);
             advance = true;
@@ -1212,7 +1235,7 @@ fn opSend(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     if (len > free) return nerr(.would_block);
     const src = @as([*]const u8, @ptrFromInt(v.buf))[0..len];
     const tail = (s.snd_head + s.queued()) % snd_cap;
-    for (src, 0..) |c, i| s.snd_buf[(tail + i) % snd_cap] = c;
+    for (src, 0..) |c, i| sndBuf(s)[(tail + i) % snd_cap] = c;
     s.snd_end +%= @intCast(len);
     tcpOutput(s);
     return .{ .num = .{ .n = len } };
@@ -1227,9 +1250,9 @@ fn opRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     }
     const n = @min(len, s.rx_len);
     const dst = @as([*]u8, @ptrFromInt(v.buf))[0..n];
-    @memcpy(dst, s.rx[0..n]);
+    @memcpy(dst, rxBuf(s)[0..n]);
     if (n < s.rx_len) {
-        for (0..s.rx_len - n) |i| s.rx[i] = s.rx[n + i];
+        for (0..s.rx_len - n) |i| rxBuf(s)[i] = rxBuf(s)[n + i];
     }
     s.rx_len -= n;
     return .{ .num = .{ .n = n } };
@@ -1328,9 +1351,14 @@ fn nattach(chan: u64) u64 {
 fn ncall(chan: u64, req: shared.NetReq) shared.NetResp {
     switch (usys.callTyped(shared.NetReq, shared.NetResp, chan, req, 0)) {
         .ok => |rep| return rep,
-        .err => usys.exit(223),
+        .err => |e| {
+            var l: [64]u8 = undefined;
+            _ = usys.log(client_log, std.fmt.bufPrint(&l, "net client: call failed: {t}", .{e}) catch "net client: call failed");
+            usys.exit(223);
+        },
     }
 }
+var client_log: u64 = 0;
 
 fn nnum(resp: shared.NetResp) ?u64 {
     return switch (resp) {
@@ -1390,6 +1418,7 @@ fn echoRoundTrip(chan: u64, buf: [*]u8, sock: u64, msg: []const u8) bool {
 }
 
 fn echosrv(log_h: u64, chan_h: u64) noreturn {
+    client_log = log_h;
     // The buffer is attached for the view; echoing reuses it server-side
     // (recv lands data exactly where send reads it), so no local access.
     _ = nattach(chan_h);
@@ -1426,6 +1455,7 @@ fn echosrv(log_h: u64, chan_h: u64) noreturn {
 }
 
 fn echocli(log_h: u64, chan_h: u64) noreturn {
+    client_log = log_h;
     const buf: [*]u8 = @ptrFromInt(nattach(chan_h));
 
     // Leg 1: loopback TCP over v4-mapped addressing.
@@ -1468,6 +1498,7 @@ fn echocli(log_h: u64, chan_h: u64) noreturn {
 }
 
 fn boxed(log_h: u64, chan_h: u64) noreturn {
+    client_log = log_h;
     const buf: [*]u8 = @ptrFromInt(nattach(chan_h));
 
     const s = connectTo(chan_h, shared.v4Words(shared.net_echo_ip4), shared.net_echo_port) orelse usys.exit(260);

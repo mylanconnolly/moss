@@ -233,9 +233,12 @@ is a plan.
   `fw_bulk`/`fw_bulk_resp`/`fw_release`, wire v6, `remote NODE { … }`
   with `mshrun` as the stage); ✅ one home across the fabric (landed
   2026-09-04: the lease, the identity proof, the remote backing view,
-  the wiped-disk drill); still open: the home service's local block
-  cache and wider transport frames (the performance step), moving a
-  home (an administrative action), publish and lookup from the language
+  the wiped-disk drill); ✅ its speed (landed 2026-09-04: a 32 KB
+  read-ahead window in the home service, 32 KB per exchange end to
+  end, a cold 64 KB read from 55 ms to 4 ms, measured on every gate
+  run); still open: moving a home (an administrative action), a
+  write-back cache beyond mossfs's own commit batching if a workload
+  ever asks, publish and lookup from the language
   (a script serves no channel and a raw channel would be untyped — this
   waits for a typed channel surface), more than one buffer per session,
   notifications across nodes; (5) tooling, host-side in
@@ -375,6 +378,17 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **Users, stage 4b: the remote home's speed** (done, 2026-09-04): a
+  32 KB read-ahead window in the home service's backing layer (sound
+  under the lease), 32 KB per exchange through netsvc and the fabric
+  (send ring 32 KB, receive 64 KB, 16 sockets, frames to match), `now`
+  and `sleep` in the language, call frames pooled per line; the
+  fabric-login drill prints write, warm-read and cold-read times: 2, 2
+  and 4 ms for 64 KB, from 55 cold. Found: a struct-literal reset of a
+  96 KB socket record overflowed the stack (buffers moved beside the
+  tables); an empty 64 KB receive buffer advertised 65536 in a 16-bit
+  field and the checked cast panicked netsvc silently (capped); the
+  language made a frame per call and ran out of arena at ten thousand.
 - ✅ **Users, stage 4: one home, wherever you log in** (done,
   2026-09-04): a fabric login leases the user's home from the node that
   holds it — a challenge, a signature under the identity key through

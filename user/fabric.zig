@@ -216,9 +216,9 @@ const max_peers = 6;
 const max_sessions = 16; // sessions and exports: a node hosting both remote stages and remote homes needs headroom
 const max_members = 8;
 /// Per-peer receive buffer: two bulk frames' worth.
-const rxbuf_cap = 8192;
-/// A frame never exceeds the network view's one-page send buffer.
-const frame_max = 4096;
+const rxbuf_cap = 2 * frame_max;
+/// A frame never exceeds the network view's send buffer (one tcp_send).
+const frame_max = shared.net_max_send;
 /// A session buffer (either side), shadowed for diffing.
 const bulk_cap = shared.fab_bulk_pages * 4096;
 const ping_every = 5; // polls between heartbeats
@@ -248,9 +248,16 @@ const Peer = struct {
     rx_key: [16]u8 = @splat(0),
     tx_ctr: u64 = 0,
     rx_ctr: u64 = 0,
-    rx: [rxbuf_cap]u8 = undefined,
     rxlen: usize = 0,
 };
+
+/// Receive buffers beside the peer table (see netsvc: a record with a
+/// 64 KB buffer in it cannot be reset by a struct literal).
+var peer_rx: [max_peers][rxbuf_cap]u8 = undefined;
+
+fn peerRx(p: *const Peer) *[rxbuf_cap]u8 {
+    return &peer_rx[(@intFromPtr(p) - @intFromPtr(&peers[0])) / @sizeOf(Peer)];
+}
 
 /// The membership view: what this node believes about the fabric. All
 /// liveness is counted on OUR poll tick — no shared clock anywhere.
@@ -1004,7 +1011,7 @@ fn sealFrame(p: *Peer, inner: []const u8, out: []u8) usize {
 // ------------------------------------------------------- net plumbing
 
 fn netAttach() void {
-    const s = usys.shmCreate(1);
+    const s = usys.shmCreate(shared.net_buf_pages);
     if (s.err != .ok) usys.exit(152);
     const m = usys.shmMap(s.data[0]);
     if (m.err != .ok) usys.exit(153);
@@ -1048,15 +1055,19 @@ fn wouldBlock(resp: shared.NetResp) bool {
 /// authenticated peers get it sealed (AEGIS + counter nonce). Failure
 /// (hard error or retries exhausted) is a PEER FAILURE: membership
 /// learns immediately, not on the next silent timeout.
+/// Frame-sized scratch, static: the serve thread alone sends, and 32 KB
+/// twice over is more than a thread's stack should carry.
+var seal_buf: [frame_max]u8 = undefined;
+var bulk_buf: [4 + 10 + shared.fab_bulk_chunk]u8 = undefined;
+
 fn sendFrame(p: *Peer, frame: []const u8) bool {
     if (frame.len + 4 + 16 > frame_max) {
         _ = usys.log(glog, "fabsvc: frame too large to send; dropped");
         return false;
     }
     if (p.greeted) {
-        var sealed: [frame_max]u8 = undefined;
-        const n = sealFrame(p, frame, &sealed);
-        return sendFrameN(p, sealed[0..n], 30);
+        const n = sealFrame(p, frame, &seal_buf);
+        return sendFrameN(p, seal_buf[0..n], 30);
     }
     return sendFrameN(p, frame, 30);
 }
@@ -1139,10 +1150,12 @@ fn pumpAll() void {
     }
 }
 
+var inner_buf: [rxbuf_cap]u8 = undefined;
+
 fn pumpPeer(p: *Peer) void {
     const buf: [*]const u8 = @ptrFromInt(net_buf);
     while (true) {
-        const resp = ncall(.{ .tcp_recv = .{ .sock = p.sock, .len = 4096 } });
+        const resp = ncall(.{ .tcp_recv = .{ .sock = p.sock, .len = shared.net_max_recv } });
         const n = nnum(resp) orelse {
             if (!wouldBlock(resp)) {
                 // TCP-level death is instant membership news.
@@ -1155,34 +1168,34 @@ fn pumpPeer(p: *Peer) void {
             peerFailed(p, "frame buffer overrun");
             break;
         }
-        @memcpy(p.rx[p.rxlen .. p.rxlen + n], buf[0..n]);
+        @memcpy(peerRx(p)[p.rxlen .. p.rxlen + n], buf[0..n]);
         p.rxlen += n;
     }
     // Process complete frames: [len u16][type u8][ver u8][payload].
     while (p.rxlen >= 4) {
-        const flen = leu16(p.rx[0..2]);
+        const flen = leu16(peerRx(p)[0..2]);
         if (flen < 4 or flen > rxbuf_cap) {
             _ = usys.log(glog, "fabsvc: malformed frame length; peer dropped");
             peerFailed(p, "malformed frame");
             return;
         }
         if (p.rxlen < flen) return;
-        if (p.rx[3] != shared.fabric_ver) {
+        if (peerRx(p)[3] != shared.fabric_ver) {
             _ = usys.log(glog, "fabsvc: wire version mismatch; peer dropped");
             peerFailed(p, "wire version mismatch");
             return;
         }
-        const ftype = p.rx[2];
+        const ftype = peerRx(p)[2];
         if (ftype == shared.fw_sealed) {
             if (!p.greeted or flen < 4 + 16) {
                 peerFailed(p, "sealed frame before the handshake");
                 return;
             }
             const clen = flen - 4 - 16;
-            var inner: [rxbuf_cap]u8 = undefined;
+            const inner = &inner_buf;
             var tag: [16]u8 = undefined;
-            @memcpy(&tag, p.rx[4 + clen .. flen]);
-            Aead.decrypt(inner[0..clen], p.rx[4 .. 4 + clen], tag, "", ctrNonce(p.rx_ctr), p.rx_key) catch {
+            @memcpy(&tag, peerRx(p)[4 + clen .. flen]);
+            Aead.decrypt(inner[0..clen], peerRx(p)[4 .. 4 + clen], tag, "", ctrNonce(p.rx_ctr), p.rx_key) catch {
                 _ = usys.log(glog, "fabsvc: sealed frame failed authentication; dropping peer");
                 peerFailed(p, "sealed frame failed authentication");
                 return;
@@ -1195,7 +1208,7 @@ fn pumpPeer(p: *Peer) void {
             }
             handleFrame(p, inner[2], inner[4..clen]);
         } else if (!p.greeted and (ftype == shared.fw_hello or ftype == shared.fw_hello_ack or ftype == shared.fw_auth)) {
-            handleFrame(p, ftype, p.rx[4..flen]);
+            handleFrame(p, ftype, peerRx(p)[4..flen]);
         } else {
             // Plaintext outside the handshake (or handshake replays after
             // auth) are protocol violations.
@@ -1203,7 +1216,7 @@ fn pumpPeer(p: *Peer) void {
             return;
         }
         const rest = p.rxlen - flen;
-        for (0..rest) |i| p.rx[i] = p.rx[flen + i];
+        for (0..rest) |i| peerRx(p)[i] = peerRx(p)[flen + i];
         p.rxlen = rest;
         if (p.dead) return;
     }
@@ -1882,7 +1895,7 @@ fn shipDiff(p: *Peer, dir: BulkDir, buf: []const u8, shadow: []u8) bool {
         var off = i;
         while (off < end) {
             const len = @min(shared.fab_bulk_chunk, end - off);
-            var f: [4 + 10 + shared.fab_bulk_chunk]u8 = undefined;
+            const f = &bulk_buf;
             const total: u16 = @intCast(14 + len);
             switch (dir) {
                 .to_export => |eid| {

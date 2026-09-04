@@ -184,8 +184,13 @@ flowchart TB
   P -- "rebinding drops the old box:\ncount 0 → freed when the statement ends" --> L
 ```
 
-Values are immutable, so memory is a matter of counting who holds
-what. Everything a line makes lives in its arena and is gone when the
+Calls allocate nothing lasting, and not much that is temporary: a
+call's frame (its parameters, captures and locals) comes from a pool
+the line keeps, returned when the call returns, so ten thousand `map`
+calls reuse one frame and a recursion fifty deep costs fifty — the
+first version made a frame per call and ran a 64 KB `join` out of its
+arena. Values are immutable, so memory is a matter of counting who
+holds what. Everything a line makes lives in its arena and is gone when the
 next line starts. What must outlive the line — a variable bound at the
 prompt, a function, a module's bindings — is a *box*: a small arena of
 its own with a reference count. `let` deep-copies the value into a
@@ -385,7 +390,8 @@ and in a session ends the session.
   this (`remote NODE $f` ships `$f`'s body; captures do not cross). See
   [the fabric page](fabric.md#remote-stages-a-functions-body-on-another-node).
 - **`sleep MS`** waits, in the host's ticks (rounded up to ten
-  milliseconds).
+  milliseconds); **`now`** is milliseconds since boot, a clock for
+  measuring (the drills time things with it).
 - **JSON.** `to-json` writes the data subset (a table as an array of
   objects), `from-json` reads it back (an array of same-shaped objects
   becomes a table); numbers with a fraction or exponent are refused.

@@ -198,7 +198,7 @@ left`) — so a script decides with `?` or `match` and never hangs on a
 dead peer: `recv` on a socket whose peer closed with nothing buffered
 is `err closed`. Addresses are dotted IPv4 (carried v4-mapped) or IPv6
 with one `::`. `send` moves a string or bytes in 512-byte pieces;
-`recv` returns up to 2048 bytes (`recv $s 100` asks for fewer).
+`recv` returns up to 32 KB (`recv $s 100` asks for fewer).
 Waiting — for the handshake, for data, for room to send, for a
 connection to accept — is a doorbell: the host hangs one notification
 on every socket it makes (`watch`) and sleeps on it whenever the
@@ -295,15 +295,19 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 
 ## In detail
 
-- **Tables.** 32 sockets and 16 views per service. A listener's
-  backlog holds 8 connections. Each socket has an 8 KB receive buffer
-  (its free space is the advertised window) and a 4 KB send ring
-  (unacknowledged and unsent bytes); a `tcp_send` queues at most 4096
-  bytes, all or `would_block`, and a `tcp_recv` returns at most 4096.
-  The socket table is zero-initialized so it lives in `.bss`: a
-  default that is not zero would put 400 KB in the image, which is
-  exactly what happened once — and the loader stage (then 256 KB, 512 KB since msh outgrew it) reports
-  an image that does not fit as "missing from the boot archive".
+- **Tables.** 16 sockets and 16 views per service. A listener's
+  backlog holds 8 connections. Each socket has a 64 KB receive buffer
+  (its free space, capped at the 16-bit field's 65535, is the
+  advertised window) and a 32 KB send ring (unacknowledged and unsent
+  bytes); a `tcp_send` queues at most 32 KB, all or `would_block`, and
+  a `tcp_recv` returns at most 32 KB — a whole bulk-transport buffer,
+  so a remote home's read-ahead window crosses in one exchange. A view
+  attaches an 8-page buffer. The socket table is zero-initialized so
+  it lives in `.bss` (a default that is not zero once put 400 KB in the
+  image, which the loader stage — then 256 KB — reported as "missing
+  from the boot archive"), and the buffers live in arrays beside it:
+  a record with 96 KB of buffer in it cannot be reset by a struct
+  literal, which builds the whole record on the stack first.
 - **Segments.** MSS 1440 announced and accepted (the option is parsed
   from the peer's SYN; 536 without one); a segment is at most that
   plus 20 bytes of header, and the driver's frame is 2048 bytes.
@@ -355,7 +359,7 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 ## Known limits and bugs
 
 - The stack is small by design: a send window bounded by the peer's
-  advertised window and our 4 KB ring, no congestion control, no
+  advertised window and our 32 KB ring, no congestion control, no
   window scaling, no selective acknowledgement, in-order receive (a
   lost segment stalls delivery until it is retransmitted), no
   TIME_WAIT, no UDP. It is the fabric's transport and a script's, not

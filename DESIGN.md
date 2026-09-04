@@ -1364,6 +1364,30 @@ exports; both are sixteen. Also: the session manager's badge-death
 handler and lease table, and `usersvc`'s gate now admits `attach_buf`
 on a lease cap and nothing else there.
 
+**Users, stage 4b (as built, 2026-09-04): the remote home's speed.**
+Measured first: a cold 64 KB read from a remote home took 55 ms, one
+fabric exchange per 4 KB block. Two changes and a measurement in the
+gate. The home service's backing layer keeps a **read-ahead window**:
+a miss fetches a whole 32 KB window aligned to its size, later blocks
+in it are served from memory, and writes go through it (patched, or
+the window dropped) — sound because the lease makes this service the
+volume's only writer. And the transport carries a window in one
+exchange: netsvc's `tcp_send`/`tcp_recv` take 32 KB (a view attaches
+8 pages), the send ring is 32 KB and the receive buffer 64 KB, the
+fabric's frame cap and bulk chunk follow (32 KB frames, 64 KB peer
+receive buffers), 16 sockets per service, budgets raised where the
+network runs (8 MB). The same read is 4 ms now; the warm read and the
+deferred write about 2 ms; the fabric-login drill prints all three on
+every gate run. Two bugs paid for it. Resetting a socket or a peer by
+struct literal built the 96 KB record on the stack and overflowed the
+thread; the buffers live in arrays beside their tables now. And the
+empty 64 KB receive buffer advertised a window of 65536, which a
+16-bit field cannot hold — the checked cast panicked netsvc silently
+and every client saw `peer_dead`; the window is capped at 65535. Also
+in this step: `now` and `sleep` as shared host commands, and the
+language pools call frames per line (a `map` of ten thousand made ten
+thousand frames from the arena and ran out at a 64 KB `join`).
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

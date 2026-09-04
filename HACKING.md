@@ -148,6 +148,14 @@ units come from `conf/units/` in the home, else `boot/conf/session/`;
 `zig build run-login` boots the multi-user system with seat 0 on your
 terminal and seat 1 on `nc 127.0.0.1 31905`.
 
+**A big record cannot be reset by a struct literal.** `s.* = .{}` on
+a record with a 64 KB buffer inside builds the whole record on the
+stack first and overflows the thread; keep buffers in arrays beside
+the table (`snd_bufs`, `rx_bufs`, `peer_rx`) and the records small.
+And a 16-bit protocol field takes a checked cast: `@intCast(65536)`
+in ReleaseSafe is a panic, and a panicking service exits without a
+word — the drill saw only `peer_dead`.
+
 **A channel with deferred replies must reply by token.** `reply` with
 token 0 answers the oldest parked caller on the channel — on a server
 that parks callers (the fabric's forwarded calls), a control reply

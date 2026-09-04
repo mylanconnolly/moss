@@ -746,7 +746,10 @@ fn spawnDevice(name: []const u8, id: shared.ImageId, arg: u64, ch: *ipc.Channel,
         .grant_debug_log = true,
         .grant_channel_a = ch,
         .auto_reap = true,
-    }) catch |e| std.debug.panic("spawn {s}: {t}", .{ name, e });
+        // Room for a buffered network stack (16 sockets, 96 KB each).
+        .user_limit = 8 << 20,
+        .kobj_limit = 2 << 20,
+}) catch |e| std.debug.panic("spawn {s}: {t}", .{ name, e });
     bootGiveDevice(ch, kind);
     bootGo(ch);
     return d;
