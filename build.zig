@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
@@ -243,7 +244,13 @@ pub fn build(b: *std.Build) void {
     // own steps and tests, outside the gate: host tooling, not the OS.
     // `fmt-test` checks every .msh under boot/ is formatted; `lint-test`
     // that every one lints clean; `ls-test` is the server's own tests.
-    const ts_prefix = b.option([]const u8, "tree-sitter", "prefix of the tree-sitter runtime (include/, lib/)") orelse "/opt/homebrew/opt/tree-sitter";
+    // The runtime's prefix: Homebrew's on macOS, the system's elsewhere;
+    // the static archive when the prefix has one, else the shared library
+    // the linker finds under that prefix (a distro's libtree-sitter.so).
+    const ts_prefix = b.option([]const u8, "tree-sitter", "prefix of the tree-sitter runtime (include/, lib/)") orelse
+        (if (builtin.os.tag == .macos) "/opt/homebrew/opt/tree-sitter" else "/usr");
+    const ts_static = b.fmt("{s}/lib/libtree-sitter.a", .{ts_prefix});
+    const ts_have_static = if (std.Io.Dir.cwd().access(b.graph.io, ts_static, .{})) true else |_| false;
     {
         const tree_mod = b.createModule(.{
             .root_source_file = b.path("tools/mshtree.zig"),
@@ -254,7 +261,13 @@ pub fn build(b: *std.Build) void {
         tree_mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{ts_prefix}) });
         tree_mod.addCSourceFile(.{ .file = b.path("tools/tree-sitter-mshl/src/parser.c"), .flags = &.{"-std=c11"} });
         tree_mod.addIncludePath(b.path("tools/tree-sitter-mshl/src"));
-        tree_mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libtree-sitter.a", .{ts_prefix}) });
+        if (ts_have_static) {
+            tree_mod.addObjectFile(.{ .cwd_relative = ts_static });
+        } else {
+            tree_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{ts_prefix}) });
+            tree_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib64", .{ts_prefix}) });
+            tree_mod.linkSystemLibrary("tree-sitter", .{});
+        }
         const mshl_mod = b.createModule(.{ .root_source_file = b.path("lib/mshl.zig"), .target = host_target, .optimize = .Debug });
         const toolModule = struct {
             fn make(bb: *std.Build, name: []const u8, tgt: std.Build.ResolvedTarget, imports: []const std.Build.Module.Import) *std.Build.Module {

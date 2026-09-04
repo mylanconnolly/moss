@@ -7,7 +7,9 @@ is ordinary hosted Zig driven from `build.zig` — except
 (editor highlighting and structure; its own README says how to
 regenerate and test it), and the tools built on that grammar's
 generated parser and the tree-sitter runtime the host provides (`brew
-install tree-sitter`, or `-Dtree-sitter=PREFIX`) — `mshtree.zig` (the
+install tree-sitter` on macOS, the distro's `tree-sitter` package on
+Linux — the static archive if the prefix has one, else the shared
+library — or `-Dtree-sitter=PREFIX`) — `mshtree.zig` (the
 parser and its helpers), `mshfmt.zig` (the formatter: `zig build fmt`
 installs `zig-out/bin/mshfmt`, `zig build fmt-test` runs its tests and
 checks every `.msh` under `boot/` is formatted), `mshlint.zig` (the
