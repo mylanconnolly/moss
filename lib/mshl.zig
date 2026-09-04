@@ -70,6 +70,10 @@ pub const Value = union(enum) {
     table: Table,
     func: *const Closure,
     result: *const Result,
+    /// A capability the host holds on the program's behalf (a socket,
+    /// a listener): counted like a function, released — the host's
+    /// `drop` runs — when the last value naming it is gone.
+    handle: *const Handle,
 
     pub fn typeName(v: Value) []const u8 {
         return switch (v) {
@@ -83,6 +87,7 @@ pub const Value = union(enum) {
             .table => "table",
             .func => "function",
             .result => "result",
+            .handle => |h| h.kind,
         };
     }
 
@@ -104,7 +109,7 @@ pub const Value = union(enum) {
     pub fn isData(v: Value) bool {
         return switch (v) {
             .nothing, .bool, .int, .str => true,
-            .bytes, .func, .result => false,
+            .bytes, .func, .result, .handle => false,
             .list => |l| for (l) |x| {
                 if (!x.isData()) break false;
             } else true,
@@ -164,6 +169,18 @@ pub const Closure = struct {
 };
 
 const Capture = struct { name: []const u8, value: Value };
+
+/// A host-held capability as a value. `kind` names it for the human
+/// and for `type`; `id` is the host's number for it; `drop` is called
+/// once, when its box is freed, unless the host closed it first.
+pub const Handle = struct {
+    box: *Box,
+    kind: []const u8,
+    id: u64,
+    ctx: *anyopaque,
+    drop: *const fn (ctx: *anyopaque, kind: []const u8, id: u64) void,
+    closed: bool = false,
+};
 
 /// Counted storage for one escaping value: an arena that holds it (and,
 /// for a function, the closure) and a count of the bindings and values
@@ -499,6 +516,10 @@ pub const Interp = struct {
             v.func.box.rc += 1;
             return v.func.box;
         }
+        if (v == .handle) {
+            v.handle.box.rc += 1;
+            return v.handle.box;
+        }
         const b = try self.heap.create(Box);
         b.* = .{ .rc = 1, .arena = std.heap.ArenaAllocator.init(self.heap), .value = .nothing };
         b.value = try self.dupRetained(b.arena.allocator(), v);
@@ -551,6 +572,9 @@ pub const Interp = struct {
                 const cl = b.value.func;
                 for (cl.captures) |c| self.releaseValue(c.value);
                 self.dropScope(cl.scope);
+            } else if (b.value == .handle) {
+                const h = b.value.handle;
+                if (!h.closed) h.drop(h.ctx, h.kind, h.id);
             } else self.releaseValue(b.value);
             b.arena.deinit();
             self.heap.destroy(b);
@@ -561,6 +585,7 @@ pub const Interp = struct {
     fn releaseValue(self: *Interp, v: Value) void {
         switch (v) {
             .func => |cl| self.dropBox(cl.box),
+            .handle => |h| self.dropBox(h.box),
             .list => |l| for (l) |x| self.releaseValue(x),
             .record => |r| for (r.vals) |x| self.releaseValue(x),
             .table => |t| for (t.rows) |row| {
@@ -828,6 +853,28 @@ pub const Interp = struct {
         b.next_dead = self.dead;
         self.dead = b;
         return b.value;
+    }
+
+    /// A handle for the host: born on the dead list like a closure, kept
+    /// only if something binds it by the end of the statement — else
+    /// `drop` runs at reclaim, so a socket nobody kept is closed.
+    pub fn newHandle(self: *Interp, kind: []const u8, id: u64, ctx: *anyopaque, drop: *const fn (ctx: *anyopaque, kind: []const u8, id: u64) void) Error!Value {
+        const b = try self.heap.create(Box);
+        b.* = .{ .rc = 0, .arena = std.heap.ArenaAllocator.init(self.heap), .value = .nothing };
+        const a = b.arena.allocator();
+        const h = try a.create(Handle);
+        h.* = .{ .box = b, .kind = try a.dupe(u8, kind), .id = id, .ctx = ctx, .drop = drop };
+        b.value = .{ .handle = h };
+        b.dead = true;
+        b.next_dead = self.dead;
+        self.dead = b;
+        return b.value;
+    }
+
+    /// The host closed a handle itself: `drop` will not run again.
+    pub fn closeHandle(self: *Interp, v: Value) void {
+        _ = self;
+        if (v == .handle) @constCast(v.handle).closed = true;
     }
 
     /// Every name the body uses that the running function has bound is
@@ -1325,7 +1372,7 @@ pub const Interp = struct {
         }
         if (eql(u8, name, "to-data")) {
             const v = input orelse (if (args.len > 0) args[0] else return self.fail("to-data: needs input", .{}));
-            if (!v.isData()) return self.fail("to-data: a {s} is not data (functions, results and bytes never are)", .{v.typeName()});
+            if (!v.isData()) return self.fail("to-data: a {s} is not data (functions, results, handles and bytes never are)", .{v.typeName()});
             var buf: std.ArrayList(u8) = .empty;
             try writeData(v, self.arena, &buf);
             return .{ .str = buf.items };
@@ -1571,7 +1618,7 @@ pub fn writeData(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!
             }
             try out.append(a, ']');
         },
-        .bytes, .func, .result => return Error.Runtime,
+        .bytes, .func, .result, .handle => return Error.Runtime,
     }
 }
 
@@ -1717,6 +1764,7 @@ pub fn valueEql(a: Value, b: Value) bool {
             break :blk true;
         },
         .func => a.func == b.func,
+        .handle => a.handle == b.handle,
         .result => a.result.ok == b.result.ok and valueEql(a.result.val, b.result.val),
     };
 }
@@ -1733,7 +1781,7 @@ pub fn compareValues(a: Value, b: Value) ?std.math.Order {
 /// Functions are shared, not copied: a function IS its box.
 pub fn dupValue(a: std.mem.Allocator, v: Value) Error!Value {
     return switch (v) {
-        .nothing, .bool, .int, .func => v,
+        .nothing, .bool, .int, .func, .handle => v,
         .str => |s| .{ .str = try a.dupe(u8, s) },
         .bytes => |s| .{ .bytes = try a.dupe(u8, s) },
         .list => |l| blk: {
@@ -1759,6 +1807,7 @@ pub fn dupValue(a: std.mem.Allocator, v: Value) Error!Value {
 fn retainValue(v: Value) void {
     switch (v) {
         .func => |cl| cl.box.rc += 1,
+        .handle => |h| h.box.rc += 1,
         .list => |l| for (l) |x| retainValue(x),
         .record => |r| for (r.vals) |x| retainValue(x),
         .table => |t| for (t.rows) |row| {
@@ -1788,7 +1837,7 @@ fn dupVals(a: std.mem.Allocator, vs: []const Value) Error![]const Value {
 pub fn render(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!void {
     switch (v) {
         .nothing => {},
-        .bool, .int, .str, .bytes, .func, .result => {
+        .bool, .int, .str, .bytes, .func, .result, .handle => {
             try renderInline(v, a, out);
             try out.append(a, '\n');
         },
@@ -1917,6 +1966,14 @@ pub fn renderInline(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Err
         .result => |r| {
             try out.appendSlice(a, if (r.ok) "ok " else "err ");
             try renderInline(r.val, a, out);
+        },
+        .handle => |h| {
+            var buf: [24]u8 = undefined;
+            try out.append(a, '<');
+            try out.appendSlice(a, h.kind);
+            try out.appendSlice(a, std.fmt.bufPrint(&buf, " {d}", .{h.id}) catch "");
+            if (h.closed) try out.appendSlice(a, " closed");
+            try out.append(a, '>');
         },
     }
 }
@@ -2832,6 +2889,9 @@ const Parser = struct {
 const TestHost = struct {
     saved_path: []const u8 = "",
     saved_text: []const u8 = "",
+    closed: usize = 0,
+    dropped: usize = 0,
+    last_dropped: u64 = 0,
 
     fn call(ctx: *anyopaque, it: *Interp, name: []const u8, args: []const Value, input: ?Value) Error!?Value {
         const self: *TestHost = @ptrCast(@alignCast(ctx));
@@ -2869,7 +2929,22 @@ const TestHost = struct {
             return it.fail("open: {s}: not found", .{path});
         }
         if (std.mem.eql(u8, name, "fails")) return it.fail("fails: as asked", .{});
+        // Handles: `open-sock N` makes one; `close-sock $h` closes it;
+        // dropped handles count in `dropped`.
+        if (std.mem.eql(u8, name, "open-sock")) return try it.newHandle("socket", @intCast(args[0].int), ctx, dropSock);
+        if (std.mem.eql(u8, name, "close-sock")) {
+            it.closeHandle(args[0]);
+            self.closed += 1;
+            return .nothing;
+        }
         return null;
+    }
+
+    fn dropSock(ctx: *anyopaque, kind: []const u8, id: u64) void {
+        const self: *TestHost = @ptrCast(@alignCast(ctx));
+        std.debug.assert(std.mem.eql(u8, kind, "socket"));
+        self.dropped += 1;
+        self.last_dropped = id;
     }
 };
 
@@ -2879,6 +2954,7 @@ const TestState = struct {
     it: Interp = undefined,
 
     fn start(self: *TestState) void {
+        self.host = .{};
         self.arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
         self.it = Interp.init(self.arena_state.allocator(), std.testing.allocator, .{ .ctx = &self.host, .call = TestHost.call });
     }
@@ -3015,7 +3091,7 @@ test "strings are UTF-8, bytes are bytes" {
     try expectOut(it, "(\"a\" | to-bytes) + (\"b\" | to-bytes) | from-bytes", "ok ab\n");
     try expectOut(it, "\"x\" | to-bytes", "<bytes: 1>\n");
     try expectRuntime(it, "\"a\" + (\"b\" | to-bytes)", "cannot add a string and a bytes");
-    try expectRuntime(it, "\"a\" | to-bytes | to-data", "to-data: a bytes is not data (functions, results and bytes never are)");
+    try expectRuntime(it, "\"a\" | to-bytes | to-data", "to-data: a bytes is not data (functions, results, handles and bytes never are)");
     try std.testing.expectError(Error.Syntax, it.run("\"\xff\""));
     try expectOut(it, "\"a,b,c\" | split \",\" | join \"-\"", "a-b-c\n");
 }
@@ -3184,7 +3260,7 @@ test "results: ok, err, ?, try, and match on them" {
     try expectOut(it, "match (try { fails }) { ok _ => \"fine\"; err $e => \"caught: $e\" }", "caught: fails: as asked\n");
     try expectOut(it, "try { (int x)? }", "err not a number: x\n");
     try expectRuntime(it, "ok 1 2", "ok: one value expected");
-    try expectRuntime(it, "ok 1 | to-data", "to-data: a result is not data (functions, results and bytes never are)");
+    try expectRuntime(it, "ok 1 | to-data", "to-data: a result is not data (functions, results, handles and bytes never are)");
 }
 
 test "use: a file is a module, its bindings a record" {
@@ -3237,6 +3313,41 @@ test "memory: boxes are counted exactly and released when unbound" {
     // Rebinding inside a loop over the old value: the box outlives the
     // statement, not the line (the leak check at deinit is the proof).
     try expectOut(it, "let big = (range 0 100); for x in $big { let big = [$x] }; $big", "99\n");
+}
+
+test "handles: a host capability as a value, dropped at the last use" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    // Unbound: dropped when the statement ends.
+    try expectOut(it, "open-sock 7", "<socket 7>\n");
+    it.reclaim();
+    try std.testing.expectEqual(@as(usize, 1), t.host.dropped);
+    try std.testing.expectEqual(@as(u64, 7), t.host.last_dropped);
+    // Bound: kept while any name or value holds it, then dropped once.
+    try expectOut(it, "let s = (open-sock 8); type $s", "socket\n");
+    try expectOut(it, "let r = { sock: $s }; let s = 0", "");
+    it.reclaim();
+    try std.testing.expectEqual(@as(usize, 1), t.host.dropped);
+    try expectOut(it, "let r = 0", "");
+    it.reclaim();
+    try std.testing.expectEqual(@as(usize, 2), t.host.dropped);
+    try std.testing.expectEqual(@as(u64, 8), t.host.last_dropped);
+    // Closed by the host: no drop afterwards.
+    try expectOut(it, "let c = (open-sock 9); close-sock $c; $c", "<socket 9 closed>\n");
+    try expectOut(it, "let c = 0", "");
+    it.reclaim();
+    try std.testing.expectEqual(@as(usize, 1), t.host.closed);
+    try std.testing.expectEqual(@as(usize, 2), t.host.dropped);
+    // A handle in a closure's capture lives with the closure.
+    try expectOut(it, "def keep [h] { fn { $h } }; let k = (keep (open-sock 10)); $k", "<fn fn []>\n");
+    it.reclaim();
+    try std.testing.expectEqual(@as(usize, 2), t.host.dropped);
+    try expectOut(it, "let k = 0", "");
+    it.reclaim();
+    try std.testing.expectEqual(@as(usize, 3), t.host.dropped);
+    try expectRuntime(it, "open-sock 1 | to-data", "to-data: a socket is not data (functions, results, handles and bytes never are)");
 }
 
 test "to-data / from-data round-trip through the strict parser" {

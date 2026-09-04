@@ -11,6 +11,7 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
 const fscmds = @import("fscmds.zig");
+const netcmds = @import("netcmds.zig");
 const tty = @import("tty.zig");
 const boot = @import("boot.zig");
 const result = @import("result.zig");
@@ -54,13 +55,22 @@ var line_fba: std.heap.FixedBufferAllocator = undefined;
 var box_pool: mosslib.pool.Pool(256, 2048) = .{};
 var host_ctx: u8 = 0;
 var fs_ctx = fscmds.Fs{ .resolve = resolve, .root = 0 };
+var net: ?netcmds.Net = null;
+/// The boot archive, when the manifest grants `bootfs`: scripts may be
+/// read from it (a unit's `script:` path) even with no view at all.
+var blob: []const u8 = "";
 
-fn resolve(_: *mshl.Interp, path: []const u8) mshl.Error!fscmds.Target {
+fn resolve(it: *mshl.Interp, path: []const u8) mshl.Error!fscmds.Target {
+    if (view_chan == 0) return it.fail("no filesystem view was given to this script", .{});
     return .{ .chan = view_chan, .buf = view_buf, .path = path };
 }
 
 fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
-    return fscmds.call(&fs_ctx, it, name, args, input);
+    if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
+    if (net) |*nt| {
+        if (try netcmds.call(nt, it, name, args, input)) |v| return v;
+    }
+    return null;
 }
 
 /// Rendered text goes to the console when there is one, else to the
@@ -99,21 +109,28 @@ fn fail(what: []const u8, msg: []const u8) noreturn {
     usys.exit(1);
 }
 
-export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
+    if (blob_va != 0) blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
     const setup = boot.take(chan_h);
     has_console = setup.has(.console) and setup.has(.console_buf);
     if (has_console) tty.attach(&setup);
-    if (!setup.has(.view)) fail("setup", "no view granted");
-    view_chan = setup.cap(.view);
-    view_buf = @ptrFromInt(fsc.attachBuf(view_chan).va);
-    fs_ctx.root = view_chan;
+    if (setup.has(.view)) {
+        view_chan = setup.cap(.view);
+        view_buf = @ptrFromInt(fsc.attachBuf(view_chan).va);
+        fs_ctx.root = view_chan;
+    }
+    if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     const path = setup.arg();
     if (path.len == 0) fail("setup", "no script path given");
 
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
     var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall });
-    const text = fscmds.readFile(&fs_ctx, &interp, path) catch fail(path, interp.err_msg);
+    // The script: from the view, else from the boot archive.
+    const text = if (view_chan != 0)
+        fscmds.readFile(&fs_ctx, &interp, path) catch fail(path, interp.err_msg)
+    else
+        shared.marcFind(blob, path) orelse fail(path, "not in the boot archive (and no view was given)");
 
     // Every top-level statement's value is rendered as the prompt would
     // — for a human (the console, or the log). Given an `out`, the last

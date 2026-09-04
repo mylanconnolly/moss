@@ -215,7 +215,10 @@ is a plan.
   file commands shared through `user/fscmds.zig`); still open: a script
   spawned on another node — `rspawn` takes a catalog number and carries
   no argument text, which the fabric surface (4) brings; (3) the network
-  surface — sockets as capability-carrying values, then the netsvc
+  surface — ✅ sockets as capability-carrying values (landed 2026-09-03:
+  handles in the language, `connect`/`listen`/`accept`/`send`/`recv`/
+  `close`/`status` answering results, `user/netcmds.zig`); still to do:
+  doorbell-driven waiting instead of tick polling, then the netsvc
   upgrade (windowing, retransmission, more sockets), then HTTP with
   parsing in Zig as host commands and handlers as mshl functions; (4)
   the fabric surface — remote pipeline stages, publish and lookup from
@@ -357,6 +360,14 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 3a: sockets as values** (done, 2026-09-03): the
+  handle value kind (a host capability with a drop, counted like a
+  closure, released at the last use), `user/netcmds.zig` for any host
+  with a network view — every network outcome a result, never a failed
+  line — `shared.parseAddr`, `mshrun` reading scripts from the archive
+  under `bootfs`, and the network drill's third step: a script doing
+  the wire echo and a listen/connect/accept loop over loopback with a
+  network view as its only authority.
 - ✅ **mshl v3, stage 2: a script is a program** (done, 2026-09-03):
   `mshrun`, an image that runs the script named by its argument through
   the one view it is handed, with the file commands — moved from the

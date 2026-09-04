@@ -1214,6 +1214,27 @@ confined to one directory. Not done: a script spawned on another node
 (`rspawn` takes a catalog number and carries no argument text) waits
 for the fabric surface, stage 4.
 
+**mshl v3, stage 3a (as built, 2026-09-03): sockets as values.** The
+language gained a value kind, the **handle**: a capability the host
+holds for the program, with a kind, a number and a drop callback, in a
+counted box like a closure — born on the dead list, kept by a binding,
+released (drop called once) when the last reference goes, at the end of
+that statement. `user/netcmds.zig` is the first host surface built to
+the language's rules: `connect`, `listen`, `accept`, `send`, `recv`,
+`close`, `status` on a network view, every outcome the network decides
+a *result* (`err refused`, `err closed`, `err "timed out"`) rather than
+a failed line, socket and listener handles whose drop is `tcp_close`.
+Addresses parse in `shared.parseAddr` (dotted v4 mapped, v6 with one
+`::`, host-tested). Waiting is polling with a tick's sleep, bounded;
+doorbells are the next step. `mshrun` gained the `bootfs` grant (a
+script read from the archive, no view needed) and the `net` cap; msh
+offers the same commands when its unit gives it a view (the system
+shell's does not). The network drill's third step is a script run from
+the archive with nothing but a network view: the wire echo, then
+listen–connect–accept over loopback in one program (the loopback
+handshake completes inside `connect`), then a closed peer and a
+refused destination as `err` values — it passed on the first boot.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

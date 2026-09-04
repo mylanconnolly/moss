@@ -157,6 +157,46 @@ nobody would ever read while the client saw every send succeed. The
 backlog is a FIFO now; a SYN that arrives with it full is dropped,
 and the client's own SYN retransmission retries.
 
+### Sockets as values: the language surface
+
+An mshl host that holds a network view — `mshrun` given `{ tag: net,
+netview: net }`, or a shell whose unit gives one — offers the network
+as commands whose values are **handles**: a socket or a listener is a
+value the program passes around, and the capability it stands for is
+released when the last value naming it is gone (the interpreter's
+reference counting calls the host's drop, which is `tcp_close`). A
+handle nobody binds is closed at the end of the statement that made it.
+
+```
+let s = (connect 10.0.2.100 9000)?     # ok <socket 2>, or err "refused"
+send $s "hello"                        # ok 5
+let reply = (from-bytes (recv $s)?)?   # recv gives bytes; from-bytes checks UTF-8
+close $s                               # explicit; dropping $s does the same
+let l = (listen 7778)?                 # ok <listener 3>
+let c = (connect ::1 7778)?            # loopback: the handshake completes inside the call
+let a = (accept $l)?                   # ok <socket 5>
+match (recv $a) { ok $b => …; err $e => echo "peer: $e" }
+status $a                              # "established", "peer closed", "closed" …
+```
+
+Every command the network can fail answers a **result** — `ok` with the
+socket, the count sent, or the bytes received; `err` with the reason
+(`refused`, `denied by the view`, `closed`, `timed out`, `no socket
+left`) — so a script decides with `?` or `match` and never hangs on a
+dead peer: `recv` on a socket whose peer closed with nothing buffered
+is `err closed`. Addresses are dotted IPv4 (carried v4-mapped) or IPv6
+with one `::`. `send` moves a string or bytes in 512-byte pieces;
+`recv` returns up to 2048 bytes (`recv $s 100` asks for fewer).
+Waiting — for the handshake, for data, for a connection to accept —
+is polling with a tick's sleep, bounded at about thirty seconds, after
+which the result is `err "timed out"`.
+
+The network drill's third step is such a script (`scripts/net-drill.msh`,
+run by `mshrun` from the boot archive with only a network view): it
+echoes through the wire, then listens, connects to itself over
+loopback, accepts, sends and receives, then proves a closed peer and a
+refused destination are errors as values.
+
 ### What the drill proves
 
 The `net` check boots the `net` profile under QEMU's user-mode network
@@ -169,7 +209,11 @@ process on the host, an echo. Three oneshot units run in order:
    over a v4-mapped address, then over IPv6 to the same listener; then
    over the wire to the host echo; then proves an IPv6 wire round trip
    by pinging the v6 gateway and watching `ping_check` count the reply.
-3. `boxed` (filtered view: `10.0.2.100:9000` only) reaches the echo,
+3. `net-script` (unrestricted view, an mshl script under `mshrun`)
+   does the wire echo and a listen/connect/accept loop over loopback
+   from the language, and checks that a closed peer and a refused
+   destination come back as `err` values.
+4. `boxed` (filtered view: `10.0.2.100:9000` only) reaches the echo,
    and is refused on the v4 gateway, the v6 gateway, loopback, listen,
    ping, and derive.
 
@@ -227,6 +271,12 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   general-purpose host stack.
 - Blocking is polling: `would_block` plus a doorbell. The async ring
   transport as a wakeup path for network I/O is planned, not built.
+  The language's `connect`/`accept`/`recv`/`send` poll with a tick's
+  sleep and give up after about thirty seconds; they do not use
+  doorbells yet.
+- The language has no `ping`, no `derive` (a script's view is what its
+  manifest gave it), and no UDP because the stack has none; a socket
+  value cannot cross to another program (no channel surface yet).
 - Sixteen sockets and eight views per service are static pools.
 - A filtered view allows one destination, IPv4 by way of a unit file
   (`allow:` takes a dotted v4 address); an IPv6 allowlist can be made
@@ -243,7 +293,8 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   the fabric" (how the fabric uses sockets, doorbells, and the backlog).
 - ROADMAP.md — Phase 10, and the fabric entries that mention netsvc.
 - Source — `user/net.zig` (driver, stack, views, sockets, the drill
-  roles), `shared/lib.zig` (`NetReq`, `NetResp`, `NetErr`, `TcpState`,
+  roles), `user/netcmds.zig` (sockets as values for mshl hosts),
+  `boot/scripts/net-drill.msh` (the script step), `shared/lib.zig` (`NetReq`, `NetResp`, `NetErr`, `TcpState`,
   addresses), `boot/conf/units/net*.msh`, `user/init.zig` (the
   `netview` give), `user/fabric.zig` (a client that waits on doorbells),
   `tools/runner.zig` (the QEMU network for each check).

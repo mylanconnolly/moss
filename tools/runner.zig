@@ -60,7 +60,7 @@ const specs = [_]Spec{
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
         .append = "profile=fs",
     },
-    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .append = "profile=net" },
+    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: loopback ok", .append = "profile=net" },
     .{
         .name = "users",
         .kind = .blk,

@@ -1,0 +1,22 @@
+# The network drill's script: sockets as values.
+# The wire: the host's echo at 10.0.2.100:9000.
+let s = (connect 10.0.2.100 9000)?
+send $s "moss script tcp"
+let got = (from-bytes (recv $s)?)?
+if $got != "moss script tcp" { (err "wire echo mismatch: $got")? }
+close $s
+echo "script: wire echo ok"
+# Loopback, all in one script: listen, connect, accept, send, receive.
+let l = (listen 7778)?
+let c = (connect ::1 7778)?
+let a = (accept $l)?
+send $c "over loopback"
+match (from-bytes (recv $a)?) {
+  ok "over loopback" => echo "script: loopback ok"
+  ok $other => (err "loopback mismatch: $other")?
+  err $e => (err "loopback: $e")?
+}
+# A closed peer is an err, not a hang; a refused view is an err too.
+close $c
+match (recv $a) { ok _ => (err "data after close")?; err $e => echo "script: after close: $e" }
+match (connect 10.0.2.2 9) { ok _ => (err "gateway port 9 answered")?; err $e => echo "script: gateway: $e" }

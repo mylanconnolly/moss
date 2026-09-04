@@ -23,6 +23,7 @@ const tty = @import("tty.zig");
 const lineedit = @import("lineedit.zig");
 const boot = @import("boot.zig");
 const fscmds = @import("fscmds.zig");
+const netcmds = @import("netcmds.zig");
 const mshl = @import("mosslib").mshl;
 const Value = mshl.Value;
 const Target = fscmds.Target;
@@ -98,6 +99,8 @@ var mounts: [max_mounts]Mount = @splat(.{});
 /// The shared file commands resolve paths through `target` (this
 /// shell's filesystem, or a mounted share).
 var fs_ctx = fscmds.Fs{ .resolve = target, .root = 0 };
+/// The network, when this shell's unit gives a `net` view.
+var net: ?netcmds.Net = null;
 
 fn targetOf(path: []const u8) ?Target {
     if (path.len == 0 or path[0] != '@') return .{ .chan = fs_chan, .buf = fs_buf, .path = path };
@@ -136,6 +139,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     fs_ctx.root = fs_chan;
     init_chan = setup.cap(.init);
     fab_chan = setup.cap(.fabric);
+    if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     // The fabric is optional: a user session has none.
     if (cons_chan == 0 or fs_chan == 0 or init_chan == 0) usys.exit(140);
 
@@ -356,6 +360,9 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
         return .nothing;
     }
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
+    if (net) |*nt| {
+        if (try netcmds.call(nt, it, name, args, input)) |v| return v;
+    }
     if (is(name, "ps")) return try psTable(it);
     if (is(name, "mem")) {
         const r = usys.sysInfo(spawner_h);
@@ -428,6 +435,8 @@ const help_text =
     \\  x | to-data | save p   write a value as data; open p | from-data reads it back
     \\  def name [a b] { .. }  a function ($in is the pipeline input); fn [a] { .. } is a value; $f args calls one
     \\  use p                  a file evaluated as a module: a record of its bindings
+    \\  connect ADDR PORT | listen PORT | accept $l | send $s DATA | recv $s | close $s | status $s
+    \\                         sockets as values (results: ok/err), when this shell holds a network view
     \\language:
     \\  x | where size > 4kb | sort-by name --desc | select name size
     \\  x | get col | first n | last n | reverse | len | keys | lines

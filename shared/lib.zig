@@ -977,6 +977,90 @@ pub const net_echo_port: u64 = 9000;
 pub const net_own_ip6: [2]u64 = .{ 0xfec0_0000_0000_0000, 0x15 }; // fec0::15
 pub const net_gw_ip6: [2]u64 = .{ 0xfec0_0000_0000_0000, 0x2 }; // fec0::2
 
+/// Parse an address as the protocol carries it: dotted IPv4 (v4-mapped
+/// on the way in) or IPv6 with one `::`. null for anything else.
+pub fn parseAddr(text: []const u8) ?[2]u64 {
+    if (std.mem.indexOfScalar(u8, text, ':') == null) {
+        var v: u32 = 0;
+        var octets: usize = 0;
+        var cur: u32 = 0;
+        var have = false;
+        for (text) |c| {
+            if (c == '.') {
+                if (!have) return null;
+                v = (v << 8) | cur;
+                octets += 1;
+                cur = 0;
+                have = false;
+            } else if (c >= '0' and c <= '9') {
+                cur = cur * 10 + (c - '0');
+                if (cur > 255) return null;
+                have = true;
+            } else return null;
+        }
+        if (!have or octets != 3) return null;
+        return v4Words((v << 8) | cur);
+    }
+    // IPv6: up to eight 16-bit groups, one `::` standing for the zeros.
+    var groups: [8]u16 = @splat(0);
+    var head: usize = 0; // groups before ::
+    var tail: [8]u16 = @splat(0);
+    var ntail: usize = 0;
+    var seen_gap = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (i + 1 < text.len and text[i] == ':' and text[i + 1] == ':') {
+            if (seen_gap) return null;
+            seen_gap = true;
+            i += 2;
+            continue;
+        }
+        if (text[i] == ':') {
+            i += 1;
+            continue;
+        }
+        var j = i;
+        var g: u32 = 0;
+        while (j < text.len and text[j] != ':') : (j += 1) {
+            const d = std.fmt.charToDigit(text[j], 16) catch return null;
+            g = (g << 4) | d;
+            if (g > 0xffff) return null;
+        }
+        if (j == i) return null;
+        if (seen_gap) {
+            if (ntail == 8) return null;
+            tail[ntail] = @intCast(g);
+            ntail += 1;
+        } else {
+            if (head == 8) return null;
+            groups[head] = @intCast(g);
+            head += 1;
+        }
+        i = j;
+    }
+    if (!seen_gap and head != 8) return null;
+    if (head + ntail > 8) return null;
+    for (0..ntail) |k| groups[8 - ntail + k] = tail[k];
+    var hi: u64 = 0;
+    var lo: u64 = 0;
+    for (0..4) |k| hi = (hi << 16) | groups[k];
+    for (4..8) |k| lo = (lo << 16) | groups[k];
+    return .{ hi, lo };
+}
+
+test "parseAddr reads dotted v4 (mapped) and v6 with a gap" {
+    try std.testing.expectEqual(v4Words(net_echo_ip4), parseAddr("10.0.2.100").?);
+    try std.testing.expectEqual(net_gw_ip6, parseAddr("fec0::2").?);
+    try std.testing.expectEqual([2]u64{ 0, 1 }, parseAddr("::1").?);
+    try std.testing.expectEqual([2]u64{ 0xfdcc_0000_0000_0000, 3 }, parseAddr("fdcc::3").?);
+    try std.testing.expectEqual([2]u64{ 0x2001_0db8_0000_0000, 0x0000_0000_0000_0001 }, parseAddr("2001:db8:0:0:0:0:0:1").?);
+    try std.testing.expect(parseAddr("10.0.2") == null);
+    try std.testing.expect(parseAddr("10.0.2.300") == null);
+    try std.testing.expect(parseAddr("fec0::2::3") == null);
+    try std.testing.expect(parseAddr("host") == null);
+    try std.testing.expect(parseAddr("1:2:3:4:5:6:7") == null);
+}
+
 // ---------------------------------------------------------------- rings
 //
 // The async transport: a submission ring and a completion ring in one

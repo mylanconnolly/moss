@@ -153,6 +153,13 @@ when it is parsed, not when the missing case arrives: a catch-all arm
 `false` — a list or record pattern never counts as covering, so
 `match $l { [] => …; [$h, ..$t] => … }` needs a `_ =>` too.
 
+**Handles.** A capability the host holds for the program — a socket, a
+listener — is a value of its own kind (`type $s` is `socket`), counted
+like a function: bind it, put it in a record, capture it in a closure,
+and it lives; drop the last of those and the host is told to release
+it (a socket is closed). A handle made and not bound is released when
+the statement ends. Handles are not data (`to-data` refuses them).
+
 **Modules.** `use path` reads a file through the shell's `open`,
 evaluates it in a scope of its own, and returns its bindings as a
 record: `let math = (use lib/math.msh)`, then `$math.double 21`,
@@ -364,6 +371,11 @@ and in a session ends the session.
   `true`, `false`, `null`; `_` and `..` mean something only in a
   pattern. A scope holds up to 128 bindings (variables and functions
   together); modules nest 8 deep.
+- **Network commands** (when the unit gives a `net` view; the system
+  shell's does not, `mshrun`'s may): `connect ADDR PORT`, `listen PORT`,
+  `accept $l`, `send $s DATA`, `recv $s [max]`, `close $s`, `status $s`
+  — sockets and listeners are handles, results carry the outcome; see
+  [the networking page](networking.md#sockets-as-values-the-language-surface).
 - **Commands.** `ls [p]`, `tree [p] [--depth n]` (default depth 8),
   `cat p`, `open p`, `write p text`, `save p`, `stat p`, `mkdir p`,
   `rm p`, `mv a b`, `ln p target` (a symlink), `readlink p` (up to 256
@@ -425,6 +437,9 @@ and in a session ends the session.
   wrap the line in a function or `match` instead.
 - A block argument sees only `$it` (and `$acc` in `reduce`); write
   `fn [a, b] { … }` for anything else.
+- A handle's release happens at the end of the statement that dropped
+  its last reference (the same rule as every box), not the instant of
+  the drop.
 - Optional shape annotations (`{ name: string }`) and host-command
   signatures from the protocol types are decided but not built: a
   wrong type is caught when it is used, not at the boundary.

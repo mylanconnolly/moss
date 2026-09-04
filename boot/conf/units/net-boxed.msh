@@ -1,4 +1,4 @@
 # The network drill, last step: a sandboxed child whose view allows exactly
 # one destination — the wire echo — and nothing else.
-{ image: net, arg: 4, profiles: [net], after: net-echocli, oneshot: true, essential: true,
+{ image: net, arg: 4, profiles: [net], after: net-script, oneshot: true, essential: true,
   give: [ { tag: net, netview: net, allow: 10.0.2.100, port: 9000 } ] }
