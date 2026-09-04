@@ -7,13 +7,14 @@
 //! tables, and becomes its core's idle thread.
 
 const std = @import("std");
+const cpuinfo = @import("cpu.zig");
 const gic = @import("gic.zig");
-const log = @import("log.zig");
-const mem = @import("mem.zig");
+const log = @import("../../log.zig");
+const mem = @import("../../mem.zig");
 const mmu = @import("mmu.zig");
-const pmem = @import("pmem.zig");
+const pmem = @import("../../pmem.zig");
 const psci = @import("psci.zig");
-const sched = @import("sched.zig");
+const sched = @import("../../sched.zig");
 const timer = @import("timer.zig");
 const trap = @import("trap.zig");
 
@@ -57,20 +58,15 @@ export fn secondaryEntry() callconv(.c) noreturn {
     mmu.activate();
     trap.init();
 
-    const mpidr = asm volatile ("mrs %[v], mpidr_el1"
-        : [v] "=r" (-> u64),
-    );
-    const cpu: u32 = @intCast(mpidr & 0xff);
+    const cpu = cpuinfo.id();
 
     sched.registerCpu(cpu);
     gic.initCore(cpu);
     timer.initCore(cpu);
 
     _ = online.fetchAdd(1, .release);
-    trap.enableIrqs();
+    cpuinfo.irqEnable();
 
     // This context is now core `cpu`'s idle thread.
-    while (true) {
-        asm volatile ("wfi");
-    }
+    while (true) cpuinfo.halt();
 }

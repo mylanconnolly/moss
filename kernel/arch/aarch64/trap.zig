@@ -7,15 +7,16 @@
 //! and calls trapHandler.
 
 const std = @import("std");
-const log = @import("log.zig");
-const mem = @import("mem.zig");
-const domain = @import("domain.zig");
+const log = @import("../../log.zig");
+const mem = @import("../../mem.zig");
+const domain = @import("../../domain.zig");
 const gic = @import("gic.zig");
-const irq = @import("irq.zig");
-const sched = @import("sched.zig");
+const irq = @import("../../irq.zig");
+const sched = @import("../../sched.zig");
 const smmu = @import("smmu.zig");
-const syscall = @import("syscall.zig");
+const syscall = @import("../../syscall.zig");
 const timer = @import("timer.zig");
+const ktimer = @import("../../timer.zig");
 const uaccess = @import("uaccess.zig");
 const vm = @import("vm.zig");
 
@@ -24,6 +25,29 @@ pub const TrapFrame = extern struct {
     elr: u64,
     spsr: u64,
     sp_el0: u64,
+
+    /// Syscall argument `i` (x0..x6) and result slot `i` (x0..x7): the
+    /// generic dispatcher names slots, the port names registers.
+    pub inline fn arg(f: *const TrapFrame, i: usize) u64 {
+        return f.regs[i];
+    }
+
+    pub inline fn set(f: *TrapFrame, i: usize, v: u64) void {
+        f.regs[i] = v;
+    }
+
+    pub inline fn pc(f: *const TrapFrame) u64 {
+        return f.elr;
+    }
+
+    /// The four message words of an IPC syscall (slots 1..4).
+    pub inline fn msgWords(f: *const TrapFrame) [4]u64 {
+        return f.regs[1..5].*;
+    }
+
+    pub inline fn setMsgWords(f: *TrapFrame, w: [4]u64) void {
+        f.regs[1..5].* = w;
+    }
 };
 
 comptime {
@@ -167,7 +191,7 @@ pub fn handleIrq() void {
     const intid = gic.acknowledge();
     if (intid == gic.spurious_intid) return;
     if (intid == timer.intid) {
-        timer.handleIrq();
+        ktimer.handleIrq();
     } else if (intid == 27) {
         vm.onVirtualTimer(); // a guest's virtual timer, fired at the host
     } else if (intid == gic.resched_sgi) {

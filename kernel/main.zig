@@ -3,79 +3,63 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const shared = @import("shared");
+const arch = @import("arch.zig");
 const cap = @import("cap.zig");
 const domain = @import("domain.zig");
-const dt = @import("dt.zig");
-const gic = @import("gic.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
-const its = @import("its.zig");
 const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
-const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
-const psci = @import("psci.zig");
 const rng = @import("rng.zig");
 const sched = @import("sched.zig");
 const sched_test = @import("sched_test.zig");
-const smmu = @import("smmu.zig");
-const smp = @import("smp.zig");
 const timer = @import("timer.zig");
 const trace = @import("trace.zig");
-const trap = @import("trap.zig");
-const vm = @import("vm.zig");
 
 comptime {
-    _ = @import("boot.zig");
+    _ = arch.boot; // the entry's assembly is emitted by reference
 }
 
 pub const panic = std.debug.FullPanic(panicHandler);
 
-export fn kmain(dtb_pa: u64) noreturn {
-    log.print("\nmoss {f} — aarch64 / qemu-virt\n\n", .{shared.version});
+/// The port's entry lands here with the MMU on and its firmware handle
+/// in `boot_arg` (the devicetree's physical address on aarch64).
+export fn kmain(boot_arg: u64) noreturn {
+    log.print("\nmoss {f} — {s}\n\n", .{ shared.version, arch.name });
 
-    trap.init();
-    log.info("core 0 up at EL{d}{s}, vectors installed", .{ currentEl(), if (currentEl() == 2) " (VHE host)" else "" });
+    arch.trap.init();
+    log.info("core 0 up at {s}, vectors installed", .{arch.cpu.describe()});
 
-    // QEMU passes the DTB in x0 per the arm64 Image boot protocol.
-    const fdt = dt.Fdt.parse(mem.physToPtr([*]const u8, dtb_pa)) catch |e| {
-        std.debug.panic("bad devicetree at 0x{x}: {t}", .{ dtb_pa, e });
-    };
-    var region_buf: [8]dt.MemRegion = undefined;
-    const regions = fdt.memoryRegions(&region_buf) catch |e| {
-        std.debug.panic("devicetree memory walk failed: {t}", .{e});
-    };
-    for (regions) |r| {
+    // The machine as firmware describes it: memory, devices, arguments.
+    const plat = arch.platform.discover(boot_arg);
+    for (plat.regions) |r| {
         log.info("ram: 0x{x} + {d}MB", .{ r.base, r.size >> 20 });
     }
-    if (fdt.bootargs()) |args| {
+    if (plat.bootargs) |args| {
         boot_node = parseNodeArg(args);
         if (boot_node != 0) log.info("bootargs: node id {d}", .{boot_node});
         boot_profile = parseProfile(args);
     }
-    // Devices come from the tree, not from constants: the PCIe host is
-    // enumerated once the memory map is up (its ECAM needs a mapping).
-    pcie_host = fdt.pcieHost();
-    if (pcie_host == null) log.warn("devicetree: no PCIe host; userspace drivers will find no devices", .{});
-    smmu_info = fdt.smmu();
-    its_reg = fdt.findReg("arm,gic-v3-its");
 
-    pmem.init(regions);
+    pmem.init(plat.regions);
     pmem.reserve(
         mem.virtToPhys(mem.kernelStart()),
         mem.kernelEnd() - mem.kernelStart(),
     );
-    pmem.reserve(dtb_pa, fdt.totalSize());
+    for (plat.reserved) |r| pmem.reserve(r.base, r.size);
     const s = pmem.stats();
     log.info("pmem: {d}MB free of {d}MB", .{ s.free_bytes >> 20, s.total_bytes >> 20 });
 
-    mmu.init(regions) catch |e| std.debug.panic("mmu build failed: {t}", .{e});
-    mmu.activate();
+    arch.mmu.init(plat.regions) catch |e| std.debug.panic("mmu build failed: {t}", .{e});
+    arch.mmu.activate();
     log.info("mmu: W^X kernel map active, boot identity map dropped", .{});
-    if (pcie_host) |h| pci.init(h);
-    if (smmu_info) |i| smmu.init(i) else log.warn("devicetree: no SMMU; device DMA is untranslated", .{});
+    // Devices come from firmware, not from constants: the PCIe host is
+    // enumerated once the memory map is up (its ECAM needs a mapping).
+    if (plat.pcie) |h| pci.init(h);
+    arch.platform.initIommu(&plat);
 
     // Allocator smoke test: quota round-trips to zero.
     {
@@ -98,12 +82,11 @@ export fn kmain(dtb_pa: u64) noreturn {
     domain.setSystemBlob(blobs.bootfs);
     irq.init();
     domain.startReaper();
-    gic.initDistributor();
-    if (its_reg) |r| its.init(r.base, r.size) else log.warn("devicetree: no ITS; devices stay on INTx", .{});
-    gic.initCore(0);
-    timer.initCore(0);
-    smp.bringUp();
-    trap.enableIrqs();
+    arch.platform.initInterrupts(&plat);
+    arch.intc.initCore(0);
+    arch.timer.initCore(0);
+    arch.smp.bringUp();
+    arch.cpu.irqEnable();
 
     if (build_options.fault_test) {
         log.warn("about to read unmapped memory (-Dfault-test)", .{});
@@ -270,7 +253,7 @@ fn domainTestWorker(_: u64) void {
         log.info("domain-test: PASS — pmem identical ({d}MB free), quotas zero", .{
             frames_after >> 20,
         });
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         std.debug.panic("domain-test: LEAK — {d}B of frames unaccounted", .{
             frames_before -% frames_after,
@@ -432,7 +415,7 @@ fn ipcTestWorker(_: u64) void {
     const shm_left = ipc.shm_account.balance();
     if (frames_after == frames_before and shm_left == 0 and askr.exit_code == 7) {
         log.info("ipc-test: PASS — pmem identical, shm account zero, death observed", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         std.debug.panic("ipc-test: FAIL — pmem delta {d}B, shm {d}B, askr exit {d}", .{
             frames_before -% frames_after, shm_left, askr.exit_code,
@@ -468,7 +451,7 @@ fn initTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (frames_after == frames_before and root.exit_code == 0) {
         log.info("init-test: PASS — userspace tree finished clean, pmem identical", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         std.debug.panic("init-test: FAIL — pmem delta {d}B, root exit {d}", .{
             frames_before -% frames_after, root.exit_code,
@@ -484,9 +467,7 @@ fn sandboxTestWorker(_: u64) void {
 
     // Benchmark: spawn + revoke of a minimal domain must stay cheap.
     {
-        const freq = asm ("mrs %[v], cntfrq_el0"
-            : [v] "=r" (-> u64),
-        );
+        const freq = arch.cpu.cycleHz();
         const t0 = cycles();
         const bench = domain.spawn("bench", .{ .blob = img(.sandbox) }, .{
             .arg = 5, // sleeper
@@ -525,7 +506,7 @@ fn sandboxTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (frames_after == frames_before) {
         log.info("sandbox-test: PASS — subtree reclaimed, budgets zero, pmem identical", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         std.debug.panic("sandbox-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
@@ -556,7 +537,7 @@ fn flapTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (root.exit_code == 77 and frames_after == frames_before) {
         log.info("flap-test: PASS — escalation reached the top (code 77), pmem identical", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         std.debug.panic("flap-test: FAIL — root exit {d}, pmem delta {d}B", .{
             root.exit_code, frames_before -% frames_after,
@@ -656,7 +637,7 @@ fn systemDrill(comptime name: []const u8) void {
     const frames_after = pmem.stats().free_bytes;
     if (code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
         log.info(name ++ "-test: PASS — the system booted from unit files, ran its drill, and shut down clean", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         ipc.dumpShms();
         trace.dump();
@@ -749,7 +730,7 @@ fn spawnDevice(name: []const u8, id: shared.ImageId, arg: u64, ch: *ipc.Channel,
         // Room for a buffered network stack (16 sockets, 96 KB each).
         .user_limit = 8 << 20,
         .kobj_limit = 2 << 20,
-}) catch |e| std.debug.panic("spawn {s}: {t}", .{ name, e });
+    }) catch |e| std.debug.panic("spawn {s}: {t}", .{ name, e });
     bootGiveDevice(ch, kind);
     bootGo(ch);
     return d;
@@ -809,7 +790,7 @@ fn rngTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     if (frames_after == frames_before) {
         log.info("rng-test: PASS — hardware entropy through a sandboxed driver, getrandom fail-closed and policed, nothing leaked", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         std.debug.panic("rng-test: FAIL — {d}B unaccounted", .{frames_before -% frames_after});
     }
@@ -826,7 +807,7 @@ var smmu_canary: [4096]u8 align(4096) = @splat(0);
 
 fn smmuTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
-    if (!smmu.active) std.debug.panic("smmu-test: FAIL — no SMMU in front of the bus", .{});
+    if (!arch.iommu.active) std.debug.panic("smmu-test: FAIL — no SMMU in front of the bus", .{});
     ensureDevices();
     const blk_idx = pci.byKind(.blk) orelse std.debug.panic("smmu-test: FAIL — no virtio-blk on the bus", .{});
 
@@ -844,7 +825,7 @@ fn smmuTestWorker(_: u64) void {
     while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);
     domain.finishTeardown(root);
     if (root.exit_code != 0) std.debug.panic("smmu-test: FAIL — block drill exit {d}", .{root.exit_code});
-    if (smmu.fault_count != 0) std.debug.panic("smmu-test: FAIL — {d} DMA faults during the honest drill", .{smmu.fault_count});
+    if (arch.iommu.fault_count != 0) std.debug.panic("smmu-test: FAIL — {d} DMA faults during the honest drill", .{arch.iommu.fault_count});
     log.info("smmu-test: block drill completed through the SMMU without a fault", .{});
 
     @memset(&smmu_canary, 0xa5);
@@ -872,15 +853,15 @@ fn smmuTestWorker(_: u64) void {
     // The device retries a refused burst word by word: many events, all
     // inside the one sector it was pointed at.
     const sid = pci.devices[blk_idx].sid;
-    const faulted = smmu.fault_count >= 1 and smmu.last_fault_sid == sid and
-        smmu.first_fault_addr == target and smmu.last_fault_addr >= target and smmu.last_fault_addr < target + 512;
+    const faulted = arch.iommu.fault_count >= 1 and arch.iommu.last_fault_sid == sid and
+        arch.iommu.first_fault_addr == target and arch.iommu.last_fault_addr >= target and arch.iommu.last_fault_addr < target + 512;
     const frames_after = pmem.stats().free_bytes;
     if (intact and faulted and frames_after == frames_before and ipc.shm_account.balance() == 0) {
-        log.info("smmu-test: PASS — DMA confined to the holder's address space: the rogue's write to kernel memory was refused ({d} refusals recorded, canary intact), nothing leaked", .{smmu.fault_count});
-        psci.systemOff();
+        log.info("smmu-test: PASS — DMA confined to the holder's address space: the rogue's write to kernel memory was refused ({d} refusals recorded, canary intact), nothing leaked", .{arch.iommu.fault_count});
+        arch.power.systemOff();
     } else {
         std.debug.panic("smmu-test: FAIL — canary intact {}, fault matched {} (count {d}, sid {d}, addr 0x{x}), pmem delta {d}B", .{
-            intact, faulted, smmu.fault_count, smmu.last_fault_sid, smmu.last_fault_addr, frames_before -% frames_after,
+            intact, faulted, arch.iommu.fault_count, arch.iommu.last_fault_sid, arch.iommu.last_fault_addr, frames_before -% frames_after,
         });
     }
 }
@@ -895,14 +876,14 @@ fn smmuTestWorker(_: u64) void {
 fn vmTestWorker(which: u64) void {
     const frames_before = pmem.stats().free_bytes;
     const name: []const u8 = if (which == 1) "guest-test" else "vm-test";
-    if (currentEl() != 2) std.debug.panic("{s}: FAIL — the kernel is not an EL2 host", .{name});
+    if (arch.cpu.currentEl() != 2) std.debug.panic("{s}: FAIL — the kernel is not an EL2 host", .{name});
     log.info("{s}: starting the VMM ({s})", .{ name, if (which == 1) "a moss kernel as the guest" else "the bare-metal guest" });
     const vmm = spawnVmm(which);
     var waited: u64 = 0;
     while (vmm.state != .dead) : (waited += 1) {
         if (waited == 600) {
             log.warn("{s}: vm stats: entries {d}, wfi {d}, waits {d}, timer fires {d} injected {d} unmasks {d}, spi injected {d}", .{
-                name, vm.stat_entries, vm.stat_wfi, vm.stat_waits, vm.stat_timer_fires, vm.stat_timer_injected, vm.stat_unmasks, vm.stat_spi_injected,
+                name, arch.vm.stat_entries, arch.vm.stat_wfi, arch.vm.stat_waits, arch.vm.stat_timer_fires, arch.vm.stat_timer_injected, arch.vm.stat_unmasks, arch.vm.stat_spi_injected,
             });
             std.debug.panic("{s}: FAIL — the guest never powered off", .{name});
         }
@@ -917,7 +898,7 @@ fn vmTestWorker(which: u64) void {
     } else {
         log.info("vm-test: PASS — an EL1 guest ran in its own stage-2 world: MMIO trapped to the VMM, virtual timer ticks injected through the vGIC, PSCI power-off honoured, nothing leaked", .{});
     }
-    psci.systemOff();
+    arch.power.systemOff();
 }
 
 /// This kernel is a guest: the system boot under the profile its VMM
@@ -1001,7 +982,7 @@ fn cpuTestWorker(_: u64) void {
     const island_ok = i >= 850 and i <= 1100 and island_seen_on_3 >= 25 and bad_placement == 0;
     if (budget_ok and greedy_ok and island_ok and frames_after == frames_before) {
         log.info("cpu-test: PASS — the CPU budget held a domain to its share, an unlimited sibling took the rest, and a partition kept a core to one domain; nothing leaked", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     } else {
         std.debug.panic("cpu-test: FAIL — budget {} (q={d}), greedy {} (g={d}), island {} (i={d} on3={d} bad={d}), pmem delta {d}B", .{
             budget_ok, q, greedy_ok, g, island_ok, i, island_seen_on_3, bad_placement, frames_before -% frames_after,
@@ -1023,7 +1004,7 @@ fn panTestWorker(_: u64) void {
     sched.sleep(20);
     _ = hello;
     log.info("pan-test: no fault — this CPU has no PAN; range checks alone (ARMv8.0 behaviour)", .{});
-    psci.systemOff();
+    arch.power.systemOff();
 }
 
 /// The VMM: log, the boot archive (guest images), the hypervisor cap
@@ -1062,7 +1043,7 @@ fn spawnVmm(which: u64) *domain.Domain {
 /// remote spawn placed on it answers an RPC: one box, two pool nodes.
 fn vmnodeTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
-    if (currentEl() != 2) std.debug.panic("vmnode-test: FAIL — the kernel is not an EL2 host", .{});
+    if (arch.cpu.currentEl() != 2) std.debug.panic("vmnode-test: FAIL — the kernel is not an EL2 host", .{});
     ensureDevices();
     if (pci.nthByKind(.net, 1) == null or pci.nthByKind(.rng, 1) == null)
         std.debug.panic("vmnode-test: FAIL — the guest needs a second NIC and a second entropy device on the bus", .{});
@@ -1091,7 +1072,7 @@ fn vmnodeTestWorker(_: u64) void {
     if (!waitMember(fab_ch, pb, 2, true, 1200)) {
         if (vmm.state == .dead) log.warn("vmnode-test: the VMM died with exit {d}", .{vmm.exit_code});
         log.warn("vmnode-test: vm stats: entries {d}, wfi {d}, waits {d}, timer fires {d} injected {d} unmasks {d}, spi injected {d}", .{
-            vm.stat_entries, vm.stat_wfi, vm.stat_waits, vm.stat_timer_fires, vm.stat_timer_injected, vm.stat_unmasks, vm.stat_spi_injected,
+            arch.vm.stat_entries, arch.vm.stat_wfi, arch.vm.stat_waits, arch.vm.stat_timer_fires, arch.vm.stat_timer_injected, arch.vm.stat_unmasks, arch.vm.stat_spi_injected,
         });
         std.debug.panic("vmnode-test: FAIL — the guest never joined the fabric", .{});
     }
@@ -1103,7 +1084,7 @@ fn vmnodeTestWorker(_: u64) void {
     // leak bar is the other VM tests' job.
     _ = frames_before;
     log.info("vmnode-test: PASS — one box, two pool nodes: a moss guest with passed-through devices joined the fabric and ran a remote spawn", .{});
-    psci.systemOff();
+    arch.power.systemOff();
 }
 
 var boot_node: u64 = 0;
@@ -1125,10 +1106,6 @@ fn parseProfile(args: []const u8) shared.BootProfile {
 }
 
 /// The PCIe host bridge from the devicetree (null if none).
-var pcie_host: ?dt.PcieHost = null;
-var smmu_info: ?dt.Smmu = null;
-var its_reg: ?dt.Reg = null;
-
 /// The kernel's own drills need the device table filled: spawn the
 /// enumerator once (told to register and exit) with the platform
 /// windows over its boot channel, and wait for it.
@@ -1260,7 +1237,7 @@ fn fabricTestWorker(arg: u64) void {
             fabPump(fab_ch, 2);
         }
         log.info("fabric-test: untrusted identity rejected (as designed)", .{});
-        psci.systemOff();
+        arch.power.systemOff();
     }
 
     if (node != 1) {
@@ -1337,7 +1314,7 @@ fn fabricTestWorker(arg: u64) void {
             }
             if (drill == 1 and t == 120) {
                 log.info("fabric-test: node {d} powering off mid-life (drill)", .{node});
-                psci.systemOff();
+                arch.power.systemOff();
             }
             // Node 3 keeps trying to come back once cut off: after its
             // revocation every attempt must be refused at the handshake.
@@ -1472,7 +1449,7 @@ fn fabricTestWorker(arg: u64) void {
     log.info("fabric-test: node 3 revoked by the trust root; dropped from membership", .{});
     fabPump(fab_ch, 100); // node 3's rejoin attempts must hit the refusal
     log.info("fabric-test: PASS — join, gossip, placement, death, rejoin, respawn, authorization, revocation", .{});
-    psci.systemOff();
+    arch.power.systemOff();
 }
 
 /// One-shot membership query: is `node` up in this fabric's view?
@@ -1676,9 +1653,7 @@ fn img(id: shared.ImageId) []const u8 {
 }
 
 fn cycles() u64 {
-    return asm volatile ("mrs %[v], cntpct_el0"
-        : [v] "=r" (-> u64),
-    );
+    return arch.cpu.cycles();
 }
 
 // ---------------------------------------------------------- ipc bench
@@ -1713,9 +1688,7 @@ fn benchClient(arg: u64) void {
 /// `pairs` call/reply pairs, pair i pinned to core i+1, all at once.
 /// Returns round trips per second across all pairs.
 fn ipcBench(pairs: u32) u64 {
-    const freq = asm ("mrs %[v], cntfrq_el0"
-        : [v] "=r" (-> u64),
-    );
+    const freq = arch.cpu.cycleHz();
     for (0..pairs) |i| bench_chs[i] = ipc.createChannel(1, 1) catch @panic("channel pool empty");
     bench_done.store(0, .release);
     const t0 = cycles();
@@ -1757,7 +1730,7 @@ fn notifHelper(arg: u64) void {
 
 fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     // Mask all interrupt classes: nothing may preempt panic reporting.
-    asm volatile ("msr daifset, #0xf");
+    arch.cpu.irqMaskAll();
     log.print("\n!! KERNEL PANIC: {s}\n", .{msg});
     if (first_trace_addr) |addr| {
         log.print("!! first trace address: 0x{x}\n", .{addr});
@@ -1766,15 +1739,6 @@ fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     halt();
 }
 
-fn currentEl() u64 {
-    const el = asm ("mrs %[el], CurrentEL"
-        : [el] "=r" (-> u64),
-    );
-    return el >> 2;
-}
-
 fn halt() noreturn {
-    while (true) {
-        asm volatile ("wfi");
-    }
+    while (true) arch.cpu.halt();
 }

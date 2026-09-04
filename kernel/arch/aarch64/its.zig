@@ -11,10 +11,10 @@
 
 const std = @import("std");
 const gic = @import("gic.zig");
-const log = @import("log.zig");
-const mem = @import("mem.zig");
+const log = @import("../../log.zig");
+const mem = @import("../../mem.zig");
 const mmu = @import("mmu.zig");
-const pmem = @import("pmem.zig");
+const pmem = @import("../../pmem.zig");
 
 pub var active = false;
 pub var base: u64 = 0;

@@ -9,17 +9,14 @@
 //! verified back to zero.
 
 const std = @import("std");
+const arch = @import("arch.zig");
 const cap = @import("cap.zig");
 const ipc = @import("ipc.zig");
-const its = @import("its.zig");
 const kalloc = @import("kalloc.zig");
 const log = @import("log.zig");
 const mem = @import("mem.zig");
-const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const pmem = @import("pmem.zig");
-const smmu = @import("smmu.zig");
-const vm = @import("vm.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
 const lock = @import("lock.zig");
@@ -121,7 +118,7 @@ pub const Domain = struct {
     user_mem: kalloc.Account = .{ .limit = 0 },
     cpu: CpuAccount = .{},
     cores: u64 = 0,
-    ttbr0_pa: u64 = 0,
+    user_root_pa: u64 = 0,
     captable: ?*cap.Table = null,
     entry_va: u64 = 0,
     /// End of the R+X text pages; [text_end_va, image_end_va) is RW data.
@@ -187,7 +184,7 @@ pub fn createThread(d: *Domain, entry: u64, sp: u64, x0: u64, x1: u64) Error!voi
     _ = d.threads_alive.fetchAdd(1, .acq_rel);
     _ = sched.spawn(d.name, extraThreadEntry, @intFromPtr(ts), .{
         .cpu_mask = d.cores,
-        .user_ttbr0 = d.ttbr0_pa,
+        .user_root = d.user_root_pa,
         .asid = d.asid,
         .user_ctx = d,
         .captable = d.captable.?,
@@ -210,7 +207,7 @@ fn extraThreadEntry(arg: u64) void {
     const x0 = ts.x0;
     const x1 = ts.x1;
     ts.* = .{}; // the record is free once its values are in registers
-    enterUser(entry, sp, .{ x0, x1, 0, 0, 0 });
+    arch.thread.enterUser(entry, sp, .{ x0, x1, 0, 0, 0 });
 }
 
 var domains: [max_domains]Domain = @splat(.{});
@@ -310,9 +307,7 @@ var cntfrq: u64 = 0;
 
 fn cpuLimitCycles(permille: u64) u64 {
     if (permille == 0) return 0;
-    if (cntfrq == 0) cntfrq = asm ("mrs %[v], cntfrq_el0"
-        : [v] "=r" (-> u64),
-    );
+    if (cntfrq == 0) cntfrq = arch.cpu.cycleHz();
     // One period is cpu_period_ticks x 100ms.
     return cntfrq * sched.cpu_period_ticks / 10 * permille / 1000;
 }
@@ -382,7 +377,7 @@ pub fn fillRecs(buf: []u8) usize {
 }
 
 fn onVmReleased(idx: u64) void {
-    if (vm.byIndex(idx)) |m| vm.destroy(m);
+    if (arch.vm.byIndex(idx)) |m| arch.vm.destroy(m);
 }
 
 fn onCtlReleased(obj: u64) void {
@@ -396,8 +391,8 @@ fn onCtlReleased(obj: u64) void {
 /// session's ctl and saw the next spawn, alive, forever). Called by
 /// whichever comes last — the teardown or the last ctl drop.
 fn releaseSlotIfUnreferenced(d: *Domain) void {
-    const daif = slots_lock.lockIrqSave();
-    defer slots_lock.unlockRestore(daif);
+    const irqs = slots_lock.lockIrqSave();
+    defer slots_lock.unlockRestore(irqs);
     if (d.state == .dead and d.ctl_refs.load(.acquire) == 0) d.state = .unused;
 }
 
@@ -497,7 +492,7 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
 
     // Address space root.
     const root_page = try kalloc.allocPage(&d.kobj);
-    d.ttbr0_pa = mem.virtToPhys(@intFromPtr(root_page));
+    d.user_root_pa = mem.virtToPhys(@intFromPtr(root_page));
 
     // Image pages: copy from the blob (zero-filled past load_size for BSS),
     // text pages mapped R+X, the rest RW.
@@ -509,9 +504,9 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
             const n = @min(avail - off, mem.page_size);
             image.read(@intCast(off), page[0..n]);
         }
-        const perms: mmu.UserPerms = if (off < header.text_size) .code else .data;
-        mmu.mapUserPage(
-            d.ttbr0_pa,
+        const perms: arch.mmu.UserPerms = if (off < header.text_size) .code else .data;
+        arch.mmu.mapUserPage(
+            d.user_root_pa,
             base + off,
             mem.virtToPhys(@intFromPtr(page)),
             perms,
@@ -528,8 +523,8 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     var sp = d.stack_base;
     while (sp < d.stack_top) : (sp += mem.page_size) {
         const page = try kalloc.allocPage(&d.user_mem);
-        mmu.mapUserPage(
-            d.ttbr0_pa,
+        arch.mmu.mapUserPage(
+            d.user_root_pa,
             sp,
             mem.virtToPhys(@intFromPtr(page)),
             .data,
@@ -576,8 +571,8 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
         const npages = mem.alignUp(system_blob_len, mem.page_size) / mem.page_size;
         const blob_base = reserveWindow(d, npages, null, false) catch return Error.NoMapSlots;
         for (0..npages) |i| {
-            mmu.mapUserPageTagged(
-                d.ttbr0_pa,
+            arch.mmu.mapUserPageTagged(
+                d.user_root_pa,
                 blob_base + i * mem.page_size,
                 system_blob_pa + i * mem.page_size,
                 .rodata,
@@ -599,7 +594,7 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     d.threads_alive.store(1, .release);
     _ = sched.spawn(d.name, userThreadEntry, @intFromPtr(d), .{
         .cpu_mask = d.cores,
-        .user_ttbr0 = d.ttbr0_pa,
+        .user_root = d.user_root_pa,
         .asid = d.asid,
         .user_ctx = d,
         .captable = table,
@@ -622,9 +617,9 @@ fn abortSpawn(d: *Domain) void {
         kalloc.freePage(&d.kobj, @ptrCast(ct));
         d.captable = null;
     }
-    if (d.ttbr0_pa != 0) {
-        mmu.destroyUserSpace(d.ttbr0_pa, &d.user_mem, &d.kobj, d.asid);
-        d.ttbr0_pa = 0;
+    if (d.user_root_pa != 0) {
+        arch.mmu.destroyUserSpace(d.user_root_pa, &d.user_mem, &d.kobj, d.asid);
+        d.user_root_pa = 0;
     }
     if (d.watcher) |n| {
         d.watcher = null;
@@ -663,7 +658,7 @@ pub fn destroy(d: *Domain) void {
     // in finishTeardown and the SMMU must never walk them afterwards.
     for (&d.captable.?.entries) |*e| {
         if (e.cap_type != .empty) {
-            if (e.cap_type == .device) smmu.detachIfHolder(e.object, @ptrCast(d), d.asid);
+            if (e.cap_type == .device) arch.iommu.detachIfHolder(e.object, @ptrCast(d), d.asid);
             ipc.releaseCap(e.cap_type, e.object, e.badge);
             e.cap_type = .empty;
             e.generation +%= 1;
@@ -701,7 +696,7 @@ pub fn drained(d: *const Domain) bool {
 pub fn finishTeardown(d: *Domain) void {
     std.debug.assert(d.state == .dying and drained(d));
     if (d.destroying.load(.acquire)) std.debug.panic("domain {s}: finishTeardown while destroy() is still running", .{d.name});
-    mmu.destroyUserSpace(d.ttbr0_pa, &d.user_mem, &d.kobj, d.asid);
+    arch.mmu.destroyUserSpace(d.user_root_pa, &d.user_mem, &d.kobj, d.asid);
     kalloc.freePage(&d.kobj, @ptrCast(d.captable.?));
     d.captable = null;
     releaseMappedShms(d);
@@ -720,8 +715,8 @@ pub fn finishTeardown(d: *Domain) void {
 }
 
 fn allocSlot() ?*Domain {
-    const daif = slots_lock.lockIrqSave();
-    defer slots_lock.unlockRestore(daif);
+    const irqs = slots_lock.lockIrqSave();
+    defer slots_lock.unlockRestore(irqs);
     for (&domains, 0..) |*d, i| {
         if (d.state == .unused) {
             d.* = .{ .id = next_domain_id, .asid = @intCast(i + 1), .state = .unused };
@@ -739,8 +734,8 @@ fn allocSlot() ?*Domain {
 /// mapped so two threads mapping at once never collide.
 fn reserveWindow(d: *Domain, npages: u64, s: ?*ipc.Shm, writable: bool) !u64 {
     const bytes = npages * mem.page_size;
-    const daif = d.windows_lock.lockIrqSave();
-    defer d.windows_lock.unlockRestore(daif);
+    const irqs = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(irqs);
     var free: ?*?Mapping = null;
     for (&d.mappings) |*m| {
         if (m.* == null) {
@@ -767,8 +762,8 @@ fn reserveWindow(d: *Domain, npages: u64, s: ?*ipc.Shm, writable: bool) !u64 {
 }
 
 fn forgetWindow(d: *Domain, va: u64) void {
-    const daif = d.windows_lock.lockIrqSave();
-    defer d.windows_lock.unlockRestore(daif);
+    const irqs = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(irqs);
     for (&d.mappings) |*m| {
         if (m.*) |x| {
             if (x.va == va) m.* = null;
@@ -783,23 +778,23 @@ fn forgetWindow(d: *Domain, va: u64) void {
 pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
     const base = try reserveWindow(d, s.npages, s, true);
     for (0..s.npages) |i| {
-        mmu.mapUserPageTagged(
-            d.ttbr0_pa,
+        arch.mmu.mapUserPageTagged(
+            d.user_root_pa,
             base + i * mem.page_size,
             s.pages[i],
             .data,
             &d.kobj,
             false,
         ) catch |e| {
-            mmu.unmapUserPages(d.ttbr0_pa, base, i, d.asid);
+            arch.mmu.unmapUserPages(d.user_root_pa, base, i, d.asid);
             forgetWindow(d, base);
             return e;
         };
     }
     // Ref and publish as one step: reaped before it, the entry says
     // "reserved" and teardown leaves the ref alone; after it, "live".
-    const daif = d.windows_lock.lockIrqSave();
-    defer d.windows_lock.unlockRestore(daif);
+    const irqs = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(irqs);
     ipc.refShm(s);
     for (&d.mappings) |*m| {
         if (m.*) |*x| {
@@ -816,8 +811,8 @@ pub fn mapShm(d: *Domain, s: *ipc.Shm) !u64 {
 pub fn unmapShm(d: *Domain, va: u64) !void {
     var found: ?Mapping = null;
     {
-        const daif = d.windows_lock.lockIrqSave();
-        defer d.windows_lock.unlockRestore(daif);
+        const irqs = d.windows_lock.lockIrqSave();
+        defer d.windows_lock.unlockRestore(irqs);
         for (&d.mappings) |*m| {
             if (m.*) |*x| {
                 if (x.va == va and x.shm != null and x.state == .live) {
@@ -830,13 +825,13 @@ pub fn unmapShm(d: *Domain, va: u64) !void {
     }
     const x = found orelse return Error.BadMapping;
     while (d.uaccess_users.load(.acquire) != 0) sched.yield();
-    mmu.unmapUserPages(d.ttbr0_pa, x.va, x.npages, d.asid);
-    smmu.invalidateAsid(d.asid);
+    arch.mmu.unmapUserPages(d.user_root_pa, x.va, x.npages, d.asid);
+    arch.iommu.invalidateAsid(d.asid);
     // Forget and unref as one step (see Mapping.state): reaped before
     // it, teardown releases the ref of an "unmapping" entry; after it,
     // there is nothing left to release.
-    const daif = d.windows_lock.lockIrqSave();
-    defer d.windows_lock.unlockRestore(daif);
+    const irqs = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(irqs);
     for (&d.mappings) |*m| {
         if (m.*) |y| {
             if (y.va == va) m.* = null;
@@ -851,8 +846,8 @@ pub fn unmapShm(d: *Domain, va: u64) !void {
 pub fn windowRangeOk(d: *Domain, ptr: u64, len: u64, writable: bool) bool {
     const end = ptr +% len;
     if (end < ptr) return false;
-    const daif = d.windows_lock.lockIrqSave();
-    defer d.windows_lock.unlockRestore(daif);
+    const irqs = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(irqs);
     for (&d.mappings) |*m| {
         const x = m.* orelse continue;
         if (x.state != .live) continue;
@@ -882,20 +877,20 @@ pub fn mapMmio(d: *Domain, base_pa: u64, pages: u64) !u64 {
 /// doorbell; that write is DMA through the domain's tables, so the
 /// doorbell page is mapped at its own address, privileged-only.
 pub fn ensureMsiDoorbell(d: *Domain) void {
-    if (d.msi_doorbell_mapped or !its.active) return;
-    const pa = its.doorbellPage();
-    mmu.mapUserPageTagged(d.ttbr0_pa, pa, pa, .msi_doorbell, &d.kobj, false) catch return;
-    asm volatile ("dsb ishst");
+    if (d.msi_doorbell_mapped or !arch.msi.isActive()) return;
+    const pa = arch.msi.doorbellPage();
+    arch.mmu.mapUserPageTagged(d.user_root_pa, pa, pa, .msi_doorbell, &d.kobj, false) catch return;
+    arch.mmu.publishTables();
     d.msi_doorbell_mapped = true;
 }
 
 /// Map frames some other object owns (device windows, a VM's RAM) into
 /// the domain, unowned: teardown leaves their frames to their owner.
-pub fn mapFrames(d: *Domain, base_pa: u64, pages: u64, perms: mmu.UserPerms) !u64 {
+pub fn mapFrames(d: *Domain, base_pa: u64, pages: u64, perms: arch.mmu.UserPerms) !u64 {
     const base = try reserveWindow(d, pages, null, true);
     for (0..pages) |i| {
-        try mmu.mapUserPageTagged(
-            d.ttbr0_pa,
+        try arch.mmu.mapUserPageTagged(
+            d.user_root_pa,
             base + i * mem.page_size,
             base_pa + i * mem.page_size,
             perms,
@@ -919,16 +914,16 @@ pub fn mapDma(d: *Domain, npages: u64) !struct { va: u64, dev: u64 } {
     @memset(bytes[0 .. npages * mem.page_size], 0);
     const base = try reserveWindow(d, npages, null, true);
     for (0..npages) |i| {
-        try mmu.mapUserPage(
-            d.ttbr0_pa,
+        try arch.mmu.mapUserPage(
+            d.user_root_pa,
             base + i * mem.page_size,
             pa + i * mem.page_size,
             .data,
             &d.kobj,
         );
     }
-    asm volatile ("dsb ishst"); // the SMMU walks these tables too
-    return .{ .va = base, .dev = if (smmu.active) base else pa };
+    arch.mmu.publishTables(); // the IOMMU walks these tables too
+    return .{ .va = base, .dev = if (arch.iommu.active) base else pa };
 }
 
 /// Fault-as-message: park the faulting thread as a caller on the supervisor
@@ -951,33 +946,9 @@ pub fn reportFaultToSupervisor(d: *Domain, esr: u64, far: u64, elr: u64) bool {
 
 fn userThreadEntry(arg: u64) void {
     const d: *Domain = @ptrFromInt(arg);
-    enterUser(d.entry_va, d.stack_top, .{
+    arch.thread.enterUser(d.entry_va, d.stack_top, .{
         d.init_handle, d.init_handle2, d.init_arg, d.blob_va, d.blob_len,
     });
-}
-
-fn enterUser(entry: u64, sp: u64, args: [5]u64) noreturn {
-    asm volatile (
-        \\msr daifset, #0xf
-        \\msr elr_el1, %[e]
-        \\msr sp_el0, %[s]
-        \\msr spsr_el1, xzr
-        \\mov x0, %[a0]
-        \\mov x1, %[a1]
-        \\mov x2, %[a2]
-        \\mov x3, %[a3]
-        \\mov x4, %[a4]
-        \\eret
-        :
-        : [e] "r" (entry),
-          [s] "r" (sp),
-          [a0] "r" (args[0]),
-          [a1] "r" (args[1]),
-          [a2] "r" (args[2]),
-          [a3] "r" (args[3]),
-          [a4] "r" (args[4]),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .memory = true });
-    unreachable;
 }
 
 /// Mapping refs come off only once the address space is gone (after

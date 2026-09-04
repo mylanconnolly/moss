@@ -193,9 +193,17 @@ is a plan.
   hypervisor: every VM drill runs only under TCG (Apple's Hypervisor
   framework exposes no nested EL2 with VHE), so EL2, stage-2 SMMU and
   device passthrough have never met silicon.
-- **The x86_64 port** — the HAL's honesty test. Audit what actually sits
-  behind the HAL boundary first: the ITS, SMMU, VHE and vGIC work is
-  deeply aarch64-shaped. PAN's counterpart there is SMAP.
+- **The x86_64 port** — the HAL's honesty test. The boundary is a
+  directory now (`kernel/arch/`, landed 2026-09-04, interface in
+  `kernel/arch.zig`); the port is a second directory: Limine boot on
+  UEFI, 4-level paging, SMAP where PAN sits, the local APIC and IOAPIC
+  behind `intc`/`msi`, the TSC and its deadline timer, ACPI (MADT, MCFG)
+  behind `platform`, VT-d or AMD-Vi behind `iommu` (the DMA-grant
+  design needs the IOMMU to walk the domain's own tables), SVM/VMX
+  behind `vm` last. Userspace has the same seam to make (`user/usys.zig`,
+  the image header stanza, the drivers' barriers). The runner and the
+  QEMU configs are aarch64-only. Modern hardware only: no legacy PIC,
+  PIT, or BIOS paths, ever (locked decision).
 - **Users, stage 3, residuals:** sharing offers are per session and in
   memory (standing grants that survive a logout are a later step);
   `apply` only creates and keeps (changing a passphrase or removing a
@@ -387,6 +395,21 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **The HAL, extracted** (2026-09-04): `kernel/arch.zig` selects a
+  port at comptime and lists what one provides; `kernel/arch/aarch64/`
+  holds the boot entry, vectors and frame, page tables, PAN, the GIC and
+  ITS (as `intc` and `msi`), the generic timer, PSCI, SMP bring-up, the
+  SMMU (`iommu`), the hypervisor, devicetree discovery (`platform`) and
+  the PL011, plus three new modules for what had been scattered:
+  `cpu.zig` (DAIF, TPIDR, the counter, WFI), `thread.zig` (the context,
+  FP state, the switch and trampoline stubs, `eret` to user) and
+  `platform.zig`. The generic kernel names slots, roots and lines
+  (`frame.arg(i)`, `user_root`, `intc.line_base`) where it named
+  registers. Only the selected port is compiled. Behaviour unchanged,
+  gate green; `-Darch` in the build. Found on the way: nothing broken —
+  the honest finding is that the boundary had existed as a habit, not a
+  seam, in eleven files' assembly and three private copies of the
+  interrupt-mask helpers.
 - ✅ **The gate on a Linux host** (2026-09-04): the first run on an
   x86_64 machine (Framework 16, Gentoo). The runner's socket calls
   went through `std.c`, which macOS links implicitly and Linux does
@@ -889,7 +912,7 @@ is a plan.
   boots as a VHE host when entered at EL2 (nothing else changes: E2H
   redirects every EL1-named register; PSCI conduit and timer line are
   chosen at run time; the per-core pointer moves to TPIDR_EL2), and
-  `kernel/vm.zig` runs an EL1 guest in its own stage-2 world through a
+  `kernel/arch/aarch64/vm.zig` runs an EL1 guest in its own stage-2 world through a
   **hypervisor capability**: `vm_create` (RAM at IPA 0x40000000, mapped
   into the VMM), `vm_set`, `vm_run` — every exit (stage-2 MMIO fault
   with the decoded access, WFI, HVC, trapped SMC/PSCI, a host interrupt)
@@ -938,7 +961,7 @@ is a plan.
   wired-INTx device would need level emulation), and everything is
   TCG-only.
 - ✅ **PAN as a safeguard** (2026-09-02): kernel access to user memory
-  goes through `kernel/uaccess.zig` only; PAN is detected (not
+  goes through `kernel/arch/aarch64/uaccess.zig` only; PAN is detected (not
   assumed), armed on every core and by every exception entry, and
   opened just inside the copy helpers, so a kernel bug that
   dereferences a user pointer elsewhere is a fault report rather than

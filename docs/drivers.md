@@ -303,8 +303,8 @@ service that starts too early gets an honest error, never a weak number.
   machines" (passthrough).
 - HACKING.md — "A program that needs more than log + one channel", the
   QEMU notes on the SMMU and virtio models.
-- Source — `kernel/pci.zig` (the device table), `kernel/its.zig`,
-  `kernel/irq.zig`, `kernel/smmu.zig`, `kernel/rng.zig`,
+- Source — `kernel/pci.zig` (the device table), `kernel/arch/aarch64/its.zig`,
+  `kernel/irq.zig`, `kernel/arch/aarch64/smmu.zig`, `kernel/rng.zig`,
   `kernel/syscall.zig` (`mmio_map`, `irq_bind`, `irq_ack`, `dma_alloc`,
   `device_register`, `device_info`, `window_map`), `user/pcisvc.zig`,
   `user/virtio.zig`, `user/blk.zig`, `user/cons.zig`, `user/rng.zig`,

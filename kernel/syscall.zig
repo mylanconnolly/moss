@@ -7,11 +7,11 @@
 //! full stop.
 
 const std = @import("std");
+const arch = @import("arch.zig");
 const cap = @import("cap.zig");
 const domain = @import("domain.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
-const its = @import("its.zig");
 const log = @import("log.zig");
 const trace = @import("trace.zig");
 const pci = @import("pci.zig");
@@ -19,45 +19,41 @@ const pmem = @import("pmem.zig");
 const rng = @import("rng.zig");
 const sched = @import("sched.zig");
 const shared = @import("shared");
-const smmu = @import("smmu.zig");
-const vm = @import("vm.zig");
-const trap = @import("trap.zig");
-const uaccess = @import("uaccess.zig");
 const build_options = @import("build_options");
 
-pub fn dispatch(frame: *trap.TrapFrame) void {
+pub fn dispatch(frame: *arch.trap.TrapFrame) void {
     const t = sched.thisCpu().current;
     const d: *domain.Domain = @ptrCast(@alignCast(t.user_ctx orelse {
-        frame.regs[0] = errno(.nosys);
+        frame.set(0, errno(.nosys));
         return;
     }));
-    const nr: shared.Syscall = @enumFromInt(frame.regs[8]);
-    frame.regs[0] = switch (nr) {
-        .log => sysLog(d, frame.regs[0], frame.regs[1], frame.regs[2]),
+    const nr: shared.Syscall = @enumFromInt(frame.arg(8));
+    frame.set(0, switch (nr) {
+        .log => sysLog(d, frame.arg(0), frame.arg(1), frame.arg(2)),
         .yield => blk: {
             sched.yield();
             break :blk errno(.ok);
         },
         .sleep => blk: {
-            sched.sleep(@min(frame.regs[0], 60 * 10));
+            sched.sleep(@min(frame.arg(0), 60 * 10));
             break :blk errno(.ok);
         },
-        .exit => sysExit(d, frame.regs[0]),
+        .exit => sysExit(d, frame.arg(0)),
         .call => sysCall(d, frame),
         .recv => sysRecv(d, frame),
         .reply => sysReply(d, frame),
         .notify_create => sysNotifyCreate(d, frame),
-        .notify_signal => sysNotifySignal(d, frame.regs[0], frame.regs[1]),
+        .notify_signal => sysNotifySignal(d, frame.arg(0), frame.arg(1)),
         .notify_wait => sysNotifyWait(d, frame),
         .shm_create => sysShmCreate(d, frame),
         .shm_map => sysShmMap(d, frame),
-        .shm_unmap => sysShmUnmap(d, frame.regs[0]),
+        .shm_unmap => sysShmUnmap(d, frame.arg(0)),
         .spawn => sysSpawn(d, frame),
         .chan_create => sysChanCreate(d, frame),
         .domain_stat => sysDomainStat(d, frame),
-        .domain_destroy => sysDomainDestroy(d, frame.regs[0]),
-        .watch_deaths => sysWatchDeaths(d, frame.regs[0]),
-        .cap_drop => sysCapDrop(d, frame.regs[0]),
+        .domain_destroy => sysDomainDestroy(d, frame.arg(0)),
+        .watch_deaths => sysWatchDeaths(d, frame.arg(0)),
+        .cap_drop => sysCapDrop(d, frame.arg(0)),
         .mmio_map => sysMmioMap(d, frame),
         .device_info => sysDeviceInfo(d, frame),
         .vm_create => sysVmCreate(d, frame),
@@ -67,20 +63,20 @@ pub fn dispatch(frame: *trap.TrapFrame) void {
         .window_map => sysWindowMap(d, frame),
         .vm_cpu_on => sysVmCpuOn(d, frame),
         .device_register => sysDeviceRegister(d, frame),
-        .irq_bind => sysIrqBind(d, frame.regs[0], frame.regs[1], frame.regs[2]),
-        .irq_ack => sysIrqAck(d, frame.regs[0], frame.regs[1]),
+        .irq_bind => sysIrqBind(d, frame.arg(0), frame.arg(1), frame.arg(2)),
+        .irq_ack => sysIrqAck(d, frame.arg(0), frame.arg(1)),
         .dma_alloc => sysDmaAlloc(d, frame),
-        .notify_bind => sysNotifyBind(d, frame.regs[0]),
+        .notify_bind => sysNotifyBind(d, frame.arg(0)),
         .chan_mint => sysChanMint(d, frame),
         .domain_list => sysDomainList(d, frame),
         .sysinfo => sysSysinfo(d, frame),
-        .getrandom => sysGetrandom(d, frame.regs[0], frame.regs[1]),
-        .rng_seed => sysRngSeed(d, frame.regs[0], frame.regs[1], frame.regs[2]),
-        .timer_arm => sysTimerArm(d, frame.regs[0], frame.regs[1], frame.regs[2]),
-        .thread_create => sysThreadCreate(d, frame.regs[0], frame.regs[1], frame.regs[2], frame.regs[3]),
+        .getrandom => sysGetrandom(d, frame.arg(0), frame.arg(1)),
+        .rng_seed => sysRngSeed(d, frame.arg(0), frame.arg(1), frame.arg(2)),
+        .timer_arm => sysTimerArm(d, frame.arg(0), frame.arg(1), frame.arg(2)),
+        .thread_create => sysThreadCreate(d, frame.arg(0), frame.arg(1), frame.arg(2), frame.arg(3)),
         .thread_exit => sched.exit(),
         _ => errno(.nosys),
-    };
+    });
 }
 
 fn sysNotifyBind(d: *domain.Domain, handle_bits: u64) u64 {
@@ -92,134 +88,134 @@ fn sysNotifyBind(d: *domain.Domain, handle_bits: u64) u64 {
 
 // ---------------------------------------------------------------- drivers
 
-fn sysMmioMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
+fn sysMmioMap(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.arg(0));
     const idx = d.captable.?.lookup(h, .device) orelse return errno(.bad_handle);
     const dev = &pci.devices[idx];
     if (dev.bar_len == 0) return errno(.bad_state);
     const pages = (dev.bar_len + 4095) / 4096;
     const va = domain.mapMmio(d, dev.bar_pa, pages) catch return errno(.no_space);
     const cfg = domain.mapMmio(d, dev.cfg_pa, 1) catch return errno(.no_space);
-    frame.regs[1] = va;
-    frame.regs[2] = pages * 4096;
-    frame.regs[3] = cfg;
-    frame.regs[4] = dev.bar_index;
+    frame.set(1, va);
+    frame.set(2, pages * 4096);
+    frame.set(3, cfg);
+    frame.set(4, dev.bar_index);
     return errno(.ok);
 }
 
-fn sysVmCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
+fn sysVmCreate(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.arg(0));
     _ = d.captable.?.lookup(h, .hypervisor) orelse return errno(.denied);
-    const pages = frame.regs[1];
-    if (pages == 0 or pages > vm.max_ram_pages) return errno(.bad_arg);
-    const m = vm.create(@ptrCast(d), &d.kobj, &d.user_mem, pages, frame.regs[2]) catch |e| return errno(switch (e) {
-        vm.Error.NotHost => .bad_state,
-        vm.Error.NoVms, vm.Error.OutOfFrames => .no_space,
+    const pages = frame.arg(1);
+    if (pages == 0 or pages > arch.vm.max_ram_pages) return errno(.bad_arg);
+    const m = arch.vm.create(@ptrCast(d), &d.kobj, &d.user_mem, pages, frame.arg(2)) catch |e| return errno(switch (e) {
+        arch.vm.Error.NotHost => .bad_state,
+        arch.vm.Error.NoVms, arch.vm.Error.OutOfFrames => .no_space,
     });
     const va = domain.mapFrames(d, m.ram_pa, pages, .data) catch {
-        vm.destroy(m);
+        arch.vm.destroy(m);
         return errno(.no_space);
     };
-    const vh = d.captable.?.insert(.vm, vm.indexOf(m)) orelse {
-        vm.destroy(m);
+    const vh = d.captable.?.insert(.vm, arch.vm.indexOf(m)) orelse {
+        arch.vm.destroy(m);
         return errno(.no_space);
     };
-    frame.regs[1] = @bitCast(vh);
-    frame.regs[2] = va;
+    frame.set(1, @bitCast(vh));
+    frame.set(2, va);
     return errno(.ok);
 }
 
-fn lookupVm(d: *domain.Domain, handle_bits: u64) ?*vm.Vm {
+fn lookupVm(d: *domain.Domain, handle_bits: u64) ?*arch.vm.Vm {
     const h: shared.Handle = @bitCast(handle_bits);
     const idx = d.captable.?.lookup(h, .vm) orelse return null;
-    const m = vm.byIndex(idx) orelse return null;
+    const m = arch.vm.byIndex(idx) orelse return null;
     if (m.owner != @as(*anyopaque, @ptrCast(d))) return null;
     return m;
 }
 
-fn sysVmRun(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
-    if (frame.regs[1] >= m.nvcpus) return errno(.bad_arg);
-    const exit = vm.run(m, frame.regs[1], frame.regs[2]);
-    frame.regs[1] = @intFromEnum(exit.kind);
-    frame.regs[2] = exit.a;
-    frame.regs[3] = exit.b;
-    frame.regs[4] = exit.c;
-    frame.regs[5] = exit.d;
+fn sysVmRun(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.arg(0)) orelse return errno(.bad_handle);
+    if (frame.arg(1) >= m.nvcpus) return errno(.bad_arg);
+    const exit = arch.vm.run(m, frame.arg(1), frame.arg(2));
+    frame.set(1, @intFromEnum(exit.kind));
+    frame.set(2, exit.a);
+    frame.set(3, exit.b);
+    frame.set(4, exit.c);
+    frame.set(5, exit.d);
     return errno(.ok);
 }
 
-fn sysVmAttachDevice(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
-    const dh: shared.Handle = @bitCast(frame.regs[1]);
+fn sysVmAttachDevice(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.arg(0)) orelse return errno(.bad_handle);
+    const dh: shared.Handle = @bitCast(frame.arg(1));
     const idx = d.captable.?.lookup(dh, .device) orelse return errno(.bad_handle);
-    const bar_ipa = frame.regs[2];
-    if (bar_ipa % 4096 != 0 or frame.regs[3] < 32 or frame.regs[3] >= 96) return errno(.bad_arg);
-    vm.attachDevice(m, idx, bar_ipa, @intCast(frame.regs[3])) catch return errno(.no_space);
+    const bar_ipa = frame.arg(2);
+    if (bar_ipa % 4096 != 0 or frame.arg(3) < 32 or frame.arg(3) >= 96) return errno(.bad_arg);
+    arch.vm.attachDevice(m, idx, bar_ipa, @intCast(frame.arg(3))) catch return errno(.no_space);
     return errno(.ok);
 }
 
-fn sysVmCpuOn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
-    vm.vcpuOn(m, frame.regs[1], frame.regs[2], frame.regs[3]) catch |e| return errno(switch (e) {
-        vm.CpuOnError.NoSuchVcpu => .bad_arg,
-        vm.CpuOnError.AlreadyOn => .busy,
+fn sysVmCpuOn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.arg(0)) orelse return errno(.bad_handle);
+    arch.vm.vcpuOn(m, frame.arg(1), frame.arg(2), frame.arg(3)) catch |e| return errno(switch (e) {
+        arch.vm.CpuOnError.NoSuchVcpu => .bad_arg,
+        arch.vm.CpuOnError.AlreadyOn => .busy,
     });
     return errno(.ok);
 }
 
-fn sysVmSet(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const m = lookupVm(d, frame.regs[0]) orelse return errno(.bad_handle);
-    m.vcpus[0].pc = frame.regs[1];
-    m.vcpus[0].regs[0] = frame.regs[2];
+fn sysVmSet(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const m = lookupVm(d, frame.arg(0)) orelse return errno(.bad_handle);
+    m.vcpus[0].pc = frame.arg(1);
+    m.vcpus[0].regs[0] = frame.arg(2);
     return errno(.ok);
 }
 
-fn sysWindowMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
+fn sysWindowMap(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.arg(0));
     const idx = d.captable.?.lookup(h, .window) orelse return errno(.bad_handle);
     if (idx >= pci.windows.len) return errno(.bad_handle);
     const w = pci.windows[idx];
-    const off = frame.regs[1];
-    const pages = frame.regs[2];
+    const off = frame.arg(1);
+    const pages = frame.arg(2);
     if (pages != 0) {
         if (pages > 4096 or (off + pages) * 4096 > w.size) return errno(.bad_arg);
         const va = domain.mapMmio(d, w.base + off * 4096, pages) catch return errno(.no_space);
-        frame.regs[1] = va;
+        frame.set(1, va);
     } else {
-        frame.regs[1] = 0;
+        frame.set(1, 0);
     }
-    frame.regs[2] = w.base;
-    frame.regs[3] = w.size;
+    frame.set(2, w.base);
+    frame.set(3, w.size);
     return errno(.ok);
 }
 
-fn sysDeviceRegister(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
+fn sysDeviceRegister(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.arg(0));
     const widx = d.captable.?.lookup(h, .window) orelse return errno(.bad_handle);
     if (widx != 0) return errno(.denied); // the ECAM holder registers
-    const kind_raw = frame.regs[2];
+    const kind_raw = frame.arg(2);
     if (kind_raw >= shared.device_kind_count) return errno(.bad_arg);
-    const pin: u8 = @truncate(frame.regs[5] & 0xff);
-    const bar_index: u8 = @truncate((frame.regs[5] >> 8) & 0xff);
-    const reg = pci.register(@intCast(frame.regs[1] & 0xffff), @enumFromInt(kind_raw), bar_index, frame.regs[3], frame.regs[4], pin) catch |e| return errno(switch (e) {
+    const pin: u8 = @truncate(frame.arg(5) & 0xff);
+    const bar_index: u8 = @truncate((frame.arg(5) >> 8) & 0xff);
+    const reg = pci.register(@intCast(frame.arg(1) & 0xffff), @enumFromInt(kind_raw), bar_index, frame.arg(3), frame.arg(4), pin) catch |e| return errno(switch (e) {
         pci.Error.TableFull => .no_space,
         else => .bad_arg,
     });
     const dh = d.captable.?.insert(.device, reg.idx) orelse return errno(.no_space);
-    frame.regs[1] = @bitCast(dh);
-    frame.regs[2] = reg.lpi;
-    frame.regs[3] = if (reg.lpi != 0) its.translater() else 0;
+    frame.set(1, @bitCast(dh));
+    frame.set(2, reg.lpi);
+    frame.set(3, if (reg.lpi != 0) arch.msi.translater() else 0);
     return errno(.ok);
 }
 
-fn sysDeviceInfo(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
+fn sysDeviceInfo(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.arg(0));
     const idx = d.captable.?.lookup(h, .device) orelse return errno(.bad_handle);
     const dev = &pci.devices[idx];
-    frame.regs[1] = @intFromEnum(dev.kind);
-    frame.regs[2] = dev.sid;
-    frame.regs[3] = dev.bar_len;
+    frame.set(1, @intFromEnum(dev.kind));
+    frame.set(2, dev.sid);
+    frame.set(3, dev.bar_len);
     return errno(.ok);
 }
 
@@ -248,12 +244,12 @@ fn sysIrqAck(d: *domain.Domain, handle_bits: u64, offset: u64) u64 {
     return errno(.ok);
 }
 
-fn sysDmaAlloc(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const npages = frame.regs[0];
+fn sysDmaAlloc(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const npages = frame.arg(0);
     if (npages == 0 or npages > 16) return errno(.bad_arg);
     const r = domain.mapDma(d, npages) catch return errno(.no_space);
-    frame.regs[1] = r.va;
-    frame.regs[2] = r.dev;
+    frame.set(1, r.va);
+    frame.set(2, r.dev);
     return errno(.ok);
 }
 
@@ -266,22 +262,22 @@ fn sysDmaAlloc(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 /// accounts cascade, so the caller's limits bound the whole subtree. The
 /// caller's registered death-watch (if any) is signaled when the child
 /// dies, and destroying the caller destroys the child.
-fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const spawner_h: shared.Handle = @bitCast(frame.regs[0]);
+fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const spawner_h: shared.Handle = @bitCast(frame.arg(0));
     _ = d.captable.?.lookup(spawner_h, .spawner) orelse return errno(.bad_handle);
     // The image is whatever the caller staged in its shm buffer: the
     // kernel has no table and no paths, only a copy. The caller's cap
     // keeps the buffer alive across the (synchronous) copy.
-    const image_h: shared.Handle = @bitCast(frame.regs[1]);
+    const image_h: shared.Handle = @bitCast(frame.arg(1));
     const image_obj = d.captable.?.lookup(image_h, .shm) orelse return errno(.bad_handle);
     const image: domain.ImageSource = .{ .shm = @ptrFromInt(image_obj) };
-    const flags = frame.regs[4];
+    const flags = frame.arg(4);
 
-    const limits = frame.regs[5];
+    const limits = frame.arg(5);
     var manifest: domain.Manifest = .{
         .grant_debug_log = flags & shared.SpawnFlags.grant_log != 0,
         .grant_spawner = flags & shared.SpawnFlags.grant_spawner != 0,
-        .arg = frame.regs[2],
+        .arg = frame.arg(2),
         .auto_reap = true,
         .watcher = d.death_watch,
         .parent = d,
@@ -290,10 +286,10 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     if (flags & shared.SpawnFlags.grant_introspect != 0) manifest.grant_introspect = true;
     if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
     if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
-    manifest.cpu_permille = frame.regs[6] & 0xffff;
-    manifest.cores = (frame.regs[6] >> 16) & 0xff;
-    if (frame.regs[3] != 0) {
-        const chan_h: shared.Handle = @bitCast(frame.regs[3]);
+    manifest.cpu_permille = frame.arg(6) & 0xffff;
+    manifest.cores = (frame.arg(6) >> 16) & 0xff;
+    if (frame.arg(3) != 0) {
+        const chan_h: shared.Handle = @bitCast(frame.arg(3));
         if (flags & shared.SpawnFlags.chan_side_a != 0) {
             const obj = d.captable.?.lookup(chan_h, .channel_a) orelse return errno(.bad_handle);
             const ch: *ipc.Channel = @ptrFromInt(obj);
@@ -326,11 +322,11 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         domain.destroy(child);
         return errno(.no_space);
     };
-    frame.regs[1] = @bitCast(h);
+    frame.set(1, @bitCast(h));
     return errno(.ok);
 }
 
-fn sysChanCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+fn sysChanCreate(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const ch = ipc.createChannel(1, 1) catch return errno(.no_space);
     const ha = d.captable.?.insert(.channel_a, @intFromPtr(ch)) orelse {
         ipc.unrefSide(ch, .a, 0);
@@ -343,25 +339,25 @@ fn sysChanCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
         ipc.unrefSide(ch, .b, 0);
         return errno(.no_space);
     };
-    frame.regs[1] = @bitCast(ha);
-    frame.regs[2] = @bitCast(hb);
+    frame.set(1, @bitCast(ha));
+    frame.set(2, @bitCast(hb));
     return errno(.ok);
 }
 
-fn sysDomainStat(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const h: shared.Handle = @bitCast(frame.regs[0]);
+fn sysDomainStat(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.arg(0));
     const obj = d.captable.?.lookup(h, .domain_ctl) orelse return errno(.bad_handle);
     const child: *domain.Domain = @ptrFromInt(obj);
     trace.record(.domain_stat, child.id, @intFromEnum(child.state));
-    frame.regs[1] = switch (child.state) {
+    frame.set(1, switch (child.state) {
         .alive => @intFromEnum(shared.DomainState.alive),
         .dying => @intFromEnum(shared.DomainState.dying),
         else => @intFromEnum(shared.DomainState.dead),
-    };
-    frame.regs[2] = child.exit_code;
+    });
+    frame.set(2, child.exit_code);
     // Budgets, used KB << 32 | limit KB (introspection for supervisors).
-    frame.regs[3] = ((child.kobj.balance() / 1024) << 32) | (child.kobj.limit / 1024);
-    frame.regs[4] = ((child.user_mem.balance() / 1024) << 32) | (child.user_mem.limit / 1024);
+    frame.set(3, ((child.kobj.balance() / 1024) << 32) | (child.kobj.limit / 1024));
+    frame.set(4, ((child.user_mem.balance() / 1024) << 32) | (child.user_mem.limit / 1024));
     return errno(.ok);
 }
 
@@ -376,19 +372,19 @@ fn introspectOk(d: *domain.Domain, handle_bits: u64) bool {
 
 /// domain_list(cap, buf, len): typed DomainRec records for every live
 /// domain — the whole tree.
-fn sysDomainList(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    if (!introspectOk(d, frame.regs[0])) return errno(.bad_handle);
-    const ptr = frame.regs[1];
-    const len = frame.regs[2];
+fn sysDomainList(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    if (!introspectOk(d, frame.arg(0))) return errno(.bad_handle);
+    const ptr = frame.arg(1);
+    const len = frame.arg(2);
     if (len == 0 or len > 64 * 1024) return errno(.bad_arg);
     domain.uaccessEnter(d);
     defer domain.uaccessLeave(d);
     if (!userRangeWritable(d, ptr, len)) return errno(.fault);
-    frame.regs[1] = uaccess.withUserBuffer(ptr, len, {}, struct {
+    frame.set(1, arch.uaccess.withUserBuffer(ptr, len, {}, struct {
         fn f(_: void, buf: []u8) u64 {
             return domain.fillRecs(buf);
         }
-    }.f);
+    }.f));
     return errno(.ok);
 }
 
@@ -406,7 +402,7 @@ fn sysGetrandom(d: *domain.Domain, ptr: u64, len: u64) u64 {
     // through a user pointer itself.
     var tmp: [shared.rng_max_request]u8 = undefined;
     rng.fill(tmp[0..len]) catch return errno(.bad_state);
-    uaccess.copyToUser(ptr, tmp[0..len]);
+    arch.uaccess.copyToUser(ptr, tmp[0..len]);
     @memset(tmp[0..len], 0);
     return errno(.ok);
 }
@@ -421,20 +417,20 @@ fn sysRngSeed(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     defer domain.uaccessLeave(d);
     if (!userRangeOk(d, ptr, len)) return errno(.fault);
     var tmp: [shared.rng_max_request]u8 = undefined;
-    uaccess.copyFromUser(tmp[0..len], ptr);
+    arch.uaccess.copyFromUser(tmp[0..len], ptr);
     rng.seed(tmp[0..len]);
     @memset(tmp[0..len], 0);
     return errno(.ok);
 }
 
 /// sysinfo(cap): pmem free/total bytes, online cores, uptime ticks.
-fn sysSysinfo(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    if (!introspectOk(d, frame.regs[0])) return errno(.bad_handle);
+fn sysSysinfo(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    if (!introspectOk(d, frame.arg(0))) return errno(.bad_handle);
     const st = pmem.stats();
-    frame.regs[1] = st.free_bytes;
-    frame.regs[2] = st.total_bytes;
-    frame.regs[3] = sched.onlineCount();
-    frame.regs[4] = sched.uptimeTicks();
+    frame.set(1, st.free_bytes);
+    frame.set(2, st.total_bytes);
+    frame.set(3, sched.onlineCount());
+    frame.set(4, sched.uptimeTicks());
     return errno(.ok);
 }
 
@@ -463,21 +459,21 @@ fn sysCapDrop(d: *domain.Domain, handle_bits: u64) u64 {
     const obj = e.object;
     const badge = e.badge;
     _ = d.captable.?.remove(h);
-    if (ct == .device) smmu.detachIfHolder(obj, @ptrCast(d), d.asid);
+    if (ct == .device) arch.iommu.detachIfHolder(obj, @ptrCast(d), d.asid);
     ipc.releaseCap(ct, obj, badge);
     return errno(.ok);
 }
 
 // --------------------------------------------------------------- channels
 
-fn sysCall(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const handle: shared.Handle = @bitCast(frame.regs[0]);
+fn sysCall(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const handle: shared.Handle = @bitCast(frame.arg(0));
     const lb = d.captable.?.lookupBadge(handle, .channel_b) orelse return errno(.bad_handle);
     const ch: *ipc.Channel = @ptrFromInt(lb.obj);
 
-    var msg: ipc.Msg = .{ .data = frame.regs[1..5].* };
-    if (frame.regs[5] != 0) {
-        if (attachCap(d, frame.regs[5], &msg)) |e| return errno(e);
+    var msg: ipc.Msg = .{ .data = frame.msgWords() };
+    if (frame.arg(5) != 0) {
+        if (attachCap(d, frame.arg(5), &msg)) |e| return errno(e);
     }
     const res = ipc.call(ch, msg, lb.badge);
     if (res.err != .ok) {
@@ -488,18 +484,18 @@ fn sysCall(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     return errno(.ok);
 }
 
-fn sysRecv(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const handle: shared.Handle = @bitCast(frame.regs[0]);
+fn sysRecv(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const handle: shared.Handle = @bitCast(frame.arg(0));
     const obj = d.captable.?.lookup(handle, .channel_a) orelse return errno(.bad_handle);
     const ch: *ipc.Channel = @ptrFromInt(obj);
     var msg: ipc.Msg = .{};
     var badge: u64 = 0;
     var token: u64 = 0;
     const e = ipc.recv(ch, &msg, &badge, &token);
-    frame.regs[6] = badge; // client_dead names the dead identity here too
+    frame.set(6, badge); // client_dead names the dead identity here too
     if (e != .ok) return errno(e);
     deliver(d, msg, frame);
-    frame.regs[7] = token;
+    frame.set(7, token);
     return errno(.ok);
 }
 
@@ -507,29 +503,29 @@ fn sysRecv(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
 /// side can mint identities for its own channel; the identity is
 /// refcounted on its own so recv reports client_dead when its last cap
 /// dies (no_space when the badge table is full).
-fn sysChanMint(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const handle: shared.Handle = @bitCast(frame.regs[0]);
+fn sysChanMint(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const handle: shared.Handle = @bitCast(frame.arg(0));
     const obj = d.captable.?.lookup(handle, .channel_a) orelse return errno(.bad_handle);
     const ch: *ipc.Channel = @ptrFromInt(obj);
-    ipc.mintBadge(ch, frame.regs[1]) catch return errno(.no_space);
-    const h = d.captable.?.insertBadged(.channel_b, obj, frame.regs[1]) orelse {
-        ipc.unrefSide(ch, .b, frame.regs[1]);
+    ipc.mintBadge(ch, frame.arg(1)) catch return errno(.no_space);
+    const h = d.captable.?.insertBadged(.channel_b, obj, frame.arg(1)) orelse {
+        ipc.unrefSide(ch, .b, frame.arg(1));
         return errno(.no_space);
     };
-    frame.regs[2] = @bitCast(h);
+    frame.set(2, @bitCast(h));
     return errno(.ok);
 }
 
-fn sysReply(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const handle: shared.Handle = @bitCast(frame.regs[0]);
+fn sysReply(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const handle: shared.Handle = @bitCast(frame.arg(0));
     const obj = d.captable.?.lookup(handle, .channel_a) orelse return errno(.bad_handle);
     const ch: *ipc.Channel = @ptrFromInt(obj);
-    var msg: ipc.Msg = .{ .data = frame.regs[1..5].* };
-    if (frame.regs[5] != 0) {
-        if (attachCap(d, frame.regs[5], &msg)) |e| return errno(e);
+    var msg: ipc.Msg = .{ .data = frame.msgWords() };
+    if (frame.arg(5) != 0) {
+        if (attachCap(d, frame.arg(5), &msg)) |e| return errno(e);
     }
     // x6: the reply token from recv (0 = the oldest pending caller).
-    const e = ipc.replyTo(ch, msg, frame.regs[6]);
+    const e = ipc.replyTo(ch, msg, frame.arg(6));
     if (e != .ok) dropAttachment(msg);
     return errno(e);
 }
@@ -582,18 +578,18 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
 
 /// Hand a received message to user registers, translating any attached cap
 /// into the receiving domain's table.
-fn deliver(d: *domain.Domain, msg: ipc.Msg, frame: *trap.TrapFrame) void {
-    frame.regs[1..5].* = msg.data;
-    frame.regs[5] = 0;
+fn deliver(d: *domain.Domain, msg: ipc.Msg, frame: *arch.trap.TrapFrame) void {
+    frame.setMsgWords(msg.data);
+    frame.set(5, 0);
     if (msg.cap_type != 0) {
         const ct: cap.CapType = @enumFromInt(msg.cap_type);
         if (d.captable.?.insertBadged(ct, msg.cap_obj, msg.cap_badge)) |h| {
-            frame.regs[5] = @bitCast(h);
+            frame.set(5, @bitCast(h));
             // Receiving a device binds its DMA to this address space: the
             // last holder handed the cap is the one whose memory it sees.
             if (ct == .device) {
                 domain.ensureMsiDoorbell(d);
-                smmu.attach(msg.cap_obj, d.ttbr0_pa, d.asid, @ptrCast(d));
+                arch.iommu.attach(msg.cap_obj, d.user_root_pa, d.asid, @ptrCast(d));
             }
         } else {
             dropAttachment(msg); // table full: the grant is dropped, not leaked
@@ -619,13 +615,13 @@ fn sysTimerArm(d: *domain.Domain, handle_bits: u64, period: u64, bits: u64) u64 
     return errno(.ok);
 }
 
-fn sysNotifyCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
+fn sysNotifyCreate(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const n = ipc.createNotification() catch return errno(.no_space);
     const h = d.captable.?.insert(.notification, @intFromPtr(n)) orelse {
         ipc.unrefNotification(n);
         return errno(.no_space);
     };
-    frame.regs[1] = @bitCast(h);
+    frame.set(1, @bitCast(h));
     return errno(.ok);
 }
 
@@ -636,36 +632,36 @@ fn sysNotifySignal(d: *domain.Domain, handle_bits: u64, bits: u64) u64 {
     return errno(.ok);
 }
 
-fn sysNotifyWait(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const handle: shared.Handle = @bitCast(frame.regs[0]);
+fn sysNotifyWait(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const handle: shared.Handle = @bitCast(frame.arg(0));
     const obj = d.captable.?.lookup(handle, .notification) orelse return errno(.bad_handle);
     const res = ipc.wait(@ptrFromInt(obj));
-    frame.regs[1] = res.bits;
+    frame.set(1, res.bits);
     return errno(res.err);
 }
 
-fn sysShmCreate(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const npages = frame.regs[0];
+fn sysShmCreate(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const npages = frame.arg(0);
     if (npages == 0 or npages > ipc.shm_max_pages) return errno(.bad_arg);
     const s = ipc.createShmBy(@intCast(npages), d.name) orelse return errno(.no_space);
     const h = d.captable.?.insert(.shm, @intFromPtr(s)) orelse {
         ipc.unrefShm(s);
         return errno(.no_space);
     };
-    frame.regs[1] = @bitCast(h);
+    frame.set(1, @bitCast(h));
     return errno(.ok);
 }
 
-fn sysShmMap(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
-    const handle: shared.Handle = @bitCast(frame.regs[0]);
+fn sysShmMap(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const handle: shared.Handle = @bitCast(frame.arg(0));
     const obj = d.captable.?.lookup(handle, .shm) orelse return errno(.bad_handle);
     const s: *ipc.Shm = @ptrFromInt(obj);
     const va = domain.mapShm(d, s) catch |e| return errno(switch (e) {
         domain.Error.NoMapSlots => .no_space,
         else => .no_space,
     });
-    frame.regs[1] = va;
-    frame.regs[2] = s.npages; // so services can bound IO by the real window
+    frame.set(1, va);
+    frame.set(2, s.npages); // so services can bound IO by the real window
     return errno(.ok);
 }
 
@@ -687,11 +683,11 @@ fn sysLog(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
         // The drill: a range-checked, perfectly mapped user byte, touched
         // with the window closed. PAN must refuse it.
         log.info("pan-test: touching the caller's buffer outside a uaccess window", .{});
-        _ = uaccess.touchOutsideWindow(ptr);
+        _ = arch.uaccess.touchOutsideWindow(ptr);
         log.warn("pan-test: the access went through — no PAN on this CPU", .{});
     }
     var line: [256]u8 = undefined;
-    uaccess.copyFromUser(line[0..len], ptr);
+    arch.uaccess.copyFromUser(line[0..len], ptr);
     log.print("[{s}] {s}\n", .{ d.name, line[0..len] });
     return errno(.ok);
 }

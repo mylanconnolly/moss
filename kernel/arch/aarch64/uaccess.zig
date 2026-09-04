@@ -17,7 +17,7 @@
 //! The same shape is what x86_64 will want (SMAP: stac/clac around the
 //! copy); nothing outside this file knows which it is.
 
-const log = @import("log.zig");
+const log = @import("../../log.zig");
 
 pub var available = false;
 var detected = false;

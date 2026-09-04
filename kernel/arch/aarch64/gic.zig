@@ -3,8 +3,8 @@
 //! CPU interface via ICC system registers. Group 1 only.
 
 const its = @import("its.zig");
-const log = @import("log.zig");
-const mem = @import("mem.zig");
+const log = @import("../../log.zig");
+const mem = @import("../../mem.zig");
 
 const gicd_base: u64 = 0x0800_0000;
 const gicr_base: u64 = 0x080a_0000;

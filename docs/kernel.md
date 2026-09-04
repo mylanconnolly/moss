@@ -235,7 +235,7 @@ mapped buffer holds a reference on its object for as long as it is
 mapped — dropping the capability cannot free frames still mapped —
 and `shm_unmap` gives a mapping back.
 
-The kernel touches user memory through one door, `kernel/uaccess.zig`.
+The kernel touches user memory through one door, `kernel/arch/aarch64/uaccess.zig`.
 Every syscall that copies range-checks the pointer against the image,
 the stack, and the window's live mappings, pins the window so an unmap
 on another core waits for the copy, and copies through a window that
@@ -244,6 +244,19 @@ runs with PAN set, so any other privileged touch of a user page is a
 fault report, not a read or write on the caller's behalf.
 
 ### The platform
+
+Everything the kernel knows about the machine sits behind one file,
+`kernel/arch.zig`: a comptime switch on the target that selects a port
+directory (`kernel/arch/aarch64/`) and lists the names a port
+provides — the CPU (interrupt masking, the per-core pointer, the
+counter), traps and the syscall frame, thread contexts, page tables,
+the door to user memory, the interrupt controller, message interrupts,
+the tick, power, secondary cores, the IOMMU, the hypervisor, firmware
+discovery and the console. The generic kernel — domains, capabilities,
+IPC, the scheduler's policy, quotas, teardown — never names a register
+or a device. Only the selected port is compiled: another architecture's
+code is never analyzed, let alone linked. `-Darch` chooses the port;
+aarch64 is the only one today.
 
 moss boots on aarch64 as a raw arm64 Image. Entered at EL2 (the usual
 case under QEMU with virtualization on), the boot code makes the core a
@@ -356,6 +369,7 @@ it — and no claim that any of this defeats Spectre-class attacks.
   dump.
 - Source — `kernel/domain.zig` (Domain, Manifest, spawn, destroy, the
   reaper, the window), `kernel/cap.zig`, `kernel/sched.zig` (threads,
-  block, kills, reaping), `kernel/syscall.zig`, `kernel/uaccess.zig`,
-  `kernel/trap.zig`, `kernel/trace.zig`, `shared/lib.zig` (`Syscall`,
-  `Errno`, `Handle`).
+  block, kills, reaping), `kernel/syscall.zig`, `kernel/trace.zig`,
+  `kernel/arch.zig` (the HAL interface) and `kernel/arch/aarch64/`
+  (`trap.zig`, `uaccess.zig`, `mmu.zig`, `cpu.zig`, `thread.zig`,
+  `platform.zig`), `shared/lib.zig` (`Syscall`, `Errno`, `Handle`).

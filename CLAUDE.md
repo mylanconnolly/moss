@@ -34,6 +34,9 @@ frontier — every unstarted arc and every residual, kept current; the
 - ROADMAP.md: locked decisions + invariants (bottom). Change decisions
   there first, deliberately, never silently in code.
 - DESIGN.md: per-subsystem "as built" sections + paid-for lessons.
+- kernel/arch.zig is the HAL: the whole interface a port provides, one
+  directory per port under kernel/arch/. Generic kernel code never
+  imports kernel/arch/* directly and never names a register.
 - HACKING.md: how to add syscalls/programs/services/tests; debugging
   recipes; the sharp-edge list (asm→C-ABI only, `asm volatile` for any
   mutable CPU-state read, no logging under any sched/IPC lock, kills land

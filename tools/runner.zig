@@ -242,11 +242,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The wire echo (cat), a canned HTTP server for `fetch`, and a
         // forward from the host to the script's own server.
         .net => try args.appendSlice(gpa, &.{
-            "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat," ++
+            "-netdev",
+            "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat," ++
                 "guestfwd=tcp:10.0.2.100:9001-cmd:printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 11\\r\\n\\r\\nhello moss!'," ++
                 "hostfwd=tcp:127.0.0.1:" ++ std.fmt.comptimePrint("{d}", .{http_port}) ++ "-:8080",
-            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-            "-object", "filter-dump,id=f0,netdev=n0,file=zig-out/check/net.pcap",
+            "-device",
+            "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+            "-object",
+            "filter-dump,id=f0,netdev=n0,file=zig-out/check/net.pcap",
         }),
         // Two NICs on one hub (host node 1, guest node 2) and a second
         // entropy device for the guest.

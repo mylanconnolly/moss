@@ -9,16 +9,14 @@
 //! freed in that window is dropped by signal() itself.
 
 const std = @import("std");
-const gic = @import("gic.zig");
+const arch = @import("arch.zig");
 const ipc = @import("ipc.zig");
-const its = @import("its.zig");
-const vm = @import("vm.zig");
 const lock = @import("lock.zig");
 
-const spi_base = 32;
-const max_spis = 256;
-const lpi_base = its.lpi_base;
-const max_lpis = its.max_lpis;
+const spi_base = arch.intc.line_base;
+const max_spis = arch.intc.line_count;
+const lpi_base = arch.msi.base;
+const max_lpis = arch.msi.count;
 
 /// Where an interrupt goes: a notification (a driver in this kernel's
 /// userspace) or a guest (injected as a virtual SPI by vm.zig).
@@ -57,12 +55,12 @@ pub const Error = error{
 pub fn bind(intid: u32, n: *ipc.Notification) Error!void {
     const s = slot(intid) orelse return Error.OutOfRange;
     {
-        const daif = irq_lock.lockIrqSave();
-        defer irq_lock.unlockRestore(daif);
+        const irqs = irq_lock.lockIrqSave();
+        defer irq_lock.unlockRestore(irqs);
         if (s.* != .none) return Error.Busy;
         s.* = .{ .notif = n };
     }
-    if (!isLpi(intid)) gic.enableSpi(intid);
+    if (!isLpi(intid)) arch.intc.enableLine(intid);
 }
 
 /// Route `intid` into a guest as virtual SPI `vintid` (a passed-through
@@ -70,17 +68,17 @@ pub fn bind(intid: u32, n: *ipc.Notification) Error!void {
 pub fn bindGuest(intid: u32, token: *anyopaque, vintid: u32) Error!void {
     const s = slot(intid) orelse return Error.OutOfRange;
     {
-        const daif = irq_lock.lockIrqSave();
-        defer irq_lock.unlockRestore(daif);
+        const irqs = irq_lock.lockIrqSave();
+        defer irq_lock.unlockRestore(irqs);
         s.* = .{ .guest = .{ .token = token, .vintid = vintid } };
     }
-    if (!isLpi(intid)) gic.enableSpi(intid);
+    if (!isLpi(intid)) arch.intc.enableLine(intid);
 }
 
 pub fn unbindGuest(intid: u32, token: *anyopaque) void {
     const s = slot(intid) orelse return;
-    const daif = irq_lock.lockIrqSave();
-    defer irq_lock.unlockRestore(daif);
+    const irqs = irq_lock.lockIrqSave();
+    defer irq_lock.unlockRestore(irqs);
     if (s.* == .guest and s.guest.token == token) s.* = .none;
 }
 
@@ -88,7 +86,7 @@ pub fn unbindGuest(intid: u32, token: *anyopaque) void {
 /// messages, nothing to re-enable.
 pub fn ack(intid: u32) Error!void {
     if (slot(intid) == null) return Error.OutOfRange;
-    if (!isLpi(intid)) gic.enableSpi(intid);
+    if (!isLpi(intid)) arch.intc.enableLine(intid);
 }
 
 /// From the trap handler (IRQs masked): true if the interrupt was bound
@@ -96,16 +94,16 @@ pub fn ack(intid: u32) Error!void {
 /// is an edge and just delivered.
 pub fn deliver(intid: u32) bool {
     const s = slot(intid) orelse return false;
-    const daif = irq_lock.lockIrqSave();
+    const irqs = irq_lock.lockIrqSave();
     const target = s.*;
     if (target == .none) {
-        irq_lock.unlockRestore(daif);
+        irq_lock.unlockRestore(irqs);
         return false;
     }
-    if (!isLpi(intid)) gic.disableSpi(intid);
-    irq_lock.unlockRestore(daif);
+    if (!isLpi(intid)) arch.intc.disableLine(intid);
+    irq_lock.unlockRestore(irqs);
     if (target == .guest) {
-        vm.injectSpi(target.guest.token, target.guest.vintid);
+        arch.vm.injectSpi(target.guest.token, target.guest.vintid);
         return true;
     }
     const n = target.notif;
@@ -123,7 +121,7 @@ fn onNotificationFreed(n: *ipc.Notification) void {
     for (&bindings, 0..) |*b, i| {
         if (b.* == .notif and b.notif == n) {
             b.* = .none;
-            gic.disableSpi(@intCast(spi_base + i));
+            arch.intc.disableLine(@intCast(spi_base + i));
         }
     }
     for (&lpi_bindings) |*b| {
@@ -131,19 +129,15 @@ fn onNotificationFreed(n: *ipc.Notification) void {
     }
 }
 
-/// Debug: log GIC state for every bound SPI.
+/// Debug: log the controller's state for every bound line.
 pub fn debugDump() void {
     const log = @import("log.zig");
     for (&bindings, 0..) |b, i| {
         if (b == .none) continue;
         const intid: u32 = @intCast(spi_base + i);
-        const reg = intid / 32;
-        const bit = @as(u32, 1) << @intCast(intid % 32);
-        const enabled = gic.gicdRead(0x100 + reg * 4) & bit != 0;
-        const pending = gic.gicdRead(0x200 + reg * 4) & bit != 0;
-        const active = gic.gicdRead(0x300 + reg * 4) & bit != 0;
+        const st = arch.intc.lineState(intid);
         log.info("irq[{d}]: enabled={} pending={} active={} target={s}", .{
-            intid, enabled, pending, active, @tagName(b),
+            intid, st.enabled, st.pending, st.active, @tagName(b),
         });
     }
 }

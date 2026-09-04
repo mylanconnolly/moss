@@ -40,7 +40,7 @@ TLB-tagged with the domain's ASID (retired with `tlbi aside1is` at teardown).
 Kernel-only threads run with TTBR0 walks disabled (TCR.EPD0), so stale user
 mappings are unreachable outside the owning domain's threads. User mappings
 are W^X and non-global. Kernel access to user memory goes through one
-door, `kernel/uaccess.zig`: every syscall range-checks the pointer
+door, `kernel/arch/aarch64/uaccess.zig`: every syscall range-checks the pointer
 against the domain's image, stack and shm window, then copies through a
 window that is the only place the hardware is told to allow it — PAN
 (ARMv8.1+, detected at boot from ID_AA64MMFR1_EL1, armed on every core
@@ -651,7 +651,7 @@ routes the line, `device_info` says what it is. Kinds are the virtio
 device ids (`shared.DeviceKind`: net, blk, console, rng), so root can
 forward what it was granted without knowing anything, and init files
 each cap by kind for unit files' `{ tag: device, device: blk }`.
-Interrupts are MSI-X through the **ITS** (`kernel/its.zig`, as built
+Interrupts are MSI-X through the **ITS** (`kernel/arch/aarch64/its.zig`, as built
 2026-09-02): after the ITS is up (device and collection tables, a
 command queue, a shared LPI configuration table, a per-core pending
 table and collection), every device with an MSI-X capability gets
@@ -711,7 +711,7 @@ sit on the bus as an unclaimed endpoint.
 
 ### The SMMU (as built, 2026-09-02)
 
-An SMMUv3 (`kernel/smmu.zig`) sits in front of the PCIe bus; every boot
+An SMMUv3 (`kernel/arch/aarch64/smmu.zig`) sits in front of the PCIe bus; every boot
 runs with it (`iommu=smmuv3`, `iommu_platform=on` on each device, so the
 devices honour it and offer ACCESS_PLATFORM). Stage-1 translation only,
 and the IO page table of a device **is the page table of the domain
@@ -1953,12 +1953,72 @@ device) — the seat model is the same either way.
 First target: aarch64 on QEMU `virt` (GICv3, generic timer, PSCI, virtio),
 chosen because Hypervisor.framework makes the edit-compile-boot loop
 near-native on the Apple Silicon dev machine and the platform has essentially
-zero legacy. The HAL boundary is kept honest for a later x86_64 (UEFI-era
-only) port.
+zero legacy. The HAL boundary was a promise until 2026-09-04, when it
+became a directory; the x86_64 (UEFI-era only) port is what tests it.
+
+### The HAL (as built, 2026-09-04)
+
+`kernel/arch.zig` is the whole of what the generic kernel knows about
+the machine: one `switch (builtin.cpu.arch)` selecting a port directory
+(`kernel/arch/aarch64/`), and a list of names every port provides —
+`cpu` (interrupt masking, the per-core pointer, the cycle counter,
+halt), `trap` (vectors, the frame and its argument/result slots),
+`thread` (the saved-register context, vector state, the switch, the
+trampoline, the drop to user mode), `mmu` (kernel and user page tables,
+`switchUser`, `publishTables`), `uaccess`, `intc` (line interrupts:
+enable, disable, acknowledge, end, kick a core), `msi` (message
+interrupts and their doorbell), `timer` (the tick source), `power`,
+`smp`, `iommu`, `vm`, `platform` (what firmware says: memory, the
+PCIe host, the boot arguments; `initInterrupts`, `initIommu`, the INTx
+line of a slot and pin) and `console`. Only the selected port is
+analyzed, so nothing of another architecture reaches a binary: the
+selection is Zig's lazy analysis, not a build flag. `-Darch` picks the
+target and the linker script (`kernel/arch/<arch>/linker.ld`).
+
+The rules of the boundary: generic code imports `arch.zig` and never a
+file under `arch/`; a port may call up into the generic kernel, but
+only through the C-ABI entry points its assembly names
+(`kmain`, `trapHandler`'s callees, `schedThreadStart`/`schedThreadRun`,
+`secondaryEntry`) and the public API of the generic modules (the trap
+path dispatches `syscall.dispatch`, `irq.deliver`, `timer.handleIrq`,
+`sched.preemptIfNeeded`; a secondary core calls `sched.registerCpu`).
+Names on the generic side are neutral — a thread carries `user_root`
+and an `asid`, a domain `user_root_pa`, a lock saves an
+`arch.cpu.IrqState` — and the port's names stay in the port (TTBR0,
+DAIF, the GIC's SPIs and the ITS's LPIs are `arch.intc` lines and
+`arch.msi` messages outside it). The devicetree parser stays a
+library (`kernel/dt.zig`, host-tested); `arch/aarch64/platform.zig` is
+what reads it.
+
+What the extraction found: the boundary had been honest in spirit —
+no generic module had grown a dependency the port could not answer —
+but it lived in eleven files' inline assembly and three modules'
+private copies of `mrs daif` / `msr daif`. The scheduler alone held
+the context-switch and FP stubs, the per-core register with its EL2
+special case, the user-space switch and the cycle counter; the domain
+loader held the `eret`; the syscall dispatcher named x0..x8 by index in
+120 places (they are frame *slots* now — the port maps a slot to a
+register). Nothing changed behaviour: the gate is the proof, every
+drill byte-identical in what it logs.
+
+What a port must bring, learned from writing the interface down:
+a boot entry that lands in `kmain` with the MMU on and the kernel
+in its high half; a trap frame with seven argument slots and eight
+result slots (the IPC syscalls return five words plus a cap, a badge
+and a token); an interrupt id space with a contiguous range of line
+interrupts and one of message interrupts (the generic `irq.zig` keeps
+one binding table per range); a per-core tick; a cycle counter with a
+constant frequency (CPU budgets are in cycles); a way for user code to
+read that counter without a syscall (userspace benchmarks and timeouts
+rely on it); and an IOMMU whose translation is the domain's own page
+tables (the DMA-grant design assumes device address == the driver's
+virtual address). The hypervisor is the one optional piece: a port
+without one answers `NotHost` from `vm.create` and the drills that
+need it are not built for it.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and
-debugging. The 64-byte Image header in `kernel/boot.zig` requests loading at
+debugging. The 64-byte Image header in `kernel/arch/aarch64/boot.zig` requests loading at
 RAM base + `0x80000` (the link address, `0x40080000`); QEMU honors the
 protocol by placing the DTB in RAM (observed at `0x48000000`) and passing its
 physical address in `x0`, entering with MMU/caches off. QEMU `virt` provides
@@ -1994,11 +2054,11 @@ without VHE (ID_AA64MMFR1.VH = 0; the E2H bit reads back clear), and a
 high-half kernel has no TTBR1 at a non-VHE EL2. `run-hvf` therefore
 boots at EL1 as before; guests are a TCG-only affair until real
 hardware. The move to a v8.2 CPU model also brought PAN; it is on (see
-"Kernel model" and `kernel/uaccess.zig`).
+"Kernel model" and `kernel/arch/aarch64/uaccess.zig`).
 
 ## Virtual machines
 
-**As built (2026-09-02, first cut).** `kernel/vm.zig` runs an EL1 guest
+**As built (2026-09-02, first cut).** `kernel/arch/aarch64/vm.zig` runs an EL1 guest
 in its own stage-2 world; a userspace VMM owns it through the
 **hypervisor capability**. `vm_create(hyp, pages)` allocates contiguous
 frames (charged to the VMM's user account), builds a stage-2 table

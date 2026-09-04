@@ -34,8 +34,8 @@ done without rediscovering the sharp edges.
 ## Adding things
 
 **A syscall**: number + doc in `shared/lib.zig` (`Syscall` enum) → dispatch
-arm + implementation in `kernel/syscall.zig` (args in `frame.regs[0..6]`,
-results written back to the frame) → wrapper in `user/usys.zig`. Anything
+arm + implementation in `kernel/syscall.zig` (args are `frame.arg(0..6)`,
+results `frame.set(i, v)` — slots the port maps to registers) → wrapper in `user/usys.zig`. Anything
 that names a kernel object goes through a capability lookup — no syscall
 takes a raw object id. A syscall that reads a user buffer checks
 `userRangeOk`; one that WRITES a user buffer checks `userRangeWritable`
@@ -207,6 +207,23 @@ line, then `psci.systemOff()`; panics are failures). Either way, add
 the option to `build.zig` (the `-D` flag and the `variants`/
 `all_test_opts` lists).
 
+**An architecture**: a directory `kernel/arch/<name>/` whose `arch.zig`
+provides every name `kernel/arch.zig` lists (read that file first: it
+is the interface, with the shape of each piece in its doc comment), a
+`linker.ld` beside it, and a case in `kernel/arch.zig`'s switch plus
+the target query in `build.zig` (`-Darch=<name>`). Start from
+`arch/aarch64/`: `cpu.zig`, `thread.zig`, `trap.zig`, `mmu.zig` and
+`platform.zig` are the shape; `gic`/`its`/`smmu`/`psci`/`vm` are the
+devices behind `intc`/`msi`/`iommu`/`power`/`vm`. The generic kernel
+never imports a file under `arch/`, and the port calls up only through
+the C-ABI entry points its assembly names and the generic modules'
+public API — a port that needs something new from the generic side adds
+it to the interface in `kernel/arch.zig`, with a doc comment, not by
+reaching around it. Userspace has the same seam to make when a second
+architecture arrives: `user/usys.zig` (the `svc` stubs and the counter
+reads), the `.text.uhdr` stanza every program carries, the `dmb`
+barriers in the virtio drivers, and `user/vmm.zig`.
+
 ## Debugging techniques that have paid off
 
 - One OS test by hand, without the whole gate: `zig build -D<name>-test`
@@ -266,6 +283,11 @@ the option to `build.zig` (the `-D` flag and the `variants`/
 
 - Assembly may only call `export`/`callconv(.c)` functions. Zig's
   unspecified convention has hidden parameters in Debug builds.
+- Architecture-specific code lives under `kernel/arch/<arch>/` and is
+  reached only through `kernel/arch.zig` (the HAL). No inline assembly,
+  system register, interrupt-controller or page-table-format knowledge
+  outside that directory; generic names for generic things (`user_root`,
+  `IrqState`, `intc.line_base`), the port's names inside the port.
 - `asm volatile` for every read of CPU state that can change (DAIF,
   TPIDR, ESR/FAR, TCR, the counters); plain `asm` only for constants
   (CNTFRQ, CurrentEL, ID registers). A non-volatile read is pure to the
@@ -428,7 +450,7 @@ debug.
   `el2vmsa` assembler feature (set on the kernel target). Anything that
   runs while a core is in a guest must first restore HCR_EL2 (vm.guestExit
   does, before anything else).
-- User memory is touched ONLY through `kernel/uaccess.zig`
+- User memory is touched ONLY through `kernel/arch/aarch64/uaccess.zig`
   (`copyFromUser`/`copyToUser`/`withUserBuffer`), after the syscall's
   range check: PAN is armed everywhere else and a stray dereference of
   a user pointer is a kernel fault ("privileged access to user memory

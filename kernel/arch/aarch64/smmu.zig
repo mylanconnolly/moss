@@ -20,14 +20,14 @@
 //! releasing capabilities.
 
 const std = @import("std");
-const dt = @import("dt.zig");
+const dt = @import("../../dt.zig");
 const gic = @import("gic.zig");
-const lock = @import("lock.zig");
-const log = @import("log.zig");
-const mem = @import("mem.zig");
+const lock = @import("../../lock.zig");
+const log = @import("../../log.zig");
+const mem = @import("../../mem.zig");
 const mmu = @import("mmu.zig");
-const pci = @import("pci.zig");
-const pmem = @import("pmem.zig");
+const pci = @import("../../pci.zig");
+const pmem = @import("../../pmem.zig");
 
 pub var active = false;
 pub var fault_count: u64 = 0;

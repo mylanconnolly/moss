@@ -8,11 +8,11 @@
 //! (UART, GIC) is mapped 4K at direct-map addresses with device attributes.
 
 const std = @import("std");
-const dt = @import("dt.zig");
-const kalloc = @import("kalloc.zig");
-const log = @import("log.zig");
-const mem = @import("mem.zig");
-const pmem = @import("pmem.zig");
+const dt = @import("../../dt.zig");
+const kalloc = @import("../../kalloc.zig");
+const log = @import("../../log.zig");
+const mem = @import("../../mem.zig");
+const pmem = @import("../../pmem.zig");
 
 const valid = 1 << 0;
 const table_or_page = 1 << 1; // in L1/L2: table; in L3: page (0 = 2MB/1GB block in L1/L2)
@@ -323,4 +323,38 @@ pub fn activate() void {
         :
         : [v] "r" (tcr | (1 << 7)),
     );
+}
+
+/// Program the user half for the incoming thread: its domain's tables
+/// (walks enabled, entries tagged by ASID), or no user space at all for
+/// kernel threads (walks disabled via TCR.EPD0 — kernel-only contexts can
+/// never reach stale user mappings). `root_pa` = 0 means none.
+pub fn switchUser(user_root: u64, asid: u16) void {
+    const epd0: u64 = 1 << 7;
+    const tcr = asm volatile ("mrs %[v], tcr_el1"
+        : [v] "=r" (-> u64),
+    );
+    if (user_root != 0) {
+        asm volatile (
+            \\msr ttbr0_el1, %[ttbr]
+            \\msr tcr_el1, %[tcr]
+            \\isb
+            :
+            : [ttbr] "r" (user_root | (@as(u64, asid) << 48)),
+              [tcr] "r" (tcr & ~epd0),
+        );
+    } else if (tcr & epd0 == 0) {
+        asm volatile (
+            \\msr tcr_el1, %[tcr]
+            \\isb
+            :
+            : [tcr] "r" (tcr | epd0),
+        );
+    }
+}
+
+/// Make page-table writes visible to every walker — the other cores and
+/// the IOMMU, which walks a driver domain's tables too.
+pub fn publishTables() void {
+    asm volatile ("dsb ishst");
 }

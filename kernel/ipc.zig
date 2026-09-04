@@ -21,6 +21,7 @@
 //! collect their targets first and signal after letting go.
 
 const std = @import("std");
+const arch = @import("arch.zig");
 const cap = @import("cap.zig");
 const kalloc = @import("kalloc.zig");
 const mem = @import("mem.zig");
@@ -136,8 +137,8 @@ pub const Error = error{NoObjects};
 /// Create a channel; both refcounts start at the caller's ownership (the
 /// caller then hands sides out via manifest grants or keeps them).
 pub fn createChannel(refs_a: u32, refs_b: u32) Error!*Channel {
-    const daif = objs_lock.lockIrqSave();
-    defer objs_lock.unlockRestore(daif);
+    const irqs = objs_lock.lockIrqSave();
+    defer objs_lock.unlockRestore(irqs);
     for (&channels) |*ch| {
         if (@atomicLoad(bool, &ch.active, .acquire)) continue;
         // A freeing side may still hold the lock for an instant.
@@ -159,9 +160,9 @@ pub const CallResult = struct {
 /// or the peer's death. `caller_badge` is the badge minted into the cap the
 /// caller invoked (0 for unbadged/kernel callers); recv delivers it.
 pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
-    const daif = ch.lock.lockIrqSave();
+    const irqs = ch.lock.lockIrqSave();
     if (!ch.a_open or !ch.b_open) {
-        ch.lock.unlockRestore(daif);
+        ch.lock.unlockRestore(irqs);
         return .{ .err = .peer_dead };
     }
 
@@ -178,7 +179,7 @@ pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
         sched.wake(server);
     }
     sched.block(&ch.callers, null, &ch.lock, null); // releases ch.lock
-    restoreIrqs(daif);
+    restoreIrqs(irqs);
 
     // Woken: either the server replied (mailbox holds the reply) or the
     // channel died under us. Either way the mailbox's cap — the reply's,
@@ -204,8 +205,8 @@ pub fn call(ch: *Channel, msg: Msg, caller_badge: u64) CallResult {
 /// and the caller is parked in a pending slot until reply(). With every
 /// slot occupied, recv reports busy: reply to something first.
 pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Errno {
-    const daif = maskIrqs();
-    defer restoreIrqs(daif);
+    const irqs = maskIrqs();
+    defer restoreIrqs(irqs);
     // A bound notification's lock is held from the latched-bits peek until
     // the thread is parked (block releases it): a signal either lands
     // before the peek and is seen, or after the park and interrupts it.
@@ -294,19 +295,12 @@ pub fn recv(ch: *Channel, out: *Msg, badge_out: *u64, token_out: *u64) shared.Er
     }
 }
 
-fn maskIrqs() u64 {
-    const daif = asm volatile ("mrs %[v], daif"
-        : [v] "=r" (-> u64),
-    );
-    asm volatile ("msr daifset, #2");
-    return daif;
+fn maskIrqs() arch.cpu.IrqState {
+    return arch.cpu.irqSave();
 }
 
-fn restoreIrqs(daif: u64) void {
-    asm volatile ("msr daif, %[v]"
-        :
-        : [v] "r" (daif),
-    );
+fn restoreIrqs(irqs: arch.cpu.IrqState) void {
+    arch.cpu.irqRestore(irqs);
 }
 
 /// Reply to the oldest pending caller (the one-at-a-time server's reply).
@@ -318,8 +312,8 @@ pub fn reply(ch: *Channel, msg: Msg) shared.Errno {
 /// was delivered first). A stale or unknown token is bad_state; a client
 /// that died mid-call reports peer_dead when its side is gone.
 pub fn replyTo(ch: *Channel, msg: Msg, token: u64) shared.Errno {
-    const daif = ch.lock.lockIrqSave();
-    defer ch.lock.unlockRestore(daif);
+    const irqs = ch.lock.lockIrqSave();
+    defer ch.lock.unlockRestore(irqs);
     var slot: ?usize = null;
     if (token == 0) {
         // Oldest = the lowest serial among the pending.
@@ -393,8 +387,8 @@ fn closeSideLocked(ch: *Channel, side: Side) void {
 /// the client identity, which chan_mint must have created.
 pub fn refSide(ch: *Channel, side: Side, badge: u64) void {
     if (side == .b and badge != 0) {
-        const daif = badges_lock.lockIrqSave();
-        defer badges_lock.unlockRestore(daif);
+        const irqs = badges_lock.lockIrqSave();
+        defer badges_lock.unlockRestore(irqs);
         const b = findBadge(ch, badge) orelse std.debug.panic("refSide: badge {d} was never minted", .{badge});
         b.refs += 1;
     }
@@ -402,8 +396,8 @@ pub fn refSide(ch: *Channel, side: Side, badge: u64) void {
 }
 
 fn refSideOnly(ch: *Channel, side: Side) void {
-    const daif = ch.lock.lockIrqSave();
-    defer ch.lock.unlockRestore(daif);
+    const irqs = ch.lock.lockIrqSave();
+    defer ch.lock.unlockRestore(irqs);
     switch (side) {
         .a => ch.refs_a += 1,
         .b => ch.refs_b += 1,
@@ -416,8 +410,8 @@ fn refSideOnly(ch: *Channel, side: Side) void {
 pub fn unrefSide(ch: *Channel, side: Side, badge: u64) void {
     var died = false;
     if (side == .b and badge != 0) {
-        const daif = badges_lock.lockIrqSave();
-        defer badges_lock.unlockRestore(daif);
+        const irqs = badges_lock.lockIrqSave();
+        defer badges_lock.unlockRestore(irqs);
         const b = findBadge(ch, badge) orelse std.debug.panic("unrefSide: badge {d} was never minted", .{badge});
         std.debug.assert(b.refs > 0);
         b.refs -= 1;
@@ -426,8 +420,8 @@ pub fn unrefSide(ch: *Channel, side: Side, badge: u64) void {
             died = true;
         }
     }
-    const daif = ch.lock.lockIrqSave();
-    defer ch.lock.unlockRestore(daif);
+    const irqs = ch.lock.lockIrqSave();
+    defer ch.lock.unlockRestore(irqs);
     if (died) {
         trace.record(.badge_dead, channelIndex(ch), badge);
         ch.deaths_pending += 1;
@@ -454,8 +448,8 @@ pub fn unrefSide(ch: *Channel, side: Side, badge: u64) void {
 /// (both caps are the same client). Fails when the badge table is full.
 pub fn mintBadge(ch: *Channel, badge: u64) Error!void {
     if (badge != 0) {
-        const daif = badges_lock.lockIrqSave();
-        defer badges_lock.unlockRestore(daif);
+        const irqs = badges_lock.lockIrqSave();
+        defer badges_lock.unlockRestore(irqs);
         const b = findBadge(ch, badge) orelse allocBadge(ch, badge) orelse return Error.NoObjects;
         b.refs += 1;
     }
@@ -508,8 +502,8 @@ fn purgeBadges(ch: *Channel) void {
 
 /// Identities in the table (live or awaiting collection): the leak bar.
 pub fn badgeCount() usize {
-    const daif = badges_lock.lockIrqSave();
-    defer badges_lock.unlockRestore(daif);
+    const irqs = badges_lock.lockIrqSave();
+    defer badges_lock.unlockRestore(irqs);
     var n: usize = 0;
     for (&badges) |*b| {
         if (b.ch != null) n += 1;
@@ -520,8 +514,8 @@ pub fn badgeCount() usize {
 // ----------------------------------------------------------- notifications
 
 pub fn createNotification() Error!*Notification {
-    const daif = objs_lock.lockIrqSave();
-    defer objs_lock.unlockRestore(daif);
+    const irqs = objs_lock.lockIrqSave();
+    defer objs_lock.unlockRestore(irqs);
     for (&notifications) |*n| {
         if (@atomicLoad(bool, &n.active, .acquire)) continue;
         n.lock.lock();
@@ -537,8 +531,8 @@ pub fn createNotification() Error!*Notification {
 /// blocked in recv (the bits stay latched for its follow-up notify_wait).
 /// A notification freed under a late IRQ/timer signal drops it.
 pub fn signal(n: *Notification, bits: u64) void {
-    const daif = n.lock.lockIrqSave();
-    defer n.lock.unlockRestore(daif);
+    const irqs = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(irqs);
     if (!n.active) return;
     n.bits |= bits;
     if (n.waiter) |t| {
@@ -564,36 +558,36 @@ pub fn notifIndex(n: *const Notification) u64 {
 }
 
 pub fn refNotification(n: *Notification) void {
-    const daif = n.lock.lockIrqSave();
-    defer n.lock.unlockRestore(daif);
+    const irqs = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(irqs);
     n.refs += 1;
 }
 
 /// Bind `t` for recv interruption (see Notification.bound).
 pub fn bindNotification(n: *Notification, t: *sched.Thread) void {
-    const daif = n.lock.lockIrqSave();
-    defer n.lock.unlockRestore(daif);
+    const irqs = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(irqs);
     n.bound = t;
     t.bound_notif = n;
 }
 
 /// Block until any bits are signaled; returns and clears them.
 pub fn wait(n: *Notification) struct { err: shared.Errno, bits: u64 } {
-    const daif = n.lock.lockIrqSave();
+    const irqs = n.lock.lockIrqSave();
     if (n.bits != 0) {
         const bits = n.bits;
         n.bits = 0;
-        n.lock.unlockRestore(daif);
+        n.lock.unlockRestore(irqs);
         return .{ .err = .ok, .bits = bits };
     }
     if (n.waiter != null) {
-        n.lock.unlockRestore(daif);
+        n.lock.unlockRestore(irqs);
         return .{ .err = .busy, .bits = 0 };
     }
     const t = sched.thisCpu().current;
     t.ipc_status = @intFromEnum(shared.Errno.ok);
     sched.block(null, &n.waiter, &n.lock, null); // releases n.lock
-    restoreIrqs(daif);
+    restoreIrqs(irqs);
     return .{ .err = @enumFromInt(t.ipc_status), .bits = t.ipc_data[0] };
 }
 
@@ -623,8 +617,8 @@ var timers: [max_timers]Timer = @splat(.{});
 /// notification; re-arming replaces it. The timer holds no ref — a
 /// notification freed under it is disarmed.
 pub fn armTimer(n: *Notification, period: u64, bits: u64, now: u64) bool {
-    const daif = timers_lock.lockIrqSave();
-    defer timers_lock.unlockRestore(daif);
+    const irqs = timers_lock.lockIrqSave();
+    defer timers_lock.unlockRestore(irqs);
     var free: ?*Timer = null;
     for (&timers) |*t| {
         if (t.n == n) {
@@ -672,8 +666,8 @@ fn timerNotifFreed(n: *Notification) void {
 }
 
 pub fn unrefNotification(n: *Notification) void {
-    const daif = n.lock.lockIrqSave();
-    defer n.lock.unlockRestore(daif);
+    const irqs = n.lock.lockIrqSave();
+    defer n.lock.unlockRestore(irqs);
     std.debug.assert(n.refs > 0);
     n.refs -= 1;
     if (n.refs == 0) {
@@ -749,8 +743,8 @@ pub fn dumpShms() void {
 
 pub fn createShmBy(npages: u32, creator: []const u8) ?*Shm {
     if (npages == 0 or npages > shm_max_pages) return null;
-    const daif = shm_lock.lockIrqSave();
-    defer shm_lock.unlockRestore(daif);
+    const irqs = shm_lock.lockIrqSave();
+    defer shm_lock.unlockRestore(irqs);
     for (&shms) |*s| {
         if (!s.active) {
             s.* = .{ .active = true, .refs = 1, .npages = npages };
@@ -772,15 +766,15 @@ pub fn createShmBy(npages: u32, creator: []const u8) ?*Shm {
 }
 
 pub fn refShm(s: *Shm) void {
-    const daif = shm_lock.lockIrqSave();
-    defer shm_lock.unlockRestore(daif);
+    const irqs = shm_lock.lockIrqSave();
+    defer shm_lock.unlockRestore(irqs);
     s.refs += 1;
     trace.record(.shm_ref, (@intFromPtr(s) - @intFromPtr(&shms[0])) / @sizeOf(Shm), s.refs);
 }
 
 pub fn unrefShm(s: *Shm) void {
-    const daif = shm_lock.lockIrqSave();
-    defer shm_lock.unlockRestore(daif);
+    const irqs = shm_lock.lockIrqSave();
+    defer shm_lock.unlockRestore(irqs);
     if (s.refs == 0) std.debug.panic("unrefShm: no ref to drop ({d} pages, created by {s})", .{ s.npages, s.creator });
     s.refs -= 1;
     trace.record(.shm_unref, (@intFromPtr(s) - @intFromPtr(&shms[0])) / @sizeOf(Shm), s.refs);

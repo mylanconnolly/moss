@@ -1,9 +1,8 @@
 //! Kernel address space constants and the direct map.
 //!
-//! Layout (4K granule, 39-bit VAs on both halves):
-//!   TTBR0: user space, 0x0000000000000000 .. 0x0000007fffffffff (Phase 3;
-//!          disabled via TCR.EPD0 once the boot identity map is dropped)
-//!   TTBR1: kernel,     0xffffff8000000000 .. 0xffffffffffffffff
+//! Layout: user space in the low half, the kernel in the high half at the
+//! port's `kvirt_offset` (arch.zig; on aarch64 4K granule, 39-bit VAs on
+//! both halves, 0xffffff8000000000 up).
 //!
 //! The kernel occupies the direct map: virt = phys + kvirt_offset, with the
 //! kernel image's own pages re-protected W^X at 4K granularity. Device MMIO
@@ -11,7 +10,7 @@
 
 pub const page_size: usize = 4096;
 
-pub const kvirt_offset: u64 = 0xffffff80_0000_0000;
+pub const kvirt_offset: u64 = @import("arch.zig").kvirt_offset;
 
 pub fn physToVirt(pa: u64) u64 {
     return pa + kvirt_offset;

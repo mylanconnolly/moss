@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const log = @import("log.zig");
-const psci = @import("psci.zig");
+const arch = @import("arch.zig");
 const sched = @import("sched.zig");
 const timer = @import("timer.zig");
 
@@ -87,7 +87,7 @@ fn watcher() void {
         std.debug.panic("sched-test: FAIL — migrants stalled ({d} wakes)", .{wakes});
     }
     log.info("sched-test: PASS — pins stayed pinned under load, {d} migrant wakes across cores", .{wakes});
-    psci.systemOff();
+    arch.power.systemOff();
 }
 
 fn mortalWorker(_: u64) void {

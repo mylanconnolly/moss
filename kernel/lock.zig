@@ -3,6 +3,7 @@
 //! handler wants the same lock on the same core.
 
 const std = @import("std");
+const arch = @import("arch.zig");
 
 pub const SpinLock = struct {
     v: std.atomic.Value(u32) = .init(0),
@@ -20,22 +21,16 @@ pub const SpinLock = struct {
         self.v.store(0, .release);
     }
 
-    /// Mask IRQs on this core, then take the lock. Returns the saved DAIF
-    /// state for unlockRestore.
-    pub fn lockIrqSave(self: *SpinLock) u64 {
-        const daif = asm volatile ("mrs %[v], daif"
-            : [v] "=r" (-> u64),
-        );
-        asm volatile ("msr daifset, #2");
+    /// Mask IRQs on this core, then take the lock. Returns the saved
+    /// interrupt state for unlockRestore.
+    pub fn lockIrqSave(self: *SpinLock) arch.cpu.IrqState {
+        const saved = arch.cpu.irqSave();
         self.lock();
-        return daif;
+        return saved;
     }
 
-    pub fn unlockRestore(self: *SpinLock, daif: u64) void {
+    pub fn unlockRestore(self: *SpinLock, saved: arch.cpu.IrqState) void {
         self.unlock();
-        asm volatile ("msr daif, %[v]"
-            :
-            : [v] "r" (daif),
-        );
+        arch.cpu.irqRestore(saved);
     }
 };

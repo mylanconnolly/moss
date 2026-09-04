@@ -28,8 +28,8 @@ var bytes_served: u64 = 0;
 /// erasure semantics. The caller zeroizes its copy.
 pub fn seed(entropy: []const u8) void {
     std.debug.assert(entropy.len >= Drbg.secret_seed_length);
-    const daif = pool_lock.lockIrqSave();
-    defer pool_lock.unlockRestore(daif);
+    const irqs = pool_lock.lockIrqSave();
+    defer pool_lock.unlockRestore(irqs);
     if (!seeded) {
         drbg = Drbg.init(entropy[0..Drbg.secret_seed_length].*);
         if (entropy.len > Drbg.secret_seed_length) {
@@ -46,24 +46,24 @@ pub const Error = error{Unseeded};
 
 /// Fill `out` with random bytes, or Unseeded before the first seed.
 pub fn fill(out: []u8) Error!void {
-    const daif = pool_lock.lockIrqSave();
-    defer pool_lock.unlockRestore(daif);
+    const irqs = pool_lock.lockIrqSave();
+    defer pool_lock.unlockRestore(irqs);
     if (!seeded) return Error.Unseeded;
     drbg.fill(out);
     bytes_served += out.len;
 }
 
 pub fn isSeeded() bool {
-    const daif = pool_lock.lockIrqSave();
-    defer pool_lock.unlockRestore(daif);
+    const irqs = pool_lock.lockIrqSave();
+    defer pool_lock.unlockRestore(irqs);
     return seeded;
 }
 
 /// How many seeds have landed (boot seed + reseeds) — introspection for
 /// the rng drill.
 pub fn seedCount() u64 {
-    const daif = pool_lock.lockIrqSave();
-    defer pool_lock.unlockRestore(daif);
+    const irqs = pool_lock.lockIrqSave();
+    defer pool_lock.unlockRestore(irqs);
     return seed_count;
 }
 

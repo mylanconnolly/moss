@@ -1,8 +1,8 @@
-//! Physical frame allocator: a bitmap over 4K frames, fed by the devicetree
-//! memory map.
+//! Physical frame allocator: a bitmap over 4K frames, fed by the memory
+//! map the port discovers (arch.platform).
 
 const std = @import("std");
-const dt = @import("dt.zig");
+const arch = @import("arch.zig");
 const lock = @import("lock.zig");
 const mem = @import("mem.zig");
 
@@ -19,7 +19,7 @@ var total_frames: usize = 0;
 var cursor: usize = 0;
 var lk: lock.SpinLock = .{};
 
-pub fn init(regions: []const dt.MemRegion) void {
+pub fn init(regions: []const arch.platform.MemRegion) void {
     for (regions) |r| {
         const first = mem.alignUp(r.base, mem.page_size) / mem.page_size;
         const last = mem.alignDown(r.base + r.size, mem.page_size) / mem.page_size;
@@ -49,8 +49,8 @@ pub fn reserve(base: u64, size: u64) void {
 
 /// Allocate one 4K frame; returns its physical address.
 pub fn alloc() ?u64 {
-    const daif = lk.lockIrqSave();
-    defer lk.unlockRestore(daif);
+    const irqs = lk.lockIrqSave();
+    defer lk.unlockRestore(irqs);
     var scanned: usize = 0;
     var f = cursor;
     while (scanned < frame_count) : (scanned += 1) {
@@ -69,8 +69,8 @@ pub fn alloc() ?u64 {
 /// Allocate `n` physically contiguous frames (so their direct-map VAs are
 /// contiguous too); returns the physical address of the first.
 pub fn allocContiguous(n: usize) ?u64 {
-    const daif = lk.lockIrqSave();
-    defer lk.unlockRestore(daif);
+    const irqs = lk.lockIrqSave();
+    defer lk.unlockRestore(irqs);
     var run: usize = 0;
     var f: usize = 0;
     while (f < frame_count) : (f += 1) {
@@ -105,8 +105,8 @@ pub fn allocZeroed() ?u64 {
 }
 
 pub fn free(pa: u64) void {
-    const daif = lk.lockIrqSave();
-    defer lk.unlockRestore(daif);
+    const irqs = lk.lockIrqSave();
+    defer lk.unlockRestore(irqs);
     const f = pa / mem.page_size;
     std.debug.assert(f < frame_count);
     std.debug.assert(!testBit(f));

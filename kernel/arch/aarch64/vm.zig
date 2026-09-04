@@ -29,18 +29,19 @@
 
 const std = @import("std");
 const gic = @import("gic.zig");
-const kalloc = @import("kalloc.zig");
-const lock = @import("lock.zig");
-const log = @import("log.zig");
-const mem = @import("mem.zig");
-const pmem = @import("pmem.zig");
-const ipc = @import("ipc.zig");
-const irq = @import("irq.zig");
+const kalloc = @import("../../kalloc.zig");
+const lock = @import("../../lock.zig");
+const log = @import("../../log.zig");
+const mem = @import("../../mem.zig");
+const pmem = @import("../../pmem.zig");
+const ipc = @import("../../ipc.zig");
+const irq = @import("../../irq.zig");
 const its = @import("its.zig");
-const pci = @import("pci.zig");
-const sched = @import("sched.zig");
+const pci = @import("../../pci.zig");
+const sched = @import("../../sched.zig");
 const shared = @import("shared");
 const smmu = @import("smmu.zig");
+const thread = @import("thread.zig");
 const trap = @import("trap.zig");
 
 pub const max_vms = 4;
@@ -140,7 +141,7 @@ pub const Vcpu = extern struct {
     exit_d: u64 = 0,
     /// The guest's vector registers: live while it runs, kept here across
     /// exits — the VMM's own code between runs uses NEON too.
-    fp: sched.FpState = .{},
+    fp: thread.FpState = .{},
 };
 
 pub const Vm = struct {
@@ -585,7 +586,7 @@ fn enterOnce(vm: *Vm, v: *Vcpu) void {
     stat_entries += 1;
 
     sched.fpSaveCurrent();
-    sched.fpRestore(&v.fp);
+    thread.fpRestore(&v.fp);
     msr("vtcr_el2", vtcr);
     msr("vttbr_el2", vm.s2_root | (@as(u64, vm.vmid) << 48));
     // What the guest reads as MIDR/MPIDR: the real part, vCPU 0 — not
@@ -635,7 +636,7 @@ pub fn guestExit(frame: *trap.TrapFrame, kind_raw: u64) void {
     // come back before anything here could run other code (a context
     // switch in the interrupt path would otherwise file the guest's
     // registers as the VMM's).
-    sched.fpSave(&v.fp);
+    thread.fpSave(&v.fp);
     sched.fpRestoreCurrent();
 
     v.regs = frame.regs;

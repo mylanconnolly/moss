@@ -9,8 +9,7 @@
 //! through the ITS, and the requester id the SMMU keys its stream on.
 
 const std = @import("std");
-const dt = @import("dt.zig");
-const its = @import("its.zig");
+const arch = @import("arch.zig");
 const log = @import("log.zig");
 const shared = @import("shared");
 
@@ -25,8 +24,8 @@ pub const Device = struct {
     bar_index: u8,
     bar_pa: u64,
     bar_len: u64,
-    /// The device's interrupt as a GIC intid: an LPI when the ITS routed
-    /// one (the enumerator then programs MSI-X), else its INTx SPI.
+    /// The device's interrupt id: a message interrupt when the port routed
+    /// one (the enumerator then programs MSI-X), else its INTx line.
     intid: u32,
     /// Requester id: bus << 8 | slot << 3 | function.
     sid: u32,
@@ -41,9 +40,9 @@ pub const Window = struct { base: u64 = 0, size: u64 = 0 };
 pub var windows: [2]Window = @splat(.{});
 pub var have_host = false;
 
-var host: dt.PcieHost = undefined;
+var host: arch.platform.PcieHost = undefined;
 
-pub fn init(h: dt.PcieHost) void {
+pub fn init(h: arch.platform.PcieHost) void {
     host = h;
     have_host = true;
     windows[0] = .{ .base = h.ecam_base, .size = 1 << 20 };
@@ -64,13 +63,13 @@ pub fn register(sid: u32, kind: shared.DeviceKind, bar_index: u8, bar_pa: u64, b
     if (sid >= 256 or pin > 4 or bar_index >= 6) return Error.BadDevice;
     if (bar_len != 0 and (bar_pa < windows[1].base or bar_pa + bar_len > windows[1].base + windows[1].size)) return Error.BadDevice;
     for (devices[0..count], 0..) |d, i| {
-        if (d.sid == sid) return .{ .idx = i, .lpi = if (d.intid >= its.lpi_base) d.intid else 0 };
+        if (d.sid == sid) return .{ .idx = i, .lpi = if (d.intid >= arch.msi.base) d.intid else 0 };
     }
     if (count == max_devices) return Error.TableFull;
     const slot: u8 = @intCast(sid >> 3);
-    var intid: u32 = if (pin == 0) 0 else 32 + host.intx_base + ((@as(u32, slot) + pin - 1) % 4);
+    var intid: u32 = if (pin == 0) 0 else arch.platform.intxIntid(host, slot, pin);
     var lpi: u32 = 0;
-    if (its.route(sid)) |l| {
+    if (arch.msi.route(sid)) |l| {
         lpi = l;
         intid = l;
     }

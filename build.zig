@@ -134,8 +134,14 @@ pub fn build(b: *std.Build) void {
         "Run the entropy drill: virtio-rng driver seeds the kernel pool; getrandom fail-closed + policed",
     ) orelse false;
 
+    // The architecture: one port under kernel/arch/<arch>/ selected at
+    // comptime by kernel/arch.zig from the target; nothing of another
+    // port is compiled. aarch64 is the first target (ROADMAP.md).
+    const arch = b.option(std.Target.Cpu.Arch, "arch", "target architecture (aarch64)") orelse .aarch64;
+    if (arch != .aarch64) std.debug.panic("moss has no port for {s} yet", .{@tagName(arch)});
+    const linker_script = b.path(b.fmt("kernel/arch/{s}/linker.ld", .{@tagName(arch)}));
     const kernel_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
+        .cpu_arch = arch,
         .os_tag = .freestanding,
         .abi = .none,
         // The kernel never touches FP/SIMD outside the scheduler's
@@ -157,7 +163,7 @@ pub fn build(b: *std.Build) void {
     // build with NEON plus the AES instructions (hardware AES-XTS in
     // std.crypto; QEMU's cortex-a72 and HVF's host CPU both provide them).
     const user_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
+        .cpu_arch = arch,
         .os_tag = .freestanding,
         .abi = .none,
         .cpu_features_add = std.Target.aarch64.featureSet(&.{.aes}),
@@ -414,7 +420,7 @@ pub fn build(b: *std.Build) void {
     gmod.addOptions("build_options", gopts);
     gmod.addAnonymousImport("user_blobs", .{ .root_source_file = guest_blobs_src });
     const gkernel = b.addExecutable(.{ .name = "moss-guest.elf", .root_module = gmod });
-    gkernel.setLinkerScript(b.path("kernel/linker.ld"));
+    gkernel.setLinkerScript(linker_script);
     const gkernel_bin = b.addObjCopy(gkernel.getEmittedBin(), .{ .format = .bin, .basename = "moss-guest.bin" });
     pack.addPrefixedFileArg("img/moss-guest=", gkernel_bin.getOutput());
 
@@ -431,7 +437,7 @@ pub fn build(b: *std.Build) void {
         .name = "moss-kernel.elf",
         .root_module = kernel_mod,
     });
-    kernel.setLinkerScript(b.path("kernel/linker.ld"));
+    kernel.setLinkerScript(linker_script);
     b.installArtifact(kernel);
 
     // QEMU virt only provides a DTB for Linux-boot-protocol payloads, so the
@@ -752,6 +758,7 @@ pub fn build(b: *std.Build) void {
             shared: *std.Build.Module,
             blobs: std.Build.LazyPath,
             test_opts: []const []const u8,
+            script: std.Build.LazyPath,
         ) std.Build.LazyPath {
             const vopts = bb.addOptions();
             const enabled = bb.fmt("{s}_test", .{vn});
@@ -772,7 +779,7 @@ pub fn build(b: *std.Build) void {
                 .name = bb.fmt("moss-check-{s}.elf", .{label}),
                 .root_module = vmod,
             });
-            vexe.setLinkerScript(bb.path("kernel/linker.ld"));
+            vexe.setLinkerScript(script);
             const vbin = bb.addObjCopy(vexe.getEmittedBin(), .{
                 .format = .bin,
                 .basename = bb.fmt("moss-check-{s}.bin", .{label}),
@@ -783,7 +790,7 @@ pub fn build(b: *std.Build) void {
         }
     };
     for (variants) |vn| {
-        const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts);
+        const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script);
         // Plain `zig build run-shell` boots this variant — no flag needed.
         if (std.mem.eql(u8, vn, "shell")) {
             run_shell.addArg("-kernel");
@@ -795,7 +802,7 @@ pub fn build(b: *std.Build) void {
         }
     }
     for (release_variants) |vn| {
-        _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts);
+        _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script);
     }
     const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests)");
     check_step.dependOn(test_step);

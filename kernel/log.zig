@@ -1,10 +1,10 @@
-//! Boot/panic logger over the PL011. Formats into a fixed stack buffer so it
+//! Boot/panic logger over the port's console (arch.console). Formats into a fixed stack buffer so it
 //! works with no allocator and inside the panic path. A spinlock keeps lines
 //! from different cores whole; never call while holding the scheduler lock.
 
 const std = @import("std");
 const lock = @import("lock.zig");
-const pl011 = @import("driver/pl011.zig");
+const arch = @import("arch.zig");
 
 var lk: lock.SpinLock = .{};
 
@@ -49,7 +49,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     const line = std.fmt.bufPrint(&buf, fmt, args) catch blk: {
         break :blk "<log line too long>\n";
     };
-    const daif = lk.lockIrqSave();
-    defer lk.unlockRestore(daif);
-    pl011.write(line);
+    const irqs = lk.lockIrqSave();
+    defer lk.unlockRestore(irqs);
+    arch.console.write(line);
 }

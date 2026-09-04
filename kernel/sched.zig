@@ -33,10 +33,9 @@
 //! logging while holding any of these.
 
 const std = @import("std");
-const vm = @import("vm.zig");
+const arch = @import("arch.zig");
 const ipc = @import("ipc.zig");
 const cap = @import("cap.zig");
-const gic = @import("gic.zig");
 const kalloc = @import("kalloc.zig");
 const lock = @import("lock.zig");
 const log = @import("log.zig");
@@ -56,23 +55,11 @@ pub const Error = error{
     QuotaExceeded,
 };
 
-const Context = extern struct {
-    // x19..x28, x29 (fp), x30 (lr), then sp.
-    regs: [12]u64 = @splat(0),
-    sp: u64 = 0,
-};
-
-/// EL0 FP/SIMD state (v0-v31 + fpsr/fpcr), saved EAGERLY at context switch
-/// for user threads only — kernel threads are FP-free by construction (the
-/// kernel is built without FP/NEON features), so their switches skip this
-/// entirely and user FP registers survive syscalls untouched in hardware.
-/// Zero-initialized at spawn: a fresh thread restores zeros and can never
-/// observe another domain's vector registers.
-pub const FpState = extern struct {
-    v: [32][16]u8 align(16) = @splat(@splat(0)),
-    fpsr: u64 = 0,
-    fpcr: u64 = 0,
-};
+/// The port's saved-register layout and vector state (arch.thread): the
+/// vector unit is per-thread state saved eagerly at every switch of a
+/// user thread and never touched for kernel threads.
+const Context = arch.thread.Context;
+pub const FpState = arch.thread.FpState;
 
 pub const State = enum {
     unused,
@@ -110,7 +97,7 @@ pub const Thread = struct {
     cpu_ticks: u64 = 0,
     wake_tick: u64 = 0,
     /// User address space, or 0 for kernel-only threads.
-    user_ttbr0: u64 = 0,
+    user_root: u64 = 0,
     asid: u16 = 0,
     /// Owning domain (opaque here to avoid an import cycle).
     user_ctx: ?*anyopaque = null,
@@ -166,7 +153,7 @@ pub const Park = enum(u8) { none, throttled, evicted };
 pub const SpawnOpts = struct {
     affinity: ?u32 = null,
     cpu_mask: u64 = 0,
-    user_ttbr0: u64 = 0,
+    user_root: u64 = 0,
     asid: u16 = 0,
     user_ctx: ?*anyopaque = null,
     captable: ?*cap.Table = null,
@@ -215,26 +202,16 @@ var global_ticks: u64 = 0;
 /// a user context has been fully reaped.
 pub var user_thread_reaped: ?*const fn (*anyopaque) void = null;
 
-/// The per-core pointer lives in TPIDR_EL1 at EL1 and in TPIDR_EL2 as
-/// the EL2 host — TPIDR_EL1 is one of the few registers VHE does not
-/// redirect, and a guest at EL1 owns it.
-pub var host_el2: bool = false;
-
+/// The per-core pointer lives in the port's per-core register
+/// (arch.cpu.thisCpu).
 pub fn thisCpu() *PerCpu {
-    if (host_el2) {
-        return @ptrFromInt(asm volatile ("mrs %[v], tpidr_el2"
-            : [v] "=r" (-> u64),
-        ));
-    }
-    return @ptrFromInt(asm volatile ("mrs %[v], tpidr_el1"
-        : [v] "=r" (-> u64),
-    ));
+    return @ptrFromInt(arch.cpu.thisCpu());
 }
 
 /// Register the calling core: its current execution context becomes the
 /// core's idle thread. Called once per core before that core enables IRQs.
 pub fn registerCpu(cpu_id: u32) void {
-    const daif = threads_lock.lockIrqSave();
+    const irqs = threads_lock.lockIrqSave();
     const idle = allocThreadSlotLocked() catch @panic("no thread slot for idle");
     idle.name = "idle";
     idle.state = .running;
@@ -242,21 +219,8 @@ pub fn registerCpu(cpu_id: u32) void {
     idle.on_cpu = cpu_id;
     const cpu = &cpus[cpu_id];
     cpu.* = .{ .id = cpu_id, .current = idle, .idle = idle, .online = true };
-    threads_lock.unlockRestore(daif);
-    const el = asm ("mrs %[el], CurrentEL"
-        : [el] "=r" (-> u64),
-    ) >> 2;
-    if (el == 2) {
-        host_el2 = true;
-        asm volatile ("msr tpidr_el2, %[v]"
-            :
-            : [v] "r" (@intFromPtr(cpu)),
-        );
-    }
-    asm volatile ("msr tpidr_el1, %[v]"
-        :
-        : [v] "r" (@intFromPtr(cpu)),
-    );
+    threads_lock.unlockRestore(irqs);
+    arch.cpu.setThisCpu(@intFromPtr(cpu));
 }
 
 pub fn uptimeTicks() u64 {
@@ -277,61 +241,51 @@ pub fn spawn(name: []const u8, entry: *const fn (u64) void, arg: u64, opts: Spaw
     try opts.stack_account.charge(stack_pages * mem.page_size);
     errdefer opts.stack_account.credit(stack_pages * mem.page_size);
 
-    const daif = threads_lock.lockIrqSave();
+    const irqs = threads_lock.lockIrqSave();
     const t = allocThreadSlotLocked() catch |e| {
-        threads_lock.unlockRestore(daif);
+        threads_lock.unlockRestore(irqs);
         return e;
     };
     t.name = name;
     t.affinity = opts.affinity;
     t.stack_pa = stack_pa;
     t.stack_account = opts.stack_account;
-    t.user_ttbr0 = opts.user_ttbr0;
+    t.user_root = opts.user_root;
     t.asid = opts.asid;
     t.user_ctx = opts.user_ctx;
     t.captable = opts.captable;
     // New threads begin in the trampoline, which unlocks the scheduler and
     // enables IRQs, then calls entry(arg) through a C-ABI shim.
-    t.ctx = .{ .sp = mem.physToVirt(stack_pa) + stack_pages * mem.page_size };
-    t.ctx.regs[0] = @intFromPtr(entry); // x19
-    t.ctx.regs[1] = arg; // x20
-    t.ctx.regs[11] = @intFromPtr(&__thread_trampoline); // x30
+    arch.thread.initContext(&t.ctx, mem.physToVirt(stack_pa) + stack_pages * mem.page_size, @intFromPtr(entry), arg);
     t.cpu_mask = opts.cpu_mask;
     threads_lock.unlock();
     t.lock.lock();
     enqueueLocked(t);
     t.lock.unlock();
-    restoreIrqs(daif);
+    restoreIrqs(irqs);
     return t;
 }
 
-fn restoreIrqs(daif: u64) void {
-    asm volatile ("msr daif, %[v]"
-        :
-        : [v] "r" (daif),
-    );
+fn restoreIrqs(irqs: arch.cpu.IrqState) void {
+    arch.cpu.irqRestore(irqs);
 }
 
-fn maskIrqs() u64 {
-    const daif = asm volatile ("mrs %[v], daif"
-        : [v] "=r" (-> u64),
-    );
-    asm volatile ("msr daifset, #2");
-    return daif;
+fn maskIrqs() arch.cpu.IrqState {
+    return arch.cpu.irqSave();
 }
 
 /// Give up the CPU voluntarily; the thread re-enters its queue (possibly on
 /// another core, if unpinned).
 pub fn yield() void {
-    const daif = maskIrqs();
+    const irqs = maskIrqs();
     thisCpu().lock.lock();
     scheduleLocked();
-    restoreIrqs(daif);
+    restoreIrqs(irqs);
 }
 
 /// Sleep for at least `ticks` timer ticks.
 pub fn sleep(ticks: u64) void {
-    const daif = maskIrqs();
+    const irqs = maskIrqs();
     const cpu = thisCpu();
     const t = cpu.current;
     std.debug.assert(t != cpu.idle); // the idle thread never sleeps
@@ -358,7 +312,7 @@ pub fn sleep(ticks: u64) void {
     sleepers_lock.unlock();
     t.lock.unlock();
     scheduleLocked();
-    restoreIrqs(daif);
+    restoreIrqs(irqs);
 }
 
 pub fn exit() noreturn {
@@ -378,8 +332,8 @@ pub fn exit() noreturn {
 /// are reaped (each reap invokes user_thread_reaped). Returns how many were
 /// freed on the spot.
 pub fn destroyThreadsOf(ctx: *anyopaque) u32 {
-    const daif = maskIrqs();
-    defer restoreIrqs(daif);
+    const irqs = maskIrqs();
+    defer restoreIrqs(irqs);
     var freed: u32 = 0;
     for (&threads) |*t| {
         if (@atomicLoad(State, &t.state, .acquire) == .unused or t.user_ctx != ctx) continue;
@@ -492,7 +446,7 @@ fn destroyOne(t: *Thread, ctx: *anyopaque) bool {
                         rq.need_resched = true;
                         rq.lock.unlock();
                         t.lock.unlock();
-                        if (c != self_cpu) gic.sendSgi(c);
+                        if (c != self_cpu) arch.intc.kick(c);
                         return false;
                     }
                     rq.lock.unlock();
@@ -627,7 +581,7 @@ pub fn onTick(is_timekeeper: bool) void {
     if (is_timekeeper) {
         global_ticks += 1;
         ipc.timerTick(global_ticks);
-        vm.tick();
+        arch.vm.tick();
         if (global_ticks % cpu_period_ticks == 0) periodReset();
         // Take the due sleepers off the list first (sleepers lock alone),
         // then wake each under its own lock — never both at once.
@@ -703,7 +657,7 @@ fn periodReset() void {
         }
         if (woke) rq.need_resched = true;
         rq.lock.unlock();
-        if (woke and rq != thisCpu()) gic.sendSgi(@intCast(i));
+        if (woke and rq != thisCpu()) arch.intc.kick(@intCast(i));
     }
 }
 
@@ -733,11 +687,11 @@ pub fn preemptIfNeeded() void {
         unreachable;
     }
     if (!@atomicLoad(bool, &cpu.need_resched, .acquire)) return;
-    const daif = maskIrqs();
+    const irqs = maskIrqs();
     cpu.lock.lock();
     cpu.need_resched = false;
     scheduleLocked();
-    restoreIrqs(daif);
+    restoreIrqs(irqs);
 }
 
 pub fn globalTicks() u64 {
@@ -813,7 +767,7 @@ fn enqueueLocked(t: *Thread) void {
     // syscall return).
     rq.need_resched = true;
     rq.lock.unlock();
-    if (rq != thisCpu()) gic.sendSgi(target);
+    if (rq != thisCpu()) arch.intc.kick(target);
 }
 
 /// May thread `t` be placed on core `c`: online, inside the thread's
@@ -859,9 +813,7 @@ pub var cpu_period_reset: ?*const fn () void = null;
 pub const cpu_period_ticks: u64 = 10; // 1s at the 100ms tick
 
 fn cycles() u64 {
-    return asm volatile ("mrs %[v], cntpct_el0"
-        : [v] "=r" (-> u64),
-    );
+    return arch.cpu.cycles();
 }
 
 fn chargeRun(t: *Thread, now: u64) void {
@@ -948,12 +900,12 @@ fn scheduleLocked() void {
     next.on_cpu = cpu.id;
     cpu.current = next;
     cpu.prev = prev;
-    programUserSpace(next);
+    arch.mmu.switchUser(next.user_root, next.asid);
     // Vector state travels with user threads (see FpState). Exited
     // threads skip the save — their state is about to be reaped.
-    if (prev.user_ttbr0 != 0 and prev.state != .exited) __fp_save(&prev.fp);
-    if (next.user_ttbr0 != 0) __fp_restore(&next.fp);
-    __context_switch(&prev.ctx, &next.ctx);
+    if (prev.user_root != 0 and prev.state != .exited) arch.thread.fpSave(&prev.fp);
+    if (next.user_root != 0) arch.thread.fpRestore(&next.fp);
+    arch.thread.switchContext(&prev.ctx, &next.ctx);
     // We are back on this thread, possibly much later, holding the
     // run-queue lock of whichever core switched to us.
     finishSwitch();
@@ -973,33 +925,6 @@ fn finishSwitch() void {
         }
     }
     cpu.lock.unlock();
-}
-
-/// Program TTBR0 for the incoming thread: its domain's tables (walks
-/// enabled), or no user space at all for kernel threads (walks disabled via
-/// TCR.EPD0 — kernel-only contexts can never reach stale user mappings).
-fn programUserSpace(t: *Thread) void {
-    const epd0: u64 = 1 << 7;
-    const tcr = asm volatile ("mrs %[v], tcr_el1"
-        : [v] "=r" (-> u64),
-    );
-    if (t.user_ttbr0 != 0) {
-        asm volatile (
-            \\msr ttbr0_el1, %[ttbr]
-            \\msr tcr_el1, %[tcr]
-            \\isb
-            :
-            : [ttbr] "r" (t.user_ttbr0 | (@as(u64, t.asid) << 48)),
-              [tcr] "r" (tcr & ~epd0),
-        );
-    } else if (tcr & epd0 == 0) {
-        asm volatile (
-            \\msr tcr_el1, %[tcr]
-            \\isb
-            :
-            : [tcr] "r" (tcr | epd0),
-        );
-    }
 }
 
 /// Free a thread nobody can reach any more (off every queue and object,
@@ -1025,7 +950,7 @@ fn reap(dead: *Thread) void {
 /// run-queue lock still held and IRQs masked.
 export fn schedThreadStart() callconv(.c) void {
     finishSwitch();
-    asm volatile ("msr daifclr, #2");
+    arch.cpu.irqEnable();
 }
 
 /// C-ABI shim between the trampoline and the entry function: the entry
@@ -1038,112 +963,14 @@ export fn schedThreadRun(entry_raw: u64, arg: u64) callconv(.c) noreturn {
     exit();
 }
 
-extern fn __context_switch(prev: *Context, next: *Context) void;
-extern fn __fp_save(st: *FpState) void;
-extern fn __fp_restore(st: *const FpState) void;
-
 /// Save/restore the current user thread's vector state around something
 /// that clobbers it (a guest run).
 pub fn fpSaveCurrent() void {
     const t = thisCpu().current;
-    if (t.user_ttbr0 != 0) __fp_save(&t.fp);
+    if (t.user_root != 0) arch.thread.fpSave(&t.fp);
 }
 
 pub fn fpRestoreCurrent() void {
     const t = thisCpu().current;
-    if (t.user_ttbr0 != 0) __fp_restore(&t.fp);
-}
-
-/// A guest's vector state, kept per vCPU (vm.zig).
-pub fn fpSave(st: *FpState) void {
-    __fp_save(st);
-}
-
-pub fn fpRestore(st: *const FpState) void {
-    __fp_restore(st);
-}
-extern const __thread_trampoline: anyopaque;
-
-comptime {
-    asm (
-        \\.section .text, "ax"
-        \\.global __context_switch
-        \\__context_switch:
-        \\        stp     x19, x20, [x0]
-        \\        stp     x21, x22, [x0, #16]
-        \\        stp     x23, x24, [x0, #32]
-        \\        stp     x25, x26, [x0, #48]
-        \\        stp     x27, x28, [x0, #64]
-        \\        stp     x29, x30, [x0, #80]
-        \\        mov     x2, sp
-        \\        str     x2, [x0, #96]
-        \\        ldp     x19, x20, [x1]
-        \\        ldp     x21, x22, [x1, #16]
-        \\        ldp     x23, x24, [x1, #32]
-        \\        ldp     x25, x26, [x1, #48]
-        \\        ldp     x27, x28, [x1, #64]
-        \\        ldp     x29, x30, [x1, #80]
-        \\        ldr     x2, [x1, #96]
-        \\        mov     sp, x2
-        \\        ret
-        \\
-        \\.global __thread_trampoline
-        \\__thread_trampoline:
-        \\        bl      schedThreadStart
-        \\        mov     x0, x19
-        \\        mov     x1, x20
-        \\        bl      schedThreadRun
-        \\
-        \\// FP/SIMD save/restore for user threads. The kernel target is
-        \\// built without FP features, so these are the only vector
-        \\// instructions in kernel text; the directive admits them.
-        \\.arch_extension fp
-        \\.arch_extension simd
-        \\.global __fp_save
-        \\__fp_save:
-        \\        stp     q0, q1, [x0, #0]
-        \\        stp     q2, q3, [x0, #32]
-        \\        stp     q4, q5, [x0, #64]
-        \\        stp     q6, q7, [x0, #96]
-        \\        stp     q8, q9, [x0, #128]
-        \\        stp     q10, q11, [x0, #160]
-        \\        stp     q12, q13, [x0, #192]
-        \\        stp     q14, q15, [x0, #224]
-        \\        stp     q16, q17, [x0, #256]
-        \\        stp     q18, q19, [x0, #288]
-        \\        stp     q20, q21, [x0, #320]
-        \\        stp     q22, q23, [x0, #352]
-        \\        stp     q24, q25, [x0, #384]
-        \\        stp     q26, q27, [x0, #416]
-        \\        stp     q28, q29, [x0, #448]
-        \\        stp     q30, q31, [x0, #480]
-        \\        mrs     x1, fpsr
-        \\        mrs     x2, fpcr
-        \\        str     x1, [x0, #512]
-        \\        str     x2, [x0, #520]
-        \\        ret
-        \\.global __fp_restore
-        \\__fp_restore:
-        \\        ldr     x1, [x0, #512]
-        \\        ldr     x2, [x0, #520]
-        \\        msr     fpsr, x1
-        \\        msr     fpcr, x2
-        \\        ldp     q0, q1, [x0, #0]
-        \\        ldp     q2, q3, [x0, #32]
-        \\        ldp     q4, q5, [x0, #64]
-        \\        ldp     q6, q7, [x0, #96]
-        \\        ldp     q8, q9, [x0, #128]
-        \\        ldp     q10, q11, [x0, #160]
-        \\        ldp     q12, q13, [x0, #192]
-        \\        ldp     q14, q15, [x0, #224]
-        \\        ldp     q16, q17, [x0, #256]
-        \\        ldp     q18, q19, [x0, #288]
-        \\        ldp     q20, q21, [x0, #320]
-        \\        ldp     q22, q23, [x0, #352]
-        \\        ldp     q24, q25, [x0, #384]
-        \\        ldp     q26, q27, [x0, #416]
-        \\        ldp     q28, q29, [x0, #448]
-        \\        ldp     q30, q31, [x0, #480]
-        \\        ret
-    );
+    if (t.user_root != 0) arch.thread.fpRestore(&t.fp);
 }

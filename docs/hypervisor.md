@@ -303,7 +303,7 @@ flowchart TB
   six paid-for lessons), "Platform and boot" (the EL2 host), "The SMMU".
 - ROADMAP.md — "EL2: Moss as hypervisor", "The pooling story", "Several
   vCPUs", "PSCI is the VMM's".
-- Source — `kernel/vm.zig` (entry, exits, vGIC, timer, stage 2,
+- Source — `kernel/arch/aarch64/vm.zig` (entry, exits, vGIC, timer, stage 2,
   passthrough), `kernel/syscall.zig` (`vm_create`, `vm_run`, `vm_set`,
   `vm_attach_device`, `vm_cpu_on`), `shared/lib.zig` (`VmExit`,
   `vm_ram_ipa`), `user/vmm.zig` (the monitor: loading, emulation, the
