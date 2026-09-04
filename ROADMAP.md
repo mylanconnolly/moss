@@ -193,17 +193,23 @@ is a plan.
   hypervisor: every VM drill runs only under TCG (Apple's Hypervisor
   framework exposes no nested EL2 with VHE), so EL2, stage-2 SMMU and
   device passthrough have never met silicon.
-- **The x86_64 port** — the HAL's honesty test. The boundary is a
-  directory now (`kernel/arch/`, landed 2026-09-04, interface in
-  `kernel/arch.zig`); the port is a second directory: Limine boot on
-  UEFI, 4-level paging, SMAP where PAN sits, the local APIC and IOAPIC
-  behind `intc`/`msi`, the TSC and its deadline timer, ACPI (MADT, MCFG)
-  behind `platform`, VT-d or AMD-Vi behind `iommu` (the DMA-grant
-  design needs the IOMMU to walk the domain's own tables), SVM/VMX
-  behind `vm` last. Userspace has the same seam to make (`user/usys.zig`,
-  the image header stanza, the drivers' barriers). The runner and the
-  QEMU configs are aarch64-only. Modern hardware only: no legacy PIC,
-  PIT, or BIOS paths, ever (locked decision).
+- **The x86_64 port** — the HAL's honesty test. ✅ Stage 1 (landed
+  2026-09-04): `kernel/arch/x86_64/` boots to "boot complete" on the
+  boot core under KVM — Limine on OVMF, 4-level paging, the TSC, x2APIC
+  detected, ACPI power-off. Next, in order: (2) the local APIC timer
+  (TSC-deadline) and the IOAPIC/MSI-X behind `intc`/`msi` from the
+  MADT, so the tick and preemption run; (3) `syscall`/`sysret`, the TSS
+  per core, SMAP behind `uaccess`, and the userspace seam
+  (`user/usys.zig`, the image header stanza, the drivers' barriers) so
+  programs build and run for the target; (4) the loader's parked cores
+  through `smp`, PCIDs and TLB shootdown by IPI; (5) the MCFG behind
+  `platform.pcie` and virtio over PCIe; (6) VT-d or AMD-Vi behind
+  `iommu` (the DMA-grant design needs the IOMMU to walk the domain's
+  own tables); (7) a runner that boots x86_64 drills so the gate covers
+  both ports; SVM behind `vm` last. Modern hardware only: no legacy
+  PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
+  debug console QEMU and a PCIe serial card speak, and the framebuffer
+  console for real machines is owed.
 - **Users, stage 3, residuals:** sharing offers are per session and in
   memory (standing grants that survive a logout are a later step);
   `apply` only creates and keeps (changing a passphrase or removing a
@@ -395,6 +401,21 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64, stage 1: boot to "boot complete"** (2026-09-04):
+  `kernel/arch/x86_64/` — Limine base revision 5 on OVMF from a FAT
+  directory on virtio-blk, the port's own direct map built in `_start`
+  beside the loader's kernel mapping, the memory map and command line
+  and RSDP and TSC frequency and CPU list copied out of the loader's
+  memory, 4-level tables rebuilt W^X, `rdgsbase` for the per-core
+  pointer, the 256-stub IDT with the syscall slot ABI fixed, SysV thread
+  contexts, ACPI S5 power-off (verified: QEMU exits). One core, no
+  interrupts, no user mode, no user programs built for the target yet.
+  Found: a `pub const` copy of Limine's end marker landed in `.rodata`
+  before the start marker and emptied the request window (the loader
+  takes the last start and the first end marker); Zig's self-hosted
+  x86_64 backend cannot build a no-SSE kernel (LLVM does); the kernel
+  image is not inside the direct map on this port, so its reservation
+  moved from kmain into the ports' `platform.reserved`.
 - ✅ **The HAL, extracted** (2026-09-04): `kernel/arch.zig` selects a
   port at comptime and lists what one provides; `kernel/arch/aarch64/`
   holds the boot entry, vectors and frame, page tables, PAN, the GIC and

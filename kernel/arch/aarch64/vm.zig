@@ -167,6 +167,11 @@ var vms_lock: lock.SpinLock = .{};
 
 pub const Error = error{ NoVms, OutOfFrames, NotHost };
 
+/// Whether this kernel can run guests (it is the EL2 host).
+pub fn isHost() bool {
+    return atEl2();
+}
+
 fn atEl2() bool {
     return (asm ("mrs %[el], CurrentEL"
         : [el] "=r" (-> u64),

@@ -27,7 +27,7 @@ pub const Info = struct {
 };
 
 var region_buf: [8]MemRegion = undefined;
-var reserved_buf: [1]Reg = undefined;
+var reserved_buf: [2]Reg = undefined;
 
 /// Parse the tree at physical `boot_arg`. Panics on a bad tree: there is
 /// no machine to run on without one.
@@ -39,6 +39,8 @@ pub fn discover(boot_arg: u64) Info {
         std.debug.panic("devicetree memory walk failed: {t}", .{e});
     };
     reserved_buf[0] = .{ .base = boot_arg, .size = fdt.totalSize() };
+    // The image lives inside the direct map on this port.
+    reserved_buf[1] = .{ .base = mem.virtToPhys(mem.kernelStart()), .size = mem.kernelEnd() - mem.kernelStart() };
     const pcie = fdt.pcieHost();
     if (pcie == null) log.warn("devicetree: no PCIe host; userspace drivers will find no devices", .{});
     return .{

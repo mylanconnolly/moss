@@ -36,7 +36,7 @@ export fn kmain(boot_arg: u64) noreturn {
     // The machine as firmware describes it: memory, devices, arguments.
     const plat = arch.platform.discover(boot_arg);
     for (plat.regions) |r| {
-        log.info("ram: 0x{x} + {d}MB", .{ r.base, r.size >> 20 });
+        if (r.size >= 1 << 20) log.info("ram: 0x{x} + {d}MB", .{ r.base, r.size >> 20 }) else log.info("ram: 0x{x} + {d}KB", .{ r.base, r.size >> 10 });
     }
     if (plat.bootargs) |args| {
         boot_node = parseNodeArg(args);
@@ -45,10 +45,7 @@ export fn kmain(boot_arg: u64) noreturn {
     }
 
     pmem.init(plat.regions);
-    pmem.reserve(
-        mem.virtToPhys(mem.kernelStart()),
-        mem.kernelEnd() - mem.kernelStart(),
-    );
+    // The image and firmware's data: the port knows where it put them.
     for (plat.reserved) |r| pmem.reserve(r.base, r.size);
     const s = pmem.stats();
     log.info("pmem: {d}MB free of {d}MB", .{ s.free_bytes >> 20, s.total_bytes >> 20 });
@@ -876,7 +873,7 @@ fn smmuTestWorker(_: u64) void {
 fn vmTestWorker(which: u64) void {
     const frames_before = pmem.stats().free_bytes;
     const name: []const u8 = if (which == 1) "guest-test" else "vm-test";
-    if (arch.cpu.currentEl() != 2) std.debug.panic("{s}: FAIL — the kernel is not an EL2 host", .{name});
+    if (!arch.vm.isHost()) std.debug.panic("{s}: FAIL — the kernel is not an EL2 host", .{name});
     log.info("{s}: starting the VMM ({s})", .{ name, if (which == 1) "a moss kernel as the guest" else "the bare-metal guest" });
     const vmm = spawnVmm(which);
     var waited: u64 = 0;
@@ -1043,7 +1040,7 @@ fn spawnVmm(which: u64) *domain.Domain {
 /// remote spawn placed on it answers an RPC: one box, two pool nodes.
 fn vmnodeTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
-    if (arch.cpu.currentEl() != 2) std.debug.panic("vmnode-test: FAIL — the kernel is not an EL2 host", .{});
+    if (!arch.vm.isHost()) std.debug.panic("vmnode-test: FAIL — the kernel is not an EL2 host", .{});
     ensureDevices();
     if (pci.nthByKind(.net, 1) == null or pci.nthByKind(.rng, 1) == null)
         std.debug.panic("vmnode-test: FAIL — the guest needs a second NIC and a second entropy device on the bus", .{});

@@ -24,6 +24,13 @@ done without rediscovering the sharp edges.
   log (also copied to `<label>-failed.log`, which a rerun does not
   overwrite) — the way to chase an intermittent one. `-Doptimize=ReleaseSafe`
   runs the whole suite optimized.
+- `-Darch=x86_64` builds the x86_64 port (stage 1: boot only) — the
+  kernel ELF alone, no user programs yet. `zig build -Darch=x86_64 run`
+  boots it on OVMF + Limine (KVM when the host has it, else TCG) from a
+  directory QEMU exposes as a FAT volume; it wants Limine's
+  `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's share dir) and the
+  x86_64 OVMF images beside QEMU (`-Dovmf`, `-Dovmf-vars`). The gate is
+  aarch64-only until the port has drills of its own.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
   echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),

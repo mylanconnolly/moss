@@ -2016,6 +2016,74 @@ virtual address). The hypervisor is the one optional piece: a port
 without one answers `NotHost` from `vm.create` and the drills that
 need it are not built for it.
 
+### The x86_64 port, stage 1 (as built, 2026-09-04)
+
+`kernel/arch/x86_64/` boots the generic kernel to "boot complete" on
+the boot core under KVM: Limine (base revision 5) on OVMF, the memory
+map, the port's own page tables, the allocator, the scheduler's
+per-core registration, thread contexts, and ACPI power-off. No
+interrupts, no user mode, one core — those are the port's next stages,
+and `zig build -Darch=x86_64 run` says so in its log.
+
+Boot: the kernel is an ELF linked in the top 2 GB (`0xffffffff80000000`,
+the "kernel" code model, red zone off), loaded by Limine from a FAT
+volume QEMU synthesizes from a build directory (`fat:ro:` on virtio-blk
+— no image tooling), with OVMF's x86_64 code flash read-only and a
+scratch copy of its variable store. The requests live in
+`.limine_requests` between the start and end markers the linker script
+keeps in order inside `.data`; the loader fills the responses in and
+lands in `_start` in long mode, paging on, interrupts off, on a stack
+of its own. `_start` builds this port's coarse direct map — 1 GB pages
+for the first 64 GB at `kvirt_offset` (`0xffff800000000000`, PML4 slot
+256) beside the loader's kernel mapping (slot 511, copied) — moves onto
+the image's stack and calls `kmain`; from then on every
+`mem.physToPtr` works, as on aarch64 after its boot L1. `platform.discover`
+copies what the port keeps out of the loader's memory (the map, the
+command line, the RSDP, the TSC frequency, the CPU list) through the
+loader's own direct map (every response pointer carries its HHDM
+offset); `mmu.init` rebuilds the tables — the direct map as 2 MB pages
+RW/NX, the ACPI regions 4K, the image 4K W^X from the linker symbols
+and the loader's physical base — and `activate` loads CR3. The image is
+not inside the direct map here, which is why the kernel's own
+reservation moved from kmain into each port's `platform.reserved`.
+
+The CPU module: RFLAGS.IF for masking, `rdgsbase`/`wrgsbase` for the
+per-core pointer (CR4.FSGSBASE, with the MSR as the fallback the
+hardware this port targets never takes), the TSC for cycles with the
+frequency the loader measured (CPUID.15H as the fallback, a panic
+without either: budgets are in cycles), HLT to idle. x2APIC is on (the
+MP request asks; the loader enables it). The trap frame is the 256-stub
+IDT's: registers, vector, error code, the CPU's five words; syscall
+slots are fixed now — rdi, rsi, rdx, r10, r8, r9, r12, r13, the number
+in rax — so the userspace stubs and the port agree before either
+exists. The GDT is the port's (kernel code/data, user data/code in the
+order `sysret` wants, a TSS slot per core for later). Thread contexts
+are the SysV callee-saved set plus rsp with a trampoline return address
+on a fresh stack; vector state is the FXSAVE area (XSAVE when userspace
+gains AVX). Power-off is ACPI S5: the FADT's PM1a_CNT and the sleep type
+read straight out of the DSDT's `_S5_` package (the one AML shape
+firmware emits for it), no interpreter — QEMU's q35 exits on it.
+
+Lessons paid for: a `pub const` array holding the Limine end marker was
+materialized in `.rodata` *before* the real start marker in `.data`,
+and the loader takes the last start and the first end marker, so the
+window was empty and the base revision tag went unhonoured — the
+values are spelled out at their one placement now. Zig's self-hosted
+x86_64 backend assumes SSE and cannot build a soft-float, no-vector
+kernel (it failed selecting `fpext` and encoding `movups`); the kernel
+executable asks for LLVM. The 256 IDT stubs are one comptime string and
+need a raised branch quota. `-drive=…` is not a QEMU spelling; the
+file argument is a separate word.
+
+What the next stages owe: the local APIC timer in TSC-deadline mode
+and the IOAPIC/MSI-X behind `intc`/`msi` (MADT), `syscall`/`sysret`
+with SMAP behind `uaccess` and the TSS per core, the userspace seam
+(`user/usys.zig`, the image header stanza, the drivers' barriers) so
+programs build for the target, the loader's parked cores through
+`smp`, PCIDs and TLB shootdown by IPI, the MCFG behind `platform.pcie`,
+an IOMMU (VT-d or AMD-Vi) walking the domain's tables, and a runner
+that boots x86_64 drills so the gate covers both ports.
+
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and
 debugging. The 64-byte Image header in `kernel/arch/aarch64/boot.zig` requests loading at

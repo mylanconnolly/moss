@@ -137,36 +137,61 @@ pub fn build(b: *std.Build) void {
     // The architecture: one port under kernel/arch/<arch>/ selected at
     // comptime by kernel/arch.zig from the target; nothing of another
     // port is compiled. aarch64 is the first target (ROADMAP.md).
-    const arch = b.option(std.Target.Cpu.Arch, "arch", "target architecture (aarch64)") orelse .aarch64;
-    if (arch != .aarch64) std.debug.panic("moss has no port for {s} yet", .{@tagName(arch)});
+    const arch = b.option(std.Target.Cpu.Arch, "arch", "target architecture (aarch64, x86_64)") orelse .aarch64;
+    if (arch != .aarch64 and arch != .x86_64) std.debug.panic("moss has no port for {s}", .{@tagName(arch)});
     const linker_script = b.path(b.fmt("kernel/arch/{s}/linker.ld", .{@tagName(arch)}));
-    const kernel_target = b.resolveTargetQuery(.{
-        .cpu_arch = arch,
-        .os_tag = .freestanding,
-        .abi = .none,
-        // The kernel never touches FP/SIMD outside the scheduler's
-        // hand-written save/restore stubs, so compiled kernel code must
-        // not use those registers (no vector state on kernel paths).
-        // strict_align is NOT needed: all Zig code runs with the MMU on
-        // (boot.zig enables it before kmain); only pre-MMU code — which is
-        // all hand-written, aligned assembly — would fault on unaligned
-        // access to Device-typed memory.
-        .cpu_features_sub = std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon }),
-        // Assembler vocabulary for the EL2 host: the stage-2 registers
-        // (VTTBR/VTCR/HPFAR, the VMALLS12 invalidations) sit behind this
-        // feature; code generation is unaffected.
-        .cpu_features_add = std.Target.aarch64.featureSet(&.{.el2vmsa}),
+    // The kernel never touches FP/SIMD outside the scheduler's
+    // hand-written save/restore stubs, so compiled kernel code must not
+    // use those registers (no vector state on kernel paths). aarch64:
+    // strict_align is NOT needed — all Zig code runs with the MMU on
+    // (boot.zig enables it before kmain); only pre-MMU code, which is all
+    // hand-written, aligned assembly, would fault on unaligned access to
+    // Device-typed memory. The el2vmsa feature is assembler vocabulary for
+    // the EL2 host (VTTBR/VTCR/HPFAR, the VMALLS12 invalidations); code
+    // generation is unaffected. x86_64: no x87/SSE/AVX in the kernel,
+    // soft float, FSGSBASE for the per-core pointer.
+    const kernel_target = b.resolveTargetQuery(switch (arch) {
+        .aarch64 => .{
+            .cpu_arch = .aarch64,
+            .os_tag = .freestanding,
+            .abi = .none,
+            .cpu_features_sub = std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon }),
+            .cpu_features_add = std.Target.aarch64.featureSet(&.{.el2vmsa}),
+        },
+        .x86_64 => .{
+            .cpu_arch = .x86_64,
+            .os_tag = .freestanding,
+            .abi = .none,
+            .cpu_features_sub = std.Target.x86.featureSet(&.{ .x87, .mmx, .sse, .sse2, .sse3, .ssse3, .sse4_1, .sse4_2, .avx, .avx2, .fma, .f16c }),
+            .cpu_features_add = std.Target.x86.featureSet(&.{ .soft_float, .fsgsbase }),
+        },
+        else => unreachable,
     });
+    // x86_64 links in the top 2 GB (the "kernel" model) and must not use
+    // the red zone (interrupts land on the current stack).
+    const kernel_code_model: std.builtin.CodeModel = if (arch == .x86_64) .kernel else .small;
+    const kernel_red_zone: ?bool = if (arch == .x86_64) false else null;
 
     // Userspace gets the vector unit: trap.init sets CPACR_EL1.FPEN and
     // the scheduler saves/restores per-thread FP state, so user programs
     // build with NEON plus the AES instructions (hardware AES-XTS in
     // std.crypto; QEMU's cortex-a72 and HVF's host CPU both provide them).
-    const user_target = b.resolveTargetQuery(.{
-        .cpu_arch = arch,
-        .os_tag = .freestanding,
-        .abi = .none,
-        .cpu_features_add = std.Target.aarch64.featureSet(&.{.aes}),
+    // (x86_64: SSE2 baseline plus AES; user programs are not yet built
+    // for it — the runtime's syscall stubs are aarch64.)
+    const user_target = b.resolveTargetQuery(switch (arch) {
+        .aarch64 => .{
+            .cpu_arch = .aarch64,
+            .os_tag = .freestanding,
+            .abi = .none,
+            .cpu_features_add = std.Target.aarch64.featureSet(&.{.aes}),
+        },
+        .x86_64 => .{
+            .cpu_arch = .x86_64,
+            .os_tag = .freestanding,
+            .abi = .none,
+            .cpu_features_add = std.Target.x86.featureSet(&.{.aes}),
+        },
+        else => unreachable,
     });
 
     const shared_mod = b.createModule(.{
@@ -209,7 +234,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("kernel/main.zig"),
         .target = kernel_target,
         .optimize = optimize,
-        .code_model = .small,
+        .code_model = kernel_code_model,
+        .red_zone = kernel_red_zone,
     });
     kernel_mod.addImport("shared", shared_mod);
     kernel_mod.addOptions("build_options", build_opts);
@@ -357,7 +383,10 @@ pub fn build(b: *std.Build) void {
     }
 
     const user_blobs = b.addWriteFiles();
-    for (user_progs) |p| {
+    // The programs, the guest and the guest kernel are aarch64 until the
+    // userspace runtime has its own port seam; an x86_64 build packs the
+    // boot files alone (the kernel embeds the archive either way).
+    if (arch == .aarch64) for (user_progs) |p| {
         const prog_mod = b.createModule(.{
             .root_source_file = b.path(p.src),
             .target = user_target,
@@ -378,51 +407,53 @@ pub fn build(b: *std.Build) void {
         });
         pack.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
         pack_guest.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
-    }
+    };
     // A guest: bare-metal EL1 code the VMM loads into a VM's RAM. Raw
     // binary, linked at the guest's RAM base, no MOSS header.
-    const guest_mod = b.createModule(.{
-        .root_source_file = b.path("guest/hello.zig"),
-        .target = user_target,
-        .optimize = .ReleaseSmall,
-        .code_model = .small,
-    });
-    const guest = b.addExecutable(.{ .name = "guest-hello.elf", .root_module = guest_mod });
-    guest.setLinkerScript(b.path("guest/guest.ld"));
-    guest.entry = .{ .symbol_name = "_start" };
-    const guest_bin = b.addObjCopy(guest.getEmittedBin(), .{ .format = .bin, .basename = "guest-hello.bin" });
-    pack.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
-    pack_guest.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
+    if (arch == .aarch64) {
+        const guest_mod = b.createModule(.{
+            .root_source_file = b.path("guest/hello.zig"),
+            .target = user_target,
+            .optimize = .ReleaseSmall,
+            .code_model = .small,
+        });
+        const guest = b.addExecutable(.{ .name = "guest-hello.elf", .root_module = guest_mod });
+        guest.setLinkerScript(b.path("guest/guest.ld"));
+        guest.entry = .{ .symbol_name = "_start" };
+        const guest_bin = b.addObjCopy(guest.getEmittedBin(), .{ .format = .bin, .basename = "guest-hello.bin" });
+        pack.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
+        pack_guest.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
 
-    // The guest kernel: this very kernel, built to boot the guest profile
-    // and report, embedding the guest archive; the host archive carries
-    // its raw Image as img/moss-guest for the VMM to load.
-    const guest_blobs = b.addWriteFiles();
-    _ = guest_blobs.addCopyFile(marc_guest_out, "bootfs.marc");
-    const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
-    const gopts = b.addOptions();
-    for ([_][]const u8{
-        "panic_test", "fault_test",  "sched_test",   "domain_test",
-        "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-        "blk_test",   "fs_test",     "net_test",     "fabric_test",
-        "shell_test", "rng_test",    "smmu_test",    "vm_test",
-        "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-        "users_test", "login_test",  "flogin_test",
-    }) |on| gopts.addOption(bool, on, false);
-    gopts.addOption(bool, "guest_kernel", true);
-    const gmod = b.createModule(.{
-        .root_source_file = b.path("kernel/main.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-        .code_model = .small,
-    });
-    gmod.addImport("shared", shared_mod);
-    gmod.addOptions("build_options", gopts);
-    gmod.addAnonymousImport("user_blobs", .{ .root_source_file = guest_blobs_src });
-    const gkernel = b.addExecutable(.{ .name = "moss-guest.elf", .root_module = gmod });
-    gkernel.setLinkerScript(linker_script);
-    const gkernel_bin = b.addObjCopy(gkernel.getEmittedBin(), .{ .format = .bin, .basename = "moss-guest.bin" });
-    pack.addPrefixedFileArg("img/moss-guest=", gkernel_bin.getOutput());
+        // The guest kernel: this very kernel, built to boot the guest profile
+        // and report, embedding the guest archive; the host archive carries
+        // its raw Image as img/moss-guest for the VMM to load.
+        const guest_blobs = b.addWriteFiles();
+        _ = guest_blobs.addCopyFile(marc_guest_out, "bootfs.marc");
+        const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
+        const gopts = b.addOptions();
+        for ([_][]const u8{
+            "panic_test", "fault_test",  "sched_test",   "domain_test",
+            "ipc_test",   "init_test",   "sandbox_test", "flap_test",
+            "blk_test",   "fs_test",     "net_test",     "fabric_test",
+            "shell_test", "rng_test",    "smmu_test",    "vm_test",
+            "guest_test", "vmnode_test", "pan_test",     "cpu_test",
+            "users_test", "login_test",  "flogin_test",
+        }) |on| gopts.addOption(bool, on, false);
+        gopts.addOption(bool, "guest_kernel", true);
+        const gmod = b.createModule(.{
+            .root_source_file = b.path("kernel/main.zig"),
+            .target = kernel_target,
+            .optimize = optimize,
+            .code_model = .small,
+        });
+        gmod.addImport("shared", shared_mod);
+        gmod.addOptions("build_options", gopts);
+        gmod.addAnonymousImport("user_blobs", .{ .root_source_file = guest_blobs_src });
+        const gkernel = b.addExecutable(.{ .name = "moss-guest.elf", .root_module = gmod });
+        gkernel.setLinkerScript(linker_script);
+        const gkernel_bin = b.addObjCopy(gkernel.getEmittedBin(), .{ .format = .bin, .basename = "moss-guest.bin" });
+        pack.addPrefixedFileArg("img/moss-guest=", gkernel_bin.getOutput());
+    }
 
     _ = user_blobs.addCopyFile(marc_out, "bootfs.marc");
     const user_blobs_src = user_blobs.add(
@@ -436,6 +467,9 @@ pub fn build(b: *std.Build) void {
     const kernel = b.addExecutable(.{
         .name = "moss-kernel.elf",
         .root_module = kernel_mod,
+        // The self-hosted x86_64 backend assumes SSE; the kernel is built
+        // without it, by LLVM.
+        .use_llvm = if (arch == .x86_64) true else null,
     });
     kernel.setLinkerScript(linker_script);
     b.installArtifact(kernel);
@@ -461,18 +495,53 @@ pub fn build(b: *std.Build) void {
         "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
     };
 
-    const run_qemu = b.addSystemCommand(&.{
-        "qemu-system-aarch64",
-        "-machine",
-        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
-        "-cpu",
-        "cortex-a76",
-    });
-    run_qemu.addArgs(&qemu_common);
-    run_qemu.addArg("-kernel");
-    run_qemu.addFileArg(kernel_bin.getOutput());
-    const run_step = b.step("run", "Boot the kernel in QEMU (TCG). Ctrl-A X exits.");
-    run_step.dependOn(&run_qemu.step);
+    const run_step = b.step("run", "Boot the kernel in QEMU (aarch64: TCG; x86_64: OVMF + Limine, KVM when there). Ctrl-A X exits.");
+    if (arch == .aarch64) {
+        const run_qemu = b.addSystemCommand(&.{
+            "qemu-system-aarch64",
+            "-machine",
+            "virt,gic-version=3,iommu=smmuv3,virtualization=on",
+            "-cpu",
+            "cortex-a76",
+        });
+        run_qemu.addArgs(&qemu_common);
+        run_qemu.addArg("-kernel");
+        run_qemu.addFileArg(kernel_bin.getOutput());
+        run_step.dependOn(&run_qemu.step);
+    } else {
+        // UEFI boot: OVMF from the host's QEMU (the code flash read-only,
+        // a scratch copy of the variable store), Limine's BOOTX64.EFI
+        // beside the kernel ELF and a limine.conf in a directory QEMU
+        // exposes as a FAT volume on virtio-blk. No disk image tooling.
+        const share = if (builtin.os.tag == .macos) "/opt/homebrew/share" else "/usr/share";
+        const limine_dir = b.option([]const u8, "limine", "directory holding Limine's BOOTX64.EFI") orelse b.fmt("{s}/limine", .{share});
+        const ovmf_code = b.option([]const u8, "ovmf", "the x86_64 OVMF code flash image") orelse b.fmt("{s}/qemu/edk2-x86_64-code.fd", .{share});
+        const ovmf_vars = b.option([]const u8, "ovmf-vars", "the OVMF variable store template") orelse b.fmt("{s}/qemu/edk2-i386-vars.fd", .{share});
+        const esp = b.addWriteFiles();
+        _ = esp.addCopyFile(kernel.getEmittedBin(), "moss-kernel.elf");
+        _ = esp.addCopyFile(.{ .cwd_relative = b.fmt("{s}/BOOTX64.EFI", .{limine_dir}) }, "EFI/BOOT/BOOTX64.EFI");
+        _ = esp.add("limine.conf", "timeout: 0\nserial: yes\n\n/moss\n    protocol: limine\n    path: boot():/moss-kernel.elf\n    cmdline: profile=system\n");
+        const vars = b.addWriteFiles();
+        const vars_fd = vars.addCopyFile(.{ .cwd_relative = ovmf_vars }, "vars.fd");
+        const run_x86 = b.addSystemCommand(&.{
+            "qemu-system-x86_64",
+            "-machine",
+            "q35",
+            "-accel",
+            "kvm",
+            "-accel",
+            "tcg",
+            "-cpu",
+            "max",
+        });
+        run_x86.addArgs(&qemu_common);
+        run_x86.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{ovmf_code}) });
+        run_x86.addArg("-drive");
+        run_x86.addPrefixedFileArg("if=pflash,format=raw,file=", vars_fd);
+        run_x86.addArg("-drive");
+        run_x86.addPrefixedDirectoryArg("format=raw,readonly=on,if=virtio,file=fat:ro:", esp.getDirectory());
+        run_step.dependOn(&run_x86.step);
+    }
 
     const run_hvf = b.addSystemCommand(&.{
         "qemu-system-aarch64",
@@ -789,7 +858,7 @@ pub fn build(b: *std.Build) void {
             return vbin.getOutput();
         }
     };
-    for (variants) |vn| {
+    if (arch == .aarch64) for (variants) |vn| {
         const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script);
         // Plain `zig build run-shell` boots this variant — no flag needed.
         if (std.mem.eql(u8, vn, "shell")) {
@@ -800,13 +869,14 @@ pub fn build(b: *std.Build) void {
             run_login.addArg("-kernel");
             run_login.addFileArg(vbin);
         }
-    }
-    for (release_variants) |vn| {
+    };
+    if (arch == .aarch64) for (release_variants) |vn| {
         _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script);
-    }
-    const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests)");
+    };
+    // The gate is aarch64's until the x86_64 port has drills of its own.
+    const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests; aarch64)");
     check_step.dependOn(test_step);
-    check_step.dependOn(&run_check.step);
+    if (arch == .aarch64) check_step.dependOn(&run_check.step);
 }
 
 /// Every .msh file under boot/, sorted, as build-root-relative paths.
