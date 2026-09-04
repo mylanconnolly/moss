@@ -16,21 +16,7 @@ const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "cons"
-        \\        .space  12
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("cons"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);
@@ -214,9 +200,9 @@ fn postAllRx() void {
 
 fn publish(vq_va: u64, shadow: u16, queue: u32) void {
     const avail_idx: *volatile u16 = @ptrFromInt(vq_va + 512 + 2);
-    asm volatile ("dmb ish");
+    usys.barrier();
     avail_idx.* = shadow;
-    asm volatile ("dmb ish");
+    usys.barrier();
     dev.notify(@intCast(queue));
 }
 
@@ -231,7 +217,7 @@ fn drainRx() void {
     const avail_ring: [*]volatile u16 = @ptrFromInt(rxq_va + 512 + 4);
     var reposted = false;
     while (rx_used_seen != used_idx.*) {
-        asm volatile ("dmb ish");
+        usys.barrier();
         const elem: *volatile extern struct { id: u32, len: u32 } =
             @ptrFromInt(rxq_va + 1024 + 4 + (rx_used_seen % q_num) * 8);
         const i = elem.id;

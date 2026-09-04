@@ -41,21 +41,7 @@ const readFileVia = fscmds.readFileVia;
 const writeFileVia = fscmds.writeFileVia;
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "shell"
-        \\        .space  11
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("shell"));
 }
 
 pub const panic = std.debug.FullPanic(uPanic);
@@ -889,4 +875,3 @@ fn trim(s: []const u8) []const u8 {
     while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\r' or s[b - 1] == '\n')) b -= 1;
     return s[a..b];
 }
-

@@ -26,21 +26,7 @@ const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "net"
-        \\        .space  13
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("net"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);
@@ -228,9 +214,9 @@ fn netInit() void {
         qAvailRing(rxq)[rx_shadow % qn] = @intCast(i);
         rx_shadow +%= 1;
     }
-    asm volatile ("dmb ish");
+    usys.barrier();
     qAvailIdx(rxq).* = rx_shadow;
-    asm volatile ("dmb ish");
+    usys.barrier();
     dev.notify(@intCast(rxq.idx));
 }
 
@@ -252,9 +238,9 @@ fn wireTx(frame: []const u8) void {
     };
     qAvailRing(txq)[tx_shadow % qn] = slot;
     tx_shadow +%= 1;
-    asm volatile ("dmb ish");
+    usys.barrier();
     qAvailIdx(txq).* = tx_shadow;
-    asm volatile ("dmb ish");
+    usys.barrier();
     dev.notify(@intCast(txq.idx));
 }
 
@@ -268,13 +254,13 @@ fn drainTxUsed() void {
 
 fn drainRxUsed() void {
     while (rx_seen != qUsedIdx(rxq).*) {
-        asm volatile ("dmb ish");
+        usys.barrier();
         const e = qUsedElem(rxq, rx_seen);
         const buf: [*]const u8 = @ptrFromInt(rx_va + @as(u64, e.id) * frame_cap);
         if (e.len > vnet_hdr) etherInput(buf[vnet_hdr..e.len]);
         qAvailRing(rxq)[rx_shadow % qn] = @intCast(e.id);
         rx_shadow +%= 1;
-        asm volatile ("dmb ish");
+        usys.barrier();
         qAvailIdx(rxq).* = rx_shadow;
         rx_seen +%= 1;
     }

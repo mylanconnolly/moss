@@ -127,7 +127,6 @@ pub fn call(fs: *const Fs, it: *mshl.Interp, name: []const u8, args: []const Val
     return null;
 }
 
-
 pub fn lsTable(fs: *const Fs, it: *mshl.Interp, path_arg: []const u8) mshl.Error!Value {
     const a = it.arena;
     const t = try fs.resolve(it, path_arg);

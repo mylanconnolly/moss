@@ -32,6 +32,12 @@ pub fn initContext(ctx: *Context, sp: u64, entry: u64, arg: u64) void {
     ctx.regs[11] = @intFromPtr(&__thread_trampoline); // x30
 }
 
+/// The kernel stack of the thread being switched to: SP_EL1 is that
+/// stack already on this port (the switch restores it), nothing to set.
+pub fn setKernelStack(top: u64) void {
+    _ = top;
+}
+
 pub fn switchContext(prev: *Context, next: *Context) void {
     __context_switch(prev, next);
 }

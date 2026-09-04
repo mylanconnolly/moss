@@ -17,21 +17,7 @@ const loader = @import("loader.zig");
 const boot = @import("boot.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "root"
-        \\        .space  12
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("root"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);

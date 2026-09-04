@@ -20,8 +20,9 @@ pub var stat_unmasks: u64 = 0;
 pub var stat_spi_delivered: u64 = 0;
 
 pub const Exit = struct { kind: shared.VmExit = .none, a: u64 = 0, b: u64 = 0, c: u64 = 0, d: u64 = 0 };
-pub const Vcpu = struct {};
-pub const Vm = struct { owner: *anyopaque, ram_pa: u64 = 0, nvcpus: u64 = 0 };
+/// The shapes the VM syscalls touch; no VM ever exists here.
+pub const Vcpu = struct { pc: u64 = 0, regs: [1]u64 = .{0} };
+pub const Vm = struct { owner: *anyopaque, ram_pa: u64 = 0, nvcpus: u64 = 0, vcpus: [max_vcpus]Vcpu = @splat(.{}) };
 pub const Error = error{ NoVms, OutOfFrames, NotHost };
 pub const CpuOnError = error{ NoSuchVcpu, AlreadyOn };
 

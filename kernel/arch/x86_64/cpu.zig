@@ -1,9 +1,8 @@
 //! The CPU as the generic kernel sees it: interrupt masking (RFLAGS.IF),
-//! the per-core pointer (the GS base, read with `rdgsbase` — FSGSBASE is
-//! on every CPU this port targets and CR4 enables it at trap.init), the
-//! cycle counter (the TSC, invariant on this class of hardware; its
-//! frequency comes from the loader), halting (HLT). Port I/O and MSR
-//! helpers live here for the rest of the port.
+//! the per-core pointer (the first word of the block at the GS base,
+//! trap.CpuLocal), the cycle counter (the TSC, invariant on this class
+//! of hardware; its frequency comes from the loader), halting (HLT).
+//! Port I/O and MSR helpers live here for the rest of the port.
 
 const std = @import("std");
 
@@ -56,7 +55,6 @@ pub fn cycleHz() u64 {
 }
 
 pub var x2apic: bool = false;
-var fsgsbase = false;
 
 pub fn describe() []const u8 {
     // IA32_APIC_BASE.EXTD: the loader's doing (the MP request asks for it).
@@ -64,33 +62,17 @@ pub fn describe() []const u8 {
     return if (x2apic) "ring 0 (x2APIC)" else "ring 0 (xAPIC)";
 }
 
-/// CR4.FSGSBASE, once per core, before setThisCpu: `rdgsbase` is the
-/// one-instruction per-core pointer read. Without the feature the MSR is
-/// used instead (slower, never on the hardware this port is for).
-pub fn enableFsgsbase() void {
-    const r = cpuid(7, 0);
-    fsgsbase = r.ebx & (1 << 0) != 0;
-    if (fsgsbase) writeCr4(readCr4() | (1 << 16));
-}
-
+/// The scheduler's per-core pointer: the first word of this core's
+/// block at the GS base (trap.CpuLocal), one instruction to read.
 pub fn thisCpu() usize {
-    if (fsgsbase) {
-        return asm volatile ("rdgsbase %[v]"
-            : [v] "=r" (-> u64),
-        );
-    }
-    return rdmsr(msr_gs_base);
+    return asm volatile ("mov %%gs:0, %[v]"
+        : [v] "=r" (-> u64),
+    );
 }
 
 pub fn setThisCpu(p: usize) void {
-    if (fsgsbase) {
-        asm volatile ("wrgsbase %[v]"
-            :
-            : [v] "r" (p),
-        );
-    } else {
-        wrmsr(msr_gs_base, p);
-    }
+    const l: *@import("trap.zig").CpuLocal = @ptrFromInt(rdmsr(msr_gs_base));
+    l.sched = p;
 }
 
 /// This core's index: its position among the CPUs the loader listed
@@ -223,6 +205,13 @@ pub fn readCr0() u64 {
     return asm volatile ("mov %%cr0, %[v]"
         : [v] "=r" (-> u64),
     );
+}
+
+pub fn writeCr0(v: u64) void {
+    asm volatile ("mov %[v], %%cr0"
+        :
+        : [v] "r" (v),
+        : .{ .memory = true });
 }
 
 pub fn invlpg(va: u64) void {

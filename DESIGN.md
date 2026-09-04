@@ -2127,14 +2127,78 @@ addresses on both ports (`llvm-addr2line -f -e moss-kernel.elf` reads
 them), because one address into a Debug build's cold panic blocks
 names the wrong function.
 
-What the next stages owe: `syscall`/`sysret` with SMAP behind
-`uaccess` and the TSS per core, the userspace seam (`user/usys.zig`,
-the image header stanza, the drivers' barriers) so programs build for
-the target, PCIDs and TLB shootdown by IPI (the port flushes locally
-today, which is enough while no user mappings exist), the MCFG behind
-`platform.pcie` and the MSI data word to the enumerator, an IOMMU
-(VT-d or AMD-Vi) walking the domain's tables, the `+rs` pass for the
-port's drills.
+### The x86_64 port, stage 3: user mode (as built, 2026-09-04)
+
+Every core keeps a block at its GS base (`trap.CpuLocal`): the
+scheduler's per-core pointer at offset 0 — `thisCpu` is `mov %gs:0`,
+one instruction, no FSGSBASE needed after all — the current thread's
+kernel stack top, a scratch word for the syscall entry, its TSS (rsp0
+= that same kernel stack, for interrupts from ring 3) and its GDT
+(kernel code and data, user data and code in the order `sysret`
+derives them, the TSS). The GS base is the block in the kernel and 0
+in user mode; `swapgs` at every crossing, both ways — the trap common
+path tests the frame's CS for ring 3 on entry and exit, the syscall
+entry and exit do it unconditionally.
+
+`syscall` lands in `__syscall_entry` with IF, TF, DF and AC masked
+(SFMASK): swap GS, stash the user rsp, take the kernel stack from the
+block, and push a frame in the trap frame's shape (ss, rsp, rflags
+from r11, cs, rip from rcx, a zero error code, vector 0x80, the
+registers) so `syscall.dispatch` sees one shape from both ports; the
+handler marks the thread in a syscall, dispatches, clears the mark and
+takes the preempt-or-die safe point, exactly the aarch64 SVC path;
+`sysretq` leaves. The scheduler tells the port the kernel stack of
+every user thread it switches to (`arch.thread.setKernelStack`, a
+no-op on aarch64 where SP_EL1 is that stack already). Entering user
+mode is an `iretq` to ring 3 with IF set, the five entry arguments in
+rdi, rsi, rdx, rcx, r8 so `umain` is a plain C function, and the
+stack aligned as the ABI wants at a function's first instruction (16
+bytes minus 8: the missing return address). A fault in ring 3 goes to
+the domain's supervisor as a message — the vector and error code, the
+address (CR2 for a page fault), the pc — else the domain dies, the
+same two outcomes as aarch64's. SMAP is the door to user memory:
+`stac`/`clac` around the copies, AC masked at every entry, and a
+kernel touch outside the window is a page fault the dump names ("refused
+(SMAP)"). CR4 also gains OSFXSR/OSXMMEXCPT (SSE in user mode), SMEP,
+PGE (kernel pages survive CR3 loads); CR0.EM off, MP on.
+
+TLB shootdown is by IPI: every CR3 load flushes the non-global entries
+(no PCIDs yet), so a core can only hold a user tree it is running at
+that moment — `switchUser` records it — and `unmapUserPages` sends the
+flush vector to exactly those cores and waits for their acks before
+the caller frees a frame; senders serialize on a lock so the acks are
+theirs. Tearing a tree down needs none: by then no core runs it.
+
+Userspace's seam is `user/usys.zig`: the syscall instruction and its
+slots by port (`syscall` with rax the number, rcx and r11 the
+instruction's own; the results come back in the argument slots, slot 0
+the errno on both), the cycle counter (`rdtsc`; its rate from a new
+ungated syscall, `cycle_hz`, cached — the TSC's rate is the loader's
+measurement, not a register), the barrier drivers use around virtio
+rings (`mfence`), and the image header stanza every program now takes
+from `usys.imageHeader("name")` instead of carrying its own copy. The
+IPC drill's vector-state probe has an x86 body (the sixteen xmm
+registers) and passes: FXSAVE at the switch keeps them.
+
+Lessons paid for: `.word` is 4 bytes on ARM and 2 on x86, so the
+shared header stanza put every field off by two — every image was
+BadImage until the field became `.4byte`. The syscall dispatcher read
+its number as "slot 8", which is x8 on aarch64 and nothing on x86;
+the frame has a `syscallNumber` now. And the one that took the frame
+dump: user threads came back from their first sleep to a #GP with
+error code 0x18 at the kernel's own `iretq` — the return frame's SS
+was 0x18 with ring 0 bits, where the thread had left through
+`sysretq`. Intel's SYSRET ORs the RPL into the SS selector it derives
+from STAR; AMD's does not; the base in STAR carries RPL 3 already
+(0x13, as Linux does), so CS is 0x23 and SS 0x1b on either. The fault
+report prints the words at the faulting stack pointer now, because
+a refused return names itself there.
+
+What the next stages owe: the MCFG behind `platform.pcie` and the MSI
+data word to the enumerator (virtio over PCIe: blk, fs, net, rng, the
+shell and users drills), an IOMMU (VT-d or AMD-Vi) walking the
+domain's tables, PCIDs, the `+rs` pass for the port's drills, a
+framebuffer console.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

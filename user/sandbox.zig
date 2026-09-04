@@ -21,21 +21,7 @@ const usys = @import("usys.zig");
 const loader = @import("loader.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "sandbox"
-        \\        .space  9
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("sandbox"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);

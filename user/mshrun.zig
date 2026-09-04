@@ -26,21 +26,7 @@ const mshl = mosslib.mshl;
 const Value = mshl.Value;
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "mshrun"
-        \\        .space  10
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("mshrun"));
 }
 
 pub const panic = std.debug.FullPanic(uPanic);

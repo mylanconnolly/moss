@@ -14,8 +14,12 @@ const cpu = @import("cpu.zig");
 const kalloc = @import("../../kalloc.zig");
 const log = @import("../../log.zig");
 const mem = @import("../../mem.zig");
+const lapic = @import("lapic.zig");
+const lock = @import("../../lock.zig");
 const platform = @import("platform.zig");
 const pmem = @import("../../pmem.zig");
+const sched = @import("../../sched.zig");
+const smp = @import("smp.zig");
 
 const present: u64 = 1 << 0;
 const writable: u64 = 1 << 1;
@@ -164,6 +168,7 @@ pub fn mapUserPageTagged(root_pa_user: u64, va: u64, pa: u64, perms: UserPerms, 
 
 pub fn unmapUserPages(root_pa_user: u64, va: u64, npages: u64, asid: u16) void {
     _ = asid;
+    defer shootdown(root_pa_user);
     for (0..npages) |i| {
         const a = va + i * mem.page_size;
         const pdpt = lookup(root_pa_user, idx(a, 39)) orelse @panic("unmapUserPages: no PDPT");
@@ -224,11 +229,42 @@ pub fn destroyUserSpace(root_pa_user: u64, user_account: *kalloc.Account, table_
 }
 
 /// The incoming thread's user half (its root shares our kernel half), or
-/// the kernel's own tables for a kernel thread.
+/// the kernel's own tables for a kernel thread. Every CR3 load flushes
+/// the non-global entries (no PCIDs yet), so a core's TLB can only hold
+/// a user tree it is running right now — which is what `cpu_root`
+/// records, for the shootdown.
 pub fn switchUser(user_root: u64, asid: u16) void {
     _ = asid;
     const want = if (user_root != 0) user_root else root_pa;
     if (cpu.readCr3() & addr_mask != want) cpu.writeCr3(want);
+    cpu_root[sched.thisCpu().id] = want;
+}
+
+var cpu_root: [sched.max_cpus]u64 = @splat(0);
+var tlb_lock: lock.SpinLock = .{};
+var tlb_acks = std.atomic.Value(u32).init(0);
+
+/// Retire `root`'s entries on every other core running it: an IPI each,
+/// answered by a CR3 reload and an ack; the caller frees nothing until
+/// every ack is in. Senders are serialized by the lock so acks are theirs.
+fn shootdown(root: u64) void {
+    const me = sched.thisCpu().id;
+    tlb_lock.lock();
+    defer tlb_lock.unlock();
+    tlb_acks.store(0, .release);
+    var pending: u32 = 0;
+    for (0..sched.max_cpus) |i| {
+        if (i == me or cpu_root[i] != root) continue;
+        lapic.sendIpi(smp.apicIdOf(@intCast(i)), lapic.vector_tlb);
+        pending += 1;
+    }
+    while (tlb_acks.load(.acquire) < pending) std.atomic.spinLoopHint();
+}
+
+/// On the target core, from the interrupt path.
+pub fn onShootdown() void {
+    cpu.writeCr3(cpu.readCr3());
+    _ = tlb_acks.fetchAdd(1, .release);
 }
 
 /// Page-table writes are ordered stores on x86; walkers see them once

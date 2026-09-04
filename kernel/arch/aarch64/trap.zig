@@ -40,6 +40,11 @@ pub const TrapFrame = extern struct {
         return f.elr;
     }
 
+    /// The syscall number: x8.
+    pub inline fn syscallNumber(f: *const TrapFrame) u64 {
+        return f.regs[8];
+    }
+
     /// The four message words of an IPC syscall (slots 1..4).
     pub inline fn msgWords(f: *const TrapFrame) [4]u64 {
         return f.regs[1..5].*;

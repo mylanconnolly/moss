@@ -18,21 +18,7 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "pingpong"
-        \\        .space  8
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("pingpong"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);
@@ -146,7 +132,7 @@ fn askr(log_h: u64, chan_h: u64) noreturn {
         fpLoad(&pattern);
         usys.sleep(3);
         fpStore(&readback);
-        for (pattern, readback) |a, b| {
+        for (pattern[0..fp_live], readback[0..fp_live]) |a, b| {
             if (a != b) usys.exit(40); // vector state corrupted across a switch
         }
         fp_rounds += 1;
@@ -156,7 +142,67 @@ fn askr(log_h: u64, chan_h: u64) noreturn {
 /// Load v0-v31 from a 512-byte buffer / store them back — the probe for
 /// eager FP context switching. No Zig code runs between load, syscall,
 /// and store, so the registers' only guardian is the kernel.
+const is_x86 = @import("builtin").cpu.arch == .x86_64;
+/// Bytes of the buffer that are live registers: 32 q registers or 16 xmm.
+const fp_live: usize = if (is_x86) 256 else 512;
+
 inline fn fpLoad(p: *const [512]u8) void {
+    if (is_x86) return fpLoadX86(p);
+    fpLoadArm(p);
+}
+
+inline fn fpStore(p: *[512]u8) void {
+    if (is_x86) return fpStoreX86(p);
+    fpStoreArm(p);
+}
+
+inline fn fpLoadX86(p: *const [512]u8) void {
+    asm volatile (
+        \\movups 0(%[p]), %%xmm0
+        \\movups 16(%[p]), %%xmm1
+        \\movups 32(%[p]), %%xmm2
+        \\movups 48(%[p]), %%xmm3
+        \\movups 64(%[p]), %%xmm4
+        \\movups 80(%[p]), %%xmm5
+        \\movups 96(%[p]), %%xmm6
+        \\movups 112(%[p]), %%xmm7
+        \\movups 128(%[p]), %%xmm8
+        \\movups 144(%[p]), %%xmm9
+        \\movups 160(%[p]), %%xmm10
+        \\movups 176(%[p]), %%xmm11
+        \\movups 192(%[p]), %%xmm12
+        \\movups 208(%[p]), %%xmm13
+        \\movups 224(%[p]), %%xmm14
+        \\movups 240(%[p]), %%xmm15
+        :
+        : [p] "r" (p),
+        : .{ .xmm0 = true, .xmm1 = true, .xmm2 = true, .xmm3 = true, .xmm4 = true, .xmm5 = true, .xmm6 = true, .xmm7 = true, .xmm8 = true, .xmm9 = true, .xmm10 = true, .xmm11 = true, .xmm12 = true, .xmm13 = true, .xmm14 = true, .xmm15 = true });
+}
+
+inline fn fpStoreX86(p: *[512]u8) void {
+    asm volatile (
+        \\movups %%xmm0, 0(%[p])
+        \\movups %%xmm1, 16(%[p])
+        \\movups %%xmm2, 32(%[p])
+        \\movups %%xmm3, 48(%[p])
+        \\movups %%xmm4, 64(%[p])
+        \\movups %%xmm5, 80(%[p])
+        \\movups %%xmm6, 96(%[p])
+        \\movups %%xmm7, 112(%[p])
+        \\movups %%xmm8, 128(%[p])
+        \\movups %%xmm9, 144(%[p])
+        \\movups %%xmm10, 160(%[p])
+        \\movups %%xmm11, 176(%[p])
+        \\movups %%xmm12, 192(%[p])
+        \\movups %%xmm13, 208(%[p])
+        \\movups %%xmm14, 224(%[p])
+        \\movups %%xmm15, 240(%[p])
+        :
+        : [p] "r" (p),
+        : .{ .memory = true });
+}
+
+inline fn fpLoadArm(p: *const [512]u8) void {
     asm volatile (
         \\ldp q0, q1, [%[p], #0]
         \\ldp q2, q3, [%[p], #32]
@@ -179,7 +225,7 @@ inline fn fpLoad(p: *const [512]u8) void {
         : .{ .v0 = true, .v1 = true, .v2 = true, .v3 = true, .v4 = true, .v5 = true, .v6 = true, .v7 = true, .v8 = true, .v9 = true, .v10 = true, .v11 = true, .v12 = true, .v13 = true, .v14 = true, .v15 = true, .v16 = true, .v17 = true, .v18 = true, .v19 = true, .v20 = true, .v21 = true, .v22 = true, .v23 = true, .v24 = true, .v25 = true, .v26 = true, .v27 = true, .v28 = true, .v29 = true, .v30 = true, .v31 = true });
 }
 
-inline fn fpStore(p: *[512]u8) void {
+inline fn fpStoreArm(p: *[512]u8) void {
     asm volatile (
         \\stp q0, q1, [%[p], #0]
         \\stp q2, q3, [%[p], #32]

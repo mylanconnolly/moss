@@ -5,6 +5,8 @@
 //! entry and argument parked in r12/r13. Vector state is the 512-byte
 //! FXSAVE area (SSE; XSAVE for wider state comes with an AVX userspace).
 
+const trap = @import("trap.zig");
+
 pub const Context = extern struct {
     // rbx, rbp, r12, r13, r14, r15, then rsp.
     regs: [6]u64 = @splat(0),
@@ -43,11 +45,45 @@ pub fn fpRestore(st: *const FpState) void {
         : .{ .memory = true });
 }
 
+/// The current thread's kernel stack top, for the syscall entry and the
+/// TSS: the scheduler says so at every switch to a user thread.
+pub const setKernelStack = trap.setKernelStack;
+
+/// Drop to ring 3 at `entry` with the five entry arguments in rdi, rsi,
+/// rdx, rcx, r8 (the SysV order, so `umain` is a plain C function), on a
+/// stack aligned as the ABI wants at a function's first instruction.
+/// `iretq` with IF set; `swapgs` hands the GS base to user mode (0).
 pub fn enterUser(entry: u64, sp: u64, args: [5]u64) noreturn {
-    _ = entry;
-    _ = sp;
-    _ = args;
-    @panic("x86_64: user mode is a later stage of the port");
+    const user_sp = (sp & ~@as(u64, 15)) - 8;
+    asm volatile (
+        \\cli
+        \\pushq $0x1b
+        \\push %[sp]
+        \\pushq $0x202
+        \\pushq $0x23
+        \\push %[entry]
+        \\xor %%eax, %%eax
+        \\xor %%ebx, %%ebx
+        \\xor %%ebp, %%ebp
+        \\xor %%r9d, %%r9d
+        \\xor %%r10d, %%r10d
+        \\xor %%r11d, %%r11d
+        \\xor %%r12d, %%r12d
+        \\xor %%r13d, %%r13d
+        \\xor %%r14d, %%r14d
+        \\xor %%r15d, %%r15d
+        \\swapgs
+        \\iretq
+        :
+        : [entry] "r" (entry),
+          [sp] "r" (user_sp),
+          [a0] "{rdi}" (args[0]),
+          [a1] "{rsi}" (args[1]),
+          [a2] "{rdx}" (args[2]),
+          [a3] "{rcx}" (args[3]),
+          [a4] "{r8}" (args[4]),
+        : .{ .memory = true });
+    unreachable;
 }
 
 extern fn __context_switch(prev: *Context, next: *Context) void;

@@ -9,21 +9,7 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "hello"
-        \\        .space  11
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("hello"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);

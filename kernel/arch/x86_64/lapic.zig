@@ -20,6 +20,7 @@ const msr_tsc_deadline: u32 = 0x6e0;
 
 pub const vector_timer: u32 = 0xf0;
 pub const vector_resched: u32 = 0xf1;
+pub const vector_tlb: u32 = 0xf2;
 pub const vector_spurious: u32 = 0xff;
 
 const lvt_masked: u64 = 1 << 16;

@@ -23,7 +23,10 @@ pub const Handle = packed struct(u64) {
     }
 };
 
-/// Syscall numbers, passed in x8; arguments in x0..x5, result in x0.
+/// Syscall numbers. aarch64: x8 the number, x0..x5 arguments, x0 the
+/// result; x86_64: rax the number, rdi rsi rdx r10 r8 r9 the arguments
+/// and results (slot 0 the result). The slot names below (x1, x2 …)
+/// are the aarch64 spelling of "result slot 1, 2 …".
 /// IPC calls additionally return message words in x1..x4 and a received cap
 /// handle (or 0) in x5.
 pub const Syscall = enum(u64) {
@@ -146,6 +149,9 @@ pub const Syscall = enum(u64) {
     /// of PSCI CPU_ON; the policy (answering the guest) is the VMM's.
     /// busy = already online, bad_arg = no such vCPU.
     vm_cpu_on = 39,
+    /// cycle_hz() -> slot 1 = the cycle counter's rate in Hz (not
+    /// authority, like the counter itself: ungated).
+    cycle_hz = 41,
     /// shm_unmap(va): undo an shm_map at `va` — the pages leave this
     /// address space and the mapping's ref on the buffer is released.
     /// bad_arg when `va` is not the base of one of this domain's shm

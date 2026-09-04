@@ -40,21 +40,7 @@ const boot = @import("boot.zig");
 const mshl = @import("mosslib").mshl;
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "init"
-        \\        .space  12
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("init"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);

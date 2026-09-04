@@ -200,15 +200,17 @@ is a plan.
   APIC timer in TSC-deadline mode, the I/O APICs and MSI vectors behind
   `intc`/`msi` from the MADT, every core through the loader's MP
   response, and the gate running the port's drills (`-Darch=x86_64
-  check`: panic, fault, sched under KVM). Next, in order: (3)
-  `syscall`/`sysret`, the TSS per core, SMAP behind `uaccess`, and the
-  userspace seam (`user/usys.zig`, the image header stanza, the
-  drivers' barriers) so programs build and run for the target; (4)
-  PCIDs and TLB shootdown by IPI; (5) the MCFG behind `platform.pcie`,
-  the MSI data word to the enumerator, virtio over PCIe; (6) VT-d or
-  AMD-Vi behind `iommu` (the DMA-grant design needs the IOMMU to walk
-  the domain's own tables); (7) the rest of the drills and the `+rs`
-  pass on the port; SVM behind `vm` last. Modern hardware only: no legacy
+  check`). ✅ Stage 3 (landed 2026-09-04): user mode — `syscall`/
+  `sysret`, a TSS and GS block per core, SMAP behind `uaccess`, TLB
+  shootdown by IPI, the userspace seam in `user/usys.zig` so every
+  program builds for the target; ten drills under KVM (panic, fault,
+  sched, pan, domain, ipc, init, sandbox, flap, cpu). Next, in order:
+  (4) the MCFG behind `platform.pcie`, the MSI data word to the
+  enumerator, virtio over PCIe — blk, fs, net, rng and the shell and
+  users drills follow; (5) VT-d or AMD-Vi behind `iommu` (the DMA-grant
+  design needs the IOMMU to walk the domain's own tables); (6) PCIDs,
+  the `+rs` pass on the port, a framebuffer console; SVM behind `vm`
+  last. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
   console for real machines is owed.
@@ -403,6 +405,20 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64, stage 3: user mode** (2026-09-04): a per-core block at
+  the GS base (the scheduler pointer, the kernel stack, the TSS, the
+  GDT), `syscall` into a trap-shaped frame and `sysretq` out, `iretq`
+  into ring 3, faults in ring 3 as messages to the supervisor, SMAP
+  around the uaccess copies, TLB shootdown by IPI to the cores running
+  a tree, and the userspace seam — `user/usys.zig` owns the syscall
+  stubs, the counter, the barrier and the image header stanza for both
+  ports, with `cycle_hz` a new ungated syscall for the TSC's rate. Ten
+  drills pass under KVM. Found: `.word` is 2 bytes on x86 (every image
+  BadImage until `.4byte`); the dispatcher's syscall number was "slot
+  8" (x8), now `frame.syscallNumber()`; and AMD's SYSRET does not OR
+  the RPL into the SS selector it derives from STAR — a user thread's
+  first interrupt return died on SS 0x18 — so STAR's base carries RPL 3
+  (0x13). The fault dump prints the words at the faulting stack pointer.
 - ✅ **x86_64, stage 2: interrupts, every core, the gate** (2026-09-04):
   x2APIC through MSRs, the APIC timer in TSC-deadline mode as the tick,
   I/O APICs and ISA overrides from the MADT behind `intc` (interrupt

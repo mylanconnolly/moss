@@ -49,21 +49,7 @@ const settings = mosslib.settings;
 const Value = mshl.Value;
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "users"
-        \\        .space  11
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("users"));
 }
 
 pub const panic = std.debug.FullPanic(uPanic);

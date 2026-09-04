@@ -27,7 +27,7 @@ pub fn dispatch(frame: *arch.trap.TrapFrame) void {
         frame.set(0, errno(.nosys));
         return;
     }));
-    const nr: shared.Syscall = @enumFromInt(frame.arg(8));
+    const nr: shared.Syscall = @enumFromInt(frame.syscallNumber());
     frame.set(0, switch (nr) {
         .log => sysLog(d, frame.arg(0), frame.arg(1), frame.arg(2)),
         .yield => blk: {
@@ -75,6 +75,10 @@ pub fn dispatch(frame: *arch.trap.TrapFrame) void {
         .timer_arm => sysTimerArm(d, frame.arg(0), frame.arg(1), frame.arg(2)),
         .thread_create => sysThreadCreate(d, frame.arg(0), frame.arg(1), frame.arg(2), frame.arg(3)),
         .thread_exit => sched.exit(),
+        .cycle_hz => blk: {
+            frame.set(1, arch.cpu.cycleHz());
+            break :blk errno(.ok);
+        },
         _ => errno(.nosys),
     });
 }

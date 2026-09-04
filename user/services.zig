@@ -13,21 +13,7 @@ const usys = @import("usys.zig");
 const boot = @import("boot.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "services"
-        \\        .space  8
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("services"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);

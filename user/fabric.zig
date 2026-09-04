@@ -47,21 +47,7 @@ const Ed25519 = fabcert.Ed25519;
 const X25519 = std.crypto.dh.X25519;
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "fabric"
-        \\        .space  10
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("fabric"));
 }
 
 pub const panic = std.debug.FullPanic(uPanic);

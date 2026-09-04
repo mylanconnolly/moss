@@ -24,16 +24,19 @@ done without rediscovering the sharp edges.
   log (also copied to `<label>-failed.log`, which a rerun does not
   overwrite) — the way to chase an intermittent one. `-Doptimize=ReleaseSafe`
   runs the whole suite optimized.
-- `-Darch=x86_64` builds the x86_64 port (stage 2: interrupts and every
-  core, no user mode) — the kernel ELF alone, no user programs yet.
-  `zig build -Darch=x86_64 run` boots it on OVMF + Limine (KVM when the
-  host has it, else TCG) from a directory QEMU exposes as a FAT volume;
-  it wants Limine's `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's
-  share dir) and the x86_64 OVMF images beside QEMU (`-Dovmf`,
-  `-Dovmf-vars`). `zig build -Darch=x86_64 check` runs the port's
-  drills (panic, fault, sched) the same way, plus the host tests; the
+- `-Darch=x86_64` builds the x86_64 port (stage 3: user mode; no PCIe
+  or IOMMU yet) — the kernel ELF and every program. `zig build
+  -Darch=x86_64 run` boots it on OVMF + Limine (KVM when the host has
+  it, else TCG) from a directory QEMU exposes as a FAT volume; it wants
+  Limine's `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's share dir)
+  and the x86_64 OVMF images beside QEMU (`-Dovmf`, `-Dovmf-vars`).
+  `zig build -Darch=x86_64 check` runs the port's drills (ten, every
+  one that needs no device) the same way, plus the host tests; the
   runner's `--arch x86_64` composes a boot directory per drill under
-  `zig-out/check/esp-<name>/`.
+  `zig-out/check/esp-<name>/`. Syscall ABI on x86_64: rax = number,
+  rdi rsi rdx r10 r8 r9 r12 r13 the argument and result slots (rcx and
+  r11 are the instruction's); the kernel's `frame.arg(i)`/`set(i)` and
+  `syscallNumber()` are the same on both ports.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
   echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),
@@ -52,11 +55,15 @@ takes a raw object id. A syscall that reads a user buffer checks
 (text and the granted blob are read-only to EL1 too — a kernel store there
 is a panic the caller provoked).
 
-**A user program**: new file in `user/` with the MOSS header stanza (copy
-the `comptime { asm(...) }` block and the `uPanic` handler from any
-existing one, and put the program's own name in the `.ascii` field — it
-is the child's domain name and must match the catalog; entry args are
-x0=log handle, x1=channel handle, x2=arg, x3/x4=boot archive va/len) →
+**A user program**: new file in `user/` opening with
+`comptime { asm (usys.imageHeader("name")); }` (the MOSS header and
+the entry, generated per port; the name is the child's domain name and
+must match the catalog) and the `uPanic` handler copied from any
+existing one; `umain(log handle, channel handle, arg, boot archive va,
+boot archive len)` is a C function — the kernel places the arguments
+per the port's ABI (x0..x4 / rdi..r8). Nothing else in a program is
+port-specific: `usys.cycles()`/`cycleHz()` for the clock,
+`usys.barrier()` between a virtio ring write and the doorbell →
 add to `user_progs` in `build.zig` and to the `shared.ImageId` catalog,
 both by name (nothing is order-coupled: the image becomes `img/<name>`
 in the boot archive). To spawn it from userspace, stage it with

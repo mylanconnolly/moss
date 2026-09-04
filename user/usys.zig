@@ -1,7 +1,49 @@
-//! Userspace syscall wrappers. ABI: x8 = number, x0..x5 args, x0 = result
-//! (a shared.Errno value). This is the seed of the Phase 5 runtime library.
+//! Userspace syscall wrappers, and the port seam of the runtime: the
+//! syscall instruction and its register slots, the cycle counter, the
+//! memory barrier drivers use, the image header stanza every program
+//! carries. Slots: aarch64 x8 = number, x0..x6 args, x0..x7 results;
+//! x86_64 rax = number, rdi rsi rdx r10 r8 r9 r12 r13 for both (rcx and
+//! r11 belong to the instruction). Slot 0 is the result (a shared.Errno).
 
+const builtin = @import("builtin");
 const shared = @import("shared");
+const std = @import("std");
+
+const is_x86 = builtin.cpu.arch == .x86_64;
+
+/// The MOSS image header and entry, as the assembly every program opens
+/// with: `comptime { asm (usys.imageHeader("name")); }`. The name is the
+/// child's domain name (16 bytes, zero-padded) and must match the
+/// catalog. Entry: umain(log, chan, arg, blob va, blob len) as a C
+/// function — the kernel places the arguments per the port's ABI.
+pub fn imageHeader(comptime name: []const u8) []const u8 {
+    if (name.len > 15) @compileError("image name too long: " ++ name);
+    return std.fmt.comptimePrint(
+        \\.section .text.uhdr, "ax"
+        \\.global __uhdr
+        \\__uhdr:
+        \\        .ascii  "MOSS"
+        \\        .4byte  0
+        \\        .quad   __utext_size
+        \\        .quad   __uload_size
+        \\        .quad   __umem_size
+        \\        .ascii  "{s}"
+        \\        .space  {d}
+        \\.global _ustart
+        \\_ustart:
+        \\        {s} umain
+    , .{ name, 16 - name.len, if (is_x86) "jmp" else "b" });
+}
+
+/// Order memory against a device: the virtio rings' descriptor and
+/// index writes before the doorbell, the used index before its entry.
+pub inline fn barrier() void {
+    if (is_x86) {
+        asm volatile ("mfence" ::: .{ .memory = true });
+    } else {
+        asm volatile ("dmb ish" ::: .{ .memory = true });
+    }
+}
 
 pub fn log(handle: u64, msg: []const u8) shared.Errno {
     return @enumFromInt(syscall3(.log, handle, @intFromPtr(msg.ptr), msg.len));
@@ -217,8 +259,18 @@ pub fn chanMint(chan_a: u64, badge: u64) IpcResult {
     return syscall6(.chan_mint, chan_a, badge, 0, 0, 0, 0);
 }
 
-/// Virtual counter ticks (EL0 access enabled by the kernel).
+/// The cycle counter: the virtual counter (EL0 access enabled by the
+/// kernel) or the TSC.
 pub fn cycles() u64 {
+    if (is_x86) {
+        var lo: u32 = undefined;
+        var hi: u32 = undefined;
+        asm volatile ("rdtsc"
+            : [lo] "={eax}" (lo),
+              [hi] "={edx}" (hi),
+        );
+        return (@as(u64, hi) << 32) | lo;
+    }
     return asm volatile (
         \\isb
         \\mrs %[v], cntvct_el0
@@ -226,7 +278,15 @@ pub fn cycles() u64 {
     );
 }
 
+var cycle_hz_cached: u64 = 0;
+
+/// The counter's rate: a register on aarch64; on x86_64 the kernel says
+/// (the loader measured it), once.
 pub fn cycleHz() u64 {
+    if (is_x86) {
+        if (cycle_hz_cached == 0) cycle_hz_cached = syscall6(.cycle_hz, 0, 0, 0, 0, 0, 0).data[0];
+        return cycle_hz_cached;
+    }
     return asm ("mrs %[v], cntfrq_el0"
         : [v] "=r" (-> u64),
     );
@@ -286,6 +346,15 @@ pub fn rngSeed(entropy_h: u64, bytes: []const u8) shared.Errno {
 }
 
 fn syscall3(nr: shared.Syscall, a0: u64, a1: u64, a2: u64) u64 {
+    if (is_x86) {
+        return asm volatile ("syscall"
+            : [ret] "={rdi}" (-> u64),
+            : [nr] "{rax}" (@intFromEnum(nr)),
+              [a0] "{rdi}" (a0),
+              [a1] "{rsi}" (a1),
+              [a2] "{rdx}" (a2),
+            : .{ .rcx = true, .r11 = true, .memory = true });
+    }
     return asm volatile ("svc #0"
         : [ret] "={x0}" (-> u64),
         : [nr] "{x8}" (@intFromEnum(nr)),
@@ -309,6 +378,27 @@ fn syscall7(nr: shared.Syscall, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
     var r5: u64 = undefined;
     var r6: u64 = undefined;
     var r7: u64 = undefined;
+    if (is_x86) {
+        asm volatile ("syscall"
+            : [r0] "={rdi}" (r0),
+              [r1] "={rsi}" (r1),
+              [r2] "={rdx}" (r2),
+              [r3] "={r10}" (r3),
+              [r4] "={r8}" (r4),
+              [r5] "={r9}" (r5),
+              [r6] "={r12}" (r6),
+              [r7] "={r13}" (r7),
+            : [nr] "{rax}" (@intFromEnum(nr)),
+              [a0] "{rdi}" (a0),
+              [a1] "{rsi}" (a1),
+              [a2] "{rdx}" (a2),
+              [a3] "{r10}" (a3),
+              [a4] "{r8}" (a4),
+              [a5] "{r9}" (a5),
+              [a6] "{r12}" (a6),
+            : .{ .rcx = true, .r11 = true, .memory = true });
+        return .{ .err = @enumFromInt(r0), .data = .{ r1, r2, r3, r4 }, .cap = r5, .badge = r6, .token = r7 };
+    }
     asm volatile ("svc #0"
         : [r0] "={x0}" (r0),
           [r1] "={x1}" (r1),

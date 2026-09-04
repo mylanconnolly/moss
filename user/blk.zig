@@ -20,21 +20,7 @@ const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "blk"
-        \\        .space  13
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("blk"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);
@@ -306,9 +292,9 @@ fn submitSlot(s: usize, fl: InFlight, sector: u64) void {
 /// Publish queued submissions and ring the device once.
 fn kick() void {
     const avail_idx: *volatile u16 = @ptrFromInt(vq_va + 512 + 2);
-    asm volatile ("dmb ish");
+    usys.barrier();
     avail_idx.* = avail_shadow;
-    asm volatile ("dmb ish");
+    usys.barrier();
     dev.notify(0);
 }
 
@@ -325,7 +311,7 @@ fn drainUsed() void {
     const used_idx: *volatile u16 = @ptrFromInt(vq_va + 1024 + 2);
     var completed_ring = false;
     while (used_seen != used_idx.*) {
-        asm volatile ("dmb ish");
+        usys.barrier();
         const elem: *volatile extern struct { id: u32, len: u32 } =
             @ptrFromInt(vq_va + 1024 + 4 + (used_seen % q_num) * 8);
         const s = elem.id / 3;

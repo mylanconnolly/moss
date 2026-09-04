@@ -6,7 +6,7 @@
 const boot_mod = @import("boot.zig");
 const stubs = @import("stubs.zig");
 
-pub const name = "x86_64 / uefi (stage 2)";
+pub const name = "x86_64 / uefi (stage 3)";
 pub const kvirt_offset: u64 = boot_mod.kvirt_offset;
 
 pub const boot = boot_mod;

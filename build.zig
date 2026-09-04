@@ -383,10 +383,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const user_blobs = b.addWriteFiles();
-    // The programs, the guest and the guest kernel are aarch64 until the
-    // userspace runtime has its own port seam; an x86_64 build packs the
-    // boot files alone (the kernel embeds the archive either way).
-    if (arch == .aarch64) for (user_progs) |p| {
+    // The programs build for either port (user/usys.zig is the runtime's
+    // seam); the guest and the guest kernel are the aarch64 hypervisor's.
+    for (user_progs) |p| {
         const prog_mod = b.createModule(.{
             .root_source_file = b.path(p.src),
             .target = user_target,
@@ -407,7 +406,7 @@ pub fn build(b: *std.Build) void {
         });
         pack.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
         pack_guest.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
-    };
+    }
     // A guest: bare-metal EL1 code the VMM loads into a VM's RAM. Raw
     // binary, linked at the guest's RAM base, no MOSS header.
     if (arch == .aarch64) {
@@ -868,9 +867,10 @@ pub fn build(b: *std.Build) void {
             return vbin.getOutput();
         }
     };
-    // The x86_64 port's drills so far: the ones that need no user
-    // programs. The runner boots them through OVMF and Limine.
-    const x86_variants = [_][]const u8{ "panic", "fault", "sched" };
+    // The x86_64 port's drills so far: everything that needs no device
+    // (PCIe is the port's next stage). The runner boots them through OVMF
+    // and Limine.
+    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu" };
     if (arch == .x86_64) {
         run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
         for (x86_variants) |vn| _ = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);

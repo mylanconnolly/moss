@@ -901,6 +901,7 @@ fn scheduleLocked() void {
     cpu.current = next;
     cpu.prev = prev;
     arch.mmu.switchUser(next.user_root, next.asid);
+    if (next.user_root != 0) arch.thread.setKernelStack(mem.physToVirt(next.stack_pa) + stack_pages * mem.page_size);
     // Vector state travels with user threads (see FpState). Exited
     // threads skip the save — their state is about to be reaped.
     if (prev.user_root != 0 and prev.state != .exited) arch.thread.fpSave(&prev.fp);

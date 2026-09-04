@@ -20,21 +20,7 @@ const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
 
 comptime {
-    asm (
-        \\.section .text.uhdr, "ax"
-        \\.global __uhdr
-        \\__uhdr:
-        \\        .ascii  "MOSS"
-        \\        .word   0
-        \\        .quad   __utext_size
-        \\        .quad   __uload_size
-        \\        .quad   __umem_size
-        \\        .ascii  "rng"
-        \\        .space  13
-        \\.global _ustart
-        \\_ustart:
-        \\        b       umain
-    );
+    asm (usys.imageHeader("rng"));
 }
 
 pub const panic = @import("std").debug.FullPanic(uPanic);
@@ -157,9 +143,9 @@ fn harvest(out: []u8) void {
         avail_ring[avail_shadow % q_num] = 0;
         avail_shadow +%= 1;
         const avail_idx: *volatile u16 = @ptrFromInt(vq_va + 512 + 2);
-        asm volatile ("dmb ish");
+        usys.barrier();
         avail_idx.* = avail_shadow;
-        asm volatile ("dmb ish");
+        usys.barrier();
         dev.notify(0);
 
         const used_idx: *volatile u16 = @ptrFromInt(vq_va + 1024 + 2);
@@ -168,7 +154,7 @@ fn harvest(out: []u8) void {
             _ = dev.isrRead();
             _ = usys.irqAck(dev_h, 0);
         }
-        asm volatile ("dmb ish");
+        usys.barrier();
         const elem: *volatile extern struct { id: u32, len: u32 } =
             @ptrFromInt(vq_va + 1024 + 4 + (used_seen % q_num) * 8);
         const len = @min(elem.len, want);
