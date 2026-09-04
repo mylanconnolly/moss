@@ -244,9 +244,10 @@ is a plan.
   notifications across nodes; (5) tooling, host-side in
   tools/: ✅ a tree-sitter grammar (landed 2026-09-04:
   `tools/tree-sitter-mshl`, highlights, a corpus recorded from the
-  language's examples, every `.msh` in the tree parsing clean), then a
-  formatter from a parser that keeps positions and comments, then lint
-  and a language server. Rule: build the
+  language's examples, every `.msh` in the tree parsing clean), ✅ a
+  formatter on it (landed 2026-09-04: `mshfmt`, `zig build fmt` /
+  `fmt-test`, the tree kept formatted), then lint and a language
+  server on the same parser. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
 - **virtio-gpu and input devices** — the graphical console.
@@ -381,6 +382,22 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 5b: the formatter** (done, 2026-09-04): `mshfmt`,
+  `tools/mshfmt.zig` — the grammar's generated parser and the
+  tree-sitter runtime linked into a host program; the tree's leaves in
+  source order, the author's line breaks and comments kept, spacing
+  and indentation decided by the kinds of neighbouring tokens, and in
+  a record written one field per line the values of neighbouring
+  one-line fields aligned. `zig build fmt` installs it, `zig build
+  fmt-test` runs its tests (idempotence, and the formatted text parsing
+  to the same tree) and `--check` over every `.msh` under `boot/`,
+  found by walking the tree. The 25 files the rules changed were
+  reformatted and the diff read: whitespace only. Lessons: the first
+  alignment rule let a field that shared its line with others join a
+  run (`run: true,` followed by `give:` on the next line), so a field
+  aligns only when it has a line to itself; and the tree's hand
+  alignment was itself inconsistent in places, which is the case for a
+  formatter.
 - ✅ **mshl v3, stage 5a: a tree-sitter grammar** (done, 2026-09-04):
   `tools/tree-sitter-mshl/` — the language's shape as tree-sitter sees
   it (commands vs. calls vs. expressions by the head of the stage,

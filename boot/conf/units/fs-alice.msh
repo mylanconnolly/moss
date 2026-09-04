@@ -1,4 +1,4 @@
 # The filesystem drill, step 1 (profile fs): alice holds the whole root
 # view read-write and populates the volume.
 { image: fs, arg: 2, budget: { user: 4mb }, profiles: [fs], oneshot: true,
-  give: [ { tag: view, fs: "", ro: false } ] }
+  give: [{ tag: view, fs: "", ro: false }] }

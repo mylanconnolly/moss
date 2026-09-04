@@ -1408,6 +1408,29 @@ fields and keys. Not in the gate: the grammar is host tooling, checked
 with `tree-sitter test`; the rule that a syntax change updates it is
 in HACKING.
 
+**mshl v3, stage 5b (as built, 2026-09-04): the formatter.**
+`tools/mshfmt.zig` is the first tool on the grammar: the generated
+`parser.c` and the host's tree-sitter runtime (`libtree-sitter.a`,
+`brew install tree-sitter`; `-Dtree-sitter=PREFIX` elsewhere) linked
+into a hosted Zig program through `@cImport`. It does not pretty-print
+from the tree; it walks the tree's leaves in source order — atomic
+nodes (strings, variables, numbers, keys, comments) copied whole — with
+the count of line breaks before each, and emits them with two decisions
+per leaf: whether a line break survives (the author's do, capped at one
+blank line; the leaf then indents by bracket depth) and whether a space
+goes before it (by the kinds of the two neighbours: none inside `()` and
+`[]`, spaces inside `{ }`, none around a glued `.`, before `?`, `,`,
+`;`). The one rule that looks across leaves is alignment: in a record
+written one field per line, a run of one-line fields on consecutive
+lines — each with the line to itself — pads its keys to the longest, as
+gofmt does; a multi-line field, a blank line or a comment ends the run.
+A file with an error node is left alone. The tests format, format
+again, and compare the S-expressions of both parses; `zig build
+fmt-test` adds `--check` over every `.msh` under `boot/`, found by
+walking, so a file that is not formatted fails the step and a new one
+cannot be forgotten. Not in the gate (host tooling; needs the runtime),
+but part of finishing a change to anything under `boot/`.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

@@ -2,4 +2,4 @@
 # then a listener, a connection and an accept, all in one script over
 # loopback. Sockets are values; the script's error is the step's.
 { image: mshrun, script: scripts/net-drill.msh, grant: [log, bootfs], profiles: [net], after: net-echocli, oneshot: true,
-  give: [ { tag: net, netview: net } ] }
+  give: [{ tag: net, netview: net }] }

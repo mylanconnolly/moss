@@ -8,8 +8,8 @@
   essential: true
   give: [
     { tag: console, unit: cons }
-    { tag: view,    fs: "", ro: false }
-    { tag: init,    self: true }
-    { tag: fabric,  unit: fabsvc }
+    { tag: view, fs: "", ro: false }
+    { tag: init, self: true }
+    { tag: fabric, unit: fabsvc }
   ]
 }

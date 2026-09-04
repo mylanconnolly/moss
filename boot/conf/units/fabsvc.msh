@@ -6,14 +6,14 @@
 # pays for the children it spawns for peers (remote stages): memory
 # accounts nest, and a child's pages are the parent's.
 {
-  image:   fabric
-  arg:     1
-  node:    boot
-  budget:  { kobj: 4mb, user: 16mb }
-  grant:   [log, spawner, bootfs]
+  image:  fabric
+  arg:    1
+  node:   boot
+  budget: { kobj: 4mb, user: 16mb }
+  grant:  [log, spawner, bootfs]
   give: [
-    { tag: buf,  shm: 1 }
-    { tag: net,  netview: net-cluster }
+    { tag: buf, shm: 1 }
+    { tag: net, netview: net-cluster }
     { tag: view, fs: state/fabric, ro: false, mkdir: true }
   ]
   certify: { root: fabroot, gossip: true, spawn: true, state: state/fabric, seeds: [1] }

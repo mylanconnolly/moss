@@ -1,8 +1,8 @@
 # The entropy driver: virtio-rng seeding the kernel pool. Started first;
 # getrandom is fail-closed until it has.
 {
-  image:   rng
-  arg:     1
+  image:    rng
+  arg:      1
   profiles: [system, users, login, flogin, fjoin]
   give: [
     { tag: device, device: rng }

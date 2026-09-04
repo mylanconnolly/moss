@@ -10,11 +10,11 @@
   profiles:  [fjoin]
   essential: true
   give: [
-    { tag: view,    fs: conf/users, ro: false, mkdir: true }
-    { tag: home,    fs: home,       ro: false }
-    { tag: conf,    fs: conf/app,   ro: true,  mkdir: true }
-    { tag: store,   fs: img,        ro: true }
-    { tag: fabric,  unit: fabsvc }
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
+    { tag: home, fs: home, ro: false }
+    { tag: conf, fs: conf/app, ro: true, mkdir: true }
+    { tag: store, fs: img, ro: true }
+    { tag: fabric, unit: fabsvc }
     { tag: console, unit: cons }
   ]
 }

@@ -101,7 +101,14 @@ the leak-detecting allocator, so a value that escapes without being
 counted fails the test; the QEMU check is for integration. A change to
 the *syntax* also changes `tools/tree-sitter-mshl/grammar.js`, with a
 corpus entry for it (`tree-sitter generate && tree-sitter test`; record
-a new tree with `tree-sitter test -u` and read it before trusting it). The memory
+a new tree with `tree-sitter test -u` and read it before trusting it),
+and then `zig build fmt-test` — the formatter compiles the generated
+parser in, so a grammar change is a formatter change, and every `.msh`
+under `boot/` must still come out unchanged (a new spacing rule means
+running `zig-out/bin/mshfmt` over the tree and reading the diff; a new
+kind of token needs its `Leaf.Kind` and a `needSpace` rule, and a test
+in `tools/mshfmt.zig`). New `.msh` files are formatted before they are
+committed; `zig build fmt-test` names any that are not. The memory
 rules for host code: a host command builds its value in `it.arena` and
 never keeps a pointer to one past the call; anything that must outlive
 the line goes through `setVar` (a box); flags read out of data files

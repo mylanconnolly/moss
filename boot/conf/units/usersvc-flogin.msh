@@ -11,10 +11,10 @@
   profiles: [flogin]
   after:    apply
   give: [
-    { tag: view,   fs: conf/users, ro: false, mkdir: true }
-    { tag: home,   fs: home,       ro: false }
-    { tag: conf,   fs: conf/app,   ro: true,  mkdir: true }
-    { tag: store,  fs: img,        ro: true }
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
+    { tag: home, fs: home, ro: false }
+    { tag: conf, fs: conf/app, ro: true, mkdir: true }
+    { tag: store, fs: img, ro: true }
     { tag: fabric, unit: fabsvc }
   ]
 }

@@ -1,4 +1,4 @@
 # The block drill (profile blk): a client exercising the block driver
 # over both transports; its exit ends the boot.
 { image: blk, arg: 2, profiles: [blk], oneshot: true, essential: true,
-  give: [ { tag: disk, unit: blk } ] }
+  give: [{ tag: disk, unit: blk }] }

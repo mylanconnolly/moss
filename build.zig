@@ -236,6 +236,38 @@ pub fn build(b: *std.Build) void {
     // program images plus the literal boot files below, laid out per the
     // standard hierarchy (identity in etc/, boot config in conf/, images
     // in img/).
+
+    // Every mshl file under boot/: the formatter must leave them as they are.
+    // mshfmt: the formatter, on the tree-sitter grammar's generated parser
+    // and the tree-sitter runtime the host provides (`brew install
+    // tree-sitter`; -Dtree-sitter=PREFIX elsewhere). Its own step and
+    // tests, outside the gate: host tooling, not the OS.
+    const ts_prefix = b.option([]const u8, "tree-sitter", "prefix of the tree-sitter runtime (include/, lib/)") orelse "/opt/homebrew/opt/tree-sitter";
+    {
+        const fmt_mod = b.createModule(.{
+            .root_source_file = b.path("tools/mshfmt.zig"),
+            .target = host_target,
+            .optimize = .Debug,
+            .link_libc = true,
+        });
+        fmt_mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{ts_prefix}) });
+        fmt_mod.addCSourceFile(.{ .file = b.path("tools/tree-sitter-mshl/src/parser.c"), .flags = &.{"-std=c11"} });
+        fmt_mod.addIncludePath(b.path("tools/tree-sitter-mshl/src"));
+        fmt_mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libtree-sitter.a", .{ts_prefix}) });
+        const mshfmt = b.addExecutable(.{ .name = "mshfmt", .root_module = fmt_mod });
+        const fmt_install = b.addInstallArtifact(mshfmt, .{});
+        const fmt_step = b.step("fmt", "build mshfmt, the mshl formatter (needs the tree-sitter runtime)");
+        fmt_step.dependOn(&fmt_install.step);
+        const fmt_tests = b.addTest(.{ .root_module = fmt_mod });
+        const fmt_test_step = b.step("fmt-test", "mshfmt's own tests, and every .msh in the tree must format idempotently");
+        fmt_test_step.dependOn(&b.addRunArtifact(fmt_tests).step);
+        // The whole tree: --check must pass, i.e. every .msh is formatted.
+        const fmt_check = b.addRunArtifact(mshfmt);
+        fmt_check.addArg("--check");
+        for (mshFiles(b)) |f| fmt_check.addFileArg(b.path(f));
+        fmt_test_step.dependOn(&fmt_check.step);
+    }
+
     const mkmarc = b.addExecutable(.{
         .name = "mkmarc",
         .root_module = b.createModule(.{
@@ -731,4 +763,24 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests)");
     check_step.dependOn(test_step);
     check_step.dependOn(&run_check.step);
+}
+
+/// Every .msh file under boot/, sorted, as build-root-relative paths.
+fn mshFiles(b: *std.Build) []const []const u8 {
+    const io = b.graph.io;
+    var found: std.ArrayList([]const u8) = .empty;
+    var dir = b.build_root.handle.openDir(io, "boot", .{ .iterate = true }) catch @panic("boot/ missing");
+    defer dir.close(io);
+    var walker = dir.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch @panic("walking boot/")) |e| {
+        if (e.kind != .file or !std.mem.endsWith(u8, e.basename, ".msh")) continue;
+        found.append(b.allocator, b.fmt("boot/{s}", .{e.path})) catch @panic("OOM");
+    }
+    std.mem.sort([]const u8, found.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    return found.items;
 }

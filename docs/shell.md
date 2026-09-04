@@ -346,9 +346,32 @@ interpreter makes — a bare word at the head of a stage is a command,
 a variable with arguments is a call, `where` takes an expression, a
 glued `.` is field access — and its corpus tests are parses recorded
 from this page's examples and the drills' scripts; every `.msh` file in
-the repository parses without an error node. A formatter, lint and a
-language server are the next tooling steps, on a parser that keeps
-positions and comments.
+the repository parses without an error node.
+
+`mshfmt` is the formatter, built on that grammar's generated parser and
+the tree-sitter runtime (`zig build fmt` installs it to
+`zig-out/bin/mshfmt`; it needs the runtime on the host, `brew install
+tree-sitter`, or `-Dtree-sitter=PREFIX`). It keeps what the author
+decided — line breaks, blank lines (at most one), comments where they
+were, the insides of strings — and normalizes the rest: one space
+between tokens, none inside `()` and `[]`, spaces inside `{ }`, `key:
+value`, spaced operators and pipes, indentation two spaces per level,
+no trailing whitespace. In a record written one field per line, the
+values of neighbouring one-line fields line up (`image:     shell`
+under `essential: true`); a field spanning lines, a blank line or a
+comment ends the run, and fields sharing a line never align. A file
+that does not parse is left alone and reported.
+
+```
+mshfmt FILE...          # rewrite in place
+mshfmt --check FILE...  # exit 1 naming any file that would change
+mshfmt --stdin          # standard input to standard output (editors)
+```
+
+`zig build fmt-test` runs its tests and `--check` over every `.msh`
+under `boot/`: the tree is always formatted, and formatting is checked
+to be idempotent and to parse to the same tree as the original. Lint
+and a language server are the next steps, on the same parser.
 
 ### Running it
 
@@ -506,7 +529,8 @@ positions and comments.
 - ROADMAP.md — "Developer shell and tooling", "msh v2", "Programs as
   files", "Manifests beside images, and a per-user store".
 - Tooling — `tools/tree-sitter-mshl/` (`grammar.js`, `queries/`,
-  `test/corpus/`; `tree-sitter generate && tree-sitter test`).
+  `test/corpus/`; `tree-sitter generate && tree-sitter test`),
+  `tools/mshfmt.zig` (`zig build fmt`, `zig build fmt-test`).
 - Source — `user/shell.zig` (the host: every command, `run`,
   `install`, startup, the REPL), `user/fscmds.zig` (the file commands
   msh and mshrun share), `user/mshrun.zig` (a script as a program),

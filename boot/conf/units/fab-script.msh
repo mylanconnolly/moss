@@ -2,4 +2,4 @@
 # node 1 through the fabric — the bulk transport at work (its script
 # and input cross the wire in a session buffer, the value comes back).
 { image: mshrun, script: scripts/fab-drill.msh, grant: [log, bootfs], profiles: [fjoin], oneshot: true,
-  give: [ { tag: fabric, unit: fabsvc } ] }
+  give: [{ tag: fabric, unit: fabsvc }] }
