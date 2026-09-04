@@ -208,10 +208,12 @@ is a plan.
   2026-09-04): PCIe — ECAM from the MCFG, the BAR window from the host
   bridge's resources, the MSI data word to the enumerator — and with it
   every device drill: nineteen of the twenty-three run on the port,
-  all but the hypervisor's and the SMMU's. Next: (5) VT-d or AMD-Vi
-  behind `iommu` (the DMA-grant design needs the IOMMU to walk the
-  domain's own tables; until then device DMA on the port is
-  untranslated, as aarch64 without its SMMU); (6) PCIDs, the `+rs` pass
+  all but the hypervisor's and the SMMU's. ✅ Stage 5 (landed
+  2026-09-04): the IOMMU — VT-d in scalable mode with first-stage
+  translation walking the domain's own tables, faults recorded and
+  counted, the smmu drill on the port; twenty drills, every one but
+  the aarch64 hypervisor's three. Still owed: AMD-Vi for the machines
+  that have it (the GCR3 walk, the same shape), PCIDs, the `+rs` pass
   on the port, a framebuffer console; SVM behind `vm` last. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
@@ -407,6 +409,17 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64, stage 5: the IOMMU** (2026-09-04): VT-d in scalable mode
+  with first-stage translation (`kernel/arch/x86_64/vtd.zig`) walks the
+  domain's own PML4 — device address == the driver's virtual address,
+  the kernel half unreachable by the user bit; one PASID per device
+  slot as the binding, the invalidation queue with a polled wait
+  descriptor, the fault record read on the IOMMU's own MSI. Every
+  drill runs through it; the smmu drill's rogue is refused. Found: the
+  drill's "kernel physical address" came from `mem.virtToPhys` of an
+  image variable, wrong on a port whose image sits outside the direct
+  map — VT-d refused a non-canonical address, the right verdict for
+  the wrong reason; `virtToPhys` is image-aware now (`arch.imagePhys`).
 - ✅ **x86_64, stage 4: PCIe** (2026-09-04): the ECAM from the MCFG,
   the BAR window from the host bridge's DWordMemory resource in the
   DSDT (read as bytes, like the S5 package), INTx by the slot swizzle

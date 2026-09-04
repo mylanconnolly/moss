@@ -9,6 +9,11 @@ const psci = @import("psci.zig");
 pub const name = "aarch64 / qemu-virt";
 pub const kvirt_offset: u64 = 0xffffff80_0000_0000;
 
+/// The image lives inside the direct map on this port.
+pub fn imagePhys(va: u64) u64 {
+    return va - kvirt_offset;
+}
+
 pub const boot = @import("boot.zig");
 pub const cpu = @import("cpu.zig");
 pub const trap = @import("trap.zig");

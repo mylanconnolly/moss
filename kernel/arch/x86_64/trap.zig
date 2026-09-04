@@ -31,6 +31,7 @@ const sched = @import("../../sched.zig");
 const smp = @import("smp.zig");
 const syscall = @import("../../syscall.zig");
 const uaccess = @import("uaccess.zig");
+const vtd = @import("vtd.zig");
 
 pub const TrapFrame = extern struct {
     r15: u64,
@@ -425,7 +426,7 @@ fn handleIrq(vector: u32) void {
         // just here for the preempt below
     } else if (vector == lapic.vector_tlb) {
         mmu.onShootdown();
-    } else if (!irq.deliver(vector)) {
+    } else if (!(vtd.handleIrq(vector) or irq.deliver(vector))) {
         log.warn("unexpected interrupt {d}", .{vector});
     }
     lapic.eoi();

@@ -10,13 +10,19 @@
 
 pub const page_size: usize = 4096;
 
-pub const kvirt_offset: u64 = @import("arch.zig").kvirt_offset;
+const arch = @import("arch.zig");
+
+pub const kvirt_offset: u64 = arch.kvirt_offset;
 
 pub fn physToVirt(pa: u64) u64 {
     return pa + kvirt_offset;
 }
 
+/// The physical address behind a kernel virtual one: the direct map's
+/// arithmetic, except for the image, which a port may place elsewhere
+/// (x86_64 links it in the top 2 GB; the loader says where it landed).
 pub fn virtToPhys(va: u64) u64 {
+    if (va >= kernelStart() and va < kernelEnd()) return arch.imagePhys(va);
     return va - kvirt_offset;
 }
 

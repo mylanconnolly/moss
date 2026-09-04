@@ -4,10 +4,10 @@
 //! maps the port's modules onto the HAL's names (kernel/arch.zig).
 
 const boot_mod = @import("boot.zig");
-const stubs = @import("stubs.zig");
 
-pub const name = "x86_64 / uefi (stage 3)";
+pub const name = "x86_64 / uefi";
 pub const kvirt_offset: u64 = boot_mod.kvirt_offset;
+pub const imagePhys = boot_mod.imagePhys;
 
 pub const boot = boot_mod;
 pub const cpu = @import("cpu.zig");
@@ -20,7 +20,7 @@ pub const msi = @import("msi.zig");
 pub const timer = @import("timer.zig");
 pub const power = @import("power.zig");
 pub const smp = @import("smp.zig");
-pub const iommu = stubs.iommu;
+pub const iommu = @import("vtd.zig");
 pub const vm = @import("vm.zig");
 pub const platform = @import("platform.zig");
 pub const console = @import("console.zig");

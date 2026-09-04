@@ -535,6 +535,7 @@ pub fn build(b: *std.Build) void {
             "-cpu",
             "max",
         });
+        run_x86.addArgs(&.{ "-device", "intel-iommu,x-scalable-mode=on,x-flts=on" });
         run_x86.addArgs(&qemu_common);
         run_x86.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{ovmf_code}) });
         run_x86.addArg("-drive");
@@ -870,9 +871,9 @@ pub fn build(b: *std.Build) void {
     // The x86_64 port's drills so far: everything that needs no device
     // (PCIe is the port's next stage). The runner boots them through OVMF
     // and Limine.
-    // Every drill but the aarch64 hypervisor's (vm, guest, vmnode) and the
-    // SMMU's, which wait for the port's IOMMU.
-    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin" };
+    // Every drill but the aarch64 hypervisor's (vm, guest, vmnode); the
+    // smmu drill runs against VT-d here.
+    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin", "smmu" };
     if (arch == .x86_64) {
         run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
         for (x86_variants) |vn| _ = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);

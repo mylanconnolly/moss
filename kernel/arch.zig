@@ -22,6 +22,9 @@ const impl = switch (builtin.cpu.arch) {
 pub const name = impl.name;
 /// The kernel's direct map: virt = phys + kvirt_offset.
 pub const kvirt_offset = impl.kvirt_offset;
+/// The physical address of a virtual one inside the kernel image (which
+/// a port may link outside the direct map).
+pub const imagePhys = impl.imagePhys;
 /// The boot entry: referenced so its assembly is emitted.
 pub const boot = impl.boot;
 /// Interrupt masking, the per-core pointer, the cycle counter, halting.

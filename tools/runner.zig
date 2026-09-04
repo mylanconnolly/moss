@@ -58,7 +58,7 @@ const specs = [_]Spec{
     .{ .name = "sandbox", .pass = "sandbox-test: PASS" },
     .{ .name = "flap", .pass = "flap-test: PASS" },
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
-    .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused" },
+    .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
     .{ .name = "vmnode", .kind = .vmnode, .pass = "vmnode-test: PASS", .extra = "fabric-test: node 2 joined the fabric via seed 1", .always_extra = "guest| [info ] smp: 4 cores online", .timeout_s = 180 },
@@ -1094,8 +1094,13 @@ fn appendBaseX86(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []
         "none",
         "-nic",
         "none",
+        // The IOMMU first (QEMU wants it before the devices it fronts):
+        // scalable mode with first-stage translation, so the domain's own
+        // page tables are what devices walk.
         "-device",
-        "virtio-rng-pci,disable-legacy=on",
+        "intel-iommu,x-scalable-mode=on,x-flts=on",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         "-serial",
         try std.fmt.allocPrint(gpa, "file:{s}", .{log_path}),
         "-drive",

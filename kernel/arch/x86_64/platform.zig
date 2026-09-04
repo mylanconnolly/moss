@@ -124,10 +124,10 @@ pub fn discover(boot_arg: u64) Info {
     };
 }
 
-/// The IOMMU: stage 4 of the port.
+/// The IOMMU (VT-d from the DMAR), once the memory map is up.
 pub fn initIommu(info: *const Info) void {
     _ = info;
-    log.warn("x86_64: no IOMMU driver yet; device DMA is untranslated", .{});
+    @import("vtd.zig").init();
 }
 
 /// The I/O APICs and the ISA overrides, from the MADT; the local APICs

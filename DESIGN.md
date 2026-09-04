@@ -2220,10 +2220,52 @@ base builder (the loader's config carries them on x86_64, `-append` on
 aarch64) and labels each node of a multi-node drill, since each gets
 its own boot directory and variable store.
 
-What the next stages owe: an IOMMU (VT-d or AMD-Vi) walking the
-domain's tables, so DMA is confined as the SMMU confines it on
-aarch64; PCIDs; the `+rs` pass for the port's drills; a framebuffer
-console; a hypervisor behind `vm` if SVM ever matters.
+### The x86_64 port, stage 5: the IOMMU (as built, 2026-09-04)
+
+VT-d in scalable mode with first-stage translation (`vtd.zig`): the
+IOMMU walks the page tables of the domain that holds a device's
+capability — the very PML4 the CPU uses — so device address == the
+driver's virtual address, as the SMMU gives the aarch64 port. First-
+stage walks require the user bit, so the kernel half is out of a
+device's reach by construction, and a page the driver was not given
+is "not present" to the device as to the driver. The structures: a
+root table whose bus-0 entry names one scalable-mode context table,
+one PASID directory and one PASID table shared by every device —
+device table index `i` takes PASID `i + 1` as its RID_PASID, so the
+PASID entry *is* the binding (first-stage, DID = the domain's ASID,
+FLPTPTR = the domain's root) and an unbound slot resolves to a
+non-present entry. Attach fills the PASID entry then the context entry
+and invalidates (context cache by device, PASID cache and PASID-IOTLB
+by PASID) through the invalidation queue — scalable mode allows no
+register-based invalidation — with a wait descriptor whose status word
+the kernel polls; detach clears both and invalidates the same way;
+`invalidateAsid` is a domain-selective IOTLB invalidation. Faults land
+in the one recording register and raise an MSI whose vector the port
+allocates like a device's; the handler reads the record (the page
+address, the source id, the reason), releases it and counts, the
+same statistics the smmu drill reads on either port. Devices' MSI
+writes never meet the translation: QEMU (as the architecture) routes
+the interrupt address range to the interrupt path, so no doorbell
+mapping matters here. The IOMMU comes from the DMAR's first DRHD;
+QEMU is asked for `intel-iommu,x-scalable-mode=on,x-flts=on`, placed
+before the devices it fronts. Every drill runs through it — the
+whole gate, twenty now, with the smmu drill's rogue refused on its
+write to a kernel page and every honest DMA translated.
+
+Lessons paid for: the drill handed the rogue a "kernel physical
+address" computed as `mem.virtToPhys` of an image variable, which on
+this port (the image outside the direct map) produced a user-half
+address that VT-d refused as non-canonical — the right answer for the
+wrong reason. `mem.virtToPhys` is image-aware now, through a new HAL
+name, `arch.imagePhys`, and the rogue targets the canary's real page.
+And a reason code with no name in the table is worth a second look:
+0x80 was the clue.
+
+What the port still owes: AMD-Vi for the machines that have it (the
+Framework's Ryzen among them — first-stage translation there is the
+GCR3 walk of x86-format tables, the same shape); PCIDs; the `+rs` pass
+for the port's drills; a framebuffer console; a hypervisor behind `vm`
+if SVM ever matters.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and
