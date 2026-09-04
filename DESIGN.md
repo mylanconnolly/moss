@@ -1364,6 +1364,126 @@ exports; both are sixteen. Also: the session manager's badge-death
 handler and lease table, and `usersvc`'s gate now admits `attach_buf`
 on a lease cap and nothing else there.
 
+**Users, stage 4b (as built, 2026-09-04): the remote home's speed.**
+Measured first: a cold 64 KB read from a remote home took 55 ms, one
+fabric exchange per 4 KB block. Two changes and a measurement in the
+gate. The home service's backing layer keeps a **read-ahead window**:
+a miss fetches a whole 32 KB window aligned to its size, later blocks
+in it are served from memory, and writes go through it (patched, or
+the window dropped) — sound because the lease makes this service the
+volume's only writer. And the transport carries a window in one
+exchange: netsvc's `tcp_send`/`tcp_recv` take 32 KB (a view attaches
+8 pages), the send ring is 32 KB and the receive buffer 64 KB, the
+fabric's frame cap and bulk chunk follow (32 KB frames, 64 KB peer
+receive buffers), 16 sockets per service, budgets raised where the
+network runs (8 MB). The same read is 4 ms now; the warm read and the
+deferred write about 2 ms; the fabric-login drill prints all three on
+every gate run. Two bugs paid for it. Resetting a socket or a peer by
+struct literal built the 96 KB record on the stack and overflowed the
+thread; the buffers live in arrays beside their tables now. And the
+empty 64 KB receive buffer advertised a window of 65536, which a
+16-bit field cannot hold — the checked cast panicked netsvc silently
+and every client saw `peer_dead`; the window is capped at 65535. Also
+in this step: `now` and `sleep` as shared host commands, and the
+language pools call frames per line (a `map` of ten thousand made ten
+thousand frames from the arena and ran out at a 64 KB `join`).
+
+**mshl v3, stage 5a (as built, 2026-09-04): a tree-sitter grammar.**
+`tools/tree-sitter-mshl/` describes the language for editors: the same
+decisions the interpreter makes, made by GLR and precedence instead of
+by hand — a stage headed by a bare word is a command (dynamic
+precedence over reading the word as a string), one headed by a
+variable with arguments is a call, `where` takes an expression, and a
+`.` glued to a primary is field access even though `.` may begin a word
+(an immediate token with lexical precedence beats a longer word; with
+whitespace before it, `.hidden` is a word). Statements are separated,
+never adjacent — a rule that must not match the empty string, so the
+list is non-empty and blocks hold an optional one. The corpus is
+recorded parses (`tree-sitter test -u`) read and corrected: the first
+recording had every argument of a command as its own statement, because
+a generator error hidden behind a grep left the previous parser in
+place. Every `.msh` file in the repository parses clean, and the
+highlight query covers keywords, operators, variables, commands,
+fields and keys. Not in the gate: the grammar is host tooling, checked
+with `tree-sitter test`; the rule that a syntax change updates it is
+in HACKING.
+
+**mshl v3, stage 5b (as built, 2026-09-04): the formatter.**
+`tools/mshfmt.zig` is the first tool on the grammar: the generated
+`parser.c` and the host's tree-sitter runtime (`libtree-sitter.a`,
+`brew install tree-sitter`; `-Dtree-sitter=PREFIX` elsewhere) linked
+into a hosted Zig program through `@cImport`. It does not pretty-print
+from the tree; it walks the tree's leaves in source order — atomic
+nodes (strings, variables, numbers, keys, comments) copied whole — with
+the count of line breaks before each, and emits them with two decisions
+per leaf: whether a line break survives (the author's do, capped at one
+blank line; the leaf then indents by bracket depth) and whether a space
+goes before it (by the kinds of the two neighbours: none inside `()` and
+`[]`, spaces inside `{ }`, none around a glued `.`, before `?`, `,`,
+`;`). The one rule that looks across leaves is alignment: in a record
+written one field per line, a run of one-line fields on consecutive
+lines — each with the line to itself — pads its keys to the longest, as
+gofmt does; a multi-line field, a blank line or a comment ends the run.
+A file with an error node is left alone. The tests format, format
+again, and compare the S-expressions of both parses; `zig build
+fmt-test` adds `--check` over every `.msh` under `boot/`, found by
+walking, so a file that is not formatted fails the step and a new one
+cannot be forgotten. Not in the gate (host tooling; needs the runtime),
+but part of finishing a change to anything under `boot/`.
+
+**mshl v3, stage 5c (as built, 2026-09-04): lint.** `tools/mshlint.zig`
+shares the parser with the formatter (`tools/mshtree.zig`: the C
+runtime behind a few helpers — kind, text, field, positions) and adds
+the one analysis a language server will need too: scopes. A scope is a
+function body (`def`, `fn`, a block argument) or the file; a block
+under `if`, `for`, `while`, `try` or a match arm is not one, because at
+run time it binds in the enclosing frame. Each scope is collected
+first — every `let`, `def`, `for` name, pattern binding and record
+shorthand anywhere in it, with function bodies skipped — then checked:
+a `$x` or a `$x` inside a string resolves up the chain, counting a use
+on the binding it finds; none anywhere is "not bound", and a use in the
+same scope that starts before every `let` of that name there is "used
+before" (across scopes order is not checked: `def f { $x }` is fine
+with `let x` after it, which is how closures resolve). The implicit
+names (`it`, `in`, `acc`, `req`) are bound in every function scope and
+the file's. Unused is reported only for a `let` in a function: a file's
+top level is what `use` exports. The `match` check is the parser's
+exhaustiveness rule transcribed (catch-all; `ok _` and `err _`; `true`
+and `false`; guards never count) plus the arm after a catch-all;
+duplicate record keys and a `def` over a builtin name (the list is
+`lib/mshl.zig`'s, imported) round out the language checks. The one
+host-specific check is the unit file: under `conf/units/` and
+`conf/session/`, a top-level key `parseUnit` does not read, because
+init ignores unknown keys and a misspelled `image:` is a unit that
+silently never starts. Diagnostics are `path:line:col: message`, sorted,
+exit 1 if any; `--stdin NAME` for editors. `zig build lint-test` runs
+its tests and the lint over the tree.
+
+**mshl v3, stage 5d (as built, 2026-09-04): the language server.**
+`tools/mshls.zig` is the lint and the formatter behind the Language
+Server Protocol: stdio, `Content-Length` frames, JSON-RPC parsed into
+`std.json.Value` and answered with typed structs through the
+stringifier. Documents are synced whole (a script is small; analysis
+is a parse and one walk) and re-analyzed per request rather than
+cached — simpler, and fast enough that nothing else is worth it yet.
+Every query starts from the lint's `Analysis`: diagnostics are its
+diagnostics with byte ranges turned into line/UTF-16 positions and its
+severities (an error is what would fail when the line runs); hover and
+definition look up the reference or binding under the cursor (a `$x`,
+a `$x` in a string, a command naming a `def`) and describe it from its
+binding — the `let` line, the `def` header up to the body, what an
+implicit name is — or, failing that, say "builtin" for a builtin's
+name; symbols are the file scope's `let`s and `def`s; completion is
+`Analysis.visible` at the cursor (innermost first, each name once) and
+then the builtins; formatting is `mshfmt.format` as one edit over the
+whole document, none when unchanged, none when the text does not
+parse. The server is a struct that takes one message and appends its
+replies to a buffer, so the tests are the protocol itself (framing
+checked, JSON parsed back) with no transport; `main` is the frame
+reader. Not built: rename, references, incremental sync, semantic
+tokens — the tree-sitter highlights cover the last, and the rest wait
+for an editor to ask.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

@@ -1,0 +1,199 @@
+================================================================================
+commands, where, redirect
+================================================================================
+ls data | where size > 4kb | sort-by name --desc | select name size
+ls data | select name > data/listing.txt
+echo hello world > data/hello.txt
+--------------------------------------------------------------------------------
+
+(source_file
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier)))
+    (where_command
+      (binary_expression
+        (bare_word
+          (identifier))
+        (number)))
+    (command
+      (identifier)
+      (bare_word
+        (identifier))
+      (bare_word
+        (identifier)))
+    (command
+      (identifier)
+      (bare_word
+        (identifier))
+      (bare_word
+        (identifier))))
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier)))
+    (command
+      (identifier)
+      (bare_word
+        (identifier)))
+    (redirect
+      (identifier)))
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier))
+      (bare_word
+        (identifier)))
+    (redirect
+      (identifier))))
+
+================================================================================
+words keep their dots and dashes
+================================================================================
+cat data/smoke/hi.txt
+connect 10.0.2.100 9000
+fetch http://10.0.2.100:9001/hello
+ln data/smoke/l hi.txt
+--------------------------------------------------------------------------------
+
+(source_file
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier))))
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier))
+      (number)))
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier))))
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier))
+      (bare_word
+        (identifier)))))
+
+================================================================================
+expressions and field access
+================================================================================
+(stat data/smoke).type == dir
+(ls | where name == "hi.txt").0.size
+$req.headers.host != "moss"
+1 + 2 * 3 - -4 / 2 % 3
+not true and false or 1 < 2
+--------------------------------------------------------------------------------
+
+(source_file
+  (pipeline
+    (binary_expression
+      (field_access
+        (paren
+          (pipeline
+            (command
+              (identifier)
+              (bare_word
+                (identifier)))))
+        (identifier))
+      (bare_word
+        (identifier))))
+  (pipeline
+    (field_access
+      (field_access
+        (paren
+          (pipeline
+            (command
+              (identifier))
+            (where_command
+              (binary_expression
+                (bare_word
+                  (identifier))
+                (string
+                  (string_text))))))
+        (identifier))
+      (identifier)))
+  (pipeline
+    (binary_expression
+      (field_access
+        (field_access
+          (variable
+            (identifier))
+          (identifier))
+        (identifier))
+      (string
+        (string_text))))
+  (pipeline
+    (binary_expression
+      (binary_expression
+        (number)
+        (binary_expression
+          (number)
+          (number)))
+      (binary_expression
+        (binary_expression
+          (bare_word
+            (identifier))
+          (number))
+        (number))))
+  (pipeline
+    (binary_expression
+      (binary_expression
+        (unary_expression
+          (boolean))
+        (boolean))
+      (binary_expression
+        (number)
+        (number)))))
+
+================================================================================
+results and the unwrap mark
+================================================================================
+let s = (connect 10.0.2.100 9000)?
+send $s "hi" ?
+(int "42")? + 1
+ok 5
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_statement
+    (identifier)
+    (unwrap
+      (paren
+        (pipeline
+          (command
+            (identifier)
+            (bare_word
+              (identifier))
+            (number))))))
+  (pipeline
+    (command
+      (identifier)
+      (variable
+        (identifier))
+      (string
+        (string_text))
+      (unwrap_mark)))
+  (pipeline
+    (binary_expression
+      (unwrap
+        (paren
+          (pipeline
+            (command
+              (identifier)
+              (string
+                (string_text))))))
+      (number)))
+  (pipeline
+    (command
+      (identifier)
+      (number))))

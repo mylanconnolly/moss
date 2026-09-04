@@ -2,8 +2,9 @@
 # (arg 1) for the drills; the system profile's fabric uses cluster
 # addressing as node 1 (see net-cluster.msh).
 {
-  image: net
-  arg:   1
+  image:  net
+  arg:    1
+  budget: { user: 8mb }
   give: [
     { tag: device, device: net }
   ]

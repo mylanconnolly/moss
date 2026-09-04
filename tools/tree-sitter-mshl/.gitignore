@@ -1,0 +1,6 @@
+build/
+node_modules/
+*.wasm
+log.html
+Cargo.lock
+bindings/

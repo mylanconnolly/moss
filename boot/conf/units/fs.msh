@@ -1,12 +1,12 @@
 # The filesystem service: mossfs on the block driver, encrypted with the
 # key below (test material). Installs the program store into img/.
 {
-  image:   fs
-  arg:     1
-  budget:  { user: 4mb }
-  grant:   [log, bootfs]
+  image:  fs
+  arg:    1
+  budget: { user: 4mb }
+  grant:  [log, bootfs]
   give: [
-    { tag: buf,  shm: 1 }
+    { tag: buf, shm: 1 }
     { secret: conf/fs.key }
     { tag: disk, unit: blk }
   ]

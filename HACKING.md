@@ -98,7 +98,26 @@ session covers it (`.raw = true` sends bytes without a newline; an empty
 values, syntax, an operator) belongs in `lib/mshl.zig` with a host test
 beside it — `zig test lib/mshl.zig` runs in a second, every test under
 the leak-detecting allocator, so a value that escapes without being
-counted fails the test; the QEMU check is for integration. The memory
+counted fails the test; the QEMU check is for integration. A change to
+the *syntax* also changes `tools/tree-sitter-mshl/grammar.js`, with a
+corpus entry for it (`tree-sitter generate && tree-sitter test`; record
+a new tree with `tree-sitter test -u` and read it before trusting it),
+and then `zig build fmt-test lint-test ls-test` — the tools compile
+the generated parser in (`tools/mshtree.zig`), so a grammar change is a
+formatter, lint and language-server change, and every `.msh` under
+`boot/` must still come out unchanged and clean (a new spacing rule means running
+`zig-out/bin/mshfmt` over the tree and reading the diff; a new kind of
+token needs its `Leaf.Kind` and a `needSpace` rule, and a test in
+`tools/mshfmt.zig`; a new binding form or scope needs `collect`/`check`
+in `tools/mshlint.zig`, and the server's hover/definition/completion
+follow from its `Analysis` — a new binding kind needs a line in
+`describe`). Two lists in the lint mirror the OS: the
+implicit names a block gets (`it`, `in`, `acc`, `req` — a host that
+calls a block with new names adds them) and the unit keys
+`user/init.zig`'s `parseUnit` reads (a new key is added there and in
+`unit_keys`, or every unit using it lints as a typo). New `.msh` files
+are formatted and lint clean before they are committed; the two test
+steps name any that are not. The memory
 rules for host code: a host command builds its value in `it.arena` and
 never keeps a pointer to one past the call; anything that must outlive
 the line goes through `setVar` (a box); flags read out of data files
@@ -147,6 +166,14 @@ opened at a console is `init` in mode 3: its
 units come from `conf/units/` in the home, else `boot/conf/session/`;
 `zig build run-login` boots the multi-user system with seat 0 on your
 terminal and seat 1 on `nc 127.0.0.1 31905`.
+
+**A big record cannot be reset by a struct literal.** `s.* = .{}` on
+a record with a 64 KB buffer inside builds the whole record on the
+stack first and overflows the thread; keep buffers in arrays beside
+the table (`snd_bufs`, `rx_bufs`, `peer_rx`) and the records small.
+And a 16-bit protocol field takes a checked cast: `@intCast(65536)`
+in ReleaseSafe is a panic, and a panicking service exits without a
+word — the drill saw only `peer_dead`.
 
 **A channel with deferred replies must reply by token.** `reply` with
 token 0 answers the oldest parked caller on the channel — on a server

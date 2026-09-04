@@ -1,4 +1,4 @@
 # The filesystem drill, step 4: after the churner died holding two dozen
 # views, two dozen more at once — only possible if its death freed them.
 { image: fs, arg: 6, budget: { user: 4mb }, profiles: [fs], after: fs-churn, oneshot: true, essential: true,
-  give: [ { tag: view, fs: "", ro: false } ] }
+  give: [{ tag: view, fs: "", ro: false }] }

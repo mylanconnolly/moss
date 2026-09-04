@@ -117,7 +117,10 @@ Host-side unit tests (`zig build test`) cover the shared ABI (handles,
 typed message codecs, rings, the boot archive), the devicetree parser,
 the `lib/` modules (lz4, xts, fabric certificates, user credentials,
 layered settings, the msh language),
-and the full mossfs suite.
+and the full mossfs suite. `zig build fmt-test lint-test ls-test`
+(host tree-sitter runtime needed: `brew install tree-sitter`) runs the
+mshl formatter's, lint's and language server's tests and checks every
+`.msh` under `boot/` is formatted and lints clean.
 
 ## Layout
 
@@ -127,7 +130,7 @@ and the full mossfs suite.
 | `kernel/` | The microkernel (aarch64-freestanding, boots as an arm64 Image; embeds only the boot archive) |
 | `shared/` | The ABI/IDL: types that compile identically for kernel, userspace, and host tests |
 | `user/` | Userspace: root task, init, services, drivers, demo programs |
-| `tools/` | Host-side tooling (`runner.zig` = the `check` harness, `mkmarc.zig` packs the boot archive, `bench.zig`) |
+| `tools/` | Host-side tooling (`runner.zig` = the `check` harness, `mkmarc.zig` packs the boot archive, `bench.zig`, `tree-sitter-mshl/` the language's grammar; `mshfmt.zig`, `mshlint.zig`, `mshls.zig` its formatter, lint and language server on `mshtree.zig`) |
 
 ## License
 

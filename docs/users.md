@@ -447,13 +447,17 @@ when every console has had a session and none is open.
   survives a logout, and no sharing to a user who is not logged in when
   the offer is withdrawn is remembered. At most 8 offers at once, 8
   mounts per shell.
-- A home reached through a lease costs a fabric exchange per mossfs
-  block miss (a few milliseconds each on the drill's segment): fine for
-  a shell, slow in bulk. The lease makes the session's home service the
-  volume's only server, so a local block cache needs no coherence with
-  anyone — that cache, and wider transport frames, are the next steps.
-  Moving a home to another node is an administrative action still to
-  be built. A user whose record was applied on several nodes (no
+- A home reached through a lease reads its volume in 32 KB windows:
+  the home service's backing layer fetches a whole aligned window on a
+  miss and serves the following blocks from it, and the window crosses
+  the fabric in one exchange. The drill measures it on every run: a 64
+  KB file written in about 2 ms (mossfs defers the blocks to its
+  commit), read back warm in about 2 ms, and read *cold* — a fresh node
+  2, every block from node 1 — in about 4 ms, where the block-at-a-time
+  transport took 55. The lease makes the session's home service the
+  volume's only writer, so the window and mossfs's own 96-block cache
+  need no coherence with anyone. Moving a home to another node is an
+  administrative action still to be built. A user whose record was applied on several nodes (no
   `home:`) has a home on each, as before; a record fetched from a node
   names that node as the home's.
 - Records are fetched only at login, so a record changed on its home

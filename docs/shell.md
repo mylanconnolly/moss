@@ -184,8 +184,13 @@ flowchart TB
   P -- "rebinding drops the old box:\ncount 0 → freed when the statement ends" --> L
 ```
 
-Values are immutable, so memory is a matter of counting who holds
-what. Everything a line makes lives in its arena and is gone when the
+Calls allocate nothing lasting, and not much that is temporary: a
+call's frame (its parameters, captures and locals) comes from a pool
+the line keeps, returned when the call returns, so ten thousand `map`
+calls reuse one frame and a recursion fifty deep costs fifty — the
+first version made a frame per call and ran a 64 KB `join` out of its
+arena. Values are immutable, so memory is a matter of counting who
+holds what. Everything a line makes lives in its arena and is gone when the
 next line starts. What must outlive the line — a variable bound at the
 prompt, a function, a module's bindings — is a *box*: a small arena of
 its own with a reference count. `let` deep-copies the value into a
@@ -331,6 +336,79 @@ print as `error: <message>`; `exit` prints `bye` and ends the shell,
 which in the system boot ends the system (msh is the essential unit)
 and in a session ends the session.
 
+### Tooling for the language
+
+`tools/tree-sitter-mshl/` is a [tree-sitter](https://tree-sitter.github.io/)
+grammar for mshl: highlighting and structure for `.msh` files in any
+editor that speaks tree-sitter, one grammar for scripts and data files
+alike (data is the literal subset). It makes the same decisions the
+interpreter makes — a bare word at the head of a stage is a command,
+a variable with arguments is a call, `where` takes an expression, a
+glued `.` is field access — and its corpus tests are parses recorded
+from this page's examples and the drills' scripts; every `.msh` file in
+the repository parses without an error node.
+
+`mshfmt` is the formatter, built on that grammar's generated parser and
+the tree-sitter runtime (`zig build fmt` installs it to
+`zig-out/bin/mshfmt`; it needs the runtime on the host, `brew install
+tree-sitter`, or `-Dtree-sitter=PREFIX`). It keeps what the author
+decided — line breaks, blank lines (at most one), comments where they
+were, the insides of strings — and normalizes the rest: one space
+between tokens, none inside `()` and `[]`, spaces inside `{ }`, `key:
+value`, spaced operators and pipes, indentation two spaces per level,
+no trailing whitespace. In a record written one field per line, the
+values of neighbouring one-line fields line up (`image:     shell`
+under `essential: true`); a field spanning lines, a blank line or a
+comment ends the run, and fields sharing a line never align. A file
+that does not parse is left alone and reported.
+
+```
+mshfmt FILE...          # rewrite in place
+mshfmt --check FILE...  # exit 1 naming any file that would change
+mshfmt --stdin          # standard input to standard output (editors)
+```
+
+`zig build fmt-test` runs its tests and `--check` over every `.msh`
+under `boot/`: the tree is always formatted, and formatting is checked
+to be idempotent and to parse to the same tree as the original.
+
+`mshlint` (`zig build lint`; `mshlint FILE...` or `mshlint --stdin
+[NAME]`) says before a line runs what the interpreter would only say
+then, as `path:line:col: message` with exit status 1 if there was
+anything:
+
+- **syntax** — a file that does not parse, and where.
+- **unbound** — `$x` with no `let x`, parameter, `for x`, pattern or
+  implicit name (`$it`, `$in`, `$acc`, `$req`) in any enclosing scope;
+  and `$x` used before its `let` in the same scope. A function body is
+  a scope; a block under `if`, `for`, `while`, `try` or an arm binds in
+  the scope around it, as it does when it runs. Order does not matter
+  across scopes (`def f { $x }` may run after `let x`), so a name bound
+  anywhere in an enclosing scope counts.
+- **unused** — a `let` inside a function that nothing reads. Not at a
+  file's top level: those are a module's exports.
+- **match** — not exhaustive, by the interpreter's rule (a catch-all
+  arm, or `ok _` and `err _`, or `true` and `false`; a guarded arm
+  never counts), and an arm after a catch-all, which cannot match.
+- **record** — the same key twice in one literal.
+- **def** — a `def` that shadows a builtin command.
+- **unit** — under `conf/units/` and `conf/session/`, a top-level key
+  the unit loader does not read (it ignores unknown keys, so `imgae:`
+  is a unit that never starts).
+
+`zig build lint-test` runs its tests and the lint over every `.msh`
+under `boot/`, which must be clean.
+
+`mshls` (`zig build ls`) is the language server, over stdio: the lint's
+diagnostics as you type (errors are what would fail when the line runs,
+warnings what runs but probably not as meant), hover on a `$name` or a
+command's name (the `let` line, a `def`'s header, what an implicit name
+like `$it` is, "builtin"), go-to-definition to the binding, the file's
+`def`s and `let`s as document symbols, completion of the names in scope
+and the builtins, and formatting by `mshfmt`. Whole-document sync — a
+script is small and re-analysis is cheap. `zig build ls-test` drives it
+message by message. Editor setup is in `tools/README.md`.
+
 ### Running it
 
 - `zig build run-shell` boots the system topology with msh on your
@@ -385,7 +463,8 @@ and in a session ends the session.
   this (`remote NODE $f` ships `$f`'s body; captures do not cross). See
   [the fabric page](fabric.md#remote-stages-a-functions-body-on-another-node).
 - **`sleep MS`** waits, in the host's ticks (rounded up to ten
-  milliseconds).
+  milliseconds); **`now`** is milliseconds since boot, a clock for
+  measuring (the drills time things with it).
 - **JSON.** `to-json` writes the data subset (a table as an array of
   objects), `from-json` reads it back (an array of same-shaped objects
   becomes a table); numbers with a fraction or exponent are refused.
@@ -485,6 +564,11 @@ and in a session ends the session.
   return values, the run handshake and the introspection authority).
 - ROADMAP.md — "Developer shell and tooling", "msh v2", "Programs as
   files", "Manifests beside images, and a per-user store".
+- Tooling — `tools/tree-sitter-mshl/` (`grammar.js`, `queries/`,
+  `test/corpus/`; `tree-sitter generate && tree-sitter test`),
+  `tools/mshtree.zig` (the parser for the tools), `tools/mshfmt.zig`
+  (`zig build fmt`, `fmt-test`), `tools/mshlint.zig` (`zig build lint`,
+  `lint-test`), `tools/mshls.zig` (`zig build ls`, `ls-test`).
 - Source — `user/shell.zig` (the host: every command, `run`,
   `install`, startup, the REPL), `user/fscmds.zig` (the file commands
   msh and mshrun share), `user/mshrun.zig` (a script as a program),

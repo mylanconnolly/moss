@@ -1,0 +1,156 @@
+================================================================================
+let, if, for, while
+================================================================================
+let x = 3; $x * 2
+if $x == 3 { echo yes } else { echo no }
+for i in [1, 2, 3] { echo "i=$i" }
+while $n < 3 { let n = $n + 1 }
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_statement
+    (identifier)
+    (number))
+  (pipeline
+    (binary_expression
+      (variable
+        (identifier))
+      (number)))
+  (if_statement
+    (binary_expression
+      (variable
+        (identifier))
+      (number))
+    (block
+      (pipeline
+        (command
+          (identifier)
+          (bare_word
+            (identifier)))))
+    (block
+      (pipeline
+        (command
+          (identifier)
+          (bare_word
+            (identifier))))))
+  (for_statement
+    (identifier)
+    (list
+      (number)
+      (number)
+      (number))
+    (block
+      (pipeline
+        (command
+          (identifier)
+          (string
+            (string_text)
+            (interpolation
+              (identifier)))))))
+  (while_statement
+    (binary_expression
+      (variable
+        (identifier))
+      (number))
+    (block
+      (let_statement
+        (identifier)
+        (binary_expression
+          (variable
+            (identifier))
+          (number))))))
+
+================================================================================
+def and functions as values
+================================================================================
+def twice [x] { $x * 2 }; twice 21
+let inc = fn [x] { $x + 1 }; $inc 41
+[1, 2, 3] | map { $it * 2 } | reduce 0 { $acc + $it }
+$m.double 4
+--------------------------------------------------------------------------------
+
+(source_file
+  (def_statement
+    (identifier)
+    (parameters
+      (identifier))
+    (block
+      (pipeline
+        (binary_expression
+          (variable
+            (identifier))
+          (number)))))
+  (pipeline
+    (command
+      (identifier)
+      (number)))
+  (let_statement
+    (identifier)
+    (fn_expression
+      (parameters
+        (identifier))
+      (block
+        (pipeline
+          (binary_expression
+            (variable
+              (identifier))
+            (number))))))
+  (pipeline
+    (call
+      (variable
+        (identifier))
+      (number)))
+  (pipeline
+    (list
+      (number)
+      (number)
+      (number))
+    (command
+      (identifier)
+      (lambda_block
+        (block
+          (pipeline
+            (binary_expression
+              (variable
+                (identifier))
+              (number))))))
+    (command
+      (identifier)
+      (number)
+      (lambda_block
+        (block
+          (pipeline
+            (binary_expression
+              (variable
+                (identifier))
+              (variable
+                (identifier))))))))
+  (pipeline
+    (call
+      (field_access
+        (variable
+          (identifier))
+        (identifier))
+      (number))))
+
+================================================================================
+comments and separators
+================================================================================
+# a comment
+let a = 1 # trailing
+
+; ;
+echo done
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (let_statement
+    (identifier)
+    (number))
+  (comment)
+  (pipeline
+    (command
+      (identifier)
+      (bare_word
+        (identifier)))))

@@ -1,2 +1,2 @@
 # `run ls PATH`: a read-only view whose root is the argument.
-{ image: ls, grant: [log], give: [ { tag: view, fs: arg, ro: true } ] }
+{ image: ls, grant: [log], give: [{ tag: view, fs: arg, ro: true }] }

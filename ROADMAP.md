@@ -233,14 +233,26 @@ is a plan.
   `fw_bulk`/`fw_bulk_resp`/`fw_release`, wire v6, `remote NODE { … }`
   with `mshrun` as the stage); ✅ one home across the fabric (landed
   2026-09-04: the lease, the identity proof, the remote backing view,
-  the wiped-disk drill); still open: the home service's local block
-  cache and wider transport frames (the performance step), moving a
-  home (an administrative action), publish and lookup from the language
+  the wiped-disk drill); ✅ its speed (landed 2026-09-04: a 32 KB
+  read-ahead window in the home service, 32 KB per exchange end to
+  end, a cold 64 KB read from 55 ms to 4 ms, measured on every gate
+  run); still open: moving a home (an administrative action), a
+  write-back cache beyond mossfs's own commit batching if a workload
+  ever asks, publish and lookup from the language
   (a script serves no channel and a raw channel would be untyped — this
   waits for a typed channel surface), more than one buffer per session,
   notifications across nodes; (5) tooling, host-side in
-  tools/: a tree-sitter grammar first, then a formatter from a parser
-  that keeps positions, then lint and a language server. Rule: build the
+  tools/: ✅ a tree-sitter grammar (landed 2026-09-04:
+  `tools/tree-sitter-mshl`, highlights, a corpus recorded from the
+  language's examples, every `.msh` in the tree parsing clean), ✅ a
+  formatter on it (landed 2026-09-04: `mshfmt`, `zig build fmt` /
+  `fmt-test`, the tree kept formatted), ✅ lint (landed 2026-09-04:
+  `mshlint`, unbound/unused names, exhaustiveness, duplicate keys,
+  unit keys; `lint-test`), ✅ a language server (landed 2026-09-04:
+  `mshls` over stdio — the lint's diagnostics, hover, definition,
+  symbols, completion, formatting; `ls-test`). Left for when an editor
+  asks: rename, references, incremental sync, semantic tokens beyond
+  the tree-sitter highlights. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
 - **virtio-gpu and input devices** — the graphical console.
@@ -389,6 +401,78 @@ is a plan.
   backlog head. Both take `close_wait` as connected now. The race hit
   once in 33 runs here, so the fix closes the hole the capture shows
   without a deterministic reproduction.
+- ✅ **mshl v3, stage 5d: the language server** (done, 2026-09-04):
+  `mshls`, `tools/mshls.zig` — LSP over stdio, whole-document sync,
+  built on the lint's `Analysis` (scopes, bindings, every reference
+  resolved) and the formatter: diagnostics on open and change (errors
+  are what would fail at run time, warnings what runs but probably not
+  as meant), hover (the `let` line, a `def`'s header, what `$it`/`$in`/
+  `$acc`/`$req` are, "builtin"), definition, document symbols,
+  completion (names in scope, then the builtins), formatting as one
+  edit. `Server.handle` takes one message and appends replies, so
+  `zig build ls-test` drives it without a transport; the binary was
+  also driven over a pipe with byte-exact frames. Bugs found: a null
+  `result` came out as the string `"null"` (naming a union's void field
+  through the type gives its tag, which the stringifier prints as a
+  name — coerce to the union), and an optional result was omitted
+  where JSON-RPC requires the key (unwrap before stringifying); the
+  header reader left the newline in the stream (`takeDelimiterExclusive`
+  does not consume it) so the second header read saw an empty line and
+  the body started at the wrong byte. Editor setup (Helix, Neovim) in
+  tools/README.md.
+- ✅ **mshl v3, stage 5c: lint** (done, 2026-09-04): `mshlint`,
+  `tools/mshlint.zig`, on the parser now shared as `tools/mshtree.zig`
+  — the interpreter's run-time complaints, before: a `$x` bound nowhere
+  in scope or used before its `let` (scopes as the interpreter has
+  them: a function body is one, blocks under `if`/`for`/`while`/`try`
+  and arms bind in the frame around them, names resolve across scopes
+  in any order), a `let` in a function nothing reads, a `match` that is
+  not exhaustive by the parser's own rule and an arm after a catch-all,
+  a key given twice, a `def` shadowing a builtin, and in a unit file a
+  key the loader does not read. `zig build lint-test` runs its tests
+  and the lint over every `.msh` under `boot/`, which lints clean.
+  Found on the first run over the tree: two unit keys the lint's list
+  did not have (`after`, `install`) — the list mirrors `parseUnit` and
+  HACKING says so — and nothing else, which is what a tree that has
+  been through the drills should show.
+- ✅ **mshl v3, stage 5b: the formatter** (done, 2026-09-04): `mshfmt`,
+  `tools/mshfmt.zig` — the grammar's generated parser and the
+  tree-sitter runtime linked into a host program; the tree's leaves in
+  source order, the author's line breaks and comments kept, spacing
+  and indentation decided by the kinds of neighbouring tokens, and in
+  a record written one field per line the values of neighbouring
+  one-line fields aligned. `zig build fmt` installs it, `zig build
+  fmt-test` runs its tests (idempotence, and the formatted text parsing
+  to the same tree) and `--check` over every `.msh` under `boot/`,
+  found by walking the tree. The 25 files the rules changed were
+  reformatted and the diff read: whitespace only. Lessons: the first
+  alignment rule let a field that shared its line with others join a
+  run (`run: true,` followed by `give:` on the next line), so a field
+  aligns only when it has a line to itself; and the tree's hand
+  alignment was itself inconsistent in places, which is the case for a
+  formatter.
+- ✅ **mshl v3, stage 5a: a tree-sitter grammar** (done, 2026-09-04):
+  `tools/tree-sitter-mshl/` — the language's shape as tree-sitter sees
+  it (commands vs. calls vs. expressions by the head of the stage,
+  `where` with an expression, a glued `.` as field access even though
+  `.` may start a word, keys with their colon, patterns), a highlight
+  query, and twelve corpus entries recorded from the docs and drills;
+  every `.msh` file in the repository parses without an error node.
+  Lessons: tree-sitter forbids a syntactic rule that matches the empty
+  string, so the statement list is non-empty and blocks hold an optional
+  one; and a generator error hidden behind a filter left a stale parser
+  that accepted adjacent statements — read the generator's output whole.
+- ✅ **Users, stage 4b: the remote home's speed** (done, 2026-09-04): a
+  32 KB read-ahead window in the home service's backing layer (sound
+  under the lease), 32 KB per exchange through netsvc and the fabric
+  (send ring 32 KB, receive 64 KB, 16 sockets, frames to match), `now`
+  and `sleep` in the language, call frames pooled per line; the
+  fabric-login drill prints write, warm-read and cold-read times: 2, 2
+  and 4 ms for 64 KB, from 55 cold. Found: a struct-literal reset of a
+  96 KB socket record overflowed the stack (buffers moved beside the
+  tables); an empty 64 KB receive buffer advertised 65536 in a 16-bit
+  field and the checked cast panicked netsvc silently (capped); the
+  language made a frame per call and ran out of arena at ten thousand.
 - ✅ **Users, stage 4: one home, wherever you log in** (done,
   2026-09-04): a fabric login leases the user's home from the node that
   holds it — a challenge, a signature under the identity key through

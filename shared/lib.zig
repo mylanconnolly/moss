@@ -800,9 +800,12 @@ pub fn v4Words(ip: u32) [2]u64 {
 }
 
 /// The most a tcp_send queues at once (it is all or would_block) and
-/// the most a tcp_recv returns; both within the view's one-page buffer.
-pub const net_max_send: u64 = 4096;
-pub const net_max_recv: u64 = 4096;
+/// the most a tcp_recv returns: a whole bulk-transport buffer, so a
+/// remote home's read-ahead window crosses in one exchange. A view's
+/// buffer is net_buf_pages (attach that many).
+pub const net_buf_pages: u64 = 8;
+pub const net_max_send: u64 = net_buf_pages * 4096;
+pub const net_max_recv: u64 = net_buf_pages * 4096;
 
 pub const NetResp = union(enum(u64)) {
     ok: void,
@@ -1028,8 +1031,10 @@ pub const fw_bulk_resp: u8 = 18; // [seq u32][off u32][len u16][bytes]
 pub const fw_release: u8 = 19; // [export u32]
 /// A session buffer is at most this many pages (32 KB: a view's buffer).
 pub const fab_bulk_pages: u64 = 8;
-/// One bulk frame carries at most this many bytes.
-pub const fab_bulk_chunk: usize = 4000;
+/// One bulk frame carries at most this many bytes: a whole 32 KB
+/// buffer's worth, so a diff that big is one frame (the seal's tag and
+/// the headers fit beside it in one tcp_send).
+pub const fab_bulk_chunk: usize = 32000;
 /// Services a node may publish to the pool (slots in fabsvc's table).
 pub const fab_max_services: usize = 8;
 

@@ -467,6 +467,18 @@ const ConsoleTap = struct {
         if (end <= t.start) return false;
         return std.mem.indexOf(u8, t.buf[t.start..end], pat) != null;
     }
+
+    /// The console line that contains `pat` (from the pattern to the end
+    /// of its line), for reporting a measurement.
+    fn line(t: *ConsoleTap, pat: []const u8) ?[]const u8 {
+        const end = t.len.load(.acquire);
+        if (end <= t.start) return null;
+        const hay = t.buf[t.start..end];
+        const at = std.mem.lastIndexOf(u8, hay, pat) orelse return null;
+        var stop = at;
+        while (stop < hay.len and hay[stop] != '\r' and hay[stop] != '\n') stop += 1;
+        return hay[at..stop];
+    }
 };
 
 /// A scripted step: `send` goes to the console (with "\r" unless raw),
@@ -754,25 +766,32 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
 /// console, no records) on one segment; alice logs in on node 2 and her
 /// record comes from node 1 over the wire. Node 2's log carries the
 /// verdict; node 1 is stopped when it is in.
-const FloginStep = struct { send: []const u8, expect: []const u8 };
+/// After `expect`, `prompt` must appear before the next line is typed
+/// (a line typed while the shell is busy is lost).
+const FloginStep = struct { send: []const u8, expect: []const u8, prompt: []const u8 = "msh> " };
 /// Boot 1: alice, whose record and home live on node 1, logs in on node
 /// 2 — the record is fetched, the home is leased and mounted through
 /// the fabric — and writes a file. Boot 2: node 2's disk is wiped first,
 /// and the file is still there: it lives on node 1.
 const flogin_script = [_]FloginStep{
-    .{ .send = "alice", .expect = "passphrase: " },
+    .{ .send = "alice", .expect = "passphrase: ", .prompt = "" },
     .{ .send = "alice-pass", .expect = "moss shell" },
     .{ .send = "df", .expect = "encrypted: true" },
     .{ .send = "ls | len", .expect = "5" },
     .{ .send = "write hello.txt \"born on node 2\"", .expect = "" },
     .{ .send = "cat hello.txt", .expect = "born on node 2" },
-    .{ .send = "exit", .expect = "bye" },
+    // The remote home's speed, measured: 64 KB written, then read back.
+    .{ .send = "let big = (range 0 6400 | map { \"0123456789\" } | join \"\")", .expect = "" },
+    .{ .send = "let t = (now); write big.txt $big; let d = ((now) - $t); echo \"remote home: 64 KB written in $d ms\"", .expect = "remote home: 64 KB written in" },
+    .{ .send = "let t = (now); let n = (cat big.txt | len); let d = ((now) - $t); echo \"remote home: 64 KB read in $d ms ($n bytes)\"", .expect = "remote home: 64 KB read in" },
+    .{ .send = "exit", .expect = "bye", .prompt = "" },
 };
 const flogin_script2 = [_]FloginStep{
-    .{ .send = "alice", .expect = "passphrase: " },
+    .{ .send = "alice", .expect = "passphrase: ", .prompt = "" },
     .{ .send = "alice-pass", .expect = "moss shell" },
     .{ .send = "cat hello.txt", .expect = "born on node 2" },
-    .{ .send = "exit", .expect = "bye" },
+    .{ .send = "let t = (now); let n = (cat big.txt | len); let d = ((now) - $t); echo \"remote home: 64 KB read cold in $d ms ($n bytes)\"", .expect = "remote home: 64 KB read cold in" },
+    .{ .send = "exit", .expect = "bye", .prompt = "" },
 };
 
 fn runFlogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
@@ -867,11 +886,23 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         tap.clear();
         sockSend(tap.stream, step.send);
         sockSend(tap.stream, "\r");
-        const got = step.expect.len == 0 or waitFor(tap, step.expect, 900, polls);
+        const got = (step.expect.len == 0 or waitFor(tap, step.expect, 900, polls)) and
+            (step.prompt.len == 0 or waitFor(tap, step.prompt, 900, polls));
         if (!got) {
             std.debug.print("[FAIL] {s}: node 2 console step '{s}' (boot {d}) missing '{s}'\n", .{ spec.name, step.send, boot, step.expect });
             reportFailure(spec.name, "fabric login script step failed", log2);
             return false;
+        }
+        // Measurements are reported, so every gate run shows the number.
+        if (std.mem.startsWith(u8, step.expect, "remote home:")) {
+            const line = tap.line(step.expect) orelse "";
+            if (std.mem.indexOfScalar(u8, line, '$') != null or std.mem.indexOf(u8, line, " ms") == null) {
+                const end = tap.len.load(.acquire);
+                std.debug.print("[FAIL] {s}: the measurement was not produced: {s}\n[console] {s}\n", .{ spec.name, line, tap.buf[tap.start..end] });
+                reportFailure(spec.name, "a remote-home measurement failed", log2);
+                return false;
+            }
+            std.debug.print("       {s}\n", .{line});
         }
     }
     // The mount is the proof of the transport; the lease's release the

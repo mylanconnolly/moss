@@ -17,6 +17,7 @@ const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
 const httpcmds = @import("httpcmds.zig");
 const fabcmds = @import("fabcmds.zig");
+const syscmds = @import("syscmds.zig");
 const tty = @import("tty.zig");
 const boot = @import("boot.zig");
 const result = @import("result.zig");
@@ -80,11 +81,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     if (fab) |*fb| {
         if (try fabcmds.call(fb, it, name, args, input)) |v| return v;
     }
-    if (std.mem.eql(u8, name, "sleep")) {
-        if (args.len != 1 or args[0] != .int or args[0].int < 0) return it.fail("sleep: milliseconds expected", .{});
-        usys.sleep(@intCast(@divTrunc(args[0].int + 9, 10)));
-        return .nothing;
-    }
+    if (try syscmds.call(it, name, args)) |v| return v;
     return null;
 }
 

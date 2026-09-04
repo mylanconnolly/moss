@@ -606,16 +606,57 @@ fn setupFile(view: u64) shared.FsResp {
     return attachVolume(dev, home_capacity_secs);
 }
 
+/// The read-ahead window: a volume behind a view — a remote home's,
+/// above all, where every read is an exchange across the fabric — is
+/// read a whole window (fs_max_io, 32 KB) at a time, and the blocks
+/// that follow a miss are served from it. This service is the volume's
+/// only writer (a remote home is leased to exactly one), so the window
+/// stays true as long as writes go through it.
+var ra_buf: [shared.fs_max_io]u8 = undefined;
+var ra_off: u64 = 0;
+var ra_len: usize = 0; // 0: no window
+
+fn raInvalidate() void {
+    ra_len = 0;
+}
+
 /// Past the file's end reads as zeros: a fresh volume file is blank.
 fn fileRead(_: *anyopaque, sector: u64, count: u64, dst: []u8) mossfs.DevError!void {
-    const n = fsc.fsReadAt(file_view, file_fd, sector * mossfs.sector_size, count * mossfs.sector_size) orelse return error.IoError;
-    const k = @min(n, dst.len);
-    @memcpy(dst[0..k], file_buf[0..k]);
-    @memset(dst[k..], 0);
+    const off = sector * mossfs.sector_size;
+    const len = count * mossfs.sector_size;
+    if (len > dst.len) return error.IoError;
+    if (ra_len != 0 and off >= ra_off and off + len <= ra_off + ra_len) {
+        @memcpy(dst[0..len], ra_buf[off - ra_off .. off - ra_off + len]);
+        return;
+    }
+    if (len > shared.fs_max_io) {
+        const n = fsc.fsReadAt(file_view, file_fd, off, len) orelse return error.IoError;
+        const k = @min(n, len);
+        @memcpy(dst[0..k], file_buf[0..k]);
+        @memset(dst[k..len], 0);
+        return;
+    }
+    // A window aligned to its own size, holding the request.
+    const win = off - off % shared.fs_max_io;
+    const n = fsc.fsReadAt(file_view, file_fd, win, shared.fs_max_io) orelse return error.IoError;
+    @memcpy(ra_buf[0..n], file_buf[0..n]);
+    @memset(ra_buf[n..], 0); // past the end: zeros
+    ra_off = win;
+    ra_len = shared.fs_max_io;
+    @memcpy(dst[0..len], ra_buf[off - win .. off - win + len]);
 }
 
 fn fileWrite(_: *anyopaque, sector: u64, _: u64, src: []const u8) mossfs.DevError!void {
-    if (!fsc.fsWriteAt(file_view, file_buf, file_fd, sector * mossfs.sector_size, src)) return error.IoError;
+    const off = sector * mossfs.sector_size;
+    if (!fsc.fsWriteAt(file_view, file_buf, file_fd, off, src)) return error.IoError;
+    // Keep the window true: patch what it covers, drop it otherwise.
+    if (ra_len != 0) {
+        if (off >= ra_off and off + src.len <= ra_off + ra_len) {
+            @memcpy(ra_buf[off - ra_off .. off - ra_off + src.len], src);
+        } else if (off < ra_off + ra_len and off + src.len > ra_off) {
+            raInvalidate();
+        }
+    }
 }
 
 fn fileFlush(_: *anyopaque) mossfs.DevError!void {

@@ -1,4 +1,4 @@
 # A script as a unit: mshrun runs scripts/hello.msh from the archive
 # (a read-only view of boot/) once at boot, logging what it renders.
 { image: mshrun, script: scripts/hello.msh, grant: [log], oneshot: true, profiles: [system],
-  give: [ { tag: view, fs: boot, ro: true } ] }
+  give: [{ tag: view, fs: boot, ro: true }] }

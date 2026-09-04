@@ -13,7 +13,7 @@
 {
   users: [
     { name: alice, passphrase: "alice-pass", budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
-    { name: bob,   passphrase: "bob-pass",   budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
+    { name: bob, passphrase: "bob-pass", budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
   ]
   settings: {
     editor: { theme: dark, tab_width: 4, telemetry: false }

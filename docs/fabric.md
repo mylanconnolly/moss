@@ -170,8 +170,9 @@ changed in the twin (`fw_bulk_resp` frames, before the `call_resp`).
 Each side keeps a **shadow** of what the other holds — pages made when
 the buffer is attached and freed with it — so a call costs the bytes
 that actually moved, not the buffer. Runs of changed bytes closer than
-16 apart are shipped as one; a frame carries up to 4000 bytes; a
-buffer is at most 8 pages (32 KB), a view's size.
+16 apart are shipped as one; a frame carries up to 32000 bytes, so a
+whole buffer's worth crosses as one frame in one `tcp_send`; a buffer
+is at most 8 pages (32 KB), a view's size.
 
 ```mermaid
 sequenceDiagram
@@ -330,9 +331,9 @@ refused.
   u16][bytes]`), bulk_resp (`[seq u32][off u32][len u16][bytes]`),
   release (`[export u32]`). After the handshake only `sealed` frames are
   accepted from a peer; plaintext outside the handshake, or a handshake
-  replay after authentication, drops the peer. A frame is at most 4096
-  bytes sealed (the network view's one-page send buffer); the per-peer
-  receive buffer is 8 KB.
+  replay after authentication, drops the peer. A frame is at most 32 KB
+  sealed (the network view's buffer, one `tcp_send`); the per-peer
+  receive buffer is 64 KB, beside the peer table rather than in it.
 - **Every reply names its caller.** The serve channel keeps forwarded
   calls parked under reply tokens; a token-less reply (`reply` with
   token 0) answers the *oldest* pending caller, whoever it is. Every

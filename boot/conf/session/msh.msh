@@ -11,9 +11,9 @@
   essential: true
   give: [
     { tag: console, session: true }
-    { tag: view,    fs: "", ro: false }
-    { tag: store,   session: true }
-    { tag: sess,    session: true }
-    { tag: init,    self: true }
+    { tag: view, fs: "", ro: false }
+    { tag: store, session: true }
+    { tag: sess, session: true }
+    { tag: init, self: true }
   ]
 }
