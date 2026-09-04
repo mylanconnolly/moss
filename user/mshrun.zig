@@ -175,6 +175,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
 fn serveRemote(chan_h: u64) noreturn {
     var buf: ?[*]u8 = null;
     var buf_len: usize = 0;
+    _ = usys.log(glog, "mshrun: remote stage up");
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
     var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall });
     while (true) {
@@ -183,18 +184,22 @@ fn serveRemote(chan_h: u64) noreturn {
         if (r.err != .ok) usys.exit(2);
         const req = shared.decodeMsg(shared.RunReq, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
+            _ = usys.log(glog, "mshrun: remote stage: a message that is not a RunReq; refused");
             _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
             continue;
         };
         switch (req) {
             .attach_buf => {
                 if (r.cap == 0) {
+                    _ = usys.log(glog, "mshrun: remote stage: attach_buf without a buffer; refused");
                     _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
                     continue;
                 }
                 const m = usys.shmMap(r.cap);
                 _ = usys.capDrop(r.cap);
                 if (m.err != .ok) {
+                    var l: [64]u8 = undefined;
+                    _ = usys.log(glog, std.fmt.bufPrint(&l, "mshrun: remote stage: cannot map the buffer ({t}); refused", .{m.err}) catch "mshrun: cannot map");
                     _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
                     continue;
                 }

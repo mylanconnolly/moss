@@ -213,7 +213,7 @@ fn rreply(chan_h: u64, resp: shared.FabResp) void {
 // ---------------------------------------------------------------- fabsvc
 
 const max_peers = 6;
-const max_sessions = 8;
+const max_sessions = 16; // sessions and exports: a node hosting both remote stages and remote homes needs headroom
 const max_members = 8;
 /// Per-peer receive buffer: two bulk frames' worth.
 const rxbuf_cap = 8192;
@@ -403,6 +403,7 @@ var mesh_logged = false;
 
 // One outstanding wire exchange at a time (v0 serializes).
 var got_spawn_ack = false;
+var spawn_req_id: u32 = 0; // the request an ack must answer to count
 var spawn_ack_session: u32 = 0;
 var spawn_ack_code: u8 = 0; // 1 = spawned, 2 = unauthorized, 0 = failed
 /// Services this node offers the pool: service id -> export id.
@@ -476,12 +477,21 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             if (r.badge != 0 and r.badge - 1 < max_sessions and sessions[r.badge - 1].used) {
                 const sess = &sessions[r.badge - 1];
                 releaseSessionBuf(sess);
-                // Tell the peer: the export behind this channel may go.
-                if (greetedPeer(sess.node)) |p| {
-                    var f: [8]u8 = undefined;
-                    frameHdr(f[0..4], 8, shared.fw_release);
-                    puleu32(f[4..8], sess.remote_id);
-                    _ = sendFrame(p, &f);
+                // Tell the peer the export behind this channel may go —
+                // unless another live session here is bound to the same
+                // export (a death heard late, after the export was bound
+                // again), in which case its release is that session's.
+                var shared_export = false;
+                for (&sessions, 0..) |*o, oi| {
+                    if (oi != r.badge - 1 and o.used and o.node == sess.node and o.remote_id == sess.remote_id) shared_export = true;
+                }
+                if (!shared_export) {
+                    if (greetedPeer(sess.node)) |p| {
+                        var f: [8]u8 = undefined;
+                        frameHdr(f[0..4], 8, shared.fw_release);
+                        puleu32(f[4..8], sess.remote_id);
+                        _ = sendFrame(p, &f);
+                    }
                 }
                 sess.* = .{};
             }
@@ -492,6 +502,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             forwardCall(r.badge, r.data, r.cap, r.token);
             continue;
         }
+        cur_token = r.token;
         const req = shared.decodeMsg(shared.FabReq, r.data) orelse {
             freply(ferr(.refused));
             continue;
@@ -595,8 +606,18 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     }
 }
 
+/// The token of the control request being served: with forwarded calls
+/// parked on this channel, a token-less reply would answer the OLDEST
+/// pending caller — a remote channel's parked client — with a control
+/// reply. Every reply names its caller.
+var cur_token: u64 = 0;
+
 fn freply(resp: shared.FabResp) void {
-    _ = usys.replyTyped(shared.FabResp, serve_a, resp, 0);
+    freplyCap(resp, 0);
+}
+
+fn freplyCap(resp: shared.FabResp, cap: u64) void {
+    _ = usys.replyRawTo(serve_a, shared.encodeMsg(shared.FabResp, resp), cap, cur_token);
 }
 
 fn ferr(code: shared.FabErr) shared.FabResp {
@@ -1384,6 +1405,10 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
         },
         shared.fw_spawn_ack => {
             if (body.len < 9) return;
+            // Only the ack to the request in flight counts: a late one
+            // (from a spawn that timed out) names an export that may be
+            // someone else's by now.
+            if (leu32(body[0..4]) != spawn_req_id) return;
             spawn_ack_session = leu32(body[4..8]);
             spawn_ack_code = body[8];
             got_spawn_ack = true;
@@ -1670,11 +1695,13 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
         return;
     };
     got_spawn_ack = false;
+    spawn_req_id +%= 1;
+    if (spawn_req_id == 0) spawn_req_id = 1;
     var req: [18]u8 = undefined;
     frameHdr(req[0..4], 18, shared.fw_spawn_req);
     puleu16(req[4..6], @intCast(image));
     puleu64(req[6..14], arg);
-    puleu32(req[14..18], 1);
+    puleu32(req[14..18], spawn_req_id);
     if (!sendFrame(p, &req)) {
         freply(ferr(.disconnected));
         return;
@@ -1707,7 +1734,7 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
         freply(ferr(.no_space));
         return;
     }
-    _ = usys.replyTyped(shared.FabResp, serve_a, .{ .spawned = .{ .node = node } }, minted);
+    freplyCap(.{ .spawned = .{ .node = node } }, minted);
     _ = usys.capDrop(minted);
 }
 
@@ -1726,7 +1753,7 @@ fn doLookup(node: u64, service: u64) void {
             freply(ferr(.no_peer));
             return;
         }
-        _ = usys.replyTyped(shared.FabResp, serve_a, .{ .found = .{ .node = node } }, exports[pb.export_id].chan_b);
+        freplyCap(.{ .found = .{ .node = node } }, exports[pb.export_id].chan_b);
         return;
     }
     const p = greetedPeer(node) orelse {
@@ -1764,7 +1791,7 @@ fn doLookup(node: u64, service: u64) void {
         freply(ferr(.no_space));
         return;
     }
-    _ = usys.replyTyped(shared.FabResp, serve_a, .{ .found = .{ .node = node } }, minted);
+    freplyCap(.{ .found = .{ .node = node } }, minted);
     _ = usys.capDrop(minted);
 }
 
@@ -1947,6 +1974,8 @@ fn forwardCall(badge: u64, words: [4]u64, cap: u64, token: u64) void {
             buf_pages = @intCast(m.data[1]);
             _ = usys.capDrop(cap); // the mapping keeps its own ref
         } else {
+            // Not shared memory: an ordinary channel cap crossing (a
+            // service handed to a remote callee), exported as before.
             const x = exportNew(cap) orelse return failReply(token, .no_space);
             cap_export = x + 1;
         }

@@ -333,6 +333,12 @@ refused.
   replay after authentication, drops the peer. A frame is at most 4096
   bytes sealed (the network view's one-page send buffer); the per-peer
   receive buffer is 8 KB.
+- **Every reply names its caller.** The serve channel keeps forwarded
+  calls parked under reply tokens; a token-less reply (`reply` with
+  token 0) answers the *oldest* pending caller, whoever it is. Every
+  control reply the fabric sends therefore carries the token of the
+  request it answers — the lesson of a remote stage that received the
+  session manager's `lookup` answer as its own.
 - **Peer loss is named.** Every `peer lost` line says why: silent,
   socket error, send failed, send retries exhausted, ping failed, call
   timed out, frame buffer overrun, malformed frame, wire version
@@ -355,7 +361,7 @@ refused.
   AEGIS-128L with a counter nonce per direction; a counter burned on a
   ping that could not be sent is rolled back so the streams never
   desync. The ephemeral secret is wiped once the keys exist.
-- **Tables.** 6 peers (connections), 8 members, 8 sessions, 8 exports,
+- **Tables.** 6 peers (connections), 8 members, 16 sessions, 16 exports,
   8 exchanges in flight (the kernel's pending-reply slots per channel),
   4 workers with 16 KB stacks, 8 held revocations. A session or export
   with a buffer holds 8 pages of it and 8 of shadow, as shared memory,
@@ -413,9 +419,9 @@ refused.
   separate concern not yet built.
 - Shared-memory caps do not cross nodes (by design); their contents do,
   through the bulk transport, for buffers of up to 8 pages attached to
-  a badged call. Notifications do not cross yet. A fabric login still
-  copies the user's record rather than mounting a remote home: the
-  transport is there, the session manager does not use it yet.
+  a badged call. Notifications do not cross yet. A remote home (see
+  [Users and sessions](users.md#logging-in-anywhere-fabric-logins-and-one-home))
+  rides on it: its mossfs blocks cross one exchange at a time.
 - A session has one buffer; a protocol that attaches more than one
   (the block service's windows) is not proxied. Every forwarded call
   ships the bytes that changed — a protocol that rewrites its whole

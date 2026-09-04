@@ -44,6 +44,7 @@ const mosslib = @import("mosslib");
 const result = @import("result.zig");
 const mshl = mosslib.mshl;
 const usercred = mosslib.usercred;
+const fabcert = mosslib.fabcert;
 const settings = mosslib.settings;
 const Value = mshl.Value;
 
@@ -130,9 +131,27 @@ const Session = struct {
     name_len: usize = 0,
     /// The user's identity, unlocked for the session's lifetime.
     kp: usercred.Ed25519.KeyPair = undefined,
+    /// A remote home: the lease cap on the holder's manager (dropped at
+    /// logout, which ends the lease there) and the node it lives on.
+    lease: u64 = 0,
+    home_node: u64 = 0,
 };
 
-const Budget = struct { kobj_kb: u64 = 1 << 10, user_kb: u64 = 4 << 10, cpu_permille: u64 = 0 };
+/// A record's budgets, and the node its home lives on (0: here).
+const Budget = struct { kobj_kb: u64 = 1 << 10, user_kb: u64 = 4 << 10, cpu_permille: u64 = 0, home_node: u64 = 0 };
+
+/// Homes leased to sessions on other nodes: one lease or one local
+/// session per home at a time. A lease is born at the challenge (so
+/// its badge can carry the proof) and held once the proof verifies.
+const max_leases = 4;
+const Lease = struct {
+    used: bool = false,
+    held: bool = false,
+    name: [max_name]u8 = @splat(0),
+    name_len: usize = 0,
+    nonce: [24]u8 = @splat(0),
+};
+var leases: [max_leases]Lease = @splat(.{});
 
 var sessions: [max_sessions]Session = @splat(.{});
 var svc_chan: u64 = 0;
@@ -148,10 +167,32 @@ var store_buf: [*]u8 = undefined;
 /// admin holding the unbadged channel) and one per session (badge =
 /// its slot + 1, minted at spawn).
 const ClientBuf = struct { va: u64 = 0, pages: u64 = 0 };
-var client_bufs: [max_sessions + 2]ClientBuf = @splat(.{});
+var client_bufs: [max_sessions + 2 + max_leases]ClientBuf = @splat(.{});
 /// The badge our published channel carries: a caller through the fabric,
-/// allowed exactly one request — `record`.
+/// allowed to ask for a record and for a home lease.
 const remote_badge: u64 = max_sessions + 1;
+/// Lease caps: badge = lease_badge0 + slot.
+const lease_badge0: u64 = max_sessions + 2;
+
+fn leaseOf(badge: u64) ?*Lease {
+    if (badge < lease_badge0 or badge - lease_badge0 >= max_leases) return null;
+    const l = &leases[badge - lease_badge0];
+    return if (l.used) l else null;
+}
+
+fn leaseHeld(name: []const u8) bool {
+    for (&leases) |*l| {
+        if (l.used and l.held and std.mem.eql(u8, l.name[0..l.name_len], name)) return true;
+    }
+    return false;
+}
+
+fn sessionOpen(name: []const u8) bool {
+    for (&sessions) |*x| {
+        if (x.used and std.mem.eql(u8, x.name[0..x.name_len], name)) return true;
+    }
+    return false;
+}
 /// The fabric, when this manager has one: it publishes itself under
 /// ServiceId.usersvc, and a login for a user without a local record asks
 /// the other members for theirs.
@@ -224,9 +265,14 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
         if (r.err == .peer_dead) usys.exit(0);
         if (r.err == .client_dead) {
             // A session's badged channel died with it: its buffer goes.
-            if (r.badge <= max_sessions and client_bufs[r.badge].va != 0) {
+            if (r.badge < client_bufs.len and client_bufs[r.badge].va != 0) {
                 _ = usys.shmUnmap(client_bufs[r.badge].va);
                 client_bufs[r.badge] = .{};
+            }
+            // A lease cap died with the remote session: the home is free.
+            if (leaseOf(r.badge)) |l| {
+                if (l.held) logName("usersvc: lease released on the home of ", l.name[0..l.name_len]);
+                l.* = .{};
             }
             continue;
         }
@@ -245,8 +291,9 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
             .login, .wait, .logout => true,
             else => false,
         };
-        const remote_ok = req == .record;
-        const allowed = if (badge == remote_badge) remote_ok else if (badge == 0) (admin_only or req == .attach_buf or req == .record) else (!admin_only and req != .record);
+        const remote_ok = req == .record or req == .home_challenge;
+        const lease_ok = req == .attach_buf or req == .home_lease;
+        const allowed = if (badge == remote_badge) remote_ok else if (leaseOf(badge) != null) lease_ok else if (badge == 0) (admin_only or req == .attach_buf or req == .record) else (!admin_only and req != .record and req != .home_challenge and req != .home_lease);
         if (!allowed) {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
             reply(.{ .sess_err = .{ .code = 5 } });
@@ -254,8 +301,10 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
         }
         switch (req) {
             .record => |q| reply(doRecord(q.name_a, q.name_b, q.chunk)),
+            .home_challenge => |q| doHomeChallenge(q.name_a, q.name_b),
+            .home_lease => |q| doHomeLease(badge, q.sig_off),
             .attach_buf => {
-                if (r.cap != 0 and badge <= max_sessions) {
+                if (r.cap != 0 and badge < client_bufs.len) {
                     const m = usys.shmMap(r.cap);
                     if (m.err == .ok) {
                         if (client_bufs[badge].va != 0) _ = usys.shmUnmap(client_bufs[badge].va);
@@ -369,6 +418,9 @@ fn releaseHome(s: *Session) void {
     }
     if (s.fs_buf_va != 0) _ = usys.shmUnmap(s.fs_buf_va);
     if (s.fs_buf_h != 0) _ = usys.capDrop(s.fs_buf_h);
+    // A remote home: dropping the lease cap ends the lease there.
+    if (s.lease != 0) _ = usys.capDrop(s.lease);
+    s.lease = 0;
     s.fs_chan = 0;
     s.fs_ctl = 0;
     s.fs_buf_va = 0;
@@ -534,9 +586,15 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
     const rec = readRecord(name, &budget) orelse (if (fab_chan != 0 and fetchRecord(name)) readRecord(name, &budget) else null) orelse return refuse("usersvc: login refused");
     var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
     const kp = usercred.unlock(fba.allocator(), &rec, phrase) catch return refuse("usersvc: login refused");
+    // One server per home: a home leased to a session elsewhere, or
+    // already open here, is not opened again.
+    if (leaseHeld(name) or sessionOpen(name)) {
+        logName("usersvc: login refused: the home is in use for ", name);
+        return .{ .sess_err = .{ .code = 6 } };
+    }
 
     const s = &sessions[slot];
-    s.* = .{ .used = true, .kp = kp, .name_len = name.len };
+    s.* = .{ .used = true, .kp = kp, .name_len = name.len, .home_node = budget.home_node };
     @memcpy(s.name[0..name.len], name);
     if (!spawnSession(s, budget, console)) {
         releaseHome(s);
@@ -555,8 +613,11 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
 // A user is the same identity on every node: the record (a public key
 // and a seed sealed under the passphrase) is safe to copy anywhere, so
 // a login on a node without it fetches it from a member that has it,
-// caches it, and unseals locally. The home stays per node — a fresh
-// volume here, keyed from the same identity.
+// caches it (remembering which node has the home), and unseals locally.
+// The home stays where it was born: a session elsewhere leases its
+// ciphertext directory through the fabric and serves the volume itself,
+// so the key never leaves the session's node and the home's node ships
+// only ciphertext.
 
 /// Publish our channel to the pool under ServiceId.usersvc: a badged
 /// copy, so requests from the wire are known for what they are.
@@ -653,7 +714,15 @@ fn fetchFrom(node: u64, name: []const u8) bool {
                     var path: [max_name + 4]u8 = undefined;
                     @memcpy(path[0..name.len], name);
                     @memcpy(path[name.len .. name.len + 4], ".msh");
-                    if (!writeFile(users_view, users_buf, path[0 .. name.len + 4], text[0..d.len])) return false;
+                    // The cached copy remembers where the home lives: the
+                    // record's closing brace gains `home: <node>`.
+                    var end = d.len;
+                    while (end > 0 and (text[end - 1] == ' ' or text[end - 1] == '\n' or text[end - 1] == '\r')) end -= 1;
+                    if (end == 0 or text[end - 1] != '}' or end + 24 > text.len) return false;
+                    var nb2: [24]u8 = undefined;
+                    const tail = cat3(text[end - 1 ..], ", home: ", decimal(&nb2, node), " }\n", "", "");
+                    const total = end - 1 + tail.len;
+                    if (!writeFile(users_view, users_buf, path[0 .. name.len + 4], text[0..total])) return false;
                     _ = fsc.fsSync(users_view);
                     var line: [96]u8 = undefined;
                     var nb: [24]u8 = undefined;
@@ -704,6 +773,7 @@ fn readRecord(name: []const u8, budget: *Budget) ?usercred.Record {
             if (int(b.record.get("cpu"))) |x| budget.cpu_permille = @intCast(@max(x, 0));
         }
     }
+    if (int(r.get("home"))) |h| budget.home_node = @intCast(@max(h, 0));
     return rec;
 }
 
@@ -713,7 +783,16 @@ fn readRecord(name: []const u8, budget: *Budget) ?usercred.Record {
 /// otherwise the session program (role 3).
 fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     const name = s.name[0..s.name_len];
-    const view = openHome(s) orelse return false;
+    // The home's backing: home/<name> on this node's volume, or, for a
+    // home that lives on another node, its ciphertext directory there,
+    // reached through a lease — the key stays here either way.
+    const backing = if (s.home_node != 0) mountRemoteHome(s) else localHomeDir(name);
+    const voldir = backing orelse return false;
+    const view = openHome(s, voldir) orelse {
+        _ = usys.capDrop(voldir);
+        return false;
+    };
+    _ = usys.capDrop(voldir);
     defer _ = usys.capDrop(view); // the session's copy is the only one left
     const image: shared.ImageId = if (console != 0) .init else .users;
     const arg: u64 = 3;
@@ -767,11 +846,170 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
 /// system volume, served by a home filesystem service spawned for this
 /// session and keyed from the unlocked identity. Returns the session's
 /// root view of it. The system volume only ever sees ciphertext.
-fn openHome(s: *Session) ?u64 {
-    const name = s.name[0..s.name_len];
+fn localHomeDir(name: []const u8) ?u64 {
     if (!fsc.fsMkdir(home_view, home_buf, name)) return null;
-    const voldir = fsc.fsDerive(home_view, home_buf, name, false) orelse return null;
-    defer _ = usys.capDrop(voldir);
+    return fsc.fsDerive(home_view, home_buf, name, false);
+}
+
+/// The lease dance with the manager that holds the home (see SessReq):
+/// look it up, take the challenge and the lease cap, prove the identity
+/// with a signature through the lease's buffer, and get the ciphertext
+/// directory's view back. The lease cap stays with the session.
+fn mountRemoteHome(s: *Session) ?u64 {
+    const name = s.name[0..s.name_len];
+    var nb: [24]u8 = undefined;
+    var line: [96]u8 = undefined;
+    if (fab_chan == 0) return null;
+    const lres = usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = s.home_node, .service = @intFromEnum(shared.ServiceId.usersvc) } }, 0);
+    const mgr: u64 = switch (lres) {
+        .ok => |ok| if (ok.rep == .found and ok.cap != 0) ok.cap else {
+            _ = usys.log(glog, cat3(&line, "usersvc: the home of ", name, " lives on node ", decimal(&nb, s.home_node), ", which is not reachable"));
+            return null;
+        },
+        .err => return null,
+    };
+    defer _ = usys.capDrop(mgr);
+    const w = shared.strToWords(name);
+    // The challenge, and the lease cap that carries the proof.
+    const cres = usys.callTypedCap(shared.SessReq, shared.SessResp, mgr, .{ .home_challenge = .{ .name_a = w[0], .name_b = w[1] } }, 0);
+    var nonce: [24]u8 = undefined;
+    const lease: u64 = switch (cres) {
+        .ok => |ok| switch (ok.rep) {
+            .chunk => |c| blk: {
+                std.mem.writeInt(u64, nonce[0..8], c.a, .little);
+                std.mem.writeInt(u64, nonce[8..16], c.b, .little);
+                std.mem.writeInt(u64, nonce[16..24], c.c, .little);
+                break :blk ok.cap;
+            },
+            .sess_err => |e| {
+                if (e.code == 6) _ = usys.log(glog, cat3(&line, "usersvc: the home of ", name, " is in use on node ", decimal(&nb, s.home_node), ""));
+                if (ok.cap != 0) _ = usys.capDrop(ok.cap);
+                return null;
+            },
+            else => {
+                if (ok.cap != 0) _ = usys.capDrop(ok.cap);
+                return null;
+            },
+        },
+        .err => return null,
+    };
+    if (lease == 0) return null;
+    errdefer _ = usys.capDrop(lease);
+    // The proof travels through a buffer on the lease (the bulk
+    // transport carries it): the identity's signature over the nonce.
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) {
+        _ = usys.capDrop(lease);
+        return null;
+    }
+    defer _ = usys.capDrop(sh.data[0]);
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) {
+        _ = usys.capDrop(lease);
+        return null;
+    }
+    defer _ = usys.shmUnmap(m.data[0]);
+    switch (usys.callTyped(shared.SessReq, shared.SessResp, lease, .attach_buf, sh.data[0])) {
+        .ok => |rep| if (rep != .ok) {
+            _ = usys.capDrop(lease);
+            return null;
+        },
+        .err => {
+            _ = usys.capDrop(lease);
+            return null;
+        },
+    }
+    const sig = fabcert.signLabeled(s.kp, shared.home_lease_label, &nonce) catch {
+        _ = usys.capDrop(lease);
+        return null;
+    };
+    const dst: [*]u8 = @ptrFromInt(m.data[0]);
+    @memcpy(dst[0..64], &sig);
+    const vres = usys.callTypedCap(shared.SessReq, shared.SessResp, lease, .{ .home_lease = .{ .sig_off = 0 } }, 0);
+    const view: u64 = switch (vres) {
+        .ok => |ok| if (ok.rep == .ok and ok.cap != 0) ok.cap else {
+            if (ok.cap != 0) _ = usys.capDrop(ok.cap);
+            _ = usys.capDrop(lease);
+            return null;
+        },
+        .err => {
+            _ = usys.capDrop(lease);
+            return null;
+        },
+    };
+    s.lease = lease;
+    _ = usys.log(glog, cat3(&line, "usersvc: the home of ", name, " mounted from node ", decimal(&nb, s.home_node), " (the key stays here)"));
+    return view;
+}
+
+/// The holder's side of a lease: the challenge (a lease slot and its
+/// badged cap are born here, so the proof can arrive on it).
+fn doHomeChallenge(name_a: u64, name_b: u64) void {
+    var name_bytes: [16]u8 = undefined;
+    std.mem.writeInt(u64, name_bytes[0..8], name_a, .little);
+    std.mem.writeInt(u64, name_bytes[8..16], name_b, .little);
+    var n: usize = 0;
+    while (n < 16 and name_bytes[n] != 0) n += 1;
+    const name = name_bytes[0..n];
+    if (!nameOk(name)) return reply(.denied);
+    var budget: Budget = .{};
+    if (readRecord(name, &budget) == null) return reply(.denied);
+    if (leaseHeld(name) or sessionOpen(name)) {
+        logName("usersvc: lease refused, the home is in use: ", name);
+        return reply(.{ .sess_err = .{ .code = 6 } });
+    }
+    var slot: usize = 0;
+    while (slot < max_leases and leases[slot].used) slot += 1;
+    if (slot == max_leases) return reply(.{ .sess_err = .{ .code = 3 } });
+    const l = &leases[slot];
+    l.* = .{ .used = true, .name_len = name.len };
+    @memcpy(l.name[0..name.len], name);
+    if (usys.getrandom(&l.nonce) != .ok) {
+        l.* = .{};
+        return reply(.{ .sess_err = .{ .code = 4 } });
+    }
+    const minted = usys.chanMint(svc_chan, lease_badge0 + slot);
+    if (minted.err != .ok) {
+        l.* = .{};
+        return reply(.{ .sess_err = .{ .code = 3 } });
+    }
+    _ = usys.replyTyped(shared.SessResp, svc_chan, .{ .chunk = .{
+        .a = std.mem.readInt(u64, l.nonce[0..8], .little),
+        .b = std.mem.readInt(u64, l.nonce[8..16], .little),
+        .c = std.mem.readInt(u64, l.nonce[16..24], .little),
+    } }, minted.data[1]);
+    _ = usys.capDrop(minted.data[1]);
+}
+
+/// The proof on a lease cap: the signature at buf[sig_off..+64] under
+/// the record's public key. Verified, the lease is held and the home's
+/// ciphertext directory goes out as a rw view.
+fn doHomeLease(badge: u64, sig_off: u64) void {
+    const l = leaseOf(badge) orelse return reply(.{ .sess_err = .{ .code = 5 } });
+    const name = l.name[0..l.name_len];
+    if (l.held) return reply(.{ .sess_err = .{ .code = 6 } });
+    const cb = client_bufs[badge];
+    if (cb.va == 0 or sig_off + 64 > cb.pages * 4096) return reply(.{ .sess_err = .{ .code = 7 } });
+    var budget: Budget = .{};
+    const rec = readRecord(name, &budget) orelse return reply(.denied);
+    const sig = @as([*]const u8, @ptrFromInt(cb.va))[sig_off .. sig_off + 64];
+    fabcert.verifyLabeled(rec.pk, shared.home_lease_label, &l.nonce, sig) catch {
+        logName("usersvc: lease refused, bad proof for ", name);
+        return reply(.{ .sess_err = .{ .code = 7 } });
+    };
+    if (leaseHeld(name) or sessionOpen(name)) return reply(.{ .sess_err = .{ .code = 6 } });
+    const dir = localHomeDir(name) orelse return reply(.{ .sess_err = .{ .code = 4 } });
+    l.held = true;
+    @memset(&l.nonce, 0);
+    logName("usersvc: home leased to a session on another node: ", name);
+    _ = usys.replyTyped(shared.SessResp, svc_chan, .ok, dir);
+    _ = usys.capDrop(dir);
+}
+
+/// The home service over `voldir` (the ciphertext directory, local or
+/// remote), keyed from the unlocked identity. Returns the session's
+/// root view of the volume; `voldir` stays the caller's to drop.
+fn openHome(s: *Session, voldir: u64) ?u64 {
     // The service's root-view buffer, shared with us: the key is staged
     // through it, and derive requests travel through it.
     const sh = usys.shmCreate(1);

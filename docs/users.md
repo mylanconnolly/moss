@@ -225,44 +225,70 @@ flowchart LR
   M --> E["effective\ntheme: light (user)\ntab_width: 4 (system)\ntelemetry: false (locked)"]
 ```
 
-### Logging in anywhere: fabric logins
+### Logging in anywhere: fabric logins, and one home
 
 A user is the same identity on every node of the pool, because a
 record is safe to copy: it holds a public key and a seed sealed under
 the passphrase, nothing a node could misuse. A session manager with a
 fabric channel publishes itself to the pool under `ServiceId.usersvc`
 (a badged copy of its channel, so a request from the wire is known for
-what it is and may ask for exactly one thing: a record). A login for a
-user with no local record asks every live member, in turn, for that
-user's record — `lookup` hands it a channel to the member's session
-manager, the record crosses in 24-byte chunks (no buffer crosses the
-wire) — caches it in `conf/users/`, and unseals it locally like any
-other. The home is born on the node where the session runs, keyed from
-the same identity.
+what it is). A login for a user with no local record asks every live
+member, in turn, for that user's record — `lookup` hands it a channel
+to the member's session manager, the record crosses in 24-byte chunks —
+caches it in `conf/users/` with one addition, `home: <node>`, the node
+it came from, and unseals it locally like any other.
+
+A user has **one home**, and it stays where it was born. A session on
+another node reaches it through a **lease**: the manager where alice is
+logging in asks the manager that holds her home for a challenge, signs
+the nonce with her unlocked identity key, and gets back a rw view of
+her home's ciphertext directory. It then spawns alice's home service
+*here*, giving it that remote view as backing and the key derived from
+her identity — so the key never leaves the node where she typed her
+passphrase, and the home's node stores and ships only ciphertext,
+through the fabric's [bulk transport](fabric.md#the-bulk-transport-a-buffers-contents-cross-the-buffer-does-not).
+Only the holder of the identity can obtain a lease: the proof is a
+signature the record's public key verifies, and a manager that merely
+holds the record cannot forge it.
 
 ```mermaid
 sequenceDiagram
   participant C as console on node 2
   participant M2 as usersvc on node 2
-  participant F as the fabric
-  participant M1 as usersvc on node 1
+  participant M1 as usersvc on node 1 (holds alice's home)
+  participant H as alice's home service (node 2)
   C->>M2: alice / passphrase
-  M2->>M2: no conf/users/alice.msh here
-  M2->>F: members, then lookup usersvc on node 1
-  F-->>M2: a channel to node 1's session manager
-  M2->>M1: record alice, chunk 0 (through the fabric)
-  M1-->>M2: 24 bytes
-  M2->>M1: chunk 1 … n
-  M1-->>M2: data, length
-  M2->>M2: cache the record, unseal the seed, open a home here
-  M2-->>C: moss shell
+  M2->>M1: record alice (chunks, through the fabric)
+  M2->>M2: cache it with home: 1, unseal the seed
+  M2->>M1: home_challenge alice
+  M1-->>M2: a 24-byte nonce, and a lease cap
+  M2->>M2: sign "moss-home-lease" ‖ nonce with the identity key
+  M2->>M1: on the lease cap: attach a buffer, home_lease (the signature in it)
+  M1->>M1: verify under the record's key; no session or lease holds the home
+  M1-->>M2: ok, with a rw view of home/alice (ciphertext)
+  M2->>H: spawn: the key, that view as backing
+  H->>M1: mossfs blocks read and written through the view (bulk transport)
+  M2-->>C: moss shell — alice's files, wherever she is
+  C->>M2: exit
+  M2->>M2: drop the lease cap
+  M1->>M1: the lease dies with it; the home is free again
 ```
 
-The `flogin` drill proves it: node 1 boots with a disk, applies the
-users and publishes its session manager; node 2 boots with a fresh disk
-and a console, joins through its seed, and alice logs in there — her
-record fetched from node 1, her home born on node 2, a file written and
-read back — then logs out and the drill ends clean.
+One server per home at a time: while a lease is held, a login on the
+home's node is refused ("the home is in use"), and while a session is
+open there, a lease is refused; the lease ends when its cap dies (the
+session's logout, or the node's death, which the fabric reports). A
+home whose node is unreachable cannot be opened: the login says which
+node it lives on and fails, rather than opening a second home that
+would silently diverge.
+
+The `flogin` drill proves it twice: node 1 boots with a disk, applies
+the users and publishes its session manager; node 2 boots with a fresh
+disk and a console, joins through its seed, and alice logs in there —
+her record fetched, her home leased on node 1 and mounted on node 2, a
+file written and read back — then logs out and the lease is released.
+Then **node 2's disk is wiped** and both boot again: alice logs in on
+node 2 and reads the file she wrote. It lives on node 1.
 
 ### The desired state, and `apply`
 
@@ -421,11 +447,17 @@ when every console has had a session and none is open.
   survives a logout, and no sharing to a user who is not logged in when
   the offer is withdrawn is remembered. At most 8 offers at once, 8
   mounts per shell.
-- A fabric login copies the record; it does not move the home. A user
-  who logs in on two nodes has two homes, one per node, both keyed
-  from the same identity; nothing synchronizes them. Records are
-  fetched only at login, so a record changed on its home node is not
-  refreshed elsewhere.
+- A home reached through a lease costs a fabric exchange per mossfs
+  block miss (a few milliseconds each on the drill's segment): fine for
+  a shell, slow in bulk. The lease makes the session's home service the
+  volume's only server, so a local block cache needs no coherence with
+  anyone — that cache, and wider transport frames, are the next steps.
+  Moving a home to another node is an administrative action still to
+  be built. A user whose record was applied on several nodes (no
+  `home:`) has a home on each, as before; a record fetched from a node
+  names that node as the home's.
+- Records are fetched only at login, so a record changed on its home
+  node is not refreshed elsewhere.
 - `apply` creates and keeps; it never rewrites or removes a record, so a
   passphrase change or a user's removal is a manual edit of
   `conf/users/`. Its KDF work area bounds the cost a record may ask

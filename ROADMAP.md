@@ -43,6 +43,7 @@ list, followed by the story of what has **Landed** since.
 | Language/toolchain | Zig, version pinned (currently 0.16.0). `build.zig` is the entire build: kernel, userspace, image packing, `zig build run`, `zig build run-cluster`. Comptime Zig types are the IDL — IPC protocols defined once in `shared/`, marshaling/stubs generated at comptime. | No Make, no shell scripts, no separate IDL compiler, ABI type-checked from one source of truth. |
 | Users | **A user is a key, a session is a domain tree, a home is a view.** No uid/gid, no passwd/shadow, no setuid/sudo, no groups or ACLs: a user record is an Ed25519 identity with its seed sealed under a passphrase-derived key; the session manager (userspace) unseals it, keeps the key in custody, and spawns the session under the record's budgets with a rw view of `home/<user>` and a settings view — logout is destroying that domain. Sharing is delegating a derived view. Settings are mshl data in two layers (`conf/<svc>.msh`, `home/<user>/conf/<svc>.msh`) merged per program with schema-declared locked keys. Admin authority is holding the caps, never a bit on a process. | Every legacy user mechanism is a number standing in for a capability or a way around not having one; the kernel already provides isolation, budgets and total teardown, so users are composition. |
 | Code sharing | **Static linking only — no dynamic loader, ever.** Shared functionality lives in `lib/`: pure, freestanding-safe, host-testable Zig modules (lz4, xts, ...) compiled into each program that imports them. Where key custody matters, a capability *service* holds the secret instead of a library. Code-page dedup, if ever needed, comes from content-addressed images (`img/`), not load-time linking. | Relocation machinery, symbol versioning, and loader attack surface bought nothing at moss's scale; static modules keep every binary analyzable and every ABI a comptime-checked Zig type. |
+| Homes across the fabric (decided 2026-09-04) | **One home per user, on the node where it was born; a session elsewhere mounts it — the home's node ships ciphertext, the session's node holds the key — under a lease that makes that session's home service the volume's only server.** Reaching the home is by proof of identity (a signature under the record's public key), never by trust between managers. No fallback home: a login whose home node is unreachable fails and names the node. Performance comes from a local block cache in the home service — exclusive under the lease, so it needs no coherence — and from wider transport frames, not from copying the home. Moving a home to another node is an administrative action, to be built. | A second home that quietly diverges is worse than a refused login; the key belongs where the passphrase was typed; the lease is what makes a cache sound. |
 | The language (mshl v3, decided 2026-09-03; stage 1 built the same day) | **One small, regular syntax for programs and data; functional; pattern matching; capabilities as values.** Values are immutable; functions are values with closures over an immutable environment snapshot, recursion by *name* (never a self-pointer), so values form no cycles and memory is **reference counted, exact, deterministic** — no tracing, no pauses, and a capability held by a value drops at the last use, when the service can reclaim it. (As built: the one cycle is a *scope* — its slots hold its functions, its functions point at it to resolve names — and it is collected by a check the interpreter runs on unheld scopes at the end of every statement; values themselves stay acyclic.) Temporaries live in a per-evaluation arena; only what is bound escapes to counted storage; lists, records and tables share structure on update. Errors are values: `Result` (`ok` / `err`) with `?` propagation and `match` that must be exhaustive; `nothing` is absence, never failure; no tuples (a record is the grouping). Modules are files reached through views (`use` evaluates a file to a record of its exports); no global namespace; the standard library ships in the archive. Extensions are two tiers: services over typed channels (drivers, GUIs — a Zig program, a thin mshl binding) and in-process Zig host commands compiled into the runtime (parsing, hashing). No concurrency in the language: parallelism is spawning programs, here or on another node, and passing values and caps through channels. Config files stay the literal subset of the same syntax. **Strongly typed, not statically typed** (decided 2026-09-03): every value carries its type and nothing coerces — conditions take booleans, comparisons take matching types, `Result` and `match` never bend — checked when evaluated and at every boundary (a value read from a file or a message is checked against the shape a program states for it); host commands declare their signatures from the same protocol types the services use, so a pipeline's mistakes are reported as typed errors, never silently wrong; annotations are optional shapes, structural (`{ name: string, size: int }` matches any record with those fields), with enumerations as unions of bare words so `match` can be checked for exhaustiveness where it is evaluated; no mandatory annotations, no static checker. **Strings are UTF-8 by guarantee** (decided 2026-09-03): validated at every boundary, `len` and indexing by code point; binary data is a distinct `bytes` type (socket payloads, images), never a string. Open: floats and a numeric tower. | The shell already thinks in the OS's values; the language must keep the properties the OS gives — no ambient authority, failure in the vocabulary, deterministic release — rather than import a runtime that fights them. Go's discipline about smallness, with the two things it lacks. |
 
 ### Non-goals (permanently, unless revisited here)
@@ -230,12 +231,14 @@ is a plan.
   the fabric surface — ✅ the bulk transport across the wire and remote
   pipeline stages (landed 2026-09-04: session buffers diffed both ways,
   `fw_bulk`/`fw_bulk_resp`/`fw_release`, wire v6, `remote NODE { … }`
-  with `mshrun` as the stage); still open: a fabric login mounting a
-  remote home (the transport is there; the session manager still copies
-  the record), publish and lookup from the language (a script serves no
-  channel and a raw channel would be untyped — this waits for a typed
-  channel surface), more than one buffer per session, notifications
-  across nodes; (5) tooling, host-side in
+  with `mshrun` as the stage); ✅ one home across the fabric (landed
+  2026-09-04: the lease, the identity proof, the remote backing view,
+  the wiped-disk drill); still open: the home service's local block
+  cache and wider transport frames (the performance step), moving a
+  home (an administrative action), publish and lookup from the language
+  (a script serves no channel and a raw channel would be untyped — this
+  waits for a typed channel surface), more than one buffer per session,
+  notifications across nodes; (5) tooling, host-side in
   tools/: a tree-sitter grammar first, then a formatter from a parser
   that keeps positions, then lint and a language server. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
@@ -372,6 +375,18 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **Users, stage 4: one home, wherever you log in** (done,
+  2026-09-04): a fabric login leases the user's home from the node that
+  holds it — a challenge, a signature under the identity key through
+  the lease cap's buffer, a rw view of the ciphertext directory back —
+  and spawns the home service locally over that remote backing: the
+  key stays with the session, the home's node ships ciphertext, one
+  server per home at a time, no fallback home. The drill wipes node 2's
+  disk between boots and alice's file is still there. Found: the
+  fabric's token-less control replies were delivered to the oldest
+  parked caller (a remote stage got a `lookup`'s answer) — every fabric
+  reply carries its token now; and eight fabric sessions/exports were
+  too few for a node serving stages and homes at once (sixteen).
 - ✅ **mshl v3, stage 4a: the bulk transport and remote stages** (done,
   2026-09-04): a shared-memory cap attached to a badged call becomes the
   session's buffer, the peer makes a twin for the exported channel, and

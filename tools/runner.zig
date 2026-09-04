@@ -105,6 +105,9 @@ const cluster_port3 = "31904"; // the imposter's hub port
 const shell_port: u16 = 31903;
 /// The net check's port forward to the script's HTTP server (:8080).
 const http_port: u16 = 31909;
+/// The fabric-login drill's own hub port: a listener the three-node
+/// drill left in TIME_WAIT must never be the one node 2 dials.
+const flogin_port = "31911";
 const poll_ms = 100;
 
 var io: Io = undefined;
@@ -754,7 +757,12 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
 /// console, no records) on one segment; alice logs in on node 2 and her
 /// record comes from node 1 over the wire. Node 2's log carries the
 /// verdict; node 1 is stopped when it is in.
-const flogin_script = [_]struct { send: []const u8, expect: []const u8, prompt: []const u8 = "" }{
+const FloginStep = struct { send: []const u8, expect: []const u8 };
+/// Boot 1: alice, whose record and home live on node 1, logs in on node
+/// 2 — the record is fetched, the home is leased and mounted through
+/// the fabric — and writes a file. Boot 2: node 2's disk is wiped first,
+/// and the file is still there: it lives on node 1.
+const flogin_script = [_]FloginStep{
     .{ .send = "alice", .expect = "passphrase: " },
     .{ .send = "alice-pass", .expect = "moss shell" },
     .{ .send = "df", .expect = "encrypted: true" },
@@ -763,15 +771,31 @@ const flogin_script = [_]struct { send: []const u8, expect: []const u8, prompt: 
     .{ .send = "cat hello.txt", .expect = "born on node 2" },
     .{ .send = "exit", .expect = "bye" },
 };
+const flogin_script2 = [_]FloginStep{
+    .{ .send = "alice", .expect = "passphrase: " },
+    .{ .send = "alice-pass", .expect = "moss shell" },
+    .{ .send = "cat hello.txt", .expect = "born on node 2" },
+    .{ .send = "exit", .expect = "bye" },
+};
 
 fn runFlogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
-    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
-    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
     const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
     const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
-    for ([_][]const u8{ log1, log2, disk1, disk2 }) |f| cwd.deleteFile(io, f) catch {};
+    for ([_][]const u8{ disk1, disk2 }) |f| cwd.deleteFile(io, f) catch {};
     try makeDisk(disk1);
     try makeDisk(disk2);
+    if (!try floginBoot(spec, bin, disk1, disk2, 1, &flogin_script, "the home is on node 1: a fresh disk here", polls)) return false;
+    // Node 2 forgets everything; node 1 keeps alice's home.
+    cwd.deleteFile(io, disk2) catch {};
+    try makeDisk(disk2);
+    return floginBoot(spec, bin, disk1, disk2, 2, &flogin_script2, "the home is on node 1: a fresh disk here", polls);
+}
+
+fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8, boot: u32, script: []const FloginStep, mounted: []const u8, polls: *u64) !bool {
+    _ = mounted;
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1-{d}.log", .{ check_dir, spec.name, boot });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2-{d}.log", .{ check_dir, spec.name, boot });
+    for ([_][]const u8{ log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
 
     var args1: std.ArrayList([]const u8) = .empty;
     try appendBase(&args1, log1, bin);
@@ -779,7 +803,8 @@ fn runFlogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{cluster_port}),
+        "-object", try std.fmt.allocPrint(gpa, "filter-dump,id=f1,netdev=h1,file={s}/{s}-node1-{d}.pcap", .{ check_dir, spec.name, boot }),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
         "-append", "profile=flogin node=1",
     });
@@ -792,8 +817,9 @@ fn runFlogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try appendBase(&args2, log2, bin);
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
-        "-netdev",  try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{cluster_port}),
+        "-netdev",  try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
         "-device",  "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+        "-object",  try std.fmt.allocPrint(gpa, "filter-dump,id=f2,netdev=n0,file={s}/{s}-node2-{d}.pcap", .{ check_dir, spec.name, boot }),
         "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
         "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{port}),
         "-device",  "virtconsole,chardev=c0",
@@ -840,20 +866,37 @@ fn runFlogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "no login prompt on node 2", log2);
         return false;
     }
-    for (&flogin_script) |step| {
+    for (script) |step| {
         tap.clear();
         sockSend(tap.fd, step.send);
         sockSend(tap.fd, "\r");
         const got = step.expect.len == 0 or waitFor(tap, step.expect, 900, polls);
         if (!got) {
-            std.debug.print("[FAIL] {s}: node 2 console step '{s}' missing '{s}'\n", .{ spec.name, step.send, step.expect });
+            std.debug.print("[FAIL] {s}: node 2 console step '{s}' (boot {d}) missing '{s}'\n", .{ spec.name, step.send, boot, step.expect });
             reportFailure(spec.name, "fabric login script step failed", log2);
             return false;
         }
     }
+    // The mount is the proof of the transport; the lease's release the
+    // proof of the lifecycle — both in the logs.
     const verdict = watch(log2, spec, spec.extra, polls);
-    if (!verdict.ok) reportFailure(spec.name, verdict.why, log2);
-    return verdict.ok;
+    if (!verdict.ok) {
+        reportFailure(spec.name, verdict.why, log2);
+        return false;
+    }
+    const n1 = cwd.readFileAlloc(io, log1, gpa, .limited(1 << 20)) catch "";
+    const n2 = cwd.readFileAlloc(io, log2, gpa, .limited(1 << 20)) catch "";
+    if (std.mem.indexOf(u8, n2, "mounted from node 1 (the key stays here)") == null) {
+        reportFailure(spec.name, "node 2 never mounted alice's home from node 1", log2);
+        return false;
+    }
+    if (std.mem.indexOf(u8, n1, "home leased to a session on another node: alice") == null or
+        std.mem.indexOf(u8, n1, "lease released on the home of alice") == null)
+    {
+        reportFailure(spec.name, "node 1 never leased alice's home, or never saw the lease released", log1);
+        return false;
+    }
+    return true;
 }
 
 fn sockSend(fd: std.posix.fd_t, bytes: []const u8) void {

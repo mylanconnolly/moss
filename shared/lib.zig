@@ -473,6 +473,20 @@ pub const SessReq = union(enum(u64)) {
     /// there is no such user. The name travels in two words (16 bytes),
     /// since no buffer crosses the wire.
     record: struct { name_a: u64, name_b: u64, chunk: u64 },
+    /// A remote home. The manager where the user is logging in asks the
+    /// manager that holds the home for a LEASE: `home_challenge` names
+    /// the user and answers a 24-byte nonce in `chunk` with a lease cap
+    /// attached (a badged copy of the holder's channel); on that cap the
+    /// asker attaches a buffer, puts the identity's signature over
+    /// "moss-home-lease" ‖ nonce at buf[sig_off..+64], and sends
+    /// `home_lease`; verified against the record's public key, the
+    /// answer is `ok` with a rw view of the home's ciphertext directory
+    /// attached, which the asker gives its own home service as backing.
+    /// The key never leaves the asker; the holder ships only ciphertext.
+    /// One lease or local session per home at a time (sess_err 6 =
+    /// busy, 7 = bad proof); the lease ends when its cap dies.
+    home_challenge: struct { name_a: u64, name_b: u64 },
+    home_lease: struct { sig_off: u64 },
 };
 
 pub const SessResp = union(enum(u64)) {
@@ -484,10 +498,14 @@ pub const SessResp = union(enum(u64)) {
     denied: void,
     /// A data literal of `len` bytes waits in the caller's buffer.
     data: struct { len: u64 },
-    /// 24 bytes of a record, little-endian words, zero-padded.
+    /// 24 bytes of a record, little-endian words, zero-padded (or a
+    /// lease challenge's nonce).
     chunk: struct { a: u64, b: u64, c: u64 },
     sess_err: struct { code: u64 },
 };
+
+/// What a remote home's lease signature covers, with the nonce.
+pub const home_lease_label = "moss-home-lease";
 
 // ------------------------------------------------------------ image store
 //

@@ -1331,6 +1331,39 @@ it spawns*. Along the way: `match` arm bodies are statements (an `if`
 in an arm was parsed as a command and its `>` as a redirect), and
 init's unit table grew to 48.
 
+**Users, stage 4 (as built, 2026-09-04): one home, wherever you log
+in.** A user's home stays on the node where it was born; a session
+elsewhere reaches it through a lease. The manager where the user logs
+in fetches the record (cached with `home: <node>`), unseals it, asks
+the home's manager for a challenge, signs the nonce with the identity
+key, and — on the lease cap the challenge came with, through a buffer
+the bulk transport carries — hands over the signature; verified under
+the record's public key, and with no session or lease holding the
+home, the answer is a rw view of the home's ciphertext directory. The
+session's home service is spawned *locally* with that view as backing
+and the key derived from the identity: the key never leaves the node
+where the passphrase was typed, the home's node ships only ciphertext,
+and every mossfs block crosses as one proxied exchange. One server per
+home: a lease refuses a local login and a local session refuses a
+lease; the lease dies with its cap (logout, or the node). No fallback
+home: a login whose home node is unreachable fails and says so — a
+second home that silently diverges is the worst outcome. Decided with
+the user: this is the model, a local block cache in the home service
+is the performance step (the lease makes the cache exclusive, so it
+needs no coherence), and moving a home is an administrative action to
+come. The drill proves it with a wiped disk: alice writes on node 2,
+node 2 forgets everything, alice reads it back on node 2 from node 1.
+Two bugs found, one of them old. The fabric answered control requests
+with token-less replies, which the kernel delivers to the *oldest*
+parked caller — with a remote stage's call parked, the session
+manager's `lookup` answer landed on it (a `FabResp.num` read as
+`RunResp.refused`); every fabric reply now carries its request's
+token, and the rule is in HACKING. And a node hosting both remote
+stages and remote homes ran out of the fabric's eight sessions and
+exports; both are sixteen. Also: the session manager's badge-death
+handler and lease table, and `usersvc`'s gate now admits `attach_buf`
+on a lease cap and nothing else there.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU
