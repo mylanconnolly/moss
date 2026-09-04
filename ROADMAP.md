@@ -43,6 +43,7 @@ list, followed by the story of what has **Landed** since.
 | Language/toolchain | Zig, version pinned (currently 0.16.0). `build.zig` is the entire build: kernel, userspace, image packing, `zig build run`, `zig build run-cluster`. Comptime Zig types are the IDL — IPC protocols defined once in `shared/`, marshaling/stubs generated at comptime. | No Make, no shell scripts, no separate IDL compiler, ABI type-checked from one source of truth. |
 | Users | **A user is a key, a session is a domain tree, a home is a view.** No uid/gid, no passwd/shadow, no setuid/sudo, no groups or ACLs: a user record is an Ed25519 identity with its seed sealed under a passphrase-derived key; the session manager (userspace) unseals it, keeps the key in custody, and spawns the session under the record's budgets with a rw view of `home/<user>` and a settings view — logout is destroying that domain. Sharing is delegating a derived view. Settings are mshl data in two layers (`conf/<svc>.msh`, `home/<user>/conf/<svc>.msh`) merged per program with schema-declared locked keys. Admin authority is holding the caps, never a bit on a process. | Every legacy user mechanism is a number standing in for a capability or a way around not having one; the kernel already provides isolation, budgets and total teardown, so users are composition. |
 | Code sharing | **Static linking only — no dynamic loader, ever.** Shared functionality lives in `lib/`: pure, freestanding-safe, host-testable Zig modules (lz4, xts, ...) compiled into each program that imports them. Where key custody matters, a capability *service* holds the secret instead of a library. Code-page dedup, if ever needed, comes from content-addressed images (`img/`), not load-time linking. | Relocation machinery, symbol versioning, and loader attack surface bought nothing at moss's scale; static modules keep every binary analyzable and every ABI a comptime-checked Zig type. |
+| The language (mshl v3, decided 2026-09-03, not yet built) | **One small, regular syntax for programs and data; functional; pattern matching; capabilities as values.** Values are immutable; functions are values with closures over an immutable environment snapshot, recursion by *name* (never a self-pointer), so the value graph is acyclic and memory is **reference counted, exact, deterministic** — no tracing, no pauses, and a capability held by a value drops at the last use, when the service can reclaim it. Temporaries live in a per-evaluation arena; only what is bound escapes to counted storage; lists, records and tables share structure on update. Errors are values: `Result` (`ok` / `err`) with `?` propagation and `match` that must be exhaustive; `nothing` is absence, never failure; no tuples (a record is the grouping). Modules are files reached through views (`use` evaluates a file to a record of its exports); no global namespace; the standard library ships in the archive. Extensions are two tiers: services over typed channels (drivers, GUIs — a Zig program, a thin mshl binding) and in-process Zig host commands compiled into the runtime (parsing, hashing). No concurrency in the language: parallelism is spawning programs, here or on another node, and passing values and caps through channels. Config files stay the literal subset of the same syntax. Open: floats and a numeric tower; a shape notation for records; UTF-8 as a guarantee. | The shell already thinks in the OS's values; the language must keep the properties the OS gives — no ambient authority, failure in the vocabulary, deterministic release — rather than import a runtime that fights them. Go's discipline about smallness, with the two things it lacks. |
 
 ### Non-goals (permanently, unless revisited here)
 
@@ -202,6 +203,24 @@ is a plan.
   needs a bulk transport across the wire (the view protocol moves data
   through an attached buffer, which does not cross), and records are
   fetched only at login, never refreshed.
+- **mshl v3 — the language as a tool for the fabric** (decisions in the
+  table above). In order: (1) the language core on the host — functions
+  as values and closures, reference-counted immutable values with
+  structural sharing, `match` and destructuring, `Result` and `?`,
+  modules as files; every feature in `zig test lib/mshl.zig` — this
+  blocks nothing and can run beside the port; (2) scripts as programs —
+  an `mshrun` image that runs a script under a manifest, so a script is
+  a unit, a run tool, or a remotely spawned service; (3) the network
+  surface — sockets as capability-carrying values, then the netsvc
+  upgrade (windowing, retransmission, more sockets), then HTTP with
+  parsing in Zig as host commands and handlers as mshl functions; (4)
+  the fabric surface — remote pipeline stages, publish and lookup from
+  the language, and the bulk transport across the wire (which also
+  finishes fabric logins with a remote home); (5) tooling, host-side in
+  tools/: a tree-sitter grammar first, then a formatter from a parser
+  that keeps positions, then lint and a language server. Rule: build the
+  primitive, then the syntax around it; a feature that cannot reach a
+  capability is a demo.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
