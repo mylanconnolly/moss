@@ -64,6 +64,7 @@ pub const Value = union(enum) {
     nothing,
     bool: bool,
     int: i64,
+    float: f64,
     str: []const u8,
     bytes: []const u8,
     list: []const Value,
@@ -75,12 +76,17 @@ pub const Value = union(enum) {
     /// a listener): counted like a function, released — the host's
     /// `drop` runs — when the last value naming it is gone.
     handle: *const Handle,
+    /// A shape (`shape { name: string }`): what a value must look like,
+    /// as a value — bound to a name, passed to `check`, kept in a
+    /// signature.
+    shape: *const Shape,
 
     pub fn typeName(v: Value) []const u8 {
         return switch (v) {
             .nothing => "nothing",
             .bool => "bool",
             .int => "int",
+            .float => "float",
             .str => "string",
             .bytes => "bytes",
             .list => "list",
@@ -89,6 +95,7 @@ pub const Value = union(enum) {
             .func => "function",
             .result => "result",
             .handle => |h| h.kind,
+            .shape => "shape",
         };
     }
 
@@ -101,7 +108,7 @@ pub const Value = union(enum) {
     /// Scalars live inline in a binding; everything else needs a box.
     fn isScalar(v: Value) bool {
         return switch (v) {
-            .nothing, .bool, .int => true,
+            .nothing, .bool, .int, .float => true,
             else => false,
         };
     }
@@ -110,7 +117,8 @@ pub const Value = union(enum) {
     pub fn isData(v: Value) bool {
         return switch (v) {
             .nothing, .bool, .int, .str => true,
-            .bytes, .func, .result, .handle => false,
+            .float => |f| std.math.isFinite(f),
+            .bytes, .func, .result, .handle, .shape => false,
             .list => |l| for (l) |x| {
                 if (!x.isData()) break false;
             } else true,
@@ -156,12 +164,229 @@ pub const Table = struct {
 /// `ok v` or `err e`.
 pub const Result = struct { ok: bool, val: Value };
 
+/// A shape: what a value must look like. Structural and optional —
+/// `{ name: string, size: int }` admits any record with those fields,
+/// `dir | file` any of those words (an enumeration), `[int]` a list
+/// (or table) of ints, `ok int | err string` a result. Written after a
+/// `let name:`, a parameter, a `->`, a `match subject:`, or the word
+/// `shape`; checked where it runs, never before (there is no static
+/// checker), and at a boundary by `check` and by a host's signature.
+pub const Shape = union(enum) {
+    any,
+    nothing,
+    bool,
+    int,
+    float,
+    string,
+    bytes,
+    list,
+    record,
+    table,
+    function,
+    result,
+    shape,
+    handle,
+    /// A handle of one kind: `handle socket`.
+    kind: []const u8,
+    /// Exactly this string, written as a bare word (or quoted): one
+    /// member of an enumeration.
+    word: []const u8,
+    /// `[S]`: a list, or a table, whose every item is an S.
+    list_of: *const Shape,
+    /// `{ k: S, … }`: a record with at least these fields.
+    record_of: []const Field,
+    /// `ok S`, `err S`: a result of that side.
+    ok: *const Shape,
+    err: *const Shape,
+    /// `S | S`: any of them.
+    one_of: []const Shape,
+    /// `$name`: a shape bound in scope, looked up where the annotation
+    /// runs (a shape *value* never holds one: `shape` resolves them).
+    ref: []const u8,
+
+    pub const Field = struct { key: []const u8, shape: Shape };
+
+    /// Render as it is written.
+    pub fn write(s: Shape, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!void {
+        switch (s) {
+            .any, .nothing, .bool, .int, .float, .string, .bytes, .list, .record, .table, .function, .result, .shape, .handle => try out.appendSlice(a, @tagName(s)),
+            .kind => |k| {
+                try out.appendSlice(a, "handle ");
+                try out.appendSlice(a, k);
+            },
+            .word => |w| {
+                // A word spelt like a type name is quoted, or it would
+                // read back as the type.
+                if (Parser.isShapeKeyword(w)) {
+                    try out.append(a, '"');
+                    try out.appendSlice(a, w);
+                    try out.append(a, '"');
+                } else if (std.mem.eql(u8, w, "true") or std.mem.eql(u8, w, "false") or std.mem.eql(u8, w, "null")) {
+                    try out.appendSlice(a, w); // words in a shape, and read back as such
+                } else try writeStr(w, a, out);
+            },
+            .list_of => |inner| {
+                try out.append(a, '[');
+                try inner.write(a, out);
+                try out.append(a, ']');
+            },
+            .record_of => |fields| {
+                if (fields.len == 0) return out.appendSlice(a, "{}");
+                try out.appendSlice(a, "{ ");
+                for (fields, 0..) |f, i| {
+                    if (i > 0) try out.appendSlice(a, ", ");
+                    try out.appendSlice(a, f.key);
+                    try out.appendSlice(a, ": ");
+                    try f.shape.write(a, out);
+                }
+                try out.appendSlice(a, " }");
+            },
+            .ok, .err => |inner| {
+                try out.appendSlice(a, if (s == .ok) "ok " else "err ");
+                if (inner.* == .one_of) try out.append(a, '(');
+                try inner.write(a, out);
+                if (inner.* == .one_of) try out.append(a, ')');
+            },
+            .one_of => |alts| for (alts, 0..) |alt, i| {
+                if (i > 0) try out.appendSlice(a, " | ");
+                try alt.write(a, out);
+            },
+            .ref => |name| {
+                try out.append(a, '$');
+                try out.appendSlice(a, name);
+            },
+        }
+    }
+
+    pub fn text(s: Shape, a: std.mem.Allocator) Error![]const u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        try s.write(a, &buf);
+        return buf.items;
+    }
+};
+
+/// One argument of a host command, in its signature.
+pub const Param = struct { name: []const u8, shape: Shape = .any, optional: bool = false };
+
+/// What a command takes from the pipeline.
+pub const Input = union(enum) { none, optional: Shape, required: Shape };
+
+/// A host command's signature: its arguments, its input, its answer.
+/// The interpreter checks the arguments and the input before the call
+/// and the answer after it, so a pipeline's mistake is a typed error at
+/// the boundary — never a value that is silently wrong — and a host's
+/// slip is reported as its own. Hosts derive shapes from the protocol
+/// types they answer with (`shapeOf`), so the two cannot drift.
+pub const Signature = struct {
+    params: []const Param = &.{},
+    /// Arguments past `params` are allowed, each of this shape.
+    rest: ?Shape = null,
+    input: Input = .none,
+    ret: Shape = .any,
+};
+
+/// `ok OK | err ERR`: the shape of a command whose outcome the world
+/// decides.
+pub fn resultShape(comptime ok_shape: Shape, comptime err_shape: Shape) Shape {
+    comptime {
+        const o = ok_shape;
+        const e = err_shape;
+        const alts = [_]Shape{ .{ .ok = &o }, .{ .err = &e } };
+        return .{ .one_of = &alts };
+    }
+}
+
+/// The shape of a Zig type: a struct is a record of its fields, an
+/// enum a choice of its tags as words, a slice a list (`[]const u8` a
+/// string), an optional the shape or nothing. With `toValue` on the
+/// same type, a host's answer and its declared shape come from one
+/// definition — the protocol's.
+pub fn shapeOf(comptime T: type) Shape {
+    comptime {
+        if (T == Value) return .any;
+        switch (@typeInfo(T)) {
+            .bool => return .bool,
+            .int, .comptime_int => return .int,
+            .float, .comptime_float => return .float,
+            .void => return .nothing,
+            .optional => |o| {
+                const alts = [_]Shape{ shapeOf(o.child), .nothing };
+                return .{ .one_of = &alts };
+            },
+            .@"enum" => |e| {
+                var alts: [e.fields.len]Shape = undefined;
+                for (e.fields, 0..) |f, i| alts[i] = .{ .word = f.name };
+                const done = alts;
+                return .{ .one_of = &done };
+            },
+            .@"struct" => |s| {
+                var fields: [s.fields.len]Shape.Field = undefined;
+                for (s.fields, 0..) |f, i| fields[i] = .{ .key = f.name, .shape = shapeOf(f.type) };
+                const done = fields;
+                return .{ .record_of = &done };
+            },
+            .pointer => |p| {
+                if (p.size == .one) return shapeOf(p.child);
+                if (p.size != .slice) @compileError("no shape for " ++ @typeName(T));
+                if (p.child == u8) return .string;
+                const inner = shapeOf(p.child);
+                return .{ .list_of = &inner };
+            },
+            .array => |arr| {
+                if (arr.child == u8) return .string;
+                const inner = shapeOf(arr.child);
+                return .{ .list_of = &inner };
+            },
+            else => @compileError("no shape for " ++ @typeName(T)),
+        }
+    }
+}
+
+/// A Zig value as an mshl value, by the same rules as `shapeOf`: a
+/// struct is a record (its field names the keys), an enum its tag as a
+/// word, a slice a list, an optional nothing or the value. Text is
+/// copied (a host's buffer is reused by its next call).
+pub fn toValue(a: std.mem.Allocator, x: anytype) Error!Value {
+    const T = @TypeOf(x);
+    if (T == Value) return x;
+    switch (@typeInfo(T)) {
+        .bool => return .{ .bool = x },
+        .int, .comptime_int => return .{ .int = @intCast(x) },
+        .float, .comptime_float => return .{ .float = @floatCast(x) },
+        .void, .null => return .nothing,
+        .optional => return if (x) |v| try toValue(a, v) else .nothing,
+        .@"enum" => return .{ .str = @tagName(x) },
+        .@"struct" => |s| {
+            const keys = try a.alloc([]const u8, s.fields.len);
+            const vals = try a.alloc(Value, s.fields.len);
+            inline for (s.fields, 0..) |f, i| {
+                keys[i] = f.name;
+                vals[i] = try toValue(a, @field(x, f.name));
+            }
+            return .{ .record = .{ .keys = keys, .vals = vals } };
+        },
+        .pointer => |p| {
+            if (p.size == .one) return toValue(a, x.*);
+            if (p.size != .slice) @compileError("no value for " ++ @typeName(T));
+            if (p.child == u8) return .{ .str = try a.dupe(u8, x) };
+            const items = try a.alloc(Value, x.len);
+            for (x, 0..) |item, i| items[i] = try toValue(a, item);
+            return tableize(a, .{ .list = items });
+        },
+        .array => return toValue(a, x[0..]),
+        else => @compileError("no value for " ++ @typeName(T)),
+    }
+}
+
 /// A function value. Lives in its own box (its tree, parameter names,
 /// captured locals); `scope` is what it sees by name when it runs.
 pub const Closure = struct {
     box: *Box,
     name: []const u8,
     params: []const []const u8,
+    /// A shape per parameter (null: any), and for what it returns.
+    param_shapes: []const ?Shape,
+    ret: ?Shape,
     body: *Node,
     /// The body's source text, for hosts that ship a function elsewhere
     /// (a remote stage runs it with only `$in`; no captures cross).
@@ -258,19 +483,25 @@ pub const Error = error{ OutOfMemory, Syntax, Runtime, Exit };
 
 /// The environment: commands the language does not define itself.
 /// Return null for an unknown name (the interpreter reports it).
+/// `signature`, when a host has one for a name, is checked around the
+/// call: arguments and input before, the answer after. `use name` asks
+/// for `module name` first (a bare name is looked up in a store, a path
+/// in the view) and falls back to `open`.
 pub const Host = struct {
     ctx: *anyopaque,
     call: *const fn (ctx: *anyopaque, it: *Interp, name: []const u8, args: []const Value, input: ?Value) Error!?Value,
+    signature: ?*const fn (ctx: *anyopaque, name: []const u8) ?Signature = null,
 };
 
 /// Commands and keywords defined by the language itself.
 pub const builtin_names = [_][]const u8{
-    "echo",   "len",   "first",  "last",    "reverse",  "where",      "sort-by", "select",
-    "get",    "lines", "keys",   "let",     "def",      "fn",         "if",      "for",
-    "while",  "match", "try",    "use",     "not",      "and",        "or",      "true",
-    "false",  "null",  "else",   "in",      "ok",       "err",        "map",     "filter",
-    "reduce", "any",   "all",    "find",    "range",    "join",       "split",   "str",
-    "int",    "type",  "to-data", "from-data", "to-bytes", "from-bytes", "to-json", "from-json",
+    "echo",      "len",     "first",     "last",     "reverse",    "where",   "sort-by",   "select",
+    "get",       "lines",   "keys",      "let",      "def",        "fn",      "if",        "for",
+    "while",     "match",   "try",       "use",      "not",        "and",     "or",        "true",
+    "false",     "null",    "else",      "in",       "ok",         "err",     "map",       "filter",
+    "reduce",    "any",     "all",       "find",     "range",      "join",    "split",     "str",
+    "int",       "float",   "round",     "floor",    "ceil",       "type",    "shape",     "check",
+    "signature", "to-data", "from-data", "to-bytes", "from-bytes", "to-json", "from-json",
 };
 
 /// Bindings per scope.
@@ -684,18 +915,22 @@ pub const Interp = struct {
         switch (n.*) {
             .let => |l| {
                 // `let x = $y` at a top level shares y's box.
-                if (self.frame == null and l.expr.* == .var_) {
+                if (self.frame == null and l.expr.* == .var_ and l.shape == null) {
                     if (self.scope) |s| if (s.find(l.expr.var_)) |src| if (src.box) |b| {
                         b.rc += 1;
                         try self.bindSlot(l.name, src.value, b);
                         return .nothing;
                     };
                 }
-                try self.bind(l.name, try self.evalNode(l.expr));
+                const v = try self.evalNode(l.expr);
+                if (l.shape) |s| {
+                    if (try self.mismatch(v, s, l.name)) |why| return self.fail("let: {s}", .{why});
+                }
+                try self.bind(l.name, v);
                 return .nothing;
             },
             .def => |d| {
-                try self.bind(d.name, try self.makeClosure(d.name, d.params, d.body, false, d.src));
+                try self.bind(d.name, try self.makeClosure(d.name, d.params, d.param_shapes, d.ret, d.body, false, d.src));
                 return .nothing;
             },
             .if_ => |c| {
@@ -804,14 +1039,22 @@ pub const Interp = struct {
                 return switch (u.op) {
                     .not => .{ .bool = !(try self.condition(v, "not")) },
                     .neg => switch (v) {
-                        .int => |i| .{ .int = -i },
+                        .int => |i| .{ .int = -%i },
+                        .float => |f| .{ .float = -f },
                         else => self.fail("cannot negate a {s}", .{v.typeName()}),
                     },
                 };
             },
-            .fn_ => |f| return self.makeClosure("fn", f.params, f.body, f.implicit, f.src),
+            .fn_ => |f| return self.makeClosure("fn", f.params, f.param_shapes, f.ret, f.body, f.implicit, f.src),
             .match_ => |m| return self.evalMatch(m),
+            .shape_lit => |s| {
+                const out = try self.arena.create(Shape);
+                out.* = try self.resolveShape(s);
+                return .{ .shape = out };
+            },
             .try_ => |inner| {
+                // A failing evaluation becomes an err, a value an ok — and
+                // a result is already in that vocabulary: it passes through.
                 const v = self.evalNode(inner) catch |e| switch (e) {
                     Error.Runtime => {
                         if (self.propagating) {
@@ -822,6 +1065,7 @@ pub const Interp = struct {
                     },
                     else => return e,
                 };
+                if (v == .result) return v;
                 return self.mkResult(true, v);
             },
             .unwrap => |inner| {
@@ -836,7 +1080,7 @@ pub const Interp = struct {
         }
     }
 
-    fn mkResult(self: *Interp, ok: bool, v: Value) Error!Value {
+    pub fn mkResult(self: *Interp, ok: bool, v: Value) Error!Value {
         const r = try self.arena.create(Result);
         r.* = .{ .ok = ok, .val = v };
         return .{ .result = r };
@@ -847,7 +1091,7 @@ pub const Interp = struct {
     /// Build a closure in a box of its own: the tree copied, the locals
     /// of the enclosing function that the body names snapshotted, the
     /// current scope retained.
-    fn makeClosure(self: *Interp, name: []const u8, params: []const []const u8, body: *Node, implicit: bool, src: []const u8) Error!Value {
+    fn makeClosure(self: *Interp, name: []const u8, params: []const []const u8, param_shapes: []const ?Shape, ret: ?Shape, body: *Node, implicit: bool, src: []const u8) Error!Value {
         const scope = try self.cur();
         const b = try self.heap.create(Box);
         b.* = .{ .rc = 0, .arena = std.heap.ArenaAllocator.init(self.heap), .value = .nothing };
@@ -855,12 +1099,16 @@ pub const Interp = struct {
         const cl = try a.create(Closure);
         const ps = try a.alloc([]const u8, params.len);
         for (params, 0..) |p, i| ps[i] = try a.dupe(u8, p);
+        const shapes = try a.alloc(?Shape, param_shapes.len);
+        for (param_shapes, 0..) |s, i| shapes[i] = if (s) |sh| try dupShape(a, sh) else null;
         var caps: std.ArrayList(Capture) = .empty;
-        if (self.frame != null) try self.captureInto(a, &caps, body, params);
+        if (self.frame != null) try self.captureInto(a, &caps, body, params, param_shapes, ret);
         cl.* = .{
             .box = b,
             .name = try a.dupe(u8, name),
             .params = ps,
+            .param_shapes = shapes,
+            .ret = if (ret) |r| try dupShape(a, r) else null,
             .body = try dupNode(a, body),
             .src = try a.dupe(u8, src),
             .captures = caps.items,
@@ -903,8 +1151,9 @@ pub const Interp = struct {
     /// Every name the body uses that the running function has bound is
     /// copied into the closure (a snapshot: rebinding later changes
     /// nothing the closure sees).
-    fn captureInto(self: *Interp, a: std.mem.Allocator, caps: *std.ArrayList(Capture), n: *const Node, params: []const []const u8) Error!void {
+    fn captureInto(self: *Interp, a: std.mem.Allocator, caps: *std.ArrayList(Capture), n: *const Node, params: []const []const u8, param_shapes: []const ?Shape, ret: ?Shape) Error!void {
         var ctx = CaptureCtx{ .it = self, .a = a, .caps = caps, .params = params };
+        try ctx.shapesIn(param_shapes, ret);
         try ctx.walk(n);
     }
 
@@ -922,10 +1171,32 @@ pub const Interp = struct {
             try c.caps.append(c.a, .{ .name = try c.a.dupe(u8, nm), .value = try c.it.dupRetained(c.a, v) });
         }
 
+        /// A `$name` in a shape is a name like any other.
+        fn shapeNames(c: *CaptureCtx, s: Shape) Error!void {
+            switch (s) {
+                .ref => |r| try c.name(r),
+                .list_of, .ok, .err => |inner| try c.shapeNames(inner.*),
+                .record_of => |fields| for (fields) |f| try c.shapeNames(f.shape),
+                .one_of => |alts| for (alts) |alt| try c.shapeNames(alt),
+                else => {},
+            }
+        }
+
+        fn shapesIn(c: *CaptureCtx, shapes: []const ?Shape, ret: ?Shape) Error!void {
+            for (shapes) |maybe| if (maybe) |s| try c.shapeNames(s);
+            if (ret) |r| try c.shapeNames(r);
+        }
+
         fn walk(c: *CaptureCtx, n: *const Node) Error!void {
             switch (n.*) {
-                .let => |l| try c.walk(l.expr),
-                .def => |d| try c.walk(d.body),
+                .let => |l| {
+                    if (l.shape) |s| try c.shapeNames(s);
+                    try c.walk(l.expr);
+                },
+                .def => |d| {
+                    try c.shapesIn(d.param_shapes, d.ret);
+                    try c.walk(d.body);
+                },
                 .if_ => |i| {
                     try c.walk(i.cond);
                     try c.walk(i.then);
@@ -964,14 +1235,19 @@ pub const Interp = struct {
                     try c.walk(b.rhs);
                 },
                 .unop => |u| try c.walk(u.operand),
-                .fn_ => |f| try c.walk(f.body),
+                .fn_ => |f| {
+                    try c.shapesIn(f.param_shapes, f.ret);
+                    try c.walk(f.body);
+                },
                 .match_ => |m| {
                     try c.walk(m.subject);
+                    if (m.shape) |s| try c.shapeNames(s);
                     for (m.arms) |arm| {
                         if (arm.guard) |g| try c.walk(g);
                         try c.walk(arm.body);
                     }
                 },
+                .shape_lit => |s| try c.shapeNames(s),
                 .try_, .unwrap => |inner| try c.walk(inner),
             }
         }
@@ -1009,13 +1285,25 @@ pub const Interp = struct {
             self.row = saved_row;
             self.releaseFrame(fr);
         }
-        return self.evalNode(cl.body) catch |e| {
+        // Annotated parameters are checked in the function's own scope
+        // (a `$Shape` in them is the function's, not the caller's).
+        if (!cl.implicit) {
+            for (cl.params, cl.param_shapes, args) |p, maybe, a| {
+                const s = maybe orelse continue;
+                if (try self.mismatch(a, s, p)) |why| return self.fail("{s}: {s}", .{ cl.name, why });
+            }
+        }
+        const out = self.evalNode(cl.body) catch |e| blk: {
             if (e == Error.Runtime and self.propagating) {
                 self.propagating = false;
-                return self.ret;
+                break :blk self.ret;
             }
             return e;
         };
+        if (cl.ret) |r| {
+            if (try self.mismatch(out, r, "return")) |why| return self.fail("{s}: {s}", .{ cl.name, why });
+        }
+        return out;
     }
 
     fn allocFrame(self: *Interp, input: ?Value) Error!*Frame {
@@ -1038,6 +1326,12 @@ pub const Interp = struct {
 
     fn evalCallv(self: *Interp, c: Callv, input: ?Value) Error!Value {
         const f = try self.evalNode(c.callee);
+        // `x | $f`: a function is called with the input; `$f` alone, or a
+        // value that is not a function, is itself.
+        if (c.args.len == 0) {
+            if (f == .func and input != null) return self.callValue(f, &.{}, input, null);
+            return f;
+        }
         const args = try self.arena.alloc(Value, c.args.len);
         for (c.args, 0..) |a, i| args[i] = try self.evalNode(a);
         return self.callValue(f, args, input, null);
@@ -1049,6 +1343,24 @@ pub const Interp = struct {
 
     fn evalMatch(self: *Interp, m: Match) Error!Value {
         const subject = try self.evalNode(m.subject);
+        // `match v: shape { … }`: the subject must have the shape, and the
+        // arms must cover it — checked here, where the shape is known,
+        // before any arm is tried, so a missing case is reported whether
+        // or not it is the case that arrived.
+        if (m.shape) |s| {
+            const shape = try self.resolveShape(s);
+            if (try self.mismatch(subject, shape, "subject")) |why| return self.fail("match: {s}", .{why});
+            var pats = try self.arena.alloc(*const Pattern, m.arms.len);
+            var n: usize = 0;
+            for (m.arms) |*arm| {
+                if (arm.guard != null) continue;
+                pats[n] = &arm.pat;
+                n += 1;
+            }
+            if (try self.uncovered(shape, pats[0..n])) |missing| {
+                return self.fail("match: the arms do not cover {s}", .{try missing.text(self.arena)});
+            }
+        }
         var binds: std.ArrayList(Bind) = .empty;
         for (m.arms) |arm| {
             binds.clearRetainingCapacity();
@@ -1164,13 +1476,26 @@ pub const Interp = struct {
             },
             .add => {
                 if (l == .int and r == .int) return .{ .int = l.int +% r.int };
+                if (l == .float and r == .float) return .{ .float = l.float + r.float };
                 if (l == .str and r == .str) return .{ .str = try std.mem.concat(self.arena, u8, &.{ l.str, r.str }) };
                 if (l == .bytes and r == .bytes) return .{ .bytes = try std.mem.concat(self.arena, u8, &.{ l.bytes, r.bytes }) };
                 if (l == .list and r == .list) return .{ .list = try std.mem.concat(self.arena, Value, &.{ l.list, r.list }) };
                 return self.fail("cannot add a {s} and a {s}", .{ l.typeName(), r.typeName() });
             },
             .sub, .mul, .div, .mod => {
-                if (l != .int or r != .int) return self.fail("arithmetic needs ints, got a {s} and a {s}", .{ l.typeName(), r.typeName() });
+                // Two ints or two floats: a number never changes kind on
+                // its own (`float`/`int` convert, and say when they cannot).
+                if (l == .float and r == .float) {
+                    if ((b.op == .div or b.op == .mod) and r.float == 0) return self.fail("division by zero", .{});
+                    return .{ .float = switch (b.op) {
+                        .sub => l.float - r.float,
+                        .mul => l.float * r.float,
+                        .div => l.float / r.float,
+                        .mod => @rem(l.float, r.float),
+                        else => unreachable,
+                    } };
+                }
+                if (l != .int or r != .int) return self.fail("arithmetic needs two ints or two floats, got a {s} and a {s}", .{ l.typeName(), r.typeName() });
                 if ((b.op == .div or b.op == .mod) and r.int == 0) return self.fail("division by zero", .{});
                 return .{ .int = switch (b.op) {
                     .sub => l.int -% r.int,
@@ -1227,8 +1552,54 @@ pub const Interp = struct {
             if (v == .func) return self.callValue(v, args, input, null);
         }
         if (try self.builtin(c.name, args, input)) |v| return v;
-        if (try self.host.call(self.host.ctx, self, c.name, args, input)) |v| return v;
+        // A host command with a signature is checked at the boundary,
+        // both ways.
+        const sig: ?Signature = if (self.host.signature) |f| f(self.host.ctx, c.name) else null;
+        if (sig) |s| try self.checkCall(c.name, s, args, input);
+        if (try self.host.call(self.host.ctx, self, c.name, args, input)) |v| {
+            if (sig) |s| {
+                if (try self.mismatch(v, s.ret, "answer")) |why| return self.fail("{s}: {s} (the host's slip, not yours)", .{ c.name, why });
+            }
+            return v;
+        }
         return self.fail("unknown command '{s}'", .{c.name});
+    }
+
+    /// The arguments and the input against a signature.
+    fn checkCall(self: *Interp, name: []const u8, sig: Signature, args: []const Value, input: ?Value) Error!void {
+        var required: usize = 0;
+        for (sig.params) |p| {
+            if (!p.optional) required += 1;
+        }
+        if (args.len < required) {
+            var need: std.ArrayList(u8) = .empty;
+            for (sig.params, 0..) |p, i| {
+                if (p.optional) continue;
+                if (i > 0) try need.append(self.arena, ' ');
+                try need.appendSlice(self.arena, p.name);
+            }
+            return self.fail("{s}: {s} expected", .{ name, need.items });
+        }
+        if (args.len > sig.params.len and sig.rest == null) {
+            return self.fail("{s}: {d} argument(s) at most, got {d}", .{ name, sig.params.len, args.len });
+        }
+        for (args, 0..) |a, i| {
+            if (i < sig.params.len) {
+                if (try self.mismatch(a, sig.params[i].shape, sig.params[i].name)) |why| return self.fail("{s}: {s}", .{ name, why });
+            } else if (try self.mismatch(a, sig.rest.?, "argument")) |why| return self.fail("{s}: {s}", .{ name, why });
+        }
+        switch (sig.input) {
+            .none => if (input) |v| {
+                if (v != .nothing) return self.fail("{s}: takes no input, got a {s}", .{ name, v.typeName() });
+            },
+            .optional => |s| if (input) |v| {
+                if (try self.mismatch(v, s, "input")) |why| return self.fail("{s}: {s}", .{ name, why });
+            },
+            .required => |s| {
+                const v = input orelse return self.fail("{s}: needs input ({s})", .{ name, try s.text(self.arena) });
+                if (try self.mismatch(v, s, "input")) |why| return self.fail("{s}: {s}", .{ name, why });
+            },
+        }
     }
 
     fn cmdWhere(self: *Interp, c: Call, input: ?Value) Error!Value {
@@ -1438,7 +1809,6 @@ pub const Interp = struct {
             };
             const parsed = json.decode(self.arena, text) catch |e| return switch (e) {
                 error.OutOfMemory => Error.OutOfMemory,
-                error.Float => self.fail("from-json: a number with a fraction or exponent (no floats yet)", .{}),
                 error.Utf8 => self.fail("from-json: a string that is not valid UTF-8", .{}),
                 error.BadJson => self.fail("from-json: not JSON", .{}),
             };
@@ -1551,16 +1921,57 @@ pub const Interp = struct {
             const v = input orelse (if (args.len > 0) args[0] else return self.fail("int: needs input", .{}));
             return switch (v) {
                 .int => try self.mkResult(true, v),
+                .float => |f| if (std.math.isFinite(f) and f > -9.3e18 and f < 9.3e18)
+                    try self.mkResult(true, .{ .int = @intFromFloat(@trunc(f)) })
+                else
+                    try self.mkResult(false, .{ .str = try std.fmt.allocPrint(self.arena, "not an int: {s}", .{try floatText(self.arena, f)}) }),
                 .str => |s| if (std.fmt.parseInt(i64, std.mem.trim(u8, s, " \t\r\n"), 10)) |i|
                     try self.mkResult(true, .{ .int = i })
                 else |_|
                     try self.mkResult(false, .{ .str = try std.fmt.allocPrint(self.arena, "not a number: {s}", .{s}) }),
-                else => self.fail("int: needs a string or int, got a {s}", .{v.typeName()}),
+                else => self.fail("int: needs a string, int or float, got a {s}", .{v.typeName()}),
+            };
+        }
+        if (eql(u8, name, "float")) {
+            const v = input orelse (if (args.len > 0) args[0] else return self.fail("float: needs input", .{}));
+            return switch (v) {
+                .float => try self.mkResult(true, v),
+                .int => |i| try self.mkResult(true, .{ .float = @floatFromInt(i) }),
+                .str => |s| if (std.fmt.parseFloat(f64, std.mem.trim(u8, s, " \t\r\n"))) |f|
+                    try self.mkResult(true, .{ .float = f })
+                else |_|
+                    try self.mkResult(false, .{ .str = try std.fmt.allocPrint(self.arena, "not a number: {s}", .{s}) }),
+                else => self.fail("float: needs a string, int or float, got a {s}", .{v.typeName()}),
+            };
+        }
+        if (eql(u8, name, "round") or eql(u8, name, "floor") or eql(u8, name, "ceil")) {
+            const v = input orelse (if (args.len > 0) args[0] else return self.fail("{s}: needs input", .{name}));
+            return switch (v) {
+                .int => v,
+                .float => |f| .{ .float = if (eql(u8, name, "round")) @round(f) else if (eql(u8, name, "floor")) @floor(f) else @ceil(f) },
+                else => self.fail("{s}: needs a float or int, got a {s}", .{ name, v.typeName() }),
             };
         }
         if (eql(u8, name, "type")) {
             const v = input orelse (if (args.len > 0) args[0] else .nothing);
             return .{ .str = v.typeName() };
+        }
+        // Shapes at a boundary: `x | check $Shape` is `ok x`, or an err
+        // saying what does not fit.
+        if (eql(u8, name, "check")) {
+            if (args.len == 0 or args[args.len - 1] != .shape) return self.fail("check: a shape expected (last)", .{});
+            const s = args[args.len - 1].shape.*;
+            const v = input orelse (if (args.len == 2) args[0] else return self.fail("check: needs input, or a value before the shape", .{}));
+            if (try self.mismatch(v, s, "it")) |why| return try self.mkResult(false, .{ .str = why });
+            return try self.mkResult(true, v);
+        }
+        // `signature NAME`: a host command's signature as a record (its
+        // shapes as shape values), or nothing.
+        if (eql(u8, name, "signature")) {
+            if (args.len != 1 or args[0] != .str) return self.fail("signature: a command name expected", .{});
+            const f = self.host.signature orelse return .nothing;
+            const sig = f(self.host.ctx, args[0].str) orelse return .nothing;
+            return try self.signatureRecord(args[0].str, sig);
         }
         if (eql(u8, name, "to-bytes")) {
             const v = input orelse (if (args.len > 0) args[0] else return self.fail("to-bytes: needs input", .{}));
@@ -1580,15 +1991,26 @@ pub const Interp = struct {
         return null;
     }
 
-    /// `use path`: the file (read through the host's `open`) evaluated in
-    /// a scope of its own; its bindings come back as a record. Functions
-    /// in it keep the scope alive and call each other by name.
+    /// `use path` or `use name`: the module's text — the host's `module`
+    /// command finds it (a bare name in a store, a path in the view; a
+    /// host without one answers `open`) — evaluated in a scope of its
+    /// own; its bindings come back as a record. Functions in it keep the
+    /// scope alive and call each other by name.
     fn cmdUse(self: *Interp, args: []const Value) Error!Value {
-        if (args.len != 1) return self.fail("use: a path expected", .{});
+        if (args.len != 1) return self.fail("use: a path or a module name expected", .{});
         const path = try self.strArg(args[0], "use");
         if (self.use_depth == max_use_depth) return self.fail("use: modules nested too deep at {s}", .{path});
-        const text = (try self.host.call(self.host.ctx, self, "open", args, null)) orelse
-            return self.fail("use: cannot read {s}", .{path});
+        var answer = try self.host.call(self.host.ctx, self, "module", args, null);
+        if (answer == null) answer = try self.host.call(self.host.ctx, self, "open", args, null);
+        var text = answer orelse return self.fail("use: cannot read {s}", .{path});
+        if (text == .result) {
+            if (!text.result.ok) {
+                var why: std.ArrayList(u8) = .empty;
+                try renderInline(text.result.val, self.arena, &why);
+                return self.fail("use: {s}: {s}", .{ path, why.items });
+            }
+            text = text.result.val;
+        }
         if (text != .str) return self.fail("use: {s} is not text", .{path});
         const mod = try self.newScope();
         const saved_scope = self.scope;
@@ -1625,7 +2047,307 @@ pub const Interp = struct {
             else => self.fail("{s}: a name expected, got a {s}", .{ cmd, v.typeName() }),
         };
     }
+
+    // ------------------------------------------------------------- shapes
+
+    /// A shape with every `$name` looked up: what `shape …` evaluates to,
+    /// so a shape value carries no names to resolve later.
+    fn resolveShape(self: *Interp, s: Shape) Error!Shape {
+        switch (s) {
+            .ref => |name| {
+                const v = self.lookup(name) orelse return self.fail("shape: unknown variable ${s}", .{name});
+                if (v != .shape) return self.fail("shape: ${s} is a {s}, not a shape", .{ name, v.typeName() });
+                return v.shape.*;
+            },
+            .list_of, .ok, .err => |inner| {
+                const out = try self.arena.create(Shape);
+                out.* = try self.resolveShape(inner.*);
+                return switch (s) {
+                    .list_of => .{ .list_of = out },
+                    .ok => .{ .ok = out },
+                    else => .{ .err = out },
+                };
+            },
+            .record_of => |fields| {
+                const out = try self.arena.alloc(Shape.Field, fields.len);
+                for (fields, 0..) |f, i| out[i] = .{ .key = f.key, .shape = try self.resolveShape(f.shape) };
+                return .{ .record_of = out };
+            },
+            .one_of => |alts| {
+                const out = try self.arena.alloc(Shape, alts.len);
+                for (alts, 0..) |alt, i| out[i] = try self.resolveShape(alt);
+                return .{ .one_of = out };
+            },
+            else => return s,
+        }
+    }
+
+    /// Null when `v` has shape `s`; else why not — "path is 3, not
+    /// string", "path.size is a string, not int", "path has no field
+    /// 'size'" — with `path` naming what was checked.
+    pub fn mismatch(self: *Interp, v: Value, s: Shape, path: []const u8) Error!?[]const u8 {
+        const fits: bool = switch (s) {
+            .any => true,
+            .nothing => v == .nothing,
+            .bool => v == .bool,
+            .int => v == .int,
+            .float => v == .float,
+            .string => v == .str,
+            .bytes => v == .bytes,
+            .list => v == .list or v == .table,
+            .record => v == .record,
+            .table => v == .table or (v == .list and for (v.list) |x| {
+                if (x != .record) break false;
+            } else true),
+            .function => v == .func,
+            .result => v == .result,
+            .shape => v == .shape,
+            .handle => v == .handle,
+            .kind => |k| v == .handle and std.mem.eql(u8, v.handle.kind, k),
+            .word => |w| v == .str and std.mem.eql(u8, v.str, w),
+            .ref => return self.mismatch(v, try self.resolveShape(s), path),
+            .one_of => |alts| for (alts) |alt| {
+                if (try self.mismatch(v, alt, path) == null) break true;
+            } else false,
+            .list_of => |inner| {
+                const items: []const Value = switch (v) {
+                    .list => |l| l,
+                    .table => |t| blk: {
+                        const rs = try self.arena.alloc(Value, t.rows.len);
+                        for (rs, 0..) |*r, i| r.* = .{ .record = t.row(i) };
+                        break :blk rs;
+                    },
+                    else => return try self.explain(v, s, path),
+                };
+                for (items, 0..) |item, i| {
+                    if (try self.mismatch(item, inner.*, try std.fmt.allocPrint(self.arena, "{s}[{d}]", .{ path, i }))) |why| return why;
+                }
+                return null;
+            },
+            .record_of => |fields| {
+                if (v != .record) return try self.explain(v, s, path);
+                for (fields) |f| {
+                    const fv = v.record.get(f.key) orelse return try std.fmt.allocPrint(self.arena, "{s} has no field '{s}'", .{ path, f.key });
+                    if (try self.mismatch(fv, f.shape, try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ path, f.key }))) |why| return why;
+                }
+                return null;
+            },
+            .ok, .err => |inner| {
+                if (v != .result or v.result.ok != (s == .ok)) return try self.explain(v, s, path);
+                return self.mismatch(v.result.val, inner.*, try std.fmt.allocPrint(self.arena, "{s} ({s})", .{ path, if (s == .ok) "ok" else "err" }));
+            },
+        };
+        if (fits) return null;
+        return try self.explain(v, s, path);
+    }
+
+    fn explain(self: *Interp, v: Value, s: Shape, path: []const u8) Error![]const u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        try buf.appendSlice(self.arena, path);
+        try buf.appendSlice(self.arena, " is ");
+        switch (v) {
+            .nothing, .bool, .int, .float => try renderInline(v, self.arena, &buf),
+            .str => |t| if (t.len <= 24) {
+                try writeStr(t, self.arena, &buf);
+            } else try buf.appendSlice(self.arena, "a string"),
+            .result => |r| {
+                try buf.appendSlice(self.arena, if (r.ok) "ok " else "err ");
+                if (r.val == .record or r.val == .table or r.val == .list) {
+                    try buf.appendSlice(self.arena, "a ");
+                    try buf.appendSlice(self.arena, r.val.typeName());
+                } else try renderInline(r.val, self.arena, &buf);
+            },
+            else => {
+                try buf.appendSlice(self.arena, "a ");
+                try buf.appendSlice(self.arena, v.typeName());
+            },
+        }
+        try buf.appendSlice(self.arena, ", not ");
+        try s.write(self.arena, &buf);
+        return buf.items;
+    }
+
+    /// The part of `s` that no pattern in `pats` covers, or null when
+    /// they cover it all. A catch-all covers anything; a word needs a
+    /// literal; `bool` both literals; `ok S` an `ok p` whose `p` covers
+    /// S; a record shape a record pattern whose fields all cover theirs;
+    /// a list shape `[..]`; everything else a catch-all.
+    fn uncovered(self: *Interp, s: Shape, pats: []const *const Pattern) Error!?Shape {
+        for (pats) |p| if (p.irrefutable()) return null;
+        switch (s) {
+            .one_of => |alts| {
+                for (alts) |alt| if (try self.uncovered(alt, pats)) |u| return u;
+                return null;
+            },
+            .ref => return self.uncovered(try self.resolveShape(s), pats),
+            .word => |w| {
+                for (pats) |p| if (p.* == .lit and p.lit == .str and std.mem.eql(u8, p.lit.str, w)) return null;
+                return s;
+            },
+            .nothing => {
+                for (pats) |p| if (p.* == .lit and p.lit == .nothing) return null;
+                return s;
+            },
+            .bool => {
+                var t = false;
+                var f = false;
+                for (pats) |p| if (p.* == .lit and p.lit == .bool) {
+                    if (p.lit.bool) t = true else f = true;
+                };
+                if (t and f) return null;
+                return .{ .word = if (t) "false" else "true" };
+            },
+            .result => {
+                const any: Shape = .any;
+                const both = [_]Shape{ .{ .ok = &any }, .{ .err = &any } };
+                return self.uncovered(.{ .one_of = &both }, pats);
+            },
+            .ok, .err => |inner| {
+                var subs: std.ArrayList(*const Pattern) = .empty;
+                for (pats) |p| {
+                    if (p.* == .ok and s == .ok) try subs.append(self.arena, p.ok);
+                    if (p.* == .err and s == .err) try subs.append(self.arena, p.err);
+                }
+                const u = (try self.uncovered(inner.*, subs.items)) orelse return null;
+                const boxed = try self.arena.create(Shape);
+                boxed.* = u;
+                return if (s == .ok) .{ .ok = boxed } else .{ .err = boxed };
+            },
+            .record_of => |fields| {
+                var recs: std.ArrayList(*const Pattern) = .empty;
+                for (pats) |p| if (p.* == .record) try recs.append(self.arena, p);
+                return if (try self.recordCovered(fields, recs.items)) null else s;
+            },
+            .list_of => {
+                for (pats) |p| if (p.* == .list and p.list.items.len == 0 and p.list.has_rest) return null;
+                return s;
+            },
+            else => return s,
+        }
+    }
+
+    /// Do these record patterns, together, match every record of the
+    /// shape? Case by case: take the first field any pattern names,
+    /// split the field's shape into its alternatives, and for each keep
+    /// the patterns that admit it — with that field crossed off — until
+    /// a pattern has nothing left to ask (it matches) or no pattern
+    /// remains for some case (it does not).
+    fn recordCovered(self: *Interp, fields: []const Shape.Field, pats: []const *const Pattern) Error!bool {
+        var key: ?[]const u8 = null;
+        for (pats) |p| {
+            if (p.record.len == 0) return true;
+            if (key == null) key = p.record[0].key;
+        }
+        const k = key orelse return false;
+        const fshape = for (fields) |f| {
+            if (std.mem.eql(u8, f.key, k)) break f.shape;
+        } else return false; // a field the shape does not promise: never relied on
+        const cases: []const Shape = switch (fshape) {
+            .one_of => |alts| alts,
+            .bool => &.{ .{ .word = "true" }, .{ .word = "false" } },
+            else => &.{fshape},
+        };
+        for (cases) |case| {
+            var kept: std.ArrayList(*const Pattern) = .empty;
+            for (pats) |p| {
+                var admits = true;
+                var rest: std.ArrayList(FieldPat) = .empty;
+                for (p.record) |fp| {
+                    if (!std.mem.eql(u8, fp.key, k)) {
+                        try rest.append(self.arena, fp);
+                        continue;
+                    }
+                    if (fp.pat) |*sub| {
+                        const one = [_]*const Pattern{sub};
+                        const probe: Shape = if (fshape == .bool and case == .word) .bool else case;
+                        if (fshape == .bool) {
+                            // The bool cases are words here; a literal must name this one.
+                            admits = sub.irrefutable() or (sub.* == .lit and sub.lit == .bool and sub.lit.bool == std.mem.eql(u8, case.word, "true"));
+                        } else admits = (try self.uncovered(probe, &one)) == null;
+                    }
+                }
+                if (!admits) continue;
+                const np = try self.arena.create(Pattern);
+                np.* = .{ .record = rest.items };
+                try kept.append(self.arena, np);
+            }
+            if (!try self.recordCovered(fields, kept.items)) return false;
+        }
+        return true;
+    }
+
+    fn signatureRecord(self: *Interp, name: []const u8, sig: Signature) Error!Value {
+        const a = self.arena;
+        const params = try a.alloc(Value, sig.params.len);
+        for (sig.params, 0..) |p, i| {
+            const sh = try a.create(Shape);
+            sh.* = p.shape;
+            const keys = try a.dupe([]const u8, &.{ "name", "shape", "optional" });
+            const vals = try a.dupe(Value, &.{ .{ .str = p.name }, .{ .shape = sh }, .{ .bool = p.optional } });
+            params[i] = .{ .record = .{ .keys = keys, .vals = vals } };
+        }
+        const rest: Value = if (sig.rest) |r| blk: {
+            const sh = try a.create(Shape);
+            sh.* = r;
+            break :blk .{ .shape = sh };
+        } else .nothing;
+        const input: Value = switch (sig.input) {
+            .none => .nothing,
+            .optional, .required => |s| blk: {
+                const sh = try a.create(Shape);
+                sh.* = s;
+                break :blk .{ .shape = sh };
+            },
+        };
+        const ret = try a.create(Shape);
+        ret.* = sig.ret;
+        const keys = try a.dupe([]const u8, &.{ "name", "params", "rest", "input", "returns" });
+        const vals = try a.dupe(Value, &.{ .{ .str = name }, try tableize(a, .{ .list = params }), rest, input, .{ .shape = ret } });
+        return .{ .record = .{ .keys = keys, .vals = vals } };
+    }
 };
+
+/// A float as text that reads back as a float: a fraction always
+/// (`3.0`, never `3`), exponent form for the very large and small.
+pub fn floatText(a: std.mem.Allocator, f: f64) Error![]const u8 {
+    if (std.math.isNan(f)) return "nan";
+    if (std.math.isInf(f)) return if (f > 0) "inf" else "-inf";
+    const mag = @abs(f);
+    var buf: [64]u8 = undefined;
+    if (mag != 0 and (mag >= 1e15 or mag < 1e-4)) return a.dupe(u8, std.fmt.bufPrint(&buf, "{e}", .{f}) catch "0.0");
+    const t = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "0.0";
+    if (std.mem.indexOfScalar(u8, t, '.') == null) return std.mem.concat(a, u8, &.{ t, ".0" });
+    return a.dupe(u8, t);
+}
+
+/// Deep copy of a shape (annotations outlive the line arena).
+fn dupShape(a: std.mem.Allocator, s: Shape) Error!Shape {
+    return switch (s) {
+        .kind => |k| .{ .kind = try a.dupe(u8, k) },
+        .word => |w| .{ .word = try a.dupe(u8, w) },
+        .ref => |r| .{ .ref = try a.dupe(u8, r) },
+        .list_of => |inner| .{ .list_of = try dupShapePtr(a, inner) },
+        .ok => |inner| .{ .ok = try dupShapePtr(a, inner) },
+        .err => |inner| .{ .err = try dupShapePtr(a, inner) },
+        .record_of => |fields| blk: {
+            const out = try a.alloc(Shape.Field, fields.len);
+            for (fields, 0..) |f, i| out[i] = .{ .key = try a.dupe(u8, f.key), .shape = try dupShape(a, f.shape) };
+            break :blk .{ .record_of = out };
+        },
+        .one_of => |alts| blk: {
+            const out = try a.alloc(Shape, alts.len);
+            for (alts, 0..) |alt, i| out[i] = try dupShape(a, alt);
+            break :blk .{ .one_of = out };
+        },
+        else => s,
+    };
+}
+
+fn dupShapePtr(a: std.mem.Allocator, s: *const Shape) Error!*const Shape {
+    const out = try a.create(Shape);
+    out.* = try dupShape(a, s.*);
+    return out;
+}
 
 /// A list of records with one shape is a table; anything else is itself.
 /// The data syntax has no table literal — a table IS a list of records —
@@ -1658,6 +2380,10 @@ pub fn writeData(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!
             var buf: [24]u8 = undefined;
             try out.appendSlice(a, std.fmt.bufPrint(&buf, "{d}", .{i}) catch "0");
         },
+        .float => |f| {
+            if (!std.math.isFinite(f)) return Error.Runtime;
+            try out.appendSlice(a, try floatText(a, f));
+        },
         .str => |s| try writeStr(s, a, out),
         .list => |l| {
             try out.append(a, '[');
@@ -1685,7 +2411,7 @@ pub fn writeData(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!
             }
             try out.append(a, ']');
         },
-        .bytes, .func, .result, .handle => return Error.Runtime,
+        .bytes, .func, .result, .handle, .shape => return Error.Runtime,
     }
 }
 
@@ -1696,7 +2422,7 @@ fn writeStr(s: []const u8, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!
         if (!Lexer.isWordChar(c) or c == ':' or c == '#') bare = false;
     }
     if (bare and s[s.len - 1] == ':') bare = false;
-    for ([_][]const u8{ "true", "false", "null", "not", "and", "or", "in", "fn", "match", "try", "_" }) |kw| {
+    for ([_][]const u8{ "true", "false", "null", "not", "and", "or", "in", "fn", "match", "try", "shape", "_" }) |kw| {
         if (std.mem.eql(u8, s, kw)) bare = false;
     }
     if (bare) return out.appendSlice(a, s);
@@ -1715,8 +2441,8 @@ fn writeStr(s: []const u8, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!
 fn dupNode(a: std.mem.Allocator, n: *Node) Error!*Node {
     const out = try a.create(Node);
     out.* = switch (n.*) {
-        .let => |l| .{ .let = .{ .name = try a.dupe(u8, l.name), .expr = try dupNode(a, l.expr) } },
-        .def => |d| .{ .def = .{ .name = try a.dupe(u8, d.name), .params = try dupStrs(a, d.params), .body = try dupNode(a, d.body), .src = try a.dupe(u8, d.src) } },
+        .let => |l| .{ .let = .{ .name = try a.dupe(u8, l.name), .shape = if (l.shape) |s| try dupShape(a, s) else null, .expr = try dupNode(a, l.expr) } },
+        .def => |d| .{ .def = .{ .name = try a.dupe(u8, d.name), .params = try dupStrs(a, d.params), .param_shapes = try dupShapes(a, d.param_shapes), .ret = if (d.ret) |r| try dupShape(a, r) else null, .body = try dupNode(a, d.body), .src = try a.dupe(u8, d.src) } },
         .if_ => |c| .{ .if_ = .{ .cond = try dupNode(a, c.cond), .then = try dupNode(a, c.then), .else_ = if (c.else_) |e| try dupNode(a, e) else null } },
         .for_ => |f| .{ .for_ = .{ .name = try a.dupe(u8, f.name), .iter = try dupNode(a, f.iter), .body = try dupNode(a, f.body) } },
         .while_ => |w| .{ .while_ = .{ .cond = try dupNode(a, w.cond), .body = try dupNode(a, w.body) } },
@@ -1738,13 +2464,13 @@ fn dupNode(a: std.mem.Allocator, n: *Node) Error!*Node {
         .field => |f| .{ .field = .{ .base = try dupNode(a, f.base), .name = try a.dupe(u8, f.name) } },
         .list => |items| .{ .list = try dupNodes(a, items) },
         .record => |fields| blk: {
-            const fs = try a.alloc(Field, fields.len);
+            const fs = try a.alloc(RecField, fields.len);
             for (fields, 0..) |f, i| fs[i] = .{ .key = try a.dupe(u8, f.key), .value = try dupNode(a, f.value) };
             break :blk .{ .record = fs };
         },
         .binop => |b| .{ .binop = .{ .op = b.op, .lhs = try dupNode(a, b.lhs), .rhs = try dupNode(a, b.rhs) } },
         .unop => |u| .{ .unop = .{ .op = u.op, .operand = try dupNode(a, u.operand) } },
-        .fn_ => |f| .{ .fn_ = .{ .params = try dupStrs(a, f.params), .body = try dupNode(a, f.body), .implicit = f.implicit, .src = try a.dupe(u8, f.src) } },
+        .fn_ => |f| .{ .fn_ = .{ .params = try dupStrs(a, f.params), .param_shapes = try dupShapes(a, f.param_shapes), .ret = if (f.ret) |r| try dupShape(a, r) else null, .body = try dupNode(a, f.body), .implicit = f.implicit, .src = try a.dupe(u8, f.src) } },
         .match_ => |m| blk: {
             const arms = try a.alloc(Arm, m.arms.len);
             for (m.arms, 0..) |arm, i| arms[i] = .{
@@ -1752,11 +2478,18 @@ fn dupNode(a: std.mem.Allocator, n: *Node) Error!*Node {
                 .guard = if (arm.guard) |g| try dupNode(a, g) else null,
                 .body = try dupNode(a, arm.body),
             };
-            break :blk .{ .match_ = .{ .subject = try dupNode(a, m.subject), .arms = arms } };
+            break :blk .{ .match_ = .{ .subject = try dupNode(a, m.subject), .shape = if (m.shape) |s| try dupShape(a, s) else null, .arms = arms } };
         },
+        .shape_lit => |s| .{ .shape_lit = try dupShape(a, s) },
         .try_ => |inner| .{ .try_ = try dupNode(a, inner) },
         .unwrap => |inner| .{ .unwrap = try dupNode(a, inner) },
     };
+    return out;
+}
+
+fn dupShapes(a: std.mem.Allocator, ss: []const ?Shape) Error![]const ?Shape {
+    const out = try a.alloc(?Shape, ss.len);
+    for (ss, 0..) |s, i| out[i] = if (s) |sh| try dupShape(a, sh) else null;
     return out;
 }
 
@@ -1801,6 +2534,7 @@ pub fn valueEql(a: Value, b: Value) bool {
         .nothing => true,
         .bool => a.bool == b.bool,
         .int => a.int == b.int,
+        .float => a.float == b.float,
         .str => std.mem.eql(u8, a.str, b.str),
         .bytes => std.mem.eql(u8, a.bytes, b.bytes),
         .list => blk: {
@@ -1833,12 +2567,24 @@ pub fn valueEql(a: Value, b: Value) bool {
         .func => a.func == b.func,
         .handle => a.handle == b.handle,
         .result => a.result.ok == b.result.ok and valueEql(a.result.val, b.result.val),
+        .shape => shapeEql(a.shape.*, b.shape.*),
     };
+}
+
+/// Shapes are equal when they are written the same.
+fn shapeEql(a: Shape, b: Shape) bool {
+    var bufs: [2][256]u8 = undefined;
+    var fa = std.heap.FixedBufferAllocator.init(&bufs[0]);
+    var fb = std.heap.FixedBufferAllocator.init(&bufs[1]);
+    const ta = a.text(fa.allocator()) catch return false;
+    const tb = b.text(fb.allocator()) catch return false;
+    return std.mem.eql(u8, ta, tb);
 }
 
 /// Ordering, for values of one orderable type only.
 pub fn compareValues(a: Value, b: Value) ?std.math.Order {
     if (a == .int and b == .int) return std.math.order(a.int, b.int);
+    if (a == .float and b == .float) return if (a.float < b.float) .lt else if (a.float > b.float) .gt else .eq;
     if (a == .str and b == .str) return std.mem.order(u8, a.str, b.str);
     if (a == .bytes and b == .bytes) return std.mem.order(u8, a.bytes, b.bytes);
     return null;
@@ -1848,7 +2594,8 @@ pub fn compareValues(a: Value, b: Value) ?std.math.Order {
 /// Functions are shared, not copied: a function IS its box.
 pub fn dupValue(a: std.mem.Allocator, v: Value) Error!Value {
     return switch (v) {
-        .nothing, .bool, .int, .func, .handle => v,
+        .nothing, .bool, .int, .float, .func, .handle => v,
+        .shape => |s| .{ .shape = try dupShapePtr(a, s) },
         .str => |s| .{ .str = try a.dupe(u8, s) },
         .bytes => |s| .{ .bytes = try a.dupe(u8, s) },
         .list => |l| blk: {
@@ -1904,7 +2651,15 @@ fn dupVals(a: std.mem.Allocator, vs: []const Value) Error![]const Value {
 pub fn render(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!void {
     switch (v) {
         .nothing => {},
-        .bool, .int, .str, .bytes, .func, .result, .handle => {
+        // At the top, an `ok` shows what it holds (the answer is the
+        // interesting part; `ls` is a table on the screen, not "ok
+        // <table>") and an `err` says so.
+        .result => |r| {
+            if (r.ok) return render(r.val, a, out);
+            try renderInline(v, a, out);
+            try out.append(a, '\n');
+        },
+        .bool, .int, .float, .str, .bytes, .func, .handle, .shape => {
             try renderInline(v, a, out);
             try out.append(a, '\n');
         },
@@ -1988,11 +2743,13 @@ pub fn renderInline(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Err
             var buf: [24]u8 = undefined;
             try out.appendSlice(a, std.fmt.bufPrint(&buf, "{d}", .{i}) catch "?");
         },
+        .float => |f| try out.appendSlice(a, try floatText(a, f)),
         .str => |s| try out.appendSlice(a, s),
         .bytes => |b| {
             var buf: [32]u8 = undefined;
             try out.appendSlice(a, std.fmt.bufPrint(&buf, "<bytes: {d}>", .{b.len}) catch "<bytes>");
         },
+        .shape => |s| try s.write(a, out),
         .list => |l| {
             try out.append(a, '[');
             for (l, 0..) |item, i| {
@@ -2050,8 +2807,9 @@ pub fn renderInline(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Err
 const Tok = union(enum) {
     word: []const u8,
     string: []const u8, // raw contents, escapes and $vars unprocessed
-    number: i64,
+    number: Value, // an int, or a float
     var_: []const u8,
+    ret_arrow, // `->`, the return shape of a function
     lparen,
     rparen,
     lbrace,
@@ -2163,9 +2921,17 @@ const Lexer = struct {
         // In expression context, a lone '.' after a word is field access;
         // words themselves may contain dots (paths, versions).
         const w = l.src[start..l.pos];
+        if (w.len == 1 and w[0] == '-' and l.peekByte() == '>') {
+            l.pos += 1;
+            return .ret_arrow;
+        }
         if (parseNumber(w)) |n| return .{ .number = n };
         if (l.expr and w.len > 1 and w[0] == '-') {
-            if (parseNumber(w[1..])) |n| return .{ .number = -n };
+            if (parseNumber(w[1..])) |n| return .{ .number = switch (n) {
+                .int => |i| .{ .int = -%i },
+                .float => |f| .{ .float = -f },
+                else => unreachable,
+            } };
         }
         if (w.len == 1 and l.expr) switch (w[0]) {
             '+' => return .{ .op = .add },
@@ -2178,25 +2944,43 @@ const Lexer = struct {
         return .{ .word = w };
     }
 
-    fn parseNumber(w: []const u8) ?i64 {
+    /// `42`, `4kb`; `1.5`, `2e3`, `1.5kb` (a fraction or an exponent
+    /// makes a float). Anything else — `1.2.3`, `10.77.0.1` — is a word.
+    fn parseNumber(w: []const u8) ?Value {
         if (w.len == 0 or !std.ascii.isDigit(w[0])) return null;
         var i: usize = 0;
-        var v: i64 = 0;
-        while (i < w.len and std.ascii.isDigit(w[i])) : (i += 1) {
-            v = std.math.mul(i64, v, 10) catch return null;
-            v = std.math.add(i64, v, w[i] - '0') catch return null;
+        while (i < w.len and std.ascii.isDigit(w[i])) i += 1;
+        var is_float = false;
+        if (i + 1 < w.len and w[i] == '.' and std.ascii.isDigit(w[i + 1])) {
+            is_float = true;
+            i += 1;
+            while (i < w.len and std.ascii.isDigit(w[i])) i += 1;
+        }
+        if (i < w.len and (w[i] == 'e' or w[i] == 'E')) {
+            var j = i + 1;
+            if (j < w.len and (w[j] == '+' or w[j] == '-')) j += 1;
+            if (j < w.len and std.ascii.isDigit(w[j])) {
+                is_float = true;
+                i = j;
+                while (i < w.len and std.ascii.isDigit(w[i])) i += 1;
+            }
         }
         const unit = w[i..];
         const mult: i64 = if (unit.len == 0) 1 else if (std.ascii.eqlIgnoreCase(unit, "b")) 1 else if (std.ascii.eqlIgnoreCase(unit, "kb")) 1024 else if (std.ascii.eqlIgnoreCase(unit, "mb")) 1024 * 1024 else if (std.ascii.eqlIgnoreCase(unit, "gb")) 1024 * 1024 * 1024 else return null;
-        return std.math.mul(i64, v, mult) catch null;
+        if (is_float) {
+            const f = std.fmt.parseFloat(f64, w[0..i]) catch return null;
+            return .{ .float = f * @as(f64, @floatFromInt(mult)) };
+        }
+        const v = std.fmt.parseInt(i64, w[0..i], 10) catch return null;
+        return .{ .int = std.math.mul(i64, v, mult) catch return null };
     }
 };
 
 // ------------------------------------------------------------------ AST
 
 pub const Node = union(enum) {
-    let: struct { name: []const u8, expr: *Node },
-    def: struct { name: []const u8, params: []const []const u8, body: *Node, src: []const u8 },
+    let: struct { name: []const u8, shape: ?Shape, expr: *Node },
+    def: struct { name: []const u8, params: []const []const u8, param_shapes: []const ?Shape, ret: ?Shape, body: *Node, src: []const u8 },
     if_: struct { cond: *Node, then: *Node, else_: ?*Node },
     for_: struct { name: []const u8, iter: *Node, body: *Node },
     while_: struct { cond: *Node, body: *Node },
@@ -2210,22 +2994,26 @@ pub const Node = union(enum) {
     interp: []const StrPart,
     field: struct { base: *Node, name: []const u8 },
     list: []const *Node,
-    record: []const Field,
+    record: []const RecField,
     binop: BinOp,
     unop: struct { op: enum { not, neg }, operand: *Node },
-    fn_: struct { params: []const []const u8, body: *Node, implicit: bool, src: []const u8 },
+    fn_: struct { params: []const []const u8, param_shapes: []const ?Shape, ret: ?Shape, body: *Node, implicit: bool, src: []const u8 },
     match_: Match,
+    /// `shape S`: a shape as a value (its `$name`s resolved when evaluated).
+    /// One term: a union is written `shape (a | b)`, since a `|` after
+    /// it would otherwise be read as the union and never as the pipe.
+    shape_lit: Shape,
     try_: *Node,
     unwrap: *Node,
 };
 
 const Pipeline = struct { stages: []const *Node, redirect: ?[]const u8 };
-const Field = struct { key: []const u8, value: *Node };
+const RecField = struct { key: []const u8, value: *Node };
 const Call = struct { name: []const u8, args: []const *Node };
 const Callv = struct { callee: *Node, args: []const *Node };
 const BinOp = struct { op: Op, lhs: *Node, rhs: *Node };
 const StrPart = union(enum) { text: []const u8, var_: []const u8 };
-const Match = struct { subject: *Node, arms: []const Arm };
+const Match = struct { subject: *Node, shape: ?Shape, arms: []const Arm };
 pub const Arm = struct { pat: Pattern, guard: ?*Node, body: *Node };
 pub const Pattern = union(enum) {
     wild,
@@ -2338,21 +3126,41 @@ const Parser = struct {
         return p.mk(.{ .block = stmts });
     }
 
-    fn params(p: *Parser, what: []const u8) Error![]const []const u8 {
-        var ps: std.ArrayList([]const u8) = .empty;
+    /// `[a, b]`, or annotated: `[a: int, b: string | nothing]`, then an
+    /// optional `-> shape` for what the function returns.
+    const Params = struct { names: []const []const u8, shapes: []const ?Shape, ret: ?Shape };
+
+    fn params(p: *Parser, what: []const u8) Error!Params {
+        var names: std.ArrayList([]const u8) = .empty;
+        var shapes: std.ArrayList(?Shape) = .empty;
         if (p.peekAt() == .lbracket) {
             _ = p.take();
             while (true) {
+                p.setExpr(false);
                 const q = p.take();
                 switch (q) {
                     .rbracket => break,
                     .comma => continue,
-                    .word => |w| try ps.append(p.a(), w),
+                    .word => |w| {
+                        if (w.len > 1 and w[w.len - 1] == ':') {
+                            try names.append(p.a(), w[0 .. w.len - 1]);
+                            try shapes.append(p.a(), try p.shapeUnion());
+                        } else {
+                            try names.append(p.a(), w);
+                            try shapes.append(p.a(), null);
+                        }
+                    },
                     else => return p.syntax("{s}: parameter name expected", .{what}),
                 }
             }
         }
-        return ps.items;
+        p.setExpr(false);
+        var ret: ?Shape = null;
+        if (p.peekAt() == .ret_arrow) {
+            _ = p.take();
+            ret = try p.shapeUnion();
+        }
+        return .{ .names = names.items, .shapes = shapes.items, .ret = ret };
     }
 
     fn stmt(p: *Parser) Error!*Node {
@@ -2362,12 +3170,18 @@ const Parser = struct {
             _ = p.take();
             const name = p.take();
             if (name != .word) return p.syntax("let: name expected", .{});
+            var nm = name.word;
+            var shape: ?Shape = null;
+            if (nm.len > 1 and nm[nm.len - 1] == ':') {
+                nm = nm[0 .. nm.len - 1];
+                shape = try p.shapeUnion();
+            }
             p.setExpr(true);
             const eq = p.peekAt();
             if (eq != .op or eq.op != .assign) return p.syntax("let: '=' expected", .{});
             _ = p.take();
             const e = try p.expr();
-            return p.mk(.{ .let = .{ .name = name.word, .expr = e } });
+            return p.mk(.{ .let = .{ .name = nm, .shape = shape, .expr = e } });
         }
         if (isWord(t, "def")) {
             _ = p.take();
@@ -2375,7 +3189,7 @@ const Parser = struct {
             if (name != .word) return p.syntax("def: name expected", .{});
             const ps = try p.params("def");
             const body = try p.block();
-            return p.mk(.{ .def = .{ .name = name.word, .params = ps, .body = body, .src = p.last_block_src } });
+            return p.mk(.{ .def = .{ .name = name.word, .params = ps.names, .param_shapes = ps.shapes, .ret = ps.ret, .body = body, .src = p.last_block_src } });
         }
         if (isWord(t, "if")) return p.ifStmt();
         if (isWord(t, "for")) {
@@ -2464,6 +3278,12 @@ const Parser = struct {
                 const call = try p.mk(.{ .callv = .{ .callee = callee, .args = args.items } });
                 return p.trailingUnwrap(call);
             }
+            // A stage that is just `$f` or `$m.f`: a function value there
+            // is called with the pipeline's input (the only way to call a
+            // function of no parameters); anything else is the value.
+            if ((callee.* == .var_ or callee.* == .field) and stageEnd(p.peekAt())) {
+                return p.mk(.{ .callv = .{ .callee = callee, .args = &.{} } });
+            }
             // Not a call: an expression that happens to start with $var.
             p.lex.pos = start;
             p.peeked = false;
@@ -2493,6 +3313,15 @@ const Parser = struct {
         return n;
     }
 
+    /// Does this token end a stage? (`>` is not one here: after a bare
+    /// `$x` it is a comparison, read in expression mode.)
+    fn stageEnd(t: Tok) bool {
+        return switch (t) {
+            .eof, .pipe, .semi, .newline, .rparen, .rbrace => true,
+            else => false,
+        };
+    }
+
     /// In command context: can this token begin an argument (as opposed
     /// to continuing an expression)?
     fn argStart(t: Tok) bool {
@@ -2511,7 +3340,7 @@ const Parser = struct {
     }
 
     fn isKeywordStart(w: []const u8) bool {
-        for ([_][]const u8{ "true", "false", "null", "not", "fn", "match", "try" }) |kw| {
+        for ([_][]const u8{ "true", "false", "null", "not", "fn", "match", "try", "shape" }) |kw| {
             if (std.mem.eql(u8, w, kw)) return true;
         }
         return false;
@@ -2527,11 +3356,12 @@ const Parser = struct {
                 if (std.mem.eql(u8, w, "true")) return p.mk(.{ .lit = .{ .bool = true } });
                 if (std.mem.eql(u8, w, "false")) return p.mk(.{ .lit = .{ .bool = false } });
                 if (std.mem.eql(u8, w, "null")) return p.mk(.{ .lit = .nothing });
+                if (std.mem.eql(u8, w, "shape")) return p.mk(.{ .shape_lit = try p.shapeTerm() });
                 return p.mk(.{ .lit = .{ .str = w } });
             },
             .number => |n| {
                 _ = p.take();
-                return p.mk(.{ .lit = .{ .int = n } });
+                return p.mk(.{ .lit = n });
             },
             .string => |s| {
                 _ = p.take();
@@ -2554,9 +3384,109 @@ const Parser = struct {
                 if (p.recordAhead()) return p.recordLit();
                 p.rewind();
                 const body = try p.block();
-                return p.mk(.{ .fn_ = .{ .params = &.{}, .body = body, .implicit = true, .src = p.last_block_src } });
+                return p.mk(.{ .fn_ = .{ .params = &.{}, .param_shapes = &.{}, .ret = null, .body = body, .implicit = true, .src = p.last_block_src } });
             },
             else => return p.syntax("unexpected token in arguments", .{}),
+        }
+    }
+
+    // Shapes.
+
+    /// `S | S | …`
+    fn shapeUnion(p: *Parser) Error!Shape {
+        var alts: std.ArrayList(Shape) = .empty;
+        try alts.append(p.a(), try p.shapeTerm());
+        while (p.peekAt() == .pipe) {
+            _ = p.take();
+            try alts.append(p.a(), try p.shapeTerm());
+        }
+        if (alts.items.len == 1) return alts.items[0];
+        return .{ .one_of = alts.items };
+    }
+
+    const shape_names = [_]struct { name: []const u8, shape: Shape }{
+        .{ .name = "any", .shape = .any },       .{ .name = "nothing", .shape = .nothing }, .{ .name = "null", .shape = .nothing },
+        .{ .name = "bool", .shape = .bool },     .{ .name = "int", .shape = .int },         .{ .name = "float", .shape = .float },
+        .{ .name = "string", .shape = .string }, .{ .name = "bytes", .shape = .bytes },     .{ .name = "list", .shape = .list },
+        .{ .name = "record", .shape = .record }, .{ .name = "table", .shape = .table },     .{ .name = "function", .shape = .function },
+        .{ .name = "result", .shape = .result }, .{ .name = "shape", .shape = .shape },
+    };
+
+    fn isShapeKeyword(w: []const u8) bool {
+        for (shape_names) |sn| if (std.mem.eql(u8, w, sn.name)) return true;
+        return std.mem.eql(u8, w, "ok") or std.mem.eql(u8, w, "err") or std.mem.eql(u8, w, "handle");
+    }
+
+    /// One shape: a type name, `handle [kind]`, `ok S` / `err S`, a bare
+    /// or quoted word (an enumeration's member), `$name`, `[S]`,
+    /// `{ key: S, … }`, or `(S | S)`.
+    fn shapeTerm(p: *Parser) Error!Shape {
+        p.setExpr(true);
+        const t = p.take();
+        switch (t) {
+            .word => |w| {
+                for (shape_names) |sn| {
+                    if (std.mem.eql(u8, w, sn.name)) return sn.shape;
+                }
+                if (std.mem.eql(u8, w, "ok") or std.mem.eql(u8, w, "err")) {
+                    const inner = try p.a().create(Shape);
+                    inner.* = try p.shapeTerm();
+                    return if (w[0] == 'o') .{ .ok = inner } else .{ .err = inner };
+                }
+                if (std.mem.eql(u8, w, "handle")) {
+                    const n = p.peekAt();
+                    if (n == .word and !std.mem.eql(u8, n.word, "ok") and !std.mem.eql(u8, n.word, "err")) {
+                        for (shape_names) |sn| if (std.mem.eql(u8, n.word, sn.name)) return .handle;
+                        _ = p.take();
+                        return .{ .kind = n.word };
+                    }
+                    return .handle;
+                }
+                return .{ .word = w };
+            },
+            .string => |s| {
+                const n = try p.stringNode(s);
+                if (n.* != .lit or n.lit != .str) return p.syntax("shape: a plain string expected", .{});
+                return .{ .word = n.lit.str };
+            },
+            .var_ => |name| return .{ .ref = name },
+            .lbracket => {
+                const inner = try p.a().create(Shape);
+                inner.* = try p.shapeUnion();
+                if (p.take() != .rbracket) return p.syntax("shape: ']' expected", .{});
+                return .{ .list_of = inner };
+            },
+            .lparen => {
+                const inner = try p.shapeUnion();
+                if (p.take() != .rparen) return p.syntax("shape: ')' expected", .{});
+                return inner;
+            },
+            .lbrace => {
+                var fields: std.ArrayList(Shape.Field) = .empty;
+                while (true) {
+                    p.setExpr(true);
+                    const n = p.peekAt();
+                    switch (n) {
+                        .rbrace => {
+                            _ = p.take();
+                            break;
+                        },
+                        .comma, .newline, .semi => {
+                            _ = p.take();
+                            continue;
+                        },
+                        .word => |w| {
+                            _ = p.take();
+                            if (w.len < 2 or w[w.len - 1] != ':') return p.syntax("shape: 'key:' expected, got '{s}'", .{w});
+                            try fields.append(p.a(), .{ .key = w[0 .. w.len - 1], .shape = try p.shapeUnion() });
+                        },
+                        .eof => return p.syntax("shape: '}}' expected", .{}),
+                        else => return p.syntax("shape: 'key:' expected", .{}),
+                    }
+                }
+                return .{ .record_of = fields.items };
+            },
+            else => return p.syntax("shape expected", .{}),
         }
     }
 
@@ -2690,16 +3620,18 @@ const Parser = struct {
     /// glued after that unwraps.
     fn postfix(p: *Parser) Error!*Node {
         var base = try p.primary();
-        while (!p.peeked and p.lex.pos < p.lex.src.len and p.lex.src[p.lex.pos] == '.') {
-            p.lex.pos += 1;
-            const start = p.lex.pos;
-            while (p.lex.pos < p.lex.src.len and (std.ascii.isAlphanumeric(p.lex.src[p.lex.pos]) or p.lex.src[p.lex.pos] == '_' or p.lex.src[p.lex.pos] == '-')) p.lex.pos += 1;
-            if (p.lex.pos == start) return p.syntax("field name expected after '.'", .{});
-            base = try p.mk(.{ .field = .{ .base = base, .name = p.lex.src[start..p.lex.pos] } });
-        }
-        if (!p.peeked and p.lex.pos < p.lex.src.len and p.lex.src[p.lex.pos] == '?') {
-            p.lex.pos += 1;
-            base = try p.mk(.{ .unwrap = base });
+        while (!p.peeked and p.lex.pos < p.lex.src.len) {
+            const ch = p.lex.src[p.lex.pos];
+            if (ch == '.') {
+                p.lex.pos += 1;
+                const start = p.lex.pos;
+                while (p.lex.pos < p.lex.src.len and (std.ascii.isAlphanumeric(p.lex.src[p.lex.pos]) or p.lex.src[p.lex.pos] == '_' or p.lex.src[p.lex.pos] == '-')) p.lex.pos += 1;
+                if (p.lex.pos == start) return p.syntax("field name expected after '.'", .{});
+                base = try p.mk(.{ .field = .{ .base = base, .name = p.lex.src[start..p.lex.pos] } });
+            } else if (ch == '?') {
+                p.lex.pos += 1;
+                base = try p.mk(.{ .unwrap = base });
+            } else break;
         }
         return base;
     }
@@ -2707,7 +3639,7 @@ const Parser = struct {
     fn primary(p: *Parser) Error!*Node {
         const t = p.take();
         switch (t) {
-            .number => |n| return p.mk(.{ .lit = .{ .int = n } }),
+            .number => |n| return p.mk(.{ .lit = n }),
             .string => |s| return p.stringNode(s),
             .var_ => |name| return p.mk(.{ .var_ = name }),
             .word => |w| {
@@ -2717,8 +3649,9 @@ const Parser = struct {
                 if (std.mem.eql(u8, w, "fn")) {
                     const ps = try p.params("fn");
                     const body = try p.block();
-                    return p.mk(.{ .fn_ = .{ .params = ps, .body = body, .implicit = false, .src = p.last_block_src } });
+                    return p.mk(.{ .fn_ = .{ .params = ps.names, .param_shapes = ps.shapes, .ret = ps.ret, .body = body, .implicit = false, .src = p.last_block_src } });
                 }
+                if (std.mem.eql(u8, w, "shape")) return p.mk(.{ .shape_lit = try p.shapeTerm() });
                 if (std.mem.eql(u8, w, "match")) return p.matchExpr();
                 if (std.mem.eql(u8, w, "try")) {
                     p.setExpr(false);
@@ -2777,7 +3710,7 @@ const Parser = struct {
     }
 
     fn recordLit(p: *Parser) Error!*Node {
-        var fields: std.ArrayList(Field) = .empty;
+        var fields: std.ArrayList(RecField) = .empty;
         while (true) {
             p.setExpr(true);
             const t = p.peekAt();
@@ -2812,6 +3745,19 @@ const Parser = struct {
     fn matchExpr(p: *Parser) Error!*Node {
         p.setExpr(true);
         const subject = try p.expr();
+        // `match v: shape { … }`: the arms must cover the shape, which is
+        // checked where the match runs (the shape may be a `$name`).
+        var shape: ?Shape = null;
+        if (subject.* == .word and subject.word.len > 1 and subject.word[subject.word.len - 1] == ':') {
+            // A bare word keeps its colon as one token (`dir:`, `5:`):
+            // split it, and read what is left as the lexer would have.
+            const w = subject.word[0 .. subject.word.len - 1];
+            subject.* = if (Lexer.parseNumber(w)) |n| .{ .lit = n } else if (std.mem.eql(u8, w, "true")) .{ .lit = .{ .bool = true } } else if (std.mem.eql(u8, w, "false")) .{ .lit = .{ .bool = false } } else if (std.mem.eql(u8, w, "null")) .{ .lit = .nothing } else .{ .word = w };
+            shape = try p.shapeUnion();
+        } else if (isWord(p.peekAt(), ":")) {
+            _ = p.take();
+            shape = try p.shapeUnion();
+        }
         p.setExpr(false);
         if (p.peekAt() != .lbrace) return p.syntax("match: '{{' expected", .{});
         _ = p.take();
@@ -2855,12 +3801,12 @@ const Parser = struct {
             try arms.append(p.a(), .{ .pat = pat, .guard = guard, .body = body });
         }
         if (arms.items.len == 0) return p.syntax("match: no arms", .{});
-        if (!catch_all and !(ok_all and err_all) and !(true_lit and false_lit)) {
+        if (shape == null and !catch_all and !(ok_all and err_all) and !(true_lit and false_lit)) {
             if (ok_all) return p.syntax("match: not exhaustive — no `err _ =>` arm", .{});
             if (err_all) return p.syntax("match: not exhaustive — no `ok _ =>` arm", .{});
             return p.syntax("match: not exhaustive — add a `_ =>` arm", .{});
         }
-        return p.mk(.{ .match_ = .{ .subject = subject, .arms = arms.items } });
+        return p.mk(.{ .match_ = .{ .subject = subject, .shape = shape, .arms = arms.items } });
     }
 
     /// An arm's body: a block, or one statement on the same line (an
@@ -2893,7 +3839,7 @@ const Parser = struct {
                 return .{ .lit = .{ .str = w } };
             },
             .var_ => |name| return .{ .bind = name },
-            .number => |n| return .{ .lit = .{ .int = n } },
+            .number => |n| return .{ .lit = n },
             .string => |s| {
                 const n = try p.stringNode(s);
                 if (n.* != .lit) return p.syntax("pattern: a plain string expected", .{});
@@ -2988,19 +3934,25 @@ const TestHost = struct {
             return .nothing;
         }
         if (std.mem.eql(u8, name, "open")) {
+            // The world decides: a result, with the protocol's word.
             const path = args[0].str;
-            if (std.mem.eql(u8, path, "lib/math.msh")) return .{ .str = 
-                \\# a module: its bindings are its exports
-                \\let version = 2
-                \\def double [x] { $x * 2 }
-                \\def quad [x] { double (double $x) }
-                \\def fact [n] { if $n < 2 { 1 } else { $n * (fact ($n - 1)) } }
-            };
-            if (std.mem.eql(u8, path, "lib/self.msh")) return .{ .str = "let me = (use lib/self.msh)" };
-            if (std.mem.eql(u8, path, "lib/bad.msh")) return .{ .str = "def f { 1 }; frobnicate" };
-            return it.fail("open: {s}: not found", .{path});
+            if (std.mem.eql(u8, path, "lib/math.msh")) return try it.mkResult(true, .{ .str = math_module });
+            if (std.mem.eql(u8, path, "lib/self.msh")) return try it.mkResult(true, .{ .str = "let me = (use lib/self.msh)" });
+            if (std.mem.eql(u8, path, "lib/bad.msh")) return try it.mkResult(true, .{ .str = "def f { 1 }; frobnicate" });
+            return try it.mkResult(false, .{ .str = "not_found" });
+        }
+        // `module NAME`: a bare name is looked up in the store; a path
+        // is the host's `open`.
+        if (std.mem.eql(u8, name, "module")) {
+            const mname = args[0].str;
+            if (std.mem.indexOfScalar(u8, mname, '/') != null) return null;
+            if (std.mem.eql(u8, mname, "math")) return try it.mkResult(true, .{ .str = math_module });
+            // The real library, as the archive ships it.
+            if (std.mem.eql(u8, mname, "std-math")) return try it.mkResult(true, .{ .str = @embedFile("msh/math.msh") });
+            return try it.mkResult(false, .{ .str = "not_found" });
         }
         if (std.mem.eql(u8, name, "fails")) return it.fail("fails: as asked", .{});
+        if (std.mem.eql(u8, name, "lies")) return .{ .int = 1 };
         // Handles: `open-sock N` makes one; `close-sock $h` closes it;
         // dropped handles count in `dropped`.
         if (std.mem.eql(u8, name, "open-sock")) return try it.newHandle("socket", @intCast(args[0].int), ctx, dropSock);
@@ -3018,6 +3970,35 @@ const TestHost = struct {
         self.dropped += 1;
         self.last_dropped = id;
     }
+
+    const math_module =
+        \\# a module: its bindings are its exports
+        \\let version = 2
+        \\def double [x] { $x * 2 }
+        \\def quad [x] { double (double $x) }
+        \\def fact [n] { if $n < 2 { 1 } else { $n * (fact ($n - 1)) } }
+    ;
+
+    /// What `ls` answers, as the host would declare it from its protocol
+    /// types: the shape and the value come from one definition.
+    const Entry = struct { name: []const u8, type: enum { file, dir }, size: i64 };
+    const Stat = struct { type: enum { file, dir }, size: i64 };
+
+    // Shapes are built once, at compile time (shapeOf and resultShape
+    // run only there).
+    const stat_shape = shapeOf(Stat);
+    const ls_shape = shapeOf([]const Entry);
+    const open_shape = resultShape(.string, .{ .word = "not_found" });
+
+    fn signature(_: *anyopaque, name: []const u8) ?Signature {
+        const path = Param{ .name = "path", .shape = .string };
+        if (std.mem.eql(u8, name, "stat")) return .{ .params = &.{path}, .ret = stat_shape };
+        if (std.mem.eql(u8, name, "ls")) return .{ .params = &.{.{ .name = "path", .shape = .string, .optional = true }}, .ret = ls_shape };
+        if (std.mem.eql(u8, name, "open")) return .{ .params = &.{path}, .ret = open_shape };
+        if (std.mem.eql(u8, name, "save")) return .{ .params = &.{ path, .{ .name = "text", .optional = true } }, .input = .{ .optional = .any }, .ret = .nothing };
+        if (std.mem.eql(u8, name, "lies")) return .{ .ret = .string };
+        return null;
+    }
 };
 
 const TestState = struct {
@@ -3028,7 +4009,7 @@ const TestState = struct {
     fn start(self: *TestState) void {
         self.host = .{};
         self.arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-        self.it = Interp.init(self.arena_state.allocator(), std.testing.allocator, .{ .ctx = &self.host, .call = TestHost.call });
+        self.it = Interp.init(self.arena_state.allocator(), std.testing.allocator, .{ .ctx = &self.host, .call = TestHost.call, .signature = TestHost.signature });
     }
 
     fn stop(self: *TestState) void {
@@ -3159,8 +4140,9 @@ test "strings are UTF-8, bytes are bytes" {
     const it = &t.it;
     try expectOut(it, "\"héllo\" | len", "5\n");
     try expectOut(it, "\"héllo\" | to-bytes | len", "6\n");
-    try expectOut(it, "\"héllo\" | to-bytes | from-bytes", "ok héllo\n");
-    try expectOut(it, "(\"a\" | to-bytes) + (\"b\" | to-bytes) | from-bytes", "ok ab\n");
+    try expectOut(it, "\"héllo\" | to-bytes | from-bytes", "héllo\n");
+    try expectOut(it, "\"héllo\" | to-bytes | from-bytes | type", "result\n");
+    try expectOut(it, "(\"a\" | to-bytes) + (\"b\" | to-bytes) | from-bytes", "ab\n");
     try expectOut(it, "\"x\" | to-bytes", "<bytes: 1>\n");
     try expectRuntime(it, "\"a\" + (\"b\" | to-bytes)", "cannot add a string and a bytes");
     try expectRuntime(it, "\"a\" | to-bytes | to-data", "to-data: a bytes is not data (functions, results, handles and bytes never are)");
@@ -3316,14 +4298,17 @@ test "results: ok, err, ?, try, and match on them" {
     t.start();
     defer t.stop();
     const it = &t.it;
-    try expectOut(it, "ok 1", "ok 1\n");
+    // At the top an ok shows what it holds; inline (echo, str, a list) it says ok.
+    try expectOut(it, "ok 1", "1\n");
+    try expectOut(it, "echo (ok 1)", "ok 1\n");
+    try expectOut(it, "[(ok 1), (err 2)]", "ok 1\nerr 2\n");
     try expectOut(it, "err \"boom\"", "err boom\n");
     try expectOut(it, "(ok 5)? + 1", "6\n");
     try expectOut(it, "match (int \"7\") { ok $n => $n * 2; err $e => -1 }", "14\n");
     try expectOut(it, "match (int x) { ok $n => $n * 2; err $e => -1 }", "-1\n");
     try expectOut(it, "match (int x) { ok $n => $n; err { code: $c } => $c; err $e => \"failed: $e\" }", "failed: not a number: x\n");
     // ? inside a function returns the err from that function.
-    try expectOut(it, "def parse2 [a, b] { ok ((int $a)? + (int $b)?) }; parse2 1 2", "ok 3\n");
+    try expectOut(it, "def parse2 [a, b] { ok ((int $a)? + (int $b)?) }; echo (parse2 1 2)", "ok 3\n");
     try expectOut(it, "parse2 1 x", "err not a number: x\n");
     try expectOut(it, "def total { $in | map { (int $it)? } | reduce 0 { $acc + $it } }; [\"1\", \"2\"] | total", "3\n");
     // The pipeline form: `stage ?`.
@@ -3334,7 +4319,10 @@ test "results: ok, err, ?, try, and match on them" {
     try expectRuntime(it, "5?", "?: needs a result, got a int");
     // try: a failing command becomes an err value; a good one an ok.
     try expectOut(it, "try { fails }", "err fails: as asked\n");
-    try expectOut(it, "try { 1 + 1 }", "ok 2\n");
+    try expectOut(it, "echo (try { 1 + 1 })", "ok 2\n");
+    // A result passes through try as it is: no double wrapping.
+    try expectOut(it, "echo (try { int x })", "err not a number: x\n");
+    try expectOut(it, "echo (try (ok 4))", "ok 4\n");
     try expectOut(it, "try (fails)", "err fails: as asked\n");
     try expectOut(it, "match (try { fails }) { ok _ => \"fine\"; err $e => \"caught: $e\" }", "caught: fails: as asked\n");
     try expectOut(it, "try { (int x)? }", "err not a number: x\n");
@@ -3359,9 +4347,169 @@ test "use: a file is a module, its bindings a record" {
     try expectOut(it, "[1, 2] | map $math.double", "2\n4\n");
     // The module's scope outlives the record that reached it.
     try expectOut(it, "let q = $math.quad; let math = 0; $q 3", "12\n");
-    try expectRuntime(it, "use lib/none.msh", "open: lib/none.msh: not found");
+    try expectRuntime(it, "use lib/none.msh", "use: lib/none.msh: not_found");
     try expectRuntime(it, "use lib/bad.msh", "unknown command 'frobnicate'");
     try expectRuntime(it, "use lib/self.msh", "use: modules nested too deep at lib/self.msh");
+    // A bare name is a module in the store (the host's `module` command).
+    try expectOut(it, "let m = (use math); $m.double 4", "8\n");
+    try expectRuntime(it, "use nope", "use: nope: not_found");
+}
+
+test "the standard library: lib/msh/math.msh through use" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    try expectOut(it, "let m = (use std-math); [3, 1, 2] | $m.sum", "6\n");
+    // A function value as a stage is called with the input; alone it is the value.
+    try expectOut(it, "$m.sum", "<fn sum []>\n");
+    try expectOut(it, "let total = $m.sum; [1, 2] | $total", "3\n");
+    try expectOut(it, "[1.5, 2.5] | $m.sum", "4.0\n");
+    try expectOut(it, "[] | $m.sum", "0\n");
+    try expectOut(it, "[4, 5] | $m.product", "20\n");
+    try expectOut(it, "[3, 9, 2] | $m.max-of", "9\n");
+    try expectOut(it, "[3, 9, 2] | $m.min-of", "2\n");
+    try expectOut(it, "[1.0, 2.0, 6.0] | $m.mean", "3.0\n");
+    try expectOut(it, "[1, 2] | $m.mean", "1.5\n");
+    try expectOut(it, "[] | $m.mean", "0.0\n");
+    try expectOut(it, "$m.clamp 15 0 10", "10\n");
+    try expectOut(it, "$m.clamp (0 - 3) 0 10", "0\n");
+}
+
+test "floats: a second kind of number, never mixed with the first" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    try expectOut(it, "1.5 + 2.25", "3.75\n");
+    try expectOut(it, "3.0", "3.0\n");
+    try expectOut(it, "2e3", "2000.0\n");
+    try expectOut(it, "1.5kb", "1536.0\n");
+    try expectOut(it, "-0.5 * 4.0", "-2.0\n");
+    try expectOut(it, "7.0 / 2.0", "3.5\n");
+    try expectOut(it, "1.0 / 3.0", "0.3333333333333333\n");
+    try expectOut(it, "7.5 % 2.0", "1.5\n");
+    try expectOut(it, "type 1.5", "float\n");
+    try expectOut(it, "1.2.3", "1.2.3\n"); // a version, not a number
+    try expectRuntime(it, "1 + 1.5", "cannot add a int and a float");
+    try expectRuntime(it, "2 * 1.5", "arithmetic needs two ints or two floats, got a int and a float");
+    try expectRuntime(it, "1.0 / 0.0", "division by zero");
+    try expectRuntime(it, "1.5 == 1", "cannot compare a float with a int");
+    try expectOut(it, "1.5 < 2.0 and 2.0 == 2.0", "true\n");
+    // Conversions are commands with typed answers.
+    try expectOut(it, "(float 2)? * 1.5", "3.0\n");
+    try expectOut(it, "(int 2.9)?", "2\n");
+    try expectOut(it, "(-2.9 | int)?", "-2\n");
+    try expectOut(it, "float \"1e-3\"", "0.001\n");
+    try expectOut(it, "echo (float x)", "err not a number: x\n");
+    try expectOut(it, "echo (int 1e30)", "err not an int: 1e30\n");
+    try expectOut(it, "[(round 2.5), (floor 2.5), (ceil 2.5), (round 3)]", "3.0\n2.0\n3.0\n3\n");
+    try expectOut(it, "str 2.50", "2.5\n");
+    // Data and JSON carry floats as floats.
+    try expectOut(it, "[1.5, 0.25] | to-data", "[1.5, 0.25]\n");
+    try expectOut(it, "{ x: 1e21, y: 3.0 } | to-data | from-data | get x", "1e21\n");
+    try expectOut(it, "[1.5, 3.0] | to-json", "[1.5,3.0]\n");
+    try expectOut(it, "\"{\\\"v\\\": 2.5}\" | from-json | get v | type", "float\n");
+    try expectRuntime(it, "(1e308 * 10.0) | to-data", "to-data: a float is not data (functions, results, handles and bytes never are)");
+}
+
+test "shapes: annotations checked where they run, check at a boundary" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    // let
+    try expectOut(it, "let n: int = 3; $n", "3\n");
+    try expectRuntime(it, "let s: string = 5", "let: s is 5, not string");
+    try expectOut(it, "let e: { name: string, size: int } = { name: a, size: 1, extra: true }; $e.extra", "true\n");
+    try expectRuntime(it, "let e: { name: string, size: int } = { name: a, size: x }", "let: e.size is x, not int");
+    try expectRuntime(it, "let e: { name: string } = { size: 1 }", "let: e has no field 'name'");
+    try expectRuntime(it, "let l: [int] = [1, 2, x]", "let: l[2] is x, not int");
+    try expectRuntime(it, "let k: dir | file = symlink", "let: k is symlink, not dir | file");
+    try expectOut(it, "let o: int | nothing = null; $o == null", "true\n");
+    try expectOut(it, "let f: float = 1.5; $f", "1.5\n");
+    try expectOut(it, "let t: [{ name: string }] = (ls); $t | len", "3\n");
+    try expectRuntime(it, "let t: [{ name: int }] = (ls)", "let: t[0].name is hi.txt, not int");
+    try expectOut(it, "let r: ok int | err string = (int \"4\"); $r", "4\n");
+    try expectRuntime(it, "let r: ok string = (int \"4\")", "let: r (ok) is 4, not string");
+    try expectRuntime(it, "let r: err any = (int \"4\")", "let: r is ok 4, not err any");
+    // Parameters and returns, checked at the call.
+    try expectOut(it, "def twice [x: int] -> int { $x * 2 }; twice 21", "42\n");
+    try expectRuntime(it, "twice a", "twice: x is a, not int");
+    try expectRuntime(it, "def bad [x: int] -> string { $x }; bad 1", "bad: return is 1, not string");
+    try expectOut(it, "def safe [t: string] -> ok int | err string { int $t }; safe \"4\"", "4\n");
+    try expectOut(it, "echo (safe q)", "err not a number: q\n");
+    try expectOut(it, "(fn [a: bool] { $a }) true", "true\n");
+    try expectOut(it, "def first-name [r: { name: string }] { $r.name }; first-name { name: bo, age: 3 }", "bo\n");
+    // Shapes are values; `check` answers a result.
+    try expectOut(it, "let S = shape { name: string, size: int }; type $S", "shape\n");
+    try expectOut(it, "$S", "{ name: string, size: int }\n");
+    try expectOut(it, "{ name: a, size: 1 } | check $S", "name: a\nsize: 1\n");
+    try expectOut(it, "echo ({ name: a } | check $S)", "err it has no field 'size'\n");
+    try expectOut(it, "echo (check 3 shape int)", "ok 3\n");
+    try expectOut(it, "echo (5 | check shape (int | string))", "ok 5\n");
+    try expectOut(it, "5 | check shape int | type", "result\n");
+    try expectOut(it, "let T = shape [$S]; $T", "[{ name: string, size: int }]\n");
+    try expectOut(it, "(ls | check $T)? | len", "3\n");
+    try expectOut(it, "shape (ok int | err (string | nothing))", "ok int | err (string | nothing)\n");
+    try expectOut(it, "shape handle socket", "handle socket\n");
+    try expectOut(it, "echo ((open-sock 1) | check shape handle socket | type)", "result\n");
+    try expectOut(it, "shape (\"two words\" | \"int\")", "\"two words\" | \"int\"\n");
+    try expectRuntime(it, "let x: $nope = 1", "shape: unknown variable $nope");
+    try expectRuntime(it, "let y = 1; let x: $y = 1", "shape: $y is a int, not a shape");
+    try expectRuntime(it, "shape { a: int } | to-data", "to-data: a shape is not data (functions, results, handles and bytes never are)");
+    // A shape in a closure resolves in the closure's scope.
+    try expectOut(it, "def mk [] { let P = shape int; fn [x: $P] { $x } }; let g = (mk); $g 7", "7\n");
+    try expectRuntime(it, "$g a", "fn: x is a, not int");
+    // match with a shape: the subject must fit, the arms must cover it.
+    try expectOut(it, "match dir: dir | file { dir => 1; file => 2 }", "1\n");
+    try expectRuntime(it, "match dir: dir | file | symlink { dir => 1; file => 2 }", "match: the arms do not cover symlink");
+    try expectRuntime(it, "match x: dir | file { dir => 1; file => 2 }", "match: subject is x, not dir | file");
+    try expectOut(it, "match (int \"3\"): ok int | err string { ok $n => $n; err _ => 0 }", "3\n");
+    try expectRuntime(it, "match (int \"3\"): result { ok _ => 1 }", "match: the arms do not cover err any");
+    try expectRuntime(it, "match (int \"3\"): ok (int | nothing) | err string { ok $n if $n > 1 => $n; ok null => 0; err _ => 0 }", "match: the arms do not cover ok int");
+    try expectRuntime(it, "match 5: int { 5 => a }", "match: the arms do not cover int");
+    try expectOut(it, "match true: bool { true => 1; false => 0 }", "1\n");
+    try expectRuntime(it, "match true: bool { true => 1 }", "match: the arms do not cover false");
+    try expectOut(it, "match { name: a }: { name: string } { { name: $n } => $n }", "a\n");
+    try expectRuntime(it, "match { name: dir }: { name: dir | file } { { name: dir } => 1 }", "match: the arms do not cover { name: dir | file }");
+    try expectOut(it, "match { name: file }: { name: dir | file } { { name: dir } => 1; { name: file } => 2 }", "2\n");
+    try expectOut(it, "match [1]: [int] { [..] => \"y\" }", "y\n");
+    try expectRuntime(it, "match [1]: [int] { [$h, ..] => $h }", "match: the arms do not cover [int]");
+    // Two fields: every combination must be covered.
+    try expectRuntime(it, "match { a: dir, b: true }: { a: dir | file, b: bool } { { a: dir, b: true } => 1; { a: file } => 2 }", "match: the arms do not cover { a: dir | file, b: bool }");
+    try expectOut(it, "match { a: dir, b: false }: { a: dir | file, b: bool } { { a: dir, b: true } => 1; { a: file } => 2; { b: false } => 3 }", "3\n");
+    try expectOut(it, "let K = shape (dir | file); match file: $K { dir => 1; file => 2 }", "2\n");
+    try expectOut(it, "def kind [t: dir | file] { match $t: dir | file { dir => \"d\"; file => \"f\" } }; kind file", "f\n");
+}
+
+test "signatures: a host command is checked at the boundary, both ways" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    try expectOut(it, "stat x | get type", "dir\n");
+    try expectRuntime(it, "stat 1", "stat: path is 1, not string");
+    try expectRuntime(it, "stat", "stat: path expected");
+    try expectRuntime(it, "stat a b", "stat: 1 argument(s) at most, got 2");
+    try expectRuntime(it, "ls | stat x", "stat: takes no input, got a table");
+    try expectOut(it, "ls | len", "3\n");
+    try expectOut(it, "ls data | len", "3\n");
+    try expectRuntime(it, "ls 1", "ls: path is 1, not string");
+    // The host's own answer is checked too, and the blame is placed.
+    try expectRuntime(it, "lies", "lies: answer is 1, not string (the host's slip, not yours)");
+    // No signature: no check (the command is on its own).
+    try expectRuntime(it, "fails 1 2 3", "fails: as asked");
+    // `signature NAME` is a record of shape values.
+    try expectOut(it, "(signature stat).returns", "{ type: file | dir, size: int }\n");
+    try expectOut(it, "(signature ls).params | get name", "path\n");
+    try expectOut(it, "(signature ls).params | get optional", "true\n");
+    try expectOut(it, "(signature ls).returns", "[{ name: string, type: file | dir, size: int }]\n");
+    try expectOut(it, "(signature open).returns", "ok string | err not_found\n");
+    try expectOut(it, "(signature save).input", "any\n");
+    try expectOut(it, "signature nope", "");
+    try expectOut(it, "(stat x | check (signature stat).returns)? | get size", "0\n");
+    try expectOut(it, "let sh: shape = (signature ls).returns; (ls | check $sh)? | len", "3\n");
 }
 
 test "memory: boxes are counted exactly and released when unbound" {
@@ -3465,7 +4613,7 @@ test "json: to-json and from-json, tables included" {
     try expectOut(it, "ls | to-json", "[{\"name\":\"hi.txt\",\"type\":\"file\",\"size\":27},{\"name\":\"big.bin\",\"type\":\"file\",\"size\":8192},{\"name\":\"sub\",\"type\":\"dir\",\"size\":0}]\n");
     try expectOut(it, "ls | to-json | from-json | where size > 1kb | get name", "big.bin\n");
     try expectOut(it, "\"{\\\"k\\\": [1, 2]}\" | from-json | get k | len", "2\n");
-    try expectRuntime(it, "\"[1.5]\" | from-json", "from-json: a number with a fraction or exponent (no floats yet)");
+    try expectOut(it, "\"[1.5, 2e3]\" | from-json | to-json", "[1.5,2000.0]\n");
     try expectRuntime(it, "\"nope\" | from-json", "from-json: not JSON");
     try expectRuntime(it, "(fn { 1 }) | to-json", "to-json: a function is not data (functions, results, handles and bytes never are)");
 }

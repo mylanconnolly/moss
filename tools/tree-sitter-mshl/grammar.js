@@ -6,7 +6,11 @@
  * that starts with a bare word is a command with arguments; one that
  * starts with a variable followed by arguments is a call of a function
  * value; anything else is an expression. Bare words are strings, keys
- * carry their colon, numbers take size units, `?` unwraps a result.
+ * carry their colon, numbers take size units (a fraction or an exponent
+ * makes a float), `?` unwraps a result. Shapes follow a `name:` in a
+ * `let` or a parameter list, a `->` after the parameters, a `:` after a
+ * match subject, or the word `shape`: type names, words, `[S]`,
+ * `{ key: S }`, `ok S`, `S | S`, `$name`.
  */
 
 const PREC = {
@@ -40,6 +44,7 @@ module.exports = grammar({
     [$.lambda_block, $._primary],
     [$._argument, $._primary],
     [$._separator, $.record],
+    [$._argument, $._expression],
   ],
 
   rules: {
@@ -64,12 +69,22 @@ module.exports = grammar({
     _statement: ($) =>
       choice($.let_statement, $.def_statement, $.if_statement, $.for_statement, $.while_statement, $.pipeline),
 
-    let_statement: ($) => seq('let', field('name', $.identifier), '=', field('value', $._expression)),
+    let_statement: ($) =>
+      seq('let', choice(field('name', $.identifier), $.typed_name), '=', field('value', $._expression)),
+
+    // `name: shape` — the name keeps its colon as one token, like a key.
+    typed_name: ($) => seq(field('name', alias($.record_key, $.identifier)), field('shape', $._shape)),
 
     def_statement: ($) =>
-      seq('def', field('name', $.identifier), optional(field('parameters', $.parameters)), field('body', $.block)),
+      seq(
+        'def',
+        field('name', $.identifier),
+        optional(field('parameters', $.parameters)),
+        optional(seq('->', field('returns', $._shape))),
+        field('body', $.block),
+      ),
 
-    parameters: ($) => seq('[', commaSep($.identifier), ']'),
+    parameters: ($) => seq('[', commaSep(choice($.identifier, $.typed_name)), ']'),
 
     if_statement: ($) =>
       seq(
@@ -121,6 +136,7 @@ module.exports = grammar({
         $.list,
         $.record,
         $.lambda_block,
+        $.shape_expression,
       ),
 
     // In argument position a variable or a parenthesized pipeline may
@@ -135,7 +151,17 @@ module.exports = grammar({
     // ------------------------------------------------------------ expressions
 
     _expression: ($) =>
-      choice($.binary_expression, $.unary_expression, $.unwrap, $.field_access, $.fn_expression, $.match_expression, $.try_expression, $._primary),
+      choice(
+        $.binary_expression,
+        $.unary_expression,
+        $.unwrap,
+        $.field_access,
+        $.fn_expression,
+        $.match_expression,
+        $.try_expression,
+        $.shape_expression,
+        $._primary,
+      ),
 
     binary_expression: ($) =>
       choice(
@@ -167,14 +193,64 @@ module.exports = grammar({
 
     record_key: ($) => token(prec(2, /[A-Za-z_][A-Za-z0-9_-]*:/)),
 
-    fn_expression: ($) => seq('fn', optional(field('parameters', $.parameters)), field('body', $.block)),
+    fn_expression: ($) =>
+      seq('fn', optional(field('parameters', $.parameters)), optional(seq('->', field('returns', $._shape))), field('body', $.block)),
+
+    // ---------------------------------------------------------------- shapes
+
+    // `shape S`: a shape as a value. One term — a union is written
+    // `shape (a | b)`, so a `|` after it is always the pipe.
+    shape_expression: ($) => seq('shape', field('shape', $._shape_term)),
+
+    _shape: ($) => choice($.shape_union, $._shape_term),
+
+    shape_union: ($) => prec.left(seq($._shape, '|', $._shape)),
+
+    _shape_term: ($) =>
+      choice(
+        $.shape_name,
+        $.handle_shape,
+        $.result_shape,
+        $.list_shape,
+        $.record_shape,
+        $.paren_shape,
+        $.string,
+        $.variable,
+        $.shape_word,
+      ),
+
+    shape_name: ($) =>
+      choice('any', 'nothing', 'null', 'bool', 'int', 'float', 'string', 'bytes', 'list', 'record', 'table', 'function', 'result', 'shape'),
+
+    // `handle`, or `handle socket`.
+    handle_shape: ($) => prec.right(seq('handle', optional(field('kind', $.identifier)))),
+
+    result_shape: ($) => prec.right(seq(choice('ok', 'err'), $._shape_term)),
+
+    list_shape: ($) => seq('[', $._shape, ']'),
+
+    record_shape: ($) => seq('{', repeat(choice($.shape_field, ',', '\n', ';')), '}'),
+
+    shape_field: ($) => seq(field('key', $.record_key), field('shape', $._shape)),
+
+    paren_shape: ($) => seq('(', $._shape, ')'),
+
+    // A bare word in a shape: one member of an enumeration.
+    shape_word: ($) => $.identifier,
 
     try_expression: ($) => prec(PREC.postfix + 1, seq('try', choice($.block, $._postfix_argument))),
 
     // --------------------------------------------------------------- match
 
     match_expression: ($) =>
-      seq('match', field('subject', $._expression), '{', repeat(choice($.match_arm, $._separator, ',')), '}'),
+      seq(
+        'match',
+        field('subject', $._expression),
+        optional(seq(':', field('shape', $._shape))),
+        '{',
+        repeat(choice($.match_arm, $._separator, ',')),
+        '}',
+      ),
 
     match_arm: ($) =>
       seq(field('pattern', $._pattern), optional(seq('if', field('guard', $._expression))), '=>', field('body', choice($.block, $._statement))),
@@ -199,7 +275,7 @@ module.exports = grammar({
     escape_sequence: ($) => token.immediate(/\\./),
     interpolation: ($) => seq(token.immediate('$'), alias(token.immediate(/[A-Za-z_][A-Za-z0-9_]*/), $.identifier)),
 
-    number: ($) => token(/[0-9]+([kKmMgG][bB]|[bB])?/),
+    number: ($) => token(/[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?([kKmMgG][bB]|[bB])?/),
 
     boolean: ($) => choice('true', 'false'),
     null: ($) => 'null',

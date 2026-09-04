@@ -259,3 +259,43 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
 }
 
 pub const command_names = [_][]const u8{ "http-read", "http-write", "serve", "fetch" };
+
+// ---------------------------------------------------------- signatures
+
+const Shape = mshl.Shape;
+const socket: Shape = .{ .kind = "socket" };
+const listener: Shape = .{ .kind = "listener" };
+const text_or_bytes = blk: {
+    const alts = [_]Shape{ .string, .bytes };
+    break :blk Shape{ .one_of = &alts };
+};
+const maybe_text = blk: {
+    const alts = [_]Shape{ .string, .nothing };
+    break :blk Shape{ .one_of = &alts };
+};
+/// What `http-read` answers: the request as a record.
+const request_shape = blk: {
+    const fields = [_]Shape.Field{
+        .{ .key = "method", .shape = .string },  .{ .key = "path", .shape = .string },       .{ .key = "query", .shape = maybe_text },
+        .{ .key = "headers", .shape = .record }, .{ .key = "body", .shape = text_or_bytes },
+    };
+    break :blk Shape{ .record_of = &fields };
+};
+/// What `fetch` answers.
+const response_shape = blk: {
+    const fields = [_]Shape.Field{ .{ .key = "status", .shape = .int }, .{ .key = "headers", .shape = .record }, .{ .key = "body", .shape = text_or_bytes } };
+    break :blk Shape{ .record_of = &fields };
+};
+const read_result = mshl.resultShape(request_shape, .string);
+const done_result = mshl.resultShape(.nothing, .string);
+const count_result = mshl.resultShape(.int, .string);
+const fetch_result = mshl.resultShape(response_shape, .string);
+
+pub fn signature(name: []const u8) ?mshl.Signature {
+    const is = std.mem.eql;
+    if (is(u8, name, "http-read")) return .{ .params = &.{.{ .name = "socket", .shape = socket, .optional = true }}, .input = .{ .optional = socket }, .ret = read_result };
+    if (is(u8, name, "http-write")) return .{ .params = &.{ .{ .name = "socket", .shape = socket }, .{ .name = "response" } }, .ret = done_result };
+    if (is(u8, name, "serve")) return .{ .params = &.{ .{ .name = "listener", .shape = listener }, .{ .name = "handler", .shape = .function }, .{ .name = "count", .shape = .int, .optional = true } }, .ret = count_result };
+    if (is(u8, name, "fetch")) return .{ .params = &.{ .{ .name = "url", .shape = .string }, .{ .name = "options", .shape = .record, .optional = true } }, .ret = fetch_result };
+    return null;
+}

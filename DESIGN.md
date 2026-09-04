@@ -1484,6 +1484,86 @@ reader. Not built: rename, references, incremental sync, semantic
 tokens — the tree-sitter highlights cover the last, and the rest wait
 for an editor to ask.
 
+**mshl v3, stage 6 (as built, 2026-09-04): shapes, signatures,
+results, floats, the library.** The residuals of stage 1, closed
+together because they are one idea: the boundary is where a type is
+checked. *Shapes* are a value kind and a small grammar of their own —
+type names, bare words as an enumeration's members, `[S]`, open
+records `{ k: S }`, `ok S` / `err S`, `S | S`, `$Name` — written after
+a `let name:`, a parameter, a `->`, a `match` subject, or the word
+`shape`; the checker (`Interp.mismatch`) walks value and shape
+together and names the first thing that does not fit by path
+(`e.size is x, not int`, `t[0].name`, `r (ok)`). Checked where they
+run and nowhere earlier; a `$Name` in an annotation resolves in the
+closure's own scope (captured like any name) and a shape *value*
+never carries one (`shape` resolves them when it evaluates).
+`match v: S` checks the subject and then that the arms *cover* S
+before any arm is tried — words by literal, `bool` by both literals,
+results side by side, records by case splitting on the first field a
+pattern names (the first cut asked one pattern to cover every field,
+which refused `{ a: dir } / { a: file }` over `{ a: dir | file }`; the
+split is the textbook one, and the two-field counter-example is in the
+tests). *Signatures*: a host says, per command, its parameters, its
+input and its answer as shapes (`Host.signature`), and the
+interpreter checks the arguments and the input before the call and
+the answer after it, blaming the host for the latter ("the host's
+slip, not yours"); `mshl.shapeOf(T)` derives a shape from a Zig type
+at compile time — struct to open record, enum to a union of words,
+slice to `[S]`, `?T` to `S | nothing` — and `mshl.toValue` builds the
+value from the same type, so `fscmds.Stat`, `Df`, the shell's `Proc`,
+`Svc`, `Node`, `Mem` and the protocol's error enums are each declared
+once; `signature NAME` hands the record back with its shapes as shape
+values (`ls data? | check (signature ls).returns`). *Results*: every
+command whose outcome the world decides answers `ok v` / `err word`,
+the word from the protocol's own enumeration (`shared.FsErr`, `NetErr`,
+`FabErr`, `@tagName`), through new error-reporting variants in
+`fsclient` (`fsListR` and kin) so the word is the service's, not a
+guess; misuse is the signature's typed error; infrastructure that did
+not answer is still `fail`. The prompt renders a top-level `ok` as
+what it holds and an `err` as `err word`; `try` passes a result
+through unchanged (it was wrapping `ok (err x)`); `use` reads a
+result. *Floats* are a second number that never mixes with the first
+(`float`/`int` convert, `round`/`floor`/`ceil`), lexed by a fraction
+or an exponent so `1.2.3` and `10.77.0.1` stay words, rendered with a
+fraction always (`3.0`) and in exponent form when huge or tiny, data
+and JSON on both sides. *The library*: `lib/msh/*.msh` — host-tested
+through the interpreter's test host, packed into the archive as
+`lib/` — is installed into the store by init beside the images — the text under its digest,
+a manifest `{ source: "<digest>" }` — and `use name` (no `/`, no
+`.msh`) asks the host for `module name`, which reads the shell's own
+store then the system's, verifies the blob against the digest, and
+evaluates it; `install name` copies a module like a program; `run`
+gives a program the system store when its manifest says `{ tag: store
+}` (mshrun's does). The grammar, formatter, lint and language server
+learned the syntax (`typed_name` aliases the key token so `x:` keeps
+its colon; the lint skips exhaustiveness when a shape is present; a
+`:` leaf glues to its subject). Decisions taken while building: the
+`shape` keyword takes *one* term (`shape (a | b)`), because a greedy
+union read `check shape int | len` as the enumeration `int | "len"`
+and silently ate the stage — a delimited annotation position takes a
+bare union; a word spelt like a type name renders quoted (`"int"`) or
+it would read back as the type, while `true`/`false`/`null` render bare
+in a shape since they are words there; a bare word or number before
+the match colon is one token (`dir:`, `5:`) and is split by the
+interpreter, but the tools' grammar wants a variable or parentheses.
+A function value alone in a stage with pipeline input is called with
+it (`[1, 2] | $m.sum`): there was no other way to call a function of
+no parameters reached through a record, and `$f` by itself stays the
+value. In Zig, `shapeOf` and `resultShape` build their slices at
+compile time and refuse a runtime call, so a host keeps its shapes in
+container constants. Two runner lessons: the console tap was a 64 KB
+buffer whose reader thread quietly stopped when it filled, so once
+the scripted session said more than that every later step looked
+like a shell that hung on a line it had in fact answered — the tap is
+4 MB now and an overflow is a named failure, and a failed step prints
+what the console said; and a userspace panic exited with 255 and no
+word, which reads the same way from a console, so msh and mshrun log
+the panic message first. The shell drill grew a dozen steps (a result matched on
+its word, a wrong argument refused by a signature, a float, an
+annotated `let`, an uncovered enumeration, `use math` from the store,
+a script that `use`s it under `mshrun`) and the login drill installs
+a module into a home.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

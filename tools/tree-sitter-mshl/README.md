@@ -29,4 +29,10 @@ else is an expression. `where` takes an expression. Statements are
 separated by newlines or `;`, never merely adjacent. A `.` glued to a
 primary is field access even though `.` may begin a word (`cat .hidden`
 is a word; `$m.double` is a field). Keys carry their colon
-(`name:`), numbers take size units, `?` unwraps a result.
+(`name:`), and so does a name before a shape (`let x: int`, `[n: int]`
+— the same token, aliased to an identifier under `typed_name`);
+numbers take size units, and a fraction or an exponent makes a float;
+`?` unwraps a result. Shapes (`shape_name`, `shape_word`, `list_shape`,
+`record_shape`, `result_shape`, `handle_shape`, `shape_union`,
+`paren_shape`, a `variable`) follow `->`, a `:` after a match subject,
+or the `shape` keyword, which takes one term.

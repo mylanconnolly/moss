@@ -154,3 +154,139 @@ echo done
       (identifier)
       (bare_word
         (identifier)))))
+
+================================================================================
+shapes: annotations, returns, match subjects, the shape keyword
+================================================================================
+let e: { name: string, size: int } = (stat data/x)?
+let k: dir | file | nothing = dir
+def twice [x: int, y] -> int { $x * 2 }
+let f = fn [a: [int]] -> ok int | err string { ok 1 }
+match $k: dir | file { dir => 1; file => 2 }
+let S = shape { name: string, kinds: [dir | "file"], sock: handle socket, r: ok $S }
+$v | check shape (int | float)
+let x = 1.5 * 2e3 + 0.25kb
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_statement
+    (typed_name
+      (identifier)
+      (record_shape
+        (shape_field
+          (record_key)
+          (shape_name))
+        (shape_field
+          (record_key)
+          (shape_name))))
+    (unwrap
+      (paren
+        (pipeline
+          (command
+            (identifier)
+            (bare_word
+              (identifier)))))))
+  (let_statement
+    (typed_name
+      (identifier)
+      (shape_union
+        (shape_union
+          (shape_word
+            (identifier))
+          (shape_word
+            (identifier)))
+        (shape_name)))
+    (bare_word
+      (identifier)))
+  (def_statement
+    (identifier)
+    (parameters
+      (typed_name
+        (identifier)
+        (shape_name))
+      (identifier))
+    (shape_name)
+    (block
+      (pipeline
+        (binary_expression
+          (variable
+            (identifier))
+          (number)))))
+  (let_statement
+    (identifier)
+    (fn_expression
+      (parameters
+        (typed_name
+          (identifier)
+          (list_shape
+            (shape_name))))
+      (shape_union
+        (result_shape
+          (shape_name))
+        (result_shape
+          (shape_name)))
+      (block
+        (pipeline
+          (command
+            (identifier)
+            (number))))))
+  (pipeline
+    (match_expression
+      (variable
+        (identifier))
+      (shape_union
+        (shape_word
+          (identifier))
+        (shape_word
+          (identifier)))
+      (match_arm
+        (bare_word
+          (identifier))
+        (pipeline
+          (number)))
+      (match_arm
+        (bare_word
+          (identifier))
+        (pipeline
+          (number)))))
+  (let_statement
+    (identifier)
+    (shape_expression
+      (record_shape
+        (shape_field
+          (record_key)
+          (shape_name))
+        (shape_field
+          (record_key)
+          (list_shape
+            (shape_union
+              (shape_word
+                (identifier))
+              (string
+                (string_text)))))
+        (shape_field
+          (record_key)
+          (handle_shape
+            (identifier)))
+        (shape_field
+          (record_key)
+          (result_shape
+            (variable
+              (identifier)))))))
+  (pipeline
+    (variable
+      (identifier))
+    (command
+      (identifier)
+      (shape_expression
+        (paren_shape
+          (shape_union
+            (shape_name)
+            (shape_name))))))
+  (let_statement
+    (identifier)
+    (binary_expression
+      (binary_expression
+        (number)
+        (number))
+      (number))))

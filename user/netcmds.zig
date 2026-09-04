@@ -158,28 +158,57 @@ fn ncall(n: *Net, req: shared.NetReq) ?shared.NetResp {
     };
 }
 
+/// The protocol's error, as the word a script matches on.
 fn errName(code: u64) []const u8 {
-    return switch (code) {
-        @intFromEnum(shared.NetErr.would_block) => "would block",
-        @intFromEnum(shared.NetErr.denied) => "denied by the view",
-        @intFromEnum(shared.NetErr.refused) => "refused",
-        @intFromEnum(shared.NetErr.closed) => "closed",
-        @intFromEnum(shared.NetErr.bad) => "bad socket or argument",
-        @intFromEnum(shared.NetErr.no_space) => "no socket left",
-        else => "network error",
-    };
+    const e = std.enums.fromInt(shared.NetErr, code) orelse return "error";
+    return @tagName(e);
 }
 
+/// A socket's state, as `status` answers it.
+pub const SockState = enum { closed, listening, connecting, handshaking, established, peer_closed };
+
 fn stateName(st: u64) []const u8 {
-    return switch (st) {
-        @intFromEnum(shared.TcpState.closed) => "closed",
-        @intFromEnum(shared.TcpState.listen) => "listening",
-        @intFromEnum(shared.TcpState.syn_sent) => "connecting",
-        @intFromEnum(shared.TcpState.syn_rcvd) => "handshaking",
-        @intFromEnum(shared.TcpState.established) => "established",
-        @intFromEnum(shared.TcpState.close_wait) => "peer closed",
-        else => "?",
+    const state: SockState = switch (st) {
+        @intFromEnum(shared.TcpState.closed) => .closed,
+        @intFromEnum(shared.TcpState.listen) => .listening,
+        @intFromEnum(shared.TcpState.syn_sent) => .connecting,
+        @intFromEnum(shared.TcpState.syn_rcvd) => .handshaking,
+        @intFromEnum(shared.TcpState.established) => .established,
+        @intFromEnum(shared.TcpState.close_wait) => .peer_closed,
+        else => .closed,
     };
+    return @tagName(state);
+}
+
+// ---------------------------------------------------------- signatures
+
+const Shape = mshl.Shape;
+const net_err = blk: {
+    const alts = [_]Shape{ mshl.shapeOf(shared.NetErr), .{ .word = "error" } };
+    break :blk Shape{ .one_of = &alts };
+};
+const socket: Shape = .{ .kind = "socket" };
+const listener: Shape = .{ .kind = "listener" };
+const sock_result = mshl.resultShape(socket, net_err);
+const listener_result = mshl.resultShape(listener, net_err);
+const sent_result = mshl.resultShape(.int, net_err);
+const recv_result = mshl.resultShape(.bytes, net_err);
+const data_shape = blk: {
+    const alts = [_]Shape{ .string, .bytes };
+    break :blk Shape{ .one_of = &alts };
+};
+const any_handle_state = mshl.shapeOf(SockState);
+
+pub fn signature(name: []const u8) ?mshl.Signature {
+    const is = std.mem.eql;
+    if (is(u8, name, "connect")) return .{ .params = &.{ .{ .name = "addr", .shape = .string }, .{ .name = "port", .shape = .int } }, .ret = sock_result };
+    if (is(u8, name, "listen")) return .{ .params = &.{.{ .name = "port", .shape = .int }}, .ret = listener_result };
+    if (is(u8, name, "accept")) return .{ .params = &.{.{ .name = "listener", .shape = listener, .optional = true }}, .input = .{ .optional = listener }, .ret = sock_result };
+    if (is(u8, name, "send")) return .{ .params = &.{ .{ .name = "socket", .shape = socket }, .{ .name = "data", .shape = data_shape } }, .ret = sent_result };
+    if (is(u8, name, "recv")) return .{ .params = &.{ .{ .name = "socket", .shape = socket, .optional = true }, .{ .name = "max", .shape = .int, .optional = true } }, .input = .{ .optional = socket }, .ret = recv_result };
+    if (is(u8, name, "close")) return .{ .params = &.{.{ .name = "handle", .shape = .handle, .optional = true }}, .input = .{ .optional = .handle }, .ret = .nothing };
+    if (is(u8, name, "status")) return .{ .params = &.{.{ .name = "handle", .shape = .handle, .optional = true }}, .input = .{ .optional = .handle }, .ret = any_handle_state };
+    return null;
 }
 
 pub fn dropSock(ctx: *anyopaque, _: []const u8, id: u64) void {

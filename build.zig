@@ -381,6 +381,13 @@ pub fn build(b: *std.Build) void {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
     }
+    // The language's standard library: mshl modules under lib/msh/,
+    // host-tested with the interpreter, served by the archive as lib/
+    // and installed into the store at boot (`use math`).
+    for ([_][]const u8{"math.msh"}) |f| {
+        pack.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
+        pack_guest.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
+    }
 
     const user_blobs = b.addWriteFiles();
     // The programs build for either port (user/usys.zig is the runtime's
@@ -899,17 +906,20 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&run_check.step);
 }
 
-/// Every .msh file under boot/, sorted, as build-root-relative paths.
+/// Every .msh file under boot/ and lib/msh/ (the standard library),
+/// sorted, as build-root-relative paths.
 fn mshFiles(b: *std.Build) []const []const u8 {
     const io = b.graph.io;
     var found: std.ArrayList([]const u8) = .empty;
-    var dir = b.build_root.handle.openDir(io, "boot", .{ .iterate = true }) catch @panic("boot/ missing");
-    defer dir.close(io);
-    var walker = dir.walk(b.allocator) catch @panic("OOM");
-    defer walker.deinit();
-    while (walker.next(io) catch @panic("walking boot/")) |e| {
-        if (e.kind != .file or !std.mem.endsWith(u8, e.basename, ".msh")) continue;
-        found.append(b.allocator, b.fmt("boot/{s}", .{e.path})) catch @panic("OOM");
+    for ([_][]const u8{ "boot", "lib/msh" }) |root| {
+        var dir = b.build_root.handle.openDir(io, root, .{ .iterate = true }) catch @panic("boot/ or lib/msh/ missing");
+        defer dir.close(io);
+        var walker = dir.walk(b.allocator) catch @panic("OOM");
+        defer walker.deinit();
+        while (walker.next(io) catch @panic("walking the .msh trees")) |e| {
+            if (e.kind != .file or !std.mem.endsWith(u8, e.basename, ".msh")) continue;
+            found.append(b.allocator, b.fmt("{s}/{s}", .{ root, e.path })) catch @panic("OOM");
+        }
     }
     std.mem.sort([]const u8, found.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {

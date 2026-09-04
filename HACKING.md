@@ -109,10 +109,23 @@ polled (`would_block`) so one loop serves everyone; a bound notification
 to `user/fscmds.zig` if it is a file command every mshl host — msh and
 mshrun — should have) that turns typed IPC into a `mshl.Value` (a table, record, string, or
 nothing — never text parsed out of another service; rendering is the
-interpreter's job), add the name to `command_names` (tab completion),
-and extend `shell_script` in `tools/runner.zig` so the scripted console
-session covers it (`.raw = true` sends bytes without a newline; an empty
-`expect` waits for the prompt only). A LANGUAGE feature (a verb over
+interpreter's job), and a line to the host's `signature` beside it:
+the arguments, the input and the answer as shapes (`mshl.Param`,
+`mshl.Signature`), the answer's derived from the Zig type the value is
+built from — declare a struct, build the value with `mshl.toValue` and
+the shape with `mshl.shapeOf` on the same type (an enum field becomes
+`a | b | c`, a slice of structs a table), so the two cannot drift. The
+interpreter checks the arguments before the call (so the arm may take
+`args[0].str` without looking) and the answer after it. What the
+service *decides* — not there, refused, closed — is a result
+(`it.mkResult(false, .{ .str = @tagName(e) })`, the word from the
+protocol's error enum, and `mshl.resultShape(ok, err)` in the
+signature); what is misuse is caught by the signature; what is broken
+infrastructure (`the service did not answer`) is `it.fail`. Add the
+name to `command_names` (tab completion), and extend `shell_script` in
+`tools/runner.zig` so the scripted console session covers it (`.raw =
+true` sends bytes without a newline; an empty `expect` waits for the
+prompt only; remember the `?` after a stage that answers a result). A LANGUAGE feature (a verb over
 values, syntax, an operator) belongs in `lib/mshl.zig` with a host test
 beside it — `zig test lib/mshl.zig` runs in a second, every test under
 the leak-detecting allocator, so a value that escapes without being
@@ -133,7 +146,11 @@ follow from its `Analysis` — a new binding kind needs a line in
 implicit names a block gets (`it`, `in`, `acc`, `req` — a host that
 calls a block with new names adds them) and the unit keys
 `user/init.zig`'s `parseUnit` reads (a new key is added there and in
-`unit_keys`, or every unit using it lints as a typo). New `.msh` files
+`unit_keys`, or every unit using it lints as a typo). A module for the
+library is a file under `lib/msh/` named in `build.zig`'s archive
+list (packed as `lib/<name>.msh`) with a host test in `lib/mshl.zig`
+that `use`s it through the test host (`@embedFile`); init installs it
+into the store at boot and `use name` finds it. New `.msh` files
 are formatted and lint clean before they are committed; the two test
 steps name any that are not. The memory
 rules for host code: a host command builds its value in `it.arena` and

@@ -10,7 +10,9 @@
 //!   unused     a `let` inside a function that nothing reads (the file's
 //!              own top level is a module's exports, so not there)
 //!   match      not exhaustive (the interpreter's rule: a catch-all, or
-//!              `ok _` and `err _`, or `true` and `false`), and an arm
+//!              `ok _` and `err _`, or `true` and `false`) — unless the
+//!              subject carries a shape, which the interpreter checks
+//!              the arms against where the match runs — and an arm
 //!              after a catch-all that can never match
 //!   record     the same key twice in one literal
 //!   def        a `def` that shadows a builtin command
@@ -86,12 +88,16 @@ pub const Scope = struct {
 
     fn add(s: *Scope, a: std.mem.Allocator, name: []const u8, k: @FieldType(Binding, "kind"), stmt: ?c.TSNode, name_node: ?c.TSNode) Error!void {
         const at: u32 = if (stmt) |n| ts.startByte(n) else 0;
+        // The name's span is the name itself (an annotated name's token
+        // carries its colon; that is not part of the name).
+        const name_start: u32 = if (name_node) |n| ts.startByte(n) else 0;
+        const name_end: u32 = if (name_node != null) name_start + @as(u32, @intCast(name.len)) else 0;
         if (s.find(name)) |b| {
             if (at < b.at) {
                 b.at = at;
                 b.stmt_end = if (stmt) |n| ts.endByte(n) else 0;
-                b.name_start = if (name_node) |n| ts.startByte(n) else 0;
-                b.name_end = if (name_node) |n| ts.endByte(n) else 0;
+                b.name_start = name_start;
+                b.name_end = name_end;
             }
             return;
         }
@@ -100,8 +106,8 @@ pub const Scope = struct {
             .kind = k,
             .at = at,
             .stmt_end = if (stmt) |n| ts.endByte(n) else 0,
-            .name_start = if (name_node) |n| ts.startByte(n) else 0,
-            .name_end = if (name_node) |n| ts.endByte(n) else 0,
+            .name_start = name_start,
+            .name_end = name_end,
         });
     }
 };
@@ -166,8 +172,8 @@ const Linter = struct {
     fn collect(l: *Linter, node: c.TSNode, s: *Scope) Error!void {
         const k = ts.kind(node);
         if (std.mem.eql(u8, k, "let_statement")) {
-            const name = ts.field(node, "name").?;
-            try s.add(l.a, ts.text(l.src, name), .let, node, name);
+            const name = boundName(node).?;
+            try s.add(l.a, bareName(ts.text(l.src, name)), .let, node, name);
         } else if (std.mem.eql(u8, k, "def_statement")) {
             const name = ts.field(node, "name").?;
             try s.add(l.a, ts.text(l.src, name), .def, node, name);
@@ -202,6 +208,10 @@ const Linter = struct {
             while (i < ts.childCount(ps)) : (i += 1) {
                 const p = ts.child(ps, i);
                 if (ts.is(p, "identifier")) try s.add(l.a, ts.text(l.src, p), .param, p, p);
+                if (ts.is(p, "typed_name")) {
+                    const name = ts.field(p, "name").?;
+                    try s.add(l.a, bareName(ts.text(l.src, name)), .param, p, name);
+                }
             }
         }
         try l.collect(body, s);
@@ -263,6 +273,9 @@ const Linter = struct {
     // ------------------------------------------------------------- match
 
     fn matchArms(l: *Linter, node: c.TSNode) Error!void {
+        // With a shape on the subject the arms are checked against it
+        // where the match runs; here only the dead arms are reported.
+        const shaped = ts.field(node, "shape") != null;
         var catch_all = false;
         var ok_all = false;
         var err_all = false;
@@ -289,7 +302,7 @@ const Linter = struct {
                 if (std.mem.eql(u8, ts.text(l.src, pat), "true")) true_lit = true else false_lit = true;
             }
         }
-        if (catch_all or (ok_all and err_all) or (true_lit and false_lit)) return;
+        if (shaped or catch_all or (ok_all and err_all) or (true_lit and false_lit)) return;
         if (ok_all) return l.report(node, "match: not exhaustive — no `err _ =>` arm", .{});
         if (err_all) return l.report(node, "match: not exhaustive — no `ok _ =>` arm", .{});
         return l.report(node, "match: not exhaustive — add a `_ =>` arm", .{});
@@ -345,6 +358,23 @@ const Linter = struct {
 
 fn varName(v: []const u8) []const u8 {
     return if (v.len > 0 and v[0] == '$') v[1..] else v;
+}
+
+/// A bound name's token without the colon an annotation glues to it.
+fn bareName(t: []const u8) []const u8 {
+    return if (t.len > 0 and t[t.len - 1] == ':') t[0 .. t.len - 1] else t;
+}
+
+/// The name a `let` binds: its `name` field, or the one inside its
+/// `typed_name`.
+fn boundName(node: c.TSNode) ?c.TSNode {
+    if (ts.field(node, "name")) |n| return n;
+    var i: u32 = 0;
+    while (i < ts.childCount(node)) : (i += 1) {
+        const ch = ts.child(node, i);
+        if (ts.is(ch, "typed_name")) return ts.field(ch, "name");
+    }
+    return null;
 }
 
 fn isUnitPath(path: []const u8) bool {
@@ -492,7 +522,13 @@ fn expectDiags(src: []const u8, expected: []const []const u8) !void {
 test "clean code says nothing" {
     try expectDiags(
         \\let n = 3
-        \\def double [x] { $x * 2 }
+        \\let e: { name: string } = { name: a }
+        \\let S = shape [int]
+        \\def double [x: int, y] -> int { $x * 2 }
+        \\def which [t: dir | file] { match $t: dir | file { dir => 1; file => 2 } }
+        \\echo $e.name $S
+        \\[1] | check $S
+        \\which dir
         \\for f in (ls data) { echo $f.name }
         \\ls | where size > 1kb | map { $it.name } | each { echo "$it" }
         \\match (stat data) {

@@ -2,29 +2,106 @@
 //! over the view protocol: each turns a typed reply into a value (a
 //! table, a record, a string, nothing) and never text parsed out of a
 //! service. The host says where a path lives (`Fs.resolve`: one view,
-//! or a view plus mounted shares) and which channel `sync`/`df` talk to.
+//! or a view plus mounted shares), which channel `sync`/`df` talk to,
+//! and which stores `use name` may read a module from.
+//!
+//! Every command has a SIGNATURE (`signature`): its arguments, its
+//! input and its answer as shapes, the answer's derived from the
+//! protocol types it is built from (`Stat`, `Df`, `shared.FsErr`) so the
+//! declared shape and the value cannot drift. What the filesystem
+//! decides — a path that is not there, a view that is read-only — is a
+//! RESULT (`ok v` / `err not_found`), the error a word from the
+//! protocol's own enumeration; misuse (a wrong argument) is a typed
+//! error the interpreter raises from the signature before the call.
 
 const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
+const loader = @import("loader.zig");
 const mshl = @import("mosslib").mshl;
 const Value = mshl.Value;
+const Shape = mshl.Shape;
+const Param = mshl.Param;
+const Signature = mshl.Signature;
 
 /// Where a path lives: a view's channel and buffer, and the path in it.
 pub const Target = struct { chan: u64, buf: [*]u8, path: []const u8 };
+
+/// A program store: a view whose root is an `img/` directory.
+pub const Store = struct { chan: u64, buf: [*]u8, name: []const u8 };
 
 pub const Fs = struct {
     resolve: *const fn (it: *mshl.Interp, path: []const u8) mshl.Error!Target,
     /// The channel `sync` and `df` address (the host's main view).
     root: u64,
+    /// The stores `use NAME` consults, in order (the user's own, then
+    /// the system's); absent ones are null.
+    stores: []const ?Store = &.{},
 };
 
+// ------------------------------------------------------------ the shapes
+//
+// What the commands answer, as Zig types: the value is built from the
+// same definition (`toValue`) the shape is derived from (`shapeOf`).
+
+/// One entry, as `stat` answers and `ls` lists.
+pub const Stat = struct { name: []const u8, type: shared.FsType, size: i64, mtime: i64 };
+/// `df`.
+pub const Df = struct { free_kb: i64, total_kb: i64, encrypted: bool };
+
+const fs_err = mshl.shapeOf(shared.FsErr);
+const stat_result = mshl.resultShape(mshl.shapeOf(Stat), fs_err);
+const ls_result = mshl.resultShape(mshl.shapeOf([]const Stat), fs_err);
+const text_result = mshl.resultShape(.string, fs_err);
+const done_result = mshl.resultShape(.nothing, fs_err);
+const module_err = blk: {
+    const alts = [_]Shape{ .{ .word = "not_found" }, .{ .word = "not_a_module" }, .{ .word = "bad_digest" }, fs_err };
+    break :blk Shape{ .one_of = &alts };
+};
+const module_result = mshl.resultShape(.string, module_err);
+const df_shape = mshl.shapeOf(Df);
+const path_param = Param{ .name = "path", .shape = .string };
+
+pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module" };
+
+/// The signature of a file command; null when the name is not one.
+pub fn signature(name: []const u8) ?Signature {
+    if (is(name, "ls")) return .{ .params = &.{.{ .name = "path", .shape = .string, .optional = true }}, .ret = ls_result };
+    if (is(name, "tree")) return .{ .params = &.{.{ .name = "path", .shape = .string, .optional = true }}, .rest = .any, .ret = .string };
+    if (is(name, "cat") or is(name, "open")) return .{ .params = &.{path_param}, .ret = text_result };
+    if (is(name, "write")) return .{ .params = &.{ path_param, .{ .name = "text" } }, .ret = done_result };
+    if (is(name, "save")) return .{ .params = &.{ path_param, .{ .name = "text", .optional = true } }, .input = .{ .optional = .any }, .ret = done_result };
+    if (is(name, "stat")) return .{ .params = &.{path_param}, .ret = stat_result };
+    if (is(name, "mkdir") or is(name, "rm")) return .{ .params = &.{path_param}, .ret = done_result };
+    if (is(name, "mv")) return .{ .params = &.{ .{ .name = "from", .shape = .string }, .{ .name = "to", .shape = .string } }, .ret = done_result };
+    if (is(name, "ln")) return .{ .params = &.{ path_param, .{ .name = "target", .shape = .string } }, .ret = done_result };
+    if (is(name, "readlink")) return .{ .params = &.{path_param}, .ret = text_result };
+    if (is(name, "sync")) return .{ .ret = done_result };
+    if (is(name, "df")) return .{ .ret = df_shape };
+    if (is(name, "source")) return .{ .params = &.{path_param}, .ret = done_result };
+    if (is(name, "module")) return .{ .params = &.{.{ .name = "name", .shape = .string }}, .ret = module_result };
+    return null;
+}
+
+fn errWord(it: *mshl.Interp, e: shared.FsErr) mshl.Error!Value {
+    return it.mkResult(false, .{ .str = @tagName(e) });
+}
+
+fn errName(it: *mshl.Interp, word: []const u8) mshl.Error!Value {
+    return it.mkResult(false, .{ .str = word });
+}
+
+fn okv(it: *mshl.Interp, v: Value) mshl.Error!Value {
+    return it.mkResult(true, v);
+}
+
 /// The shared commands: ls, tree, cat/open, write, save, stat, mkdir,
-/// rm, mv, ln, readlink, sync, df, source. null = not one of these.
+/// rm, mv, ln, readlink, sync, df, source, module. null = not one of
+/// these. Arguments arrive checked against `signature`.
 pub fn call(fs: *const Fs, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     const a = it.arena;
-    if (is(name, "ls")) return try lsTable(fs, it, if (args.len > 0) try pathArg(it, args[0]) else "");
+    if (is(name, "ls")) return try lsTable(fs, it, if (args.len > 0) args[0].str else "");
     if (is(name, "tree")) {
         var path: []const u8 = "";
         var depth: usize = 8;
@@ -43,111 +120,145 @@ pub fn call(fs: *const Fs, it: *mshl.Interp, name: []const u8, args: []const Val
         return .{ .str = text.items };
     }
     if (is(name, "cat") or is(name, "open")) {
-        if (args.len < 1) return it.fail("{s}: path expected", .{name});
-        return .{ .str = try readFile(fs, it, try pathArg(it, args[0])) };
+        return switch (try readFileR(fs, it, args[0].str)) {
+            .text => |t| try okv(it, .{ .str = t }),
+            .err => |e| try errWord(it, e),
+        };
     }
     if (is(name, "write")) {
-        if (args.len < 2) return it.fail("write: path and text expected", .{});
         var text: std.ArrayList(u8) = .empty;
         try mshl.renderInline(args[1], a, &text);
-        try writeFile(fs, it, try pathArg(it, args[0]), text.items);
-        return .nothing;
+        return try doneResult(it, try writeFileR(fs, it, args[0].str, text.items));
     }
     if (is(name, "save")) {
         // `x | save path`, or the redirect form (path, rendered text).
-        if (args.len < 1) return it.fail("save: path expected", .{});
         var text: std.ArrayList(u8) = .empty;
         if (args.len >= 2) {
             try mshl.renderInline(args[1], a, &text);
         } else if (input) |v| {
             try mshl.render(v, a, &text);
         } else return it.fail("save: nothing to save", .{});
-        try writeFile(fs, it, try pathArg(it, args[0]), text.items);
-        return .nothing;
+        return try doneResult(it, try writeFileR(fs, it, args[0].str, text.items));
     }
     if (is(name, "stat")) {
-        if (args.len < 1) return it.fail("stat: path expected", .{});
-        const path = try pathArg(it, args[0]);
+        const path = args[0].str;
         const t = try fs.resolve(it, path);
-        const st = fsc.fsStat(t.chan, t.buf, t.path) orelse return it.fail("stat: {s}: not found", .{path});
-        return try statRecord(it, baseName(path), st);
+        return switch (fsc.fsStatR(t.chan, t.buf, t.path)) {
+            .ok => |st| try okv(it, try statRecord(it, baseName(path), st)),
+            .err => |e| try errWord(it, e),
+        };
     }
     if (is(name, "mkdir")) {
-        if (args.len < 1) return it.fail("mkdir: path expected", .{});
-        const path = try pathArg(it, args[0]);
-        const t = try fs.resolve(it, path);
-        if (!fsc.fsMkdir(t.chan, t.buf, t.path)) return it.fail("mkdir: {s}: failed", .{path});
-        return .nothing;
+        const t = try fs.resolve(it, args[0].str);
+        return try doneResult(it, fsc.fsMkdirR(t.chan, t.buf, t.path));
     }
     if (is(name, "rm")) {
-        if (args.len < 1) return it.fail("rm: path expected", .{});
-        const path = try pathArg(it, args[0]);
-        const t = try fs.resolve(it, path);
+        const t = try fs.resolve(it, args[0].str);
         return switch (fsc.fsDelete(t.chan, t.buf, t.path)) {
-            .ok => .nothing,
-            .err => |e| it.fail("rm: {s}: {t}", .{ path, e }),
+            .ok => try okv(it, .nothing),
+            .err => |e| try errWord(it, e),
         };
     }
     if (is(name, "mv")) {
-        if (args.len < 2) return it.fail("mv: from and to expected", .{});
-        const from = try fs.resolve(it, try pathArg(it, args[0]));
-        const to = try fs.resolve(it, try pathArg(it, args[1]));
+        const from = try fs.resolve(it, args[0].str);
+        const to = try fs.resolve(it, args[1].str);
         if (from.chan != to.chan) return it.fail("mv: both paths must be in the same filesystem", .{});
-        if (!fsc.fsRename(from.chan, from.buf, from.path, to.path)) return it.fail("mv: failed", .{});
-        return .nothing;
+        return try doneResult(it, fsc.fsRenameR(from.chan, from.buf, from.path, to.path));
     }
     if (is(name, "ln")) {
-        if (args.len < 2) return it.fail("ln: path and target expected", .{});
-        const t = try fs.resolve(it, try pathArg(it, args[0]));
-        if (!fsc.fsSymlink(t.chan, t.buf, t.path, try pathArg(it, args[1]))) return it.fail("ln: failed", .{});
-        return .nothing;
+        const t = try fs.resolve(it, args[0].str);
+        return try doneResult(it, fsc.fsSymlinkR(t.chan, t.buf, t.path, args[1].str));
     }
     if (is(name, "readlink")) {
-        if (args.len < 1) return it.fail("readlink: path expected", .{});
-        const t = try fs.resolve(it, try pathArg(it, args[0]));
-        const n = fsc.fsReadlink(t.chan, t.buf, t.path) orelse return it.fail("readlink: failed", .{});
-        return .{ .str = try a.dupe(u8, t.buf[0..@min(n, 256)]) };
+        const t = try fs.resolve(it, args[0].str);
+        return switch (fsc.fsReadlinkR(t.chan, t.buf, t.path)) {
+            .ok => |n| try okv(it, .{ .str = try a.dupe(u8, t.buf[0..@min(n, 256)]) }),
+            .err => |e| try errWord(it, e),
+        };
     }
-    if (is(name, "sync")) {
-        if (!fsc.fsSync(fs.root)) return it.fail("sync: failed", .{});
-        return .nothing;
-    }
+    if (is(name, "sync")) return try doneResult(it, fsc.fsSyncR(fs.root));
     if (is(name, "df")) {
-        const st = fsc.fsStatfs(fs.root) orelse return it.fail("df: failed", .{});
-        return try record(it, &.{ "free_kb", "total_kb", "encrypted" }, &.{
-            .{ .int = @intCast(st.free_blocks * 4) }, .{ .int = @intCast(st.total_blocks * 4) }, .{ .bool = st.encrypted },
-        });
+        const st = fsc.fsStatfs(fs.root) orelse return it.fail("df: the filesystem did not answer", .{});
+        return try mshl.toValue(a, Df{ .free_kb = @intCast(st.free_blocks * 4), .total_kb = @intCast(st.total_blocks * 4), .encrypted = st.encrypted });
     }
     if (is(name, "source")) {
-        if (args.len < 1) return it.fail("source: path expected", .{});
-        const text = try readFile(fs, it, try pathArg(it, args[0]));
+        const text = switch (try readFileR(fs, it, args[0].str)) {
+            .text => |t| t,
+            .err => |e| return try errWord(it, e),
+        };
         _ = try it.evalScript(text, &it.out); // its output joins this line's
-        return .nothing;
+        return try okv(it, .nothing);
     }
+    if (is(name, "module")) return try moduleText(fs, it, args[0].str);
     return null;
+}
+
+fn doneResult(it: *mshl.Interp, out: fsc.Outcome(void)) mshl.Error!Value {
+    return switch (out) {
+        .ok => try okv(it, .nothing),
+        .err => |e| try errWord(it, e),
+    };
+}
+
+/// `use NAME`: a path (a `/` in it, or `.msh` at its end) is a file in
+/// the view; a bare name is a module in a store — `NAME.msh` there is
+/// a manifest `{ source: "<digest>" }` and the text is the blob of that
+/// name, verified against the digest (the name IS the content, as for
+/// programs). The user's own store is consulted before the system's.
+pub fn moduleText(fs: *const Fs, it: *mshl.Interp, name: []const u8) mshl.Error!Value {
+    if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.endsWith(u8, name, ".msh")) {
+        return switch (try readFileR(fs, it, name)) {
+            .text => |t| try okv(it, .{ .str = t }),
+            .err => |e| try errWord(it, e),
+        };
+    }
+    for (fs.stores) |maybe| {
+        const st = maybe orelse continue;
+        var mpath: [64]u8 = undefined;
+        if (name.len + shared.img_manifest_ext.len > mpath.len) return it.fail("use: name too long", .{});
+        @memcpy(mpath[0..name.len], name);
+        @memcpy(mpath[name.len .. name.len + shared.img_manifest_ext.len], shared.img_manifest_ext);
+        const mp = mpath[0 .. name.len + shared.img_manifest_ext.len];
+        const manifest = switch (try readFileViaR(it, st.chan, st.buf, mp)) {
+            .text => |t| t,
+            .err => continue,
+        };
+        const v = try it.parseData(manifest);
+        if (v != .record) return try errName(it, "not_a_module");
+        const src = v.record.get("source") orelse return try errName(it, "not_a_module");
+        if (src != .str or src.str.len != shared.img_digest_hex_len) return try errName(it, "not_a_module");
+        const text = switch (try readFileViaR(it, st.chan, st.buf, src.str)) {
+            .text => |t| t,
+            .err => |e| return try errWord(it, e),
+        };
+        const have = loader.digestHex(text);
+        if (!std.mem.eql(u8, &have, src.str)) return try errName(it, "bad_digest");
+        return try okv(it, .{ .str = text });
+    }
+    return try errName(it, "not_found");
 }
 
 pub fn lsTable(fs: *const Fs, it: *mshl.Interp, path_arg: []const u8) mshl.Error!Value {
     const a = it.arena;
     const t = try fs.resolve(it, path_arg);
     const path = t.path;
-    const count = fsc.fsList(t.chan, t.buf, path) orelse return it.fail("ls: {s}: cannot list", .{path_arg});
+    const count = switch (fsc.fsListR(t.chan, t.buf, path)) {
+        .ok => |n| n,
+        .err => |e| return try errWord(it, e),
+    };
     const names = try a.dupe(u8, t.buf[0..count]);
-    var rows: std.ArrayList([]const Value) = .empty;
+    var rows: std.ArrayList(Stat) = .empty;
     var split = std.mem.splitScalar(u8, names, '\n');
     while (split.next()) |name| {
         if (name.len == 0) continue;
         var full: [256]u8 = undefined;
         const fl = joinPath(&full, path, name);
         const st = fsc.fsStat(t.chan, t.buf, full[0..fl]) orelse continue;
-        const row = try a.alloc(Value, 4);
-        row[0] = .{ .str = name };
-        row[1] = .{ .str = typeName(st.typ) };
-        row[2] = .{ .int = @intCast(st.size) };
-        row[3] = .{ .int = @intCast(st.mtime) };
-        try rows.append(a, row);
+        try rows.append(a, try statOf(it, name, st));
     }
-    return .{ .table = .{ .cols = &.{ "name", "type", "size", "mtime" }, .rows = rows.items } };
+    // An empty listing is still a table with the columns.
+    if (rows.items.len == 0) return try okv(it, .{ .table = .{ .cols = &.{ "name", "type", "size", "mtime" }, .rows = &.{} } });
+    return try okv(it, try mshl.toValue(a, @as([]const Stat, rows.items)));
 }
 
 pub fn treeInto(fs: *const Fs, it: *mshl.Interp, text: *std.ArrayList(u8), path_arg: []const u8, indent: []const u8, depth: usize) mshl.Error!void {
@@ -187,61 +298,84 @@ pub fn treeInto(fs: *const Fs, it: *mshl.Interp, text: *std.ArrayList(u8), path_
     }
 }
 
+pub const ReadOut = union(enum) { text: []const u8, err: shared.FsErr };
+
+/// A file's text, or the filesystem's reason.
+pub fn readFileR(fs: *const Fs, it: *mshl.Interp, path: []const u8) mshl.Error!ReadOut {
+    const t = try fs.resolve(it, path);
+    return readFileViaR(it, t.chan, t.buf, t.path);
+}
+
+pub fn readFileViaR(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8) mshl.Error!ReadOut {
+    const fd = switch (fsc.fsOpen(chan, buf, path, 0)) {
+        .fd => |f| f,
+        .err => |e| return .{ .err = e },
+    };
+    defer fsc.fsClose(chan, fd);
+    var out: std.ArrayList(u8) = .empty;
+    var off: u64 = 0;
+    while (true) {
+        const n = fsc.fsReadAt(chan, fd, off, shared.fs_max_io) orelse return .{ .err = .io };
+        if (n == 0) break;
+        try out.appendSlice(it.arena, buf[0..n]);
+        off += n;
+    }
+    return .{ .text = out.items };
+}
+
+/// A file's text, failing the line when it cannot be read (for a host's
+/// own needs — a startup script, a manifest — not for a command).
 pub fn readFile(fs: *const Fs, it: *mshl.Interp, path: []const u8) mshl.Error![]const u8 {
     const t = try fs.resolve(it, path);
     return readFileVia(it, t.chan, t.buf, t.path);
 }
 
 pub fn readFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8) mshl.Error![]const u8 {
-    const fd = switch (fsc.fsOpen(chan, buf, path, 0)) {
-        .fd => |f| f,
-        .err => |e| return it.fail("cannot open {s}: {t}", .{ path, e }),
+    return switch (try readFileViaR(it, chan, buf, path)) {
+        .text => |t| t,
+        .err => |e| it.fail("cannot open {s}: {t}", .{ path, e }),
     };
-    defer fsc.fsClose(chan, fd);
-    var out: std.ArrayList(u8) = .empty;
-    var off: u64 = 0;
-    while (true) {
-        const n = fsc.fsReadAt(chan, fd, off, shared.fs_max_io) orelse return it.fail("read error on {s}", .{path});
-        if (n == 0) break;
-        try out.appendSlice(it.arena, buf[0..n]);
-        off += n;
-    }
-    return out.items;
 }
 
-pub fn writeFile(fs: *const Fs, it: *mshl.Interp, path: []const u8, text: []const u8) mshl.Error!void {
+pub fn writeFileR(fs: *const Fs, it: *mshl.Interp, path: []const u8, text: []const u8) mshl.Error!fsc.Outcome(void) {
     const t = try fs.resolve(it, path);
-    return writeFileVia(it, t.chan, t.buf, t.path, text);
+    return writeFileViaR(t.chan, t.buf, t.path, text);
 }
 
-pub fn writeFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8, text: []const u8) mshl.Error!void {
+pub fn writeFileViaR(chan: u64, buf: [*]u8, path: []const u8, text: []const u8) fsc.Outcome(void) {
     const fd = switch (fsc.fsOpen(chan, buf, path, 1)) {
         .fd => |f| f,
-        .err => |e| return it.fail("cannot open {s}: {t}", .{ path, e }),
+        .err => |e| return .{ .err = e },
     };
     defer fsc.fsClose(chan, fd);
     var off: usize = 0;
     while (off < text.len) {
         const n = @min(shared.fs_max_io, text.len - off);
-        if (!fsc.fsWriteAt(chan, buf, fd, off, text[off .. off + n])) return it.fail("write failed on {s}", .{path});
+        if (!fsc.fsWriteAt(chan, buf, fd, off, text[off .. off + n])) return .{ .err = .io };
         off += n;
     }
-    if (!fsc.fsTruncate(chan, fd, text.len)) return it.fail("truncate failed on {s}", .{path});
+    if (!fsc.fsTruncate(chan, fd, text.len)) return .{ .err = .io };
+    return .{ .ok = {} };
+}
+
+pub fn writeFileVia(it: *mshl.Interp, chan: u64, buf: [*]u8, path: []const u8, text: []const u8) mshl.Error!void {
+    switch (writeFileViaR(chan, buf, path, text)) {
+        .ok => {},
+        .err => |e| return it.fail("cannot write {s}: {t}", .{ path, e }),
+    }
+}
+
+fn statOf(it: *mshl.Interp, name: []const u8, st: fsc.StatOut) mshl.Error!Stat {
+    return .{
+        .name = try it.arena.dupe(u8, name),
+        .type = std.enums.fromInt(shared.FsType, st.typ) orelse return it.fail("stat: {s}: an object of unknown type {d}", .{ name, st.typ }),
+        .size = @intCast(st.size),
+        .mtime = @intCast(st.mtime),
+    };
 }
 
 pub fn statRecord(it: *mshl.Interp, name: []const u8, st: fsc.StatOut) mshl.Error!Value {
-    return record(it, &.{ "name", "type", "size", "mtime" }, &.{
-        .{ .str = name }, .{ .str = typeName(st.typ) }, .{ .int = @intCast(st.size) }, .{ .int = @intCast(st.mtime) },
-    });
-}
-
-pub fn typeName(typ: u64) []const u8 {
-    return switch (typ) {
-        @intFromEnum(shared.FsType.file) => "file",
-        @intFromEnum(shared.FsType.dir) => "dir",
-        @intFromEnum(shared.FsType.symlink) => "symlink",
-        else => "?",
-    };
+    return mshl.toValue(it.arena, try statOf(it, name, st));
 }
 
 pub fn record(it: *mshl.Interp, keys: []const []const u8, vals: []const Value) mshl.Error!Value {

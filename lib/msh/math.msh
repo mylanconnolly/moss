@@ -1,0 +1,24 @@
+# math — the standard library's arithmetic over lists: `let m = (use math)`.
+# Sums and products keep the kind of number they are given (ints stay
+# ints, floats floats); `mean` is always a float.
+def sum {
+  match ($in | first 1) {
+    [] => 0
+    [$x, ..] => $in | reduce ($x - $x) { $acc + $it }
+    _ => 0
+  }
+}
+def product {
+  match ($in | first 1) {
+    [] => 1
+    [$x, ..] => $in | reduce ($x / $x) { $acc * $it }
+    _ => 1
+  }
+}
+def max-of { $in | reduce null { if $acc == null or $it > $acc { $it } else { $acc } } }
+def min-of { $in | reduce null { if $acc == null or $it < $acc { $it } else { $acc } } }
+def mean -> float {
+  let n = ($in | len)
+  if $n == 0 { 0.0 } else { (float ($in | sum))? / (float $n)? }
+}
+def clamp [x, lo, hi] { if $x < $lo { $lo } else if $x > $hi { $hi } else { $x } }

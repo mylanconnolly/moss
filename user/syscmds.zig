@@ -29,3 +29,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value) mshl.Error!
 }
 
 pub const command_names = [_][]const u8{ "sleep", "now" };
+
+pub fn signature(name: []const u8) ?mshl.Signature {
+    if (std.mem.eql(u8, name, "sleep")) return .{ .params = &.{.{ .name = "ms", .shape = .int }}, .ret = .nothing };
+    if (std.mem.eql(u8, name, "now")) return .{ .ret = .int };
+    return null;
+}

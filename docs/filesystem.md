@@ -154,10 +154,24 @@ path `arg` means "the argument the user typed"; `arg` is the role the
 image is started with. A unit file that says `run: true` gets a
 manifest under the unit's name too (`apply` is the users image's role
 2 that way). The `mshrun` manifest gives a script the shell's whole
-filesystem (`fs: ""`), so `run mshrun PATH` runs the script at PATH
-with the authority of the shell over files, and nothing else. Init installs the system store at boot from
-the boot archive, writing each image once (present ones are skipped)
-and a manifest built from the program's unit file, when it has one.
+filesystem (`fs: ""`) and the system store (`{ tag: store }`), so `run
+mshrun PATH` runs the script at PATH with the authority of the shell
+over files, the library to `use`, and nothing else. Init installs the
+system store at boot from the boot archive, writing each image once
+(present ones are skipped) and a manifest built from the program's
+unit file, when it has one.
+
+**Modules live in the store too.** The archive's library, `lib/`
+(`lib/msh/` in the tree, `math.msh` to begin with), is installed
+beside the programs: the
+module's text under its digest, and a manifest `{ source: "<digest>" }`
+under its name. `use math` in the shell or in a script asks the host
+for `module math`, which reads `math.msh` from the shell's own store
+and then the system's, reads the blob the manifest names, verifies it
+against the digest, and evaluates it; `install math` copies both files
+into a home's own store exactly as it copies a program. A module is
+content-addressed like an image because it is one more thing a session
+runs, and it is verified for the same reason.
 
 A shell consults two stores in order:
 

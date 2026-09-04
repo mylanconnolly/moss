@@ -2,6 +2,7 @@
 //! against fssvc, shared by the fs demo roles (alice/bob) and msh.
 //! Every path/data byte travels through the view's attached shm buffer.
 
+const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 
@@ -38,6 +39,97 @@ pub fn fsRead(chan: u64, fd: u64, len: u64) ?u64 {
             else => return null,
         },
         .err => return null,
+    }
+}
+
+/// The outcome of a call whose failure the caller passes on as a
+/// value: the protocol's error, by name.
+pub fn Outcome(comptime T: type) type {
+    return union(enum) { ok: T, err: shared.FsErr };
+}
+
+fn errOf(rep: shared.FsResp) shared.FsErr {
+    return switch (rep) {
+        .fs_err => |e| std.enums.fromInt(shared.FsErr, e.code) orelse .io,
+        else => .io,
+    };
+}
+
+pub fn fsListR(chan: u64, buf: [*]u8, path: []const u8) Outcome(u64) {
+    @memcpy(buf[1024 .. 1024 + path.len], path);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
+        .list = .{ .path_off = 1024, .path_len = path.len },
+    }, 0)) {
+        .ok => |rep| return switch (rep) {
+            .num => |x| .{ .ok = x.n },
+            else => .{ .err = errOf(rep) },
+        },
+        .err => return .{ .err = .io },
+    }
+}
+
+pub fn fsMkdirR(chan: u64, buf: [*]u8, path: []const u8) Outcome(void) {
+    @memcpy(buf[1024 .. 1024 + path.len], path);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
+        .open = .{ .path_off = 1024, .path_len = path.len, .create = 2 },
+    }, 0)) {
+        .ok => |rep| return if (rep == .ok) .{ .ok = {} } else .{ .err = errOf(rep) },
+        .err => return .{ .err = .io },
+    }
+}
+
+pub fn fsRenameR(chan: u64, buf: [*]u8, from: []const u8, to: []const u8) Outcome(void) {
+    @memcpy(buf[1024 .. 1024 + from.len], from);
+    @memcpy(buf[1536 .. 1536 + to.len], to);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
+        .rename = .{ .from = 1024 | (from.len << 32), .to = 1536 | (to.len << 32) },
+    }, 0)) {
+        .ok => |rep| return if (rep == .ok) .{ .ok = {} } else .{ .err = errOf(rep) },
+        .err => return .{ .err = .io },
+    }
+}
+
+pub fn fsStatR(chan: u64, buf: [*]u8, path: []const u8) Outcome(StatOut) {
+    @memcpy(buf[1024 .. 1024 + path.len], path);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
+        .stat = .{ .path_off = 1024, .path_len = path.len },
+    }, 0)) {
+        .ok => |rep| return switch (rep) {
+            .stat => |st| .{ .ok = .{ .typ = st.typ, .size = st.size, .mtime = st.mtime } },
+            else => .{ .err = errOf(rep) },
+        },
+        .err => return .{ .err = .io },
+    }
+}
+
+pub fn fsSymlinkR(chan: u64, buf: [*]u8, path: []const u8, target: []const u8) Outcome(void) {
+    @memcpy(buf[1024 .. 1024 + path.len], path);
+    @memcpy(buf[1536 .. 1536 + target.len], target);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
+        .symlink = .{ .path = 1024 | (path.len << 32), .target = 1536 | (target.len << 32) },
+    }, 0)) {
+        .ok => |rep| return if (rep == .ok) .{ .ok = {} } else .{ .err = errOf(rep) },
+        .err => return .{ .err = .io },
+    }
+}
+
+pub fn fsReadlinkR(chan: u64, buf: [*]u8, path: []const u8) Outcome(u64) {
+    @memcpy(buf[1024 .. 1024 + path.len], path);
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .{
+        .readlink = .{ .path_off = 1024, .path_len = path.len },
+    }, 0)) {
+        .ok => |rep| return switch (rep) {
+            .num => |x| .{ .ok = x.n },
+            else => .{ .err = errOf(rep) },
+        },
+        .err => return .{ .err = .io },
+    }
+}
+
+pub fn fsSyncR(chan: u64) Outcome(void) {
+    switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .sync, 0)) {
+        .ok => |rep| return if (rep == .ok) .{ .ok = {} } else .{ .err = errOf(rep) },
+        .err => return .{ .err = .io },
     }
 }
 
