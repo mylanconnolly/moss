@@ -220,7 +220,7 @@ into the user's own, after which `run NAME` finds the user's copy first.
   16 bytes). The manifest record's `image` must be exactly that; `grant`
   may contain `introspect`; `give` entries with `fs: arg` derive a view
   of the run argument from the shell's own filesystem, `ro` defaulting
-  to true. A program is staged into a 256 KB buffer, verified, and
+  to true. A program is staged into a 512 KB buffer, verified, and
   spawned with a 512 KB kernel-object and 2 MB user-memory budget. The
   run argument is 24 bytes of text.
 - **Settings.** `lib/settings.zig` merges the system layer

@@ -215,6 +215,53 @@ the wire echo and through loopback with a recursive `recv-all` (the
 window at work: more than one segment in flight each way), then
 proves a closed peer and a refused destination are errors as values.
 
+### HTTP: handlers are functions
+
+On top of those sockets, an mshl host with a network view speaks
+HTTP/1.1 — the small part a script needs, parsed and formatted in
+`lib/http.zig` (host-tested), JSON in `lib/json.zig` beside it:
+
+```
+# a server: the handler is a function of the request record
+def handler [req] {
+  match $req.path {
+    "/hello" => "hello from moss"                       # 200 text/plain
+    "/items" => (ls data | select name size)            # 200 application/json
+    "/echo"  => { status: 200, headers: { x-method: $req.method }, body: $req.body }
+    _        => { status: 404, body: "no such page" }
+  }
+}
+let l = (listen 8080)?
+serve $l $handler          # forever; `serve $l $handler 4` returns after four
+
+# the primitives underneath, for anything serve does not do
+let s = (accept $l)?
+let req = (http-read $s)?  # ok { method, path, query, headers, body } / err
+http-write $s { status: 204 }
+close $s
+
+# a client
+let r = (fetch http://10.0.2.100:9001/hello)?          # ok { status, headers, body }
+let p = (fetch http://10.0.2.100:9001/api { method: POST, body: { n: 1 } })?
+```
+
+A request record has `method`, `path` (before any `?`), `query` (the
+text after it, or null), `headers` (a record, names lowercased) and
+`body` (a string if it is UTF-8, bytes otherwise). What a handler
+returns decides the response: a record with `status`, `headers` or
+`body` is explicit (`body` may be text, bytes, or data); a string is
+`200 text/plain`; a list, record or table is `200 application/json`
+(`to-json` / `from-json` are the language's own way to and from JSON,
+tables included; JSON numbers with a fraction or exponent are refused
+because the language has no floats). A handler that fails, or returns
+an `err`, answers `500` with the message and the server goes on. Every
+response carries `Content-Length` and `Connection: close`, and the
+socket is closed after it: one request per connection, no keep-alive,
+no chunked transfer (a chunked request or response is an `err`). Bodies
+are bounded (a 16 KB head, a 256 KB body). `fetch` takes `http://`
+URLs whose host is an address — there is no name resolution — and
+reads the response to its `Content-Length` or to the close.
+
 ### What the drill proves
 
 The `net` check boots the `net` profile under QEMU's user-mode network
@@ -229,8 +276,15 @@ process on the host, an echo. Three oneshot units run in order:
    by pinging the v6 gateway and watching `ping_check` count the reply.
 3. `net-script` (unrestricted view, an mshl script under `mshrun`)
    does the wire echo and a listen/connect/accept loop over loopback
-   from the language, moves 5000 bytes each way, and checks that a
-   closed peer and a refused destination come back as `err` values.
+   from the language, moves 5000 bytes each way, `fetch`es a page from
+   a canned server the host runs behind `10.0.2.100:9001`, parses a raw
+   request with `http-read` and answers it with `http-write` over
+   loopback, then **serves four pages to the runner itself** — the
+   check connects through a port forward (`127.0.0.1:31909` → `:8080`)
+   and asserts a text page, a JSON page, a POST echoed with a custom
+   header, and a 404 — and finally checks that a closed peer and a
+   refused destination come back as `err` values. The check also
+   writes the wire's packets to `zig-out/check/net.pcap`.
 4. `boxed` (filtered view: `10.0.2.100:9000` only) reaches the echo,
    and is refused on the v4 gateway, the v6 gateway, loopback, listen,
    ping, and derive.
@@ -248,7 +302,7 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   bytes, all or `would_block`, and a `tcp_recv` returns at most 4096.
   The socket table is zero-initialized so it lives in `.bss`: a
   default that is not zero would put 400 KB in the image, which is
-  exactly what happened once — and init's 256 KB loader stage reports
+  exactly what happened once — and the loader stage (then 256 KB, 512 KB since msh outgrew it) reports
   an image that does not fit as "missing from the boot archive".
 - **Segments.** MSS 1440 announced and accepted (the option is parsed
   from the peer's SYN; 536 without one); a segment is at most that
@@ -315,6 +369,13 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - The language has no `ping`, no `derive` (a script's view is what its
   manifest gave it), and no UDP because the stack has none; a socket
   value cannot cross to another program (no channel surface yet).
+- HTTP is one request per connection (`Connection: close` both ways),
+  no keep-alive, no chunked transfer, no TLS, no name resolution, and
+  a `serve` handles one connection at a time — the language has no
+  concurrency, so a slow handler holds the next client at the door
+  (the listener's backlog holds eight).
+- A server's `serve` never returns unless given a count; there is no
+  way to stop it from inside the script but an error.
 - Thirty-two sockets and sixteen views per service are static pools.
 - A filtered view allows one destination, IPv4 by way of a unit file
   (`allow:` takes a dotted v4 address); an IPv6 allowlist can be made
@@ -332,7 +393,10 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - ROADMAP.md — Phase 10, and the fabric entries that mention netsvc.
 - Source — `user/net.zig` (driver, stack, views, sockets, the drill
   roles), `user/netcmds.zig` (sockets as values for mshl hosts),
-  `boot/scripts/net-drill.msh` (the script step), `shared/lib.zig` (`NetReq`, `NetResp`, `NetErr`, `TcpState`,
+  `user/httpcmds.zig` (`http-read`, `http-write`, `serve`, `fetch`),
+  `lib/http.zig` and `lib/json.zig` (the parsers, host-tested),
+  `boot/scripts/net-drill.msh` (the script step), `tools/runner.zig`
+  (`httpProbe`: the check as an HTTP client), `shared/lib.zig` (`NetReq`, `NetResp`, `NetErr`, `TcpState`,
   addresses), `boot/conf/units/net*.msh`, `user/init.zig` (the
   `netview` give), `user/fabric.zig` (a client that waits on doorbells),
   `tools/runner.zig` (the QEMU network for each check).

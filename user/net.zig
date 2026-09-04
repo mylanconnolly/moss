@@ -144,6 +144,9 @@ var rx_dev: u64 = 0;
 var tx_va: u64 = 0;
 var tx_dev: u64 = 0;
 var irq_notif: u64 = 0;
+/// Bits on irq_notif: the device's interrupt (bound at bit 0) and the clock.
+const bit_irq: u64 = 1;
+const bit_tick: u64 = 2;
 
 const Q = struct { desc: u64, avail: u64, used: u64, idx: u32 };
 const rxq: Q = .{ .desc = 0, .avail = 128, .used = 256, .idx = 0 };
@@ -555,6 +558,11 @@ const mss_max = 1440;
 const mss_default = 536;
 const seg_max = 20 + mss_max;
 const max_rexmits = 8;
+/// How long a closed connection waits for the peer's FIN (so it is
+/// acknowledged, not retransmitted at us forever): two seconds.
+fn lingerMax() u64 {
+    return usys.cycleHz() * 2;
+}
 
 const Sock = struct {
     used: bool = false,
@@ -589,6 +597,9 @@ const Sock = struct {
     rexmits: u32 = 0,
     rto: u64 = 0,
     in_output: bool = false,
+    /// When the client closed: a lingering socket is kept until its FIN
+    /// is acknowledged and the peer has closed too, or this long.
+    closed_at: u64 = 0,
     /// Receive side: in-order bytes the client has not taken yet.
     rcv_nxt: u32 = 0,
     rx: [rx_cap]u8 = undefined,
@@ -825,7 +836,12 @@ fn tcpOutput(s: *Sock) void {
 fn retransmitScan() void {
     const now = usys.cycles();
     for (&socks) |*s| {
-        if (!s.used or !s.unacked()) continue;
+        if (!s.used) continue;
+        if (s.lingering and now - s.closed_at > lingerMax()) {
+            s.* = .{};
+            continue;
+        }
+        if (!s.unacked()) continue;
         if (now - s.sent_at < s.rto) continue;
         if (s.rexmits >= max_rexmits) {
             sockDead(s);
@@ -995,9 +1011,9 @@ fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, wnd: u16, opts: []const u8
         tcpEmit(s, s.snd_nxt, F_ACK, "", "");
     }
     // A lingering socket is done once its FIN is acknowledged and the
-    // peer has closed too (or just acknowledged: a half-open peer may
-    // never close, and the socket is not worth keeping for it).
-    if (s.lingering and s.fin_sent and s.snd_una == s.fin_seq +% 1) {
+    // peer has closed too; a peer that never closes is given up on by
+    // the scan (lingerMax).
+    if (s.lingering and s.fin_sent and s.snd_una == s.fin_seq +% 1 and s.peer_closed) {
         s.* = .{};
         return;
     }
@@ -1056,6 +1072,10 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
         have_gw6 = true;
     }
     if (usys.notifyBind(irq_notif) != .ok) usys.exit(178);
+    // The clock: retransmission must run even when nobody calls and no
+    // frame arrives — a client sleeping on its doorbell after a lost SYN
+    // waits for exactly that. Every tenth of a second, bit_tick.
+    if (usys.timerArm(irq_notif, 10, bit_tick) != .ok) usys.exit(180);
     _ = usys.log(log_h, "netsvc: virtio-net up, serving");
 
     views[0] = .{ .used = true }; // badge 0: unrestricted root view
@@ -1063,8 +1083,8 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     while (true) {
         const r = usys.recvMsg(serve_a);
         if (r.err == .interrupted) {
-            _ = usys.notifyWait(irq_notif);
-            irqDrain();
+            const w = usys.notifyWait(irq_notif);
+            if (w.err == .ok and w.data[0] & bit_irq != 0) irqDrain() else netTick();
             continue;
         }
         if (r.err == .peer_dead) usys.exit(0);
@@ -1237,6 +1257,7 @@ fn opClose(badge: u64, idx: u64) shared.NetResp {
         s.lingering = true;
         s.badge = 0;
         s.rx_len = 0;
+        s.closed_at = usys.cycles();
         tcpSendFin(s);
         return .ok;
     }

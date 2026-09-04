@@ -85,7 +85,7 @@ root and init from unit files — also require root's exit code to be 0.
 | `guest` | A moss kernel as a guest of moss boots its own userspace and powers off | plain |
 | `vmnode` | A moss guest with a passed-through NIC joins the fabric as node 2 and takes a remote spawn | vmnode |
 | `fs` | Namespace views on real storage; persistence across a second boot; a hundred views reclaimed on client death | blk, two boots |
-| `net` | Dual-stack TCP through the userspace network service; allowlist views; a script speaking TCP with sockets as values | net |
+| `net` | Dual-stack TCP through the userspace network service; allowlist views; a script speaking TCP and HTTP with sockets as values, serving pages the runner fetches through a port forward; packets kept in `zig-out/check/net.pcap` | net |
 | `rng` | The userspace virtio-rng driver seeds the kernel pool; `getrandom` fail-closed and policed | plain |
 | `fabric` | Three nodes: per-node identities, join, gossip, placement, a node's death and rejoin, an imposter refused, spawn authorization, revocation | cluster |
 | `shell` | A scripted msh session over a console socket: pipelines, the language (closures, `match`, results, modules), redirection, scripts, `run` (including `mshrun`, a script as a program, and the `script-hello` unit at boot); identity born on the first boot and restored on the second | shell, two boots |

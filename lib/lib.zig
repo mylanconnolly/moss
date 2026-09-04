@@ -4,6 +4,8 @@
 //! matters, a capability service holds the secret instead.
 
 pub const fabcert = @import("fabcert.zig");
+pub const http = @import("http.zig");
+pub const json = @import("json.zig");
 pub const lz4 = @import("lz4.zig");
 pub const mshl = @import("mshl.zig");
 pub const pool = @import("pool.zig");
@@ -13,6 +15,8 @@ pub const xts = @import("xts.zig");
 
 test {
     _ = fabcert;
+    _ = http;
+    _ = json;
     _ = lz4;
     _ = mshl;
     _ = pool;

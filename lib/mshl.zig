@@ -58,6 +58,7 @@
 //! point reads it.
 
 const std = @import("std");
+const json = @import("json.zig");
 
 pub const Value = union(enum) {
     nothing,
@@ -266,7 +267,7 @@ pub const builtin_names = [_][]const u8{
     "while",  "match", "try",    "use",     "not",      "and",        "or",      "true",
     "false",  "null",  "else",   "in",      "ok",       "err",        "map",     "filter",
     "reduce", "any",   "all",    "find",    "range",    "join",       "split",   "str",
-    "int",    "type",  "to-data", "from-data", "to-bytes", "from-bytes",
+    "int",    "type",  "to-data", "from-data", "to-bytes", "from-bytes", "to-json", "from-json",
 };
 
 /// Bindings per scope.
@@ -350,6 +351,13 @@ pub const Interp = struct {
     /// statement's value is rendered into `out` as it is produced. The
     /// last statement's value is the script's (good until the next call).
     pub fn evalScript(self: *Interp, src: []const u8, out: *std.ArrayList(u8)) Error!Value {
+        return self.evalScriptEach(src, out, null);
+    }
+
+    /// evalScript, telling `sink` after every statement what was just
+    /// rendered (a host that shows output as it happens — a script
+    /// that serves forever still says it started).
+    pub fn evalScriptEach(self: *Interp, src: []const u8, out: *std.ArrayList(u8), sink: ?*const fn (text: []const u8) void) Error!Value {
         var p = Parser{ .it = self, .lex = Lexer{ .src = src } };
         const prog = try p.program();
         var last: Value = .nothing;
@@ -359,7 +367,9 @@ pub const Interp = struct {
                 self.reclaim();
                 return e;
             };
+            const before = out.items.len;
             try render(last, self.arena, out);
+            if (sink) |f| f(out.items[before..]);
         }
         return last;
     }
@@ -1376,6 +1386,28 @@ pub const Interp = struct {
             var buf: std.ArrayList(u8) = .empty;
             try writeData(v, self.arena, &buf);
             return .{ .str = buf.items };
+        }
+        if (eql(u8, name, "to-json")) {
+            const v = input orelse (if (args.len > 0) args[0] else return self.fail("to-json: needs input", .{}));
+            if (!v.isData()) return self.fail("to-json: a {s} is not data (functions, results, handles and bytes never are)", .{v.typeName()});
+            var buf: std.ArrayList(u8) = .empty;
+            try json.encode(v, self.arena, &buf);
+            return .{ .str = buf.items };
+        }
+        if (eql(u8, name, "from-json")) {
+            const v = input orelse (if (args.len > 0) args[0] else return self.fail("from-json: needs input", .{}));
+            const text: []const u8 = switch (v) {
+                .str => |t| t,
+                .bytes => |b| b,
+                else => return self.fail("from-json: needs text or bytes", .{}),
+            };
+            const parsed = json.decode(self.arena, text) catch |e| return switch (e) {
+                error.OutOfMemory => Error.OutOfMemory,
+                error.Float => self.fail("from-json: a number with a fraction or exponent (no floats yet)", .{}),
+                error.Utf8 => self.fail("from-json: a string that is not valid UTF-8", .{}),
+                error.BadJson => self.fail("from-json: not JSON", .{}),
+            };
+            return try tableize(self.arena, parsed);
         }
         if (eql(u8, name, "from-data")) {
             const v = input orelse (if (args.len > 0) args[0] else return self.fail("from-data: needs input", .{}));
@@ -3361,6 +3393,20 @@ test "to-data / from-data round-trip through the strict parser" {
     try expectOut(it, "\"a\\\"b\" | to-data | from-data", "a\"b\n");
     try expectOut(it, "ls | to-data | from-data | len", "3\n");
     try expectOut(it, "[\"fn\", \"match\", \"_\", \"ok\"] | to-data", "[\"fn\", \"match\", \"_\", ok]\n");
+}
+
+test "json: to-json and from-json, tables included" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    try expectOut(it, "{ a: [1, two, true, null], b: { c: \"x\" } } | to-json", "{\"a\":[1,\"two\",true,null],\"b\":{\"c\":\"x\"}}\n");
+    try expectOut(it, "ls | to-json", "[{\"name\":\"hi.txt\",\"type\":\"file\",\"size\":27},{\"name\":\"big.bin\",\"type\":\"file\",\"size\":8192},{\"name\":\"sub\",\"type\":\"dir\",\"size\":0}]\n");
+    try expectOut(it, "ls | to-json | from-json | where size > 1kb | get name", "big.bin\n");
+    try expectOut(it, "\"{\\\"k\\\": [1, 2]}\" | from-json | get k | len", "2\n");
+    try expectRuntime(it, "\"[1.5]\" | from-json", "from-json: a number with a fraction or exponent (no floats yet)");
+    try expectRuntime(it, "\"nope\" | from-json", "from-json: not JSON");
+    try expectRuntime(it, "(fn { 1 }) | to-json", "to-json: a function is not data (functions, results, handles and bytes never are)");
 }
 
 test "scripts render every statement's value" {

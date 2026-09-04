@@ -12,6 +12,7 @@ const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
+const httpcmds = @import("httpcmds.zig");
 const tty = @import("tty.zig");
 const boot = @import("boot.zig");
 const result = @import("result.zig");
@@ -69,6 +70,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
     if (net) |*nt| {
         if (try netcmds.call(nt, it, name, args, input)) |v| return v;
+        if (try httpcmds.call(nt, it, name, args, input)) |v| return v;
     }
     return null;
 }
@@ -137,8 +139,7 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     // statement's value is the program's and the text is not made: a
     // program run by msh returns a value, like ls and ps.
     var out: std.ArrayList(u8) = .empty;
-    const last = interp.evalScript(text, &out) catch |e| {
-        if (!setup.has(.out)) emit(out.items);
+    const last = interp.evalScriptEach(text, &out, if (setup.has(.out)) null else emit) catch |e| {
         fail(path, switch (e) {
             error.OutOfMemory => "out of memory",
             error.Exit => "exit",
@@ -148,6 +149,6 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     if (setup.has(.out)) {
         var res = result.Result.init();
         if (last.isData() and !res.deliver(&setup, last)) fail(path, "the result does not fit the out buffer");
-    } else emit(out.items);
+    }
     usys.exit(0);
 }

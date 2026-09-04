@@ -31,7 +31,7 @@ pub const Net = struct {
         return .{ .chan = chan };
     }
 
-    fn attach(n: *Net) bool {
+    pub fn attach(n: *Net) bool {
         if (n.attached) return true;
         const s = usys.shmCreate(1);
         if (s.err != .ok) return false;
@@ -51,12 +51,99 @@ pub const Net = struct {
 
     /// Hang the bell on a socket, then sleep on it whenever an operation
     /// answers would_block.
-    fn watch(n: *Net, sock: u64) void {
+    pub fn watch(n: *Net, sock: u64) void {
         _ = usys.callTyped(shared.NetReq, shared.NetResp, n.chan, .{ .watch = .{ .sock = sock } }, n.bell);
     }
 
-    fn wait(n: *Net) void {
+    pub fn wait(n: *Net) void {
         _ = usys.notifyWait(n.bell);
+    }
+
+    // Raw operations for other host surfaces (HTTP): sockets by number,
+    // waiting on the bell, outcomes as the protocol's errors.
+
+    pub const Outcome = union(enum) { sock: u64, failed: []const u8 };
+
+    /// Connect and wait for the handshake.
+    pub fn connectRaw(n: *Net, words: [2]u64, port: u64) Outcome {
+        if (!n.attach()) return .{ .failed = "cannot attach a buffer to the network view" };
+        const rep = ncall(n, .{ .tcp_connect = .{ .ip_hi = words[0], .ip_lo = words[1], .port = port } }) orelse return .{ .failed = "the network service did not answer" };
+        const sock = switch (rep) {
+            .num => |x| x.n,
+            .net_err => |e| return .{ .failed = errName(e.code) },
+            .ok => return .{ .failed = "unexpected reply" },
+        };
+        n.watch(sock);
+        while (true) {
+            const st = ncall(n, .{ .tcp_status = .{ .sock = sock } }) orelse break;
+            const code = switch (st) {
+                .num => |x| x.n,
+                else => break,
+            };
+            if (code == @intFromEnum(shared.TcpState.established)) return .{ .sock = sock };
+            if (code == @intFromEnum(shared.TcpState.closed)) break;
+            n.wait();
+        }
+        _ = ncall(n, .{ .tcp_close = .{ .sock = sock } });
+        return .{ .failed = "refused" };
+    }
+
+    /// Wait for a connection on a listener.
+    pub fn acceptRaw(n: *Net, l: u64) Outcome {
+        while (true) {
+            const rep = ncall(n, .{ .tcp_accept = .{ .sock = l } }) orelse return .{ .failed = "the network service did not answer" };
+            switch (rep) {
+                .num => |x| {
+                    n.watch(x.n);
+                    return .{ .sock = x.n };
+                },
+                .net_err => |e| if (e.code != @intFromEnum(shared.NetErr.would_block)) return .{ .failed = errName(e.code) },
+                .ok => {},
+            }
+            n.wait();
+        }
+    }
+
+    /// Send everything, waiting for room; null on success.
+    pub fn sendAll(n: *Net, s: u64, data: []const u8) ?[]const u8 {
+        var off: usize = 0;
+        while (off < data.len) {
+            const len = @min(piece, data.len - off);
+            @memcpy(n.buf[0..len], data[off .. off + len]);
+            const rep = ncall(n, .{ .tcp_send = .{ .sock = s, .len = len } }) orelse return "the network service did not answer";
+            switch (rep) {
+                .num => |x| off += x.n,
+                .net_err => |e| {
+                    if (e.code != @intFromEnum(shared.NetErr.would_block)) return errName(e.code);
+                    n.wait();
+                },
+                .ok => {},
+            }
+        }
+        return null;
+    }
+
+    pub const Recv = union(enum) { data: []const u8, closed, failed: []const u8 };
+
+    /// Wait for data; what arrives lives in the view buffer until the
+    /// next operation, so copy it out.
+    pub fn recvSome(n: *Net, s: u64) Recv {
+        while (true) {
+            const rep = ncall(n, .{ .tcp_recv = .{ .sock = s, .len = shared.net_max_recv } }) orelse return .{ .failed = "the network service did not answer" };
+            switch (rep) {
+                .num => |x| return .{ .data = n.buf[0..x.n] },
+                .net_err => |e| {
+                    if (e.code == @intFromEnum(shared.NetErr.closed)) return .closed;
+                    if (e.code != @intFromEnum(shared.NetErr.would_block)) return .{ .failed = errName(e.code) };
+                },
+                .ok => {},
+            }
+            n.wait();
+        }
+    }
+
+    pub fn closeRaw(n: *Net, s: u64) void {
+        _ = ncall(n, .{ .tcp_close = .{ .sock = s } });
     }
 };
 
@@ -93,7 +180,7 @@ fn stateName(st: u64) []const u8 {
     };
 }
 
-fn dropSock(ctx: *anyopaque, _: []const u8, id: u64) void {
+pub fn dropSock(ctx: *anyopaque, _: []const u8, id: u64) void {
     const n: *Net = @ptrCast(@alignCast(ctx));
     _ = ncall(n, .{ .tcp_close = .{ .sock = id } });
 }
@@ -110,7 +197,7 @@ fn okResult(it: *mshl.Interp, v: Value) mshl.Error!Value {
     return .{ .result = r };
 }
 
-fn sockArg(it: *mshl.Interp, v: Value, cmd: []const u8, kind: []const u8) mshl.Error!u64 {
+pub fn sockArg(it: *mshl.Interp, v: Value, cmd: []const u8, kind: []const u8) mshl.Error!u64 {
     if (v != .handle or !std.mem.eql(u8, v.handle.kind, kind)) return it.fail("{s}: a {s} expected, got a {s}", .{ cmd, kind, v.typeName() });
     if (v.handle.closed) return it.fail("{s}: the {s} is closed", .{ cmd, kind });
     return v.handle.id;

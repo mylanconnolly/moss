@@ -60,7 +60,7 @@ const specs = [_]Spec{
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
         .append = "profile=fs",
     },
-    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: loopback ok", .append = "profile=net" },
+    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 4", .append = "profile=net" },
     .{
         .name = "users",
         .kind = .blk,
@@ -102,6 +102,8 @@ const cluster_port = "31901";
 const cluster_port2 = "31902";
 const cluster_port3 = "31904"; // the imposter's hub port
 const shell_port: u16 = 31903;
+/// The net check's port forward to the script's HTTP server (:8080).
+const http_port: u16 = 31909;
 const poll_ms = 100;
 
 var io: Io = undefined;
@@ -233,9 +235,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     if (spec.append) |a| try args.appendSlice(gpa, &.{ "-append", a });
     switch (spec.kind) {
         .blk => try appendDisk(&args, disk),
+        // The wire echo (cat), a canned HTTP server for `fetch`, and a
+        // forward from the host to the script's own server.
         .net => try args.appendSlice(gpa, &.{
-            "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
+            "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat," ++
+                "guestfwd=tcp:10.0.2.100:9001-cmd:printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 11\\r\\n\\r\\nhello moss!'," ++
+                "hostfwd=tcp:127.0.0.1:" ++ std.fmt.comptimePrint("{d}", .{http_port}) ++ "-:8080",
             "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+            "-object", "filter-dump,id=f0,netdev=n0,file=zig-out/check/net.pcap",
         }),
         // Two NICs on one hub (host node 1, guest node 2) and a second
         // entropy device for the guest.
@@ -251,9 +258,65 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
 
     var child = try spawnQemu(args.items);
     defer child.kill(io);
+    if (spec.kind == .net) {
+        if (!try httpProbe(spec, log_path, polls)) return false;
+    }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
     return verdict.ok;
+}
+
+/// The net check's client side: once the script says it is serving,
+/// fetch four pages through the port forward and check each answer.
+fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = cwd.readFileAlloc(io, log_path, gpa, .limited(1 << 20)) catch "";
+        if (std.mem.indexOf(u8, content, "script: serving http") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the script never started serving http", log_path);
+            return false;
+        }
+    }
+    const probes = [_]struct { req: []const u8, expect: []const u8, expect2: []const u8 }{
+        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "HTTP/1.1 200 OK", .expect2 = "\r\n\r\nhello from moss" },
+        .{ .req = "GET /json HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "Content-Type: application/json", .expect2 = "[{\"n\":1},{\"n\":2}]" },
+        .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nContent-Length: 7\r\n\r\npayload", .expect = "x-method: POST", .expect2 = "\r\n\r\npayload" },
+        .{ .req = "GET /nope HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "HTTP/1.1 404 Not Found", .expect2 = "no such page" },
+    };
+    for (probes, 0..) |p, i| {
+        var fd: ?std.posix.fd_t = null;
+        for (0..50) |_| {
+            fd = tcpConnect(http_port) catch {
+                sleepMs(poll_ms);
+                polls.* += 1;
+                continue;
+            };
+            break;
+        }
+        const sock = fd orelse {
+            reportFailure(spec.name, "could not connect to the script's http server", log_path);
+            return false;
+        };
+        defer _ = std.c.close(sock);
+        sockSend(sock, p.req);
+        var resp: std.ArrayList(u8) = .empty;
+        var chunk: [4096]u8 = undefined;
+        while (true) {
+            const k = std.c.read(sock, &chunk, chunk.len);
+            if (k <= 0) break;
+            try resp.appendSlice(gpa, chunk[0..@intCast(k)]);
+        }
+        if (std.mem.indexOf(u8, resp.items, p.expect) == null or std.mem.indexOf(u8, resp.items, p.expect2) == null) {
+            std.debug.print("[FAIL] {s}: http probe {d} got:\n{s}\n", .{ spec.name, i, resp.items });
+            reportFailure(spec.name, "an http probe answered wrong", log_path);
+            return false;
+        }
+    }
+    return true;
 }
 
 /// The dynamic-membership drill: three nodes on one L2 segment (node 1's

@@ -35,6 +35,37 @@ send $c $big
 let back2 = (from-bytes (recv-all $a ($big | len))?)?
 if $back2 != $big { (err "bulk loopback mismatch")? }
 echo "script: bulk loopback ok"
+# HTTP. The client: a canned server on the host (guestfwd at :9001).
+let r = (fetch http://10.0.2.100:9001/hello)?
+if $r.status != 200 or $r.body != "hello moss!" { (err "fetch: $r.status $r.body")? }
+echo "script: fetch ok"
+# The primitives over loopback: a raw request in, a parsed record out.
+let hl = (listen 8081)?
+let hc = (connect ::1 8081)?
+send $hc "GET /raw?x=1 HTTP/1.1\r\nHost: moss\r\nContent-Length: 2\r\n\r\nhi"
+let ha = (accept $hl)?
+let req = (http-read $ha)?
+if $req.method != "GET" or $req.path != "/raw" or $req.query != "x=1" or $req.body != "hi" or $req.headers.host != "moss" { (err "http-read: bad parse")? }
+(http-write $ha { status: 201, body: { made: true } })?
+close $ha
+let raw = (from-bytes (recv $hc)?)?
+if ($raw | split "\r\n" | first 1) != ["HTTP/1.1 201 Created"] { (err "http-write: bad status line")? }
+if not ($raw | split "\r\n" | any { $it == "Content-Type: application/json" }) { (err "http-write: no json type")? }
+echo "script: http primitives ok"
+# The server: the host's runner fetches three pages through a port
+# forward, then serve returns.
+def handler [req] {
+  match $req.path {
+    "/hello" => "hello from moss"
+    "/json" => [{ n: 1 }, { n: 2 }]
+    "/echo" => { status: 200, headers: { x-method: $req.method }, body: $req.body }
+    _ => { status: 404, body: "no such page" }
+  }
+}
+let srv = (listen 8080)?
+echo "script: serving http"
+let n = (serve $srv $handler 4)?
+echo "script: served $n"
 # A closed peer is an err, not a hang; a refused view is an err too.
 close $c
 match (recv $a) { ok _ => (err "data after close")?; err $e => echo "script: after close: $e" }

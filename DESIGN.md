@@ -1254,10 +1254,45 @@ guarded per socket so the nested call returns to the outer loop. The
 language's network commands wait on a doorbell now, one notification
 per host hung on every socket, instead of ticking. Bug found: giving
 the socket table a non-zero default (the MSS) moved 400 KB of it from
-`.bss` into the image, past the 256 KB stage init loads images
+`.bss` into the image, past the stage (then 256 KB) init loads images
 through, which reports "image missing from the boot archive" for one
 that does not fit — so the table is zero-initialized and `sockAlloc`
 sets the defaults, and a misleading message has a story behind it.
+
+**mshl v3, stage 3c (as built, 2026-09-04): HTTP.** Two pure modules
+carry the format — `lib/http.zig` (requests and responses parsed
+incrementally out of bytes, `incomplete` until the head and the body
+it announces are all there; formatting with `Content-Length` and
+`Connection: close`; URLs with IPv6 literals in brackets) and
+`lib/json.zig` (the data subset out, objects as records and arrays as
+lists in, `\u` escapes and surrogate pairs, floats refused because the
+language has none) — and `user/httpcmds.zig` moves the bytes over the
+network commands' raw socket operations. `http-read` and `http-write`
+are the primitives; `serve $listener $handler [n]` is the loop, with a
+handler as an ordinary function of the request record and its return
+value deciding the response (a record is explicit, a string is text,
+data is JSON; a failing handler is a 500 and the server goes on);
+`fetch URL [opts]` is the client, address-only hosts. `to-json` and
+`from-json` joined the language. One request per connection, no
+keep-alive, no chunked transfer: what a script needs, not a proxy.
+The network drill's script serves four pages that the check itself
+fetches through a slirp port forward — text, JSON, a POST echoed with
+a custom header, a 404 — and `fetch`es from a canned server the host
+runs as a slirp `guestfwd` command. Two bugs found by the drill: a
+script that serves forever must say so *before* serving, and `mshrun`
+had been printing a script's rendering only at its end — it streams
+each statement's output now (`evalScriptEach`); and with clients
+asleep on doorbells nobody called `netsvc`, so its retransmission scan
+never ran and a lost SYN was never resent — the service has a clock
+now (a kernel timer on its interrupt notification, ten ticks). Also
+fixed on the way: a closed connection freed as soon as its own FIN
+was acknowledged left the peer's FIN unanswered, and slirp retransmitted
+it at us for a minute; a lingering socket now waits for the peer's FIN
+too, or two seconds. And the shell itself, with the interpreter and
+the file, network and HTTP hosts compiled in, passed 256 KB of code and
+stopped loading — "image missing from the boot archive" again — so the
+loader stage is 512 KB (128 pages) and, since a stage is one shared
+buffer, `shm_max_pages` went from 64 to 128.
 
 ### The gate (as built, 2026-09-03)
 

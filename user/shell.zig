@@ -24,6 +24,7 @@ const lineedit = @import("lineedit.zig");
 const boot = @import("boot.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
+const httpcmds = @import("httpcmds.zig");
 const mshl = @import("mosslib").mshl;
 const Value = mshl.Value;
 const Target = fscmds.Target;
@@ -362,6 +363,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
     if (net) |*nt| {
         if (try netcmds.call(nt, it, name, args, input)) |v| return v;
+        if (try httpcmds.call(nt, it, name, args, input)) |v| return v;
     }
     if (is(name, "ps")) return try psTable(it);
     if (is(name, "mem")) {
@@ -437,6 +439,8 @@ const help_text =
     \\  use p                  a file evaluated as a module: a record of its bindings
     \\  connect ADDR PORT | listen PORT | accept $l | send $s DATA | recv $s | close $s | status $s
     \\                         sockets as values (results: ok/err), when this shell holds a network view
+    \\  http-read $s | http-write $s RESP | serve $l $handler [n] | fetch URL [{ method, headers, body }]
+    \\                         HTTP on those sockets; a handler returns a record { status, headers, body }, text, or data (JSON)
     \\language:
     \\  x | where size > 4kb | sort-by name --desc | select name size
     \\  x | get col | first n | last n | reverse | len | keys | lines

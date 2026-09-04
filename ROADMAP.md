@@ -220,10 +220,13 @@ is a plan.
   `close`/`status` answering results, `user/netcmds.zig`); ✅ doorbell
   waiting and the netsvc upgrade (landed 2026-09-04: windowed sending
   against the peer's window and MSS, per-connection retransmission
-  with backoff, lingering close, 32 sockets / 16 views); still to do:
-  HTTP with parsing in Zig as host commands and handlers as mshl
-  functions, and, when a use case demands them, congestion control
-  and out-of-order receive; (4)
+  with backoff, lingering close, 32 sockets / 16 views); ✅ HTTP
+  (landed 2026-09-04: `lib/http.zig`, `lib/json.zig`, `http-read`,
+  `http-write`, `serve` with handlers as functions, `fetch`, `to-json`
+  / `from-json`); still open: keep-alive and chunked transfer, name
+  resolution (needs UDP), TLS, concurrent handling (needs the language
+  to spawn), and, when a use case demands them, congestion control and
+  out-of-order receive; (4)
   the fabric surface — remote pipeline stages, publish and lookup from
   the language, and the bulk transport across the wire (which also
   finishes fabric logins with a remote home); (5) tooling, host-side in
@@ -363,6 +366,21 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 3c: HTTP** (done, 2026-09-04): `lib/http.zig` and
+  `lib/json.zig` (pure, host-tested), `user/httpcmds.zig` — `http-read`,
+  `http-write`, `serve $l $handler [n]` with a handler's return value
+  deciding the response (record, text, or data as JSON), `fetch URL
+  [opts]` — and `to-json`/`from-json` in the language. The network
+  drill's script serves four pages the check fetches through a port
+  forward and fetches from a canned host server. Found: `mshrun`
+  printed a script's output only at the end (it streams now); netsvc
+  had no clock, so with doorbell-sleeping clients a lost SYN was never
+  retransmitted (a kernel timer drives the scan now); a closed socket
+  freed before the peer's FIN left slirp retransmitting it for a
+  minute (it lingers for the peer's FIN, or two seconds). And msh
+  itself outgrew the 256 KB loader stage (300 KB of ReleaseSafe code
+  with every host in it): the stage is 512 KB now, which took the
+  kernel's shared-buffer cap from 64 to 128 pages.
 - ✅ **mshl v3, stage 3b: the stack upgraded** (done, 2026-09-04):
   windowed TCP in netsvc — a send ring, the peer's window and MSS
   honored, cumulative ACKs, an advertised receive window, per-connection
@@ -371,7 +389,7 @@ is a plan.
   and 16 views — and doorbell-driven waiting in the language's network
   commands. The drill's script step moves 5000 bytes each way through
   the wire echo and loopback. Bug found: a non-zero default in the
-  socket table put 400 KB of it in the image, past the loader's 256 KB
+  socket table put 400 KB of it in the image, past the loader's (then 256 KB)
   stage, reported as "image missing"; the table is zero-initialized
   now.
 - ✅ **mshl v3, stage 3a: sockets as values** (done, 2026-09-03): the

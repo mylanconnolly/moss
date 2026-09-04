@@ -148,6 +148,10 @@ units come from `conf/units/` in the home, else `boot/conf/session/`;
 `zig build run-login` boots the multi-user system with seat 0 on your
 terminal and seat 1 on `nc 127.0.0.1 31905`.
 
+**Looking at the wire**: the `net` check keeps its packets in
+`zig-out/check/net.pcap` (`tcpdump -nr zig-out/check/net.pcap`); the
+manual boots take the same `-object filter-dump` (see the runner).
+
 **An OS test**: prefer a unit-file drill — a profile in
 `shared.BootProfile`, drill units under `boot/conf/units/` (`profiles:
 [x]`, `oneshot: true`, `after:` for steps, `essential: true` on the last),

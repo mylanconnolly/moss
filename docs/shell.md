@@ -299,7 +299,7 @@ it as `@NAME`, so `ls @NAME`, `cat @NAME/file` and the rest work on it;
 ```mermaid
 flowchart TD
   A["boot channel: console, view, init, [fabric], [store]; spawner from the manifest"] --> B["console: create a 1-page byte buffer, hand it to the driver (setup)"]
-  B --> C["stage (256 KB) and result buffer (8 pages) for run"]
+  B --> C["stage (512 KB) and result buffer (8 pages) for run"]
   C --> D["attach a buffer to the view; derive img/ as the own store; attach the system store if given"]
   D --> E["banner"]
   E --> F{"conf/msh/startup.msh in the view?"}
@@ -365,8 +365,8 @@ and in a session ends the session.
   string into a list), `echo`, `to-data`, `from-data`; `map f`,
   `filter f`, `reduce init f`, `any f`, `all f`, `find f` (a function
   or a block of `$it`); `range a b`; `join sep`, `split sep`; `str`,
-  `int` (a result), `type`; `to-bytes`, `from-bytes` (a result); `ok`,
-  `err`; `use path`. The reserved words are `let`, `def`, `fn`, `if`,
+  `int` (a result), `type`; `to-bytes`, `from-bytes` (a result);
+  `to-json`, `from-json`; `ok`, `err`; `use path`. The reserved words are `let`, `def`, `fn`, `if`,
   `else`, `for`, `in`, `while`, `match`, `try`, `not`, `and`, `or`,
   `true`, `false`, `null`; `_` and `..` mean something only in a
   pattern. A scope holds up to 128 bindings (variables and functions
@@ -374,8 +374,13 @@ and in a session ends the session.
 - **Network commands** (when the unit gives a `net` view; the system
   shell's does not, `mshrun`'s may): `connect ADDR PORT`, `listen PORT`,
   `accept $l`, `send $s DATA`, `recv $s [max]`, `close $s`, `status $s`
-  — sockets and listeners are handles, results carry the outcome; see
-  [the networking page](networking.md#sockets-as-values-the-language-surface).
+  — sockets and listeners are handles, results carry the outcome; and
+  HTTP on them: `http-read $s`, `http-write $s RESP`, `serve $l $handler
+  [n]`, `fetch URL [opts]`; see [the networking
+  page](networking.md#sockets-as-values-the-language-surface).
+- **JSON.** `to-json` writes the data subset (a table as an array of
+  objects), `from-json` reads it back (an array of same-shaped objects
+  becomes a table); numbers with a fraction or exponent are refused.
 - **Commands.** `ls [p]`, `tree [p] [--depth n]` (default depth 8),
   `cat p`, `open p`, `write p text`, `save p`, `stat p`, `mkdir p`,
   `rm p`, `mv a b`, `ln p target` (a symlink), `readlink p` (up to 256
@@ -385,7 +390,7 @@ and in a session ends the session.
   answer to a 40+2 RPC), `rand` (16 bytes from the kernel pool as 32
   hex characters; refused while the pool is unseeded), `run`,
   `install`, `source`, `help`, `clear`, `exit`.
-- **run.** The stage is a 256 KB buffer (64 pages); the image is read
+- **run.** The stage is a 512 KB buffer (128 pages; it was 256 KB until msh itself outgrew it); the image is read
   through the store's view in 32 KB pieces and verified before anything
   else. The child gets a 512 KB kernel-object and 2 MB user-memory
   budget, `log`, side A of its boot channel, and `introspect` only if

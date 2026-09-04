@@ -68,7 +68,7 @@ without polling.
 ### Shared buffers carry the bulk
 
 Out-of-line data travels through **shared buffers**: a program creates
-one (up to 64 pages), maps it into its own window, and attaches the cap
+one (up to 128 pages), maps it into its own window, and attaches the cap
 to a call; the service maps it too. Both mappings hold a reference, so
 the frames outlive either side's cap and are freed only when the last
 mapping is unmapped or torn down. A filesystem view's path and data
@@ -222,7 +222,7 @@ would stop being guarantees and become special cases.
   domain. `timer_arm(n, period, bits)` signals every `period` ticks of
   100 ms (0 disarms; one timer per notification; 16 timers). Signals to
   a notification with nobody waiting and nobody bound simply latch.
-- **Shared buffers.** `shm_create(pages)` (1 to 64 pages, charged to
+- **Shared buffers.** `shm_create(pages)` (1 to 128 pages, charged to
   the kernel's shared-buffer account, 16 MB); `shm_map` returns the
   address and the page count; `shm_unmap(va)` undoes it. A domain's
   window holds 64 mappings. Kernel copies into a window (log,
