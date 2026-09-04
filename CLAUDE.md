@@ -8,7 +8,7 @@ frontier — every unstarted arc and every residual, kept current; the
 
 ## Commands
 
-- `zig build check` — THE gate: 22 OS tests under QEMU, 6 of them again
+- `zig build check` — THE gate: 23 OS tests under QEMU, 6 of them again
   under a ReleaseSafe kernel (`+rs` rows), + host unit tests; ~2 min. Run
   before every commit. Failure logs: `zig-out/check/*.log`.
   `-Donly=a,b+rs` for a subset, `-Dsoak=N` to repeat (flaky hunts).

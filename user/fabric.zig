@@ -366,6 +366,12 @@ var mesh_logged = false;
 var got_spawn_ack = false;
 var spawn_ack_session: u32 = 0;
 var spawn_ack_code: u8 = 0; // 1 = spawned, 2 = unauthorized, 0 = failed
+/// Services this node offers the pool: service id -> export id.
+const Published = struct { used: bool = false, export_id: u32 = 0 };
+var published: [shared.fab_max_services]Published = @splat(.{});
+var got_lookup_ack = false;
+var lookup_ack_export: u32 = 0;
+var lookup_ack_code: u8 = 0;
 
 /// hello / hello_ack body prefix: [node u16][nonce 16][eph pk 32][cert].
 const hello_len = 2 + 16 + 32 + fabcert.cert_len;
@@ -516,6 +522,24 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             },
             .connect_peer => |q| freply(doConnectPeer(q.node)),
             .remote_spawn => |q| doRemoteSpawn(q.node, q.image, q.arg),
+            .publish => |q| {
+                // Only a local holder of our channel may publish (remote
+                // callers arrive badged and are forwarded above).
+                if (r.cap == 0 or q.service >= shared.fab_max_services) {
+                    if (r.cap != 0) _ = usys.capDrop(r.cap);
+                    freply(ferr(.refused));
+                    continue;
+                }
+                const eid = exportNew(r.cap) orelse {
+                    _ = usys.capDrop(r.cap);
+                    freply(ferr(.no_space));
+                    continue;
+                };
+                published[q.service] = .{ .used = true, .export_id = eid };
+                _ = usys.log(glog, "fabsvc: service published to the pool");
+                freply(.ok);
+            },
+            .lookup => |q| doLookup(q.node, q.service),
         }
     }
 }
@@ -653,7 +677,7 @@ fn doMembers() shared.FabResp {
         const rec = out[n * shared.fab_member_size ..];
         puleu16(rec[0..2], @intCast(m.node));
         rec[2] = @intFromBool(m.up);
-        rec[3] = 0;
+        rec[3] = @intFromBool(m.node == my_node);
         puleu16(rec[4..6], @intCast(@min(m.free_mb, 0xffff)));
         rec[6] = 0;
         rec[7] = 0;
@@ -1302,6 +1326,28 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             spawn_ack_code = body[8];
             got_spawn_ack = true;
         },
+        shared.fw_lookup_req => {
+            // [service u16][req u32] -> the export behind a published
+            // service, if any. Any certified member may ask: the service
+            // itself is the authority boundary, reached by badge.
+            if (body.len < 6) return;
+            const service = leu16(body[0..2]);
+            const req_id = leu32(body[2..6]);
+            var ack: [13]u8 = undefined;
+            frameHdr(ack[0..4], 13, shared.fw_lookup_ack);
+            puleu32(ack[4..8], req_id);
+            const pb = if (service < shared.fab_max_services) published[service] else Published{};
+            const ok = pb.used and exports[pb.export_id].used;
+            puleu32(ack[8..12], if (ok) pb.export_id else 0);
+            ack[12] = if (ok) 1 else 0;
+            _ = sendFrame(p, &ack);
+        },
+        shared.fw_lookup_ack => {
+            if (body.len < 9) return;
+            lookup_ack_export = leu32(body[4..8]);
+            lookup_ack_code = body[8];
+            got_lookup_ack = true;
+        },
         shared.fw_revoke => {
             // A root-signed revocation, forwarded by a peer: verify, apply,
             // and pass it on once if it was news.
@@ -1528,6 +1574,63 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
         return;
     }
     _ = usys.replyTyped(shared.FabResp, serve_a, .{ .spawned = .{ .node = node } }, minted);
+    _ = usys.capDrop(minted);
+}
+
+/// `lookup`: a channel to a service another node published — a session
+/// badge bound to its export, or a copy of the export itself when the
+/// service is on this node. The same shape as a remote spawn's answer:
+/// the caller gets an ordinary-looking channel.
+fn doLookup(node: u64, service: u64) void {
+    if (service >= shared.fab_max_services) {
+        freply(ferr(.refused));
+        return;
+    }
+    if (node == my_node) {
+        const pb = published[service];
+        if (!pb.used or !exports[pb.export_id].used) {
+            freply(ferr(.no_peer));
+            return;
+        }
+        _ = usys.replyTyped(shared.FabResp, serve_a, .{ .found = .{ .node = node } }, exports[pb.export_id].chan_b);
+        return;
+    }
+    const p = greetedPeer(node) orelse {
+        freply(ferr(.no_peer));
+        return;
+    };
+    got_lookup_ack = false;
+    var req: [10]u8 = undefined;
+    frameHdr(req[0..4], 10, shared.fw_lookup_req);
+    puleu16(req[4..6], @intCast(service));
+    puleu32(req[6..10], 1);
+    if (!sendFrame(p, &req)) {
+        freply(ferr(.disconnected));
+        return;
+    }
+    for (0..50) |_| {
+        pumpAll();
+        if (got_lookup_ack) break;
+        if (p.dead) {
+            freply(ferr(.disconnected));
+            return;
+        }
+        usys.sleep(1);
+    }
+    if (!got_lookup_ack) {
+        freply(ferr(.timeout));
+        return;
+    }
+    if (lookup_ack_code != 1) {
+        freply(ferr(.no_peer));
+        return;
+    }
+    const minted = sessionCap(node, lookup_ack_export);
+    if (minted == 0) {
+        freply(ferr(.no_space));
+        return;
+    }
+    _ = usys.replyTyped(shared.FabResp, serve_a, .{ .found = .{ .node = node } }, minted);
     _ = usys.capDrop(minted);
 }
 

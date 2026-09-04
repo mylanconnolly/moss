@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin };
 
 const Spec = struct {
     name: []const u8,
@@ -78,6 +78,13 @@ const specs = [_]Spec{
         .timeout_s = 120,
     },
     .{ .name = "rng", .pass = "rng-test: PASS", .extra = "rngprobe: unseeded pool refuses getrandom" },
+    .{
+        .name = "flogin",
+        .kind = .flogin,
+        .pass = "flogin-test: PASS",
+        .extra = "fetched from node 1",
+        .timeout_s = 150,
+    },
     .{
         .name = "shell",
         .kind = .shell,
@@ -204,6 +211,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .cluster) return runCluster(spec, bin, polls);
     if (spec.kind == .shell) return runShell(spec, bin, polls);
     if (spec.kind == .login) return runLogin(spec, bin, polls);
+    if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
     if (spec.kind == .blk) try makeDisk(disk);
@@ -322,6 +330,10 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     }
     if (std.mem.indexOf(u8, n3, "spawn refused on certificate grounds") == null) {
         reportFailure(spec.name, "node 3's unauthorized spawn was not refused", log3);
+        return false;
+    }
+    if (std.mem.indexOf(u8, n3, "reached node 1's published service") == null) {
+        reportFailure(spec.name, "node 3 never reached the published service (lookup)", log3);
         return false;
     }
     if (std.mem.indexOf(u8, n3, "rejoin attempt refused") == null) {
@@ -650,6 +662,113 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
     }
     const verdict = watch(log_path, spec, spec.extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
+    return verdict.ok;
+}
+
+/// The fabric-login drill: node 1 (a disk, the users applied, its
+/// session manager published to the pool) and node 2 (a fresh disk, a
+/// console, no records) on one segment; alice logs in on node 2 and her
+/// record comes from node 1 over the wire. Node 2's log carries the
+/// verdict; node 1 is stopped when it is in.
+const flogin_script = [_]struct { send: []const u8, expect: []const u8, prompt: []const u8 = "" }{
+    .{ .send = "alice", .expect = "passphrase: " },
+    .{ .send = "alice-pass", .expect = "moss shell" },
+    .{ .send = "df", .expect = "encrypted: true" },
+    .{ .send = "ls | len", .expect = "5" },
+    .{ .send = "write hello.txt \"born on node 2\"", .expect = "" },
+    .{ .send = "cat hello.txt", .expect = "born on node 2" },
+    .{ .send = "exit", .expect = "bye" },
+};
+
+fn runFlogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
+    const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
+    const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
+    for ([_][]const u8{ log1, log2, disk1, disk2 }) |f| cwd.deleteFile(io, f) catch {};
+    try makeDisk(disk1);
+    try makeDisk(disk2);
+
+    var args1: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args1, log1, bin);
+    try appendDisk(&args1, disk1);
+    try args1.appendSlice(gpa, &.{
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{cluster_port}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+        "-append", "profile=flogin node=1",
+    });
+    var c1 = try spawnQemu(args1.items);
+    defer c1.kill(io);
+    sleepMs(1000);
+
+    const port: u16 = shell_port + 3;
+    var args2: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args2, log2, bin);
+    try appendDisk(&args2, disk2);
+    try args2.appendSlice(gpa, &.{
+        "-netdev",  try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{cluster_port}),
+        "-device",  "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+        "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
+        "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{port}),
+        "-device",  "virtconsole,chardev=c0",
+        "-append",  "profile=fjoin node=2",
+    });
+    var c2 = try spawnQemu(args2.items);
+    defer c2.kill(io);
+
+    // Node 1 must be serving before anyone logs in on node 2.
+    var published = false;
+    for (0..600) |_| {
+        sleepMs(poll_ms);
+        polls.* += 1;
+        const content = cwd.readFileAlloc(io, log1, gpa, .limited(1 << 20)) catch "";
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null) break;
+        if (std.mem.indexOf(u8, content, "usersvc: published to the pool") != null) {
+            published = true;
+            break;
+        }
+    }
+    if (!published) {
+        reportFailure(spec.name, "node 1 never published its session manager", log1);
+        return false;
+    }
+
+    var fd: ?std.posix.fd_t = null;
+    for (0..50) |_| {
+        fd = tcpConnect(port) catch {
+            sleepMs(100);
+            polls.* += 1;
+            continue;
+        };
+        break;
+    }
+    const sock = fd orelse {
+        reportFailure(spec.name, "console socket never accepted", log2);
+        return false;
+    };
+    const tap = try gpa.create(ConsoleTap);
+    tap.* = .{ .fd = sock };
+    const th = try std.Thread.spawn(.{}, ConsoleTap.readerLoop, .{tap});
+    th.detach();
+    if (!waitFor(tap, login_prompt, 600, polls)) {
+        reportFailure(spec.name, "no login prompt on node 2", log2);
+        return false;
+    }
+    for (&flogin_script) |step| {
+        tap.clear();
+        sockSend(tap.fd, step.send);
+        sockSend(tap.fd, "\r");
+        const got = step.expect.len == 0 or waitFor(tap, step.expect, 900, polls);
+        if (!got) {
+            std.debug.print("[FAIL] {s}: node 2 console step '{s}' missing '{s}'\n", .{ spec.name, step.send, step.expect });
+            reportFailure(spec.name, "fabric login script step failed", log2);
+            return false;
+        }
+    }
+    const verdict = watch(log2, spec, spec.extra, polls);
+    if (!verdict.ok) reportFailure(spec.name, verdict.why, log2);
     return verdict.ok;
 }
 

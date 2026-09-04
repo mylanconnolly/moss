@@ -15,7 +15,7 @@ done without rediscovering the sharp edges.
   the kernel follows `-Doptimize` (Debug default — ReleaseFast kernel is
   untested territory). Benchmark numbers are meaningless from a Debug
   userspace; that mistake cost a 5x mystery once.
-- `zig build check` is the gate: 22 OS tests under QEMU plus host unit
+- `zig build check` is the gate: 23 OS tests under QEMU plus host unit
   tests, then the kernel-heavy drills once more under a **ReleaseSafe
   kernel** (the `+rs` rows) — about two minutes. Run it before
   committing. Logs land in `zig-out/check/` (`<name>-1.log`,
@@ -65,9 +65,12 @@ receiver's second of that tag), and `profiles: [system, ...]` (the
 profiles under which the unit starts at boot — there is no `start:`
 key; a unit with no `profiles` starts only when something `give`s its
 channel or an `after:` step names it) / `essential: true`
-/ `certify` / `install` / `run: true` (the unit is also a program the
-shell can `run` under its name: init writes a manifest for it into the
-store) as needed — added to the boot-file list in
+/ `certify` (with `seeds: [..]`, members the fabric dials once
+certified) / `node: boot` (the boot's `node=N` becomes the program's
+node: arg = role | node << 8, and the certification names it) /
+`install` / `run: true` (the unit is also a program the shell can `run`
+under its name: init writes a manifest for it into the store) as
+needed — added to the boot-file list in
 `build.zig`. A step that starts `after:` another must list the
 `profiles` it belongs to, or it never starts. The program takes
 it all with `boot.take`. A run tool's unit file becomes its manifest in

@@ -1,0 +1,20 @@
+# The fabric-login drill, node 2 (profile fjoin): a login prompt on the
+# console (x2 bit 8) and the drill's end condition (bit 9), with the
+# fabric — this node has no user records, so a login here fetches the
+# record from the member that has it and caches it in conf/users.
+{
+  image:     users
+  arg:       769
+  budget:    { user: 40mb }
+  grant:     [log, spawner, bootfs]
+  profiles:  [fjoin]
+  essential: true
+  give: [
+    { tag: view,    fs: conf/users, ro: false, mkdir: true }
+    { tag: home,    fs: home,       ro: false }
+    { tag: conf,    fs: conf/app,   ro: true,  mkdir: true }
+    { tag: store,   fs: img,        ro: true }
+    { tag: fabric,  unit: fabsvc }
+    { tag: console, unit: cons }
+  ]
+}

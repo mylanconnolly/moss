@@ -1379,6 +1379,23 @@ refcount at the second teardown. Every service gets its own staging
 buffer; and finishTeardown's bare assert became a named panic (domain,
 kobj and user balances) so the next leak says who.
 
+**Published services (as built, 2026-09-03):** `publish{service}` with
+a channel cap attached makes that channel an export remembered under a
+`ServiceId` (only a local holder of the fabric channel may publish; a
+request from the wire arrives badged and is forwarded, never
+interpreted); `lookup{node, service}` asks that node for the export
+behind the id (`lookup_req`/`lookup_ack`, wire version 5) and binds a
+session badge to it, handing back an ordinary channel cap — a lookup
+of one's own node answers with a copy of the export. Any certified
+member may look a service up: the service is the authority boundary,
+by badge. The fabric drill has node 1 publish its calc service and
+node 3, with no spawn authority, reach it; the session manager uses
+the same path for fabric logins. A system boot is node-parameterized
+now — `node: boot` in a unit takes the boot's node id (root passes it
+to init in its argument's high bits) into the program's argument and
+its certification, and `certify.seeds` has init dial the seeds once
+certified — so the cluster units serve any node, not node 1 alone.
+
 ## Users and sessions
 
 **As built (stage 1, 2026-09-03):** a user is not a kernel concept. The
@@ -1555,6 +1572,22 @@ of its own settings-layer and store views — the same badge, hence the
 same one attached buffer on the service, so a second session's attach
 replaced the first's and a dead session's buffer lingered until the
 manager died. A view handed to a session is derived for that session.
+
+**Fabric logins (as built, 2026-09-03):** a record is safe to copy —
+a public key and a seed sealed under the passphrase — so the same
+identity can log in on any node. A session manager holding a fabric
+channel publishes a badged copy of its channel to the pool under
+`ServiceId.usersvc` (the badge admits exactly one request, `record`);
+a login for a user with no local record asks every live member in
+turn — `members`, then `lookup` for its session manager — and pulls
+the record 24 bytes a chunk through the proxied channel, caches it in
+`conf/users/`, and unseals it locally. The home is born on the node of
+the session, keyed from the same identity; a remote home would need a
+bulk transport across the wire, which the view protocol (data through
+an attached buffer) does not have. The `flogin` drill: two system
+boots on one segment, both with disks, node 1 applying the users and
+publishing, node 2 joining through its seed and logging alice in on
+its console.
 
 What this does not do, deliberately: standing shares that survive a
 logout (offers are per session, in memory), fabric logins (stage 3,

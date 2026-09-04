@@ -65,7 +65,7 @@ reference count and creating domain (`ipc.dumpShms`), then the trace
 ring, then panics with the delta. The system drills — those that boot
 root and init from unit files — also require root's exit code to be 0.
 
-### What the 22 drills prove
+### What the 23 drills prove
 
 | Drill | Proves | Kind |
 |---|---|---|
@@ -90,7 +90,8 @@ root and init from unit files — also require root's exit code to be 0.
 | `fabric` | Three nodes: per-node identities, join, gossip, placement, a node's death and rejoin, an imposter refused, spawn authorization, revocation | cluster |
 | `shell` | A scripted msh session over a console socket: pipelines, the language, redirection, scripts, `run`; identity born on the first boot and restored on the second | shell, two boots |
 | `users` | Users as keys, sessions as domains, homes as encrypted volumes; two sessions at once; work persisting across logins; a locked setting | blk |
-| `login` | Two users at two consoles at once, each session an init instance with msh on its home; `run` from the system store, `install` into the home's own; seats freed | login |
+| `login` | Two users at two consoles at once, each session an init instance with msh on its home; `run` from the system store, `install` into the home's own; a share offered, accepted, read through, refused a write, and withdrawn; seats freed | login |
+| `flogin` | Fabric login: node 1 applies the users and publishes its session manager, node 2 (a fresh disk, a console) joins through its seed and alice logs in there — her record fetched from node 1, her home born on node 2 | flogin (two QEMUs on one segment) |
 
 Six of them boot a second time under a ReleaseSafe kernel — the `+rs`
 rows: `sched`, `domain`, `ipc`, `sandbox`, `fs`, `users`. These are the

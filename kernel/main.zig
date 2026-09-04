@@ -167,6 +167,12 @@ export fn kmain(dtb_pa: u64) noreturn {
         };
     }
 
+    if (build_options.flogin_test) {
+        _ = sched.spawn("boot-watch", floginTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
     if (build_options.users_test) {
         _ = sched.spawn("boot-watch", usersTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -588,6 +594,15 @@ fn loginTestWorker(_: u64) void {
     systemDrill("login");
 }
 
+/// The fabric-login drill: two system boots on one segment, both with a
+/// disk. Node 1 (profile flogin) applies the users and publishes its
+/// session manager; node 2 (profile fjoin) has no records, joins the
+/// fabric, and the runner logs alice in on its console — her record is
+/// fetched from node 1 over the wire, her home is born on node 2.
+fn floginTestWorker(_: u64) void {
+    systemDrill("flogin");
+}
+
 /// Developer-tooling boot: the storage stack, the virtio-console driver,
 /// init (serving its front channel), and msh — the interactive shell —
 /// wired together by capability grants. Used by both `zig build
@@ -608,7 +623,7 @@ fn systemDrill(comptime name: []const u8) void {
 
     log.info(name ++ ": spawning root (profile {t})", .{boot_profile});
     const root = domain.spawn("root", .{ .blob = img(.root) }, .{
-        .arg = 2 | (@intFromEnum(boot_profile) << 8),
+        .arg = 2 | (@intFromEnum(boot_profile) << 8) | (boot_node << 16),
         .grant_debug_log = true,
         .grant_spawner = true,
         .grant_bootfs = true,
@@ -1285,8 +1300,34 @@ fn fabricTestWorker(arg: u64) void {
             log.info("fabric-test: node 3 spawn refused on certificate grounds (no spawn authority)", .{});
         }
         var t: u64 = 0;
+        var reached = false;
         while (true) : (t += 1) {
             fabPump(fab_ch, 1);
+            // Node 3, with no spawn authority, reaches a service node 1
+            // PUBLISHED: lookup hands it a channel, the call comes back.
+            if (node == 3 and !reached and t % 10 == 0 and t <= 300) {
+                const lres = ipc.call(fab_ch, .{
+                    .data = shared.encodeMsg(shared.FabReq, .{ .lookup = .{ .node = 1, .service = @intFromEnum(shared.ServiceId.calc) } }),
+                }, 0);
+                if (lres.err == .ok and lres.msg.cap_type != 0) {
+                    if (shared.decodeMsg(shared.FabResp, lres.msg.data)) |lrep| {
+                        if (lrep == .found) {
+                            const cres = ipc.call(fab_ch, .{
+                                .data = shared.encodeMsg(shared.CalcRequest, .{ .add = .{ .a = 40, .b = 2 } }),
+                            }, lres.msg.cap_badge);
+                            if (cres.err == .ok and cres.msg.data[0] != shared.fabric_err_sentinel) {
+                                if (shared.decodeMsg(shared.CalcReply, cres.msg.data)) |crep| {
+                                    if (crep == .sum and crep.sum.value == 42) {
+                                        reached = true;
+                                        log.info("fabric-test: node 3 reached node 1's published service: 40+2=42", .{});
+                                    }
+                                }
+                            }
+                            ipc.releaseCap(@enumFromInt(lres.msg.cap_type), lres.msg.cap_obj, lres.msg.cap_badge);
+                        }
+                    }
+                }
+            }
             if (drill == 1 and t == 120) {
                 log.info("fabric-test: node {d} powering off mid-life (drill)", .{node});
                 psci.systemOff();
@@ -1317,6 +1358,38 @@ fn fabricTestWorker(arg: u64) void {
         std.debug.panic("fabric-test: placement spawn failed", .{});
     var landed = placed.node;
     log.info("fabric-test: placement spawn landed on node {d}; RPC verified", .{landed});
+
+    // Stage B1: a service PUBLISHED to the pool. A local calc service's
+    // channel is offered under ServiceId.calc; node 3 (no spawn
+    // authority) looks it up and calls it — its log carries the proof.
+    {
+        const pub_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");
+        _ = domain.spawn("calc-pub", .{ .blob = img(.pingpong) }, .{
+            .grant_debug_log = true,
+            .grant_channel_a = pub_ch,
+            .arg = 1,
+            .auto_reap = true,
+        }) catch |e| std.debug.panic("spawn calc-pub: {t}", .{e});
+        // Our B ref rides the publish; the fabric's export keeps it.
+        const pres = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .{ .publish = .{ .service = @intFromEnum(shared.ServiceId.calc) } }),
+            .cap_type = @intFromEnum(cap.CapType.channel_b),
+            .cap_obj = @intFromPtr(pub_ch),
+        }, 0);
+        const prep = if (pres.err == .ok) shared.decodeMsg(shared.FabResp, pres.msg.data) else null;
+        if (prep == null or prep.? != .ok) std.debug.panic("fabric-test: FAIL — publish refused", .{});
+        // And a lookup of our own node answers with the export itself.
+        const lres = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.FabReq, .{ .lookup = .{ .node = 1, .service = @intFromEnum(shared.ServiceId.calc) } }),
+        }, 0);
+        if (lres.err != .ok or lres.msg.cap_type == 0) std.debug.panic("fabric-test: FAIL — local lookup found nothing", .{});
+        const cres = ipc.call(fab_ch, .{
+            .data = shared.encodeMsg(shared.CalcRequest, .{ .add = .{ .a = 1, .b = 1 } }),
+        }, lres.msg.cap_badge);
+        _ = cres;
+        ipc.releaseCap(@enumFromInt(lres.msg.cap_type), lres.msg.cap_obj, lres.msg.cap_badge);
+        log.info("fabric-test: calc published to the pool (node 1)", .{});
+    }
 
     // Stage B2: a capability crosses the wire. A local calc service's
     // channel rides a greet to the remote child, which calls back through

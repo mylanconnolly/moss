@@ -1,15 +1,17 @@
-# The fabric service for node 1 (arg = 1 | node << 8). Its identity is
-# born on this node on first boot (a random seed) and kept, with its
-# certificate, in state/fabric — the root of trust is needed only to
-# certify a new identity. Revocations it accepts are kept there too.
+# The fabric service (arg = 1 | node << 8; the node is the boot's). Its
+# identity is born on this node on first boot (a random seed) and kept,
+# with its certificate, in state/fabric — the root of trust is needed
+# only to certify a new identity. Revocations it accepts are kept there
+# too. Once certified it dials the seeds (skipping itself).
 {
   image:   fabric
-  arg:     257
+  arg:     1
+  node:    boot
   grant:   [log, spawner, bootfs]
   give: [
     { tag: buf,  shm: 1 }
     { tag: net,  netview: net-cluster }
     { tag: view, fs: state/fabric, ro: false, mkdir: true }
   ]
-  certify: { root: fabroot, node: 1, gossip: true, spawn: true, state: state/fabric }
+  certify: { root: fabroot, gossip: true, spawn: true, state: state/fabric, seeds: [1] }
 }

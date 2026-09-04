@@ -34,7 +34,7 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 (`brew install qemu`).
 
 ```sh
-zig build check      # the whole test suite: 22 OS tests under QEMU (+6 again on a ReleaseSafe kernel) + host unit tests (~2 min)
+zig build check      # the whole test suite: 23 OS tests under QEMU (+6 again on a ReleaseSafe kernel) + host unit tests (~2 min)
 zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (intermittent failures)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
@@ -107,8 +107,9 @@ PASS marker and power off. Individual tests can still be run by hand:
 | users | Users as keys, sessions as domains, homes as encrypted volumes: `apply` creates the users from the desired state, passphrase-unlocked identities in a custodian's care, two sessions at once under their own budgets, wrong passphrase and unknown user refused, each home a volume keyed from its identity with the system volume holding only ciphertext, work persisting across logins, layered settings with a locked key | `zig build run-blk -Dusers-test` |
 | login | Console login: two users at two consoles at once, each session an init instance with msh holding the home as its whole filesystem; a refused passphrase, the other's files unnameable, out and back in, `run` from the system store and `install` into the home's own, a share offered, accepted, read through, refused a write, and withdrawn, seats freed | `zig build run-login` (interactive) |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
+| flogin | Fabric login: a user whose record lives on node 1 logs in on node 2 — the session manager publishes itself to the pool, the record is fetched over the sealed link, the home is born on node 2 | runner only (two QEMUs on one segment) |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
-| fabric | Per-node identities (root-signed certs, signed DH, sealed transport): join, gossip, placement, death, rejoin, imposter refused, spawn authorization, revocation | `zig build run-cluster -Dfabric-test` |
+| fabric | Per-node identities (root-signed certs, signed DH, sealed transport): join, gossip, placement, death, rejoin, imposter refused, spawn authorization, revocation, a published service reached by lookup | `zig build run-cluster -Dfabric-test` |
 | shell | msh scripted console session: typed pipelines (where/select/get over real listings), let/if/for/while/def, `>` redirection, data files, scripts and a startup script, tab completion, `run` of content-addressed programs whose results are values, and `run apply` making the volume match its desired state | `zig build run-shell` (interactive) |
 
 Host-side unit tests (`zig build test`) cover the shared ABI (handles,

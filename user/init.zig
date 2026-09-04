@@ -114,7 +114,18 @@ const Certify = struct {
     flags: u64,
     /// Where the identity lives across boots (seed + certificate files).
     state: []const u8,
+    /// Members to dial once certified (this node's own id is skipped).
+    seeds: [4]u64 = @splat(0),
+    nseeds: usize = 0,
 };
+
+/// The boot's node id (`node=N` in the boot arguments, through root's
+/// argument), 0 when none was given; units saying `node: boot` take it.
+var boot_node: u64 = 0;
+
+fn nodeId() u64 {
+    return if (boot_node == 0) 1 else boot_node;
+}
 
 const Unit = struct {
     name: []const u8,
@@ -220,6 +231,16 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
     const image = std.meta.stringToEnum(shared.ImageId, image_name) orelse return null;
     var u: Unit = .{ .name = name, .image = image };
     if (r.get("arg")) |a| u.arg = @intCast(int(a) orelse 0);
+    // `node: boot`: the program's node id is the boot's — arg becomes
+    // role | node << 8 (netsvc's and fabsvc's shape), and a certify
+    // block names this node.
+    var node_boot = false;
+    if (r.get("node")) |nd| {
+        if (nd == .str and std.mem.eql(u8, nd.str, "boot")) {
+            node_boot = true;
+            u.arg = (u.arg & 0xff) | (nodeId() << 8);
+        }
+    }
     if (r.get("cores")) |cs| {
         if (cs == .list) {
             for (cs.list) |c| {
@@ -324,10 +345,19 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             };
             u.certify = .{
                 .root = str(c.record.get("root")) orelse return null,
-                .node = @intCast(int(c.record.get("node")) orelse 1),
+                .node = if (node_boot) nodeId() else @intCast(int(c.record.get("node")) orelse 1),
                 .flags = flags,
                 .state = str(c.record.get("state")) orelse "state/fabric",
             };
+            if (c.record.get("seeds")) |sl| {
+                if (sl == .list) for (sl.list) |sv| {
+                    if (u.certify.?.nseeds == 4) break;
+                    if (int(sv)) |n| {
+                        u.certify.?.seeds[u.certify.?.nseeds] = @intCast(@max(n, 0));
+                        u.certify.?.nseeds += 1;
+                    }
+                };
+            }
         }
     }
     return u;
@@ -569,6 +599,27 @@ fn keep(text: []const u8) ?[]const u8 {
 /// Before go: the identity secret — the node's seed (restored from its
 /// state, or born now from the kernel pool and kept there) plus the
 /// root's cluster key — into the unit's buffer.
+/// Certified: dial the configured seeds (not ourselves). A seed that
+/// is not up yet is retried for a while — the other node may be booting.
+fn dialSeeds(u: *Unit) void {
+    const c = u.certify.?;
+    for (c.seeds[0..c.nseeds]) |seed| {
+        if (seed == nodeId()) continue;
+        var joined = false;
+        for (0..60) |_| {
+            switch (usys.callTyped(shared.FabReq, shared.FabResp, u.chan_b, .{ .connect_peer = .{ .node = seed } }, 0)) {
+                .ok => |rep| if (rep == .ok) {
+                    joined = true;
+                    break;
+                },
+                .err => break,
+            }
+            usys.sleep(5);
+        }
+        logLine(if (joined) "init: joined the fabric via a seed for unit " else "init: could not reach a seed for unit ", u.name);
+    }
+}
+
 fn certifySecret(u: *Unit) bool {
     const c = u.certify.?;
     const root = unitByName(c.root) orelse return false;
@@ -642,7 +693,10 @@ fn certifyFinish(u: *Unit) bool {
     while (attempt < 30) : (attempt += 1) {
         switch (usys.callTyped(shared.FabReq, shared.FabResp, u.chan_b, .{ .set_cert = .{ .off = 0, .len = shared.fab_cert_len } }, 0)) {
             .ok => |rep| switch (rep) {
-                .ok => return true,
+                .ok => {
+                    dialSeeds(u);
+                    return true;
+                },
                 .fab_err => |e| {
                     if (e.code != @intFromEnum(shared.FabErr.no_entropy)) return false;
                     usys.sleep(1); // rngd is still seeding the pool
@@ -774,6 +828,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         loadSessionUnits();
         logLine("init: session for ", setup.arg());
     } else {
+        boot_node = arg >> 16;
         loadUnits();
     }
     const front = usys.chanCreate();
@@ -781,7 +836,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     front_a = front.data[0];
     front_b = front.data[1];
 
-    if (arg & 0xff == 2) system(notif.data[0], arg >> 8);
+    if (arg & 0xff == 2) system(notif.data[0], (arg >> 8) & 0xff);
     if (arg & 0xff == 3) system(notif.data[0], @intFromEnum(shared.BootProfile.session));
     demo(notif.data[0]);
 }

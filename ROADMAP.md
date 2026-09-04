@@ -194,12 +194,14 @@ is a plan.
 - **The x86_64 port** — the HAL's honesty test. Audit what actually sits
   behind the HAL boundary first: the ITS, SMMU, VHE and vGIC work is
   deeply aarch64-shaped. PAN's counterpart there is SMAP.
-- **Users, stage 3, remaining:** fabric logins (needs notifications
-  crossing nodes and dynamic addressing, below). Sharing landed
-  (2026-09-03) as per-session, in-memory offers — standing grants that
-  survive a logout are a later step; `apply` landed the same day and
-  only creates and keeps — changing a passphrase or removing a user is
-  a manual edit of `conf/users/`.
+- **Users, stage 3, residuals:** sharing offers are per session and in
+  memory (standing grants that survive a logout are a later step);
+  `apply` only creates and keeps (changing a passphrase or removing a
+  user is a manual edit of `conf/users/`); a fabric login copies the
+  record and gives the user a home per node — reaching a remote home
+  needs a bulk transport across the wire (the view protocol moves data
+  through an attached buffer, which does not cross), and records are
+  fetched only at login, never refreshed.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
@@ -731,8 +733,7 @@ is a plan.
   volume, keyed from the unlocked identity and served by a home
   filesystem service spawned per session and destroyed with it — the
   system volume holds ciphertext only, and the drill scans it to prove
-  so. Residuals: fabric logins / the desired-state `apply` tool and
-  installer (stage 3) and an enforced home capacity.
+  so. Residuals: an enforced home capacity.
   ✅ **Sharing between users** (2026-09-03): a session derives a view
   of a path in its home and offers it, under a name, to one user
   through the session manager — every session now holds its own badged
@@ -762,6 +763,20 @@ is a plan.
   role read the archive before its entry point recorded where it was,
   and a drill step accepted the resulting "exited with code 255"
   because it matched on a digit.
+  ✅ **Published services, and fabric logins** (2026-09-03): the fabric
+  gained `publish{service}` (a channel cap offered to the pool under a
+  ServiceId, becoming an export) and `lookup{node, service}` (a
+  proxied channel to it, the same shape as a remote spawn's answer;
+  wire version 5), proven in the drill by node 3 — no spawn authority
+  — reaching node 1's published calc. The session manager publishes
+  itself, and a login for a user without a local record fetches it
+  from a live member 24 bytes a chunk (nothing but words cross), caches
+  it, and unseals locally; the home is born on the node of the session.
+  A system boot is node-parameterized now (`node: boot` in a unit takes
+  `node=N` from the boot arguments through root to init; `certify.seeds`
+  dials the seeds once certified), and the `flogin` drill boots two
+  system profiles on one segment, each with a disk, and logs alice in
+  on node 2 with her record on node 1.
 - ✅ **The gate hardened** (2026-09-03): the check runs the kernel-heavy
   drills a second time under a **ReleaseSafe kernel** (`+rs` rows), has
   a soak mode (`-Dsoak=N`) and a filter (`-Donly=a,b`). The first

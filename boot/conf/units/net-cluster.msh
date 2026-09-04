@@ -1,8 +1,9 @@
-# The network service in cluster addressing as node 1 (arg = 1 | node << 8),
-# for the fabric under the system profile.
+# The network service in cluster addressing (arg = 1 | node << 8; the
+# node is the boot's, `node=N` in the boot arguments, 1 by default).
 {
   image: net
-  arg:   257
+  arg:   1
+  node:  boot
   give: [
     { tag: device, device: net }
   ]

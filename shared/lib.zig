@@ -341,6 +341,12 @@ pub const ImageId = enum(u64) {
 pub const ServiceId = enum(u64) {
     logsvc = 0,
     greeter = 1,
+    /// The session manager (usersvc), published to the pool so a login
+    /// on any node can fetch a user's record from the node holding it.
+    usersvc = 2,
+    /// The fabric drill's calc service (node 1 publishes it, node 3
+    /// reaches it).
+    calc = 3,
 };
 
 /// Encode a message union into the four IPC data words: word 0 is the tag,
@@ -460,6 +466,12 @@ pub const SessReq = union(enum(u64)) {
     shares: void,
     /// Take an offer made to me: the reply attaches the view cap.
     accept: struct { name: u64 },
+    /// From another node's session manager (through the fabric): the
+    /// user's record, 24 bytes per chunk — `chunk { a, b, c }` while
+    /// bytes remain, `data { len }` once past the end, `denied` when
+    /// there is no such user. The name travels in two words (16 bytes),
+    /// since no buffer crosses the wire.
+    record: struct { name_a: u64, name_b: u64, chunk: u64 },
 };
 
 pub const SessResp = union(enum(u64)) {
@@ -471,6 +483,8 @@ pub const SessResp = union(enum(u64)) {
     denied: void,
     /// A data literal of `len` bytes waits in the caller's buffer.
     data: struct { len: u64 },
+    /// 24 bytes of a record, little-endian words, zero-padded.
+    chunk: struct { a: u64, b: u64, c: u64 },
     sess_err: struct { code: u64 },
 };
 
@@ -801,7 +815,7 @@ pub const TcpState = enum(u64) {
 // node N is 10.77.0.N / fdcc::N.
 
 pub const fabric_port: u64 = 7100;
-pub const fabric_ver: u8 = 4; // v4: per-node identities (certs + signed DH)
+pub const fabric_ver: u8 = 5; // v5: published services (lookup); v4: per-node identities
 
 /// set_identity record: [identity seed 32][cluster key 32]; set_cert
 /// then delivers the fab_cert_len certificate (lib/fabcert.zig layout).
@@ -844,15 +858,23 @@ pub const FabReq = union(enum(u64)) {
     /// peers are dropped), and gossiped to every peer.
     revoke: struct { off: u64, len: u64 },
     /// Fill the attached buffer with fab_member_size-byte records
-    /// {node u16, up u8, pad u8, free_mb u16, pad u16}; reply num{n}.
+    /// {node u16, up u8, self u8, free_mb u16, pad u16}; reply num{n}.
     members: void,
     /// num{the most wire exchanges this node has had in flight at once}.
     stats: void,
+    /// + channel_b cap: offer that channel to the pool under a ServiceId,
+    /// so any member can `lookup` it here. Local (unbadged) callers only.
+    publish: struct { service: u64 },
+    /// A channel to the service `node` published under that id: the
+    /// reply is `found { node }` with a remote-channel cap attached (a
+    /// local copy of the export when node is this node).
+    lookup: struct { node: u64, service: u64 },
 };
 
 pub const FabResp = union(enum(u64)) {
     ok: void,
     spawned: struct { node: u64 }, // + remote-channel cap; node = where
+    found: struct { node: u64 }, // + remote-channel cap to a published service
     num: struct { n: u64 },
     fab_err: struct { code: u64 },
 };
@@ -938,6 +960,12 @@ pub const fw_auth: u8 = 11;
 pub const fw_sealed: u8 = 12;
 pub const fw_members: u8 = 13;
 pub const fw_revoke: u8 = 14;
+/// Published services: lookup_req [service u16][req u32] -> lookup_ack
+/// [req u32][export u32][code u8] (1 = found, 0 = nothing published).
+pub const fw_lookup_req: u8 = 15;
+pub const fw_lookup_ack: u8 = 16;
+/// Services a node may publish to the pool (slots in fabsvc's table).
+pub const fab_max_services: usize = 8;
 
 // QEMU slirp constants (static config; DHCP/SLAAC are not Phase 10
 // problems). v4 net 10.0.2.0/24, v6 prefix fec0::/64.
@@ -1126,7 +1154,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

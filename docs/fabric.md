@@ -176,6 +176,25 @@ only if the requester's certificate carries the *spawn* flag and the
 bit for that image in its image mask; otherwise the answer is a typed
 `denied`, not a timeout.
 
+### Published services
+
+A remote channel used to arise only from a remote spawn. `publish
+{service}` with a channel cap attached offers that channel to the pool
+under a `ServiceId` (the cap becomes an export, remembered under the
+id; only a local holder of the fabric channel may publish — a request
+from the wire arrives badged and is forwarded, never interpreted).
+`lookup{node, service}` on any member sends `lookup_req` to that node,
+which answers with the export id behind the service, or nothing; the
+requester binds a session badge to it and hands back an ordinary
+channel cap — the same shape as a remote spawn's answer. Looking up a
+service on one's own node answers with a copy of the export itself.
+Any certified member may look a service up: the service is the
+authority boundary, and it sees the caller by badge. The fabric drill
+has node 1 publish its calc service and node 3 — which holds no spawn
+authority at all — reach it and get 42 back; the session manager uses
+the same path to fetch a user's record from the node that has it
+(see [Users and sessions](users.md)).
+
 ### Revocation, not rekeying
 
 A revocation is a root-signed record {node, minimum serial}. Wherever it
@@ -265,7 +284,11 @@ refused.
   and checked to name this node and this key — a mis-issued certificate
   fails here, and accepting it opens the network), `connect_peer`,
   `remote_spawn`, `attach_buf`, `revoke`, `members` (8-byte records
-  {node, up, free MB}), `stats` (the most exchanges ever in flight).
+  {node, up, self, free MB}), `stats` (the most exchanges ever in
+  flight), `publish{service}` (+ a channel cap; 8 service slots) and
+  `lookup{node, service}` (answers `found{node}` + a channel cap).
+  Wire frames `lookup_req` [service u16][req u32] and `lookup_ack`
+  [req u32][export u32][code u8]; wire version 5.
   Errors: `no_peer`, `timeout`, `disconnected`, `refused`, `no_space`,
   `no_identity`, `no_entropy`, `denied`.
 - **Remote spawn.** Request `[image u16][arg u64][req u32]`; the child
@@ -286,7 +309,13 @@ refused.
 - Addressing is static: node `N` is `10.77.0.N`; dynamic addressing is a
   separate concern not yet built.
 - Shared-memory caps do not cross nodes (by design), and notifications
-  do not cross yet.
+  do not cross yet; a protocol that moves bulk data through an attached
+  buffer (the filesystem view protocol) therefore cannot be proxied,
+  which is why a fabric login copies the record rather than reaching a
+  remote home.
+- A `lookup` is one exchange in flight per node at a time (the same
+  shape as a remote spawn), and a published service is unpublished only
+  by its node's restart.
 - Certificates carry no expiry: with no shared clock, revocation serials
   are the only clock. Revocations live in each node's state and in
   memory; a whole cluster restarted from blank state forgets them until

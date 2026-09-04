@@ -1,0 +1,20 @@
+# The fabric-login drill, node 1 (profile flogin): the session manager
+# with the fabric — it publishes itself to the pool so a login on
+# another node can fetch a user's record from here. Started after the
+# desired state has created the users; no console, no drill end: this
+# node serves until the runner stops it.
+{
+  image:    users
+  arg:      1
+  budget:   { user: 40mb }
+  grant:    [log, spawner, bootfs]
+  profiles: [flogin]
+  after:    apply
+  give: [
+    { tag: view,   fs: conf/users, ro: false, mkdir: true }
+    { tag: home,   fs: home,       ro: false }
+    { tag: conf,   fs: conf/app,   ro: true,  mkdir: true }
+    { tag: store,  fs: img,        ro: true }
+    { tag: fabric, unit: fabsvc }
+  ]
+}

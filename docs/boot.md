@@ -136,7 +136,11 @@ The remaining keys: `arg` (the program's personality word), `budget`
 (`kobj`, `user`, `cpu` as permille of a core or `"25%"`), `cores` (a
 partition reserved for the unit alone), `grant` (`log`, `spawner`,
 `bootfs`, `introspect`), `restart: { max: N }`, `profiles`,
-`essential`, `oneshot`, `after`, `run` (`run: true`: the unit is also a
+`essential`, `oneshot`, `after`, `node` (`node: boot`: the program's
+node id is the boot's, `node=N` in the boot arguments, 1 by default —
+its `arg` becomes role | node << 8, and its `certify` names this
+node), `certify.seeds` (members the fabric service dials once
+certified, skipping itself), `run` (`run: true`: the unit is also a
 program the shell can run under its name — init writes a manifest for
 it into the store with its image's digest, `arg`, grants and gives),
 `certify` (the fabric's certification

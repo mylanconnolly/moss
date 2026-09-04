@@ -148,7 +148,15 @@ var store_buf: [*]u8 = undefined;
 /// admin holding the unbadged channel) and one per session (badge =
 /// its slot + 1, minted at spawn).
 const ClientBuf = struct { va: u64 = 0, pages: u64 = 0 };
-var client_bufs: [max_sessions + 1]ClientBuf = @splat(.{});
+var client_bufs: [max_sessions + 2]ClientBuf = @splat(.{});
+/// The badge our published channel carries: a caller through the fabric,
+/// allowed exactly one request — `record`.
+const remote_badge: u64 = max_sessions + 1;
+/// The fabric, when this manager has one: it publishes itself under
+/// ServiceId.usersvc, and a login for a user without a local record asks
+/// the other members for theirs.
+var fab_chan: u64 = 0;
+var fab_buf: [*]u8 = undefined;
 
 // ------------------------------------------------------------- sharing
 //
@@ -193,6 +201,8 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
     stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(181);
     _ = usys.log(glog, "usersvc: up; sessions are domains, identities are keys");
+    fab_chan = setup.cap(.fabric);
+    if (fab_chan != 0) joinPool();
     if (flags & 0x100 != 0) {
         login_drill = flags & 0x200 != 0;
         for (0..max_consoles) |i| {
@@ -228,17 +238,22 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
         };
         const badge = r.badge;
         // Badge 0 (the unbadged channel: the drill, an admin) may open
-        // and end sessions; a session (its own badge) may only share.
+        // and end sessions; a session (its own badge) may only share; a
+        // caller through the fabric (the published channel's badge) may
+        // only ask for a record.
         const admin_only = switch (req) {
             .login, .wait, .logout => true,
             else => false,
         };
-        if ((admin_only and badge != 0) or (!admin_only and req != .attach_buf and badge == 0)) {
+        const remote_ok = req == .record;
+        const allowed = if (badge == remote_badge) remote_ok else if (badge == 0) (admin_only or req == .attach_buf or req == .record) else (!admin_only and req != .record);
+        if (!allowed) {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
             reply(.{ .sess_err = .{ .code = 5 } });
             continue;
         }
         switch (req) {
+            .record => |q| reply(doRecord(q.name_a, q.name_b, q.chunk)),
             .attach_buf => {
                 if (r.cap != 0 and badge <= max_sessions) {
                     const m = usys.shmMap(r.cap);
@@ -516,7 +531,7 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
     if (slot == max_sessions) return .{ .sess_err = .{ .code = 3 } };
 
     var budget: Budget = .{};
-    const rec = readRecord(name, &budget) orelse return refuse("usersvc: login refused");
+    const rec = readRecord(name, &budget) orelse (if (fab_chan != 0 and fetchRecord(name)) readRecord(name, &budget) else null) orelse return refuse("usersvc: login refused");
     var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
     const kp = usercred.unlock(fba.allocator(), &rec, phrase) catch return refuse("usersvc: login refused");
 
@@ -535,6 +550,124 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
 
 /// One answer for every refusal, after a pause: the reply never says
 /// whether the name or the passphrase was wrong, and guessing is slow.
+// -------------------------------------------------------------- the pool
+//
+// A user is the same identity on every node: the record (a public key
+// and a seed sealed under the passphrase) is safe to copy anywhere, so
+// a login on a node without it fetches it from a member that has it,
+// caches it, and unseals locally. The home stays per node — a fresh
+// volume here, keyed from the same identity.
+
+/// Publish our channel to the pool under ServiceId.usersvc: a badged
+/// copy, so requests from the wire are known for what they are.
+fn joinPool() void {
+    const s = usys.shmCreate(1);
+    if (s.err != .ok) return;
+    const m = usys.shmMap(s.data[0]);
+    if (m.err != .ok) return;
+    fab_buf = @ptrFromInt(m.data[0]);
+    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .attach_buf, s.data[0])) {
+        .ok => {},
+        .err => return,
+    }
+    const minted = usys.chanMint(svc_chan, remote_badge);
+    if (minted.err != .ok) return;
+    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .publish = .{ .service = @intFromEnum(shared.ServiceId.usersvc) } }, minted.data[1])) {
+        .ok => |rep| {
+            if (rep == .ok) _ = usys.log(glog, "usersvc: published to the pool");
+        },
+        .err => {},
+    }
+    _ = usys.capDrop(minted.data[1]);
+}
+
+/// A member's request for a record: 24 bytes per chunk from the file.
+fn doRecord(name_a: u64, name_b: u64, chunk: u64) shared.SessResp {
+    var name_bytes: [16]u8 = undefined;
+    std.mem.writeInt(u64, name_bytes[0..8], name_a, .little);
+    std.mem.writeInt(u64, name_bytes[8..16], name_b, .little);
+    var n: usize = 0;
+    while (n < 16 and name_bytes[n] != 0) n += 1;
+    const name = name_bytes[0..n];
+    if (!nameOk(name)) return .denied;
+    var path: [max_name + 4]u8 = undefined;
+    @memcpy(path[0..name.len], name);
+    @memcpy(path[name.len .. name.len + 4], ".msh");
+    var text: [1024]u8 = undefined;
+    const rec = readInto(users_view, users_buf, path[0 .. name.len + 4], &text) orelse return .denied;
+    const off = chunk * 24;
+    if (off >= rec.len) return .{ .data = .{ .len = rec.len } };
+    var bytes: [24]u8 = @splat(0);
+    const k = @min(24, rec.len - off);
+    @memcpy(bytes[0..k], rec[off .. off + k]);
+    return .{ .chunk = .{
+        .a = std.mem.readInt(u64, bytes[0..8], .little),
+        .b = std.mem.readInt(u64, bytes[8..16], .little),
+        .c = std.mem.readInt(u64, bytes[16..24], .little),
+    } };
+}
+
+/// Ask every live member (not ourselves) for the record; the first to
+/// have it wins, and the record is cached in conf/users here.
+fn fetchRecord(name: []const u8) bool {
+    const mres = usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .members, 0);
+    const count: u64 = switch (mres) {
+        .ok => |rep| if (rep == .num) rep.num.n else 0,
+        .err => 0,
+    };
+    var i: u64 = 0;
+    while (i < count and i < 16) : (i += 1) {
+        const rec = fab_buf[i * shared.fab_member_size .. (i + 1) * shared.fab_member_size];
+        const node: u64 = std.mem.readInt(u16, rec[0..2], .little);
+        const up = rec[2] != 0;
+        const self = rec[3] != 0;
+        if (!up or self) continue;
+        if (fetchFrom(node, name)) return true;
+    }
+    return false;
+}
+
+fn fetchFrom(node: u64, name: []const u8) bool {
+    const lres = usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = node, .service = @intFromEnum(shared.ServiceId.usersvc) } }, 0);
+    const chan: u64 = switch (lres) {
+        .ok => |ok| if (ok.rep == .found and ok.cap != 0) ok.cap else return false,
+        .err => return false,
+    };
+    defer _ = usys.capDrop(chan);
+    const w = shared.strToWords(name);
+    var text: [1024]u8 = undefined;
+    var len: usize = 0;
+    var chunk: u64 = 0;
+    while (chunk < 48) : (chunk += 1) {
+        switch (usys.callTyped(shared.SessReq, shared.SessResp, chan, .{ .record = .{ .name_a = w[0], .name_b = w[1], .chunk = chunk } }, 0)) {
+            .ok => |rep| switch (rep) {
+                .chunk => |c| {
+                    if (len + 24 > text.len) return false;
+                    std.mem.writeInt(u64, text[len..][0..8], c.a, .little);
+                    std.mem.writeInt(u64, text[len + 8 ..][0..8], c.b, .little);
+                    std.mem.writeInt(u64, text[len + 16 ..][0..8], c.c, .little);
+                    len += 24;
+                },
+                .data => |d| {
+                    if (d.len > len or d.len > text.len) return false;
+                    var path: [max_name + 4]u8 = undefined;
+                    @memcpy(path[0..name.len], name);
+                    @memcpy(path[name.len .. name.len + 4], ".msh");
+                    if (!writeFile(users_view, users_buf, path[0 .. name.len + 4], text[0..d.len])) return false;
+                    _ = fsc.fsSync(users_view);
+                    var line: [96]u8 = undefined;
+                    var nb: [24]u8 = undefined;
+                    _ = usys.log(glog, cat3(&line, "usersvc: record for ", name, " fetched from node ", decimal(&nb, node), ""));
+                    return true;
+                },
+                else => return false,
+            },
+            .err => return false,
+        }
+    }
+    return false;
+}
+
 fn refuse(msg: []const u8) shared.SessResp {
     usys.sleep(20);
     _ = usys.log(glog, msg);
@@ -820,7 +953,7 @@ fn apply(chan_h: u64) noreturn {
     const text = readInto(cv, cbuf, "system.msh", &text_buf) orelse
         (shared.marcFind(@as([*]const u8, @ptrFromInt(blob_va))[0..blob_len], "conf/system.msh") orelse {
             _ = usys.log(glog, "apply: no desired state: neither conf/system.msh nor the archive's");
-            usys.exit(195);
+            usys.exit(198);
         });
     var fba = std.heap.FixedBufferAllocator.init(&apply_heap);
     const a = fba.allocator();

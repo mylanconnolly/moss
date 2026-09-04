@@ -122,6 +122,11 @@ pub fn build(b: *std.Build) void {
         "login-test",
         "Run the login drill: two users log in on two consoles at once, each session an init instance with msh on its home",
     ) orelse false;
+    const flogin_test = b.option(
+        bool,
+        "flogin-test",
+        "Run the fabric-login drill: a login on node 2 with the user's record on node 1 (pair with profile=flogin node=1 / profile=fjoin node=2)",
+    ) orelse false;
     const rng_test = b.option(
         bool,
         "rng-test",
@@ -191,6 +196,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "rng_test", rng_test);
     build_opts.addOption(bool, "users_test", users_test);
     build_opts.addOption(bool, "login_test", login_test);
+    build_opts.addOption(bool, "flogin_test", flogin_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -247,23 +253,24 @@ pub fn build(b: *std.Build) void {
     // (etc/ identity, conf/ boot configuration: unit files under
     // conf/units/, test key material beside them).
     for ([_][]const u8{
-        "etc/motd",                     "etc/version",
-        "conf/fs.key",                  "conf/fabric/root.seed",
-        "conf/units/rngd.msh",          "conf/units/blk.msh",
-        "conf/units/fs.msh",            "conf/units/net.msh",
-        "conf/units/fabroot.msh",       "conf/units/fabsvc.msh",
-        "conf/units/cons.msh",          "conf/units/msh.msh",
-        "conf/units/logsvc.msh",        "conf/units/greeter.msh",
-        "conf/units/ps.msh",            "conf/units/ls.msh",
-        "conf/units/net-cluster.msh",   "conf/units/blk-drill.msh",
-        "conf/units/fs-alice.msh",      "conf/units/fs-bob.msh",
-        "conf/units/fs-churn.msh",      "conf/units/fs-churn2.msh",
-        "conf/units/net-echosrv.msh",   "conf/units/net-echocli.msh",
-        "conf/units/net-boxed.msh",     "conf/msh/startup.msh",
-        "conf/units/guest-hello.msh",   "conf/units/usersvc.msh",
-        "conf/units/apply.msh",         "conf/units/users-drill.msh",
-        "conf/system.msh",              "conf/units/cons1.msh",
-        "conf/units/usersvc-login.msh", "conf/session/msh.msh",
+        "etc/motd",                      "etc/version",
+        "conf/fs.key",                   "conf/fabric/root.seed",
+        "conf/units/rngd.msh",           "conf/units/blk.msh",
+        "conf/units/fs.msh",             "conf/units/net.msh",
+        "conf/units/fabroot.msh",        "conf/units/fabsvc.msh",
+        "conf/units/cons.msh",           "conf/units/msh.msh",
+        "conf/units/logsvc.msh",         "conf/units/greeter.msh",
+        "conf/units/ps.msh",             "conf/units/ls.msh",
+        "conf/units/net-cluster.msh",    "conf/units/blk-drill.msh",
+        "conf/units/fs-alice.msh",       "conf/units/fs-bob.msh",
+        "conf/units/fs-churn.msh",       "conf/units/fs-churn2.msh",
+        "conf/units/net-echosrv.msh",    "conf/units/net-echocli.msh",
+        "conf/units/net-boxed.msh",      "conf/msh/startup.msh",
+        "conf/units/guest-hello.msh",    "conf/units/usersvc.msh",
+        "conf/units/apply.msh",          "conf/units/users-drill.msh",
+        "conf/system.msh",               "conf/units/cons1.msh",
+        "conf/units/usersvc-login.msh",  "conf/session/msh.msh",
+        "conf/units/usersvc-flogin.msh", "conf/units/usersvc-fjoin.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -320,7 +327,7 @@ pub fn build(b: *std.Build) void {
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-        "users_test", "login_test",
+        "users_test", "login_test",  "flogin_test",
     }) |on| gopts.addOption(bool, on, false);
     gopts.addOption(bool, "guest_kernel", true);
     const gmod = b.createModule(.{
@@ -645,13 +652,13 @@ pub fn build(b: *std.Build) void {
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-        "users_test", "login_test",
+        "users_test", "login_test",  "flogin_test",
     };
     const variants = [_][]const u8{
-        "panic",   "fault", "sched", "domain", "ipc",   "init",
-        "sandbox", "flap",  "blk",   "fs",     "net",   "fabric",
-        "shell",   "rng",   "smmu",  "vm",     "guest", "vmnode",
-        "pan",     "cpu",   "users", "login",
+        "panic",   "fault", "sched", "domain", "ipc",    "init",
+        "sandbox", "flap",  "blk",   "fs",     "net",    "fabric",
+        "shell",   "rng",   "smmu",  "vm",     "guest",  "vmnode",
+        "pan",     "cpu",   "users", "login",  "flogin",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

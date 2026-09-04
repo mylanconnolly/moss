@@ -225,6 +225,45 @@ flowchart LR
   M --> E["effective\ntheme: light (user)\ntab_width: 4 (system)\ntelemetry: false (locked)"]
 ```
 
+### Logging in anywhere: fabric logins
+
+A user is the same identity on every node of the pool, because a
+record is safe to copy: it holds a public key and a seed sealed under
+the passphrase, nothing a node could misuse. A session manager with a
+fabric channel publishes itself to the pool under `ServiceId.usersvc`
+(a badged copy of its channel, so a request from the wire is known for
+what it is and may ask for exactly one thing: a record). A login for a
+user with no local record asks every live member, in turn, for that
+user's record — `lookup` hands it a channel to the member's session
+manager, the record crosses in 24-byte chunks (no buffer crosses the
+wire) — caches it in `conf/users/`, and unseals it locally like any
+other. The home is born on the node where the session runs, keyed from
+the same identity.
+
+```mermaid
+sequenceDiagram
+  participant C as console on node 2
+  participant M2 as usersvc on node 2
+  participant F as the fabric
+  participant M1 as usersvc on node 1
+  C->>M2: alice / passphrase
+  M2->>M2: no conf/users/alice.msh here
+  M2->>F: members, then lookup usersvc on node 1
+  F-->>M2: a channel to node 1's session manager
+  M2->>M1: record alice, chunk 0 (through the fabric)
+  M1-->>M2: 24 bytes
+  M2->>M1: chunk 1 … n
+  M1-->>M2: data, length
+  M2->>M2: cache the record, unseal the seed, open a home here
+  M2-->>C: moss shell
+```
+
+The `flogin` drill proves it: node 1 boots with a disk, applies the
+users and publishes its session manager; node 2 boots with a fresh disk
+and a console, joins through its seed, and alice logs in there — her
+record fetched from node 1, her home born on node 2, a file written and
+read back — then logs out and the drill ends clean.
+
 ### The desired state, and `apply`
 
 Nothing about users is configured by hand. `conf/system.msh` describes
@@ -382,8 +421,11 @@ when every console has had a session and none is open.
   survives a logout, and no sharing to a user who is not logged in when
   the offer is withdrawn is remembered. At most 8 offers at once, 8
   mounts per shell.
-- No fabric logins: the identity is built to sign challenges across
-  nodes, but nothing asks it to yet (stage 3).
+- A fabric login copies the record; it does not move the home. A user
+  who logs in on two nodes has two homes, one per node, both keyed
+  from the same identity; nothing synchronizes them. Records are
+  fetched only at login, so a record changed on its home node is not
+  refreshed elsewhere.
 - `apply` creates and keeps; it never rewrites or removes a record, so a
   passphrase change or a user's removal is a manual edit of
   `conf/users/`. Its KDF work area bounds the cost a record may ask
