@@ -246,8 +246,11 @@ is a plan.
   `tools/tree-sitter-mshl`, highlights, a corpus recorded from the
   language's examples, every `.msh` in the tree parsing clean), ✅ a
   formatter on it (landed 2026-09-04: `mshfmt`, `zig build fmt` /
-  `fmt-test`, the tree kept formatted), then lint and a language
-  server on the same parser. Rule: build the
+  `fmt-test`, the tree kept formatted), ✅ lint (landed 2026-09-04:
+  `mshlint`, unbound/unused names, exhaustiveness, duplicate keys,
+  unit keys; `lint-test`), then a language server on the same parser
+  (diagnostics from the lint, hover and go-to-definition from its
+  scopes, formatting from mshfmt). Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
 - **virtio-gpu and input devices** — the graphical console.
@@ -382,6 +385,21 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 5c: lint** (done, 2026-09-04): `mshlint`,
+  `tools/mshlint.zig`, on the parser now shared as `tools/mshtree.zig`
+  — the interpreter's run-time complaints, before: a `$x` bound nowhere
+  in scope or used before its `let` (scopes as the interpreter has
+  them: a function body is one, blocks under `if`/`for`/`while`/`try`
+  and arms bind in the frame around them, names resolve across scopes
+  in any order), a `let` in a function nothing reads, a `match` that is
+  not exhaustive by the parser's own rule and an arm after a catch-all,
+  a key given twice, a `def` shadowing a builtin, and in a unit file a
+  key the loader does not read. `zig build lint-test` runs its tests
+  and the lint over every `.msh` under `boot/`, which lints clean.
+  Found on the first run over the tree: two unit keys the lint's list
+  did not have (`after`, `install`) — the list mirrors `parseUnit` and
+  HACKING says so — and nothing else, which is what a tree that has
+  been through the drills should show.
 - ✅ **mshl v3, stage 5b: the formatter** (done, 2026-09-04): `mshfmt`,
   `tools/mshfmt.zig` — the grammar's generated parser and the
   tree-sitter runtime linked into a host program; the tree's leaves in

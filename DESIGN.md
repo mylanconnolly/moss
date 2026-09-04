@@ -1431,6 +1431,34 @@ walking, so a file that is not formatted fails the step and a new one
 cannot be forgotten. Not in the gate (host tooling; needs the runtime),
 but part of finishing a change to anything under `boot/`.
 
+**mshl v3, stage 5c (as built, 2026-09-04): lint.** `tools/mshlint.zig`
+shares the parser with the formatter (`tools/mshtree.zig`: the C
+runtime behind a few helpers — kind, text, field, positions) and adds
+the one analysis a language server will need too: scopes. A scope is a
+function body (`def`, `fn`, a block argument) or the file; a block
+under `if`, `for`, `while`, `try` or a match arm is not one, because at
+run time it binds in the enclosing frame. Each scope is collected
+first — every `let`, `def`, `for` name, pattern binding and record
+shorthand anywhere in it, with function bodies skipped — then checked:
+a `$x` or a `$x` inside a string resolves up the chain, counting a use
+on the binding it finds; none anywhere is "not bound", and a use in the
+same scope that starts before every `let` of that name there is "used
+before" (across scopes order is not checked: `def f { $x }` is fine
+with `let x` after it, which is how closures resolve). The implicit
+names (`it`, `in`, `acc`, `req`) are bound in every function scope and
+the file's. Unused is reported only for a `let` in a function: a file's
+top level is what `use` exports. The `match` check is the parser's
+exhaustiveness rule transcribed (catch-all; `ok _` and `err _`; `true`
+and `false`; guards never count) plus the arm after a catch-all;
+duplicate record keys and a `def` over a builtin name (the list is
+`lib/mshl.zig`'s, imported) round out the language checks. The one
+host-specific check is the unit file: under `conf/units/` and
+`conf/session/`, a top-level key `parseUnit` does not read, because
+init ignores unknown keys and a misspelled `image:` is a unit that
+silently never starts. Diagnostics are `path:line:col: message`, sorted,
+exit 1 if any; `--stdin NAME` for editors. `zig build lint-test` runs
+its tests and the lint over the tree.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

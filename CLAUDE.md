@@ -16,10 +16,10 @@ frontier — every unstarted arc and every residual, kept current; the
   lib/ lz4+xts+fabcert+mshl+usercred+settings, the full mossfs suite incl.
   crash sweeps).
   `zig test lib/mshl.zig` alone is the fast loop for shell-language work.
-- `zig build fmt-test` — mshfmt's tests + `--check` over every `.msh`
-  under boot/ (needs the tree-sitter runtime, `brew install tree-sitter`);
-  run after touching any .msh or the grammar. `zig build fmt` installs
-  `zig-out/bin/mshfmt` to reformat.
+- `zig build fmt-test lint-test` — mshfmt's and mshlint's tests, then
+  `--check`/lint over every `.msh` under boot/ (needs the tree-sitter
+  runtime, `brew install tree-sitter`); run after touching any .msh, the
+  grammar, or init's unit keys. `zig build fmt` / `lint` install the tools.
 - `zig build bench | bench-soft` — host perf baselines (DESIGN.md table).
 - `zig build run-shell` — interactive msh console on your terminal.
 - `zig build run-login` — multi-user boot: login prompts on your terminal

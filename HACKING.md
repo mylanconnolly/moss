@@ -102,13 +102,20 @@ counted fails the test; the QEMU check is for integration. A change to
 the *syntax* also changes `tools/tree-sitter-mshl/grammar.js`, with a
 corpus entry for it (`tree-sitter generate && tree-sitter test`; record
 a new tree with `tree-sitter test -u` and read it before trusting it),
-and then `zig build fmt-test` — the formatter compiles the generated
-parser in, so a grammar change is a formatter change, and every `.msh`
-under `boot/` must still come out unchanged (a new spacing rule means
-running `zig-out/bin/mshfmt` over the tree and reading the diff; a new
-kind of token needs its `Leaf.Kind` and a `needSpace` rule, and a test
-in `tools/mshfmt.zig`). New `.msh` files are formatted before they are
-committed; `zig build fmt-test` names any that are not. The memory
+and then `zig build fmt-test lint-test` — the tools compile the
+generated parser in (`tools/mshtree.zig`), so a grammar change is a
+formatter and lint change, and every `.msh` under `boot/` must still
+come out unchanged and clean (a new spacing rule means running
+`zig-out/bin/mshfmt` over the tree and reading the diff; a new kind of
+token needs its `Leaf.Kind` and a `needSpace` rule, and a test in
+`tools/mshfmt.zig`; a new binding form or scope needs `collect`/`check`
+in `tools/mshlint.zig`). Two lists in the lint mirror the OS: the
+implicit names a block gets (`it`, `in`, `acc`, `req` — a host that
+calls a block with new names adds them) and the unit keys
+`user/init.zig`'s `parseUnit` reads (a new key is added there and in
+`unit_keys`, or every unit using it lints as a typo). New `.msh` files
+are formatted and lint clean before they are committed; the two test
+steps name any that are not. The memory
 rules for host code: a host command builds its value in `it.arena` and
 never keeps a pointer to one past the call; anything that must outlive
 the line goes through `setVar` (a box); flags read out of data files

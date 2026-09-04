@@ -1,5 +1,6 @@
 //! mshfmt — the formatter for mshl, built on the tree-sitter grammar in
-//! tools/tree-sitter-mshl (one definition of the syntax for every tool).
+//! tools/tree-sitter-mshl (one definition of the syntax for every tool;
+//! the parser and its helpers are tools/mshtree.zig, shared with mshlint).
 //! It keeps the author's line breaks and comments and normalizes the
 //! rest: one space between tokens, none inside `()` and `[]`, spaces
 //! inside `{ }`, `key: value`, spaced operators and pipes, indentation
@@ -17,13 +18,10 @@
 //! the same tree as the original.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("tree_sitter/api.h");
-});
+const ts = @import("mshtree");
+const c = ts.c;
 
-extern fn tree_sitter_mshl() callconv(.c) *const c.TSLanguage;
-
-pub const Error = error{ OutOfMemory, ParseError };
+pub const Error = ts.Error;
 
 /// A leaf of the tree in source order: what to print, and what kind of
 /// thing it is (the kinds decide the spacing between neighbours).
@@ -246,12 +244,9 @@ const Formatter = struct {
 
 /// Format `src`; null if it does not parse.
 pub fn format(a: std.mem.Allocator, src: []const u8) Error!?[]u8 {
-    const parser = c.ts_parser_new() orelse return Error.OutOfMemory;
-    defer c.ts_parser_delete(parser);
-    if (!c.ts_parser_set_language(parser, tree_sitter_mshl())) return Error.ParseError;
-    const tree = c.ts_parser_parse_string(parser, null, src.ptr, @intCast(src.len)) orelse return Error.OutOfMemory;
-    defer c.ts_tree_delete(tree);
-    const root = c.ts_tree_root_node(tree);
+    const tree = try ts.Tree.parse(src);
+    defer tree.deinit();
+    const root = tree.root();
     if (c.ts_node_has_error(root)) return null;
     var f = Formatter{ .a = a, .src = src };
     try f.collect(root);
@@ -259,18 +254,7 @@ pub fn format(a: std.mem.Allocator, src: []const u8) Error!?[]u8 {
     return f.out.items;
 }
 
-/// The tree's shape as an S-expression without positions, to compare
-/// the formatted text's parse with the original's.
-pub fn sexp(a: std.mem.Allocator, src: []const u8) Error![]u8 {
-    const parser = c.ts_parser_new() orelse return Error.OutOfMemory;
-    defer c.ts_parser_delete(parser);
-    _ = c.ts_parser_set_language(parser, tree_sitter_mshl());
-    const tree = c.ts_parser_parse_string(parser, null, src.ptr, @intCast(src.len)) orelse return Error.OutOfMemory;
-    defer c.ts_tree_delete(tree);
-    const s = c.ts_node_string(c.ts_tree_root_node(tree));
-    defer std.c.free(s);
-    return a.dupe(u8, std.mem.span(s));
-}
+const sexp = ts.sexp;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;

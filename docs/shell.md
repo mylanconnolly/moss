@@ -370,8 +370,35 @@ mshfmt --stdin          # standard input to standard output (editors)
 
 `zig build fmt-test` runs its tests and `--check` over every `.msh`
 under `boot/`: the tree is always formatted, and formatting is checked
-to be idempotent and to parse to the same tree as the original. Lint
-and a language server are the next steps, on the same parser.
+to be idempotent and to parse to the same tree as the original.
+
+`mshlint` (`zig build lint`; `mshlint FILE...` or `mshlint --stdin
+[NAME]`) says before a line runs what the interpreter would only say
+then, as `path:line:col: message` with exit status 1 if there was
+anything:
+
+- **syntax** — a file that does not parse, and where.
+- **unbound** — `$x` with no `let x`, parameter, `for x`, pattern or
+  implicit name (`$it`, `$in`, `$acc`, `$req`) in any enclosing scope;
+  and `$x` used before its `let` in the same scope. A function body is
+  a scope; a block under `if`, `for`, `while`, `try` or an arm binds in
+  the scope around it, as it does when it runs. Order does not matter
+  across scopes (`def f { $x }` may run after `let x`), so a name bound
+  anywhere in an enclosing scope counts.
+- **unused** — a `let` inside a function that nothing reads. Not at a
+  file's top level: those are a module's exports.
+- **match** — not exhaustive, by the interpreter's rule (a catch-all
+  arm, or `ok _` and `err _`, or `true` and `false`; a guarded arm
+  never counts), and an arm after a catch-all, which cannot match.
+- **record** — the same key twice in one literal.
+- **def** — a `def` that shadows a builtin command.
+- **unit** — under `conf/units/` and `conf/session/`, a top-level key
+  the unit loader does not read (it ignores unknown keys, so `imgae:`
+  is a unit that never starts).
+
+`zig build lint-test` runs its tests and the lint over every `.msh`
+under `boot/`, which must be clean. A language server on the same
+parser is the next step.
 
 ### Running it
 
@@ -530,7 +557,9 @@ and a language server are the next steps, on the same parser.
   files", "Manifests beside images, and a per-user store".
 - Tooling — `tools/tree-sitter-mshl/` (`grammar.js`, `queries/`,
   `test/corpus/`; `tree-sitter generate && tree-sitter test`),
-  `tools/mshfmt.zig` (`zig build fmt`, `zig build fmt-test`).
+  `tools/mshtree.zig` (the parser for the tools), `tools/mshfmt.zig`
+  (`zig build fmt`, `fmt-test`), `tools/mshlint.zig` (`zig build lint`,
+  `lint-test`).
 - Source — `user/shell.zig` (the host: every command, `run`,
   `install`, startup, the REPL), `user/fscmds.zig` (the file commands
   msh and mshrun share), `user/mshrun.zig` (a script as a program),
