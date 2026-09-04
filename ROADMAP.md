@@ -227,9 +227,15 @@ is a plan.
   resolution (needs UDP), TLS, concurrent handling (needs the language
   to spawn), and, when a use case demands them, congestion control and
   out-of-order receive; (4)
-  the fabric surface — remote pipeline stages, publish and lookup from
-  the language, and the bulk transport across the wire (which also
-  finishes fabric logins with a remote home); (5) tooling, host-side in
+  the fabric surface — ✅ the bulk transport across the wire and remote
+  pipeline stages (landed 2026-09-04: session buffers diffed both ways,
+  `fw_bulk`/`fw_bulk_resp`/`fw_release`, wire v6, `remote NODE { … }`
+  with `mshrun` as the stage); still open: a fabric login mounting a
+  remote home (the transport is there; the session manager still copies
+  the record), publish and lookup from the language (a script serves no
+  channel and a raw channel would be untyped — this waits for a typed
+  channel surface), more than one buffer per session, notifications
+  across nodes; (5) tooling, host-side in
   tools/: a tree-sitter grammar first, then a formatter from a parser
   that keeps positions, then lint and a language server. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
@@ -366,6 +372,22 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 4a: the bulk transport and remote stages** (done,
+  2026-09-04): a shared-memory cap attached to a badged call becomes the
+  session's buffer, the peer makes a twin for the exported channel, and
+  the two are kept alike by diff frames before every call and after
+  every reply (shadows as shared memory, made on attach); a session's
+  death releases the export across the wire (channel, twin, a spawned
+  child's control cap); wire v6. `x | remote NODE { … }` runs a block on
+  another node with `$in` (`mshrun`'s remote-stage role; closures keep
+  their source). The fabric-login drill's node 2 runs three stages on
+  node 1. Found: the diff scan's off-by-one spun the serve thread until
+  the peer dropped the node for silence (peer loss now says why); the
+  fabric kept spawned children's control caps, so the second spawn was
+  refused — memory accounts nest, and a fabric service pays for its
+  children, so it has an explicit budget now (4 MB / 16 MB) and the
+  kernel logs why a spawn was refused; `match` arms take any statement;
+  init holds 48 units.
 - ✅ **mshl v3, stage 3c: HTTP** (done, 2026-09-04): `lib/http.zig` and
   `lib/json.zig` (pure, host-tested), `user/httpcmds.zig` — `http-read`,
   `http-write`, `serve $l $handler [n]` with a handler's return value

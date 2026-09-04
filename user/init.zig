@@ -67,7 +67,7 @@ const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 
 // ------------------------------------------------------------------ units
 
-const max_units = 32;
+const max_units = 48;
 const max_gives = 8;
 
 const GiveKind = enum { unit, device, shm, secret, view, netview, self_init, session_cap };

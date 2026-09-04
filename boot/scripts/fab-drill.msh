@@ -1,0 +1,16 @@
+# A remote stage: the block runs on node 1 with $in as its input. Node 1
+# may not be in the mesh yet when this node boots: try for a while.
+def on-node-1 [tries] {
+  match ([1, 2, 3, 4] | remote 1 { $in | map { $it * $it } | reduce 0 { $acc + $it } }) {
+    ok $v => ok $v
+    err $e => if $tries > 0 { sleep 500; on-node-1 ($tries - 1) } else { err $e }
+  }
+}
+let squares = (on-node-1 60)?
+if $squares != 30 { (err "remote stage: wrong answer $squares")? }
+echo "script: remote stage ok"
+# A table crosses too, and comes back as one; a failing stage is an err.
+let t = ([{ n: 1, s: a }, { n: 2, s: b }, { n: 3, s: c }] | remote 1 { $in | where n > 1 | select s })?
+if ($t | len) != 2 or ($t | get s) != [b, c] { (err "remote table: wrong answer")? }
+match ("x" | remote 1 { frobnicate }) { ok _ => (err "a failing stage answered ok")?; err $e => echo "script: remote failure: $e" }
+echo "script: remote stages done"

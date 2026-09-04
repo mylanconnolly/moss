@@ -1225,6 +1225,10 @@ fn fabricTestWorker(arg: u64) void {
         .grant_spawner = true,
         .grant_bootfs = true, // remote spawns load their images from it
         .auto_reap = true,
+        // Memory accounts nest: the children it spawns for peers (the
+        // drill's remote echo, a remote stage) are paid from here.
+        .kobj_limit = 4 << 20,
+        .user_limit = 16 << 20,
     }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
     // Identity: the root of trust certifies this node over the fabric's
     // boot channel, then certification opens the network. The imposter's

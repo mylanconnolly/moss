@@ -2,11 +2,14 @@
 # identity is born on this node on first boot (a random seed) and kept,
 # with its certificate, in state/fabric — the root of trust is needed
 # only to certify a new identity. Revocations it accepts are kept there
-# too. Once certified it dials the seeds (skipping itself).
+# too. Once certified it dials the seeds (skipping itself). Its budget
+# pays for the children it spawns for peers (remote stages): memory
+# accounts nest, and a child's pages are the parent's.
 {
   image:   fabric
   arg:     1
   node:    boot
+  budget:  { kobj: 4mb, user: 16mb }
   grant:   [log, spawner, bootfs]
   give: [
     { tag: buf,  shm: 1 }

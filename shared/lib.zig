@@ -810,6 +810,29 @@ pub const TcpState = enum(u64) {
     close_wait = 5,
 };
 
+// -------------------------------------------------------- remote stages
+//
+// A script as a remote service: mshrun spawned by the fabric (arg 1)
+// serves this on its channel. The client attaches a buffer (which the
+// fabric proxies as a session buffer), writes the script text and the
+// pipeline input as a data literal into it, and asks for `run`; the
+// value comes back as a data literal in the same buffer.
+pub const RunReq = union(enum(u64)) {
+    attach_buf: void, // + shm cap
+    /// buf[0..script_len] is the script; buf[script_len..+input_len] the
+    /// input as a data literal (0 = no input, $in is nothing).
+    run: struct { script_len: u64, input_len: u64 },
+};
+
+pub const RunResp = union(enum(u64)) {
+    ok: void,
+    /// The value as a data literal at buf[0..len] (0 = nothing).
+    value: struct { len: u64 },
+    /// The error message at buf[0..len].
+    failed: struct { len: u64 },
+    refused: void,
+};
+
 // ---------------------------------------------------------------- fabric
 //
 // The multi-node fabric: init at a larger radius. Each node runs a fabric
@@ -821,7 +844,7 @@ pub const TcpState = enum(u64) {
 // node N is 10.77.0.N / fdcc::N.
 
 pub const fabric_port: u64 = 7100;
-pub const fabric_ver: u8 = 5; // v5: published services (lookup); v4: per-node identities
+pub const fabric_ver: u8 = 6; // v6: bulk transport (session buffers); v5: published services; v4: per-node identities
 
 /// set_identity record: [identity seed 32][cluster key 32]; set_cert
 /// then delivers the fab_cert_len certificate (lib/fabcert.zig layout).
@@ -970,6 +993,25 @@ pub const fw_revoke: u8 = 14;
 /// [req u32][export u32][code u8] (1 = found, 0 = nothing published).
 pub const fw_lookup_req: u8 = 15;
 pub const fw_lookup_ack: u8 = 16;
+// v6: bulk transport. A shared-memory cap attached to a badged call
+// does not cross; instead it becomes the SESSION'S BUFFER: the fabric
+// maps it, tells the peer how many pages (call_req gained [buf_pages
+// u16]), and the peer creates a twin and attaches THAT to the exported
+// channel. From then on every call ships what changed in the caller's
+// buffer since the last exchange (fw_bulk, before the call_req) and
+// every reply ships what the service changed in the twin (fw_bulk_resp,
+// before the call_resp) — protocols that move bytes through an attached
+// buffer (the filesystem view, a script's input and value) cross the
+// wire unmodified.
+pub const fw_bulk: u8 = 17; // [export u32][off u32][len u16][bytes]
+pub const fw_bulk_resp: u8 = 18; // [seq u32][off u32][len u16][bytes]
+/// The holder of a remote channel is gone: the export behind it (unless
+/// published) is dropped — a remotely spawned child sees peer_dead.
+pub const fw_release: u8 = 19; // [export u32]
+/// A session buffer is at most this many pages (32 KB: a view's buffer).
+pub const fab_bulk_pages: u64 = 8;
+/// One bulk frame carries at most this many bytes.
+pub const fab_bulk_chunk: usize = 4000;
 /// Services a node may publish to the pool (slots in fabsvc's table).
 pub const fab_max_services: usize = 8;
 

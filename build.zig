@@ -274,7 +274,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/usersvc-flogin.msh", "conf/units/usersvc-fjoin.msh",
         "conf/units/mshrun.msh",         "conf/units/script-hello.msh",
         "scripts/hello.msh",             "conf/units/net-script.msh",
-        "scripts/net-drill.msh",
+        "scripts/net-drill.msh",         "conf/units/fab-script.msh",
+        "scripts/fab-drill.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));

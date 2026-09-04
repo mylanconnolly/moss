@@ -140,7 +140,7 @@ match (try { cat $path }) {
 ```
 
 **Match.** `match value { pattern [if guard] => body … }` tries the
-arms in order; a body is a block or a one-line pipeline. Patterns are
+arms in order; a body is a block or one statement on the same line. Patterns are
 `_` (anything), `$name` (anything, bound), literals (`1`, `"text"`, a
 bare word as a string — `dir`, `file` — `true`, `false`, `null`),
 `ok p` and `err p`, lists `[p, p]`, `[$head, ..$tail]`, `[1, ..]`, and
@@ -378,6 +378,14 @@ and in a session ends the session.
   HTTP on them: `http-read $s`, `http-write $s RESP`, `serve $l $handler
   [n]`, `fetch URL [opts]`; see [the networking
   page](networking.md#sockets-as-values-the-language-surface).
+- **The fabric** (when the unit gives a `fabric` cap: the system
+  shell's does, a user session's does not): `x | remote NODE { … }`
+  runs the block on another node with `$in` = `x` and returns its
+  value; `nodes`, `rspawn`. A function remembers its source text for
+  this (`remote NODE $f` ships `$f`'s body; captures do not cross). See
+  [the fabric page](fabric.md#remote-stages-a-functions-body-on-another-node).
+- **`sleep MS`** waits, in the host's ticks (rounded up to ten
+  milliseconds).
 - **JSON.** `to-json` writes the data subset (a table as an array of
   objects), `from-json` reads it back (an array of same-shaped objects
   becomes a table); numbers with a fraction or exponent are refused.

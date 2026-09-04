@@ -148,6 +148,12 @@ units come from `conf/units/` in the home, else `boot/conf/session/`;
 `zig build run-login` boots the multi-user system with seat 0 on your
 terminal and seat 1 on `nc 127.0.0.1 31905`.
 
+**A peer dropped**: every `fabsvc: peer lost (…)` line names the
+reason (silent, send failed, sealed frame failed authentication, call
+timed out, …); a `spawn by X refused: <cause>` line on the kernel log
+says why a spawn answered `no_space` (usually `QuotaExceeded`: memory
+accounts nest, and a parent pays for its children).
+
 **Looking at the wire**: the `net` check keeps its packets in
 `zig-out/check/net.pcap` (`tcpdump -nr zig-out/check/net.pcap`); the
 manual boots take the same `-object filter-dump` (see the runner).

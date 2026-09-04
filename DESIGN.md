@@ -1294,6 +1294,43 @@ stopped loading — "image missing from the boot archive" again — so the
 loader stage is 512 KB (128 pages) and, since a stage is one shared
 buffer, `shm_max_pages` went from 64 to 128.
 
+**mshl v3, stage 4a (as built, 2026-09-04): the bulk transport and
+remote stages.** A shared-memory cap attached to a badged call does not
+cross the fabric; its *contents* do now. The caller's fabric maps the
+cap as the session's buffer and tells the peer its size in the
+`call_req`; the peer makes a twin and attaches it to the exported
+channel with the caller's own words, so the service sees an ordinary
+`attach_buf`. Every forwarded call is preceded by `fw_bulk` frames
+carrying what changed in the caller's buffer since the last exchange,
+every reply by `fw_bulk_resp` frames carrying what the service changed
+in the twin, each side diffing against a shadow of what the other
+holds — a call costs the bytes that moved. Frames are capped at the
+network view's page (4 KB sealed), the peer's receive buffer grew to 8
+KB, and wire version is 6. A session's death crosses as `fw_release`:
+the peer drops the export — channel, twin, and a spawned child's
+control cap, so the child dies and its memory returns. On top of it,
+`x | remote NODE { … }`: `mshrun` in a remote-stage role, spawned by
+the fabric, served one `run` — script text and input as a data
+literal in, the value as a data literal out — and closures remember
+their source so a block can be shipped. Three bugs, all found by the
+fabric-login drill's new script. The diff's run scan ended one byte
+short after a quiet gap and re-scanned that byte forever, spinning the
+serve thread and silencing the node until its peer dropped it —
+`peerFailed` now names every reason in its log line, because "peer
+lost" without a cause cost an hour. The fabric kept every spawned
+child's control cap, so a finished stage kept its 4 MB reserved and
+the second spawn was refused with a bare `no_space` — the kernel now
+logs a refused spawn's cause (`QuotaExceeded`), the export holds the
+control cap and drops it on release. And half a megabyte of static
+shadow memory pushed the drill's fabric service — spawned with the 1
+MB default — past its budget once a child's pages were charged up the
+chain to it: shadows are shared-memory pages made on attach and freed
+on release, and a fabric service has an explicit budget (4 MB / 16 MB)
+in its unit and in the kernel drill, because *it pays for the children
+it spawns*. Along the way: `match` arm bodies are statements (an `if`
+in an arm was parsed as a command and its `>` as a redirect), and
+init's unit table grew to 48.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

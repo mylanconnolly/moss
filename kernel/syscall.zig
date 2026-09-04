@@ -310,6 +310,8 @@ fn sysSpawn(d: *domain.Domain, frame: *trap.TrapFrame) u64 {
     const child = domain.spawn(null, image, manifest) catch |e| {
         if (manifest.grant_channel_a) |ch| ipc.unrefSide(ch, .a, 0);
         if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b, 0);
+        // The caller sees one of three errnos; the log keeps the cause.
+        log.info("spawn by {s} refused: {t}", .{ d.name, e });
         return errno(switch (e) {
             domain.Error.QuotaExceeded => .no_space,
             domain.Error.BadImage => .bad_arg,

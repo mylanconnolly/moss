@@ -83,6 +83,7 @@ const specs = [_]Spec{
         .kind = .flogin,
         .pass = "flogin-test: PASS",
         .extra = "fetched from node 1",
+        .always_extra = "mshrun: script: remote stages done",
         .timeout_s = 150,
     },
     .{

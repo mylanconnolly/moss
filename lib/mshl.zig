@@ -24,7 +24,7 @@
 //!   postfix  := primary ('.' name | '.' index)* ['?']
 //!   record   := '{' (word ':' expr (',' | newline)*)* '}'   (a '{' followed
 //!               by `word:` is a record; otherwise it is a block)
-//!   arm      := pattern ['if' expr] '=>' (block | pipeline)
+//!   arm      := pattern ['if' expr] '=>' (block | stmt)
 //!   pattern  := '_' | '$'name | literal | word | 'ok' pattern | 'err' pattern
 //!             | '[' pattern,* ['..' ['$'name]] ']'
 //!             | '{' (word ':' pattern | word),* '}'
@@ -163,6 +163,9 @@ pub const Closure = struct {
     name: []const u8,
     params: []const []const u8,
     body: *Node,
+    /// The body's source text, for hosts that ship a function elsewhere
+    /// (a remote stage runs it with only `$in`; no captures cross).
+    src: []const u8,
     captures: []const Capture,
     scope: *Scope,
     /// A block written as an argument: binds `$it` (and `$acc`) by name.
@@ -683,7 +686,7 @@ pub const Interp = struct {
                 return .nothing;
             },
             .def => |d| {
-                try self.bind(d.name, try self.makeClosure(d.name, d.params, d.body, false));
+                try self.bind(d.name, try self.makeClosure(d.name, d.params, d.body, false, d.src));
                 return .nothing;
             },
             .if_ => |c| {
@@ -797,7 +800,7 @@ pub const Interp = struct {
                     },
                 };
             },
-            .fn_ => |f| return self.makeClosure("fn", f.params, f.body, f.implicit),
+            .fn_ => |f| return self.makeClosure("fn", f.params, f.body, f.implicit, f.src),
             .match_ => |m| return self.evalMatch(m),
             .try_ => |inner| {
                 const v = self.evalNode(inner) catch |e| switch (e) {
@@ -835,7 +838,7 @@ pub const Interp = struct {
     /// Build a closure in a box of its own: the tree copied, the locals
     /// of the enclosing function that the body names snapshotted, the
     /// current scope retained.
-    fn makeClosure(self: *Interp, name: []const u8, params: []const []const u8, body: *Node, implicit: bool) Error!Value {
+    fn makeClosure(self: *Interp, name: []const u8, params: []const []const u8, body: *Node, implicit: bool, src: []const u8) Error!Value {
         const scope = try self.cur();
         const b = try self.heap.create(Box);
         b.* = .{ .rc = 0, .arena = std.heap.ArenaAllocator.init(self.heap), .value = .nothing };
@@ -850,6 +853,7 @@ pub const Interp = struct {
             .name = try a.dupe(u8, name),
             .params = ps,
             .body = try dupNode(a, body),
+            .src = try a.dupe(u8, src),
             .captures = caps.items,
             .scope = scope,
             .implicit = implicit,
@@ -1681,7 +1685,7 @@ fn dupNode(a: std.mem.Allocator, n: *Node) Error!*Node {
     const out = try a.create(Node);
     out.* = switch (n.*) {
         .let => |l| .{ .let = .{ .name = try a.dupe(u8, l.name), .expr = try dupNode(a, l.expr) } },
-        .def => |d| .{ .def = .{ .name = try a.dupe(u8, d.name), .params = try dupStrs(a, d.params), .body = try dupNode(a, d.body) } },
+        .def => |d| .{ .def = .{ .name = try a.dupe(u8, d.name), .params = try dupStrs(a, d.params), .body = try dupNode(a, d.body), .src = try a.dupe(u8, d.src) } },
         .if_ => |c| .{ .if_ = .{ .cond = try dupNode(a, c.cond), .then = try dupNode(a, c.then), .else_ = if (c.else_) |e| try dupNode(a, e) else null } },
         .for_ => |f| .{ .for_ = .{ .name = try a.dupe(u8, f.name), .iter = try dupNode(a, f.iter), .body = try dupNode(a, f.body) } },
         .while_ => |w| .{ .while_ = .{ .cond = try dupNode(a, w.cond), .body = try dupNode(a, w.body) } },
@@ -1709,7 +1713,7 @@ fn dupNode(a: std.mem.Allocator, n: *Node) Error!*Node {
         },
         .binop => |b| .{ .binop = .{ .op = b.op, .lhs = try dupNode(a, b.lhs), .rhs = try dupNode(a, b.rhs) } },
         .unop => |u| .{ .unop = .{ .op = u.op, .operand = try dupNode(a, u.operand) } },
-        .fn_ => |f| .{ .fn_ = .{ .params = try dupStrs(a, f.params), .body = try dupNode(a, f.body), .implicit = f.implicit } },
+        .fn_ => |f| .{ .fn_ = .{ .params = try dupStrs(a, f.params), .body = try dupNode(a, f.body), .implicit = f.implicit, .src = try a.dupe(u8, f.src) } },
         .match_ => |m| blk: {
             const arms = try a.alloc(Arm, m.arms.len);
             for (m.arms, 0..) |arm, i| arms[i] = .{
@@ -2161,7 +2165,7 @@ const Lexer = struct {
 
 pub const Node = union(enum) {
     let: struct { name: []const u8, expr: *Node },
-    def: struct { name: []const u8, params: []const []const u8, body: *Node },
+    def: struct { name: []const u8, params: []const []const u8, body: *Node, src: []const u8 },
     if_: struct { cond: *Node, then: *Node, else_: ?*Node },
     for_: struct { name: []const u8, iter: *Node, body: *Node },
     while_: struct { cond: *Node, body: *Node },
@@ -2178,7 +2182,7 @@ pub const Node = union(enum) {
     record: []const Field,
     binop: BinOp,
     unop: struct { op: enum { not, neg }, operand: *Node },
-    fn_: struct { params: []const []const u8, body: *Node, implicit: bool },
+    fn_: struct { params: []const []const u8, body: *Node, implicit: bool, src: []const u8 },
     match_: Match,
     try_: *Node,
     unwrap: *Node,
@@ -2216,6 +2220,8 @@ const Parser = struct {
     tok: Tok = .eof,
     peeked: bool = false,
     tok_start: usize = 0,
+    /// The text between the braces of the block most recently parsed.
+    last_block_src: []const u8 = "",
 
     fn a(p: *Parser) std.mem.Allocator {
         return p.it.arena;
@@ -2293,8 +2299,10 @@ const Parser = struct {
         p.setExpr(false);
         if (p.peekAt() != .lbrace) return p.syntax("'{{' expected", .{});
         _ = p.take();
+        const start = p.lex.pos;
         const stmts = try p.program();
         if (p.peekAt() != .rbrace) return p.syntax("'}}' expected", .{});
+        p.last_block_src = std.mem.trim(u8, p.lex.src[start..p.tok_start], " \t\r\n");
         _ = p.take();
         return p.mk(.{ .block = stmts });
     }
@@ -2336,7 +2344,7 @@ const Parser = struct {
             if (name != .word) return p.syntax("def: name expected", .{});
             const ps = try p.params("def");
             const body = try p.block();
-            return p.mk(.{ .def = .{ .name = name.word, .params = ps, .body = body } });
+            return p.mk(.{ .def = .{ .name = name.word, .params = ps, .body = body, .src = p.last_block_src } });
         }
         if (isWord(t, "if")) return p.ifStmt();
         if (isWord(t, "for")) {
@@ -2515,7 +2523,7 @@ const Parser = struct {
                 if (p.recordAhead()) return p.recordLit();
                 p.rewind();
                 const body = try p.block();
-                return p.mk(.{ .fn_ = .{ .params = &.{}, .body = body, .implicit = true } });
+                return p.mk(.{ .fn_ = .{ .params = &.{}, .body = body, .implicit = true, .src = p.last_block_src } });
             },
             else => return p.syntax("unexpected token in arguments", .{}),
         }
@@ -2678,7 +2686,7 @@ const Parser = struct {
                 if (std.mem.eql(u8, w, "fn")) {
                     const ps = try p.params("fn");
                     const body = try p.block();
-                    return p.mk(.{ .fn_ = .{ .params = ps, .body = body, .implicit = false } });
+                    return p.mk(.{ .fn_ = .{ .params = ps, .body = body, .implicit = false, .src = p.last_block_src } });
                 }
                 if (std.mem.eql(u8, w, "match")) return p.matchExpr();
                 if (std.mem.eql(u8, w, "try")) {
@@ -2824,7 +2832,8 @@ const Parser = struct {
         return p.mk(.{ .match_ = .{ .subject = subject, .arms = arms.items } });
     }
 
-    /// An arm's body: a block, or a pipeline on the same line.
+    /// An arm's body: a block, or one statement on the same line (an
+    /// `if`, a `let`, a pipeline …).
     fn armBody(p: *Parser) Error!*Node {
         p.setExpr(false);
         if (p.peekAt() == .lbrace) {
@@ -2833,7 +2842,7 @@ const Parser = struct {
             p.rewind();
             if (!is_record) return p.block();
         }
-        return p.pipeline();
+        return p.stmt();
     }
 
     fn pattern(p: *Parser) Error!Pattern {
@@ -3216,6 +3225,11 @@ test "functions are values: fn, closures, block arguments, higher-order verbs" {
     try expectOut(it, "def make { let base = 100; let f = fn [x] { $base + $x }; let base = 0; $f 1 }; make", "101\n");
     // Functions in records, called through a field.
     try expectOut(it, "let m = { double: (fn [x] { $x * 2 }) }; $m.double 4", "8\n");
+    // A function remembers its source (a host may ship it elsewhere).
+    try expectOut(it, "def twice [x] { $x * 2 }; type $twice", "function\n");
+    try std.testing.expectEqualStrings("$x * 2", it.lookup("twice").?.func.src);
+    try expectOut(it, "let g = fn {\n  $in | len\n}", "");
+    try std.testing.expectEqualStrings("$in | len", it.lookup("g").?.func.src);
     try expectRuntime(it, "$m 1", "cannot call a record");
     try expectRuntime(it, "[1] | map 3", "map: a function expected");
     // A $var stage that is not a call is still an expression.
@@ -3239,6 +3253,8 @@ test "match: patterns, destructuring, guards, exhaustiveness" {
     try expectOut(it, "match (stat x) { { type } => $type; _ => \"untyped\" }", "dir\n");
     try expectOut(it, "match 7 { $n if $n > 5 => \"big\"; $n => \"small\" }", "big\n");
     try expectOut(it, "match 3 { $n if $n > 5 => \"big\"; $n => \"small\" }", "small\n");
+    // An arm's body may be any one statement.
+    try expectOut(it, "match 3 { $n => if $n > 2 { \"big\" } else { \"small\" } }", "big\n");
     try expectOut(it, "match dir { file => \"f\"; dir => \"d\"; _ => \"x\" }", "d\n");
     try expectOut(it, "match true { true => \"t\"; false => \"f\" }", "t\n");
     try expectOut(it, "match \"a b\" { \"a b\" => \"yes\"; _ => \"no\" }", "yes\n");

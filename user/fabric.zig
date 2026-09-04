@@ -215,7 +215,12 @@ fn rreply(chan_h: u64, resp: shared.FabResp) void {
 const max_peers = 6;
 const max_sessions = 8;
 const max_members = 8;
-const rxbuf_cap = 512;
+/// Per-peer receive buffer: two bulk frames' worth.
+const rxbuf_cap = 8192;
+/// A frame never exceeds the network view's one-page send buffer.
+const frame_max = 4096;
+/// A session buffer (either side), shadowed for diffing.
+const bulk_cap = shared.fab_bulk_pages * 4096;
 const ping_every = 5; // polls between heartbeats
 const dead_after = 40; // silent polls before a peer is declared dead
 
@@ -264,6 +269,11 @@ const Session = struct {
     used: bool = false,
     node: u64 = 0,
     remote_id: u32 = 0,
+    /// The caller's attached buffer, mapped here, and what the peer's
+    /// twin holds (as of the last exchange) — the diff is what ships.
+    buf_va: u64 = 0,
+    buf_len: usize = 0,
+    shadow_va: u64 = 0,
 };
 
 /// B-side: a local channel made reachable by peers under an id — a
@@ -272,6 +282,17 @@ const Session = struct {
 const Export = struct {
     used: bool = false,
     chan_b: u64 = 0,
+    /// A remotely spawned child's control cap: dropped with the export,
+    /// so the child is torn down and its budget returned once nobody on
+    /// the far side can reach it.
+    ctl: u64 = 0,
+    /// A published service: never released by a remote holder's death.
+    published: bool = false,
+    /// The twin of the remote caller's buffer, attached to chan_b, and
+    /// a shadow of what the caller holds.
+    buf_va: u64 = 0,
+    buf_len: usize = 0,
+    shadow_va: u64 = 0,
 };
 
 /// A local call forwarded to a peer and awaiting its response: the
@@ -283,6 +304,7 @@ const InFlight = struct {
     seq: u32 = 0,
     node: u64 = 0,
     deadline: u64 = 0,
+    session: usize = 0,
 };
 
 const max_inflight = 8; // the kernel's pending-reply slots per channel
@@ -304,6 +326,7 @@ const Job = struct {
     reply: [4]u64 = @splat(0),
     reply_cap: u64 = 0,
     bell: u64 = 0, // the worker's own notification
+    eid: u32 = 0, // the export served (its buffer ships back with the reply)
 };
 
 const n_workers = 4;
@@ -314,6 +337,22 @@ var members: [max_members]Member = @splat(.{});
 var sessions: [max_sessions]Session = @splat(.{});
 var exports: [max_sessions]Export = @splat(.{});
 var inflight: [max_inflight]InFlight = @splat(.{});
+/// A shadow — per session, what the peer's twin holds; per export, what
+/// the remote caller's buffer holds — is shared-memory pages made when
+/// a buffer is attached and freed with it: memory a node pays for only
+/// while a bulk session is open (a service that spawns children pays
+/// for them out of its own budget, so it stays lean).
+fn newShadow(pages: u64) u64 {
+    const sh = usys.shmCreate(pages);
+    if (sh.err != .ok) return 0;
+    const m = usys.shmMap(sh.data[0]);
+    _ = usys.capDrop(sh.data[0]);
+    return if (m.err == .ok) m.data[0] else 0;
+}
+
+fn shadowOf(va: u64, len: usize) []u8 {
+    return @as([*]u8, @ptrFromInt(va))[0..len];
+}
 var next_seq: u32 = 1;
 var max_inflight_seen: u64 = 0;
 // The event source: socket doorbells (bit_net) and the heartbeat clock
@@ -434,7 +473,18 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             // The local holder of a remote channel is gone: its session
             // slot is free again (the peer's export stays that node's
             // business; nothing crosses the wire for this).
-            if (r.badge != 0 and r.badge - 1 < max_sessions) sessions[r.badge - 1] = .{};
+            if (r.badge != 0 and r.badge - 1 < max_sessions and sessions[r.badge - 1].used) {
+                const sess = &sessions[r.badge - 1];
+                releaseSessionBuf(sess);
+                // Tell the peer: the export behind this channel may go.
+                if (greetedPeer(sess.node)) |p| {
+                    var f: [8]u8 = undefined;
+                    frameHdr(f[0..4], 8, shared.fw_release);
+                    puleu32(f[4..8], sess.remote_id);
+                    _ = sendFrame(p, &f);
+                }
+                sess.* = .{};
+            }
             continue;
         }
         if (r.err != .ok) usys.exit(151);
@@ -536,6 +586,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                     continue;
                 };
                 published[q.service] = .{ .used = true, .export_id = eid };
+                exports[eid].published = true;
                 _ = usys.log(glog, "fabsvc: service published to the pool");
                 freply(.ok);
             },
@@ -631,7 +682,7 @@ fn heartbeat() void {
         if (!p.used or p.dead) continue;
         if (p.greeted) {
             const m = memberByNode(p.node) orelse continue;
-            if (tick - m.last_heard > dead_after) peerFailed(p);
+            if (tick - m.last_heard > dead_after) peerFailed(p, "silent");
         } else if (tick - p.born > dead_after) {
             p.dead = true;
         }
@@ -847,7 +898,7 @@ fn applyRevocation(rec: *const [fabcert.rev_len]u8) bool {
     for (&peers) |*p| {
         if (p.used and !p.dead and p.greeted and p.node == r.node and p.serial_theirs < r.min_serial) {
             _ = usys.log(glog, "fabsvc: identity revoked by trust root; peer dropped");
-            peerFailed(p);
+            peerFailed(p, "revoked");
         }
     }
     return true;
@@ -977,8 +1028,12 @@ fn wouldBlock(resp: shared.NetResp) bool {
 /// (hard error or retries exhausted) is a PEER FAILURE: membership
 /// learns immediately, not on the next silent timeout.
 fn sendFrame(p: *Peer, frame: []const u8) bool {
+    if (frame.len + 4 + 16 > frame_max) {
+        _ = usys.log(glog, "fabsvc: frame too large to send; dropped");
+        return false;
+    }
     if (p.greeted) {
-        var sealed: [rxbuf_cap]u8 = undefined;
+        var sealed: [frame_max]u8 = undefined;
         const n = sealFrame(p, frame, &sealed);
         return sendFrameN(p, sealed[0..n], 30);
     }
@@ -992,12 +1047,12 @@ fn sendFrameN(p: *Peer, frame: []const u8, retries: u64) bool {
         const resp = ncall(.{ .tcp_send = .{ .sock = p.sock, .len = frame.len } });
         if (nnum(resp) != null) return true;
         if (!wouldBlock(resp)) {
-            peerFailed(p);
+            peerFailed(p, "send failed");
             return false;
         }
         if (retries > 1) usys.sleep(1);
     }
-    peerFailed(p);
+    peerFailed(p, "send retries exhausted");
     return false;
 }
 
@@ -1018,12 +1073,12 @@ fn tryPing(p: *Peer, frame: []const u8) void {
         p.tx_ctr -= 1;
         return;
     }
-    peerFailed(p);
+    peerFailed(p, "ping failed");
 }
 
 /// One place a peer dies: close, membership down, broadcast. Setting
 /// p.dead FIRST keeps the broadcast from recursing into this peer.
-fn peerFailed(p: *Peer) void {
+fn peerFailed(p: *Peer, why: []const u8) void {
     if (p.dead) return;
     p.dead = true;
     _ = ncall(.{ .tcp_close = .{ .sock = p.sock } });
@@ -1035,7 +1090,8 @@ fn peerFailed(p: *Peer) void {
         }
     }
     if (p.greeted) {
-        _ = usys.log(glog, "fabsvc: peer lost; membership updated");
+        var line: [96]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "fabsvc: peer lost ({s}); membership updated", .{why}) catch "fabsvc: peer lost");
         memberDown(p.node);
         broadcastMember(shared.fw_member_down, p.node);
     }
@@ -1065,17 +1121,17 @@ fn pumpAll() void {
 fn pumpPeer(p: *Peer) void {
     const buf: [*]const u8 = @ptrFromInt(net_buf);
     while (true) {
-        const resp = ncall(.{ .tcp_recv = .{ .sock = p.sock, .len = 256 } });
+        const resp = ncall(.{ .tcp_recv = .{ .sock = p.sock, .len = 4096 } });
         const n = nnum(resp) orelse {
             if (!wouldBlock(resp)) {
                 // TCP-level death is instant membership news.
-                peerFailed(p);
+                peerFailed(p, "socket error");
             }
             break;
         };
         if (p.rxlen + n > rxbuf_cap) {
             _ = usys.log(glog, "fabsvc: peer overran the frame buffer; dropped");
-            peerFailed(p);
+            peerFailed(p, "frame buffer overrun");
             break;
         }
         @memcpy(p.rx[p.rxlen .. p.rxlen + n], buf[0..n]);
@@ -1086,19 +1142,19 @@ fn pumpPeer(p: *Peer) void {
         const flen = leu16(p.rx[0..2]);
         if (flen < 4 or flen > rxbuf_cap) {
             _ = usys.log(glog, "fabsvc: malformed frame length; peer dropped");
-            peerFailed(p);
+            peerFailed(p, "malformed frame");
             return;
         }
         if (p.rxlen < flen) return;
         if (p.rx[3] != shared.fabric_ver) {
             _ = usys.log(glog, "fabsvc: wire version mismatch; peer dropped");
-            peerFailed(p);
+            peerFailed(p, "wire version mismatch");
             return;
         }
         const ftype = p.rx[2];
         if (ftype == shared.fw_sealed) {
             if (!p.greeted or flen < 4 + 16) {
-                peerFailed(p);
+                peerFailed(p, "sealed frame before the handshake");
                 return;
             }
             const clen = flen - 4 - 16;
@@ -1107,13 +1163,13 @@ fn pumpPeer(p: *Peer) void {
             @memcpy(&tag, p.rx[4 + clen .. flen]);
             Aead.decrypt(inner[0..clen], p.rx[4 .. 4 + clen], tag, "", ctrNonce(p.rx_ctr), p.rx_key) catch {
                 _ = usys.log(glog, "fabsvc: sealed frame failed authentication; dropping peer");
-                peerFailed(p);
+                peerFailed(p, "sealed frame failed authentication");
                 return;
             };
             p.rx_ctr += 1;
             // The plaintext is itself a complete frame.
             if (clen < 4 or leu16(inner[0..2]) != clen or inner[3] != shared.fabric_ver) {
-                peerFailed(p);
+                peerFailed(p, "inner frame mismatch");
                 return;
             }
             handleFrame(p, inner[2], inner[4..clen]);
@@ -1122,7 +1178,7 @@ fn pumpPeer(p: *Peer) void {
         } else {
             // Plaintext outside the handshake (or handshake replays after
             // auth) are protocol violations.
-            peerFailed(p);
+            peerFailed(p, "plaintext outside the handshake");
             return;
         }
         const rest = p.rxlen - flen;
@@ -1148,7 +1204,7 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             // The certificate is checked BEFORE anything else changes: a
             // stranger claiming a live peer's id must not evict it.
             if (!acceptCert(p, node, body[50..hello_len])) {
-                peerFailed(p);
+                peerFailed(p, "certificate refused");
                 return;
             }
             // Rejoin / duplicate: a fresh authentic connection for a node
@@ -1183,7 +1239,7 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             if (body.len < hello_len + 64 or !p.dialer) return;
             if (leu16(body[0..2]) != p.node) {
                 _ = usys.log(glog, "fabsvc: acceptor claims a different node id; dropped");
-                peerFailed(p);
+                peerFailed(p, "node id mismatch");
                 return;
             }
             @memcpy(&p.nonce_theirs, body[2..18]);
@@ -1192,7 +1248,7 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
                 !verifyTranscript(hs_ack, p, body[hello_len .. hello_len + 64]))
             {
                 _ = usys.log(glog, "fabsvc: peer failed authentication; dropped");
-                peerFailed(p);
+                peerFailed(p, "sealed frame failed authentication");
                 return;
             }
             var auth: [4 + 64]u8 = undefined;
@@ -1201,7 +1257,7 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             @memcpy(auth[4..], &sig);
             _ = sendFrame(p, &auth); // still plaintext: they derive on receipt
             if (!deriveSession(p)) {
-                peerFailed(p);
+                peerFailed(p, "plaintext outside the handshake");
                 return;
             }
             p.greeted = true;
@@ -1214,11 +1270,11 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             if (body.len < 64 or p.dialer) return;
             if (!verifyTranscript(hs_auth, p, body[0..64])) {
                 _ = usys.log(glog, "fabsvc: peer failed authentication; dropped");
-                peerFailed(p);
+                peerFailed(p, "sealed frame failed authentication");
                 return;
             }
             if (!deriveSession(p)) {
-                peerFailed(p);
+                peerFailed(p, "key derivation failed");
                 return;
             }
             p.greeted = true;
@@ -1305,9 +1361,15 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
                     shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a,
                     usys.kbLimits(1 << 10, 4 << 10),
                 );
-                if (sp.err != .ok) break;
+                if (sp.err != .ok) {
+                    var l: [64]u8 = undefined;
+                    _ = usys.log(glog, std.fmt.bufPrint(&l, "fabsvc: remote spawn failed: {t}", .{sp.err}) catch "fabsvc: remote spawn failed");
+                    _ = usys.capDrop(ch.data[0]);
+                    _ = usys.capDrop(ch.data[1]);
+                    break;
+                }
                 _ = usys.capDrop(ch.data[0]); // child owns its serving side
-                rs.* = .{ .used = true, .chan_b = ch.data[1] };
+                rs.* = .{ .used = true, .chan_b = ch.data[1], .ctl = sp.data[0] };
                 sid = @intCast(i);
                 ok = true;
                 _ = usys.log(glog, "fabsvc: remote spawn request served; child running here");
@@ -1359,12 +1421,13 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             // calls the local channel; a cap that crossed with the call
             // becomes a badged session back to the caller's node. No
             // free worker = refused, never a stall.
-            if (body.len < 44) return;
+            if (body.len < 46) return;
             const eid = leu32(body[0..4]);
             const seq = leu32(body[4..8]);
             var w: [4]u64 = undefined;
             for (0..4) |i| w[i] = leu64(body[8 + i * 8 .. 16 + i * 8]);
             const cap_export = leu32(body[40..44]);
+            const buf_pages = leu16(body[44..46]);
             var job: ?*Job = null;
             for (&jobs) |*j| {
                 if (j.state.load(.acquire) == 0) {
@@ -1379,11 +1442,82 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             const j = job.?;
             j.node = p.node;
             j.seq = seq;
+            j.eid = eid;
             j.chan_b = exports[eid].chan_b;
             j.cap = if (cap_export != 0) sessionCap(p.node, cap_export - 1) else 0;
+            if (buf_pages != 0) {
+                // The caller attached a buffer: make its twin here and
+                // hand THAT to the service with the caller's words.
+                if (buf_pages > shared.fab_bulk_pages) {
+                    sendCallResp(p, seq, false, @splat(0), 0);
+                    return;
+                }
+                const sh = usys.shmCreate(buf_pages);
+                const m = if (sh.err == .ok) usys.shmMap(sh.data[0]) else sh;
+                if (sh.err != .ok or m.err != .ok) {
+                    sendCallResp(p, seq, false, @splat(0), 0);
+                    return;
+                }
+                const e = &exports[eid];
+                const shadow = newShadow(buf_pages);
+                if (shadow == 0) {
+                    _ = usys.shmUnmap(m.data[0]);
+                    _ = usys.capDrop(sh.data[0]);
+                    sendCallResp(p, seq, false, @splat(0), 0);
+                    return;
+                }
+                releaseExportBuf(e);
+                e.buf_va = m.data[0];
+                e.buf_len = @as(usize, buf_pages) * 4096;
+                e.shadow_va = shadow;
+                j.cap = sh.data[0];
+            }
             j.words = w;
             j.state.store(1, .release);
             _ = usys.notifySignal(j.bell, 1);
+        },
+        shared.fw_release => {
+            // [export u32]: nobody on the peer holds the channel to this
+            // export any more; drop it (its buffer too) unless published.
+            if (body.len < 4) return;
+            const eid = leu32(body[0..4]);
+            if (eid >= max_sessions or !exports[eid].used or exports[eid].published) return;
+            const e = &exports[eid];
+            releaseExportBuf(e);
+            _ = usys.capDrop(e.chan_b);
+            if (e.ctl != 0) _ = usys.capDrop(e.ctl);
+            e.* = .{};
+        },
+        shared.fw_bulk => {
+            // [export u32][off u32][len u16][bytes]: the caller's buffer
+            // changed here; the twin and the shadow follow.
+            if (body.len < 10) return;
+            const eid = leu32(body[0..4]);
+            const off = leu32(body[4..8]);
+            const len = leu16(body[8..10]);
+            if (eid >= max_sessions or !exports[eid].used or exports[eid].buf_va == 0) return;
+            const e = &exports[eid];
+            if (body.len < 10 + len or off + len > e.buf_len) return;
+            const dst: [*]u8 = @ptrFromInt(e.buf_va);
+            @memcpy(dst[off .. off + len], body[10 .. 10 + len]);
+            @memcpy(shadowOf(e.shadow_va, e.buf_len)[off .. off + len], body[10 .. 10 + len]);
+        },
+        shared.fw_bulk_resp => {
+            // [seq u32][off u32][len u16][bytes]: the service changed the
+            // twin; the caller's buffer and our shadow follow.
+            if (body.len < 10) return;
+            const seq = leu32(body[0..4]);
+            const off = leu32(body[4..8]);
+            const len = leu16(body[8..10]);
+            for (&inflight) |*f| {
+                if (!f.used or f.seq != seq or f.node != p.node) continue;
+                const sess = &sessions[f.session];
+                if (!sess.used or sess.buf_va == 0 or body.len < 10 + len or off + len > sess.buf_len) return;
+                const dst: [*]u8 = @ptrFromInt(sess.buf_va);
+                @memcpy(dst[off .. off + len], body[10 .. 10 + len]);
+                @memcpy(shadowOf(sess.shadow_va, sess.buf_len)[off .. off + len], body[10 .. 10 + len]);
+                return;
+            }
         },
         shared.fw_call_resp => {
             // [seq u32][ok u8][4 x u64][cap export u32] -> answer the
@@ -1660,7 +1794,13 @@ fn finishJobs() void {
             if (exportNew(j.reply_cap)) |x| export_id = x + 1 else _ = usys.capDrop(j.reply_cap);
         }
         if (peerByNode(j.node)) |p| {
-            if (p.greeted) sendCallResp(p, j.seq, j.ok, j.reply, export_id);
+            if (p.greeted) {
+                const e = &exports[j.eid];
+                if (e.used and e.buf_va != 0) {
+                    _ = shipDiff(p, .{ .to_caller = j.seq }, shadowOf(e.buf_va, e.buf_len), shadowOf(e.shadow_va, e.buf_len));
+                }
+                sendCallResp(p, j.seq, j.ok, j.reply, export_id);
+            }
         }
         j.* = .{ .bell = j.bell };
     }
@@ -1674,6 +1814,69 @@ fn sendCallResp(p: *Peer, seq: u32, ok: bool, rw: [4]u64, export_id: u32) void {
     for (0..4) |i| puleu64(resp[9 + i * 8 .. 17 + i * 8], rw[i]);
     puleu32(resp[41..45], export_id);
     _ = sendFrame(p, &resp);
+}
+
+fn releaseSessionBuf(sess: *Session) void {
+    if (sess.buf_va != 0) _ = usys.shmUnmap(sess.buf_va);
+    if (sess.shadow_va != 0) _ = usys.shmUnmap(sess.shadow_va);
+    sess.buf_va = 0;
+    sess.shadow_va = 0;
+    sess.buf_len = 0;
+}
+
+fn releaseExportBuf(e: *Export) void {
+    if (e.buf_va != 0) _ = usys.shmUnmap(e.buf_va);
+    if (e.shadow_va != 0) _ = usys.shmUnmap(e.shadow_va);
+    e.buf_va = 0;
+    e.shadow_va = 0;
+    e.buf_len = 0;
+}
+
+const BulkDir = union(enum) { to_export: u32, to_caller: u32 };
+
+/// Send what differs between a buffer and its shadow as bulk frames,
+/// runs closer than a few bytes merged, chunked to the frame size, and
+/// bring the shadow up to date. False if the peer failed.
+fn shipDiff(p: *Peer, dir: BulkDir, buf: []const u8, shadow: []u8) bool {
+    var i: usize = 0;
+    while (i < buf.len) {
+        if (buf[i] == shadow[i]) {
+            i += 1;
+            continue;
+        }
+        // A run: from this byte to the last differing byte within reach
+        // (a gap of up to 16 equal bytes joins two runs into one).
+        var last = i;
+        var scan = i + 1;
+        while (scan < buf.len and scan - last <= 16) : (scan += 1) {
+            if (buf[scan] != shadow[scan]) last = scan;
+        }
+        const end = last + 1;
+        var off = i;
+        while (off < end) {
+            const len = @min(shared.fab_bulk_chunk, end - off);
+            var f: [4 + 10 + shared.fab_bulk_chunk]u8 = undefined;
+            const total: u16 = @intCast(14 + len);
+            switch (dir) {
+                .to_export => |eid| {
+                    frameHdr(f[0..4], total, shared.fw_bulk);
+                    puleu32(f[4..8], eid);
+                },
+                .to_caller => |seq| {
+                    frameHdr(f[0..4], total, shared.fw_bulk_resp);
+                    puleu32(f[4..8], seq);
+                },
+            }
+            puleu32(f[8..12], @intCast(off));
+            puleu16(f[12..14], @intCast(len));
+            @memcpy(f[14 .. 14 + len], buf[off .. off + len]);
+            if (!sendFrame(p, f[0..total])) return false;
+            @memcpy(shadow[off .. off + len], buf[off .. off + len]);
+            off += len;
+        }
+        i = end;
+    }
+    return true;
 }
 
 /// A badged cap on this service bound to (node, export id there): the
@@ -1720,20 +1923,53 @@ fn forwardCall(badge: u64, words: [4]u64, cap: u64, token: u64) void {
     }
     const f = slot orelse return failReply(token, .no_space);
     var cap_export: u32 = 0;
+    var buf_pages: u16 = 0;
     if (cap != 0) {
-        const x = exportNew(cap) orelse return failReply(token, .no_space);
-        cap_export = x + 1;
+        // A shared-memory cap does not cross: it becomes the session's
+        // buffer, and the peer makes a twin for the exported channel.
+        const m = usys.shmMap(cap);
+        if (m.err == .ok) {
+            if (m.data[1] > shared.fab_bulk_pages) {
+                _ = usys.shmUnmap(m.data[0]);
+                _ = usys.capDrop(cap);
+                return failReply(token, .refused);
+            }
+            const shadow = newShadow(m.data[1]);
+            if (shadow == 0) {
+                _ = usys.shmUnmap(m.data[0]);
+                _ = usys.capDrop(cap);
+                return failReply(token, .no_space);
+            }
+            releaseSessionBuf(sess);
+            sess.buf_va = m.data[0];
+            sess.buf_len = @intCast(m.data[1] * 4096);
+            sess.shadow_va = shadow;
+            buf_pages = @intCast(m.data[1]);
+            _ = usys.capDrop(cap); // the mapping keeps its own ref
+        } else {
+            const x = exportNew(cap) orelse return failReply(token, .no_space);
+            cap_export = x + 1;
+        }
     }
     const seq = next_seq;
     next_seq +%= 1;
     if (next_seq == 0) next_seq = 1;
-    f.* = .{ .used = true, .token = token, .seq = seq, .node = sess.node, .deadline = tick + call_timeout };
-    var req: [48]u8 = undefined;
-    frameHdr(req[0..4], 48, shared.fw_call_req);
+    f.* = .{ .used = true, .token = token, .seq = seq, .node = sess.node, .deadline = tick + call_timeout, .session = badge - 1 };
+    // What changed in the caller's buffer since the last exchange goes
+    // ahead of the call, so the twin is current when the service runs.
+    if (sess.buf_va != 0 and buf_pages == 0) {
+        if (!shipDiff(p, .{ .to_export = sess.remote_id }, shadowOf(sess.buf_va, sess.buf_len), shadowOf(sess.shadow_va, sess.buf_len))) {
+            f.* = .{};
+            return failReply(token, .disconnected);
+        }
+    }
+    var req: [50]u8 = undefined;
+    frameHdr(req[0..4], 50, shared.fw_call_req);
     puleu32(req[4..8], sess.remote_id);
     puleu32(req[8..12], seq);
     for (0..4) |i| puleu64(req[12 + i * 8 .. 20 + i * 8], words[i]);
     puleu32(req[44..48], cap_export);
+    puleu16(req[48..50], buf_pages);
     if (!sendFrame(p, &req)) {
         f.* = .{};
         return failReply(token, .disconnected);
@@ -1758,7 +1994,7 @@ fn expireInflight() void {
         const node = f.node;
         failReply(f.token, .timeout);
         f.* = .{};
-        if (peerByNode(node)) |p| peerFailed(p);
+        if (peerByNode(node)) |p| peerFailed(p, "call timed out");
     }
 }
 

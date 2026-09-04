@@ -4,7 +4,10 @@
 //! authority its manifest or unit file gives it. Under msh (`run mshrun
 //! PATH`) it has the console and hands its last value back through
 //! `out`; as a unit it logs what it renders and exits — 0, or 1 with
-//! the error on the log.
+//! the error on the log. Spawned by the fabric (arg 1) it is a REMOTE
+//! STAGE: it serves RunReq on the channel it was born with — a script
+//! and its input arrive in an attached buffer, the value goes back the
+//! same way — answers once, and exits.
 
 const std = @import("std");
 const shared = @import("shared");
@@ -13,6 +16,7 @@ const fsc = @import("fsclient.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
 const httpcmds = @import("httpcmds.zig");
+const fabcmds = @import("fabcmds.zig");
 const tty = @import("tty.zig");
 const boot = @import("boot.zig");
 const result = @import("result.zig");
@@ -57,6 +61,7 @@ var box_pool: mosslib.pool.Pool(256, 2048) = .{};
 var host_ctx: u8 = 0;
 var fs_ctx = fscmds.Fs{ .resolve = resolve, .root = 0 };
 var net: ?netcmds.Net = null;
+var fab: ?fabcmds.Fab = null;
 /// The boot archive, when the manifest grants `bootfs`: scripts may be
 /// read from it (a unit's `script:` path) even with no view at all.
 var blob: []const u8 = "";
@@ -71,6 +76,14 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     if (net) |*nt| {
         if (try netcmds.call(nt, it, name, args, input)) |v| return v;
         if (try httpcmds.call(nt, it, name, args, input)) |v| return v;
+    }
+    if (fab) |*fb| {
+        if (try fabcmds.call(fb, it, name, args, input)) |v| return v;
+    }
+    if (std.mem.eql(u8, name, "sleep")) {
+        if (args.len != 1 or args[0] != .int or args[0].int < 0) return it.fail("sleep: milliseconds expected", .{});
+        usys.sleep(@intCast(@divTrunc(args[0].int + 9, 10)));
+        return .nothing;
     }
     return null;
 }
@@ -111,9 +124,10 @@ fn fail(what: []const u8, msg: []const u8) noreturn {
     usys.exit(1);
 }
 
-export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
     if (blob_va != 0) blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
+    if (arg == 1) serveRemote(chan_h);
     const setup = boot.take(chan_h);
     has_console = setup.has(.console) and setup.has(.console_buf);
     if (has_console) tty.attach(&setup);
@@ -123,6 +137,7 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
         fs_ctx.root = view_chan;
     }
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
+    if (setup.has(.fabric)) fab = .{ .chan = setup.cap(.fabric) };
     const path = setup.arg();
     if (path.len == 0) fail("setup", "no script path given");
 
@@ -151,4 +166,84 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
         if (last.isData() and !res.deliver(&setup, last)) fail(path, "the result does not fit the out buffer");
     }
     usys.exit(0);
+}
+
+/// The remote stage: serve one `run` on the channel the fabric spawned
+/// us with. The buffer arrives with attach_buf (the fabric's twin of
+/// the caller's); the script is buf[0..script_len], the input a data
+/// literal after it; the value — data only — is written back at buf[0].
+fn serveRemote(chan_h: u64) noreturn {
+    var buf: ?[*]u8 = null;
+    var buf_len: usize = 0;
+    line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
+    var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall });
+    while (true) {
+        const r = usys.recvMsg(chan_h);
+        if (r.err == .peer_dead) usys.exit(0);
+        if (r.err != .ok) usys.exit(2);
+        const req = shared.decodeMsg(shared.RunReq, r.data) orelse {
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
+            _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
+            continue;
+        };
+        switch (req) {
+            .attach_buf => {
+                if (r.cap == 0) {
+                    _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
+                    continue;
+                }
+                const m = usys.shmMap(r.cap);
+                _ = usys.capDrop(r.cap);
+                if (m.err != .ok) {
+                    _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
+                    continue;
+                }
+                buf = @ptrFromInt(m.data[0]);
+                buf_len = m.data[1] * 4096;
+                _ = usys.replyTyped(shared.RunResp, chan_h, .ok, 0);
+            },
+            .run => |q| {
+                const b = buf orelse {
+                    _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
+                    continue;
+                };
+                if (q.script_len + q.input_len > buf_len) {
+                    _ = usys.replyTyped(shared.RunResp, chan_h, .refused, 0);
+                    continue;
+                }
+                line_fba.reset();
+                const script = line_fba.allocator().dupe(u8, b[0..q.script_len]) catch usys.exit(3);
+                const in_text = line_fba.allocator().dupe(u8, b[q.script_len .. q.script_len + q.input_len]) catch usys.exit(3);
+                const outcome = runStage(&interp, script, in_text);
+                const text = switch (outcome) {
+                    .value => |t| t,
+                    .failed => |t| t,
+                };
+                const n = @min(text.len, buf_len);
+                @memcpy(b[0..n], text[0..n]);
+                _ = usys.replyTyped(shared.RunResp, chan_h, switch (outcome) {
+                    .value => .{ .value = .{ .len = n } },
+                    .failed => .{ .failed = .{ .len = n } },
+                }, 0);
+                usys.exit(0); // one stage, one answer
+            },
+        }
+    }
+}
+
+const StageOut = union(enum) { value: []const u8, failed: []const u8 };
+
+fn runStage(it: *mshl.Interp, script: []const u8, in_text: []const u8) StageOut {
+    const in_val: Value = if (in_text.len == 0) .nothing else (it.parseData(in_text) catch return .{ .failed = "the input is not data" });
+    it.setVar("in", mshl.tableize(it.arena, in_val) catch return .{ .failed = "out of memory" }) catch return .{ .failed = "out of memory" };
+    var out: std.ArrayList(u8) = .empty;
+    const last = it.evalScript(script, &out) catch |e| return .{ .failed = switch (e) {
+        error.OutOfMemory => "out of memory",
+        error.Exit => "exit",
+        else => it.err_msg,
+    } };
+    if (!last.isData()) return .{ .failed = "the value is not data (functions, results, handles and bytes cannot cross)" };
+    var text: std.ArrayList(u8) = .empty;
+    mshl.writeData(last, it.arena, &text) catch return .{ .failed = "out of memory" };
+    return .{ .value = text.items };
 }

@@ -150,6 +150,11 @@ handed over as the 24-byte argument text: the `mshrun` image reads the
 script there in the view the unit gives it — a script as a unit, see
 [the shell page](shell.md#scripts-as-programs)).
 
+A unit that spawns children (the fabric service, for remote stages)
+needs a budget that covers them: memory accounts nest, and a child's
+pages are charged up to its parent (`fabsvc.msh` says `budget: { kobj:
+4mb, user: 16mb }`; the default is 1 MB and 4 MB).
+
 ### Profiles and drills
 
 A unit lists the **profiles** under which it starts at boot
@@ -265,7 +270,7 @@ failed.
   receiver copies it out and wipes the buffer. Every program takes the
   handshake with `boot.take`, even one handed nothing — init says `go`
   to everyone, and a program that starts serving first never answers.
-- **Unit limits** (`user/init.zig`): 32 units, 8 `give` lines each; the
+- **Unit limits** (`user/init.zig`): 48 units, 8 `give` lines each; the
   parser's arena is 256 KB, reset per file; a session's unit text is
   kept in a 32 KB area. Defaults: kernel-object budget 1 MB, user memory
   4 MB, no CPU budget, grants `log` only. The repository ships 27 unit

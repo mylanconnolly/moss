@@ -25,6 +25,7 @@ const boot = @import("boot.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
 const httpcmds = @import("httpcmds.zig");
+const fabcmds = @import("fabcmds.zig");
 const mshl = @import("mosslib").mshl;
 const Value = mshl.Value;
 const Target = fscmds.Target;
@@ -102,6 +103,7 @@ var mounts: [max_mounts]Mount = @splat(.{});
 var fs_ctx = fscmds.Fs{ .resolve = target, .root = 0 };
 /// The network, when this shell's unit gives a `net` view.
 var net: ?netcmds.Net = null;
+var fab_ctx: fabcmds.Fab = .{ .chan = 0 };
 
 fn targetOf(path: []const u8) ?Target {
     if (path.len == 0 or path[0] != '@') return .{ .chan = fs_chan, .buf = fs_buf, .path = path };
@@ -140,6 +142,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     fs_ctx.root = fs_chan;
     init_chan = setup.cap(.init);
     fab_chan = setup.cap(.fabric);
+    fab_ctx.chan = fab_chan;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     // The fabric is optional: a user session has none.
     if (cons_chan == 0 or fs_chan == 0 or init_chan == 0) usys.exit(140);
@@ -365,6 +368,14 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
         if (try netcmds.call(nt, it, name, args, input)) |v| return v;
         if (try httpcmds.call(nt, it, name, args, input)) |v| return v;
     }
+    if (fab_chan != 0) {
+        if (try fabcmds.call(&fab_ctx, it, name, args, input)) |v| return v;
+    }
+    if (is(name, "sleep")) {
+        if (args.len != 1 or args[0] != .int or args[0].int < 0) return it.fail("sleep: milliseconds expected", .{});
+        usys.sleep(@intCast(@divTrunc(args[0].int + 9, 10)));
+        return .nothing;
+    }
     if (is(name, "ps")) return try psTable(it);
     if (is(name, "mem")) {
         const r = usys.sysInfo(spawner_h);
@@ -441,6 +452,7 @@ const help_text =
     \\                         sockets as values (results: ok/err), when this shell holds a network view
     \\  http-read $s | http-write $s RESP | serve $l $handler [n] | fetch URL [{ method, headers, body }]
     \\                         HTTP on those sockets; a handler returns a record { status, headers, body }, text, or data (JSON)
+    \\  x | remote NODE { .. }  run the block on another node with $in = x (the fabric); sleep MS
     \\language:
     \\  x | where size > 4kb | sort-by name --desc | select name size
     \\  x | get col | first n | last n | reverse | len | keys | lines

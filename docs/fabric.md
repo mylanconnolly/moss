@@ -62,7 +62,7 @@ decrypt a past session. From then on every frame travels sealed.
 sequenceDiagram
   participant D as dialer (node 3)
   participant A as acceptor (node 1)
-  Note over D,A: plaintext, TCP port 7100, wire version 4
+  Note over D,A: plaintext, TCP port 7100, wire version 6
   D->>A: hello: node id, nonce (16 B), X25519 ephemeral key, certificate (112 B)
   A->>A: verify the certificate under the cluster key (signed by our root, names node 3, serial clears every revocation held)
   A->>D: hello_ack: node id, nonce, ephemeral key, certificate, identity signature over the transcript (label ack)
@@ -149,7 +149,82 @@ becomes an export on the caller's node and a session on the callee's,
 so the callee holds an ordinary channel cap that calls *back* through
 the reverse proxy — the drill hands a local service to a remote child,
 which calls it and returns the sum. Shared-memory caps do not cross,
-by design: there is no cross-machine shared memory.
+by design: there is no cross-machine shared memory. What crosses
+instead is their *contents* — see the bulk transport below.
+
+### The bulk transport: a buffer's contents cross, the buffer does not
+
+Most of moss's protocols move bytes through a buffer the client
+attaches to the channel (the filesystem view's paths and data, a
+script's input and value). Since wire version 6 such a buffer works
+across the fabric: a shared-memory cap attached to a badged call does
+not cross, but the fabric maps it as the **session's buffer**, tells
+the peer how many pages (`call_req` carries `buf_pages`), and the peer
+makes a **twin** — its own pages, attached to the exported channel with
+the caller's very words, so the service sees an ordinary `attach_buf`.
+From then on the two are kept alike by *diffing*: before every
+forwarded call the caller's fabric ships what changed in its buffer
+since the last exchange (`fw_bulk` frames, before the `call_req`), and
+after the service answers the callee's fabric ships what the service
+changed in the twin (`fw_bulk_resp` frames, before the `call_resp`).
+Each side keeps a **shadow** of what the other holds — pages made when
+the buffer is attached and freed with it — so a call costs the bytes
+that actually moved, not the buffer. Runs of changed bytes closer than
+16 apart are shipped as one; a frame carries up to 4000 bytes; a
+buffer is at most 8 pages (32 KB), a view's size.
+
+```mermaid
+sequenceDiagram
+  participant C as caller (node 2)
+  participant L as fabsvc node 2
+  participant R as fabsvc node 1
+  participant S as the service (node 1)
+  C->>L: call with a shm cap attached (attach_buf)
+  L->>L: map it: the session's buffer; a shadow of its size
+  L->>R: call_req … buf_pages = 8
+  R->>R: create the twin (8 pages) and a shadow
+  R->>S: attach_buf with the twin's cap
+  S-->>R: ok
+  R-->>L: call_resp
+  L-->>C: ok
+  C->>C: writes a script and its input into the buffer
+  C->>L: call run{…}
+  L->>R: fw_bulk (the bytes that differ from the shadow) …
+  L->>R: call_req run{…}
+  R->>R: apply the runs to the twin and the shadow
+  R->>S: run{…} — the service reads the twin
+  S-->>R: value{len} — written into the twin
+  R->>L: fw_bulk_resp (what the service changed) …
+  R->>L: call_resp
+  L->>L: apply to the caller's buffer and the shadow
+  L-->>C: value{len} — the caller reads its own buffer
+```
+
+A remote channel's death crosses too: when the holder of a session dies
+(`client_dead`), its fabric unmaps the buffer and sends `fw_release`,
+and the peer drops the export behind it — the channel cap, the twin,
+and, for a remotely spawned child, its control cap, so the child is
+torn down and its memory returned. A published service's export is
+never released this way.
+
+### Remote stages: a function's body on another node
+
+The language reaches the fabric through one command: `x | remote NODE
+{ … }` runs the block on that node with `$in` bound to `x` and gives
+the block's last value back — a **remote pipeline stage**. The host
+asks the fabric to spawn `mshrun` there in its remote-stage role,
+attaches a buffer to the channel it gets back (which the bulk transport
+proxies), writes the function's source and the input as a data literal
+into it, asks for `run`, and reads the value back as a data literal.
+The stage sees `$in` and nothing else of the caller — no captures, no
+files, no network, no caps beyond a log: pure computation placed
+elsewhere — answers once, and exits; the caller's session cap drops,
+the release crosses, and the child's export and budget are freed.
+Every outcome the fabric decides is a result (`err "no such member"`,
+`err "denied: …"`), and a stage that fails is `err` with its message.
+The fabric-login drill's node 2 runs `scripts/fab-drill.msh` at boot:
+a list to node 1 and back (`map`, `reduce`), a table to node 1 and
+back as a table (`where`, `select`), and a stage that fails.
 
 Many exchanges are in flight per link at once; the kernel's deferred
 replies let the fabric park each caller under a token and carry on. A
@@ -222,6 +297,8 @@ node is deleting its state.
 
 `nodes` lists the member table (node, up, free MB) as a table. `rspawn
 NODE IMAGE` asks for a remote spawn and reports where it landed.
+`x | remote NODE { … }` runs a block there (above); `mshrun` offers the
+same when its unit gives it a `fabric` cap.
 
 ### The evidence: the fabric drill
 
@@ -245,12 +322,23 @@ refused.
 ## In detail
 
 - **Wire.** Frames are `[len u16][type u8][ver u8][payload]`,
-  little-endian; version 4. A version-mismatched peer is dropped
-  loudly. Frame types: hello, hello_ack, spawn_req, spawn_ack, call_req,
+  little-endian; version 6. A version-mismatched peer is dropped
+  loudly. Frame types: hello, hello_ack, spawn_req, spawn_ack, call_req
+  (`[export u32][seq u32][4 × u64][cap export u32][buf_pages u16]`),
   call_resp, ping, pong, member_up, member_down, auth, sealed, members,
-  revoke. After the handshake only `sealed` frames are accepted from a
-  peer; plaintext outside the handshake, or a handshake replay after
-  authentication, drops the peer. Per-peer receive buffer: 512 bytes.
+  revoke, lookup_req, lookup_ack, bulk (`[export u32][off u32][len
+  u16][bytes]`), bulk_resp (`[seq u32][off u32][len u16][bytes]`),
+  release (`[export u32]`). After the handshake only `sealed` frames are
+  accepted from a peer; plaintext outside the handshake, or a handshake
+  replay after authentication, drops the peer. A frame is at most 4096
+  bytes sealed (the network view's one-page send buffer); the per-peer
+  receive buffer is 8 KB.
+- **Peer loss is named.** Every `peer lost` line says why: silent,
+  socket error, send failed, send retries exhausted, ping failed, call
+  timed out, frame buffer overrun, malformed frame, wire version
+  mismatch, sealed frame failed authentication, inner frame mismatch,
+  plaintext outside the handshake, sealed frame before the handshake,
+  certificate refused, node id mismatch, key derivation failed, revoked.
 - **Handshake sizes.** Nonces 16 bytes and ephemeral keys 32 bytes, both
   from `getrandom` (the network is refused with `no_entropy` while the
   kernel pool is unseeded). Certificate 112 bytes: a 48-byte body
@@ -269,7 +357,14 @@ refused.
   desync. The ephemeral secret is wiped once the keys exist.
 - **Tables.** 6 peers (connections), 8 members, 8 sessions, 8 exports,
   8 exchanges in flight (the kernel's pending-reply slots per channel),
-  4 workers with 16 KB stacks, 8 held revocations. Sessions are keyed
+  4 workers with 16 KB stacks, 8 held revocations. A session or export
+  with a buffer holds 8 pages of it and 8 of shadow, as shared memory,
+  while the buffer is attached.
+- **Budget.** Memory accounts nest, so the children a fabric service
+  spawns for its peers are paid from its own budget: the unit gives it
+  4 MB of kernel objects and 16 MB of user memory, and the drill's
+  kernel driver the same; a remotely spawned child gets 1 MB and 4 MB
+  of that. Sessions are keyed
   by node id, never by peer slot, so a slot recycled by a rejoin cannot
   misroute a stale remote channel — calls to a rebooted node fail
   cleanly instead.
@@ -288,14 +383,22 @@ refused.
   flight), `publish{service}` (+ a channel cap; 8 service slots) and
   `lookup{node, service}` (answers `found{node}` + a channel cap).
   Wire frames `lookup_req` [service u16][req u32] and `lookup_ack`
-  [req u32][export u32][code u8]; wire version 5.
+  [req u32][export u32][code u8]; wire version 6 (v5 added them).
   Errors: `no_peer`, `timeout`, `disconnected`, `refused`, `no_space`,
   `no_identity`, `no_entropy`, `denied`.
 - **Remote spawn.** Request `[image u16][arg u64][req u32]`; the child
   gets a log cap and the serving side of a fresh channel, 1 MB of
   kernel-object budget and 4 MB of user memory; the ack carries the
-  export id and a code: spawned, unauthorized, or failed. Image ids are
-  the shared catalog's numbering (a 64-bit mask, so ids below 64).
+  export id and a code: spawned, unauthorized, or failed (a failed
+  spawn's cause is on the spawning node's kernel log: `spawn by fabsvc
+  refused: QuotaExceeded`). Image ids are the shared catalog's
+  numbering (a 64-bit mask, so ids below 64). The export keeps the
+  child's control cap and drops it on release.
+- **Remote stage protocol** (`RunReq`/`RunResp`, served by `mshrun`
+  with arg 1): `attach_buf` (+ shm cap), `run{script_len, input_len}`
+  with the script at `buf[0..]` and the input's data literal after it;
+  `value{len}` or `failed{len}` with the text at `buf[0..len]`. One
+  `run`, then the stage exits.
 - **Authorization flags.** `gossip` (1): membership news is believed.
   `spawn` (2): may request spawns, per the image mask. The check
   certifies node 1 with both and every image; node 3 without spawn.
@@ -308,11 +411,22 @@ refused.
 
 - Addressing is static: node `N` is `10.77.0.N`; dynamic addressing is a
   separate concern not yet built.
-- Shared-memory caps do not cross nodes (by design), and notifications
-  do not cross yet; a protocol that moves bulk data through an attached
-  buffer (the filesystem view protocol) therefore cannot be proxied,
-  which is why a fabric login copies the record rather than reaching a
-  remote home.
+- Shared-memory caps do not cross nodes (by design); their contents do,
+  through the bulk transport, for buffers of up to 8 pages attached to
+  a badged call. Notifications do not cross yet. A fabric login still
+  copies the user's record rather than mounting a remote home: the
+  transport is there, the session manager does not use it yet.
+- A session has one buffer; a protocol that attaches more than one
+  (the block service's windows) is not proxied. Every forwarded call
+  ships the bytes that changed — a protocol that rewrites its whole
+  buffer every call pays for the whole buffer every call.
+- A remote stage is pure: it sees `$in` and nothing else — no captured
+  locals, no files, no network — and its value must be data (no
+  functions, results, handles or bytes). Script plus input, and the
+  value, must each fit the 32 KB buffer.
+- `publish` and `lookup` have no language surface: a script serves no
+  channel, so it has nothing to publish, and a looked-up channel would
+  be untyped in its hands.
 - A `lookup` is one exchange in flight per node at a time (the same
   shape as a remote spawn), and a published service is unpublished only
   by its node's restart.
@@ -344,7 +458,9 @@ refused.
 - HACKING.md — the cluster boot (`run-cluster`), pcap capture per NIC,
   and the service conventions (badges, bound notifications).
 - Source — `user/fabric.zig` (the service, handshake, gossip, proxying,
-  workers), `lib/fabcert.zig` (certificates and revocations, host-tested),
+  workers, the bulk transport: `shipDiff`, `fw_bulk`, `fw_release`),
+  `user/fabcmds.zig` (`remote`), `user/mshrun.zig` (`serveRemote`),
+  `boot/scripts/fab-drill.msh` and `boot/conf/units/fab-script.msh`, `lib/fabcert.zig` (certificates and revocations, host-tested),
   `shared/lib.zig` (FabReq/FabResp, RootReq, frame types),
   `boot/conf/units/fabsvc.msh` and `fabroot.msh`, `kernel/main.zig`
   (`fabricTestWorker`), `tools/runner.zig` (`runCluster`).
