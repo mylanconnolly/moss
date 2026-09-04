@@ -149,6 +149,9 @@ const Unit = struct {
     /// (`after: name`); a non-zero exit takes the system down.
     oneshot: bool = false,
     after: []const u8 = "",
+    /// `script: path`: handed over as the argument text (mshrun reads
+    /// the script at that path in its view).
+    script: []const u8 = "",
     certify: ?Certify = null,
     // The instance.
     ctl: u64 = 0,
@@ -333,6 +336,7 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
     if (r.get("essential")) |e| u.essential = e.asBool();
     if (r.get("oneshot")) |e| u.oneshot = e.asBool();
     if (r.get("after")) |a| u.after = str(a) orelse "";
+    if (r.get("script")) |sc| u.script = str(sc) orelse "";
     if (r.get("install")) |e| u.install = e.asBool();
     if (r.get("certify")) |c| {
         if (c == .record) {
@@ -429,6 +433,10 @@ fn activate(u: *Unit) bool {
     if (ok and u.certify != null) {
         ok = certifySecret(u);
         if (!ok) logLine("init: certify secret failed for unit ", u.name);
+    }
+    if (ok and u.script.len > 0) {
+        const w = shared.strToWords(u.script);
+        ok = boot.give(u.chan_b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0);
     }
     if (ok) ok = boot.give(u.chan_b, .go, 0);
     if (!ok) {

@@ -334,6 +334,7 @@ pub const ImageId = enum(u64) {
     vmm = 15,
     pcisvc = 16,
     users = 17,
+    mshrun = 18,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over

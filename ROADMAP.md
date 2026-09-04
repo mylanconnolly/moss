@@ -210,9 +210,11 @@ is a plan.
   still open from it: shape annotations and host-command signatures
   from the protocol types (a wrong type is caught at use, not at the
   boundary), host commands returning results instead of failing, a
-  module loaded from the store, floats; (2) scripts as programs —
-  an `mshrun` image that runs a script under a manifest, so a script is
-  a unit, a run tool, or a remotely spawned service; (3) the network
+  module loaded from the store, floats; (2) ✅ scripts as programs
+  (landed 2026-09-03: the `mshrun` image, `script:` in unit files, the
+  file commands shared through `user/fscmds.zig`); still open: a script
+  spawned on another node — `rspawn` takes a catalog number and carries
+  no argument text, which the fabric surface (4) brings; (3) the network
   surface — sockets as capability-carrying values, then the netsvc
   upgrade (windowing, retransmission, more sockets), then HTTP with
   parsing in Zig as host commands and handlers as mshl functions; (4)
@@ -355,6 +357,17 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 2: a script is a program** (done, 2026-09-03):
+  `mshrun`, an image that runs the script named by its argument through
+  the one view it is handed, with the file commands — moved from the
+  shell into `user/fscmds.zig` so msh and mshrun share one host — as
+  its whole authority. `run mshrun PATH` from the shell returns the
+  script's last value (nothing rendered: a program returns a value);
+  `script: path` in a unit file makes a script a unit (init passes the
+  path as the argument text), its statements rendered to the log and
+  its error a non-zero exit, so a drill step can be a script. The
+  shell drill runs three scripts (a value, a table, an error) and
+  requires the `script-hello` unit's log line.
 - ✅ **mshl v3, stage 1: the language core** (done, 2026-09-03):
   functions as values (`fn`, `def`, blocks as functions of `$it`, `$f
   args`), closures over a snapshot of the enclosing call's locals plus

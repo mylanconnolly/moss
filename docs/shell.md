@@ -248,6 +248,37 @@ program's role, as in a unit file) and grant `bootfs` besides
 memory. `run apply` makes the volume match `conf/system.msh` (see
 [Users and sessions](users.md)) and returns what it did as a table.
 
+### Scripts as programs
+
+A script is a program when `mshrun` runs it. The image takes one view
+and an argument — the script's path in that view — evaluates the script
+with the shared file commands (`ls`, `tree`, `cat`, `open`, `write`,
+`save`, `stat`, `mkdir`, `rm`, `mv`, `ln`, `readlink`, `sync`, `df`,
+`source`, and through `open`, `use`) as its whole host, and has exactly
+the authority its manifest or unit file gives it: no console, no
+spawner, no fabric unless given. Three ways to run one:
+
+- **From the shell**: `run mshrun data/s.msh`. The archive's manifest
+  for `mshrun` gives it the shell's whole filesystem as a writable view
+  (`fs: ""`), the console, and an `out` buffer; the script's *last*
+  statement's value comes back as the command's value (`run mshrun
+  data/report.msh | where size > 1kb`), and nothing is rendered on the
+  way — a program run by msh returns a value, like `ls` and `ps`. A
+  failing script exits 1 with its error on the console, which `run`
+  reports as an exit code.
+- **As a unit**: a unit file naming the image and the script —
+  `{ image: mshrun, script: scripts/hello.msh, give: [ { tag: view, fs:
+  boot, ro: true } ], oneshot: true, profiles: [system] }` — runs it at
+  boot with the view the unit gives; every statement's value is
+  rendered to the log, one `mshrun: …` line each, and an error is a
+  non-zero exit (which, for a `oneshot` step, takes the boot down: a
+  script can be a drill step). The archive's `script-hello` unit is
+  that example: it counts the unit files and logs the count.
+- **Anywhere a manifest goes**: the manifest decides the view and the
+  grants, so a copy in a user's store with a narrower `fs:` is a script
+  that sees one directory, and `install mshrun` puts the runner in a
+  home's store.
+
 In a user session the shell also holds a badged channel to the session
 manager, and four commands use it: `share PATH NAME USER [rw]` derives
 a view of a path in the home and offers it; `shares` lists offers made
@@ -356,6 +387,13 @@ and in a session ends the session.
   (`user/result.zig`) is 128 KB.
 - **Editor.** Line 512 bytes, history 16, completion up to 32
   candidates of 64 bytes.
+- **mshrun.** Reads the script through its view (`open`-style, whole
+  file), runs it with a 1 MB arena and a 512 KB box pool, delivers a
+  data value (never a function, result or bytes — those are not data)
+  through `out` when it has one, else logs or prints the rendering;
+  exits 0, or 1 with `mshrun: <path>: <error>`. The script path is the
+  24-byte argument text (`script:` in a unit file, the `run` argument
+  from the shell).
 - **Data files.** `parseData` accepts one literal: numbers with units,
   strings, bare words, `true`/`false`/`null`, lists, records, comments —
   and refuses anything executable. A `.msh` file is a program or data
@@ -368,7 +406,11 @@ and in a session ends the session.
 
 - `save` alone (and `> path`) writes *rendered text*; only a `to-data`
   value round-trips as data.
-- A run argument is 24 bytes of text; a longer path cannot be passed.
+- A run argument is 24 bytes of text; a longer path cannot be passed —
+  a script's path included.
+- A script run by `mshrun` prints nothing when it has an `out` (its
+  value is its result); a script that wants to talk and return must
+  build a value that says both.
 - The system store is the only source of programs for `install`.
 - At most 8 mounted shares; a mount's buffer stays mapped after the
   share dies or is replaced (the cap is dropped, the page is not).
@@ -416,7 +458,9 @@ and in a session ends the session.
 - ROADMAP.md — "Developer shell and tooling", "msh v2", "Programs as
   files", "Manifests beside images, and a per-user store".
 - Source — `user/shell.zig` (the host: every command, `run`,
-  `install`, startup, the REPL), `lib/mshl.zig` (the language: grammar
+  `install`, startup, the REPL), `user/fscmds.zig` (the file commands
+  msh and mshrun share), `user/mshrun.zig` (a script as a program),
+  `lib/mshl.zig` (the language: grammar
   in the header comment, values, boxes and scopes, closures, `match`,
   results, verbs, `parseData`, `writeData`, `evalScript`; host-tested
   with `zig test lib/mshl.zig`, every test under the leak-checking

@@ -230,6 +230,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "vmm", .src = "user/vmm.zig" },
         .{ .name = "pcisvc", .src = "user/pcisvc.zig" },
         .{ .name = "users", .src = "user/users.zig" },
+        .{ .name = "mshrun", .src = "user/mshrun.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -271,6 +272,8 @@ pub fn build(b: *std.Build) void {
         "conf/system.msh",               "conf/units/cons1.msh",
         "conf/units/usersvc-login.msh",  "conf/session/msh.msh",
         "conf/units/usersvc-flogin.msh", "conf/units/usersvc-fjoin.msh",
+        "conf/units/mshrun.msh",         "conf/units/script-hello.msh",
+        "scripts/hello.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));

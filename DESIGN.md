@@ -1192,6 +1192,28 @@ and `use`d, a typed error, a UTF-8 `len`) and seventeen host tests
 cover it; the line editor had been dropping every byte above 0x7e, so
 no UTF-8 could ever be typed — found by the drill's `"héllo" | len`.
 
+**mshl v3, stage 2 (as built, 2026-09-03): a script is a program.**
+`mshrun` (`user/mshrun.zig`) is an image like `ls`: it takes its world
+over the boot channel — one view, an argument (the script's path in
+that view), a console and an `out` when msh runs it — and evaluates
+the script with the file commands as its entire host. Those commands
+moved out of the shell into `user/fscmds.zig`, parameterized by a
+resolver (msh: its view plus mounted shares; mshrun: its one view), so
+the two hosts cannot drift. The rules: with an `out` the last value is
+the result and nothing is rendered (a program returns a value); without
+one every statement's value is rendered to the console or, as a unit,
+to the log a line at a time; an error is exit 1 with `mshrun: path:
+message`. A unit file gained `script: path`, which init hands over as
+the argument text, so a script is a unit — eager, `oneshot`, `after`,
+`essential` all apply, and a drill step can be a script (the archive's
+`script-hello` unit runs `scripts/hello.msh` from a read-only view of
+`boot/` in the system profile and the shell drill requires its log
+line). The manifest `mshrun.msh` gives `fs: ""` — the whole filesystem
+the shell holds, writable — and a narrower copy in a store is a script
+confined to one directory. Not done: a script spawned on another node
+(`rspawn` takes a catalog number and carries no argument text) waits
+for the fabric surface, stage 4.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

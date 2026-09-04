@@ -153,7 +153,9 @@ authority; `bootfs` the boot archive); `give` lists views, where the
 path `arg` means "the argument the user typed"; `arg` is the role the
 image is started with. A unit file that says `run: true` gets a
 manifest under the unit's name too (`apply` is the users image's role
-2 that way). Init installs the system store at boot from
+2 that way). The `mshrun` manifest gives a script the shell's whole
+filesystem (`fs: ""`), so `run mshrun PATH` runs the script at PATH
+with the authority of the shell over files, and nothing else. Init installs the system store at boot from
 the boot archive, writing each image once (present ones are skipped)
 and a manifest built from the program's unit file, when it has one.
 

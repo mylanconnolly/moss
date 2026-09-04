@@ -144,8 +144,11 @@ certified, skipping itself), `run` (`run: true`: the unit is also a
 program the shell can run under its name — init writes a manifest for
 it into the store with its image's digest, `arg`, grants and gives),
 `certify` (the fabric's certification
-against a root-of-trust unit), and `install` (install the program store
-through this filesystem unit once it is up).
+against a root-of-trust unit), `install` (install the program store
+through this filesystem unit once it is up), and `script` (a path,
+handed over as the 24-byte argument text: the `mshrun` image reads the
+script there in the view the unit gives it — a script as a unit, see
+[the shell page](shell.md#scripts-as-programs)).
 
 ### Profiles and drills
 

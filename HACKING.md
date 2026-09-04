@@ -87,8 +87,9 @@ polled (`would_block`) so one loop serves everyone; a bound notification
 (`notifyBind`) can interrupt your blocked `recv` — drain it with
 `notifyWait` after every `interrupted` or the latched bits will spin you.
 
-**A shell command**: add an arm to `hostCall` in `user/shell.zig` that
-turns typed IPC into a `mshl.Value` (a table, record, string, or
+**A shell command**: add an arm to `hostCall` in `user/shell.zig` (or
+to `user/fscmds.zig` if it is a file command every mshl host — msh and
+mshrun — should have) that turns typed IPC into a `mshl.Value` (a table, record, string, or
 nothing — never text parsed out of another service; rendering is the
 interpreter's job), add the name to `command_names` (tab completion),
 and extend `shell_script` in `tools/runner.zig` so the scripted console
@@ -152,7 +153,10 @@ terminal and seat 1 on `nc 127.0.0.1 31905`.
 [x]`, `oneshot: true`, `after:` for steps, `essential: true` on the last),
 a kernel worker that is just `systemDrill("x")`, and a `Spec` in
 `tools/runner.zig` with `.append = "profile=x"`; a non-zero step exit
-fails the boot with that code. Write a kernel-side driver only when the
+fails the boot with that code. A step can be a script: `{ image:
+mshrun, script: scripts/x.msh, oneshot: true, give: [ { tag: view, fs:
+boot, ro: true } ] }` runs it from the archive and its error is the
+step's failure. Write a kernel-side driver only when the
 test must assert kernel state (log a unique `"<name>-test: PASS ..."`
 line, then `psci.systemOff()`; panics are failures). Either way, add
 the option to `build.zig` (the `-D` flag and the `variants`/

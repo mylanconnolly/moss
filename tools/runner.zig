@@ -90,6 +90,7 @@ const specs = [_]Spec{
         .kind = .shell,
         .pass = "shell-test: PASS",
         .extra = "fabric identity born and certified",
+        .always_extra = "mshrun: hello from a script: ",
         .second_run_extra = "fabric identity restored from state",
         .timeout_s = 120,
     },
@@ -467,6 +468,14 @@ const shell_script = [_]Step{
     .{ .send = "let m = (use data/m.msh); $m.quad 4", .expect = "16" },
     .{ .send = "if 1 { echo x }", .expect = "error: if: condition is a int, not a bool" },
     .{ .send = "\"héllo\" | len", .expect = "5" },
+    // Scripts as programs: mshrun runs a script under a manifest and
+    // returns its last value; its errors are its exit.
+    .{ .send = "write data/s2.msh \"[1, 2, 3] | map { \\$it * 3 } | reduce 0 { \\$acc + \\$it }\"", .expect = "" },
+    .{ .send = "run mshrun data/s2.msh", .expect = "18" },
+    .{ .send = "write data/s3.msh \"ls data/smoke | where size > 0\"", .expect = "" },
+    .{ .send = "run mshrun data/s3.msh | get name", .expect = "hi.txt" },
+    .{ .send = "write data/s4.msh \"frobnicate\"", .expect = "" },
+    .{ .send = "run mshrun data/s4.msh", .expect = "unknown command 'frobnicate'" },
     // The editor: tab completes a command, ctrl-c abandons the line.
     .{ .send = "mkd\t", .expect = "mkdir", .raw = true },
     .{ .send = "\x03", .expect = "^C", .raw = true },

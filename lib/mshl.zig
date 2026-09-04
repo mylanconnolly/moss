@@ -330,18 +330,21 @@ pub const Interp = struct {
     }
 
     /// Run a script the way the prompt runs lines: every top-level
-    /// statement's value is rendered into `out` as it is produced.
-    pub fn evalScript(self: *Interp, src: []const u8, out: *std.ArrayList(u8)) Error!void {
+    /// statement's value is rendered into `out` as it is produced. The
+    /// last statement's value is the script's (good until the next call).
+    pub fn evalScript(self: *Interp, src: []const u8, out: *std.ArrayList(u8)) Error!Value {
         var p = Parser{ .it = self, .lex = Lexer{ .src = src } };
         const prog = try p.program();
-        for (prog) |stmt| {
-            const v = self.evalTop(stmt) catch |e| {
+        var last: Value = .nothing;
+        for (prog, 0..) |stmt, i| {
+            if (i > 0) self.reclaim();
+            last = self.evalTop(stmt) catch |e| {
                 self.reclaim();
                 return e;
             };
-            try render(v, self.arena, out);
-            self.reclaim();
+            try render(last, self.arena, out);
         }
+        return last;
     }
 
     /// A top-level statement: an unhandled `?` is an error here.
@@ -3255,7 +3258,8 @@ test "scripts render every statement's value" {
     defer t.stop();
     const it = &t.it;
     var out: std.ArrayList(u8) = .empty;
-    try it.evalScript("echo one\nlet x = 2\n$x\ndef f { 3 }\nf", &out);
+    const last = try it.evalScript("echo one\nlet x = 2\n$x\ndef f { 3 }\nf", &out);
+    try std.testing.expectEqual(@as(i64, 3), last.int);
     try std.testing.expectEqualStrings("one\n2\n3\n", out.items);
 }
 

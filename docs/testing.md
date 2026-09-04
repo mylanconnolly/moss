@@ -88,7 +88,7 @@ root and init from unit files — also require root's exit code to be 0.
 | `net` | Dual-stack TCP through the userspace network service; allowlist views | net |
 | `rng` | The userspace virtio-rng driver seeds the kernel pool; `getrandom` fail-closed and policed | plain |
 | `fabric` | Three nodes: per-node identities, join, gossip, placement, a node's death and rejoin, an imposter refused, spawn authorization, revocation | cluster |
-| `shell` | A scripted msh session over a console socket: pipelines, the language, redirection, scripts, `run`; identity born on the first boot and restored on the second | shell, two boots |
+| `shell` | A scripted msh session over a console socket: pipelines, the language (closures, `match`, results, modules), redirection, scripts, `run` (including `mshrun`, a script as a program, and the `script-hello` unit at boot); identity born on the first boot and restored on the second | shell, two boots |
 | `users` | Users as keys, sessions as domains, homes as encrypted volumes; two sessions at once; work persisting across logins; a locked setting | blk |
 | `login` | Two users at two consoles at once, each session an init instance with msh on its home; `run` from the system store, `install` into the home's own; a share offered, accepted, read through, refused a write, and withdrawn; seats freed | login |
 | `flogin` | Fabric login: node 1 applies the users and publishes its session manager, node 2 (a fresh disk, a console) joins through its seed and alice logs in there — her record fetched from node 1, her home born on node 2 | flogin (two QEMUs on one segment) |
