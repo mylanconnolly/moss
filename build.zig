@@ -237,12 +237,12 @@ pub fn build(b: *std.Build) void {
     // standard hierarchy (identity in etc/, boot config in conf/, images
     // in img/).
 
-    // The mshl tools: mshfmt and mshlint, on the tree-sitter grammar's
+    // The mshl tools: mshfmt, mshlint and mshls, on the tree-sitter grammar's
     // generated parser and the tree-sitter runtime the host provides
     // (`brew install tree-sitter`; -Dtree-sitter=PREFIX elsewhere). Their
     // own steps and tests, outside the gate: host tooling, not the OS.
     // `fmt-test` checks every .msh under boot/ is formatted; `lint-test`
-    // that every one lints clean.
+    // that every one lints clean; `ls-test` is the server's own tests.
     const ts_prefix = b.option([]const u8, "tree-sitter", "prefix of the tree-sitter runtime (include/, lib/)") orelse "/opt/homebrew/opt/tree-sitter";
     {
         const tree_mod = b.createModule(.{
@@ -256,28 +256,39 @@ pub fn build(b: *std.Build) void {
         tree_mod.addIncludePath(b.path("tools/tree-sitter-mshl/src"));
         tree_mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libtree-sitter.a", .{ts_prefix}) });
         const mshl_mod = b.createModule(.{ .root_source_file = b.path("lib/mshl.zig"), .target = host_target, .optimize = .Debug });
-        const Tool = struct { name: []const u8, step: []const u8, test_step: []const u8, arg: ?[]const u8, what: []const u8 };
+        const toolModule = struct {
+            fn make(bb: *std.Build, name: []const u8, tgt: std.Build.ResolvedTarget, imports: []const std.Build.Module.Import) *std.Build.Module {
+                return bb.createModule(.{
+                    .root_source_file = bb.path(bb.fmt("tools/{s}.zig", .{name})),
+                    .target = tgt,
+                    .optimize = .Debug,
+                    .link_libc = true,
+                    .imports = imports,
+                });
+            }
+        }.make;
+        const base_imports = [_]std.Build.Module.Import{ .{ .name = "mshtree", .module = tree_mod }, .{ .name = "mshl", .module = mshl_mod } };
+        const fmt_mod = toolModule(b, "mshfmt", host_target, &base_imports);
+        const lint_mod = toolModule(b, "mshlint", host_target, &base_imports);
+        const ls_mod = toolModule(b, "mshls", host_target, &(base_imports ++ [_]std.Build.Module.Import{ .{ .name = "mshfmt", .module = fmt_mod }, .{ .name = "mshlint", .module = lint_mod } }));
+        const Tool = struct { name: []const u8, mod: *std.Build.Module, step: []const u8, test_step: []const u8, over_tree: ?[]const []const u8, what: []const u8 };
         for ([_]Tool{
-            .{ .name = "mshfmt", .step = "fmt", .test_step = "fmt-test", .arg = "--check", .what = "the mshl formatter" },
-            .{ .name = "mshlint", .step = "lint", .test_step = "lint-test", .arg = null, .what = "the mshl lint" },
+            .{ .name = "mshfmt", .mod = fmt_mod, .step = "fmt", .test_step = "fmt-test", .over_tree = &.{"--check"}, .what = "the mshl formatter" },
+            .{ .name = "mshlint", .mod = lint_mod, .step = "lint", .test_step = "lint-test", .over_tree = &.{}, .what = "the mshl lint" },
+            .{ .name = "mshls", .mod = ls_mod, .step = "ls", .test_step = "ls-test", .over_tree = null, .what = "the mshl language server" },
         }) |t| {
-            const mod = b.createModule(.{
-                .root_source_file = b.path(b.fmt("tools/{s}.zig", .{t.name})),
-                .target = host_target,
-                .optimize = .Debug,
-                .link_libc = true,
-                .imports = &.{ .{ .name = "mshtree", .module = tree_mod }, .{ .name = "mshl", .module = mshl_mod } },
-            });
-            const exe = b.addExecutable(.{ .name = t.name, .root_module = mod });
+            const exe = b.addExecutable(.{ .name = t.name, .root_module = t.mod });
             const step = b.step(t.step, b.fmt("build {s}, {s} (needs the tree-sitter runtime)", .{ t.name, t.what }));
             step.dependOn(&b.addInstallArtifact(exe, .{}).step);
-            const tests = b.addTest(.{ .root_module = mod });
-            const test_step = b.step(t.test_step, b.fmt("{s}'s own tests, then {s} over every .msh under boot/", .{ t.name, t.name }));
+            const tests = b.addTest(.{ .root_module = t.mod });
+            const test_step = b.step(t.test_step, if (t.over_tree != null) b.fmt("{s}'s own tests, then {s} over every .msh under boot/", .{ t.name, t.name }) else b.fmt("{s}'s own tests", .{t.name}));
             test_step.dependOn(&b.addRunArtifact(tests).step);
-            const over_tree = b.addRunArtifact(exe);
-            if (t.arg) |arg| over_tree.addArg(arg);
-            for (mshFiles(b)) |f| over_tree.addFileArg(b.path(f));
-            test_step.dependOn(&over_tree.step);
+            if (t.over_tree) |args| {
+                const over_tree = b.addRunArtifact(exe);
+                over_tree.addArgs(args);
+                for (mshFiles(b)) |f| over_tree.addFileArg(b.path(f));
+                test_step.dependOn(&over_tree.step);
+            }
         }
     }
 

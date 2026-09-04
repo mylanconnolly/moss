@@ -1459,6 +1459,31 @@ silently never starts. Diagnostics are `path:line:col: message`, sorted,
 exit 1 if any; `--stdin NAME` for editors. `zig build lint-test` runs
 its tests and the lint over the tree.
 
+**mshl v3, stage 5d (as built, 2026-09-04): the language server.**
+`tools/mshls.zig` is the lint and the formatter behind the Language
+Server Protocol: stdio, `Content-Length` frames, JSON-RPC parsed into
+`std.json.Value` and answered with typed structs through the
+stringifier. Documents are synced whole (a script is small; analysis
+is a parse and one walk) and re-analyzed per request rather than
+cached — simpler, and fast enough that nothing else is worth it yet.
+Every query starts from the lint's `Analysis`: diagnostics are its
+diagnostics with byte ranges turned into line/UTF-16 positions and its
+severities (an error is what would fail when the line runs); hover and
+definition look up the reference or binding under the cursor (a `$x`,
+a `$x` in a string, a command naming a `def`) and describe it from its
+binding — the `let` line, the `def` header up to the body, what an
+implicit name is — or, failing that, say "builtin" for a builtin's
+name; symbols are the file scope's `let`s and `def`s; completion is
+`Analysis.visible` at the cursor (innermost first, each name once) and
+then the builtins; formatting is `mshfmt.format` as one edit over the
+whole document, none when unchanged, none when the text does not
+parse. The server is a struct that takes one message and appends its
+replies to a buffer, so the tests are the protocol itself (framing
+checked, JSON parsed back) with no transport; `main` is the frame
+reader. Not built: rename, references, incremental sync, semantic
+tokens — the tree-sitter highlights cover the last, and the rest wait
+for an editor to ask.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

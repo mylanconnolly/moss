@@ -248,9 +248,11 @@ is a plan.
   formatter on it (landed 2026-09-04: `mshfmt`, `zig build fmt` /
   `fmt-test`, the tree kept formatted), ✅ lint (landed 2026-09-04:
   `mshlint`, unbound/unused names, exhaustiveness, duplicate keys,
-  unit keys; `lint-test`), then a language server on the same parser
-  (diagnostics from the lint, hover and go-to-definition from its
-  scopes, formatting from mshfmt). Rule: build the
+  unit keys; `lint-test`), ✅ a language server (landed 2026-09-04:
+  `mshls` over stdio — the lint's diagnostics, hover, definition,
+  symbols, completion, formatting; `ls-test`). Left for when an editor
+  asks: rename, references, incremental sync, semantic tokens beyond
+  the tree-sitter highlights. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
 - **virtio-gpu and input devices** — the graphical console.
@@ -385,6 +387,25 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 5d: the language server** (done, 2026-09-04):
+  `mshls`, `tools/mshls.zig` — LSP over stdio, whole-document sync,
+  built on the lint's `Analysis` (scopes, bindings, every reference
+  resolved) and the formatter: diagnostics on open and change (errors
+  are what would fail at run time, warnings what runs but probably not
+  as meant), hover (the `let` line, a `def`'s header, what `$it`/`$in`/
+  `$acc`/`$req` are, "builtin"), definition, document symbols,
+  completion (names in scope, then the builtins), formatting as one
+  edit. `Server.handle` takes one message and appends replies, so
+  `zig build ls-test` drives it without a transport; the binary was
+  also driven over a pipe with byte-exact frames. Bugs found: a null
+  `result` came out as the string `"null"` (naming a union's void field
+  through the type gives its tag, which the stringifier prints as a
+  name — coerce to the union), and an optional result was omitted
+  where JSON-RPC requires the key (unwrap before stringifying); the
+  header reader left the newline in the stream (`takeDelimiterExclusive`
+  does not consume it) so the second header read saw an empty line and
+  the body started at the wrong byte. Editor setup (Helix, Neovim) in
+  tools/README.md.
 - ✅ **mshl v3, stage 5c: lint** (done, 2026-09-04): `mshlint`,
   `tools/mshlint.zig`, on the parser now shared as `tools/mshtree.zig`
   — the interpreter's run-time complaints, before: a `$x` bound nowhere

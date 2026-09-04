@@ -397,8 +397,17 @@ anything:
   is a unit that never starts).
 
 `zig build lint-test` runs its tests and the lint over every `.msh`
-under `boot/`, which must be clean. A language server on the same
-parser is the next step.
+under `boot/`, which must be clean.
+
+`mshls` (`zig build ls`) is the language server, over stdio: the lint's
+diagnostics as you type (errors are what would fail when the line runs,
+warnings what runs but probably not as meant), hover on a `$name` or a
+command's name (the `let` line, a `def`'s header, what an implicit name
+like `$it` is, "builtin"), go-to-definition to the binding, the file's
+`def`s and `let`s as document symbols, completion of the names in scope
+and the builtins, and formatting by `mshfmt`. Whole-document sync — a
+script is small and re-analysis is cheap. `zig build ls-test` drives it
+message by message. Editor setup is in `tools/README.md`.
 
 ### Running it
 
@@ -559,7 +568,7 @@ parser is the next step.
   `test/corpus/`; `tree-sitter generate && tree-sitter test`),
   `tools/mshtree.zig` (the parser for the tools), `tools/mshfmt.zig`
   (`zig build fmt`, `fmt-test`), `tools/mshlint.zig` (`zig build lint`,
-  `lint-test`).
+  `lint-test`), `tools/mshls.zig` (`zig build ls`, `ls-test`).
 - Source — `user/shell.zig` (the host: every command, `run`,
   `install`, startup, the REPL), `user/fscmds.zig` (the file commands
   msh and mshrun share), `user/mshrun.zig` (a script as a program),
