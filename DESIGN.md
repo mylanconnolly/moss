@@ -1146,6 +1146,52 @@ the first prompt. A script renders every top-level statement's value as
 it goes, the way the prompt does — the first cut rendered only the
 last, and a startup script ending in a `def` printed nothing.
 
+**mshl v3, stage 1 (as built, 2026-09-03): the language core.** The
+decisions in ROADMAP's locked table, built on the host first, with the
+shell as the only host so far. *Functions are values*: `fn [params]
+{ body }` anywhere, `def` as its named form, a block in argument
+position as a function of `$it`; `map`, `filter`, `reduce`, `any`,
+`all`, `find` take one; a `$var` (or `$rec.field`) with arguments is a
+call. A closure snapshots the locals of the function that made it and
+points at the *scope* it was defined in, reading names there at call
+time — recursion and mutual recursion by name, never a self-pointer in
+a value. *Memory is counted, exactly*: a line's arena as before; what
+`let`/`def` bind at a top level is a **box** (an arena of its own with
+a count; scalars inline, `let y = $x` shares, a record retains the
+functions inside it); rebinding drops; a box at zero is freed at the
+end of the top-level statement, never mid-statement, because the loop
+rebinding a name may still be walking the old value. Frames (params,
+captures, locals) are arena memory: a call allocates nothing lasting.
+The one cycle — a scope's slots hold its closures, its closures point
+at the scope — is collected knowingly: at every reclaim, an unheld
+scope whose closures are referenced only from its own slots is freed
+(`scopeGarbage`); the tests run under the leak-detecting allocator and
+`deinit` must return every byte. msh's boxes come from a 1 MB chunk
+pool (`lib/pool.zig`: first fit, marks cleared on free) — the first
+freeing allocator in moss userspace. *Strong, dynamic typing*:
+conditions take bools, `==` and `<` take one type, `+` never converts;
+`str`, `int` (a result) and `type` are the conversions; strings are
+validated UTF-8 with `len` in code points and `bytes` is its own type
+(`to-bytes`, `from-bytes` → result). *Failure is a value*: `ok`/`err`
+results, `?` unwinds to the enclosing function (an internal flag and
+`Error.Runtime`, so the public error set did not change), `try { }`
+turns a failing host command into an `err` with its message — the
+bridge until host commands have signatures. *`match`* with patterns
+over literals, bare words (the enumeration story), `ok`/`err`, lists
+with `..$rest`, open records with `{ name }` shorthand, guards; the
+exhaustiveness check is at parse time and deliberately blunt (a
+catch-all, both result arms, or both bools). *Modules*: `use path`
+evaluates a file in a fresh scope and returns its bindings as a record;
+the scope lives while any of its functions does; no global namespace.
+Two decisions taken while building: `?` at the prompt is an error, not
+a print (nothing to return to); a one-line match arm is a pipeline, so
+a bare word there is a command, as everywhere else — quote it. The
+shell drill's language lines in QEMU (closures, `match` on a result
+and on `try`, `?` inside a function, a module written to the volume
+and `use`d, a typed error, a UTF-8 `len`) and seventeen host tests
+cover it; the line editor had been dropping every byte above 0x7e, so
+no UTF-8 could ever be typed — found by the drill's `"héllo" | len`.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

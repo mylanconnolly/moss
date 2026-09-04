@@ -456,6 +456,17 @@ const shell_script = [_]Step{
     .{ .send = "echo hello world > data/hello.txt", .expect = "" },
     .{ .send = "cat data/hello.txt | lines | first 1", .expect = "hello world" },
     .{ .send = "(stat data/smoke).type == dir", .expect = "true" },
+    // mshl v3: functions as values, results, match, modules, typing.
+    .{ .send = "[1, 2, 3, 4] | map { $it * 2 } | reduce 0 { $acc + $it }", .expect = "20" },
+    .{ .send = "ls data/smoke | filter { $it.size > 0 } | map { $it.name }", .expect = "hi.txt" },
+    .{ .send = "def adder [n] { fn [x] { $x + $n } }; let add5 = (adder 5); $add5 10", .expect = "15" },
+    .{ .send = "match (int nope) { ok $n => $n; err $e => echo \"bad: $e\" }", .expect = "bad: not a number: nope" },
+    .{ .send = "match (try { cat data/none }) { ok _ => \"read\"; err $e => \"caught\" }", .expect = "caught" },
+    .{ .send = "def safe-cat [p] { ok (try { cat $p })? }; safe-cat data/smoke/hi.txt", .expect = "ok typed ipc" },
+    .{ .send = "write data/m.msh \"def double [x] { \\$x * 2 }; def quad [x] { double (double \\$x) }\"", .expect = "" },
+    .{ .send = "let m = (use data/m.msh); $m.quad 4", .expect = "16" },
+    .{ .send = "if 1 { echo x }", .expect = "error: if: condition is a int, not a bool" },
+    .{ .send = "\"héllo\" | len", .expect = "5" },
     // The editor: tab completes a command, ctrl-c abandons the line.
     .{ .send = "mkd\t", .expect = "mkdir", .raw = true },
     .{ .send = "\x03", .expect = "^C", .raw = true },

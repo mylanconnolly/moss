@@ -138,7 +138,8 @@ pub const Editor = struct {
                 e.redraw();
             },
             0x09 => e.complete(),
-            else => if (c >= 0x20 and c < 0x7f) e.insert(c),
+            // Printable ASCII, and every byte of a UTF-8 sequence.
+            else => if ((c >= 0x20 and c < 0x7f) or c >= 0x80) e.insert(c),
         }
         return .none;
     }

@@ -76,45 +76,135 @@ else — no commands, no variables.
 let n = (ls data | len)
 if $n == 1 { echo "one file" } else { echo many }
 for f in (ls data | get name) { echo "file: $f" }
-let i = 0; while $i < 3 { let i = $i + 1 }; $i
 def twice [x] { $x * 2 }; twice 21
 ls data | where size > 4kb | sort-by name --desc | select name size
-(stat data/smoke).type == dir
-ls data | select name > data/listing.txt
+ls data | filter { $it.size > 0 } | map { $it.name }
+[1, 2, 3, 4] | reduce 0 { $acc + $it }
+let inc = fn [x] { $x + 1 }; $inc 41
+match (int $text) { ok $n => $n * 2; err $e => echo "not a number: $e" }
+def total { $in | map { (int $it)? } | reduce 0 { $acc + $it } }
+let math = (use lib/math.msh); $math.double 21
 ```
 
 Statements are separated by `;` or newlines. A pipeline is stages
-joined by `|`; a stage is a command name with arguments, or an
-expression. Arguments and expressions may be words, `"strings"` (which
-interpolate `$var`), `$vars`, `(sub | pipelines)`, `[lists]`, blocks,
-and records `{ key: value, … }` (a `{` followed by `word:` is a record,
-otherwise a block). Numbers take size units — `4kb`, `8mb`, `1gb`,
+joined by `|`; a stage is a command name with arguments, a function
+value with arguments (`$inc 41`, `$math.double 21`), or an expression.
+Arguments and expressions may be words, `"strings"` (which interpolate
+`$var`), `$vars`, `(sub | pipelines)`, `[lists]`, records
+`{ key: value, … }` (a `{` followed by `word:` is a record, otherwise a
+block), and blocks. Numbers take size units — `4kb`, `8mb`, `1gb`,
 case-insensitive. Operators: `== != < <= > >=`, `+ - * / %`, `not`,
 `and`, `or`; `.field` and `.index` reach into records and lists.
-`def name [params] { body }` defines a function whose body outlives the
-line; inside it `$in` is the pipeline input and the parameters bind for
-the call. `source path` runs a script in the session, rendering every
-top-level statement's value as it goes, the way the prompt does.
+`source path` runs a script in the session, rendering every top-level
+statement's value as it goes, the way the prompt does.
+
+**Types are strong, not static.** Every value is one of nothing, bool,
+int, string, bytes, list, record, table, function, result, and nothing
+coerces: `if 1 { }` is the error "if: condition is a int, not a bool",
+`1 == "1"` is "cannot compare a int with a string", and `1 + "a"` is
+refused. Only `null` compares with anything (absence is a fair
+question). Conversions are commands with typed answers: `str v`
+renders a value, `int text` gives a *result* (`ok 42` or `err …`), and
+`type v` names the type. Strings are UTF-8 by construction — a literal
+that is not valid UTF-8 is a syntax error — with `len` in code points;
+`to-bytes` makes bytes of one, `from-bytes` gives an `ok` string or an
+`err` when the bytes are not UTF-8, and `+` joins bytes with bytes.
+
+**Functions are values.** `def name [params] { body }` binds one to a
+name; `fn [params] { body }` makes one anywhere. Inside, `$in` is the
+pipeline input and the parameters bind for the call; a `let` in the
+body is local to the call. A block written as a *command argument* is
+a function of `$it` (and `$acc`, for `reduce`), which is what the
+higher-order verbs take: `map`, `filter`, `reduce init`, `any`, `all`,
+`find` — on lists, or on tables row by row. A function is a closure: it
+carries a snapshot of the locals of the function that made it (an
+`adder [n]` returning `fn [x] { $x + $n }` remembers its `n`), and it
+reads the *scope* it was defined in — the session's, or a module's —
+by name when it runs, so functions call each other, and themselves, by
+name (`fact` calls `fact`), and see a scope's names as they are at call
+time.
+
+**Failure is a value.** `ok v` and `err e` make results. `?` after an
+expression or a stage unwraps an `ok` and returns the `err` from the
+enclosing function — at the prompt, where there is nothing to return
+to, it is the error "unhandled err …". `try { … }` (or `try (expr)`)
+turns a command that fails into an `err` carrying its message, and a
+value into an `ok`. `match` takes a result apart:
+
+```
+match (try { cat $path }) {
+  ok $text if ($text | len) > 0 => $text | lines | first 1
+  ok _                          => "empty"
+  err $e                        => echo "cannot read: $e"
+}
+```
+
+**Match.** `match value { pattern [if guard] => body … }` tries the
+arms in order; a body is a block or a one-line pipeline. Patterns are
+`_` (anything), `$name` (anything, bound), literals (`1`, `"text"`, a
+bare word as a string — `dir`, `file` — `true`, `false`, `null`),
+`ok p` and `err p`, lists `[p, p]`, `[$head, ..$tail]`, `[1, ..]`, and
+records `{ name: $n, size: 0 }` or `{ name }` (which binds `$name`);
+a record pattern matches a record that has at least those fields.
+Bindings are local inside a function and session variables at the
+prompt, like `for`'s. A `match` must be exhaustive, and that is checked
+when it is parsed, not when the missing case arrives: a catch-all arm
+(`_` or `$x`, unguarded), both `ok _` and `err _`, or both `true` and
+`false` — a list or record pattern never counts as covering, so
+`match $l { [] => …; [$h, ..$t] => … }` needs a `_ =>` too.
+
+**Modules.** `use path` reads a file through the shell's `open`,
+evaluates it in a scope of its own, and returns its bindings as a
+record: `let math = (use lib/math.msh)`, then `$math.double 21`,
+`$math.version`, `[1, 2] | map $math.double`. The module's functions
+find each other in the module's scope, never in the session's, and the
+scope lives as long as any of them does. There is no global namespace:
+a module reaches another only by `use`.
 
 ### The interpreter's memory
 
 ```mermaid
 flowchart TB
-  subgraph bss["msh's own memory (static, inside its 8 MB budget)"]
-    L["per-line arena — 2 MB\nreset before every line:\nparse tree, temporaries, this line's values, rendered output"]
-    P["persistent arena — 1 MB\nnever reset:\nvariables (deep-copied by let), functions (def), their names"]
+  subgraph msh["msh's own memory (static, inside its 8 MB budget)"]
+    L["per-line arena — 2 MB\nreset before every line:\nparse tree, temporaries, locals of every call,\nthis line's values, rendered output"]
+    P["box pool — 1 MB, 256-byte chunks, freed and reused\none BOX per binding at the prompt or in a module:\nits own arena holding a deep copy of the value\n(or a closure: tree, captured locals, its scope)"]
   end
   LINE["a line from the editor"] --> L
-  L -- "let x = …  copies the value" --> P
-  L -- "def f … copies the body" --> P
-  P -- "$x, f …" --> L
+  L -- "let x = [..]  copies into a new box" --> P
+  L -- "let y = $x  shares x's box (count 2)" --> P
+  L -- "def f … a closure box" --> P
+  P -- "$x, f … read in place" --> L
+  P -- "rebinding drops the old box:\ncount 0 → freed when the statement ends" --> L
 ```
 
-Nothing is ever freed piecemeal: a line's memory is one arena thrown
-away when the next line starts, and what must outlive the line —
-variables and function bodies — is copied into a second arena that is
-never reset. A line too large for its arena is refused with "out of
-memory", not a crash.
+Values are immutable, so memory is a matter of counting who holds
+what. Everything a line makes lives in its arena and is gone when the
+next line starts. What must outlive the line — a variable bound at the
+prompt, a function, a module's bindings — is a *box*: a small arena of
+its own with a reference count. `let` deep-copies the value into a
+fresh box (a scalar — nothing, a bool, an int — needs no box and lives
+in the binding itself), `let y = $x` shares x's box instead of copying,
+a record holding a function keeps the function's box alive, and
+rebinding or unbinding a name drops a reference. A box at zero is
+freed when the top-level statement ends — not the instant it hits
+zero, because `for v in $l { let l = … }` is still walking the old
+list — and a box freed drops everything it held. The count is exact:
+the host tests run every test under Zig's leak-detecting allocator and
+the interpreter's `deinit` must give every byte back. Calls allocate
+nothing lasting: a function's parameters, captures and locals are a
+frame in the line arena.
+
+Scopes — the session's, and one per `use` — are where names live, and
+they hold the one cycle in the whole graph: a function points at the
+scope it was defined in (that is how it calls its siblings by name),
+and the scope's slots hold the function. The interpreter knows this
+cycle and collects it deliberately: a scope nobody holds (the session
+until `exit`; a module once `use` has returned) whose functions are
+referenced only from its own slots is garbage, checked at the end of
+every statement; there is no other tracing anywhere. A closure made
+inside a function copies the locals it names *at that moment* — a
+snapshot — never a pointer to a frame, so frames stay in the arena and
+closures never form a cycle among themselves.
 
 ### Running a program
 
@@ -231,12 +321,18 @@ and in a session ends the session.
   for up to 64 bytes. `\n` in rendered text becomes `\r\n` on the way
   out.
 - **Values and verbs.** `where cond` filters rows (bare words are
-  columns); `sort-by col [--desc]`; `select cols…`; `get col` (a list of
-  that column); `first n`, `last n`, `reverse`, `len`, `keys` (a
-  record's keys), `lines` (a string into a list), `echo`, `to-data`,
-  `from-data`. The reserved words are `let`, `def`, `if`, `else`, `for`,
-  `in`, `while`, `not`, `and`, `or`, `true`, `false`, `null`. `let`
-  keeps up to 32 variables and `def` up to 16 functions.
+  columns; `$it` is the row or item); `sort-by col [--desc]`;
+  `select cols…`; `get col` (a list of that column); `first n`,
+  `last n`, `reverse`, `len`, `keys` (a record's keys), `lines` (a
+  string into a list), `echo`, `to-data`, `from-data`; `map f`,
+  `filter f`, `reduce init f`, `any f`, `all f`, `find f` (a function
+  or a block of `$it`); `range a b`; `join sep`, `split sep`; `str`,
+  `int` (a result), `type`; `to-bytes`, `from-bytes` (a result); `ok`,
+  `err`; `use path`. The reserved words are `let`, `def`, `fn`, `if`,
+  `else`, `for`, `in`, `while`, `match`, `try`, `not`, `and`, `or`,
+  `true`, `false`, `null`; `_` and `..` mean something only in a
+  pattern. A scope holds up to 128 bindings (variables and functions
+  together); modules nest 8 deep.
 - **Commands.** `ls [p]`, `tree [p] [--depth n]` (default depth 8),
   `cat p`, `open p`, `write p text`, `save p`, `stat p`, `mkdir p`,
   `rm p`, `mv a b`, `ln p target` (a symlink), `readlink p` (up to 256
@@ -253,9 +349,11 @@ and in a session ends the session.
   the manifest grants it. The result buffer is 8 pages; a program's
   value is a NUL-terminated data literal there, a table being a list of
   records. The run argument travels as three words: 24 bytes.
-- **Memory.** Per-line arena 2 MB, persistent arena 1 MB, both static
-  in msh's image. A program's result-building arena (`user/result.zig`)
-  is 128 KB.
+- **Memory.** Per-line arena 2 MB; box pool 1 MB in 256-byte chunks
+  (`lib/pool.zig`: first fit for a run of chunks, freed by clearing
+  their marks; a box whose value outgrows the pool is "out of memory");
+  both static in msh's image. A program's result-building arena
+  (`user/result.zig`) is 128 KB.
 - **Editor.** Line 512 bytes, history 16, completion up to 32
   candidates of 64 bytes.
 - **Data files.** `parseData` accepts one literal: numbers with units,
@@ -276,9 +374,33 @@ and in a session ends the session.
   share dies or is replaced (the cap is dropped, the page is not).
 - A session's shell has no fabric: `nodes` and `rspawn` are errors
   there. `rspawn`'s image argument is a catalog number, not a name.
-- 32 variables and 16 functions per session; a 512-character line; 16
-  lines of history; one 2 MB arena per line (a very large `open` or
-  `tree` is "out of memory", not a crash).
+- 128 bindings per scope; a 512-character line; 16 lines of history;
+  one 2 MB arena per line (a very large `open` or `tree` is "out of
+  memory", not a crash); a 1 MB pool for everything bound at the prompt.
+- No floats: `int` is the only number. No tuples, by decision: a record
+  is the grouping.
+- A `?` at the prompt has no function to return from and is an error;
+  wrap the line in a function or `match` instead.
+- A block argument sees only `$it` (and `$acc` in `reduce`); write
+  `fn [a, b] { … }` for anything else.
+- Optional shape annotations (`{ name: string }`) and host-command
+  signatures from the protocol types are decided but not built: a
+  wrong type is caught when it is used, not at the boundary.
+- Rebinding a list-valued variable inside a loop that walks it keeps
+  the old value until the statement ends — deliberate, and memory a
+  long loop should not spend; `map`/`reduce` are the shape for that.
+- Host commands (`cat`, `ls`, `stat` …) still *fail* rather than return
+  results; `try { … }` is the bridge until stage 2 gives them
+  signatures.
+- `use` reads through `open`, so a module path is relative to the view
+  like any file; a module cannot be loaded from the store yet.
+- A module's functions cannot be called by a bare name from the session
+  (`$math.double`, never `double`) — by design, there is no global
+  namespace.
+- The line editor accepts UTF-8 but counts bytes: the cursor keys and
+  delete move one byte at a time, so editing inside a multi-byte
+  character can split it — the line is then refused as invalid UTF-8,
+  not run.
 - Strings interpolate `$var` only — no expressions inside strings; no
   globbing; no job control or background commands; the console has one
   client, so a `run` program owns it until it exits.
@@ -295,8 +417,10 @@ and in a session ends the session.
   files", "Manifests beside images, and a per-user store".
 - Source — `user/shell.zig` (the host: every command, `run`,
   `install`, startup, the REPL), `lib/mshl.zig` (the language: grammar
-  in the header comment, values, verbs, `parseData`, `writeData`,
-  `evalScript`; host-tested with `zig test lib/mshl.zig`),
+  in the header comment, values, boxes and scopes, closures, `match`,
+  results, verbs, `parseData`, `writeData`, `evalScript`; host-tested
+  with `zig test lib/mshl.zig`, every test under the leak-checking
+  allocator), `lib/pool.zig` (the box pool),
   `user/lineedit.zig`, `user/tty.zig`, `user/result.zig`,
   `boot/conf/msh/startup.msh`, `tools/runner.zig` (`shell_script`: the
   session the gate drives).

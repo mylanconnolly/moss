@@ -95,8 +95,15 @@ and extend `shell_script` in `tools/runner.zig` so the scripted console
 session covers it (`.raw = true` sends bytes without a newline; an empty
 `expect` waits for the prompt only). A LANGUAGE feature (a verb over
 values, syntax, an operator) belongs in `lib/mshl.zig` with a host test
-beside it — `zig test lib/mshl.zig` runs in a second; the QEMU check is
-for integration.
+beside it — `zig test lib/mshl.zig` runs in a second, every test under
+the leak-detecting allocator, so a value that escapes without being
+counted fails the test; the QEMU check is for integration. The memory
+rules for host code: a host command builds its value in `it.arena` and
+never keeps a pointer to one past the call; anything that must outlive
+the line goes through `setVar` (a box); flags read out of data files
+are `Value.asBool()` — `true` and nothing else — because the language
+coerces nothing, and a host command that wants a number takes an int,
+not text it parses.
 
 **A run tool's result**: build a `mshl.Value` in a `result.Result` arena
 and `deliver` it — it lands in msh's `out` buffer as a data literal and

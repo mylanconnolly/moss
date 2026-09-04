@@ -104,12 +104,12 @@ fn target(it: *mshl.Interp, path: []const u8) mshl.Error!Target {
 const run_out_pages: u64 = 8;
 
 // The interpreter's memory: a per-line arena (reset before every line)
-// and a persistent region for variables. Static, like everything in
-// moss userspace; msh's manifest budget covers it.
+// and a pool the interpreter's boxes — what `let` and `def` bind — are
+// allocated from and returned to. Static, like everything in moss
+// userspace; msh's manifest budget covers it.
 var heap_line: [2 << 20]u8 = undefined;
-var heap_vars: [1 << 20]u8 = undefined;
 var line_fba: std.heap.FixedBufferAllocator = undefined;
-var vars_fba: std.heap.FixedBufferAllocator = undefined;
+var box_pool: @import("mosslib").pool.Pool(256, 4096) = .{};
 var interp: mshl.Interp = undefined;
 var host_ctx: u8 = 0;
 
@@ -171,8 +171,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     }
 
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
-    vars_fba = std.heap.FixedBufferAllocator.init(&heap_vars);
-    interp = mshl.Interp.init(line_fba.allocator(), vars_fba.allocator(), .{
+    interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{
         .ctx = @ptrCast(&host_ctx),
         .call = hostCall,
     });
@@ -513,12 +512,16 @@ const help_text =
     \\  accept NAME            mount an offer made to you: paths @NAME/...
     \\  source p               run a script in this session (startup: conf/msh/startup.msh)
     \\  x | to-data | save p   write a value as data; open p | from-data reads it back
-    \\  def name [a b] { .. }  a function ($in is the pipeline input)
+    \\  def name [a b] { .. }  a function ($in is the pipeline input); fn [a] { .. } is a value; $f args calls one
+    \\  use p                  a file evaluated as a module: a record of its bindings
     \\language:
     \\  x | where size > 4kb | sort-by name --desc | select name size
     \\  x | get col | first n | last n | reverse | len | keys | lines
+    \\  x | map { $it * 2 } | filter { .. } | reduce 0 { $acc + $it } | any | all | find
     \\  let v = expr; $v; "text $v"; if c { } else { }; for x in list { }
-    \\  while c { }; (sub | pipeline); [a, b]; x > path  (save rendered)
+    \\  while c { }; (sub | pipeline); [a, b]; { k: v }; x > path  (save rendered)
+    \\  ok v | err e; r?; try { cmd }; match v { ok $x => ..; err $e => ..; [$h, ..$t] => ..; _ => .. }
+    \\  str v | int text | type v | to-bytes | from-bytes   (strong types: nothing coerces)
     \\  ctrl-a/e, arrows, history, tab completes commands and paths
     \\  clear (or ctrl-l) | help | exit
 ;
@@ -952,7 +955,7 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
                 if (fs_path != .str) continue;
                 const p = if (is(fs_path.str, "arg")) path else fs_path.str;
                 var ro = true;
-                if (item.record.get("ro")) |r| ro = r.truthy();
+                if (item.record.get("ro")) |r| ro = r.asBool();
                 const t = try target(it, p);
                 view = fsc.fsDerive(t.chan, t.buf, t.path, ro) orelse return it.fail("run: no such path: {s}", .{p});
             };

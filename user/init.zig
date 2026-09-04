@@ -302,8 +302,8 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             } else if (gr.get("fs")) |x| {
                 give.kind = .view;
                 give.name = str(x) orelse continue;
-                if (gr.get("ro")) |ro| give.ro = ro.truthy();
-                if (gr.get("mkdir")) |mk| give.mkdir = mk.truthy();
+                if (gr.get("ro")) |ro| give.ro = ro.asBool();
+                if (gr.get("mkdir")) |mk| give.mkdir = mk.asBool();
             } else if (gr.get("netview")) |x| {
                 give.kind = .netview;
                 give.name = str(x) orelse continue;
@@ -330,17 +330,17 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             if (std.meta.stringToEnum(shared.BootProfile, pn)) |bp| u.profiles |= @as(u64, 1) << @intCast(@intFromEnum(bp));
         };
     }
-    if (r.get("essential")) |e| u.essential = e.truthy();
-    if (r.get("oneshot")) |e| u.oneshot = e.truthy();
+    if (r.get("essential")) |e| u.essential = e.asBool();
+    if (r.get("oneshot")) |e| u.oneshot = e.asBool();
     if (r.get("after")) |a| u.after = str(a) orelse "";
-    if (r.get("install")) |e| u.install = e.truthy();
+    if (r.get("install")) |e| u.install = e.asBool();
     if (r.get("certify")) |c| {
         if (c == .record) {
             var flags: u64 = 0;
-            if (c.record.get("gossip")) |x| if (x.truthy()) {
+            if (c.record.get("gossip")) |x| if (x.asBool()) {
                 flags |= shared.fab_flag_gossip;
             };
-            if (c.record.get("spawn")) |x| if (x.truthy()) {
+            if (c.record.get("spawn")) |x| if (x.asBool()) {
                 flags |= shared.fab_flag_spawn;
             };
             u.certify = .{
@@ -983,7 +983,7 @@ fn installImages(view: u64) u64 {
         var mi = mshl.Interp.init(sfba.allocator(), sfba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
         const v = mi.parseData(e.data) catch continue;
         if (v != .record) continue;
-        const runnable = if (v.record.get("run")) |r| r.truthy() else false;
+        const runnable = if (v.record.get("run")) |r| r.asBool() else false;
         if (!runnable) continue;
         const image_name = str(v.record.get("image")) orelse continue;
         const id = std.meta.stringToEnum(shared.ImageId, image_name) orelse continue;

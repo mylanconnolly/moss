@@ -43,7 +43,7 @@ list, followed by the story of what has **Landed** since.
 | Language/toolchain | Zig, version pinned (currently 0.16.0). `build.zig` is the entire build: kernel, userspace, image packing, `zig build run`, `zig build run-cluster`. Comptime Zig types are the IDL — IPC protocols defined once in `shared/`, marshaling/stubs generated at comptime. | No Make, no shell scripts, no separate IDL compiler, ABI type-checked from one source of truth. |
 | Users | **A user is a key, a session is a domain tree, a home is a view.** No uid/gid, no passwd/shadow, no setuid/sudo, no groups or ACLs: a user record is an Ed25519 identity with its seed sealed under a passphrase-derived key; the session manager (userspace) unseals it, keeps the key in custody, and spawns the session under the record's budgets with a rw view of `home/<user>` and a settings view — logout is destroying that domain. Sharing is delegating a derived view. Settings are mshl data in two layers (`conf/<svc>.msh`, `home/<user>/conf/<svc>.msh`) merged per program with schema-declared locked keys. Admin authority is holding the caps, never a bit on a process. | Every legacy user mechanism is a number standing in for a capability or a way around not having one; the kernel already provides isolation, budgets and total teardown, so users are composition. |
 | Code sharing | **Static linking only — no dynamic loader, ever.** Shared functionality lives in `lib/`: pure, freestanding-safe, host-testable Zig modules (lz4, xts, ...) compiled into each program that imports them. Where key custody matters, a capability *service* holds the secret instead of a library. Code-page dedup, if ever needed, comes from content-addressed images (`img/`), not load-time linking. | Relocation machinery, symbol versioning, and loader attack surface bought nothing at moss's scale; static modules keep every binary analyzable and every ABI a comptime-checked Zig type. |
-| The language (mshl v3, decided 2026-09-03, not yet built) | **One small, regular syntax for programs and data; functional; pattern matching; capabilities as values.** Values are immutable; functions are values with closures over an immutable environment snapshot, recursion by *name* (never a self-pointer), so the value graph is acyclic and memory is **reference counted, exact, deterministic** — no tracing, no pauses, and a capability held by a value drops at the last use, when the service can reclaim it. Temporaries live in a per-evaluation arena; only what is bound escapes to counted storage; lists, records and tables share structure on update. Errors are values: `Result` (`ok` / `err`) with `?` propagation and `match` that must be exhaustive; `nothing` is absence, never failure; no tuples (a record is the grouping). Modules are files reached through views (`use` evaluates a file to a record of its exports); no global namespace; the standard library ships in the archive. Extensions are two tiers: services over typed channels (drivers, GUIs — a Zig program, a thin mshl binding) and in-process Zig host commands compiled into the runtime (parsing, hashing). No concurrency in the language: parallelism is spawning programs, here or on another node, and passing values and caps through channels. Config files stay the literal subset of the same syntax. **Strongly typed, not statically typed** (decided 2026-09-03): every value carries its type and nothing coerces — conditions take booleans, comparisons take matching types, `Result` and `match` never bend — checked when evaluated and at every boundary (a value read from a file or a message is checked against the shape a program states for it); host commands declare their signatures from the same protocol types the services use, so a pipeline's mistakes are reported as typed errors, never silently wrong; annotations are optional shapes, structural (`{ name: string, size: int }` matches any record with those fields), with enumerations as unions of bare words so `match` can be checked for exhaustiveness where it is evaluated; no mandatory annotations, no static checker. **Strings are UTF-8 by guarantee** (decided 2026-09-03): validated at every boundary, `len` and indexing by code point; binary data is a distinct `bytes` type (socket payloads, images), never a string. Open: floats and a numeric tower. | The shell already thinks in the OS's values; the language must keep the properties the OS gives — no ambient authority, failure in the vocabulary, deterministic release — rather than import a runtime that fights them. Go's discipline about smallness, with the two things it lacks. |
+| The language (mshl v3, decided 2026-09-03; stage 1 built the same day) | **One small, regular syntax for programs and data; functional; pattern matching; capabilities as values.** Values are immutable; functions are values with closures over an immutable environment snapshot, recursion by *name* (never a self-pointer), so values form no cycles and memory is **reference counted, exact, deterministic** — no tracing, no pauses, and a capability held by a value drops at the last use, when the service can reclaim it. (As built: the one cycle is a *scope* — its slots hold its functions, its functions point at it to resolve names — and it is collected by a check the interpreter runs on unheld scopes at the end of every statement; values themselves stay acyclic.) Temporaries live in a per-evaluation arena; only what is bound escapes to counted storage; lists, records and tables share structure on update. Errors are values: `Result` (`ok` / `err`) with `?` propagation and `match` that must be exhaustive; `nothing` is absence, never failure; no tuples (a record is the grouping). Modules are files reached through views (`use` evaluates a file to a record of its exports); no global namespace; the standard library ships in the archive. Extensions are two tiers: services over typed channels (drivers, GUIs — a Zig program, a thin mshl binding) and in-process Zig host commands compiled into the runtime (parsing, hashing). No concurrency in the language: parallelism is spawning programs, here or on another node, and passing values and caps through channels. Config files stay the literal subset of the same syntax. **Strongly typed, not statically typed** (decided 2026-09-03): every value carries its type and nothing coerces — conditions take booleans, comparisons take matching types, `Result` and `match` never bend — checked when evaluated and at every boundary (a value read from a file or a message is checked against the shape a program states for it); host commands declare their signatures from the same protocol types the services use, so a pipeline's mistakes are reported as typed errors, never silently wrong; annotations are optional shapes, structural (`{ name: string, size: int }` matches any record with those fields), with enumerations as unions of bare words so `match` can be checked for exhaustiveness where it is evaluated; no mandatory annotations, no static checker. **Strings are UTF-8 by guarantee** (decided 2026-09-03): validated at every boundary, `len` and indexing by code point; binary data is a distinct `bytes` type (socket payloads, images), never a string. Open: floats and a numeric tower. | The shell already thinks in the OS's values; the language must keep the properties the OS gives — no ambient authority, failure in the vocabulary, deterministic release — rather than import a runtime that fights them. Go's discipline about smallness, with the two things it lacks. |
 
 ### Non-goals (permanently, unless revisited here)
 
@@ -204,11 +204,13 @@ is a plan.
   through an attached buffer, which does not cross), and records are
   fetched only at login, never refreshed.
 - **mshl v3 — the language as a tool for the fabric** (decisions in the
-  table above). In order: (1) the language core on the host — functions
-  as values and closures, reference-counted immutable values with
-  structural sharing, `match` and destructuring, `Result` and `?`,
-  modules as files; every feature in `zig test lib/mshl.zig` — this
-  blocks nothing and can run beside the port; (2) scripts as programs —
+  table above). In order: (1) ✅ the language core on the host (landed
+  2026-09-03: closures, counted boxes and scopes, `match`, results and
+  `?`, `try`, `use`, strong dynamic typing, UTF-8 strings and `bytes`);
+  still open from it: shape annotations and host-command signatures
+  from the protocol types (a wrong type is caught at use, not at the
+  boundary), host commands returning results instead of failing, a
+  module loaded from the store, floats; (2) scripts as programs —
   an `mshrun` image that runs a script under a manifest, so a script is
   a unit, a run tool, or a remotely spawned service; (3) the network
   surface — sockets as capability-carrying values, then the netsvc
@@ -353,6 +355,25 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 1: the language core** (done, 2026-09-03):
+  functions as values (`fn`, `def`, blocks as functions of `$it`, `$f
+  args`), closures over a snapshot of the enclosing call's locals plus
+  the defining scope read by name at call time; `map`/`filter`/`reduce`
+  /`any`/`all`/`find`; strong dynamic typing (conditions take bools,
+  comparisons take one type, nothing converts; `str`/`int`/`type`);
+  UTF-8 strings, `bytes`; `ok`/`err` results, `?`, `try`, exhaustive
+  `match` with list/record/result patterns and guards; `use path` →
+  a record of a module's bindings. Memory: the per-line arena plus
+  counted **boxes** for what is bound at a top level (deep copy in,
+  scalars inline, sharing on `let y = $x`, retain through records),
+  freed at the end of the statement that dropped them; the scope↔closure
+  cycle collected by an explicit check; every host test under the leak
+  detector. msh got `lib/pool.zig`, a 1 MB freeing chunk pool, in place
+  of its never-freed persistent arena. Found on the way: a closure made
+  as a temporary (a block argument) had nowhere to be released from —
+  closures are now born at count zero on the dead list and survive
+  only if something binds them by the end of the statement; and the
+  "acyclic" story needed the scope caveat now in the decisions table.
 - ✅ **Real IOMMU (SMMU) backing the DMA-grant API** (done, 2026-09-02):
   an SMMUv3 in front of the PCIe bus, stage-1 translation, with a
   device's DMA translated through the **holder's own page tables** —
