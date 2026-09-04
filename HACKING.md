@@ -24,15 +24,16 @@ done without rediscovering the sharp edges.
   log (also copied to `<label>-failed.log`, which a rerun does not
   overwrite) — the way to chase an intermittent one. `-Doptimize=ReleaseSafe`
   runs the whole suite optimized.
-- `-Darch=x86_64` builds the x86_64 port (VT-d as the IOMMU; no
-  hypervisor) — the kernel ELF and every program. `zig build
+- `-Darch=x86_64` builds the x86_64 port (VT-d as the IOMMU, AMD-V as
+  the hypervisor — bare-metal guests so far) — the kernel ELF and every
+  program. `zig build
   -Darch=x86_64 run` boots it on OVMF + Limine (KVM when the host has
   it, else TCG) from a directory QEMU exposes as a FAT volume; it wants
   Limine's `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's share dir)
   and the x86_64 OVMF images beside QEMU (`-Dovmf`, `-Dovmf-vars`).
-  `zig build -Darch=x86_64 check` runs the port's drills (twenty:
-  everything but vm, guest and vmnode) the same way, plus the host
-  tests; the
+  `zig build -Darch=x86_64 check` runs the port's drills (twenty-one:
+  everything but guest and vmnode, which wait for the moss guest on
+  the port) the same way, plus the host tests; the
   runner's `--arch x86_64` composes a boot directory per drill under
   `zig-out/check/esp-<name>/`. Syscall ABI on x86_64: rax = number,
   rdi rsi rdx r10 r8 r9 r12 r13 the argument and result slots (rcx and

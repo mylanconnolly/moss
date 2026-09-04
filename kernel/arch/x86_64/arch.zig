@@ -21,6 +21,6 @@ pub const timer = @import("timer.zig");
 pub const power = @import("power.zig");
 pub const smp = @import("smp.zig");
 pub const iommu = @import("vtd.zig");
-pub const vm = @import("vm.zig");
+pub const vm = @import("svm.zig");
 pub const platform = @import("platform.zig");
 pub const console = @import("console.zig");

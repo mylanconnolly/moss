@@ -170,8 +170,7 @@ fn sysVmCpuOn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
 
 fn sysVmSet(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const m = lookupVm(d, frame.arg(0)) orelse return errno(.bad_handle);
-    m.vcpus[0].pc = frame.arg(1);
-    m.vcpus[0].regs[0] = frame.arg(2);
+    arch.vm.setEntry(m, 0, frame.arg(1), frame.arg(2), .{ frame.arg(3), frame.arg(4) });
     return errno(.ok);
 }
 

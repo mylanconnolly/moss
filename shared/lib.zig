@@ -129,7 +129,9 @@ pub const Syscall = enum(u64) {
     /// vm_run(vm_handle, vcpu, resume_value) -> x1 = VmExit, x2..x5 = exit
     /// details; `resume_value` completes a pending mmio_read.
     vm_run = 34,
-    /// vm_set(vm_handle, pc, x0): the vCPU's entry point and first argument.
+    /// vm_set(vm_handle, pc, x0, a, b): the vCPU's entry point and first
+    /// argument; a port may take more (x86_64: a = the guest's page
+    /// tables, 0 for the VM's shared ones; b = its stack).
     vm_set = 35,
     /// vm_attach_device(vm_handle, device_handle, bar_ipa, vintid): pass a
     /// device through to the guest — its BAR mapped at bar_ipa in the
@@ -195,6 +197,10 @@ pub const VmExit = enum(u64) {
     /// A trapped SMC, answered like an HVC (x2..x5 = x0..x3, resume_value
     /// -> x0).
     smc = 9,
+    /// Port I/O (x86_64): x2 = port, x3 = size; a read's value is the
+    /// next vm_run's resume_value, a write's value is x4.
+    pio_read = 10,
+    pio_write = 11,
 };
 
 pub const vm_ram_ipa: u64 = 0x4000_0000;

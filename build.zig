@@ -407,25 +407,27 @@ pub fn build(b: *std.Build) void {
         pack.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
         pack_guest.addPrefixedFileArg(b.fmt("img/{s}=", .{p.name}), prog_bin.getOutput());
     }
-    // A guest: bare-metal EL1 code the VMM loads into a VM's RAM. Raw
-    // binary, linked at the guest's RAM base, no MOSS header.
-    if (arch == .aarch64) {
+    // A guest: bare-metal code the VMM loads into a VM's RAM. Raw binary,
+    // linked at the guest's RAM base, no MOSS header; one per port.
+    {
         const guest_mod = b.createModule(.{
-            .root_source_file = b.path("guest/hello.zig"),
+            .root_source_file = b.path(if (arch == .x86_64) "guest/hello_x86.zig" else "guest/hello.zig"),
             .target = user_target,
             .optimize = .ReleaseSmall,
             .code_model = .small,
+            .red_zone = if (arch == .x86_64) false else null,
         });
         const guest = b.addExecutable(.{ .name = "guest-hello.elf", .root_module = guest_mod });
-        guest.setLinkerScript(b.path("guest/guest.ld"));
+        guest.setLinkerScript(b.path(if (arch == .x86_64) "guest/guest_x86.ld" else "guest/guest.ld"));
         guest.entry = .{ .symbol_name = "_start" };
         const guest_bin = b.addObjCopy(guest.getEmittedBin(), .{ .format = .bin, .basename = "guest-hello.bin" });
         pack.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
         pack_guest.addPrefixedFileArg("img/guest-hello=", guest_bin.getOutput());
-
-        // The guest kernel: this very kernel, built to boot the guest profile
-        // and report, embedding the guest archive; the host archive carries
-        // its raw Image as img/moss-guest for the VMM to load.
+    }
+    // The guest kernel: this very kernel, built to boot the guest profile
+    // and report, embedding the guest archive; the host archive carries
+    // its raw Image as img/moss-guest for the VMM to load.
+    if (arch == .aarch64) {
         const guest_blobs = b.addWriteFiles();
         _ = guest_blobs.addCopyFile(marc_guest_out, "bootfs.marc");
         const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
@@ -873,7 +875,7 @@ pub fn build(b: *std.Build) void {
     // and Limine.
     // Every drill but the aarch64 hypervisor's (vm, guest, vmnode); the
     // smmu drill runs against VT-d here.
-    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin", "smmu" };
+    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin", "smmu", "vm" };
     if (arch == .x86_64) {
         run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
         for (x86_variants) |vn| _ = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);

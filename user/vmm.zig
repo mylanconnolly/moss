@@ -17,6 +17,8 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 const boot = @import("boot.zig");
 
+const is_x86 = @import("builtin").cpu.arch == .x86_64;
+
 comptime {
     asm (usys.imageHeader("vmm"));
 }
@@ -121,9 +123,25 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
         _ = usys.log(log_h, "vmm: moss guest loaded at IPA 0x40080000 with its devicetree; entering EL1");
     } else {
         @memcpy(ram[0..image.len], image);
-        _ = usys.log(log_h, "vmm: guest loaded at IPA 0x40000000; entering EL1");
+        _ = usys.log(log_h, if (is_x86) "vmm: guest loaded at GPA 0x40000000; entering ring 0" else "vmm: guest loaded at IPA 0x40000000; entering EL1");
     }
-    if (usys.vmSet(vm_h, entry, x0) != .ok) usys.exit(132);
+    if (is_x86) {
+        // A 64-bit guest cannot run without page tables: identity-map its
+        // RAM with 2 MB pages at the top of that RAM, its stack below.
+        const ram_bytes = ram_pages * 4096;
+        const pml4_off = ram_bytes - 4096;
+        const pdpt_off = ram_bytes - 8192;
+        const pd_off = ram_bytes - 12288;
+        const pml4: [*]u64 = @ptrCast(@alignCast(ram + pml4_off));
+        const pdpt: [*]u64 = @ptrCast(@alignCast(ram + pdpt_off));
+        const pd: [*]u64 = @ptrCast(@alignCast(ram + pd_off));
+        pml4[0] = (shared.vm_ram_ipa + pdpt_off) | 7;
+        pdpt[1] = (shared.vm_ram_ipa + pd_off) | 7; // 0x40000000 >> 30
+        for (0..(ram_bytes + (2 << 20) - 1) / (2 << 20)) |i| pd[i] = (shared.vm_ram_ipa + i * (2 << 20)) | 7 | (1 << 7);
+        if (usys.vmSetX(vm_h, entry, x0, shared.vm_ram_ipa + pml4_off, shared.vm_ram_ipa + pd_off - 16) != .ok) usys.exit(132);
+    } else {
+        if (usys.vmSet(vm_h, entry, x0) != .ok) usys.exit(132);
+    }
 
     runLoop(0);
     _ = usys.capDrop(vm_h);
@@ -148,6 +166,17 @@ fn runLoop(vcpu: u64) void {
         switch (kind) {
             .mmio_write => mmioWrite(r.data[1], r.data[2], r.data[3]),
             .mmio_read => value = mmioRead(r.data[1], r.data[2]),
+            // x86_64: the serial port's data register is the console, the
+            // ACPI PM1a control register with SLP_EN the power-off.
+            .pio_write => {
+                if (r.data[1] == 0x3f8) {
+                    uartByte(@truncate(r.data[3]));
+                } else if (r.data[1] == 0x604 and r.data[3] & (1 << 13) != 0) {
+                    _ = usys.log(log_h, "vmm: guest asked ACPI to power off; VM done");
+                    return;
+                }
+            },
+            .pio_read => value = if (r.data[1] == 0x3fd) 0x60 else 0, // LSR: transmitter empty
             .wfi => usys.sleep(1),
             .hvc, .smc => {
                 // The guest's firmware interface is this program: PSCI on

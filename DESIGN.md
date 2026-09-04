@@ -2261,11 +2261,69 @@ name, `arch.imagePhys`, and the rogue targets the canary's real page.
 And a reason code with no name in the table is worth a second look:
 0x80 was the clue.
 
-What the port still owes: AMD-Vi for the machines that have it (the
-Framework's Ryzen among them — first-stage translation there is the
-GCR3 walk of x86-format tables, the same shape); PCIDs; the `+rs` pass
-for the port's drills; a framebuffer console; a hypervisor behind `vm`
-if SVM ever matters.
+### The x86_64 port, stage 6a: the hypervisor's core (as built, 2026-09-04)
+
+AMD-V (`svm.zig`), the counterpart of the EL2 host: a VMCB per vCPU,
+nested paging (the NPT is an x86 table with the user bit — what nested
+walks are, and what VT-d's first stage can walk too, so a passed-through
+device's DMA will reach guest memory by the same tables), and every
+way out of the guest intercepted: host interrupts, CPUID, HLT, port
+I/O, MSRs, the hypercall (`vmmcall`), the SVM instructions themselves,
+shutdown; a nested-paging fault on memory the VM was not given is the
+VMM's MMIO exit. The core's own state is what the architecture saves
+for the host (`VM_HSAVE_PA`) plus a `vmsave` of its segment state at
+`trap.init`, reloaded after every exit; the entry stub keeps the host's
+callee-saved registers in the vCPU and moves the fourteen guest
+registers the VMCB does not carry. Around a run: the VMM thread's
+vector state saved and the guest's restored (FXSAVE, as at a switch),
+`clgi`/`stgi`, and the host interrupt that ended a run taken on the
+spot (`sti; nop; cli`) so a tick preempts the VMM's thread as it would
+anyone's. The guest's local APIC is emulated here through its x2APIC
+MSRs — the vGIC's role: ID, SVR, TPR, EOI, the LVTs, the ICR (an IPI
+pends the vector on the target vCPU) and IA32_TSC_DEADLINE; a
+deadline is watched at the host's tick and the timer's vector pended
+when it passes, so the guest's tick is coarse — a hundred
+milliseconds, the host's period — which is what the aarch64 port's
+descheduled vCPU gets too. Delivery is the VMCB's virtual-interrupt
+request (V_IRQ with the vector, V_IGN_TPR): the CPU takes it when the
+guest's IF allows and clears the request, and the next pending vector
+goes in at the next entry. CPUID is the host's with the vCPU's id,
+x2APIC and TSC-deadline present, MONITOR and SVM absent.
+
+What the guest sees at entry is the loader's state a moss kernel
+expects: long mode, paging on, flat 64-bit segments (CS 0x28, data
+0x30), PAE and SSE enabled in CR4, EFER with SVME forced (VMRUN
+requires it; a read of EFER hides it). `vm_set` grew two words for
+this port — the guest's page tables and its stack, since a 64-bit
+guest cannot take its first instruction without either — and the VMM
+builds the bare guest's identity map (2 MB pages at the top of its
+RAM) before entering it. Port I/O is a new pair of exit kinds
+(`pio_read`/`pio_write`); the VMM answers the serial port's data
+register as the console, its line-status register as always ready,
+and the ACPI PM1a control register with SLP_EN as the power-off. The
+bare-metal guest for this port (`guest/hello_x86.zig`) is the aarch64
+one's twin: its own GDT and one IDT gate, x2APIC on through the MSRs,
+a TSC-deadline tick, three ticks over the serial port, `vmmcall` with
+the PSCI power-off id the VMM already answers. The vm drill passes
+under nested KVM.
+
+Lessons paid for: the VMCB's 64-bit intercept word sits at offset 12,
+unaligned — an `extern struct` field padded it to 16 and the comptime
+offset asserts caught it before hardware did. And VINTR is not an
+intercept to hold: it fires the moment the guest can take the virtual
+interrupt, before delivery, so a handler that merely re-enters spins
+forever (ten million entries, one tick) — the request delivers by
+itself, and V_IRQ clearing is how the hypervisor learns it did.
+
+What the hypervisor still owes (stage 6b): the moss kernel as a guest
+— the VMM speaking the Limine protocol to it (the memory map, HHDM,
+executable address, command line, TSC frequency, RSDP with ACPI tables
+the VMM synthesizes, an MP response with parked vCPUs), an MMIO decoder
+for nested-paging faults so its PCIe config and BAR accesses can be
+answered, device passthrough (the NPT as VT-d's first stage, MSI-X
+vectors injected), and with those the guest and vmnode drills. Then
+AMD-Vi for the machines that have it, PCIDs, the `+rs` pass, a
+framebuffer console.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

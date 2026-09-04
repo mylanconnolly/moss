@@ -682,6 +682,15 @@ fn answerInX0(v: *Vcpu) void {
     v.pending_advance = false;
 }
 
+/// The VMM's entry for vCPU `vcpu`: pc and x0 (the extras are another
+/// port's: page tables and a stack a 64-bit x86 guest cannot do without).
+pub fn setEntry(vm: *Vm, vcpu: u64, pc: u64, arg: u64, extra: [2]u64) void {
+    _ = extra;
+    if (vcpu >= vm.nvcpus) return;
+    vm.vcpus[vcpu].pc = pc;
+    vm.vcpus[vcpu].regs[0] = arg;
+}
+
 pub const CpuOnError = error{ NoSuchVcpu, AlreadyOn };
 
 /// The mechanics of CPU_ON (the VMM's syscall): reset vCPU `idx` at

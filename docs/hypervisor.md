@@ -13,6 +13,14 @@ a firmware call, or a second processor means. With a real device handed
 through and an IOMMU keeping its DMA inside the guest's memory, a guest
 becomes a full member of the machine pool: one box, two nodes.
 
+This page describes the aarch64 hypervisor (the EL2 host, the vGIC).
+The x86_64 port has the same design on AMD-V — nested paging as the
+guest's world, the guest's local APIC emulated in the kernel through
+its x2APIC registers where aarch64 has the vGIC, port I/O and
+hypercalls as exits beside MMIO — and runs the bare-metal guest today;
+a moss kernel as a guest there is the port's next step (DESIGN.md, "The
+x86_64 port, stage 6a").
+
 ## How it works
 
 ### The kernel boots as a host
@@ -295,6 +303,12 @@ flowchart TB
 - The bare-metal guest's UART and the moss guest's PL011 are write-only
   as emulated; a `mmio_read` of the flag register reports "TX not full,
   RX empty" and every other register reads as zero.
+- **x86_64 (AMD-V):** only the bare-metal guest runs so far — the moss
+  guest needs the VMM to speak Limine's protocol to it, an MMIO decoder
+  and synthesized ACPI. A guest's TSC-deadline timer is watched at the
+  host's tick, so its period is at best the host's (100 ms). No
+  interrupt remapping: a passed-through device's MSI-X will be routed
+  as on aarch64, by the host, when passthrough lands there.
 
 ## Dig deeper
 

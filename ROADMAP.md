@@ -212,9 +212,15 @@ is a plan.
   2026-09-04): the IOMMU — VT-d in scalable mode with first-stage
   translation walking the domain's own tables, faults recorded and
   counted, the smmu drill on the port; twenty drills, every one but
-  the aarch64 hypervisor's three. Still owed: AMD-Vi for the machines
-  that have it (the GCR3 walk, the same shape), PCIDs, the `+rs` pass
-  on the port, a framebuffer console; SVM behind `vm` last. Modern hardware only: no legacy
+  the aarch64 hypervisor's three. ✅ Stage 6a (landed 2026-09-04): the
+  hypervisor's core — AMD-V with nested paging, the guest's local APIC
+  emulated through its x2APIC MSRs, port I/O and hypercall exits, the
+  bare-metal x86 guest; the vm drill on the port. Next, 6b: the moss
+  kernel as a guest (the VMM speaking Limine's protocol to it, an MMIO
+  decoder, synthesized ACPI, parked vCPUs), device passthrough (the NPT
+  as VT-d's first stage), the guest and vmnode drills. Still owed:
+  AMD-Vi for the machines that have it (the GCR3 walk, the same shape),
+  PCIDs, the `+rs` pass on the port, a framebuffer console. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
   console for real machines is owed.
@@ -409,6 +415,19 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64, stage 6a: the hypervisor's core** (2026-09-04): AMD-V
+  (`kernel/arch/x86_64/svm.zig`) — a VMCB per vCPU, nested paging with
+  the user bit (VT-d's first stage can walk it), every exit
+  intercepted, the guest's local APIC emulated through its x2APIC MSRs
+  (IPIs pend vectors, the TSC deadline is watched at the host tick),
+  delivery by the VMCB's virtual-interrupt request; `vm_set` grew the
+  guest's page tables and stack, `VmExit` grew port I/O; the VMM builds
+  the bare guest's identity map and answers the serial port and ACPI
+  power-off; `guest/hello_x86.zig` is the aarch64 guest's twin. The vm
+  drill passes under nested KVM. Found: the VMCB's intercept word is
+  unaligned (an extern field padded it; the offset asserts caught it),
+  and intercepting VINTR — which fires before delivery — spun ten
+  million entries on one tick.
 - ✅ **x86_64, stage 5: the IOMMU** (2026-09-04): VT-d in scalable mode
   with first-stage translation (`kernel/arch/x86_64/vtd.zig`) walks the
   domain's own PML4 — device address == the driver's virtual address,

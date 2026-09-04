@@ -316,9 +316,9 @@ Verify in QEMU rather than reason from memory.
   is a scratch copy per drill (per node, for the multi-node drills,
   each labelled `<name>-nodeN`), and every boot carries
   `intel-iommu,x-scalable-mode=on,x-flts=on` ahead of its devices.
-  Twenty drills run there — all but vm, guest and vmnode (the aarch64
-  hypervisor) — with the port's own fault-dump and DMA-refusal
-  markers.
+  Twenty-one drills run there — all but guest and vmnode, which wait
+  for the moss kernel to run as a guest on the port — with the port's
+  own fault-dump and DMA-refusal markers.
 - Reproduction of a timing race depends on host conditions: several
   teardown races showed only on the first run after a build, with a
   fresh disk image, and never under added logging. The soak and the

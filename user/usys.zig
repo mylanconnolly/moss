@@ -217,6 +217,12 @@ pub fn vmSet(vm: u64, pc: u64, x0: u64) shared.Errno {
     return @enumFromInt(syscall3(.vm_set, vm, pc, x0));
 }
 
+/// vm_set with the extras an x86_64 guest needs: its page tables (0 =
+/// the VM's shared ones) and its stack.
+pub fn vmSetX(vm: u64, pc: u64, arg: u64, cr3: u64, rsp: u64) shared.Errno {
+    return syscall6(.vm_set, vm, pc, arg, cr3, rsp, 0).err;
+}
+
 /// window_map(window, page_offset, pages): data[0] = va (0 for an
 /// enquiry with pages 0), data[1] = base pa, data[2] = size.
 pub fn windowMap(window: u64, page_off: u64, pages: u64) IpcResult {

@@ -386,6 +386,9 @@ pub fn init() void {
     cpu.wrmsr(cpu.msr_gs_base, @intFromPtr(l));
     cpu.wrmsr(cpu.msr_kernel_gs_base, 0);
     uaccess.enable();
+    // AMD-V, if this CPU has it: the host save area and segment state
+    // this core reloads after every guest exit.
+    @import("svm.zig").initCore();
 }
 
 /// The current thread's kernel stack, for the syscall entry and the TSS

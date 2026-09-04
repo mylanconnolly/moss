@@ -260,8 +260,9 @@ aarch64 is complete; x86_64 (Limine on UEFI, x2APIC with the APIC timer
 in TSC-deadline mode, I/O APICs and MSI vectors from ACPI, every core)
 runs the kernel, user programs (`syscall`/`sysret`, SMAP as the door
 to user memory), PCIe with MSI-X, VT-d walking each domain's own page
-tables for its devices' DMA, and every drill but the aarch64
-hypervisor's; a hypervisor and AMD-Vi are what the port still owes.
+tables for its devices' DMA, AMD-V for guests (the bare-metal guest so
+far; a moss kernel as a guest is the next step), and every drill but
+the two that need that guest; AMD-Vi is what the port still owes.
 
 moss boots on aarch64 as a raw arm64 Image. Entered at EL2 (the usual
 case under QEMU with virtualization on), the boot code makes the core a

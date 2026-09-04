@@ -893,7 +893,7 @@ fn vmTestWorker(which: u64) void {
     if (which == 1) {
         log.info("guest-test: PASS — a moss kernel booted at EL1 inside a moss VM: devicetree from the VMM, PL011 and GIC emulated as trapped MMIO, virtual timer, PSCI over HVC, its userspace ran and it powered off; nothing leaked", .{});
     } else {
-        log.info("vm-test: PASS — an EL1 guest ran in its own stage-2 world: MMIO trapped to the VMM, virtual timer ticks injected through the vGIC, PSCI power-off honoured, nothing leaked", .{});
+        log.info("vm-test: PASS — a guest ran in its own second-stage world: its device accesses trapped to the VMM, timer ticks injected, its power-off honoured, nothing leaked", .{});
     }
     arch.power.systemOff();
 }
