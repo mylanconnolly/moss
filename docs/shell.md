@@ -336,6 +336,20 @@ print as `error: <message>`; `exit` prints `bye` and ends the shell,
 which in the system boot ends the system (msh is the essential unit)
 and in a session ends the session.
 
+### Tooling for the language
+
+`tools/tree-sitter-mshl/` is a [tree-sitter](https://tree-sitter.github.io/)
+grammar for mshl: highlighting and structure for `.msh` files in any
+editor that speaks tree-sitter, one grammar for scripts and data files
+alike (data is the literal subset). It makes the same decisions the
+interpreter makes — a bare word at the head of a stage is a command,
+a variable with arguments is a call, `where` takes an expression, a
+glued `.` is field access — and its corpus tests are parses recorded
+from this page's examples and the drills' scripts; every `.msh` file in
+the repository parses without an error node. A formatter, lint and a
+language server are the next tooling steps, on a parser that keeps
+positions and comments.
+
 ### Running it
 
 - `zig build run-shell` boots the system topology with msh on your
@@ -491,6 +505,8 @@ and in a session ends the session.
   return values, the run handshake and the introspection authority).
 - ROADMAP.md — "Developer shell and tooling", "msh v2", "Programs as
   files", "Manifests beside images, and a per-user store".
+- Tooling — `tools/tree-sitter-mshl/` (`grammar.js`, `queries/`,
+  `test/corpus/`; `tree-sitter generate && tree-sitter test`).
 - Source — `user/shell.zig` (the host: every command, `run`,
   `install`, startup, the REPL), `user/fscmds.zig` (the file commands
   msh and mshrun share), `user/mshrun.zig` (a script as a program),

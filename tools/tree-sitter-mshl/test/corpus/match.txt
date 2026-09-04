@@ -1,0 +1,166 @@
+================================================================================
+match with every pattern kind
+================================================================================
+match (int x) { ok $n => $n * 2; err $e => "bad" }
+match $v {
+  [] => "empty"
+  [$h, ..$t] => { echo "$h then $t" }
+  [1, ..] => "starts with 1"
+  { name: $n, size: 0 } => echo "empty $n"
+  { type } => $type
+  $n if $n > 5 => "big"
+  dir => "d"
+  true => "t"
+  "a b" => "yes"
+  _ => "other"
+}
+--------------------------------------------------------------------------------
+
+(source_file
+  (pipeline
+    (match_expression
+      (paren
+        (pipeline
+          (command
+            (identifier)
+            (bare_word
+              (identifier)))))
+      (match_arm
+        (result_pattern
+          (bind_pattern
+            (variable
+              (identifier))))
+        (pipeline
+          (binary_expression
+            (variable
+              (identifier))
+            (number))))
+      (match_arm
+        (result_pattern
+          (bind_pattern
+            (variable
+              (identifier))))
+        (pipeline
+          (string
+            (string_text))))))
+  (pipeline
+    (match_expression
+      (variable
+        (identifier))
+      (match_arm
+        (list_pattern)
+        (pipeline
+          (string
+            (string_text))))
+      (match_arm
+        (list_pattern
+          (bind_pattern
+            (variable
+              (identifier)))
+          (rest_pattern
+            (variable
+              (identifier))))
+        (block
+          (pipeline
+            (command
+              (identifier)
+              (string
+                (interpolation
+                  (identifier))
+                (string_text)
+                (interpolation
+                  (identifier)))))))
+      (match_arm
+        (list_pattern
+          (number)
+          (rest_pattern))
+        (pipeline
+          (string
+            (string_text))))
+      (match_arm
+        (record_pattern
+          (record_field_pattern
+            (record_key)
+            (bind_pattern
+              (variable
+                (identifier))))
+          (record_field_pattern
+            (record_key)
+            (number)))
+        (pipeline
+          (command
+            (identifier)
+            (string
+              (string_text)
+              (interpolation
+                (identifier))))))
+      (match_arm
+        (record_pattern
+          (record_field_pattern
+            (identifier)))
+        (pipeline
+          (variable
+            (identifier))))
+      (match_arm
+        (bind_pattern
+          (variable
+            (identifier)))
+        (binary_expression
+          (variable
+            (identifier))
+          (number))
+        (pipeline
+          (string
+            (string_text))))
+      (match_arm
+        (bare_word
+          (identifier))
+        (pipeline
+          (string
+            (string_text))))
+      (match_arm
+        (boolean)
+        (pipeline
+          (string
+            (string_text))))
+      (match_arm
+        (string
+          (string_text))
+        (pipeline
+          (string
+            (string_text))))
+      (match_arm
+        (wildcard_pattern)
+        (pipeline
+          (string
+            (string_text)))))))
+
+================================================================================
+try and use
+================================================================================
+try { fails }
+try (fails)
+let math = (use lib/math.msh)
+--------------------------------------------------------------------------------
+
+(source_file
+  (pipeline
+    (try_expression
+      (block
+        (pipeline
+          (command
+            (identifier))))))
+  (pipeline
+    (try_expression
+      (paren
+        (pipeline
+          (command
+            (identifier))))))
+  (let_statement
+    (identifier)
+    (paren
+      (pipeline
+        (command
+          (identifier)
+          (bare_word
+            (identifier)))))))

@@ -1,0 +1,140 @@
+================================================================================
+a unit file is a record
+================================================================================
+# the filesystem service
+{
+  image:  fs
+  arg:    1
+  budget: { kobj: 1mb, user: 4mb }
+  grant:  [log, bootfs]
+  give: [
+    { tag: buf,  shm: 1 }
+    { tag: key,  secret: conf/fs.key }
+  ]
+  restart: { policy: one-for-one, max: 5 }
+}
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (pipeline
+    (record
+      (record_field
+        (record_key)
+        (bare_word
+          (identifier)))
+      (record_field
+        (record_key)
+        (number))
+      (record_field
+        (record_key)
+        (record
+          (record_field
+            (record_key)
+            (number))
+          (record_field
+            (record_key)
+            (number))))
+      (record_field
+        (record_key)
+        (list
+          (bare_word
+            (identifier))
+          (bare_word
+            (identifier))))
+      (record_field
+        (record_key)
+        (list
+          (record
+            (record_field
+              (record_key)
+              (bare_word
+                (identifier)))
+            (record_field
+              (record_key)
+              (number)))
+          (record
+            (record_field
+              (record_key)
+              (bare_word
+                (identifier)))
+            (record_field
+              (record_key)
+              (bare_word
+                (identifier))))))
+      (record_field
+        (record_key)
+        (record
+          (record_field
+            (record_key)
+            (bare_word
+              (identifier)))
+          (record_field
+            (record_key)
+            (number)))))))
+
+================================================================================
+strings, interpolation, escapes
+================================================================================
+echo "hello $name!"
+send $c "GET /raw HTTP/1.1\r\nHost: moss\r\n\r\n"
+let t = "a\"b"
+--------------------------------------------------------------------------------
+
+(source_file
+  (pipeline
+    (command
+      (identifier)
+      (string
+        (string_text)
+        (interpolation
+          (identifier))
+        (string_text))))
+  (pipeline
+    (command
+      (identifier)
+      (variable
+        (identifier))
+      (string
+        (string_text)
+        (escape_sequence)
+        (escape_sequence)
+        (string_text)
+        (escape_sequence)
+        (escape_sequence)
+        (escape_sequence)
+        (escape_sequence))))
+  (let_statement
+    (identifier)
+    (string
+      (string_text)
+      (escape_sequence)
+      (string_text))))
+
+================================================================================
+lists and records inline
+================================================================================
+let r = { status: 201, body: { made: true } }
+[1, "two words", true, null]
+--------------------------------------------------------------------------------
+
+(source_file
+  (let_statement
+    (identifier)
+    (record
+      (record_field
+        (record_key)
+        (number))
+      (record_field
+        (record_key)
+        (record
+          (record_field
+            (record_key)
+            (boolean))))))
+  (pipeline
+    (list
+      (number)
+      (string
+        (string_text))
+      (boolean)
+      (null))))

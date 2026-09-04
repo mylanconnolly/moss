@@ -98,7 +98,10 @@ session covers it (`.raw = true` sends bytes without a newline; an empty
 values, syntax, an operator) belongs in `lib/mshl.zig` with a host test
 beside it — `zig test lib/mshl.zig` runs in a second, every test under
 the leak-detecting allocator, so a value that escapes without being
-counted fails the test; the QEMU check is for integration. The memory
+counted fails the test; the QEMU check is for integration. A change to
+the *syntax* also changes `tools/tree-sitter-mshl/grammar.js`, with a
+corpus entry for it (`tree-sitter generate && tree-sitter test`; record
+a new tree with `tree-sitter test -u` and read it before trusting it). The memory
 rules for host code: a host command builds its value in `it.arena` and
 never keeps a pointer to one past the call; anything that must outlive
 the line goes through `setVar` (a box); flags read out of data files

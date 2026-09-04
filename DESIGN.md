@@ -1388,6 +1388,26 @@ in this step: `now` and `sleep` as shared host commands, and the
 language pools call frames per line (a `map` of ten thousand made ten
 thousand frames from the arena and ran out at a 64 KB `join`).
 
+**mshl v3, stage 5a (as built, 2026-09-04): a tree-sitter grammar.**
+`tools/tree-sitter-mshl/` describes the language for editors: the same
+decisions the interpreter makes, made by GLR and precedence instead of
+by hand — a stage headed by a bare word is a command (dynamic
+precedence over reading the word as a string), one headed by a
+variable with arguments is a call, `where` takes an expression, and a
+`.` glued to a primary is field access even though `.` may begin a word
+(an immediate token with lexical precedence beats a longer word; with
+whitespace before it, `.hidden` is a word). Statements are separated,
+never adjacent — a rule that must not match the empty string, so the
+list is non-empty and blocks hold an optional one. The corpus is
+recorded parses (`tree-sitter test -u`) read and corrected: the first
+recording had every argument of a command as its own statement, because
+a generator error hidden behind a grep left the previous parser in
+place. Every `.msh` file in the repository parses clean, and the
+highlight query covers keywords, operators, variables, commands,
+fields and keys. Not in the gate: the grammar is host tooling, checked
+with `tree-sitter test`; the rule that a syntax change updates it is
+in HACKING.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

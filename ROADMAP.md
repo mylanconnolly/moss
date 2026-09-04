@@ -242,8 +242,11 @@ is a plan.
   (a script serves no channel and a raw channel would be untyped — this
   waits for a typed channel surface), more than one buffer per session,
   notifications across nodes; (5) tooling, host-side in
-  tools/: a tree-sitter grammar first, then a formatter from a parser
-  that keeps positions, then lint and a language server. Rule: build the
+  tools/: ✅ a tree-sitter grammar (landed 2026-09-04:
+  `tools/tree-sitter-mshl`, highlights, a corpus recorded from the
+  language's examples, every `.msh` in the tree parsing clean), then a
+  formatter from a parser that keeps positions and comments, then lint
+  and a language server. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
 - **virtio-gpu and input devices** — the graphical console.
@@ -378,6 +381,17 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **mshl v3, stage 5a: a tree-sitter grammar** (done, 2026-09-04):
+  `tools/tree-sitter-mshl/` — the language's shape as tree-sitter sees
+  it (commands vs. calls vs. expressions by the head of the stage,
+  `where` with an expression, a glued `.` as field access even though
+  `.` may start a word, keys with their colon, patterns), a highlight
+  query, and twelve corpus entries recorded from the docs and drills;
+  every `.msh` file in the repository parses without an error node.
+  Lessons: tree-sitter forbids a syntactic rule that matches the empty
+  string, so the statement list is non-empty and blocks hold an optional
+  one; and a generator error hidden behind a filter left a stale parser
+  that accepted adjacent statements — read the generator's output whole.
 - ✅ **Users, stage 4b: the remote home's speed** (done, 2026-09-04): a
   32 KB read-ahead window in the home service's backing layer (sound
   under the lease), 32 KB per exchange through netsvc and the fabric
