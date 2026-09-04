@@ -26,9 +26,10 @@ frontier — every unstarted arc and every residual, kept current; the
 - `zig build run-shell` — interactive msh console on your terminal.
 - `zig build run-login` — multi-user boot: login prompts on your terminal
   and on `nc 127.0.0.1 31905` (alice / alice-pass, bob / bob-pass).
-- `zig build -Darch=x86_64 run` — the x86_64 port (stage 1: boot to
-  "boot complete", no interrupts/user mode yet) on OVMF + Limine, KVM
-  here. The gate stays aarch64-only until the port has drills.
+- `zig build -Darch=x86_64 run | check` — the x86_64 port (stage 2:
+  interrupts and every core, no user mode yet) on OVMF + Limine, KVM
+  here; its check runs panic, fault, sched (~20 s). Run it too when
+  kernel/ or the runner change.
 - `zig build run | run-hvf | run-blk | run-net | run-cluster` — manual
   boots (pair with `-D<name>-test` flags; see README test matrix).
 

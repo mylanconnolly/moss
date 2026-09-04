@@ -1732,7 +1732,18 @@ fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     if (first_trace_addr) |addr| {
         log.print("!! first trace address: 0x{x}\n", .{addr});
     }
-    log.print("!! core halted\n", .{});
+    // The frame-pointer chain — [fp] = the caller's fp, [fp + 8] = the
+    // return address, on both ports — as addresses for addr2line.
+    var fp: u64 = @frameAddress();
+    var depth: usize = 0;
+    log.print("!! stack:", .{});
+    while (fp >= mem.kvirt_offset and fp % 8 == 0 and depth < 12) : (depth += 1) {
+        const words: [*]const u64 = @ptrFromInt(fp);
+        log.print(" 0x{x}", .{words[1]});
+        if (words[0] <= fp) break;
+        fp = words[0];
+    }
+    log.print("\n!! core halted\n", .{});
     halt();
 }
 

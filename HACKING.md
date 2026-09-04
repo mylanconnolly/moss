@@ -24,13 +24,16 @@ done without rediscovering the sharp edges.
   log (also copied to `<label>-failed.log`, which a rerun does not
   overwrite) — the way to chase an intermittent one. `-Doptimize=ReleaseSafe`
   runs the whole suite optimized.
-- `-Darch=x86_64` builds the x86_64 port (stage 1: boot only) — the
-  kernel ELF alone, no user programs yet. `zig build -Darch=x86_64 run`
-  boots it on OVMF + Limine (KVM when the host has it, else TCG) from a
-  directory QEMU exposes as a FAT volume; it wants Limine's
-  `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's share dir) and the
-  x86_64 OVMF images beside QEMU (`-Dovmf`, `-Dovmf-vars`). The gate is
-  aarch64-only until the port has drills of its own.
+- `-Darch=x86_64` builds the x86_64 port (stage 2: interrupts and every
+  core, no user mode) — the kernel ELF alone, no user programs yet.
+  `zig build -Darch=x86_64 run` boots it on OVMF + Limine (KVM when the
+  host has it, else TCG) from a directory QEMU exposes as a FAT volume;
+  it wants Limine's `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's
+  share dir) and the x86_64 OVMF images beside QEMU (`-Dovmf`,
+  `-Dovmf-vars`). `zig build -Darch=x86_64 check` runs the port's
+  drills (panic, fault, sched) the same way, plus the host tests; the
+  runner's `--arch x86_64` composes a boot directory per drill under
+  `zig-out/check/esp-<name>/`.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
   echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),
@@ -257,6 +260,12 @@ barriers in the virtio drivers, and `user/vmm.zig`.
 - **Read the fault dump.** ESR class is decoded for you; `far` is the bad
   address; `elr` locates the code (`objdump -d zig-out/bin/moss-kernel.elf`
   and search). Most bugs in this repo's history fell to the dump alone.
+- **A panic prints its backtrace**: the frame-pointer chain as return
+  addresses (`!! stack: 0x… 0x…`); feed them to `llvm-addr2line -f -e
+  zig-out/bin/moss-kernel.elf` (or the check variant's `.elf` under
+  `.zig-cache`). The first address alone is not enough — it lands in
+  the cold panic block of a Debug build and addr2line names whatever
+  symbol precedes it.
 - **A hang dumps itself.** Every system drill (`systemDrill` in
   kernel/main.zig) panics after 60s without shutdown, first printing
   every thread (state, the channel or notification it blocks on, its

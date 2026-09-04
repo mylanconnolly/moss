@@ -196,17 +196,19 @@ is a plan.
 - **The x86_64 port** — the HAL's honesty test. ✅ Stage 1 (landed
   2026-09-04): `kernel/arch/x86_64/` boots to "boot complete" on the
   boot core under KVM — Limine on OVMF, 4-level paging, the TSC, x2APIC
-  detected, ACPI power-off. Next, in order: (2) the local APIC timer
-  (TSC-deadline) and the IOAPIC/MSI-X behind `intc`/`msi` from the
-  MADT, so the tick and preemption run; (3) `syscall`/`sysret`, the TSS
-  per core, SMAP behind `uaccess`, and the userspace seam
-  (`user/usys.zig`, the image header stanza, the drivers' barriers) so
-  programs build and run for the target; (4) the loader's parked cores
-  through `smp`, PCIDs and TLB shootdown by IPI; (5) the MCFG behind
-  `platform.pcie` and virtio over PCIe; (6) VT-d or AMD-Vi behind
-  `iommu` (the DMA-grant design needs the IOMMU to walk the domain's
-  own tables); (7) a runner that boots x86_64 drills so the gate covers
-  both ports; SVM behind `vm` last. Modern hardware only: no legacy
+  detected, ACPI power-off. ✅ Stage 2 (landed 2026-09-04): the local
+  APIC timer in TSC-deadline mode, the I/O APICs and MSI vectors behind
+  `intc`/`msi` from the MADT, every core through the loader's MP
+  response, and the gate running the port's drills (`-Darch=x86_64
+  check`: panic, fault, sched under KVM). Next, in order: (3)
+  `syscall`/`sysret`, the TSS per core, SMAP behind `uaccess`, and the
+  userspace seam (`user/usys.zig`, the image header stanza, the
+  drivers' barriers) so programs build and run for the target; (4)
+  PCIDs and TLB shootdown by IPI; (5) the MCFG behind `platform.pcie`,
+  the MSI data word to the enumerator, virtio over PCIe; (6) VT-d or
+  AMD-Vi behind `iommu` (the DMA-grant design needs the IOMMU to walk
+  the domain's own tables); (7) the rest of the drills and the `+rs`
+  pass on the port; SVM behind `vm` last. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
   console for real machines is owed.
@@ -401,6 +403,19 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64, stage 2: interrupts, every core, the gate** (2026-09-04):
+  x2APIC through MSRs, the APIC timer in TSC-deadline mode as the tick,
+  I/O APICs and ISA overrides from the MADT behind `intc` (interrupt
+  ids are vectors: lines 32 + GSI, messages 128..223), IPIs for
+  `kick`, the interrupt path in the trap handler, the loader's parked
+  cores brought up one at a time through a CR3-and-stack trampoline;
+  `zig build -Darch=x86_64 check` runs panic, fault and sched under KVM
+  (17 s). Found: the IDT's stub arithmetic assumed an aligned base the
+  label did not have, so every gate pointed into the wrong stub and the
+  first interrupt on each core panicked on a garbage vector — and a
+  single trace address into a Debug build's panic blocks named the
+  wrong function, so the panic handler now prints a frame-pointer
+  backtrace on both ports.
 - ✅ **x86_64, stage 1: boot to "boot complete"** (2026-09-04):
   `kernel/arch/x86_64/` — Limine base revision 5 on OVMF from a FAT
   directory on virtio-blk, the port's own direct map built in `_start`

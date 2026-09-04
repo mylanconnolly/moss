@@ -308,6 +308,14 @@ Verify in QEMU rather than reason from memory.
   linked implicitly only on macOS, were replaced. `run-hvf` exists only
   on Apple Silicon; `run-login`'s second seat needs a `nc` (or any
   TCP client) on the host.
+- `--arch x86_64` (what `zig build -Darch=x86_64 check` passes) boots
+  each drill through OVMF and Limine instead of `-kernel`: a directory
+  per drill under `zig-out/check/esp-<name>/` holds `BOOTX64.EFI`, the
+  kernel ELF and a `limine.conf` with the drill's boot arguments, and
+  QEMU presents it as a FAT volume on virtio-blk; OVMF's variable store
+  is a scratch copy per drill. Only the drills that need no user
+  programs run there yet (panic, fault, sched), with the port's own
+  fault-dump markers.
 - Reproduction of a timing race depends on host conditions: several
   teardown races showed only on the first run after a build, with a
   fresh disk image, and never under added logging. The soak and the

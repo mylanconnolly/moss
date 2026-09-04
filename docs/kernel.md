@@ -256,9 +256,11 @@ discovery and the console. The generic kernel — domains, capabilities,
 IPC, the scheduler's policy, quotas, teardown — never names a register
 or a device. Only the selected port is compiled: another architecture's
 code is never analyzed, let alone linked. `-Darch` chooses the port:
-aarch64 is complete; x86_64 (Limine on UEFI, x2APIC, ACPI) boots to
-"boot complete" on one core and stops there — its interrupts, user mode,
-other cores and IOMMU are the port's coming stages.
+aarch64 is complete; x86_64 (Limine on UEFI, x2APIC with the APIC timer
+in TSC-deadline mode, I/O APICs and MSI vectors from ACPI, every core)
+runs the kernel and its scheduler drills, and stops short of user mode
+— syscalls, the userspace runtime, PCIe and the IOMMU are the port's
+coming stages.
 
 moss boots on aarch64 as a raw arm64 Image. Entered at EL2 (the usual
 case under QEMU with virtualization on), the boot code makes the core a

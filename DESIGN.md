@@ -2075,14 +2075,66 @@ executable asks for LLVM. The 256 IDT stubs are one comptime string and
 need a raised branch quota. `-drive=…` is not a QEMU spelling; the
 file argument is a separate word.
 
-What the next stages owe: the local APIC timer in TSC-deadline mode
-and the IOAPIC/MSI-X behind `intc`/`msi` (MADT), `syscall`/`sysret`
-with SMAP behind `uaccess` and the TSS per core, the userspace seam
-(`user/usys.zig`, the image header stanza, the drivers' barriers) so
-programs build for the target, the loader's parked cores through
-`smp`, PCIDs and TLB shootdown by IPI, the MCFG behind `platform.pcie`,
-an IOMMU (VT-d or AMD-Vi) walking the domain's tables, and a runner
-that boots x86_64 drills so the gate covers both ports.
+### The x86_64 port, stage 2: interrupts and every core (as built, 2026-09-04)
+
+The local APIC in x2APIC mode (`lapic.zig`: every register an MSR, the
+loader having enabled x2APIC on every core at the MP request's asking):
+the spurious vector at 0xff, the LVT lines masked, the timer in
+TSC-deadline mode — one MSR write per period, the TSC the loader
+measured as the clock, so the tick is `rdtsc + interval` into
+IA32_TSC_DEADLINE and nothing is calibrated. End-of-interrupt is one
+MSR write; an IPI is one (`intc.kick`: the resched vector 0xf1 to the
+core's APIC id). Interrupt ids are vectors, so delivery needs no
+translation: lines are 32 + the GSI (I/O APIC redirection entries,
+programmed at `enableLine` with the MADT overrides' polarity and
+trigger for ISA lines and level/low for PCI's, all to the boot core),
+messages are vectors 128..223 handed out by `msi.route` (the data word
+a device writes is the vector; the doorbell is the LAPIC's page with
+the boot core's id in the address), the tick 0xf0. The trap handler's
+one branch — vector ≥ 32 — is the interrupt path: the tick, the kick
+(only there for the preempt), a bound line or message, EOI before any
+context switch, `sched.preemptIfNeeded`, exactly as on aarch64.
+
+The other cores are the loader's (`smp.zig`): Limine parks them and
+releases one at a `goto_address` store. The port brings them up one at
+a time — allocate a stack, publish it and the index in globals, store
+the address, wait for the online count — and the trampoline loads the
+kernel's CR3 and the new stack in one asm block (the loader's stack is
+unmapped under our tables, and any spill between the two would fault),
+then `secondaryEntry` does what the boot core did: its GDT/IDT/CR4,
+`sched.registerCpu`, the local APIC, the timer, interrupts on, HLT.
+The parked cores' memory is the loader's reclaimable region, which the
+port keeps reserved. The scheduler drill runs on all four cores under
+KVM: pins pinned, migrants migrating, the mortal reaped, in 12 seconds
+of a 17-second gate.
+
+The gate now runs the port's drills: `zig build -Darch=x86_64 check`
+builds panic, fault and sched for the target and the runner (`--arch
+x86_64`) composes a boot directory per drill — Limine's `BOOTX64.EFI`,
+the ELF, a `limine.conf` carrying the drill's boot arguments — and
+launches OVMF on it; a drill's markers differ only where the port's
+fault dump does (`pass_x86`). Host tests run as always.
+
+Lessons paid for: the IDT assumed stub `v` at `base + 16·v`, but the
+label before the first stub was not itself aligned, so every gate
+pointed a few bytes into the wrong stub, the frame lost a push, and
+the first interrupt on every core panicked on a vector that did not
+fit in 32 bits — the fix is `.balign 16` before the label, and the
+lesson that a table of fixed-pitch stubs needs its base aligned as
+strictly as its entries. Finding it needed a backtrace: the panic
+handler now walks the frame-pointer chain and prints the return
+addresses on both ports (`llvm-addr2line -f -e moss-kernel.elf` reads
+them), because one address into a Debug build's cold panic blocks
+names the wrong function.
+
+What the next stages owe: `syscall`/`sysret` with SMAP behind
+`uaccess` and the TSS per core, the userspace seam (`user/usys.zig`,
+the image header stanza, the drivers' barriers) so programs build for
+the target, PCIDs and TLB shootdown by IPI (the port flushes locally
+today, which is enough while no user mappings exist), the MCFG behind
+`platform.pcie` and the MSI data word to the enumerator, an IOMMU
+(VT-d or AMD-Vi) walking the domain's tables, the `+rs` pass for the
+port's drills.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

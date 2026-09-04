@@ -39,7 +39,8 @@ zig build check      # the whole test suite: 23 OS tests under QEMU (+6 again on
 zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (intermittent failures)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
-zig build -Darch=x86_64 run   # the x86_64 port (stage 1: boot only) on OVMF + Limine, KVM where available
+zig build -Darch=x86_64 run   # the x86_64 port (stage 2: interrupts, every core; no user mode yet) on OVMF + Limine, KVM where available
+zig build -Darch=x86_64 check # its drills so far: panic, fault, sched
 ```
 
 The x86_64 boot wants Limine (`BOOTX64.EFI` under the host's share

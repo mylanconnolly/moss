@@ -33,11 +33,22 @@ const Spec = struct {
     /// Boot arguments (QEMU -append): the unit-file drills pick a profile.
     append: ?[]const u8 = null,
     timeout_s: u64 = 90,
+    /// The x86_64 port's markers where they differ (its fault dump).
+    pass_x86: ?[]const u8 = null,
+    extra_x86: ?[]const u8 = null,
 };
+
+/// Which port the kernels under test are (`--arch`): the QEMU machine,
+/// the boot method and a drill's markers follow it.
+const Arch = enum { aarch64, x86_64 };
+var target_arch: Arch = .aarch64;
+var limine_dir: []const u8 = "/usr/share/limine";
+var ovmf_code: []const u8 = "/usr/share/qemu/edk2-x86_64-code.fd";
+var ovmf_vars: []const u8 = "/usr/share/qemu/edk2-i386-vars.fd";
 
 const specs = [_]Spec{
     .{ .name = "panic", .pass = "KERNEL PANIC: panic test requested", .panic_is_failure = false },
-    .{ .name = "fault", .pass = "!! EXCEPTION: cur_spx_sync", .extra = "far=0xffffff7fdead0000", .panic_is_failure = false },
+    .{ .name = "fault", .pass = "!! EXCEPTION: cur_spx_sync", .extra = "far=0xffffff7fdead0000", .panic_is_failure = false, .pass_x86 = "!! EXCEPTION: vector 14 — page fault", .extra_x86 = "cr2=0xffffff7fdead0000" },
     .{ .name = "pan", .pass = "privileged access to user memory refused (PAN)", .extra = "pan-test: touching the caller's buffer outside a uaccess window", .panic_is_failure = false },
     .{ .name = "sched", .pass = "sched-test: PASS" },
     .{ .name = "cpu", .pass = "cpu-test: PASS", .extra = "a second reservation of core 3 refused", .timeout_s = 90 },
@@ -131,10 +142,21 @@ pub fn main(init: std.process.Init) !u8 {
             repeat = std.fmt.parseInt(u32, argv[i + 1], 10) catch 0;
         } else if (std.mem.eql(u8, argv[i], "--only")) {
             only = argv[i + 1];
+        } else if (std.mem.eql(u8, argv[i], "--arch")) {
+            target_arch = std.meta.stringToEnum(Arch, argv[i + 1]) orelse {
+                std.debug.print("runner: unknown --arch {s}\n", .{argv[i + 1]});
+                return 2;
+            };
+        } else if (std.mem.eql(u8, argv[i], "--limine")) {
+            limine_dir = argv[i + 1];
+        } else if (std.mem.eql(u8, argv[i], "--ovmf")) {
+            ovmf_code = argv[i + 1];
+        } else if (std.mem.eql(u8, argv[i], "--ovmf-vars")) {
+            ovmf_vars = argv[i + 1];
         } else break;
     }
     if (repeat == 0 or argv.len - i < 2 or (argv.len - i) % 2 != 0) {
-        std.debug.print("usage: runner [--repeat N] [--only a,b] <name> <kernel.bin> ...\n", .{});
+        std.debug.print("usage: runner [--repeat N] [--only a,b] [--arch aarch64|x86_64] [--limine DIR] [--ovmf FD] [--ovmf-vars FD] <name> <kernel> ...\n", .{});
         return 2;
     }
     cwd.createDirPath(io, check_dir) catch {};
@@ -155,6 +177,12 @@ pub fn main(init: std.process.Init) !u8 {
             continue;
         };
         spec.name = label; // logs and disks per label: the +rs pass keeps its own
+        if (target_arch == .x86_64) {
+            if (spec.pass_x86) |p| {
+                spec.pass = p;
+                spec.extra = spec.extra_x86;
+            }
+        }
         ran += 1;
         var polls: u64 = 0;
         var ok = true;
@@ -235,8 +263,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     cwd.deleteFile(io, log_path) catch {};
 
     var args: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args, log_path, bin);
-    if (spec.append) |a| try args.appendSlice(gpa, &.{ "-append", a });
+    try appendBase(&args, log_path, bin, spec.name, spec.append);
     switch (spec.kind) {
         .blk => try appendDisk(&args, disk),
         // The wire echo (cat), a canned HTTP server for `fetch`, and a
@@ -338,7 +365,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     for ([_][]const u8{ log1, log2, log2b, log3 }) |l| cwd.deleteFile(io, l) catch {};
 
     var args1: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args1, log1, bin);
+    try appendBase(&args1, log1, bin, spec.name, null);
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
@@ -424,7 +451,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
 
 fn joinerArgs(log_path: []const u8, bin: []const u8, port: []const u8, append: []const u8) ![]const []const u8 {
     var args: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args, log_path, bin);
+    try appendBase(&args, log_path, bin, "fabric-joiner", null);
     try args.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{port}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
@@ -576,7 +603,7 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
     cwd.deleteFile(io, log_path) catch {};
 
     var args: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args, log_path, bin);
+    try appendBase(&args, log_path, bin, spec.name, null);
     try appendDisk(&args, disk);
     try args.appendSlice(gpa, &.{
         "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
@@ -707,7 +734,7 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
 
     const ports = [2]u16{ shell_port + 1, shell_port + 2 };
     var args: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args, log_path, bin);
+    try appendBase(&args, log_path, bin, spec.name, null);
     try appendDisk(&args, disk);
     if (spec.append) |a| try args.appendSlice(gpa, &.{ "-append", a });
     for (ports, 0..) |port, i| {
@@ -817,7 +844,7 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
     for ([_][]const u8{ log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
 
     var args1: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args1, log1, bin);
+    try appendBase(&args1, log1, bin, spec.name, null);
     try appendDisk(&args1, disk1);
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
@@ -833,7 +860,7 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
 
     const port: u16 = shell_port + 3;
     var args2: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args2, log2, bin);
+    try appendBase(&args2, log2, bin, spec.name, null);
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
         "-netdev",  try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
@@ -1008,7 +1035,12 @@ fn sleepMs(ms: u64) void {
     Io.sleep(io, .fromMilliseconds(@intCast(ms)), .awake) catch {};
 }
 
-fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []const u8) !void {
+/// The machine, the console log and the kernel — by port. aarch64 boots
+/// the raw Image with `-kernel` and takes `-append`; x86_64 boots an ELF
+/// through OVMF and Limine from a directory QEMU presents as a FAT
+/// volume, the boot arguments in that directory's limine.conf.
+fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []const u8, label: []const u8, append: ?[]const u8) !void {
+    if (target_arch == .x86_64) return appendBaseX86(args, log_path, bin, label, append);
     try args.appendSlice(gpa, &.{
         "qemu-system-aarch64",
         "-machine",
@@ -1029,6 +1061,56 @@ fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []con
         try std.fmt.allocPrint(gpa, "file:{s}", .{log_path}),
         "-kernel",
         bin,
+    });
+    if (append) |a| try args.appendSlice(gpa, &.{ "-append", a });
+}
+
+fn appendBaseX86(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []const u8, label: []const u8, append: ?[]const u8) !void {
+    const esp = try std.fmt.allocPrint(gpa, "{s}/esp-{s}", .{ check_dir, label });
+    try cwd.createDirPath(io, try std.fmt.allocPrint(gpa, "{s}/EFI/BOOT", .{esp}));
+    try cwd.copyFile(try std.fmt.allocPrint(gpa, "{s}/BOOTX64.EFI", .{limine_dir}), cwd, try std.fmt.allocPrint(gpa, "{s}/EFI/BOOT/BOOTX64.EFI", .{esp}), io, .{});
+    try cwd.copyFile(bin, cwd, try std.fmt.allocPrint(gpa, "{s}/moss-kernel.elf", .{esp}), io, .{});
+    {
+        const f = try cwd.createFile(io, try std.fmt.allocPrint(gpa, "{s}/limine.conf", .{esp}), .{ .truncate = true });
+        defer f.close(io);
+        var wbuf: [512]u8 = undefined;
+        var w = f.writer(io, &wbuf);
+        try w.interface.print("timeout: 0\nserial: yes\n\n/moss\n    protocol: limine\n    path: boot():/moss-kernel.elf\n    cmdline: {s}\n", .{append orelse ""});
+        try w.interface.flush();
+    }
+    // A scratch variable store per label: OVMF writes it.
+    const vars = try std.fmt.allocPrint(gpa, "{s}/{s}-vars.fd", .{ check_dir, label });
+    try cwd.copyFile(ovmf_vars, cwd, vars, io, .{});
+    try args.appendSlice(gpa, &.{
+        "qemu-system-x86_64",
+        "-machine",
+        "q35",
+        "-accel",
+        "kvm",
+        "-accel",
+        "tcg",
+        "-cpu",
+        "max",
+        "-smp",
+        "4",
+        "-m",
+        "512M",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-nic",
+        "none",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+        "-serial",
+        try std.fmt.allocPrint(gpa, "file:{s}", .{log_path}),
+        "-drive",
+        try std.fmt.allocPrint(gpa, "if=pflash,format=raw,readonly=on,file={s}", .{ovmf_code}),
+        "-drive",
+        try std.fmt.allocPrint(gpa, "if=pflash,format=raw,file={s}", .{vars}),
+        "-drive",
+        try std.fmt.allocPrint(gpa, "format=raw,readonly=on,if=virtio,file=fat:ro:{s}", .{esp}),
     });
 }
 

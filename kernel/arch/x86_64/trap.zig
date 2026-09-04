@@ -8,7 +8,11 @@
 
 const std = @import("std");
 const cpu = @import("cpu.zig");
+const irq = @import("../../irq.zig");
+const ktimer = @import("../../timer.zig");
+const lapic = @import("lapic.zig");
 const log = @import("../../log.zig");
+const sched = @import("../../sched.zig");
 const uaccess = @import("uaccess.zig");
 
 /// Registers as the common stub pushes them, then the vector and error
@@ -149,6 +153,7 @@ fn stubs() []const u8 {
 comptime {
     asm (
         \\.section .text, "ax"
+        \\.balign 16
         \\.global __trap_stubs
         \\__trap_stubs:
         \\
@@ -194,7 +199,9 @@ comptime {
 
 extern const __trap_stubs: anyopaque;
 
-/// Once, from the boot core: the gates (every stub is 16 bytes apart).
+/// Once, from the boot core: the gates. Every stub is 16 bytes apart —
+/// the label before the first is aligned too, or the arithmetic points
+/// into the middle of the stubs (the first bug this port found).
 fn buildIdt() void {
     const base = @intFromPtr(&__trap_stubs);
     for (&idt, 0..) |*g, v| {
@@ -252,7 +259,25 @@ pub fn init() void {
 }
 
 export fn trapHandler(frame: *TrapFrame) callconv(.c) void {
+    if (frame.vector >= 32) return handleIrq(@intCast(frame.vector));
     reportFault(frame);
+}
+
+/// An interrupt: the vector is the interrupt id. The tick, the kick (only
+/// here for the preempt below), a bound line or message; end-of-interrupt
+/// before any context switch, as on aarch64, so a preempted-away thread
+/// never holds this core's in-service state hostage.
+fn handleIrq(vector: u32) void {
+    if (vector == lapic.vector_spurious) return; // no EOI for a spurious one
+    if (vector == lapic.vector_timer) {
+        ktimer.handleIrq();
+    } else if (vector == lapic.vector_resched) {
+        // just here for the preempt below
+    } else if (!irq.deliver(vector)) {
+        log.warn("unexpected interrupt {d}", .{vector});
+    }
+    lapic.eoi();
+    sched.preemptIfNeeded();
 }
 
 fn reportFault(frame: *TrapFrame) noreturn {

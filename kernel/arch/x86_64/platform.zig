@@ -9,9 +9,12 @@ const std = @import("std");
 const acpi = @import("acpi.zig");
 const boot = @import("boot.zig");
 const cpu = @import("cpu.zig");
+const ioapic = @import("ioapic.zig");
+const lapic = @import("lapic.zig");
 const limine = @import("limine.zig");
 const log = @import("../../log.zig");
 const mem = @import("../../mem.zig");
+const msi = @import("msi.zig");
 
 pub const MemRegion = struct { base: u64, size: u64 };
 pub const Reg = struct { base: u64, size: u64 };
@@ -117,10 +120,30 @@ pub fn initIommu(info: *const Info) void {
     log.warn("x86_64: no IOMMU driver yet; device DMA is untranslated", .{});
 }
 
-/// The interrupt controllers: stage 2 of the port.
+/// The I/O APICs and the ISA overrides, from the MADT; the local APICs
+/// are per core (intc.initCore). Every line and message targets the boot
+/// core, whose id the MSI doorbell address carries.
 pub fn initInterrupts(info: *const Info) void {
     _ = info;
-    log.warn("x86_64: no interrupt controller driver yet (stage 1: boot only)", .{});
+    ioapic.setBsp(lapic.id());
+    msi.setBsp(lapic.id());
+    const pa = acpi.find("APIC") orelse {
+        log.warn("acpi: no MADT; no I/O APIC lines", .{});
+        return;
+    };
+    const b = acpi.bytes(pa);
+    var off: usize = 44; // header (36) + local APIC address (4) + flags (4)
+    while (off + 2 <= b.len) {
+        const kind = b[off];
+        const len = b[off + 1];
+        if (len < 2 or off + len > b.len) break;
+        switch (kind) {
+            1 => ioapic.add(std.mem.readInt(u32, b[off + 4 ..][0..4], .little), std.mem.readInt(u32, b[off + 8 ..][0..4], .little)),
+            2 => ioapic.addOverride(std.mem.readInt(u32, b[off + 4 ..][0..4], .little), std.mem.readInt(u16, b[off + 8 ..][0..2], .little)),
+            else => {},
+        }
+        off += len;
+    }
 }
 
 pub fn intxIntid(host: PcieHost, slot: u8, pin: u8) u32 {

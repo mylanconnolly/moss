@@ -495,6 +495,12 @@ pub fn build(b: *std.Build) void {
         "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
     };
 
+    // The x86_64 boot's firmware and loader, from the host's share
+    // directory unless told otherwise.
+    const share = if (builtin.os.tag == .macos) "/opt/homebrew/share" else "/usr/share";
+    const limine_dir = b.option([]const u8, "limine", "directory holding Limine's BOOTX64.EFI") orelse b.fmt("{s}/limine", .{share});
+    const ovmf_code = b.option([]const u8, "ovmf", "the x86_64 OVMF code flash image") orelse b.fmt("{s}/qemu/edk2-x86_64-code.fd", .{share});
+    const ovmf_vars = b.option([]const u8, "ovmf-vars", "the OVMF variable store template") orelse b.fmt("{s}/qemu/edk2-i386-vars.fd", .{share});
     const run_step = b.step("run", "Boot the kernel in QEMU (aarch64: TCG; x86_64: OVMF + Limine, KVM when there). Ctrl-A X exits.");
     if (arch == .aarch64) {
         const run_qemu = b.addSystemCommand(&.{
@@ -513,10 +519,6 @@ pub fn build(b: *std.Build) void {
         // a scratch copy of the variable store), Limine's BOOTX64.EFI
         // beside the kernel ELF and a limine.conf in a directory QEMU
         // exposes as a FAT volume on virtio-blk. No disk image tooling.
-        const share = if (builtin.os.tag == .macos) "/opt/homebrew/share" else "/usr/share";
-        const limine_dir = b.option([]const u8, "limine", "directory holding Limine's BOOTX64.EFI") orelse b.fmt("{s}/limine", .{share});
-        const ovmf_code = b.option([]const u8, "ovmf", "the x86_64 OVMF code flash image") orelse b.fmt("{s}/qemu/edk2-x86_64-code.fd", .{share});
-        const ovmf_vars = b.option([]const u8, "ovmf-vars", "the OVMF variable store template") orelse b.fmt("{s}/qemu/edk2-i386-vars.fd", .{share});
         const esp = b.addWriteFiles();
         _ = esp.addCopyFile(kernel.getEmittedBin(), "moss-kernel.elf");
         _ = esp.addCopyFile(.{ .cwd_relative = b.fmt("{s}/BOOTX64.EFI", .{limine_dir}) }, "EFI/BOOT/BOOTX64.EFI");
@@ -828,6 +830,7 @@ pub fn build(b: *std.Build) void {
             blobs: std.Build.LazyPath,
             test_opts: []const []const u8,
             script: std.Build.LazyPath,
+            port: std.Target.Cpu.Arch,
         ) std.Build.LazyPath {
             const vopts = bb.addOptions();
             const enabled = bb.fmt("{s}_test", .{vn});
@@ -839,7 +842,8 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = bb.path("kernel/main.zig"),
                 .target = target,
                 .optimize = opt,
-                .code_model = .small,
+                .code_model = if (port == .x86_64) .kernel else .small,
+                .red_zone = if (port == .x86_64) false else null,
             });
             vmod.addImport("shared", shared);
             vmod.addOptions("build_options", vopts);
@@ -847,19 +851,32 @@ pub fn build(b: *std.Build) void {
             const vexe = bb.addExecutable(.{
                 .name = bb.fmt("moss-check-{s}.elf", .{label}),
                 .root_module = vmod,
+                .use_llvm = if (port == .x86_64) true else null,
             });
             vexe.setLinkerScript(script);
+            run.addArg(label);
+            // x86_64 boots the ELF through Limine; aarch64 the raw Image.
+            if (port == .x86_64) {
+                run.addFileArg(vexe.getEmittedBin());
+                return vexe.getEmittedBin();
+            }
             const vbin = bb.addObjCopy(vexe.getEmittedBin(), .{
                 .format = .bin,
                 .basename = bb.fmt("moss-check-{s}.bin", .{label}),
             });
-            run.addArg(label);
             run.addFileArg(vbin.getOutput());
             return vbin.getOutput();
         }
     };
+    // The x86_64 port's drills so far: the ones that need no user
+    // programs. The runner boots them through OVMF and Limine.
+    const x86_variants = [_][]const u8{ "panic", "fault", "sched" };
+    if (arch == .x86_64) {
+        run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
+        for (x86_variants) |vn| _ = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
+    }
     if (arch == .aarch64) for (variants) |vn| {
-        const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script);
+        const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
         // Plain `zig build run-shell` boots this variant — no flag needed.
         if (std.mem.eql(u8, vn, "shell")) {
             run_shell.addArg("-kernel");
@@ -871,12 +888,12 @@ pub fn build(b: *std.Build) void {
         }
     };
     if (arch == .aarch64) for (release_variants) |vn| {
-        _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script);
+        _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
     };
-    // The gate is aarch64's until the x86_64 port has drills of its own.
-    const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests; aarch64)");
+    // The gate: every drill on aarch64; on x86_64 the port's drills so far.
+    const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests); -Darch=x86_64 runs the x86_64 port's drills");
     check_step.dependOn(test_step);
-    if (arch == .aarch64) check_step.dependOn(&run_check.step);
+    check_step.dependOn(&run_check.step);
 }
 
 /// Every .msh file under boot/, sorted, as build-root-relative paths.
