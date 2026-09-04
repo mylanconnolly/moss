@@ -363,7 +363,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     for ([_][]const u8{ log1, log2, log2b, log3 }) |l| cwd.deleteFile(io, l) catch {};
 
     var args1: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args1, log1, bin, spec.name, null);
+    try appendBase(&args1, log1, bin, try std.fmt.allocPrint(gpa, "{s}-node1", .{spec.name}), "node=1");
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
@@ -373,20 +373,19 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
         "-netdev", "hubport,id=h3,hubid=0,netdev=s3",
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s9,listen=127.0.0.1:{s}", .{cluster_port3}),
         "-netdev", "hubport,id=h9,hubid=0,netdev=s9",
-        "-append", "node=1",
     });
     var c1 = try spawnQemu(args1.items);
     defer c1.kill(io);
     sleepMs(1000);
 
-    var c2 = try spawnQemu(try joinerArgs(log2, bin, cluster_port, "node=2 drill=1"));
+    var c2 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node2", .{spec.name}), log2, bin, cluster_port, "node=2 drill=1"));
     defer c2.kill(io);
-    var c3 = try spawnQemu(try joinerArgs(log3, bin, cluster_port2, "node=3"));
+    var c3 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node3", .{spec.name}), log3, bin, cluster_port2, "node=3"));
     defer c3.kill(io);
     // The imposter: wrong fabric key; the handshake must refuse it.
     const log9 = try std.fmt.allocPrint(gpa, "{s}/{s}-node9.log", .{ check_dir, spec.name });
     cwd.deleteFile(io, log9) catch {};
-    var c9 = try spawnQemu(try joinerArgs(log9, bin, cluster_port3, "node=9 badkey=1"));
+    var c9 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node9", .{spec.name}), log9, bin, cluster_port3, "node=9 badkey=1"));
     defer c9.kill(io);
 
     // Stage: wait for the death marker, then relaunch node 2 (the rejoin).
@@ -408,7 +407,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "death never detected", log1);
         return false;
     }
-    c2b = try spawnQemu(try joinerArgs(log2b, bin, cluster_port, "node=2 drill=0"));
+    c2b = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node2b", .{spec.name}), log2b, bin, cluster_port, "node=2 drill=0"));
 
     // The verdict lives in node 1's log; the gossip proof in node 3's.
     const verdict = watch(log1, spec, spec.extra, polls);
@@ -447,13 +446,12 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     return true;
 }
 
-fn joinerArgs(log_path: []const u8, bin: []const u8, port: []const u8, append: []const u8) ![]const []const u8 {
+fn joinerArgs(label: []const u8, log_path: []const u8, bin: []const u8, port: []const u8, append: []const u8) ![]const []const u8 {
     var args: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args, log_path, bin, "fabric-joiner", null);
+    try appendBase(&args, log_path, bin, label, append);
     try args.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{port}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-        "-append", append,
     });
     return args.items;
 }
@@ -732,9 +730,8 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
 
     const ports = [2]u16{ shell_port + 1, shell_port + 2 };
     var args: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args, log_path, bin, spec.name, null);
+    try appendBase(&args, log_path, bin, spec.name, spec.append);
     try appendDisk(&args, disk);
-    if (spec.append) |a| try args.appendSlice(gpa, &.{ "-append", a });
     for (ports, 0..) |port, i| {
         try args.appendSlice(gpa, &.{
             "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
@@ -842,7 +839,7 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
     for ([_][]const u8{ log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
 
     var args1: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args1, log1, bin, spec.name, null);
+    try appendBase(&args1, log1, bin, try std.fmt.allocPrint(gpa, "{s}-node1", .{spec.name}), "profile=flogin node=1");
     try appendDisk(&args1, disk1);
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
@@ -850,7 +847,6 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         "-object", try std.fmt.allocPrint(gpa, "filter-dump,id=f1,netdev=h1,file={s}/{s}-node1-{d}.pcap", .{ check_dir, spec.name, boot }),
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
-        "-append", "profile=flogin node=1",
     });
     var c1 = try spawnQemu(args1.items);
     defer c1.kill(io);
@@ -858,7 +854,7 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
 
     const port: u16 = shell_port + 3;
     var args2: std.ArrayList([]const u8) = .empty;
-    try appendBase(&args2, log2, bin, spec.name, null);
+    try appendBase(&args2, log2, bin, try std.fmt.allocPrint(gpa, "{s}-node2", .{spec.name}), "profile=fjoin node=2");
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
         "-netdev",  try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
@@ -867,7 +863,6 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
         "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{port}),
         "-device",  "virtconsole,chardev=c0",
-        "-append",  "profile=fjoin node=2",
     });
     var c2 = try spawnQemu(args2.items);
     defer c2.kill(io);

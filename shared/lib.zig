@@ -143,6 +143,8 @@ pub const Syscall = enum(u64) {
     /// bar_len, pin | bar_index << 8) -> x1 = device handle, x2 = the LPI
     /// routed for it (0 without an ITS), x3 = the doorbell address the
     /// device's MSI-X entry must target. The ECAM holder's authority.
+    /// -> x4 = the MSI data word the device writes (the ITS event id
+    /// on aarch64, the vector on x86_64).
     device_register = 38,
     /// vm_cpu_on(vm_handle, vcpu, entry, context): reset that vCPU at
     /// `entry` with `context` in x0 and mark it online — the mechanics

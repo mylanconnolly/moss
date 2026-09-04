@@ -171,15 +171,17 @@ fn probe(log_h: u64, slot: u8) void {
     const dev_cap = reg.data[0];
     const lpi = reg.data[1];
     const doorbell = reg.data[2];
+    const msi_data = reg.data[3];
     var msi = false;
     if (lpi != 0 and msix_cap != 0 and msix_table != 0 and msix_table >= mmio_base) {
-        // MSI-X entry 0: the ITS doorbell with event 0; enable, unmask.
+        // MSI-X entry 0: the doorbell and the data word the kernel named
+        // (the ITS event, or the vector); enable, unmask.
         const page = usys.windowMap(mmio_h, (msix_table - mmio_base) / 4096, 1);
         if (page.err == .ok) {
             const entry: [*]volatile u32 = @ptrFromInt(page.data[0] + (msix_table & 0xfff));
             entry[0] = @truncate(doorbell);
             entry[1] = @truncate(doorbell >> 32);
-            entry[2] = 0;
+            entry[2] = @truncate(msi_data);
             entry[3] = 0;
             const mc = cfg(u16, slot, msix_cap + 2);
             mc.* = (mc.* | 0x8000) & ~@as(u16, 0x4000);

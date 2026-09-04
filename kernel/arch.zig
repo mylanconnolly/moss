@@ -41,8 +41,8 @@ pub const uaccess = impl.uaccess;
 /// `enableLine`, `disableLine`, `configureEdge`), `initCore`, `kick`,
 /// `acknowledge`, `endOfInterrupt`, `spurious`, `lineState`.
 pub const intc = impl.intc;
-/// Message-signalled interrupts: `active`, `base`, `count`, `route`,
-/// `doorbellPage`, `translater`.
+/// Message-signalled interrupts: `isActive`, `base`, `count`, `route`,
+/// `data` (the word a device writes), `doorbellPage`, `translater`.
 pub const msi = impl.msi;
 /// The per-core tick source: `initCore`, `rearm`, `intid`.
 pub const timer = impl.timer;

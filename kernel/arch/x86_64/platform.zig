@@ -87,11 +87,21 @@ pub fn discover(boot_arg: u64) Info {
         @memcpy(cmdline_buf[0..n], s[0..n]);
         if (n > 0) bootargs = cmdline_buf[0..n];
     }
+    var pcie: ?PcieHost = null;
     if (boot.rsdp_request.response) |r| {
         rsdp_pa = loaderToPhys(r.address);
         acpi.init(rsdp_pa);
         if (acpi.fadt()) |f| {
             log.info("acpi: FADT pm1a_cnt=0x{x}, S5 sleep type {?d}", .{ f.pm1a_cnt, acpi.s5SleepType(f.dsdt) });
+            // The PCIe host: ECAM from the MCFG, the BAR window from the
+            // host bridge's resources in the DSDT. INTx lines on this
+            // class of machine are GSIs 16..23 (PCI links); MSI-X is what
+            // the enumerator uses.
+            if (acpi.mcfg()) |m| {
+                if (acpi.pciWindow(f.dsdt)) |w| {
+                    pcie = .{ .ecam_base = m.base, .mmio_base = w.base, .mmio_size = w.size, .intx_base = 16 + 32 };
+                } else log.warn("acpi: no 32-bit memory window in the DSDT; no BAR placement", .{});
+            } else log.warn("acpi: no MCFG; no PCIe", .{});
         } else log.warn("acpi: no FADT; no power-off", .{});
     } else log.warn("limine: no RSDP; no ACPI, no power-off", .{});
     if (boot.tsc_request.response) |t| {
@@ -110,7 +120,7 @@ pub fn discover(boot_arg: u64) Info {
         .regions = region_buf[0..nr],
         .reserved = reserved_buf[0..nres],
         .bootargs = bootargs,
-        .pcie = null,
+        .pcie = pcie,
     };
 }
 
@@ -146,6 +156,9 @@ pub fn initInterrupts(info: *const Info) void {
     }
 }
 
+/// The line a function's INTx pin raises (an interrupt id: 32 + GSI),
+/// by the conventional slot swizzle; the enumerator uses MSI-X, so
+/// this is the fallback for a device without it.
 pub fn intxIntid(host: PcieHost, slot: u8, pin: u8) u32 {
     return host.intx_base + ((@as(u32, slot) + pin - 1) % 4);
 }

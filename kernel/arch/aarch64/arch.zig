@@ -54,6 +54,12 @@ pub const msi = struct {
         return its.active;
     }
     pub const route = its.route;
+    /// The data word a device writes with its message: the ITS event id
+    /// (0 — one event per device is routed).
+    pub fn data(intid: u32) u32 {
+        _ = intid;
+        return 0;
+    }
     pub const doorbellPage = its.doorbellPage;
     pub const translater = its.translater;
 };

@@ -39,8 +39,8 @@ zig build check      # the whole test suite: 23 OS tests under QEMU (+6 again on
 zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (intermittent failures)
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
-zig build -Darch=x86_64 run   # the x86_64 port (stage 3: user mode; no PCIe or IOMMU yet) on OVMF + Limine, KVM where available
-zig build -Darch=x86_64 check # its drills so far: the ten that need no device
+zig build -Darch=x86_64 run   # the x86_64 port (stage 4: PCIe; no IOMMU or hypervisor yet) on OVMF + Limine, KVM where available
+zig build -Darch=x86_64 check # its gate: 19 of the 23 drills (all but vm, guest, vmnode, smmu)
 ```
 
 The x86_64 boot wants Limine (`BOOTX64.EFI` under the host's share

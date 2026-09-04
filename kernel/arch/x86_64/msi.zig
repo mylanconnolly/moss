@@ -28,6 +28,11 @@ pub fn route(device_id: u32) ?u32 {
     return v;
 }
 
+/// The data word a device writes with its message: the vector.
+pub fn data(intid: u32) u32 {
+    return intid;
+}
+
 pub fn doorbellPage() u64 {
     return 0xfee0_0000;
 }

@@ -224,7 +224,9 @@ pub fn windowMap(window: u64, page_off: u64, pages: u64) IpcResult {
 }
 
 /// device_register(ecam, sid, kind, bar_pa, bar_len, pin|bar_index<<8):
-/// data[0] = device handle, data[1] = LPI (0 = none), data[2] = doorbell.
+/// data[0] = device handle, data[1] = the message interrupt id (0 =
+/// none), data[2] = the doorbell address, data[3] = the data word the
+/// device writes to it.
 pub fn deviceRegister(ecam: u64, sid: u64, kind: u64, bar_pa: u64, bar_len: u64, pin_bar: u64) IpcResult {
     return syscall6(.device_register, ecam, sid, kind, bar_pa, bar_len, pin_bar);
 }

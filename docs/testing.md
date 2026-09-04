@@ -313,10 +313,10 @@ Verify in QEMU rather than reason from memory.
   per drill under `zig-out/check/esp-<name>/` holds `BOOTX64.EFI`, the
   kernel ELF and a `limine.conf` with the drill's boot arguments, and
   QEMU presents it as a FAT volume on virtio-blk; OVMF's variable store
-  is a scratch copy per drill. The drills that need no device run
-  there (panic, fault, sched, pan, domain, ipc, init, sandbox, flap,
-  cpu), with the port's own fault-dump markers; the rest wait for the
-  port's PCIe stage.
+  is a scratch copy per drill (per node, for the multi-node drills,
+  each labelled `<name>-nodeN`). Nineteen drills run there — all but
+  vm, guest, vmnode (the aarch64 hypervisor) and smmu (the port has no
+  IOMMU yet) — with the port's own fault-dump markers.
 - Reproduction of a timing race depends on host conditions: several
   teardown races showed only on the first run after a build, with a
   fresh disk image, and never under added logging. The soak and the

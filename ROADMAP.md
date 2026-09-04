@@ -204,13 +204,15 @@ is a plan.
   `sysret`, a TSS and GS block per core, SMAP behind `uaccess`, TLB
   shootdown by IPI, the userspace seam in `user/usys.zig` so every
   program builds for the target; ten drills under KVM (panic, fault,
-  sched, pan, domain, ipc, init, sandbox, flap, cpu). Next, in order:
-  (4) the MCFG behind `platform.pcie`, the MSI data word to the
-  enumerator, virtio over PCIe — blk, fs, net, rng and the shell and
-  users drills follow; (5) VT-d or AMD-Vi behind `iommu` (the DMA-grant
-  design needs the IOMMU to walk the domain's own tables); (6) PCIDs,
-  the `+rs` pass on the port, a framebuffer console; SVM behind `vm`
-  last. Modern hardware only: no legacy
+  sched, pan, domain, ipc, init, sandbox, flap, cpu). ✅ Stage 4 (landed
+  2026-09-04): PCIe — ECAM from the MCFG, the BAR window from the host
+  bridge's resources, the MSI data word to the enumerator — and with it
+  every device drill: nineteen of the twenty-three run on the port,
+  all but the hypervisor's and the SMMU's. Next: (5) VT-d or AMD-Vi
+  behind `iommu` (the DMA-grant design needs the IOMMU to walk the
+  domain's own tables; until then device DMA on the port is
+  untranslated, as aarch64 without its SMMU); (6) PCIDs, the `+rs` pass
+  on the port, a framebuffer console; SVM behind `vm` last. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
   console for real machines is owed.
@@ -405,6 +407,17 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64, stage 4: PCIe** (2026-09-04): the ECAM from the MCFG,
+  the BAR window from the host bridge's DWordMemory resource in the
+  DSDT (read as bytes, like the S5 package), INTx by the slot swizzle
+  for a device without MSI-X; `device_register` answers the MSI data
+  word (`arch.msi.data`: the ITS event id on aarch64, the vector on
+  x86_64) and pcisvc writes it beside the doorbell. Every device drill
+  passed on the first run — rng, blk, fs, net, shell, users, login,
+  fabric, flogin — so the x86_64 gate is nineteen drills, all but the
+  hypervisor's and the SMMU's. The runner labels each node of a
+  multi-node drill (its own boot directory and variable store) and
+  carries every drill's boot arguments through the port-aware base.
 - ✅ **x86_64, stage 3: user mode** (2026-09-04): a per-core block at
   the GS base (the scheduler pointer, the kernel stack, the TSS, the
   GDT), `syscall` into a trap-shaped frame and `sysretq` out, `iretq`

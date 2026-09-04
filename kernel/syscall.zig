@@ -210,6 +210,7 @@ fn sysDeviceRegister(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     frame.set(1, @bitCast(dh));
     frame.set(2, reg.lpi);
     frame.set(3, if (reg.lpi != 0) arch.msi.translater() else 0);
+    frame.set(4, if (reg.lpi != 0) arch.msi.data(reg.lpi) else 0);
     return errno(.ok);
 }
 

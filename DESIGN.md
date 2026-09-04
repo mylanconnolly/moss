@@ -2194,11 +2194,36 @@ from STAR; AMD's does not; the base in STAR carries RPL 3 already
 report prints the words at the faulting stack pointer now, because
 a refused return names itself there.
 
-What the next stages owe: the MCFG behind `platform.pcie` and the MSI
-data word to the enumerator (virtio over PCIe: blk, fs, net, rng, the
-shell and users drills), an IOMMU (VT-d or AMD-Vi) walking the
-domain's tables, PCIDs, the `+rs` pass for the port's drills, a
-framebuffer console.
+### The x86_64 port, stage 4: PCIe (as built, 2026-09-04)
+
+The PCIe host comes from ACPI: the ECAM base and bus range from the
+MCFG, the window BARs may be placed in from the host bridge's
+resources in the DSDT — the largest 32-bit DWordMemory descriptor above
+the first megabyte, read as bytes (type 0x87, length, resource type,
+min, max, length), no interpreter, as the S5 package is — and INTx
+lines by the conventional slot swizzle onto GSIs 16..23, which nothing
+uses: the enumerator programs MSI-X. The one addition the enumerator
+needed is the data word: an ITS takes an event id (0) where the local
+APIC takes the vector, so `device_register` answers a fourth word,
+`arch.msi.data(intid)`, and pcisvc writes it into the MSI-X entry
+beside the doorbell address. Nothing else changed: the kernel's device
+table, the window capabilities, `dma_alloc` (device address = physical
+address without an IOMMU, as the aarch64 port without its SMMU), the
+virtio drivers, the filesystem, the network stack, the fabric — every
+drill that needs a device passed the first time it ran: rng, blk, fs
+and net, then shell, users, login, the three-node fabric and the
+fabric login. The x86_64 gate is nineteen drills, everything but the
+aarch64 hypervisor's three and the SMMU's, in three minutes under KVM.
+
+The runner routes every drill's boot arguments through the port-aware
+base builder (the loader's config carries them on x86_64, `-append` on
+aarch64) and labels each node of a multi-node drill, since each gets
+its own boot directory and variable store.
+
+What the next stages owe: an IOMMU (VT-d or AMD-Vi) walking the
+domain's tables, so DMA is confined as the SMMU confines it on
+aarch64; PCIDs; the `+rs` pass for the port's drills; a framebuffer
+console; a hypervisor behind `vm` if SVM ever matters.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

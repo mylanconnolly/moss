@@ -870,7 +870,9 @@ pub fn build(b: *std.Build) void {
     // The x86_64 port's drills so far: everything that needs no device
     // (PCIe is the port's next stage). The runner boots them through OVMF
     // and Limine.
-    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu" };
+    // Every drill but the aarch64 hypervisor's (vm, guest, vmnode) and the
+    // SMMU's, which wait for the port's IOMMU.
+    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin" };
     if (arch == .x86_64) {
         run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
         for (x86_variants) |vn| _ = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);

@@ -95,6 +95,43 @@ pub fn fadt() ?Fadt {
     return .{ .pm1a_cnt = rd32(b, 64), .pm1b_cnt = rd32(b, 68), .dsdt = dsdt };
 }
 
+/// The MCFG: the ECAM base of segment 0 and the buses it covers.
+pub const Mcfg = struct { base: u64, start_bus: u8, end_bus: u8 };
+
+pub fn mcfg() ?Mcfg {
+    const pa = find("MCFG") orelse return null;
+    const b = bytes(pa);
+    if (b.len < 44 + 16) return null;
+    // Header (36), reserved (8), then 16-byte allocations.
+    const e = b[44..][0..16];
+    return .{
+        .base = std.mem.readInt(u64, e[0..8], .little),
+        .start_bus = e[10],
+        .end_bus = e[11],
+    };
+}
+
+/// The largest 32-bit memory range the DSDT's resource descriptors
+/// hand out (the host bridge's `_CRS`, a DWordMemory descriptor: 0x87,
+/// length, resource type 0, flags, granularity, min, max, translation,
+/// length) above the first megabyte — where BARs may be placed.
+pub fn pciWindow(dsdt_pa: u64) ?Reg {
+    const b = bytes(dsdt_pa);
+    var best: ?Reg = null;
+    var i: usize = 0;
+    while (i + 26 <= b.len) : (i += 1) {
+        if (b[i] != 0x87 or b[i + 1] != 0x17 or b[i + 2] != 0x00 or b[i + 3] != 0x00) continue;
+        const min = std.mem.readInt(u32, b[i + 10 ..][0..4], .little);
+        const max = std.mem.readInt(u32, b[i + 14 ..][0..4], .little);
+        const len = std.mem.readInt(u32, b[i + 22 ..][0..4], .little);
+        if (min < (1 << 20) or max <= min or len == 0) continue;
+        if (best == null or len > best.?.size) best = .{ .base = min, .size = len };
+    }
+    return best;
+}
+
+pub const Reg = struct { base: u64, size: u64 };
+
 /// SLP_TYPa for S5 from the DSDT's `_S5_` package: `08 '_S5_' 12 <len>
 /// <n> [0a] typa [0a] typb ...` — the one AML shape firmware emits for
 /// it, read without an interpreter.
