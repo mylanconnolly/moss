@@ -292,28 +292,25 @@ fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         .{ .req = "GET /nope HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "HTTP/1.1 404 Not Found", .expect2 = "no such page" },
     };
     for (probes, 0..) |p, i| {
-        var fd: ?std.posix.fd_t = null;
+        var conn: ?Io.net.Stream = null;
         for (0..50) |_| {
-            fd = tcpConnect(http_port) catch {
+            conn = tcpConnect(http_port) catch {
                 sleepMs(poll_ms);
                 polls.* += 1;
                 continue;
             };
             break;
         }
-        const sock = fd orelse {
+        const stream = conn orelse {
             reportFailure(spec.name, "could not connect to the script's http server", log_path);
             return false;
         };
-        defer _ = std.c.close(sock);
-        sockSend(sock, p.req);
+        defer stream.close(io);
+        sockSend(stream, p.req);
         var resp: std.ArrayList(u8) = .empty;
-        var chunk: [4096]u8 = undefined;
-        while (true) {
-            const k = std.c.read(sock, &chunk, chunk.len);
-            if (k <= 0) break;
-            try resp.appendSlice(gpa, chunk[0..@intCast(k)]);
-        }
+        var rbuf: [4096]u8 = undefined;
+        var reader = stream.reader(io, &rbuf);
+        reader.interface.appendRemainingUnlimited(gpa, &resp) catch {};
         if (std.mem.indexOf(u8, resp.items, p.expect) == null or std.mem.indexOf(u8, resp.items, p.expect2) == null) {
             std.debug.print("[FAIL] {s}: http probe {d} got:\n{s}\n", .{ spec.name, i, resp.items });
             reportFailure(spec.name, "an http probe answered wrong", log_path);
@@ -440,7 +437,7 @@ fn joinerArgs(log_path: []const u8, bin: []const u8, port: []const u8, append: [
 /// socket into a shared buffer the script polls — same poll-with-timeout
 /// shape as the log watching.
 const ConsoleTap = struct {
-    fd: std.posix.fd_t,
+    stream: Io.net.Stream,
     buf: [1 << 16]u8 = undefined,
     /// Reader thread appends bytes then releases len; the main thread
     /// acquires len and scans past its discard watermark. Single writer,
@@ -451,7 +448,7 @@ const ConsoleTap = struct {
     fn readerLoop(t: *ConsoleTap) void {
         var chunk: [1024]u8 = undefined;
         while (true) {
-            const n = std.posix.read(t.fd, &chunk) catch break;
+            const n = std.posix.read(t.stream.socket.handle, &chunk) catch break;
             if (n == 0) break;
             const old = t.len.load(.monotonic);
             const k = @min(n, t.buf.len - old);
@@ -578,7 +575,7 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
     defer child.kill(io);
 
     // Connect (QEMU binds the chardev at startup).
-    var fd: ?std.posix.fd_t = null;
+    var fd: ?Io.net.Stream = null;
     for (0..50) |_| {
         fd = tcpConnect(shell_port) catch {
             sleepMs(100);
@@ -592,7 +589,7 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
         return false;
     };
     var tap = try gpa.create(ConsoleTap);
-    tap.* = .{ .fd = sock };
+    tap.* = .{ .stream = sock };
     const th = try std.Thread.spawn(.{}, ConsoleTap.readerLoop, .{tap});
     th.detach();
 
@@ -710,7 +707,7 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
 
     var taps: [2]*ConsoleTap = undefined;
     for (ports, 0..) |port, i| {
-        var fd: ?std.posix.fd_t = null;
+        var fd: ?Io.net.Stream = null;
         for (0..50) |_| {
             fd = tcpConnect(port) catch {
                 sleepMs(100);
@@ -724,7 +721,7 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
             return false;
         };
         taps[i] = try gpa.create(ConsoleTap);
-        taps[i].* = .{ .fd = sock };
+        taps[i].* = .{ .stream = sock };
         const th = try std.Thread.spawn(.{}, ConsoleTap.readerLoop, .{taps[i]});
         th.detach();
     }
@@ -737,8 +734,8 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
     for (&login_script) |step| {
         const tap = taps[step.con];
         tap.clear();
-        sockSend(tap.fd, step.send);
-        sockSend(tap.fd, "\r");
+        sockSend(tap.stream, step.send);
+        sockSend(tap.stream, "\r");
         const got = step.expect.len == 0 or waitFor(tap, step.expect, 600, polls);
         const prompted = step.prompt.len == 0 or waitFor(tap, step.prompt, 600, polls);
         if (!(got and prompted)) {
@@ -845,7 +842,7 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         return false;
     }
 
-    var fd: ?std.posix.fd_t = null;
+    var fd: ?Io.net.Stream = null;
     for (0..50) |_| {
         fd = tcpConnect(port) catch {
             sleepMs(100);
@@ -859,7 +856,7 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         return false;
     };
     const tap = try gpa.create(ConsoleTap);
-    tap.* = .{ .fd = sock };
+    tap.* = .{ .stream = sock };
     const th = try std.Thread.spawn(.{}, ConsoleTap.readerLoop, .{tap});
     th.detach();
     if (!waitFor(tap, login_prompt, 600, polls)) {
@@ -868,8 +865,8 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
     }
     for (script) |step| {
         tap.clear();
-        sockSend(tap.fd, step.send);
-        sockSend(tap.fd, "\r");
+        sockSend(tap.stream, step.send);
+        sockSend(tap.stream, "\r");
         const got = step.expect.len == 0 or waitFor(tap, step.expect, 900, polls);
         if (!got) {
             std.debug.print("[FAIL] {s}: node 2 console step '{s}' (boot {d}) missing '{s}'\n", .{ spec.name, step.send, boot, step.expect });
@@ -899,19 +896,16 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
     return true;
 }
 
-fn sockSend(fd: std.posix.fd_t, bytes: []const u8) void {
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const n = std.c.write(fd, bytes.ptr + off, bytes.len - off);
-        if (n <= 0) return;
-        off += @intCast(n);
-    }
+fn sockSend(stream: Io.net.Stream, bytes: []const u8) void {
+    var wbuf: [4096]u8 = undefined;
+    var writer = stream.writer(io, &wbuf);
+    writer.interface.writeAll(bytes) catch return;
+    writer.interface.flush() catch return;
 }
 
-fn tcpConnect(port: u16) !std.posix.fd_t {
+fn tcpConnect(port: u16) !Io.net.Stream {
     const addr = try Io.net.IpAddress.parse("127.0.0.1", port);
-    const stream = try addr.connect(io, .{ .mode = .stream });
-    return stream.socket.handle;
+    return addr.connect(io, .{ .mode = .stream });
 }
 
 /// Poll the console tap for a pattern; `ticks` are 100ms polls.

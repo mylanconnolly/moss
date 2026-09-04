@@ -351,6 +351,14 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - **Doorbells.** One notification per socket; `watch` replaces an
   earlier bell (dropping it) and rings immediately if there is already
   news. The bell is dropped with the socket.
+- **A connection is `established` or `close_wait`.** A client polling
+  `tcp_status` after `tcp_connect`, and `tcp_accept` looking at the
+  head of a backlog, must take both: a peer that answers and closes
+  at once (a canned server, a probe) can move the socket through
+  `established` into `close_wait` between two polls, and a loop that
+  waits for `established` alone then sleeps on a bell that never
+  rings again (found 2026-09-04 on the first Linux host, whose faster
+  QEMU made the ordering likely).
 
 ## Known limits and bugs
 

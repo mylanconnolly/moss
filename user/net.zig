@@ -1190,7 +1190,9 @@ fn opAccept(badge: u64, idx: u64) shared.NetResp {
     }
     if (l.backlog_n == 0) return nerr(.would_block);
     const ci: u64 = l.backlog[0];
-    if (socks[ci].state != .established) return nerr(.would_block);
+    // A head that the peer already closed (close_wait) is still a
+    // connection with data to read; only an unfinished handshake waits.
+    if (socks[ci].state != .established and socks[ci].state != .close_wait) return nerr(.would_block);
     backlogPop(l);
     return .{ .num = .{ .n = ci } };
 }

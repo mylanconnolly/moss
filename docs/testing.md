@@ -299,9 +299,15 @@ Verify in QEMU rather than reason from memory.
 
 ## Known limits and bugs
 
-- The gate takes about two minutes and cannot run drills in parallel;
+- The gate takes about two minutes on the M3 (four on an x86_64 host,
+  where aarch64 QEMU is TCG only) and cannot run drills in parallel;
   the cluster, shell and login drills bind fixed TCP ports (31901 to
   31905), so two gates cannot run at once on one machine.
+- The runner is host-portable Zig (`std.Io` streams, no libc): it
+  first ran on Linux on 2026-09-04, when its `std.c` socket calls,
+  linked implicitly only on macOS, were replaced. `run-hvf` exists only
+  on Apple Silicon; `run-login`'s second seat needs a `nc` (or any
+  TCP client) on the host.
 - Reproduction of a timing race depends on host conditions: several
   teardown races showed only on the first run after a build, with a
   fresh disk image, and never under added logging. The soak and the

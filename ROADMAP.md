@@ -375,6 +375,20 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **The gate on a Linux host** (2026-09-04): the first run on an
+  x86_64 machine (Framework 16, Gentoo). The runner's socket calls
+  went through `std.c`, which macOS links implicitly and Linux does
+  not; they are `std.Io.net.Stream` reads and writes now, host-neutral.
+  Found on the first full gate: the `net` drill hung in `fetch` — the
+  capture showed the handshake done and the canned server's reply and
+  FIN in, but the script's request never sent. `connect` (both the
+  language's and the HTTP host's) polled `tcp_status` until
+  `established` and treated `close_wait` as "keep waiting", so a peer
+  that answers and closes before the next poll parked the client on a
+  bell no one would ring again; `tcp_accept` had the same hole for a
+  backlog head. Both take `close_wait` as connected now. The race hit
+  once in 33 runs here, so the fix closes the hole the capture shows
+  without a deterministic reproduction.
 - ✅ **Users, stage 4: one home, wherever you log in** (done,
   2026-09-04): a fabric login leases the user's home from the node that
   holds it — a challenge, a signature under the identity key through

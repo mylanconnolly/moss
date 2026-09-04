@@ -80,7 +80,9 @@ pub const Net = struct {
                 .num => |x| x.n,
                 else => break,
             };
-            if (code == @intFromEnum(shared.TcpState.established)) return .{ .sock = sock };
+            // Established, or already past it: a peer that answered and
+            // closed before this poll (close_wait) is a connection too.
+            if (code == @intFromEnum(shared.TcpState.established) or code == @intFromEnum(shared.TcpState.close_wait)) return .{ .sock = sock };
             if (code == @intFromEnum(shared.TcpState.closed)) break;
             n.wait();
         }
@@ -231,7 +233,7 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
                 .num => |x| x.n,
                 else => break,
             };
-            if (code == @intFromEnum(shared.TcpState.established)) return try okResult(it, try it.newHandle("socket", sock, n, dropSock));
+            if (code == @intFromEnum(shared.TcpState.established) or code == @intFromEnum(shared.TcpState.close_wait)) return try okResult(it, try it.newHandle("socket", sock, n, dropSock));
             if (code == @intFromEnum(shared.TcpState.closed)) break;
             n.wait();
         }

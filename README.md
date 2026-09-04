@@ -31,7 +31,8 @@ working documents it points into:
 ## Quickstart
 
 Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
-(`brew install qemu`).
+(`brew install qemu` on macOS; `qemu-system-aarch64` from your distro on
+Linux, where every boot is TCG). `run-login`'s second seat wants a `nc`.
 
 ```sh
 zig build check      # the whole test suite: 23 OS tests under QEMU (+6 again on a ReleaseSafe kernel) + host unit tests (~2 min)
