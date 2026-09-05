@@ -941,9 +941,12 @@ fn unitForService(id: u64) ?*Unit {
 /// as a content-addressed file (skipped when present — the name IS the
 /// content), with its manifest beside it: `img/<name>.msh` names the
 /// digest and what the program is handed (grant, give — from the
-/// archive's unit file of the same name, when there is one). Init is
-/// the installer because it holds the archive and the catalog; fssvc
-/// knows nothing about programs and msh only reads.
+/// archive's unit file of the same name, when there is one). The
+/// archive's library (`lib/<name>.msh`, modules a script reaches with
+/// `use name`) is installed the same way: the source under its digest,
+/// a manifest `{ source: "<digest>" }` beside it. Init is the installer
+/// because it holds the archive and the catalog; fssvc knows nothing
+/// about programs and msh only reads.
 fn installImages(view: u64) u64 {
     const b = fsc.attachBuf(view);
     const buf: [*]u8 = @ptrFromInt(b.va);
@@ -985,6 +988,30 @@ fn installImages(view: u64) u64 {
         const image = shared.marcFind(blob, shared.imagePath(id)) orelse continue;
         const digest = loader.digestHex(image);
         writeManifest(view, buf, uname, &digest);
+    }
+    // The library: each module's text under its digest, and a manifest
+    // naming it as a source.
+    it = shared.marcIter(blob);
+    while (it.next()) |e| {
+        if (!std.mem.startsWith(u8, e.path, shared.lib_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
+        const mname = e.path[shared.lib_dir.len .. e.path.len - shared.unit_ext.len];
+        const digest = loader.digestHex(e.data);
+        var path: [4 + shared.img_digest_hex_len]u8 = undefined;
+        @memcpy(path[0..4], "img/");
+        @memcpy(path[4..], &digest);
+        if (fsc.fsStat(view, buf, &path) == null) {
+            if (writeFile(view, buf, &path, e.data)) installed += 1;
+        }
+        var scratch: [4 << 10]u8 = undefined;
+        var sfba = std.heap.FixedBufferAllocator.init(&scratch);
+        const a = sfba.allocator();
+        const rec: Value = .{ .record = .{ .keys = &.{"source"}, .vals = &.{.{ .str = &digest }} } };
+        var out: std.ArrayList(u8) = .empty;
+        mshl.writeData(rec, a, &out) catch continue;
+        out.append(a, '\n') catch continue;
+        var mpath: [64]u8 = undefined;
+        const mp = cat3(&mpath, "img/", mname, shared.img_manifest_ext);
+        _ = writeFile(view, buf, mp, out.items);
     }
     _ = fsc.fsSync(view);
     if (installed > 0) _ = usys.log(glog, "init: installed images into img/ (content-addressed)");

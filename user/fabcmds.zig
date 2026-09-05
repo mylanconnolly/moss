@@ -32,18 +32,22 @@ fn okResult(it: *mshl.Interp, v: Value) mshl.Error!Value {
     return .{ .result = r };
 }
 
-fn fabErrName(code: u64) []const u8 {
-    return switch (code) {
-        @intFromEnum(shared.FabErr.no_peer) => "no such member",
-        @intFromEnum(shared.FabErr.timeout) => "timed out",
-        @intFromEnum(shared.FabErr.disconnected) => "disconnected",
-        @intFromEnum(shared.FabErr.refused) => "refused",
-        @intFromEnum(shared.FabErr.no_space) => "the fabric's tables are full",
-        @intFromEnum(shared.FabErr.no_identity) => "this node has no identity",
-        @intFromEnum(shared.FabErr.no_entropy) => "no entropy yet",
-        @intFromEnum(shared.FabErr.denied) => "denied: this node's certificate does not allow it",
-        else => "fabric error",
-    };
+/// The fabric's error, as the word a script matches on.
+pub fn fabErrName(code: u64) []const u8 {
+    const e = std.enums.fromInt(shared.FabErr, code) orelse return "error";
+    return @tagName(e);
+}
+
+const Shape = mshl.Shape;
+const stage_shape = blk: {
+    const alts = [_]Shape{ .function, .string };
+    break :blk Shape{ .one_of = &alts };
+};
+const remote_result = mshl.resultShape(.any, .string);
+
+pub fn signature(name: []const u8) ?mshl.Signature {
+    if (!std.mem.eql(u8, name, "remote")) return null;
+    return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "stage", .shape = stage_shape } }, .input = .{ .optional = .any }, .ret = remote_result };
 }
 
 /// null = not a fabric command.

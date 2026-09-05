@@ -3,8 +3,9 @@
 //! table is an array of objects; nothing is null); `decode` reads
 //! objects as records (keys in the order written), arrays as lists,
 //! integers as ints, strings (with \u escapes, surrogate pairs joined)
-//! as UTF-8 strings. Numbers with a fraction or exponent are refused:
-//! the language has no floats yet, and a rounded number is a lie.
+//! as UTF-8 strings, numbers with a fraction or an exponent as floats
+//! (an integer that does not fit an int is a float too, and says so by
+//! its type).
 
 const std = @import("std");
 const mshl = @import("mshl.zig");
@@ -18,6 +19,10 @@ pub fn encode(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!voi
         .int => |i| {
             var buf: [24]u8 = undefined;
             try out.appendSlice(a, std.fmt.bufPrint(&buf, "{d}", .{i}) catch "0");
+        },
+        .float => |f| {
+            if (!std.math.isFinite(f)) return Error.Runtime; // JSON has no inf or nan
+            try out.appendSlice(a, try mshl.floatText(a, f));
         },
         .str => |s| try writeStr(s, a, out),
         .list => |l| {
@@ -37,7 +42,7 @@ pub fn encode(v: Value, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!voi
             }
             try out.append(a, ']');
         },
-        .bytes, .func, .result, .handle => return Error.Runtime,
+        .bytes, .func, .result, .handle, .shape => return Error.Runtime,
     }
 }
 
@@ -69,7 +74,7 @@ fn writeStr(s: []const u8, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!
     try out.append(a, '"');
 }
 
-pub const DecodeError = error{ OutOfMemory, BadJson, Float, Utf8 };
+pub const DecodeError = error{ OutOfMemory, BadJson, Utf8 };
 
 /// One JSON value; anything after it but whitespace is an error.
 pub fn decode(a: std.mem.Allocator, text: []const u8) DecodeError!Value {
@@ -186,9 +191,25 @@ const Parser = struct {
         if (p.peek() == '-') p.pos += 1;
         if (p.peek() == null or !std.ascii.isDigit(p.src[p.pos])) return error.BadJson;
         while (p.pos < p.src.len and std.ascii.isDigit(p.src[p.pos])) p.pos += 1;
-        if (p.pos < p.src.len and (p.src[p.pos] == '.' or p.src[p.pos] == 'e' or p.src[p.pos] == 'E')) return error.Float;
-        const n = std.fmt.parseInt(i64, p.src[start..p.pos], 10) catch return error.BadJson;
-        return .{ .int = n };
+        var is_float = false;
+        if (p.pos < p.src.len and p.src[p.pos] == '.') {
+            is_float = true;
+            p.pos += 1;
+            if (p.peek() == null or !std.ascii.isDigit(p.src[p.pos])) return error.BadJson;
+            while (p.pos < p.src.len and std.ascii.isDigit(p.src[p.pos])) p.pos += 1;
+        }
+        if (p.pos < p.src.len and (p.src[p.pos] == 'e' or p.src[p.pos] == 'E')) {
+            is_float = true;
+            p.pos += 1;
+            if (p.peek() == '+' or p.peek() == '-') p.pos += 1;
+            if (p.peek() == null or !std.ascii.isDigit(p.src[p.pos])) return error.BadJson;
+            while (p.pos < p.src.len and std.ascii.isDigit(p.src[p.pos])) p.pos += 1;
+        }
+        const text = p.src[start..p.pos];
+        if (!is_float) {
+            if (std.fmt.parseInt(i64, text, 10)) |n| return .{ .int = n } else |_| {}
+        }
+        return .{ .float = std.fmt.parseFloat(f64, text) catch return error.BadJson };
     }
 
     fn hex4(p: *Parser) DecodeError!u16 {
@@ -259,7 +280,7 @@ test "json: encode the data subset" {
     try std.testing.expectError(Error.Runtime, encode(.{ .bytes = "x" }, a, &out));
 }
 
-test "json: decode objects, arrays, strings with escapes, and refuse floats" {
+test "json: decode objects, arrays, strings with escapes, and floats" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -269,8 +290,11 @@ test "json: decode objects, arrays, strings with escapes, and refuse floats" {
     try std.testing.expect(v.record.get("a").?.list[2].record.get("b").? == .nothing);
     try std.testing.expectEqualStrings("café 😀 \"q\"", v.record.get("s").?.str);
     try std.testing.expect(v.record.get("t").?.bool);
-    try std.testing.expectError(error.Float, decode(a, "1.5"));
-    try std.testing.expectError(error.Float, decode(a, "[1e3]"));
+    try std.testing.expectEqual(@as(f64, 1.5), (try decode(a, "1.5")).float);
+    try std.testing.expectEqual(@as(f64, 1000), (try decode(a, "[1e3]")).list[0].float);
+    try std.testing.expectEqual(@as(f64, -0.25), (try decode(a, "-2.5E-1")).float);
+    try std.testing.expectError(error.BadJson, decode(a, "1."));
+    try std.testing.expectError(error.BadJson, decode(a, "1e"));
     try std.testing.expectError(error.BadJson, decode(a, "{\"a\":1,}"));
     try std.testing.expectError(error.BadJson, decode(a, "[1] x"));
     try std.testing.expectError(error.BadJson, decode(a, "\"\\ud83d\""));

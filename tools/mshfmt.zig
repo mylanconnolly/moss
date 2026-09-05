@@ -34,7 +34,7 @@ const Leaf = struct {
     /// of neighbouring one-line fields line up.
     pad: u32 = 0,
 
-    const Kind = enum { open, close, comma, semi, pipe, op, assign, arrow, dot, unwrap, key, word, comment, string, dollar_immediate, redirect };
+    const Kind = enum { open, close, comma, semi, pipe, op, assign, arrow, dot, unwrap, key, colon, word, comment, string, dollar_immediate, redirect };
 };
 
 const Formatter = struct {
@@ -179,10 +179,12 @@ const Formatter = struct {
             '?' => return .unwrap,
             '=' => return .assign,
             '>' => return .redirect,
+            ':' => return .colon, // `match v: shape`
             '\n' => return .semi,
             else => {},
         };
         if (std.mem.eql(u8, text, "=>")) return .arrow;
+        if (std.mem.eql(u8, text, "->")) return .op;
         if (std.mem.eql(u8, text, "==") or std.mem.eql(u8, text, "!=") or std.mem.eql(u8, text, "<") or std.mem.eql(u8, text, "<=") or
             std.mem.eql(u8, text, ">=") or std.mem.eql(u8, text, "+") or std.mem.eql(u8, text, "-") or std.mem.eql(u8, text, "*") or
             std.mem.eql(u8, text, "/") or std.mem.eql(u8, text, "%")) return .op;
@@ -234,7 +236,7 @@ const Formatter = struct {
         if (p.kind == .comment) return true;
         if (p.kind == .dot or n.kind == .dot) return false;
         if (n.kind == .unwrap) return false;
-        if (n.kind == .comma or n.kind == .semi) return false;
+        if (n.kind == .comma or n.kind == .semi or n.kind == .colon) return false;
         if (p.kind == .open) return std.mem.eql(u8, p.text, "{"); // `{ a: 1 }`, `[1]`, `(x)`
         if (n.kind == .close) return std.mem.eql(u8, n.text, "}");
         if (p.kind == .dollar_immediate) return false;

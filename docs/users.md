@@ -354,7 +354,7 @@ alice's and bob's records from the archive's desired state (seeds and
 salts from the kernel's entropy pool) and the system settings file; the driver then has a wrong
 passphrase and an unknown user refused with the same answer, opens both
 sessions at once, and waits for each to exit clean. Each session, from
-inside, writes into its home, finds that `..` is an error and that
+inside, writes into its home, finds that `..` is `err bad_path` and that
 `conf/users/alice.msh` does not exist rather than being forbidden, and
 computes its effective settings: theme from the user layer, tab width
 from the system, telemetry locked. The driver, through its own read-only
@@ -366,7 +366,7 @@ kernel object is back.
 
 The `login` drill drives two consoles over TCP: alice's wrong passphrase
 refused, alice and bob in at once, each home the whole filesystem (`ls`
-shows only one's own files, `cat ../b.txt` is an error), both shells
+shows only one's own files, `cat ../b.txt` is `err bad_path`), both shells
 visible in `ps` from either seat, alice out and back in to find her
 file, `run ps` from the system store inside her session, `install ps`
 and the home's own store listing it, then both out. The manager exits

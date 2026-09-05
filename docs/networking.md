@@ -188,15 +188,17 @@ let l = (listen 7778)?                 # ok <listener 3>
 let c = (connect ::1 7778)?            # loopback: the handshake completes inside the call
 let a = (accept $l)?                   # ok <socket 5>
 match (recv $a) { ok $b => …; err $e => echo "peer: $e" }
-status $a                              # "established", "peer closed", "closed" …
+status $a                              # established, peer_closed, closed, listening …
 ```
 
 Every command the network can fail answers a **result** — `ok` with the
 socket, the count sent, or the bytes received; `err` with the reason
-(`refused`, `denied by the view`, `closed`, `timed out`, `no socket
-left`) — so a script decides with `?` or `match` and never hangs on a
-dead peer: `recv` on a socket whose peer closed with nothing buffered
-is `err closed`. Addresses are dotted IPv4 (carried v4-mapped) or IPv6
+as a word from the protocol's own enumeration (`refused`, `denied`,
+`closed`, `bad`, `no_space`), so a script matches on it (`err closed
+=> …`) — and never hangs on a dead peer: `recv` on a socket whose peer
+closed with nothing buffered is `err closed`. Each command declares
+what it takes and answers (`signature connect`), so a port that is not
+an int is refused before the call. Addresses are dotted IPv4 (carried v4-mapped) or IPv6
 with one `::`. `send` moves a string or bytes in 512-byte pieces;
 `recv` returns up to 32 KB (`recv $s 100` asks for fewer).
 Waiting — for the handshake, for data, for room to send, for a
@@ -226,7 +228,7 @@ HTTP/1.1 — the small part a script needs, parsed and formatted in
 def handler [req] {
   match $req.path {
     "/hello" => "hello from moss"                       # 200 text/plain
-    "/items" => (ls data | select name size)            # 200 application/json
+    "/items" => (ls data? | select name size)           # 200 application/json
     "/echo"  => { status: 200, headers: { x-method: $req.method }, body: $req.body }
     _        => { status: 404, body: "no such page" }
   }
@@ -252,8 +254,7 @@ returns decides the response: a record with `status`, `headers` or
 `body` is explicit (`body` may be text, bytes, or data); a string is
 `200 text/plain`; a list, record or table is `200 application/json`
 (`to-json` / `from-json` are the language's own way to and from JSON,
-tables included; JSON numbers with a fraction or exponent are refused
-because the language has no floats). A handler that fails, or returns
+tables included, floats as floats). A handler that fails, or returns
 an `err`, answers `500` with the message and the server goes on. Every
 response carries `Content-Length` and `Connection: close`, and the
 socket is closed after it: one request per connection, no keep-alive,

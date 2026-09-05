@@ -1336,6 +1336,9 @@ pub const session_unit_dir = "conf/session/";
 /// and wire every program (see boot/conf/units/ and DESIGN).
 pub const unit_dir = "conf/units/";
 pub const unit_ext = ".msh";
+/// The archive's library: modules a script reaches with `use NAME`,
+/// installed into the store as content-addressed sources.
+pub const lib_dir = "lib/";
 
 test "marcFind walks an archive and misses cleanly" {
     var buf: [64]u8 = undefined;

@@ -464,7 +464,11 @@ fn joinerArgs(label: []const u8, log_path: []const u8, bin: []const u8, port: []
 /// shape as the log watching.
 const ConsoleTap = struct {
     stream: Io.net.Stream,
-    buf: [1 << 16]u8 = undefined,
+    /// Everything the console ever said in this session (a long script
+    /// with tables and help text runs past 64 KB; the first size did,
+    /// and every step after the overflow "hung").
+    buf: [1 << 22]u8 = undefined,
+    overflowed: bool = false,
     /// Reader thread appends bytes then releases len; the main thread
     /// acquires len and scans past its discard watermark. Single writer,
     /// single reader, append-only: no lock needed.
@@ -478,7 +482,11 @@ const ConsoleTap = struct {
             if (n == 0) break;
             const old = t.len.load(.monotonic);
             const k = @min(n, t.buf.len - old);
-            if (k == 0) break;
+            if (k == 0) {
+                t.overflowed = true;
+                std.debug.print("[FAIL] console tap overflowed ({d} bytes): the session said more than the tap holds\n", .{t.buf.len});
+                break;
+            }
             @memcpy(t.buf[old .. old + k], chunk[0..k]);
             t.len.store(old + k, .release);
         }
@@ -492,6 +500,15 @@ const ConsoleTap = struct {
         const end = t.len.load(.acquire);
         if (end <= t.start) return false;
         return std.mem.indexOf(u8, t.buf[t.start..end], pat) != null;
+    }
+
+    /// What the console said since the step began (for a failure
+    /// report: the step's own echo and whatever came back).
+    fn dumpRecent(t: *ConsoleTap) void {
+        const end = t.len.load(.acquire);
+        if (end <= t.start) return std.debug.print("       (the console said nothing)\n", .{});
+        const got = t.buf[t.start..end];
+        std.debug.print("       the console said: {s}\n", .{got[0..@min(got.len, 600)]});
     }
 
     /// The console line that contains `pat` (from the pattern to the end
@@ -527,57 +544,86 @@ const shell_script = [_]Step{
     .{ .send = "svc", .expect = "up" },
     .{ .send = "stop 1", .expect = "stopped" },
     .{ .send = "nodes", .expect = "up" },
-    .{ .send = "rspawn 9 9", .expect = "error: rspawn" },
+    .{ .send = "rspawn 9 9", .expect = "err no_peer" },
     .{ .send = "rm data/smoke/l", .expect = "" },
     .{ .send = "sync", .expect = "" },
     .{ .send = "rand | len", .expect = "32" },
-    .{ .send = "ls img | get name", .expect = "ps.msh" },
+    // What the world decides is a result: `?` unwraps it, `match` takes
+    // it apart, and an err is a word from the protocol.
+    .{ .send = "ls img? | get name", .expect = "ps.msh" },
+    .{ .send = "cat data/none", .expect = "err not_found" },
+    .{ .send = "match (cat data/none) { ok $t => $t; err not_found => \"no such file\"; err $e => $e }", .expect = "no such file" },
+    .{ .send = "ls | get name", .expect = "error: cannot take .name of a result" },
     // Programs return values: their tables compose with the language.
-    .{ .send = "run ps | where name == shell | get name", .expect = "shell" },
-    .{ .send = "run ls data/smoke | get name", .expect = "hi.txt" },
-    .{ .send = "run nope", .expect = "no such program" },
+    .{ .send = "run ps? | where name == shell | get name", .expect = "shell" },
+    .{ .send = "run ls data/smoke? | get name", .expect = "hi.txt" },
+    .{ .send = "run nope", .expect = "err not_found" },
     // The desired-state tool from the shell: users created once, then kept.
-    .{ .send = "run apply | where kind == user | len", .expect = "2" },
-    .{ .send = "run apply | where action == kept | len", .expect = "3" },
-    .{ .send = "ls conf/users | get name", .expect = "alice.msh" },
+    .{ .send = "run apply? | where kind == user | len", .expect = "2" },
+    .{ .send = "run apply? | where action == kept | len", .expect = "3" },
+    .{ .send = "ls conf/users? | get name", .expect = "alice.msh" },
     // Functions, data files, scripts (the startup script defined `alive`).
     .{ .send = "def twice [x] { $x * 2 }; twice 21", .expect = "42" },
     .{ .send = "alive | where name == fs | len", .expect = "1" },
-    .{ .send = "ls data/smoke | to-data | save data/l.msh", .expect = "" },
-    .{ .send = "open data/l.msh | from-data | get name", .expect = "hi.txt" },
+    .{ .send = "ls data/smoke? | to-data | save data/l.msh", .expect = "" },
+    .{ .send = "open data/l.msh? | from-data | get name", .expect = "hi.txt" },
     .{ .send = "write data/s.msh \"let n = 7; \\$n + 1000\"", .expect = "" },
     .{ .send = "source data/s.msh", .expect = "1007" },
     // The language: typed pipelines, variables, control flow, redirection.
-    .{ .send = "ls data/smoke | where size > 0 | get name", .expect = "hi.txt" },
-    .{ .send = "ls data/smoke | select name size", .expect = "hi.txt  26" },
-    .{ .send = "let n = (ls data/smoke | len); if $n == 1 { echo \"one file\" } else { echo many }", .expect = "one file" },
-    .{ .send = "for f in (ls data/smoke | get name) { echo \"file: $f\" }", .expect = "file: hi.txt" },
+    .{ .send = "ls data/smoke? | where size > 0 | get name", .expect = "hi.txt" },
+    .{ .send = "ls data/smoke? | select name size", .expect = "hi.txt  26" },
+    .{ .send = "let n = (ls data/smoke? | len); if $n == 1 { echo \"one file\" } else { echo many }", .expect = "one file" },
+    .{ .send = "for f in (ls data/smoke? | get name) { echo \"file: $f\" }", .expect = "file: hi.txt" },
     .{ .send = "let i = 0; while $i < 3 { let i = $i + 1 }; $i", .expect = "3" },
     .{ .send = "tree data", .expect = "hi.txt" },
-    .{ .send = "ls data/smoke | select name > data/listing.txt", .expect = "" },
+    .{ .send = "ls data/smoke? | select name > data/listing.txt", .expect = "" },
     .{ .send = "cat data/listing.txt", .expect = "hi.txt" },
     .{ .send = "echo hello world > data/hello.txt", .expect = "" },
-    .{ .send = "cat data/hello.txt | lines | first 1", .expect = "hello world" },
-    .{ .send = "(stat data/smoke).type == dir", .expect = "true" },
+    .{ .send = "cat data/hello.txt? | lines | first 1", .expect = "hello world" },
+    .{ .send = "(stat data/smoke)?.type == dir", .expect = "true" },
     // mshl v3: functions as values, results, match, modules, typing.
     .{ .send = "[1, 2, 3, 4] | map { $it * 2 } | reduce 0 { $acc + $it }", .expect = "20" },
-    .{ .send = "ls data/smoke | filter { $it.size > 0 } | map { $it.name }", .expect = "hi.txt" },
+    .{ .send = "ls data/smoke? | filter { $it.size > 0 } | map { $it.name }", .expect = "hi.txt" },
     .{ .send = "def adder [n] { fn [x] { $x + $n } }; let add5 = (adder 5); $add5 10", .expect = "15" },
     .{ .send = "match (int nope) { ok $n => $n; err $e => echo \"bad: $e\" }", .expect = "bad: not a number: nope" },
-    .{ .send = "match (try { cat data/none }) { ok _ => \"read\"; err $e => \"caught\" }", .expect = "caught" },
-    .{ .send = "def safe-cat [p] { ok (try { cat $p })? }; safe-cat data/smoke/hi.txt", .expect = "ok typed ipc" },
+    .{ .send = "match (try { frobnicate }) { ok _ => \"ran\"; err $e => \"caught: $e\" }", .expect = "caught: unknown command 'frobnicate'" },
+    .{ .send = "def first-line [p] { (cat $p)? | lines | first 1 }; first-line data/smoke/hi.txt", .expect = "typed ipc all the way down" },
+    .{ .send = "first-line data/none", .expect = "err not_found" },
     .{ .send = "write data/m.msh \"def double [x] { \\$x * 2 }; def quad [x] { double (double \\$x) }\"", .expect = "" },
     .{ .send = "let m = (use data/m.msh); $m.quad 4", .expect = "16" },
     .{ .send = "if 1 { echo x }", .expect = "error: if: condition is a int, not a bool" },
     .{ .send = "\"héllo\" | len", .expect = "5" },
+    // Floats: a second kind of number, never mixed with the first.
+    .{ .send = "1.5 * 4.0", .expect = "6.0" },
+    .{ .send = "(float (ls data/smoke? | get size | first 1).0)? / 4.0", .expect = "6.5" },
+    .{ .send = "1 + 1.5", .expect = "error: cannot add a int and a float" },
+    // Shapes: checked where they run; every host command has a signature.
+    .{ .send = "let e: { name: string, size: int } = (stat data/smoke/hi.txt)?; $e.size", .expect = "26" },
+    .{ .send = "let e: { name: int } = (stat data/smoke/hi.txt)?", .expect = "error: let: e.name is hi.txt, not int" },
+    .{ .send = "def size-of [p: string] -> int { (stat $p)?.size }; size-of data/smoke/hi.txt", .expect = "26" },
+    .{ .send = "size-of 3", .expect = "error: size-of: p is 3, not string" },
+    .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => \"a directory\"; file => \"a file\"; symlink => \"a link\" }", .expect = "a directory" },
+    .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => 1; file => 2 }", .expect = "error: match: the arms do not cover symlink" },
+    .{ .send = "stat 1", .expect = "error: stat: path is 1, not string" },
+    .{ .send = "ls | stat data", .expect = "error: stat: takes no input, got a result" },
+    .{ .send = "(signature stat).returns", .expect = "ok { name: string, type: file | dir | symlink, size: int, mtime: int } | err (denied | not_found | no_space | bad_path | bad_fd | exists | io | not_empty | bad_key)" },
+    .{ .send = "let S = shape (dir | file); $S", .expect = "dir | file" },
+    .{ .send = "(ls data/smoke? | check (signature ls).returns) | type", .expect = "result" },
+    // The library: a module from the store, installed from the archive.
+    .{ .send = "let math = (use math); [3, 1, 2] | $math.sum", .expect = "6" },
+    .{ .send = "$math.clamp 15 0 10", .expect = "10" },
+    .{ .send = "[1.0, 2.0, 6.0] | $math.mean", .expect = "3.0" },
+    .{ .send = "use nope", .expect = "error: use: nope: not_found" },
     // Scripts as programs: mshrun runs a script under a manifest and
     // returns its last value; its errors are its exit.
     .{ .send = "write data/s2.msh \"[1, 2, 3] | map { \\$it * 3 } | reduce 0 { \\$acc + \\$it }\"", .expect = "" },
     .{ .send = "run mshrun data/s2.msh", .expect = "18" },
-    .{ .send = "write data/s3.msh \"ls data/smoke | where size > 0\"", .expect = "" },
-    .{ .send = "run mshrun data/s3.msh | get name", .expect = "hi.txt" },
+    .{ .send = "write data/s3.msh \"ls data/smoke? | where size > 0\"", .expect = "" },
+    .{ .send = "run mshrun data/s3.msh? | get name", .expect = "hi.txt" },
     .{ .send = "write data/s4.msh \"frobnicate\"", .expect = "" },
     .{ .send = "run mshrun data/s4.msh", .expect = "unknown command 'frobnicate'" },
+    .{ .send = "write data/s5.msh \"let m = (use math); [4, 5] | \\$m.product\"", .expect = "" },
+    .{ .send = "run mshrun data/s5.msh", .expect = "20" },
     // The editor: tab completes a command, ctrl-c abandons the line.
     .{ .send = "mkd\t", .expect = "mkdir", .raw = true },
     .{ .send = "\x03", .expect = "^C", .raw = true },
@@ -644,6 +690,7 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
         const got = step.expect.len == 0 or waitFor(tap, step.expect, 300, polls);
         if (!(got and waitFor(tap, "msh> ", 300, polls))) {
             std.debug.print("[FAIL] {s}: console step '{s}' missing '{s}'\n", .{ spec.name, step.send, step.expect });
+            tap.dumpRecent();
             reportFailure(spec.name, "console script step failed", log_path);
             return false;
         }
@@ -677,14 +724,14 @@ const login_script = [_]LoginStep{
     // Each works in a home that is its whole filesystem.
     .{ .con = 0, .send = "mkdir notes; write notes/a.txt \"alice was here\"", .expect = "" },
     .{ .con = 1, .send = "write b.txt \"bob was here\"", .expect = "" },
-    .{ .con = 0, .send = "ls | get name", .expect = "notes" },
-    .{ .con = 1, .send = "ls | get name", .expect = "b.txt" },
-    .{ .con = 0, .send = "ls | where name == notes | len", .expect = "1" },
-    .{ .con = 1, .send = "ls | where name == b.txt | len", .expect = "1" },
-    .{ .con = 0, .send = "ls | where name == b.txt | len", .expect = "0" },
+    .{ .con = 0, .send = "ls? | get name", .expect = "notes" },
+    .{ .con = 1, .send = "ls? | get name", .expect = "b.txt" },
+    .{ .con = 0, .send = "ls? | where name == notes | len", .expect = "1" },
+    .{ .con = 1, .send = "ls? | where name == b.txt | len", .expect = "1" },
+    .{ .con = 0, .send = "ls? | where name == b.txt | len", .expect = "0" },
     .{ .con = 0, .send = "df", .expect = "encrypted: true" },
-    .{ .con = 0, .send = "cat ../b.txt", .expect = "error" },
-    .{ .con = 1, .send = "cat notes/a.txt", .expect = "error" },
+    .{ .con = 0, .send = "cat ../b.txt", .expect = "err bad_path" },
+    .{ .con = 1, .send = "cat notes/a.txt", .expect = "err not_found" },
     // Both shells alive at once, seen from either.
     .{ .con = 0, .send = "ps | where name == shell | len", .expect = "2" },
     .{ .con = 1, .send = "nodes", .expect = "error" },
@@ -692,16 +739,16 @@ const login_script = [_]LoginStep{
     // offer, accepts it, reads through it, cannot write through it;
     // alice withdraws it and bob's next read fails.
     .{ .con = 0, .send = "share notes shared bob", .expect = "" },
-    .{ .con = 0, .send = "share notes shared bob", .expect = "error" },
+    .{ .con = 0, .send = "share notes shared bob", .expect = "err exists" },
     .{ .con = 1, .send = "shares | get name", .expect = "shared" },
     .{ .con = 1, .send = "cat @shared/a.txt", .expect = "error" },
     .{ .con = 1, .send = "accept shared", .expect = "" },
     .{ .con = 1, .send = "cat @shared/a.txt", .expect = "alice was here" },
-    .{ .con = 1, .send = "ls @shared | get name", .expect = "a.txt" },
-    .{ .con = 1, .send = "write @shared/x.txt \"no\"", .expect = "error" },
+    .{ .con = 1, .send = "ls @shared? | get name", .expect = "a.txt" },
+    .{ .con = 1, .send = "write @shared/x.txt \"no\"", .expect = "err denied" },
     .{ .con = 1, .send = "shares | where accepted == true | len", .expect = "1" },
     .{ .con = 0, .send = "unshare shared", .expect = "" },
-    .{ .con = 1, .send = "cat @shared/a.txt", .expect = "error" },
+    .{ .con = 1, .send = "cat @shared/a.txt", .expect = "err bad_fd" },
     .{ .con = 1, .send = "shares | len", .expect = "0" },
     // Alice leaves; her session is torn down and the seat is free again.
     .{ .con = 0, .send = "exit", .expect = "bye", .prompt = login_prompt },
@@ -710,12 +757,16 @@ const login_script = [_]LoginStep{
     .{ .con = 0, .send = "cat notes/a.txt", .expect = "alice was here" },
     // Programs: the system store serves a session; `install` copies one
     // into the home's own store, which `run` then finds first.
-    .{ .con = 0, .send = "run ps | where name == shell | get name", .expect = "shell" },
-    .{ .con = 0, .send = "ls img | len", .expect = "0" },
+    .{ .con = 0, .send = "run ps? | where name == shell | get name", .expect = "shell" },
+    .{ .con = 0, .send = "ls img? | len", .expect = "0" },
     .{ .con = 0, .send = "install ps", .expect = "installed ps into your store" },
-    .{ .con = 0, .send = "ls img | get name", .expect = "ps.msh" },
-    .{ .con = 0, .send = "run ps | where name == shell | len", .expect = "2" },
+    .{ .con = 0, .send = "ls img? | get name", .expect = "ps.msh" },
+    .{ .con = 0, .send = "run ps? | where name == shell | len", .expect = "2" },
     .{ .con = 1, .send = "ps | where name == shell | len", .expect = "2" },
+    // A module from the system store, then installed into the home's own.
+    .{ .con = 1, .send = "let m = (use math); [2, 3] | $m.sum", .expect = "5" },
+    .{ .con = 1, .send = "install math", .expect = "installed math into your store" },
+    .{ .con = 1, .send = "ls img? | where name == math.msh | len", .expect = "1" },
     .{ .con = 0, .send = "exit", .expect = "bye", .prompt = login_prompt },
     // The last logout ends the drill: the manager exits, no prompt follows.
     .{ .con = 1, .send = "exit", .expect = "bye", .prompt = "" },
@@ -777,6 +828,7 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
         const prompted = step.prompt.len == 0 or waitFor(tap, step.prompt, 600, polls);
         if (!(got and prompted)) {
             std.debug.print("[FAIL] {s}: console {d} step '{s}' missing '{s}' / '{s}'\n", .{ spec.name, step.con, step.send, step.expect, step.prompt });
+            tap.dumpRecent();
             reportFailure(spec.name, "login script step failed", log_path);
             return false;
         }
@@ -802,20 +854,20 @@ const flogin_script = [_]FloginStep{
     .{ .send = "alice", .expect = "passphrase: ", .prompt = "" },
     .{ .send = "alice-pass", .expect = "moss shell" },
     .{ .send = "df", .expect = "encrypted: true" },
-    .{ .send = "ls | len", .expect = "5" },
+    .{ .send = "ls? | len", .expect = "5" },
     .{ .send = "write hello.txt \"born on node 2\"", .expect = "" },
     .{ .send = "cat hello.txt", .expect = "born on node 2" },
     // The remote home's speed, measured: 64 KB written, then read back.
     .{ .send = "let big = (range 0 6400 | map { \"0123456789\" } | join \"\")", .expect = "" },
     .{ .send = "let t = (now); write big.txt $big; let d = ((now) - $t); echo \"remote home: 64 KB written in $d ms\"", .expect = "remote home: 64 KB written in" },
-    .{ .send = "let t = (now); let n = (cat big.txt | len); let d = ((now) - $t); echo \"remote home: 64 KB read in $d ms ($n bytes)\"", .expect = "remote home: 64 KB read in" },
+    .{ .send = "let t = (now); let n = (cat big.txt? | len); let d = ((now) - $t); echo \"remote home: 64 KB read in $d ms ($n bytes)\"", .expect = "remote home: 64 KB read in" },
     .{ .send = "exit", .expect = "bye", .prompt = "" },
 };
 const flogin_script2 = [_]FloginStep{
     .{ .send = "alice", .expect = "passphrase: ", .prompt = "" },
     .{ .send = "alice-pass", .expect = "moss shell" },
     .{ .send = "cat hello.txt", .expect = "born on node 2" },
-    .{ .send = "let t = (now); let n = (cat big.txt | len); let d = ((now) - $t); echo \"remote home: 64 KB read cold in $d ms ($n bytes)\"", .expect = "remote home: 64 KB read cold in" },
+    .{ .send = "let t = (now); let n = (cat big.txt? | len); let d = ((now) - $t); echo \"remote home: 64 KB read cold in $d ms ($n bytes)\"", .expect = "remote home: 64 KB read cold in" },
     .{ .send = "exit", .expect = "bye", .prompt = "" },
 };
 

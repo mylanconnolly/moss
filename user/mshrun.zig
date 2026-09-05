@@ -31,7 +31,15 @@ comptime {
 
 pub const panic = std.debug.FullPanic(uPanic);
 
-fn uPanic(_: []const u8, _: ?usize) noreturn {
+/// A panic says what it was on the log before the exit: a silent 255
+/// from an essential unit reads as a hang from the console.
+fn uPanic(msg: []const u8, _: ?usize) noreturn {
+    var buf: [200]u8 = undefined;
+    const pre = "panic: ";
+    @memcpy(buf[0..pre.len], pre);
+    const n = @min(msg.len, buf.len - pre.len);
+    @memcpy(buf[pre.len .. pre.len + n], msg[0..n]);
+    _ = usys.log(glog, buf[0 .. pre.len + n]);
     usys.exit(255);
 }
 
@@ -47,6 +55,9 @@ var line_fba: std.heap.FixedBufferAllocator = undefined;
 var box_pool: mosslib.pool.Pool(256, 2048) = .{};
 var host_ctx: u8 = 0;
 var fs_ctx = fscmds.Fs{ .resolve = resolve, .root = 0 };
+/// The stores `use NAME` reads a module from: `img/` in the view when
+/// there is one, and the system store when the manifest gives it.
+var stores: [2]?fscmds.Store = .{ null, null };
 var net: ?netcmds.Net = null;
 var fab: ?fabcmds.Fab = null;
 /// The boot archive, when the manifest grants `bootfs`: scripts may be
@@ -56,6 +67,18 @@ var blob: []const u8 = "";
 fn resolve(it: *mshl.Interp, path: []const u8) mshl.Error!fscmds.Target {
     if (view_chan == 0) return it.fail("no filesystem view was given to this script", .{});
     return .{ .chan = view_chan, .buf = view_buf, .path = path };
+}
+
+fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
+    if (fscmds.signature(name)) |sig| return sig;
+    if (net != null) {
+        if (netcmds.signature(name)) |sig| return sig;
+        if (httpcmds.signature(name)) |sig| return sig;
+    }
+    if (fab != null) {
+        if (fabcmds.signature(name)) |sig| return sig;
+    }
+    return syscmds.signature(name);
 }
 
 fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
@@ -118,14 +141,22 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         view_chan = setup.cap(.view);
         view_buf = @ptrFromInt(fsc.attachBuf(view_chan).va);
         fs_ctx.root = view_chan;
+        if (fsc.fsDerive(view_chan, view_buf, "img", true)) |own| {
+            stores[0] = .{ .chan = own, .buf = @ptrFromInt(fsc.attachBuf(own).va), .name = "your store" };
+        }
     }
+    if (setup.has(.store)) {
+        const st = setup.cap(.store);
+        stores[1] = .{ .chan = st, .buf = @ptrFromInt(fsc.attachBuf(st).va), .name = "the system store" };
+    }
+    fs_ctx.stores = &stores;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     if (setup.has(.fabric)) fab = .{ .chan = setup.cap(.fabric) };
     const path = setup.arg();
     if (path.len == 0) fail("setup", "no script path given");
 
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
-    var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall });
+    var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
     // The script: from the view, else from the boot archive.
     const text = if (view_chan != 0)
         fscmds.readFile(&fs_ctx, &interp, path) catch fail(path, interp.err_msg)
@@ -160,7 +191,7 @@ fn serveRemote(chan_h: u64) noreturn {
     var buf_len: usize = 0;
     _ = usys.log(glog, "mshrun: remote stage up");
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
-    var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall });
+    var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);

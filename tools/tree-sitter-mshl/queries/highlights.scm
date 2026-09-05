@@ -2,14 +2,14 @@
 ; capture names (tree-sitter's conventions, as editors expect them).
 
 [
-  "let" "def" "fn" "if" "else" "for" "in" "while" "match" "try"
+  "let" "def" "fn" "if" "else" "for" "in" "while" "match" "try" "shape"
 ] @keyword
 
 ["ok" "err"] @keyword.operator
 "not" @keyword.operator
 ["and" "or"] @keyword.operator
 
-["==" "!=" "<" "<=" ">" ">=" "+" "-" "*" "/" "%" "=" "=>" "|"] @operator
+["==" "!=" "<" "<=" ">" ">=" "+" "-" "*" "/" "%" "=" "=>" "|" "->" ":"] @operator
 (unwrap "?" @operator)
 (unwrap_mark) @operator
 (redirect ">" @operator)
@@ -30,6 +30,7 @@
 (variable (identifier) @variable)
 (variable "$" @punctuation.special)
 (let_statement name: (identifier) @variable)
+(typed_name name: (identifier) @variable)
 (for_statement name: (identifier) @variable)
 (parameters (identifier) @variable.parameter)
 (bind_pattern (variable (identifier) @variable))
@@ -45,3 +46,11 @@
 (record_field_pattern key: (identifier) @property)
 
 (bare_word (identifier) @string.special)
+
+; shapes: type names as types, a bare word as a member of an enumeration
+(shape_name) @type
+(handle_shape "handle" @type)
+(handle_shape kind: (identifier) @type)
+(result_shape ["ok" "err"] @type)
+(shape_word (identifier) @constant)
+(shape_field key: (record_key) @property)
