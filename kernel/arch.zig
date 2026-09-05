@@ -35,6 +35,7 @@ pub const trap = impl.trap;
 /// `initContext`, `switchContext`, `fpSave`/`fpRestore`, `enterUser`.
 pub const thread = impl.thread;
 /// Page tables, kernel and user: `init`, `activate`, `mapDeviceLive`,
+/// `mapFramebuffer` (write-combining where the port has it),
 /// `UserPerms`, `mapUserPage(Tagged)`, `unmapUserPages`,
 /// `destroyUserSpace`, `switchUser`, `publishTables`.
 pub const mmu = impl.mmu;

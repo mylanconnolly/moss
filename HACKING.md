@@ -25,8 +25,8 @@ done without rediscovering the sharp edges.
   overwrite) — the way to chase an intermittent one. `-Doptimize=ReleaseSafe`
   runs the whole suite optimized.
 - `-Darch=x86_64` builds the x86_64 port (VT-d as the IOMMU, AMD-V as
-  the hypervisor — bare-metal guests so far) — the kernel ELF and every
-  program. `zig build
+  the hypervisor, the log on the framebuffer as well as the serial
+  port) — the kernel ELF and every program. `zig build
   -Darch=x86_64 run` boots it on OVMF + Limine (KVM when the host has
   it, else TCG) from a directory QEMU exposes as a FAT volume; it wants
   Limine's `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's share dir)
@@ -323,6 +323,11 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   could not.
 - A **failed build leaves the previous kernel in zig-out** — if a QEMU run
   shows stale behavior, check the build actually succeeded.
+- A console that got slow, not wrong: stores to memory nothing backs
+  (a moved BAR, an unmapped MMIO range) leave the VM one at a time at
+  ~5 µs each and look like a hang. The framebuffer console prints its
+  address and a scroll's cost at attach; if the drills with `pcisvc`
+  stall while the kernel-only ones do not, a BAR moved.
 
 ## Conventions and invariants (the short list)
 
@@ -502,3 +507,14 @@ debug.
   refused"). No PAN toggling anywhere else, and never hold a window
   across a log call or a block; no cap transfer across nodes beyond
   spawn-time grants. All recorded in DESIGN.md "as built" sections.
+
+## The console font
+
+`kernel/font/console8x16.zig` is generated: `tools/mkfont.py
+DepartureMono-Regular.otf > kernel/font/console8x16.zig` (Pillow with
+FreeType on the host) rasterizes Departure Mono at its native 12 px onto
+the 8x16 grid. It is a Modified Version under the SIL Open Font License
+(`kernel/font/OFL-1.1.txt`); keep the notice with it. To see the
+console, boot a drill's ESP under QEMU with `-monitor unix:PATH,server,nowait`
+and send `screendump FILE.ppm` to the socket — the gate only asserts
+that the console attached (the panic drill's x86_64 marker).

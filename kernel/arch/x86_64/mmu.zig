@@ -38,6 +38,9 @@ const Perms = enum {
     kernel_ro,
     kernel_rw,
     device,
+    /// Write-combining: PAT entry 1 (PWT alone), which trap.init makes
+    /// WC on every core.
+    framebuffer,
 
     fn bits(self: Perms) u64 {
         return switch (self) {
@@ -45,6 +48,7 @@ const Perms = enum {
             .kernel_ro => present | global | nx,
             .kernel_rw => present | writable | global | nx,
             .device => present | writable | global | nx | pcd | pwt,
+            .framebuffer => present | writable | global | nx | pwt,
         };
     }
 };
@@ -85,6 +89,18 @@ pub fn mapDeviceLive(base: u64, size: u64) Error!void {
     var pa = base;
     while (pa < base + size) : (pa += mem.page_size) {
         try mapAt(mem.physToVirt(pa), pa, Perms.device.bits());
+        cpu.invlpg(mem.physToVirt(pa));
+    }
+}
+
+/// The framebuffer at its direct-map address, write-combining: stores
+/// stream to it, nothing is cached, and a scroll's screenful costs what
+/// a memcpy does. Live tables, so each page is invalidated.
+pub fn mapFramebuffer(base: u64, size: u64) Error!void {
+    var pa = mem.alignDown(base, mem.page_size);
+    const end = mem.alignUp(base + size, mem.page_size);
+    while (pa < end) : (pa += mem.page_size) {
+        try mapAt(mem.physToVirt(pa), pa, Perms.framebuffer.bits());
         cpu.invlpg(mem.physToVirt(pa));
     }
 }

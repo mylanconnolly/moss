@@ -6,6 +6,7 @@ const shared = @import("shared");
 const arch = @import("arch.zig");
 const cap = @import("cap.zig");
 const domain = @import("domain.zig");
+const fbcon = @import("fbcon.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
 const kalloc = @import("kalloc.zig");
@@ -53,6 +54,13 @@ export fn kmain(boot_arg: u64) noreturn {
     arch.mmu.init(plat.regions) catch |e| std.debug.panic("mmu build failed: {t}", .{e});
     arch.mmu.activate();
     log.info("mmu: W^X kernel map active, boot identity map dropped", .{});
+    // A screen, if firmware left one: from here on the log is drawn too.
+    if (plat.framebuffer) |f| {
+        if (fbcon.attach(f)) {
+            const redraw_us = fbcon.redrawCycles() * 1_000_000 / arch.cpu.cycleHz();
+            log.info("fbcon: on the framebuffer at 0x{x}, {d}x{d}x{d}, {d}x{d} characters, a scroll redraws in {d} us", .{ f.pa, f.width, f.height, f.bpp, fbcon.cols, fbcon.rows, redraw_us });
+        } else log.warn("fbcon: framebuffer {d}x{d}x{d} not drawn (32-bit RGB only)", .{ f.width, f.height, f.bpp });
+    }
     // Devices come from firmware, not from constants: the PCIe host is
     // enumerated once the memory map is up (its ECAM needs a mapping).
     if (plat.pcie) |h| pci.init(h);

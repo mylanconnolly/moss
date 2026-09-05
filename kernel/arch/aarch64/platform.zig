@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const dt = @import("../../dt.zig");
+const fbcon = @import("../../fbcon.zig");
 const gic = @import("gic.zig");
 const its = @import("its.zig");
 const log = @import("../../log.zig");
@@ -24,6 +25,9 @@ pub const Info = struct {
     pcie: ?PcieHost,
     smmu: ?dt.Smmu = null,
     its: ?Reg = null,
+    /// A firmware framebuffer for the console; QEMU virt's devicetree
+    /// boot brings none.
+    framebuffer: ?fbcon.Framebuffer = null,
 };
 
 var region_buf: [8]MemRegion = undefined;

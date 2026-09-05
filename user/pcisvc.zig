@@ -117,21 +117,32 @@ fn probe(log_h: u64, slot: u8) void {
         }
         const is64 = (mask >> 1) & 3 == 2;
         var size_mask: u64 = mask & ~@as(u32, 0xf);
+        var orig_pa: u64 = orig & ~@as(u32, 0xf);
         if (is64) {
             const rh = cfg(u32, slot, off + 4);
             const origh = rh.*;
             rh.* = 0xffff_ffff;
             size_mask |= @as(u64, rh.*) << 32;
             rh.* = origh;
+            orig_pa |= @as(u64, origh) << 32;
         } else {
             size_mask |= 0xffff_ffff_0000_0000;
         }
         const size = ~size_mask + 1;
-        const pa = (mmio_next + @max(size, 4096) - 1) & ~(@max(size, 4096) - 1);
+        const align_to = @max(size, 4096);
+        // Firmware's placement stands when it has one inside the window
+        // (UEFI assigns every BAR; the display's framebuffer is one of
+        // them, and the kernel is already drawing there). A BAR firmware
+        // left empty — every BAR on a devicetree machine — is placed
+        // here, from the window's base up.
+        const keep = orig_pa != 0 and orig_pa % align_to == 0 and orig_pa >= mmio_base and orig_pa + size <= mmio_base + mmio_size;
+        const pa = if (keep) orig_pa else (mmio_next + align_to - 1) & ~(align_to - 1);
         if (pa + size > mmio_base + mmio_size) return;
-        r.* = @truncate(pa);
-        if (is64) cfg(u32, slot, off + 4).* = @truncate(pa >> 32);
-        mmio_next = pa + size;
+        if (!keep) {
+            r.* = @truncate(pa);
+            if (is64) cfg(u32, slot, off + 4).* = @truncate(pa >> 32);
+            mmio_next = pa + size;
+        }
         bars[i] = .{ .pa = pa, .len = size };
         i += if (is64) 2 else 1;
     }

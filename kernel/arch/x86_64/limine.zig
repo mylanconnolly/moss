@@ -84,6 +84,31 @@ pub const MpRequest = extern struct {
     flags: u64 = mp_x2apic,
 };
 
+pub const framebuffer_rgb: u8 = 1;
+pub const Framebuffer = extern struct {
+    address: u64,
+    width: u64,
+    height: u64,
+    pitch: u64,
+    bpp: u16,
+    memory_model: u8,
+    red_mask_size: u8,
+    red_mask_shift: u8,
+    green_mask_size: u8,
+    green_mask_shift: u8,
+    blue_mask_size: u8,
+    blue_mask_shift: u8,
+    unused: [7]u8,
+    edid_size: u64,
+    edid: u64,
+};
+pub const FramebufferResponse = extern struct { revision: u64, framebuffer_count: u64, framebuffers: [*]*Framebuffer };
+pub const FramebufferRequest = extern struct {
+    id: [4]u64 = id(0x9d5827dcd881dd75, 0xa3148604f6fab11b),
+    revision: u64 = 0,
+    response: ?*FramebufferResponse = null,
+};
+
 pub const BootloaderInfoResponse = extern struct { revision: u64, name: [*:0]u8, version: [*:0]u8 };
 pub const BootloaderInfoRequest = extern struct {
     id: [4]u64 = id(0xf55038d8e2a1202f, 0x279426fcf5f59740),

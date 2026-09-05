@@ -101,6 +101,12 @@ fn mapKernelImageChunk(chunk_pa: u64) Error!void {
 
 /// Map a device window into the live kernel tables (post-activate): PCI
 /// ECAM, discovered after the memory map is up.
+/// A framebuffer: device memory here (no write-combining attribute is
+/// set up on this port; nothing hands it a framebuffer yet).
+pub fn mapFramebuffer(base: u64, size: u64) Error!void {
+    return mapDeviceLive(base, size);
+}
+
 pub fn mapDeviceLive(base: u64, size: u64) Error!void {
     try mapDeviceRange(base, size);
     asm volatile (

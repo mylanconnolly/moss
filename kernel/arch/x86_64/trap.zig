@@ -371,6 +371,10 @@ pub fn init() void {
     if (f7 & (1 << 7) != 0) cr4 |= 1 << 20;
     if (f7 & (1 << 20) != 0) cr4 |= 1 << 21;
     cpu.writeCr4(cr4);
+    // PAT: entry 1 (PWT alone) becomes write-combining — the memory
+    // type the framebuffer is mapped with; the rest stay at their reset
+    // values (WB; UC- at PCD; UC at PCD|PWT, the device mapping).
+    if (cpu.cpuid(1, 0).edx & (1 << 16) != 0) cpu.wrmsr(0x277, 0x0007_0406_0007_0106);
     // CR0: MP on, EM/TS off — the vector unit is live for user threads.
     cpu.writeCr0((cpu.readCr0() | (1 << 1)) & ~@as(u64, (1 << 2) | (1 << 3)));
     // syscall/sysret: kernel CS 0x08 (SS 0x10); sysret CS = base + 16,

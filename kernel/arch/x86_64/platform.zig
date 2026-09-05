@@ -12,6 +12,7 @@ const cpu = @import("cpu.zig");
 const ioapic = @import("ioapic.zig");
 const lapic = @import("lapic.zig");
 const limine = @import("limine.zig");
+const fbcon = @import("../../fbcon.zig");
 const log = @import("../../log.zig");
 const mem = @import("../../mem.zig");
 const msi = @import("msi.zig");
@@ -26,6 +27,8 @@ pub const Info = struct {
     reserved: []const Reg,
     bootargs: ?[]const u8,
     pcie: ?PcieHost,
+    /// The loader's framebuffer (the GOP mode firmware left), if any.
+    framebuffer: ?fbcon.Framebuffer = null,
 };
 
 const max_regions = 32;
@@ -116,10 +119,32 @@ pub fn discover(boot_arg: u64) Info {
         @import("smp.zig").note(mp);
     }
     log.info("tsc: {d} MHz; {s}", .{ cpu.tsc_hz / 1_000_000, cpu.describe() });
+    // The framebuffer, for the console: firmware's mode, as the loader
+    // reports it (addresses are the loader's higher-half ones).
+    var framebuffer: ?fbcon.Framebuffer = null;
+    if (boot.framebuffer_request.response) |resp| {
+        if (resp.framebuffer_count > 0) {
+            const f = mem.physToPtr(*const limine.Framebuffer, loaderToPhys(@intFromPtr(resp.framebuffers[0])));
+            if (f.memory_model == limine.framebuffer_rgb) framebuffer = .{
+                .pa = loaderToPhys(f.address),
+                .width = @intCast(f.width),
+                .height = @intCast(f.height),
+                .pitch = @intCast(f.pitch),
+                .bpp = f.bpp,
+                .red_shift = f.red_mask_shift,
+                .green_shift = f.green_mask_shift,
+                .blue_shift = f.blue_mask_shift,
+                .red_size = f.red_mask_size,
+                .green_size = f.green_mask_size,
+                .blue_size = f.blue_mask_size,
+            };
+        }
+    }
     return .{
         .regions = region_buf[0..nr],
         .reserved = reserved_buf[0..nres],
         .bootargs = bootargs,
+        .framebuffer = framebuffer,
         .pcie = pcie,
     };
 }

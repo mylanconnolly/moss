@@ -1,9 +1,11 @@
 //! The boot console: a 16550 UART at COM1, reached through port I/O. It is
 //! the debug channel QEMU exposes (`-serial`) and what a PCIe serial card
-//! speaks; a real machine's console — the framebuffer Limine hands over —
-//! is a later step. Polled, no interrupts, usable before the MMU switch.
+//! speaks. Polled, no interrupts, usable before the MMU switch. Once the
+//! kernel's tables are up, every line is drawn on the loader's
+//! framebuffer as well (`fbcon`) — a real machine's screen.
 
 const cpu = @import("cpu.zig");
+const fbcon = @import("../../fbcon.zig");
 
 const base: u16 = 0x3f8;
 const r_data = base + 0;
@@ -34,4 +36,5 @@ pub fn write(bytes: []const u8) void {
         if (byte == '\n') putByte('\r');
         putByte(byte);
     }
+    fbcon.write(bytes);
 }

@@ -35,6 +35,7 @@ pub export var rsdp_request: limine.RsdpRequest linksection(".limine_requests") 
 pub export var tsc_request: limine.TscFrequencyRequest linksection(".limine_requests") = .{};
 pub export var mp_request: limine.MpRequest linksection(".limine_requests") = .{};
 pub export var bootloader_info_request: limine.BootloaderInfoRequest linksection(".limine_requests") = .{};
+pub export var framebuffer_request: limine.FramebufferRequest linksection(".limine_requests") = .{};
 
 extern var __boot_pml4: [512]u64 align(4096);
 extern var __boot_pdpt: [512]u64 align(4096);

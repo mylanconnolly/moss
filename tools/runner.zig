@@ -51,7 +51,7 @@ var ovmf_code: []const u8 = "/usr/share/qemu/edk2-x86_64-code.fd";
 var ovmf_vars: []const u8 = "/usr/share/qemu/edk2-i386-vars.fd";
 
 const specs = [_]Spec{
-    .{ .name = "panic", .pass = "KERNEL PANIC: panic test requested", .panic_is_failure = false },
+    .{ .name = "panic", .pass = "KERNEL PANIC: panic test requested", .panic_is_failure = false, .extra_x86 = "fbcon: on the framebuffer" },
     .{ .name = "fault", .pass = "!! EXCEPTION: cur_spx_sync", .extra = "far=0xffffff7fdead0000", .panic_is_failure = false, .pass_x86 = "!! EXCEPTION: vector 14 — page fault", .extra_x86 = "cr2=0xffffff7fdead0000" },
     .{ .name = "pan", .pass = "privileged access to user memory refused (PAN)", .extra = "pan-test: touching the caller's buffer outside a uaccess window", .panic_is_failure = false, .pass_x86 = "privileged access to user memory refused (SMAP)" },
     .{ .name = "sched", .pass = "sched-test: PASS" },

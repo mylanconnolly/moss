@@ -263,7 +263,8 @@ runs the kernel, user programs (`syscall`/`sysret`, SMAP as the door
 to user memory), PCIe with MSI-X, VT-d walking each domain's own page
 tables for its devices' DMA, AMD-V for guests (a moss kernel as a
 guest, loaded by the VMM over the Limine protocol, with devices passed
-through), and every drill; AMD-Vi is what the port still owes.
+through), the log drawn on the loader's framebuffer beside the serial
+port, and every drill; AMD-Vi is what the port still owes.
 
 moss boots on aarch64 as a raw arm64 Image. Entered at EL2 (the usual
 case under QEMU with virtualization on), the boot code makes the core a

@@ -2490,9 +2490,68 @@ fabric as node 2 and serving a remote spawn) pass under nested KVM;
 the port's gate is all twenty-three drills — and, since the day
 after, the six `+rs` rows as well: the ReleaseSafe kernel passed them
 on the port unchanged, so both gates are the same twenty-nine rows.
-Still owed: AMD-Vi for the machines that have it, PCIDs, a framebuffer
-console, and an I/O APIC and MSI-X for guests when a guest needs more
-than a line per device.
+Still owed: AMD-Vi for the machines that have it, PCIDs, and an I/O
+APIC and MSI-X for guests when a guest needs more than a line per
+device.
+
+### The framebuffer console (as built, 2026-09-04)
+
+A real machine has a screen where QEMU has a serial port, so the log
+is drawn as well as sent: `kernel/fbcon.zig`, generic, fed by the
+port's console `write` after the serial bytes go out. The port's
+platform reports the framebuffer firmware left (`Info.framebuffer`:
+Limine's response on x86_64 — the GOP mode, 1280x800x32 under OVMF
+with QEMU's standard VGA; aarch64's devicetree boot brings none and
+the field stays null), and the port's mmu maps it: write-combining on
+x86_64, which is PAT entry 1 — `trap.init` reprograms IA32_PAT on
+every core so that PWT alone means WC, the other seven entries at
+their reset values — so stores stream and a screenful costs a memcpy,
+where an uncached mapping would make each scroll a visible pause. The
+console attaches right after the kernel's tables are live; the lines
+before that reach the serial port only.
+
+Character cells are the unit. The font is an 8x16 bitmap of printable
+ASCII rasterized from Departure Mono, a pixel font that lands on that
+grid at its native 12 px without anti-aliasing to lose (SIL Open Font
+License 1.1; the notice and license sit beside it in `kernel/font/`,
+`tools/mkfont.py` regenerates it); three candidates were rendered and
+looked at before choosing. A shadow of the text (rows by columns of
+bytes) is what a scroll redraws the whole screen from — no reads of
+the framebuffer, which through a WC mapping are uncached and slow, and
+no second pixel buffer to size to the mode. The log is UTF-8 and the
+font is ASCII, so a multibyte sequence is gathered and drawn as one
+stand-in — a hyphen for the dashes, an angle bracket for an arrow,
+`?` for the rest — after the first screenshot showed the em dash in
+the PCIe line as three question marks. Writes take a spinlock with
+IRQs masked and a bounded spin: a core that panics while another holds
+the lock drops its line on the screen rather than hanging, since the
+serial port already has it.
+
+Verification was by looking: QEMU's monitor `screendump` of the panic
+drill (the boot log and the panic, legible) and of the sched drill
+mid-run (a scrolled screenful, every row where it should be). The
+gate cannot look, so the panic drill asserts the console's attach line
+on x86_64 and the rest is the eye's, as it should be for a console.
+
+The gate found what the eye could not. With the console on, the users,
+login and fabric drills stalled for a minute at a time while the
+kernel-only drills kept their times, and counters in the console put
+the minute inside its own writes: a scroll that cost 2.6 ms at attach
+cost five seconds later — five microseconds a store, the price of a
+store that leaves the VM. The framebuffer had moved. `pcisvc`, the
+user-space enumerator, assigned every BAR from the window's base as it
+does on the devicetree machine where firmware assigns none; on UEFI
+firmware had assigned them all, the display's among them, and the
+kernel went on drawing at the address the loader gave it while QEMU
+had re-homed the memory behind the BAR. Every store went to nothing,
+slowly. The kernel-only drills never start `pcisvc`, which is why the
+screenshots were fine. `pcisvc` now keeps a firmware placement that
+lies inside the window and allocates only for BARs firmware left empty
+— the right rule on both machines, and the console's attach line now
+prints the address so the next move shows. Under TCG the console is
+the gate's single largest cost: a scroll is a million emulated stores,
+and the x86_64 gate there went from about four minutes to under six;
+under KVM it is unchanged.
 
 ### The x86_64 port under TCG (as built, 2026-09-04)
 
