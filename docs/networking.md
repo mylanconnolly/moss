@@ -264,6 +264,23 @@ resolves `www.moss.test` and `node1.moss.test` through it, gets
 loopback. A one-off check through slirp's forwarder resolved a public
 name to its four addresses and fetched the page by name.
 
+### Time
+
+The time service (`user/clock.zig`, the `clock` unit) learns the time
+over SNTP (RFC 4330, `lib/sntp.zig`, host-tested): it asks each server
+its settings file names (`conf/clock.msh`, `{ servers: [::1,
+time.cloudflare.com], serve: true, interval: 3600 }`) — names resolve
+like any other — four questions apiece, keeps the median offset of the
+best half by delay, and sets the kernel's clock with the `clock`
+grant; a server more than a day away is not believed, and a node with
+no RTC keeps asking every thirty seconds until one answers. It serves
+SNTP itself on UDP 123, so a node learns the time from a peer: the
+fabric's time comes from the fabric, and the drill's node asks itself
+over loopback (the same loop answers questions while its own is out).
+`date` in the language is the result: `ok { unix, ms, iso, year …
+weekday, source }` or `err no_clock`. A one-off check through slirp
+synced from a public server to within the round trip.
+
 ### HTTP: handlers are functions
 
 On top of those sockets, an mshl host with a network view speaks

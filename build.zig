@@ -265,6 +265,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "users", .src = "user/users.zig" },
         .{ .name = "mshrun", .src = "user/mshrun.zig" },
         .{ .name = "dnsd", .src = "user/dnsd.zig" },
+        .{ .name = "clock", .src = "user/clock.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -379,7 +380,8 @@ pub fn build(b: *std.Build) void {
         "scripts/net-drill.msh",         "conf/units/fab-script.msh",
         "scripts/fab-drill.msh",         "conf/net.msh",
         "conf/net-cluster.msh",          "conf/units/dnsd.msh",
-        "conf/dns.msh",
+        "conf/dns.msh",                  "conf/units/clock.msh",
+        "conf/clock.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));

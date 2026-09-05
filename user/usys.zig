@@ -49,8 +49,21 @@ pub fn log(handle: u64, msg: []const u8) shared.Errno {
     return @enumFromInt(syscall3(.log, handle, @intFromPtr(msg.ptr), msg.len));
 }
 
+/// The kernel's tick, the unit of `sleep` and `timerArm`: a tenth of
+/// a second (kernel/timer.zig). Ask in milliseconds and convert.
+pub const tick_ms: u64 = 100;
+
+/// Milliseconds as ticks, rounded up, never zero.
+pub fn msToTicks(ms: u64) u64 {
+    return @max((ms + tick_ms - 1) / tick_ms, 1);
+}
+
 pub fn sleep(ticks: u64) void {
     _ = syscall3(.sleep, ticks, 0, 0);
+}
+
+pub fn sleepMs(ms: u64) void {
+    sleep(msToTicks(ms));
 }
 
 pub fn yield() void {
@@ -345,6 +358,30 @@ pub fn domainList(spawner_h: u64, buf: []u8) IpcResult {
 /// data[2] = online cores, data[3] = uptime ticks.
 pub fn sysInfo(spawner_h: u64) IpcResult {
     return syscall6(.sysinfo, spawner_h, 0, 0, 0, 0, 0);
+}
+
+pub const Clock = struct { boot_epoch_ms: u64, source: shared.ClockSource };
+
+/// clock_get: the Unix time of boot in milliseconds (0 = unknown) and
+/// where it came from; wall time is boot_epoch_ms + the cycle counter's
+/// milliseconds. No authority needed.
+pub fn clockGet() Clock {
+    const r = syscall6(.clock_get, 0, 0, 0, 0, 0, 0);
+    return .{ .boot_epoch_ms = r.data[0], .source = std.enums.fromInt(shared.ClockSource, r.data[1]) orelse .none };
+}
+
+/// clock_set: with the `clock` grant, say when boot was (Unix ms).
+pub fn clockSet(clock_h: u64, boot_epoch_ms: u64) shared.Errno {
+    return @enumFromInt(syscall3(.clock_set, clock_h, boot_epoch_ms, 0));
+}
+
+/// Wall time now in Unix milliseconds, or null when nobody knows yet.
+pub fn wallMs() ?u64 {
+    const c = clockGet();
+    if (c.source == .none) return null;
+    const hz = cycleHz();
+    if (hz == 0) return c.boot_epoch_ms;
+    return c.boot_epoch_ms + cycles() / (hz / 1000);
 }
 
 /// getrandom: fill buf (1..rng_max_request bytes) from the kernel CSPRNG.

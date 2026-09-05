@@ -1284,7 +1284,8 @@ had been printing a script's rendering only at its end — it streams
 each statement's output now (`evalScriptEach`); and with clients
 asleep on doorbells nobody called `netsvc`, so its retransmission scan
 never ran and a lost SYN was never resent — the service has a clock
-now (a kernel timer on its interrupt notification, ten ticks). Also
+now (a kernel timer on its interrupt notification, ten ticks — a
+second, as it turned out; one tick since the clock arc). Also
 fixed on the way: a closed connection freed as soon as its own FIN
 was acknowledged left the peer's FIN unanswered, and slirp retransmitted
 it at us for a minute; a lingering socket now waits for the peer's FIN
@@ -1658,6 +1659,47 @@ answer — it connects through the whole list now and keys the pool by
 the host as written. With those three, the test fetched a public
 page by name: status 200, chunked and keep-alive, from a real server,
 in about a second — the arc's two stages meeting.
+
+**The clock (as built, 2026-09-05).** Built ahead of TLS, whose
+certificate checks want the time, and small by design. The kernel
+keeps one number, the Unix time at which the cycle counter read zero,
+and where it came from: `kernel/clock.zig`; the port reads the
+real-time clock once at boot through a HAL entry
+(`arch.platform.rtcSeconds` — on aarch64 the PL031 found in the device
+tree by compatible string, its data register mapped live and read
+once; the x86_64 port answers none and owes its CMOS read), and two
+syscalls expose it: `clock_get`, for anyone, since reading time is not
+authority, and `clock_set` behind a new `clock` capability, the grant
+a unit asks for by name. Userspace adds its own cycle count
+(`usys.wallMs`). The time service (`user/clock.zig`) is SNTP both
+ways — `lib/sntp.zig` builds and reads the packets and turns a round
+trip into an offset and a delay, `choose` takes the median of the best
+half — asking each configured server (names resolve) four times and
+setting the clock by the winner, refusing an offset over a day, asking
+every thirty seconds until it knows the time and hourly after; and it
+answers SNTP on UDP 123 so a node learns the time from a peer. Its
+loop is one doorbell over two datagram sockets, and while its own
+question is out it keeps answering others — which is how the drill
+syncs a node from itself over loopback (offset 0, delay 0, four
+samples). `lib/civil.zig` is Hinnant's days-from-civil arithmetic and
+ISO 8601 text, round-tripped across four thousand years of dates in
+its test; `date` in the language answers the record or `err
+no_clock`. Two things the tests caught: an NTP fraction converted by
+truncation lost a millisecond each way (rounded now), and a signed
+year zero-padded by `std.fmt` prints with a plus sign. One thing the
+first boot caught: a "never synced" sentinel of `minInt(i64)`
+overflowed the first subtraction, and the service's panic — logged
+now, thanks to the earlier lesson — said so in one line. And the wire
+check found the day's largest bug, older than the day: the kernel
+tick is a tenth of a second, and `sleep` and `timer_arm` count ticks,
+but the language's `sleep`, and every timed wait written this day —
+HTTP's idle and stall limits, the bounded connect attempt, the SNTP
+reply wait, netsvc's own retransmission scan ("every tenth of a
+second", armed for ten ticks) — had assumed ten milliseconds, so each
+was ten times what it said (a 3 s idle was 30, a 1.5 s attempt 15, and
+one silent IPv6 address cost an SNTP sync eight seconds). `usys.tick_ms`
+and `msToTicks` are the single conversion now; every caller speaks
+milliseconds; the scan runs every tick.
 
 ### The gate (as built, 2026-09-03)
 

@@ -374,7 +374,11 @@ barriers in the virtio drivers, and `user/vmm.zig`.
 - Sentinels must not collide with valid values (sockets and slots start at
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in
-  `domain.spawn`: log→chan→spawner→entropy→introspect→windows→hypervisor; user
+  `domain.spawn`: log→chan→spawner→entropy→introspect→clock→windows→hypervisor; user
+- **The kernel tick is 100 ms**, and `sleep` and `timer_arm` count
+  ticks. Nothing in userspace should count ticks by hand: ask in
+  milliseconds through `usys.sleepMs` / `usys.msToTicks` (a day's worth
+  of timeouts were ten times their stated length before that existed).
   programs hardcode the slots they expect (documented per program).
 - The kernel embeds exactly one blob, the boot archive; `spawn` takes an
   shm cap holding a staged image, never an index. An shm mapping refs

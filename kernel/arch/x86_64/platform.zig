@@ -41,6 +41,12 @@ fn loaderToPhys(p: u64) u64 {
     return p - boot.hhdm_offset;
 }
 
+/// The real-time clock: not read on this port yet (the CMOS RTC is
+/// owed); the time service sets wall time over the network.
+pub fn rtcSeconds(_: *const Info) ?u64 {
+    return null;
+}
+
 pub fn discover(boot_arg: u64) Info {
     _ = boot_arg; // the responses are globals the loader filled
     if (boot.bootloader_info_request.response) |bi| {

@@ -136,7 +136,8 @@ graph LR
 The remaining keys: `arg` (the program's personality word), `budget`
 (`kobj`, `user`, `cpu` as permille of a core or `"25%"`), `cores` (a
 partition reserved for the unit alone), `grant` (`log`, `spawner`,
-`bootfs`, `introspect`), `restart: { max: N }`, `profiles`,
+`bootfs`, `introspect`, `clock` — the right to set the wall clock),
+`restart: { max: N }`, `profiles`,
 `essential`, `oneshot`, `after`, `node` (`node: boot`: the program's
 node id is the boot's, `node=N` in the boot arguments, 1 by default —
 its `arg` becomes role | node << 8, and its `certify` names this

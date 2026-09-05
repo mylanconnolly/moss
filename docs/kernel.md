@@ -272,6 +272,21 @@ conduit and the timer's interrupt line are chosen at run time. That is
 what lets the kernel also be a hypervisor (a separate page). Entered at
 EL1, it runs there unchanged.
 
+### Time
+
+The kernel keeps one number about the wall clock: the Unix time at
+which the cycle counter read zero (`boot_epoch_ms`), and where it came
+from. The port reads the machine's real-time clock once at boot
+(`arch.platform.rtcSeconds`: the PL031 from the device tree on
+aarch64; the x86_64 port owes its CMOS read and reports none), and the
+time service refines it over the network. `clock_get` hands the
+number and its source to anyone — reading the time is not authority —
+and a process adds its own cycle count (`usys.wallMs`); `clock_set`
+takes a `clock` capability, the grant the time service's unit asks
+for, and is the only way the number changes. Everything the kernel
+itself does is still ticks and cycles: the clock is for programs and
+their records, not for scheduling.
+
 ### Security posture, honestly
 
 W^X and NX are unconditional; every domain has its own address space;

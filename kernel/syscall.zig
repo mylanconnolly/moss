@@ -10,6 +10,7 @@ const std = @import("std");
 const arch = @import("arch.zig");
 const cap = @import("cap.zig");
 const domain = @import("domain.zig");
+const clock = @import("clock.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
 const log = @import("log.zig");
@@ -79,6 +80,13 @@ pub fn dispatch(frame: *arch.trap.TrapFrame) void {
             frame.set(1, arch.cpu.cycleHz());
             break :blk errno(.ok);
         },
+        .clock_get => blk: {
+            const c = clock.get();
+            frame.set(1, c.boot_epoch_ms);
+            frame.set(2, @intFromEnum(c.source));
+            break :blk errno(.ok);
+        },
+        .clock_set => sysClockSet(d, frame.arg(0), frame.arg(1)),
         _ => errno(.nosys),
     });
 }
@@ -289,6 +297,7 @@ fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     };
     if (flags & shared.SpawnFlags.grant_bootfs != 0) manifest.grant_bootfs = true;
     if (flags & shared.SpawnFlags.grant_introspect != 0) manifest.grant_introspect = true;
+    if (flags & shared.SpawnFlags.grant_clock != 0) manifest.grant_clock = true;
     if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
     if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
     manifest.cpu_permille = frame.arg(6) & 0xffff;
@@ -439,6 +448,14 @@ fn sysSysinfo(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     return errno(.ok);
 }
 
+/// clock_set: the time service's authority to say what time it is.
+fn sysClockSet(d: *domain.Domain, handle_bits: u64, boot_epoch_ms: u64) u64 {
+    const h: shared.Handle = @bitCast(handle_bits);
+    _ = d.captable.?.lookup(h, .clock) orelse return errno(.bad_handle);
+    clock.set(boot_epoch_ms);
+    return errno(.ok);
+}
+
 fn sysDomainDestroy(d: *domain.Domain, handle_bits: u64) u64 {
     const h: shared.Handle = @bitCast(handle_bits);
     const obj = d.captable.?.lookup(h, .domain_ctl) orelse return errno(.bad_handle);
@@ -545,7 +562,7 @@ fn attachCap(d: *domain.Domain, handle_bits: u64, msg: *ipc.Msg) ?shared.Errno {
     if (handle.slot < cap.slots) {
         const e = &d.captable.?.entries[handle.slot];
         if (e.generation == handle.generation) switch (e.cap_type) {
-            .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor, .window => {
+            .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor, .window, .clock => {
                 msg.cap_type = @intFromEnum(e.cap_type);
                 msg.cap_obj = e.object;
                 return null;

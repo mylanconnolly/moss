@@ -13,7 +13,7 @@
 //! request a connection carries (bytes read past one request wait in
 //! a per-socket leftover for the next, so pipelined requests are fine)
 //! until the peer says close, the count is reached, or the connection
-//! sits idle for `idle_ticks`; `http-write` says keep-alive unless the
+//! sits idle for `idle_ms`; `http-write` says keep-alive unless the
 //! record says `close: true`; `fetch` keeps up to `pool_size` idle
 //! connections by address and port and retries once on a fresh one
 //! when a kept connection turns out dead (the peer closed it while it
@@ -77,9 +77,9 @@ fn keepLeftover(sock: u64, bytes: []const u8) void {
 }
 
 /// How long `serve` waits for the next request on a kept connection.
-const idle_ticks: u64 = 300; // 3 s
+const idle_ms: u64 = 3000;
 /// How long any read waits for the rest of a request once it began.
-const stall_ticks: u64 = 1000; // 10 s
+const stall_ms: u64 = 10_000;
 
 /// `fetch`'s kept connections: one per host (as written in the URL:
 /// an address or a name) and port, idle.
@@ -111,7 +111,7 @@ fn bodyValue(b: []const u8) Value {
 /// Read one request from a socket into the arena, starting with what
 /// the last read left over; what this one leaves is kept for the next.
 /// `idle`: how long to wait for the first byte (null: as long as it
-/// takes); a request that began is waited for `stall_ticks`.
+/// takes); a request that began is waited for `stall_ms`.
 const ReadOut = union(enum) { request: http.Request, failed: []const u8, idle };
 
 fn readRequest(n: *Net, it: *mshl.Interp, s: u64, idle: ?u64) mshl.Error!ReadOut {
@@ -133,9 +133,9 @@ fn readRequest(n: *Net, it: *mshl.Interp, s: u64, idle: ?u64) mshl.Error!ReadOut
             },
             .incomplete => {},
         }
-        const wait: ?u64 = if (buf.items.len == 0) idle else stall_ticks;
-        if (wait) |ticks| {
-            switch (n.recvSomeFor(s, ticks)) {
+        const wait: ?u64 = if (buf.items.len == 0) idle else stall_ms;
+        if (wait) |ms| {
+            switch (n.recvSomeFor(s, ms)) {
                 .data => |d| try buf.appendSlice(it.arena, d),
                 .closed => return .{ .failed = if (buf.items.len == 0) "closed" else "closed mid-request" },
                 .failed => |m| return .{ .failed = m },
@@ -250,7 +250,7 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
             // Every request the connection carries, until the peer says
             // close, the count runs out, or it sits idle.
             while (left == null or left.? > 0) {
-                const req = switch (try readRequest(n, it, s, idle_ticks)) {
+                const req = switch (try readRequest(n, it, s, idle_ms)) {
                     .request => |r| r,
                     .idle => break,
                     .failed => |m| {
@@ -377,7 +377,7 @@ fn exchange(n: *Net, it: *mshl.Interp, s: u64, req: []const u8, keep: bool) mshl
         }
         if (closed) return .{ .failed = "closed before the response was complete", .early = buf.items.len == 0 };
         // A kept connection the peer closed answers nothing at all.
-        switch (n.recvSomeFor(s, stall_ticks)) {
+        switch (n.recvSomeFor(s, stall_ms)) {
             .data => |d| try buf.appendSlice(it.arena, d),
             .closed => closed = true,
             .failed => |m| return .{ .failed = m, .early = buf.items.len == 0 },

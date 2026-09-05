@@ -557,9 +557,9 @@ message by message. Editor setup is in `tools/README.md`.
   value; `nodes`, `rspawn`. A function remembers its source text for
   this (`remote NODE $f` ships `$f`'s body; captures do not cross). See
   [the fabric page](fabric.md#remote-stages-a-functions-body-on-another-node).
-- **`sleep MS`** waits, in the host's ticks (rounded up to ten
-  milliseconds); **`now`** is milliseconds since boot, a clock for
-  measuring (the drills time things with it).
+- **`sleep MS`** waits, rounded up to the kernel's tick (a tenth of a
+  second); **`now`** is milliseconds since boot, a clock for measuring
+  (the drills time things with it); **`date`** is the wall clock.
 - **JSON.** `to-json` writes the data subset (a table as an array of
   objects), `from-json` reads it back (an array of same-shaped objects
   becomes a table); numbers with a fraction or exponent are refused.

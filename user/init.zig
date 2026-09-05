@@ -266,6 +266,7 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             if (std.mem.eql(u8, gn, "spawner")) u.flags |= shared.SpawnFlags.grant_spawner;
             if (std.mem.eql(u8, gn, "bootfs")) u.flags |= shared.SpawnFlags.grant_bootfs;
             if (std.mem.eql(u8, gn, "introspect")) u.flags |= shared.SpawnFlags.grant_introspect;
+            if (std.mem.eql(u8, gn, "clock")) u.flags |= shared.SpawnFlags.grant_clock;
         };
     }
     if (r.get("give")) |g| {

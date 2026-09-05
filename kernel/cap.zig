@@ -38,6 +38,8 @@ pub const CapType = enum(u8) {
     introspect,
     /// Authority to create virtual machines (vm_create).
     hypervisor,
+    /// Authority to set the wall clock (clock_set).
+    clock,
     /// One virtual machine (object = index into vm.vms): run it, set
     /// its vCPU; dropping the last cap tears it down.
     vm,

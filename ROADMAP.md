@@ -303,11 +303,15 @@ is a plan.
   the tree-sitter highlights. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
-- **A clock, then a re-evaluation.** The system has had no wall clock
-  and no shared time; decided 2026-09-05 to build one (an RTC driver
-  at boot, SNTP over the fabric's UDP with the time service serving
-  SNTP to peers, a `clock` capability, `date` in the language) before
-  TLS, whose certificate checks need it. **Then, as a task of its own:
+- **A clock, then a re-evaluation.** ✅ The clock (landed 2026-09-05):
+  the kernel reads the RTC once at boot through the HAL (PL031 on
+  aarch64; the x86_64 port owes its CMOS read), keeps the Unix time of
+  boot, hands it out with `clock_get` and lets the `clock` grant set it;
+  the time service syncs over SNTP (`lib/sntp.zig`) from the servers
+  its settings name and serves SNTP to peers, so the fabric's time
+  comes from the fabric; `date` in the language (`lib/civil.zig`).
+  Owed: the clock unit in the system and cluster profiles (with dnsd
+  beside it), a CMOS RTC on x86_64. **Then, as a task of its own:
   re-read every decision taken because there was no clock and decide
   each again with one.** Known so far — the list to start from, not
   the whole of it: fabric certificates carry no expiry and revocation

@@ -73,10 +73,10 @@ pub const Net = struct {
         return n.connectRawFor(words, port, null);
     }
 
-    /// Connect, waiting at most `ticks` for the handshake (null: until
-    /// the stack gives up); a timeout answers "timed_out" and the
-    /// attempt is closed.
-    pub fn connectRawFor(n: *Net, words: [2]u64, port: u64, ticks: ?u64) Outcome {
+    /// Connect, waiting at most `ms` milliseconds for the handshake
+    /// (null: until the stack gives up); a timeout answers "timed_out"
+    /// and the attempt is closed.
+    pub fn connectRawFor(n: *Net, words: [2]u64, port: u64, ms: ?u64) Outcome {
         if (!n.attach()) return .{ .failed = "cannot attach a buffer to the network view" };
         const rep = ncall(n, .{ .tcp_connect = .{ .ip_hi = words[0], .ip_lo = words[1], .port = port } }) orelse return .{ .failed = "the network service did not answer" };
         const sock = switch (rep) {
@@ -87,8 +87,8 @@ pub const Net = struct {
         n.watch(sock);
         const bit_timeout: u64 = 2;
         const start = syscmds.nowMs();
-        if (ticks) |t| _ = usys.timerArm(n.bell, t, bit_timeout);
-        defer if (ticks != null) {
+        if (ms) |t| _ = usys.timerArm(n.bell, usys.msToTicks(t), bit_timeout);
+        defer if (ms != null) {
             _ = usys.timerArm(n.bell, 0, bit_timeout);
         };
         var why: []const u8 = "refused";
@@ -103,8 +103,8 @@ pub const Net = struct {
             if (code == @intFromEnum(shared.TcpState.established) or code == @intFromEnum(shared.TcpState.close_wait)) return .{ .sock = sock };
             if (code == @intFromEnum(shared.TcpState.closed)) break;
             const w = usys.notifyWait(n.bell);
-            if (ticks) |t| {
-                if (w.err == .ok and (w.data[0] & bit_timeout) != 0 and syscmds.nowMs() - start >= @as(i64, @intCast(t * 10))) {
+            if (ms) |t| {
+                if (w.err == .ok and (w.data[0] & bit_timeout) != 0 and syscmds.nowMs() - start >= @as(i64, @intCast(t))) {
                     why = "timed_out";
                     break;
                 }
@@ -170,16 +170,16 @@ pub const Net = struct {
 
     pub const RecvFor = union(enum) { data: []const u8, closed, failed: []const u8, timeout };
 
-    /// Like recvSome, giving up after `ticks` (10 ms each) with nothing
+    /// Like recvSome, giving up after `ms` milliseconds with nothing
     /// received: a kernel timer rings the bell with a bit of its own.
     /// The bit may still be latched from an earlier arming, so a wake
     /// counts as the timeout only once the clock agrees.
-    pub fn recvSomeFor(n: *Net, s: u64, ticks: u64) RecvFor {
+    pub fn recvSomeFor(n: *Net, s: u64, ms: u64) RecvFor {
         const bit_timeout: u64 = 2; // netsvc rings bit 1
-        if (usys.timerArm(n.bell, ticks, bit_timeout) != .ok) return .{ .failed = "no timer for the network view" };
+        if (usys.timerArm(n.bell, usys.msToTicks(ms), bit_timeout) != .ok) return .{ .failed = "no timer for the network view" };
         defer _ = usys.timerArm(n.bell, 0, bit_timeout);
         const start = syscmds.nowMs();
-        const limit_ms: i64 = @intCast(ticks * 10);
+        const limit_ms: i64 = @intCast(ms);
         while (true) {
             const rep = ncall(n, .{ .tcp_recv = .{ .sock = s, .len = shared.net_max_recv } }) orelse return .{ .failed = "the network service did not answer" };
             switch (rep) {
@@ -248,6 +248,33 @@ pub const Net = struct {
         }
     }
 
+    /// The next datagram if one is waiting, else null (no waiting).
+    pub fn udpTryRecvRaw(n: *Net, s: u64) ?Dgram {
+        const rep = ncall(n, .{ .udp_recv = .{ .sock = s, .len = shared.udp_max } }) orelse return null;
+        return switch (rep) {
+            .num => |x| .{
+                .from = getWords(n.buf[0..16]),
+                .port = (@as(u64, n.buf[16]) << 8) | n.buf[17],
+                .data = n.buf[shared.udp_hdr .. shared.udp_hdr + x.n],
+            },
+            else => null,
+        };
+    }
+
+    /// Sleep on the bell until it rings or `ms` milliseconds pass; true
+    /// when the time ran out (the timer's bit, confirmed by the clock).
+    pub fn waitFor(n: *Net, ms: u64) bool {
+        const bit_timeout: u64 = 2;
+        if (usys.timerArm(n.bell, usys.msToTicks(ms), bit_timeout) != .ok) {
+            n.wait();
+            return false;
+        }
+        defer _ = usys.timerArm(n.bell, 0, bit_timeout);
+        const start = syscmds.nowMs();
+        const w = usys.notifyWait(n.bell);
+        return w.err == .ok and (w.data[0] & bit_timeout) != 0 and syscmds.nowMs() - start >= @as(i64, @intCast(ms));
+    }
+
     // Names.
 
     pub const Resolved = struct { words: [shared.resolve_max][2]u64 = undefined, n: usize = 0, ttl: u32 = 0 };
@@ -295,7 +322,7 @@ pub const Net = struct {
     /// How long one address of several gets before the next is tried
     /// (a route that is not there — IPv6 behind slirp — would otherwise
     /// cost the stack's whole retransmission run per address).
-    pub const attempt_ticks: u64 = 150;
+    pub const attempt_ms: u64 = 1500;
 
     /// Connect to a host given as an address or a name, trying each
     /// address in turn — a bounded attempt each while others remain,
@@ -308,7 +335,7 @@ pub const Net = struct {
         var last: []const u8 = "refused";
         for (r.words[0..r.n], 0..) |w, i| {
             const bounded = i + 1 < r.n;
-            switch (n.connectRawFor(w, port, if (bounded) attempt_ticks else null)) {
+            switch (n.connectRawFor(w, port, if (bounded) attempt_ms else null)) {
                 .sock => |s| return .{ .sock = s },
                 .failed => |m| last = m,
             }

@@ -6,6 +6,7 @@ const shared = @import("shared");
 const arch = @import("arch.zig");
 const cap = @import("cap.zig");
 const domain = @import("domain.zig");
+const clock = @import("clock.zig");
 const ipc = @import("ipc.zig");
 const irq = @import("irq.zig");
 const kalloc = @import("kalloc.zig");
@@ -57,6 +58,7 @@ export fn kmain(boot_arg: u64) noreturn {
     // enumerated once the memory map is up (its ECAM needs a mapping).
     if (plat.pcie) |h| pci.init(h);
     arch.platform.initIommu(&plat);
+    clock.init(arch.platform.rtcSeconds(&plat));
 
     // Allocator smoke test: quota round-trips to zero.
     {

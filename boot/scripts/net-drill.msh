@@ -112,6 +112,12 @@ if (from-bytes (recv $na)?)? != "by name" { (err "connect by name: wrong data")?
 close $nc
 close $na
 echo "script: resolve ok"
+# The wall clock: the kernel read the RTC at boot, the time service
+# refined it; date is a record with the calendar in it.
+let d = (date)?
+if $d.unix < 1700000000 or ($d.iso | len) != 20 { (err "date: $d")? }
+let iso = $d.iso
+echo "script: date $iso"
 # A closed peer is an err, not a hang; a refused view is an err too.
 close $c
 match (recv $a) { ok _ => (err "data after close")?; err $e => echo "script: after close: $e" }

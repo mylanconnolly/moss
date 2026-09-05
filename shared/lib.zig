@@ -160,6 +160,13 @@ pub const Syscall = enum(u64) {
     /// cycle_hz() -> slot 1 = the cycle counter's rate in Hz (not
     /// authority, like the counter itself: ungated).
     cycle_hz = 41,
+    /// clock_get() -> x1 = the Unix time of boot in milliseconds (0 when
+    /// unknown), x2 = its source (ClockSource); wall time is x1 plus the
+    /// cycle counter's milliseconds. Reading time is not authority.
+    clock_get = 42,
+    /// clock_set(clock_handle, boot_epoch_ms): the time service sets what
+    /// it learned (SNTP); the `clock` grant is the authority.
+    clock_set = 43,
     /// shm_unmap(va): undo an shm_map at `va` — the pages leave this
     /// address space and the mapping's ref on the buffer is released.
     /// bad_arg when `va` is not the base of one of this domain's shm
@@ -219,7 +226,12 @@ pub const SpawnFlags = struct {
     /// Grant read-only introspection (domain_list, sysinfo) WITHOUT spawn
     /// authority — for tools that look but never create.
     pub const grant_introspect: u64 = 1 << 4;
+    /// Grant the right to set the wall clock (the time service).
+    pub const grant_clock: u64 = 1 << 5;
 };
+
+/// Where the kernel's idea of wall time came from.
+pub const ClockSource = enum(u64) { none = 0, rtc = 1, set = 2 };
 
 /// Domain lifecycle as reported by domain_stat.
 pub const DomainState = enum(u64) {
@@ -354,6 +366,7 @@ pub const ImageId = enum(u64) {
     users = 17,
     mshrun = 18,
     dnsd = 19,
+    clock = 20,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over

@@ -11,6 +11,7 @@ const its = @import("its.zig");
 const log = @import("../../log.zig");
 const mem = @import("../../mem.zig");
 const smmu = @import("smmu.zig");
+const mmu = @import("mmu.zig");
 
 pub const MemRegion = dt.MemRegion;
 pub const PcieHost = dt.PcieHost;
@@ -24,6 +25,8 @@ pub const Info = struct {
     pcie: ?PcieHost,
     smmu: ?dt.Smmu = null,
     its: ?Reg = null,
+    /// The PL031 real-time clock, when the tree has one.
+    rtc: ?Reg = null,
 };
 
 var region_buf: [8]MemRegion = undefined;
@@ -50,7 +53,17 @@ pub fn discover(boot_arg: u64) Info {
         .pcie = pcie,
         .smmu = fdt.smmu(),
         .its = fdt.findReg("arm,gic-v3-its"),
+        .rtc = fdt.findReg("arm,pl031"),
     };
+}
+
+/// The real-time clock, read once: Unix seconds from the PL031's data
+/// register, or nothing when the machine has none.
+pub fn rtcSeconds(info: *const Info) ?u64 {
+    const r = info.rtc orelse return null;
+    mmu.mapDeviceLive(r.base, mem.page_size) catch return null;
+    const dr: *volatile u32 = @ptrFromInt(mem.physToVirt(r.base));
+    return dr.*;
 }
 
 /// The IOMMU, once the memory map is up (its registers need a mapping).

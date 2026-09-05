@@ -60,6 +60,8 @@ pub const vm = impl.vm;
 /// Discovery of memory and devices from firmware: `discover`,
 /// `initInterrupts`, `initIommu`, `intxIntid`, the `MemRegion` and
 /// `PcieHost` shapes.
+/// Also `platform.rtcSeconds(&info)`: the machine's real-time clock
+/// read once at boot, or null.
 pub const platform = impl.platform;
 /// The boot console: `write`.
 pub const console = impl.console;

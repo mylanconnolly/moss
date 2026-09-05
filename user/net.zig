@@ -1568,8 +1568,9 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     if (usys.notifyBind(irq_notif) != .ok) usys.exit(178);
     // The clock: retransmission must run even when nobody calls and no
     // frame arrives — a client sleeping on its doorbell after a lost SYN
-    // waits for exactly that. Every tenth of a second, bit_tick.
-    if (usys.timerArm(irq_notif, 10, bit_tick) != .ok) usys.exit(180);
+    // waits for exactly that. Every tick (a tenth of a second), bit_tick
+    // — the first cut asked for ten of them, believing a tick was 10 ms.
+    if (usys.timerArm(irq_notif, 1, bit_tick) != .ok) usys.exit(180);
     _ = usys.log(log_h, "netsvc: virtio-net up, serving");
 
     views[0] = .{ .used = true }; // badge 0: unrestricted root view
