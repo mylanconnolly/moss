@@ -261,9 +261,9 @@ is a plan.
   protocol types and checked at the boundary both ways, every command
   the world decides answering a result with the protocol's word, a
   module loaded from the store (`use math`, the archive's `lib/`),
-  floats; still open: a numeric tower above int and float, signatures
-  for the builtins, shapes the lint could check statically when they
-  are literal; (2) ✅ scripts as programs
+  floats; ✅ signatures for the builtins (2026-09-04); still open: a
+  numeric tower above int and float, shapes the lint could check
+  statically when they are literal; (2) ✅ scripts as programs
   (landed 2026-09-03: the `mshrun` image, `script:` in unit files, the
   file commands shared through `user/fscmds.zig`); still open: a script
   spawned on another node — `rspawn` takes a catalog number and carries
@@ -276,10 +276,23 @@ is a plan.
   with backoff, lingering close, 32 sockets / 16 views); ✅ HTTP
   (landed 2026-09-04: `lib/http.zig`, `lib/json.zig`, `http-read`,
   `http-write`, `serve` with handlers as functions, `fetch`, `to-json`
-  / `from-json`); still open: keep-alive and chunked transfer, name
-  resolution (needs UDP), TLS, concurrent handling (needs the language
-  to spawn), and, when a use case demands them, congestion control and
-  out-of-order receive; (4)
+  / `from-json`); ✅ keep-alive and chunked transfer (landed 2026-09-04:
+  every request a connection carries, pipelined too, a per-socket
+  leftover and an idle timeout on a kernel timer, chunked bodies
+  decoded, a four-connection pool in `fetch` with one retry on a dead
+  kept connection); ✅ UDP (landed 2026-09-04: `udp_bind`/`udp_send`/
+  `udp_recv` in netsvc, both families, loopback, the allowlist judging
+  destinations, `udp-bind`/`udp-send`/`udp-recv` in the language);
+  ✅ name resolution (landed 2026-09-04: `lib/dns.zig`, the resolver
+  in netsvc with a TTL cache asking the settings file's resolvers in
+  order, `resolve` and names in `connect`/`udp-send`/`fetch` with
+  bounded attempts per address, `dnsd` serving a zone from mshl data —
+  the gate's hermetic upstream and the fabric's names); still open:
+  DNS over TLS (with TLS), search lists and a hosts file if a use case
+  asks, names for fabric nodes by default (dnsd in the cluster
+  profile), TLS,
+  concurrent handling (needs the language to spawn), and, when a use
+  case demands them, congestion control and out-of-order receive; (4)
   the fabric surface — ✅ the bulk transport across the wire and remote
   pipeline stages (landed 2026-09-04: session buffers diffed both ways,
   `fw_bulk`/`fw_bulk_resp`/`fw_release`, wire v6, `remote NODE { … }`
@@ -307,6 +320,30 @@ is a plan.
   the tree-sitter highlights. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
+- **A clock, then a re-evaluation.** ✅ The clock (landed 2026-09-05):
+  the kernel reads the RTC once at boot through the HAL (PL031 on
+  aarch64; on x86_64 the loader's date-at-boot answer, firmware's clock
+  through UEFI rather than the CMOS ports — landed with the merge of
+  2026-09-05, when the net drill's `date` step found the port had no
+  time), keeps the Unix time of
+  boot, hands it out with `clock_get` and lets the `clock` grant set it;
+  the time service syncs over SNTP (`lib/sntp.zig`) from the servers
+  its settings name and serves SNTP to peers, so the fabric's time
+  comes from the fabric; `date` in the language (`lib/civil.zig`).
+  Owed: the clock unit in the system and cluster profiles (with dnsd
+  beside it). **Then, as a task of its own:
+  re-read every decision taken because there was no clock and decide
+  each again with one.** Known so far — the list to start from, not
+  the whole of it: fabric certificates carry no expiry and revocation
+  serials are "the only clock" (docs/fabric.md, the fabric residuals
+  below); fabric liveness runs on each node's own poll clock; user
+  records carry no expiry; mossfs writes `mtime` as 0 and `stat`
+  reports it; `now` is milliseconds since boot and the log has no
+  timestamps; the resolver's TTL cache and HTTP's `Date` header have
+  no time to compare against; the users drill's sessions and the
+  shares have no lease clock. Each is either a workaround to undo, a
+  decision that stands on its own merits, or a new feature the clock
+  makes possible — and the entry for each says which.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
@@ -379,8 +416,10 @@ is a plan.
 
 **Networking**
 
-- A minimal stack by design: stop-and-wait with one segment in flight,
-  no congestion control, no UDP, no TCP options.
+- A minimal stack by design: no congestion control, no TCP options
+  beyond MSS; UDP sockets keep eight datagrams and drop the rest; the
+  resolver holds eight lookups and a cache of sixteen names; a
+  truncated DNS answer is not retried over TCP.
 - Blocking is polling plus a doorbell; rings as the wakeup path are not
   built.
 - 16 sockets and 8 views per service.
@@ -398,6 +437,14 @@ is a plan.
   system store; there is no other source of programs (no download, no
   build).
 - A session's shell has no fabric (`nodes`, `rspawn` are errors).
+- **A known flake (seen 2026-09-04):** the `users` drill failed its
+  leak bar once — `shm[14]: 8 pages, 1 refs, created by users`, pmem
+  delta 32 KB — at the end of the fourth, logged-out-early session;
+  three soaks in a row passed. A session's buffer with one reference
+  left after every domain is gone points at a teardown ordering
+  (a mapping or a cap in flight when the manager is revoked), not a
+  userspace leak. Reproduce with `-Donly=users -Dsoak=N` and read the
+  trace ring in the kept log; the fix is owed.
 
 **Fabric**
 
@@ -427,8 +474,7 @@ is a plan.
 - Interpreter limits: 128 bindings per scope, a 512-character line,
   16 lines of history; strings interpolate `$var` only; no globbing,
   no job control. Shapes are checked where they run, never statically;
-  the `shape` keyword takes one term; signatures cover host commands,
-  not the builtins.
+  the `shape` keyword takes one term.
 
 **Testing**
 

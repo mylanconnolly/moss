@@ -1284,7 +1284,8 @@ had been printing a script's rendering only at its end — it streams
 each statement's output now (`evalScriptEach`); and with clients
 asleep on doorbells nobody called `netsvc`, so its retransmission scan
 never ran and a lost SYN was never resent — the service has a clock
-now (a kernel timer on its interrupt notification, ten ticks). Also
+now (a kernel timer on its interrupt notification, ten ticks — a
+second, as it turned out; one tick since the clock arc). Also
 fixed on the way: a closed connection freed as soon as its own FIN
 was acknowledged left the peer's FIN unanswered, and slirp retransmitted
 it at us for a minute; a lingering socket now waits for the peer's FIN
@@ -1513,7 +1514,11 @@ slice to `[S]`, `?T` to `S | nothing` — and `mshl.toValue` builds the
 value from the same type, so `fscmds.Stat`, `Df`, the shell's `Proc`,
 `Svc`, `Node`, `Mem` and the protocol's error enums are each declared
 once; `signature NAME` hands the record back with its shapes as shape
-values (`ls data? | check (signature ls).returns`). *Results*: every
+values (`ls data? | check (signature ls).returns`); the builtins carry
+signatures in a table of their own (`builtin_sigs`), checked at the
+call the same way — which retired the hand-written argument checks in
+the dispatcher — and rendered on an editor's hover (`first [count?:
+int] (input: list) -> list`). *Results*: every
 command whose outcome the world decides answers `ok v` / `err word`,
 the word from the protocol's own enumeration (`shared.FsErr`, `NetErr`,
 `FabErr`, `@tagName`), through new error-reporting variants in
@@ -1555,14 +1560,148 @@ container constants. Two runner lessons: the console tap was a 64 KB
 buffer whose reader thread quietly stopped when it filled, so once
 the scripted session said more than that every later step looked
 like a shell that hung on a line it had in fact answered — the tap is
-4 MB now and an overflow is a named failure, and a failed step prints
-what the console said; and a userspace panic exited with 255 and no
+4 MB now and an overflow is a named failure, a failed step prints what
+the console said on one line and keeps the whole transcript beside the
+kernel log (a raw carriage return in that dump hid an answer behind
+its echo, and a grep that read only the echo's line made an answered
+step look like a hang twice); and a userspace panic exited with 255 and no
 word, which reads the same way from a console, so msh and mshrun log
 the panic message first. The shell drill grew a dozen steps (a result matched on
 its word, a wrong argument refused by a signature, a float, an
 annotated `let`, an uncovered enumeration, `use math` from the store,
 a script that `use`s it under `mshrun`) and the login drill installs
 a module into a home.
+
+**mshl v3, stage 3d (as built, 2026-09-04): keep-alive and chunked
+transfer.** `lib/http.zig` frames a body three ways now — a length,
+chunked (decoded in place of the sizes and trailers, `len` still the
+bytes consumed as sent so the next request is found behind it), or
+the close — and every parsed message says `keep`: HTTP/1.1 unless
+`Connection: close`, HTTP/1.0 only with `keep-alive`, never after a
+body that ran to the close; 204, 304 and 1xx end with their head.
+What is written always carries a length and the Connection header the
+caller decides. In `user/httpcmds.zig`, `serve` answers every request
+a connection carries: bytes past the end of one request wait in a
+per-socket leftover (eight slots of a receive's size, static, since the
+interpreter's arena is a line's) so pipelined requests parse whole,
+and the connection ends when the peer says close, a handler's record
+says `close: true`, the count runs out, or it sits idle three seconds
+— the wait is `Net.recvSomeFor`, a kernel timer (`timer_arm`) ringing
+the host's doorbell with a bit of its own beside netsvc's, and since
+that bit may still be latched from the last arming, a wake counts as
+the timeout only once the clock agrees. `fetch` keeps up to four idle
+connections by address and port; a kept connection the peer closed
+while it sat answers nothing, which is the one case worth a single
+retry on a fresh connection (the drill's canned server, a `printf`,
+does exactly that). The network drill's server now serves seven
+requests over six connections — the runner pipelines two on one and
+sends a chunked POST on another — and the script fetches twice.
+
+**Networking, UDP (as built, 2026-09-04).** Datagrams joined the stack
+as the first step toward name resolution: a table of eight UDP sockets
+in netsvc, each a bound port, a doorbell and a queue of eight datagrams
+kept with their sources; `udp_bind` (0 for an ephemeral port; a
+filtered view may bind only so, and hears only from its one allowed
+peer), `udp_send` with the destination address in the view buffer
+ahead of the bytes (a request carries three words, and an address is
+two), `udp_recv` answering the source the same way; UDP socket numbers
+start at 1000 so `watch` and `tcp_close` serve both kinds. The
+checksum is the pseudo-header sum TCP uses with protocol 17 and a
+zero folded to 0xffff; loopback goes straight back into `udpInput`,
+as TCP's does. `shared.formatAddr` renders an address as text (dotted
+for v4-mapped, RFC 5952 `::` for the longest zero run) so a datagram's
+`from` is a string a script can match. In the language: `udp-bind`,
+`udp-send`, `udp-recv` (a `{ from, port, data }` record), `close` and
+`status` on a `udp` handle. The network drill's script sends to a
+bound port from an ephemeral one over `::1` and `10.0.2.15` and
+answers back.
+
+**Networking, names (as built, 2026-09-04).** Three pieces on top of
+UDP. `lib/dns.zig` is the wire format and nothing else — build a
+query (recursion desired, an OPT record announcing 1232 bytes), parse
+a message (labels, compression pointers with a hop limit and no
+forward references, the question echoed, records raw with their
+offset so a CNAME can be read), gather the addresses for a name
+following a CNAME chain within the answer with the smallest TTL, and
+build an authoritative response — host-tested against hand-written
+packets. The resolver lives in netsvc, which has the timers, the
+clock and the sockets: a lookup asks the current resolver for AAAA
+and A at once (two ids stepping through the id space from a boot-time
+seed, one source port chosen at boot), the tick resends after half a
+second and moves to the next resolver after two tries, a REFUSED or
+SERVFAIL moves on at once, and the lookup finishes when both questions
+are answered or the last resolver gave up — with what came, or
+`nxdomain`, `refused`, `timeout`; answers are cached by TTL (bounded
+to an hour, a minute for a negative one) in sixteen slots. The
+protocol is `resolve` (the name in the buffer; answers a lookup
+number a `watch` can ring) and `resolve_check` (the addresses in the
+buffer, or the error, freeing the lookup); any view may resolve, since
+a name is a question and the allowlist judges the address that comes
+of it. Resolvers come from the unit's settings file — `conf/net.msh`,
+delivered by init's new `file:` give, the `secret` mechanism for bytes
+that are not secret (kept, not wiped, up to 2 KB) — `::1` first for
+the node's own dnsd, then slirp's forwarder. `dnsd` (`user/dnsd.zig`)
+is that server: one zone from `conf/dns.msh` given the same way, UDP
+53 on its own network view, A or AAAA by the address's family,
+NXDOMAIN in the zone, REFUSED outside it. In the language: `resolve`,
+and a name wherever an address goes; `Net.connectHost` tries the
+addresses in order with a bounded attempt (a kernel timer on the
+doorbell, as the timed receive) while more remain. Found by the
+one-off wire test the gate cannot run: with a public name answering
+two IPv6 and two IPv4 addresses and slirp routing only IPv4, connect
+by name sat through the stack's whole retransmission run per IPv6
+address and the drill's hang watchdog fired — the bounded attempt is
+the fix, and dnsd answering NXDOMAIN for every unknown name had kept
+the resolver from ever asking slirp, hence REFUSED outside the zone;
+and `fetch` had taken its socket from a single-address connect and
+keyed its pool by that address, so it never got past the first IPv6
+answer — it connects through the whole list now and keys the pool by
+the host as written. With those three, the test fetched a public
+page by name: status 200, chunked and keep-alive, from a real server,
+in about a second — the arc's two stages meeting.
+
+**The clock (as built, 2026-09-05).** Built ahead of TLS, whose
+certificate checks want the time, and small by design. The kernel
+keeps one number, the Unix time at which the cycle counter read zero,
+and where it came from: `kernel/clock.zig`; the port reads the
+real-time clock once at boot through a HAL entry
+(`arch.platform.rtcSeconds` — on aarch64 the PL031 found in the device
+tree by compatible string, its data register mapped live and read
+once; on x86_64 the loader's date-at-boot response — firmware's clock
+through UEFI, the modern path, the CMOS ports being legacy — plus the
+seconds since boot from the TSC), and two
+syscalls expose it: `clock_get`, for anyone, since reading time is not
+authority, and `clock_set` behind a new `clock` capability, the grant
+a unit asks for by name. Userspace adds its own cycle count
+(`usys.wallMs`). The time service (`user/clock.zig`) is SNTP both
+ways — `lib/sntp.zig` builds and reads the packets and turns a round
+trip into an offset and a delay, `choose` takes the median of the best
+half — asking each configured server (names resolve) four times and
+setting the clock by the winner, refusing an offset over a day, asking
+every thirty seconds until it knows the time and hourly after; and it
+answers SNTP on UDP 123 so a node learns the time from a peer. Its
+loop is one doorbell over two datagram sockets, and while its own
+question is out it keeps answering others — which is how the drill
+syncs a node from itself over loopback (offset 0, delay 0, four
+samples). `lib/civil.zig` is Hinnant's days-from-civil arithmetic and
+ISO 8601 text, round-tripped across four thousand years of dates in
+its test; `date` in the language answers the record or `err
+no_clock`. Two things the tests caught: an NTP fraction converted by
+truncation lost a millisecond each way (rounded now), and a signed
+year zero-padded by `std.fmt` prints with a plus sign. One thing the
+first boot caught: a "never synced" sentinel of `minInt(i64)`
+overflowed the first subtraction, and the service's panic — logged
+now, thanks to the earlier lesson — said so in one line. And the wire
+check found the day's largest bug, older than the day: the kernel
+tick is a tenth of a second, and `sleep` and `timer_arm` count ticks,
+but the language's `sleep`, and every timed wait written this day —
+HTTP's idle and stall limits, the bounded connect attempt, the SNTP
+reply wait, netsvc's own retransmission scan ("every tenth of a
+second", armed for ten ticks) — had assumed ten milliseconds, so each
+was ten times what it said (a 3 s idle was 30, a 1.5 s attempt 15, and
+one silent IPv6 address cost an SNTP sync eight seconds). `usys.tick_ms`
+and `msToTicks` are the single conversion now; every caller speaks
+milliseconds; the scan runs every tick.
 
 ### The gate (as built, 2026-09-03)
 
@@ -2552,6 +2691,29 @@ prints the address so the next move shows. Under TCG the console is
 the gate's single largest cost: a scroll is a million emulated stores,
 and the x86_64 gate there went from about four minutes to under six;
 under KVM it is unchanged.
+
+### The x86_64 port: the loader's requests lead the image (2026-09-05)
+
+A merge that added two programs and five configuration files to the
+boot archive stopped every x86_64 drill at the first line of the
+kernel: "the loader does not speak Limine base revision 5". Nothing
+in the merge touched the boot. What had moved was the archive's
+layout. Limine finds the protocol's markers by scanning the loaded
+image from its base in 8-byte steps, resetting at a start marker and
+stopping at the first end marker it meets — and the host kernel's
+archive carries the guest kernel, an ELF with markers of its own,
+inside `.rodata`, ahead of the real requests in `.data`. Those copies
+had been skipped only because the archive happened to leave them at
+addresses no 8-byte step lands on; the new files shifted the archive
+by a few bytes, a copy came into step, and the loader answered the
+guest kernel's requests inside the blob and left the host's untouched.
+The requests now come first: their own section and load segment at
+the image base, mapped read-only once the kernel's tables are up (the
+loader wrote its answers before the kernel ran; the kernel only reads
+them), so the scan ends at the real end marker before it reaches
+anything that resembles one. The lesson generalizes: an image that
+embeds another image of the same kind must not let the embedded copy
+be found first by a scanner that stops at the first match.
 
 ### The x86_64 port under TCG (as built, 2026-09-04)
 

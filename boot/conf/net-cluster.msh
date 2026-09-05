@@ -1,0 +1,3 @@
+# The network service's settings, cluster addressing: no resolver yet
+# (the fabric's own names come with dnsd on a node).
+{ resolvers: [] }

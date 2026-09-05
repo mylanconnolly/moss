@@ -217,6 +217,70 @@ the wire echo and through loopback with a recursive `recv-all` (the
 window at work: more than one segment in flight each way), then
 proves a closed peer and a refused destination are errors as values.
 
+### Datagrams
+
+UDP is the same shape with no connection: `udp-bind PORT` (0 for any
+port; a filtered view may bind only that way) makes a `udp` handle,
+`udp-send $u ADDR PORT DATA` sends one datagram of up to 1452 bytes
+to an address the view allows, and `udp-recv $u` waits for the next
+one and answers `{ from, port, data }` — the sender's address as text,
+its port, the bytes. A socket keeps eight datagrams behind it; more
+are dropped, as datagrams are. Checksums are computed on the way out
+and checked on the way in (a v4 sender may leave it out). Loopback
+works for both families. The drill binds 5353, sends to it from an
+ephemeral socket over `::1` and over `10.0.2.15`, and answers back.
+### Names
+
+The stack resolves names itself: `resolve NAME` answers `ok` with a
+list of addresses as text (IPv6 first, then IPv4, as the resolver
+returned them) or `err nxdomain`, `err timeout`, `err refused`, `err
+no_resolver`; `connect`, `udp-send` and `fetch` take a name wherever
+they take an address. netsvc asks the resolvers its settings file
+names (`conf/net.msh`, `{ resolvers: [::1, 10.0.2.3] }`, given to the
+unit as a file from the archive), in order: AAAA and A at once, two
+tries of half a second each, the next resolver when one refuses or
+never answers, and a cache by the answer's TTL (a minute for a name
+that does not exist). A DNS message is `lib/dns.zig` — labels,
+compression pointers, EDNS0 with a 1232-byte payload, A and AAAA and
+a CNAME chain followed within one answer; host-tested — and nothing
+else of the wider world: no search lists, no hosts file, no mDNS, no
+DNSSEC, no TCP fallback (a truncated answer is what it is). A
+resolver's identity is its address; the answers are trusted as far
+as that goes, which is where TLS comes in. Connecting by name tries
+each address in turn, a bounded attempt (1.5 s) each while others
+remain, so an IPv6 address behind a gateway that cannot route it
+costs a moment, not the stack's whole retransmission run.
+
+**dnsd** is the OS's own name server: one zone from `conf/dns.msh`
+(`{ zone: moss.test, ttl: 300, names: { www: [::1], node1:
+[10.77.0.1, fdcc::1] } }`; an IPv4 address answers A, an IPv6 one
+AAAA), served on UDP 53 through its own network view. A name in the
+zone it lacks is NXDOMAIN; a name outside the zone is REFUSED, which
+sends a resolver that asked it first on to the next server. It is the
+resolver's first stop on a node, the fabric's way to a name instead
+of `10.77.0.N`, and the gate's hermetic upstream: the network drill
+resolves `www.moss.test` and `node1.moss.test` through it, gets
+`nxdomain` for a name it does not have, and connects by name over
+loopback. A one-off check through slirp's forwarder resolved a public
+name to its four addresses and fetched the page by name.
+
+### Time
+
+The time service (`user/clock.zig`, the `clock` unit) learns the time
+over SNTP (RFC 4330, `lib/sntp.zig`, host-tested): it asks each server
+its settings file names (`conf/clock.msh`, `{ servers: [::1,
+time.cloudflare.com], serve: true, interval: 3600 }`) — names resolve
+like any other — four questions apiece, keeps the median offset of the
+best half by delay, and sets the kernel's clock with the `clock`
+grant; a server more than a day away is not believed, and a node with
+no RTC keeps asking every thirty seconds until one answers. It serves
+SNTP itself on UDP 123, so a node learns the time from a peer: the
+fabric's time comes from the fabric, and the drill's node asks itself
+over loopback (the same loop answers questions while its own is out).
+`date` in the language is the result: `ok { unix, ms, iso, year …
+weekday, source }` or `err no_clock`. A one-off check through slirp
+synced from a public server to within the round trip.
+
 ### HTTP: handlers are functions
 
 On top of those sockets, an mshl host with a network view speaks
@@ -256,11 +320,22 @@ returns decides the response: a record with `status`, `headers` or
 (`to-json` / `from-json` are the language's own way to and from JSON,
 tables included, floats as floats). A handler that fails, or returns
 an `err`, answers `500` with the message and the server goes on. Every
-response carries `Content-Length` and `Connection: close`, and the
-socket is closed after it: one request per connection, no keep-alive,
-no chunked transfer (a chunked request or response is an `err`). Bodies
-are bounded (a 16 KB head, a 256 KB body). `fetch` takes `http://`
-URLs whose host is an address — there is no name resolution — and
+response carries `Content-Length`. Connections are kept alive as
+HTTP/1.1 expects: `serve` answers every request a connection carries
+— pipelined ones too, since bytes read past one request wait for the
+next — until the peer says `Connection: close`, the count runs out, a
+handler's record says `close: true`, or the connection sits idle for
+three seconds; `http-write` says keep-alive unless the record says
+`close: true`. A chunked request or response body is decoded (the
+sizes and any trailers dropped); what is sent is always framed by a
+length. Bodies are bounded (a 16 KB head, a 256 KB body, ten seconds
+for the rest of a message that began). `fetch` keeps up to four idle
+connections by address and port and reuses one for the next request
+to the same place; a kept connection the peer closed meanwhile is
+noticed by the empty answer and the request goes once more on a fresh
+one, and `{ keep: false }` in the options asks for a close instead.
+`fetch` takes `http://`
+URLs whose host is an address or a name — and
 reads the response to its `Content-Length` or to the close.
 
 ### What the drill proves
@@ -371,22 +446,24 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   advertised window and our 32 KB ring, no congestion control, no
   window scaling, no selective acknowledgement, in-order receive (a
   lost segment stalls delivery until it is retransmitted), no
-  TIME_WAIT, no UDP. It is the fabric's transport and a script's, not
-  a general-purpose host stack.
+  TIME_WAIT; UDP keeps eight datagrams per socket and drops the rest.
+  It is the fabric's transport and a script's, not a general-purpose
+  host stack.
 - Blocking is `would_block` plus a doorbell; the async ring transport
   as a wakeup path for network I/O is planned, not built. The
   language's `accept` and `recv` wait on the doorbell for as long as
   it takes — a server's `accept` with no client never returns — and
   `connect` and `send` until the stack gives up (about 16 s of
   retransmission), then answer `err`.
-- The language has no `ping`, no `derive` (a script's view is what its
-  manifest gave it), and no UDP because the stack has none; a socket
-  value cannot cross to another program (no channel surface yet).
-- HTTP is one request per connection (`Connection: close` both ways),
-  no keep-alive, no chunked transfer, no TLS, no name resolution, and
-  a `serve` handles one connection at a time — the language has no
-  concurrency, so a slow handler holds the next client at the door
-  (the listener's backlog holds eight).
+- The language has no `ping` and no `derive` (a script's view is what
+  its manifest gave it); a socket value cannot cross to another program
+  (no channel surface yet).
+- HTTP has no TLS yet, and a `serve` handles
+  one connection at a time — the language has no concurrency, so a
+  slow handler, or a kept connection that sits idle (up to three
+  seconds), holds the next client at the door (the listener's backlog
+  holds eight). What is sent is always framed by a length, never
+  chunked; a chunked body over 256 KB is refused.
 - A server's `serve` never returns unless given a count; there is no
   way to stop it from inside the script but an error.
 - Thirty-two sockets and sixteen views per service are static pools.

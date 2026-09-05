@@ -1,0 +1,5 @@
+# The time service's settings: the SNTP servers to ask (names or
+# addresses, in order), whether to serve SNTP to peers on UDP 123, and
+# how often to ask again (seconds). ::1 is this node's own server: the
+# drill's hermetic sync.
+{ servers: [::1], serve: true, interval: 3600 }

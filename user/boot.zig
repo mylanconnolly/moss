@@ -7,7 +7,7 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 
 pub const max_secret = 256;
-pub const max_data = 256;
+pub const max_data = 2048;
 pub const max_device_kinds = 8;
 /// How many caps of one tag (or devices of one kind) a program can be
 /// handed: the cap message's `kind` word is the index for ordinary

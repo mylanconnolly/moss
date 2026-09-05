@@ -84,6 +84,13 @@ pub const MpRequest = extern struct {
     flags: u64 = mp_x2apic,
 };
 
+pub const DateAtBootResponse = extern struct { revision: u64, timestamp: i64 };
+pub const DateAtBootRequest = extern struct {
+    id: [4]u64 = id(0x502746e184c088aa, 0xfbc5ec83e6327893),
+    revision: u64 = 0,
+    response: ?*DateAtBootResponse = null,
+};
+
 pub const framebuffer_rgb: u8 = 1;
 pub const Framebuffer = extern struct {
     address: u64,

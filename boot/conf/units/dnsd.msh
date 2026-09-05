@@ -1,0 +1,4 @@
+# The name server (profile net): serves conf/dns.msh over UDP 53 on
+# its own network view, so the drill's resolver has something to ask.
+{ image: dnsd, profiles: [net], grant: [log],
+  give: [{ tag: net, netview: net }, { tag: buf, shm: 1 }, { file: conf/dns.msh }] }

@@ -56,6 +56,7 @@ const Perms = enum {
 const block_2m: u64 = 2 << 20;
 
 var root_pa: u64 = 0;
+extern const __requests_end: u8;
 
 pub const Error = error{OutOfFrames};
 
@@ -74,13 +75,16 @@ pub fn init(regions: []const platform.MemRegion) Error!void {
             try mapAt(mem.physToVirt(pa), pa, Perms.kernel_rw.bits());
         }
     }
-    // The image, W^X.
+    // The image, W^X. The loader's requests lead it (the linker script
+    // says why); the loader answered them before the kernel ran, and the
+    // kernel only reads them, so their pages are read-only here.
     const kstart = mem.kernelStart();
+    const requests_end = @intFromPtr(&__requests_end);
     const text_end = mem.textEnd();
     const rodata_end = mem.rodataEnd();
     var va = kstart;
     while (va < mem.kernelEnd()) : (va += mem.page_size) {
-        const perms: Perms = if (va < text_end) .kernel_text else if (va < rodata_end) .kernel_ro else .kernel_rw;
+        const perms: Perms = if (va < requests_end) .kernel_ro else if (va < text_end) .kernel_text else if (va < rodata_end) .kernel_ro else .kernel_rw;
         try mapAt(va, boot.imagePhys(va), perms.bits());
     }
 }

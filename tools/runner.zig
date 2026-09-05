@@ -75,7 +75,7 @@ const specs = [_]Spec{
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
         .append = "profile=fs",
     },
-    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 4", .append = "profile=net" },
+    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .append = "profile=net" },
     .{
         .name = "users",
         .kind = .blk,
@@ -322,11 +322,16 @@ fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+    // Each probe is one connection; the last request on it says close,
+    // so the read runs to the close. Probe 5 pipelines two requests on a
+    // kept connection; probe 6 sends a chunked body.
     const probes = [_]struct { req: []const u8, expect: []const u8, expect2: []const u8 }{
-        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "HTTP/1.1 200 OK", .expect2 = "\r\n\r\nhello from moss" },
-        .{ .req = "GET /json HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "Content-Type: application/json", .expect2 = "[{\"n\":1},{\"n\":2}]" },
-        .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nContent-Length: 7\r\n\r\npayload", .expect = "x-method: POST", .expect2 = "\r\n\r\npayload" },
-        .{ .req = "GET /nope HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "HTTP/1.1 404 Not Found", .expect2 = "no such page" },
+        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "HTTP/1.1 200 OK", .expect2 = "\r\n\r\nhello from moss" },
+        .{ .req = "GET /json HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "Content-Type: application/json", .expect2 = "[{\"n\":1},{\"n\":2}]" },
+        .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload", .expect = "x-method: POST", .expect2 = "\r\n\r\npayload" },
+        .{ .req = "GET /nope HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "HTTP/1.1 404 Not Found", .expect2 = "no such page" },
+        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\n\r\nGET /json HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "Connection: keep-alive\r\n\r\nhello from moss", .expect2 = "Connection: close\r\n\r\n[{\"n\":1},{\"n\":2}]" },
+        .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\npay\r\n4\r\nload\r\n0\r\n\r\n", .expect = "x-method: POST", .expect2 = "Content-Length: 7\r\nConnection: close\r\n\r\npayload" },
     };
     for (probes, 0..) |p, i| {
         var conn: ?Io.net.Stream = null;
@@ -478,6 +483,7 @@ const ConsoleTap = struct {
     /// and every step after the overflow "hung").
     buf: [1 << 22]u8 = undefined,
     overflowed: bool = false,
+    reader_done: bool = false,
     /// Reader thread appends bytes then releases len; the main thread
     /// acquires len and scans past its discard watermark. Single writer,
     /// single reader, append-only: no lock needed.
@@ -486,8 +492,12 @@ const ConsoleTap = struct {
 
     fn readerLoop(t: *ConsoleTap) void {
         var chunk: [1024]u8 = undefined;
+        defer t.reader_done = true;
         while (true) {
-            const n = std.posix.read(t.stream.socket.handle, &chunk) catch break;
+            const n = std.posix.read(t.stream.socket.handle, &chunk) catch |e| {
+                std.debug.print("[FAIL] console tap: read failed: {t}\n", .{e});
+                break;
+            };
             if (n == 0) break;
             const old = t.len.load(.monotonic);
             const k = @min(n, t.buf.len - old);
@@ -512,12 +522,37 @@ const ConsoleTap = struct {
     }
 
     /// What the console said since the step began (for a failure
-    /// report: the step's own echo and whatever came back).
+    /// report: the step's own echo and whatever came back), on one line
+    /// — a raw carriage return would hide the answer behind the echo.
     fn dumpRecent(t: *ConsoleTap) void {
         const end = t.len.load(.acquire);
         if (end <= t.start) return std.debug.print("       (the console said nothing)\n", .{});
         const got = t.buf[t.start..end];
-        std.debug.print("       the console said: {s}\n", .{got[0..@min(got.len, 600)]});
+        var shown: [700]u8 = undefined;
+        var n: usize = 0;
+        for (got[0..@min(got.len, 600)]) |ch| {
+            if (ch == '\r') continue;
+            if (ch == '\n') {
+                @memcpy(shown[n .. n + 3], " | ");
+                n += 3;
+                continue;
+            }
+            shown[n] = ch;
+            n += 1;
+        }
+        std.debug.print("       the console said: {s}\n       (tap: {d} bytes so far, reader {s})\n", .{ shown[0..n], end, if (t.reader_done) "gone" else "alive" });
+    }
+
+    /// The whole session so far, kept beside the kernel log on a failure.
+    fn save(t: *ConsoleTap, path: []const u8) void {
+        const end = t.len.load(.acquire);
+        const f = cwd.createFile(io, path, .{ .truncate = true }) catch return;
+        defer f.close(io);
+        var wbuf: [4096]u8 = undefined;
+        var w = f.writer(io, &wbuf);
+        w.interface.writeAll(t.buf[0..end]) catch return;
+        w.interface.flush() catch return;
+        std.debug.print("       (console transcript kept as {s})\n", .{path});
     }
 
     /// The console line that contains `pat` (from the pattern to the end
@@ -617,6 +652,8 @@ const shell_script = [_]Step{
     .{ .send = "ls | stat data", .expect = "error: stat: takes no input, got a result" },
     .{ .send = "(signature stat).returns", .expect = "ok { name: string, type: file | dir | symlink, size: int, mtime: int } | err (denied | not_found | no_space | bad_path | bad_fd | exists | io | not_empty | bad_key)" },
     .{ .send = "let S = shape (dir | file); $S", .expect = "dir | file" },
+    .{ .send = "(signature map).params | get \"shape\"", .expect = "function" },
+    .{ .send = "[1] | map 3", .expect = "error: map: f is 3, not function" },
     .{ .send = "(ls data/smoke? | check (signature ls).returns) | type", .expect = "result" },
     // The library: a module from the store, installed from the archive.
     .{ .send = "let math = (use math); [3, 1, 2] | $math.sum", .expect = "6" },
@@ -700,6 +737,7 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
         if (!(got and waitFor(tap, "msh> ", 300, polls))) {
             std.debug.print("[FAIL] {s}: console step '{s}' missing '{s}'\n", .{ spec.name, step.send, step.expect });
             tap.dumpRecent();
+            tap.save(std.fmt.allocPrint(gpa, "{s}/{s}-console.log", .{ check_dir, spec.name }) catch "console.log");
             reportFailure(spec.name, "console script step failed", log_path);
             return false;
         }
@@ -838,6 +876,7 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
         if (!(got and prompted)) {
             std.debug.print("[FAIL] {s}: console {d} step '{s}' missing '{s}' / '{s}'\n", .{ spec.name, step.con, step.send, step.expect, step.prompt });
             tap.dumpRecent();
+            tap.save(std.fmt.allocPrint(gpa, "{s}/{s}-console{d}.log", .{ check_dir, spec.name, step.con }) catch "console.log");
             reportFailure(spec.name, "login script step failed", log_path);
             return false;
         }

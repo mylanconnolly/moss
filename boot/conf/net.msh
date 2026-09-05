@@ -1,0 +1,4 @@
+# The network service's settings, slirp addressing: the resolvers it
+# asks, in order. ::1 is this node's own dnsd when it runs (the network
+# drill's zone); 10.0.2.3 is slirp's, which forwards to the host's.
+{ resolvers: [::1, 10.0.2.3] }

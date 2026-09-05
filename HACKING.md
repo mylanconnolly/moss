@@ -150,7 +150,11 @@ follow from its `Analysis` — a new binding kind needs a line in
 implicit names a block gets (`it`, `in`, `acc`, `req` — a host that
 calls a block with new names adds them) and the unit keys
 `user/init.zig`'s `parseUnit` reads (a new key is added there and in
-`unit_keys`, or every unit using it lints as a typo). A module for the
+`unit_keys`, or every unit using it lints as a typo). A settings record for a
+service is a `.msh` file under `boot/conf/` named in `build.zig`'s
+archive list and given to the unit with `{ tag: buf, shm: 1 }` and
+`{ file: conf/name.msh }` (`setup.data()` is its text; parse it with
+`mshl.parseData`). A module for the
 library is a file under `lib/msh/` named in `build.zig`'s archive
 list (packed as `lib/<name>.msh`) with a host test in `lib/mshl.zig`
 that `use`s it through the test host (`@embedFile`); init installs it
@@ -323,6 +327,13 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   could not.
 - A **failed build leaves the previous kernel in zig-out** — if a QEMU run
   shows stale behavior, check the build actually succeeded.
+- "the loader does not speak Limine base revision 5" on x86_64 with
+  nothing changed in the boot: the Limine markers exist more than once
+  in the image (the boot archive embeds the guest kernel), and the
+  loader's 8-byte-step scan met a copy first. The real requests lead
+  the image (their own segment at the base, `kernel/arch/x86_64/linker.ld`);
+  `python3`-search the ELF for `f6b8f4b39de7d1ae` — the first hit must
+  be at file offset 0x1000.
 - A console that got slow, not wrong: stores to memory nothing backs
   (a moved BAR, an unmapped MMIO range) leave the VM one at a time at
   ~5 µs each and look like a hang. The framebuffer console prints its
@@ -379,7 +390,11 @@ barriers in the virtio drivers, and `user/vmm.zig`.
 - Sentinels must not collide with valid values (sockets and slots start at
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in
-  `domain.spawn`: log→chan→spawner→entropy→introspect→windows→hypervisor; user
+  `domain.spawn`: log→chan→spawner→entropy→introspect→clock→windows→hypervisor; user
+- **The kernel tick is 100 ms**, and `sleep` and `timer_arm` count
+  ticks. Nothing in userspace should count ticks by hand: ask in
+  milliseconds through `usys.sleepMs` / `usys.msToTicks` (a day's worth
+  of timeouts were ten times their stated length before that existed).
   programs hardcode the slots they expect (documented per program).
 - The kernel embeds exactly one blob, the boot archive; `spawn` takes an
   shm cap holding a staged image, never an index. An shm mapping refs

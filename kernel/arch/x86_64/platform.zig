@@ -44,6 +44,17 @@ fn loaderToPhys(p: u64) u64 {
     return p - boot.hhdm_offset;
 }
 
+/// The real-time clock, as the loader read it from firmware at boot
+/// (Limine's date-at-boot answer — UEFI's GetTime, the modern path to
+/// the RTC; the CMOS ports are legacy and not touched): seconds since
+/// the epoch as of now, the time since boot added from the TSC.
+pub fn rtcSeconds(_: *const Info) ?u64 {
+    const r = boot.date_request.response orelse return null;
+    if (r.timestamp <= 0) return null;
+    const since_boot: u64 = if (cpu.cycleHz() != 0) cpu.cycles() / cpu.cycleHz() else 0;
+    return @as(u64, @intCast(r.timestamp)) + since_boot;
+}
+
 pub fn discover(boot_arg: u64) Info {
     _ = boot_arg; // the responses are globals the loader filled
     if (boot.bootloader_info_request.response) |bi| {

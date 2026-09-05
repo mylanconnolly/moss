@@ -801,7 +801,7 @@ pub var vm_release: ?*const fn (u64) void = null;
 /// is the cap's (a badged channel_b cap also holds its client identity).
 pub fn releaseCap(cap_type: cap.CapType, obj: u64, badge: u64) void {
     switch (cap_type) {
-        .empty, .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor, .window => {},
+        .empty, .debug_log, .spawner, .device, .entropy, .introspect, .hypervisor, .window, .clock => {},
         .vm => if (vm_release) |f| f(obj),
         .channel_a => unrefSide(@ptrFromInt(obj), .a, 0),
         .channel_b => unrefSide(@ptrFromInt(obj), .b, badge),

@@ -88,6 +88,8 @@ pub const Manifest = struct {
     /// Grant read-only introspection (domain_list/sysinfo) — what a
     /// spawner cap also carries, without the power to spawn.
     grant_introspect: bool = false,
+    /// Grant the right to set the wall clock (the time service).
+    grant_clock: bool = false,
     /// Parent in the domain tree (the spawning domain, for syscall spawns).
     parent: ?*Domain = null,
     /// Kernel reaper auto-finishes teardown and signals the watcher; off
@@ -557,6 +559,9 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     }
     if (manifest.grant_introspect) {
         _ = table.insert(.introspect, 0) orelse return Error.CapTableFull;
+    }
+    if (manifest.grant_clock) {
+        _ = table.insert(.clock, 0) orelse return Error.CapTableFull;
     }
     if (manifest.grant_windows and pci.have_host) {
         _ = table.insert(.window, 0) orelse return Error.CapTableFull;

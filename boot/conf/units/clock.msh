@@ -1,0 +1,6 @@
+# The time service (profile net): learns the time over SNTP from the
+# servers conf/clock.msh names and sets the kernel's clock (the `clock`
+# grant), and serves SNTP on UDP 123 to peers. In the drill it asks
+# itself over loopback.
+{ image: clock, profiles: [net], grant: [log, clock],
+  give: [{ tag: net, netview: net }, { tag: buf, shm: 1 }, { file: conf/clock.msh }] }

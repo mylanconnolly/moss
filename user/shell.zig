@@ -486,7 +486,7 @@ const help_text =
     \\  http-read $s | http-write $s RESP | serve $l $handler [n] | fetch URL [{ method, headers, body }]
     \\                         HTTP on those sockets; a handler returns a record { status, headers, body }, text, or data (JSON)
     \\  x | remote NODE { .. }  run the block on another node with $in = x (the fabric)
-    \\  sleep MS | now         wait; milliseconds since boot (a clock for measuring)
+    \\  sleep MS | now | date  wait; milliseconds since boot (a clock for measuring); the wall clock as a record
     \\language:
     \\  x | where size > 4kb | sort-by name --desc | select name size
     \\  x | get col | first n | last n | reverse | len | keys | lines

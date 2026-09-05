@@ -1,7 +1,11 @@
 /* The kernel links in the top 2 GB (the x86_64 "kernel" code model), where
  * Limine maps it at its link address; the direct map is a separate PML4
  * slot the boot entry builds (boot.zig). The Limine requests keep their
- * order — start marker, requests, end marker — inside .data. */
+ * order — start marker, requests, end marker — and come FIRST in the
+ * image: the loader scans from the image base in 8-byte steps and stops
+ * at the first end marker it meets, and the boot archive in .rodata
+ * carries a guest kernel whose own markers would otherwise be found
+ * first whenever the archive's layout happens to align them. */
 
 KERNEL_VIRT_BASE = 0xffffffff80000000;
 
@@ -9,6 +13,7 @@ ENTRY(_start)
 
 PHDRS
 {
+    requests PT_LOAD FLAGS(6);
     text   PT_LOAD FLAGS(5);
     rodata PT_LOAD FLAGS(4);
     data   PT_LOAD FLAGS(6);
@@ -18,6 +23,14 @@ SECTIONS
 {
     . = KERNEL_VIRT_BASE;
     __kernel_start = .;
+
+    .limine_requests : {
+        KEEP(*(.limine_requests_start))
+        KEEP(*(.limine_requests))
+        KEEP(*(.limine_requests_end))
+    } :requests
+    . = ALIGN(4096);
+    __requests_end = .;
 
     .text : {
         *(.text*)
@@ -33,10 +46,6 @@ SECTIONS
 
     .data : {
         *(.data*)
-        . = ALIGN(8);
-        KEEP(*(.limine_requests_start))
-        KEEP(*(.limine_requests))
-        KEEP(*(.limine_requests_end))
     } :data
 
     .bss : ALIGN(4096) {

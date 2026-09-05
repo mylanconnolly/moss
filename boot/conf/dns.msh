@@ -1,0 +1,11 @@
+# The zone dnsd serves: names under `zone`, each a list of addresses
+# (an IPv4 address answers A, an IPv6 one AAAA), all with one TTL.
+{
+  zone: moss.test
+  ttl:  300
+  names: {
+    www:   [::1]
+    node1: [10.77.0.1, fdcc::1]
+    node2: [10.77.0.2, fdcc::2]
+  }
+}

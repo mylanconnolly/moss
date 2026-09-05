@@ -442,6 +442,13 @@ when every console has had a session and none is open.
 
 ## Known limits and bugs
 
+- The `users` drill has failed its leak bar once (2026-09-04): one
+  8-page buffer created by the users image with one reference left
+  after the last, early-logged-out session, 32 KB of pmem with it.
+  Three soaks passed afterwards. It reads as a teardown-ordering race
+  in the manager's last session rather than a leak in normal use; it
+  is on the roadmap's open list, and `zig build check -Donly=users
+  -Dsoak=N` is how to hunt it.
 - Shares are not persistent: an offer lives in the manager's memory
   while the owner's session does; there is no standing grant that
   survives a logout, and no sharing to a user who is not logged in when

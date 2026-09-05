@@ -102,7 +102,8 @@ use it for — and where init gets it from:
 | `{ tag: device, device: blk }` | the device cap root forwarded, filed by kind; `index: 1` picks the second of that kind |
 | `{ tag: disk, unit: blk }` | activating unit `blk` first, then handing over its channel |
 | `{ tag: buf, shm: 1 }` | creating a shared buffer of that many pages (a `buf` is also where secrets are staged) |
-| `{ secret: conf/fs.key }` | copying that archive file into the unit's `buf` and pointing at it (bytes, not a capability — no tag) |
+| `{ secret: conf/fs.key }` | copying that archive file into the unit's `buf` and pointing at it (bytes, not a capability — no tag); wiped once read |
+| `{ file: conf/net.msh }` | the same delivery for bytes that are not secret — a settings record from the archive, up to 2 KB, kept |
 | `{ tag: view, fs: state/fabric, ro: false, mkdir: true }` | deriving a filesystem view from the `fs` unit's root view (a session's from its home), creating the directory first if asked |
 | `{ tag: net, netview: net, allow: 10.0.2.100, port: 9000 }` | asking the named network unit to derive a view, optionally allowing one destination |
 | `{ tag: init, self: true }` | a copy of init's own front channel |
@@ -135,7 +136,8 @@ graph LR
 The remaining keys: `arg` (the program's personality word), `budget`
 (`kobj`, `user`, `cpu` as permille of a core or `"25%"`), `cores` (a
 partition reserved for the unit alone), `grant` (`log`, `spawner`,
-`bootfs`, `introspect`), `restart: { max: N }`, `profiles`,
+`bootfs`, `introspect`, `clock` — the right to set the wall clock),
+`restart: { max: N }`, `profiles`,
 `essential`, `oneshot`, `after`, `node` (`node: boot`: the program's
 node id is the boot's, `node=N` in the boot arguments, 1 by default —
 its `arg` becomes role | node << 8, and its `certify` names this

@@ -228,10 +228,11 @@ pub const Server = struct {
         if (bindingUnder(&an, at)) |b| {
             return .{ .contents = .{ .value = try describe(a, d.text, b) }, .range = rangeOf(d.text, span.start, span.end) };
         }
-        // A builtin command's name.
+        // A builtin command's name: its signature, when it has one.
         const word = d.text[span.start..span.end];
         for (mshl.builtin_names) |n| if (std.mem.eql(u8, n, word)) {
-            return .{ .contents = .{ .value = try std.fmt.allocPrint(a, "```msh\n{s}\n```\nbuiltin", .{n}) }, .range = rangeOf(d.text, span.start, span.end) };
+            const line = if (mshl.builtinSignature(n)) |sig| mshl.signatureText(a, n, sig) catch n else n;
+            return .{ .contents = .{ .value = try std.fmt.allocPrint(a, "```msh\n{s}\n```\nbuiltin", .{line}) }, .range = rangeOf(d.text, span.start, span.end) };
         };
         return null;
     }
@@ -326,7 +327,11 @@ pub const Server = struct {
             .kind = if (b.kind == .def) completion_function else completion_variable,
             .detail = @tagName(b.kind),
         });
-        for (mshl.builtin_names) |n| try out.append(a, .{ .label = n, .kind = completion_function, .detail = "builtin" });
+        for (mshl.builtin_names) |n| try out.append(a, .{
+            .label = n,
+            .kind = completion_function,
+            .detail = if (mshl.builtinSignature(n)) |sig| mshl.signatureText(a, n, sig) catch "builtin" else "builtin",
+        });
         return out.items;
     }
 
@@ -536,7 +541,9 @@ test "hover, definition, symbols and completion from the scopes" {
     const hi = try h.at(3, "textDocument/hover", uri, 3, 13);
     try testing.expect(std.mem.indexOf(u8, hi.object.get("contents").?.object.get("value").?.string, "block argument") != null);
     const hm = try h.at(4, "textDocument/hover", uri, 3, 6);
-    try testing.expect(std.mem.endsWith(u8, hm.object.get("contents").?.object.get("value").?.string, "builtin"));
+    const hm_text = hm.object.get("contents").?.object.get("value").?.string;
+    try testing.expect(std.mem.endsWith(u8, hm_text, "builtin"));
+    try testing.expect(std.mem.indexOf(u8, hm_text, "map [f: function] (input: list) -> list") != null);
     // definition of `$what` inside shout: its parameter
     const def = try h.at(5, "textDocument/definition", uri, 1, 27);
     const sel = def.object.get("range").?.object.get("start").?;

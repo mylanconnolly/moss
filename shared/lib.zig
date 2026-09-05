@@ -160,6 +160,13 @@ pub const Syscall = enum(u64) {
     /// cycle_hz() -> slot 1 = the cycle counter's rate in Hz (not
     /// authority, like the counter itself: ungated).
     cycle_hz = 41,
+    /// clock_get() -> x1 = the Unix time of boot in milliseconds (0 when
+    /// unknown), x2 = its source (ClockSource); wall time is x1 plus the
+    /// cycle counter's milliseconds. Reading time is not authority.
+    clock_get = 42,
+    /// clock_set(clock_handle, boot_epoch_ms): the time service sets what
+    /// it learned (SNTP); the `clock` grant is the authority.
+    clock_set = 43,
     /// shm_unmap(va): undo an shm_map at `va` — the pages leave this
     /// address space and the mapping's ref on the buffer is released.
     /// bad_arg when `va` is not the base of one of this domain's shm
@@ -219,7 +226,12 @@ pub const SpawnFlags = struct {
     /// Grant read-only introspection (domain_list, sysinfo) WITHOUT spawn
     /// authority — for tools that look but never create.
     pub const grant_introspect: u64 = 1 << 4;
+    /// Grant the right to set the wall clock (the time service).
+    pub const grant_clock: u64 = 1 << 5;
 };
+
+/// Where the kernel's idea of wall time came from.
+pub const ClockSource = enum(u64) { none = 0, rtc = 1, set = 2 };
 
 /// Domain lifecycle as reported by domain_stat.
 pub const DomainState = enum(u64) {
@@ -353,6 +365,8 @@ pub const ImageId = enum(u64) {
     pcisvc = 16,
     users = 17,
     mshrun = 18,
+    dnsd = 19,
+    clock = 20,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -808,9 +822,44 @@ pub const NetReq = union(enum(u64)) {
     /// + notification cap: the socket's doorbell. Signaled (bit 1) when
     /// it has news — data, a state change, a connection to accept — so a
     /// client can block in recv with the notification bound instead of
-    /// polling. One bell per socket; dropped with the socket.
+    /// polling. One bell per socket; dropped with the socket. A UDP
+    /// socket (its number is udp_sock_base + slot) takes one too.
     watch: struct { sock: u64 },
+    /// Datagrams. `udp_bind` takes a port (0: an ephemeral one) and
+    /// answers num(sock), numbered from udp_sock_base; a filtered view
+    /// may bind ephemerally only, and hears only from its allowed
+    /// destination. `udp_send` sends buf[udp_hdr..udp_hdr+len] to the
+    /// address at buf[0..16] (the view's allowlist judges it) and the
+    /// port; `udp_recv` puts the source address at buf[0..16], its port
+    /// big-endian at buf[16..18], and the datagram at buf[udp_hdr..],
+    /// answering num(len) or would_block. `tcp_close` closes either kind.
+    udp_bind: struct { port: u64 },
+    udp_send: struct { sock: u64, port: u64, len: u64 },
+    udp_recv: struct { sock: u64, len: u64 },
+    /// Name resolution. `resolve` takes the name at buf[0..len] and
+    /// answers num(lookup), numbered from lookup_base — a `watch` on it
+    /// rings when the answer is in; `resolve_check` then answers
+    /// would_block, num(n) with the n addresses at buf[0..16n] (the TTL
+    /// in seconds big-endian at buf[16n..16n+4]), or an error
+    /// (nxdomain, timeout, no_resolver); either answer frees the lookup.
+    /// Any view may resolve: a name is a question, the address it
+    /// yields is what the allowlist judges.
+    resolve: struct { len: u64 },
+    resolve_check: struct { lookup: u64 },
 };
+
+/// Lookups are numbered from here.
+pub const lookup_base: u64 = 2000;
+/// The most addresses one lookup answers.
+pub const resolve_max: u64 = 8;
+
+/// Where a UDP datagram's bytes start in the view buffer, after the
+/// address and port of its peer.
+pub const udp_hdr: u64 = 32;
+/// The largest datagram sent or delivered (an IPv6 MTU's worth).
+pub const udp_max: u64 = 1452;
+/// UDP sockets are numbered from here, so one `watch`/`close` serves both kinds.
+pub const udp_sock_base: u64 = 1000;
 
 /// v4-mapped IPv6 words for an IPv4 address given as 0xAABBCCDD.
 pub fn v4Words(ip: u32) [2]u64 {
@@ -838,6 +887,11 @@ pub const NetErr = enum(u64) {
     closed = 4,
     bad = 5,
     no_space = 6,
+    /// Resolution: the name does not exist (or has no address), no
+    /// resolver answered, no resolver is configured.
+    nxdomain = 7,
+    timeout = 8,
+    no_resolver = 9,
 };
 
 pub const TcpState = enum(u64) {
@@ -1067,6 +1121,56 @@ pub const net_gw_ip6: [2]u64 = .{ 0xfec0_0000_0000_0000, 0x2 }; // fec0::2
 
 /// Parse an address as the protocol carries it: dotted IPv4 (v4-mapped
 /// on the way in) or IPv6 with one `::`. null for anything else.
+/// An address as text: dotted for a v4-mapped one, else IPv6 with the
+/// longest run of zero groups as `::` (RFC 5952). `out` needs 40 bytes.
+pub fn formatAddr(out: []u8, words: [2]u64) []const u8 {
+    if (words[0] == 0 and (words[1] >> 32) == 0x0000_ffff) {
+        const ip: u32 = @truncate(words[1]);
+        return std.fmt.bufPrint(out, "{d}.{d}.{d}.{d}", .{ ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255 }) catch out[0..0];
+    }
+    var groups: [8]u16 = undefined;
+    for (0..8) |i| {
+        const w = if (i < 4) words[0] else words[1];
+        groups[i] = @truncate(w >> @intCast((3 - (i % 4)) * 16));
+    }
+    // The longest run of zeros (two or more) becomes `::`.
+    var best_at: usize = 8;
+    var best_len: usize = 1;
+    var i: usize = 0;
+    while (i < 8) {
+        if (groups[i] != 0) {
+            i += 1;
+            continue;
+        }
+        var j = i;
+        while (j < 8 and groups[j] == 0) j += 1;
+        if (j - i > best_len) {
+            best_at = i;
+            best_len = j - i;
+        }
+        i = j;
+    }
+    var n: usize = 0;
+    i = 0;
+    while (i < 8) {
+        if (i == best_at) {
+            out[n] = ':';
+            out[n + 1] = ':';
+            n += 2;
+            i += best_len;
+            continue;
+        }
+        if (n > 0 and out[n - 1] != ':') {
+            out[n] = ':';
+            n += 1;
+        }
+        const t = std.fmt.bufPrint(out[n..], "{x}", .{groups[i]}) catch return out[0..n];
+        n += t.len;
+        i += 1;
+    }
+    return out[0..n];
+}
+
 pub fn parseAddr(text: []const u8) ?[2]u64 {
     if (std.mem.indexOfScalar(u8, text, ':') == null) {
         var v: u32 = 0;
@@ -1139,6 +1243,18 @@ pub fn parseAddr(text: []const u8) ?[2]u64 {
 test "parseAddr reads dotted v4 (mapped) and v6 with a gap" {
     try std.testing.expectEqual(v4Words(net_echo_ip4), parseAddr("10.0.2.100").?);
     try std.testing.expectEqual(net_gw_ip6, parseAddr("fec0::2").?);
+    var buf: [40]u8 = undefined;
+    try std.testing.expectEqualStrings("10.0.2.100", formatAddr(&buf, v4Words(net_echo_ip4)));
+    try std.testing.expectEqualStrings("fec0::2", formatAddr(&buf, net_gw_ip6));
+    try std.testing.expectEqualStrings("::1", formatAddr(&buf, .{ 0, 1 }));
+    try std.testing.expectEqualStrings("::", formatAddr(&buf, .{ 0, 0 }));
+    try std.testing.expectEqualStrings("fdcc::3", formatAddr(&buf, .{ 0xfdcc_0000_0000_0000, 3 }));
+    try std.testing.expectEqualStrings("2001:db8:0:1:1::1", formatAddr(&buf, parseAddr("2001:db8:0:1:1::1").?)); // the longest run wins
+    try std.testing.expectEqualStrings("2001:db8::1:0:0:1", formatAddr(&buf, parseAddr("2001:db8:0:0:1::1").?));
+    for ([_][]const u8{ "1:2:3:4:5:6:7:8", "1::8", "1:0:0:2::" }) |t| {
+        const round = formatAddr(&buf, parseAddr(t).?);
+        try std.testing.expectEqualStrings(t, round);
+    }
     try std.testing.expectEqual([2]u64{ 0, 1 }, parseAddr("::1").?);
     try std.testing.expectEqual([2]u64{ 0xfdcc_0000_0000_0000, 3 }, parseAddr("fdcc::3").?);
     try std.testing.expectEqual([2]u64{ 0x2001_0db8_0000_0000, 0x0000_0000_0000_0001 }, parseAddr("2001:db8:0:0:0:0:0:1").?);

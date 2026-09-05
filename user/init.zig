@@ -56,7 +56,7 @@ const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 const max_units = 48;
 const max_gives = 8;
 
-const GiveKind = enum { unit, device, shm, secret, view, netview, self_init, session_cap };
+const GiveKind = enum { unit, device, shm, secret, file, view, netview, self_init, session_cap };
 
 const Give = struct {
     tag: shared.CapTag,
@@ -266,15 +266,23 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             if (std.mem.eql(u8, gn, "spawner")) u.flags |= shared.SpawnFlags.grant_spawner;
             if (std.mem.eql(u8, gn, "bootfs")) u.flags |= shared.SpawnFlags.grant_bootfs;
             if (std.mem.eql(u8, gn, "introspect")) u.flags |= shared.SpawnFlags.grant_introspect;
+            if (std.mem.eql(u8, gn, "clock")) u.flags |= shared.SpawnFlags.grant_clock;
         };
     }
     if (r.get("give")) |g| {
         if (g == .list) for (g.list) |item| {
             if (item != .record or u.ngives == max_gives) continue;
             const gr = item.record;
-            // A secret is bytes, not a capability: no tag.
+            // A secret is bytes, not a capability: no tag. A file is the
+            // same delivery for bytes that are not secret (a settings
+            // record from the archive), kept rather than wiped.
             if (gr.get("secret")) |x| {
                 u.gives[u.ngives] = .{ .tag = .buf, .kind = .secret, .name = str(x) orelse continue };
+                u.ngives += 1;
+                continue;
+            }
+            if (gr.get("file")) |x| {
+                u.gives[u.ngives] = .{ .tag = .buf, .kind = .file, .name = str(x) orelse continue };
                 u.ngives += 1;
                 continue;
             }
@@ -478,15 +486,17 @@ fn giveOne(u: *Unit, g: Give) bool {
             u.buf_va = m.data[0];
             return boot.giveCap(u.chan_b, g.tag, s.data[0]);
         },
-        .secret => {
+        .secret, .file => {
             const bytes = shared.marcFind(archive(), g.name) orelse {
-                logLine("init: secret not in the archive: ", g.name);
+                logLine("init: not in the archive: ", g.name);
                 return false;
             };
-            if (u.buf_va == 0 or bytes.len > boot.max_secret) return false;
+            const limit: usize = if (g.kind == .secret) boot.max_secret else boot.max_data;
+            if (u.buf_va == 0 or bytes.len > limit) return false;
             const dst: [*]volatile u8 = @ptrFromInt(u.buf_va);
             for (bytes, 0..) |b, i| dst[i] = b;
-            return boot.give(u.chan_b, .{ .secret = .{ .off = 0, .len = bytes.len } }, 0);
+            if (g.kind == .secret) return boot.give(u.chan_b, .{ .secret = .{ .off = 0, .len = bytes.len } }, 0);
+            return boot.give(u.chan_b, .{ .data = .{ .off = 0, .len = bytes.len } }, 0);
         },
         .view => {
             // A session's views derive from its home; the system's from
