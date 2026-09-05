@@ -120,6 +120,10 @@ const cluster_port3 = "31904"; // the imposter's hub port
 const shell_port: u16 = 31903;
 /// The net check's port forward to the script's HTTP server (:8080).
 const http_port: u16 = 31909;
+/// Where the net drill's TLS server listens on the host (the guest reaches
+/// it as 10.0.2.2, slirp's name for the host): `openssl s_server -www`
+/// with the certificate for tls.moss.test under lib/tls/.
+const tls_port: u16 = 31910;
 /// The fabric-login drill's own hub port: a listener the three-node
 /// drill left in TIME_WAIT must never be the one node 2 dials.
 const flogin_port = "31911";
@@ -284,6 +288,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             "-object",
             "filter-dump,id=f0,netdev=n0,file=zig-out/check/net.pcap",
+            // Entropy: a TLS handshake draws on the kernel pool, which rngd seeds.
+            "-device",
+            "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),
         // Two NICs on one hub (host node 1, guest node 2) and a second
         // entropy device for the guest.
@@ -297,6 +304,12 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         else => {},
     }
 
+    var tls_server: ?std.process.Child = null;
+    if (spec.kind == .net) tls_server = try spawnQemu(&.{
+        "openssl", "s_server",                     "-accept", std.fmt.comptimePrint("127.0.0.1:{d}", .{tls_port}), "-www", "-tls1_3", "-quiet",
+        "-cert",   "lib/tls/moss-test-server.pem", "-key",    "lib/tls/moss-test-server.key",
+    });
+    defer if (tls_server) |*t| t.kill(io);
     var child = try spawnQemu(args.items);
     defer child.kill(io);
     if (spec.kind == .net) {

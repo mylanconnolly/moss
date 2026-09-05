@@ -383,7 +383,7 @@ pub fn build(b: *std.Build) void {
         "conf/net-cluster.msh",          "conf/units/dnsd.msh",
         "conf/dns.msh",                  "conf/units/clock.msh",
         "conf/clock.msh",                "conf/units/clock-cluster.msh",
-        "conf/clock-cluster.msh",
+        "conf/clock-cluster.msh",        "tls/roots.pem",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -395,6 +395,10 @@ pub fn build(b: *std.Build) void {
         pack.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
     }
+    // The network drill's own trust root (lib/tls/, beside the server
+    // certificate the runner serves with): a drill trusts its root alone.
+    pack.addPrefixedFileArg("tls/moss-test-ca.pem=", b.path("lib/tls/moss-test-ca.pem"));
+    pack_guest.addPrefixedFileArg("tls/moss-test-ca.pem=", b.path("lib/tls/moss-test-ca.pem"));
 
     const user_blobs = b.addWriteFiles();
     // The programs build for either port (user/usys.zig is the runtime's

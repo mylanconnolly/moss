@@ -3,6 +3,7 @@
 //! argument text (shared.BootReq). Whoever spawned us holds the caps and
 //! decides what we get; we only learn what each one is FOR.
 
+const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 
@@ -38,6 +39,21 @@ pub const Setup = struct {
 
     pub fn has(s: *const Setup, tag: shared.CapTag) bool {
         return s.cap(tag) != 0;
+    }
+
+    /// A file given under a tag (`{ tag: roots, file: tls/roots.pem }`):
+    /// a shared buffer holding a u64 length then the bytes, mapped here
+    /// and left mapped — the slice is the program's for good. Null when
+    /// nothing was given under the tag or the buffer is malformed.
+    pub fn file(s: *const Setup, tag: shared.CapTag) ?[]const u8 {
+        const h = s.cap(tag);
+        if (h == 0) return null;
+        const m = usys.shmMap(h);
+        if (m.err != .ok) return null;
+        const base: [*]const u8 = @ptrFromInt(m.data[0]);
+        const len = std.mem.readInt(u64, base[0..8], .little);
+        if (8 + len > m.data[1] * 4096) return null;
+        return base[8 .. 8 + len];
     }
 
     pub fn device(s: *const Setup, kind: shared.DeviceKind) u64 {

@@ -271,17 +271,18 @@ fn writeHeader(a: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, 
     try out.appendSlice(a, "\r\n");
 }
 
-pub const Url = struct { host: []const u8, port: u16, path: []const u8 };
+pub const Url = struct { host: []const u8, port: u16, path: []const u8, tls: bool = false };
 
-/// `http://host[:port]/path?query`; the host may be an IPv6 literal
-/// in brackets. Only http.
+/// `http://host[:port]/path?query` or `https://…` (port 443 unless
+/// given, `tls` set); the host may be an IPv6 literal in brackets.
 pub fn parseUrl(url: []const u8) ?Url {
-    const rest = if (std.mem.startsWith(u8, url, "http://")) url[7..] else return null;
+    const tls = std.mem.startsWith(u8, url, "https://");
+    const rest = if (tls) url[8..] else if (std.mem.startsWith(u8, url, "http://")) url[7..] else return null;
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
     var authority = rest[0..slash];
     const path = if (slash < rest.len) rest[slash..] else "/";
     var host: []const u8 = undefined;
-    var port: u16 = 80;
+    var port: u16 = if (tls) 443 else 80;
     if (authority.len > 0 and authority[0] == '[') {
         const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
         host = authority[1..close];
@@ -295,7 +296,7 @@ pub fn parseUrl(url: []const u8) ?Url {
         port = std.fmt.parseInt(u16, authority[c + 1 ..], 10) catch return null;
     } else host = authority;
     if (host.len == 0) return null;
-    return .{ .host = host, .port = port, .path = path };
+    return .{ .host = host, .port = port, .path = path, .tls = tls };
 }
 
 /// Headers as a record for the language (names already lowercased).
@@ -404,6 +405,11 @@ test "http: formatting and urls" {
     try std.testing.expectEqualStrings("fdcc::2", v6.host);
     try std.testing.expectEqual(@as(u16, 80), v6.port);
     try std.testing.expectEqualStrings("/", parseUrl("http://1.2.3.4").?.path);
-    try std.testing.expect(parseUrl("https://x/") == null);
+    const secure = parseUrl("https://tls.moss.test/x").?;
+    try std.testing.expect(secure.tls and secure.port == 443);
+    try std.testing.expectEqualStrings("tls.moss.test", secure.host);
+    try std.testing.expect(parseUrl("https://h:8443/").?.port == 8443);
+    try std.testing.expect(!u.tls);
+    try std.testing.expect(parseUrl("ftp://x/") == null);
     try std.testing.expect(parseUrl("http://[::1") == null);
 }

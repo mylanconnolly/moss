@@ -12,6 +12,7 @@ pub const mshl = @import("mshl.zig");
 pub const pool = @import("pool.zig");
 pub const settings = @import("settings.zig");
 pub const sntp = @import("sntp.zig");
+pub const tls = @import("tls.zig");
 pub const usercred = @import("usercred.zig");
 pub const xts = @import("xts.zig");
 
@@ -25,6 +26,7 @@ test {
     _ = pool;
     _ = settings;
     _ = sntp;
+    _ = tls;
     _ = usercred;
     _ = xts;
 }

@@ -595,9 +595,13 @@ pub const CapTag = enum(u64) {
     /// directory (the system's), so a shell can run programs it does
     /// not hold in its own store.
     store = 19,
+    /// Trust roots: the PEM bundle a TLS client verifies servers
+    /// against, handed as a file under a tag (a mapped buffer: a u64
+    /// length, then the bytes).
+    roots = 20,
 };
 
-pub const cap_tag_count = 20;
+pub const cap_tag_count = 21;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver

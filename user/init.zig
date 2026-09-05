@@ -56,7 +56,7 @@ const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 const max_units = 48;
 const max_gives = 8;
 
-const GiveKind = enum { unit, device, shm, secret, file, view, netview, self_init, session_cap };
+const GiveKind = enum { unit, device, shm, secret, file, file_cap, view, netview, self_init, session_cap };
 
 const Give = struct {
     tag: shared.CapTag,
@@ -282,7 +282,12 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 continue;
             }
             if (gr.get("file")) |x| {
-                u.gives[u.ngives] = .{ .tag = .buf, .kind = .file, .name = str(x) orelse continue };
+                // With a tag, the file is a capability of its own: a
+                // mapped buffer (any size) under that tag.
+                if (gr.get("tag")) |t| {
+                    const tag = std.meta.stringToEnum(shared.CapTag, str(t) orelse continue) orelse continue;
+                    u.gives[u.ngives] = .{ .tag = tag, .kind = .file_cap, .name = str(x) orelse continue };
+                } else u.gives[u.ngives] = .{ .tag = .buf, .kind = .file, .name = str(x) orelse continue };
                 u.ngives += 1;
                 continue;
             }
@@ -485,6 +490,29 @@ fn giveOne(u: *Unit, g: Give) bool {
             u.buf_h = s.data[0];
             u.buf_va = m.data[0];
             return boot.giveCap(u.chan_b, g.tag, s.data[0]);
+        },
+        .file_cap => {
+            // The file as a buffer of its own: a u64 length, then the
+            // bytes; the unit maps it (boot.Setup.file) and keeps it.
+            const bytes = shared.marcFind(archive(), g.name) orelse {
+                logLine("init: not in the archive: ", g.name);
+                return false;
+            };
+            const pages = (8 + bytes.len + 4095) / 4096;
+            const s = usys.shmCreate(pages);
+            if (s.err != .ok) return false;
+            const m = usys.shmMap(s.data[0]);
+            if (m.err != .ok) {
+                _ = usys.capDrop(s.data[0]);
+                return false;
+            }
+            const dst: [*]u8 = @ptrFromInt(m.data[0]);
+            std.mem.writeInt(u64, dst[0..8], bytes.len, .little);
+            @memcpy(dst[8 .. 8 + bytes.len], bytes);
+            _ = usys.shmUnmap(m.data[0]);
+            const gave = boot.giveCap(u.chan_b, g.tag, s.data[0]);
+            _ = usys.capDrop(s.data[0]);
+            return gave;
         },
         .secret, .file => {
             const bytes = shared.marcFind(archive(), g.name) orelse {

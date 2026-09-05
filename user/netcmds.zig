@@ -175,13 +175,20 @@ pub const Net = struct {
     /// The bit may still be latched from an earlier arming, so a wake
     /// counts as the timeout only once the clock agrees.
     pub fn recvSomeFor(n: *Net, s: u64, ms: u64) RecvFor {
+        return n.recvUpToFor(s, shared.net_max_recv, ms);
+    }
+
+    /// recvSomeFor with a ceiling on how much (a caller filling a
+    /// buffer of its own).
+    pub fn recvUpToFor(n: *Net, s: u64, max: usize, ms: u64) RecvFor {
+        const want: u64 = @min(@max(max, 1), shared.net_max_recv);
         const bit_timeout: u64 = 2; // netsvc rings bit 1
         if (usys.timerArm(n.bell, usys.msToTicks(ms), bit_timeout) != .ok) return .{ .failed = "no timer for the network view" };
         defer _ = usys.timerArm(n.bell, 0, bit_timeout);
         const start = syscmds.nowMs();
         const limit_ms: i64 = @intCast(ms);
         while (true) {
-            const rep = ncall(n, .{ .tcp_recv = .{ .sock = s, .len = shared.net_max_recv } }) orelse return .{ .failed = "the network service did not answer" };
+            const rep = ncall(n, .{ .tcp_recv = .{ .sock = s, .len = want } }) orelse return .{ .failed = "the network service did not answer" };
             switch (rep) {
                 .num => |x| return .{ .data = n.buf[0..x.n] },
                 .net_err => |e| {
@@ -398,6 +405,12 @@ const net_err = blk: {
     break :blk Shape{ .one_of = &alts };
 };
 const socket: Shape = .{ .kind = "socket" };
+/// What `send` and `recv` take: a socket, or a tls connection (tlscmds
+/// answers for those).
+const stream = blk: {
+    const alts = [_]Shape{ socket, .{ .kind = "tls" } };
+    break :blk Shape{ .one_of = &alts };
+};
 const listener: Shape = .{ .kind = "listener" };
 const sock_result = mshl.resultShape(socket, net_err);
 const listener_result = mshl.resultShape(listener, net_err);
@@ -423,8 +436,8 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (is(u8, name, "resolve")) return .{ .params = &.{.{ .name = "name", .shape = .string }}, .ret = addresses_result };
     if (is(u8, name, "listen")) return .{ .params = &.{.{ .name = "port", .shape = .int }}, .ret = listener_result };
     if (is(u8, name, "accept")) return .{ .params = &.{.{ .name = "listener", .shape = listener, .optional = true }}, .input = .{ .optional = listener }, .ret = sock_result };
-    if (is(u8, name, "send")) return .{ .params = &.{ .{ .name = "socket", .shape = socket }, .{ .name = "data", .shape = data_shape } }, .ret = sent_result };
-    if (is(u8, name, "recv")) return .{ .params = &.{ .{ .name = "socket", .shape = socket, .optional = true }, .{ .name = "max", .shape = .int, .optional = true } }, .input = .{ .optional = socket }, .ret = recv_result };
+    if (is(u8, name, "send")) return .{ .params = &.{ .{ .name = "socket", .shape = stream }, .{ .name = "data", .shape = data_shape } }, .ret = sent_result };
+    if (is(u8, name, "recv")) return .{ .params = &.{ .{ .name = "socket", .shape = stream, .optional = true }, .{ .name = "max", .shape = .int, .optional = true } }, .input = .{ .optional = stream }, .ret = recv_result };
     if (is(u8, name, "close")) return .{ .params = &.{.{ .name = "handle", .shape = .handle, .optional = true }}, .input = .{ .optional = .handle }, .ret = .nothing };
     if (is(u8, name, "status")) return .{ .params = &.{.{ .name = "handle", .shape = .handle, .optional = true }}, .input = .{ .optional = .handle }, .ret = any_handle_state };
     if (is(u8, name, "udp-bind")) return .{ .params = &.{.{ .name = "port", .shape = .int }}, .ret = udp_result };

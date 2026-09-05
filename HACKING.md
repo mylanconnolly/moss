@@ -154,7 +154,9 @@ calls a block with new names adds them) and the unit keys
 service is a `.msh` file under `boot/conf/` named in `build.zig`'s
 archive list and given to the unit with `{ tag: buf, shm: 1 }` and
 `{ file: conf/name.msh }` (`setup.data()` is its text; parse it with
-`mshl.parseData`). A module for the
+`mshl.parseData`); a file too big for that is given under a tag of its
+own, `{ tag: roots, file: tls/roots.pem }`, and `setup.file(.roots)`
+is its bytes. A module for the
 library is a file under `lib/msh/` named in `build.zig`'s archive
 list (packed as `lib/<name>.msh`) with a host test in `lib/mshl.zig`
 that `use`s it through the test host (`@embedFile`); init installs it

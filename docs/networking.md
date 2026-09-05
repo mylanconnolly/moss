@@ -341,9 +341,47 @@ connections by address and port and reuses one for the next request
 to the same place; a kept connection the peer closed meanwhile is
 noticed by the empty answer and the request goes once more on a fresh
 one, and `{ keep: false }` in the options asks for a close instead.
-`fetch` takes `http://`
-URLs whose host is an address or a name — and
-reads the response to its `Content-Length` or to the close.
+`fetch` takes `http://` and `https://` URLs whose host is an address
+or a name — and reads the response to its `Content-Length` or to the
+close.
+
+### TLS: the client, and whom it trusts
+
+`tls-connect HOST PORT [{ host: NAME }]` opens a TCP connection and
+shakes hands over it — TLS 1.3, the standard library's client wrapped
+by `lib/tls.zig` over a transport of the socket's send and receive —
+and answers a `tls` handle that `send`, `recv`, `status` and `close`
+take exactly like a socket. `fetch https://…` opens one the same way
+(port 443 unless the URL says otherwise) and keeps it in the pool like
+any other. The server's certificate must be for NAME — the host as
+written unless the option says otherwise (a server reached by address,
+or a name that is not the certificate's) — and must chain to a root the
+program **trusts**: the PEM bundle its unit gave it, `{ tag: roots,
+file: tls/roots.pem }`, the Mozilla root store as curl publishes it
+(`boot/tls/roots.pem`, dated in its header). A program given no roots
+cannot trust anyone: `tls-connect` answers `err no_roots`, never an
+unverified connection — there is no "insecure" switch. The drill trusts
+one root only, its own (`lib/tls/moss-test-ca.pem`, which also signs
+the certificate the runner's server presents).
+
+Two more things a handshake needs are the system's: the wall clock,
+to judge a certificate's validity (`err no_clock` before the RTC or
+the time service has set it), and entropy for the key share, from the
+kernel pool `rngd` seeds (`err no_entropy` before it has). What goes
+wrong is a result by its word: `untrusted` (no root vouches for the
+chain), `host_mismatch`, `expired`, `alert:<description>` (the server
+said why), `closed`, `too_many` (four sessions per program), or the
+transport's own reason. A session is four record-sized buffers and the
+roots parse into an arena — some 600 KB together, mapped on first use.
+
+```mshl
+let t = (fetch https://example.com/)?                       # 200, by the Mozilla roots
+let c = (tls-connect tls.moss.test 31910)?                    # a tls handle
+send $c "GET / HTTP/1.0\r\n\r\n"
+let page = (from-bytes (recv $c)?)?
+close $c
+match (fetch https://10.0.2.2:31910/) { err host_mismatch => …, … }
+```
 
 ### What the drill proves
 
@@ -365,9 +403,15 @@ process on the host, an echo. Three oneshot units run in order:
    loopback, then **serves four pages to the runner itself** — the
    check connects through a port forward (`127.0.0.1:31909` → `:8080`)
    and asserts a text page, a JSON page, a POST echoed with a custom
-   header, and a 404 — and finally checks that a closed peer and a
-   refused destination come back as `err` values. The check also
-   writes the wire's packets to `zig-out/check/net.pcap`.
+   header, and a 404 — then speaks TLS to the host: the runner runs
+   `openssl s_server -www` at `127.0.0.1:31910` with the certificate
+   for `tls.moss.test` (which `dnsd`'s zone maps to `10.0.2.2`, slirp's
+   name for the host), and the script `fetch`es `https://tls.moss.test`
+   by the drill's own root, sees `https://10.0.2.2` refused with
+   `host_mismatch`, and drives a `tls-connect` handle by hand — and
+   finally checks that a closed peer and a refused destination come
+   back as `err` values. The check also writes the wire's packets to
+   `zig-out/check/net.pcap`.
 4. `boxed` (filtered view: `10.0.2.100:9000` only) reaches the echo,
    and is refused on the v4 gateway, the v6 gateway, loopback, listen,
    ping, and derive.
@@ -465,7 +509,11 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - The language has no `ping` and no `derive` (a script's view is what
   its manifest gave it); a socket value cannot cross to another program
   (no channel surface yet).
-- HTTP has no TLS yet, and a `serve` handles
+- TLS is the client side only: no `tls-listen`, so `serve` is plain
+  HTTP; no client certificates, no session resumption, no revocation
+  checking (CRL, OCSP), no DNS over TLS yet; the roots are the bundle
+  as shipped in the archive, with no update path but a rebuild. A
+  program holds at most four sessions. A `serve` handles
   one connection at a time — the language has no concurrency, so a
   slow handler, or a kept connection that sits idle (up to three
   seconds), holds the next client at the door (the listener's backlog
@@ -491,6 +539,9 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - Source — `user/net.zig` (driver, stack, views, sockets, the drill
   roles), `user/netcmds.zig` (sockets as values for mshl hosts),
   `user/httpcmds.zig` (`http-read`, `http-write`, `serve`, `fetch`),
+  `user/tlscmds.zig` (`tls-connect`, sessions, the roots) and
+  `lib/tls.zig` (the client over a transport, roots from PEM,
+  host-tested with `lib/tls/`'s test root and certificate),
   `lib/http.zig` and `lib/json.zig` (the parsers, host-tested),
   `boot/scripts/net-drill.msh` (the script step), `tools/runner.zig`
   (`httpProbe`: the check as an HTTP client), `shared/lib.zig` (`NetReq`, `NetResp`, `NetErr`, `TcpState`,

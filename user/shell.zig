@@ -25,6 +25,7 @@ const boot = @import("boot.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
 const httpcmds = @import("httpcmds.zig");
+const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
 const syscmds = @import("syscmds.zig");
 const mshl = @import("mosslib").mshl;
@@ -141,6 +142,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     fab_chan = setup.cap(.fabric);
     fab_ctx.chan = fab_chan;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
+    tlscmds.setRoots(setup.file(.roots) orelse "");
     // The fabric is optional: a user session has none.
     if (cons_chan == 0 or fs_chan == 0 or init_chan == 0) usys.exit(140);
 
@@ -381,6 +383,7 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (is(name, "exit") or is(name, "clear")) return .{ .ret = .nothing };
     if (fscmds.signature(name)) |sig| return sig;
     if (net != null) {
+        if (tlscmds.signature(name)) |sig| return sig;
         if (netcmds.signature(name)) |sig| return sig;
         if (httpcmds.signature(name)) |sig| return sig;
     }
@@ -421,6 +424,8 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     }
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
     if (net) |*nt| {
+        // tls first: it answers for the socket commands on its own handles.
+        if (try tlscmds.call(nt, it, name, args, input)) |v| return v;
         if (try netcmds.call(nt, it, name, args, input)) |v| return v;
         if (try httpcmds.call(nt, it, name, args, input)) |v| return v;
     }

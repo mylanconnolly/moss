@@ -23,6 +23,7 @@ const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const netcmds = @import("netcmds.zig");
+const tlscmds = @import("tlscmds.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const http = mosslib.http;
@@ -81,26 +82,69 @@ const idle_ms: u64 = 3000;
 /// How long any read waits for the rest of a request once it began.
 const stall_ms: u64 = 10_000;
 
+/// A client connection: a socket, or a tls session over one.
+const Conn = union(enum) {
+    plain: u64,
+    tls: tlscmds.Conn,
+
+    fn send(c: Conn, n: *Net, data: []const u8) ?[]const u8 {
+        return switch (c) {
+            .plain => |s| n.sendAll(s, data),
+            .tls => |t| tlscmds.sendAll(t, data),
+        };
+    }
+
+    fn recvFor(c: Conn, n: *Net, ms: u64) Net.RecvFor {
+        return switch (c) {
+            .plain => |s| n.recvSomeFor(s, ms),
+            .tls => |t| tlscmds.recvSomeFor(t, ms),
+        };
+    }
+
+    fn close(c: Conn, n: *Net) void {
+        switch (c) {
+            .plain => |s| n.closeRaw(s),
+            .tls => |t| tlscmds.close(t),
+        }
+    }
+};
+
 /// `fetch`'s kept connections: one per host (as written in the URL:
-/// an address or a name) and port, idle.
+/// an address or a name), port and scheme, idle.
 const pool_size = 4;
 const max_host = 128;
-const Pooled = struct { used: bool = false, host: [max_host]u8 = undefined, host_len: usize = 0, port: u64 = 0, sock: u64 = 0 };
+const Pooled = struct { used: bool = false, host: [max_host]u8 = undefined, host_len: usize = 0, port: u64 = 0, tls: bool = false, conn: Conn = .{ .plain = 0 } };
 var pool: [pool_size]Pooled = @splat(.{});
 
-fn pooled(host: []const u8, port: u64) ?*Pooled {
-    for (&pool) |*p| if (p.used and p.port == port and std.mem.eql(u8, p.host[0..p.host_len], host)) return p;
+fn pooled(host: []const u8, port: u64, tls: bool) ?*Pooled {
+    for (&pool) |*p| if (p.used and p.port == port and p.tls == tls and std.mem.eql(u8, p.host[0..p.host_len], host)) return p;
     return null;
 }
 
-fn poolPut(n: *Net, host: []const u8, port: u64, sock: u64) void {
-    if (host.len > max_host) return n.closeRaw(sock);
+fn poolPut(n: *Net, host: []const u8, port: u64, tls: bool, conn: Conn) void {
+    if (host.len > max_host) return conn.close(n);
     for (&pool) |*p| if (!p.used) {
-        p.* = .{ .used = true, .host_len = host.len, .port = port, .sock = sock };
+        p.* = .{ .used = true, .host_len = host.len, .port = port, .tls = tls, .conn = conn };
         @memcpy(p.host[0..host.len], host);
         return;
     };
-    n.closeRaw(sock); // no room: not kept
+    conn.close(n); // no room: not kept
+}
+
+/// A fresh connection for a URL: TCP to the host, and for https the
+/// handshake as `name` (the certificate's name: the host unless the
+/// options say otherwise).
+const ConnOut = union(enum) { conn: Conn, failed: []const u8 };
+
+fn connectUrl(n: *Net, url: http.Url, name: []const u8) ConnOut {
+    if (url.tls) return switch (tlscmds.open(n, url.host, url.port, name)) {
+        .conn => |t| .{ .conn = .{ .tls = t } },
+        .failed => |m| .{ .failed = m },
+    };
+    return switch (n.connectHost(url.host, url.port)) {
+        .sock => |x| .{ .conn = .{ .plain = x } },
+        .failed => |m| .{ .failed = m },
+    };
 }
 
 /// Text if it is UTF-8, bytes otherwise.
@@ -288,14 +332,19 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
         return try okResult(it, .{ .int = served });
     }
     if (is(u8, name, "fetch")) {
-        const url = http.parseUrl(args[0].str) orelse return it.fail("fetch: not an http URL: {s}", .{args[0].str});
+        const url = http.parseUrl(args[0].str) orelse return it.fail("fetch: not an http or https URL: {s}", .{args[0].str});
         var method: []const u8 = "GET";
         var headers: std.ArrayList(http.Header) = .empty;
         var body: []const u8 = "";
         var keep = true;
+        var cert_name = url.host;
         if (args.len > 1) {
             const o = args[1].record;
             if (o.get("keep")) |k| keep = k.asBool();
+            if (o.get("host")) |h| {
+                if (h != .str) return it.fail("fetch: host must be a string", .{});
+                cert_name = h.str;
+            }
             if (o.get("method")) |m| {
                 if (m != .str) return it.fail("fetch: method must be a string", .{});
                 method = m.str;
@@ -329,26 +378,26 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
         // The host is an address or a name; every address it has is
         // tried in turn.
         var reused = false;
-        var s: u64 = undefined;
-        if (pooled(url.host, url.port)) |p| {
-            s = p.sock;
+        var c: Conn = undefined;
+        if (pooled(url.host, url.port, url.tls)) |p| {
+            c = p.conn;
             p.used = false;
             reused = true;
-        } else s = switch (n.connectHost(url.host, url.port)) {
-            .sock => |x| x,
+        } else c = switch (connectUrl(n, url, cert_name)) {
+            .conn => |x| x,
             .failed => |m| return try errResult(it, m),
         };
         while (true) {
-            const out = try exchange(n, it, s, req.items, keep);
+            const out = try exchange(n, it, c, req.items, keep);
             if (out.response) |v| {
-                if (out.kept) poolPut(n, url.host, url.port, s) else n.closeRaw(s);
+                if (out.kept) poolPut(n, url.host, url.port, url.tls, c) else c.close(n);
                 return try okResult(it, v);
             }
-            n.closeRaw(s);
+            c.close(n);
             if (reused and out.early) {
                 reused = false;
-                s = switch (n.connectHost(url.host, url.port)) {
-                    .sock => |x| x,
+                c = switch (connectUrl(n, url, cert_name)) {
+                    .conn => |x| x,
                     .failed => |m2| return try errResult(it, m2),
                 };
                 continue;
@@ -360,8 +409,8 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
 }
 
 /// One request and its response on a socket.
-fn exchange(n: *Net, it: *mshl.Interp, s: u64, req: []const u8, keep: bool) mshl.Error!ExchangeOut {
-    if (n.sendAll(s, req)) |m| return .{ .failed = m, .early = true };
+fn exchange(n: *Net, it: *mshl.Interp, c: Conn, req: []const u8, keep: bool) mshl.Error!ExchangeOut {
+    if (c.send(n, req)) |m| return .{ .failed = m, .early = true };
     var buf: std.ArrayList(u8) = .empty;
     var closed = false;
     while (true) {
@@ -379,7 +428,7 @@ fn exchange(n: *Net, it: *mshl.Interp, s: u64, req: []const u8, keep: bool) mshl
         }
         if (closed) return .{ .failed = "closed before the response was complete", .early = buf.items.len == 0 };
         // A kept connection the peer closed answers nothing at all.
-        switch (n.recvSomeFor(s, stall_ms)) {
+        switch (c.recvFor(n, stall_ms)) {
             .data => |d| try buf.appendSlice(it.arena, d),
             .closed => closed = true,
             .failed => |m| return .{ .failed = m, .early = buf.items.len == 0 },

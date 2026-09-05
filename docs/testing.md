@@ -26,6 +26,9 @@ different `-D<name>-test` option compiled in — and hands the runner
 one the runner starts QEMU with the machine configuration the drill
 needs (a scratch disk, a user-mode network, a cluster of nodes, console
 sockets), points the serial port at a log file, and watches that file.
+The `net` drill also needs `openssl` on the host's PATH (LibreSSL's or
+OpenSSL's): the runner serves TLS with it at `127.0.0.1:31910` for the
+script's `https` steps.
 
 ```mermaid
 flowchart LR

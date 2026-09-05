@@ -16,6 +16,7 @@ const fsc = @import("fsclient.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
 const httpcmds = @import("httpcmds.zig");
+const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
 const syscmds = @import("syscmds.zig");
 const tty = @import("tty.zig");
@@ -72,6 +73,7 @@ fn resolve(it: *mshl.Interp, path: []const u8) mshl.Error!fscmds.Target {
 fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (fscmds.signature(name)) |sig| return sig;
     if (net != null) {
+        if (tlscmds.signature(name)) |sig| return sig;
         if (netcmds.signature(name)) |sig| return sig;
         if (httpcmds.signature(name)) |sig| return sig;
     }
@@ -84,6 +86,8 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
 fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
     if (net) |*nt| {
+        // tls first: it answers for the socket commands on its own handles.
+        if (try tlscmds.call(nt, it, name, args, input)) |v| return v;
         if (try netcmds.call(nt, it, name, args, input)) |v| return v;
         if (try httpcmds.call(nt, it, name, args, input)) |v| return v;
     }
@@ -151,6 +155,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     }
     fs_ctx.stores = &stores;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
+    tlscmds.setRoots(setup.file(.roots) orelse "");
     if (setup.has(.fabric)) fab = .{ .chan = setup.cap(.fabric) };
     const path = setup.arg();
     if (path.len == 0) fail("setup", "no script path given");

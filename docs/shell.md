@@ -396,7 +396,7 @@ it as `@NAME`, so `ls @NAME`, `cat @NAME/file` and the rest work on it;
 ```mermaid
 flowchart TD
   A["boot channel: console, view, init, [fabric], [store]; spawner from the manifest"] --> B["console: create a 1-page byte buffer, hand it to the driver (setup)"]
-  B --> C["stage (512 KB) and result buffer (8 pages) for run"]
+  B --> C["stage (1 MB) and result buffer (8 pages) for run"]
   C --> D["attach a buffer to the view; derive img/ as the own store; attach the system store if given"]
   D --> E["banner"]
   E --> F{"conf/msh/startup.msh in the view?"}
@@ -549,7 +549,10 @@ message by message. Editor setup is in `tools/README.md`.
   `accept $l`, `send $s DATA`, `recv $s [max]`, `close $s`, `status $s`
   — sockets and listeners are handles, results carry the outcome; and
   HTTP on them: `http-read $s`, `http-write $s RESP`, `serve $l $handler
-  [n]`, `fetch URL [opts]`; see [the networking
+  [n]`, `fetch URL [opts]` (`http://` or `https://`); and TLS:
+  `tls-connect HOST PORT [{ host: NAME }]` answers a handle the socket
+  commands take, trusting the roots the unit gave (`{ tag: roots, file:
+  tls/roots.pem }`); see [the networking
   page](networking.md#sockets-as-values-the-language-surface).
 - **The fabric** (when the unit gives a `fabric` cap: the system
   shell's does, a user session's does not): `x | remote NODE { … }`
@@ -572,7 +575,7 @@ message by message. Editor setup is in `tools/README.md`.
   answer to a 40+2 RPC), `rand` (16 bytes from the kernel pool as 32
   hex characters; refused while the pool is unseeded), `run`,
   `install`, `source`, `help`, `clear`, `exit`.
-- **run.** The stage is a 512 KB buffer (128 pages; it was 256 KB until msh itself outgrew it); the image is read
+- **run.** The stage is a 1 MB buffer (256 pages; it was 256 KB until msh itself outgrew it, and 512 KB until TLS did); the image is read
   through the store's view in 32 KB pieces and verified before anything
   else. The child gets a 512 KB kernel-object and 2 MB user-memory
   budget, `log`, side A of its boot channel, and `introspect` only if

@@ -288,9 +288,18 @@ is a plan.
   order, `resolve` and names in `connect`/`udp-send`/`fetch` with
   bounded attempts per address, `dnsd` serving a zone from mshl data —
   the gate's hermetic upstream and the fabric's names); still open:
-  DNS over TLS (with TLS), search lists and a hosts file if a use case
+  search lists and a hosts file if a use case
   asks, names for fabric nodes by default (dnsd in the cluster
-  profile), TLS,
+  profile); ✅ TLS, the client (landed 2026-09-05: `lib/tls.zig` — the
+  standard library's TLS 1.3 client over a transport the host provides,
+  trust roots parsed from PEM; `tls-connect` answering a handle the
+  socket commands take, `fetch https://`; roots given to a unit as a
+  file under a tag, the Mozilla bundle in the archive, a drill trusting
+  its own root; the gate's server is `openssl s_server` on the host,
+  and the wire was proved against example.com and cloudflare); still
+  open on TLS: the server side (`tls-listen`, `serve` over TLS — the
+  standard library has no server; ours or a port), DNS over TLS,
+  client certificates, resumption, revocation, a roots update path;
   concurrent handling (needs the language to spawn), and, when a use
   case demands them, congestion control and out-of-order receive; (4)
   the fabric surface — ✅ the bulk transport across the wire and remote

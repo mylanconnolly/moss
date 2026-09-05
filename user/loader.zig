@@ -31,10 +31,11 @@ pub const Stage = struct {
 
     /// The shm ceiling (64 pages = 256K) — comfortably above the largest
     /// image (fabric, ~140K carrying its own crypto).
-    /// 512 KB: msh with its interpreter, file, network and HTTP hosts is
-    /// 300 KB of ReleaseSafe code; a stage too small reports "image
-    /// missing from the boot archive".
-    pub const default_pages: u64 = 128;
+    /// 1 MB: msh with its interpreter, file, network, HTTP and TLS hosts
+    /// is ~900 KB of ReleaseSafe code (TLS 1.3 with its cipher suites and
+    /// certificate parsing is 450 KB of it); a stage too small reports
+    /// "image missing from the boot archive".
+    pub const default_pages: u64 = 256;
 
     pub fn init(pages: u64) ?Stage {
         const s = usys.shmCreate(pages);

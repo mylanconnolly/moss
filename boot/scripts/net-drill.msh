@@ -118,6 +118,24 @@ let d = (date)?
 if $d.unix < 1700000000 or ($d.iso | len) != 20 { (err "date: $d")? }
 let iso = $d.iso
 echo "script: date $iso"
+# TLS: the runner's openssl serves tls.moss.test (10.0.2.2 by our zone)
+# with a certificate the drill's own root vouches for; fetch speaks https.
+let t = (fetch https://tls.moss.test:31910/)?
+if $t.status != 200 or ($t.body | split "TLSv1.3" | len) < 2 { (err "fetch https: $t.status")? }
+echo "script: https ok"
+# The address is not the name: the certificate is for tls.moss.test.
+match (fetch https://10.0.2.2:31910/) {
+  ok _ => (err "https by address was trusted")?
+  err host_mismatch => echo "script: https mismatch refused"
+  err $e => (err "https by address: $e")?
+}
+# The primitives: a connection as a value, bytes both ways.
+let tc = (tls-connect tls.moss.test 31910)?
+send $tc "GET / HTTP/1.0\r\n\r\n"
+let page = (from-bytes (recv $tc)?)?
+if ($page | split "\r\n" | first 1) != ["HTTP/1.0 200 ok"] { (err "tls recv: $page")? }
+close $tc
+echo "script: tls primitives ok"
 # A closed peer is an err, not a hang; a refused view is an err too.
 close $c
 match (recv $a) { ok _ => (err "data after close")?; err $e => echo "script: after close: $e" }

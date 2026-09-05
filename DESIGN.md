@@ -1732,6 +1732,48 @@ time, certificates without expiry (a node with no RTC cannot judge
 one), records without expiry, the resolver's monotonic TTLs, shares
 that end with the session — the roadmap entry says why for each.
 
+**TLS, the client (as built, 2026-09-05).** `lib/tls.zig` wraps the
+standard library's TLS 1.3 client (`std.crypto.tls.Client`) so that
+nothing in it touches a socket, a clock or an entropy source: a
+`Transport` is two function pointers (send every byte; receive some),
+the wall clock and 240 random bytes are handed in, and the trust roots
+are a `Certificate.Bundle` built from PEM text by our own loop (the
+library's loader wants an OS file). The client's `Reader`/`Writer`
+seams made this a hundred lines: a `stream` that receives into the
+reader's buffer and a `drain` that sends the writer's; the `.bundle`
+option wants an `Io` and a lock the client only reaches to fetch a
+missing root from the OS, which never happens off one — the lock is
+uncontended and the `Io` is `undefined`, and the comment says so. A
+session owns four record-sized buffers (the two the client asserts on
+its wire side, its own read buffer, a 4 KB write buffer), so
+`user/tlscmds.zig` keeps a table of four sessions and the roots' arena
+in a buffer mapped on first use, and answers for `send`/`recv`/
+`status`/`close` on its own handles before the socket commands do;
+`fetch https://` goes through a `Conn` that is a socket or a session.
+The roots reach a program as a *file given under a tag* — `{ tag:
+roots, file: tls/roots.pem }` — a new delivery: init copies the archive
+file into a shared buffer of its own (a u64 length, then the bytes)
+and gives the cap, since the 2 KB `file:` delivery is for settings.
+The gate proves it against `openssl s_server -www` on the host, the
+certificate for `tls.moss.test` (the drill's zone maps it to slirp's
+host address) signed by a root only the drill trusts; the wire was
+proved once by hand against example.com and cloudflare with the
+Mozilla bundle. What it took to get there, each a lesson: a TLS 1.3
+server's first records after the handshake are session tickets that
+yield no application data, and a `read` that took an empty fill for
+end of stream ended every response at zero bytes; the client with its
+cipher suites and certificate parsing is 450 KB of ReleaseSafe code,
+which put msh past the 512 KB program stage (the shared-buffer cap
+went to 256 pages, the stage to 1 MB); the `net` profile ran no `rngd`,
+so the first handshake found an unseeded pool (`no_entropy` — the
+profile has it now, and the drill's QEMU an entropy device); and the
+handshake — hybrid key share, a certificate chain on the stack — needs
+more than the 96 KB user stack, which faulted 27 KB below its floor
+(256 KB now, eagerly mapped, sixteen domains at most). Not built: the
+server side (the standard library has no TLS server), client
+certificates, resumption, revocation, DNS over TLS, and any way to
+update the roots but a rebuild.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU
