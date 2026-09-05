@@ -886,18 +886,13 @@ pub fn build(b: *std.Build) void {
             return vbin.getOutput();
         }
     };
-    // The x86_64 port's drills so far: everything that needs no device
-    // (PCIe is the port's next stage). The runner boots them through OVMF
-    // and Limine.
-    // Every drill but the aarch64 hypervisor's (vm, guest, vmnode); the
-    // smmu drill runs against VT-d here.
-    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin", "smmu", "vm", "guest", "vmnode" };
-    if (arch == .x86_64) {
-        run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
-        for (x86_variants) |vn| _ = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
-    }
-    if (arch == .aarch64) for (variants) |vn| {
+    // Both ports run every drill: aarch64 from the raw Image with
+    // `-kernel`, x86_64 through OVMF and Limine (the smmu drill against
+    // VT-d there, the hypervisor's against AMD-V).
+    if (arch == .x86_64) run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
+    for (variants) |vn| {
         const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
+        if (arch != .aarch64) continue;
         // Plain `zig build run-shell` boots this variant — no flag needed.
         if (std.mem.eql(u8, vn, "shell")) {
             run_shell.addArg("-kernel");
@@ -907,12 +902,12 @@ pub fn build(b: *std.Build) void {
             run_login.addArg("-kernel");
             run_login.addFileArg(vbin);
         }
-    };
-    if (arch == .aarch64) for (release_variants) |vn| {
+    }
+    for (release_variants) |vn| {
         _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
-    };
-    // The gate: every drill on aarch64; on x86_64 the port's drills so far.
-    const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests); -Darch=x86_64 runs the x86_64 port's drills");
+    }
+    // The gate: every drill and the +rs rows, on whichever port -Darch names.
+    const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests); -Darch=x86_64 runs it on the x86_64 port");
     check_step.dependOn(test_step);
     check_step.dependOn(&run_check.step);
 }

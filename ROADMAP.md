@@ -220,10 +220,12 @@ is a plan.
   protocol to it with synthesized ACPI and parks its vCPUs, an MMIO
   decoder that knows the ALU forms a compiler folds loads into, device
   passthrough over the NPT as VT-d's first stage; the guest and vmnode
-  drills, and with them all twenty-three on the port. Still owed:
-  AMD-Vi for the machines that have it (the GCR3 walk, the same shape),
-  PCIDs, the `+rs` pass on the port, a framebuffer console, an I/O APIC
-  and MSI-X for guests. Modern hardware only: no legacy
+  drills, and with them all twenty-three on the port; the six `+rs`
+  rows followed (2026-09-04), so both gates are the same twenty-nine
+  rows. Still owed: AMD-Vi for the machines that have it (the GCR3
+  walk, the same shape — untestable under QEMU, whose AMD IOMMU has no
+  guest translation; wait for the port to boot real hardware), PCIDs, a
+  framebuffer console, an I/O APIC and MSI-X for guests. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
   console for real machines is owed.

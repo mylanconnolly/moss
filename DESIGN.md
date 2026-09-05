@@ -2484,10 +2484,12 @@ The guest drill (the moss kernel with four vCPUs, its own PCIe and
 ACPI, powering itself off through the PM1a port) and the vmnode drill
 (a NIC and an entropy device passed through, the guest joining the
 fabric as node 2 and serving a remote spawn) pass under nested KVM;
-the port's gate is all twenty-three drills. Still owed: AMD-Vi for
-the machines that have it, PCIDs, the `+rs` pass, a framebuffer
-console, and an I/O APIC and MSI-X for guests when a guest needs
-more than a line per device.
+the port's gate is all twenty-three drills — and, since the day
+after, the six `+rs` rows as well: the ReleaseSafe kernel passed them
+on the port unchanged, so both gates are the same twenty-nine rows.
+Still owed: AMD-Vi for the machines that have it, PCIDs, a framebuffer
+console, and an I/O APIC and MSI-X for guests when a guest needs more
+than a line per device.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

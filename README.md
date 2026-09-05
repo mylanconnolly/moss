@@ -40,7 +40,7 @@ zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (int
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 zig build -Darch=x86_64 run   # the x86_64 port (Limine on OVMF, x2APIC, VT-d, AMD-V) — KVM where available
-zig build -Darch=x86_64 check # its gate: all 23 drills on OVMF + Limine, VT-d and nested AMD-V under KVM
+zig build -Darch=x86_64 check # its gate: the same 29 rows on OVMF + Limine, VT-d and nested AMD-V under KVM
 ```
 
 The x86_64 boot wants Limine (`BOOTX64.EFI` under the host's share

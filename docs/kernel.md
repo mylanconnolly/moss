@@ -356,7 +356,7 @@ it — and no claim that any of this defeats Spectre-class attacks.
   cheap future win.
 - On aarch64 guests (the hypervisor) run only under TCG, since Apple's
   nested virtualization has no VHE; on x86_64 they run under nested
-  KVM. The x86_64 port still owes AMD-Vi, PCIDs and the `+rs` pass.
+  KVM. The x86_64 port still owes AMD-Vi and PCIDs.
 - Randomness is not interposable: `getrandom` is ungated, like reading
   the counter; a domain that must see deterministic randomness is a
   future manifest option (ROADMAP.md, "Entropy").
