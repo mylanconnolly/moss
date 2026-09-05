@@ -222,10 +222,22 @@ is a plan.
   passthrough over the NPT as VT-d's first stage; the guest and vmnode
   drills, and with them all twenty-three on the port; the six `+rs`
   rows followed (2026-09-04), so both gates are the same twenty-nine
-  rows. Still owed: AMD-Vi for the machines that have it (the GCR3
-  walk, the same shape — untestable under QEMU, whose AMD IOMMU has no
-  guest translation; wait for the port to boot real hardware), PCIDs, a
-  framebuffer console, an I/O APIC and MSI-X for guests. Modern hardware only: no legacy
+  rows. ✅ Under TCG too (2026-09-04): `-Dtcg` runs the gate without
+  KVM — the APIC timer in one-shot mode where TSC-deadline is missing,
+  the hypervisor stepping fixed-length exits by hand where next-RIP
+  save is — so the x86_64 gate runs on the Apple-silicon machine as
+  well; all twenty-nine rows pass both ways. Still owed: AMD-Vi for the
+  machines that have it (the GCR3 walk, the same shape — untestable
+  under QEMU, whose AMD IOMMU has no guest translation; wait for the
+  port to boot real hardware); PCIDs — the design: PCID = the domain's
+  ASID (1..16, the kernel PCID 0), CR3 loads with the no-flush bit, a
+  per-core bitmask of PCIDs ever resident to target the shootdown IPI,
+  INVPCID per page locally and single-context on the targets, and a
+  teardown broadcast retiring the PCID everywhere before its slot is
+  reused; written and reverted on 2026-09-04 because no host to hand
+  offers PCIDs (this Framework's Linux hides them from KVM guests, TCG
+  lacks them) and a TLB scheme nobody has run does not land; a
+  framebuffer console; an I/O APIC and MSI-X for guests. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
   console for real machines is owed.
@@ -426,6 +438,16 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64 under TCG** (2026-09-04): `-Dtcg` (runner `--tcg`) boots
+  the port on QEMU's own emulation, which the Apple-silicon machine
+  needs for the x86_64 gate. TCG's `max` CPU lacks TSC-deadline mode,
+  so the tick falls back to the APIC timer in one-shot mode, its clock
+  calibrated against the TSC once at boot; its SVM lacks next-RIP save,
+  so the hypervisor steps CPUID/HLT/VMMCALL/MSR exits by their fixed
+  lengths when the VMCB does not say. All 29 rows pass under TCG and
+  under KVM. PCIDs were built the same day and reverted unlanded: TCG
+  has none and this host's Linux hides them from KVM, so nothing could
+  run the tagged-TLB path (design kept under Open).
 - ✅ **x86_64, stage 6b: the moss kernel as a guest, passthrough**
   (2026-09-04): the VMM speaks the Limine protocol to the guest kernel
   (`loadMossGuestX86`: the image at its link address and a higher-half

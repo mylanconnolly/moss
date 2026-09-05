@@ -216,7 +216,10 @@ pub fn initCore() void {
     if (ext.ecx & (1 << 2) == 0) return; // no SVM
     if (cpu.rdmsr(msr_vm_cr) & (1 << 4) != 0) return; // SVMDIS: firmware locked it
     const feat = cpu.cpuid(0x8000_000a, 0);
-    if (feat.edx & 1 == 0 or feat.edx & (1 << 3) == 0) return; // nested paging, next-RIP
+    if (feat.edx & 1 == 0) return; // nested paging is the design
+    // Next-RIP save spares the decode of the instruction that exited;
+    // without it (QEMU's TCG) the fixed-length ones are stepped by hand.
+    nrips = feat.edx & (1 << 3) != 0;
     const idx = smp.currentIndex();
     cpu.wrmsr(msr_efer, cpu.rdmsr(msr_efer) | (1 << 12));
     cpu.wrmsr(msr_vm_hsave_pa, boot.imagePhys(@intFromPtr(&host_pages[idx][0])));
@@ -231,7 +234,23 @@ pub fn initCore() void {
         msrpm_ready = true;
     }
     svm_ready = true;
-    if (idx == 0) log.info("svm: AMD-V with nested paging; this kernel is a hypervisor", .{});
+    if (idx == 0) log.info("svm: AMD-V with nested paging{s}; this kernel is a hypervisor", .{if (nrips) "" else " (no next-RIP save)"});
+}
+
+var nrips: bool = false;
+
+/// The instruction after the one that exited: the saved next RIP, or
+/// the fixed length of the instruction the exit code names — CPUID and
+/// RDMSR/WRMSR are two bytes, HLT one, VMMCALL three; compilers put no
+/// prefix on any of them. (Port I/O carries its own in EXITINFO2.)
+fn nextRip(c: *volatile Vmcb) u64 {
+    if (nrips) return c.nrip;
+    return c.rip + @as(u64, switch (c.exit_code) {
+        exit_hlt => 1,
+        exit_cpuid, exit_msr => 2,
+        exit_vmmcall => 3,
+        else => 0,
+    });
 }
 
 /// Clear the two permission bits of an MSR in the map: bit offset
@@ -702,16 +721,16 @@ fn decode(v: *Vcpu) void {
     switch (code) {
         exit_intr => setExit(v, .interrupted, 0, 0, 0, 0),
         exit_hlt => {
-            c.rip = c.nrip;
+            c.rip = nextRip(c);
             setExit(v, .wfi, 0, 0, 0, 0);
         },
         exit_cpuid => {
             emulateCpuid(v);
-            c.rip = c.nrip;
+            c.rip = nextRip(c);
         },
         exit_msr => {
             if (c.exit_info1 == 0) emulateRdmsr(v) else emulateWrmsr(v);
-            c.rip = c.nrip;
+            c.rip = nextRip(c);
         },
         exit_ioio => {
             const info = c.exit_info1;
@@ -732,7 +751,7 @@ fn decode(v: *Vcpu) void {
             }
         },
         exit_vmmcall => {
-            c.rip = c.nrip;
+            c.rip = nextRip(c);
             v.pending_read = true;
             v.pend_kind = @intFromEnum(Pend.rax);
             v.pend_size = 8;

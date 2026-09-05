@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
     // `+rs` rows are the ReleaseSafe kernel pass, e.g. `ipc+rs`).
     const soak = b.option(u32, "soak", "check: run each OS test this many times") orelse 1;
     const only = b.option([]const u8, "only", "check: run only these OS tests (comma-separated; `name+rs` = ReleaseSafe pass)");
+    const force_tcg = b.option(bool, "tcg", "check (x86_64): software emulation even where KVM exists — QEMU's full `max` CPU (PCIDs) instead of the host's") orelse false;
     const user_optimize = b.option(
         std.builtin.OptimizeMode,
         "user-optimize",
@@ -542,17 +543,9 @@ pub fn build(b: *std.Build) void {
         _ = esp.add("limine.conf", "timeout: 0\nserial: yes\n\n/moss\n    protocol: limine\n    path: boot():/moss-kernel.elf\n    cmdline: profile=system\n");
         const vars = b.addWriteFiles();
         const vars_fd = vars.addCopyFile(.{ .cwd_relative = ovmf_vars }, "vars.fd");
-        const run_x86 = b.addSystemCommand(&.{
-            "qemu-system-x86_64",
-            "-machine",
-            "q35",
-            "-accel",
-            "kvm",
-            "-accel",
-            "tcg",
-            "-cpu",
-            "max",
-        });
+        const run_x86 = b.addSystemCommand(&.{ "qemu-system-x86_64", "-machine", "q35" });
+        if (!force_tcg) run_x86.addArgs(&.{ "-accel", "kvm" });
+        run_x86.addArgs(&.{ "-accel", "tcg", "-cpu", "max" });
         run_x86.addArgs(&.{ "-device", "intel-iommu,x-scalable-mode=on,x-flts=on" });
         run_x86.addArgs(&qemu_common);
         run_x86.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{ovmf_code}) });
@@ -889,7 +882,10 @@ pub fn build(b: *std.Build) void {
     // Both ports run every drill: aarch64 from the raw Image with
     // `-kernel`, x86_64 through OVMF and Limine (the smmu drill against
     // VT-d there, the hypervisor's against AMD-V).
-    if (arch == .x86_64) run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
+    if (arch == .x86_64) {
+        run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
+        if (force_tcg) run_check.addArg("--tcg");
+    }
     for (variants) |vn| {
         const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
         if (arch != .aarch64) continue;

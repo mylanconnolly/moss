@@ -2162,7 +2162,10 @@ loader having enabled x2APIC on every core at the MP request's asking):
 the spurious vector at 0xff, the LVT lines masked, the timer in
 TSC-deadline mode — one MSR write per period, the TSC the loader
 measured as the clock, so the tick is `rdtsc + interval` into
-IA32_TSC_DEADLINE and nothing is calibrated. End-of-interrupt is one
+IA32_TSC_DEADLINE and nothing is calibrated (on a CPU without that
+mode — QEMU's TCG — the same timer in one-shot mode, its clock
+calibrated against the TSC once at boot; see "under TCG" below).
+End-of-interrupt is one
 MSR write; an IPI is one (`intc.kick`: the resched vector 0xf1 to the
 core's APIC id). Interrupt ids are vectors, so delivery needs no
 translation: lines are 32 + the GSI (I/O APIC redirection entries,
@@ -2490,6 +2493,36 @@ on the port unchanged, so both gates are the same twenty-nine rows.
 Still owed: AMD-Vi for the machines that have it, PCIDs, a framebuffer
 console, and an I/O APIC and MSI-X for guests when a guest needs more
 than a line per device.
+
+### The x86_64 port under TCG (as built, 2026-09-04)
+
+The port grew up under KVM, and the first boot under QEMU's own
+emulation (`-Dtcg`, the runner's `--tcg`: no `-accel kvm`) panicked at
+the timer — TCG's `max` CPU has no TSC-deadline mode, nor PCIDs, nor
+next-RIP save in its SVM, three things every real x86 of the last
+decade has. TCG matters because it is the only way the x86_64 gate
+runs on the Apple-silicon machine the project grew up on, and because
+`-cpu max` there is the CPU model with the most features QEMU can
+offer at all. So the port does without those three where it must. The
+tick falls back to the local APIC timer in one-shot mode: the APIC's
+clock is calibrated against the TSC over 20 ms once, on the boot core
+(`lapic.calibrateTimer`; QEMU's runs at 1 GHz), and every tick is one
+write of the initial-count register instead of the deadline MSR — the
+same vector, the same handler, `lapic.tsc_deadline` deciding at
+`initCore`. The hypervisor no longer requires next-RIP save: the exits
+whose instruction has a fixed length (CPUID and RDMSR/WRMSR two bytes,
+HLT one, VMMCALL three — compilers prefix none of them) are stepped by
+hand when the VMCB does not say (`nextRip`), and port I/O carries its
+own next RIP in EXITINFO2 either way. Nested paging and VGIF TCG has,
+and with those the three hypervisor drills pass under emulation — the
+moss guest and its passed-through devices included. All twenty-nine
+rows pass under TCG on the Framework; the KVM gate is the fast one, and
+what the box runs by default. PCIDs are the third absence, and the
+reason they are still owed: this host's Linux hides PCID from KVM
+guests as well (INVPCID shows, PCID does not), so no machine to hand
+can exercise a tagged TLB, and an unverified TLB-tagging scheme is not
+one to ship. The design is written down in ROADMAP for the day a host
+can test it.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

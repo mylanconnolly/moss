@@ -43,6 +43,10 @@ const Spec = struct {
 const Arch = enum { aarch64, x86_64 };
 var target_arch: Arch = .aarch64;
 var limine_dir: []const u8 = "/usr/share/limine";
+/// `--tcg`: software emulation even where KVM exists — the way to run
+/// the x86_64 drills on a CPU model the host's KVM does not offer (PCIDs
+/// on a host kernel that hid them, say).
+var force_tcg: bool = false;
 var ovmf_code: []const u8 = "/usr/share/qemu/edk2-x86_64-code.fd";
 var ovmf_vars: []const u8 = "/usr/share/qemu/edk2-i386-vars.fd";
 
@@ -136,7 +140,7 @@ pub fn main(init: std.process.Init) !u8 {
     var repeat: u32 = 1;
     var only: ?[]const u8 = null;
     var i: usize = 1;
-    while (i < argv.len and std.mem.startsWith(u8, argv[i], "--")) : (i += 2) {
+    while (i < argv.len and std.mem.startsWith(u8, argv[i], "--")) {
         if (i + 1 >= argv.len) break;
         if (std.mem.eql(u8, argv[i], "--repeat")) {
             repeat = std.fmt.parseInt(u32, argv[i + 1], 10) catch 0;
@@ -147,6 +151,10 @@ pub fn main(init: std.process.Init) !u8 {
                 std.debug.print("runner: unknown --arch {s}\n", .{argv[i + 1]});
                 return 2;
             };
+        } else if (std.mem.eql(u8, argv[i], "--tcg")) {
+            force_tcg = true;
+            i += 1;
+            continue;
         } else if (std.mem.eql(u8, argv[i], "--limine")) {
             limine_dir = argv[i + 1];
         } else if (std.mem.eql(u8, argv[i], "--ovmf")) {
@@ -154,9 +162,10 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, argv[i], "--ovmf-vars")) {
             ovmf_vars = argv[i + 1];
         } else break;
+        i += 2;
     }
     if (repeat == 0 or argv.len - i < 2 or (argv.len - i) % 2 != 0) {
-        std.debug.print("usage: runner [--repeat N] [--only a,b] [--arch aarch64|x86_64] [--limine DIR] [--ovmf FD] [--ovmf-vars FD] <name> <kernel> ...\n", .{});
+        std.debug.print("usage: runner [--repeat N] [--only a,b] [--arch aarch64|x86_64] [--tcg] [--limine DIR] [--ovmf FD] [--ovmf-vars FD] <name> <kernel> ...\n", .{});
         return 2;
     }
     cwd.createDirPath(io, check_dir) catch {};
@@ -1126,12 +1135,9 @@ fn appendBaseX86(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []
     // A scratch variable store per label: OVMF writes it.
     const vars = try std.fmt.allocPrint(gpa, "{s}/{s}-vars.fd", .{ check_dir, label });
     try cwd.copyFile(ovmf_vars, cwd, vars, io, .{});
+    try args.appendSlice(gpa, &.{ "qemu-system-x86_64", "-machine", "q35" });
+    if (!force_tcg) try args.appendSlice(gpa, &.{ "-accel", "kvm" });
     try args.appendSlice(gpa, &.{
-        "qemu-system-x86_64",
-        "-machine",
-        "q35",
-        "-accel",
-        "kvm",
         "-accel",
         "tcg",
         "-cpu",

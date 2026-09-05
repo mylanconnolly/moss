@@ -257,7 +257,8 @@ IPC, the scheduler's policy, quotas, teardown — never names a register
 or a device. Only the selected port is compiled: another architecture's
 code is never analyzed, let alone linked. `-Darch` chooses the port:
 aarch64 is complete; x86_64 (Limine on UEFI, x2APIC with the APIC timer
-in TSC-deadline mode, I/O APICs and MSI vectors from ACPI, every core)
+in TSC-deadline mode — one-shot where the CPU lacks it — I/O APICs and
+MSI vectors from ACPI, every core)
 runs the kernel, user programs (`syscall`/`sysret`, SMAP as the door
 to user memory), PCIe with MSI-X, VT-d walking each domain's own page
 tables for its devices' DMA, AMD-V for guests (a moss kernel as a
