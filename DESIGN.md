@@ -1596,6 +1596,69 @@ does exactly that). The network drill's server now serves seven
 requests over six connections — the runner pipelines two on one and
 sends a chunked POST on another — and the script fetches twice.
 
+**Networking, UDP (as built, 2026-09-04).** Datagrams joined the stack
+as the first step toward name resolution: a table of eight UDP sockets
+in netsvc, each a bound port, a doorbell and a queue of eight datagrams
+kept with their sources; `udp_bind` (0 for an ephemeral port; a
+filtered view may bind only so, and hears only from its one allowed
+peer), `udp_send` with the destination address in the view buffer
+ahead of the bytes (a request carries three words, and an address is
+two), `udp_recv` answering the source the same way; UDP socket numbers
+start at 1000 so `watch` and `tcp_close` serve both kinds. The
+checksum is the pseudo-header sum TCP uses with protocol 17 and a
+zero folded to 0xffff; loopback goes straight back into `udpInput`,
+as TCP's does. `shared.formatAddr` renders an address as text (dotted
+for v4-mapped, RFC 5952 `::` for the longest zero run) so a datagram's
+`from` is a string a script can match. In the language: `udp-bind`,
+`udp-send`, `udp-recv` (a `{ from, port, data }` record), `close` and
+`status` on a `udp` handle. The network drill's script sends to a
+bound port from an ephemeral one over `::1` and `10.0.2.15` and
+answers back.
+
+**Networking, names (as built, 2026-09-04).** Three pieces on top of
+UDP. `lib/dns.zig` is the wire format and nothing else — build a
+query (recursion desired, an OPT record announcing 1232 bytes), parse
+a message (labels, compression pointers with a hop limit and no
+forward references, the question echoed, records raw with their
+offset so a CNAME can be read), gather the addresses for a name
+following a CNAME chain within the answer with the smallest TTL, and
+build an authoritative response — host-tested against hand-written
+packets. The resolver lives in netsvc, which has the timers, the
+clock and the sockets: a lookup asks the current resolver for AAAA
+and A at once (two ids stepping through the id space from a boot-time
+seed, one source port chosen at boot), the tick resends after half a
+second and moves to the next resolver after two tries, a REFUSED or
+SERVFAIL moves on at once, and the lookup finishes when both questions
+are answered or the last resolver gave up — with what came, or
+`nxdomain`, `refused`, `timeout`; answers are cached by TTL (bounded
+to an hour, a minute for a negative one) in sixteen slots. The
+protocol is `resolve` (the name in the buffer; answers a lookup
+number a `watch` can ring) and `resolve_check` (the addresses in the
+buffer, or the error, freeing the lookup); any view may resolve, since
+a name is a question and the allowlist judges the address that comes
+of it. Resolvers come from the unit's settings file — `conf/net.msh`,
+delivered by init's new `file:` give, the `secret` mechanism for bytes
+that are not secret (kept, not wiped, up to 2 KB) — `::1` first for
+the node's own dnsd, then slirp's forwarder. `dnsd` (`user/dnsd.zig`)
+is that server: one zone from `conf/dns.msh` given the same way, UDP
+53 on its own network view, A or AAAA by the address's family,
+NXDOMAIN in the zone, REFUSED outside it. In the language: `resolve`,
+and a name wherever an address goes; `Net.connectHost` tries the
+addresses in order with a bounded attempt (a kernel timer on the
+doorbell, as the timed receive) while more remain. Found by the
+one-off wire test the gate cannot run: with a public name answering
+two IPv6 and two IPv4 addresses and slirp routing only IPv4, connect
+by name sat through the stack's whole retransmission run per IPv6
+address and the drill's hang watchdog fired — the bounded attempt is
+the fix, and dnsd answering NXDOMAIN for every unknown name had kept
+the resolver from ever asking slirp, hence REFUSED outside the zone;
+and `fetch` had taken its socket from a single-address connect and
+keyed its pool by that address, so it never got past the first IPv6
+answer — it connects through the whole list now and keys the pool by
+the host as written. With those three, the test fetched a public
+page by name: status 200, chunked and keep-alive, from a real server,
+in about a second — the arc's two stages meeting.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

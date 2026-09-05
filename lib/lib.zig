@@ -3,6 +3,7 @@
 //! needs them. No dynamic loader exists or ever will; where key custody
 //! matters, a capability service holds the secret instead.
 
+pub const dns = @import("dns.zig");
 pub const fabcert = @import("fabcert.zig");
 pub const http = @import("http.zig");
 pub const json = @import("json.zig");
@@ -14,6 +15,7 @@ pub const usercred = @import("usercred.zig");
 pub const xts = @import("xts.zig");
 
 test {
+    _ = dns;
     _ = fabcert;
     _ = http;
     _ = json;

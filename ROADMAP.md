@@ -263,7 +263,17 @@ is a plan.
   every request a connection carries, pipelined too, a per-socket
   leftover and an idle timeout on a kernel timer, chunked bodies
   decoded, a four-connection pool in `fetch` with one retry on a dead
-  kept connection); still open: name resolution (needs UDP), TLS,
+  kept connection); ✅ UDP (landed 2026-09-04: `udp_bind`/`udp_send`/
+  `udp_recv` in netsvc, both families, loopback, the allowlist judging
+  destinations, `udp-bind`/`udp-send`/`udp-recv` in the language);
+  ✅ name resolution (landed 2026-09-04: `lib/dns.zig`, the resolver
+  in netsvc with a TTL cache asking the settings file's resolvers in
+  order, `resolve` and names in `connect`/`udp-send`/`fetch` with
+  bounded attempts per address, `dnsd` serving a zone from mshl data —
+  the gate's hermetic upstream and the fabric's names); still open:
+  DNS over TLS (with TLS), search lists and a hosts file if a use case
+  asks, names for fabric nodes by default (dnsd in the cluster
+  profile), TLS,
   concurrent handling (needs the language to spawn), and, when a use
   case demands them, congestion control and out-of-order receive; (4)
   the fabric surface — ✅ the bulk transport across the wire and remote
@@ -365,8 +375,10 @@ is a plan.
 
 **Networking**
 
-- A minimal stack by design: stop-and-wait with one segment in flight,
-  no congestion control, no UDP, no TCP options.
+- A minimal stack by design: no congestion control, no TCP options
+  beyond MSS; UDP sockets keep eight datagrams and drop the rest; the
+  resolver holds eight lookups and a cache of sixteen names; a
+  truncated DNS answer is not retried over TCP.
 - Blocking is polling plus a doorbell; rings as the wakeup path are not
   built.
 - 16 sockets and 8 views per service.

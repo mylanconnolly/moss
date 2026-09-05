@@ -146,7 +146,11 @@ follow from its `Analysis` — a new binding kind needs a line in
 implicit names a block gets (`it`, `in`, `acc`, `req` — a host that
 calls a block with new names adds them) and the unit keys
 `user/init.zig`'s `parseUnit` reads (a new key is added there and in
-`unit_keys`, or every unit using it lints as a typo). A module for the
+`unit_keys`, or every unit using it lints as a typo). A settings record for a
+service is a `.msh` file under `boot/conf/` named in `build.zig`'s
+archive list and given to the unit with `{ tag: buf, shm: 1 }` and
+`{ file: conf/name.msh }` (`setup.data()` is its text; parse it with
+`mshl.parseData`). A module for the
 library is a file under `lib/msh/` named in `build.zig`'s archive
 list (packed as `lib/<name>.msh`) with a host test in `lib/mshl.zig`
 that `use`s it through the test host (`@embedFile`); init installs it

@@ -81,19 +81,23 @@ const idle_ticks: u64 = 300; // 3 s
 /// How long any read waits for the rest of a request once it began.
 const stall_ticks: u64 = 1000; // 10 s
 
-/// `fetch`'s kept connections: one per address and port, idle.
+/// `fetch`'s kept connections: one per host (as written in the URL:
+/// an address or a name) and port, idle.
 const pool_size = 4;
-const Pooled = struct { used: bool = false, words: [2]u64 = .{ 0, 0 }, port: u64 = 0, sock: u64 = 0 };
+const max_host = 128;
+const Pooled = struct { used: bool = false, host: [max_host]u8 = undefined, host_len: usize = 0, port: u64 = 0, sock: u64 = 0 };
 var pool: [pool_size]Pooled = @splat(.{});
 
-fn pooled(words: [2]u64, port: u64) ?*Pooled {
-    for (&pool) |*p| if (p.used and p.words[0] == words[0] and p.words[1] == words[1] and p.port == port) return p;
+fn pooled(host: []const u8, port: u64) ?*Pooled {
+    for (&pool) |*p| if (p.used and p.port == port and std.mem.eql(u8, p.host[0..p.host_len], host)) return p;
     return null;
 }
 
-fn poolPut(n: *Net, words: [2]u64, port: u64, sock: u64) void {
+fn poolPut(n: *Net, host: []const u8, port: u64, sock: u64) void {
+    if (host.len > max_host) return n.closeRaw(sock);
     for (&pool) |*p| if (!p.used) {
-        p.* = .{ .used = true, .words = words, .port = port, .sock = sock };
+        p.* = .{ .used = true, .host_len = host.len, .port = port, .sock = sock };
+        @memcpy(p.host[0..host.len], host);
         return;
     };
     n.closeRaw(sock); // no room: not kept
@@ -283,7 +287,6 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     }
     if (is(u8, name, "fetch")) {
         const url = http.parseUrl(args[0].str) orelse return it.fail("fetch: not an http URL: {s}", .{args[0].str});
-        const words = shared.parseAddr(url.host) orelse return it.fail("fetch: the host must be an address (there is no name resolution): {s}", .{url.host});
         var method: []const u8 = "GET";
         var headers: std.ArrayList(http.Header) = .empty;
         var body: []const u8 = "";
@@ -321,26 +324,28 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
         try http.formatRequest(it.arena, &req, method, url.path, host, headers.items, body, keep);
         // A kept connection first; if it turns out dead before a byte
         // came back, once more on a fresh one.
+        // The host is an address or a name; every address it has is
+        // tried in turn.
         var reused = false;
         var s: u64 = undefined;
-        if (pooled(words, url.port)) |p| {
+        if (pooled(url.host, url.port)) |p| {
             s = p.sock;
             p.used = false;
             reused = true;
-        } else s = switch (n.connectRaw(words, url.port)) {
+        } else s = switch (n.connectHost(url.host, url.port)) {
             .sock => |x| x,
             .failed => |m| return try errResult(it, m),
         };
         while (true) {
             const out = try exchange(n, it, s, req.items, keep);
             if (out.response) |v| {
-                if (out.kept) poolPut(n, words, url.port, s) else n.closeRaw(s);
+                if (out.kept) poolPut(n, url.host, url.port, s) else n.closeRaw(s);
                 return try okResult(it, v);
             }
             n.closeRaw(s);
             if (reused and out.early) {
                 reused = false;
-                s = switch (n.connectRaw(words, url.port)) {
+                s = switch (n.connectHost(url.host, url.port)) {
                     .sock => |x| x,
                     .failed => |m2| return try errResult(it, m2),
                 };

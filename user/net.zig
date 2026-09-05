@@ -24,6 +24,9 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
+const mosslib = @import("mosslib");
+const dns = mosslib.dns;
+const mshl = mosslib.mshl;
 
 comptime {
     asm (usys.imageHeader("net"));
@@ -57,6 +60,31 @@ fn takeDevice(chan_h: u64) void {
     const setup = boot.take(chan_h);
     dev_h = setup.device(.net);
     if (dev_h == 0) usys.exit(169);
+    readSettings(setup.data());
+}
+
+/// The unit's settings file (`{ resolvers: [addr, …] }`), given as
+/// bytes from the archive; none is fine (no resolver, then).
+fn readSettings(text: []const u8) void {
+    if (text.len == 0) return;
+    var scratch: [8 << 10]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var ctx: u8 = 0;
+    var it = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&ctx), .call = noHost });
+    const v = it.parseData(text) catch return;
+    if (v != .record) return;
+    const list = v.record.get("resolvers") orelse return;
+    if (list != .list) return;
+    for (list.list) |item| {
+        if (item != .str or n_resolvers == max_resolvers) continue;
+        const words = shared.parseAddr(item.str) orelse continue;
+        resolvers[n_resolvers] = addrFromWords(words[0], words[1]);
+        n_resolvers += 1;
+    }
+}
+
+fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const mshl.Value, _: ?mshl.Value) mshl.Error!?mshl.Value {
+    return null;
 }
 
 // ------------------------------------------------------------- addresses
@@ -271,6 +299,7 @@ fn netTick() void {
     drainRxUsed();
     drainTxUsed();
     retransmitScan();
+    lookupScan();
 }
 
 fn irqDrain() void {
@@ -500,6 +529,7 @@ fn ip4Input(p: []const u8) void {
     const src = v4Addr(be32(p[12..16]));
     switch (p[9]) {
         6 => tcpInput(src, p[ihl..total]),
+        17 => udpInput(src, v4Addr(own_ip4), p[ihl..total]),
         1 => { // ICMP
             const b = p[ihl..total];
             if (b.len >= 8 and b[0] == 0) ping_replies += 1;
@@ -520,9 +550,463 @@ fn ip6Input(p: []const u8) void {
     @memcpy(&src, p[8..24]);
     switch (p[6]) {
         6 => tcpInput(src, p[40 .. 40 + plen]),
+        17 => udpInput(src, dst, p[40 .. 40 + plen]),
         58 => icmp6Input(src, p[40 .. 40 + plen]),
         else => {},
     }
+}
+
+// ------------------------------------------------------------------- UDP
+//
+// Datagrams: a socket is a bound port and a queue of what arrived, each
+// datagram kept with its source. Sending builds the UDP header and the
+// IP header for the destination's family (loopback goes straight back
+// in), the checksum over the pseudo-header as TCP's.
+
+const max_udp = 8;
+const udp_q_len = 8;
+const udp_dgram_cap = shared.udp_max;
+
+const Dgram = struct { src: Addr = @splat(0), port: u16 = 0, len: u16 = 0 };
+
+const Udp = struct {
+    used: bool = false,
+    badge: u64 = 0,
+    lport: u16 = 0,
+    bell: u64 = 0,
+    /// Arrived, not yet taken: a FIFO of heads; the bytes live beside.
+    q: [udp_q_len]Dgram = @splat(.{}),
+    q_head: u8 = 0,
+    q_n: u8 = 0,
+};
+
+var udps: [max_udp]Udp = @splat(.{});
+var udp_bufs: [max_udp][udp_q_len][udp_dgram_cap]u8 = undefined;
+var next_udp_eph: u16 = 50000;
+
+fn udpOf(badge: u64, idx: u64) ?*Udp {
+    if (idx < shared.udp_sock_base or idx - shared.udp_sock_base >= max_udp) return null;
+    const u = &udps[idx - shared.udp_sock_base];
+    if (!u.used or u.badge != badge) return null;
+    return u;
+}
+
+fn udpRing(u: *Udp) void {
+    if (u.bell != 0) _ = usys.notifySignal(u.bell, 1);
+}
+
+fn udpChecksum(src: Addr, dst: Addr, seg: []const u8) u16 {
+    var sum: u32 = 0;
+    if (isV4Mapped(dst)) {
+        var ph: [12]u8 = undefined;
+        pbe32(ph[0..4], v4Of(src));
+        pbe32(ph[4..8], v4Of(dst));
+        ph[8] = 0;
+        ph[9] = 17;
+        pbe16(ph[10..12], @intCast(seg.len));
+        sum = partial(&ph, 0);
+    } else {
+        sum = partial(&src, 0);
+        sum = partial(&dst, sum);
+        var lenw: [4]u8 = undefined;
+        pbe32(&lenw, @intCast(seg.len));
+        sum = partial(&lenw, sum);
+        sum += 17;
+    }
+    const f = fold(partial(seg, sum));
+    return if (f == 0) 0xffff else f; // a zero checksum means "none" on v4
+}
+
+fn udpInput(src: Addr, dst: Addr, seg: []const u8) void {
+    if (seg.len < 8) return;
+    const len = be16(seg[4..6]);
+    if (len < 8 or len > seg.len) return;
+    const dport = be16(seg[2..4]);
+    // Verify the checksum unless a v4 sender left it out.
+    if (!(isV4Mapped(dst) and be16(seg[6..8]) == 0)) {
+        var copy: [8 + udp_dgram_cap]u8 = undefined;
+        if (len > copy.len) return;
+        @memcpy(copy[0..len], seg[0..len]);
+        copy[6] = 0;
+        copy[7] = 0;
+        if (udpChecksum(src, dst, copy[0..len]) != be16(seg[6..8])) return;
+    }
+    const payload = seg[8..len];
+    if (payload.len > udp_dgram_cap) return;
+    if (dport == resolver_port and resolver_port != 0) return dnsInput(src, be16(seg[0..2]), payload);
+    for (&udps, 0..) |*u, i| {
+        if (!u.used or u.lport != dport) continue;
+        // A filtered view hears only from its one destination.
+        const v = &views[u.badge];
+        if (v.filtered and (!addrEq(src, v.allow) or be16(seg[0..2]) != v.allow_port)) return;
+        if (u.q_n == udp_q_len) return; // full: dropped, as datagrams are
+        const slot = (u.q_head + u.q_n) % udp_q_len;
+        u.q[slot] = .{ .src = src, .port = be16(seg[0..2]), .len = @intCast(payload.len) };
+        @memcpy(udp_bufs[i][slot][0..payload.len], payload);
+        u.q_n += 1;
+        udpRing(u);
+        return;
+    }
+}
+
+fn udpEmit(sport: u16, dst: Addr, dport: u16, payload: []const u8) void {
+    var t: [8 + udp_dgram_cap]u8 = undefined;
+    const len = 8 + payload.len;
+    pbe16(t[0..2], sport);
+    pbe16(t[2..4], dport);
+    pbe16(t[4..6], @intCast(len));
+    t[6] = 0;
+    t[7] = 0;
+    @memcpy(t[8..len], payload);
+    const v4 = isV4Mapped(dst);
+    const local = isLocalAddr(dst);
+    const src_addr: Addr = if (local) dst else if (v4) v4Addr(own_ip4) else own_ip6;
+    const sum = udpChecksum(src_addr, dst, t[0..len]);
+    t[6] = @truncate(sum >> 8);
+    t[7] = @truncate(sum);
+    if (local) {
+        udpInput(src_addr, dst, t[0..len]);
+        return;
+    }
+    if (v4) {
+        var pkt: [20 + 8 + udp_dgram_cap]u8 = undefined;
+        const total = 20 + len;
+        pkt[0] = 0x45;
+        pkt[1] = 0;
+        pbe16(pkt[2..4], @intCast(total));
+        pkt[4] = 0;
+        pkt[5] = 0;
+        pkt[6] = 0x40;
+        pkt[7] = 0;
+        pkt[8] = 64;
+        pkt[9] = 17;
+        pkt[10] = 0;
+        pkt[11] = 0;
+        pbe32(pkt[12..16], own_ip4);
+        pbe32(pkt[16..20], v4Of(dst));
+        const ipsum = csum(pkt[0..20], 0);
+        pkt[10] = @truncate(ipsum >> 8);
+        pkt[11] = @truncate(ipsum);
+        @memcpy(pkt[20..total], t[0..len]);
+        if (have_gw4) ethSend(&gw_mac, 0x0800, pkt[0..total]);
+    } else {
+        var pkt: [40 + 8 + udp_dgram_cap]u8 = undefined;
+        pkt[0] = 0x60;
+        pkt[1] = 0;
+        pkt[2] = 0;
+        pkt[3] = 0;
+        pbe16(pkt[4..6], @intCast(len));
+        pkt[6] = 17;
+        pkt[7] = 64;
+        @memcpy(pkt[8..24], &own_ip6);
+        @memcpy(pkt[24..40], &dst);
+        @memcpy(pkt[40 .. 40 + len], t[0..len]);
+        if (have_gw6) ethSend(&gw6_mac, 0x86dd, pkt[0 .. 40 + len]);
+    }
+}
+
+fn opUdpBind(v: *NetView, badge: u64, port: u64) shared.NetResp {
+    if (port > 65535) return nerr(.bad);
+    if (v.filtered and port != 0) return nerr(.denied);
+    for (&udps) |*u| if (u.used and u.lport == port and port != 0) return nerr(.bad);
+    for (&udps, 0..) |*u, i| {
+        if (u.used) continue;
+        var lport: u16 = @intCast(port);
+        if (lport == 0) {
+            lport = next_udp_eph;
+            next_udp_eph +%= 1;
+            if (next_udp_eph < 50000) next_udp_eph = 50000;
+        }
+        u.* = .{ .used = true, .badge = badge, .lport = lport };
+        return .{ .num = .{ .n = shared.udp_sock_base + i } };
+    }
+    return nerr(.no_space);
+}
+
+fn opUdpSend(v: *NetView, badge: u64, idx: u64, port: u64, len: u64) shared.NetResp {
+    const u = udpOf(badge, idx) orelse return nerr(.bad);
+    if (v.buf == 0 or port == 0 or port > 65535 or len > shared.udp_max) return nerr(.bad);
+    const b = @as([*]const u8, @ptrFromInt(v.buf));
+    var dst: Addr = undefined;
+    @memcpy(&dst, b[0..16]);
+    if (v.filtered and (!addrEq(dst, v.allow) or port != v.allow_port)) return nerr(.denied);
+    udpEmit(u.lport, dst, @intCast(port), b[shared.udp_hdr .. shared.udp_hdr + len]);
+    return .{ .num = .{ .n = len } };
+}
+
+fn opUdpRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
+    const u = udpOf(badge, idx) orelse return nerr(.bad);
+    if (v.buf == 0 or len == 0 or shared.udp_hdr + len > shared.net_max_recv) return nerr(.bad);
+    if (u.q_n == 0) return nerr(.would_block);
+    const slot = u.q_head;
+    const d = u.q[slot];
+    const n = @min(len, d.len); // a datagram longer than asked is cut, as datagrams are
+    const b = @as([*]u8, @ptrFromInt(v.buf));
+    @memcpy(b[0..16], &d.src);
+    pbe16(b[16..18], d.port);
+    @memcpy(b[shared.udp_hdr .. shared.udp_hdr + n], udp_bufs[idx - shared.udp_sock_base][slot][0..n]);
+    u.q_head = (u.q_head + 1) % udp_q_len;
+    u.q_n -= 1;
+    return .{ .num = .{ .n = n } };
+}
+
+fn opUdpClose(u: *Udp) shared.NetResp {
+    if (u.bell != 0) _ = usys.capDrop(u.bell);
+    u.* = .{};
+    return .ok;
+}
+
+// -------------------------------------------------------------- resolver
+//
+// Names: a lookup asks the configured resolvers, in order, for AAAA
+// and A at once (two ids), retries on the tick, and answers when both
+// came back or the last resolver gave up on it. Answers are cached
+// by their TTL (a name that does not exist for a minute). The
+// resolver's own port is one UDP port chosen at boot; what arrives on
+// it is a DNS reply or nothing.
+
+const max_lookups = 8;
+const max_resolvers = 4;
+const cache_len = 16;
+const lookup_tries = 2;
+const lookup_wait_ms: i64 = 500;
+const negative_ttl_s: u32 = 60;
+const max_ttl_s: u32 = 3600;
+
+var resolvers: [max_resolvers]Addr = undefined;
+var n_resolvers: usize = 0;
+var resolver_port: u16 = 0;
+
+const Lookup = struct {
+    used: bool = false,
+    badge: u64 = 0,
+    bell: u64 = 0,
+    name: [dns.max_name]u8 = undefined,
+    name_len: usize = 0,
+    /// The AAAA and A queries in flight: ids, and which have answered.
+    ids: [2]u16 = .{ 0, 0 },
+    got: [2]bool = .{ false, false },
+    nx: bool = false,
+    /// The last resolver refused, or could not, answer.
+    declined: bool = false,
+    resolver: usize = 0,
+    tries: u32 = 0,
+    sent_at: i64 = 0,
+    addrs: [shared.resolve_max][2]u64 = undefined,
+    n: usize = 0,
+    ttl: u32 = max_ttl_s,
+    done: bool = false,
+    err: ?shared.NetErr = null,
+
+    fn nameSlice(l: *const Lookup) []const u8 {
+        return l.name[0..l.name_len];
+    }
+};
+
+const CacheEntry = struct {
+    used: bool = false,
+    name: [dns.max_name]u8 = undefined,
+    name_len: usize = 0,
+    addrs: [shared.resolve_max][2]u64 = undefined,
+    n: usize = 0,
+    err: ?shared.NetErr = null,
+    expires_ms: i64 = 0,
+};
+
+var lookups: [max_lookups]Lookup = @splat(.{});
+var cache: [cache_len]CacheEntry = @splat(.{});
+var next_query_id: u16 = 0;
+
+fn nowMs() i64 {
+    const hz = usys.cycleHz();
+    if (hz == 0) return 0;
+    return @intCast(usys.cycles() / (hz / 1000));
+}
+
+fn lookupOf(badge: u64, idx: u64) ?*Lookup {
+    if (idx < shared.lookup_base or idx - shared.lookup_base >= max_lookups) return null;
+    const l = &lookups[idx - shared.lookup_base];
+    if (!l.used or l.badge != badge) return null;
+    return l;
+}
+
+fn lookupRing(l: *Lookup) void {
+    if (l.bell != 0) _ = usys.notifySignal(l.bell, 1);
+}
+
+fn cacheFind(name: []const u8) ?*CacheEntry {
+    const now = nowMs();
+    for (&cache) |*c| {
+        if (!c.used) continue;
+        if (now >= c.expires_ms) {
+            c.used = false;
+            continue;
+        }
+        if (std.ascii.eqlIgnoreCase(c.name[0..c.name_len], name)) return c;
+    }
+    return null;
+}
+
+fn cachePut(l: *const Lookup) void {
+    var slot: ?*CacheEntry = null;
+    var oldest: i64 = std.math.maxInt(i64);
+    for (&cache) |*c| {
+        if (!c.used) {
+            slot = c;
+            break;
+        }
+        if (c.expires_ms < oldest) {
+            oldest = c.expires_ms;
+            slot = c;
+        }
+    }
+    const c = slot orelse return;
+    const ttl_s: u32 = if (l.err != null) negative_ttl_s else @max(@min(l.ttl, max_ttl_s), 1);
+    c.* = .{ .used = true, .name_len = l.name_len, .addrs = l.addrs, .n = l.n, .err = l.err, .expires_ms = nowMs() + @as(i64, ttl_s) * 1000 };
+    @memcpy(c.name[0..l.name_len], l.nameSlice());
+}
+
+fn resolverInit() void {
+    resolver_port = @intCast(49152 + (usys.cycles() % 16000));
+    next_query_id = @truncate(usys.cycles() >> 8);
+}
+
+fn queryId() u16 {
+    next_query_id +%= 0x9e37; // a stride that walks the space
+    if (next_query_id == 0) next_query_id = 1;
+    return next_query_id;
+}
+
+/// Send the queries the lookup still lacks to its current resolver.
+fn lookupSend(l: *Lookup) void {
+    const types = [_]dns.Type{ .aaaa, .a };
+    for (types, 0..) |t, k| {
+        if (l.got[k]) continue;
+        l.ids[k] = queryId();
+        var q: [512]u8 = undefined;
+        const n = dns.buildQuery(&q, l.ids[k], l.nameSlice(), t) catch continue;
+        udpEmit(resolver_port, resolvers[l.resolver], 53, q[0..n]);
+    }
+    l.sent_at = nowMs();
+}
+
+fn lookupFinish(l: *Lookup) void {
+    if (l.n == 0 and l.err == null) l.err = if (l.nx) .nxdomain else if (l.declined) .refused else if (l.got[0] or l.got[1]) .nxdomain else .timeout;
+    l.done = true;
+    cachePut(l);
+    lookupRing(l);
+}
+
+/// A reply on the resolver's port: match it to a lookup by id and
+/// resolver, take its addresses, and finish the lookup when both
+/// questions are answered.
+fn dnsInput(src: Addr, sport: u16, msg: []const u8) void {
+    if (sport != 53) return;
+    var scratch: [4 << 10]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const a = fba.allocator();
+    const r = dns.parse(a, msg) catch return;
+    for (&lookups) |*l| {
+        if (!l.used or l.done) continue;
+        if (!addrEq(src, resolvers[l.resolver])) continue;
+        const k: usize = if (r.id == l.ids[0] and !l.got[0]) 0 else if (r.id == l.ids[1] and !l.got[1]) 1 else continue;
+        if (!std.ascii.eqlIgnoreCase(r.qname, l.nameSlice())) return; // not our question
+        switch (r.rcode) {
+            .ok => {
+                const found = dns.addressesFor(a, msg, r, l.nameSlice()) catch return;
+                for (found.words) |w| {
+                    if (l.n == shared.resolve_max) break;
+                    l.addrs[l.n] = w;
+                    l.n += 1;
+                }
+                if (found.words.len > 0) l.ttl = @min(l.ttl, found.ttl);
+            },
+            .nxdomain => l.nx = true,
+            else => {
+                // Refused, or a server that cannot: this resolver is not
+                // the one to ask — the next one, now.
+                if (l.n == 0 and l.resolver + 1 < n_resolvers) {
+                    l.resolver += 1;
+                    l.tries = 0;
+                    l.got = .{ false, false };
+                    lookupSend(l);
+                    return;
+                }
+                l.declined = true;
+            },
+        }
+        l.got[k] = true;
+        if (l.got[0] and l.got[1]) lookupFinish(l);
+        return;
+    }
+}
+
+/// On the tick: resend what is overdue, move on to the next resolver,
+/// give up.
+fn lookupScan() void {
+    const now = nowMs();
+    for (&lookups) |*l| {
+        if (!l.used or l.done) continue;
+        if (now - l.sent_at < lookup_wait_ms) continue;
+        l.tries += 1;
+        if (l.tries < lookup_tries) {
+            lookupSend(l);
+            continue;
+        }
+        if (l.resolver + 1 < n_resolvers and l.n == 0) {
+            l.resolver += 1;
+            l.tries = 0;
+            l.got = .{ false, false };
+            lookupSend(l);
+            continue;
+        }
+        lookupFinish(l); // with what came, or a timeout
+    }
+}
+
+fn opResolve(v: *NetView, badge: u64, len: u64) shared.NetResp {
+    if (v.buf == 0 or len == 0 or len > dns.max_name) return nerr(.bad);
+    const name = @as([*]const u8, @ptrFromInt(v.buf))[0..len];
+    var probe: [dns.max_name + 8]u8 = undefined;
+    _ = dns.encodeName(&probe, 0, name) catch return nerr(.bad);
+    var slot: ?*Lookup = null;
+    for (&lookups) |*l| if (!l.used) {
+        slot = l;
+        break;
+    };
+    const l = slot orelse return nerr(.no_space);
+    l.* = .{ .used = true, .badge = badge, .name_len = len };
+    @memcpy(l.name[0..len], name);
+    if (cacheFind(name)) |c| {
+        l.addrs = c.addrs;
+        l.n = c.n;
+        l.err = c.err;
+        l.done = true;
+    } else if (n_resolvers == 0) {
+        l.err = .no_resolver;
+        l.done = true;
+    } else lookupSend(l);
+    return .{ .num = .{ .n = shared.lookup_base + (@intFromPtr(l) - @intFromPtr(&lookups[0])) / @sizeOf(Lookup) } };
+}
+
+fn opResolveCheck(v: *NetView, badge: u64, idx: u64) shared.NetResp {
+    const l = lookupOf(badge, idx) orelse return nerr(.bad);
+    if (!l.done) return nerr(.would_block);
+    defer {
+        if (l.bell != 0) _ = usys.capDrop(l.bell);
+        l.* = .{};
+    }
+    if (l.err) |e| return nerr(e);
+    if (v.buf == 0) return nerr(.bad);
+    const b = @as([*]u8, @ptrFromInt(v.buf));
+    for (l.addrs[0..l.n], 0..) |w, i| {
+        pbe32(b[i * 16 .. i * 16 + 4], @truncate(w[0] >> 32));
+        pbe32(b[i * 16 + 4 .. i * 16 + 8], @truncate(w[0]));
+        pbe32(b[i * 16 + 8 .. i * 16 + 12], @truncate(w[1] >> 32));
+        pbe32(b[i * 16 + 12 .. i * 16 + 16], @truncate(w[1]));
+    }
+    pbe32(b[l.n * 16 .. l.n * 16 + 4], l.ttl);
+    return .{ .num = .{ .n = l.n } };
 }
 
 // ------------------------------------------------------------------- TCP
@@ -1058,6 +1542,7 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     }
 
     serve_a = chan_h;
+    resolverInit();
     netInit();
     _ = usys.log(log_h, "netsvc: nic up, resolving gateways");
 
@@ -1129,7 +1614,12 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             .tcp_accept => |q| nreply(opAccept(r.badge, q.sock)),
             .tcp_send => |q| nreply(opSend(v, r.badge, q.sock, q.len)),
             .tcp_recv => |q| nreply(opRecv(v, r.badge, q.sock, q.len)),
-            .tcp_close => |q| nreply(opClose(r.badge, q.sock)),
+            .tcp_close => |q| nreply(if (udpOf(r.badge, q.sock)) |u| opUdpClose(u) else opClose(r.badge, q.sock)),
+            .udp_bind => |q| nreply(opUdpBind(v, r.badge, q.port)),
+            .udp_send => |q| nreply(opUdpSend(v, r.badge, q.sock, q.port, q.len)),
+            .udp_recv => |q| nreply(opUdpRecv(v, r.badge, q.sock, q.len)),
+            .resolve => |q| nreply(opResolve(v, r.badge, q.len)),
+            .resolve_check => |q| nreply(opResolveCheck(v, r.badge, q.lookup)),
             .ping => |q| nreply(opPing(v, q.ip_hi, q.ip_lo)),
             .ping_check => nreply(.{ .num = .{ .n = ping_replies } }),
             .derive => |q| opDerive(v, q.ip_hi, q.ip_lo, q.port),
@@ -1247,6 +1737,20 @@ fn opRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
 }
 
 fn opWatch(badge: u64, idx: u64, bell: u64) shared.NetResp {
+    if (lookupOf(badge, idx)) |l| {
+        if (bell == 0) return nerr(.bad);
+        if (l.bell != 0) _ = usys.capDrop(l.bell);
+        l.bell = bell;
+        if (l.done) lookupRing(l);
+        return .ok;
+    }
+    if (udpOf(badge, idx)) |u| {
+        if (bell == 0) return nerr(.bad);
+        if (u.bell != 0) _ = usys.capDrop(u.bell);
+        u.bell = bell;
+        if (u.q_n > 0) udpRing(u);
+        return .ok;
+    }
     const s = sockOf(badge, idx) orelse return nerr(.bad);
     if (bell == 0) return nerr(.bad);
     if (s.bell != 0) _ = usys.capDrop(s.bell);
@@ -1289,6 +1793,15 @@ fn releaseView(badge: u64) void {
     if (badge == 0 or badge >= max_views or !views[badge].used) return;
     for (&socks, 0..) |*s, i| {
         if (s.used and !s.lingering and s.badge == badge) _ = opClose(badge, i);
+    }
+    for (&udps) |*u| {
+        if (u.used and u.badge == badge) _ = opUdpClose(u);
+    }
+    for (&lookups) |*l| {
+        if (l.used and l.badge == badge) {
+            if (l.bell != 0) _ = usys.capDrop(l.bell);
+            l.* = .{};
+        }
     }
     if (views[badge].buf != 0) _ = usys.shmUnmap(views[badge].buf);
     views[badge] = .{};

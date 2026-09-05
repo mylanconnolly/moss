@@ -72,6 +72,46 @@ let srv = (listen 8080)?
 echo "script: serving http"
 let n = (serve $srv $handler 7)?
 echo "script: served $n"
+# Datagrams over loopback, both families: a bound port hears what an
+# ephemeral socket sends it, with the sender's address and port.
+let d = (udp-bind 5353)?
+let e = (udp-bind 0)?
+(udp-send $e ::1 5353 "ping")?
+match (udp-recv $d) {
+  ok { from: "::1", port: $p, data: $b } => {
+    if (from-bytes $b)? != "ping" { (err "udp: wrong data")? }
+    (udp-send $d ::1 $p "pong")?
+  }
+  ok $other => (err "udp: unexpected datagram $other")?
+  err $x => (err "udp: $x")?
+}
+let back = (udp-recv $e)?
+if (from-bytes $back.data)? != "pong" or $back.port != 5353 { (err "udp: no pong")? }
+(udp-send $e 10.0.2.15 5353 (to-bytes "four"))?
+let v4 = (udp-recv $d)?
+if $v4.from != "10.0.2.15" or ($v4.data | len) != 4 { (err "udp v4: $v4")? }
+close $d
+close $e
+echo "script: udp loopback ok"
+# Names: dnsd on this node serves moss.test, and the resolver asks it
+# first; a name that is not there is an err by its word.
+let www = (resolve www.moss.test)?
+if $www != ["::1"] { (err "resolve www: $www")? }
+let node1 = (resolve node1.moss.test)?
+if ($node1 | len) != 2 { (err "resolve node1: $node1")? }
+match (resolve nope.moss.test) {
+  ok $a => (err "nope resolved: $a")?
+  err nxdomain => echo "script: nxdomain ok"
+  err $e => (err "resolve nope: $e")?
+}
+let nl = (listen 8084)?
+let nc = (connect www.moss.test 8084)?
+let na = (accept $nl)?
+send $nc "by name"
+if (from-bytes (recv $na)?)? != "by name" { (err "connect by name: wrong data")? }
+close $nc
+close $na
+echo "script: resolve ok"
 # A closed peer is an err, not a hang; a refused view is an err too.
 close $c
 match (recv $a) { ok _ => (err "data after close")?; err $e => echo "script: after close: $e" }
