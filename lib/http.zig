@@ -235,13 +235,15 @@ pub fn reasonFor(status: u16) []const u8 {
 }
 
 /// A response with Content-Length and a Connection header (`keep`:
-/// keep-alive, else close), plus the caller's headers (a content-type,
-/// say).
-pub fn formatResponse(a: std.mem.Allocator, out: *std.ArrayList(u8), status: u16, headers: []const Header, payload: []const u8, keep: bool) error{OutOfMemory}!void {
+/// keep-alive, else close), a Date when the caller knows the time
+/// (`date`: IMF-fixdate text, `shared.civil.imfText`; an origin with a
+/// clock must say so), plus the caller's headers (a content-type, say).
+pub fn formatResponse(a: std.mem.Allocator, out: *std.ArrayList(u8), status: u16, headers: []const Header, payload: []const u8, keep: bool, date: ?[]const u8) error{OutOfMemory}!void {
     var buf: [64]u8 = undefined;
     try out.appendSlice(a, std.fmt.bufPrint(&buf, "HTTP/1.1 {d} ", .{status}) catch "");
     try out.appendSlice(a, reasonFor(status));
     try out.appendSlice(a, "\r\n");
+    if (date) |d| try writeHeader(a, out, "Date", d);
     for (headers) |h| try writeHeader(a, out, h.name, h.value);
     try out.appendSlice(a, std.fmt.bufPrint(&buf, "Content-Length: {d}\r\nConnection: {s}\r\n\r\n", .{ payload.len, if (keep) "keep-alive" else "close" }) catch "");
     try out.appendSlice(a, payload);
@@ -383,11 +385,11 @@ test "http: formatting and urls" {
     defer arena.deinit();
     const a = arena.allocator();
     var out: std.ArrayList(u8) = .empty;
-    try formatResponse(a, &out, 201, &.{.{ .name = "Content-Type", .value = "application/json" }}, "{}", false);
+    try formatResponse(a, &out, 201, &.{.{ .name = "Content-Type", .value = "application/json" }}, "{}", false, null);
     try std.testing.expectEqualStrings("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}", out.items);
     out.clearRetainingCapacity();
-    try formatResponse(a, &out, 200, &.{}, "ok", true);
-    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok", out.items);
+    try formatResponse(a, &out, 200, &.{}, "ok", true, "Sat, 05 Sep 2026 02:47:33 GMT");
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nDate: Sat, 05 Sep 2026 02:47:33 GMT\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok", out.items);
     out.clearRetainingCapacity();
     try formatRequest(a, &out, "GET", "/x?y", "10.0.2.100:9001", &.{}, "", false);
     try std.testing.expectEqualStrings("GET /x?y HTTP/1.1\r\nHost: 10.0.2.100:9001\r\nConnection: close\r\n\r\n", out.items);

@@ -279,7 +279,13 @@ fabric's time comes from the fabric, and the drill's node asks itself
 over loopback (the same loop answers questions while its own is out).
 `date` in the language is the result: `ok { unix, ms, iso, year …
 weekday, source }` or `err no_clock`. A one-off check through slirp
-synced from a public server to within the round trip.
+synced from a public server to within the round trip. In the cluster
+profile (`clock-cluster`, `conf/clock-cluster.msh`) node 1 serves the
+time its RTC gave it and every node asks `10.77.0.1` — node 1 asks
+itself — so the fabric agrees on one clock; the fabric-login drill
+requires node 2 to have synced from node 1 (the `fabric` drill is the
+kernel's own, with no init and no units). Until its first answer a node asks
+again every ten seconds (a peer may still be booting), hourly after.
 
 ### HTTP: handlers are functions
 
@@ -320,7 +326,8 @@ returns decides the response: a record with `status`, `headers` or
 (`to-json` / `from-json` are the language's own way to and from JSON,
 tables included, floats as floats). A handler that fails, or returns
 an `err`, answers `500` with the message and the server goes on. Every
-response carries `Content-Length`. Connections are kept alive as
+response carries `Content-Length`, and a `Date` once the system knows
+the time (an origin with a clock must say so). Connections are kept alive as
 HTTP/1.1 expects: `serve` answers every request a connection carries
 — pipelined ones too, since bytes read past one request wait for the
 next — until the peer says `Connection: close`, the count runs out, a

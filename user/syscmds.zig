@@ -6,10 +6,11 @@
 //! knows the time).
 
 const std = @import("std");
+const shared = @import("shared");
 const usys = @import("usys.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
-const civil = mosslib.civil;
+const civil = shared.civil;
 const Value = mshl.Value;
 
 /// What `date` answers.

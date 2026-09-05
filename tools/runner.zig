@@ -315,7 +315,7 @@ fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         sleepMs(poll_ms);
         n += 1;
         polls.* += 1;
-        const content = cwd.readFileAlloc(io, log_path, gpa, .limited(1 << 20)) catch "";
+        const content = readLog(log_path);
         if (std.mem.indexOf(u8, content, "script: serving http") != null) break;
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the script never started serving http", log_path);
@@ -326,7 +326,7 @@ fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // so the read runs to the close. Probe 5 pipelines two requests on a
     // kept connection; probe 6 sends a chunked body.
     const probes = [_]struct { req: []const u8, expect: []const u8, expect2: []const u8 }{
-        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "HTTP/1.1 200 OK", .expect2 = "\r\n\r\nhello from moss" },
+        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "\r\nDate: ", .expect2 = "\r\n\r\nhello from moss" },
         .{ .req = "GET /json HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "Content-Type: application/json", .expect2 = "[{\"n\":1},{\"n\":2}]" },
         .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload", .expect = "x-method: POST", .expect2 = "\r\n\r\npayload" },
         .{ .req = "GET /nope HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "HTTP/1.1 404 Not Found", .expect2 = "no such page" },
@@ -410,7 +410,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     for (0..death_deadline) |_| {
         sleepMs(poll_ms);
         polls.* += 1;
-        const content = cwd.readFileAlloc(io, log1, gpa, .limited(1 << 20)) catch "";
+        const content = readLog(log1);
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null) break;
         if (std.mem.indexOf(u8, content, "node 2 death detected") != null) {
             seen_death = true;
@@ -429,7 +429,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, verdict.why, log1);
         return false;
     }
-    const n3 = cwd.readFileAlloc(io, log3, gpa, .limited(1 << 20)) catch "";
+    const n3 = readLog(log3);
     if (std.mem.indexOf(u8, n3, "full mesh") == null) {
         reportFailure(spec.name, "node 3 never reached full mesh (gossip)", log3);
         return false;
@@ -447,12 +447,12 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
         return false;
     }
     // The revocation must have reached node 2 by gossip (its rejoin log).
-    const n2b = cwd.readFileAlloc(io, log2b, gpa, .limited(1 << 20)) catch "";
+    const n2b = readLog(log2b);
     if (std.mem.indexOf(u8, n2b, "revocation accepted from trust root") == null) {
         reportFailure(spec.name, "revocation never reached node 2 by gossip", log2b);
         return false;
     }
-    const n9 = cwd.readFileAlloc(io, log9, gpa, .limited(1 << 20)) catch "";
+    const n9 = readLog(log9);
     if (std.mem.indexOf(u8, n9, "untrusted identity rejected") == null) {
         reportFailure(spec.name, "imposter was not rejected", log9);
         return false;
@@ -625,6 +625,8 @@ const shell_script = [_]Step{
     .{ .send = "echo hello world > data/hello.txt", .expect = "" },
     .{ .send = "cat data/hello.txt? | lines | first 1", .expect = "hello world" },
     .{ .send = "(stat data/smoke)?.type == dir", .expect = "true" },
+    // mtime is the wall clock now (the first cut wrote seconds since boot).
+    .{ .send = "(stat data/smoke/hi.txt)?.mtime > 1700000000", .expect = "true" },
     // mshl v3: functions as values, results, match, modules, typing.
     .{ .send = "[1, 2, 3, 4] | map { $it * 2 } | reduce 0 { $acc + $it }", .expect = "20" },
     .{ .send = "ls data/smoke? | filter { $it.size > 0 } | map { $it.name }", .expect = "hi.txt" },
@@ -972,7 +974,7 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
     for (0..600) |_| {
         sleepMs(poll_ms);
         polls.* += 1;
-        const content = cwd.readFileAlloc(io, log1, gpa, .limited(1 << 20)) catch "";
+        const content = readLog(log1);
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null) break;
         if (std.mem.indexOf(u8, content, "usersvc: published to the pool") != null) {
             published = true;
@@ -1035,10 +1037,15 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         reportFailure(spec.name, verdict.why, log2);
         return false;
     }
-    const n1 = cwd.readFileAlloc(io, log1, gpa, .limited(1 << 20)) catch "";
-    const n2 = cwd.readFileAlloc(io, log2, gpa, .limited(1 << 20)) catch "";
+    const n1 = readLog(log1);
+    const n2 = readLog(log2);
     if (std.mem.indexOf(u8, n2, "mounted from node 1 (the key stays here)") == null) {
         reportFailure(spec.name, "node 2 never mounted alice's home from node 1", log2);
+        return false;
+    }
+    // The fabric's time: node 2 synced its clock from node 1.
+    if (std.mem.indexOf(u8, n2, "clock: synced from 10.77.0.1") == null) {
+        reportFailure(spec.name, "node 2 never synced its clock from node 1", log2);
         return false;
     }
     if (std.mem.indexOf(u8, n1, "home leased to a session on another node: alice") == null or
@@ -1062,6 +1069,73 @@ fn tcpConnect(port: u16) !Io.net.Stream {
     return addr.connect(io, .{ .mode = .stream });
 }
 
+/// A log as read for matching: every line's clock stamp removed (see
+/// stripLine), so markers name what was said, not when.
+fn readLog(path: []const u8) []const u8 {
+    const raw = cwd.readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return "";
+    var out = gpa.alloc(u8, raw.len) catch return raw;
+    var n: usize = 0;
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) {
+            out[n] = '\n';
+            n += 1;
+        }
+        first = false;
+        n += stripLine(out[n..], line);
+    }
+    return out[0..n];
+}
+
+/// One log line with its clock stamps (`03:14:22.123 ` or `+12.345 `)
+/// removed: at the start, and again after a guest's `guest| ` prefix
+/// wherever that sits — a guest's console comes through the host VMM's
+/// own stamped log line. Returns the length written to `out`.
+fn stripLine(out: []u8, line: []const u8) usize {
+    var n: usize = 0;
+    var rest = line[stampLen(line)..];
+    for ([_][]const u8{ "guest| ", "guest> " }) |pre| {
+        if (std.mem.indexOf(u8, rest, pre)) |at| {
+            const head = rest[0 .. at + pre.len];
+            @memcpy(out[n .. n + head.len], head);
+            n += head.len;
+            rest = rest[head.len..];
+            break;
+        }
+    }
+    rest = rest[stampLen(rest)..];
+    @memcpy(out[n .. n + rest.len], rest);
+    return n + rest.len;
+}
+
+test "stripLine removes the host's and the guest's stamps" {
+    var buf: [128]u8 = undefined;
+    const cases = [_][2][]const u8{
+        .{ "+0.035 [info ] smmu: up", "[info ] smmu: up" },
+        .{ "19:27:50.469 [vmm] guest| +0.502 [info ] smp: 4 cores online", "[vmm] guest| [info ] smp: 4 cores online" },
+        .{ "guest| 03:14:22.123 [init] init: system up", "guest| [init] init: system up" },
+        .{ "guest> ok", "guest> ok" },
+        .{ "no stamp here", "no stamp here" },
+        .{ "", "" },
+    };
+    for (cases) |c| try std.testing.expectEqualStrings(c[1], buf[0..stripLine(&buf, c[0])]);
+}
+
+/// The length of a clock stamp at the start of a line, with its space.
+fn stampLen(line: []const u8) usize {
+    if (line.len >= 13 and line[2] == ':' and line[5] == ':' and line[8] == '.' and line[12] == ' ') {
+        for ([_]usize{ 0, 1, 3, 4, 6, 7, 9, 10, 11 }) |i| if (!std.ascii.isDigit(line[i])) return 0;
+        return 13;
+    }
+    if (line.len > 6 and line[0] == '+' and std.ascii.isDigit(line[1])) {
+        if (std.mem.indexOfScalar(u8, line, ' ')) |sp| {
+            if (sp >= 6 and line[sp - 4] == '.') return sp + 1;
+        }
+    }
+    return 0;
+}
+
 /// Poll the console tap for a pattern; `ticks` are 100ms polls.
 fn waitFor(tap: *ConsoleTap, pat: []const u8, ticks: u64, polls: *u64) bool {
     for (0..ticks) |_| {
@@ -1083,7 +1157,7 @@ fn watch(log_path: []const u8, spec: Spec, extra: ?[]const u8, polls: *u64) Verd
         n += 1;
         polls.* += 1;
 
-        const content = cwd.readFileAlloc(io, log_path, gpa, .limited(1 << 20)) catch "";
+        const content = readLog(log_path);
 
         if (spec.panic_is_failure and std.mem.indexOf(u8, content, "KERNEL PANIC") != null) {
             return .{ .ok = false, .why = "kernel panic" };
@@ -1105,7 +1179,8 @@ fn watch(log_path: []const u8, spec: Spec, extra: ?[]const u8, polls: *u64) Verd
 
 fn reportFailure(name: []const u8, why: []const u8, log_path: []const u8) void {
     std.debug.print("[FAIL] {s}: {s} (log: {s})\n", .{ name, why, log_path });
-    const content = cwd.readFileAlloc(io, log_path, gpa, .limited(1 << 20)) catch return;
+    const content = readLog(log_path);
+    if (content.len == 0) return;
     var start = content.len;
     var lines: u32 = 0;
     while (start > 0 and lines < 15) {

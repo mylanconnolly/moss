@@ -207,7 +207,9 @@ fn responseBytes(it: *mshl.Interp, v: Value, out: *std.ArrayList(u8), keep: bool
         },
         else => return it.fail("http: cannot send a {s} as a body", .{body_val.typeName()}),
     }
-    try http.formatResponse(it.arena, out, status, headers.items, body, keep and !wantsClose(v));
+    var date_buf: [32]u8 = undefined;
+    const date: ?[]const u8 = if (usys.wallMs()) |ms| shared.civil.imfText(&date_buf, @intCast(ms / 1000)) else null;
+    try http.formatResponse(it.arena, out, status, headers.items, body, keep and !wantsClose(v), date);
 }
 
 fn writeResponse(n: *Net, it: *mshl.Interp, s: u64, v: Value, keep: bool) mshl.Error!?[]const u8 {

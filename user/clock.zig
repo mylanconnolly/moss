@@ -18,7 +18,7 @@ const netcmds = @import("netcmds.zig");
 const syscmds = @import("syscmds.zig");
 const mosslib = @import("mosslib");
 const sntp = mosslib.sntp;
-const civil = mosslib.civil;
+const civil = shared.civil;
 const mshl = mosslib.mshl;
 
 comptime {
@@ -135,8 +135,8 @@ fn ask(client: u64, to: [2]u64) ?sntp.Sample {
 }
 
 /// Ask each server in turn until one answers well; set the clock by
-/// the median of its best samples.
-fn sync(client: u64) void {
+/// the median of its best samples. True when one did.
+fn sync(client: u64) bool {
     for (servers[0..n_servers]) |name| {
         const addrs = switch (net.addressesOf(name)) {
             .addresses => |r| r,
@@ -166,14 +166,15 @@ fn sync(client: u64) void {
             const epoch: i64 = @as(i64, @intCast(c.boot_epoch_ms)) + best.offset_ms;
             if (usys.clockSet(clock_h, @intCast(@max(epoch, 0))) != .ok) {
                 logLine("clock: the kernel refused clock_set (no grant?)", .{});
-                return;
+                return false;
             }
             var when: [24]u8 = undefined;
             logLine("clock: synced from {s}: offset {d} ms, delay {d} ms, {d} samples; now {s}", .{ name, best.offset_ms, best.delay_ms, n, isoNow(&when) });
-            return;
+            return true;
         }
     }
     if (n_servers > 0) logLine("clock: no server answered", .{});
+    return false;
 }
 
 export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
@@ -207,15 +208,17 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
         },
     };
     if (n_servers > 0 and usys.wallMs() == null) logLine("clock: no RTC; asking the network", .{});
-    // Serving whoever asks, asking again every interval; a machine with
-    // no RTC keeps asking until someone answers.
-    var last_sync: ?i64 = null;
+    // Serving whoever asks, asking again every interval; until the
+    // first answer (a peer that is still booting, a machine with no
+    // RTC) asking again every ten seconds.
+    var last_try: ?i64 = null;
+    var synced = false;
     while (true) {
         const now = syscmds.nowMs();
-        const due: i64 = if (usys.wallMs() == null) 30_000 else @intCast(interval_s * 1000);
-        if (n_servers > 0 and (last_sync == null or now - last_sync.? >= due)) {
-            sync(client);
-            last_sync = syscmds.nowMs();
+        const due: i64 = if (!synced) 10_000 else @intCast(interval_s * 1000);
+        if (n_servers > 0 and (last_try == null or now - last_try.? >= due)) {
+            synced = sync(client) or synced;
+            last_try = syscmds.nowMs();
         }
         serveWaiting();
         // Sleep until a datagram or a tenth of the interval, whichever first.

@@ -1,0 +1,6 @@
+# The time service in cluster addressing (the system profile, and the
+# fabric-login drill's two): node 1 serves the time its RTC gave it;
+# every node asks 10.77.0.1 — node 1 itself over loopback — so the
+# fabric agrees on one clock.
+{ image: clock, profiles: [system, flogin, fjoin], grant: [log, clock],
+  give: [{ tag: net, netview: net-cluster }, { tag: buf, shm: 1 }, { file: conf/clock-cluster.msh }] }

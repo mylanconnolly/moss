@@ -253,9 +253,13 @@ fn parseBoot(blob_va: u64, blob_len: u64) void {
 
 var cycle_hz: u64 = 0;
 
+/// The time a change is stamped with: wall-clock seconds once the
+/// system knows the time, else 0 ("unknown", as the archive's files
+/// say) — never seconds since boot, which the first cut wrote and
+/// which ordered files wrongly across boots.
 fn nowSec() u64 {
-    if (cycle_hz == 0) cycle_hz = usys.cycleHz();
-    return usys.cycles() / cycle_hz;
+    const ms = usys.wallMs() orelse return 0;
+    return ms / 1000;
 }
 
 // ----------------------------------------------------------- disk backend

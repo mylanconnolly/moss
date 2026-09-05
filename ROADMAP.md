@@ -330,20 +330,25 @@ is a plan.
   the time service syncs over SNTP (`lib/sntp.zig`) from the servers
   its settings name and serves SNTP to peers, so the fabric's time
   comes from the fabric; `date` in the language (`lib/civil.zig`).
-  Owed: the clock unit in the system and cluster profiles (with dnsd
-  beside it). **Then, as a task of its own:
-  re-read every decision taken because there was no clock and decide
-  each again with one.** Known so far — the list to start from, not
-  the whole of it: fabric certificates carry no expiry and revocation
-  serials are "the only clock" (docs/fabric.md, the fabric residuals
-  below); fabric liveness runs on each node's own poll clock; user
-  records carry no expiry; mossfs writes `mtime` as 0 and `stat`
-  reports it; `now` is milliseconds since boot and the log has no
-  timestamps; the resolver's TTL cache and HTTP's `Date` header have
-  no time to compare against; the users drill's sessions and the
-  shares have no lease clock. Each is either a workaround to undo, a
-  decision that stands on its own merits, or a new feature the clock
-  makes possible — and the entry for each says which.
+  Owed: dnsd beside the clock in the cluster profile. ✅ **The
+  re-evaluation (2026-09-05)** — every decision taken because there
+  was no clock, decided again with one. *Undone as workarounds*:
+  mossfs stamped files with seconds since boot (wall seconds now, 0
+  when unknown); the log had no timestamps (every line carries the
+  wall clock, or seconds since boot until it is known; the runner
+  reads past them); HTTP responses carried no `Date` (they do, when
+  the clock is known). *New, because the clock allows it*: the
+  fabric's time — node 1 serves SNTP from its RTC and every node in
+  the cluster profiles syncs from it, checked by the fabric-login drill.
+  *Standing on their own merits*: fabric liveness on each node's own
+  monotonic clock (heartbeats are durations); fabric certificates
+  without expiry and serials as the revocation clock (a joining node
+  with no RTC has no time until a peer it has not yet verified says
+  so; revisit only with X.509 from the fabric root); user records
+  without expiry; the resolver's TTL cache on monotonic time; shares
+  that end with the session. *Deferred*: a written-at time in mossfs's
+  superblock and transaction groups, useful forensics, waits for the
+  next on-disk format bump.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.

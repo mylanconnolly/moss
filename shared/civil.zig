@@ -2,7 +2,8 @@
 //! day, UTC, and the ISO 8601 text of it (`2026-09-05T02:47:33Z`).
 //! Proleptic Gregorian, the days-from-civil arithmetic of Howard
 //! Hinnant; no zones, no leap seconds (Unix time has none). Pure and
-//! host-tested; `date` in the language and the log use it.
+//! host-tested; `date` in the language, the kernel's log stamps and
+//! HTTP's Date header use it, which is why it lives in shared/.
 
 const std = @import("std");
 
@@ -68,6 +69,24 @@ pub fn isoText(out: []u8, secs: i64) []const u8 {
     return std.fmt.bufPrint(out, "{s}{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ sign, year, c.month, c.day, c.hour, c.minute, c.second }) catch out[0..0];
 }
 
+const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+/// HTTP's date (RFC 7231 IMF-fixdate): `Sat, 05 Sep 2026 03:14:22 GMT`;
+/// `out` needs 30 bytes.
+pub fn imfText(out: []u8, secs: i64) []const u8 {
+    const c = fromUnix(secs);
+    const year: u64 = @intCast(@max(c.year, 0));
+    return std.fmt.bufPrint(out, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{ day_names[c.weekday - 1], c.day, month_names[c.month - 1], year, c.hour, c.minute, c.second }) catch out[0..0];
+}
+
+/// A clock reading for a log line: `03:14:22.123` (UTC, the date is
+/// in the boot banner); `out` needs 12 bytes.
+pub fn clockText(out: []u8, unix_ms: u64) []const u8 {
+    const c = fromUnix(@intCast(unix_ms / 1000));
+    return std.fmt.bufPrint(out, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{ c.hour, c.minute, c.second, unix_ms % 1000 }) catch out[0..0];
+}
+
 /// Read ISO text back (`YYYY-MM-DDTHH:MM:SSZ`, the seconds optional).
 pub fn parseIso(text: []const u8) ?i64 {
     if (text.len < 16 or text[4] != '-' or text[7] != '-' or text[10] != 'T' or text[13] != ':') return null;
@@ -104,6 +123,10 @@ test "civil: known dates both ways" {
         const cc = fromUnix(t);
         try std.testing.expectEqual(t, toUnix(cc.year, cc.month, cc.day, cc.hour, cc.minute, cc.second));
     }
+    var http: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("Sat, 05 Sep 2026 02:47:33 GMT", imfText(&http, 1_788_576_453));
+    try std.testing.expectEqualStrings("Thu, 01 Jan 1970 00:00:00 GMT", imfText(&http, 0));
+    try std.testing.expectEqualStrings("02:47:33.250", clockText(&http, 1_788_576_453_250));
     try std.testing.expect(parseIso("2026-13-01T00:00Z") == null);
     try std.testing.expect(parseIso("nope") == null);
 }

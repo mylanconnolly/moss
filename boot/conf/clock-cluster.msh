@@ -1,0 +1,3 @@
+# The time service's settings in cluster addressing: node 1 is the
+# fabric's time source (its own RTC under QEMU); everyone asks it.
+{ servers: [10.77.0.1], serve: true, interval: 3600 }

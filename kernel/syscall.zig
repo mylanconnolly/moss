@@ -710,7 +710,8 @@ fn sysLog(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
     }
     var line: [256]u8 = undefined;
     arch.uaccess.copyFromUser(line[0..len], ptr);
-    log.print("[{s}] {s}\n", .{ d.name, line[0..len] });
+    var st: [16]u8 = undefined;
+    log.print("{s} [{s}] {s}\n", .{ log.stamp(&st), d.name, line[0..len] });
     return errno(.ok);
 }
 

@@ -1703,6 +1703,35 @@ one silent IPv6 address cost an SNTP sync eight seconds). `usys.tick_ms`
 and `msToTicks` are the single conversion now; every caller speaks
 milliseconds; the scan runs every tick.
 
+**The clock, part two (as built, 2026-09-05): what it changed.** The
+re-evaluation the clock arc promised, done as code where a decision
+had been a workaround. mossfs had stamped every change with seconds
+since boot — `fs.zig`'s `nowSec` was the cycle counter over its rate
+— so a file written a minute into day two sorted before one written an
+hour into day one; it stamps wall seconds now, and 0 when the system
+does not know the time, the same "unknown" the archive's files always
+reported. The log had no time at all: one `stamp` in `kernel/log.zig`
+now leads every line, the kernel's and a unit's alike — `03:14:22.123`
+once the clock is known, `+12.345` seconds since boot before — and the
+runner's `readLog` removes stamps before matching, so no marker
+changed and a `grep` on a kept log still sees the time (the guest and
+vmnode drills caught the case missed on the first pass: a guest's line
+arrives inside the host VMM's stamped line, `19:27:50 [vmm] guest|
++0.502 [info ] …`, so both stamps must go); the calendar
+moved to `shared/civil.zig` for the kernel's sake (lib/ cannot see
+shared, and http.zig takes its Date text from the host instead).
+HTTP responses carry `Date` when the clock is known. And the clock
+became the fabric's: `clock-cluster` runs in the system profile, node
+1 serving SNTP from its RTC and every node asking `10.77.0.1` (node 1
+itself, over loopback), asking again every ten seconds until the first
+answer since a peer may still be booting; the fabric-login drill
+requires node 2 to have synced from node 1 (the `fabric` drill is the
+kernel's own driver — no init, no units — which the first cut of this
+check forgot). What stood: liveness on monotonic
+time, certificates without expiry (a node with no RTC cannot judge
+one), records without expiry, the resolver's monotonic TTLs, shares
+that end with the session — the roadmap entry says why for each.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

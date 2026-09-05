@@ -299,6 +299,12 @@ Verify in QEMU rather than reason from memory.
 
 ## Known limits and bugs
 
+- Every log line starts with a clock stamp (`03:14:22.123 [init] …`, or
+  `+1.234` seconds since boot before the time is known). The runner's
+  `readLog` strips stamps before matching, so markers name what was
+  said, not when; a `grep` on a kept log sees them. A guest's console
+  line carries two — the host VMM's, then the guest's own after
+  `guest| ` — and both go (`stripLine`'s unit test pins the cases).
 - Known flaky: the `users` drill's leak bar failed once on 2026-09-04
   (one 8-page buffer with one reference after the last session's
   teardown) and passed three soaks after. A failed gate that names

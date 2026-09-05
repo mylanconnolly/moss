@@ -848,6 +848,9 @@ pub const NetReq = union(enum(u64)) {
     resolve_check: struct { lookup: u64 },
 };
 
+/// The calendar: Unix time to dates and back, ISO and HTTP text.
+pub const civil = @import("civil.zig");
+
 /// Lookups are numbered from here.
 pub const lookup_base: u64 = 2000;
 /// The most addresses one lookup answers.
@@ -1455,6 +1458,10 @@ pub const unit_ext = ".msh";
 /// The archive's library: modules a script reaches with `use NAME`,
 /// installed into the store as content-addressed sources.
 pub const lib_dir = "lib/";
+
+test {
+    _ = civil;
+}
 
 test "marcFind walks an archive and misses cleanly" {
     var buf: [64]u8 = undefined;

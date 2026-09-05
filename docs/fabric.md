@@ -437,7 +437,10 @@ refused.
 - A `lookup` is one exchange in flight per node at a time (the same
   shape as a remote spawn), and a published service is unpublished only
   by its node's restart.
-- Certificates carry no expiry: with no shared clock, revocation serials
+- Time is the fabric's own: node 1 serves SNTP from its RTC and the
+  others sync from it (`clock-cluster`), so `date` agrees across nodes
+  to within a round trip.
+- Certificates carry no expiry: revocation serials
   are the only clock. Revocations live in each node's state and in
   memory; a whole cluster restarted from blank state forgets them until
   the root re-issues.

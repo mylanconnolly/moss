@@ -382,7 +382,8 @@ pub fn build(b: *std.Build) void {
         "scripts/fab-drill.msh",         "conf/net.msh",
         "conf/net-cluster.msh",          "conf/units/dnsd.msh",
         "conf/dns.msh",                  "conf/units/clock.msh",
-        "conf/clock.msh",
+        "conf/clock.msh",                "conf/units/clock-cluster.msh",
+        "conf/clock-cluster.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -806,6 +807,8 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     const runner = b.addExecutable(.{ .name = "moss-check", .root_module = runner_mod });
+    // The runner's own tests (log stamp stripping) ride with the host suite.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = runner_mod })).step);
     // Installed too, so one test can be run by hand:
     //   zig build -D<name>-test && zig-out/bin/moss-check <name> zig-out/bin/moss-kernel.bin
     b.installArtifact(runner);

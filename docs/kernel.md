@@ -288,7 +288,10 @@ and a process adds its own cycle count (`usys.wallMs`); `clock_set`
 takes a `clock` capability, the grant the time service's unit asks
 for, and is the only way the number changes. Everything the kernel
 itself does is still ticks and cycles: the clock is for programs and
-their records, not for scheduling.
+their records, not for scheduling. Every log line — the kernel's and a
+unit's alike — starts with a stamp: the wall clock (`03:14:22.123`,
+UTC; the date is on the boot line that reads the RTC) once it is
+known, `+12.345` seconds since boot before that.
 
 ### Security posture, honestly
 
