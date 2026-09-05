@@ -303,6 +303,23 @@ is a plan.
   the tree-sitter highlights. Rule: build the
   primitive, then the syntax around it; a feature that cannot reach a
   capability is a demo.
+- **A clock, then a re-evaluation.** The system has had no wall clock
+  and no shared time; decided 2026-09-05 to build one (an RTC driver
+  at boot, SNTP over the fabric's UDP with the time service serving
+  SNTP to peers, a `clock` capability, `date` in the language) before
+  TLS, whose certificate checks need it. **Then, as a task of its own:
+  re-read every decision taken because there was no clock and decide
+  each again with one.** Known so far — the list to start from, not
+  the whole of it: fabric certificates carry no expiry and revocation
+  serials are "the only clock" (docs/fabric.md, the fabric residuals
+  below); fabric liveness runs on each node's own poll clock; user
+  records carry no expiry; mossfs writes `mtime` as 0 and `stat`
+  reports it; `now` is milliseconds since boot and the log has no
+  timestamps; the resolver's TTL cache and HTTP's `Date` header have
+  no time to compare against; the users drill's sessions and the
+  shares have no lease clock. Each is either a workaround to undo, a
+  decision that stands on its own merits, or a new feature the clock
+  makes possible — and the entry for each says which.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
