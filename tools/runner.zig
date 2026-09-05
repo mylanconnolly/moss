@@ -71,7 +71,7 @@ const specs = [_]Spec{
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
         .append = "profile=fs",
     },
-    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 4", .append = "profile=net" },
+    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .append = "profile=net" },
     .{
         .name = "users",
         .kind = .blk,
@@ -313,11 +313,16 @@ fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+    // Each probe is one connection; the last request on it says close,
+    // so the read runs to the close. Probe 5 pipelines two requests on a
+    // kept connection; probe 6 sends a chunked body.
     const probes = [_]struct { req: []const u8, expect: []const u8, expect2: []const u8 }{
-        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "HTTP/1.1 200 OK", .expect2 = "\r\n\r\nhello from moss" },
-        .{ .req = "GET /json HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "Content-Type: application/json", .expect2 = "[{\"n\":1},{\"n\":2}]" },
-        .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nContent-Length: 7\r\n\r\npayload", .expect = "x-method: POST", .expect2 = "\r\n\r\npayload" },
-        .{ .req = "GET /nope HTTP/1.1\r\nHost: moss\r\n\r\n", .expect = "HTTP/1.1 404 Not Found", .expect2 = "no such page" },
+        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "HTTP/1.1 200 OK", .expect2 = "\r\n\r\nhello from moss" },
+        .{ .req = "GET /json HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "Content-Type: application/json", .expect2 = "[{\"n\":1},{\"n\":2}]" },
+        .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload", .expect = "x-method: POST", .expect2 = "\r\n\r\npayload" },
+        .{ .req = "GET /nope HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "HTTP/1.1 404 Not Found", .expect2 = "no such page" },
+        .{ .req = "GET /hello HTTP/1.1\r\nHost: moss\r\n\r\nGET /json HTTP/1.1\r\nHost: moss\r\nConnection: close\r\n\r\n", .expect = "Connection: keep-alive\r\n\r\nhello from moss", .expect2 = "Connection: close\r\n\r\n[{\"n\":1},{\"n\":2}]" },
+        .{ .req = "POST /echo HTTP/1.1\r\nHost: moss\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\npay\r\n4\r\nload\r\n0\r\n\r\n", .expect = "x-method: POST", .expect2 = "Content-Length: 7\r\nConnection: close\r\n\r\npayload" },
     };
     for (probes, 0..) |p, i| {
         var conn: ?Io.net.Stream = null;

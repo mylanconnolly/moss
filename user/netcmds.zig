@@ -17,6 +17,7 @@
 const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const syscmds = @import("syscmds.zig");
 const mshl = @import("mosslib").mshl;
 const Value = mshl.Value;
 
@@ -141,6 +142,33 @@ pub const Net = struct {
                 .ok => {},
             }
             n.wait();
+        }
+    }
+
+    pub const RecvFor = union(enum) { data: []const u8, closed, failed: []const u8, timeout };
+
+    /// Like recvSome, giving up after `ticks` (10 ms each) with nothing
+    /// received: a kernel timer rings the bell with a bit of its own.
+    /// The bit may still be latched from an earlier arming, so a wake
+    /// counts as the timeout only once the clock agrees.
+    pub fn recvSomeFor(n: *Net, s: u64, ticks: u64) RecvFor {
+        const bit_timeout: u64 = 2; // netsvc rings bit 1
+        if (usys.timerArm(n.bell, ticks, bit_timeout) != .ok) return .{ .failed = "no timer for the network view" };
+        defer _ = usys.timerArm(n.bell, 0, bit_timeout);
+        const start = syscmds.nowMs();
+        const limit_ms: i64 = @intCast(ticks * 10);
+        while (true) {
+            const rep = ncall(n, .{ .tcp_recv = .{ .sock = s, .len = shared.net_max_recv } }) orelse return .{ .failed = "the network service did not answer" };
+            switch (rep) {
+                .num => |x| return .{ .data = n.buf[0..x.n] },
+                .net_err => |e| {
+                    if (e.code == @intFromEnum(shared.NetErr.closed)) return .closed;
+                    if (e.code != @intFromEnum(shared.NetErr.would_block)) return .{ .failed = errName(e.code) };
+                },
+                .ok => {},
+            }
+            const w = usys.notifyWait(n.bell);
+            if (w.err == .ok and (w.data[0] & bit_timeout) != 0 and syscmds.nowMs() - start >= limit_ms) return .timeout;
         }
     }
 

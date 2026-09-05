@@ -256,10 +256,21 @@ returns decides the response: a record with `status`, `headers` or
 (`to-json` / `from-json` are the language's own way to and from JSON,
 tables included, floats as floats). A handler that fails, or returns
 an `err`, answers `500` with the message and the server goes on. Every
-response carries `Content-Length` and `Connection: close`, and the
-socket is closed after it: one request per connection, no keep-alive,
-no chunked transfer (a chunked request or response is an `err`). Bodies
-are bounded (a 16 KB head, a 256 KB body). `fetch` takes `http://`
+response carries `Content-Length`. Connections are kept alive as
+HTTP/1.1 expects: `serve` answers every request a connection carries
+— pipelined ones too, since bytes read past one request wait for the
+next — until the peer says `Connection: close`, the count runs out, a
+handler's record says `close: true`, or the connection sits idle for
+three seconds; `http-write` says keep-alive unless the record says
+`close: true`. A chunked request or response body is decoded (the
+sizes and any trailers dropped); what is sent is always framed by a
+length. Bodies are bounded (a 16 KB head, a 256 KB body, ten seconds
+for the rest of a message that began). `fetch` keeps up to four idle
+connections by address and port and reuses one for the next request
+to the same place; a kept connection the peer closed meanwhile is
+noticed by the empty answer and the request goes once more on a fresh
+one, and `{ keep: false }` in the options asks for a close instead.
+`fetch` takes `http://`
 URLs whose host is an address — there is no name resolution — and
 reads the response to its `Content-Length` or to the close.
 

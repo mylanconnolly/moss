@@ -39,6 +39,12 @@ echo "script: bulk loopback ok"
 let r = (fetch http://10.0.2.100:9001/hello)?
 if $r.status != 200 or $r.body != "hello moss!" { (err "fetch: $r.status $r.body")? }
 echo "script: fetch ok"
+# Again: the first answer said nothing about closing, so the connection
+# was kept — and the canned server closed it anyway. fetch notices and
+# retries once on a fresh one.
+let r2 = (fetch http://10.0.2.100:9001/hello)?
+if $r2.body != "hello moss!" { (err "fetch again: $r2.body")? }
+echo "script: fetch again ok"
 # The primitives over loopback: a raw request in, a parsed record out.
 let hl = (listen 8081)?
 let hc = (connect ::1 8081)?
@@ -64,7 +70,7 @@ def handler [req] {
 }
 let srv = (listen 8080)?
 echo "script: serving http"
-let n = (serve $srv $handler 4)?
+let n = (serve $srv $handler 7)?
 echo "script: served $n"
 # A closed peer is an err, not a hang; a refused view is an err too.
 close $c

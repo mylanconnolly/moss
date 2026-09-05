@@ -259,10 +259,13 @@ is a plan.
   with backoff, lingering close, 32 sockets / 16 views); ✅ HTTP
   (landed 2026-09-04: `lib/http.zig`, `lib/json.zig`, `http-read`,
   `http-write`, `serve` with handlers as functions, `fetch`, `to-json`
-  / `from-json`); still open: keep-alive and chunked transfer, name
-  resolution (needs UDP), TLS, concurrent handling (needs the language
-  to spawn), and, when a use case demands them, congestion control and
-  out-of-order receive; (4)
+  / `from-json`); ✅ keep-alive and chunked transfer (landed 2026-09-04:
+  every request a connection carries, pipelined too, a per-socket
+  leftover and an idle timeout on a kernel timer, chunked bodies
+  decoded, a four-connection pool in `fetch` with one retry on a dead
+  kept connection); still open: name resolution (needs UDP), TLS,
+  concurrent handling (needs the language to spawn), and, when a use
+  case demands them, congestion control and out-of-order receive; (4)
   the fabric surface — ✅ the bulk transport across the wire and remote
   pipeline stages (landed 2026-09-04: session buffers diffed both ways,
   `fw_bulk`/`fw_bulk_resp`/`fw_release`, wire v6, `remote NODE { … }`

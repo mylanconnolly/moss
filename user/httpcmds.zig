@@ -1,13 +1,23 @@
 //! HTTP for mshl hosts, on top of the network commands' sockets:
 //! `http-read $sock` parses a request into a record, `http-write $sock
 //! $resp` answers it, `serve $listener $handler [n]` loops accept /
-//! read / handle / write / close with handlers as ordinary functions
-//! of the request record, and `fetch URL [opts]` is the client. What a
+//! read / handle / write with handlers as ordinary functions of the
+//! request record, and `fetch URL [opts]` is the client. What a
 //! handler returns decides the response: a record { status, headers,
 //! body } is explicit; a string is 200 text/plain; a list, record or
 //! table is 200 application/json. Every outcome the network or the
 //! peer decides is a result. Parsing and formatting live in lib/http.zig
 //! (host-tested); this file only moves bytes.
+//!
+//! Connections are kept alive as HTTP/1.1 does: `serve` answers every
+//! request a connection carries (bytes read past one request wait in
+//! a per-socket leftover for the next, so pipelined requests are fine)
+//! until the peer says close, the count is reached, or the connection
+//! sits idle for `idle_ticks`; `http-write` says keep-alive unless the
+//! record says `close: true`; `fetch` keeps up to `pool_size` idle
+//! connections by address and port and retries once on a fresh one
+//! when a kept connection turns out dead (the peer closed it while it
+//! sat), so a script talking to one server pays the handshake once.
 
 const std = @import("std");
 const shared = @import("shared");
@@ -36,27 +46,98 @@ fn record(it: *mshl.Interp, keys: []const []const u8, vals: []const Value) mshl.
     return .{ .record = .{ .keys = try it.arena.dupe([]const u8, keys), .vals = try it.arena.dupe(Value, vals) } };
 }
 
+// ------------------------------------------------------ connection state
+//
+// Bytes received past the end of one request belong to the next one on
+// the same socket; they live here between calls (the interpreter's
+// arena is a line's).
+
+const max_leftover = shared.net_max_recv;
+const Leftover = struct { sock: u64 = 0, len: usize = 0, buf: [max_leftover]u8 = undefined };
+const max_conns = 8;
+var leftovers: [max_conns]Leftover = @splat(.{});
+
+fn leftoverOf(sock: u64) ?*Leftover {
+    for (&leftovers) |*l| if (l.sock == sock and l.len > 0) return l;
+    return null;
+}
+
+fn keepLeftover(sock: u64, bytes: []const u8) void {
+    for (&leftovers) |*l| if (l.sock == sock) {
+        l.len = 0;
+        l.sock = 0;
+    };
+    if (bytes.len == 0 or bytes.len > max_leftover) return;
+    for (&leftovers) |*l| if (l.len == 0) {
+        l.sock = sock;
+        l.len = bytes.len;
+        @memcpy(l.buf[0..bytes.len], bytes);
+        return;
+    };
+}
+
+/// How long `serve` waits for the next request on a kept connection.
+const idle_ticks: u64 = 300; // 3 s
+/// How long any read waits for the rest of a request once it began.
+const stall_ticks: u64 = 1000; // 10 s
+
+/// `fetch`'s kept connections: one per address and port, idle.
+const pool_size = 4;
+const Pooled = struct { used: bool = false, words: [2]u64 = .{ 0, 0 }, port: u64 = 0, sock: u64 = 0 };
+var pool: [pool_size]Pooled = @splat(.{});
+
+fn pooled(words: [2]u64, port: u64) ?*Pooled {
+    for (&pool) |*p| if (p.used and p.words[0] == words[0] and p.words[1] == words[1] and p.port == port) return p;
+    return null;
+}
+
+fn poolPut(n: *Net, words: [2]u64, port: u64, sock: u64) void {
+    for (&pool) |*p| if (!p.used) {
+        p.* = .{ .used = true, .words = words, .port = port, .sock = sock };
+        return;
+    };
+    n.closeRaw(sock); // no room: not kept
+}
+
 /// Text if it is UTF-8, bytes otherwise.
 fn bodyValue(b: []const u8) Value {
     return if (std.unicode.utf8ValidateSlice(b)) .{ .str = b } else .{ .bytes = b };
 }
 
-/// Read one request from a socket into the arena.
-const ReadOut = union(enum) { request: http.Request, failed: []const u8 };
+/// Read one request from a socket into the arena, starting with what
+/// the last read left over; what this one leaves is kept for the next.
+/// `idle`: how long to wait for the first byte (null: as long as it
+/// takes); a request that began is waited for `stall_ticks`.
+const ReadOut = union(enum) { request: http.Request, failed: []const u8, idle };
 
-fn readRequest(n: *Net, it: *mshl.Interp, s: u64) mshl.Error!ReadOut {
+fn readRequest(n: *Net, it: *mshl.Interp, s: u64, idle: ?u64) mshl.Error!ReadOut {
     var buf: std.ArrayList(u8) = .empty;
+    if (leftoverOf(s)) |l| {
+        try buf.appendSlice(it.arena, l.buf[0..l.len]);
+        l.len = 0;
+        l.sock = 0;
+    }
     while (true) {
         switch (http.parseRequest(it.arena, buf.items) catch |e| return .{ .failed = switch (e) {
             error.OutOfMemory => return mshl.Error.OutOfMemory,
             error.Bad => "bad request",
             error.TooLarge => "request too large",
-            error.Chunked => "chunked requests are not supported",
         } }) {
-            .done => |r| return .{ .request = r },
+            .done => |r| {
+                keepLeftover(s, buf.items[r.len..]);
+                return .{ .request = r };
+            },
             .incomplete => {},
         }
-        switch (n.recvSome(s)) {
+        const wait: ?u64 = if (buf.items.len == 0) idle else stall_ticks;
+        if (wait) |ticks| {
+            switch (n.recvSomeFor(s, ticks)) {
+                .data => |d| try buf.appendSlice(it.arena, d),
+                .closed => return .{ .failed = if (buf.items.len == 0) "closed" else "closed mid-request" },
+                .failed => |m| return .{ .failed = m },
+                .timeout => return if (buf.items.len == 0) .idle else .{ .failed = "timed out mid-request" },
+            }
+        } else switch (n.recvSome(s)) {
             .data => |d| try buf.appendSlice(it.arena, d),
             .closed => return .{ .failed = if (buf.items.len == 0) "closed" else "closed mid-request" },
             .failed => |m| return .{ .failed = m },
@@ -74,14 +155,21 @@ fn requestRecord(it: *mshl.Interp, r: http.Request) mshl.Error!Value {
     });
 }
 
+/// A response record may say `close: true` to end the connection.
+fn wantsClose(v: Value) bool {
+    if (v != .record) return false;
+    const c = v.record.get("close") orelse return false;
+    return c.asBool();
+}
+
 /// What a handler (or the caller of http-write) gave, as wire bytes.
-fn responseBytes(it: *mshl.Interp, v: Value, out: *std.ArrayList(u8)) mshl.Error!void {
+fn responseBytes(it: *mshl.Interp, v: Value, out: *std.ArrayList(u8), keep: bool) mshl.Error!void {
     var status: u16 = 200;
     var headers: std.ArrayList(http.Header) = .empty;
     var body: []const u8 = "";
     var content_type: ?[]const u8 = null;
     var body_val: Value = v;
-    if (v == .record and (v.record.get("status") != null or v.record.get("body") != null or v.record.get("headers") != null)) {
+    if (v == .record and (v.record.get("status") != null or v.record.get("body") != null or v.record.get("headers") != null or v.record.get("close") != null)) {
         if (v.record.get("status")) |st| {
             if (st != .int or st.int < 100 or st.int > 599) return it.fail("http: status must be an int from 100 to 599", .{});
             status = @intCast(st.int);
@@ -115,12 +203,12 @@ fn responseBytes(it: *mshl.Interp, v: Value, out: *std.ArrayList(u8)) mshl.Error
         },
         else => return it.fail("http: cannot send a {s} as a body", .{body_val.typeName()}),
     }
-    try http.formatResponse(it.arena, out, status, headers.items, body);
+    try http.formatResponse(it.arena, out, status, headers.items, body, keep and !wantsClose(v));
 }
 
-fn writeResponse(n: *Net, it: *mshl.Interp, s: u64, v: Value) mshl.Error!?[]const u8 {
+fn writeResponse(n: *Net, it: *mshl.Interp, s: u64, v: Value, keep: bool) mshl.Error!?[]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    try responseBytes(it, v, &out);
+    try responseBytes(it, v, &out, keep);
     return n.sendAll(s, out.items);
 }
 
@@ -130,24 +218,22 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     if (is(u8, name, "http-read")) {
         const sv = input orelse (if (args.len > 0) args[0] else return it.fail("http-read: a socket expected", .{}));
         const s = try netcmds.sockArg(it, sv, "http-read", "socket");
-        return switch (try readRequest(n, it, s)) {
+        return switch (try readRequest(n, it, s, null)) {
             .request => |r| try okResult(it, try requestRecord(it, r)),
             .failed => |m| try errResult(it, m),
+            .idle => unreachable, // no idle limit was given
         };
     }
     if (is(u8, name, "http-write")) {
-        if (args.len != 2) return it.fail("http-write: SOCKET RESPONSE expected", .{});
         const s = try netcmds.sockArg(it, args[0], "http-write", "socket");
-        if (try writeResponse(n, it, s, args[1])) |m| return try errResult(it, m);
+        if (try writeResponse(n, it, s, args[1], true)) |m| return try errResult(it, m);
         return try okResult(it, .nothing);
     }
     if (is(u8, name, "serve")) {
-        if (args.len < 2) return it.fail("serve: LISTENER HANDLER [count] expected", .{});
         const l = try netcmds.sockArg(it, args[0], "serve", "listener");
-        if (args[1] != .func) return it.fail("serve: a handler function expected, got a {s}", .{args[1].typeName()});
         var left: ?i64 = null;
         if (args.len > 2) {
-            if (args[2] != .int or args[2].int < 1) return it.fail("serve: the count must be a positive int", .{});
+            if (args[2].int < 1) return it.fail("serve: the count must be a positive int", .{});
             left = args[2].int;
         }
         var served: i64 = 0;
@@ -157,46 +243,54 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
                 .failed => |m| return try errResult(it, m),
             };
             defer n.closeRaw(s);
-            const req = switch (try readRequest(n, it, s)) {
-                .request => |r| r,
-                .failed => |m| {
-                    if (!is(u8, m, "closed")) _ = try writeResponse(n, it, s, .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 400 }, .{ .str = m } } } });
-                    continue;
-                },
-            };
-            // The handler runs in its own line-sized world; a failure is
-            // a 500 with the message, never the end of the server.
-            const reply: Value = blk: {
-                const out = it.callValue(args[1], &.{try requestRecord(it, req)}, null, &.{"req"}) catch |e| switch (e) {
-                    mshl.Error.Runtime => break :blk .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 500 }, .{ .str = it.err_msg } } } },
-                    else => return e,
+            // Every request the connection carries, until the peer says
+            // close, the count runs out, or it sits idle.
+            while (left == null or left.? > 0) {
+                const req = switch (try readRequest(n, it, s, idle_ticks)) {
+                    .request => |r| r,
+                    .idle => break,
+                    .failed => |m| {
+                        if (!is(u8, m, "closed")) _ = try writeResponse(n, it, s, .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 400 }, .{ .str = m } } } }, false);
+                        break;
+                    },
                 };
-                if (out == .result) {
-                    if (!out.result.ok) {
-                        var msg: std.ArrayList(u8) = .empty;
-                        try mshl.renderInline(out.result.val, it.arena, &msg);
-                        break :blk .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 500 }, .{ .str = msg.items } } } };
+                // The handler runs in its own line-sized world; a failure is
+                // a 500 with the message, never the end of the server.
+                const reply: Value = blk: {
+                    const out = it.callValue(args[1], &.{try requestRecord(it, req)}, null, &.{"req"}) catch |e| switch (e) {
+                        mshl.Error.Runtime => break :blk .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 500 }, .{ .str = it.err_msg } } } },
+                        else => return e,
+                    };
+                    if (out == .result) {
+                        if (!out.result.ok) {
+                            var msg: std.ArrayList(u8) = .empty;
+                            try mshl.renderInline(out.result.val, it.arena, &msg);
+                            break :blk .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 500 }, .{ .str = msg.items } } } };
+                        }
+                        break :blk out.result.val;
                     }
-                    break :blk out.result.val;
-                }
-                break :blk out;
-            };
-            _ = try writeResponse(n, it, s, reply);
-            served += 1;
-            if (left) |*k| k.* -= 1;
+                    break :blk out;
+                };
+                served += 1;
+                if (left) |*k| k.* -= 1;
+                const keep = req.keep and !wantsClose(reply) and (left == null or left.? > 0);
+                if (try writeResponse(n, it, s, reply, keep)) |_| break;
+                if (!keep) break;
+            }
+            keepLeftover(s, ""); // the socket number may be reused
         }
         return try okResult(it, .{ .int = served });
     }
     if (is(u8, name, "fetch")) {
-        if (args.len < 1 or args[0] != .str) return it.fail("fetch: URL [opts] expected", .{});
         const url = http.parseUrl(args[0].str) orelse return it.fail("fetch: not an http URL: {s}", .{args[0].str});
         const words = shared.parseAddr(url.host) orelse return it.fail("fetch: the host must be an address (there is no name resolution): {s}", .{url.host});
         var method: []const u8 = "GET";
         var headers: std.ArrayList(http.Header) = .empty;
         var body: []const u8 = "";
+        var keep = true;
         if (args.len > 1) {
-            if (args[1] != .record) return it.fail("fetch: options must be a record", .{});
             const o = args[1].record;
+            if (o.get("keep")) |k| keep = k.asBool();
             if (o.get("method")) |m| {
                 if (m != .str) return it.fail("fetch: method must be a string", .{});
                 method = m.str;
@@ -221,42 +315,80 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
                 },
             };
         }
-        const s = switch (n.connectRaw(words, url.port)) {
-            .sock => |x| x,
-            .failed => |m| return try errResult(it, m),
-        };
-        defer n.closeRaw(s);
         var host_hdr: [64]u8 = undefined;
         const host = std.fmt.bufPrint(&host_hdr, "{s}:{d}", .{ url.host, url.port }) catch url.host;
         var req: std.ArrayList(u8) = .empty;
-        try http.formatRequest(it.arena, &req, method, url.path, host, headers.items, body);
-        if (n.sendAll(s, req.items)) |m| return try errResult(it, m);
-        var buf: std.ArrayList(u8) = .empty;
-        var closed = false;
+        try http.formatRequest(it.arena, &req, method, url.path, host, headers.items, body, keep);
+        // A kept connection first; if it turns out dead before a byte
+        // came back, once more on a fresh one.
+        var reused = false;
+        var s: u64 = undefined;
+        if (pooled(words, url.port)) |p| {
+            s = p.sock;
+            p.used = false;
+            reused = true;
+        } else s = switch (n.connectRaw(words, url.port)) {
+            .sock => |x| x,
+            .failed => |m| return try errResult(it, m),
+        };
         while (true) {
-            switch (http.parseResponse(it.arena, buf.items, closed) catch |e| return try errResult(it, switch (e) {
-                error.OutOfMemory => return mshl.Error.OutOfMemory,
-                error.Bad => "bad response",
-                error.TooLarge => "response too large",
-                error.Chunked => "chunked responses are not supported",
-            })) {
-                .done => |r| return try okResult(it, try record(it, &.{ "status", "headers", "body" }, &.{
-                    .{ .int = r.status },
-                    try http.headersRecord(it.arena, r.headers),
-                    bodyValue(r.body),
-                })),
-                .incomplete => {},
+            const out = try exchange(n, it, s, req.items, keep);
+            if (out.response) |v| {
+                if (out.kept) poolPut(n, words, url.port, s) else n.closeRaw(s);
+                return try okResult(it, v);
             }
-            if (closed) return try errResult(it, "closed before the response was complete");
-            switch (n.recvSome(s)) {
-                .data => |d| try buf.appendSlice(it.arena, d),
-                .closed => closed = true,
-                .failed => |m| return try errResult(it, m),
+            n.closeRaw(s);
+            if (reused and out.early) {
+                reused = false;
+                s = switch (n.connectRaw(words, url.port)) {
+                    .sock => |x| x,
+                    .failed => |m2| return try errResult(it, m2),
+                };
+                continue;
             }
+            return try errResult(it, out.failed orelse "failed");
         }
     }
     return null;
 }
+
+/// One request and its response on a socket.
+fn exchange(n: *Net, it: *mshl.Interp, s: u64, req: []const u8, keep: bool) mshl.Error!ExchangeOut {
+    if (n.sendAll(s, req)) |m| return .{ .failed = m, .early = true };
+    var buf: std.ArrayList(u8) = .empty;
+    var closed = false;
+    while (true) {
+        switch (http.parseResponse(it.arena, buf.items, closed) catch |e| return .{ .failed = switch (e) {
+            error.OutOfMemory => return mshl.Error.OutOfMemory,
+            error.Bad => "bad response",
+            error.TooLarge => "response too large",
+        }, .early = false }) {
+            .done => |r| return .{ .response = try record(it, &.{ "status", "headers", "body" }, &.{
+                .{ .int = r.status },
+                try http.headersRecord(it.arena, r.headers),
+                bodyValue(r.body),
+            }), .kept = keep and r.keep and !r.to_close and !closed },
+            .incomplete => {},
+        }
+        if (closed) return .{ .failed = "closed before the response was complete", .early = buf.items.len == 0 };
+        // A kept connection the peer closed answers nothing at all.
+        switch (n.recvSomeFor(s, stall_ticks)) {
+            .data => |d| try buf.appendSlice(it.arena, d),
+            .closed => closed = true,
+            .failed => |m| return .{ .failed = m, .early = buf.items.len == 0 },
+            .timeout => return .{ .failed = "timed out waiting for the response", .early = false },
+        }
+    }
+}
+
+const ExchangeOut = struct {
+    response: ?Value = null,
+    kept: bool = false,
+    failed: ?[]const u8 = null,
+    /// Nothing had come back when it failed: on a kept connection, the
+    /// peer had closed it while it sat — worth one retry.
+    early: bool = false,
+};
 
 pub const command_names = [_][]const u8{ "http-read", "http-write", "serve", "fetch" };
 

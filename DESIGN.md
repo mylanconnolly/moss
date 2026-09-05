@@ -1571,6 +1571,31 @@ annotated `let`, an uncovered enumeration, `use math` from the store,
 a script that `use`s it under `mshrun`) and the login drill installs
 a module into a home.
 
+**mshl v3, stage 3d (as built, 2026-09-04): keep-alive and chunked
+transfer.** `lib/http.zig` frames a body three ways now — a length,
+chunked (decoded in place of the sizes and trailers, `len` still the
+bytes consumed as sent so the next request is found behind it), or
+the close — and every parsed message says `keep`: HTTP/1.1 unless
+`Connection: close`, HTTP/1.0 only with `keep-alive`, never after a
+body that ran to the close; 204, 304 and 1xx end with their head.
+What is written always carries a length and the Connection header the
+caller decides. In `user/httpcmds.zig`, `serve` answers every request
+a connection carries: bytes past the end of one request wait in a
+per-socket leftover (eight slots of a receive's size, static, since the
+interpreter's arena is a line's) so pipelined requests parse whole,
+and the connection ends when the peer says close, a handler's record
+says `close: true`, the count runs out, or it sits idle three seconds
+— the wait is `Net.recvSomeFor`, a kernel timer (`timer_arm`) ringing
+the host's doorbell with a bit of its own beside netsvc's, and since
+that bit may still be latched from the last arming, a wake counts as
+the timeout only once the clock agrees. `fetch` keeps up to four idle
+connections by address and port; a kept connection the peer closed
+while it sat answers nothing, which is the one case worth a single
+retry on a fresh connection (the drill's canned server, a `printf`,
+does exactly that). The network drill's server now serves seven
+requests over six connections — the runner pipelines two on one and
+sends a chunked POST on another — and the script fetches twice.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU
