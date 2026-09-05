@@ -299,6 +299,11 @@ Verify in QEMU rather than reason from memory.
 
 ## Known limits and bugs
 
+- Known flaky: the `users` drill's leak bar failed once on 2026-09-04
+  (one 8-page buffer with one reference after the last session's
+  teardown) and passed three soaks after. A failed gate that names
+  `users` alone with that signature is this, not the change under
+  test — rerun it, and note it on the roadmap's entry if it repeats.
 - The gate takes about two minutes on the M3 (four on an x86_64 host,
   where aarch64 QEMU is TCG only) and cannot run drills in parallel;
   the cluster, shell and login drills bind fixed TCP ports (31901 to

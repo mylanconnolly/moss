@@ -396,6 +396,14 @@ is a plan.
   system store; there is no other source of programs (no download, no
   build).
 - A session's shell has no fabric (`nodes`, `rspawn` are errors).
+- **A known flake (seen 2026-09-04):** the `users` drill failed its
+  leak bar once — `shm[14]: 8 pages, 1 refs, created by users`, pmem
+  delta 32 KB — at the end of the fourth, logged-out-early session;
+  three soaks in a row passed. A session's buffer with one reference
+  left after every domain is gone points at a teardown ordering
+  (a mapping or a cap in flight when the manager is revoked), not a
+  userspace leak. Reproduce with `-Donly=users -Dsoak=N` and read the
+  trace ring in the kept log; the fix is owed.
 
 **Fabric**
 
