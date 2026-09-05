@@ -244,9 +244,9 @@ is a plan.
   protocol types and checked at the boundary both ways, every command
   the world decides answering a result with the protocol's word, a
   module loaded from the store (`use math`, the archive's `lib/`),
-  floats; still open: a numeric tower above int and float, signatures
-  for the builtins, shapes the lint could check statically when they
-  are literal; (2) ✅ scripts as programs
+  floats; ✅ signatures for the builtins (2026-09-04); still open: a
+  numeric tower above int and float, shapes the lint could check
+  statically when they are literal; (2) ✅ scripts as programs
   (landed 2026-09-03: the `mshrun` image, `script:` in unit files, the
   file commands shared through `user/fscmds.zig`); still open: a script
   spawned on another node — `rspawn` takes a catalog number and carries
@@ -410,8 +410,7 @@ is a plan.
 - Interpreter limits: 128 bindings per scope, a 512-character line,
   16 lines of history; strings interpolate `$var` only; no globbing,
   no job control. Shapes are checked where they run, never statically;
-  the `shape` keyword takes one term; signatures cover host commands,
-  not the builtins.
+  the `shape` keyword takes one term.
 
 **Testing**
 

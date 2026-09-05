@@ -183,7 +183,9 @@ stat).returns` is `ok { name: string, type: file | dir | symlink, size:
 int, mtime: int } | err (denied | not_found | …)`), the interpreter
 checks the arguments before the call and the answer after it, and a
 host that answers something other than what it declared is blamed by
-name ("the host's slip, not yours").
+name ("the host's slip, not yours"). The builtins have signatures too
+(`signature first` is `first [count?: int] (input: list) -> list`),
+checked the same way, and an editor's hover shows them.
 
 **Functions are values.** `def name [params] { body }` binds one to a
 name; `fn [params] { body }` makes one anywhere. Inside, `$in` is the
@@ -496,7 +498,7 @@ under `boot/`, which must be clean.
 diagnostics as you type (errors are what would fail when the line runs,
 warnings what runs but probably not as meant), hover on a `$name` or a
 command's name (the `let` line, a `def`'s header, what an implicit name
-like `$it` is, "builtin"), go-to-definition to the binding, the file's
+like `$it` is, a builtin's signature), go-to-definition to the binding, the file's
 `def`s and `let`s as document symbols, completion of the names in scope
 and the builtins, and formatting by `mshfmt`. Whole-document sync — a
 script is small and re-analysis is cheap. `zig build ls-test` drives it
@@ -636,10 +638,10 @@ message by message. Editor setup is in `tools/README.md`.
   a number as a `match` subject keeps its colon in one token, so
   `match dir: dir | file` is read by the interpreter but not by the
   tools' grammar; put the subject in a variable or parentheses.
-  Signatures cover host commands; the builtins (`len`, `map` …) check
-  their arguments themselves and `signature len` is nothing. A record
-  shape is checked field by field, so a match over two enumerated
-  fields must cover every combination or end in `_`.
+  `shape` is a keyword, so a field or column of that name is reached
+  with quotes (`get "shape"`). A record shape is checked field by
+  field, so a match over two enumerated fields must cover every
+  combination or end in `_`.
 - Rebinding a list-valued variable inside a loop that walks it keeps
   the old value until the statement ends — deliberate, and memory a
   long loop should not spend; `map`/`reduce` are the shape for that.

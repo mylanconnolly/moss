@@ -1513,7 +1513,11 @@ slice to `[S]`, `?T` to `S | nothing` — and `mshl.toValue` builds the
 value from the same type, so `fscmds.Stat`, `Df`, the shell's `Proc`,
 `Svc`, `Node`, `Mem` and the protocol's error enums are each declared
 once; `signature NAME` hands the record back with its shapes as shape
-values (`ls data? | check (signature ls).returns`). *Results*: every
+values (`ls data? | check (signature ls).returns`); the builtins carry
+signatures in a table of their own (`builtin_sigs`), checked at the
+call the same way — which retired the hand-written argument checks in
+the dispatcher — and rendered on an editor's hover (`first [count?:
+int] (input: list) -> list`). *Results*: every
 command whose outcome the world decides answers `ok v` / `err word`,
 the word from the protocol's own enumeration (`shared.FsErr`, `NetErr`,
 `FabErr`, `@tagName`), through new error-reporting variants in
@@ -1555,8 +1559,11 @@ container constants. Two runner lessons: the console tap was a 64 KB
 buffer whose reader thread quietly stopped when it filled, so once
 the scripted session said more than that every later step looked
 like a shell that hung on a line it had in fact answered — the tap is
-4 MB now and an overflow is a named failure, and a failed step prints
-what the console said; and a userspace panic exited with 255 and no
+4 MB now and an overflow is a named failure, a failed step prints what
+the console said on one line and keeps the whole transcript beside the
+kernel log (a raw carriage return in that dump hid an answer behind
+its echo, and a grep that read only the echo's line made an answered
+step look like a hang twice); and a userspace panic exited with 255 and no
 word, which reads the same way from a console, so msh and mshrun log
 the panic message first. The shell drill grew a dozen steps (a result matched on
 its word, a wrong argument refused by a signature, a float, an

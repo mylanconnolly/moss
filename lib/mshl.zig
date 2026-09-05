@@ -504,6 +504,118 @@ pub const builtin_names = [_][]const u8{
     "signature", "to-data", "from-data", "to-bytes", "from-bytes", "to-json", "from-json",
 };
 
+/// The builtins' signatures: what each takes and answers, checked at
+/// the call exactly as a host command's is, and what `signature NAME`
+/// and an editor's hover show. `where` is not here (it takes an
+/// unevaluated expression); `check` takes its shape last and says so
+/// itself.
+const S = struct {
+    const str_or_bytes: Shape = .{ .one_of = &.{ .string, .bytes } };
+    const number_or_text: Shape = .{ .one_of = &.{ .string, .int, .float } };
+    const int_or_float: Shape = .{ .one_of = &.{ .int, .float } };
+    const table_or_record: Shape = .{ .one_of = &.{ .table, .record } };
+    const record_or_nothing: Shape = .{ .one_of = &.{ .record, .nothing } };
+    const strings: Shape = .{ .list_of = &.string };
+    const ints: Shape = .{ .list_of = &.int };
+    const int_result = resultShape(.int, .string);
+    const float_result = resultShape(.float, .string);
+    const text_result = resultShape(.string, .string);
+    const fn_param = Param{ .name = "f", .shape = .function };
+    const value_param = Param{ .name = "value", .optional = true };
+    const text_param = Param{ .name = "text", .shape = .string, .optional = true };
+    const in_any: Input = .{ .optional = .any };
+    const in_list: Input = .{ .required = .list }; // a table is a list of records
+};
+
+const BuiltinSig = struct { name: []const u8, sig: Signature };
+
+const builtin_sigs = [_]BuiltinSig{
+    .{ .name = "echo", .sig = .{ .rest = .any, .input = S.in_any, .ret = .string } },
+    .{ .name = "len", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .int } },
+    .{ .name = "first", .sig = .{ .params = &.{.{ .name = "count", .shape = .int, .optional = true }}, .input = S.in_list, .ret = .list } },
+    .{ .name = "last", .sig = .{ .params = &.{.{ .name = "count", .shape = .int, .optional = true }}, .input = S.in_list, .ret = .list } },
+    .{ .name = "reverse", .sig = .{ .input = S.in_list, .ret = .list } },
+    .{ .name = "sort-by", .sig = .{ .params = &.{.{ .name = "column", .shape = .string }}, .rest = .{ .word = "--desc" }, .input = .{ .required = .table }, .ret = .table } },
+    .{ .name = "select", .sig = .{ .params = &.{.{ .name = "column", .shape = .string }}, .rest = .string, .input = .{ .required = S.table_or_record }, .ret = S.table_or_record } },
+    .{ .name = "get", .sig = .{ .params = &.{.{ .name = "field", .shape = .string }}, .input = .{ .required = .any }, .ret = .any } },
+    .{ .name = "keys", .sig = .{ .input = .{ .required = S.table_or_record }, .ret = S.strings } },
+    .{ .name = "lines", .sig = .{ .params = &.{S.text_param}, .input = .{ .optional = .string }, .ret = S.strings } },
+    .{ .name = "to-data", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .string } },
+    .{ .name = "from-data", .sig = .{ .params = &.{S.text_param}, .input = .{ .optional = .string }, .ret = .any } },
+    .{ .name = "to-json", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .string } },
+    .{ .name = "from-json", .sig = .{ .params = &.{.{ .name = "text", .shape = S.str_or_bytes, .optional = true }}, .input = .{ .optional = S.str_or_bytes }, .ret = .any } },
+    .{ .name = "ok", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .result } },
+    .{ .name = "err", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .result } },
+    .{ .name = "map", .sig = .{ .params = &.{S.fn_param}, .input = S.in_list, .ret = .list } },
+    .{ .name = "filter", .sig = .{ .params = &.{S.fn_param}, .input = S.in_list, .ret = .list } },
+    .{ .name = "reduce", .sig = .{ .params = &.{ .{ .name = "init" }, S.fn_param }, .input = S.in_list, .ret = .any } },
+    .{ .name = "any", .sig = .{ .params = &.{S.fn_param}, .input = S.in_list, .ret = .bool } },
+    .{ .name = "all", .sig = .{ .params = &.{S.fn_param}, .input = S.in_list, .ret = .bool } },
+    .{ .name = "find", .sig = .{ .params = &.{S.fn_param}, .input = S.in_list, .ret = .any } },
+    .{ .name = "range", .sig = .{ .params = &.{ .{ .name = "from", .shape = .int }, .{ .name = "to", .shape = .int } }, .ret = S.ints } },
+    .{ .name = "join", .sig = .{ .params = &.{.{ .name = "separator", .shape = .string, .optional = true }}, .input = .{ .required = S.strings }, .ret = .string } },
+    .{ .name = "split", .sig = .{ .params = &.{.{ .name = "separator", .shape = .string, .optional = true }}, .input = .{ .required = .string }, .ret = S.strings } },
+    .{ .name = "str", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .string } },
+    .{ .name = "int", .sig = .{ .params = &.{.{ .name = "value", .shape = S.number_or_text, .optional = true }}, .input = .{ .optional = S.number_or_text }, .ret = S.int_result } },
+    .{ .name = "float", .sig = .{ .params = &.{.{ .name = "value", .shape = S.number_or_text, .optional = true }}, .input = .{ .optional = S.number_or_text }, .ret = S.float_result } },
+    .{ .name = "round", .sig = .{ .params = &.{.{ .name = "value", .shape = S.int_or_float, .optional = true }}, .input = .{ .optional = S.int_or_float }, .ret = S.int_or_float } },
+    .{ .name = "floor", .sig = .{ .params = &.{.{ .name = "value", .shape = S.int_or_float, .optional = true }}, .input = .{ .optional = S.int_or_float }, .ret = S.int_or_float } },
+    .{ .name = "ceil", .sig = .{ .params = &.{.{ .name = "value", .shape = S.int_or_float, .optional = true }}, .input = .{ .optional = S.int_or_float }, .ret = S.int_or_float } },
+    .{ .name = "type", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .string } },
+    .{ .name = "check", .sig = .{ .params = &.{ .{ .name = "value" }, .{ .name = "shape", .shape = .shape, .optional = true } }, .input = S.in_any, .ret = .result } },
+    .{ .name = "signature", .sig = .{ .params = &.{.{ .name = "command", .shape = .string }}, .ret = S.record_or_nothing } },
+    .{ .name = "to-bytes", .sig = .{ .params = &.{.{ .name = "value", .shape = S.str_or_bytes, .optional = true }}, .input = .{ .optional = S.str_or_bytes }, .ret = .bytes } },
+    .{ .name = "from-bytes", .sig = .{ .params = &.{.{ .name = "bytes", .shape = .bytes, .optional = true }}, .input = .{ .optional = .bytes }, .ret = S.text_result } },
+    .{ .name = "use", .sig = .{ .params = &.{.{ .name = "module", .shape = .string }}, .ret = .record } },
+};
+
+/// A builtin's signature, or null for a name that is not one (or
+/// `where`, which takes an expression).
+pub fn builtinSignature(name: []const u8) ?Signature {
+    for (builtin_sigs) |b| {
+        if (std.mem.eql(u8, b.name, name)) return b.sig;
+    }
+    return null;
+}
+
+/// A signature as one line: `first [count?: int] (input: list) -> list`.
+pub fn signatureText(a: std.mem.Allocator, name: []const u8, sig: Signature) Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, name);
+    if (sig.params.len > 0 or sig.rest != null) {
+        try out.appendSlice(a, " [");
+        for (sig.params, 0..) |p, i| {
+            if (i > 0) try out.appendSlice(a, ", ");
+            try out.appendSlice(a, p.name);
+            if (p.optional) try out.append(a, '?');
+            try out.appendSlice(a, ": ");
+            try p.shape.write(a, &out);
+        }
+        if (sig.rest) |r| {
+            if (sig.params.len > 0) try out.appendSlice(a, ", ");
+            try out.appendSlice(a, "...: ");
+            try r.write(a, &out);
+        }
+        try out.append(a, ']');
+    }
+    switch (sig.input) {
+        .none => {},
+        .optional => |sh| {
+            try out.appendSlice(a, " (input?: ");
+            try sh.write(a, &out);
+            try out.append(a, ')');
+        },
+        .required => |sh| {
+            try out.appendSlice(a, " (input: ");
+            try sh.write(a, &out);
+            try out.append(a, ')');
+        },
+    }
+    try out.appendSlice(a, " -> ");
+    try sig.ret.write(a, &out);
+    return out.items;
+}
+
 /// Bindings per scope.
 pub const max_vars = 128;
 const max_use_depth = 8;
@@ -1551,6 +1663,9 @@ pub const Interp = struct {
         if (self.lookup(c.name)) |v| {
             if (v == .func) return self.callValue(v, args, input, null);
         }
+        // A builtin is checked against its signature like any command
+        // (its answer is its own business).
+        if (builtinSignature(c.name)) |sig| try self.checkCall(c.name, sig, args, input);
         if (try self.builtin(c.name, args, input)) |v| return v;
         // A host command with a signature is checked at the boundary,
         // both ways.
@@ -1572,10 +1687,11 @@ pub const Interp = struct {
             if (!p.optional) required += 1;
         }
         if (args.len < required) {
+            // Name what is missing, not what was given.
             var need: std.ArrayList(u8) = .empty;
-            for (sig.params, 0..) |p, i| {
+            for (sig.params[args.len..]) |p| {
                 if (p.optional) continue;
-                if (i > 0) try need.append(self.arena, ' ');
+                if (need.items.len > 0) try need.append(self.arena, ' ');
                 try need.appendSlice(self.arena, p.name);
             }
             return self.fail("{s}: {s} expected", .{ name, need.items });
@@ -1658,11 +1774,6 @@ pub const Interp = struct {
         };
     }
 
-    fn funcArg(self: *Interp, args: []const Value, cmd: []const u8) Error!Value {
-        if (args.len != 1 or args[0] != .func) return self.fail("{s}: a function expected", .{cmd});
-        return args[0];
-    }
-
     /// The pure builtins. null = not one of ours.
     fn builtin(self: *Interp, name: []const u8, args: []const Value, input: ?Value) Error!?Value {
         const eql = std.mem.eql;
@@ -1686,12 +1797,12 @@ pub const Interp = struct {
             }) };
         }
         if (eql(u8, name, "first") or eql(u8, name, "last")) {
-            const v = input orelse return self.fail("{s}: needs input", .{name});
-            const n: usize = if (args.len > 0) @intCast(try self.intArg(args[0], name)) else 1;
+            const v = input.?;
+            const n: usize = if (args.len > 0) @intCast(@max(args[0].int, 0)) else 1;
             const total = switch (v) {
                 .list => |l| l.len,
                 .table => |t| t.rows.len,
-                else => return self.fail("{s}: needs a table or list", .{name}),
+                else => unreachable,
             };
             const k = @min(n, total);
             const lo = if (eql(u8, name, "first")) 0 else total - k;
@@ -1702,7 +1813,7 @@ pub const Interp = struct {
             };
         }
         if (eql(u8, name, "reverse")) {
-            const v = input orelse return self.fail("reverse: needs input", .{});
+            const v = input.?;
             switch (v) {
                 .list => |l| {
                     const out = try self.arena.dupe(Value, l);
@@ -1714,19 +1825,14 @@ pub const Interp = struct {
                     std.mem.reverse([]const Value, out);
                     return .{ .table = .{ .cols = t.cols, .rows = out } };
                 },
-                else => return self.fail("reverse: needs a table or list", .{}),
+                else => unreachable,
             }
         }
         if (eql(u8, name, "sort-by")) {
-            const v = input orelse return self.fail("sort-by: needs input", .{});
-            if (v != .table) return self.fail("sort-by: needs a table", .{});
-            var key: ?[]const u8 = null;
-            var desc = false;
-            for (args) |a| {
-                if (a == .str and eql(u8, a.str, "--desc")) desc = true else if (a == .str) key = a.str;
-            }
-            const ci = v.table.col(key orelse return self.fail("sort-by: column name expected", .{})) orelse
-                return self.fail("sort-by: no column '{s}'", .{key.?});
+            const v = input.?;
+            const key = args[0].str;
+            const desc = args.len > 1;
+            const ci = v.table.col(key) orelse return self.fail("sort-by: no column '{s}'", .{key});
             const rows = try self.arena.dupe([]const Value, v.table.rows);
             const Ctx = struct { ci: usize, desc: bool };
             std.mem.sort([]const Value, rows, Ctx{ .ci = ci, .desc = desc }, struct {
@@ -1738,14 +1844,13 @@ pub const Interp = struct {
             return .{ .table = .{ .cols = v.table.cols, .rows = rows } };
         }
         if (eql(u8, name, "select")) {
-            const v = input orelse return self.fail("select: needs input", .{});
-            if (args.len == 0) return self.fail("select: column names expected", .{});
+            const v = input.?;
             switch (v) {
                 .table => |t| {
                     const idx = try self.arena.alloc(usize, args.len);
                     const cols = try self.arena.alloc([]const u8, args.len);
                     for (args, 0..) |a, i| {
-                        const cn = try self.strArg(a, "select");
+                        const cn = a.str;
                         idx[i] = t.col(cn) orelse return self.fail("select: no column '{s}'", .{cn});
                         cols[i] = cn;
                     }
@@ -1761,26 +1866,23 @@ pub const Interp = struct {
                     const keys = try self.arena.alloc([]const u8, args.len);
                     const vals = try self.arena.alloc(Value, args.len);
                     for (args, 0..) |a, i| {
-                        const kn = try self.strArg(a, "select");
+                        const kn = a.str;
                         keys[i] = kn;
                         vals[i] = r.get(kn) orelse return self.fail("select: no field '{s}'", .{kn});
                     }
                     return .{ .record = .{ .keys = keys, .vals = vals } };
                 },
-                else => return self.fail("select: needs a table or record", .{}),
+                else => unreachable,
             }
         }
         if (eql(u8, name, "get")) {
-            const v = input orelse return self.fail("get: needs input", .{});
-            if (args.len != 1) return self.fail("get: one column or field expected", .{});
-            return try self.fieldOf(v, try self.strArg(args[0], "get"));
+            return try self.fieldOf(input.?, args[0].str);
         }
         if (eql(u8, name, "keys")) {
-            const v = input orelse return self.fail("keys: needs input", .{});
-            const names = switch (v) {
+            const names = switch (input.?) {
                 .record => |r| r.keys,
                 .table => |t| t.cols,
-                else => return self.fail("keys: needs a record or table", .{}),
+                else => unreachable,
             };
             const vals = try self.arena.alloc(Value, names.len);
             for (names, 0..) |k, i| vals[i] = .{ .str = k };
@@ -1821,7 +1923,6 @@ pub const Interp = struct {
         }
         if (eql(u8, name, "lines")) {
             const v = input orelse (if (args.len > 0) args[0] else return self.fail("lines: needs input", .{}));
-            if (v != .str) return self.fail("lines: needs a string", .{});
             var out: std.ArrayList(Value) = .empty;
             var itl = std.mem.splitScalar(u8, v.str, '\n');
             while (itl.next()) |line| {
@@ -1837,16 +1938,16 @@ pub const Interp = struct {
         // Higher-order verbs: the function is called with each item (a
         // block argument sees it as `$it`).
         if (eql(u8, name, "map")) {
-            const items = try self.itemsOf(input orelse return self.fail("map: needs input", .{}), "map");
-            const f = try self.funcArg(args, "map");
+            const items = try self.itemsOf(input.?, "map");
+            const f = args[0];
             const out = try self.arena.alloc(Value, items.len);
             for (items, 0..) |item, i| out[i] = try self.callValue(f, &.{item}, null, null);
             return try tableize(self.arena, .{ .list = out });
         }
         if (eql(u8, name, "filter")) {
-            const v = input orelse return self.fail("filter: needs input", .{});
+            const v = input.?;
             const items = try self.itemsOf(v, "filter");
-            const f = try self.funcArg(args, "filter");
+            const f = args[0];
             var keep: std.ArrayList(Value) = .empty;
             for (items) |item| {
                 if (try self.condition(try self.callValue(f, &.{item}, null, null), "filter")) try keep.append(self.arena, item);
@@ -1855,15 +1956,14 @@ pub const Interp = struct {
             return .{ .list = keep.items };
         }
         if (eql(u8, name, "reduce")) {
-            const items = try self.itemsOf(input orelse return self.fail("reduce: needs input", .{}), "reduce");
-            if (args.len != 2 or args[1] != .func) return self.fail("reduce: an initial value and a function expected", .{});
+            const items = try self.itemsOf(input.?, "reduce");
             var acc = args[0];
             for (items) |item| acc = try self.callValue(args[1], &.{ acc, item }, null, &.{ "acc", "it" });
             return acc;
         }
         if (eql(u8, name, "any") or eql(u8, name, "all")) {
-            const items = try self.itemsOf(input orelse return self.fail("{s}: needs input", .{name}), name);
-            const f = try self.funcArg(args, name);
+            const items = try self.itemsOf(input.?, name);
+            const f = args[0];
             const want_any = eql(u8, name, "any");
             for (items) |item| {
                 const hit = try self.condition(try self.callValue(f, &.{item}, null, null), name);
@@ -1873,17 +1973,16 @@ pub const Interp = struct {
             return .{ .bool = !want_any };
         }
         if (eql(u8, name, "find")) {
-            const items = try self.itemsOf(input orelse return self.fail("find: needs input", .{}), "find");
-            const f = try self.funcArg(args, "find");
+            const items = try self.itemsOf(input.?, "find");
+            const f = args[0];
             for (items) |item| {
                 if (try self.condition(try self.callValue(f, &.{item}, null, null), "find")) return item;
             }
             return .nothing;
         }
         if (eql(u8, name, "range")) {
-            if (args.len != 2) return self.fail("range: from and to expected", .{});
-            const lo = try self.intArg(args[0], "range");
-            const hi = try self.intArg(args[1], "range");
+            const lo = args[0].int;
+            const hi = args[1].int;
             if (hi < lo or hi - lo > 1_000_000) return self.fail("range: bad bounds", .{});
             const out = try self.arena.alloc(Value, @intCast(hi - lo));
             for (out, 0..) |*o, i| o.* = .{ .int = lo + @as(i64, @intCast(i)) };
@@ -1891,20 +1990,18 @@ pub const Interp = struct {
         }
         // Strings and bytes.
         if (eql(u8, name, "join")) {
-            const items = try self.itemsOf(input orelse return self.fail("join: needs input", .{}), "join");
-            const sep = if (args.len > 0) try self.strArg(args[0], "join") else "";
+            const items = try self.itemsOf(input.?, "join");
+            const sep = if (args.len > 0) args[0].str else "";
             var buf: std.ArrayList(u8) = .empty;
             for (items, 0..) |item, i| {
                 if (i > 0) try buf.appendSlice(self.arena, sep);
-                if (item != .str) return self.fail("join: item {d} is a {s}, not a string", .{ i, item.typeName() });
                 try buf.appendSlice(self.arena, item.str);
             }
             return .{ .str = buf.items };
         }
         if (eql(u8, name, "split")) {
-            const v = input orelse return self.fail("split: needs input", .{});
-            if (v != .str) return self.fail("split: needs a string", .{});
-            const sep = if (args.len > 0) try self.strArg(args[0], "split") else " ";
+            const v = input.?;
+            const sep = if (args.len > 0) args[0].str else " ";
             if (sep.len == 0) return self.fail("split: empty separator", .{});
             var out: std.ArrayList(Value) = .empty;
             var its = std.mem.splitSequence(u8, v.str, sep);
@@ -1929,7 +2026,7 @@ pub const Interp = struct {
                     try self.mkResult(true, .{ .int = i })
                 else |_|
                     try self.mkResult(false, .{ .str = try std.fmt.allocPrint(self.arena, "not a number: {s}", .{s}) }),
-                else => self.fail("int: needs a string, int or float, got a {s}", .{v.typeName()}),
+                else => unreachable,
             };
         }
         if (eql(u8, name, "float")) {
@@ -1941,7 +2038,7 @@ pub const Interp = struct {
                     try self.mkResult(true, .{ .float = f })
                 else |_|
                     try self.mkResult(false, .{ .str = try std.fmt.allocPrint(self.arena, "not a number: {s}", .{s}) }),
-                else => self.fail("float: needs a string, int or float, got a {s}", .{v.typeName()}),
+                else => unreachable,
             };
         }
         if (eql(u8, name, "round") or eql(u8, name, "floor") or eql(u8, name, "ceil")) {
@@ -1949,7 +2046,7 @@ pub const Interp = struct {
             return switch (v) {
                 .int => v,
                 .float => |f| .{ .float = if (eql(u8, name, "round")) @round(f) else if (eql(u8, name, "floor")) @floor(f) else @ceil(f) },
-                else => self.fail("{s}: needs a float or int, got a {s}", .{ name, v.typeName() }),
+                else => unreachable,
             };
         }
         if (eql(u8, name, "type")) {
@@ -1968,9 +2065,8 @@ pub const Interp = struct {
         // `signature NAME`: a host command's signature as a record (its
         // shapes as shape values), or nothing.
         if (eql(u8, name, "signature")) {
-            if (args.len != 1 or args[0] != .str) return self.fail("signature: a command name expected", .{});
-            const f = self.host.signature orelse return .nothing;
-            const sig = f(self.host.ctx, args[0].str) orelse return .nothing;
+            const hosted: ?Signature = if (self.host.signature) |f| f(self.host.ctx, args[0].str) else null;
+            const sig = hosted orelse builtinSignature(args[0].str) orelse return .nothing;
             return try self.signatureRecord(args[0].str, sig);
         }
         if (eql(u8, name, "to-bytes")) {
@@ -1978,12 +2074,11 @@ pub const Interp = struct {
             return switch (v) {
                 .str => |s| .{ .bytes = s },
                 .bytes => v,
-                else => self.fail("to-bytes: needs a string, got a {s}", .{v.typeName()}),
+                else => unreachable,
             };
         }
         if (eql(u8, name, "from-bytes")) {
             const v = input orelse (if (args.len > 0) args[0] else return self.fail("from-bytes: needs input", .{}));
-            if (v != .bytes) return self.fail("from-bytes: needs bytes, got a {s}", .{v.typeName()});
             if (!std.unicode.utf8ValidateSlice(v.bytes)) return try self.mkResult(false, .{ .str = "not valid UTF-8" });
             return try self.mkResult(true, .{ .str = v.bytes });
         }
@@ -1997,8 +2092,7 @@ pub const Interp = struct {
     /// own; its bindings come back as a record. Functions in it keep the
     /// scope alive and call each other by name.
     fn cmdUse(self: *Interp, args: []const Value) Error!Value {
-        if (args.len != 1) return self.fail("use: a path or a module name expected", .{});
-        const path = try self.strArg(args[0], "use");
+        const path = args[0].str;
         if (self.use_depth == max_use_depth) return self.fail("use: modules nested too deep at {s}", .{path});
         var answer = try self.host.call(self.host.ctx, self, "module", args, null);
         if (answer == null) answer = try self.host.call(self.host.ctx, self, "open", args, null);
@@ -2032,20 +2126,6 @@ pub const Interp = struct {
             vals[i] = try dupValue(self.arena, slot.value);
         }
         return .{ .record = .{ .keys = keys, .vals = vals } };
-    }
-
-    fn intArg(self: *Interp, v: Value, cmd: []const u8) Error!i64 {
-        return switch (v) {
-            .int => |i| i,
-            else => self.fail("{s}: an int expected, got a {s}", .{ cmd, v.typeName() }),
-        };
-    }
-
-    fn strArg(self: *Interp, v: Value, cmd: []const u8) Error![]const u8 {
-        return switch (v) {
-            .str => |s| s,
-            else => self.fail("{s}: a name expected, got a {s}", .{ cmd, v.typeName() }),
-        };
     }
 
     // ------------------------------------------------------------- shapes
@@ -4121,7 +4201,7 @@ test "strong typing: nothing coerces" {
     try expectRuntime(it, "true and 1", "and: condition is a int, not a bool");
     try expectRuntime(it, "1 + \"a\"", "cannot add a int and a string");
     try expectRuntime(it, "[1] | where $it", "where: condition is a int, not a bool");
-    try expectRuntime(it, "ls | first \"2\"", "first: an int expected, got a string");
+    try expectRuntime(it, "ls | first \"2\"", "first: count is \"2\", not int");
     // nothing compares with anything (absence is a question worth asking).
     try expectOut(it, "null == 1", "false\n");
     try expectOut(it, "let x = null; $x == null", "true\n");
@@ -4244,7 +4324,7 @@ test "functions are values: fn, closures, block arguments, higher-order verbs" {
     try expectOut(it, "let g = fn {\n  $in | len\n}", "");
     try std.testing.expectEqualStrings("$in | len", it.lookup("g").?.func.src);
     try expectRuntime(it, "$m 1", "cannot call a record");
-    try expectRuntime(it, "[1] | map 3", "map: a function expected");
+    try expectRuntime(it, "[1] | map 3", "map: f is 3, not function");
     // A $var stage that is not a call is still an expression.
     try expectOut(it, "let x = 3; $x * 2", "6\n");
     try expectOut(it, "$x", "3\n");
@@ -4326,7 +4406,7 @@ test "results: ok, err, ?, try, and match on them" {
     try expectOut(it, "try (fails)", "err fails: as asked\n");
     try expectOut(it, "match (try { fails }) { ok _ => \"fine\"; err $e => \"caught: $e\" }", "caught: fails: as asked\n");
     try expectOut(it, "try { (int x)? }", "err not a number: x\n");
-    try expectRuntime(it, "ok 1 2", "ok: one value expected");
+    try expectRuntime(it, "ok 1 2", "ok: 1 argument(s) at most, got 2");
     try expectRuntime(it, "ok 1 | to-data", "to-data: a result is not data (functions, results, handles and bytes never are)");
 }
 
@@ -4508,6 +4588,16 @@ test "signatures: a host command is checked at the boundary, both ways" {
     try expectOut(it, "(signature open).returns", "ok string | err not_found\n");
     try expectOut(it, "(signature save).input", "any\n");
     try expectOut(it, "signature nope", "");
+    // The builtins have signatures too, checked the same way.
+    try expectOut(it, "(signature first).params | get name", "count\n");
+    try expectOut(it, "(signature map).input", "list\n");
+    try expectOut(it, "(signature int).returns", "ok int | err string\n");
+    try expectRuntime(it, "first 1", "first: needs input (list)");
+    try expectRuntime(it, "\"x\" | reverse", "reverse: input is x, not list");
+    try expectRuntime(it, "range 1", "range: to expected");
+    try expectRuntime(it, "[1] | reduce 0", "reduce: f expected");
+    try expectRuntime(it, "[\"a\", 1] | join", "join: input[1] is 1, not string");
+    try expectRuntime(it, "5 | to-bytes", "to-bytes: input is 5, not string | bytes");
     try expectOut(it, "(stat x | check (signature stat).returns)? | get size", "0\n");
     try expectOut(it, "let sh: shape = (signature ls).returns; (ls | check $sh)? | len", "3\n");
 }
