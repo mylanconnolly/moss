@@ -260,9 +260,9 @@ aarch64 is complete; x86_64 (Limine on UEFI, x2APIC with the APIC timer
 in TSC-deadline mode, I/O APICs and MSI vectors from ACPI, every core)
 runs the kernel, user programs (`syscall`/`sysret`, SMAP as the door
 to user memory), PCIe with MSI-X, VT-d walking each domain's own page
-tables for its devices' DMA, AMD-V for guests (the bare-metal guest so
-far; a moss kernel as a guest is the next step), and every drill but
-the two that need that guest; AMD-Vi is what the port still owes.
+tables for its devices' DMA, AMD-V for guests (a moss kernel as a
+guest, loaded by the VMM over the Limine protocol, with devices passed
+through), and every drill; AMD-Vi is what the port still owes.
 
 moss boots on aarch64 as a raw arm64 Image. Entered at EL2 (the usual
 case under QEMU with virtualization on), the boot code makes the core a
@@ -354,10 +354,9 @@ it — and no claim that any of this defeats Spectre-class attacks.
   creating domain (recorded as a residual since Phase 5).
 - Reaping is polled, once per tick; event-driven reaping is noted as a
   cheap future win.
-- The kernel is aarch64 only; the x86_64 port that would test the HAL
-  boundary is in the Phase 12 pool (ROADMAP.md). Guests (the
-  hypervisor) run only under TCG, since Apple's nested virtualization
-  has no VHE.
+- On aarch64 guests (the hypervisor) run only under TCG, since Apple's
+  nested virtualization has no VHE; on x86_64 they run under nested
+  KVM. The x86_64 port still owes AMD-Vi, PCIDs and the `+rs` pass.
 - Randomness is not interposable: `getrandom` is ungated, like reading
   the counter; a domain that must see deterministic randomness is a
   future manifest option (ROADMAP.md, "Entropy").

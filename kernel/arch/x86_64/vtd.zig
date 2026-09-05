@@ -208,7 +208,12 @@ pub fn attach(idx: u64, root: u64, asid: u16, who: *anyopaque) void {
     pe[1] = asid; // DID
     for (3..8) |i| pe[i] = 0;
     asm volatile ("" ::: .{ .memory = true });
-    pe[0] = 1 | (1 << 6); // present, first-stage translation
+    // Present, first-stage translation, AW = 48-bit. AW describes the
+    // second-stage table, which first-stage translation never walks —
+    // but QEMU derives its "is the DMA address canonical" limit from it
+    // even for first-stage, and AW=0 means 30 bits: every DMA above 1 GB
+    // came back as "non-canonical" (fault 0x80) until this was set.
+    pe[0] = 1 | (1 << 6) | (2 << 2);
     const ce = contextEntry(dev.sid);
     ce[1] = pasid; // RID_PASID
     ce[2] = 0;
@@ -220,13 +225,17 @@ pub fn attach(idx: u64, root: u64, asid: u16, who: *anyopaque) void {
     holder[idx] = who;
 }
 
-/// No hypervisor on this port: a guest never holds a device.
+/// A guest's device: its DMA addresses are guest-physical, and the VM's
+/// nested page tables — x86 tables with the user bit — are what a
+/// first-stage walk translates them by. The domain id is the VM's,
+/// apart from every domain's ASID.
 pub fn attachStage2(idx: u64, s2_root: u64, vmid: u16, who: *anyopaque) void {
-    _ = .{ idx, s2_root, vmid, who };
+    attach(idx, s2_root, 0x800 | vmid, who);
+    if (active and idx < pci.count) log.info("vtd: device {d} -> guest tables, domain {d}", .{ pci.devices[idx].sid, vmid });
 }
 
 pub fn detachStage2(idx: u64, vmid: u16, who: *anyopaque) void {
-    _ = .{ idx, vmid, who };
+    detachIfHolder(idx, who, 0x800 | vmid);
 }
 
 /// Unbind device `idx` if `who` is its holder: the entries go

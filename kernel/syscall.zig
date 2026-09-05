@@ -170,7 +170,7 @@ fn sysVmCpuOn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
 
 fn sysVmSet(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const m = lookupVm(d, frame.arg(0)) orelse return errno(.bad_handle);
-    arch.vm.setEntry(m, 0, frame.arg(1), frame.arg(2), .{ frame.arg(3), frame.arg(4) });
+    arch.vm.setEntry(m, frame.arg(5), frame.arg(1), frame.arg(2), .{ frame.arg(3), frame.arg(4) });
     return errno(.ok);
 }
 
@@ -201,7 +201,8 @@ fn sysDeviceRegister(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     if (kind_raw >= shared.device_kind_count) return errno(.bad_arg);
     const pin: u8 = @truncate(frame.arg(5) & 0xff);
     const bar_index: u8 = @truncate((frame.arg(5) >> 8) & 0xff);
-    const reg = pci.register(@intCast(frame.arg(1) & 0xffff), @enumFromInt(kind_raw), bar_index, frame.arg(3), frame.arg(4), pin) catch |e| return errno(switch (e) {
+    const want_msi = (frame.arg(5) >> 16) & 1 != 0;
+    const reg = pci.register(@intCast(frame.arg(1) & 0xffff), @enumFromInt(kind_raw), bar_index, frame.arg(3), frame.arg(4), pin, want_msi) catch |e| return errno(switch (e) {
         pci.Error.TableFull => .no_space,
         else => .bad_arg,
     });

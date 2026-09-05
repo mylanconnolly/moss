@@ -426,8 +426,9 @@ pub fn build(b: *std.Build) void {
     }
     // The guest kernel: this very kernel, built to boot the guest profile
     // and report, embedding the guest archive; the host archive carries
-    // its raw Image as img/moss-guest for the VMM to load.
-    if (arch == .aarch64) {
+    // it as img/moss-guest for the VMM to load — the raw Image on
+    // aarch64, the ELF (debug info stripped) on x86_64.
+    {
         const guest_blobs = b.addWriteFiles();
         _ = guest_blobs.addCopyFile(marc_guest_out, "bootfs.marc");
         const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
@@ -445,15 +446,23 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("kernel/main.zig"),
             .target = kernel_target,
             .optimize = optimize,
-            .code_model = .small,
+            .code_model = kernel_code_model,
+            .red_zone = kernel_red_zone,
+            // x86_64 embeds the ELF: without debug info, or the archive
+            // would carry the DWARF of a whole kernel.
+            .strip = if (arch == .x86_64) true else null,
         });
         gmod.addImport("shared", shared_mod);
         gmod.addOptions("build_options", gopts);
         gmod.addAnonymousImport("user_blobs", .{ .root_source_file = guest_blobs_src });
-        const gkernel = b.addExecutable(.{ .name = "moss-guest.elf", .root_module = gmod });
+        const gkernel = b.addExecutable(.{ .name = "moss-guest.elf", .root_module = gmod, .use_llvm = if (arch == .x86_64) true else null });
         gkernel.setLinkerScript(linker_script);
-        const gkernel_bin = b.addObjCopy(gkernel.getEmittedBin(), .{ .format = .bin, .basename = "moss-guest.bin" });
-        pack.addPrefixedFileArg("img/moss-guest=", gkernel_bin.getOutput());
+        if (arch == .x86_64) {
+            pack.addPrefixedFileArg("img/moss-guest=", gkernel.getEmittedBin());
+        } else {
+            const gkernel_bin = b.addObjCopy(gkernel.getEmittedBin(), .{ .format = .bin, .basename = "moss-guest.bin" });
+            pack.addPrefixedFileArg("img/moss-guest=", gkernel_bin.getOutput());
+        }
     }
 
     _ = user_blobs.addCopyFile(marc_out, "bootfs.marc");
@@ -875,7 +884,7 @@ pub fn build(b: *std.Build) void {
     // and Limine.
     // Every drill but the aarch64 hypervisor's (vm, guest, vmnode); the
     // smmu drill runs against VT-d here.
-    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin", "smmu", "vm" };
+    const x86_variants = [_][]const u8{ "panic", "fault", "sched", "pan", "domain", "ipc", "init", "sandbox", "flap", "cpu", "rng", "blk", "fs", "net", "shell", "users", "login", "fabric", "flogin", "smmu", "vm", "guest", "vmnode" };
     if (arch == .x86_64) {
         run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
         for (x86_variants) |vn| _ = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);

@@ -273,7 +273,7 @@ pub const Vcpu = extern struct {
     /// Vectors waiting for delivery, 256 bits.
     pending: [4]u64 = @splat(0),
     // The emulated local APIC.
-    apic_base: u64 = 0xfee0_0900, // enabled, x2APIC on, BSP for vCPU 0
+    apic_base: u64 = 0xfee0_0d00, // enabled, x2APIC on (as the loader leaves a core), BSP for vCPU 0
     svr: u64 = 0xff,
     tpr: u64 = 0,
     lvt_timer: u64 = 1 << 16,
@@ -286,9 +286,17 @@ pub const Vcpu = extern struct {
     timer_pending: bool = false,
     pat: u64 = 0x0007_0406_0007_0406,
     first_run: bool = true,
+    /// A read the VMM answers at the next vm_run, and what to do with
+    /// the value: `pend_kind` (see Pend), the register encoding, the size,
+    /// the other operand and the address for a read-modify-write.
     pending_read: bool = false,
-    pending_read_reg: u8 = 0, // 0 = rax, else regs index + 1
-    pending_read_size: u8 = 0,
+    pend_kind: u8 = 0,
+    pend_reg: u8 = 0,
+    pend_size: u8 = 0,
+    pend_extend: u8 = 0, // 0 keep upper bytes, 1 zero-extend, 2 sign-extend
+    pend_alu: u8 = 0, // the ALU op of a test/cmp/rmw (Alu)
+    pend_operand: u64 = 0,
+    pend_gpa: u64 = 0,
     exit_kind: u64 = 0,
     exit_a: u64 = 0,
     exit_b: u64 = 0,
@@ -387,6 +395,9 @@ fn initVmcb(vm: *Vm, v: *Vcpu) void {
         icpt_vmrun | icpt_vmmcall | icpt_vmload | icpt_vmsave | icpt_stgi | icpt_clgi | icpt_skinit | icpt_wbinvd | icpt_monitor | icpt_mwait | icpt_mwait_cond | icpt_xsetbv;
     c.intercept_v3 = @truncate(icpt);
     c.intercept_v4 = @truncate(icpt >> 32);
+    // A double fault in the guest is a fault exit that names its rip and
+    // CR2, where a shutdown would say nothing.
+    c.intercept_exc = 1 << 8;
     c.iopm_pa = boot.imagePhys(@intFromPtr(&iopm));
     c.msrpm_pa = boot.imagePhys(@intFromPtr(&msrpm));
     c.asid = vm.asid;
@@ -444,8 +455,9 @@ pub fn vcpuOn(vm: *Vm, idx: u64, entry: u64, ctx: u64) CpuOnError!void {
     initVmcb(vm, v);
     vmcbOf(v).rip = entry;
     v.regs[4] = ctx;
-    v.apic_base = 0xfee0_0800; // not the BSP
+    v.apic_base = 0xfee0_0c00; // not the BSP
     v.online = true;
+    log.info("vm: vcpu {d} online at 0x{x}", .{ idx, entry });
 }
 
 // ------------------------------------------------------ nested paging
@@ -614,16 +626,7 @@ pub fn run(vm: *Vm, vcpu: u64, resume_value: u64) Exit {
     if (!v.online) return .{ .kind = .fault };
     if (v.pending_read) {
         v.pending_read = false;
-        const val = switch (v.pending_read_size) {
-            1 => resume_value & 0xff,
-            2 => resume_value & 0xffff,
-            4 => resume_value & 0xffff_ffff,
-            else => resume_value,
-        };
-        if (v.pending_read_reg == 0) {
-            const c = vmcbOf(v);
-            c.rax = if (v.pending_read_size == 4) val else (c.rax & ~sizeMask(v.pending_read_size)) | val;
-        } else v.regs[v.pending_read_reg - 1] = val;
+        if (completeRead(v, resume_value & sizeMask(v.pend_size))) |exit| return exit;
     }
     while (true) {
         v.exit_kind = 0;
@@ -721,8 +724,8 @@ fn decode(v: *Vcpu) void {
             c.rip = c.exit_info2;
             if (info & 1 != 0) {
                 v.pending_read = true;
-                v.pending_read_reg = 0;
-                v.pending_read_size = size;
+                v.pend_kind = @intFromEnum(Pend.rax);
+                v.pend_size = size;
                 setExit(v, .pio_read, port, size, 0, 0);
             } else {
                 setExit(v, .pio_write, port, size, c.rax & sizeMask(size), 0);
@@ -731,14 +734,338 @@ fn decode(v: *Vcpu) void {
         exit_vmmcall => {
             c.rip = c.nrip;
             v.pending_read = true;
-            v.pending_read_reg = 0;
-            v.pending_read_size = 8;
+            v.pend_kind = @intFromEnum(Pend.rax);
+            v.pend_size = 8;
             setExit(v, .hvc, c.rax, v.regs[4], v.regs[3], v.regs[2]); // rax, rdi, rsi, rdx
         },
-        exit_npf => setExit(v, .fault, code, c.rip, c.exit_info2, c.exit_info1),
-        exit_shutdown => setExit(v, .fault, code, c.rip, 0, 0),
+        exit_npf => decodeMmio(v, c.exit_info2, c.exit_info1),
+        exit_shutdown => setExit(v, .fault, code, c.rip, c.cr2, 0),
+        0x48 => setExit(v, .fault, code, c.rip, c.cr2, c.exit_info1), // #DF: rip, cr2, error
         else => setExit(v, .fault, code, c.rip, c.exit_info1, c.exit_info2),
     }
+}
+
+// ------------------------------------------------------------- MMIO
+
+/// What a completed read does with its value.
+const Pend = enum(u8) {
+    /// Into rax, the size's low bytes (port I/O, a hypercall's answer).
+    rax = 1,
+    /// Into the register `pend_reg` names, extended per `pend_extend`.
+    reg = 2,
+    /// Flags only: `test`/`cmp` against `pend_operand`.
+    flags = 3,
+    /// Flags, then the ALU result written back: a read-modify-write.
+    rmw = 4,
+};
+
+const Alu = enum(u8) { add = 0, @"or" = 1, adc = 2, sbb = 3, @"and" = 4, sub = 5, xor = 6, cmp = 7, @"test" = 8 };
+
+var undecodable_logged: u32 = 0;
+
+/// The bytes of an instruction the decoder refused, logged for the
+/// first few — how the decoder learns a new form.
+fn undecodable(v: *Vcpu, b: []const u8, gpa: u64, info: u64) void {
+    const c = vmcbOf(v);
+    if (undecodable_logged < 4) {
+        undecodable_logged += 1;
+        log.warn("vm: MMIO instruction not decoded at rip 0x{x} (gpa 0x{x}): {x}", .{ c.rip, gpa, b });
+    }
+    setExit(v, .fault, exit_npf, c.rip, gpa, info);
+}
+
+/// A nested-paging fault on memory the VM was not given: an MMIO exit,
+/// if the instruction is one a device driver produces — a move (also
+/// zero/sign-extending, or from an immediate), `test`/`cmp` against
+/// memory, or an ALU read-modify-write on it. The bytes come with the
+/// exit (decode assist) or are fetched through the guest's tables; the
+/// address is the fault's, so only the register operand and the width
+/// are decoded. Reads complete at the next vm_run (`completeRead`).
+fn decodeMmio(v: *Vcpu, gpa: u64, info: u64) void {
+    const c = vmcbOf(v);
+    var b: [15]u8 = undefined;
+    var n: usize = c.insn_len;
+    if (n > 15) n = 0;
+    for (0..n) |k| b[k] = c.insn_bytes[k];
+    if (n == 0) {
+        n = fetchGuestBytes(v, c.rip, &b);
+        if (n == 0) return setExit(v, .fault, exit_npf, c.rip, gpa, info);
+    }
+    var i: usize = 0;
+    var opsize: u8 = 4;
+    var rex: u8 = 0;
+    while (i < n) : (i += 1) {
+        if (b[i] == 0x66) {
+            opsize = 2;
+        } else if (b[i] & 0xf0 == 0x40) {
+            rex = b[i];
+        } else break;
+    }
+    if (rex & 8 != 0) opsize = 8;
+    if (i >= n) return undecodable(v, b[0..n], gpa, info);
+    var op = b[i];
+    i += 1;
+    var two = false;
+    if (op == 0x0f) {
+        if (i >= n) return undecodable(v, b[0..n], gpa, info);
+        op = b[i];
+        i += 1;
+        two = true;
+    }
+    if (i >= n) return undecodable(v, b[0..n], gpa, info);
+    const modrm = b[i];
+    i += 1;
+    const reg: u8 = ((modrm >> 3) & 7) | (if (rex & 4 != 0) @as(u8, 8) else 0);
+    const ext: u8 = (modrm >> 3) & 7; // the opcode extension of a group
+    const mod = modrm >> 6;
+    const rm = modrm & 7;
+    if (mod != 3 and rm == 4) i += 1; // SIB
+    if (mod == 1) i += 1 else if (mod == 2 or (mod == 0 and rm == 5)) i += 4;
+    if (i > n) return undecodable(v, b[0..n], gpa, info);
+
+    var size: u8 = opsize;
+    var kind: Pend = .reg;
+    var alu: Alu = .add;
+    var write_value: ?u64 = null; // a plain store
+    var operand: u64 = 0;
+    var extend: u8 = 1;
+    var imm_len: usize = 0;
+    const Imm = struct {
+        fn read(bytes: []const u8, at: usize, len: usize, to_size: u8) ?u64 {
+            if (at + len > bytes.len) return null;
+            const raw: u64 = switch (len) {
+                1 => bytes[at],
+                2 => std.mem.readInt(u16, bytes[at..][0..2], .little),
+                4 => std.mem.readInt(u32, bytes[at..][0..4], .little),
+                else => return null,
+            };
+            // Immediates sign-extend to the operand size.
+            const shift: u6 = @intCast(64 - len * 8);
+            const sx: u64 = @bitCast(@as(i64, @bitCast(raw << shift)) >> shift);
+            return sx & sizeMask(to_size);
+        }
+    };
+    if (!two) switch (op) {
+        0x88 => {
+            size = 1;
+            write_value = regRead(v, reg, 1);
+        },
+        0x89 => write_value = regRead(v, reg, size),
+        0x8a => {
+            size = 1;
+            extend = 0;
+        },
+        0x8b => extend = if (size == 4) 1 else 0,
+        0xc6, 0xc7 => {
+            if (ext != 0) return undecodable(v, b[0..n], gpa, info);
+            if (op == 0xc6) size = 1;
+            imm_len = if (op == 0xc6) 1 else if (size == 2) 2 else 4;
+            write_value = Imm.read(b[0..n], i, imm_len, size) orelse return undecodable(v, b[0..n], gpa, info);
+        },
+        0x84, 0x85 => { // test m, r
+            if (op == 0x84) size = 1;
+            kind = .flags;
+            alu = .@"test";
+            operand = regRead(v, reg, size);
+        },
+        0xf6, 0xf7 => { // test m, imm
+            if (ext != 0) return undecodable(v, b[0..n], gpa, info);
+            if (op == 0xf6) size = 1;
+            imm_len = if (op == 0xf6) 1 else if (size == 2) 2 else 4;
+            kind = .flags;
+            alu = .@"test";
+            operand = Imm.read(b[0..n], i, imm_len, size) orelse return undecodable(v, b[0..n], gpa, info);
+        },
+        0x38, 0x39 => { // cmp m, r
+            if (op == 0x38) size = 1;
+            kind = .flags;
+            alu = .cmp;
+            operand = regRead(v, reg, size);
+        },
+        0x3a, 0x3b => { // cmp r, m: the operands reversed
+            if (op == 0x3a) size = 1;
+            kind = .flags;
+            alu = .cmp;
+            operand = regRead(v, reg, size) | (1 << 63); // marked: r - m
+            if (size == 8) return undecodable(v, b[0..n], gpa, info);
+        },
+        0x80, 0x81, 0x83 => { // group 1: ALU m, imm
+            if (op == 0x80) size = 1;
+            imm_len = if (op == 0x81) (if (size == 2) 2 else 4) else 1;
+            operand = Imm.read(b[0..n], i, imm_len, size) orelse return undecodable(v, b[0..n], gpa, info);
+            alu = @enumFromInt(ext);
+            kind = if (alu == .cmp) .flags else .rmw;
+        },
+        0x00, 0x01, 0x08, 0x09, 0x20, 0x21, 0x28, 0x29, 0x30, 0x31 => { // ALU m, r
+            if (op & 1 == 0) size = 1;
+            alu = @enumFromInt(op >> 3);
+            operand = regRead(v, reg, size);
+            kind = .rmw;
+        },
+        else => return undecodable(v, b[0..n], gpa, info),
+    } else switch (op) {
+        0xb6 => size = 1, // movzx
+        0xb7 => size = 2,
+        0xbe => {
+            size = 1;
+            extend = 2;
+        },
+        0xbf => {
+            size = 2;
+            extend = 2;
+        },
+        else => return undecodable(v, b[0..n], gpa, info),
+    }
+    c.rip += i + imm_len;
+    if (write_value) |w| return setExit(v, .mmio_write, gpa, size, w & sizeMask(size), 0);
+    v.pending_read = true;
+    v.pend_kind = @intFromEnum(kind);
+    v.pend_reg = reg;
+    v.pend_size = size;
+    v.pend_extend = extend;
+    v.pend_alu = @intFromEnum(alu);
+    v.pend_operand = operand;
+    v.pend_gpa = gpa;
+    setExit(v, .mmio_read, gpa, size, reg, 0);
+}
+
+/// The VMM answered a read: finish the instruction. A read-modify-write
+/// produces the write as the next exit, before the guest runs again.
+fn completeRead(v: *Vcpu, val: u64) ?Exit {
+    const c = vmcbOf(v);
+    const size = v.pend_size;
+    switch (@as(Pend, @enumFromInt(v.pend_kind))) {
+        .rax => c.rax = if (size == 4) val else (c.rax & ~sizeMask(size)) | val,
+        .reg => {
+            const wide: u64 = if (v.pend_extend == 2) signExtend(val, size) else val;
+            const zero = v.pend_extend != 0;
+            regWrite(v, v.pend_reg, if (v.pend_extend == 2) 8 else size, wide, zero);
+        },
+        .flags => {
+            const alu: Alu = @enumFromInt(v.pend_alu);
+            if (v.pend_operand & (1 << 63) != 0 and alu == .cmp) {
+                _ = aluOp(v, .cmp, v.pend_operand & sizeMask(size), val, size);
+            } else {
+                _ = aluOp(v, alu, val, v.pend_operand, size);
+            }
+        },
+        .rmw => {
+            const result = aluOp(v, @enumFromInt(v.pend_alu), val, v.pend_operand, size);
+            return .{ .kind = .mmio_write, .a = v.pend_gpa, .b = size, .c = result & sizeMask(size), .d = 0 };
+        },
+    }
+    return null;
+}
+
+fn signExtend(val: u64, size: u8) u64 {
+    const shift: u6 = @intCast(64 - @as(u32, size) * 8);
+    return @bitCast(@as(i64, @bitCast(val << shift)) >> shift);
+}
+
+/// An ALU operation on `a` and `b` of `size` bytes: the result, and the
+/// guest's CF/PF/ZF/SF/OF as the instruction would leave them.
+fn aluOp(v: *Vcpu, op: Alu, a: u64, b: u64, size: u8) u64 {
+    const mask = sizeMask(size);
+    const bits: u6 = @intCast(@as(u32, size) * 8 - 1);
+    const sign: u64 = @as(u64, 1) << bits;
+    var result: u64 = 0;
+    var cf = false;
+    var of = false;
+    switch (op) {
+        .add, .adc => {
+            const wide = (a & mask) + (b & mask);
+            result = wide & mask;
+            cf = wide > mask;
+            of = ((a ^ result) & (b ^ result) & sign) != 0;
+        },
+        .sub, .sbb, .cmp => {
+            result = (a -% b) & mask;
+            cf = (a & mask) < (b & mask);
+            of = ((a ^ b) & (a ^ result) & sign) != 0;
+        },
+        .@"and", .@"test" => result = a & b & mask,
+        .@"or" => result = (a | b) & mask,
+        .xor => result = (a ^ b) & mask,
+    }
+    const zf = result == 0;
+    const sf = result & sign != 0;
+    const low: u8 = @truncate(result);
+    const pf = @popCount(low) % 2 == 0;
+    const c = vmcbOf(v);
+    var f = c.rflags & ~@as(u64, 0x8d5);
+    if (cf) f |= 1;
+    if (pf) f |= 1 << 2;
+    if (zf) f |= 1 << 6;
+    if (sf) f |= 1 << 7;
+    if (of) f |= 1 << 11;
+    c.rflags = f;
+    return result;
+}
+
+/// Guest-physical to host-physical, for guest RAM only.
+fn gpaToPa(vm: *Vm, g: u64) ?u64 {
+    if (g < ram_ipa or g >= ram_ipa + vm.ram_pages * mem.page_size) return null;
+    return vm.ram_pa + (g - ram_ipa);
+}
+
+/// Walk the guest's page tables (CR3 in the VMCB) for `va`; 4-level,
+/// 4K/2M/1G pages; null when unmapped.
+fn guestVaToPa(v: *Vcpu, va: u64) ?u64 {
+    const vm = vmOf(v);
+    var table = vmcbOf(v).cr3 & 0x000f_ffff_ffff_f000;
+    const shifts = [_]u6{ 39, 30, 21, 12 };
+    for (shifts, 0..) |shift, level| {
+        const tpa = gpaToPa(vm, table) orelse return null;
+        const e = mem.physToPtr([*]const u64, tpa)[(va >> shift) & 0x1ff];
+        if (e & 1 == 0) return null;
+        if (level == 3) return (e & 0x000f_ffff_ffff_f000) | (va & 0xfff);
+        if (level > 0 and e & (1 << 7) != 0) { // a large page
+            const page_mask: u64 = (@as(u64, 1) << shift) - 1;
+            return (e & 0x000f_ffff_ffff_f000 & ~page_mask) | (va & page_mask);
+        }
+        table = e & 0x000f_ffff_ffff_f000;
+    }
+    return null;
+}
+
+/// Up to 15 instruction bytes at the guest's rip (within its page).
+fn fetchGuestBytes(v: *Vcpu, rip: u64, out: *[15]u8) usize {
+    const vm = vmOf(v);
+    const g = guestVaToPa(v, rip) orelse return 0;
+    const pa = gpaToPa(vm, g) orelse return 0;
+    const room = mem.page_size - (pa & 0xfff);
+    const n: usize = @intCast(@min(15, room));
+    const src = mem.physToPtr([*]const u8, pa);
+    for (0..n) |i| out[i] = src[i];
+    return n;
+}
+
+/// General registers by encoding: 0 rax .. 7 rdi, 8..15 r8..r15; rax and
+/// rsp live in the VMCB, the rest in `regs` (rbx rcx rdx rsi rdi rbp r8..).
+fn regIndex(enc: u8) ?usize {
+    return switch (enc) {
+        1 => 1, // rcx
+        2 => 2, // rdx
+        3 => 0, // rbx
+        5 => 5, // rbp
+        6 => 3, // rsi
+        7 => 4, // rdi
+        8...15 => 6 + @as(usize, enc - 8),
+        else => null, // rax, rsp: the VMCB's
+    };
+}
+
+fn regRead(v: *Vcpu, enc: u8, size: u8) u64 {
+    const c = vmcbOf(v);
+    const full: u64 = if (enc == 0) c.rax else if (enc == 4) c.rsp else v.regs[regIndex(enc).?];
+    return full & sizeMask(size);
+}
+
+fn regWrite(v: *Vcpu, enc: u8, size: u8, val: u64, zero_extend: bool) void {
+    const c = vmcbOf(v);
+    const old: u64 = if (enc == 0) c.rax else if (enc == 4) c.rsp else v.regs[regIndex(enc).?];
+    const new: u64 = if (zero_extend or size >= 4) (val & sizeMask(size)) else (old & ~sizeMask(size)) | (val & sizeMask(size));
+    if (enc == 0) c.rax = new else if (enc == 4) c.rsp = new else v.regs[regIndex(enc).?] = new;
 }
 
 // ------------------------------------------------------ the guest's CPU
@@ -870,10 +1197,14 @@ fn svmRunAsm() []const u8 {
         \\
     ;
     for (host_regs, 0..) |r, i| out = out ++ std.fmt.comptimePrint("        mov %{s}, {d}(%rdi)\n", .{ r, o_host + i * 8 });
+    // GIF off, then the host's IF on: nothing is delivered until the
+    // guest runs, and a physical interrupt during the guest is then an
+    // INTR exit (with IF clear at vmrun it would be blocked instead).
     out = out ++
         \\        push %rdi
         \\        mov %rsi, %rax
         \\        clgi
+        \\        sti
         \\        vmload %rax
         \\
     ;
@@ -893,7 +1224,7 @@ fn svmRunAsm() []const u8 {
         out = out ++ std.fmt.comptimePrint("        mov %{s}, {d}(%rdi)\n", .{ r, o_regs + i * 8 });
     }
     out = out ++ std.fmt.comptimePrint("        pop %rsi\n        mov %rsi, {d}(%rdi)\n", .{o_regs + 4 * 8});
-    out = out ++ std.fmt.comptimePrint("        vmsave %rax\n        mov {d}(%rdi), %rax\n        vmload %rax\n        stgi\n        pop %rdi\n", .{o_host_vmcb});
+    out = out ++ std.fmt.comptimePrint("        vmsave %rax\n        mov {d}(%rdi), %rax\n        vmload %rax\n        cli\n        stgi\n        pop %rdi\n", .{o_host_vmcb});
     for (host_regs, 0..) |r, i| out = out ++ std.fmt.comptimePrint("        mov {d}(%rdi), %{s}\n", .{ o_host + i * 8, r });
     out = out ++ "        ret\n";
     return out;

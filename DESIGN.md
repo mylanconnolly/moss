@@ -2315,15 +2315,99 @@ interrupt, before delivery, so a handler that merely re-enters spins
 forever (ten million entries, one tick) — the request delivers by
 itself, and V_IRQ clearing is how the hypervisor learns it did.
 
-What the hypervisor still owes (stage 6b): the moss kernel as a guest
-— the VMM speaking the Limine protocol to it (the memory map, HHDM,
-executable address, command line, TSC frequency, RSDP with ACPI tables
-the VMM synthesizes, an MP response with parked vCPUs), an MMIO decoder
-for nested-paging faults so its PCIe config and BAR accesses can be
-answered, device passthrough (the NPT as VT-d's first stage, MSI-X
-vectors injected), and with those the guest and vmnode drills. Then
-AMD-Vi for the machines that have it, PCIDs, the `+rs` pass, a
-framebuffer console.
+### The x86_64 port, stage 6b: the moss kernel as a guest, passthrough (as built, 2026-09-04)
+
+The VMM is the guest's loader, as on aarch64 — but there the guest
+kernel is an Image with a devicetree, and here it is the Limine
+protocol (`user/vmm.zig`, `loadMossGuestX86`). The VMM copies the
+ELF's segments into guest RAM at their link address, builds the guest's
+first page tables (the image, and the higher-half direct map at the
+same offset the real loader uses), scans the image for the protocol's
+request markers, and answers each request the kernel makes: the memory
+map (usable RAM, and the image, tables, ACPI and stacks as loader
+reservations), the HHDM offset, the executable's addresses, the command
+line (the drill's boot arguments, as on aarch64), the RSDP, the TSC
+frequency (the host's, since the TSC is not scaled), the bootloader's
+name, and the MP response. ACPI is synthesized, the same tables the
+port reads on hardware: an RSDP and XSDT, a FADT with the PM1a control
+port the VMM already answers as power-off and a DSDT carrying `_S5_`
+and the host bridge's memory window, a MADT with the vCPUs' local
+APICs and no I/O APIC, and an MCFG placing the emulated ECAM. The MP
+response parks the secondary vCPUs the way the loader parks cores:
+one VMM thread per AP polls its `goto_address`, and when the kernel
+writes it the thread sets the vCPU's entry, page tables and stack
+(`vm_set`) and brings it online (`vm_cpu_on`) — the same PSCI
+mechanics the aarch64 VMM answers by hypercall, driven by memory here.
+The guest kernel boots as it does on hardware, four cores up, and the
+entry it hands its stack is a higher-half address: the first attempt
+passed the guest-physical one and triple-faulted at its first push.
+
+Nested-paging faults are instructions to finish. The decoder in
+`svm.zig` takes the instruction's bytes from the exit when the CPU
+provides them and otherwise fetches them through the guest's own page
+tables (nested KVM offers no decode assist), and knows what a driver
+compiles to: moves in both directions and from an immediate, the zero-
+and sign-extending loads, `test` and `cmp` against memory, and the
+ALU read-modify-writes (`or`, `and`, `add`, `sub`, `xor` on a memory
+operand). The address is the fault's, so only the width and the other
+operand are decoded. A read completes at the next `vm_run` with the
+VMM's value: into the register, or through the ALU into RFLAGS — and a
+read-modify-write yields its write as the very next exit, before the
+guest runs again, so the two halves are one instruction to the guest.
+The first form the drill demanded was not a move: LLVM folded
+`pcisvc`'s volatile load of the header-type byte into `testb
+$0x7f,(%rax)`, and a decoder that stopped at `mov` reported it as
+undecodable. The undecodable ones are logged with their bytes — the
+way the decoder learns the next form.
+
+Passthrough is the stage-5 machinery pointed at the guest: the NPT is
+the device's first-stage table in VT-d (`attachStage2`, domain id
+`0x800 | vm`), so a device the VMM hands over addresses guest-physical
+memory directly, and the device's interrupt — its MSI-X vector on the
+host, programmed by the host's enumerator — is bound to the VM and
+delivered as the vector the guest expects for the slot's INTx line,
+48 plus the platform's swizzle. The guest has no I/O APIC: the MADT
+does not name one, its line enables and masks are no-ops, and the
+injected vector is the line. Masking is the host's business, and the
+host's line is a message, so there is nothing to re-enable; interrupt
+remapping is not needed for this. The guest's enumerator sees the
+device's real configuration space with virtual BARs (sized from the
+real one, placed by the guest) and no BAR for the MSI-X table, so it
+falls back to INTx — which exposed a mismatch that had been harmless
+on the host: `pci.register` routed a message interrupt for every
+device on x86_64, because the local APIC routes them for any device
+where aarch64 needs an ITS, and the kernel's idea of the device's
+interrupt (vector 128) parted from the enumerator's (INTx). The
+guest's rngd waited on 128 while the host injected 49. The fix is a
+word from the enumerator: `device_register` carries an `msix` bit,
+and a message interrupt is routed only when the enumerator can reach
+the MSI-X table; a device without one keeps its INTx line, on both
+architectures. The second bug was VT-d's: the PASID entry's address
+width describes the second-stage table, which first-stage translation
+never walks, so it was left zero — and QEMU derives its "is this DMA
+address canonical" limit from that field for first-stage too. Zero
+means 30 bits; every DMA above 1 GB, which is where guest RAM begins,
+was refused as non-canonical (fault 0x80) while the smmu drill, whose
+buffers sit lower, passed. The port sets it to 48 bits.
+
+Two more lessons from the run loop. A `vmrun` with the host's
+interrupts disabled never sees the INTR intercept fire, since the
+core does not take the interrupt that would cause the exit: the BSP,
+spinning for its APs, ran on forever with the VMM's poller threads
+never scheduled. The entry stub now runs the guest under `clgi; sti`
+and returns through `cli; stgi`, so a host interrupt ends the run and
+is taken as soon as GIF is set again. And an instruction the decoder
+finished must advance `rip` by the bytes it decoded, not the bytes it
+fetched — the fetch takes fifteen.
+
+The guest drill (the moss kernel with four vCPUs, its own PCIe and
+ACPI, powering itself off through the PM1a port) and the vmnode drill
+(a NIC and an entropy device passed through, the guest joining the
+fabric as node 2 and serving a remote spawn) pass under nested KVM;
+the port's gate is all twenty-three drills. Still owed: AMD-Vi for
+the machines that have it, PCIDs, the `+rs` pass, a framebuffer
+console, and an I/O APIC and MSI-X for guests when a guest needs
+more than a line per device.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

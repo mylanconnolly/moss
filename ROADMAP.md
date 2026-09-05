@@ -215,12 +215,15 @@ is a plan.
   the aarch64 hypervisor's three. ✅ Stage 6a (landed 2026-09-04): the
   hypervisor's core — AMD-V with nested paging, the guest's local APIC
   emulated through its x2APIC MSRs, port I/O and hypercall exits, the
-  bare-metal x86 guest; the vm drill on the port. Next, 6b: the moss
-  kernel as a guest (the VMM speaking Limine's protocol to it, an MMIO
-  decoder, synthesized ACPI, parked vCPUs), device passthrough (the NPT
-  as VT-d's first stage), the guest and vmnode drills. Still owed:
+  bare-metal x86 guest; the vm drill on the port. ✅ Stage 6b (landed
+  2026-09-04): the moss kernel as a guest — the VMM speaks Limine's
+  protocol to it with synthesized ACPI and parks its vCPUs, an MMIO
+  decoder that knows the ALU forms a compiler folds loads into, device
+  passthrough over the NPT as VT-d's first stage; the guest and vmnode
+  drills, and with them all twenty-three on the port. Still owed:
   AMD-Vi for the machines that have it (the GCR3 walk, the same shape),
-  PCIDs, the `+rs` pass on the port, a framebuffer console. Modern hardware only: no legacy
+  PCIDs, the `+rs` pass on the port, a framebuffer console, an I/O APIC
+  and MSI-X for guests. Modern hardware only: no legacy
   PIC, PIT, or BIOS paths, ever (locked decision); the 16550 is the
   debug console QEMU and a PCIe serial card speak, and the framebuffer
   console for real machines is owed.
@@ -415,6 +418,28 @@ is a plan.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **x86_64, stage 6b: the moss kernel as a guest, passthrough**
+  (2026-09-04): the VMM speaks the Limine protocol to the guest kernel
+  (`loadMossGuestX86`: the image at its link address and a higher-half
+  map, memory map, HHDM, command line, TSC rate, synthesized RSDP/XSDT/
+  FADT/DSDT/MADT/MCFG, an MP response whose parked vCPUs VMM threads
+  release with `vm_set` + `vm_cpu_on`); the nested-paging MMIO decoder
+  in `svm.zig` handles moves, extending loads, `test`/`cmp` against
+  memory and ALU read-modify-writes (a read exit, then the write as the
+  next exit), fetching bytes through the guest's tables when the exit
+  carries none; passthrough puts the NPT in VT-d's first stage and
+  delivers the device's host MSI-X vector as the guest's INTx vector.
+  guest and vmnode pass under nested KVM — the x86_64 gate is all 23
+  drills. Found: LLVM folds a volatile load into `testb $0x7f,(%rax)`
+  (a mov-only decoder is not a decoder); the VT-d PASID entry's
+  second-stage address width bounds QEMU's first-stage canonical check
+  (zero = 30 bits, every DMA above 1 GB refused as non-canonical); the
+  kernel routed an MSI vector for every x86 device while the enumerator
+  fell back to INTx when the MSI-X BAR was hidden — `device_register`
+  now carries the enumerator's `msix` bit and routes messages only on
+  it; a `vmrun` with host IF clear never takes the INTR exit (the stub
+  runs the guest under `clgi; sti`); `rip` advances by decoded, not
+  fetched, bytes; AP stacks must be higher-half addresses.
 - ✅ **x86_64, stage 6a: the hypervisor's core** (2026-09-04): AMD-V
   (`kernel/arch/x86_64/svm.zig`) — a VMCB per vCPU, nested paging with
   the user bit (VT-d's first stage can walk it), every exit

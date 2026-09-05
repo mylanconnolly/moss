@@ -129,9 +129,10 @@ pub const Syscall = enum(u64) {
     /// vm_run(vm_handle, vcpu, resume_value) -> x1 = VmExit, x2..x5 = exit
     /// details; `resume_value` completes a pending mmio_read.
     vm_run = 34,
-    /// vm_set(vm_handle, pc, x0, a, b): the vCPU's entry point and first
-    /// argument; a port may take more (x86_64: a = the guest's page
-    /// tables, 0 for the VM's shared ones; b = its stack).
+    /// vm_set(vm_handle, pc, x0, a, b, vcpu): the vCPU's entry point and
+    /// first argument; a port may take more (x86_64: a = the guest's page
+    /// tables, 0 for the VM's shared ones; b = its stack). vcpu defaults
+    /// to 0.
     vm_set = 35,
     /// vm_attach_device(vm_handle, device_handle, bar_ipa, vintid): pass a
     /// device through to the guest — its BAR mapped at bar_ipa in the
@@ -142,9 +143,12 @@ pub const Syscall = enum(u64) {
     /// pages = 0: an enquiry), x2 = the window's physical base, x3 = size.
     window_map = 37,
     /// device_register(ecam_window_handle, requester_id, kind, bar_pa,
-    /// bar_len, pin | bar_index << 8) -> x1 = device handle, x2 = the LPI
-    /// routed for it (0 without an ITS), x3 = the doorbell address the
-    /// device's MSI-X entry must target. The ECAM holder's authority.
+    /// bar_len, pin | bar_index << 8 | msix << 16) -> x1 = device handle,
+    /// x2 = the message interrupt routed for it (only when the enumerator
+    /// set the msix bit — it has a usable MSI-X table — and the platform
+    /// routes messages: 0 otherwise, and the device's INTx line is its
+    /// interrupt), x3 = the doorbell address the device's MSI-X entry must
+    /// target. The ECAM holder's authority.
     /// -> x4 = the MSI data word the device writes (the ITS event id
     /// on aarch64, the vector on x86_64).
     device_register = 38,

@@ -55,10 +55,16 @@ pub fn init(h: arch.platform.PcieHost) void {
 pub const Error = error{ NoHost, TableFull, BadDevice };
 
 /// Register an endpoint the enumerator found: its requester id, kind,
-/// the BAR its virtio structures live in, and its INTx pin (0 = none).
+/// the BAR its virtio structures live in, its INTx pin (0 = none), and
+/// whether the enumerator can program an MSI-X entry for it — only then
+/// is a message interrupt routed; a device whose MSI-X table it cannot
+/// reach keeps its INTx line as its interrupt. (The x86_64 port's local
+/// APIC routes messages for any device, so without the enumerator's word
+/// a guest's passed-through device — its MSI-X BAR hidden by the VMM —
+/// would wait on a vector the VMM never delivers.)
 /// Returns the table index and the LPI routed for it (0 without an
 /// ITS). Registering a requester id again returns the existing entry.
-pub fn register(sid: u32, kind: shared.DeviceKind, bar_index: u8, bar_pa: u64, bar_len: u64, pin: u8) Error!struct { idx: usize, lpi: u32 } {
+pub fn register(sid: u32, kind: shared.DeviceKind, bar_index: u8, bar_pa: u64, bar_len: u64, pin: u8, want_msi: bool) Error!struct { idx: usize, lpi: u32 } {
     if (!have_host) return Error.NoHost;
     if (sid >= 256 or pin > 4 or bar_index >= 6) return Error.BadDevice;
     if (bar_len != 0 and (bar_pa < windows[1].base or bar_pa + bar_len > windows[1].base + windows[1].size)) return Error.BadDevice;
@@ -69,10 +75,10 @@ pub fn register(sid: u32, kind: shared.DeviceKind, bar_index: u8, bar_pa: u64, b
     const slot: u8 = @intCast(sid >> 3);
     var intid: u32 = if (pin == 0) 0 else arch.platform.intxIntid(host, slot, pin);
     var lpi: u32 = 0;
-    if (arch.msi.route(sid)) |l| {
+    if (want_msi) if (arch.msi.route(sid)) |l| {
         lpi = l;
         intid = l;
-    }
+    };
     devices[count] = .{
         .slot = slot,
         .kind = kind,

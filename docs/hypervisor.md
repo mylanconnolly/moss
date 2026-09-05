@@ -17,9 +17,11 @@ This page describes the aarch64 hypervisor (the EL2 host, the vGIC).
 The x86_64 port has the same design on AMD-V — nested paging as the
 guest's world, the guest's local APIC emulated in the kernel through
 its x2APIC registers where aarch64 has the vGIC, port I/O and
-hypercalls as exits beside MMIO — and runs the bare-metal guest today;
-a moss kernel as a guest there is the port's next step (DESIGN.md, "The
-x86_64 port, stage 6a").
+hypercalls as exits beside MMIO, the VMM speaking the Limine protocol
+to a moss guest where it hands the aarch64 one a devicetree — and runs
+the bare-metal guest, the moss guest and the two-node vmnode drill with
+devices passed through (DESIGN.md, "The x86_64 port, stage 6a" and
+"6b").
 
 ## How it works
 
@@ -303,12 +305,15 @@ flowchart TB
 - The bare-metal guest's UART and the moss guest's PL011 are write-only
   as emulated; a `mmio_read` of the flag register reports "TX not full,
   RX empty" and every other register reads as zero.
-- **x86_64 (AMD-V):** only the bare-metal guest runs so far — the moss
-  guest needs the VMM to speak Limine's protocol to it, an MMIO decoder
-  and synthesized ACPI. A guest's TSC-deadline timer is watched at the
-  host's tick, so its period is at best the host's (100 ms). No
-  interrupt remapping: a passed-through device's MSI-X will be routed
-  as on aarch64, by the host, when passthrough lands there.
+- **x86_64 (AMD-V):** a guest's TSC-deadline timer is watched at the
+  host's tick, so its period is at best the host's (100 ms). The guest
+  has no I/O APIC and no MSI-X for its devices: a passed-through
+  device's interrupt (its MSI-X vector on the host) arrives as the
+  guest's INTx vector for the slot, one line per device, and the
+  guest's line masks are no-ops. The MMIO decoder knows moves,
+  extending loads, `test`/`cmp` and ALU read-modify-writes on memory;
+  an instruction outside that set is logged with its bytes and the
+  guest is stopped with a fault exit.
 
 ## Dig deeper
 

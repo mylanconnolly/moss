@@ -223,6 +223,11 @@ pub fn vmSetX(vm: u64, pc: u64, arg: u64, cr3: u64, rsp: u64) shared.Errno {
     return syscall6(.vm_set, vm, pc, arg, cr3, rsp, 0).err;
 }
 
+/// vmSetX for another vCPU (after vm_cpu_on brought it online).
+pub fn vmSetVcpu(vm: u64, vcpu: u64, pc: u64, arg: u64, cr3: u64, rsp: u64) shared.Errno {
+    return syscall6(.vm_set, vm, pc, arg, cr3, rsp, vcpu).err;
+}
+
 /// window_map(window, page_offset, pages): data[0] = va (0 for an
 /// enquiry with pages 0), data[1] = base pa, data[2] = size.
 pub fn windowMap(window: u64, page_off: u64, pages: u64) IpcResult {

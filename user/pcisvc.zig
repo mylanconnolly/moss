@@ -163,7 +163,8 @@ fn probe(log_h: u64, slot: u8) void {
         0;
     const bar = if (bar_index < 6) bars[bar_index] else bars[0];
 
-    const reg = usys.deviceRegister(ecam_h, @as(u64, slot) << 3, kind, bar.pa, bar.len, @as(u64, pin) | (@as(u64, if (bar_index < 6) bar_index else 0) << 8));
+    const msix_usable = msix_cap != 0 and msix_table != 0 and msix_table >= mmio_base;
+    const reg = usys.deviceRegister(ecam_h, @as(u64, slot) << 3, kind, bar.pa, bar.len, @as(u64, pin) | (@as(u64, if (bar_index < 6) bar_index else 0) << 8) | (@as(u64, @intFromBool(msix_usable)) << 16));
     if (reg.err != .ok) {
         _ = usys.log(log_h, "pcisvc: the kernel refused a device registration");
         return;
@@ -173,7 +174,7 @@ fn probe(log_h: u64, slot: u8) void {
     const doorbell = reg.data[2];
     const msi_data = reg.data[3];
     var msi = false;
-    if (lpi != 0 and msix_cap != 0 and msix_table != 0 and msix_table >= mmio_base) {
+    if (lpi != 0 and msix_usable) {
         // MSI-X entry 0: the doorbell and the data word the kernel named
         // (the ITS event, or the vector); enable, unmask.
         const page = usys.windowMap(mmio_h, (msix_table - mmio_base) / 4096, 1);
