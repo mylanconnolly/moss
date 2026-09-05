@@ -11,8 +11,9 @@
   after:     apply
   essential: true
   give: [
-    { tag: view, fs: conf/users, ro: true, mkdir: true }
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
     { tag: home, fs: home, ro: false }
+    { tag: shares, fs: conf/shares, ro: false, mkdir: true }
     { tag: conf, fs: conf/app, ro: true, mkdir: true }
     { tag: store, fs: img, ro: true }
     { tag: console, unit: cons }

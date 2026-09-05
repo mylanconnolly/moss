@@ -301,7 +301,7 @@ const command_names = [_][]const u8{
     "mkdir", "rm",      "mv",     "ln",     "readlink", "sync",   "df",
     "ps",    "mem",     "svc",    "start",  "stop",     "nodes",  "rspawn",
     "rand",  "run",     "help",   "exit",   "clear",    "source", "install",
-    "share", "unshare", "shares", "accept",
+    "share", "unshare", "shares", "accept", "passwd",
 };
 
 /// Tab completion: command names in command position, paths elsewhere
@@ -400,6 +400,7 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (is(name, "share")) return .{ .params = &.{ .{ .name = "path", .shape = .string }, .{ .name = "name", .shape = .string }, .{ .name = "user", .shape = .string }, .{ .name = "mode", .shape = .{ .word = "rw" }, .optional = true } }, .ret = sess_result };
     if (is(name, "unshare") or is(name, "accept")) return .{ .params = &.{.{ .name = "name", .shape = .string }}, .ret = sess_result };
     if (is(name, "shares")) return .{ .ret = .table };
+    if (is(name, "passwd")) return .{ .params = &.{ .{ .name = "old", .shape = .string }, .{ .name = "new", .shape = .string } }, .ret = sess_result };
     return null;
 }
 
@@ -462,6 +463,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     if (is(name, "install")) return try cmdInstall(it, args[0].str);
     if (is(name, "share")) return try cmdShare(it, args[0].str, args[1].str, args[2].str, args.len > 3);
     if (is(name, "unshare")) return try cmdUnshare(it, args[0].str);
+    if (is(name, "passwd")) return try cmdPasswd(it, args[0].str, args[1].str);
     if (is(name, "shares")) return try cmdShares(it);
     if (is(name, "accept")) return try cmdAccept(it, args[0].str);
     return null;
@@ -684,6 +686,7 @@ fn sessWordOf(resp: shared.SessResp) []const u8 {
             5 => "denied",
             6 => "no_such_user",
             7, 8 => "exists",
+            9 => "home_elsewhere",
             else => "refused",
         },
         .denied => "denied",
@@ -695,14 +698,33 @@ fn cmdShare(it: *mshl.Interp, path: []const u8, name: []const u8, user: []const 
     if (sess_chan == 0) return try errWord(it, "no_session");
     if (path.len > 0 and path[0] == '@') return it.fail("share: only paths in your own home can be shared", .{});
     if (name.len == 0 or name.len > 16 or user.len == 0 or user.len > 16) return it.fail("share: NAME and USER are at most 16 characters", .{});
+    if (path.len > 64) return it.fail("share: PATH is at most 64 characters", .{});
     const d = fsc.fsDeriveBadged(fs_chan, fs_buf, path, !rw) orelse return try errWord(it, "not_found");
     const nw = sessWord(0, name);
-    const uw = sessWord(64, user);
-    const res = usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .share = .{ .name = nw, .user = uw, .badge = d.badge } }, d.cap);
+    _ = sessWord(64, user);
+    _ = sessWord(128, path);
+    const user_path: u64 = 64 | (@as(u64, user.len) << 16) | (@as(u64, 128) << 32) | (@as(u64, path.len) << 48);
+    const badge_rw: u64 = d.badge | (@as(u64, @intFromBool(rw)) << 63);
+    const res = usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .share = .{ .name = nw, .user_path = user_path, .badge = badge_rw } }, d.cap);
     _ = usys.capDrop(d.cap); // the manager's copy (or nobody's) carries on
     switch (res) {
         .ok => |rep| if (rep != .ok) return try errWord(it, sessWordOf(rep)),
         .err => |e| return it.fail("share: {t}", .{e}),
+    }
+    return try okv(it, .nothing);
+}
+
+/// `passwd OLD NEW`: the manager proves OLD and seals the identity
+/// again under NEW; both leave this buffer wiped.
+fn cmdPasswd(it: *mshl.Interp, old: []const u8, new: []const u8) mshl.Error!Value {
+    if (sess_chan == 0) return try errWord(it, "no_session");
+    if (old.len == 0 or old.len > 256 or new.len == 0 or new.len > 256) return it.fail("passwd: a passphrase is 1 to 256 bytes", .{});
+    const ow = sessWord(0, old);
+    const nw = sessWord(512, new);
+    defer @memset(sess_buf[0..1024], 0);
+    switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .passwd = .{ .old = ow, .new = nw } }, 0)) {
+        .ok => |rep| if (rep != .ok) return try errWord(it, sessWordOf(rep)),
+        .err => |e| return it.fail("passwd: {t}", .{e}),
     }
     return try okv(it, .nothing);
 }
@@ -798,9 +820,16 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     // store when it asks (`{ tag: store }`). The console is always ours
     // to give.
     var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
-    var view: u64 = 0;
     var run_arg: u64 = 0;
     var give_store = false;
+    // The fs views the manifest asks for, each under its own tag (a
+    // give without one is `view`, the common case): apply asks for both
+    // its conf view and the home tier, so one `view` slot is not enough.
+    var derived: [4]struct { tag: shared.CapTag, cap: u64 } = undefined;
+    var nderived: usize = 0;
+    errdefer for (derived[0..nderived]) |d| {
+        _ = usys.capDrop(d.cap);
+    };
     {
         const unit = prog.manifest;
         if (unit.record.get("grant")) |g| {
@@ -815,11 +844,13 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
         if (unit.record.get("give")) |g| {
             if (g == .list) for (g.list) |item| {
                 if (item != .record) continue;
+                var cap_tag: shared.CapTag = .view;
                 if (item.record.get("tag")) |tg| {
                     if (tg == .str and is(tg.str, "store")) {
                         give_store = true;
                         continue;
                     }
+                    if (tg == .str) cap_tag = std.meta.stringToEnum(shared.CapTag, tg.str) orelse .view;
                 }
                 const fs_path = item.record.get("fs") orelse continue;
                 if (fs_path != .str) continue;
@@ -827,7 +858,13 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
                 var ro = true;
                 if (item.record.get("ro")) |r| ro = r.asBool();
                 const t = try target(it, p);
-                view = fsc.fsDerive(t.chan, t.buf, t.path, ro) orelse return try errWord(it, "no_such_path");
+                const cap = fsc.fsDerive(t.chan, t.buf, t.path, ro) orelse return try errWord(it, "no_such_path");
+                if (nderived == derived.len) {
+                    _ = usys.capDrop(cap);
+                    return it.fail("run: too many views to give", .{});
+                }
+                derived[nderived] = .{ .tag = cap_tag, .cap = cap };
+                nderived += 1;
             };
         }
     }
@@ -839,14 +876,17 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     _ = usys.capDrop(ch.data[0]);
     if (sp.err != .ok) {
         _ = usys.capDrop(ch.data[1]);
-        if (view != 0) _ = usys.capDrop(view);
         return try errWord(it, "refused");
     }
     const bch = ch.data[1];
     // A clean result buffer: the program's value comes back through it.
     @memset(@as([*]u8, @ptrFromInt(run_out_va))[0 .. run_out_pages * 4096], 0);
     var ok = boot.giveCap(bch, .console, cons_chan) and boot.giveCap(bch, .console_buf, cons_shm_h) and boot.giveCap(bch, .out, run_out_h);
-    if (ok and view != 0) ok = boot.giveCap(bch, .view, view);
+    for (derived[0..nderived]) |d| {
+        if (ok) ok = boot.giveCap(bch, d.tag, d.cap);
+        _ = usys.capDrop(d.cap);
+    }
+    nderived = 0;
     if (ok and give_store) {
         if (sys_store) |st| ok = boot.giveCap(bch, .store, st.chan);
     }
@@ -872,7 +912,6 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     }
     _ = usys.capDrop(sp.data[0]);
     _ = usys.capDrop(bch);
-    if (view != 0) _ = usys.capDrop(view);
     // Whatever the program wrote back is its value; nothing = nothing.
     const out_bytes = @as([*]const u8, @ptrFromInt(run_out_va));
     var n: usize = 0;

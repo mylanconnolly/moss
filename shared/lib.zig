@@ -487,11 +487,18 @@ pub const SessReq = union(enum(u64)) {
     // Sharing between users (from a session's own badged sess cap; the
     // badge names the caller, never a word in the message). A share is
     // a view the owner derived from its home, offered under a name to
-    // one user; it lives while both sessions do.
+    // one user. It STANDS until unshared: the manager records path and
+    // mode, and re-offers it every time the owner logs in (the view
+    // itself dies with the owner's session; the next login derives it
+    // again from the owner's root view).
     /// + view cap: offer it as `name` to `user`. `badge` is the view's
     /// badge on the owner's home filesystem (derive's answer), so the
-    /// manager can revoke it through the owner's root view later.
-    share: struct { name: u64, user: u64, badge: u64 }, // name/user: off | len<<32
+    /// manager can revoke it through the owner's root view later, with
+    /// bit 63 set when the share is read-write; `user_path` packs two
+    /// buffer words in 16-bit fields — user_off | user_len<<16 |
+    /// path_off<<32 | path_len<<48 — the path and mode being what the
+    /// manager derives again at the owner's next login.
+    share: struct { name: u64, user_path: u64, badge: u64 }, // name: off | len<<32
     /// Withdraw an offer: the holder's calls fail from now on.
     unshare: struct { name: u64 },
     /// List offers made to me and by me: an mshl table literal lands in
@@ -499,6 +506,12 @@ pub const SessReq = union(enum(u64)) {
     shares: void,
     /// Take an offer made to me: the reply attaches the view cap.
     accept: struct { name: u64 },
+    /// Change my passphrase (from a session's badged cap): the old one
+    /// proves the identity, the seed is sealed again under the new one
+    /// and the record rewritten — where the home lives (a session on a
+    /// remote home is refused with sess_err 9: change it there). Words
+    /// into my buffer, each at most 256 bytes; both wiped after.
+    passwd: struct { old: u64, new: u64 },
     /// From another node's session manager (through the fabric): the
     /// user's record, 24 bytes per chunk — `chunk { a, b, c }` while
     /// bytes remain, `data { len }` once past the end, `denied` when
@@ -595,9 +608,11 @@ pub const CapTag = enum(u64) {
     /// directory (the system's), so a shell can run programs it does
     /// not hold in its own store.
     store = 19,
+    /// The standing shares (`conf/shares/`), for the session manager.
+    shares = 20,
 };
 
-pub const cap_tag_count = 20;
+pub const cap_tag_count = 21;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver

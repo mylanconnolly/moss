@@ -193,17 +193,22 @@ Every session holds its own **badged** channel to the manager (minted
 at spawn with the session's slot as the badge), so a sharing request
 names its caller by badge and never by a word in the message; the
 unbadged channel the drills hold can open and end sessions, a session's
-badge can only share. Offers live in the manager's table (8 at a time)
-while the owner's session does: at logout the home service dies and
-every view of it with it, and the manager forgets the owner's offers
-and whatever that user had accepted.
+badge can only share. An offer **stands** across logins: the manager
+writes `{ name, path, to, rw }` to `conf/shares/<owner>.msh`, and at
+the owner's next login derives the view again from the owner's root and
+re-offers it — the view itself dies with the owner's session (the home
+service goes, and every view of it), but the offer comes back. `unshare`
+ends it for good, at the source and in the file. Eight offers at a time,
+and whatever a user accepted dies with their domain (the taker accepts
+once per session of theirs).
 
 The shell mounts an accepted view as `@name`: `ls @shared`, `cat
 @shared/a.txt`, `write @shared/x.txt "…"` (refused when the share is
 read-only — and the owner may share read-write with a fourth word,
 `rw`). A revoked or dead share simply fails its calls; `accept` of the
-same name again replaces the mount. Sharing is per session pair and
-lives in memory: nothing about an offer is written to disk.
+same name again replaces the mount. The offer is persistent (the
+manager's `conf/shares/` directory); a mount is per session of the
+taker, held in the shell.
 
 ### Settings in layers
 
@@ -224,6 +229,19 @@ flowchart LR
   L["locked keys (the program's schema)\n[telemetry]"] --> M
   M --> E["effective\ntheme: light (user)\ntab_width: 4 (system)\ntelemetry: false (locked)"]
 ```
+
+### Changing a passphrase
+
+`passwd OLD NEW` changes the user's own passphrase. The manager proves
+`OLD` by the same unseal a login does, seals the identity's seed again
+under `NEW` with a fresh salt, and rewrites the record in place —
+budgets and KDF cost unchanged, the identity key unchanged, so the home
+volume (keyed from the identity, not the passphrase) opens exactly as
+before. It happens only where the home lives: a session running on a
+leased remote home is refused (`home_elsewhere`), since the record that
+counts is on the home's node and a cached copy would be overwritten by
+the next refresh. Both passphrases are wiped from the session's buffer
+after the change, as at login.
 
 ### Logging in anywhere: fabric logins, and one home
 
@@ -312,7 +330,11 @@ The boot archive ships a copy as the default; a copy on the volume at
 already has a record is kept exactly as is — the passphrase in the
 file is used only to create a record that does not exist, and nothing
 in this file can change one — and a settings file is rewritten only
-when its content differs. It runs as the first step of the `users` and
+when its content differs. A user entry marked `absent: true` is
+**removed**: the record goes, the standing shares go, and (apply now
+holds the home tier) the home volume goes with them, ciphertext and
+all. Removal is explicit — a name simply missing from the list is
+never taken to mean it, so a partial desired-state file is safe. It runs as the first step of the `users` and
 `login` profiles (so a fresh disk boots to a multi-user system with no
 manual step: the volume formats, the store installs, the users appear,
 the prompt comes up) and from the system shell as `run apply`, where
@@ -442,18 +464,23 @@ when every console has had a session and none is open.
 
 ## Known limits and bugs
 
-- The `users` drill has failed its leak bar once (2026-09-04): one
-  8-page buffer created by the users image with one reference left
-  after the last, early-logged-out session, 32 KB of pmem with it.
-  Three soaks passed afterwards. It reads as a teardown-ordering race
-  in the manager's last session rather than a leak in normal use; it
-  is on the roadmap's open list, and `zig build check -Donly=users
-  -Dsoak=N` is how to hunt it.
-- Shares are not persistent: an offer lives in the manager's memory
-  while the owner's session does; there is no standing grant that
-  survives a logout, and no sharing to a user who is not logged in when
-  the offer is withdrawn is remembered. At most 8 offers at once, 8
-  mounts per shell.
+- The `users` drill flakes on its leak bar: one 8-page buffer created
+  by the users image keeps a reference after the last, early-logged-out
+  session, 32 KB of pmem with it. A soak on this machine (2026-09-05)
+  showed it about once in eight runs, on `users` and `users+rs` alike,
+  and a `git stash` of that day's session-manager work reproduced it on
+  the clean tree — so it is a pre-existing teardown-ordering race in the
+  manager's last session, not a regression from standing shares or
+  `passwd`. It is on the roadmap's open list; `zig build check
+  -Donly=users -Dsoak=N` is how to hunt it.
+- Shares are persistent as offers: an offer stands in
+  `conf/shares/<owner>.msh` and is re-derived and re-offered at every
+  login of the owner, until `unshare`. The offered *view* still exists
+  only while the owner's session does (a taker's calls fail between the
+  owner's logins), and the offer's target need not be logged in when it
+  is made. At most 8 offers at once, 8 mounts per shell. A session on a
+  leased *remote* home does not restore standing shares (the manager
+  there has no `conf/shares` of its own); they stand on the home node.
 - A home reached through a lease reads its volume in 32 KB windows:
   the home service's backing layer fetches a whole aligned window on a
   miss and serves the following blocks from it, and the window crosses
@@ -467,12 +494,16 @@ when every console has had a session and none is open.
   administrative action still to be built. A user whose record was applied on several nodes (no
   `home:`) has a home on each, as before; a record fetched from a node
   names that node as the home's.
-- Records are fetched only at login, so a record changed on its home
-  node is not refreshed elsewhere.
-- `apply` creates and keeps; it never rewrites or removes a record, so a
-  passphrase change or a user's removal is a manual edit of
-  `conf/users/`. Its KDF work area bounds the cost a record may ask
-  for (about 2 MB: `ln` up to 11 with `r` 8).
+- A record whose home is on another node is refreshed from that node at
+  every login that can reach it (so a passphrase changed on the home
+  node takes effect on the next login elsewhere); when the home node is
+  unreachable the cached copy still serves, and the lease that follows
+  reports the home away.
+- `apply` creates, keeps, and removes (a user marked `absent: true`);
+  it never rewrites an existing record, so a passphrase change is
+  `passwd` from the user's own session, not an admin edit. Its KDF work
+  area bounds the cost a record may ask for (about 2 MB: `ln` up to 11
+  with `r` 8).
 - The passphrases in a desired-state file are bootstrap material in
   plain text; the archive's copy carries the drills' test users.
 - A home volume's 8 MB capacity is reported, not enforced (see

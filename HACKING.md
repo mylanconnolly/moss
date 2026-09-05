@@ -334,6 +334,14 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   the image (their own segment at the base, `kernel/arch/x86_64/linker.ld`);
   `python3`-search the ELF for `f6b8f4b39de7d1ae` — the first hit must
   be at file offset 0x1000.
+- A derived view must not outlive the service it came from: a session
+  manager that re-derives a standing share's view at each login and then
+  drops the cap at logout *after* destroying the home service left the
+  service's block device doing DMA into torn-down tables (an IOMMU
+  refusal, then a teardown that never finished — only under TCG's
+  timing). Revoke and drop such a view through the service while it is
+  still alive, before the service is destroyed (`user/users.zig`,
+  `close`/`forgetShares`).
 - A console that got slow, not wrong: stores to memory nothing backs
   (a moved BAR, an unmapped MMIO range) leave the VM one at a time at
   ~5 µs each and look like a hang. The framebuffer console prints its

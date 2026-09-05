@@ -606,6 +606,15 @@ const shell_script = [_]Step{
     .{ .send = "run apply? | where kind == user | len", .expect = "2" },
     .{ .send = "run apply? | where action == kept | len", .expect = "3" },
     .{ .send = "ls conf/users? | get name", .expect = "alice.msh" },
+    // A user marked absent goes — record and home; a missing name never
+    // means that. Then the override is removed and the default re-applied,
+    // so the second boot finds the same two users.
+    .{ .send = "write conf/system.msh \"{ users: [ { name: alice, absent: true } ] }\"", .expect = "" },
+    .{ .send = "run apply? | where action == removed | get name", .expect = "alice" },
+    .{ .send = "ls conf/users? | get name", .expect = "bob.msh" },
+    .{ .send = "ls home? | where name == alice | len", .expect = "0" },
+    .{ .send = "rm conf/system.msh", .expect = "" },
+    .{ .send = "run apply? | where action == created | get name", .expect = "alice" },
     // Functions, data files, scripts (the startup script defined `alive`).
     .{ .send = "def twice [x] { $x * 2 }; twice 21", .expect = "42" },
     .{ .send = "alive | where name == fs | len", .expect = "1" },
@@ -797,11 +806,27 @@ const login_script = [_]LoginStep{
     .{ .con = 0, .send = "unshare shared", .expect = "" },
     .{ .con = 1, .send = "cat @shared/a.txt", .expect = "err bad_fd" },
     .{ .con = 1, .send = "shares | len", .expect = "0" },
+    // A share stands: alice offers again and leaves; the offer is gone
+    // with her session and back the moment she is, for bob to accept.
+    .{ .con = 0, .send = "share notes shared bob", .expect = "" },
+    .{ .con = 1, .send = "shares | get path", .expect = "notes" },
+    // A passphrase is the user's to change: the old one proves the right,
+    // the new one opens the same home at the next login (the identity
+    // keys the volume, not the passphrase). Folded into the logout just
+    // below, so the drill gains no extra login cycle on this seat.
+    .{ .con = 0, .send = "passwd wrong-pass alice-new", .expect = "err denied" },
+    .{ .con = 0, .send = "passwd alice-pass alice-new", .expect = "" },
     // Alice leaves; her session is torn down and the seat is free again.
     .{ .con = 0, .send = "exit", .expect = "bye", .prompt = login_prompt },
+    .{ .con = 1, .send = "shares | len", .expect = "0" },
     .{ .con = 0, .send = "alice", .expect = "passphrase: ", .prompt = "" },
-    .{ .con = 0, .send = "alice-pass", .expect = "moss shell" },
+    .{ .con = 0, .send = "alice-new", .expect = "moss shell" },
     .{ .con = 0, .send = "cat notes/a.txt", .expect = "alice was here" },
+    .{ .con = 1, .send = "shares | get name", .expect = "shared" },
+    .{ .con = 1, .send = "accept shared", .expect = "" },
+    .{ .con = 1, .send = "cat @shared/a.txt", .expect = "alice was here" },
+    .{ .con = 0, .send = "unshare shared", .expect = "" },
+    .{ .con = 1, .send = "shares | len", .expect = "0" },
     // Programs: the system store serves a session; `install` copies one
     // into the home's own store, which `run` then finds first.
     .{ .con = 0, .send = "run ps? | where name == shell | get name", .expect = "shell" },

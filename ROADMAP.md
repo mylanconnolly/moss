@@ -244,14 +244,20 @@ is a plan.
   paths, ever (locked decision); the 16550 is the debug console QEMU
   and a PCIe serial card speak; the screen is the console a real
   machine has.
-- **Users, stage 3, residuals:** sharing offers are per session and in
-  memory (standing grants that survive a logout are a later step);
-  `apply` only creates and keeps (changing a passphrase or removing a
-  user is a manual edit of `conf/users/`); a fabric login copies the
-  record and gives the user a home per node — reaching a remote home
-  needs a bulk transport across the wire (the view protocol moves data
-  through an attached buffer, which does not cross), and records are
-  fetched only at login, never refreshed.
+- **Users, stage 3, residuals:** ✅ standing shares (landed 2026-09-05):
+  an offer is written to `conf/shares/<owner>.msh` and re-offered at
+  every login of the owner, until `unshare`. ✅ `passwd` (2026-09-05):
+  a user changes their own passphrase from their session, the old one
+  proving the right and the identity key unchanged so the home still
+  opens; only where the home lives. ✅ `apply` removes a user marked
+  `absent: true` — record, standing shares, and (apply now holds the
+  home tier) the home volume. ✅ Record refresh (2026-09-05): a record
+  whose home is elsewhere is refreshed from the home node at every login
+  that can reach it, so a `passwd` there takes effect on the next login
+  away. Still open: standing shares are per owner-name and re-derived
+  from the owner's live home, so a share of a path that no longer exists
+  is silently dropped at the next login rather than reported; moving a
+  home to another node is still an administrative action to build.
 - **mshl v3 — the language as a tool for the fabric** (decisions in the
   table above). In order: (1) ✅ the language core on the host (landed
   2026-09-03: closures, counted boxes and scopes, `match`, results and
@@ -437,14 +443,18 @@ is a plan.
   system store; there is no other source of programs (no download, no
   build).
 - A session's shell has no fabric (`nodes`, `rspawn` are errors).
-- **A known flake (seen 2026-09-04):** the `users` drill failed its
-  leak bar once — `shm[14]: 8 pages, 1 refs, created by users`, pmem
-  delta 32 KB — at the end of the fourth, logged-out-early session;
-  three soaks in a row passed. A session's buffer with one reference
-  left after every domain is gone points at a teardown ordering
-  (a mapping or a cap in flight when the manager is revoked), not a
-  userspace leak. Reproduce with `-Donly=users -Dsoak=N` and read the
-  trace ring in the kept log; the fix is owed.
+- **A known flake (seen 2026-09-04, quantified 2026-09-05):** the
+  `users` drill flakes its leak bar — `shm[14]: 8 pages, 1 refs,
+  created by users`, pmem delta 32 KB — at the end of an early
+  logged-out session. A soak put it at about one run in eight, on
+  `users` and `users+rs`, and it reproduces on the tree with that day's
+  session-manager work (standing shares, `passwd`) stashed away, so it
+  is a pre-existing teardown ordering (a mapping or a cap in flight when
+  the manager is revoked), not a userspace leak or a regression.
+  Reproduce with `-Donly=users -Dsoak=N` and read the trace ring in the
+  kept log; the fix is owed. The `flogin` drill has a matching timing
+  fragility under TCG (a false fabric "member down" right after the
+  lease exchange, ~half the runs); under KVM it is solid.
 
 **Fabric**
 
