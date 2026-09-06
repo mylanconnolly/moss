@@ -307,9 +307,14 @@ is a plan.
   suites, an ECDSA P-256 or Ed25519 identity. The gate proves both
   directions against openssl — `s_server` for our client, `s_client`
   for our server — and the wire was proved against example.com and
-  cloudflare); still open on TLS: client certificates, session
-  resumption, revocation (CRL/OCSP), DNS over TLS, a roots update path,
-  and RSA server keys;
+  cloudflare); ✅ DNS over TLS (landed 2026-09-06: `dotd`, a DoT
+  forwarder — binds UDP 53 so netsvc's resolver reaches it as a local
+  resolver, and forwards each query to the upstream over TLS with the
+  RFC 7858 length framing, verifying the server against the roots; the
+  `dot` drill points netsvc at it and resolves through a DoT server
+  built from moss's own TLS server); still open on TLS: client
+  certificates, session resumption, revocation (CRL/OCSP), DoT
+  keep-alive and DoH, a roots update path, and RSA server keys;
   concurrent handling (needs the language to spawn), and, when a use
   case demands them, congestion control and out-of-order receive; (4)
   the fabric surface — ✅ the bulk transport across the wire and remote

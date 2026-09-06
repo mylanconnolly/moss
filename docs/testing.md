@@ -32,7 +32,7 @@ script's `https` steps.
 
 ```mermaid
 flowchart LR
-  B["zig build check"] --> V["one kernel per drill\n(22 Debug + 6 ReleaseSafe, built in parallel)"]
+  B["zig build check"] --> V["one kernel per drill\n(24 Debug + 6 ReleaseSafe, built in parallel)"]
   B --> H["host unit tests\n(zig build test)"]
   V --> R["tools/runner.zig\nlabel + kernel.bin pairs"]
   R --> Q["QEMU per drill\nmachine config by kind:\nplain · blk · net · cluster · shell · vmnode · login"]

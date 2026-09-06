@@ -1,0 +1,9 @@
+# The DNS-over-TLS forwarder: binds UDP 53 on its view and forwards each
+# query to the upstream over TLS, verifying the server against the trust
+# roots given here. In the dot drill netsvc's resolver points at it (::1,
+# from conf/net.msh). Its view is unrestricted: it binds a local port and
+# reaches the upstream. Settings (the upstream and the name its
+# certificate must carry) come as a file, staged through the buffer.
+{ image: dotd, grant: [log], profiles: [dot],
+  give: [{ tag: net, netview: net }, { tag: roots, file: tls/moss-test-ca.pem },
+    { tag: buf, shm: 1 }, { file: conf/dot.msh }] }

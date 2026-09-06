@@ -1,0 +1,7 @@
+# Resolve a name over DNS-over-TLS: netsvc's resolver forwards to dotd
+# (::1:53), which asks the upstream over TLS. The responder answers any
+# name with 2001:db8::53 (AAAA) and 192.0.2.53 (A); resolve returns both,
+# AAAA first.
+let a = (resolve secure.example)?
+if $a != ["2001:db8::53", "192.0.2.53"] { (err "resolve over tls: $a")? }
+echo "script: dot resolve ok"

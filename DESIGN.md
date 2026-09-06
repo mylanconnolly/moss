@@ -1821,8 +1821,35 @@ by `tls-listen` must be hung on the network doorbell (`n.watch`) like
 any other, or `accept` sleeps forever while the client waits — the
 handshake deadlock reads on the wire as "shutdown while in init".
 Not built beyond the client's list: client certificates, resumption,
-revocation, DNS over TLS, RSA server keys, and any roots update but a
-rebuild.
+revocation, RSA server keys, and any roots update but a rebuild.
+
+**DNS over TLS (as built, 2026-09-06).** The resolver in `netsvc` is
+event-driven and non-blocking; a TLS handshake is a blocking,
+multi-round-trip exchange, and pumping one inside netsvc would either
+starve the stack or demand reentrant event processing. So DoT is a
+separate program, `dotd`, shaped exactly like `dnsd`: one thread, one
+query at a time. It binds UDP 53 on its view, which makes it an
+ordinary local resolver as far as netsvc is concerned — point
+`conf/net.msh`'s `resolvers` at `::1` and the existing forwarding path
+carries queries to it, no netsvc change at all. For each datagram it
+opens a TLS 1.3 connection (the `lib/tls.zig` client over its own TCP
+socket, verifying the upstream against the roots its unit gave and the
+wall clock), frames the query as DNS-over-TCP does — a two-byte length
+then the message — reads the reply the same way, and sends it back. It
+never parses the DNS; it moves opaque messages, so it is purely the
+resolver's private path out. The gate's upstream is `tools/dot-
+responder.zig`, moss's own TLS server (again `lib/tls.zig`) run over
+stdio by a QEMU `guestfwd ... -cmd`, answering a fixed zone from
+`lib/dns.zig`'s `buildResponse`; the `dot` drill points netsvc at dotd
+and watches a name only that responder knows resolve to its address.
+The lesson this arc paid for was in the responder, not the forwarder:
+`std.Io.Reader.readVec` returning zero is transient, not end of stream
+(only `error.EndOfStream` is a close), and a transport that took the
+first zero for a close aborted the handshake on its very first read —
+the moss socket API says `closed` explicitly, but a raw byte reader
+does not. Not built: keep-alive (a fresh connection per query),
+DNS-over-HTTPS, and a resolver that speaks DoT itself rather than
+through dotd.
 
 ### The gate (as built, 2026-09-03)
 

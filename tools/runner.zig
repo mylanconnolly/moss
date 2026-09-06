@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot };
 
 const Spec = struct {
     name: []const u8,
@@ -76,6 +76,7 @@ const specs = [_]Spec{
         .append = "profile=fs",
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .append = "profile=net" },
+    .{ .name = "dot", .kind = .dot, .pass = "dot-test: PASS", .extra = "mshrun: script: dot resolve ok", .append = "profile=dot" },
     .{
         .name = "users",
         .kind = .blk,
@@ -293,6 +294,17 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-object",
             "filter-dump,id=f0,netdev=n0,file=zig-out/check/net.pcap",
             // Entropy: a TLS handshake draws on the kernel pool, which rngd seeds.
+            "-device",
+            "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
+        }),
+        // The DNS-over-TLS drill: a NIC on slirp with a guestfwd to the
+        // DoT responder (moss's own TLS server over stdio, one per
+        // connection), and an entropy device for dotd's handshakes.
+        .dot => try args.appendSlice(gpa, &.{
+            "-netdev",
+            "user,id=n0,guestfwd=tcp:10.0.2.100:853-cmd:zig-out/bin/dot-responder",
+            "-device",
+            "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             "-device",
             "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),

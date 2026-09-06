@@ -8,7 +8,7 @@ frontier — every unstarted arc and every residual, kept current; the
 
 ## Commands
 
-- `zig build check` — THE gate: 23 OS tests under QEMU, 6 of them again
+- `zig build check` — THE gate: 24 OS tests under QEMU, 6 of them again
   under a ReleaseSafe kernel (`+rs` rows), + host unit tests; ~2 min on
   the M3, ~4 on x86_64 (aarch64 TCG only); the net drill needs
   `openssl` on PATH. Run
@@ -27,7 +27,7 @@ frontier — every unstarted arc and every residual, kept current; the
 - `zig build run-shell` — interactive msh console on your terminal.
 - `zig build run-login` — multi-user boot: login prompts on your terminal
   and on `nc 127.0.0.1 31905` (alice / alice-pass, bob / bob-pass).
-- `zig build -Darch=x86_64 check` — the x86_64 port's gate: the same 29
+- `zig build -Darch=x86_64 check` — the x86_64 port's gate: the same 30
   rows on OVMF + Limine with VT-d and nested AMD-V under KVM, ~4 min;
   `-Dtcg` runs it without KVM (how it runs on the Mac; also passes,
   ~6 min). Run it too when kernel/, user/, shared/ or the runner

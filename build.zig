@@ -129,6 +129,11 @@ pub fn build(b: *std.Build) void {
         "flogin-test",
         "Run the fabric-login drill: a login on node 2 with the user's record on node 1 (pair with profile=flogin node=1 / profile=fjoin node=2)",
     ) orelse false;
+    const dot_test = b.option(
+        bool,
+        "dot-test",
+        "Run the DNS-over-TLS drill: netsvc's resolver forwards through dotd over TLS to a canned DoT responder",
+    ) orelse false;
     const rng_test = b.option(
         bool,
         "rng-test",
@@ -230,6 +235,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "users_test", users_test);
     build_opts.addOption(bool, "login_test", login_test);
     build_opts.addOption(bool, "flogin_test", flogin_test);
+    build_opts.addOption(bool, "dot_test", dot_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -267,6 +273,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mshrun", .src = "user/mshrun.zig" },
         .{ .name = "dnsd", .src = "user/dnsd.zig" },
         .{ .name = "clock", .src = "user/clock.zig" },
+        .{ .name = "dotd", .src = "user/dotd.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -348,6 +355,24 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
+    // The gate's DNS-over-TLS server: a host tool QEMU spawns per
+    // connection, moss's own TLS server (lib/tls.zig) over stdio.
+    const host_lib_mod = b.createModule(.{
+        .root_source_file = b.path("lib/lib.zig"),
+        .target = host_target,
+        .optimize = .Debug,
+    });
+    const dot_responder = b.addExecutable(.{
+        .name = "dot-responder",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/dot-responder.zig"),
+            .target = host_target,
+            .optimize = .Debug,
+        }),
+    });
+    dot_responder.root_module.addImport("mosslib", host_lib_mod);
+    b.installArtifact(dot_responder);
+
     const pack = b.addRunArtifact(mkmarc);
     const marc_out = pack.addOutputFileArg("bootfs.marc");
     // The guest kernel's archive: the same tree minus the guest kernel
@@ -384,6 +409,8 @@ pub fn build(b: *std.Build) void {
         "conf/dns.msh",                  "conf/units/clock.msh",
         "conf/clock.msh",                "conf/units/clock-cluster.msh",
         "conf/clock-cluster.msh",        "tls/roots.pem",
+        "conf/units/dotd.msh",           "conf/dot.msh",
+        "conf/units/dot-script.msh",     "scripts/dot-drill.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -461,7 +488,7 @@ pub fn build(b: *std.Build) void {
             "blk_test",   "fs_test",     "net_test",     "fabric_test",
             "shell_test", "rng_test",    "smmu_test",    "vm_test",
             "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-            "users_test", "login_test",  "flogin_test",
+            "users_test", "login_test",  "flogin_test",  "dot_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -830,13 +857,13 @@ pub fn build(b: *std.Build) void {
         "blk_test",   "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-        "users_test", "login_test",  "flogin_test",
+        "users_test", "login_test",  "flogin_test",  "dot_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc",    "init",
         "sandbox", "flap",  "blk",   "fs",     "net",    "fabric",
         "shell",   "rng",   "smmu",  "vm",     "guest",  "vmnode",
-        "pan",     "cpu",   "users", "login",  "flogin",
+        "pan",     "cpu",   "users", "login",  "flogin", "dot",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

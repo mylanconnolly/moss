@@ -264,6 +264,24 @@ resolves `www.moss.test` and `node1.moss.test` through it, gets
 loopback. A one-off check through slirp's forwarder resolved a public
 name to its four addresses and fetched the page by name.
 
+**dotd** closes the gap the cleartext resolver leaves — that a name
+query and its answer cross the wire in the open. It is a DNS-over-TLS
+forwarder (RFC 7858): it binds UDP 53 on its view, so netsvc's
+resolver reaches it as an ordinary local resolver (point `resolvers`
+at `::1`), and for each query it opens a TLS 1.3 connection to the
+configured upstream, sends the message framed as DNS-over-TCP is (a
+two-byte length, then the bytes), reads the reply the same way, and
+sends it back. It verifies the upstream's certificate for the
+configured name against the trust roots its unit gave, and against the
+wall clock; a query fails closed if the time is unknown or no root
+vouches. Settings are `conf/dot.msh` (`{ upstream: 1.1.1.1, port: 853,
+name: cloudflare-dns.com }`). It never parses the DNS itself — it moves
+opaque messages — so it is only the resolver's private path out; the
+`dot` drill points netsvc at dotd and resolves a name that only the
+upstream (a DoT server built from moss's own TLS server, run by the
+runner) answers, so a right address proves the private path end to
+end. One query per connection for now; a real resolver keeps it alive.
+
 ### Time
 
 The time service (`user/clock.zig`, the `clock` unit) learns the time
@@ -541,9 +559,9 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   client offering no x25519 share is refused), the three IANA AEAD
   suites, and — on the server — an ECDSA P-256 or Ed25519 certificate
   (no RSA server key). No client certificates, no session resumption,
-  no revocation checking (CRL, OCSP), no DNS over TLS; the roots are
-  the bundle as shipped in the archive, with no update path but a
-  rebuild. A program holds at most four connections (client and server
+  no revocation checking (CRL, OCSP); DNS over TLS is dotd forwarding
+  one query per connection (no keep-alive, no DoH); the roots are the
+  bundle as shipped in the archive, with no update path but a rebuild. A program holds at most four connections (client and server
   share the pool). A `serve` handles one connection at a time — the language has no concurrency, so a
   slow handler, or a kept connection that sits idle (up to three
   seconds), holds the next client at the door (the listener's backlog
@@ -569,8 +587,11 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - Source — `user/net.zig` (driver, stack, views, sockets, the drill
   roles), `user/netcmds.zig` (sockets as values for mshl hosts),
   `user/httpcmds.zig` (`http-read`, `http-write`, `serve`, `fetch`),
-  `user/tlscmds.zig` (`tls-connect`, `tls-listen`, `accept`, the
-  sessions, the roots and the server identity) and `lib/tls.zig` (the
+  `user/dotd.zig` (the DNS-over-TLS forwarder) and
+  `tools/dot-responder.zig` (the gate's DoT server, moss's TLS server
+  over stdio); `user/tlscmds.zig` (`tls-connect`, `tls-listen`,
+  `accept`, the sessions, the roots and the server identity) and
+  `lib/tls.zig` (the
   client and the server over a transport, roots from PEM, host-tested
   with `lib/tls/`'s test root, certificate and key — including our
   client and server shaking hands over a pipe),

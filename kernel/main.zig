@@ -181,6 +181,12 @@ export fn kmain(boot_arg: u64) noreturn {
         };
     }
 
+    if (build_options.dot_test) {
+        _ = sched.spawn("boot-watch", dotTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
     if (build_options.cpu_test) {
         _ = sched.spawn("cpu-test", cpuTestWorker, 0, .{}) catch @panic("spawn cpu-test");
     }
@@ -659,6 +665,10 @@ fn systemDrill(comptime name: []const u8) void {
 /// bar when the drill's essential unit has exited.
 fn netTestWorker(_: u64) void {
     systemDrill("net");
+}
+
+fn dotTestWorker(_: u64) void {
+    systemDrill("dot");
 }
 
 /// The entropy driver: virtio-rng behind the standard driver grants plus

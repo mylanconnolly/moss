@@ -367,6 +367,7 @@ pub const ImageId = enum(u64) {
     mshrun = 18,
     dnsd = 19,
     clock = 20,
+    dotd = 21,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -1468,7 +1469,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 
