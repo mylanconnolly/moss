@@ -235,6 +235,21 @@ instead of parking. The race was as old as SMP teardown itself; today's
 faster userspace merely widened the window until a 45-second suite could
 hit it.
 
+A second teardown race, from the same SMP shape, cost the `users` drill
+its leak bar about one run in eight (2026-09-05). `destroy` marks a
+thread on another core to die — it finishes the syscall in hand and
+dies at the next safe point — then walks and releases the cap table.
+A thread finishing `shm_create` in that window allocates the buffer and
+inserts its cap *after* the walk, into a table `finishTeardown` then
+freed without a second look: the buffer's ref orphaned, held by no
+domain and no mapping, 8 pages (32 KB) that never came back. The fix is
+a backstop: `finishTeardown` releases whatever caps remain before it
+frees the table, and by then every thread is truly dead (`drained`), so
+nothing can insert again — it catches exactly the stragglers, for any
+cap-inserting syscall, not just this one. The buffer with one reference
+and no owner in the shutdown dump was the tell; a trace ring widened to
+catch the failing lifecycle showed the create with no matching insert.
+
 Two scheduler lessons from the same benchmark: (1) enqueueing a thread onto
 another core must *kick* that core (SGI out of wfi; need_resched + a
 preempt check on syscall return for the local core) — without it every

@@ -7,8 +7,9 @@
   budget: { user: 40mb }
   grant:  [log, spawner, bootfs]
   give: [
-    { tag: view, fs: conf/users, ro: true, mkdir: true }
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
     { tag: home, fs: home, ro: false }
+    { tag: shares, fs: conf/shares, ro: false, mkdir: true }
     { tag: conf, fs: conf/app, ro: true, mkdir: true }
     { tag: store, fs: img, ro: true }
   ]

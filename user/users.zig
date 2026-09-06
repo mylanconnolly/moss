@@ -189,9 +189,14 @@ var fab_buf: [*]u8 = undefined;
 //
 // A share is a view the owner's session derived from its home, offered
 // under a name to one user; the manager brokers it and revokes it
-// through the owner's root view. It lives while the owner's session
-// does (the home service dies with the session, and the view with it).
+// through the owner's root view. The view lives while the owner's
+// session does (the home service dies with the session, and the view
+// with it) — the OFFER stands: the manager writes {name, path, to, rw}
+// to conf/shares/<owner>.msh, and at the owner's next login derives the
+// view again from the owner's root view and re-offers it. `unshare`
+// ends it for good; accepting is per session of the taker.
 const max_shares = 8;
+const max_path = 64;
 const Share = struct {
     used: bool = false,
     name: [max_name]u8 = @splat(0),
@@ -200,6 +205,11 @@ const Share = struct {
     from_len: usize = 0,
     to: [max_name]u8 = @splat(0),
     to_len: usize = 0,
+    /// What the offer is of, in the owner's home, and whether writable:
+    /// what the next login derives again.
+    path: [max_path]u8 = @splat(0),
+    path_len: usize = 0,
+    rw: bool = false,
     /// The view's badge on the owner's home filesystem: revoke's name for it.
     fs_badge: u64 = 0,
     /// The offered cap, held here until accepted (0 afterwards).
@@ -207,6 +217,9 @@ const Share = struct {
     accepted: bool = false,
 };
 var shares: [max_shares]Share = @splat(.{});
+/// The standing shares' directory (conf/shares), when the manager has it.
+var shares_view: u64 = 0;
+var shares_buf: [*]u8 = undefined;
 var stage: loader.Stage = undefined;
 var blob_va: u64 = 0;
 var blob_len: u64 = 0;
@@ -223,6 +236,8 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     store_view = setup.cap(.store); // the system program store, for every session
     app_buf = @ptrFromInt(fsc.attachBuf(app_view).va);
     if (store_view != 0) store_buf = @ptrFromInt(fsc.attachBuf(store_view).va);
+    shares_view = setup.cap(.shares);
+    if (shares_view != 0) shares_buf = @ptrFromInt(fsc.attachBuf(shares_view).va);
     if (users_view == 0 or home_view == 0 or app_view == 0) usys.exit(180);
     users_buf = @ptrFromInt(fsc.attachBuf(users_view).va);
     home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
@@ -302,7 +317,9 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
             },
             .share => |sh| {
                 lock();
-                const res = doShare(badge, sh.name, sh.user, sh.badge, r.cap);
+                const user_w = (sh.user_path & 0xffff) | (((sh.user_path >> 16) & 0xffff) << 32);
+                const path_w = ((sh.user_path >> 32) & 0xffff) | (((sh.user_path >> 48) & 0xffff) << 32);
+                const res = doShare(badge, sh.name, user_w, sh.badge & ~(@as(u64, 1) << 63), r.cap, path_w, sh.badge >> 63 != 0);
                 unlock();
                 if (res != .ok and r.cap != 0) _ = usys.capDrop(r.cap);
                 reply(res);
@@ -323,6 +340,12 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
                 lock();
                 doAccept(badge, ac.name);
                 unlock();
+            },
+            .passwd => |pw| {
+                lock();
+                const res = doPasswd(badge, pw.old, pw.new);
+                unlock();
+                reply(res);
             },
             .login => |l| {
                 lock();
@@ -385,8 +408,11 @@ fn close(s: *Session) void {
     // Logout is a durability barrier: what the session was told is
     // written reaches the disk before its filesystem service goes.
     if (s.fs_chan != 0) _ = fsc.fsSync(s.fs_chan);
+    // Drop the session's shares while its home service is still alive:
+    // an owned view is revoked through it (the standing entry on disk
+    // stays), so no derived badge outlives the service it lived on.
+    forgetShares(s);
     releaseHome(s);
-    forgetShares(s.name[0..s.name_len]);
     @memset(std.mem.asBytes(&s.kp), 0);
     logName("usersvc: session closed for ", s.name[0..s.name_len]);
     s.* = .{};
@@ -455,23 +481,97 @@ fn findOffer(to: []const u8, name: []const u8) ?*Share {
     return null;
 }
 
-/// `share`: record the offer and keep the cap until someone accepts.
-fn doShare(badge: u64, name_w: u64, user_w: u64, fs_badge: u64, cap: u64) shared.SessResp {
+/// `share`: record the offer, keep the cap until someone accepts, and
+/// write the standing entry so the next login offers it again.
+fn doShare(badge: u64, name_w: u64, user_w: u64, fs_badge: u64, cap: u64, path_w: u64, rw: bool) shared.SessResp {
     const me = callerSession(badge) orelse return .{ .sess_err = .{ .code = 5 } };
     const name = clientSlice(badge, name_w) orelse return .{ .sess_err = .{ .code = 6 } };
     const user = clientSlice(badge, user_w) orelse return .{ .sess_err = .{ .code = 6 } };
-    if (cap == 0 or !shareNameOk(name) or !userExists(user)) return .{ .sess_err = .{ .code = 6 } };
+    const path = clientSlice(badge, path_w) orelse return .{ .sess_err = .{ .code = 6 } };
+    if (cap == 0 or !shareNameOk(name) or !userExists(user) or path.len > max_path) return .{ .sess_err = .{ .code = 6 } };
     const owner = me.name[0..me.name_len];
     if (findShare(owner, name) != null) return .{ .sess_err = .{ .code = 7 } };
+    const sh = insertShare(name, owner, user, path, rw, fs_badge, cap) orelse return .{ .sess_err = .{ .code = 3 } };
+    _ = sh;
+    saveStanding(owner);
+    return .ok;
+}
+
+fn insertShare(name: []const u8, owner: []const u8, user: []const u8, path: []const u8, rw: bool, fs_badge: u64, cap: u64) ?*Share {
     for (&shares) |*sh| {
         if (sh.used) continue;
-        sh.* = .{ .used = true, .name_len = name.len, .from_len = owner.len, .to_len = user.len, .fs_badge = fs_badge, .cap = cap };
+        sh.* = .{ .used = true, .name_len = name.len, .from_len = owner.len, .to_len = user.len, .path_len = path.len, .rw = rw, .fs_badge = fs_badge, .cap = cap };
         @memcpy(sh.name[0..name.len], name);
         @memcpy(sh.from[0..owner.len], owner);
         @memcpy(sh.to[0..user.len], user);
-        return .ok;
+        @memcpy(sh.path[0..path.len], path);
+        return sh;
     }
-    return .{ .sess_err = .{ .code = 3 } };
+    return null;
+}
+
+/// The owner's standing shares, rewritten from the table: a list of
+/// { name, path, to, rw } in conf/shares/<owner>.msh (an empty list
+/// when the last one went). Without the directory, shares are per
+/// session, as they were.
+fn saveStanding(owner: []const u8) void {
+    if (shares_view == 0) return;
+    var text: [max_shares * (max_name * 2 + max_path + 48) + 8]u8 = undefined;
+    var n: usize = 0;
+    n = putStr(&text, n, "[\n");
+    for (&shares) |*sh| {
+        if (!sh.used or !std.mem.eql(u8, sh.from[0..sh.from_len], owner)) continue;
+        n = putStr(&text, n, "  { name: \"");
+        n = putStr(&text, n, sh.name[0..sh.name_len]);
+        n = putStr(&text, n, "\", path: \"");
+        n = putStr(&text, n, sh.path[0..sh.path_len]);
+        n = putStr(&text, n, "\", to: \"");
+        n = putStr(&text, n, sh.to[0..sh.to_len]);
+        n = putStr(&text, n, if (sh.rw) "\", rw: true }\n" else "\", rw: false }\n");
+    }
+    n = putStr(&text, n, "]\n");
+    var path: [max_name + 4]u8 = undefined;
+    const p = cat3(&path, owner, ".msh", "", "", "");
+    if (!writeFile(shares_view, shares_buf, p, text[0..n])) return logName("usersvc: could not write the standing shares of ", owner);
+    _ = fsc.fsSync(shares_view);
+}
+
+/// The owner is back: every standing share is derived again from the
+/// session's root view and offered as it was. Caller holds the lock;
+/// the session's home service is up.
+fn restoreStanding(s: *Session) void {
+    if (shares_view == 0) return;
+    const owner = s.name[0..s.name_len];
+    var path: [max_name + 4]u8 = undefined;
+    const p = cat3(&path, owner, ".msh", "", "", "");
+    var text: [2048]u8 = undefined;
+    const n = readFile(shares_view, shares_buf, p, &text) orelse return;
+    var fba = std.heap.FixedBufferAllocator.init(&text_heap);
+    var interp = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
+    const v = interp.parseData(text[0..n]) catch return logName("usersvc: unreadable standing shares file for ", owner);
+    if (v != .list) return;
+    const fbuf: [*]u8 = @ptrFromInt(s.fs_buf_va);
+    var restored: u64 = 0;
+    for (v.list) |e| {
+        if (e != .record) continue;
+        const name = str(e.record.get("name")) orelse continue;
+        const to = str(e.record.get("to")) orelse continue;
+        const spath = str(e.record.get("path")) orelse continue;
+        const rw = if (e.record.get("rw")) |r| (r == .bool and r.bool) else false;
+        if (!shareNameOk(name) or spath.len > max_path or !userExists(to)) continue;
+        if (findShare(owner, name) != null) continue;
+        const d = fsc.fsDeriveBadged(s.fs_chan, fbuf, spath, !rw) orelse continue;
+        if (insertShare(name, owner, to, spath, rw, d.badge, d.cap) == null) {
+            _ = usys.capDrop(d.cap);
+            break;
+        }
+        restored += 1;
+    }
+    if (restored != 0) {
+        var line: [96]u8 = undefined;
+        var nb: [24]u8 = undefined;
+        _ = usys.log(glog, cat3(&line, "usersvc: ", decimal(&nb, restored), " standing share(s) of ", owner, " offered again"));
+    }
 }
 
 /// `unshare`: the owner's home filesystem withdraws the view (every
@@ -483,6 +583,7 @@ fn doUnshare(badge: u64, name_w: u64) shared.SessResp {
     if (sh.cap != 0) _ = usys.capDrop(sh.cap);
     _ = fsc.fsRevoke(me.fs_chan, sh.fs_badge);
     sh.* = .{};
+    saveStanding(me.name[0..me.name_len]);
     return .ok;
 }
 
@@ -503,11 +604,14 @@ fn doShares(badge: u64) shared.SessResp {
         if (!std.mem.eql(u8, from, mine) and !std.mem.eql(u8, to, mine)) continue;
         n = putStr(out, n, "  { name: \"");
         n = putStr(out, n, sh.name[0..sh.name_len]);
+        n = putStr(out, n, "\", path: \"");
+        n = putStr(out, n, sh.path[0..sh.path_len]);
         n = putStr(out, n, "\", from: \"");
         n = putStr(out, n, from);
         n = putStr(out, n, "\", to: \"");
         n = putStr(out, n, to);
-        n = putStr(out, n, if (sh.accepted) "\", accepted: true }\n" else "\", accepted: false }\n");
+        n = putStr(out, n, if (sh.rw) "\", rw: true" else "\", rw: false");
+        n = putStr(out, n, if (sh.accepted) ", accepted: true }\n" else ", accepted: false }\n");
     }
     n = putStr(out, n, "]\n");
     return .{ .data = .{ .len = n } };
@@ -531,14 +635,54 @@ fn doAccept(badge: u64, name_w: u64) void {
     sh.accepted = true;
 }
 
-/// A session ended: its offers die with its home service, and what it
-/// accepted died with its domain.
-fn forgetShares(user: []const u8) void {
+/// `passwd`: the old passphrase proves the identity (the same unseal a
+/// login does), the seed is sealed again under the new one with a fresh
+/// salt, and the record is rewritten in place — budgets kept. Only
+/// where the home lives: a cached record's home node holds the record
+/// that counts, and the next login there fetches it fresh.
+fn doPasswd(badge: u64, old_w: u64, new_w: u64) shared.SessResp {
+    const me = callerSession(badge) orelse return .{ .sess_err = .{ .code = 5 } };
+    const old_src = clientSlice(badge, old_w) orelse return .{ .sess_err = .{ .code = 6 } };
+    const new_src = clientSlice(badge, new_w) orelse return .{ .sess_err = .{ .code = 6 } };
+    defer @memset(old_src, 0);
+    defer @memset(new_src, 0);
+    if (me.home_node != 0) return .{ .sess_err = .{ .code = 9 } };
+    if (new_src.len == 0) return .{ .sess_err = .{ .code = 6 } };
+    const name = me.name[0..me.name_len];
+    var budget: Budget = .{};
+    const rec = readRecord(name, &budget) orelse return .denied;
+    var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
+    _ = usercred.unlock(fba.allocator(), &rec, old_src) catch return refuse("usersvc: passphrase change refused");
+    var sk = me.kp.secret_key.toBytes();
+    defer @memset(&sk, 0);
+    var seed: [usercred.seed_len]u8 = undefined;
+    defer @memset(&seed, 0);
+    @memcpy(&seed, sk[0..usercred.seed_len]);
+    var salt: [usercred.salt_len]u8 = undefined;
+    if (usys.getrandom(&salt) != .ok) return .{ .sess_err = .{ .code = 4 } };
+    var kfba = std.heap.FixedBufferAllocator.init(&kdf_heap);
+    const fresh = usercred.create(kfba.allocator(), &seed, &salt, new_src, rec.kdf) catch return .{ .sess_err = .{ .code = 4 } };
+    var path: [max_name + 4]u8 = undefined;
+    const p = cat3(&path, name, ".msh", "", "", "");
+    var rtext: [1024]u8 = undefined;
+    if (!writeFile(users_view, users_buf, p, renderRecord(&rtext, fresh, budget))) return .{ .sess_err = .{ .code = 4 } };
+    _ = fsc.fsSync(users_view);
+    logName("usersvc: passphrase changed for ", name);
+    return .ok;
+}
+
+/// A session ended: forget the in-memory offers it owned (the standing
+/// entry on disk remains, to be re-offered next login) and whatever it
+/// accepted. An owned view is revoked through the still-living home
+/// service and its cap dropped, so nothing derived outlives the service.
+fn forgetShares(s: *Session) void {
+    const user = s.name[0..s.name_len];
     for (&shares) |*sh| {
         if (!sh.used) continue;
         const owned = std.mem.eql(u8, sh.from[0..sh.from_len], user);
         const taken = sh.accepted and std.mem.eql(u8, sh.to[0..sh.to_len], user);
         if (owned or taken) {
+            if (owned and s.fs_chan != 0) _ = fsc.fsRevoke(s.fs_chan, sh.fs_badge);
             if (sh.cap != 0) _ = usys.capDrop(sh.cap);
             sh.* = .{};
         }
@@ -569,7 +713,16 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
     if (slot == max_sessions) return .{ .sess_err = .{ .code = 3 } };
 
     var budget: Budget = .{};
-    const rec = readRecord(name, &budget) orelse (if (fab_chan != 0 and fetchRecord(name)) readRecord(name, &budget) else null) orelse return refuse("usersvc: login refused");
+    var local = readRecord(name, &budget);
+    // A cached copy of a record whose home is elsewhere is refreshed
+    // from the home's node at every login it can reach it (a passphrase
+    // changed there is a passphrase changed here); unreachable, the
+    // copy serves — and the lease that follows says the home is away.
+    if (local != null and budget.home_node != 0 and fab_chan != 0 and fetchFrom(budget.home_node, name)) {
+        budget = .{};
+        local = readRecord(name, &budget);
+    }
+    const rec = local orelse (if (fab_chan != 0 and fetchRecord(name)) readRecord(name, &budget) else null) orelse return refuse("usersvc: login refused");
     var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
     const kp = usercred.unlock(fba.allocator(), &rec, phrase) catch return refuse("usersvc: login refused");
     // One server per home: a home leased to a session elsewhere, or
@@ -588,6 +741,7 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
         s.* = .{};
         return .{ .sess_err = .{ .code = 4 } };
     }
+    restoreStanding(s);
     logName("usersvc: session opened for ", name);
     return .{ .session = .{ .sid = slot } };
 }
@@ -1172,6 +1326,10 @@ fn apply(chan_h: u64) noreturn {
     const cv = setup.cap(.view); // conf/, read-write
     if (cv == 0) usys.exit(190);
     const cbuf: [*]u8 = @ptrFromInt(fsc.attachBuf(cv).va);
+    // The home tier, to remove a user's home with the user (optional:
+    // without it, only the record goes).
+    const hv = setup.cap(.home);
+    const hbuf: [*]u8 = if (hv != 0) @ptrFromInt(fsc.attachBuf(hv).va) else undefined;
 
     var text_buf: [8192]u8 = undefined;
     const text = readInto(cv, cbuf, "system.msh", &text_buf) orelse
@@ -1192,6 +1350,7 @@ fn apply(chan_h: u64) noreturn {
     var rows: std.ArrayList([]const Value) = .empty;
     var created: u64 = 0;
     var written: u64 = 0;
+    var removed: u64 = 0;
 
     if (desired.record.get("users")) |users| {
         if (users != .list) usys.exit(196);
@@ -1205,7 +1364,29 @@ fn apply(chan_h: u64) noreturn {
             }
             var path: [max_name + 10]u8 = undefined;
             const p = cat3(&path, "users/", name, ".msh", "", "");
-            if (fsc.fsStat(cv, cbuf, p) != null) {
+            const exists = fsc.fsStat(cv, cbuf, p) != null;
+            // `absent: true`: the user goes — record, standing shares and
+            // (with the home tier at hand) the home, ciphertext and all.
+            // Explicit, never implied by a name missing from the list.
+            if (u.record.get("absent")) |ab| if (ab == .bool and ab.bool) {
+                if (!exists) {
+                    row(&res, &rows, "user", name, "absent");
+                    continue;
+                }
+                if (fsc.fsDelete(cv, cbuf, p) != .ok) usys.exit(199);
+                var spath: [max_name + 12]u8 = undefined;
+                _ = fsc.fsDelete(cv, cbuf, cat3(&spath, "shares/", name, ".msh", "", ""));
+                if (hv != 0) {
+                    var vpath: [max_name + 8]u8 = undefined;
+                    _ = fsc.fsDelete(hv, hbuf, cat3(&vpath, name, "/vol", "", "", ""));
+                    _ = fsc.fsDelete(hv, hbuf, name);
+                }
+                logName("apply: removed user ", name);
+                row(&res, &rows, "user", name, "removed");
+                removed += 1;
+                continue;
+            };
+            if (exists) {
                 row(&res, &rows, "user", name, "kept");
                 continue;
             }
@@ -1281,10 +1462,12 @@ fn apply(chan_h: u64) noreturn {
     }
 
     if (!fsc.fsSync(cv)) usys.exit(194);
-    var line: [96]u8 = undefined;
+    var line: [128]u8 = undefined;
     var nb: [24]u8 = undefined;
     var nb2: [24]u8 = undefined;
-    _ = usys.log(glog, cat3(&line, "apply: done: users created ", decimal(&nb, created), ", settings written ", decimal(&nb2, written), ""));
+    var nb3: [24]u8 = undefined;
+    var head: [64]u8 = undefined;
+    _ = usys.log(glog, cat3(&line, cat3(&head, "apply: done: users created ", decimal(&nb, created), ", removed ", decimal(&nb3, removed), ""), ", settings written ", decimal(&nb2, written), "", ""));
     _ = res.deliver(&setup, .{ .table = .{ .cols = &.{ "kind", "name", "action" }, .rows = rows.items } });
     usys.exit(0);
 }

@@ -384,12 +384,16 @@ spawner, no fabric unless given. Three ways to run one:
   home's store.
 
 In a user session the shell also holds a badged channel to the session
-manager, and four commands use it: `share PATH NAME USER [rw]` derives
+manager, and five commands use it: `share PATH NAME USER [rw]` derives
 a view of a path in the home and offers it; `shares` lists offers made
-to and by this user as a table; `accept NAME` takes an offer and mounts
-it as `@NAME`, so `ls @NAME`, `cat @NAME/file` and the rest work on it;
-`unshare NAME` withdraws an offer at the source. A path beginning with
-`@` names a mount; `mv` refuses to cross between a mount and the home.
+to and by this user as a table (with each offer's `path` and `rw`);
+`accept NAME` takes an offer and mounts it as `@NAME`, so `ls @NAME`,
+`cat @NAME/file` and the rest work on it; `unshare NAME` withdraws an
+offer at the source; `passwd OLD NEW` changes this user's passphrase.
+A path beginning with `@` names a mount; `mv` refuses to cross between a
+mount and the home. An offer **stands**: the manager remembers it and
+re-offers it every time the owner logs in, until `unshare`; the taker
+accepts once per session of theirs.
 
 ### Startup, the prompt, and the editor
 

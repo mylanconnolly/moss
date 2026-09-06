@@ -702,6 +702,22 @@ pub fn finishTeardown(d: *Domain) void {
     std.debug.assert(d.state == .dying and drained(d));
     if (d.destroying.load(.acquire)) std.debug.panic("domain {s}: finishTeardown while destroy() is still running", .{d.name});
     arch.mmu.destroyUserSpace(d.user_root_pa, &d.user_mem, &d.kobj, d.asid);
+    // Stragglers: destroy() releases the cap table while threads on other
+    // cores are only marked to die and may still be finishing a syscall.
+    // One that inserts a cap after that walk — shm_create's cap between
+    // createShm and the table insert, say — leaves it in the table for
+    // nobody to release, and the buffer's ref leaks (an early-logged-out
+    // session, about one users run in eight). Every thread is truly dead
+    // by now (drained), so no more can be inserted: release whatever the
+    // walk in destroy() could have missed.
+    for (&d.captable.?.entries) |*e| {
+        if (e.cap_type != .empty) {
+            if (e.cap_type == .device) arch.iommu.detachIfHolder(e.object, @ptrCast(d), d.asid);
+            ipc.releaseCap(e.cap_type, e.object, e.badge);
+            e.cap_type = .empty;
+            e.generation +%= 1;
+        }
+    }
     kalloc.freePage(&d.kobj, @ptrCast(d.captable.?));
     d.captable = null;
     releaseMappedShms(d);
