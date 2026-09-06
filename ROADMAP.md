@@ -273,7 +273,11 @@ is a plan.
   `2 == 2.0` holds — shape annotations stay strict); ✅ literal shapes
   the lint checks statically (2026-09-06: `let x: int = "hi"` and its
   kind is flagged at lint time, mirroring the runtime's exact-kind
-  match); still open: bignum/decimal/rational are a decided non-goal;
+  match); not built: bignum, exact decimal, rational and complex —
+  a library first (money is exact over integer minor units today, a
+  `{ re, im }` record carries a complex), a numeric primitive only when
+  a workload asks for the literal/operator ergonomics a module cannot
+  give;
   (2) ✅ scripts as programs
   (landed 2026-09-03: the `mshrun` image, `script:` in unit files, the
   file commands shared through `user/fscmds.zig`); still open: a script

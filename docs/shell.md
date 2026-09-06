@@ -635,9 +635,14 @@ message by message. Editor setup is in `tools/README.md`.
   memory", not a crash); a 1 MB pool for everything bound at the prompt.
 - Two numbers, int and float, with int→float promotion in mixed
   arithmetic and comparison — but no tower of *kinds* above them: no big
-  integers, no decimals, no rationals (a mixed comparison past 2^53
-  loses precision, as f64 does). `nan` and `inf` cannot be written and
-  are refused as data. No tuples, by decision: a record is the grouping.
+  integers, no exact decimal, no rationals, no complex (a mixed
+  comparison past 2^53 loses precision, as f64 does). These are not
+  built rather than forbidden: exact money is a library over integer
+  minor units, a complex is a `{ re, im }` record, and a numeric
+  primitive would be revisited only when a workload needs the literal
+  and operator ergonomics a module cannot provide. `nan` and `inf`
+  cannot be written and are refused as data. No tuples, by decision: a
+  record is the grouping.
 - A `?` at the prompt has no function to return from and is an error;
   wrap the line in a function or `match` instead.
 - A block argument sees only `$it` (and `$acc` in `reduce`); write
