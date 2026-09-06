@@ -267,9 +267,14 @@ is a plan.
   protocol types and checked at the boundary both ways, every command
   the world decides answering a result with the protocol's word, a
   module loaded from the store (`use math`, the archive's `lib/`),
-  floats; ✅ signatures for the builtins (2026-09-04); still open: a
-  numeric tower above int and float, shapes the lint could check
-  statically when they are literal; (2) ✅ scripts as programs
+  floats; ✅ signatures for the builtins (2026-09-04); ✅ the numeric
+  tower (landed 2026-09-06: a float on either side of an arithmetic or
+  comparison operator promotes the int, two ints stay integer,
+  `2 == 2.0` holds — shape annotations stay strict); ✅ literal shapes
+  the lint checks statically (2026-09-06: `let x: int = "hi"` and its
+  kind is flagged at lint time, mirroring the runtime's exact-kind
+  match); still open: bignum/decimal/rational are a decided non-goal;
+  (2) ✅ scripts as programs
   (landed 2026-09-03: the `mshrun` image, `script:` in unit files, the
   file commands shared through `user/fscmds.zig`); still open: a script
   spawned on another node — `rspawn` takes a catalog number and carries

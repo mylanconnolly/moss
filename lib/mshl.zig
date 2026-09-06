@@ -1571,9 +1571,15 @@ pub const Interp = struct {
         const r = try self.evalNode(b.rhs);
         switch (b.op) {
             .eq, .ne => {
-                if (std.meta.activeTag(l) != std.meta.activeTag(r) and l != .nothing and r != .nothing)
-                    return self.fail("cannot compare a {s} with a {s}", .{ l.typeName(), r.typeName() });
-                const same = valueEql(l, r);
+                const same = if (isNumber(l) and isNumber(r)) blk: {
+                    // Across the tower: `2 == 2.0`. Two ints compare
+                    // exactly; a float on either side compares as float.
+                    break :blk if (l == .int and r == .int) l.int == r.int else asFloat(l) == asFloat(r);
+                } else blk: {
+                    if (std.meta.activeTag(l) != std.meta.activeTag(r) and l != .nothing and r != .nothing)
+                        return self.fail("cannot compare a {s} with a {s}", .{ l.typeName(), r.typeName() });
+                    break :blk valueEql(l, r);
+                };
                 return .{ .bool = if (b.op == .eq) same else !same };
             },
             .lt, .le, .gt, .ge => {
@@ -1587,33 +1593,38 @@ pub const Interp = struct {
                 } };
             },
             .add => {
+                // The numeric tower: two ints stay int; if either side is
+                // a float the other is promoted and the result is float.
                 if (l == .int and r == .int) return .{ .int = l.int +% r.int };
-                if (l == .float and r == .float) return .{ .float = l.float + r.float };
+                if (isNumber(l) and isNumber(r)) return .{ .float = asFloat(l) + asFloat(r) };
                 if (l == .str and r == .str) return .{ .str = try std.mem.concat(self.arena, u8, &.{ l.str, r.str }) };
                 if (l == .bytes and r == .bytes) return .{ .bytes = try std.mem.concat(self.arena, u8, &.{ l.bytes, r.bytes }) };
                 if (l == .list and r == .list) return .{ .list = try std.mem.concat(self.arena, Value, &.{ l.list, r.list }) };
                 return self.fail("cannot add a {s} and a {s}", .{ l.typeName(), r.typeName() });
             },
             .sub, .mul, .div, .mod => {
-                // Two ints or two floats: a number never changes kind on
-                // its own (`float`/`int` convert, and say when they cannot).
-                if (l == .float and r == .float) {
-                    if ((b.op == .div or b.op == .mod) and r.float == 0) return self.fail("division by zero", .{});
-                    return .{ .float = switch (b.op) {
-                        .sub => l.float - r.float,
-                        .mul => l.float * r.float,
-                        .div => l.float / r.float,
-                        .mod => @rem(l.float, r.float),
+                // Two ints: integer arithmetic (division truncates). One or
+                // both floats: the tower promotes to float. `int` and
+                // `float` still convert a number explicitly.
+                if (l == .int and r == .int) {
+                    if ((b.op == .div or b.op == .mod) and r.int == 0) return self.fail("division by zero", .{});
+                    return .{ .int = switch (b.op) {
+                        .sub => l.int -% r.int,
+                        .mul => l.int *% r.int,
+                        .div => @divTrunc(l.int, r.int),
+                        .mod => @rem(l.int, r.int),
                         else => unreachable,
                     } };
                 }
-                if (l != .int or r != .int) return self.fail("arithmetic needs two ints or two floats, got a {s} and a {s}", .{ l.typeName(), r.typeName() });
-                if ((b.op == .div or b.op == .mod) and r.int == 0) return self.fail("division by zero", .{});
-                return .{ .int = switch (b.op) {
-                    .sub => l.int -% r.int,
-                    .mul => l.int *% r.int,
-                    .div => @divTrunc(l.int, r.int),
-                    .mod => @rem(l.int, r.int),
+                if (!isNumber(l) or !isNumber(r)) return self.fail("arithmetic needs numbers, got a {s} and a {s}", .{ l.typeName(), r.typeName() });
+                const lf = asFloat(l);
+                const rf = asFloat(r);
+                if ((b.op == .div or b.op == .mod) and rf == 0) return self.fail("division by zero", .{});
+                return .{ .float = switch (b.op) {
+                    .sub => lf - rf,
+                    .mul => lf * rf,
+                    .div => lf / rf,
+                    .mod => @rem(lf, rf),
                     else => unreachable,
                 } };
             },
@@ -2664,10 +2675,30 @@ fn shapeEql(a: Shape, b: Shape) bool {
 /// Ordering, for values of one orderable type only.
 pub fn compareValues(a: Value, b: Value) ?std.math.Order {
     if (a == .int and b == .int) return std.math.order(a.int, b.int);
-    if (a == .float and b == .float) return if (a.float < b.float) .lt else if (a.float > b.float) .gt else .eq;
+    // The numeric tower: an int orders against a float by value (as
+    // f64, so a magnitude past 2^53 loses precision — a shell's bargain).
+    if (isNumber(a) and isNumber(b)) {
+        const x = asFloat(a);
+        const y = asFloat(b);
+        return if (x < y) .lt else if (x > y) .gt else .eq;
+    }
     if (a == .str and b == .str) return std.mem.order(u8, a.str, b.str);
     if (a == .bytes and b == .bytes) return std.mem.order(u8, a.bytes, b.bytes);
     return null;
+}
+
+/// A number in the tower: an int or a float.
+fn isNumber(v: Value) bool {
+    return v == .int or v == .float;
+}
+
+/// A number's value as f64 (for a mixed-kind operation or comparison).
+fn asFloat(v: Value) f64 {
+    return switch (v) {
+        .int => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => unreachable,
+    };
 }
 
 /// Deep copy into another allocator (values outlive the line arena).
@@ -4456,7 +4487,7 @@ test "the standard library: lib/msh/math.msh through use" {
     try expectOut(it, "$m.clamp (0 - 3) 0 10", "0\n");
 }
 
-test "floats: a second kind of number, never mixed with the first" {
+test "floats and the numeric tower: a float promotes an int, two ints stay integer" {
     var t: TestState = undefined;
     t.start();
     defer t.stop();
@@ -4471,10 +4502,23 @@ test "floats: a second kind of number, never mixed with the first" {
     try expectOut(it, "7.5 % 2.0", "1.5\n");
     try expectOut(it, "type 1.5", "float\n");
     try expectOut(it, "1.2.3", "1.2.3\n"); // a version, not a number
-    try expectRuntime(it, "1 + 1.5", "cannot add a int and a float");
-    try expectRuntime(it, "2 * 1.5", "arithmetic needs two ints or two floats, got a int and a float");
+    // The numeric tower: a float on either side promotes the int, and
+    // the result is float; two ints stay integer (division truncates).
+    try expectOut(it, "1 + 1.5", "2.5\n");
+    try expectOut(it, "2 * 1.5", "3.0\n");
+    try expectOut(it, "1.5 + 1", "2.5\n");
+    try expectOut(it, "7 / 2", "3\n"); // integer division for two ints
+    try expectOut(it, "7 / 2.0", "3.5\n"); // a float makes it float division
+    try expectOut(it, "10 % 3.0", "1.0\n");
+    try expectOut(it, "type (1 + 1.5)", "float\n");
+    try expectOut(it, "type (2 + 2)", "int\n");
     try expectRuntime(it, "1.0 / 0.0", "division by zero");
-    try expectRuntime(it, "1.5 == 1", "cannot compare a float with a int");
+    try expectRuntime(it, "1 / 0", "division by zero");
+    try expectRuntime(it, "1 + \"a\"", "cannot add a int and a string");
+    // Comparisons cross the tower by value.
+    try expectOut(it, "1.5 == 1", "false\n");
+    try expectOut(it, "2 == 2.0", "true\n");
+    try expectOut(it, "2 < 2.5 and 3.0 > 1", "true\n");
     try expectOut(it, "1.5 < 2.0 and 2.0 == 2.0", "true\n");
     // Conversions are commands with typed answers.
     try expectOut(it, "(float 2)? * 1.5", "3.0\n");

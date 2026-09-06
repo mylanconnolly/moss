@@ -1542,11 +1542,16 @@ guess; misuse is the signature's typed error; infrastructure that did
 not answer is still `fail`. The prompt renders a top-level `ok` as
 what it holds and an `err` as `err word`; `try` passes a result
 through unchanged (it was wrapping `ok (err x)`); `use` reads a
-result. *Floats* are a second number that never mixes with the first
-(`float`/`int` convert, `round`/`floor`/`ceil`), lexed by a fraction
-or an exponent so `1.2.3` and `10.77.0.1` stay words, rendered with a
-fraction always (`3.0`) and in exponent form when huge or tiny, data
-and JSON on both sides. *The library*: `lib/msh/*.msh` — host-tested
+result. *Floats* are a second number in a two-level tower with the first
+(added 2026-09-06): two ints stay an int, but a float on either side
+of an operator promotes the int and the result is float (`1 + 1.5`,
+`7 / 2.0`), and `==` crosses the two by value; a shape annotation stays
+strict, so `let x: float = 5` is still a mismatch (the lint now flags a
+literal against a primitive shape without running). `float`/`int`
+convert explicitly, `round`/`floor`/`ceil` round; floats are lexed by a
+fraction or an exponent so `1.2.3` and `10.77.0.1` stay words, rendered
+with a fraction always (`3.0`) and in exponent form when huge or tiny,
+data and JSON on both sides. *The library*: `lib/msh/*.msh` — host-tested
 through the interpreter's test host, packed into the archive as
 `lib/` — is installed into the store by init beside the images — the text under its digest,
 a manifest `{ source: "<digest>" }` — and `use name` (no `/`, no

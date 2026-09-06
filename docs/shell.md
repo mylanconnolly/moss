@@ -135,13 +135,17 @@ by construction — a literal that is not valid UTF-8 is a syntax error
 `from-bytes` gives an `ok` string or an `err` when the bytes are not
 UTF-8, and `+` joins bytes with bytes.
 
-**Two kinds of number.** An int is 64 bits and wraps; a float is
-written with a fraction or an exponent (`1.5`, `2e3`, `0.25kb`) and
-is a double. They never mix on their own: `1 + 1.5` is "cannot add a
-int and a float", and `2 * 1.5` is refused the same way — `float v`
-(always `ok` for an int, a result for text) and `int v` (truncation
-toward zero, `err` when a float is out of range) convert, `round`,
-`floor` and `ceil` take a float to a float. A float always shows its
+**Two kinds of number, and a small tower.** An int is 64 bits and
+wraps; a float is written with a fraction or an exponent (`1.5`, `2e3`,
+`0.25kb`) and is a double. In arithmetic and comparison they form a
+two-level tower: two ints stay an int (division truncates, `7 / 2` is
+`3`), but a float on either side promotes the int and the result is a
+float (`1 + 1.5` is `2.5`, `7 / 2.0` is `3.5`), and `2 == 2.0` is true.
+A *shape* annotation stays strict, though — `let x: float = 5` is a
+mismatch (the lint catches it), because the value is still an int; use
+`2.5`, or `float v` (always `ok` for an int, a result for text) and
+`int v` (truncation toward zero, `err` when a float is out of range) to
+convert, and `round`, `floor` and `ceil` take a float to a float. A float always shows its
 fraction (`3.0`, never `3`) so it reads back as what it is, and the
 very large and small use exponent form; `nan` and `inf` cannot be
 written and are not data. Floats travel through data files and JSON as
@@ -629,10 +633,11 @@ message by message. Editor setup is in `tools/README.md`.
 - 128 bindings per scope; a 512-character line; 16 lines of history;
   one 2 MB arena per line (a very large `open` or `tree` is "out of
   memory", not a crash); a 1 MB pool for everything bound at the prompt.
-- Two numbers, int and float, and no tower above them: no big
-  integers, no decimals, no rationals. `nan` and `inf` cannot be
-  written and are refused as data. No tuples, by decision: a record is
-  the grouping.
+- Two numbers, int and float, with int→float promotion in mixed
+  arithmetic and comparison — but no tower of *kinds* above them: no big
+  integers, no decimals, no rationals (a mixed comparison past 2^53
+  loses precision, as f64 does). `nan` and `inf` cannot be written and
+  are refused as data. No tuples, by decision: a record is the grouping.
 - A `?` at the prompt has no function to return from and is an error;
   wrap the line in a function or `match` instead.
 - A block argument sees only `$it` (and `$acc` in `reduce`); write
@@ -640,8 +645,11 @@ message by message. Editor setup is in `tools/README.md`.
 - A handle's release happens at the end of the statement that dropped
   its last reference (the same rule as every box), not the instant of
   the drop.
-- Shapes are checked where they run and nowhere earlier: a wrong
-  annotation deep in a function is found when that function is called.
+- Shapes are checked where they run: a wrong annotation deep in a
+  function is found when that function is called. The one exception the
+  tools reach earlier is a typed `let` whose value is a literal against a
+  primitive shape — `let x: int = "hi"` — which the lint flags without
+  running, mirroring the runtime's exact-kind match.
   The `shape` keyword takes one term (`shape (a | b)` for a union),
   since a `|` after it would otherwise never be a pipe. A bare word or
   a number as a `match` subject keeps its colon in one token, so

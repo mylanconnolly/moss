@@ -734,10 +734,12 @@ const shell_script = [_]Step{
     .{ .send = "let m = (use data/m.msh); $m.quad 4", .expect = "16" },
     .{ .send = "if 1 { echo x }", .expect = "error: if: condition is a int, not a bool" },
     .{ .send = "\"héllo\" | len", .expect = "5" },
-    // Floats: a second kind of number, never mixed with the first.
+    // Floats and the numeric tower: a float promotes an int, two ints stay integer.
     .{ .send = "1.5 * 4.0", .expect = "6.0" },
     .{ .send = "(float (ls data/smoke? | get size | first 1).0)? / 4.0", .expect = "6.5" },
-    .{ .send = "1 + 1.5", .expect = "error: cannot add a int and a float" },
+    .{ .send = "1 + 1.5", .expect = "2.5" },
+    .{ .send = "7 / 2", .expect = "3" },
+    .{ .send = "2 == 2.0", .expect = "true" },
     // Shapes: checked where they run; every host command has a signature.
     .{ .send = "let e: { name: string, size: int } = (stat data/smoke/hi.txt)?; $e.size", .expect = "26" },
     .{ .send = "let e: { name: int } = (stat data/smoke/hi.txt)?", .expect = "error: let: e.name is hi.txt, not int" },

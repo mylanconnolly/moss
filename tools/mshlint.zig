@@ -221,6 +221,7 @@ const Linter = struct {
 
     fn check(l: *Linter, node: c.TSNode, s: *Scope) Error!void {
         const k = ts.kind(node);
+        if (std.mem.eql(u8, k, "let_statement")) try l.letShape(node);
         if (std.mem.eql(u8, k, "def_statement")) {
             const name = ts.text(l.src, ts.field(node, "name").?);
             for (mshl.builtin_names) |b| if (std.mem.eql(u8, b, name)) try l.warn(node, "def {s} shadows the builtin `{s}`", .{ name, name });
@@ -244,6 +245,29 @@ const Linter = struct {
         if (std.mem.eql(u8, k, "record")) try l.recordKeys(node);
         var i: u32 = 0;
         while (i < ts.childCount(node)) : (i += 1) try l.check(ts.child(node, i), s);
+    }
+
+    /// A typed `let name: SHAPE = LITERAL` whose value is a literal and
+    /// whose shape is a single primitive type name is checked here, at
+    /// lint time: the interpreter would reject it at runtime (shape
+    /// matching is by exact kind), so a categorical mismatch is a typo
+    /// worth catching without running. Anything less certain — a shape
+    /// that is a union, a list, a record, a word, or a reference; a value
+    /// that is not a plain literal — is left to the runtime.
+    fn letShape(l: *Linter, node: c.TSNode) Error!void {
+        var typed: ?c.TSNode = null;
+        var i: u32 = 0;
+        while (i < ts.childCount(node)) : (i += 1) {
+            if (ts.is(ts.child(node, i), "typed_name")) typed = ts.child(node, i);
+        }
+        const tn = typed orelse return;
+        const shape = ts.field(tn, "shape") orelse return;
+        const value = ts.field(node, "value") orelse return;
+        if (!ts.is(shape, "shape_name")) return; // only single primitives
+        const want = ts.text(l.src, shape);
+        const lit = literalKind(l.src, value) orelse return; // only plain literals
+        if (satisfiesShape(lit, want)) return;
+        try l.report(value, "a {s} value cannot be a {s}", .{ @tagName(lit), want });
     }
 
     fn use(l: *Linter, node: c.TSNode, name: []const u8, s: *Scope) Error!void {
@@ -367,6 +391,55 @@ fn bareName(t: []const u8) []const u8 {
 
 /// The name a `let` binds: its `name` field, or the one inside its
 /// `typed_name`.
+/// The static kind of a plain literal value node, or null when the
+/// value is anything the lint cannot pin down without running (a
+/// command, a variable, an interpolation, an expression).
+const Lit = enum {
+    int,
+    float,
+    string,
+    bool,
+    nothing,
+    list,
+    record,
+};
+
+fn literalKind(src: []const u8, node: c.TSNode) ?Lit {
+    const k = ts.kind(node);
+    if (std.mem.eql(u8, k, "number")) {
+        const t = ts.text(src, node);
+        // A fraction or an exponent makes a float (size units like `kb`
+        // do not); everything else is an integer.
+        for (t) |ch| if (ch == '.' or ch == 'e' or ch == 'E') return .float;
+        return .int;
+    }
+    if (std.mem.eql(u8, k, "string") or std.mem.eql(u8, k, "bare_word")) return .string;
+    if (std.mem.eql(u8, k, "boolean")) return .bool;
+    if (std.mem.eql(u8, k, "null")) return .nothing;
+    if (std.mem.eql(u8, k, "list")) return .list;
+    if (std.mem.eql(u8, k, "record")) return .record;
+    return null;
+}
+
+/// Whether a literal of kind `lit` could satisfy the primitive shape
+/// named `want` — the runtime matches by exact kind, so this mirrors it.
+/// A list literal is allowed for `table` (it may be a list of records);
+/// `bytes`, `function`, `result`, `shape` and `handle` have no literal.
+fn satisfiesShape(lit: Lit, want: []const u8) bool {
+    const is = std.mem.eql;
+    if (is(u8, want, "any")) return true;
+    if (is(u8, want, "int")) return lit == .int;
+    if (is(u8, want, "float")) return lit == .float;
+    if (is(u8, want, "string")) return lit == .string;
+    if (is(u8, want, "bool")) return lit == .bool;
+    if (is(u8, want, "nothing") or is(u8, want, "null")) return lit == .nothing;
+    if (is(u8, want, "list")) return lit == .list;
+    if (is(u8, want, "record")) return lit == .record;
+    if (is(u8, want, "table")) return lit == .list;
+    if (is(u8, want, "bytes") or is(u8, want, "function") or is(u8, want, "result") or is(u8, want, "shape")) return false;
+    return true; // an unknown name: leave it to the runtime
+}
+
 fn boundName(node: c.TSNode) ?c.TSNode {
     if (ts.field(node, "name")) |n| return n;
     var i: u32 = 0;
@@ -541,6 +614,32 @@ test "clean code says nothing" {
     , &.{});
 }
 
+test "typed let: a literal value against a primitive shape, statically" {
+    try expectDiags(
+        \\let a: int = "hi"
+        \\let b: string = 5
+        \\let c: float = 5
+        \\let d: bytes = "x"
+        \\let ok1: int = 5
+        \\let ok2: float = 2.5
+        \\let ok3: string = hello
+        \\let t: table = { a: 1 }
+        \\let n: nothing = null
+        \\let li: list = 5
+        \\let byname: int = $b
+        \\let bycmd: int = (len [1])
+        \\let sh: [int] = 5
+        \\echo $a $b $c $d $ok1 $ok2 $ok3 $t $n $li $byname $bycmd $sh
+        \\
+    , &.{
+        "1:14: a string value cannot be a int",
+        "2:17: a int value cannot be a string",
+        "3:16: a int value cannot be a float",
+        "4:16: a string value cannot be a bytes",
+        "8:16: a record value cannot be a table",
+        "10:16: a int value cannot be a list",
+    });
+}
 test "unbound and used-before-let" {
     try expectDiags(
         \\echo $nope
