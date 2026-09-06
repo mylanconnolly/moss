@@ -464,15 +464,11 @@ when every console has had a session and none is open.
 
 ## Known limits and bugs
 
-- The `users` drill flakes on its leak bar: one 8-page buffer created
-  by the users image keeps a reference after the last, early-logged-out
-  session, 32 KB of pmem with it. A soak on this machine (2026-09-05)
-  showed it about once in eight runs, on `users` and `users+rs` alike,
-  and a `git stash` of that day's session-manager work reproduced it on
-  the clean tree — so it is a pre-existing teardown-ordering race in the
-  manager's last session, not a regression from standing shares or
-  `passwd`. It is on the roadmap's open list; `zig build check
-  -Donly=users -Dsoak=N` is how to hunt it.
+- The `users` drill's leak-bar flake (an 8-page buffer surviving an
+  early-logged-out session, ~1 run in 8) was fixed on 2026-09-05: a
+  cap-table teardown race in the kernel (`domain.finishTeardown` now
+  releases caps a straggler syscall inserted after `destroy` walked the
+  table — see DESIGN, "A second teardown race"). Soaked 20× clean.
 - Shares are persistent as offers: an offer stands in
   `conf/shares/<owner>.msh` and is re-derived and re-offered at every
   login of the owner, until `unshare`. The offered *view* still exists

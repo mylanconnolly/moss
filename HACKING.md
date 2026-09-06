@@ -334,6 +334,16 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   the image (their own segment at the base, `kernel/arch/x86_64/linker.ld`);
   `python3`-search the ELF for `f6b8f4b39de7d1ae` — the first hit must
   be at file offset 0x1000.
+- A cap inserted after `domain.destroy` walked the cap table is
+  orphaned: `destroy` kills threads on other cores by *marking* them
+  (they die at their next safe point, having finished the syscall in
+  hand), then releases the cap table — so a thread completing
+  `shm_create` inserts its cap after the walk, and `finishTeardown` used
+  to free the table without a second walk, leaking the buffer's ref
+  (the `users` leak-bar flake, ~1 in 8). `finishTeardown` now releases
+  any caps still in the table (safe: every thread is dead by then). Any
+  syscall that inserts a cap has this shape; the second walk is the
+  backstop for all of them.
 - A derived view must not outlive the service it came from: a session
   manager that re-derives a standing share's view at each login and then
   drops the cap at logout *after* destroying the home service left the

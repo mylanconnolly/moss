@@ -443,18 +443,20 @@ is a plan.
   system store; there is no other source of programs (no download, no
   build).
 - A session's shell has no fabric (`nodes`, `rspawn` are errors).
-- **A known flake (seen 2026-09-04, quantified 2026-09-05):** the
-  `users` drill flakes its leak bar — `shm[14]: 8 pages, 1 refs,
-  created by users`, pmem delta 32 KB — at the end of an early
-  logged-out session. A soak put it at about one run in eight, on
-  `users` and `users+rs`, and it reproduces on the tree with that day's
-  session-manager work (standing shares, `passwd`) stashed away, so it
-  is a pre-existing teardown ordering (a mapping or a cap in flight when
-  the manager is revoked), not a userspace leak or a regression.
-  Reproduce with `-Donly=users -Dsoak=N` and read the trace ring in the
-  kept log; the fix is owed. The `flogin` drill has a matching timing
-  fragility under TCG (a false fabric "member down" right after the
-  lease exchange, ~half the runs); under KVM it is solid.
+- ✅ **The `users` leak-bar flake, fixed (2026-09-05):** the drill
+  leaked an 8-page buffer (32 KB) about one run in eight, at the end of
+  an early-logged-out session. Traced to a cap-table teardown race:
+  `domain.destroy` releases the cap table while threads on other cores
+  are only *marked* to die, and one finishing `shm_create` (the buffer
+  allocated, the cap not yet inserted) inserts its cap after that walk,
+  into a table `finishTeardown` then frees without releasing — the
+  buffer's ref orphaned, held by nothing. `finishTeardown` now releases
+  whatever caps remain before freeing the table; every thread is truly
+  dead by then, so it catches exactly the stragglers. Soaked 20×
+  (`users` and `users+rs`) and 10× across the teardown-heavy drills,
+  all clean. The `flogin` drill keeps a separate timing fragility under
+  TCG (a false fabric "member down" right after the lease exchange,
+  ~half the runs); under KVM it is solid.
 
 **Fabric**
 
