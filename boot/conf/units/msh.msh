@@ -2,7 +2,7 @@
 # and the fabric. Essential: when it exits, the system shuts down.
 {
   image:     shell
-  budget:    { user: 8mb }
+  budget:    { user: 24mb }
   grant:     [log, spawner]
   profiles:  [system]
   essential: true

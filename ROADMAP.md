@@ -411,9 +411,15 @@ is a plan.
   client end closing, the server end closing, or a stop sentinel; the
   runtime owns worker handles so a script's exit kills its live workers,
   no orphans, and every worker teardown meets the leak bar. Staged: (1)
-  a worker serving a channel and `call` — `spawn { handler }` and `x |
-  call $w`, the payload an mshl data literal over a shared buffer as the
-  remote stage already does, worker teardown on drop; (2) fabric
+  ✅ a worker serving a channel and `call` (landed 2026-09-06: `spawn {
+  handler }` runs the block in an mshrun worker domain behind a channel,
+  `x | call $w` sends data and gets the handler's value, many calls per
+  worker, the payload an mshl data literal over a shared buffer as the
+  remote stage does; a worker is a handle destroyed totally on drop or
+  `close`, checked by the shell drill; data-only, and a handler's
+  unhandled `?` returns as the call's err — running the handler as a
+  function for cleaner errors and cap-passing in a message are the near
+  residuals); (2) fabric
   publish/lookup over the pool's service registry — scripts as fabric
   services; (3) `select` and a concurrent `serve` over many sources via
   `notify_bind`, and standalone `channel`/`spawn` for parallel work.

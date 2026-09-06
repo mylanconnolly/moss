@@ -24,6 +24,7 @@ const lineedit = @import("lineedit.zig");
 const boot = @import("boot.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
+const workcmds = @import("workcmds.zig");
 const httpcmds = @import("httpcmds.zig");
 const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
@@ -160,6 +161,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     }
     tty.init(cons_chan, cons_buf);
     run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(147);
+    workcmds.setup(spawner_h, loadWorkerStage);
     {
         const o = usys.shmCreate(run_out_pages);
         if (o.err != .ok) usys.exit(148);
@@ -382,6 +384,7 @@ const nodes_shape = mshl.shapeOf([]const Node);
 fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (is(name, "help")) return .{ .ret = .string };
     if (is(name, "exit") or is(name, "clear")) return .{ .ret = .nothing };
+    if (workcmds.signature(name)) |sig| return sig;
     if (fscmds.signature(name)) |sig| return sig;
     if (net != null) {
         if (tlscmds.signature(name)) |sig| return sig;
@@ -424,6 +427,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
         tty.out("\x1b[2J\x1b[H"); // clear the screen, cursor home (ctrl-l does the same)
         return .nothing;
     }
+    if (try workcmds.call(it, name, args, input)) |v| return v;
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
     if (net) |*nt| {
         // tls first: it answers for the socket commands on its own handles.
@@ -792,6 +796,16 @@ fn cmdAccept(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
 const Program = struct { store: Store, digest: [shared.img_digest_hex_len]u8, manifest: Value };
 
 /// `img/<name>.msh` in the user's own store, then the system's.
+/// Load the mshrun image into the run stage for a `spawn` worker, and
+/// return its stage handle verified — or null if the store cannot give
+/// it. `spawn` runs a worker, which is mshrun in its serving mode.
+fn loadWorkerStage(it: *mshl.Interp) ?u64 {
+    const prog = (findProgram(it, "mshrun") catch return null) orelse return null;
+    const len = readIntoStageVia(prog.store.chan, prog.store.buf, &prog.digest) orelse return null;
+    if (!run_stage.verify(len, &prog.digest)) return null;
+    return run_stage.handle;
+}
+
 fn findProgram(it: *mshl.Interp, name: []const u8) mshl.Error!?Program {
     const candidates = [_]?Store{ own_store, sys_store };
     for (candidates) |maybe| {

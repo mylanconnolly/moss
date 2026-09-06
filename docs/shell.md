@@ -387,6 +387,22 @@ spawner, no fabric unless given. Three ways to run one:
   that sees one directory, and `install mshrun` puts the runner in a
   home's store.
 
+**Workers.** A shell (or any host that holds a spawner) can offload work
+to another domain: `spawn { $in + 1 }` starts a worker — an mshrun
+running that block as its handler — and answers a `worker` handle;
+`x | call $w` sends `x` and gets the handler's value back, the handler
+running there with `$in = x`, and the same worker answers as many calls
+as you make. Only data crosses (the `remote` rule); captures do not, so
+the block sees `$in` and nothing of the caller's scope, and the request
+and the value are mshl data. The worker is a handle like a socket: it is
+destroyed — its domain torn down totally, crash-only — when its handle
+drops at the end of the statement or on `close $w`, so a script's exit
+kills its live workers and leaves no orphan. `status $w` is `alive` or
+`closed`. This is the first cut of the concurrency arc; serving a
+channel to the fabric (`publish`/`lookup`) and waiting on many sources
+(`select`) build on it. A handler that fails an unhandled `?` comes back
+as an `err` on the call.
+
 In a user session the shell also holds a badged channel to the session
 manager, and five commands use it: `share PATH NAME USER [rw]` derives
 a view of a path in the home and offers it; `shares` lists offers made

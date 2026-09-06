@@ -138,6 +138,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     glog = log_h;
     if (blob_va != 0) blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
     if (arg == 1) serveRemote(chan_h);
+    if (arg == 2) serveWorker(chan_h);
     const setup = boot.take(chan_h);
     has_console = setup.has(.console) and setup.has(.console_buf);
     if (has_console) tty.attach(&setup);
@@ -255,6 +256,86 @@ fn serveRemote(chan_h: u64) noreturn {
                     .failed => .{ .failed = .{ .len = n } },
                 }, 0);
                 usys.exit(0); // one stage, one answer
+            },
+        }
+    }
+}
+
+/// The worker stage: `spawn { handler }` in another domain. The buffer
+/// arrives with attach_buf, the handler's source once, then each `call`
+/// runs the handler with `$in` = the request and writes its value back.
+/// The handler body is an ordinary script that reads `$in`, so every
+/// call reuses `runStage`; a fresh interpreter per call keeps no state
+/// between them. The worker loops until the channel closes (the caller
+/// dropped or closed the handle) and then exits — no orphan.
+var handler_src: [8 << 10]u8 = undefined;
+var handler_len: usize = 0;
+
+fn serveWorker(chan_h: u64) noreturn {
+    var buf: ?[*]u8 = null;
+    var buf_len: usize = 0;
+    _ = usys.log(glog, "mshrun: worker up");
+    while (true) {
+        const r = usys.recvMsg(chan_h);
+        if (r.err == .peer_dead) usys.exit(0);
+        if (r.err != .ok) usys.exit(2);
+        const req = shared.decodeMsg(shared.WorkReq, r.data) orelse {
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
+            _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+            continue;
+        };
+        switch (req) {
+            .attach_buf => {
+                if (r.cap == 0) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                const m = usys.shmMap(r.cap);
+                _ = usys.capDrop(r.cap);
+                if (m.err != .ok) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                buf = @ptrFromInt(m.data[0]);
+                buf_len = m.data[1] * 4096;
+                _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
+            },
+            .handler => |q| {
+                const b = buf orelse {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                };
+                if (q.len > handler_src.len or q.len > buf_len) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                @memcpy(handler_src[0..q.len], b[0..q.len]);
+                handler_len = q.len;
+                _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
+            },
+            .call => |q| {
+                const b = buf orelse {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                };
+                if (q.len > buf_len) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
+                const in_text = line_fba.allocator().dupe(u8, b[0..q.len]) catch usys.exit(3);
+                var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
+                const outcome = runStage(&interp, handler_src[0..handler_len], in_text);
+                const text = switch (outcome) {
+                    .value => |t| t,
+                    .failed => |t| t,
+                };
+                const n = @min(text.len, buf_len);
+                @memcpy(b[0..n], text[0..n]);
+                _ = usys.replyTyped(shared.WorkResp, chan_h, switch (outcome) {
+                    .value => .{ .value = .{ .len = n } },
+                    .failed => .{ .failed = .{ .len = n } },
+                }, 0);
             },
         }
     }

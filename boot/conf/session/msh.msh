@@ -5,7 +5,7 @@
 # replaces this template.
 {
   image:     shell
-  budget:    { user: 8mb }
+  budget:    { user: 24mb }
   grant:     [log, spawner]
   profiles:  [session]
   essential: true

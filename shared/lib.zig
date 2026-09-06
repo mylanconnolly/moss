@@ -951,6 +951,28 @@ pub const RunResp = union(enum(u64)) {
     refused: void,
 };
 
+/// A worker (a `spawn`ed mshrun serving a typed channel): the buffer is
+/// attached once, the handler's source set once, then each `call` sends
+/// a request (a data literal in the buffer) and gets the handler's value
+/// back the same way. Unlike the remote stage, the worker loops — it
+/// answers many calls and lives until the channel closes.
+pub const WorkReq = union(enum(u64)) {
+    attach_buf: void, // + shm cap
+    /// The handler function's source at buf[0..len]; set once, first.
+    handler: struct { len: u64 },
+    /// The request (the handler's `$in`) as a data literal at buf[0..len]
+    /// (0 = nothing).
+    call: struct { len: u64 },
+};
+pub const WorkResp = union(enum(u64)) {
+    ok: void,
+    /// The handler's value as a data literal at buf[0..len] (0 = nothing).
+    value: struct { len: u64 },
+    /// The handler's error message at buf[0..len].
+    failed: struct { len: u64 },
+    refused: void,
+};
+
 // ---------------------------------------------------------------- fabric
 //
 // The multi-node fabric: init at a larger radius. Each node runs a fabric
