@@ -389,6 +389,34 @@ is a plan.
   that end with the session. *Deferred*: a written-at time in mossfs's
   superblock and transaction groups, useful forensics, waits for the
   next on-disk format bump.
+- **Concurrency and typed channels for the language** (the model
+  approved 2026-09-06). The one arc several items wait on: a script that
+  *serves* — concurrent `serve`, fabric publish/lookup from the
+  language, sockets crossing programs. Decisions, locked here: (a) the
+  model is cooperative select for concurrency of I/O plus **worker
+  domains** for parallelism of work — never interpreter-level threading
+  (shared mutable interpreter state is the race we refuse); a worker is
+  a child domain reached over a typed channel, captures do not cross
+  (data and the block's source only, the `remote` rule). (b) Messages
+  are typed request/reply, mshl values checked at both ends like a host
+  command's signature, capabilities allowed to ride along; streaming is
+  deferred until a workload asks. (c) Lifecycle is crash-only,
+  structured, and observed: a channel end, a worker and a published
+  service are handle values released at the end of the statement that
+  drops the last reference (the socket rule) — releasing a channel end
+  closes it and the kernel completes every peer operation with a close,
+  releasing a worker destroys its domain totally, releasing a published
+  service withdraws it; `close` does it now, `await` joins a worker for
+  its result, and `serve` ends on the first of a reached count, the last
+  client end closing, the server end closing, or a stop sentinel; the
+  runtime owns worker handles so a script's exit kills its live workers,
+  no orphans, and every worker teardown meets the leak bar. Staged: (1)
+  a worker serving a channel and `call` — `spawn { handler }` and `x |
+  call $w`, the payload an mshl data literal over a shared buffer as the
+  remote stage already does, worker teardown on drop; (2) fabric
+  publish/lookup over the pool's service registry — scripts as fabric
+  services; (3) `select` and a concurrent `serve` over many sources via
+  `notify_bind`, and standalone `channel`/`spawn` for parallel work.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
