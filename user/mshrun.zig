@@ -325,7 +325,7 @@ fn serveWorker(chan_h: u64) noreturn {
                 line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
                 const in_text = line_fba.allocator().dupe(u8, b[0..q.len]) catch usys.exit(3);
                 var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
-                const outcome = runStage(&interp, handler_src[0..handler_len], in_text);
+                const outcome = runHandler(&interp, handler_src[0..handler_len], in_text);
                 const text = switch (outcome) {
                     .value => |t| t,
                     .failed => |t| t,
@@ -342,6 +342,42 @@ fn serveWorker(chan_h: u64) noreturn {
 }
 
 const StageOut = union(enum) { value: []const u8, failed: []const u8 };
+
+/// Run a worker's handler on one request. Unlike the remote stage, the
+/// handler runs as a function (its source wrapped in `fn { … }`) called
+/// with the request as `$in`, so a `?` inside propagates out as the
+/// handler's failure carrying the err's own value — `(err "boom")?`
+/// answers the call `err boom`, not a top-level "unhandled err".
+fn runHandler(it: *mshl.Interp, src: []const u8, in_text: []const u8) StageOut {
+    const in_val: Value = if (in_text.len == 0) .nothing else (it.parseData(in_text) catch return .{ .failed = "the input is not data" });
+    const tin = mshl.tableize(it.arena, in_val) catch return .{ .failed = "out of memory" };
+    var wrapped: [handler_src.len + 8]u8 = undefined;
+    if (src.len + 6 > wrapped.len) return .{ .failed = "the handler is too large" };
+    @memcpy(wrapped[0..4], "fn {");
+    @memcpy(wrapped[4 .. 4 + src.len], src);
+    wrapped[4 + src.len] = '}';
+    const fn_val = it.evalSource(wrapped[0 .. 5 + src.len]) catch return .{ .failed = "the handler does not parse" };
+    var val = it.callValue(fn_val, &.{}, tin, null) catch |e| return .{ .failed = switch (e) {
+        error.OutOfMemory => "out of memory",
+        error.Exit => "exit",
+        else => it.err_msg,
+    } };
+    // A `?` inside the handler returns the err from the function, so the
+    // handler's value can be a result: an err is the call's failure (its
+    // own value, not "unhandled"), an ok is unwrapped to its value.
+    if (val == .result) {
+        if (!val.result.ok) {
+            var msg: std.ArrayList(u8) = .empty;
+            mshl.renderInline(val.result.val, it.arena, &msg) catch return .{ .failed = "out of memory" };
+            return .{ .failed = msg.items };
+        }
+        val = val.result.val;
+    }
+    if (!val.isData()) return .{ .failed = "the value is not data (functions, results, handles and bytes cannot cross)" };
+    var text: std.ArrayList(u8) = .empty;
+    mshl.writeData(val, it.arena, &text) catch return .{ .failed = "out of memory" };
+    return .{ .value = text.items };
+}
 
 fn runStage(it: *mshl.Interp, script: []const u8, in_text: []const u8) StageOut {
     const in_val: Value = if (in_text.len == 0) .nothing else (it.parseData(in_text) catch return .{ .failed = "the input is not data" });

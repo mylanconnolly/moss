@@ -416,10 +416,10 @@ is a plan.
   `x | call $w` sends data and gets the handler's value, many calls per
   worker, the payload an mshl data literal over a shared buffer as the
   remote stage does; a worker is a handle destroyed totally on drop or
-  `close`, checked by the shell drill; data-only, and a handler's
-  unhandled `?` returns as the call's err — running the handler as a
-  function for cleaner errors and cap-passing in a message are the near
-  residuals); (2) fabric
+  `close`, checked by the shell drill; data-only; the handler
+  runs as a function so a `?` inside returns the err's own value as the
+  call's err; cap-passing in a message (a socket handed to a worker) is
+  the near residual); (2) fabric
   publish/lookup over the pool's service registry — scripts as fabric
   services; (3) `select` and a concurrent `serve` over many sources via
   `notify_bind`, and standalone `channel`/`spawn` for parallel work.

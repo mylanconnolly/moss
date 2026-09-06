@@ -748,8 +748,9 @@ const shell_script = [_]Step{
     // Workers: a block runs in its own domain, called many times, then dropped.
     .{ .send = "let w = (spawn { $in + 1 })?; (5 | call $w)?", .expect = "6" },
     .{ .send = "let w = (spawn { $in * 10 })?; let a = (2 | call $w)?; let b = (3 | call $w)?; \"$a $b\"", .expect = "20 30" },
-    .{ .send = "let w = (spawn { (err \"boom\")? })?; 0 | call $w", .expect = "err unhandled err boom" },
+    .{ .send = "let w = (spawn { (err \"boom\")? })?; 0 | call $w", .expect = "err boom" },
     .{ .send = "let w = (spawn { $in.x + $in.y })?; ({ x: 3, y: 4 } | call $w)?", .expect = "7" },
+    .{ .send = "let w = (spawn { (int $in)? * 2 })?; (\"21\" | call $w)?", .expect = "42" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => \"a directory\"; file => \"a file\"; symlink => \"a link\" }", .expect = "a directory" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => 1; file => 2 }", .expect = "error: match: the arms do not cover symlink" },
     .{ .send = "stat 1", .expect = "error: stat: path is 1, not string" },

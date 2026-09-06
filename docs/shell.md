@@ -400,8 +400,9 @@ drops at the end of the statement or on `close $w`, so a script's exit
 kills its live workers and leaves no orphan. `status $w` is `alive` or
 `closed`. This is the first cut of the concurrency arc; serving a
 channel to the fabric (`publish`/`lookup`) and waiting on many sources
-(`select`) build on it. A handler that fails an unhandled `?` comes back
-as an `err` on the call.
+(`select`) build on it. The handler runs as a function, so a `?` inside
+it returns the err — `spawn { (int $in)? * 2 }` fails a bad number as
+the call's `err`, and a good one comes back `ok`.
 
 In a user session the shell also holds a badged channel to the session
 manager, and five commands use it: `share PATH NAME USER [rw]` derives
