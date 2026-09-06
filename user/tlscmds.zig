@@ -1,24 +1,26 @@
 //! TLS for mshl hosts: `tls-connect HOST PORT [{ host: NAME }]` opens
 //! a TCP connection and shakes hands over it (TLS 1.3, lib/tls.zig on
 //! the standard library's client), verifying the server's certificate
-//! against the trust roots the host was given (`{ tag: roots, file:
-//! tls/roots.pem }` in its unit) for NAME — the host as written unless
-//! the option says otherwise — and the wall clock. The value is a
-//! `tls` handle that `send`, `recv`, `status` and `close` take like a
-//! socket; `fetch https://…` opens one the same way. A handshake that
-//! fails is a result by its word: `untrusted`, `host_mismatch`,
-//! `expired`, `no_roots` (nothing given), `no_clock` (certificates
-//! cannot be checked without the time), `too_many`, or the transport's.
+//! against the trust roots read from `assets/tls/roots.pem` in the host's
+//! filesystem view, for NAME — the host as written unless the option
+//! says otherwise — and the wall clock. The roots reload when that file
+//! changes, so an updated bundle takes effect with no restart. The
+//! value is a `tls` handle that `send`, `recv`, `status` and `close`
+//! take like a socket; `fetch https://…` opens one the same way. A
+//! handshake that fails is a result by its word: `untrusted`,
+//! `host_mismatch`, `expired`, `no_roots` (none could be read), `no_clock`
+//! (certificates cannot be checked without the time), `too_many`, or
+//! the transport's.
 //!
-//! Sessions are a small table (each owns four record-sized buffers) and
-//! the roots parse once, on first use, into an arena: together some
-//! 600 KB, mapped on first use rather than carried in the image (an
-//! image is staged in 512 KB).
+//! Sessions and the roots' parse arena and PEM source live in a buffer
+//! mapped on first use — some 850 KB — rather than carried in the image
+//! (an image is staged in 1 MB).
 
 const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const netcmds = @import("netcmds.zig");
+const fsc = @import("fsclient.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const tls = mosslib.tls;
@@ -27,19 +29,31 @@ const Shape = mshl.Shape;
 const Net = netcmds.Net;
 
 // ------------------------------------------------------------------ roots
+//
+// Trust roots are read from an asset file in a filesystem view (the host
+// passes the view it holds), reloaded when the file's mtime advances —
+// updating `assets/tls/roots.pem` takes effect with no restart. The
+// default path suits a view rooted at the filesystem root, as msh's is.
 
-var roots_pem: []const u8 = "";
+var roots_view: u64 = 0;
+var roots_view_buf: [*]u8 = undefined;
+var roots_path: []const u8 = "assets/tls/roots.pem";
 var roots: tls.Roots = .{};
-var roots_state: enum { unloaded, loaded, none } = .unloaded;
+var roots_mtime: u64 = 0;
+var roots_size: u64 = 0;
+var roots_ok = false;
 /// The Mozilla bundle is ~190 KB of PEM (~140 KB of DER) plus the map.
 const roots_mem_len = 384 << 10;
+const roots_pem_len = 256 << 10;
 var roots_fba: std.heap.FixedBufferAllocator = undefined;
 
 /// Everything sized in records or roots lives here, mapped on first
-/// use: the roots' arena, the server identity's DER, and the slots.
+/// use: the roots' parse arena and PEM source, the server identity's
+/// DER, and the slots.
 const identity_mem_len = 8 << 10;
 const State = struct {
     roots_mem: [roots_mem_len]u8,
+    roots_pem: [roots_pem_len]u8,
     identity_mem: [identity_mem_len]u8,
     slots: [max_sessions]Slot,
 };
@@ -62,9 +76,11 @@ fn stateNow() ?*State {
     return st;
 }
 
-/// The host says what it was given (once, at start).
-pub fn setRoots(pem: []const u8) void {
-    roots_pem = pem;
+/// The host passes the filesystem view it holds; roots are read from
+/// `assets/tls/roots.pem` within it. Called once, at start.
+pub fn setRootsView(chan: u64, buf: [*]u8) void {
+    roots_view = chan;
+    roots_view_buf = buf;
 }
 
 // --------------------------------------------------------------- identity
@@ -108,23 +124,26 @@ fn identityNow() IdentityOut {
 
 const RootsOut = union(enum) { roots: *tls.Roots, failed: []const u8 };
 
+/// The trust roots, current: read and parse `assets/tls/roots.pem` from
+/// the host's view when it is first needed or its mtime has advanced, so
+/// an updated bundle is picked up without a restart.
 fn rootsNow(st: *State, now_ms: u64) RootsOut {
-    switch (roots_state) {
-        .loaded => return .{ .roots = &roots },
-        .none => return .{ .failed = "no_roots" },
-        .unloaded => {},
-    }
-    if (roots_pem.len == 0) {
-        roots_state = .none;
-        return .{ .failed = "no_roots" };
-    }
+    if (roots_view == 0) return .{ .failed = "no_roots" };
+    const stat = fsc.fsStat(roots_view, roots_view_buf, roots_path) orelse return .{ .failed = "no_roots" };
+    // mtime and size together: an update changes one or the other
+    // (mtime alone is second-grained).
+    if (roots_ok and stat.mtime == roots_mtime and stat.size == roots_size) return .{ .roots = &roots };
+    const pem = fsc.readWhole(roots_view, roots_view_buf, roots_path, &st.roots_pem) orelse return .{ .failed = "no_roots" };
+    roots = .{};
     roots_fba = std.heap.FixedBufferAllocator.init(&st.roots_mem);
-    const n = roots.add(roots_fba.allocator(), roots_pem, @intCast(now_ms / 1000)) catch 0;
+    const n = roots.add(roots_fba.allocator(), pem, @intCast(now_ms / 1000)) catch 0;
     if (n == 0) {
-        roots_state = .none;
+        roots_ok = false;
         return .{ .failed = "no_roots" };
     }
-    roots_state = .loaded;
+    roots_mtime = stat.mtime;
+    roots_size = stat.size;
+    roots_ok = true;
     return .{ .roots = &roots };
 }
 

@@ -374,13 +374,17 @@ take exactly like a socket. `fetch https://…` opens one the same way
 any other. The server's certificate must be for NAME — the host as
 written unless the option says otherwise (a server reached by address,
 or a name that is not the certificate's) — and must chain to a root the
-program **trusts**: the PEM bundle its unit gave it, `{ tag: roots,
-file: tls/roots.pem }`, the Mozilla root store as curl publishes it
-(`boot/tls/roots.pem`, dated in its header). A program given no roots
-cannot trust anyone: `tls-connect` answers `err no_roots`, never an
-unverified connection — there is no "insecure" switch. The drill trusts
-one root only, its own (`lib/tls/moss-test-ca.pem`, which also signs
-the certificate the runner's server presents).
+program **trusts**: the roots it reads from `assets/tls/roots.pem` in
+its filesystem view — reference data seeded from the archive into the
+`assets/` tier at first boot and updatable in place (see [the
+filesystem page](filesystem.md)). The roots reload when that file's
+mtime or size changes, so refreshing the bundle takes effect with no
+restart. A program that can read no roots cannot trust anyone:
+`tls-connect` answers `err no_roots`, never an unverified connection —
+there is no "insecure" switch. The gate seeds its own test root there
+(`lib/tls/moss-test-ca.pem`, which also signs the certificate the
+runner's server presents); the Mozilla bundle as curl publishes it
+rides along at `assets/tls/ca-bundle.pem`.
 
 Two more things a handshake needs are the system's: the wall clock,
 to judge a certificate's validity (`err no_clock` before the RTC or
@@ -560,8 +564,10 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   suites, and — on the server — an ECDSA P-256 or Ed25519 certificate
   (no RSA server key). No client certificates, no session resumption,
   no revocation checking (CRL, OCSP); DNS over TLS is dotd forwarding
-  one query per connection (no keep-alive, no DoH); the roots are the
-  bundle as shipped in the archive, with no update path but a rebuild. A program holds at most four connections (client and server
+  one query per connection (no keep-alive, no DoH). The trust roots
+  live in the `assets/` tier and reload on change, but the change signal
+  is mtime-and-size, so two writes within one second that leave the size
+  unchanged are not noticed. A program holds at most four connections (client and server
   share the pool). A `serve` handles one connection at a time — the language has no concurrency, so a
   slow handler, or a kept connection that sits idle (up to three
   seconds), holds the next client at the door (the listener's backlog

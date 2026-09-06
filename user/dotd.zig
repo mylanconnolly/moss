@@ -5,11 +5,13 @@
 //! query framed as DNS-over-TCP is (a two-byte length, then the
 //! message), reads the reply the same way, and sends it back as UDP.
 //! The upstream's certificate is verified for the configured name
-//! against the trust roots the unit gave (`{ tag: roots, file: … }`),
-//! and against the wall clock — a query fails closed if the time is
-//! unknown or no root vouches for the server. Settings (`conf/dot.msh`,
-//! given as a file): the upstream's address, its port (853), and the
-//! name its certificate must carry.
+//! against the trust roots read from the assets view the unit gave
+//! (`assets/tls/roots.pem` by default), and against the wall clock — a
+//! query fails closed if the time is unknown or no root vouches. The
+//! roots are reloaded when the file's mtime advances, so updating the
+//! bundle in the filesystem takes effect with no restart. Settings
+//! (`conf/dot.msh`, a file): the upstream address, its port (853), the
+//! name its certificate must carry, and the roots path in the view.
 //!
 //! One thread, one query at a time, a fresh TLS connection each (a DoT
 //! server keeps the connection alive; this first cut does not). The
@@ -21,6 +23,7 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 const boot = @import("boot.zig");
 const netcmds = @import("netcmds.zig");
+const fsc = @import("fsclient.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const tls = mosslib.tls;
@@ -60,6 +63,8 @@ var upstream: []const u8 = "";
 var upstream_port: u64 = 853;
 var cert_name_buf: [128]u8 = undefined;
 var cert_name: []const u8 = "";
+var roots_path_buf: [128]u8 = undefined;
+var roots_path: []const u8 = "assets/tls/roots.pem";
 var settings_mem: [4 << 10]u8 = undefined;
 
 fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const mshl.Value, _: ?mshl.Value) mshl.Error!?mshl.Value {
@@ -90,16 +95,53 @@ fn readSettings(text: []const u8) void {
     if (name.len > cert_name_buf.len) fail("dotd: name: too long");
     @memcpy(cert_name_buf[0..name.len], name);
     cert_name = cert_name_buf[0..name.len];
+    // Where the trust roots live in the assets view (a path relative to
+    // the view the unit gave), reloaded when the file changes.
+    if (v.record.get("roots")) |rp| {
+        if (rp == .str and rp.str.len <= roots_path_buf.len) {
+            @memcpy(roots_path_buf[0..rp.str.len], rp.str);
+            roots_path = roots_path_buf[0..rp.str.len];
+        }
+    }
 }
 
 // ------------------------------------------------------------- the wire
 
-/// The trust roots live here for the life of the server (BSS, not image
-/// bytes): the Mozilla bundle is ~140 KB of DER plus the map.
+/// The trust roots, read from the assets view and reloaded when the
+/// file's mtime advances — an update to the bundle takes effect without
+/// a restart. All BSS, not image bytes: the parse arena (a real bundle
+/// is ~140 KB of DER plus the map) and the PEM source buffer.
 var roots: tls.Roots = .{};
-var roots_loaded = false;
+var roots_mtime: u64 = 0;
+var roots_size: u64 = 0;
+var roots_ok = false;
 var roots_mem: [384 << 10]u8 = undefined;
+var roots_pem_buf: [256 << 10]u8 = undefined;
 var roots_fba: std.heap.FixedBufferAllocator = undefined;
+var view_chan: u64 = 0;
+var view_buf: [*]u8 = undefined;
+
+/// Ensure the roots are loaded and current: stat the file, and (re)read
+/// and (re)parse it when its mtime has changed since the last load.
+/// `now_ms` dates the certificates. Null with a reason on failure.
+fn ensureRoots(now_ms: u64) ?[]const u8 {
+    const st = fsc.fsStat(view_chan, view_buf, roots_path) orelse return "no roots file";
+    // The change signal is mtime and size together: an update to the
+    // bundle changes one or the other. (mtime alone is second-grained.)
+    if (roots_ok and st.mtime == roots_mtime and st.size == roots_size) return null;
+    const pem = fsc.readWhole(view_chan, view_buf, roots_path, &roots_pem_buf) orelse return "cannot read roots";
+    roots = .{};
+    roots_fba = std.heap.FixedBufferAllocator.init(&roots_mem);
+    const n = roots.add(roots_fba.allocator(), pem, @intCast(now_ms / 1000)) catch 0;
+    if (n == 0) {
+        roots_ok = false;
+        return "no roots";
+    }
+    roots_mtime = st.mtime;
+    roots_size = st.size;
+    roots_ok = true;
+    return null;
+}
 
 var session: tls.Session = .{};
 
@@ -132,14 +174,8 @@ const ForwardOut = union(enum) { reply: []const u8, failed: []const u8 };
 /// One query out, its reply back: connect, handshake, frame, exchange.
 /// `reply` points into `out`.
 fn forward(net: *netcmds.Net, query: []const u8, out: []u8) ForwardOut {
-    if (!roots_loaded) {
-        const now = usys.wallMs() orelse return .{ .failed = "no clock" };
-        roots_fba = std.heap.FixedBufferAllocator.init(&roots_mem);
-        const n = roots.add(roots_fba.allocator(), roots_pem, @intCast(now / 1000)) catch 0;
-        if (n == 0) return .{ .failed = "no roots" };
-        roots_loaded = true;
-    }
     const now = usys.wallMs() orelse return .{ .failed = "no clock" };
+    if (ensureRoots(now)) |m| return .{ .failed = m };
     const sock = switch (net.connectHost(upstream, upstream_port)) {
         .sock => |s| s,
         .failed => |m| return .{ .failed = m },
@@ -180,14 +216,14 @@ fn readExact(buf: []u8) bool {
 
 const dns_max = 4096;
 
-var roots_pem: []const u8 = "";
-
 export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     glog = log_h;
     const setup = boot.take(chan_h);
     if (!setup.has(.net)) fail("dotd: no network view");
+    if (!setup.has(.view)) fail("dotd: no assets view (for the trust roots)");
     readSettings(setup.data());
-    roots_pem = setup.file(.roots) orelse fail("dotd: no trust roots given");
+    view_chan = setup.cap(.view);
+    view_buf = @ptrFromInt(fsc.attachBuf(view_chan).va);
     var net = netcmds.Net.init(setup.cap(.net));
     if (!net.attach()) fail("dotd: cannot attach a buffer to the network view");
     const sock = switch (net.udpBindRaw(53)) {

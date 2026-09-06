@@ -281,6 +281,29 @@ pub fn fsClose(chan: u64, fd: u64) void {
     _ = usys.callTyped(shared.FsReq, shared.FsResp, chan, .{ .close = .{ .fd = fd } }, 0);
 }
 
+/// A whole file read into `dst` (no interpreter, no allocator): open,
+/// read in `fs_max_io` chunks through the view buffer, close. Null on
+/// any error or a file larger than `dst`. For programs reading an asset
+/// (a trust bundle, a database) from a view they hold.
+pub fn readWhole(chan: u64, buf: [*]u8, path: []const u8, dst: []u8) ?[]const u8 {
+    const fd = switch (fsOpen(chan, buf, path, 0)) {
+        .fd => |f| f,
+        .err => return null,
+    };
+    defer fsClose(chan, fd);
+    var off: usize = 0;
+    while (true) {
+        const want = @min(shared.fs_max_io, dst.len - off + 1); // +1 so an oversize file is caught
+        if (want == 0) return null; // dst full but more remains
+        const n = fsReadAt(chan, fd, off, want) orelse return null;
+        if (n == 0) break;
+        if (off + n > dst.len) return null; // larger than dst
+        @memcpy(dst[off .. off + n], buf[0..n]);
+        off += n;
+    }
+    return dst[0..off];
+}
+
 /// Positioned write: data lands at buf[0..len] and goes to fd at `off`.
 pub fn fsWriteAt(chan: u64, buf: [*]u8, fd: u64, off: u64, data: []const u8) bool {
     @memcpy(buf[0..data.len], data);

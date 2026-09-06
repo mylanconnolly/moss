@@ -775,8 +775,42 @@ fn joinPath(out: *[64]u8, dir: []const u8, name: []const u8) []const u8 {
 fn installStore(u: *Unit) void {
     if (u.buf_va == 0) return;
     const view = fsc.fsDerive(u.chan_b, @ptrFromInt(u.buf_va), "", false) orelse return;
-    _ = installImages(view);
+    const buf: [*]u8 = @ptrFromInt(fsc.attachBuf(view).va);
+    _ = installImages(view, buf);
+    installAssets(view, buf);
     _ = usys.capDrop(view);
+}
+
+/// Seed the `assets/` tier from the archive: every entry under
+/// `assets/` becomes a file at the same path, created only if absent so
+/// an updated copy (written into the live filesystem) survives reboots.
+/// This is the one way reference data ships with the system and is
+/// updated in a running one — a program reads its asset from a view and
+/// reloads when the file's mtime advances; no rebuild, no restart.
+fn installAssets(view: u64, buf: [*]u8) void {
+    var it = shared.marcIter(archive());
+    var seeded: u64 = 0;
+    while (it.next()) |e| {
+        if (!std.mem.startsWith(u8, e.path, shared.assets_dir)) continue;
+        mkdirp(view, buf, e.path); // the tier exists; create nested dirs
+        if (fsc.fsStat(view, buf, e.path) == null) {
+            if (writeFile(view, buf, e.path, e.data)) seeded += 1;
+        }
+    }
+    if (seeded > 0) {
+        _ = fsc.fsSync(view);
+        _ = usys.log(glog, "init: seeded the assets tier from the archive");
+    }
+}
+
+/// Create every directory prefix of `path` (a/b/c.pem -> a, a/b), each
+/// idempotently. `path` names a file; its own last component is not a dir.
+fn mkdirp(view: u64, buf: [*]u8, path: []const u8) void {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, path, i, '/')) |slash| {
+        _ = fsc.fsMkdir(view, buf, path[0..slash]); // idempotent; ignore "exists"
+        i = slash + 1;
+    }
 }
 
 // ------------------------------------------------------------ supervision
@@ -957,7 +991,7 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
         },
         .install => {
             if (r.cap == 0) return failReply(chan, .bad_arg);
-            const n = installImages(r.cap);
+            const n = installImages(r.cap, @ptrFromInt(fsc.attachBuf(r.cap).va));
             _ = usys.replyTyped(shared.InitReply, chan, .{ .installed = .{ .n = n } }, 0);
         },
     }
@@ -985,9 +1019,7 @@ fn unitForService(id: u64) ?*Unit {
 /// a manifest `{ source: "<digest>" }` beside it. Init is the installer
 /// because it holds the archive and the catalog; fssvc knows nothing
 /// about programs and msh only reads.
-fn installImages(view: u64) u64 {
-    const b = fsc.attachBuf(view);
-    const buf: [*]u8 = @ptrFromInt(b.va);
+fn installImages(view: u64, buf: [*]u8) u64 {
     const blob = archive();
     if (!fsc.fsMkdir(view, buf, "img")) {
         _ = usys.log(glog, "init: no img/ tier on this volume; store not installed");

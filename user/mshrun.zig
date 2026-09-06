@@ -155,7 +155,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     }
     fs_ctx.stores = &stores;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
-    tlscmds.setRoots(setup.file(.roots) orelse "");
+    if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
     tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
     if (setup.has(.fabric)) fab = .{ .chan = setup.cap(.fabric) };
     const path = setup.arg();
@@ -163,8 +163,12 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
 
     line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
     var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
-    // The script: from the view, else from the boot archive.
-    const text = if (view_chan != 0)
+    // The script: from the boot archive when it is granted and holds the
+    // path (a drill's script is an archive path, even when the unit also
+    // has a filesystem view for its data), else from the view.
+    const text = if (blob.len != 0 and shared.marcFind(blob, path) != null)
+        shared.marcFind(blob, path).?
+    else if (view_chan != 0)
         fscmds.readFile(&fs_ctx, &interp, path) catch fail(path, interp.err_msg)
     else
         shared.marcFind(blob, path) orelse fail(path, "not in the boot archive (and no view was given)");

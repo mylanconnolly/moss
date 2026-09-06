@@ -1,7 +1,18 @@
-# Resolve a name over DNS-over-TLS: netsvc's resolver forwards to dotd
-# (::1:53), which asks the upstream over TLS. The responder answers any
-# name with 2001:db8::53 (AAAA) and 192.0.2.53 (A); resolve returns both,
-# AAAA first.
-let a = (resolve secure.example)?
+# Resolve over DNS-over-TLS: netsvc's resolver forwards to dotd (::1:53),
+# which asks the upstream over TLS with the trust roots seeded into the
+# assets tier. The responder answers any name with 2001:db8::53 (AAAA)
+# and 192.0.2.53 (A); resolve returns both, AAAA first.
+let a = (resolve first.example)?
 if $a != ["2001:db8::53", "192.0.2.53"] { (err "resolve over tls: $a")? }
 echo "script: dot resolve ok"
+# Hot update: overwrite the trust roots with a root that does not vouch
+# for the upstream, then resolve a fresh name (an uncached one). dotd
+# reloads the roots on its next query — no restart — so the handshake is
+# now untrusted and the resolve fails. The rw assets view is the update
+# authority.
+let other = (cat tls/other-ca.pem)?
+(write tls/roots.pem $other)?
+match (resolve second.example) {
+  ok $b => (err "still trusted after the roots were swapped: $b")?
+  err $e => echo "script: roots swap took effect (resolve: $e)"
+}

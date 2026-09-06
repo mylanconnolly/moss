@@ -104,8 +104,8 @@ use it for — and where init gets it from:
 | `{ tag: buf, shm: 1 }` | creating a shared buffer of that many pages (a `buf` is also where secrets are staged) |
 | `{ secret: conf/fs.key }` | copying that archive file into the unit's `buf` and pointing at it (bytes, not a capability — no tag); wiped once read |
 | `{ file: conf/net.msh }` | the same delivery for bytes that are not secret — a settings record from the archive, up to 2 KB, kept |
-| `{ tag: roots, file: tls/roots.pem }` | a file of any size as a capability of its own: a shared buffer holding a u64 length then the bytes, under that tag (`boot.Setup.file(tag)` maps it) — the trust roots are 190 KB |
-| `{ tag: cert, file: tls/server.pem }` | the same delivery for a TLS server's certificate chain; its private key comes as `{ secret: … }` |
+| `{ tag: cert, file: tls/server.pem }` | a file of any size as a capability of its own: a shared buffer holding a u64 length then the bytes, under that tag (`boot.Setup.file(tag)` maps it) — a TLS server's certificate chain; its private key comes as `{ secret: … }` |
+| `{ tag: view, fs: assets, ro: true }` | a view of the `assets/` tier: how a program reads reference data (trust roots, later tz/locale) that is seeded from the archive and updated in place — see [the filesystem page](filesystem.md) |
 | `{ tag: view, fs: state/fabric, ro: false, mkdir: true }` | deriving a filesystem view from the `fs` unit's root view (a session's from its home), creating the directory first if asked |
 | `{ tag: net, netview: net, allow: 10.0.2.100, port: 9000 }` | asking the named network unit to derive a view, optionally allowing one destination |
 | `{ tag: init, self: true }` | a copy of init's own front channel |

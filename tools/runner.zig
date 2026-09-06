@@ -264,7 +264,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -319,6 +319,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         else => {},
     }
+    // net and dot keep their assets (trust roots) in mossfs, so they
+    // boot a scratch disk alongside the NIC.
+    if (spec.kind == .net or spec.kind == .dot) try appendDisk(&args, disk);
 
     var tls_server: ?std.process.Child = null;
     if (spec.kind == .net) tls_server = try spawnQemu(&.{

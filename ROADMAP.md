@@ -314,7 +314,14 @@ is a plan.
   `dot` drill points netsvc at it and resolves through a DoT server
   built from moss's own TLS server); still open on TLS: client
   certificates, session resumption, revocation (CRL/OCSP), DoT
-  keep-alive and DoH, a roots update path, and RSA server keys;
+  keep-alive and DoH, and RSA server keys; ✅ trust roots (and reference
+  data at large) updatable in a running system (landed 2026-09-06: the
+  `assets/` filesystem tier, seeded from the archive at first boot and
+  read from a view with an mtime-or-size reload — dotd and the msh TLS
+  hosts read `assets/tls/roots.pem` this way, and the `dot` drill proves
+  a hot roots swap changes trust with no restart; the one mechanism for
+  shipping and updating reference data, timezone and locale databases to
+  come);
   concurrent handling (needs the language to spawn), and, when a use
   case demands them, congestion control and out-of-order receive; (4)
   the fabric surface — ✅ the bulk transport across the wire and remote

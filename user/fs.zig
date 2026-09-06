@@ -538,7 +538,7 @@ fn attachVolume(dev: mossfs.BlockDev, sectors: u64) shared.FsResp {
 }
 
 /// The root's fixed children (boot/ is the archive overlay, not on disk).
-const std_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile", "home" };
+const std_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile", "home", "assets" };
 /// A home volume: the same lifecycle tiers at the user's radius (its
 /// conf/ is the user settings layer, its img/ a program store).
 const home_hierarchy = [_][]const u8{ "conf", "img", "state", "data", "volatile" };

@@ -32,6 +32,7 @@ graph TD
   root --> data["data/  — shared payload, by explicit grant"]
   root --> volatile["volatile/  — scratch, emptied at every mount"]
   root --> home["home/  — one user per subtree\n(alice/vol, bob/vol …)"]
+  root --> assets["assets/  — reference data, seeded from\nthe archive, updated in place (tls/, later tz/, cldr/)"]
 ```
 
 | Tier | Lifecycle | Who writes | Who reads |
@@ -43,6 +44,18 @@ graph TD
 | `data/` | survives reboot | granted case by case | granted case by case |
 | `volatile/` | cleared at every mount | the owning service | the owning service |
 | `home/` | survives reboot | the session manager and each user's own session | the user's session only |
+| `assets/` | seeded from the archive at first boot, updated in place | whoever holds a rw view (an updater) | any program with a view (reloads on change) |
+
+The `assets/` tier is how reference data — trust roots today, timezone
+and locale databases in time — ships with the system and is updated in
+a running one. The archive is only a *seed*: at first boot init lays
+every archive entry under `assets/` into the tier (skipping ones already
+present, so an update survives reboots), exactly as it installs programs
+into `img/`. A program reads its asset from a view and reloads when the
+file's mtime or size changes, so a new bundle takes effect with no
+rebuild and no restart; the authority to update is simply holding a
+read-write view of the path. Writers should replace a file atomically
+(write a temporary, then rename) so a reader never sees it half-written.
 
 ### What a view is
 

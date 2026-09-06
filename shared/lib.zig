@@ -611,12 +611,11 @@ pub const CapTag = enum(u64) {
     store = 19,
     /// The standing shares (`conf/shares/`), for the session manager.
     shares = 20,
-    /// Trust roots: the PEM bundle a TLS client verifies servers
-    /// against, handed as a file under a tag (a mapped buffer: a u64
-    /// length, then the bytes).
-    roots = 21,
+    // 21 (was `roots`): trust roots are read from the assets tier now
+    // (a view), not handed as a file cap — see `assets_dir`.
     /// A TLS server's certificate chain (PEM), handed as a file under a
-    /// tag the same way; the matching private key comes as a `secret`.
+    /// tag (a mapped buffer: a u64 length, then the bytes); the matching
+    /// private key comes as a `secret`.
     cert = 22,
 };
 
@@ -1481,6 +1480,11 @@ pub const unit_ext = ".msh";
 /// The archive's library: modules a script reaches with `use NAME`,
 /// installed into the store as content-addressed sources.
 pub const lib_dir = "lib/";
+/// Archive entries under this prefix are seeded into the `assets/` tier
+/// of the filesystem at first boot: reference data (trust roots, and in
+/// time timezone and locale databases) a running system reads and
+/// updates in place, not baked into the read-only archive.
+pub const assets_dir = "assets/";
 
 test {
     _ = civil;

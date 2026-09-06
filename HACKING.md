@@ -156,7 +156,13 @@ archive list and given to the unit with `{ tag: buf, shm: 1 }` and
 `{ file: conf/name.msh }` (`setup.data()` is its text; parse it with
 `mshl.parseData`); a file too big for that is given under a tag of its
 own, `{ tag: roots, file: tls/roots.pem }`, and `setup.file(.roots)`
-is its bytes. A module for the
+is its bytes. Reference data a running system reads and updates — trust
+roots, and timezone/locale databases to come — is an *asset*: a file
+packed into the archive under `assets/` (in `build.zig`'s asset list),
+which init seeds into the `assets/` filesystem tier at first boot; a
+program reads it from a view it holds (`fsclient.readWhole`) and reloads
+when the file's mtime or size changes, so an update in place takes
+effect with no restart. A module for the
 library is a file under `lib/msh/` named in `build.zig`'s archive
 list (packed as `lib/<name>.msh`) with a host test in `lib/mshl.zig`
 that `use`s it through the test host (`@embedFile`); init installs it

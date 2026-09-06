@@ -1,6 +1,6 @@
 # The DNS-over-TLS drill: a script resolves a name; netsvc's resolver
-# forwards the query through dotd, which asks the upstream over TLS. The
-# name is one only the DoT responder answers, so a right answer proves
-# the private path end to end.
+# forwards the query through dotd, which asks the upstream over TLS. It
+# also holds a read/write view of the assets tier, to overwrite the
+# trust roots mid-run and prove dotd picks the change up with no restart.
 { image: mshrun, script: scripts/dot-drill.msh, grant: [log, bootfs], profiles: [dot], oneshot: true, essential: true,
-  give: [{ tag: net, netview: net }] }
+  give: [{ tag: net, netview: net }, { tag: view, fs: assets, ro: false }] }

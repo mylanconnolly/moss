@@ -1821,7 +1821,7 @@ by `tls-listen` must be hung on the network doorbell (`n.watch`) like
 any other, or `accept` sleeps forever while the client waits — the
 handshake deadlock reads on the wire as "shutdown while in init".
 Not built beyond the client's list: client certificates, resumption,
-revocation, RSA server keys, and any roots update but a rebuild.
+revocation, and RSA server keys.
 
 **DNS over TLS (as built, 2026-09-06).** The resolver in `netsvc` is
 event-driven and non-blocking; a TLS handshake is a blocking,
@@ -1850,6 +1850,31 @@ the moss socket API says `closed` explicitly, but a raw byte reader
 does not. Not built: keep-alive (a fresh connection per query),
 DNS-over-HTTPS, and a resolver that speaks DoT itself rather than
 through dotd.
+
+**Assets, updated in a running system (as built, 2026-09-06).** Trust
+roots expire and rotate, and timezone and locale databases will follow;
+baking them into the read-only archive would mean a rebuild to change
+one. So the archive became a *seed*, and `assets/` a new filesystem
+tier (a top-level tier is fixed at format, so it is in `std_hierarchy`
+beside `img/` and `home/`, not something a program may `mkdir`). At
+first boot init lays every archive entry under `assets/` into the tier,
+skipping ones already present so an update survives reboots — the same
+installer pass that content-addresses programs into `img/`
+(`installAssets` beside `installImages`, sharing one attached buffer:
+the first cut attached a second buffer to the same view and every write
+silently failed, because a view holds one). A program reads its asset
+from a view it holds and reloads when the file's mtime *or* size changes
+— mtime alone is second-grained, so a bundle swapped within the same
+second as the read would be missed, and size catches the common case;
+`fsclient.readWhole` is the no-allocator read a service uses. The
+authority to update is nothing new: a read-write view of the path. dotd
+and the msh TLS hosts both moved their trust roots off a spawn-time
+capability onto `assets/tls/roots.pem` this way; the `dot` drill proves
+the whole loop — seed, resolve over TLS, overwrite the roots with a
+root that does not vouch for the upstream, and watch the next resolve
+turn untrusted with no restart. This is the one way reference data ships
+and updates; a package manager, if it ever comes, would sit on top of
+it, not replace it.
 
 ### The gate (as built, 2026-09-03)
 

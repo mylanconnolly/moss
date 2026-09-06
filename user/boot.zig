@@ -41,7 +41,7 @@ pub const Setup = struct {
         return s.cap(tag) != 0;
     }
 
-    /// A file given under a tag (`{ tag: roots, file: tls/roots.pem }`):
+    /// A file given under a tag (`{ tag: cert, file: tls/server.pem }`):
     /// a shared buffer holding a u64 length then the bytes, mapped here
     /// and left mapped — the slice is the program's for good. Null when
     /// nothing was given under the tag or the buffer is malformed.

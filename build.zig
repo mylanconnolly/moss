@@ -408,9 +408,9 @@ pub fn build(b: *std.Build) void {
         "conf/net-cluster.msh",          "conf/units/dnsd.msh",
         "conf/dns.msh",                  "conf/units/clock.msh",
         "conf/clock.msh",                "conf/units/clock-cluster.msh",
-        "conf/clock-cluster.msh",        "tls/roots.pem",
-        "conf/units/dotd.msh",           "conf/dot.msh",
-        "conf/units/dot-script.msh",     "scripts/dot-drill.msh",
+        "conf/clock-cluster.msh",        "conf/units/dotd.msh",
+        "conf/dot.msh",                  "conf/units/dot-script.msh",
+        "scripts/dot-drill.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -422,13 +422,28 @@ pub fn build(b: *std.Build) void {
         pack.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
     }
-    // The network drill's own trust root (lib/tls/, beside the server
-    // certificate the runner serves with): a drill trusts its root alone.
-    // The drill's own root, and the server identity the drill's `serve`
-    // over TLS presents (a certificate for tls.moss.test and its key).
-    for ([_][]const u8{ "moss-test-ca.pem", "moss-test-server.pem", "moss-test-server.key" }) |f| {
+    // The server identity the drill's `serve` over TLS presents (a
+    // certificate for tls.moss.test and its key), given to the unit as
+    // capabilities — not assets.
+    for ([_][]const u8{ "moss-test-server.pem", "moss-test-server.key" }) |f| {
         pack.addPrefixedFileArg(b.fmt("tls/{s}=", .{f}), b.path(b.fmt("lib/tls/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("tls/{s}=", .{f}), b.path(b.fmt("lib/tls/{s}", .{f})));
+    }
+    // The trust roots, as assets seeded into the filesystem at first boot
+    // and updatable in place: `assets/tls/roots.pem` is what the system
+    // trusts (the drill's own test root here; a real build would seed the
+    // public bundle). `ca-bundle.pem` is the Mozilla bundle as curl
+    // publishes it — a realistic 190 KB asset, and the "other" root set
+    // the drill swaps in to prove a hot update changes trust with no
+    // restart; `other-ca.pem` is a second small root for the same.
+    const asset_files = [_]struct { at: []const u8, from: []const u8 }{
+        .{ .at = "assets/tls/roots.pem", .from = "lib/tls/moss-test-ca.pem" },
+        .{ .at = "assets/tls/ca-bundle.pem", .from = "boot/tls/roots.pem" },
+        .{ .at = "assets/tls/other-ca.pem", .from = "lib/tls/other-ca.pem" },
+    };
+    for (asset_files) |a| {
+        pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));
+        pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));
     }
 
     const user_blobs = b.addWriteFiles();

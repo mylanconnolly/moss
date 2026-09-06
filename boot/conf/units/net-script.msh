@@ -1,6 +1,8 @@
 # The network drill, third step: a script speaks TCP — the wire echo,
 # then a listener, a connection and an accept, all in one script over
-# loopback. Sockets are values; the script's error is the step's.
+# loopback. Sockets are values; the script's error is the step's. It
+# holds the whole filesystem (rw) so its TLS commands read the trust
+# roots from the assets tier, and the server identity as capabilities.
 { image: mshrun, script: scripts/net-drill.msh, grant: [log, bootfs], profiles: [net], after: net-echocli, oneshot: true,
-  give: [{ tag: net, netview: net }, { tag: roots, file: tls/moss-test-ca.pem },
+  give: [{ tag: net, netview: net }, { tag: view, fs: "", ro: false },
     { tag: buf, shm: 1 }, { tag: cert, file: tls/moss-test-server.pem }, { secret: tls/moss-test-server.key }] }
