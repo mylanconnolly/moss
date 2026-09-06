@@ -136,6 +136,19 @@ let page = (from-bytes (recv $tc)?)?
 if ($page | split "\r\n" | first 1) != ["HTTP/1.0 200 ok"] { (err "tls recv: $page")? }
 close $tc
 echo "script: tls primitives ok"
+# TLS the other way: this node serves https, and the runner (openssl
+# s_client) fetches one page through a port forward, verifying the
+# certificate against the drill's root.
+let ts = (tls-listen 8443)?
+echo "script: serving https"
+# One connection by hand: accept, read the request over TLS, answer.
+let tc = (accept $ts)?
+let treq = (http-read $tc)?
+if $treq.path != "/" { (err "tls http-read: $treq.path")? }
+(http-write $tc { status: 200, body: "secure hello from moss" })?
+close $tc
+close $ts
+echo "script: served https ok"
 # A closed peer is an err, not a hang; a refused view is an err too.
 close $c
 match (recv $a) { ok _ => (err "data after close")?; err $e => echo "script: after close: $e" }

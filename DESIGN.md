@@ -1769,10 +1769,45 @@ so the first handshake found an unseeded pool (`no_entropy` — the
 profile has it now, and the drill's QEMU an entropy device); and the
 handshake — hybrid key share, a certificate chain on the stack — needs
 more than the 96 KB user stack, which faulted 27 KB below its floor
-(256 KB now, eagerly mapped, sixteen domains at most). Not built: the
-server side (the standard library has no TLS server), client
-certificates, resumption, revocation, DNS over TLS, and any way to
-update the roots but a rebuild.
+(256 KB now, eagerly mapped, sixteen domains at most).
+
+**TLS, the server (as built, 2026-09-05).** The standard library ships
+no TLS server, so `lib/tls.zig` grows one — TLS 1.3 only, written on
+the same primitives the client is (`tls.hkdfExpandLabel`, the AEAD and
+hash suites, `Certificate.der`), over the same `Transport` and `Wire`
+adapters, so it too touches no socket, clock or entropy. One key
+exchange (x25519), the three IANA AEAD suites chosen from what the
+client offers, a certificate chain and an ECDSA P-256 or Ed25519 key
+loaded from PEM into an `Identity` (SEC1 and PKCS#8 both parsed); no
+client certificates, no resumption, no HelloRetryRequest — a client
+with no x25519 share is refused. The handshake is one function
+generic over the negotiated suite: read the ClientHello, derive the
+handshake secrets, write ServerHello + an encrypted flight
+(EncryptedExtensions, Certificate, CertificateVerify signing the
+transcript, Finished), then read and verify the client Finished.
+Application records dispatch on the AEAD alone, since all three share a
+12-byte nonce and 16-byte tag. In the language it is `tls-listen PORT`
+(a TCP listener the host presents as a `tls-listener`) with `accept`
+and `serve` shaking hands over it — httpcmds runs its accept/read/
+handle/write loop over a `Conn` that is a plain socket or a tls
+connection, so a handler is the same ordinary function either way, and
+`http-read`/`http-write`/`serve`/`accept` type-check against a
+`one_of` of the plain and tls kinds (tlscmds owns `accept`'s
+signature). The identity reaches the program as a tagged-file
+certificate and a `secret` key, the same capability shapes as the
+roots. The gate proves it the hard way: `openssl s_client` connects to
+the drill's server through a slirp forward, verifies the chain against
+the drill's root, and reads the page — an independent implementation
+on the other end, the mirror of the client's `openssl s_server`. Two
+lessons on the way there: openssl negotiates a SHA-384 suite where our
+own client took SHA-256, so a CertificateVerify buffer sized for the
+32-byte transcript overflowed on the 48-byte one; and a listener made
+by `tls-listen` must be hung on the network doorbell (`n.watch`) like
+any other, or `accept` sleeps forever while the client waits — the
+handshake deadlock reads on the wire as "shutdown while in init".
+Not built beyond the client's list: client certificates, resumption,
+revocation, DNS over TLS, RSA server keys, and any roots update but a
+rebuild.
 
 ### The gate (as built, 2026-09-03)
 

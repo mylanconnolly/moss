@@ -124,6 +124,9 @@ const http_port: u16 = 31909;
 /// it as 10.0.2.2, slirp's name for the host): `openssl s_server -www`
 /// with the certificate for tls.moss.test under lib/tls/.
 const tls_port: u16 = 31910;
+/// Where the host reaches the moss server's own TLS listener (`serve`
+/// over a tls-listener), forwarded to the guest's :8443.
+const tls_srv_port: u16 = 31911;
 /// The fabric-login drill's own hub port: a listener the three-node
 /// drill left in TIME_WAIT must never be the one node 2 dials.
 const flogin_port = "31911";
@@ -283,7 +286,8 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-netdev",
             "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat," ++
                 "guestfwd=tcp:10.0.2.100:9001-cmd:printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 11\\r\\n\\r\\nhello moss!'," ++
-                "hostfwd=tcp:127.0.0.1:" ++ std.fmt.comptimePrint("{d}", .{http_port}) ++ "-:8080",
+                "hostfwd=tcp:127.0.0.1:" ++ std.fmt.comptimePrint("{d}", .{http_port}) ++ "-:8080," ++
+                "hostfwd=tcp:127.0.0.1:" ++ std.fmt.comptimePrint("{d}", .{tls_srv_port}) ++ "-:8443",
             "-device",
             "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             "-object",
@@ -314,6 +318,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     defer child.kill(io);
     if (spec.kind == .net) {
         if (!try httpProbe(spec, log_path, polls)) return false;
+        if (!try tlsProbe(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -371,6 +376,59 @@ fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             reportFailure(spec.name, "an http probe answered wrong", log_path);
             return false;
         }
+    }
+    return true;
+}
+
+/// The net check's TLS server side: once the script says it is serving
+/// https, connect with `openssl s_client` (an independent TLS
+/// implementation), verifying the moss server's certificate against the
+/// drill's root, and check the page it serves.
+fn tlsProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "script: serving https") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the script never started serving https", log_path);
+            return false;
+        }
+    }
+    // Run under a shell so the HTTP request feeds openssl's stdin and its
+    // diagnostics (the chain verification, any alert) land in a file we
+    // can read on failure. -verify_return_error makes a bad chain a
+    // nonzero exit; -ign_eof keeps the request from tearing the socket
+    // down before the reply arrives.
+    const err_file = std.fmt.comptimePrint("zig-out/check/tls-s_client.err", .{});
+    const cmd = std.fmt.comptimePrint(
+        "printf 'GET / HTTP/1.1\\r\\nHost: tls.moss.test\\r\\nConnection: close\\r\\n\\r\\n' | " ++
+            "openssl s_client -connect 127.0.0.1:{d} -servername tls.moss.test " ++
+            "-CAfile lib/tls/moss-test-ca.pem -verify_return_error -quiet -ign_eof 2>{s}",
+        .{ tls_srv_port, err_file },
+    );
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "sh", "-c", cmd },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch |e| {
+        std.debug.print("[FAIL] {s}: could not spawn openssl s_client: {s}\n", .{ spec.name, @errorName(e) });
+        reportFailure(spec.name, "openssl s_client did not run", log_path);
+        return false;
+    };
+    defer child.kill(io);
+    var resp: std.ArrayList(u8) = .empty;
+    var rbuf: [4096]u8 = undefined;
+    var reader = child.stdout.?.reader(io, &rbuf);
+    reader.interface.appendRemainingUnlimited(gpa, &resp) catch {};
+    if (std.mem.indexOf(u8, resp.items, "secure hello from moss") == null) {
+        const errs = cwd.readFileAlloc(io, err_file, gpa, .limited(4096)) catch "";
+        std.debug.print("[FAIL] {s}: tls server probe got:\n{s}\n--- openssl stderr ---\n{s}\n", .{ spec.name, resp.items, errs });
+        reportFailure(spec.name, "the tls server answered wrong or was not trusted", log_path);
+        return false;
     }
     return true;
 }

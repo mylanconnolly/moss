@@ -552,7 +552,9 @@ message by message. Editor setup is in `tools/README.md`.
   [n]`, `fetch URL [opts]` (`http://` or `https://`); and TLS:
   `tls-connect HOST PORT [{ host: NAME }]` answers a handle the socket
   commands take, trusting the roots the unit gave (`{ tag: roots, file:
-  tls/roots.pem }`); see [the networking
+  tls/roots.pem }`), and `tls-listen PORT` is the server side (`accept`
+  and `serve` shake hands over it, presenting the unit's `{ tag: cert }`
+  and `{ secret }` identity); see [the networking
   page](networking.md#sockets-as-values-the-language-surface).
 - **The fabric** (when the unit gives a `fabric` cap: the system
   shell's does, a user session's does not): `x | remote NODE { … }`

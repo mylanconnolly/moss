@@ -383,6 +383,30 @@ close $c
 match (fetch https://10.0.2.2:31910/) { err host_mismatch => …, … }
 ```
 
+### TLS: the server
+
+The other side is `tls-listen PORT` — a plain TCP listener that
+`accept` and `serve` shake hands over. `accept` on a tls-listener does
+the TCP accept and the TLS 1.3 handshake and answers a `tls` connection;
+`serve` over one runs the same accept/read/handle/write loop as plain
+HTTP, so a handler is an ordinary function of the request record and
+the answer goes back encrypted. The server needs an identity its unit
+gives it: the certificate chain as `{ tag: cert, file: … }` and the
+private key as `{ secret: … }` (staged through a `{ tag: buf, shm: 1 }`
+buffer and wiped once read); without both, `tls-listen` answers `err
+no_identity`. The server is TLS 1.3 only — one x25519 key share, the
+three IANA AEAD suites, an ECDSA P-256 or Ed25519 certificate — written
+here on the standard library's crypto, since it ships no TLS server.
+
+```mshl
+let l = (tls-listen 8443)?
+let c = (accept $l)?                 # a tls connection, handshake done
+let req = (http-read $c)?
+(http-write $c { status: 200, body: "secure hello" })?
+close $c
+# or, the whole loop: serve $l $handler [count]
+```
+
 ### What the drill proves
 
 The `net` check boots the `net` profile under QEMU's user-mode network
@@ -403,15 +427,19 @@ process on the host, an echo. Three oneshot units run in order:
    loopback, then **serves four pages to the runner itself** — the
    check connects through a port forward (`127.0.0.1:31909` → `:8080`)
    and asserts a text page, a JSON page, a POST echoed with a custom
-   header, and a 404 — then speaks TLS to the host: the runner runs
-   `openssl s_server -www` at `127.0.0.1:31910` with the certificate
-   for `tls.moss.test` (which `dnsd`'s zone maps to `10.0.2.2`, slirp's
-   name for the host), and the script `fetch`es `https://tls.moss.test`
-   by the drill's own root, sees `https://10.0.2.2` refused with
-   `host_mismatch`, and drives a `tls-connect` handle by hand — and
-   finally checks that a closed peer and a refused destination come
-   back as `err` values. The check also writes the wire's packets to
-   `zig-out/check/net.pcap`.
+   header, and a 404 — then speaks TLS both ways to the host. As a
+   client: the runner runs `openssl s_server -www` at
+   `127.0.0.1:31910` with the certificate for `tls.moss.test` (which
+   `dnsd`'s zone maps to `10.0.2.2`, slirp's name for the host), and
+   the script `fetch`es `https://tls.moss.test` by the drill's own
+   root, sees `https://10.0.2.2` refused with `host_mismatch`, and
+   drives a `tls-connect` handle by hand. As a server: the script
+   `tls-listen`s on `:8443`, and the runner connects with `openssl
+   s_client` through a port forward (`127.0.0.1:31911`), verifying the
+   moss server's certificate against the drill's root and reading the
+   page it serves. Finally it checks that a closed peer and a refused
+   destination come back as `err` values. The check also writes the
+   wire's packets to `zig-out/check/net.pcap`.
 4. `boxed` (filtered view: `10.0.2.100:9000` only) reaches the echo,
    and is refused on the v4 gateway, the v6 gateway, loopback, listen,
    ping, and derive.
@@ -509,12 +537,14 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - The language has no `ping` and no `derive` (a script's view is what
   its manifest gave it); a socket value cannot cross to another program
   (no channel surface yet).
-- TLS is the client side only: no `tls-listen`, so `serve` is plain
-  HTTP; no client certificates, no session resumption, no revocation
-  checking (CRL, OCSP), no DNS over TLS yet; the roots are the bundle
-  as shipped in the archive, with no update path but a rebuild. A
-  program holds at most four sessions. A `serve` handles
-  one connection at a time — the language has no concurrency, so a
+- TLS is TLS 1.3 only, and a spare one: x25519 key share alone (a
+  client offering no x25519 share is refused), the three IANA AEAD
+  suites, and — on the server — an ECDSA P-256 or Ed25519 certificate
+  (no RSA server key). No client certificates, no session resumption,
+  no revocation checking (CRL, OCSP), no DNS over TLS; the roots are
+  the bundle as shipped in the archive, with no update path but a
+  rebuild. A program holds at most four connections (client and server
+  share the pool). A `serve` handles one connection at a time — the language has no concurrency, so a
   slow handler, or a kept connection that sits idle (up to three
   seconds), holds the next client at the door (the listener's backlog
   holds eight). What is sent is always framed by a length, never
@@ -539,9 +569,11 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - Source — `user/net.zig` (driver, stack, views, sockets, the drill
   roles), `user/netcmds.zig` (sockets as values for mshl hosts),
   `user/httpcmds.zig` (`http-read`, `http-write`, `serve`, `fetch`),
-  `user/tlscmds.zig` (`tls-connect`, sessions, the roots) and
-  `lib/tls.zig` (the client over a transport, roots from PEM,
-  host-tested with `lib/tls/`'s test root and certificate),
+  `user/tlscmds.zig` (`tls-connect`, `tls-listen`, `accept`, the
+  sessions, the roots and the server identity) and `lib/tls.zig` (the
+  client and the server over a transport, roots from PEM, host-tested
+  with `lib/tls/`'s test root, certificate and key — including our
+  client and server shaking hands over a pipe),
   `lib/http.zig` and `lib/json.zig` (the parsers, host-tested),
   `boot/scripts/net-drill.msh` (the script step), `tools/runner.zig`
   (`httpProbe`: the check as an HTTP client), `shared/lib.zig` (`NetReq`, `NetResp`, `NetErr`, `TcpState`,

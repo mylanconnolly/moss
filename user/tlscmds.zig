@@ -35,8 +35,14 @@ var roots_state: enum { unloaded, loaded, none } = .unloaded;
 const roots_mem_len = 384 << 10;
 var roots_fba: std.heap.FixedBufferAllocator = undefined;
 
-/// Everything sized in records or roots lives here, mapped on first use.
-const State = struct { roots_mem: [roots_mem_len]u8, slots: [max_sessions]Slot };
+/// Everything sized in records or roots lives here, mapped on first
+/// use: the roots' arena, the server identity's DER, and the slots.
+const identity_mem_len = 8 << 10;
+const State = struct {
+    roots_mem: [roots_mem_len]u8,
+    identity_mem: [identity_mem_len]u8,
+    slots: [max_sessions]Slot,
+};
 var state: ?*State = null;
 
 fn stateNow() ?*State {
@@ -47,7 +53,11 @@ fn stateNow() ?*State {
     const m = usys.shmMap(sh.data[0]);
     if (m.err != .ok) return null;
     const st: *State = @ptrFromInt(m.data[0]);
-    for (&st.slots) |*sl| sl.* = .{ .used = false, .gen = 0, .net = undefined, .sock = 0, .wait_ms = wire_wait_ms, .sess = .{}, .recv_buf = undefined };
+    for (&st.slots) |*sl| {
+        sl.used = false;
+        sl.gen = 0;
+        sl.wait_ms = wire_wait_ms;
+    }
     state = st;
     return st;
 }
@@ -55,6 +65,45 @@ fn stateNow() ?*State {
 /// The host says what it was given (once, at start).
 pub fn setRoots(pem: []const u8) void {
     roots_pem = pem;
+}
+
+// --------------------------------------------------------------- identity
+
+var cert_pem: []const u8 = "";
+var key_pem: []const u8 = "";
+var identity: tls.Identity = .{};
+var identity_state: enum { unloaded, loaded, none } = .unloaded;
+var identity_fba: std.heap.FixedBufferAllocator = undefined;
+
+/// The host says what server certificate and key it was given (once).
+pub fn setIdentity(cert: []const u8, key: []const u8) void {
+    cert_pem = cert;
+    key_pem = key;
+}
+
+const IdentityOut = union(enum) { id: *const tls.Identity, failed: []const u8 };
+
+fn identityNow() IdentityOut {
+    switch (identity_state) {
+        .loaded => return .{ .id = &identity },
+        .none => return .{ .failed = "no_identity" },
+        .unloaded => {},
+    }
+    if (cert_pem.len == 0 or key_pem.len == 0) {
+        identity_state = .none;
+        return .{ .failed = "no_identity" };
+    }
+    const st = state orelse {
+        identity_state = .none;
+        return .{ .failed = "no_memory" };
+    };
+    identity_fba = std.heap.FixedBufferAllocator.init(&st.identity_mem);
+    identity.loadPem(identity_fba.allocator(), cert_pem, key_pem) catch {
+        identity_state = .none;
+        return .{ .failed = "bad_identity" };
+    };
+    identity_state = .loaded;
+    return .{ .id = &identity };
 }
 
 const RootsOut = union(enum) { roots: *tls.Roots, failed: []const u8 };
@@ -79,17 +128,25 @@ fn rootsNow(st: *State, now_ms: u64) RootsOut {
     return .{ .roots = &roots };
 }
 
-// --------------------------------------------------------------- sessions
+// ------------------------------------------------------------ connections
+//
+// One slot holds either the client side (a `tls.Session`) or the server
+// side (a `tls.Server`) of a connection; a handle names slot and
+// generation so a late drop cannot close the connection that took its
+// slot. Sessions and servers are the same pool — a program is usually
+// one or the other.
 
 const Slot = struct {
     used: bool,
-    /// Bumped per open: a handle names slot and generation, so one
-    /// dropped late cannot close the session that took its slot.
     gen: u32,
     net: *Net,
     sock: u64,
     wait_ms: u64,
-    sess: tls.Session,
+    role: enum { client, server },
+    conn: union {
+        client: tls.Session,
+        server: tls.Server,
+    },
     recv_buf: [4096]u8,
 };
 const max_sessions = 4;
@@ -130,10 +187,16 @@ fn slotOf(c: Conn) ?*Slot {
     return sl;
 }
 
+fn freeSlot(st: *State) ?usize {
+    var idx: usize = 0;
+    while (idx < max_sessions and st.slots[idx].used) idx += 1;
+    return if (idx == max_sessions) null else idx;
+}
+
 pub const OpenOut = union(enum) { conn: Conn, failed: []const u8 };
 
-/// Connect to `host`:`port` and shake hands as `name`, the name the
-/// certificate must carry (and the server is told, SNI).
+/// The client side: connect to `host`:`port` and shake hands as `name`,
+/// the name the certificate must carry (and the server is told, SNI).
 pub fn open(n: *Net, host: []const u8, port: u64, name: []const u8) OpenOut {
     const st = stateNow() orelse return .{ .failed = "no_memory" };
     const now = usys.wallMs() orelse return .{ .failed = "no_clock" };
@@ -141,9 +204,7 @@ pub fn open(n: *Net, host: []const u8, port: u64, name: []const u8) OpenOut {
         .roots => |r| r,
         .failed => |m| return .{ .failed = m },
     };
-    var idx: usize = 0;
-    while (idx < max_sessions and st.slots[idx].used) idx += 1;
-    if (idx == max_sessions) return .{ .failed = "too_many" };
+    const idx = freeSlot(st) orelse return .{ .failed = "too_many" };
     const sl = &st.slots[idx];
     sl.sock = switch (n.connectHost(host, port)) {
         .sock => |s| s,
@@ -153,14 +214,52 @@ pub fn open(n: *Net, host: []const u8, port: u64, name: []const u8) OpenOut {
     sl.used = true;
     sl.gen +%= 1;
     sl.wait_ms = wire_wait_ms;
+    sl.role = .client;
+    sl.conn = .{ .client = .{} };
     var entropy: [tls.entropy_len]u8 = undefined;
     if (usys.getrandom(&entropy) != .ok) {
         n.closeRaw(sl.sock);
         sl.used = false;
         return .{ .failed = "no_entropy" };
     }
-    sl.sess.connect(.{ .ctx = @ptrCast(sl), .send = wireSend, .recv = wireRecv }, .{ .host = name, .roots = rt, .entropy = &entropy, .now_ms = now }) catch {
-        const why = sl.sess.reason();
+    sl.conn.client.connect(.{ .ctx = @ptrCast(sl), .send = wireSend, .recv = wireRecv }, .{ .host = name, .roots = rt, .entropy = &entropy, .now_ms = now }) catch {
+        const why = sl.conn.client.reason();
+        n.closeRaw(sl.sock);
+        sl.used = false;
+        return .{ .failed = why };
+    };
+    return .{ .conn = connOf(st, idx) };
+}
+
+/// The server side: TCP-accept a connection on `listener` and shake
+/// hands as the server, presenting the identity the host was given.
+pub fn accept(n: *Net, listener: u64) OpenOut {
+    const st = stateNow() orelse return .{ .failed = "no_memory" };
+    const now = usys.wallMs() orelse return .{ .failed = "no_clock" };
+    const id = switch (identityNow()) {
+        .id => |x| x,
+        .failed => |m| return .{ .failed = m },
+    };
+    const idx = freeSlot(st) orelse return .{ .failed = "too_many" };
+    const sl = &st.slots[idx];
+    sl.sock = switch (n.acceptRaw(listener)) {
+        .sock => |s| s,
+        .failed => |m| return .{ .failed = m },
+    };
+    sl.net = n;
+    sl.used = true;
+    sl.gen +%= 1;
+    sl.wait_ms = wire_wait_ms;
+    sl.role = .server;
+    sl.conn = .{ .server = .{} };
+    var entropy: [tls.server_entropy_len]u8 = undefined;
+    if (usys.getrandom(&entropy) != .ok) {
+        n.closeRaw(sl.sock);
+        sl.used = false;
+        return .{ .failed = "no_entropy" };
+    }
+    sl.conn.server.accept(.{ .ctx = @ptrCast(sl), .send = wireSend, .recv = wireRecv }, .{ .identity = id, .entropy = &entropy, .now_ms = now }) catch {
+        const why = sl.conn.server.reason();
         n.closeRaw(sl.sock);
         sl.used = false;
         return .{ .failed = why };
@@ -171,32 +270,40 @@ pub fn open(n: *Net, host: []const u8, port: u64, name: []const u8) OpenOut {
 /// Every byte, encrypted; null when sent, else why not.
 pub fn sendAll(c: Conn, data: []const u8) ?[]const u8 {
     const sl = slotOf(c) orelse return "closed";
-    sl.sess.write(data) catch return sl.sess.reason();
+    switch (sl.role) {
+        .client => sl.conn.client.write(data) catch return sl.conn.client.reason(),
+        .server => sl.conn.server.write(data) catch return sl.conn.server.reason(),
+    }
     return null;
 }
 
-/// Some decrypted bytes (they live in the session until the next
-/// receive), the peer's clean close, or a failure or timeout.
+/// Some decrypted bytes (they live in the slot until the next receive),
+/// the peer's clean close, or a failure or timeout.
 pub fn recvSomeFor(c: Conn, ms: u64) Net.RecvFor {
     const sl = slotOf(c) orelse return .closed;
     sl.wait_ms = ms;
     defer sl.wait_ms = wire_wait_ms;
-    const n = sl.sess.read(&sl.recv_buf) catch |e| switch (e) {
-        error.Closed => return .closed,
-        error.Failed => {
-            const why = sl.sess.reason();
-            if (std.mem.eql(u8, why, "timeout")) return .timeout;
-            return .{ .failed = why };
-        },
+    const n = switch (sl.role) {
+        .client => sl.conn.client.read(&sl.recv_buf) catch |e| return readErr(e, sl.conn.client.reason()),
+        .server => sl.conn.server.read(&sl.recv_buf) catch |e| return readErr(e, sl.conn.server.reason()),
     };
     if (n == 0) return .closed;
     return .{ .data = sl.recv_buf[0..n] };
 }
 
+fn readErr(e: anyerror, why: []const u8) Net.RecvFor {
+    if (e == error.Closed) return .closed;
+    if (std.mem.eql(u8, why, "timeout")) return .timeout;
+    return .{ .failed = why };
+}
+
 /// Close notify, then the socket; the slot is free again.
 pub fn close(c: Conn) void {
     const sl = slotOf(c) orelse return;
-    sl.sess.close();
+    switch (sl.role) {
+        .client => sl.conn.client.close(),
+        .server => sl.conn.server.close(),
+    }
     sl.net.closeRaw(sl.sock);
     sl.used = false;
 }
@@ -217,14 +324,33 @@ fn okResult(it: *mshl.Interp, v: Value) mshl.Error!Value {
 
 const tls_kind: Shape = .{ .kind = "tls" };
 const tls_result = mshl.resultShape(tls_kind, .string);
+const tls_listener: Shape = .{ .kind = "tls-listener" };
+const tls_listener_result = mshl.resultShape(tls_listener, .string);
+/// `accept` takes a plain listener or a tls-listener and yields a socket
+/// or a tls connection; tlscmds owns the signature so both kinds pass the
+/// type check (netcmds's `accept` would reject a tls-listener), and the
+/// call dispatch hands a plain listener on to netcmds.
+const listener_kind: Shape = .{ .kind = "listener" };
+const any_listener = blk: {
+    const alts = [_]Shape{ listener_kind, tls_listener };
+    break :blk Shape{ .one_of = &alts };
+};
+const accepted = blk: {
+    const alts = [_]Shape{ .{ .kind = "socket" }, tls_kind };
+    break :blk Shape{ .one_of = &alts };
+};
+const accept_result = mshl.resultShape(accepted, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "tls-connect")) return .{ .params = &.{ .{ .name = "host", .shape = .string }, .{ .name = "port", .shape = .int }, .{ .name = "options", .shape = .record, .optional = true } }, .ret = tls_result };
+    if (std.mem.eql(u8, name, "tls-listen")) return .{ .params = &.{.{ .name = "port", .shape = .int }}, .ret = tls_listener_result };
+    if (std.mem.eql(u8, name, "accept")) return .{ .params = &.{.{ .name = "listener", .shape = any_listener, .optional = true }}, .input = .{ .optional = any_listener }, .ret = accept_result };
     return null;
 }
 
-/// null = not for us: `tls-connect`, and `send`/`recv`/`status`/`close`
-/// when the handle is a tls one (the socket commands otherwise).
+/// null = not for us: `tls-connect`, `tls-listen`, and `accept` on a
+/// tls-listener / `send`/`recv`/`status`/`close` on a tls handle (the
+/// socket commands answer for their own handles).
 pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     const is = std.mem.eql;
     if (is(u8, name, "tls-connect")) {
@@ -242,7 +368,33 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
             .failed => |m| try errResult(it, m),
         };
     }
+    if (is(u8, name, "tls-listen")) {
+        if (args[0].int < 1 or args[0].int > 65535) return it.fail("tls-listen: a port (1-65535) expected", .{});
+        // Refuse to listen with no identity to present.
+        if (stateNow() == null) return it.fail("tls-listen: no memory for tls", .{});
+        switch (identityNow()) {
+            .id => {},
+            .failed => |m| return try errResult(it, m),
+        }
+        if (!n.attach()) return it.fail("tls-listen: cannot attach a buffer to the network view", .{});
+        const rep = netcmds.ncallPub(n, .{ .tcp_listen = .{ .port = @intCast(args[0].int) } }) orelse return it.fail("tls-listen: the network service did not answer", .{});
+        return switch (rep) {
+            .num => |x| blk: {
+                n.watch(x.n); // so accept wakes when a client connects
+                break :blk try okResult(it, try it.newHandle("tls-listener", x.n, n, netcmds.dropSock));
+            },
+            .net_err => |e| try errResult(it, netcmds.errNamePub(e.code)),
+            .ok => it.fail("tls-listen: unexpected reply", .{}),
+        };
+    }
     const hv = input orelse (if (args.len > 0) args[0] else return null);
+    if (is(u8, name, "accept") and hv == .handle and is(u8, hv.handle.kind, "tls-listener")) {
+        if (hv.handle.closed) return it.fail("accept: the tls-listener is closed", .{});
+        return switch (accept(n, hv.handle.id)) {
+            .conn => |c| try okResult(it, try it.newHandle("tls", c, n, dropConn)),
+            .failed => |m| try errResult(it, m),
+        };
+    }
     if (hv != .handle or !is(u8, hv.handle.kind, "tls")) return null;
     if (is(u8, name, "send")) {
         if (args.len != 2) return it.fail("send: SOCKET DATA expected", .{});
@@ -277,4 +429,4 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     return null;
 }
 
-pub const command_names = [_][]const u8{"tls-connect"};
+pub const command_names = [_][]const u8{ "tls-connect", "tls-listen" };

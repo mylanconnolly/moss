@@ -599,9 +599,12 @@ pub const CapTag = enum(u64) {
     /// against, handed as a file under a tag (a mapped buffer: a u64
     /// length, then the bytes).
     roots = 20,
+    /// A TLS server's certificate chain (PEM), handed as a file under a
+    /// tag the same way; the matching private key comes as a `secret`.
+    cert = 21,
 };
 
-pub const cap_tag_count = 21;
+pub const cap_tag_count = 22;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver

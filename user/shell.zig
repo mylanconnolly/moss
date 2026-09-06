@@ -143,6 +143,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     fab_ctx.chan = fab_chan;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     tlscmds.setRoots(setup.file(.roots) orelse "");
+    tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
     // The fabric is optional: a user session has none.
     if (cons_chan == 0 or fs_chan == 0 or init_chan == 0) usys.exit(140);
 

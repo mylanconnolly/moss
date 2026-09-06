@@ -397,8 +397,12 @@ pub fn build(b: *std.Build) void {
     }
     // The network drill's own trust root (lib/tls/, beside the server
     // certificate the runner serves with): a drill trusts its root alone.
-    pack.addPrefixedFileArg("tls/moss-test-ca.pem=", b.path("lib/tls/moss-test-ca.pem"));
-    pack_guest.addPrefixedFileArg("tls/moss-test-ca.pem=", b.path("lib/tls/moss-test-ca.pem"));
+    // The drill's own root, and the server identity the drill's `serve`
+    // over TLS presents (a certificate for tls.moss.test and its key).
+    for ([_][]const u8{ "moss-test-ca.pem", "moss-test-server.pem", "moss-test-server.key" }) |f| {
+        pack.addPrefixedFileArg(b.fmt("tls/{s}=", .{f}), b.path(b.fmt("lib/tls/{s}", .{f})));
+        pack_guest.addPrefixedFileArg(b.fmt("tls/{s}=", .{f}), b.path(b.fmt("lib/tls/{s}", .{f})));
+    }
 
     const user_blobs = b.addWriteFiles();
     // The programs build for either port (user/usys.zig is the runtime's

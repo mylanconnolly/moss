@@ -156,6 +156,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     fs_ctx.stores = &stores;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     tlscmds.setRoots(setup.file(.roots) orelse "");
+    tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
     if (setup.has(.fabric)) fab = .{ .chan = setup.cap(.fabric) };
     const path = setup.arg();
     if (path.len == 0) fail("setup", "no script path given");

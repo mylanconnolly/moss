@@ -290,16 +290,20 @@ is a plan.
   the gate's hermetic upstream and the fabric's names); still open:
   search lists and a hosts file if a use case
   asks, names for fabric nodes by default (dnsd in the cluster
-  profile); ✅ TLS, the client (landed 2026-09-05: `lib/tls.zig` — the
-  standard library's TLS 1.3 client over a transport the host provides,
-  trust roots parsed from PEM; `tls-connect` answering a handle the
-  socket commands take, `fetch https://`; roots given to a unit as a
-  file under a tag, the Mozilla bundle in the archive, a drill trusting
-  its own root; the gate's server is `openssl s_server` on the host,
-  and the wire was proved against example.com and cloudflare); still
-  open on TLS: the server side (`tls-listen`, `serve` over TLS — the
-  standard library has no server; ours or a port), DNS over TLS,
-  client certificates, resumption, revocation, a roots update path;
+  profile); ✅ TLS (landed 2026-09-05: `lib/tls.zig` — the standard
+  library's TLS 1.3 client, and a TLS 1.3 server written on the
+  standard library's crypto since it ships none, both over a transport
+  the host provides; trust roots parsed from PEM. The client:
+  `tls-connect`, `fetch https://`, roots as a file under a tag, the
+  Mozilla bundle in the archive. The server: `tls-listen` + `accept` +
+  `serve` over TLS, the certificate and key given to the unit as a
+  tagged file and a secret; x25519 key share, the three IANA AEAD
+  suites, an ECDSA P-256 or Ed25519 identity. The gate proves both
+  directions against openssl — `s_server` for our client, `s_client`
+  for our server — and the wire was proved against example.com and
+  cloudflare); still open on TLS: client certificates, session
+  resumption, revocation (CRL/OCSP), DNS over TLS, a roots update path,
+  and RSA server keys;
   concurrent handling (needs the language to spawn), and, when a use
   case demands them, congestion control and out-of-order receive; (4)
   the fabric surface — ✅ the bulk transport across the wire and remote

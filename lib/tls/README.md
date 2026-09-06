@@ -4,7 +4,9 @@ A root and a server certificate the tests and the gate use — and
 nothing else trusts. `moss-test-ca.pem` is packed into the boot archive
 as `tls/moss-test-ca.pem` and given to the net drill's script as its
 only trust root; `moss-test-server.pem` / `.key` are what the runner's
-`openssl s_server` presents for `tls.moss.test`; `lib/tls.zig`'s host
+`openssl s_server` presents for `tls.moss.test` (and what the moss
+server presents when the drill `tls-listen`s, verified by `openssl
+s_client`); `lib/tls.zig`'s host
 tests verify the one by the other. Both keys are P-256, both
 certificates good for a hundred years from 2026-09-05. To make them
 again:

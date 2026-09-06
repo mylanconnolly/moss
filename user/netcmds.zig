@@ -365,6 +365,12 @@ fn getWords(b: []const u8) [2]u64 {
 
 const piece = shared.net_max_send;
 
+pub fn ncallPub(n: *Net, req: shared.NetReq) ?shared.NetResp {
+    return ncall(n, req);
+}
+pub fn errNamePub(code: u64) []const u8 {
+    return errName(code);
+}
 fn ncall(n: *Net, req: shared.NetReq) ?shared.NetResp {
     return switch (usys.callTyped(shared.NetReq, shared.NetResp, n.chan, req, 0)) {
         .ok => |rep| rep,

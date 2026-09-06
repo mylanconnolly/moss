@@ -54,23 +54,24 @@ fn record(it: *mshl.Interp, keys: []const []const u8, vals: []const Value) mshl.
 // arena is a line's).
 
 const max_leftover = shared.net_max_recv;
-const Leftover = struct { sock: u64 = 0, len: usize = 0, buf: [max_leftover]u8 = undefined };
+const Leftover = struct { key: u64 = 0, has: bool = false, len: usize = 0, buf: [max_leftover]u8 = undefined };
 const max_conns = 8;
 var leftovers: [max_conns]Leftover = @splat(.{});
 
-fn leftoverOf(sock: u64) ?*Leftover {
-    for (&leftovers) |*l| if (l.sock == sock and l.len > 0) return l;
+fn leftoverOf(key: u64) ?*Leftover {
+    for (&leftovers) |*l| if (l.has and l.key == key and l.len > 0) return l;
     return null;
 }
 
-fn keepLeftover(sock: u64, bytes: []const u8) void {
-    for (&leftovers) |*l| if (l.sock == sock) {
+fn keepLeftover(key: u64, bytes: []const u8) void {
+    for (&leftovers) |*l| if (l.has and l.key == key) {
+        l.has = false;
         l.len = 0;
-        l.sock = 0;
     };
     if (bytes.len == 0 or bytes.len > max_leftover) return;
-    for (&leftovers) |*l| if (l.len == 0) {
-        l.sock = sock;
+    for (&leftovers) |*l| if (!l.has) {
+        l.has = true;
+        l.key = key;
         l.len = bytes.len;
         @memcpy(l.buf[0..bytes.len], bytes);
         return;
@@ -106,6 +107,16 @@ const Conn = union(enum) {
             .plain => |s| n.closeRaw(s),
             .tls => |t| tlscmds.close(t),
         }
+    }
+
+    /// A key for the per-connection leftover buffer, distinct across the
+    /// plain and TLS namespaces (a socket number and a tls connection
+    /// number can collide otherwise).
+    fn leftoverKey(c: Conn) u64 {
+        return switch (c) {
+            .plain => |s| s,
+            .tls => |t| (1 << 40) | t,
+        };
     }
 };
 
@@ -158,12 +169,13 @@ fn bodyValue(b: []const u8) Value {
 /// takes); a request that began is waited for `stall_ms`.
 const ReadOut = union(enum) { request: http.Request, failed: []const u8, idle };
 
-fn readRequest(n: *Net, it: *mshl.Interp, s: u64, idle: ?u64) mshl.Error!ReadOut {
+fn readRequest(n: *Net, it: *mshl.Interp, c: Conn, idle: ?u64) mshl.Error!ReadOut {
+    const key = c.leftoverKey();
     var buf: std.ArrayList(u8) = .empty;
-    if (leftoverOf(s)) |l| {
+    if (leftoverOf(key)) |l| {
         try buf.appendSlice(it.arena, l.buf[0..l.len]);
+        l.has = false;
         l.len = 0;
-        l.sock = 0;
     }
     while (true) {
         switch (http.parseRequest(it.arena, buf.items) catch |e| return .{ .failed = switch (e) {
@@ -172,26 +184,25 @@ fn readRequest(n: *Net, it: *mshl.Interp, s: u64, idle: ?u64) mshl.Error!ReadOut
             error.TooLarge => "request too large",
         } }) {
             .done => |r| {
-                keepLeftover(s, buf.items[r.len..]);
+                keepLeftover(key, buf.items[r.len..]);
                 return .{ .request = r };
             },
             .incomplete => {},
         }
-        const wait: ?u64 = if (buf.items.len == 0) idle else stall_ms;
-        if (wait) |ms| {
-            switch (n.recvSomeFor(s, ms)) {
-                .data => |d| try buf.appendSlice(it.arena, d),
-                .closed => return .{ .failed = if (buf.items.len == 0) "closed" else "closed mid-request" },
-                .failed => |m| return .{ .failed = m },
-                .timeout => return if (buf.items.len == 0) .idle else .{ .failed = "timed out mid-request" },
-            }
-        } else switch (n.recvSome(s)) {
+        // The first byte waits `idle` (or, for http-read, a long time);
+        // once a request has begun, `stall_ms` for the rest.
+        const ms: u64 = if (buf.items.len == 0) (idle orelse forever_ms) else stall_ms;
+        switch (c.recvFor(n, ms)) {
             .data => |d| try buf.appendSlice(it.arena, d),
             .closed => return .{ .failed = if (buf.items.len == 0) "closed" else "closed mid-request" },
             .failed => |m| return .{ .failed = m },
+            .timeout => return if (buf.items.len == 0 and idle != null) .idle else .{ .failed = "timed out mid-request" },
         }
     }
 }
+
+/// A stand-in for "as long as it takes" on a single http-read.
+const forever_ms: u64 = 3600_000;
 
 fn requestRecord(it: *mshl.Interp, r: http.Request) mshl.Error!Value {
     return record(it, &.{ "method", "path", "query", "headers", "body" }, &.{
@@ -256,10 +267,19 @@ fn responseBytes(it: *mshl.Interp, v: Value, out: *std.ArrayList(u8), keep: bool
     try http.formatResponse(it.arena, out, status, headers.items, body, keep and !wantsClose(v), date);
 }
 
-fn writeResponse(n: *Net, it: *mshl.Interp, s: u64, v: Value, keep: bool) mshl.Error!?[]const u8 {
+fn writeResponse(n: *Net, it: *mshl.Interp, c: Conn, v: Value, keep: bool) mshl.Error!?[]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try responseBytes(it, v, &out, keep);
-    return n.sendAll(s, out.items);
+    return c.send(n, out.items);
+}
+
+/// A connection from a handle: a plain socket, or a tls connection.
+fn connOfHandle(it: *mshl.Interp, v: Value, cmd: []const u8) mshl.Error!Conn {
+    if (v == .handle and std.mem.eql(u8, v.handle.kind, "tls")) {
+        if (v.handle.closed) return it.fail("{s}: the tls connection is closed", .{cmd});
+        return .{ .tls = v.handle.id };
+    }
+    return .{ .plain = try netcmds.sockArg(it, v, cmd, "socket") };
 }
 
 /// null = not an HTTP command.
@@ -267,20 +287,21 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     const is = std.mem.eql;
     if (is(u8, name, "http-read")) {
         const sv = input orelse (if (args.len > 0) args[0] else return it.fail("http-read: a socket expected", .{}));
-        const s = try netcmds.sockArg(it, sv, "http-read", "socket");
-        return switch (try readRequest(n, it, s, null)) {
+        const c = try connOfHandle(it, sv, "http-read");
+        return switch (try readRequest(n, it, c, null)) {
             .request => |r| try okResult(it, try requestRecord(it, r)),
             .failed => |m| try errResult(it, m),
             .idle => unreachable, // no idle limit was given
         };
     }
     if (is(u8, name, "http-write")) {
-        const s = try netcmds.sockArg(it, args[0], "http-write", "socket");
-        if (try writeResponse(n, it, s, args[1], true)) |m| return try errResult(it, m);
+        const c = try connOfHandle(it, args[0], "http-write");
+        if (try writeResponse(n, it, c, args[1], true)) |m| return try errResult(it, m);
         return try okResult(it, .nothing);
     }
     if (is(u8, name, "serve")) {
-        const l = try netcmds.sockArg(it, args[0], "serve", "listener");
+        const tls_listener = args[0] == .handle and is(u8, args[0].handle.kind, "tls-listener");
+        const l = try netcmds.sockArg(it, args[0], "serve", if (tls_listener) "tls-listener" else "listener");
         var left: ?i64 = null;
         if (args.len > 2) {
             if (args[2].int < 1) return it.fail("serve: the count must be a positive int", .{});
@@ -288,19 +309,24 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
         }
         var served: i64 = 0;
         while (left == null or left.? > 0) {
-            const s = switch (n.acceptRaw(l)) {
-                .sock => |x| x,
+            const c: Conn = if (tls_listener) switch (tlscmds.accept(n, l)) {
+                .conn => |t| .{ .tls = t },
+                // A handshake that fails is one client's problem, not the
+                // server's: wait for the next.
+                .failed => continue,
+            } else switch (n.acceptRaw(l)) {
+                .sock => |x| .{ .plain = x },
                 .failed => |m| return try errResult(it, m),
             };
-            defer n.closeRaw(s);
+            defer c.close(n);
             // Every request the connection carries, until the peer says
             // close, the count runs out, or it sits idle.
             while (left == null or left.? > 0) {
-                const req = switch (try readRequest(n, it, s, idle_ms)) {
+                const req = switch (try readRequest(n, it, c, idle_ms)) {
                     .request => |r| r,
                     .idle => break,
                     .failed => |m| {
-                        if (!is(u8, m, "closed")) _ = try writeResponse(n, it, s, .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 400 }, .{ .str = m } } } }, false);
+                        if (!is(u8, m, "closed")) _ = try writeResponse(n, it, c, .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 400 }, .{ .str = m } } } }, false);
                         break;
                     },
                 };
@@ -324,10 +350,10 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
                 served += 1;
                 if (left) |*k| k.* -= 1;
                 const keep = req.keep and !wantsClose(reply) and (left == null or left.? > 0);
-                if (try writeResponse(n, it, s, reply, keep)) |_| break;
+                if (try writeResponse(n, it, c, reply, keep)) |_| break;
                 if (!keep) break;
             }
-            keepLeftover(s, ""); // the socket number may be reused
+            keepLeftover(c.leftoverKey(), ""); // the number may be reused
         }
         return try okResult(it, .{ .int = served });
     }
@@ -453,6 +479,16 @@ pub const command_names = [_][]const u8{ "http-read", "http-write", "serve", "fe
 const Shape = mshl.Shape;
 const socket: Shape = .{ .kind = "socket" };
 const listener: Shape = .{ .kind = "listener" };
+/// http-read/http-write and serve take a plain socket/listener or a TLS
+/// one; the runtime dispatch tells them apart by the handle's kind.
+const stream = blk: {
+    const alts = [_]Shape{ .{ .kind = "socket" }, .{ .kind = "tls" } };
+    break :blk Shape{ .one_of = &alts };
+};
+const any_listener = blk: {
+    const alts = [_]Shape{ .{ .kind = "listener" }, .{ .kind = "tls-listener" } };
+    break :blk Shape{ .one_of = &alts };
+};
 const text_or_bytes = blk: {
     const alts = [_]Shape{ .string, .bytes };
     break :blk Shape{ .one_of = &alts };
@@ -481,9 +517,9 @@ const fetch_result = mshl.resultShape(response_shape, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
     const is = std.mem.eql;
-    if (is(u8, name, "http-read")) return .{ .params = &.{.{ .name = "socket", .shape = socket, .optional = true }}, .input = .{ .optional = socket }, .ret = read_result };
-    if (is(u8, name, "http-write")) return .{ .params = &.{ .{ .name = "socket", .shape = socket }, .{ .name = "response" } }, .ret = done_result };
-    if (is(u8, name, "serve")) return .{ .params = &.{ .{ .name = "listener", .shape = listener }, .{ .name = "handler", .shape = .function }, .{ .name = "count", .shape = .int, .optional = true } }, .ret = count_result };
+    if (is(u8, name, "http-read")) return .{ .params = &.{.{ .name = "socket", .shape = stream, .optional = true }}, .input = .{ .optional = stream }, .ret = read_result };
+    if (is(u8, name, "http-write")) return .{ .params = &.{ .{ .name = "socket", .shape = stream }, .{ .name = "response" } }, .ret = done_result };
+    if (is(u8, name, "serve")) return .{ .params = &.{ .{ .name = "listener", .shape = any_listener }, .{ .name = "handler", .shape = .function }, .{ .name = "count", .shape = .int, .optional = true } }, .ret = count_result };
     if (is(u8, name, "fetch")) return .{ .params = &.{ .{ .name = "url", .shape = .string }, .{ .name = "options", .shape = .record, .optional = true } }, .ret = fetch_result };
     return null;
 }
