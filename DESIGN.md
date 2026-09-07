@@ -1283,10 +1283,13 @@ it announces are all there; formatting with `Content-Length` and
 lists in, `\u` escapes and surrogate pairs, floats refused because the
 language has none) — and `user/httpcmds.zig` moves the bytes over the
 network commands' raw socket operations. `http-read` and `http-write`
-are the primitives; `serve $listener $handler [n]` is the loop, with a
-handler as an ordinary function of the request record and its return
+are the primitives; `http-serve $listener $handler [n]` is the loop, with
+a handler as an ordinary function of the request record and its return
 value deciding the response (a record is explicit, a string is text,
-data is JSON; a failing handler is a 500 and the server goes on);
+data is JSON; a failing handler is a 500 and the server goes on) — one
+connection at a time (for concurrency across connections, the worker-pool
+`serve` hands each socket to a worker whose handler may itself call
+`http-read`/`http-write`);
 `fetch URL [opts]` is the client, address-only hosts. `to-json` and
 `from-json` joined the language. One request per connection, no
 keep-alive, no chunked transfer: what a script needs, not a proxy.
@@ -2119,6 +2122,33 @@ proves each connection gets its own worker and its own answer, not the
 timing, since forcing genuine overlap is the same unreproducible thing
 as the simultaneous-call race. The structure is the point — a slow
 handler on one connection no longer blocks accepting the next.
+
+**Concurrency: a built-in `serve` over a worker pool (as built,
+2026-09-07).** The accept-and-dispatch pattern above became a command:
+`serve $listener { handler } [count]` accepts connections and hands each
+to a fresh worker running the handler block (with `$in` the socket), up
+to `max_workers` serving at once, reaping finished workers to make room
+for more, and draining the rest before it returns the number served.
+The reaping is the same doorbell `race`/`await` use: when the pool is
+full the accept loop waits on it for any worker to finish (its handler
+returned, so its response is already sent), tears that worker down, and
+spawns a fresh one for the next connection. It lives in `workcmds` (which
+already imports `netcmds`), because it needs both a spawner and a net
+view — the listener handle carries its view as the handle's context — and
+it drives the raw handoff directly (`startServeRaw`), so a long accept
+loop makes no per-connection interpreter handle. The deliberate design
+choice is a worker *per connection* bounding concurrency, not a fixed
+set of workers reused across connections: `handoff` mints a *fresh* net
+view per socket, so a reused worker would re-`attach_net` a new view on
+every connection and leak the previous one — whereas a per-connection
+worker attaches exactly one view, torn down with its domain when it is
+reaped. The old request-level HTTP server kept its own name, `http-serve`
+(it belongs beside `http-read`/`http-write`, does its own parsing and
+keep-alive, and handles TLS listeners a raw handoff cannot); the new
+`serve` is plain-socket and worker-level, and a worker's handler may
+itself speak HTTP. The net drill runs five connections through a pool of
+four — proving the fill-then-reuse path, not just one worker each — and
+reads all five echoes back: "pool serve ok".
 
 ### The gate (as built, 2026-09-03)
 

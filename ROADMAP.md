@@ -473,9 +473,26 @@ is a plan.
   That gate is being lifted (started 2026-09-07): netsvc `handoff(sock)`
   moves a socket's ownership to a fresh view and hands back a cap to it —
   the socket crossing to another domain, the cap the authority (drilled
-  natively in the net echo client). Next: give a worker that view and
-  the socket over `call`/`dispatch`, then a `serve` that spawns a worker
-  per connection. And standalone `channel`/`spawn`.
+  natively in the net echo client). ✅ a socket handed to a worker over
+  `call`/`dispatch` (landed 2026-09-07): the worker adopts the handed-off
+  view and serves the connection as `$in`, so `socket | dispatch $w`
+  serves fire-and-forget and `await`/`race` reap it — concurrent serve,
+  first as a script pattern (accept N, dispatch each, await). ✅ a
+  built-in concurrent `serve` over a managed worker pool (landed
+  2026-09-07): `serve $listener { handler } [count]` accepts connections
+  and hands each to a fresh worker (the handler block, `$in` = the
+  socket) from a bounded pool — up to `max_workers` serving at once,
+  reaped via the doorbell as they finish and drained at the end. Decided:
+  the pool is workers-*per-connection* bounding concurrency (each worker
+  attaches exactly one net view, torn down with its domain — no
+  per-connection view leak), not a fixed set reused across connections
+  (handoff mints a fresh view per socket, so reuse would leak a view per
+  connection). The old request-level HTTP server (handler a function of a
+  request record, keep-alive, TLS) keeps its own name `http-serve`
+  alongside `http-read`/`http-write`; the new `serve` is plain-socket,
+  worker-level (a worker's handler may itself do http-read/http-write).
+  Still open: standalone `channel`/`spawn`; the simultaneous-call race
+  (true simultaneity is unforceable in the deterministic drills).
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.

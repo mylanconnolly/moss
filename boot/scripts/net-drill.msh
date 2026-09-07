@@ -28,6 +28,7 @@ let served = ($wa | call $echoer)?
 if $served != "served" { (err "socket to worker: $served")? }
 if (from-bytes (recv $wc)?)? != "over a worker" { (err "socket to worker echo failed")? }
 close $wc
+close $echoer
 echo "script: socket to worker ok"
 # Concurrent serve: two connections, each handed to its own worker with
 # `dispatch` (async) so both serve at once, then reaped with `await`.
@@ -50,7 +51,41 @@ if (from-bytes (recv $cc1)?)? != "alpha" { (err "concurrent serve 1 wrong")? }
 if (from-bytes (recv $cc2)?)? != "beta" { (err "concurrent serve 2 wrong")? }
 close $cc1
 close $cc2
+close $cw1
+close $cw2
 echo "script: concurrent serve ok"
+# The built-in `serve` over a managed worker pool: one command accepts
+# connections and hands each to a fresh worker running the handler block
+# (with `$in` the socket), up to the pool's width serving at once,
+# reaping finished workers to take more. Five connections through a pool
+# of four proves the fill-then-reuse path, not just a worker per
+# connection. (The clients connect and send first; `serve` blocks the
+# script until it has served the count, so they wait in the backlog.)
+let sl = (listen 8094)?
+let s1 = (connect ::1 8094)?
+let s2 = (connect ::1 8094)?
+let s3 = (connect ::1 8094)?
+let s4 = (connect ::1 8094)?
+let s5 = (connect ::1 8094)?
+send $s1 "one"
+send $s2 "two"
+send $s3 "three"
+send $s4 "four"
+send $s5 "five"
+let n = (serve $sl { let m = (from-bytes (recv $in)?)?; (send $in $m)?; "ok" } 5)?
+if $n != 5 { (err "pool serve: served $n, wanted 5")? }
+if (from-bytes (recv $s1)?)? != "one" { (err "pool serve 1 wrong")? }
+if (from-bytes (recv $s2)?)? != "two" { (err "pool serve 2 wrong")? }
+if (from-bytes (recv $s3)?)? != "three" { (err "pool serve 3 wrong")? }
+if (from-bytes (recv $s4)?)? != "four" { (err "pool serve 4 wrong")? }
+if (from-bytes (recv $s5)?)? != "five" { (err "pool serve 5 wrong")? }
+close $s1
+close $s2
+close $s3
+close $s4
+close $s5
+close $sl
+echo "script: pool serve ok"
 # Bulk: more than one segment in flight, both ways — the window at work.
 def recv-all [s, want] {
   if $want <= 0 { ok (to-bytes "") } else {
@@ -105,7 +140,7 @@ def handler [req] {
 }
 let srv = (listen 8080)?
 echo "script: serving http"
-let n = (serve $srv $handler 7)?
+let n = (http-serve $srv $handler 7)?
 echo "script: served $n"
 # Datagrams over loopback, both families: a bound port hears what an
 # ephemeral socket sends it, with the sender's address and port.

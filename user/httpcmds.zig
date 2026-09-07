@@ -1,8 +1,11 @@
 //! HTTP for mshl hosts, on top of the network commands' sockets:
 //! `http-read $sock` parses a request into a record, `http-write $sock
-//! $resp` answers it, `serve $listener $handler [n]` loops accept /
+//! $resp` answers it, `http-serve $listener $handler [n]` loops accept /
 //! read / handle / write with handlers as ordinary functions of the
-//! request record, and `fetch URL [opts]` is the client. What a
+//! request record (one connection at a time; for concurrency across
+//! connections, the worker-pool `serve` hands each socket to a worker
+//! whose handler may itself call http-read/http-write), and `fetch URL
+//! [opts]` is the client. What a
 //! handler returns decides the response: a record { status, headers,
 //! body } is explicit; a string is 200 text/plain; a list, record or
 //! table is 200 application/json. Every outcome the network or the
@@ -299,12 +302,12 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
         if (try writeResponse(n, it, c, args[1], true)) |m| return try errResult(it, m);
         return try okResult(it, .nothing);
     }
-    if (is(u8, name, "serve")) {
+    if (is(u8, name, "http-serve")) {
         const tls_listener = args[0] == .handle and is(u8, args[0].handle.kind, "tls-listener");
-        const l = try netcmds.sockArg(it, args[0], "serve", if (tls_listener) "tls-listener" else "listener");
+        const l = try netcmds.sockArg(it, args[0], "http-serve", if (tls_listener) "tls-listener" else "listener");
         var left: ?i64 = null;
         if (args.len > 2) {
-            if (args[2].int < 1) return it.fail("serve: the count must be a positive int", .{});
+            if (args[2].int < 1) return it.fail("http-serve: the count must be a positive int", .{});
             left = args[2].int;
         }
         var served: i64 = 0;
@@ -472,7 +475,7 @@ const ExchangeOut = struct {
     early: bool = false,
 };
 
-pub const command_names = [_][]const u8{ "http-read", "http-write", "serve", "fetch" };
+pub const command_names = [_][]const u8{ "http-read", "http-write", "http-serve", "fetch" };
 
 // ---------------------------------------------------------- signatures
 
@@ -519,7 +522,7 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     const is = std.mem.eql;
     if (is(u8, name, "http-read")) return .{ .params = &.{.{ .name = "socket", .shape = stream, .optional = true }}, .input = .{ .optional = stream }, .ret = read_result };
     if (is(u8, name, "http-write")) return .{ .params = &.{ .{ .name = "socket", .shape = stream }, .{ .name = "response" } }, .ret = done_result };
-    if (is(u8, name, "serve")) return .{ .params = &.{ .{ .name = "listener", .shape = any_listener }, .{ .name = "handler", .shape = .function }, .{ .name = "count", .shape = .int, .optional = true } }, .ret = count_result };
+    if (is(u8, name, "http-serve")) return .{ .params = &.{ .{ .name = "listener", .shape = any_listener }, .{ .name = "handler", .shape = .function }, .{ .name = "count", .shape = .int, .optional = true } }, .ret = count_result };
     if (is(u8, name, "fetch")) return .{ .params = &.{ .{ .name = "url", .shape = .string }, .{ .name = "options", .shape = .record, .optional = true } }, .ret = fetch_result };
     return null;
 }

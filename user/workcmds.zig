@@ -388,9 +388,12 @@ const worker_result = mshl.resultShape(worker_kind, .string);
 const service_result = mshl.resultShape(service_kind, .string);
 const callable_kind: Shape = .{ .one_of = &.{ worker_kind, service_kind } };
 const call_result = mshl.resultShape(.any, .string);
+const listener_kind: Shape = .{ .kind = "listener" };
+const serve_result = mshl.resultShape(.int, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "spawn")) return .{ .params = &.{.{ .name = "handler", .shape = .function }}, .ret = worker_result };
+    if (std.mem.eql(u8, name, "serve")) return .{ .params = &.{ .{ .name = "listener", .shape = listener_kind }, .{ .name = "handler", .shape = .function }, .{ .name = "count", .shape = .int, .optional = true } }, .ret = serve_result };
     if (std.mem.eql(u8, name, "call")) return .{ .params = &.{ .{ .name = "worker", .shape = callable_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "dispatch")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "await")) return .{ .params = &.{.{ .name = "worker", .shape = worker_kind }}, .input = .{ .optional = worker_kind }, .ret = call_result };
@@ -416,6 +419,23 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             .conn => |c| try okResult(it, try it.newHandle("worker", c, &workers, dropWorker)),
             .failed => |m| try errResult(it, m),
         };
+    }
+    if (is(u8, name, "serve")) {
+        if (spawner == 0 or loadStage == null) return it.fail("serve: this program cannot spawn workers (no spawner)", .{});
+        if (args.len < 2) return it.fail("serve: a listener and a handler expected", .{});
+        if (args[0] != .handle or !is(u8, args[0].handle.kind, "listener")) return it.fail("serve: a listener expected, got a {s}", .{args[0].typeName()});
+        if (args[0].handle.closed) return it.fail("serve: the listener is closed", .{});
+        const src = switch (args[1]) {
+            .func => |cl| cl.src,
+            else => return it.fail("serve: a handler block expected, got a {s}", .{args[1].typeName()}),
+        };
+        var count: ?i64 = null;
+        if (args.len > 2) {
+            if (args[2] != .int or args[2].int < 1) return it.fail("serve: the count must be a positive int", .{});
+            count = args[2].int;
+        }
+        const n: *netcmds.Net = @ptrCast(@alignCast(args[0].handle.ctx));
+        return try poolServe(it, n, args[0].handle.id, src, count);
     }
     if (is(u8, name, "call")) {
         // The worker (or a looked-up service) is the first argument; the
@@ -561,27 +581,35 @@ fn loadRequest(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!union(enu
 /// doorbell when done, so many connections serve at once. Returns an
 /// error result on failure, or null on success (the worker is pending).
 fn startServe(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!?Value {
-    if (w.published) return try errResult(it, "the worker is published; reach it through lookup");
-    if (w.pending) return try errResult(it, "the worker is already running");
     const n: *netcmds.Net = @ptrCast(@alignCast(sv.handle.ctx));
-    const id = sv.handle.id;
-    const cap = netcmds.handoff(n, id) orelse return try errResult(it, "the socket could not be handed off");
+    if (startServeRaw(w, n, sv.handle.id)) |m| return try errResult(it, m);
+    it.closeHandle(sv); // the socket moved; our handle no longer owns it
+    return null;
+}
+
+/// The core of `startServe`, working on a raw socket number on view `n`
+/// rather than a socket Value — the built-in `serve` uses it directly so
+/// its accept loop makes no per-connection interpreter handle. Returns an
+/// error message on failure, or null on success (the worker is pending).
+fn startServeRaw(w: *Worker, n: *netcmds.Net, id: u64) ?[]const u8 {
+    if (w.published) return "the worker is published; reach it through lookup";
+    if (w.pending) return "the worker is already running";
+    const cap = netcmds.handoff(n, id) orelse return "the socket could not be handed off";
     switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .attach_net, cap)) {
         .ok => |rep| if (rep != .ok) {
             _ = usys.capDrop(cap);
-            return try errResult(it, "the worker refused the net view");
+            return "the worker refused the net view";
         },
         .err => {
             _ = usys.capDrop(cap);
-            return try errResult(it, "the worker vanished");
+            return "the worker vanished";
         },
     }
     _ = usys.capDrop(cap); // the worker holds its own ref now
-    it.closeHandle(sv); // the socket moved; our handle no longer owns it
     ready_mask &= ~(@as(u64, 1) << w.bit); // a fresh run
     switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .serve = .{ .idx = id } }, 0)) {
-        .ok => |rep| if (rep != .ok) return try errResult(it, "the worker refused to serve"),
-        .err => return try errResult(it, "the worker vanished"),
+        .ok => |rep| if (rep != .ok) return "the worker refused to serve",
+        .err => return "the worker vanished",
     }
     w.pending = true;
     return null;
@@ -599,6 +627,118 @@ fn callServeSocket(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!Value {
 fn dispatchServeSocket(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!Value {
     if (try startServe(it, w, sv)) |e| return e;
     return try okResult(it, .nothing);
+}
+
+// -------------------------------------------------- built-in serve pool
+//
+// `serve $listener { handler } [count]` is the concurrent-serve script
+// pattern made a command: accept connections and hand each to a fresh
+// worker running the handler block (with `$in` the socket), up to
+// `max_workers` serving at once. When the pool is full the accept loop
+// waits on the doorbell for one worker to finish and reaps it (its
+// domain torn down, its value discarded) before taking the next; at the
+// end every worker still serving is drained. A worker attaches exactly
+// one net view — the handed-off socket's, torn down with its domain — so
+// there is no per-connection view leak; the pool bounds concurrency.
+
+fn removeInflight(inflight: []Conn, n_inflight: *usize, i: usize) void {
+    n_inflight.* -= 1;
+    inflight[i] = inflight[n_inflight.*]; // swap-remove; order does not matter
+}
+
+/// Wait on the doorbell until one in-flight worker has finished serving
+/// (its handler returned, so its response is already sent), then tear it
+/// down and drop it from the list. Requires `n_inflight.* > 0`.
+fn reapOneServe(inflight: []Conn, n_inflight: *usize) void {
+    var wanted: u64 = 0;
+    for (inflight[0..n_inflight.*]) |c| {
+        if (slotOf(c)) |w| if (w.pending) {
+            wanted |= @as(u64, 1) << w.bit;
+        };
+    }
+    if (wanted != 0 and doorbell != 0) {
+        while (ready_mask & wanted == 0) {
+            const r = usys.notifyWait(doorbell);
+            if (r.err != .ok) break;
+            ready_mask |= r.data[0];
+        }
+    }
+    // Reap the first ready worker (with no doorbell, or a failed wait,
+    // the first worker — it is done or gone either way).
+    var i: usize = 0;
+    while (i < n_inflight.*) : (i += 1) {
+        const w = slotOf(inflight[i]) orelse {
+            removeInflight(inflight, n_inflight, i);
+            return;
+        };
+        if (doorbell == 0 or (ready_mask & (@as(u64, 1) << w.bit)) != 0) {
+            ready_mask &= ~(@as(u64, 1) << w.bit);
+            close(inflight[i]);
+            removeInflight(inflight, n_inflight, i);
+            return;
+        }
+    }
+    // A successful wait always flags one of the wanted bits, so this is a
+    // safety net: reap the first to avoid stalling.
+    close(inflight[0]);
+    removeInflight(inflight, n_inflight, 0);
+}
+
+fn drainServe(inflight: []Conn, n_inflight: *usize) void {
+    while (n_inflight.* > 0) reapOneServe(inflight, n_inflight);
+}
+
+/// The built-in `serve`: accept on listener `l` (view `n`) and hand each
+/// connection to a worker running `src`, up to `max_workers` at once.
+/// Returns the number of connections served (an int result), or an error
+/// result if accept fails or no worker can be had for the first one.
+fn poolServe(it: *mshl.Interp, n: *netcmds.Net, l: u64, src: []const u8, count: ?i64) mshl.Error!Value {
+    const stage = loadStage.?(it) orelse return try errResult(it, "unreadable");
+    var inflight: [max_workers]Conn = undefined;
+    var n_inflight: usize = 0;
+    var served: i64 = 0;
+    while (count == null or served < count.?) {
+        const id = switch (n.acceptRaw(l)) {
+            .sock => |s| s,
+            .failed => |m| {
+                drainServe(&inflight, &n_inflight);
+                return try errResult(it, m);
+            },
+        };
+        // A worker for this connection: a fresh spawn, reaping one of ours
+        // if every worker slot is taken (the pool is full).
+        var out = spawnWorker(stage, src);
+        if (out == .failed and std.mem.eql(u8, out.failed, "too_many")) {
+            if (n_inflight == 0) {
+                n.closeRaw(id); // no worker to serve it, and none to reap
+                return try errResult(it, "serve: no worker slots are free");
+            }
+            reapOneServe(&inflight, &n_inflight);
+            out = spawnWorker(stage, src);
+        }
+        const conn = switch (out) {
+            .conn => |c| c,
+            .failed => |m| {
+                n.closeRaw(id);
+                drainServe(&inflight, &n_inflight);
+                return try errResult(it, m);
+            },
+        };
+        const w = slotOf(conn).?;
+        if (startServeRaw(w, n, id)) |_| {
+            // This one connection could not be handed off; drop it and its
+            // worker and keep serving — one client's failure is not the
+            // server's. (If the socket moved, closeRaw here is a no-op.)
+            close(conn);
+            n.closeRaw(id);
+            continue;
+        }
+        inflight[n_inflight] = conn;
+        n_inflight += 1;
+        served += 1;
+    }
+    drainServe(&inflight, &n_inflight);
+    return try okResult(it, .{ .int = served });
 }
 
 fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
@@ -687,4 +827,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await", "race", "publish", "lookup", "dial" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial" };
