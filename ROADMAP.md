@@ -434,8 +434,17 @@ is a plan.
   connection migration since a socket is a badge, not a standalone cap);
   (2) fabric
   publish/lookup over the pool's service registry — scripts as fabric
-  services; (3) `select` and a concurrent `serve` over many sources via
-  `notify_bind`, and standalone `channel`/`spawn` for parallel work.
+  services; (3) ✅ parallel workers (landed 2026-09-07, "stage 3a"):
+  `call` is synchronous, so `x | dispatch $w` sends the input and the
+  worker acks before running the handler — the caller does not block, and
+  two workers dispatched before either is awaited run at once, each in
+  its own domain; `await $w` joins one for its result. No new kernel
+  primitive: the worker answers the dispatch early and stashes its result
+  for `collect`. The program stage grew 256 → 384 pages (and the kernel's
+  `shm_max_pages` with it) because msh, carrying every command module and
+  the interpreter, crossed 1M. Still open in (3): `select` (the first of
+  many to finish, via `notify_bind`) and a concurrent `serve` over many
+  sources, plus standalone `channel`/`spawn`.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.

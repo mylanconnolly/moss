@@ -47,6 +47,9 @@ const Worker = struct {
     gen: u32 = 0,
     chan: u64 = 0, // our end of the worker's channel
     ctl: u64 = 0, // the worker domain's control cap (for teardown)
+    /// A `start` is outstanding: the worker is computing (or its result
+    /// waits unclaimed), and `await` will collect it.
+    pending: bool = false,
     shm: u64 = 0,
     buf: [*]u8 = undefined,
     buf_len: usize = 0,
@@ -176,6 +179,8 @@ const call_result = mshl.resultShape(.any, .string);
 pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "spawn")) return .{ .params = &.{.{ .name = "handler", .shape = .function }}, .ret = worker_result };
     if (std.mem.eql(u8, name, "call")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
+    if (std.mem.eql(u8, name, "dispatch")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
+    if (std.mem.eql(u8, name, "await")) return .{ .params = &.{.{ .name = "worker", .shape = worker_kind }}, .input = .{ .optional = worker_kind }, .ret = call_result };
     return null;
 }
 
@@ -204,6 +209,18 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (!in_val.isData()) return it.fail("call: the input is a {s}, which cannot cross to a worker (only data can)", .{in_val.typeName()});
         return try callWorker(it, w, in_val);
     }
+    if (is(u8, name, "dispatch")) {
+        if (args.len < 1) return it.fail("dispatch: a worker expected", .{});
+        const w = try workerArg(it, args[0]);
+        const in_val: Value = if (input) |v| v else if (args.len > 1) args[1] else .nothing;
+        if (!in_val.isData()) return it.fail("dispatch: the input is a {s}, which cannot cross to a worker (only data can)", .{in_val.typeName()});
+        return try dispatchWorker(it, w, in_val);
+    }
+    if (is(u8, name, "await")) {
+        const wv = input orelse (if (args.len > 0) args[0] else return it.fail("await: a worker expected", .{}));
+        const w = try workerArg(it, wv);
+        return try awaitWorker(it, w);
+    }
     // close / status on a worker handle only.
     const hv = input orelse (if (args.len > 0) args[0] else return null);
     if (hv != .handle or !is(u8, hv.handle.kind, "worker")) return null;
@@ -226,25 +243,71 @@ fn workerArg(it: *mshl.Interp, v: Value) mshl.Error!*Worker {
     return slotOf(v.handle.id) orelse return it.fail("call: the worker is closed", .{});
 }
 
-fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
+/// Turn a worker's reply (its value/error in the buffer) into a result.
+fn replyToValue(it: *mshl.Interp, w: *Worker, rep: shared.WorkResp) mshl.Error!Value {
+    return switch (rep) {
+        .value => |v| blk: {
+            if (v.len == 0) break :blk try okResult(it, .nothing);
+            if (v.len > w.buf_len) break :blk try errResult(it, "the worker's value overran the buffer");
+            const text = try it.arena.dupe(u8, w.buf[0..v.len]);
+            break :blk try okResult(it, try mshl.tableize(it.arena, try it.parseData(text)));
+        },
+        .failed => |e| try errResult(it, try it.arena.dupe(u8, w.buf[0..@min(e.len, w.buf_len)])),
+        .refused => try errResult(it, "the worker refused"),
+        .ok => try okResult(it, .nothing),
+    };
+}
+
+/// Write the request into the worker's buffer; returns its length or an
+/// error result if it does not fit.
+fn loadRequest(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!union(enum) { len: usize, err: Value } {
     var in_text: std.ArrayList(u8) = .empty;
     if (in_val != .nothing) try mshl.writeData(in_val, it.arena, &in_text);
-    if (in_text.items.len > w.buf_len) return try errResult(it, "the request is larger than the buffer");
+    if (in_text.items.len > w.buf_len) return .{ .err = try errResult(it, "the request is larger than the buffer") };
     @memcpy(w.buf[0..in_text.items.len], in_text.items);
-    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .call = .{ .len = in_text.items.len } }, 0)) {
+    return .{ .len = in_text.items.len };
+}
+
+fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
+    if (w.pending) return try errResult(it, "the worker is running; await it first");
+    const len = switch (try loadRequest(it, w, in_val)) {
+        .len => |n| n,
+        .err => |e| return e,
+    };
+    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .call = .{ .len = len } }, 0)) {
+        .ok => |rep| try replyToValue(it, w, rep),
+        .err => try errResult(it, "the worker vanished"),
+    };
+}
+
+/// Async dispatch: hand the worker its input and let it compute while we
+/// go on. The worker acks at once; its result waits for `await`.
+fn dispatchWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
+    if (w.pending) return try errResult(it, "the worker is already running");
+    const len = switch (try loadRequest(it, w, in_val)) {
+        .len => |n| n,
+        .err => |e| return e,
+    };
+    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .dispatch = .{ .len = len } }, 0)) {
         .ok => |rep| switch (rep) {
-            .value => |v| blk: {
-                if (v.len == 0) break :blk try okResult(it, .nothing);
-                if (v.len > w.buf_len) break :blk try errResult(it, "the worker's value overran the buffer");
-                const text = try it.arena.dupe(u8, w.buf[0..v.len]);
-                break :blk try okResult(it, try mshl.tableize(it.arena, try it.parseData(text)));
+            .ok => blk: {
+                w.pending = true;
+                break :blk try okResult(it, .nothing);
             },
-            .failed => |e| try errResult(it, try it.arena.dupe(u8, w.buf[0..@min(e.len, w.buf_len)])),
-            .refused => try errResult(it, "the worker refused"),
-            .ok => try okResult(it, .nothing),
+            else => try errResult(it, "the worker refused the start"),
         },
         .err => try errResult(it, "the worker vanished"),
     };
 }
 
-pub const command_names = [_][]const u8{ "spawn", "call" };
+/// Join a started worker for its result (blocks until it is done).
+fn awaitWorker(it: *mshl.Interp, w: *Worker) mshl.Error!Value {
+    if (!w.pending) return try errResult(it, "nothing to await: the worker was not started");
+    w.pending = false;
+    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .collect, 0)) {
+        .ok => |rep| try replyToValue(it, w, rep),
+        .err => try errResult(it, "the worker vanished"),
+    };
+}
+
+pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await" };

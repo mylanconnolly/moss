@@ -1932,6 +1932,34 @@ QuotaExceeded the shell itself paid for at 24M). A boot-time script
 units spawn — so scripts-with-workers are a post-boot capability, proven
 by the shell drill running one through `run mshrun`.
 
+**Concurrency, stage 3a: parallel workers (as built, 2026-09-07).**
+`call` is a synchronous rendezvous — the kernel parks the caller until
+the worker replies — so a script that only `call`s runs its workers one
+at a time. Parallelism splits the call: `x | dispatch $w` writes the
+input and sends `WorkReq.dispatch`, to which the worker replies `.ok`
+*before* running the handler, so the caller does not block on the work
+— it goes on to dispatch other workers while this one computes. The
+result waits in the worker's buffer for `await $w`, which sends
+`collect` and reads it back. Two workers dispatched before either is
+awaited run at once, each in its own domain on its own core; `await`
+joins them in turn. This needs no new kernel primitive — it is the
+existing call/recv/reply, with the worker choosing to answer the
+dispatch early and stash its result. One unclaimed result at a time:
+`dispatch` on a busy worker, or `call` on a dispatched one, is refused;
+`await` with nothing outstanding is an err, not a hang. `select` (the
+first of many to finish, via `notify_bind`) and a concurrent `serve`
+build on this.
+
+Two limits grew to make room for the language's own weight. Every
+program image is copied through a *stage* — an shm buffer — into the
+child; msh, now carrying every command module (files, net, TLS, HTTP,
+fabric, workers) and the whole mshl interpreter, crossed 1M. So the
+stage went 256 → 384 pages (`loader.default_pages`), and the kernel's
+`shm_max_pages` with it (256 → 384): the ceiling on any one shm object
+existed precisely for the program stage, and the stage had outgrown it.
+Each shm object's page table grew by the same factor; the cost is a few
+kilobytes per live buffer.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

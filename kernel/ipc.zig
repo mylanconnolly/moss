@@ -35,7 +35,7 @@ const trace = @import("trace.zig");
 const max_channels = 64;
 const max_notifications = 64;
 const max_shms = 64;
-pub const shm_max_pages = 256; // 1M: a program stage (msh with TLS is ~900K); the blk data window needs 8 x 32K slots
+pub const shm_max_pages = 384; // 1.5M: a program stage — msh, with every command module and the mshl interpreter, crossed 1M; the blk data window needs 8 x 32K slots
 
 pub const Side = enum { a, b };
 

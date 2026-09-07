@@ -35,7 +35,10 @@ pub const Stage = struct {
     /// is ~900 KB of ReleaseSafe code (TLS 1.3 with its cipher suites and
     /// certificate parsing is 450 KB of it); a stage too small reports
     /// "image missing from the boot archive".
-    pub const default_pages: u64 = 256;
+    // 384 (1.5M): the biggest program image (msh, ~1.05M — every command
+    // module plus the mshl interpreter) must fit in the stage it is copied
+    // through. Bounded by ipc.shm_max_pages, which matches.
+    pub const default_pages: u64 = 384;
 
     pub fn init(pages: u64) ?Stage {
         const s = usys.shmCreate(pages);

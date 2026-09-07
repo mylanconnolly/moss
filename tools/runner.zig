@@ -755,6 +755,14 @@ const shell_script = [_]Step{
     // A script (not the interactive shell) spawns workers too: run mshrun
     // on a script that offloads compute and a file stat to workers.
     .{ .send = "run mshrun scripts/worker-demo.msh?", .expect = "42 26" },
+    // Async: start dispatches without blocking, await joins for the result.
+    .{ .send = "let w = (spawn { (int $in)? * 2 })?; (21 | dispatch $w)?; (await $w)?", .expect = "42" },
+    // Two workers started before either is awaited run in parallel.
+    .{ .send = "let a = (spawn { (int $in)? + 1 })?; let b = (spawn { (int $in)? + 1 })?; (10 | dispatch $a)?; (20 | dispatch $b)?; let x = (await $a)?; let y = (await $b)?; \"$x $y\"", .expect = "11 21" },
+    // A handler error surfaces at await, as the collected result's err.
+    .{ .send = "let w = (spawn { (err \"boom\")? })?; (0 | dispatch $w)?; await $w", .expect = "err boom" },
+    // await with nothing started is an err, not a hang.
+    .{ .send = "let w = (spawn { $in })?; await $w", .expect = "err nothing to await" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => \"a directory\"; file => \"a file\"; symlink => \"a link\" }", .expect = "a directory" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => 1; file => 2 }", .expect = "error: match: the arms do not cover symlink" },
     .{ .send = "stat 1", .expect = "error: stat: path is 1, not string" },

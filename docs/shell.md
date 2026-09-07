@@ -404,11 +404,20 @@ worker. The worker is a handle like a socket: it is
 destroyed — its domain torn down totally, crash-only — when its handle
 drops at the end of the statement or on `close $w`, so a script's exit
 kills its live workers and leaves no orphan. `status $w` is `alive` or
-`closed`. This is the first cut of the concurrency arc; serving a
-channel to the fabric (`publish`/`lookup`) and waiting on many sources
-(`select`) build on it. The handler runs as a function, so a `?` inside
+`closed`. The handler runs as a function, so a `?` inside
 it returns the err — `spawn { (int $in)? * 2 }` fails a bad number as
 the call's `err`, and a good one comes back `ok`.
+
+`call` is synchronous: it blocks until the worker answers. For
+parallelism, split it — `x | dispatch $w` hands the worker its input and
+returns at once, the worker computing while you go on; `await $w` then
+joins it for the result. Two workers dispatched before either is awaited
+run at the same time, each in its own domain: `let a = (spawn { slow
+$in })?; let b = (spawn { slow $in })?; (1 | dispatch $a)?; (2 | dispatch
+$b)?; (await $a)? + (await $b)?` runs `a` and `b` together. `await` on a
+worker that was never dispatched is an err, not a hang. Waiting on the
+*first* of many to finish (`select`), serving a channel to the fabric
+(`publish`/`lookup`), and a concurrent `serve` build on this.
 
 In a user session the shell also holds a badged channel to the session
 manager, and five commands use it: `share PATH NAME USER [rw]` derives

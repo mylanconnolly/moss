@@ -309,6 +309,11 @@ var handler_len: usize = 0;
 fn serveWorker(chan_h: u64) noreturn {
     var buf: ?[*]u8 = null;
     var buf_len: usize = 0;
+    // An async `start` computes now and stashes its result in the buffer
+    // for the next `collect`; these remember it across the two messages.
+    var stashed = false;
+    var stash_len: usize = 0;
+    var stash_failed = false;
     _ = usys.log(glog, "mshrun: worker up");
     while (true) {
         const r = usys.recvMsg(chan_h);
@@ -371,20 +376,42 @@ fn serveWorker(chan_h: u64) noreturn {
                     _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
                     continue;
                 }
-                line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
-                const in_text = line_fba.allocator().dupe(u8, b[0..q.len]) catch usys.exit(3);
-                var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
-                const outcome = runHandler(&interp, handler_src[0..handler_len], in_text);
-                const text = switch (outcome) {
-                    .value => |t| t,
-                    .failed => |t| t,
+                const r2 = runJob(b, q.len, buf_len);
+                _ = usys.replyTyped(shared.WorkResp, chan_h, if (r2.failed)
+                    .{ .failed = .{ .len = r2.len } }
+                else
+                    .{ .value = .{ .len = r2.len } }, 0);
+            },
+            .dispatch => |q| {
+                const b = buf orelse {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
                 };
-                const n = @min(text.len, buf_len);
-                @memcpy(b[0..n], text[0..n]);
-                _ = usys.replyTyped(shared.WorkResp, chan_h, switch (outcome) {
-                    .value => .{ .value = .{ .len = n } },
-                    .failed => .{ .failed = .{ .len = n } },
-                }, 0);
+                // One unclaimed result at a time; the caller collects before
+                // starting again.
+                if (stashed or q.len > buf_len) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                // Accept NOW, before running the handler, so the caller does
+                // not block on the work — it goes on to start other workers
+                // while this one computes. The result waits for `collect`.
+                _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
+                const r2 = runJob(b, q.len, buf_len);
+                stash_len = r2.len;
+                stash_failed = r2.failed;
+                stashed = true;
+            },
+            .collect => {
+                if (!stashed) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                stashed = false;
+                _ = usys.replyTyped(shared.WorkResp, chan_h, if (stash_failed)
+                    .{ .failed = .{ .len = stash_len } }
+                else
+                    .{ .value = .{ .len = stash_len } }, 0);
             },
         }
     }
@@ -397,6 +424,24 @@ const StageOut = union(enum) { value: []const u8, failed: []const u8 };
 /// with the request as `$in`, so a `?` inside propagates out as the
 /// handler's failure carrying the err's own value — `(err "boom")?`
 /// answers the call `err boom`, not a top-level "unhandled err".
+/// Run the handler on the request in `b[0..in_len]` and write its value
+/// (a data literal, or the error text) back to `b`, returning its length
+/// and whether it failed. A fresh interpreter per job keeps no state
+/// between calls. Shared by `call` (sync) and `start` (async).
+fn runJob(b: [*]u8, in_len: usize, buf_len: usize) struct { len: usize, failed: bool } {
+    line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
+    const in_text = line_fba.allocator().dupe(u8, b[0..in_len]) catch usys.exit(3);
+    var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
+    const outcome = runHandler(&interp, handler_src[0..handler_len], in_text);
+    const text = switch (outcome) {
+        .value => |t| t,
+        .failed => |t| t,
+    };
+    const n = @min(text.len, buf_len);
+    @memcpy(b[0..n], text[0..n]);
+    return .{ .len = n, .failed = outcome == .failed };
+}
+
 fn runHandler(it: *mshl.Interp, src: []const u8, in_text: []const u8) StageOut {
     const in_val: Value = if (in_text.len == 0) .nothing else (it.parseData(in_text) catch return .{ .failed = "the input is not data" });
     const tin = mshl.tableize(it.arena, in_val) catch return .{ .failed = "out of memory" };

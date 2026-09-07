@@ -966,8 +966,17 @@ pub const WorkReq = union(enum(u64)) {
     /// The handler function's source at buf[0..len]; set once, first.
     handler: struct { len: u64 },
     /// The request (the handler's `$in`) as a data literal at buf[0..len]
-    /// (0 = nothing).
+    /// (0 = nothing). Synchronous: the reply carries the value.
     call: struct { len: u64 },
+    /// Async dispatch: the request at buf[0..len]. The worker replies `.ok`
+    /// AT ONCE (before running the handler), so the caller does not block
+    /// on the work — the worker then computes and stashes the result for
+    /// the next `collect`. Two workers dispatched before either is
+    /// collected run in parallel. Refused if a result is already stashed.
+    dispatch: struct { len: u64 },
+    /// Join a started worker: reply the stashed result (`value`/`failed`,
+    /// the data in the buffer), or `refused` if none is pending.
+    collect: void,
 };
 pub const WorkResp = union(enum(u64)) {
     ok: void,
