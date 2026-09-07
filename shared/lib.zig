@@ -1204,7 +1204,6 @@ pub const fab_bulk_pages: u64 = 8;
 /// the headers fit beside it in one tcp_send).
 pub const fab_bulk_chunk: usize = 32000;
 /// Services a node may publish to the pool (slots in fabsvc's table).
-pub const fab_max_services: usize = 8;
 
 // QEMU slirp constants (static config; DHCP/SLAAC are not Phase 10
 // problems). v4 net 10.0.2.0/24, v6 prefix fec0::/64.

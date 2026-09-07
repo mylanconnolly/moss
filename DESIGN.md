@@ -2028,27 +2028,52 @@ so it is deferred rather than made blind. The other standing limit: a
 published worker dies with the script that spawned it, so a durable
 service needs a host that outlives the request.
 
-**Concurrency, stage 2: durable service units and `dial` (as built,
-2026-09-07, local first).** A published worker's life is its script's;
-a durable service should not be. The answer is the one the system
-already had at a smaller radius: a *unit*. A service is
-`conf/units/<name>.msh` named after a `ServiceId`, and init starts it,
-keeps it up (crash-only restart on a budget), and stops it only when
-told — its life is init's, not any caller's. mshrun grew a service mode
-(arg 3): after its setup it does not run the script once, it serves
-`WorkReq` on its boot channel with the script pinned as the handler,
-until init stops or restarts it — the worker serve loop, given a fixed
-handler instead of one that arrives over the wire. `dial SERVICE` reaches
-it: it asks init to `connect` the service (which lazily starts it, or
-restarts a stopped one) and wraps the channel init hands back as the same
-callable `service` handle `lookup` produces, so `x | call $s` drives it.
-The shell drill dials the `doubler` unit and calls it — init logs
-`started unit doubler`, mshrun logs `service up`, and the answer comes
-back, with no keep-alive loop anywhere: the sleep-loop the cross-node
-publish drill needed was an artifact of launching a service as a
-script-spawned worker rather than as a unit. This is the local half of
-transparent clustering; the remote half routes the same `dial` through
-the fabric to a peer's init.
+**Concurrency, stage 2: durable service units, `dial`, and names (as
+built, 2026-09-07).** A published worker's life is its script's; a
+durable service should not be. The answer is the one the system already
+had at a smaller radius: a *unit*. A service is `conf/units/<name>.msh`,
+and init starts it, keeps it up (crash-only restart on a budget), and
+stops it only when told — its life is init's, not any caller's. mshrun
+grew a service mode (arg 3): after setup it does not run its script once,
+it serves `WorkReq` on its boot channel with the script pinned as the
+handler, until init stops or restarts it — the worker serve loop given a
+fixed handler instead of one over the wire.
+
+`dial NAME` reaches it locally: init `connect_named` looks the unit up by
+name, lazily starts it, and hands back the channel, wrapped as the same
+callable `service` handle `lookup` produces (`x | call $s`). `dial NODE
+NAME` reaches one on another node: the fabric carries a `remote_connect`
+to the peer, whose fabsvc (holding its own init's front channel, given
+`{ tag: init, self: true }`) asks *its* init to connect the unit and
+exports the channel back — the remote-spawn path, but connecting a
+supervised unit rather than spawning a raw image, so the service's life
+is the hosting node's init. Starting a service on a peer takes the peer's
+spawn authority, signed into its certificate. The fabric-login drill
+dials the `doubler` unit on node 1 from node 2 and 7 comes back 14; no
+keep-alive loop anywhere — the sleep-loop the publish drill needed was an
+artifact of launching a service as a script-spawned worker rather than a
+unit. (One bug: a fabric-only script with no spawner could not `lookup`
+until mshrun turned the worker commands on for a spawner *or* a fabric,
+each command self-guarding.)
+
+The identity is a *name*, not a number, end to end. `dial`, `publish`
+and `lookup` take a string (up to 16 bytes, two words, carried in the
+request and every fabric frame that once held a service number); the
+fabric's published registry is not a separate table but a flag and a
+name on the exports table already there — a published service *is* an
+export that carries a name — so there is no `fab_max_services`, and the
+count of services a node can offer is bounded by the exports it already
+has, not a second, smaller, arbitrary limit. `start NAME`, `stop NAME`
+and `svc` moved off numbers too: init gained `stop_named` and a `list`
+that fills a buffer with a `UnitRec` per unit it knows, so `svc` shows
+the whole supervised set (filter with `where state == up`) rather than a
+hardcoded pair. With nothing left using it, the `ServiceId` enum was
+deleted. The native session manager rode the change (it publishes and
+looks itself up as `"usersvc"`, proven still cross-node by the flogin
+drill), as did the Phase-5 init demo (`connect_named`) and the
+fabric-security drill's `"calc"`. This is what the fabric's own header
+meant by "init at a larger radius": the same verbs, the node just an
+address, the service just a name.
 
 ### The gate (as built, 2026-09-03)
 

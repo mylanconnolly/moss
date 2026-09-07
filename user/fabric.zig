@@ -279,8 +279,12 @@ const Export = struct {
     /// so the child is torn down and its budget returned once nobody on
     /// the far side can reach it.
     ctl: u64 = 0,
-    /// A published service: never released by a remote holder's death.
+    /// A published service: never released by a remote holder's death,
+    /// and reachable by its pool name (below). Non-published exports
+    /// (remote-spawn/connect children, cap crossings) leave name empty.
     published: bool = false,
+    name: [16]u8 = @splat(0),
+    name_len: u8 = 0,
     /// The twin of the remote caller's buffer, attached to chan_b, and
     /// a shadow of what the caller holds.
     buf_va: u64 = 0,
@@ -407,13 +411,6 @@ var spawn_req_id: u32 = 0; // the request an ack must answer to count
 var spawn_ack_session: u32 = 0;
 var spawn_ack_code: u8 = 0; // 1 = spawned, 2 = unauthorized, 0 = failed
 /// Services this node offers the pool: service id -> export id.
-const Published = struct {
-    used: bool = false,
-    name: [16]u8 = @splat(0),
-    name_len: u8 = 0,
-    export_id: u32 = 0,
-};
-
 /// Unpack a two-word service name into bytes (up to 16, NUL-trimmed).
 fn nameBytes(buf: *[16]u8, a: u64, b: u64) []const u8 {
     std.mem.writeInt(u64, buf[0..8], a, .little);
@@ -423,14 +420,15 @@ fn nameBytes(buf: *[16]u8, a: u64, b: u64) []const u8 {
     return buf[0..n];
 }
 
-/// The published slot with this name, if any.
-fn findPublished(name: []const u8) ?*Published {
-    for (&published) |*pb| {
-        if (pb.used and std.mem.eql(u8, pb.name[0..pb.name_len], name)) return pb;
+/// The export published under this name, if any. A published service is
+/// just an export that carries a name — there is no separate registry
+/// (and so no separate, arbitrary cap): the exports table bounds them.
+fn findPublished(name: []const u8) ?u32 {
+    for (&exports, 0..) |*e, i| {
+        if (e.used and e.published and std.mem.eql(u8, e.name[0..e.name_len], name)) return @intCast(i);
     }
     return null;
 }
-var published: [shared.fab_max_services]Published = @splat(.{});
 var got_lookup_ack = false;
 var lookup_ack_export: u32 = 0;
 var lookup_ack_code: u8 = 0;
@@ -617,26 +615,24 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                     freply(ferr(.refused));
                     continue;
                 }
-                var slot: ?*Published = findPublished(name);
-                if (slot == null) for (&published) |*pb| {
-                    if (!pb.used) {
-                        slot = pb;
-                        break;
-                    }
-                };
-                const pb = slot orelse {
-                    _ = usys.capDrop(r.cap);
-                    freply(ferr(.no_space));
+                if (findPublished(name)) |eid| {
+                    // Re-publishing the same name: swap in the new channel.
+                    const e = &exports[eid];
+                    if (e.chan_b != 0) _ = usys.capDrop(e.chan_b);
+                    e.chan_b = r.cap;
+                    _ = usys.log(glog, "fabsvc: service re-published to the pool");
+                    freply(.ok);
                     continue;
-                };
+                }
                 const eid = exportNew(r.cap) orelse {
                     _ = usys.capDrop(r.cap);
                     freply(ferr(.no_space));
                     continue;
                 };
-                pb.* = .{ .used = true, .export_id = eid, .name_len = @intCast(name.len) };
-                @memcpy(pb.name[0..name.len], name);
-                exports[eid].published = true;
+                const e = &exports[eid];
+                e.published = true;
+                e.name_len = @intCast(name.len);
+                @memcpy(e.name[0..name.len], name);
                 _ = usys.log(glog, "fabsvc: service published to the pool");
                 freply(.ok);
             },
@@ -1510,10 +1506,9 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             var ack: [13]u8 = undefined;
             frameHdr(ack[0..4], 13, shared.fw_lookup_ack);
             puleu32(ack[4..8], req_id);
-            const pb = findPublished(name);
-            const ok = pb != null and exports[pb.?.export_id].used;
-            puleu32(ack[8..12], if (ok) pb.?.export_id else 0);
-            ack[12] = if (ok) 1 else 0;
+            const eid = findPublished(name);
+            puleu32(ack[8..12], if (eid) |x| x else 0);
+            ack[12] = if (eid != null) 1 else 0;
             _ = sendFrame(p, &ack);
         },
         shared.fw_lookup_ack => {
@@ -1885,15 +1880,11 @@ fn doLookup(node: u64, a: u64, b: u64) void {
         return;
     }
     if (node == my_node) {
-        const pb = findPublished(name) orelse {
+        const eid = findPublished(name) orelse {
             freply(ferr(.no_peer));
             return;
         };
-        if (!exports[pb.export_id].used) {
-            freply(ferr(.no_peer));
-            return;
-        }
-        freplyCap(.{ .found = .{ .node = node } }, exports[pb.export_id].chan_b);
+        freplyCap(.{ .found = .{ .node = node } }, exports[eid].chan_b);
         return;
     }
     const p = greetedPeer(node) orelse {

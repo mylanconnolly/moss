@@ -432,30 +432,27 @@ is a plan.
   program store installs after units spawn). The residual is passing an
   arbitrary open handle (a socket handed to a worker), which needs
   connection migration since a socket is a badge, not a standalone cap);
-  (2) fabric
-  publish/lookup over the pool's service registry — scripts as fabric
-  services (✅ landed 2026-09-07: `publish SERVICE $w` offers a worker to
-  the pool under a ServiceId — a number, like rspawn's catalog, no
-  fabric-wire change — and `lookup NODE SERVICE` gets a `service` handle
-  that `call` drives; the cross-node hop reuses the fabric's forwardCall
-  buffer-proxying, drilled in the fabric-login drill: node 1 publishes,
-  node 2 looks up and calls across the wire. Multiple clients
-  work (drilled: node 2 opens two sessions to the one service and calls
-  them alternately, each answer correct — each call carries its own
-  length and the worker reads exactly that, so the shared per-export
-  buffer never mixes callers). Remaining edge: *simultaneous* calls to
-  one service race on that shared buffer; a per-session buffer on the
-  service node would harden it, but the race is unreproducible in the
-  deterministic drills, so it is deferred not made blind. And a published
-  worker still dies with its spawning script). ▸ Transparent clustering
-  (started 2026-09-07): a durable service is a UNIT (init-started,
-  supervised, its life init's not its caller's), named by a ServiceId;
-  mshrun serves it (arg 3, the script pinned as the handler); `dial
-  SERVICE` reaches it locally through init (lazy start + a callable
-  handle) — no keep-alive loop. Next: route `dial NODE SERVICE` through
-  the fabric to a peer's init, so a durable service starts and is
-  supervised on the node that hosts it, reached from anywhere by the same
-  verb — "the fabric is init at a larger radius"); (3) ✅ parallel
+  (2) ✅ fabric
+  services + transparent clustering (landed 2026-09-07). Two ways to
+  offer a service, both reached by NAME across the pool: an ephemeral
+  worker a script `publish`es (`publish "name" $w`, reached by `lookup
+  NODE "name"`, its life the script's); and a durable UNIT init starts
+  and supervises (`conf/units/<name>.msh`, mshrun in service mode arg 3
+  serving the script as a pinned handler), reached by `dial "name"`
+  locally or `dial NODE "name"` across the wire — the fabric routes the
+  connect to the peer's init, which starts and supervises the unit on the
+  node that hosts it, so no keep-alive loop. Names are strings (16 bytes,
+  two words) everywhere — dial/publish/lookup, and start/stop/svc, which
+  moved off numbers too (`svc` asks init to `list` every unit, filter
+  with `where`); the numeric ServiceId enum is deleted, and the published
+  registry is folded into the exports table (a published service is an
+  export with a name), so there is no separate `fab_max_services` cap.
+  Drilled cross-node (fabric-login: usersvc's record fetch, and dialing
+  the doubler unit) and locally (shell). "The fabric is init at a larger
+  radius." Remaining edge: *simultaneous* calls to one service race on
+  its shared per-export buffer (per-session buffers would harden it, but
+  the race is unreproducible in the deterministic drills, so deferred);
+  (3) ✅ parallel
   workers (landed 2026-09-07, "stage 3a"):
   `call` is synchronous, so `x | dispatch $w` sends the input and the
   worker acks before running the handler — the caller does not block, and
