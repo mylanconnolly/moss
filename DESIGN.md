@@ -2075,6 +2075,23 @@ fabric-security drill's `"calc"`. This is what the fabric's own header
 meant by "init at a larger radius": the same verbs, the node just an
 address, the service just a name.
 
+**Networking: a socket handed to another view (as built, 2026-09-07).**
+A socket in netsvc is owned by a badge — the net-view client that opened
+it — and `sockOf(badge, idx)` gates every operation on that ownership.
+`handoff(sock)` moves ownership: netsvc reassigns the socket to a fresh
+view badge, mints a channel cap to that view, and hands it back; the
+socket keeps its number and its whole connection (the send/receive rings
+are per-socket and global, so nothing is copied — only the owning badge
+changes). Whoever holds the returned cap owns exactly that socket and
+nothing else, and the caller's own view can no longer touch it — so the
+cap *is* the authority, with no badge to guess. This is the mechanism
+for a socket to cross to another domain: a server will hand an accepted
+connection to a worker, which serves it while the server goes back to
+accept. The net drill proves the primitive: the echo client connects,
+hands the socket to a fresh view, watches its old view refused, and
+echoes on the new view. The new owner re-`watch`es the socket for its
+own doorbell (the handoff clears the old bell).
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

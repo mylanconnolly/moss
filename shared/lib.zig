@@ -864,6 +864,13 @@ pub const NetReq = union(enum(u64)) {
     /// Unrestricted views only: mint a filtered view allowing exactly one
     /// outbound destination (and no listening). Reply attaches the cap.
     derive: struct { ip_hi: u64, ip_lo: u64, port: u64 },
+    /// Hand a connected socket to a fresh net view: its ownership moves
+    /// to a new badge, and the reply attaches a channel cap to that view.
+    /// Whoever holds the cap owns exactly this socket (by the same
+    /// number) and nothing else — a socket crossing to another domain,
+    /// the cap being the authority. The caller's view can no longer use
+    /// the socket. The new owner re-`watch`es it for its own doorbell.
+    handoff: struct { sock: u64 },
     /// + notification cap: the socket's doorbell. Signaled (bit 1) when
     /// it has news — data, a state change, a connection to accept — so a
     /// client can block in recv with the notification bound instead of

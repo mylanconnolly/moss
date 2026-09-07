@@ -1624,6 +1624,7 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             .ping => |q| nreply(opPing(v, q.ip_hi, q.ip_lo)),
             .ping_check => nreply(.{ .num = .{ .n = ping_replies } }),
             .derive => |q| opDerive(v, q.ip_hi, q.ip_lo, q.port),
+            .handoff => |q| opHandoff(r.badge, q.sock),
             .watch => |q| nreply(opWatch(r.badge, q.sock, r.cap)),
         }
     }
@@ -1836,6 +1837,35 @@ fn opDerive(v: *NetView, hi: u64, lo: u64, port: u64) void {
     _ = usys.capDrop(minted.data[1]);
 }
 
+/// Hand socket `idx` (owned by `badge`) to a fresh net view: reassign it
+/// to a new badge and reply with a channel cap to that view. The socket
+/// keeps its number and its connection; only its owner changes. The new
+/// owner re-`watch`es it (its bell is cleared here).
+fn opHandoff(badge: u64, idx: u64) void {
+    const s = sockOf(badge, idx) orelse {
+        nreply(nerr(.bad));
+        return;
+    };
+    var slot: usize = 0;
+    while (slot < max_views and views[slot].used) slot += 1;
+    if (slot == max_views) {
+        nreply(nerr(.no_space));
+        return;
+    }
+    views[slot] = .{ .used = true, .filtered = true };
+    s.badge = slot;
+    s.bell = 0;
+    const minted = usys.chanMint(serve_a, slot);
+    if (minted.err != .ok) {
+        views[slot].used = false;
+        s.badge = badge;
+        nreply(nerr(.no_space));
+        return;
+    }
+    _ = usys.replyTyped(shared.NetResp, serve_a, .ok, minted.data[1]);
+    _ = usys.capDrop(minted.data[1]);
+}
+
 // -------------------------------------------------------------- clients
 
 fn nattach(chan: u64) u64 {
@@ -1996,7 +2026,29 @@ fn echocli(log_h: u64, chan_h: u64) noreturn {
     }
     if (!ok) usys.exit(251);
     _ = usys.log(log_h, "echocli: IPv6 wire round trip (ping fec0::2) verified");
+
+    // Leg 5: hand a connected socket to a fresh net view (a cap) and
+    // serve it there — a socket crossing to another owner.
+    const s5 = connectTo(chan_h, shared.v4Words(shared.net_echo_ip4), shared.net_echo_port) orelse usys.exit(252);
+    if (!waitEstablished(chan_h, s5)) usys.exit(253);
+    const hv = handoffTo(chan_h, s5) orelse usys.exit(254);
+    // The old view no longer owns it: a status op is refused.
+    if (nnum(ncall(chan_h, .{ .tcp_status = .{ .sock = s5 } })) != null) usys.exit(255);
+    // On the new view, the socket still echoes, then closes.
+    const hbuf: [*]u8 = @ptrFromInt(nattach(hv));
+    if (!echoRoundTrip(hv, hbuf, s5, "moss handed-off socket")) usys.exit(256);
+    _ = ncall(hv, .{ .tcp_close = .{ .sock = s5 } });
+    _ = usys.capDrop(hv);
+    _ = usys.log(log_h, "echocli: handed-off socket echoed on a new view");
     usys.exit(0);
+}
+
+/// Hand `sock` to a fresh net view and return the channel cap to it.
+fn handoffTo(chan: u64, sock: u64) ?u64 {
+    switch (usys.callTypedCap(shared.NetReq, shared.NetResp, chan, .{ .handoff = .{ .sock = sock } }, 0)) {
+        .ok => |ok| return if (ok.rep == .ok and ok.cap != 0) ok.cap else null,
+        .err => return null,
+    }
 }
 
 fn boxed(log_h: u64, chan_h: u64) noreturn {

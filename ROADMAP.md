@@ -469,8 +469,13 @@ is a plan.
   not `select`, and dispatch named `dispatch`, not `start`: both plainer
   names were already shell verbs.) Still open in (3): a concurrent
   `serve` over many sources (the same doorbell bound into a serving recv
-  with `notify_bind`) — gated on handing a worker an open socket, which
-  needs connection migration; and standalone `channel`/`spawn`.
+  with `notify_bind`) — was gated on handing a worker an open socket. ▸
+  That gate is being lifted (started 2026-09-07): netsvc `handoff(sock)`
+  moves a socket's ownership to a fresh view and hands back a cap to it —
+  the socket crossing to another domain, the cap the authority (drilled
+  natively in the net echo client). Next: give a worker that view and
+  the socket over `call`/`dispatch`, then a `serve` that spawns a worker
+  per connection. And standalone `channel`/`spawn`.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.

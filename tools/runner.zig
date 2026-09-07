@@ -75,7 +75,7 @@ const specs = [_]Spec{
         .second_run_extra = "existing mossfs found (encrypted, key verified)",
         .append = "profile=fs",
     },
-    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .append = "profile=net" },
+    .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .always_extra = "echocli: handed-off socket echoed on a new view", .append = "profile=net" },
     .{ .name = "dot", .kind = .dot, .pass = "dot-test: PASS", .extra = "mshrun: script: dot resolve ok", .append = "profile=dot" },
     .{
         .name = "users",
