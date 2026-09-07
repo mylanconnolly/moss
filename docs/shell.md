@@ -394,7 +394,11 @@ running that block as its handler — and answers a `worker` handle;
 running there with `$in = x`, and the same worker answers as many calls
 as you make. Only data crosses (the `remote` rule); captures do not, so
 the block sees `$in` and nothing of the caller's scope, and the request
-and the value are mshl data. The worker is a handle like a socket: it is
+and the value are mshl data. A worker is its caller's agent for the
+filesystem: it inherits a fresh view derived from the caller's own (its
+own badge, not a shared one), so a handler can read and write files —
+`"data/x.txt" | call (spawn { (stat $in)?.size })?` stats through the
+worker. The worker is a handle like a socket: it is
 destroyed — its domain torn down totally, crash-only — when its handle
 drops at the end of the statement or on `close $w`, so a script's exit
 kills its live workers and leaves no orphan. `status $w` is `alive` or

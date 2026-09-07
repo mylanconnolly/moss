@@ -161,7 +161,6 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     }
     tty.init(cons_chan, cons_buf);
     run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(147);
-    workcmds.setup(spawner_h, loadWorkerStage);
     {
         const o = usys.shmCreate(run_out_pages);
         if (o.err != .ok) usys.exit(148);
@@ -183,6 +182,9 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     }
     stores = .{ own_store, sys_store };
     fs_ctx.stores = &stores;
+    // Workers are the shell's agents: hand them its filesystem view and
+    // the system store, so a `spawn`ed handler can read files and `use`.
+    workcmds.setup(spawner_h, loadWorkerStage, fs_chan, fs_buf);
     sess_chan = setup.cap(.sess);
     if (sess_chan != 0) {
         const sh = usys.shmCreate(1);

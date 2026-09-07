@@ -958,6 +958,11 @@ pub const RunResp = union(enum(u64)) {
 /// answers many calls and lives until the channel closes.
 pub const WorkReq = union(enum(u64)) {
     attach_buf: void, // + shm cap
+    /// + a filesystem view cap: the handler's fs commands work on it. The
+    /// caller derives a fresh view (the worker's own badge) from its own,
+    /// so the worker is its agent without sharing a view buffer. Optional,
+    /// set once, before the handler.
+    attach_view: void,
     /// The handler function's source at buf[0..len]; set once, first.
     handler: struct { len: u64 },
     /// The request (the handler's `$in`) as a data literal at buf[0..len]

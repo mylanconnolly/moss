@@ -1881,6 +1881,38 @@ turn untrusted with no restart. This is the one way reference data ships
 and updates; a package manager, if it ever comes, would sit on top of
 it, not replace it.
 
+**Concurrency, stage 1: workers (as built, 2026-09-06).** The language
+has no threads — shared mutable interpreter state is the race the model
+refuses. Concurrency is *domains*: `spawn { handler }` starts a worker
+(an mshrun run with arg 2, `serveWorker`) in its own domain behind a
+typed channel, and `x | call $w` sends `x` and gets the handler's value
+back — the handler runs there with `$in = x`, and one worker answers
+many calls. The channel and a shared buffer are the remote stage's exact
+shape: a small `WorkReq`/`WorkResp` carries lengths, the value is an
+mshl data literal in the buffer. Only data crosses (the `remote` rule);
+captures do not, so a block sees `$in` and nothing of the caller's
+scope. The handler runs as a *function* (`fn { src }` called with `$in`)
+so a `?` inside it returns the err's own value as the call's `err`,
+never an "unhandled err" — a bad number to `spawn { (int $in)? * 2 }`
+comes back as the call's err, a good one `ok`. A worker is a handle like
+a socket: dropping it at the end of the statement, or `close $w`,
+destroys its domain totally (crash-only), so a script's exit kills its
+live workers and leaves no orphan; `status $w` is `alive` or `closed`,
+and every teardown meets the leak bar.
+
+A worker is also its caller's *filesystem agent*. Before the handler,
+the caller derives a **fresh** view from its own — a new badge, read
+write — and hands the cap over `attach_view`; the worker attaches its
+own shared buffer to that badge and serves its handler's fs commands
+through it. The fresh badge matters: a view holds one attached buffer,
+so a *shared* badge would make the worker's buffer displace the
+caller's and quietly break the caller's own reads (the shell lost
+`open data/l.msh` to exactly this before the fix). This is the first
+cap to cross the worker channel; passing an arbitrary open handle (a
+socket handed to a worker) is the residual. The shell drill spawns a
+worker that `stat`s a file through its view and checks the size comes
+back.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

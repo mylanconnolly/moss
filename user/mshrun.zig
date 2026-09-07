@@ -300,6 +300,20 @@ fn serveWorker(chan_h: u64) noreturn {
                 buf_len = m.data[1] * 4096;
                 _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
             },
+            .attach_view => {
+                if (r.cap == 0) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                view_chan = r.cap;
+                view_buf = @ptrFromInt(fsc.attachBuf(view_chan).va);
+                fs_ctx.root = view_chan;
+                if (fsc.fsDerive(view_chan, view_buf, "img", true)) |own| {
+                    stores[0] = .{ .chan = own, .buf = @ptrFromInt(fsc.attachBuf(own).va), .name = "your store" };
+                }
+                fs_ctx.stores = &stores;
+                _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
+            },
             .handler => |q| {
                 const b = buf orelse {
                     _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);

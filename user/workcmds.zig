@@ -15,6 +15,7 @@
 const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const fsc = @import("fsclient.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const Value = mshl.Value;
@@ -26,10 +27,14 @@ const Shape = mshl.Shape;
 pub const LoadFn = *const fn (it: *mshl.Interp) ?u64;
 var spawner: u64 = 0;
 var loadStage: ?LoadFn = null;
+var fs_chan: u64 = 0;
+var fs_buf: [*]u8 = undefined;
 
-pub fn setup(spawner_cap: u64, load: LoadFn) void {
+pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8) void {
     spawner = spawner_cap;
     loadStage = load;
+    fs_chan = view_chan;
+    fs_buf = view_buf;
 }
 
 const buf_pages = shared.fab_bulk_pages; // 8 pages / 32 KB, like a remote stage
@@ -106,6 +111,17 @@ fn spawnWorker(stage_handle: u64, handler_src: []const u8) SpawnOut {
             tearDown(ctl, chan, sh.data[0], m.data[0]);
             return .{ .failed = "the worker did not start" };
         },
+    }
+    // The worker is our agent: hand it a filesystem view so its handler
+    // can read and write files. It must be a FRESH view (its own badge),
+    // derived from ours — a shared badge would make the worker's own
+    // attached buffer displace ours on the same view. Best-effort: a
+    // worker still computes if the view cannot be given.
+    if (fs_chan != 0) {
+        if (fsc.fsDerive(fs_chan, fs_buf, "", false)) |wv| {
+            _ = usys.callTyped(shared.WorkReq, shared.WorkResp, chan, .attach_view, wv);
+            _ = usys.capDrop(wv); // the worker holds its own ref now
+        }
     }
     @memcpy(buf[0..handler_src.len], handler_src);
     switch (usys.callTyped(shared.WorkReq, shared.WorkResp, chan, .{ .handler = .{ .len = handler_src.len } }, 0)) {

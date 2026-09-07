@@ -416,10 +416,15 @@ is a plan.
   `x | call $w` sends data and gets the handler's value, many calls per
   worker, the payload an mshl data literal over a shared buffer as the
   remote stage does; a worker is a handle destroyed totally on drop or
-  `close`, checked by the shell drill; data-only; the handler
+  `close`, checked by the shell drill; the handler
   runs as a function so a `?` inside returns the err's own value as the
-  call's err; cap-passing in a message (a socket handed to a worker) is
-  the near residual); (2) fabric
+  call's err. A worker is its caller's filesystem agent: the caller
+  derives a *fresh* view (the worker's own badge, never a shared one, so
+  neither's shared buffer displaces the other's) from its own and hands
+  the cap over `attach_view` before the handler, so a handler reads and
+  writes files — the first cap crossing the worker channel. The residual
+  is passing an arbitrary open handle (a socket handed to a worker));
+  (2) fabric
   publish/lookup over the pool's service registry — scripts as fabric
   services; (3) `select` and a concurrent `serve` over many sources via
   `notify_bind`, and standalone `channel`/`spawn` for parallel work.
