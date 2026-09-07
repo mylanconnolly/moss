@@ -32,13 +32,17 @@ var fs_buf: [*]u8 = undefined;
 /// The fabric channel, when the host holds one: `publish`/`lookup` offer
 /// a worker to the pool and reach one there. 0 = no fabric.
 var fab_chan: u64 = 0;
+/// init's front channel, when the host holds one: `dial` reaches a
+/// durable service unit through it (init starts and supervises it).
+var init_chan: u64 = 0;
 
-pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8, fabric: u64) void {
+pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8, fabric: u64, init: u64) void {
     spawner = spawner_cap;
     loadStage = load;
     fs_chan = view_chan;
     fs_buf = view_buf;
     fab_chan = fabric;
+    init_chan = init;
 }
 
 const buf_pages = shared.fab_bulk_pages; // 8 pages / 32 KB, like a remote stage
@@ -299,6 +303,20 @@ fn publishWorker(it: *mshl.Interp, id: u64, w: *Worker) mshl.Error!Value {
     };
 }
 
+/// Wrap a channel to a service (from lookup or dial) as a callable
+/// `service` handle; drops the channel and errs if no slot is free.
+fn newServiceHandle(it: *mshl.Interp, chan: u64) mshl.Error!Value {
+    var idx: usize = 0;
+    while (idx < max_services and services[idx].used) idx += 1;
+    if (idx == max_services) {
+        _ = usys.capDrop(chan);
+        return try errResult(it, "too many services");
+    }
+    const sv = &services[idx];
+    sv.* = .{ .used = true, .gen = sv.gen +% 1, .chan = chan };
+    return try okResult(it, try it.newHandle("service", svcId(idx), &services, dropService));
+}
+
 /// Look up a published service on `node` and wrap the channel the fabric
 /// hands back as a callable `service` handle.
 fn lookupService(it: *mshl.Interp, node: u64, id: u64) mshl.Error!Value {
@@ -306,20 +324,29 @@ fn lookupService(it: *mshl.Interp, node: u64, id: u64) mshl.Error!Value {
         .ok => |ok| switch (ok.rep) {
             .found => blk: {
                 if (ok.cap == 0) break :blk try errResult(it, "the fabric handed back no channel");
-                var idx: usize = 0;
-                while (idx < max_services and services[idx].used) idx += 1;
-                if (idx == max_services) {
-                    _ = usys.capDrop(ok.cap);
-                    break :blk try errResult(it, "too many services");
-                }
-                const sv = &services[idx];
-                sv.* = .{ .used = true, .gen = sv.gen +% 1, .chan = ok.cap };
-                break :blk try okResult(it, try it.newHandle("service", svcId(idx), &services, dropService));
+                break :blk try newServiceHandle(it, ok.cap);
             },
             .fab_err => |e| try errResult(it, fabErr(e.code)),
             else => try errResult(it, "the fabric gave an unexpected reply"),
         },
         .err => try errResult(it, "the fabric did not answer"),
+    };
+}
+
+/// Dial a durable service unit through init: init starts it (or restarts
+/// a stopped one) and supervises it, and hands back a channel we wrap as
+/// a callable `service` handle. The service outlives us — it is init's.
+fn dialService(it: *mshl.Interp, id: u64) mshl.Error!Value {
+    return switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{ .connect = .{ .service = id } }, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .connected => blk: {
+                if (ok.cap == 0) break :blk try errResult(it, "init handed back no channel");
+                break :blk try newServiceHandle(it, ok.cap);
+            },
+            .failed => try errResult(it, "refused"),
+            else => try errResult(it, "init gave an unexpected reply"),
+        },
+        .err => try errResult(it, "init did not answer"),
     };
 }
 
@@ -347,6 +374,7 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "race")) return .{ .params = &.{.{ .name = "workers", .shape = .list }}, .input = .{ .optional = .list }, .ret = worker_result };
     if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "service", .shape = .int }, .{ .name = "worker", .shape = worker_kind } }, .ret = call_result };
     if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "service", .shape = .int } }, .ret = service_result };
+    if (std.mem.eql(u8, name, "dial")) return .{ .params = &.{.{ .name = "service", .shape = .int }}, .ret = service_result };
     return null;
 }
 
@@ -412,6 +440,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         const id: u64 = @intCast(@max(args[1].int, 0));
         if (id >= shared.fab_max_services) return it.fail("lookup: service id must be 0..{d}", .{shared.fab_max_services - 1});
         return try lookupService(it, node, id);
+    }
+    if (is(u8, name, "dial")) {
+        if (init_chan == 0) return it.fail("dial: this program cannot reach init", .{});
+        if (args.len < 1 or args[0] != .int) return it.fail("dial: a service id expected", .{});
+        const id: u64 = @intCast(@max(args[0].int, 0));
+        return try dialService(it, id);
     }
     // close / status on a service handle.
     const hv = input orelse (if (args.len > 0) args[0] else return null);
@@ -560,4 +594,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await", "race", "publish", "lookup" };
+pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await", "race", "publish", "lookup", "dial" };

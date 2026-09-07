@@ -447,7 +447,16 @@ is a plan.
   one service race on that shared buffer; a per-session buffer on the
   service node would harden it, but the race is unreproducible in the
   deterministic drills, so it is deferred not made blind. And a published
-  worker still dies with its spawning script); (3) ✅ parallel workers (landed 2026-09-07, "stage 3a"):
+  worker still dies with its spawning script). ▸ Transparent clustering
+  (started 2026-09-07): a durable service is a UNIT (init-started,
+  supervised, its life init's not its caller's), named by a ServiceId;
+  mshrun serves it (arg 3, the script pinned as the handler); `dial
+  SERVICE` reaches it locally through init (lazy start + a callable
+  handle) — no keep-alive loop. Next: route `dial NODE SERVICE` through
+  the fabric to a peer's init, so a durable service starts and is
+  supervised on the node that hosts it, reached from anywhere by the same
+  verb — "the fabric is init at a larger radius"); (3) ✅ parallel
+  workers (landed 2026-09-07, "stage 3a"):
   `call` is synchronous, so `x | dispatch $w` sends the input and the
   worker acks before running the handler — the caller does not block, and
   two workers dispatched before either is awaited run at once, each in

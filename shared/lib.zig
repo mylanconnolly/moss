@@ -381,6 +381,9 @@ pub const ServiceId = enum(u64) {
     /// The fabric drill's calc service (node 1 publishes it, node 3
     /// reaches it).
     calc = 3,
+    /// A durable mshl service unit (`conf/units/doubler.msh`): mshrun
+    /// serving a handler, started and supervised by init on `dial`.
+    doubler = 4,
 };
 
 /// Encode a message union into the four IPC data words: word 0 is the tag,

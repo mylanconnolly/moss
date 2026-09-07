@@ -162,7 +162,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     glog = log_h;
     if (blob_va != 0) blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
     if (arg == 1) serveRemote(chan_h);
-    if (arg == 2) serveWorker(chan_h);
+    if (arg == 2) serveWorker(chan_h, null);
     const setup = boot.take(chan_h);
     has_console = setup.has(.console) and setup.has(.console_buf);
     if (has_console) tty.attach(&setup);
@@ -196,7 +196,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     // or a fabric (publish/lookup); each command self-guards, so a script
     // with only a fabric gets lookup, not spawn.
     workcmds_on = worker_spawner != 0 or fab_chan != 0;
-    if (workcmds_on) workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan);
+    if (workcmds_on) workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, 0);
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
     tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
@@ -215,6 +215,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         fscmds.readFile(&fs_ctx, &interp, path) catch fail(path, interp.err_msg)
     else
         shared.marcFind(blob, path) orelse fail(path, "not in the boot archive (and no view was given)");
+
+    // A durable service (arg 3): the script IS the handler, and mshrun
+    // serves WorkReq on its boot channel until init stops or restarts it.
+    if (arg == 3) serveWorker(chan_h, text);
 
     // Every top-level statement's value is rendered as the prompt would
     // — for a human (the console, or the log). Given an `out`, the last
@@ -313,7 +317,11 @@ fn serveRemote(chan_h: u64) noreturn {
 var handler_src: [8 << 10]u8 = undefined;
 var handler_len: usize = 0;
 
-fn serveWorker(chan_h: u64) noreturn {
+/// Serve `WorkReq` on `chan_h`. With `pinned` (a durable service unit,
+/// arg 3), the handler is fixed to that source and the loop is a service
+/// init supervises; without it, a spawned worker whose handler arrives
+/// over the channel.
+fn serveWorker(chan_h: u64, pinned: ?[]const u8) noreturn {
     var buf: ?[*]u8 = null;
     var buf_len: usize = 0;
     // An async `start` computes now and stashes its result in the buffer
@@ -325,7 +333,12 @@ fn serveWorker(chan_h: u64) noreturn {
     // bit in it: rung when a dispatch finishes, so a `select` wakes.
     var bell: u64 = 0;
     var bell_bit: u6 = 0;
-    _ = usys.log(glog, "mshrun: worker up");
+    if (pinned) |src| {
+        const n = @min(src.len, handler_src.len);
+        @memcpy(handler_src[0..n], src[0..n]);
+        handler_len = n;
+        _ = usys.log(glog, "mshrun: service up");
+    } else _ = usys.log(glog, "mshrun: worker up");
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);

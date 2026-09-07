@@ -1,0 +1,5 @@
+# A durable mshl service: mshrun serves scripts/doubler.msh as a handler
+# (arg 3), started and supervised by init when something first `dial`s it
+# — no profile, so it is lazy, and no keep-alive loop, because its life
+# is init's, not its launcher's.
+{ image: mshrun, arg: 3, script: scripts/doubler.msh, grant: [log, bootfs] }

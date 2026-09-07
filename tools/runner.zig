@@ -773,6 +773,10 @@ const shell_script = [_]Step{
     .{ .send = "let pw = (spawn { (int $in)? * 2 })?; (publish 3 $pw)?; let svc = (lookup 1 3)?; (21 | call $svc)?", .expect = "42" },
     // a published worker is reached only through lookup: a direct call errs.
     .{ .send = "(5 | call $pw)", .expect = "err the worker is published" },
+    // dial a durable service unit: init starts and supervises it (no
+    // keep-alive loop), and hands back a channel we call. Service 4 is
+    // the doubler unit (conf/units/doubler.msh, mshrun in service mode).
+    .{ .send = "let ds = (dial 4)?; (21 | call $ds)?", .expect = "42" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => \"a directory\"; file => \"a file\"; symlink => \"a link\" }", .expect = "a directory" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => 1; file => 2 }", .expect = "error: match: the arms do not cover symlink" },
     .{ .send = "stat 1", .expect = "error: stat: path is 1, not string" },

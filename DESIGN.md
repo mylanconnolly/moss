@@ -2028,6 +2028,28 @@ so it is deferred rather than made blind. The other standing limit: a
 published worker dies with the script that spawned it, so a durable
 service needs a host that outlives the request.
 
+**Concurrency, stage 2: durable service units and `dial` (as built,
+2026-09-07, local first).** A published worker's life is its script's;
+a durable service should not be. The answer is the one the system
+already had at a smaller radius: a *unit*. A service is
+`conf/units/<name>.msh` named after a `ServiceId`, and init starts it,
+keeps it up (crash-only restart on a budget), and stops it only when
+told — its life is init's, not any caller's. mshrun grew a service mode
+(arg 3): after its setup it does not run the script once, it serves
+`WorkReq` on its boot channel with the script pinned as the handler,
+until init stops or restarts it — the worker serve loop, given a fixed
+handler instead of one that arrives over the wire. `dial SERVICE` reaches
+it: it asks init to `connect` the service (which lazily starts it, or
+restarts a stopped one) and wraps the channel init hands back as the same
+callable `service` handle `lookup` produces, so `x | call $s` drives it.
+The shell drill dials the `doubler` unit and calls it — init logs
+`started unit doubler`, mshrun logs `service up`, and the answer comes
+back, with no keep-alive loop anywhere: the sleep-loop the cross-node
+publish drill needed was an artifact of launching a service as a
+script-spawned worker rather than as a unit. This is the local half of
+transparent clustering; the remote half routes the same `dial` through
+the fabric to a peer's init.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

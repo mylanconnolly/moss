@@ -186,7 +186,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     fs_ctx.stores = &stores;
     // Workers are the shell's agents: hand them its filesystem view and
     // the system store, so a `spawn`ed handler can read files and `use`.
-    workcmds.setup(spawner_h, loadWorkerStage, fs_chan, fs_buf, fab_chan);
+    workcmds.setup(spawner_h, loadWorkerStage, fs_chan, fs_buf, fab_chan, init_chan);
     sess_chan = setup.cap(.sess);
     if (sess_chan != 0) {
         const sh = usys.shmCreate(1);

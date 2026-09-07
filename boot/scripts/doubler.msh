@@ -1,0 +1,4 @@
+# The handler of a durable mshl service (ServiceId doubler). mshrun in
+# service mode (arg 3) serves this per call, with the request as $in; the
+# value goes back. init starts it on the first dial and supervises it.
+$in * 2
