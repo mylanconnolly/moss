@@ -768,6 +768,11 @@ const shell_script = [_]Step{
     .{ .send = "let a = (spawn { sleep 300; 1 })?; let b = (spawn { 2 })?; (0 | dispatch $a)?; (0 | dispatch $b)?; let f = (race [$a, $b])?; let v1 = (await $f)?; let s = (race [$a, $b])?; let v2 = (await $s)?; \"$v1 $v2\"", .expect = "2 1" },
     // race over workers none of which is dispatched is an err, not a hang.
     .{ .send = "let w = (spawn { $in })?; race [$w]", .expect = "err race: none of these workers is running" },
+    // publish a worker to the pool under a service id, then reach it back
+    // through lookup on this node (1) and call it — the fabric surface.
+    .{ .send = "let pw = (spawn { (int $in)? * 2 })?; (publish 3 $pw)?; let svc = (lookup 1 3)?; (21 | call $svc)?", .expect = "42" },
+    // a published worker is reached only through lookup: a direct call errs.
+    .{ .send = "(5 | call $pw)", .expect = "err the worker is published" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => \"a directory\"; file => \"a file\"; symlink => \"a link\" }", .expect = "a directory" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => 1; file => 2 }", .expect = "error: match: the arms do not cover symlink" },
     .{ .send = "stat 1", .expect = "error: stat: path is 1, not string" },

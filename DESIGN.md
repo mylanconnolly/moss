@@ -1988,6 +1988,30 @@ was already the table's column projection (so the first-of-many is
 `race`). The lesson is that a new worker verb must be checked against
 every host command module, not just the workers'.
 
+**Concurrency, stage 2: publish/lookup (as built, 2026-09-07, same-node
+first).** A worker can be offered to the pool: `publish SERVICE $w`
+hands the worker's channel (our client end) to the fabric under a
+service id — a small number, like `rspawn`'s catalog, in the fixed
+`ServiceId` space rather than a string, so the fabric wire is unchanged
+— and `lookup NODE SERVICE` gets a channel back wrapped as a `service`
+handle that `call` drives with its own buffer, speaking the same
+`WorkReq` the worker already serves. A published worker is reached only
+through `lookup` (a direct `call`/`dispatch` errs — its buffer is now
+the looker-up's), one client at a time. The cross-node hop is the
+existing machinery: the fabric's `forwardCall` already turns a call's
+attached shm cap into a proxied session buffer with a twin on the
+service's node (this is how `remote` ships a script and its input), so a
+looked-up service's `call` proxies the same way — nothing new on the
+wire. What is validated so far is same-node: publish stores an export in
+fabsvc and lookup retrieves it, exercising the whole mshl↔fabric surface
+and the service-handle call path; the cross-node drill (a persistent
+publisher on one node, a caller on another) is the next slice. Two
+caveats stand and are why this is a first cut: multi-client concurrency
+needs the worker to key its buffer by caller badge (the fssvc/usersvc
+pattern) rather than holding one, and a published worker dies with the
+script that spawned it, so a durable service needs a host that outlives
+the request.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

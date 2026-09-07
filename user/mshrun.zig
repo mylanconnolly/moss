@@ -187,7 +187,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         if (usys.sysInfo(spawner_slot).err == .ok) {
             run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(148);
             worker_spawner = spawner_slot;
-            workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf);
+            workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, if (setup.has(.fabric)) setup.cap(.fabric) else 0);
         }
     }
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));

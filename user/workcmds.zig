@@ -29,12 +29,16 @@ var spawner: u64 = 0;
 var loadStage: ?LoadFn = null;
 var fs_chan: u64 = 0;
 var fs_buf: [*]u8 = undefined;
+/// The fabric channel, when the host holds one: `publish`/`lookup` offer
+/// a worker to the pool and reach one there. 0 = no fabric.
+var fab_chan: u64 = 0;
 
-pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8) void {
+pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8, fabric: u64) void {
     spawner = spawner_cap;
     loadStage = load;
     fs_chan = view_chan;
     fs_buf = view_buf;
+    fab_chan = fabric;
 }
 
 const buf_pages = shared.fab_bulk_pages; // 8 pages / 32 KB, like a remote stage
@@ -52,6 +56,10 @@ const Worker = struct {
     pending: bool = false,
     /// This worker's bit in the shared doorbell (its slot index).
     bit: u6 = 0,
+    /// Offered to the pool by `publish`: reached only through `lookup`
+    /// now, so a direct `call`/`dispatch` is refused (its buffer is the
+    /// looker-up's).
+    published: bool = false,
     shm: u64 = 0,
     buf: [*]u8 = undefined,
     buf_len: usize = 0,
@@ -181,7 +189,141 @@ fn dropWorker(_: *anyopaque, _: []const u8, id: u64) void {
     close(id);
 }
 
-// --------------------------------------------------------------- commands
+// ---------------------------------------------------------- services
+//
+// A worker `publish`ed to the pool is reached elsewhere by `lookup`,
+// which hands back a channel to it; a `service` handle wraps that
+// channel with its own shared buffer, and `call` on it speaks the same
+// worker protocol (the fabric proxies the buffer across the wire). One
+// client at a time for now: the buffer is the looker-up's.
+
+const max_services = 4;
+const Service = struct {
+    used: bool = false,
+    gen: u32 = 0,
+    chan: u64 = 0,
+    shm: u64 = 0,
+    buf: [*]u8 = undefined,
+    buf_len: usize = 0,
+    attached: bool = false,
+};
+var services: [max_services]Service = @splat(.{});
+
+fn svcId(idx: usize) Conn {
+    return @as(u64, services[idx].gen) << 8 | idx;
+}
+fn svcSlot(c: Conn) ?*Service {
+    const idx: usize = @intCast(c & 0xff);
+    if (idx >= max_services) return null;
+    const sv = &services[idx];
+    if (!sv.used or sv.gen != c >> 8) return null;
+    return sv;
+}
+
+fn closeService(c: Conn) void {
+    const sv = svcSlot(c) orelse return;
+    if (sv.attached) _ = usys.shmUnmap(@intFromPtr(sv.buf));
+    if (sv.shm != 0) _ = usys.capDrop(sv.shm);
+    if (sv.chan != 0) _ = usys.capDrop(sv.chan);
+    sv.used = false;
+}
+
+fn dropService(_: *anyopaque, _: []const u8, id: u64) void {
+    closeService(id);
+}
+
+/// Give the service its own shared buffer the first time it is called.
+fn ensureServiceBuf(sv: *Service) bool {
+    if (sv.attached) return true;
+    const sh = usys.shmCreate(buf_pages);
+    if (sh.err != .ok) return false;
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) {
+        _ = usys.capDrop(sh.data[0]);
+        return false;
+    }
+    switch (usys.callTyped(shared.WorkReq, shared.WorkResp, sv.chan, .attach_buf, sh.data[0])) {
+        .ok => |rep| if (rep != .ok) {
+            _ = usys.shmUnmap(m.data[0]);
+            _ = usys.capDrop(sh.data[0]);
+            return false;
+        },
+        .err => {
+            _ = usys.shmUnmap(m.data[0]);
+            _ = usys.capDrop(sh.data[0]);
+            return false;
+        },
+    }
+    sv.shm = sh.data[0];
+    sv.buf = @ptrFromInt(m.data[0]);
+    sv.buf_len = m.data[1] * 4096;
+    sv.attached = true;
+    return true;
+}
+
+fn callService(it: *mshl.Interp, sv: *Service, in_val: Value) mshl.Error!Value {
+    if (!ensureServiceBuf(sv)) return try errResult(it, "cannot attach a buffer to the service");
+    var in_text: std.ArrayList(u8) = .empty;
+    if (in_val != .nothing) try mshl.writeData(in_val, it.arena, &in_text);
+    if (in_text.items.len > sv.buf_len) return try errResult(it, "the request is larger than the buffer");
+    @memcpy(sv.buf[0..in_text.items.len], in_text.items);
+    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, sv.chan, .{ .call = .{ .len = in_text.items.len } }, 0)) {
+        .ok => |rep| try replyToValue(it, sv.buf, sv.buf_len, rep),
+        .err => try errResult(it, "the service vanished"),
+    };
+}
+
+/// The fabric's error as a word, for a publish/lookup result.
+fn fabErr(code: u64) []const u8 {
+    const e = std.enums.fromInt(shared.FabErr, code) orelse return "error";
+    return @tagName(e);
+}
+
+/// Offer a worker to the pool under a service id. The worker's channel
+/// (our client end) becomes the export; remote callers reach the worker
+/// through it, the fabric proxying their buffer. The worker is then
+/// reached only through `lookup` — its buffer is the looker-up's.
+fn publishWorker(it: *mshl.Interp, id: u64, w: *Worker) mshl.Error!Value {
+    if (w.published) return try errResult(it, "the worker is already published");
+    if (w.pending) return try errResult(it, "the worker is running; await it first");
+    return switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .publish = .{ .service = id } }, w.chan)) {
+        .ok => |rep| switch (rep) {
+            .ok => blk: {
+                w.published = true;
+                break :blk try okResult(it, .nothing);
+            },
+            .fab_err => |e| try errResult(it, fabErr(e.code)),
+            else => try errResult(it, "the fabric gave an unexpected reply"),
+        },
+        .err => try errResult(it, "the fabric did not answer"),
+    };
+}
+
+/// Look up a published service on `node` and wrap the channel the fabric
+/// hands back as a callable `service` handle.
+fn lookupService(it: *mshl.Interp, node: u64, id: u64) mshl.Error!Value {
+    return switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = node, .service = id } }, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .found => blk: {
+                if (ok.cap == 0) break :blk try errResult(it, "the fabric handed back no channel");
+                var idx: usize = 0;
+                while (idx < max_services and services[idx].used) idx += 1;
+                if (idx == max_services) {
+                    _ = usys.capDrop(ok.cap);
+                    break :blk try errResult(it, "too many services");
+                }
+                const sv = &services[idx];
+                sv.* = .{ .used = true, .gen = sv.gen +% 1, .chan = ok.cap };
+                break :blk try okResult(it, try it.newHandle("service", svcId(idx), &services, dropService));
+            },
+            .fab_err => |e| try errResult(it, fabErr(e.code)),
+            else => try errResult(it, "the fabric gave an unexpected reply"),
+        },
+        .err => try errResult(it, "the fabric did not answer"),
+    };
+}
+
+// ---------------------------------------------------------- commands
 
 fn errResult(it: *mshl.Interp, msg: []const u8) mshl.Error!Value {
     return it.mkResult(false, .{ .str = msg });
@@ -191,15 +333,20 @@ fn okResult(it: *mshl.Interp, v: Value) mshl.Error!Value {
 }
 
 const worker_kind: Shape = .{ .kind = "worker" };
+const service_kind: Shape = .{ .kind = "service" };
 const worker_result = mshl.resultShape(worker_kind, .string);
+const service_result = mshl.resultShape(service_kind, .string);
+const callable_kind: Shape = .{ .one_of = &.{ worker_kind, service_kind } };
 const call_result = mshl.resultShape(.any, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "spawn")) return .{ .params = &.{.{ .name = "handler", .shape = .function }}, .ret = worker_result };
-    if (std.mem.eql(u8, name, "call")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
+    if (std.mem.eql(u8, name, "call")) return .{ .params = &.{ .{ .name = "worker", .shape = callable_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "dispatch")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "await")) return .{ .params = &.{.{ .name = "worker", .shape = worker_kind }}, .input = .{ .optional = worker_kind }, .ret = call_result };
     if (std.mem.eql(u8, name, "race")) return .{ .params = &.{.{ .name = "workers", .shape = .list }}, .input = .{ .optional = .list }, .ret = worker_result };
+    if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "service", .shape = .int }, .{ .name = "worker", .shape = worker_kind } }, .ret = call_result };
+    if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "service", .shape = .int } }, .ret = service_result };
     return null;
 }
 
@@ -220,12 +367,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         };
     }
     if (is(u8, name, "call")) {
-        // The worker is the first argument; the request is the piped
-        // input (`x | call $w`) or the second argument (`call $w x`).
+        // The worker (or a looked-up service) is the first argument; the
+        // request is the piped input (`x | call $w`) or the second arg.
         if (args.len < 1) return it.fail("call: a worker expected", .{});
-        const w = try workerArg(it, args[0]);
         const in_val: Value = if (input) |v| v else if (args.len > 1) args[1] else .nothing;
         if (!in_val.isData()) return it.fail("call: the input is a {s}, which cannot cross to a worker (only data can)", .{in_val.typeName()});
+        if (args[0] == .handle and is(u8, args[0].handle.kind, "service")) {
+            if (args[0].handle.closed) return it.fail("call: the service is closed", .{});
+            const sv = svcSlot(args[0].handle.id) orelse return it.fail("call: the service is closed", .{});
+            return try callService(it, sv, in_val);
+        }
+        const w = try workerArg(it, args[0]);
         return try callWorker(it, w, in_val);
     }
     if (is(u8, name, "dispatch")) {
@@ -245,8 +397,38 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (lv != .list) return it.fail("race: a list of workers expected, got a {s}", .{lv.typeName()});
         return try raceWorkers(it, lv.list);
     }
-    // close / status on a worker handle only.
+    if (is(u8, name, "publish")) {
+        if (fab_chan == 0) return it.fail("publish: this program has no fabric", .{});
+        if (args.len < 2 or args[0] != .int) return it.fail("publish: SERVICE WORKER expected", .{});
+        const id: u64 = @intCast(@max(args[0].int, 0));
+        if (id >= shared.fab_max_services) return it.fail("publish: service id must be 0..{d}", .{shared.fab_max_services - 1});
+        const w = try workerArg(it, args[1]);
+        return try publishWorker(it, id, w);
+    }
+    if (is(u8, name, "lookup")) {
+        if (fab_chan == 0) return it.fail("lookup: this program has no fabric", .{});
+        if (args.len < 2 or args[0] != .int or args[1] != .int) return it.fail("lookup: NODE SERVICE expected", .{});
+        const node: u64 = @intCast(@max(args[0].int, 0));
+        const id: u64 = @intCast(@max(args[1].int, 0));
+        if (id >= shared.fab_max_services) return it.fail("lookup: service id must be 0..{d}", .{shared.fab_max_services - 1});
+        return try lookupService(it, node, id);
+    }
+    // close / status on a service handle.
     const hv = input orelse (if (args.len > 0) args[0] else return null);
+    if (hv == .handle and is(u8, hv.handle.kind, "service")) {
+        if (is(u8, name, "close")) {
+            if (!hv.handle.closed) {
+                closeService(hv.handle.id);
+                it.closeHandle(hv);
+            }
+            return .nothing;
+        }
+        if (is(u8, name, "status")) {
+            return .{ .str = if (hv.handle.closed or svcSlot(hv.handle.id) == null) "closed" else "alive" };
+        }
+        return null;
+    }
+    // close / status on a worker handle only.
     if (hv != .handle or !is(u8, hv.handle.kind, "worker")) return null;
     if (is(u8, name, "close")) {
         if (!hv.handle.closed) {
@@ -267,16 +449,16 @@ fn workerArg(it: *mshl.Interp, v: Value) mshl.Error!*Worker {
     return slotOf(v.handle.id) orelse return it.fail("call: the worker is closed", .{});
 }
 
-/// Turn a worker's reply (its value/error in the buffer) into a result.
-fn replyToValue(it: *mshl.Interp, w: *Worker, rep: shared.WorkResp) mshl.Error!Value {
+/// Turn a worker's reply (its value/error in `buf`) into a result.
+fn replyToValue(it: *mshl.Interp, buf: [*]u8, buf_len: usize, rep: shared.WorkResp) mshl.Error!Value {
     return switch (rep) {
         .value => |v| blk: {
             if (v.len == 0) break :blk try okResult(it, .nothing);
-            if (v.len > w.buf_len) break :blk try errResult(it, "the worker's value overran the buffer");
-            const text = try it.arena.dupe(u8, w.buf[0..v.len]);
+            if (v.len > buf_len) break :blk try errResult(it, "the worker's value overran the buffer");
+            const text = try it.arena.dupe(u8, buf[0..v.len]);
             break :blk try okResult(it, try mshl.tableize(it.arena, try it.parseData(text)));
         },
-        .failed => |e| try errResult(it, try it.arena.dupe(u8, w.buf[0..@min(e.len, w.buf_len)])),
+        .failed => |e| try errResult(it, try it.arena.dupe(u8, buf[0..@min(e.len, buf_len)])),
         .refused => try errResult(it, "the worker refused"),
         .ok => try okResult(it, .nothing),
     };
@@ -293,13 +475,14 @@ fn loadRequest(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!union(enu
 }
 
 fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
+    if (w.published) return try errResult(it, "the worker is published; reach it through lookup");
     if (w.pending) return try errResult(it, "the worker is running; await it first");
     const len = switch (try loadRequest(it, w, in_val)) {
         .len => |n| n,
         .err => |e| return e,
     };
     return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .call = .{ .len = len } }, 0)) {
-        .ok => |rep| try replyToValue(it, w, rep),
+        .ok => |rep| try replyToValue(it, w.buf, w.buf_len, rep),
         .err => try errResult(it, "the worker vanished"),
     };
 }
@@ -307,6 +490,7 @@ fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
 /// Async dispatch: hand the worker its input and let it compute while we
 /// go on. The worker acks at once; its result waits for `await`.
 fn dispatchWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
+    if (w.published) return try errResult(it, "the worker is published; reach it through lookup");
     if (w.pending) return try errResult(it, "the worker is already running");
     ready_mask &= ~(@as(u64, 1) << w.bit); // a fresh run: forget any old bell
     const len = switch (try loadRequest(it, w, in_val)) {
@@ -343,7 +527,7 @@ fn awaitWorker(it: *mshl.Interp, w: *Worker) mshl.Error!Value {
     }
     w.pending = false;
     return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .collect, 0)) {
-        .ok => |rep| try replyToValue(it, w, rep),
+        .ok => |rep| try replyToValue(it, w.buf, w.buf_len, rep),
         .err => try errResult(it, "the worker vanished"),
     };
 }
@@ -376,4 +560,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await", "race" };
+pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await", "race", "publish", "lookup" };

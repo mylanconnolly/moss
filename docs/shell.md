@@ -420,8 +420,13 @@ takes a list of dispatched workers and returns the first to finish, so
 you can collect results in completion order — `let r = (race [$a, $b,
 $c])?; await $r`, again for the rest. It waits on a doorbell every worker
 rings when its dispatch completes, so it costs nothing while they run.
-Serving a channel to the fabric (`publish`/`lookup`) and a concurrent
-`serve` build on the same worker machinery.
+A worker can be offered to the pool: `publish SERVICE $w` hands it to
+the fabric under a service id (a small number, like `rspawn`'s catalog),
+and `lookup NODE SERVICE` on any member gets a `service` handle back that
+`call` drives like a worker — the fabric proxies the request buffer
+across the wire. A published worker is reached only through `lookup`
+(a direct `call` on it errs), and it is one client at a time for now.
+A concurrent `serve` over many sources builds on the same machinery.
 
 In a user session the shell also holds a badged channel to the session
 manager, and five commands use it: `share PATH NAME USER [rw]` derives
