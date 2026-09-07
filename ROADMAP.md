@@ -439,10 +439,15 @@ is a plan.
   fabric-wire change — and `lookup NODE SERVICE` gets a `service` handle
   that `call` drives; the cross-node hop reuses the fabric's forwardCall
   buffer-proxying, drilled in the fabric-login drill: node 1 publishes,
-  node 2 looks up and calls across the wire. Caveats: one client at a
-  time until the worker keys buffers by caller badge, and a published
-  worker dies with its spawning script — a durable service needs a host
-  that outlives the request); (3) ✅ parallel workers (landed 2026-09-07, "stage 3a"):
+  node 2 looks up and calls across the wire. Multiple clients
+  work (drilled: node 2 opens two sessions to the one service and calls
+  them alternately, each answer correct — each call carries its own
+  length and the worker reads exactly that, so the shared per-export
+  buffer never mixes callers). Remaining edge: *simultaneous* calls to
+  one service race on that shared buffer; a per-session buffer on the
+  service node would harden it, but the race is unreproducible in the
+  deterministic drills, so it is deferred not made blind. And a published
+  worker still dies with its spawning script); (3) ✅ parallel workers (landed 2026-09-07, "stage 3a"):
   `call` is synchronous, so `x | dispatch $w` sends the input and the
   worker acks before running the handler — the caller does not block, and
   two workers dispatched before either is awaited run at once, each in

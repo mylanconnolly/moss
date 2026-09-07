@@ -2012,9 +2012,19 @@ publishes and sleeps.) One command was mis-gated: a fabric-only script
 with no spawner could not `lookup`, because mshrun turned the worker
 commands on only for a spawner; now it turns them on for a spawner OR a
 fabric, and each command self-guards (spawn needs the spawner, lookup
-the fabric). Two caveats stand and are why this is a first cut:
-multi-client concurrency needs the worker to key its buffer by caller
-badge (the fssvc/usersvc pattern) rather than holding one, and a
+the fabric). Multiple clients work: the fabric-login drill opens two sessions to the
+one published service and calls them alternately with different inputs,
+and each answer is correct. It works even over the shared per-export
+buffer because every call carries its own length and the worker reads
+exactly that many bytes, and the diff shipped for a call patches that
+range — so a session's data is always right where the worker looks, no
+matter what a prior session left beyond it. The one case this does not
+cover is *simultaneous* calls to the same service: two fabric jobs
+writing that one export buffer at the same instant would race. Making
+that safe means a buffer per caller session on the service's node
+(rather than per export) — correct by construction, but a change whose
+only failure mode is a race the deterministic drills cannot reproduce,
+so it is deferred rather than made blind. The other standing limit: a
 published worker dies with the script that spawned it, so a durable
 service needs a host that outlives the request.
 
