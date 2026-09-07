@@ -1308,7 +1308,7 @@ fn fabricTestWorker(arg: u64) void {
             // PUBLISHED: lookup hands it a channel, the call comes back.
             if (node == 3 and !reached and t % 10 == 0 and t <= 300) {
                 const lres = ipc.call(fab_ch, .{
-                    .data = shared.encodeMsg(shared.FabReq, .{ .lookup = .{ .node = 1, .service = @intFromEnum(shared.ServiceId.calc) } }),
+                    .data = shared.encodeMsg(shared.FabReq, .{ .lookup = .{ .node = 1, .a = shared.strToWords("calc")[0], .b = shared.strToWords("calc")[1] } }),
                 }, 0);
                 if (lres.err == .ok and lres.msg.cap_type != 0) {
                     if (shared.decodeMsg(shared.FabResp, lres.msg.data)) |lrep| {
@@ -1373,7 +1373,7 @@ fn fabricTestWorker(arg: u64) void {
         }) catch |e| std.debug.panic("spawn calc-pub: {t}", .{e});
         // Our B ref rides the publish; the fabric's export keeps it.
         const pres = ipc.call(fab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .{ .publish = .{ .service = @intFromEnum(shared.ServiceId.calc) } }),
+            .data = shared.encodeMsg(shared.FabReq, .{ .publish = .{ .a = shared.strToWords("calc")[0], .b = shared.strToWords("calc")[1] } }),
             .cap_type = @intFromEnum(cap.CapType.channel_b),
             .cap_obj = @intFromPtr(pub_ch),
         }, 0);
@@ -1381,7 +1381,7 @@ fn fabricTestWorker(arg: u64) void {
         if (prep == null or prep.? != .ok) std.debug.panic("fabric-test: FAIL — publish refused", .{});
         // And a lookup of our own node answers with the export itself.
         const lres = ipc.call(fab_ch, .{
-            .data = shared.encodeMsg(shared.FabReq, .{ .lookup = .{ .node = 1, .service = @intFromEnum(shared.ServiceId.calc) } }),
+            .data = shared.encodeMsg(shared.FabReq, .{ .lookup = .{ .node = 1, .a = shared.strToWords("calc")[0], .b = shared.strToWords("calc")[1] } }),
         }, 0);
         if (lres.err != .ok or lres.msg.cap_type == 0) std.debug.panic("fabric-test: FAIL — local lookup found nothing", .{});
         const cres = ipc.call(fab_ch, .{

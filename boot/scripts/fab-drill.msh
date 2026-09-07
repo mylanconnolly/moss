@@ -16,7 +16,7 @@ match ("x" | remote 1 { frobnicate }) { ok _ => (err "a failing stage answered o
 # A published service on node 1: look it up and call it across the wire
 # (its request buffer is proxied by the fabric, as a remote stage's is).
 def svc-on-1 [tries] {
-  match (lookup 1 3) {
+  match (lookup 1 calcsvc) {
     ok $s => match (21 | call $s) {
       ok $v => ok $v
       err $e => if $tries > 0 { sleep 500; svc-on-1 ($tries - 1) } else { err $e }
@@ -30,8 +30,8 @@ echo "script: service via lookup ok"
 # Two sessions to the same service, called alternately with different
 # inputs: each must keep its own request buffer. A shared one desyncs
 # each session's shadow across the wire and corrupts the third call.
-let sa = (lookup 1 3)?
-let sb = (lookup 1 3)?
+let sa = (lookup 1 calcsvc)?
+let sb = (lookup 1 calcsvc)?
 let m1 = (10 | call $sa)?
 let m2 = (20 | call $sb)?
 let m3 = (5 | call $sa)?

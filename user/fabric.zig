@@ -407,7 +407,29 @@ var spawn_req_id: u32 = 0; // the request an ack must answer to count
 var spawn_ack_session: u32 = 0;
 var spawn_ack_code: u8 = 0; // 1 = spawned, 2 = unauthorized, 0 = failed
 /// Services this node offers the pool: service id -> export id.
-const Published = struct { used: bool = false, export_id: u32 = 0 };
+const Published = struct {
+    used: bool = false,
+    name: [16]u8 = @splat(0),
+    name_len: u8 = 0,
+    export_id: u32 = 0,
+};
+
+/// Unpack a two-word service name into bytes (up to 16, NUL-trimmed).
+fn nameBytes(buf: *[16]u8, a: u64, b: u64) []const u8 {
+    std.mem.writeInt(u64, buf[0..8], a, .little);
+    std.mem.writeInt(u64, buf[8..16], b, .little);
+    var n: usize = 0;
+    while (n < 16 and buf[n] != 0) n += 1;
+    return buf[0..n];
+}
+
+/// The published slot with this name, if any.
+fn findPublished(name: []const u8) ?*Published {
+    for (&published) |*pb| {
+        if (pb.used and std.mem.eql(u8, pb.name[0..pb.name_len], name)) return pb;
+    }
+    return null;
+}
 var published: [shared.fab_max_services]Published = @splat(.{});
 var got_lookup_ack = false;
 var lookup_ack_export: u32 = 0;
@@ -588,22 +610,37 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             .publish => |q| {
                 // Only a local holder of our channel may publish (remote
                 // callers arrive badged and are forwarded above).
-                if (r.cap == 0 or q.service >= shared.fab_max_services) {
+                var nb: [16]u8 = undefined;
+                const name = nameBytes(&nb, q.a, q.b);
+                if (r.cap == 0 or name.len == 0) {
                     if (r.cap != 0) _ = usys.capDrop(r.cap);
                     freply(ferr(.refused));
                     continue;
                 }
+                var slot: ?*Published = findPublished(name);
+                if (slot == null) for (&published) |*pb| {
+                    if (!pb.used) {
+                        slot = pb;
+                        break;
+                    }
+                };
+                const pb = slot orelse {
+                    _ = usys.capDrop(r.cap);
+                    freply(ferr(.no_space));
+                    continue;
+                };
                 const eid = exportNew(r.cap) orelse {
                     _ = usys.capDrop(r.cap);
                     freply(ferr(.no_space));
                     continue;
                 };
-                published[q.service] = .{ .used = true, .export_id = eid };
+                pb.* = .{ .used = true, .export_id = eid, .name_len = @intCast(name.len) };
+                @memcpy(pb.name[0..name.len], name);
                 exports[eid].published = true;
                 _ = usys.log(glog, "fabsvc: service published to the pool");
                 freply(.ok);
             },
-            .lookup => |q| doLookup(q.node, q.service),
+            .lookup => |q| doLookup(q.node, q.a, q.b),
         }
     }
 }
@@ -1463,18 +1500,19 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             got_connect_ack = true;
         },
         shared.fw_lookup_req => {
-            // [service u16][req u32] -> the export behind a published
-            // service, if any. Any certified member may ask: the service
-            // itself is the authority boundary, reached by badge.
-            if (body.len < 6) return;
-            const service = leu16(body[0..2]);
-            const req_id = leu32(body[2..6]);
+            // [16 name bytes][req u32] -> the export behind a published
+            // service of that name, if any. Any certified member may ask:
+            // the service itself is the authority boundary.
+            if (body.len < 20) return;
+            var nb: [16]u8 = undefined;
+            const name = nameBytes(&nb, leu64(body[0..8]), leu64(body[8..16]));
+            const req_id = leu32(body[16..20]);
             var ack: [13]u8 = undefined;
             frameHdr(ack[0..4], 13, shared.fw_lookup_ack);
             puleu32(ack[4..8], req_id);
-            const pb = if (service < shared.fab_max_services) published[service] else Published{};
-            const ok = pb.used and exports[pb.export_id].used;
-            puleu32(ack[8..12], if (ok) pb.export_id else 0);
+            const pb = findPublished(name);
+            const ok = pb != null and exports[pb.?.export_id].used;
+            puleu32(ack[8..12], if (ok) pb.?.export_id else 0);
             ack[12] = if (ok) 1 else 0;
             _ = sendFrame(p, &ack);
         },
@@ -1839,14 +1877,19 @@ fn doRemoteConnect(node: u64, a: u64, b: u64) void {
 /// badge bound to its export, or a copy of the export itself when the
 /// service is on this node. The same shape as a remote spawn's answer:
 /// the caller gets an ordinary-looking channel.
-fn doLookup(node: u64, service: u64) void {
-    if (service >= shared.fab_max_services) {
+fn doLookup(node: u64, a: u64, b: u64) void {
+    var nb: [16]u8 = undefined;
+    const name = nameBytes(&nb, a, b);
+    if (name.len == 0) {
         freply(ferr(.refused));
         return;
     }
     if (node == my_node) {
-        const pb = published[service];
-        if (!pb.used or !exports[pb.export_id].used) {
+        const pb = findPublished(name) orelse {
+            freply(ferr(.no_peer));
+            return;
+        };
+        if (!exports[pb.export_id].used) {
             freply(ferr(.no_peer));
             return;
         }
@@ -1858,10 +1901,11 @@ fn doLookup(node: u64, service: u64) void {
         return;
     };
     got_lookup_ack = false;
-    var req: [10]u8 = undefined;
-    frameHdr(req[0..4], 10, shared.fw_lookup_req);
-    puleu16(req[4..6], @intCast(service));
-    puleu32(req[6..10], 1);
+    var req: [24]u8 = undefined;
+    frameHdr(req[0..4], 24, shared.fw_lookup_req);
+    puleu64(req[4..12], a);
+    puleu64(req[12..20], b);
+    puleu32(req[20..24], 1);
     if (!sendFrame(p, &req)) {
         freply(ferr(.disconnected));
         return;

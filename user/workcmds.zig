@@ -287,10 +287,11 @@ fn fabErr(code: u64) []const u8 {
 /// (our client end) becomes the export; remote callers reach the worker
 /// through it, the fabric proxying their buffer. The worker is then
 /// reached only through `lookup` — its buffer is the looker-up's.
-fn publishWorker(it: *mshl.Interp, id: u64, w: *Worker) mshl.Error!Value {
+fn publishWorker(it: *mshl.Interp, name: []const u8, w: *Worker) mshl.Error!Value {
     if (w.published) return try errResult(it, "the worker is already published");
     if (w.pending) return try errResult(it, "the worker is running; await it first");
-    return switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .publish = .{ .service = id } }, w.chan)) {
+    const nw = shared.strToWords(name);
+    return switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .publish = .{ .a = nw[0], .b = nw[1] } }, w.chan)) {
         .ok => |rep| switch (rep) {
             .ok => blk: {
                 w.published = true;
@@ -319,8 +320,9 @@ fn newServiceHandle(it: *mshl.Interp, chan: u64) mshl.Error!Value {
 
 /// Look up a published service on `node` and wrap the channel the fabric
 /// hands back as a callable `service` handle.
-fn lookupService(it: *mshl.Interp, node: u64, id: u64) mshl.Error!Value {
-    return switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = node, .service = id } }, 0)) {
+fn lookupService(it: *mshl.Interp, node: u64, name: []const u8) mshl.Error!Value {
+    const nw = shared.strToWords(name);
+    return switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = node, .a = nw[0], .b = nw[1] } }, 0)) {
         .ok => |ok| switch (ok.rep) {
             .found => blk: {
                 if (ok.cap == 0) break :blk try errResult(it, "the fabric handed back no channel");
@@ -392,8 +394,8 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "dispatch")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "await")) return .{ .params = &.{.{ .name = "worker", .shape = worker_kind }}, .input = .{ .optional = worker_kind }, .ret = call_result };
     if (std.mem.eql(u8, name, "race")) return .{ .params = &.{.{ .name = "workers", .shape = .list }}, .input = .{ .optional = .list }, .ret = worker_result };
-    if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "service", .shape = .int }, .{ .name = "worker", .shape = worker_kind } }, .ret = call_result };
-    if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "service", .shape = .int } }, .ret = service_result };
+    if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "name", .shape = .string }, .{ .name = "worker", .shape = worker_kind } }, .ret = call_result };
+    if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "name", .shape = .string } }, .ret = service_result };
     if (std.mem.eql(u8, name, "dial")) return .{ .params = &.{ .{ .name = "node_or_name", .shape = .{ .one_of = &.{ .string, .int } } }, .{ .name = "name", .shape = .string, .optional = true } }, .ret = service_result };
     return null;
 }
@@ -447,19 +449,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     }
     if (is(u8, name, "publish")) {
         if (fab_chan == 0) return it.fail("publish: this program has no fabric", .{});
-        if (args.len < 2 or args[0] != .int) return it.fail("publish: SERVICE WORKER expected", .{});
-        const id: u64 = @intCast(@max(args[0].int, 0));
-        if (id >= shared.fab_max_services) return it.fail("publish: service id must be 0..{d}", .{shared.fab_max_services - 1});
+        if (args.len < 2 or args[0] != .str) return it.fail("publish: NAME WORKER expected", .{});
+        if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("publish: a service name is 1..16 bytes", .{});
         const w = try workerArg(it, args[1]);
-        return try publishWorker(it, id, w);
+        return try publishWorker(it, args[0].str, w);
     }
     if (is(u8, name, "lookup")) {
         if (fab_chan == 0) return it.fail("lookup: this program has no fabric", .{});
-        if (args.len < 2 or args[0] != .int or args[1] != .int) return it.fail("lookup: NODE SERVICE expected", .{});
+        if (args.len < 2 or args[0] != .int or args[1] != .str) return it.fail("lookup: NODE NAME expected", .{});
         const node: u64 = @intCast(@max(args[0].int, 0));
-        const id: u64 = @intCast(@max(args[1].int, 0));
-        if (id >= shared.fab_max_services) return it.fail("lookup: service id must be 0..{d}", .{shared.fab_max_services - 1});
-        return try lookupService(it, node, id);
+        if (args[1].str.len == 0 or args[1].str.len > 16) return it.fail("lookup: a service name is 1..16 bytes", .{});
+        return try lookupService(it, node, args[1].str);
     }
     if (is(u8, name, "dial")) {
         if (args.len == 0) return it.fail("dial: a service name (or NODE NAME) expected", .{});

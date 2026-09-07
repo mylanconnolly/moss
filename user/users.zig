@@ -157,6 +157,8 @@ var client_bufs: [max_sessions + 2 + max_leases]ClientBuf = @splat(.{});
 /// The badge our published channel carries: a caller through the fabric,
 /// allowed to ask for a record and for a home lease.
 const remote_badge: u64 = max_sessions + 1;
+/// This service's pool name, packed for FabReq.publish/lookup.
+const usersvc_name = shared.strToWords("usersvc");
 /// Lease caps: badge = lease_badge0 + slot.
 const lease_badge0: u64 = max_sessions + 2;
 
@@ -773,7 +775,7 @@ fn joinPool() void {
     }
     const minted = usys.chanMint(svc_chan, remote_badge);
     if (minted.err != .ok) return;
-    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .publish = .{ .service = @intFromEnum(shared.ServiceId.usersvc) } }, minted.data[1])) {
+    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .publish = .{ .a = usersvc_name[0], .b = usersvc_name[1] } }, minted.data[1])) {
         .ok => |rep| {
             if (rep == .ok) _ = usys.log(glog, "usersvc: published to the pool");
         },
@@ -829,7 +831,7 @@ fn fetchRecord(name: []const u8) bool {
 }
 
 fn fetchFrom(node: u64, name: []const u8) bool {
-    const lres = usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = node, .service = @intFromEnum(shared.ServiceId.usersvc) } }, 0);
+    const lres = usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = node, .a = usersvc_name[0], .b = usersvc_name[1] } }, 0);
     const chan: u64 = switch (lres) {
         .ok => |ok| if (ok.rep == .found and ok.cap != 0) ok.cap else return false,
         .err => return false,
@@ -1000,7 +1002,7 @@ fn mountRemoteHome(s: *Session) ?u64 {
     var nb: [24]u8 = undefined;
     var line: [96]u8 = undefined;
     if (fab_chan == 0) return null;
-    const lres = usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = s.home_node, .service = @intFromEnum(shared.ServiceId.usersvc) } }, 0);
+    const lres = usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .lookup = .{ .node = s.home_node, .a = usersvc_name[0], .b = usersvc_name[1] } }, 0);
     const mgr: u64 = switch (lres) {
         .ok => |ok| if (ok.rep == .found and ok.cap != 0) ok.cap else {
             _ = usys.log(glog, cat3(&line, "usersvc: the home of ", name, " lives on node ", decimal(&nb, s.home_node), ", which is not reachable"));

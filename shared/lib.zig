@@ -1061,13 +1061,14 @@ pub const FabReq = union(enum(u64)) {
     members: void,
     /// num{the most wire exchanges this node has had in flight at once}.
     stats: void,
-    /// + channel_b cap: offer that channel to the pool under a ServiceId,
-    /// so any member can `lookup` it here. Local (unbadged) callers only.
-    publish: struct { service: u64 },
-    /// A channel to the service `node` published under that id: the
-    /// reply is `found { node }` with a remote-channel cap attached (a
-    /// local copy of the export when node is this node).
-    lookup: struct { node: u64, service: u64 },
+    /// + channel_b cap: offer that channel to the pool under a NAME (two
+    /// words, up to 16 bytes), so any member can `lookup` it here by that
+    /// name. Local (unbadged) callers only.
+    publish: struct { a: u64, b: u64 },
+    /// A channel to the service `node` published under that NAME (two
+    /// words): the reply is `found { node }` with a remote-channel cap
+    /// (a local copy of the export when node is this node).
+    lookup: struct { node: u64, a: u64, b: u64 },
 };
 
 pub const FabResp = union(enum(u64)) {

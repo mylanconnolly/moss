@@ -9,6 +9,6 @@ def spawn-when-ready [tries] {
   }
 }
 let w = (spawn-when-ready 120)?
-(publish 3 $w)?
+(publish calcsvc $w)?
 echo "script: published service 3 to the pool"
 while true { sleep 60000 }

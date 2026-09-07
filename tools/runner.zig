@@ -770,7 +770,7 @@ const shell_script = [_]Step{
     .{ .send = "let w = (spawn { $in })?; race [$w]", .expect = "err race: none of these workers is running" },
     // publish a worker to the pool under a service id, then reach it back
     // through lookup on this node (1) and call it — the fabric surface.
-    .{ .send = "let pw = (spawn { (int $in)? * 2 })?; (publish 3 $pw)?; let svc = (lookup 1 3)?; (21 | call $svc)?", .expect = "42" },
+    .{ .send = "let pw = (spawn { (int $in)? * 2 })?; (publish \"myworker\" $pw)?; let svc = (lookup 1 \"myworker\")?; (21 | call $svc)?", .expect = "42" },
     // a published worker is reached only through lookup: a direct call errs.
     .{ .send = "(5 | call $pw)", .expect = "err the worker is published" },
     // dial a durable service unit: init starts and supervises it (no
