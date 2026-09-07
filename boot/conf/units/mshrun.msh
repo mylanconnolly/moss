@@ -1,5 +1,7 @@
 # `run mshrun PATH`: runs the script at PATH. Its view is the whole
 # filesystem the shell holds (a home, or the system volume), writable,
 # so a script can do what the shell can with files, and the system
-# store, so `use NAME` finds the library; nothing else.
-{ image: mshrun, grant: [log], give: [{ tag: view, fs: "", ro: false }, { tag: store }] }
+# store, so `use NAME` finds the library. It also holds a spawner (so a
+# script may offload work — `spawn`/`call`) and the boot archive (so it
+# can read a script bundled there); nothing else.
+{ image: mshrun, grant: [log, spawner, bootfs], give: [{ tag: view, fs: "", ro: false }, { tag: store }] }

@@ -422,8 +422,16 @@ is a plan.
   derives a *fresh* view (the worker's own badge, never a shared one, so
   neither's shared buffer displaces the other's) from its own and hands
   the cap over `attach_view` before the handler, so a handler reads and
-  writes files — the first cap crossing the worker channel. The residual
-  is passing an arbitrary open handle (a socket handed to a worker));
+  writes files — the first cap crossing the worker channel. Workers are
+  any script's, not the interactive shell's alone: `run mshrun` grants a
+  spawner (the shell delegating its authority), so a script offloads
+  work too — the program loader factored into `progload`, mshrun probing
+  for its spawner since it cannot read its own grants, `max_domains`
+  raised 16 → 32 for the nesting, and a spawner-holding child given room
+  for its workers; scripts-with-workers are a post-boot capability (the
+  program store installs after units spawn). The residual is passing an
+  arbitrary open handle (a socket handed to a worker), which needs
+  connection migration since a socket is a badge, not a standalone cap);
   (2) fabric
   publish/lookup over the pool's service registry — scripts as fabric
   services; (3) `select` and a concurrent `serve` over many sources via

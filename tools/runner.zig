@@ -752,6 +752,9 @@ const shell_script = [_]Step{
     .{ .send = "let w = (spawn { $in.x + $in.y })?; ({ x: 3, y: 4 } | call $w)?", .expect = "7" },
     .{ .send = "let w = (spawn { (int $in)? * 2 })?; (\"21\" | call $w)?", .expect = "42" },
     .{ .send = "let w = (spawn { (stat $in)?.size })?; (\"data/smoke/hi.txt\" | call $w)?", .expect = "26" },
+    // A script (not the interactive shell) spawns workers too: run mshrun
+    // on a script that offloads compute and a file stat to workers.
+    .{ .send = "run mshrun scripts/worker-demo.msh?", .expect = "42 26" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => \"a directory\"; file => \"a file\"; symlink => \"a link\" }", .expect = "a directory" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => 1; file => 2 }", .expect = "error: match: the arms do not cover symlink" },
     .{ .send = "stat 1", .expect = "error: stat: path is 1, not string" },

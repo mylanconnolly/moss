@@ -41,6 +41,8 @@ const joinPath = fscmds.joinPath;
 const statRecord = fscmds.statRecord;
 const readFileVia = fscmds.readFileVia;
 const writeFileVia = fscmds.writeFileVia;
+const progload = @import("progload.zig");
+const Program = progload.Program;
 
 comptime {
     asm (usys.imageHeader("shell"));
@@ -794,47 +796,20 @@ fn cmdAccept(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
     return try okv(it, .nothing);
 }
 
-/// A program found in a store: which store, its digest, its manifest.
-const Program = struct { store: Store, digest: [shared.img_digest_hex_len]u8, manifest: Value };
-
 /// `img/<name>.msh` in the user's own store, then the system's.
 /// Load the mshrun image into the run stage for a `spawn` worker, and
 /// return its stage handle verified — or null if the store cannot give
 /// it. `spawn` runs a worker, which is mshrun in its serving mode.
 fn loadWorkerStage(it: *mshl.Interp) ?u64 {
-    const prog = (findProgram(it, "mshrun") catch return null) orelse return null;
-    const len = readIntoStageVia(prog.store.chan, prog.store.buf, &prog.digest) orelse return null;
-    if (!run_stage.verify(len, &prog.digest)) return null;
-    return run_stage.handle;
-}
-
-fn findProgram(it: *mshl.Interp, name: []const u8) mshl.Error!?Program {
-    const candidates = [_]?Store{ own_store, sys_store };
-    for (candidates) |maybe| {
-        const st = maybe orelse continue;
-        var mpath: [64]u8 = undefined;
-        if (name.len + shared.img_manifest_ext.len > mpath.len) return it.fail("run: name too long", .{});
-        @memcpy(mpath[0..name.len], name);
-        @memcpy(mpath[name.len .. name.len + shared.img_manifest_ext.len], shared.img_manifest_ext);
-        const mp = mpath[0 .. name.len + shared.img_manifest_ext.len];
-        const text = readFileVia(it, st.chan, st.buf, mp) catch continue;
-        const v = try it.parseData(text);
-        if (v != .record) return it.fail("run: {s}: the manifest in {s} is not a record", .{ name, st.name });
-        const img = v.record.get("image") orelse return it.fail("run: {s}: manifest names no image", .{name});
-        if (img != .str or img.str.len != shared.img_digest_hex_len) return it.fail("run: {s}: manifest image is not a digest", .{name});
-        var p: Program = .{ .store = st, .digest = undefined, .manifest = v };
-        @memcpy(&p.digest, img.str);
-        return p;
-    }
-    return null;
+    return progload.loadImage(it, "mshrun", &stores, &run_stage);
 }
 
 /// `run NAME [path]`: what the store and the spawner decide is a result
 /// (`err not_found`, `err bad_digest` …); the program's own value is the
 /// `ok`.
 fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value {
-    const prog = (try findProgram(it, name)) orelse return try errWord(it, "not_found");
-    const len = readIntoStageVia(prog.store.chan, prog.store.buf, &prog.digest) orelse return try errWord(it, "unreadable");
+    const prog = (try progload.find(it, name, &stores)) orelse return try errWord(it, "not_found");
+    const len = progload.stageInto(&prog, &run_stage) orelse return try errWord(it, "unreadable");
     if (!run_stage.verify(len, &prog.digest)) return try errWord(it, "bad_digest");
 
     // The manifest says what the program is handed: kernel grants and
@@ -856,6 +831,7 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
         const unit = prog.manifest;
         if (unit.record.get("grant")) |g| {
             if (g == .list) for (g.list) |item| {
+                if (item == .str and is(item.str, "spawner")) flags |= shared.SpawnFlags.grant_spawner;
                 if (item == .str and is(item.str, "introspect")) flags |= shared.SpawnFlags.grant_introspect;
                 if (item == .str and is(item.str, "bootfs")) flags |= shared.SpawnFlags.grant_bootfs;
             };
@@ -894,7 +870,12 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     // The tool serves side A of its boot channel; we feed it caps on B.
     const ch = usys.chanCreate();
     if (ch.err != .ok) return it.fail("run: out of channels", .{});
-    const sp = usys.spawn(spawner_h, run_stage.handle, run_arg, ch.data[0], flags, usys.kbLimits(1 << 10, 8 << 10));
+    // A child we grant a spawner may offload work to its own workers, so
+    // it needs room for them (each ~4M) plus the transient overlap while
+    // a finished worker's memory is still being reclaimed — 20M, against
+    // 8M for a plain program. The shell's own 24M budget hosts it.
+    const child_mb: u64 = if (flags & shared.SpawnFlags.grant_spawner != 0) 20 << 10 else 8 << 10;
+    const sp = usys.spawn(spawner_h, run_stage.handle, run_arg, ch.data[0], flags, usys.kbLimits(1 << 10, child_mb));
     _ = usys.capDrop(ch.data[0]);
     if (sp.err != .ok) {
         _ = usys.capDrop(ch.data[1]);
@@ -977,7 +958,7 @@ fn cmdInstall(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
         const have = loader.digestHex(bytes);
         if (!std.mem.eql(u8, &have, &digest)) return try errWord(it, "bad_digest");
     } else {
-        const len = readIntoStageVia(sys.chan, sys.buf, &digest) orelse return try errWord(it, "unreadable");
+        const len = progload.stageDigest(sys.chan, sys.buf, &digest, &run_stage) orelse return try errWord(it, "unreadable");
         if (!run_stage.verify(len, &digest)) return try errWord(it, "bad_digest");
         bytes = run_stage.slice(len);
     }
@@ -995,24 +976,6 @@ fn cmdInstall(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
     _ = l.str("installed ").str(name).str(" into your store");
     l.flush();
     return try okv(it, .nothing);
-}
-
-/// Read a store's image `<digest>` through that store's buffer into the
-/// run stage; returns its length.
-fn readIntoStageVia(chan: u64, buf: [*]u8, digest: *const [shared.img_digest_hex_len]u8) ?usize {
-    const fd = switch (fsc.fsOpen(chan, buf, digest, 0)) {
-        .fd => |fd| fd,
-        .err => return null,
-    };
-    defer fsc.fsClose(chan, fd);
-    var off: usize = 0;
-    while (off < run_stage.bytes) {
-        const n = fsc.fsReadAt(chan, fd, off, @min(shared.fs_max_io, run_stage.bytes - off)) orelse return null;
-        if (n == 0) break;
-        @memcpy(run_stage.slice(off + n)[off..], buf[0..n]);
-        off += n;
-    }
-    return off;
 }
 
 // ------------------------------------------------------------- utilities

@@ -387,8 +387,10 @@ spawner, no fabric unless given. Three ways to run one:
   that sees one directory, and `install mshrun` puts the runner in a
   home's store.
 
-**Workers.** A shell (or any host that holds a spawner) can offload work
-to another domain: `spawn { $in + 1 }` starts a worker — an mshrun
+**Workers.** Any mshl host that holds a spawner can offload work to
+another domain — the interactive shell, and a script too: `run mshrun`
+grants a spawner, so `spawn`/`call` are a script's to use, not the
+shell's alone. `spawn { $in + 1 }` starts a worker — an mshrun
 running that block as its handler — and answers a `worker` handle;
 `x | call $w` sends `x` and gets the handler's value back, the handler
 running there with `$in = x`, and the same worker answers as many calls

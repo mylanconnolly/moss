@@ -22,7 +22,11 @@ const shared = @import("shared");
 const lock = @import("lock.zig");
 const trace = @import("trace.zig");
 
-const max_domains = 16;
+// 32, not 16: the base system is ~14 domains, and a script may now spawn
+// workers (up to four each, itself a child of the shell) — nested
+// spawning that 16 could not host. Each slot is a Domain (~3K, mostly its
+// mappings table), so the headroom costs ~48K of static kernel memory.
+const max_domains = 32;
 const user_stack_pages = 64; // 256K: a TLS 1.3 handshake (hybrid key share, certificate chain) needs >120K; before it, mossfs's CoW rebuild set the bar at 96K
 const user_stack_top: u64 = 0x800_0000; // 128MB, far above the image
 

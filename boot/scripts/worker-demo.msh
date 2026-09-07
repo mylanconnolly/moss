@@ -1,0 +1,3 @@
+let doubled = ("21" | call (spawn { (int $in)? * 2 })?)?
+let sz = ("data/smoke/hi.txt" | call (spawn { (stat $in)?.size })?)?
+"$doubled $sz"

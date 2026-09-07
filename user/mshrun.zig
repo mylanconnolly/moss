@@ -18,6 +18,9 @@ const netcmds = @import("netcmds.zig");
 const httpcmds = @import("httpcmds.zig");
 const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
+const workcmds = @import("workcmds.zig");
+const loader = @import("loader.zig");
+const progload = @import("progload.zig");
 const syscmds = @import("syscmds.zig");
 const tty = @import("tty.zig");
 const boot = @import("boot.zig");
@@ -47,6 +50,11 @@ fn uPanic(msg: []const u8, _: ?usize) noreturn {
 var glog: u64 = 0;
 var view_chan: u64 = 0;
 var view_buf: [*]u8 = undefined;
+/// When this script was granted a spawner, the stage its `spawn`
+/// workers are loaded into, and the spawner slot (slot 2, insert order
+/// log->chan->spawner). 0 = not granted: `spawn` is refused.
+var run_stage: loader.Stage = undefined;
+var worker_spawner: u64 = 0;
 var has_console = false;
 
 // The interpreter's memory: an arena for the whole run (a script is one
@@ -72,6 +80,9 @@ fn resolve(it: *mshl.Interp, path: []const u8) mshl.Error!fscmds.Target {
 
 fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (fscmds.signature(name)) |sig| return sig;
+    if (worker_spawner != 0) {
+        if (workcmds.signature(name)) |sig| return sig;
+    }
     if (net != null) {
         if (tlscmds.signature(name)) |sig| return sig;
         if (netcmds.signature(name)) |sig| return sig;
@@ -85,6 +96,9 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
 
 fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
+    if (worker_spawner != 0) {
+        if (try workcmds.call(it, name, args, input)) |v| return v;
+    }
     if (net) |*nt| {
         // tls first: it answers for the socket commands on its own handles.
         if (try tlscmds.call(nt, it, name, args, input)) |v| return v;
@@ -134,6 +148,14 @@ fn fail(what: []const u8, msg: []const u8) noreturn {
     usys.exit(1);
 }
 
+/// Load the mshrun image into the run stage for a `spawn` worker (the
+/// worker is mshrun in its serving mode) — from this script's own
+/// stores, verified. null on any failure; workcmds turns that into the
+/// `spawn` result's err.
+fn loadWorkerStage(it: *mshl.Interp) ?u64 {
+    return progload.loadImage(it, "mshrun", &stores, &run_stage);
+}
+
 export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
     if (blob_va != 0) blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
@@ -155,6 +177,19 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         stores[1] = .{ .chan = st, .buf = @ptrFromInt(fsc.attachBuf(st).va), .name = "the system store" };
     }
     fs_ctx.stores = &stores;
+    // A spawner lands at slot 2 (grant insert order log->chan->spawner);
+    // we cannot read our own grants, so probe it — a spawn-gated read
+    // that answers only for a real spawner. With one, a script may
+    // offload work: `spawn { handler }` and `x | call $w`, workers being
+    // mshrun in its serving mode, staged from our own stores.
+    {
+        const spawner_slot: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
+        if (usys.sysInfo(spawner_slot).err == .ok) {
+            run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(148);
+            worker_spawner = spawner_slot;
+            workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf);
+        }
+    }
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
     tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());

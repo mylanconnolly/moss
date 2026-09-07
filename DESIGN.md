@@ -1913,6 +1913,25 @@ socket handed to a worker) is the residual. The shell drill spawns a
 worker that `stat`s a file through its view and checks the size comes
 back.
 
+Workers are not the interactive shell's alone: any mshl host that holds
+a spawner may `spawn`, so a *script* offloads work too. `run mshrun`
+grants the child a spawner (the shell delegating its own authority, as
+init does), and the finding, staging and verifying of a program image
+— the shared step `run` and a worker both need — moved to `progload`,
+which the shell's `run` and mshrun's worker loader now both call over
+their own stores. mshrun cannot read its own grants, so it *probes* for
+a spawner (a spawn-gated `sysinfo` on the fixed slot) and offers
+`spawn`/`call` only when the probe answers. Two sizings had to give:
+`max_domains` went 16 → 32 (a script spawning up to four workers, itself
+a child of the shell, is nested spawning 16 could not host, ~48K more
+static kernel memory), and a spawner-holding `run` child gets 20M rather
+than 8M — room for its workers plus the transient overlap while a
+finished worker's memory is still being reclaimed by the reaper (the
+QuotaExceeded the shell itself paid for at 24M). A boot-time script
+*cannot* stage a worker: the program store is installed post-boot, after
+units spawn — so scripts-with-workers are a post-boot capability, proven
+by the shell drill running one through `run mshrun`.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU
