@@ -113,8 +113,8 @@ fn greeter(log_h: u64, chan_h: u64) noreturn {
 fn worker(log_h: u64, init_b: u64) noreturn {
     var line: [64]u8 = undefined;
 
-    var log_chan = connect(log_h, init_b, .logsvc); // lazy start #1
-    const greet_chan = connect(log_h, init_b, .greeter); // lazy start #2
+    var log_chan = connect(log_h, init_b, "logsvc"); // lazy start #1
+    const greet_chan = connect(log_h, init_b, "greeter"); // lazy start #2
 
     var sent: u64 = 0;
     var rewires: u64 = 0;
@@ -133,7 +133,7 @@ fn worker(log_h: u64, init_b: u64) noreturn {
                 rewires += 1;
                 _ = usys.log(log_h, "worker: logsvc died mid-call; re-wiring through init");
                 _ = usys.capDrop(log_chan);
-                log_chan = connect(log_h, init_b, .logsvc);
+                log_chan = connect(log_h, init_b, "logsvc");
                 // The message never got its reply; send it again.
             },
         }
@@ -155,9 +155,10 @@ fn worker(log_h: u64, init_b: u64) noreturn {
     usys.exit(0);
 }
 
-fn connect(log_h: u64, init_b: u64, service: shared.ServiceId) u64 {
+fn connect(log_h: u64, init_b: u64, name: []const u8) u64 {
+    const w = shared.strToWords(name);
     switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_b, .{
-        .connect = .{ .service = @intFromEnum(service) },
+        .connect_named = .{ .a = w[0], .b = w[1] },
     }, 0)) {
         .ok => |ok| switch (ok.rep) {
             .connected => {

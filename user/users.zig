@@ -182,7 +182,7 @@ fn sessionOpen(name: []const u8) bool {
     return false;
 }
 /// The fabric, when this manager has one: it publishes itself under
-/// ServiceId.usersvc, and a login for a user without a local record asks
+/// the pool as "usersvc", and a login for a user without a local record asks
 /// the other members for theirs.
 var fab_chan: u64 = 0;
 var fab_buf: [*]u8 = undefined;
@@ -761,7 +761,7 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
 // so the key never leaves the session's node and the home's node ships
 // only ciphertext.
 
-/// Publish our channel to the pool under ServiceId.usersvc: a badged
+/// Publish our channel to the pool under the name "usersvc": a badged
 /// copy, so requests from the wire are known for what they are.
 fn joinPool() void {
     const s = usys.shmCreate(1);

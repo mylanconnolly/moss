@@ -372,19 +372,6 @@ pub const ImageId = enum(u64) {
 
 /// Services init knows how to activate. Discovery is by protocol id over
 /// init's channel — never by global name.
-pub const ServiceId = enum(u64) {
-    logsvc = 0,
-    greeter = 1,
-    /// The session manager (usersvc), published to the pool so a login
-    /// on any node can fetch a user's record from the node holding it.
-    usersvc = 2,
-    /// The fabric drill's calc service (node 1 publishes it, node 3
-    /// reaches it).
-    calc = 3,
-    /// A durable mshl service unit (`conf/units/doubler.msh`): mshrun
-    /// serving a handler, started and supervised by init on `dial`.
-    doubler = 4,
-};
 
 /// Encode a message union into the four IPC data words: word 0 is the tag,
 /// words 1..3 the payload fields (u64s, at most three). This is the seed of
@@ -449,17 +436,17 @@ pub const FaultMsg = union(enum(u64)) {
 /// Init's front-channel protocol: ask to be connected to a service; the
 /// reply attaches a fresh channel-B cap for it.
 pub const InitRequest = union(enum(u64)) {
-    /// Connect to (lazily starting, or restarting a stopped) service.
-    connect: struct { service: u64 },
-    /// Same, but by the unit's NAME (packed into two words, up to 16
-    /// bytes) rather than a fixed ServiceId — so a service can be named,
-    /// not drawn from a catalog. `dial NAME` reaches a unit this way.
+    /// Connect to a service UNIT by NAME (two words, up to 16 bytes),
+    /// lazily starting it (or restarting a stopped one) and supervising
+    /// it — `start NAME` and `dial NAME` both reach a unit this way.
     connect_named: struct { a: u64, b: u64 },
-    /// Service-level status: up/down, restart usage.
-    status: struct { service: u64 },
-    /// Deliberate stop: the instance is destroyed and supervision will
-    /// not restart it (connect starts it again).
-    stop: struct { service: u64 },
+    /// Deliberate stop by name: the instance is destroyed and supervision
+    /// will not restart it (a connect starts it again).
+    stop_named: struct { a: u64, b: u64 },
+    /// + a buffer cap: fill it with `UnitRec`s for every unit init knows,
+    /// and reply `listed { n }`. `svc` reads the table this way — no fixed
+    /// catalog of service ids.
+    list: void,
     /// Install the boot archive's programs into the attached `img/` view
     /// (+ view cap): content-addressed `img/<digest>` files plus the
     /// manifests beside them (`img/<name>.msh`). Idempotent — present images are skipped.
@@ -469,9 +456,38 @@ pub const InitRequest = union(enum(u64)) {
 pub const InitReply = union(enum(u64)) {
     connected: void,
     failed: struct { err: u64 },
-    svc_status: struct { up: u64, restarts: u64, max_restarts: u64 },
+    listed: struct { n: u64 },
     stopped: void,
     installed: struct { n: u64 },
+};
+
+/// One unit as `svc` sees it, packed into a buffer by init's `list`.
+pub const UnitRec = struct {
+    name: [16]u8, // NUL-padded
+    up: u8,
+    restarts: u32,
+    max_restarts: u32,
+
+    pub const size = 28;
+
+    pub fn encode(r: *const UnitRec, out: *[size]u8) void {
+        @memcpy(out[0..16], &r.name);
+        out[16] = r.up;
+        out[17] = 0;
+        out[18] = 0;
+        out[19] = 0;
+        std.mem.writeInt(u32, out[20..24], r.restarts, .little);
+        std.mem.writeInt(u32, out[24..28], r.max_restarts, .little);
+    }
+
+    pub fn decode(b: *const [size]u8) UnitRec {
+        return .{
+            .name = b[0..16].*,
+            .up = b[16],
+            .restarts = std.mem.readInt(u32, b[20..24], .little),
+            .max_restarts = std.mem.readInt(u32, b[24..28], .little),
+        };
+    }
 };
 
 // ----------------------------------------------------------------- users

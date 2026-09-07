@@ -964,38 +964,53 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
         return;
     };
     switch (req) {
-        .connect => |c| {
-            const u = unitForService(c.service) orelse return failReply(chan, .bad_arg);
-            if (!ensureUp(u)) return failReply(chan, .no_space);
-            u.stopped = false; // connect doubles as (re)start
-            _ = usys.replyTyped(shared.InitReply, chan, .connected, u.chan_b);
-        },
         .connect_named => |c| {
             var nbuf: [24]u8 = undefined;
             const name = shared.wordsToStr(&nbuf, .{ c.a, c.b, 0 });
             const u = unitByName(name) orelse return failReply(chan, .bad_arg);
             if (!ensureUp(u)) return failReply(chan, .no_space);
-            u.stopped = false;
+            u.stopped = false; // connect doubles as (re)start
             _ = usys.replyTyped(shared.InitReply, chan, .connected, u.chan_b);
         },
-        .status => |q| {
-            const u = unitForService(q.service) orelse return failReply(chan, .bad_arg);
-            if (u.up and u.ctl != 0) {
-                const st = usys.domainStat(u.ctl);
-                if (st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.dead)) u.up = false;
-            }
-            _ = usys.replyTyped(shared.InitReply, chan, .{ .svc_status = .{
-                .up = @intFromBool(u.up),
-                .restarts = u.restarts,
-                .max_restarts = u.max_restarts,
-            } }, 0);
-        },
-        .stop => |q| {
-            const u = unitForService(q.service) orelse return failReply(chan, .bad_arg);
+        .stop_named => |c| {
+            var nbuf: [24]u8 = undefined;
+            const name = shared.wordsToStr(&nbuf, .{ c.a, c.b, 0 });
+            const u = unitByName(name) orelse return failReply(chan, .bad_arg);
             if (u.up and u.ctl != 0) _ = usys.domainDestroy(u.ctl);
             u.up = false;
             u.stopped = true;
             _ = usys.replyTyped(shared.InitReply, chan, .stopped, 0);
+        },
+        .list => {
+            // Fill the caller's buffer with a UnitRec per unit init knows;
+            // `svc` renders the table (and filters it with `where`). A
+            // unit up but whose domain has died is reported down.
+            if (r.cap == 0) return failReply(chan, .bad_arg);
+            const m = usys.shmMap(r.cap);
+            _ = usys.capDrop(r.cap);
+            if (m.err != .ok) return failReply(chan, .bad_arg);
+            const buf: [*]u8 = @ptrFromInt(m.data[0]);
+            const cap_recs = (m.data[1] * 4096) / shared.UnitRec.size;
+            var n: usize = 0;
+            for (units[0..nunits]) |*u| {
+                if (n == cap_recs) break;
+                if (u.up and u.ctl != 0) {
+                    const st = usys.domainStat(u.ctl);
+                    if (st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.dead)) u.up = false;
+                }
+                var rec: shared.UnitRec = .{
+                    .name = @splat(0),
+                    .up = @intFromBool(u.up),
+                    .restarts = @intCast(u.restarts),
+                    .max_restarts = @intCast(u.max_restarts),
+                };
+                const k = @min(u.name.len, 16);
+                @memcpy(rec.name[0..k], u.name[0..k]);
+                rec.encode(buf[n * shared.UnitRec.size ..][0..shared.UnitRec.size]);
+                n += 1;
+            }
+            _ = usys.shmUnmap(m.data[0]);
+            _ = usys.replyTyped(shared.InitReply, chan, .{ .listed = .{ .n = n } }, 0);
         },
         .install => {
             if (r.cap == 0) return failReply(chan, .bad_arg);
@@ -1009,11 +1024,7 @@ fn failReply(chan: u64, e: shared.Errno) void {
     _ = usys.replyTyped(shared.InitReply, chan, .{ .failed = .{ .err = @intFromEnum(e) } }, 0);
 }
 
-/// Services are units named after shared.ServiceId.
-fn unitForService(id: u64) ?*Unit {
-    const sid = std.enums.fromInt(shared.ServiceId, id) orelse return null;
-    return unitByName(@tagName(sid));
-}
+/// Services are units, reached by name.
 
 // ---------------------------------------------------------- image store
 

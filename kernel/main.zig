@@ -1361,7 +1361,7 @@ fn fabricTestWorker(arg: u64) void {
     log.info("fabric-test: placement spawn landed on node {d}; RPC verified", .{landed});
 
     // Stage B1: a service PUBLISHED to the pool. A local calc service's
-    // channel is offered under ServiceId.calc; node 3 (no spawn
+    // channel is offered under the name "calc"; node 3 (no spawn
     // authority) looks it up and calls it — its log carries the proof.
     {
         const pub_ch = ipc.createChannel(1, 1) catch @panic("channel pool empty");

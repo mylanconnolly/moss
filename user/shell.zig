@@ -378,7 +378,7 @@ const sess_result = mshl.resultShape(.nothing, sess_err);
 const rspawn_result = mshl.resultShape(mshl.shapeOf(struct { node: i64, rpc_40_plus_2: i64 }), .{ .one_of = &.{ mshl.shapeOf(shared.FabErr), .{ .word = "error" } } });
 const Proc = struct { id: i64, name: []const u8, state: enum { alive, dying, dead }, threads: i64, kobj_kb: i64, kobj_max: i64, user_kb: i64, user_max: i64 };
 const Mem = struct { free_mb: i64, total_mb: i64, cores: i64, uptime_s: i64 };
-const Svc = struct { id: i64, name: []const u8, state: enum { up, down }, restarts: i64, max: i64 };
+const Svc = struct { name: []const u8, state: enum { up, down }, restarts: i64, max: i64 };
 const Node = struct { id: i64, state: enum { up, down }, free_mb: i64 };
 const ps_shape = mshl.shapeOf([]const Proc);
 const mem_shape = mshl.shapeOf(Mem);
@@ -402,7 +402,7 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (is(name, "ps")) return .{ .ret = ps_shape };
     if (is(name, "mem")) return .{ .ret = mem_shape };
     if (is(name, "svc")) return .{ .ret = svc_shape };
-    if (is(name, "start") or is(name, "stop")) return .{ .params = &.{.{ .name = "service", .shape = .int }}, .ret = svc_result };
+    if (is(name, "start") or is(name, "stop")) return .{ .params = &.{.{ .name = "service", .shape = .string }}, .ret = svc_result };
     if (is(name, "nodes")) return .{ .ret = nodes_shape };
     if (is(name, "rspawn")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "image", .shape = .int } }, .ret = rspawn_result };
     if (is(name, "rand")) return .{ .ret = .string };
@@ -451,8 +451,9 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     }
     if (is(name, "svc")) return try svcTable(it);
     if (is(name, "start") or is(name, "stop")) {
-        if (args[0].int < 0) return it.fail("{s}: a service id is not negative", .{name});
-        return try svcControl(it, name, @intCast(args[0].int));
+        if (args[0] != .str) return it.fail("{s}: a service name expected, got a {s}", .{ name, args[0].typeName() });
+        if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("{s}: a service name is 1..16 bytes", .{name});
+        return try svcControl(it, name, args[0].str);
     }
     if (is(name, "nodes")) return try nodesTable(it);
     if (is(name, "rspawn")) {
@@ -547,36 +548,46 @@ fn psTable(it: *mshl.Interp) mshl.Error!Value {
     return try mshl.toValue(a, @as([]const Proc, rows.items));
 }
 
-const svc_names = [_][]const u8{ "logsvc", "greeter" };
-
 fn svcTable(it: *mshl.Interp) mshl.Error!Value {
     const a = it.arena;
+    // init fills a buffer with a UnitRec per unit it knows; svc is the
+    // table (filter it with `where`). No fixed catalog of service ids.
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return it.fail("svc: out of shared memory", .{});
+    defer _ = usys.capDrop(sh.data[0]);
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return it.fail("svc: cannot map the buffer", .{});
+    defer _ = usys.shmUnmap(m.data[0]);
+    const buf: [*]u8 = @ptrFromInt(m.data[0]);
+    const n = switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .list, sh.data[0])) {
+        .ok => |rep| switch (rep) {
+            .listed => |l| l.n,
+            else => return it.fail("svc: bad reply from init", .{}),
+        },
+        .err => return it.fail("svc: init unreachable", .{}),
+    };
     var rows: std.ArrayList(Svc) = .empty;
-    for (svc_names, 0..) |sname, id| {
-        switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{
-            .status = .{ .service = id },
-        }, 0)) {
-            .ok => |rep| switch (rep) {
-                .svc_status => |st| try rows.append(a, .{
-                    .id = @intCast(id),
-                    .name = sname,
-                    .state = if (st.up != 0) .up else .down,
-                    .restarts = @intCast(st.restarts),
-                    .max = @intCast(st.max_restarts),
-                }),
-                else => return it.fail("svc: bad reply from init", .{}),
-            },
-            .err => return it.fail("svc: init unreachable", .{}),
-        }
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const rec = shared.UnitRec.decode(buf[i * shared.UnitRec.size ..][0..shared.UnitRec.size]);
+        var nlen: usize = 0;
+        while (nlen < 16 and rec.name[nlen] != 0) nlen += 1;
+        try rows.append(a, .{
+            .name = try a.dupe(u8, rec.name[0..nlen]),
+            .state = if (rec.up != 0) .up else .down,
+            .restarts = @intCast(rec.restarts),
+            .max = @intCast(rec.max_restarts),
+        });
     }
     return try mshl.toValue(a, @as([]const Svc, rows.items));
 }
 
 /// `start N` / `stop N`: what init decides is a result.
-fn svcControl(it: *mshl.Interp, op: []const u8, id: u64) mshl.Error!Value {
+fn svcControl(it: *mshl.Interp, op: []const u8, name: []const u8) mshl.Error!Value {
+    const w = shared.strToWords(name);
     if (is(op, "start")) {
         switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{
-            .connect = .{ .service = id },
+            .connect_named = .{ .a = w[0], .b = w[1] },
         }, 0)) {
             .ok => |ok| switch (ok.rep) {
                 .connected => {
@@ -589,7 +600,7 @@ fn svcControl(it: *mshl.Interp, op: []const u8, id: u64) mshl.Error!Value {
         }
     }
     switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{
-        .stop = .{ .service = id },
+        .stop_named = .{ .a = w[0], .b = w[1] },
     }, 0)) {
         .ok => |rep| switch (rep) {
             .stopped => return try okv(it, .{ .str = "stopped" }),
