@@ -776,7 +776,7 @@ const shell_script = [_]Step{
     // dial a durable service unit: init starts and supervises it (no
     // keep-alive loop), and hands back a channel we call. Service 4 is
     // the doubler unit (conf/units/doubler.msh, mshrun in service mode).
-    .{ .send = "let ds = (dial 4)?; (21 | call $ds)?", .expect = "42" },
+    .{ .send = "let ds = (dial \"doubler\")?; (21 | call $ds)?", .expect = "42" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => \"a directory\"; file => \"a file\"; symlink => \"a link\" }", .expect = "a directory" },
     .{ .send = "match (stat data/smoke)?.type: dir | file | symlink { dir => 1; file => 2 }", .expect = "error: match: the arms do not cover symlink" },
     .{ .send = "stat 1", .expect = "error: stat: path is 1, not string" },

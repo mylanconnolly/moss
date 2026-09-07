@@ -451,6 +451,10 @@ pub const FaultMsg = union(enum(u64)) {
 pub const InitRequest = union(enum(u64)) {
     /// Connect to (lazily starting, or restarting a stopped) service.
     connect: struct { service: u64 },
+    /// Same, but by the unit's NAME (packed into two words, up to 16
+    /// bytes) rather than a fixed ServiceId — so a service can be named,
+    /// not drawn from a catalog. `dial NAME` reaches a unit this way.
+    connect_named: struct { a: u64, b: u64 },
     /// Service-level status: up/down, restart usage.
     status: struct { service: u64 },
     /// Deliberate stop: the instance is destroyed and supervision will
@@ -1037,11 +1041,11 @@ pub const FabReq = union(enum(u64)) {
     connect_peer: struct { node: u64 },
     /// node 0 = placement: the least-loaded live member is chosen.
     remote_spawn: struct { node: u64, image: u64, arg: u64 },
-    /// Reach a durable service UNIT on `node` through its init: the peer
-    /// starts and supervises it (`connect`), and hands a channel back —
-    /// `dial NODE SERVICE`, transparent clustering. -> found { node } +
-    /// a remote-channel cap.
-    remote_connect: struct { node: u64, service: u64 },
+    /// Reach a durable service UNIT on `node` through its init, by NAME
+    /// (two words, up to 16 bytes): the peer starts and supervises it,
+    /// and hands a channel back — `dial NODE NAME`, transparent
+    /// clustering. -> found { node } + a remote-channel cap.
+    remote_connect: struct { node: u64, a: u64, b: u64 },
     attach_buf: void, // + shm cap: buffer for members listings (clients)
     /// Badge-0 only, once: the fab_cert_len certificate the root issued
     /// for this node. Verified under the cluster key and checked to name

@@ -42,7 +42,7 @@ echo "script: multi-client ok"
 # unlike the published worker above. dial NODE SERVICE, service 4 is the
 # doubler unit. Node 1 may still be settling, so try for a while.
 def dial-on-1 [tries] {
-  match (dial 1 4) {
+  match (dial 1 doubler) {
     ok $s => match (7 | call $s) {
       ok $v => ok $v
       err $e => if $tries > 0 { sleep 500; dial-on-1 ($tries - 1) } else { err $e }

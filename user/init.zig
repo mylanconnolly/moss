@@ -970,6 +970,14 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
             u.stopped = false; // connect doubles as (re)start
             _ = usys.replyTyped(shared.InitReply, chan, .connected, u.chan_b);
         },
+        .connect_named => |c| {
+            var nbuf: [24]u8 = undefined;
+            const name = shared.wordsToStr(&nbuf, .{ c.a, c.b, 0 });
+            const u = unitByName(name) orelse return failReply(chan, .bad_arg);
+            if (!ensureUp(u)) return failReply(chan, .no_space);
+            u.stopped = false;
+            _ = usys.replyTyped(shared.InitReply, chan, .connected, u.chan_b);
+        },
         .status => |q| {
             const u = unitForService(q.service) orelse return failReply(chan, .bad_arg);
             if (u.up and u.ctl != 0) {

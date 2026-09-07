@@ -337,8 +337,9 @@ fn lookupService(it: *mshl.Interp, node: u64, id: u64) mshl.Error!Value {
 /// peer's init starts and supervises it, and hands a channel back that
 /// we wrap as a callable `service` handle — the same as a local dial,
 /// only the node is elsewhere (transparent clustering).
-fn remoteConnect(it: *mshl.Interp, node: u64, id: u64) mshl.Error!Value {
-    return switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .remote_connect = .{ .node = node, .service = id } }, 0)) {
+fn remoteConnect(it: *mshl.Interp, node: u64, name: []const u8) mshl.Error!Value {
+    const w = shared.strToWords(name);
+    return switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .remote_connect = .{ .node = node, .a = w[0], .b = w[1] } }, 0)) {
         .ok => |ok| switch (ok.rep) {
             .found => blk: {
                 if (ok.cap == 0) break :blk try errResult(it, "the fabric handed back no channel");
@@ -354,8 +355,9 @@ fn remoteConnect(it: *mshl.Interp, node: u64, id: u64) mshl.Error!Value {
 /// Dial a durable service unit through init: init starts it (or restarts
 /// a stopped one) and supervises it, and hands back a channel we wrap as
 /// a callable `service` handle. The service outlives us — it is init's.
-fn dialService(it: *mshl.Interp, id: u64) mshl.Error!Value {
-    return switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{ .connect = .{ .service = id } }, 0)) {
+fn dialService(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
+    const w = shared.strToWords(name);
+    return switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{ .connect_named = .{ .a = w[0], .b = w[1] } }, 0)) {
         .ok => |ok| switch (ok.rep) {
             .connected => blk: {
                 if (ok.cap == 0) break :blk try errResult(it, "init handed back no channel");
@@ -392,7 +394,7 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "race")) return .{ .params = &.{.{ .name = "workers", .shape = .list }}, .input = .{ .optional = .list }, .ret = worker_result };
     if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "service", .shape = .int }, .{ .name = "worker", .shape = worker_kind } }, .ret = call_result };
     if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "service", .shape = .int } }, .ret = service_result };
-    if (std.mem.eql(u8, name, "dial")) return .{ .params = &.{ .{ .name = "node_or_service", .shape = .int }, .{ .name = "service", .shape = .int, .optional = true } }, .ret = service_result };
+    if (std.mem.eql(u8, name, "dial")) return .{ .params = &.{ .{ .name = "node_or_name", .shape = .{ .one_of = &.{ .string, .int } } }, .{ .name = "name", .shape = .string, .optional = true } }, .ret = service_result };
     return null;
 }
 
@@ -460,20 +462,20 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         return try lookupService(it, node, id);
     }
     if (is(u8, name, "dial")) {
-        if (args.len < 1 or args[0] != .int) return it.fail("dial: a service id (or NODE SERVICE) expected", .{});
+        if (args.len == 0) return it.fail("dial: a service name (or NODE NAME) expected", .{});
         if (args.len >= 2) {
-            // dial NODE SERVICE: reach a durable service unit on another
-            // node through the fabric — its init starts and supervises it.
+            // dial NODE NAME: reach a durable service unit on another node
+            // through the fabric — its init starts and supervises it.
             if (fab_chan == 0) return it.fail("dial: this program has no fabric", .{});
-            if (args[1] != .int) return it.fail("dial: NODE SERVICE expected", .{});
+            if (args[0] != .int or args[1] != .str) return it.fail("dial: NODE NAME expected", .{});
             const node: u64 = @intCast(@max(args[0].int, 0));
-            const id: u64 = @intCast(@max(args[1].int, 0));
-            if (id >= shared.fab_max_services) return it.fail("dial: service id must be 0..{d}", .{shared.fab_max_services - 1});
-            return try remoteConnect(it, node, id);
+            if (args[1].str.len > 16) return it.fail("dial: a service name is at most 16 bytes", .{});
+            return try remoteConnect(it, node, args[1].str);
         }
         if (init_chan == 0) return it.fail("dial: this program cannot reach init", .{});
-        const id: u64 = @intCast(@max(args[0].int, 0));
-        return try dialService(it, id);
+        if (args[0] != .str) return it.fail("dial: a service name expected, got a {s}", .{args[0].typeName()});
+        if (args[0].str.len > 16) return it.fail("dial: a service name is at most 16 bytes", .{});
+        return try dialService(it, args[0].str);
     }
     // close / status on a service handle.
     const hv = input orelse (if (args.len > 0) args[0] else return null);

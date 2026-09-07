@@ -584,7 +584,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             },
             .connect_peer => |q| freply(doConnectPeer(q.node)),
             .remote_spawn => |q| doRemoteSpawn(q.node, q.image, q.arg),
-            .remote_connect => |q| doRemoteConnect(q.node, q.service),
+            .remote_connect => |q| doRemoteConnect(q.node, q.a, q.b),
             .publish => |q| {
                 // Only a local holder of our channel may publish (remote
                 // callers arrive badged and are forwarded above).
@@ -1422,19 +1422,20 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             got_spawn_ack = true;
         },
         shared.fw_connect_req => {
-            // [service u16][req u32] -> start (via our init) and supervise
-            // the service unit, export its channel, ack the caller's node.
-            // Connecting can start a unit here, so it needs the peer's
-            // spawn authority (signed into its certificate).
-            if (body.len < 6) return;
-            const service = leu16(body[0..2]);
-            const req_id = leu32(body[2..6]);
+            // [16 name bytes][req u32] -> start (via our init) and
+            // supervise the named service unit, export its channel, ack
+            // the caller's node. Connecting can start a unit here, so it
+            // needs the peer's spawn authority (signed into its cert).
+            if (body.len < 20) return;
+            const na = leu64(body[0..8]);
+            const nb = leu64(body[8..16]);
+            const req_id = leu32(body[16..20]);
             const allowed = p.flags_theirs & fabcert.flag_spawn != 0;
             if (!allowed) _ = usys.log(glog, "fabsvc: refused connect: peer's certificate does not authorize starting services");
             var sid: u32 = 0;
             var ok = false;
             if (allowed and init_chan != 0) {
-                switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{ .connect = .{ .service = service } }, 0)) {
+                switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{ .connect_named = .{ .a = na, .b = nb } }, 0)) {
                     .ok => |ic| {
                         if (ic.rep == .connected and ic.cap != 0) {
                             if (exportNew(ic.cap)) |eid| {
@@ -1790,7 +1791,7 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
 /// init) and supervise the service unit, and hand back a channel to it.
 /// The same shape as a remote spawn, but the peer connects a durable
 /// unit instead of spawning a raw image.
-fn doRemoteConnect(node: u64, service: u64) void {
+fn doRemoteConnect(node: u64, a: u64, b: u64) void {
     const p = greetedPeer(node) orelse {
         freply(ferr(.no_peer));
         return;
@@ -1798,10 +1799,12 @@ fn doRemoteConnect(node: u64, service: u64) void {
     got_connect_ack = false;
     connect_req_id +%= 1;
     if (connect_req_id == 0) connect_req_id = 1;
-    var req: [10]u8 = undefined;
-    frameHdr(req[0..4], 10, shared.fw_connect_req);
-    puleu16(req[4..6], @intCast(service));
-    puleu32(req[6..10], connect_req_id);
+    // [16 name bytes][req u32]: the service unit's name for the peer's init.
+    var req: [24]u8 = undefined;
+    frameHdr(req[0..4], 24, shared.fw_connect_req);
+    puleu64(req[4..12], a);
+    puleu64(req[12..20], b);
+    puleu32(req[20..24], connect_req_id);
     if (!sendFrame(p, &req)) {
         freply(ferr(.disconnected));
         return;
