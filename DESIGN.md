@@ -2103,8 +2103,22 @@ is consumed (closed) since the socket has moved. Workers gained a net
 view the way they already had a filesystem view; the net-drill script
 (now holding a spawner) proves it: it accepts a loopback connection,
 hands it to a `spawn`ed worker whose handler echoes on it, and reads its
-own bytes back — "socket to worker ok". This is the mechanism a
-concurrent `serve` will use, a worker per connection.
+own bytes back — "socket to worker ok".
+
+And `dispatch` a socket rather than `call` it, and the serve is
+concurrent: the worker's `serve` became async like `dispatch` — it acks
+at once, runs its handler on the socket, and rings the doorbell when
+done — so a server hands each accepted connection to its own worker with
+`socket | dispatch $w` and goes back to accept, and `await`/`race` reaps
+whoever finishes. `call` a socket is now just that plus an immediate
+`await`. The net drill accepts two connections, dispatches each to its
+own worker before awaiting either, and reads both echoes back —
+"concurrent serve ok", worker per connection. What the deterministic
+drill cannot show is that the two are served at the *same instant*: it
+proves each connection gets its own worker and its own answer, not the
+timing, since forcing genuine overlap is the same unreproducible thing
+as the simultaneous-call race. The structure is the point — a slow
+handler on one connection no longer blocks accepting the next.
 
 ### The gate (as built, 2026-09-03)
 

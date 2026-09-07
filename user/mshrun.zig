@@ -429,14 +429,22 @@ fn serveWorker(chan_h: u64, pinned: ?[]const u8) noreturn {
                     _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
                     continue;
                 };
-                if (net == null) {
+                if (net == null or stashed) {
                     _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
                     continue;
                 }
+                // Async, like dispatch: ack before serving so the caller can
+                // hand other connections to other workers meanwhile — many
+                // serve at once. The handler's value waits for `collect`,
+                // and the doorbell lets the caller reap whoever finishes.
+                _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
                 line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
                 var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
                 const sock = netcmds.socketValue(&interp, &net.?, q.idx) catch {
-                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    stash_len = 0;
+                    stash_failed = true;
+                    stashed = true;
+                    if (bell != 0) _ = usys.notifySignal(bell, @as(u64, 1) << bell_bit);
                     continue;
                 };
                 const outcome = runHandlerWith(&interp, handler_src[0..handler_len], sock);
@@ -444,12 +452,11 @@ fn serveWorker(chan_h: u64, pinned: ?[]const u8) noreturn {
                     .value => |t| t,
                     .failed => |t| t,
                 };
-                const n = @min(text.len, buf_len);
-                @memcpy(b[0..n], text[0..n]);
-                _ = usys.replyTyped(shared.WorkResp, chan_h, if (outcome == .failed)
-                    .{ .failed = .{ .len = n } }
-                else
-                    .{ .value = .{ .len = n } }, 0);
+                stash_len = @min(text.len, buf_len);
+                @memcpy(b[0..stash_len], text[0..stash_len]);
+                stash_failed = outcome == .failed;
+                stashed = true;
+                if (bell != 0) _ = usys.notifySignal(bell, @as(u64, 1) << bell_bit);
             },
             .dispatch => |q| {
                 const b = buf orelse {

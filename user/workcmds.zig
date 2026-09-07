@@ -426,7 +426,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         // is the worker serving the connection.
         if (in_val == .handle and is(u8, in_val.handle.kind, "socket") and !in_val.handle.closed and args[0] == .handle and is(u8, args[0].handle.kind, "worker")) {
             const w = try workerArg(it, args[0]);
-            return try serveViaWorker(it, w, in_val);
+            return try callServeSocket(it, w, in_val);
         }
         if (!in_val.isData()) return it.fail("call: the input is a {s}, which cannot cross to a worker (only data can)", .{in_val.typeName()});
         if (args[0] == .handle and is(u8, args[0].handle.kind, "service")) {
@@ -441,6 +441,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (args.len < 1) return it.fail("dispatch: a worker expected", .{});
         const w = try workerArg(it, args[0]);
         const in_val: Value = if (input) |v| v else if (args.len > 1) args[1] else .nothing;
+        // A socket dispatched to a worker: it serves the connection while
+        // we go on (concurrent serve, reaped by await/race).
+        if (in_val == .handle and is(u8, in_val.handle.kind, "socket") and !in_val.handle.closed) {
+            return try dispatchServeSocket(it, w, in_val);
+        }
         if (!in_val.isData()) return it.fail("dispatch: the input is a {s}, which cannot cross to a worker (only data can)", .{in_val.typeName()});
         return try dispatchWorker(it, w, in_val);
     }
@@ -550,9 +555,14 @@ fn loadRequest(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!union(enu
 /// cap goes to the worker (attach_net), and the worker serves the socket
 /// by its number. The socket is consumed here — the caller's handle no
 /// longer owns it.
-fn serveViaWorker(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!Value {
+/// Hand a socket to a worker and set it serving (async): hand off the
+/// socket, give the worker the resulting net view, and send `serve` —
+/// the worker acks, runs its handler on the socket, and rings the
+/// doorbell when done, so many connections serve at once. Returns an
+/// error result on failure, or null on success (the worker is pending).
+fn startServe(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!?Value {
     if (w.published) return try errResult(it, "the worker is published; reach it through lookup");
-    if (w.pending) return try errResult(it, "the worker is running; await it first");
+    if (w.pending) return try errResult(it, "the worker is already running");
     const n: *netcmds.Net = @ptrCast(@alignCast(sv.handle.ctx));
     const id = sv.handle.id;
     const cap = netcmds.handoff(n, id) orelse return try errResult(it, "the socket could not be handed off");
@@ -568,10 +578,27 @@ fn serveViaWorker(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!Value {
     }
     _ = usys.capDrop(cap); // the worker holds its own ref now
     it.closeHandle(sv); // the socket moved; our handle no longer owns it
-    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .serve = .{ .idx = id } }, 0)) {
-        .ok => |rep| try replyToValue(it, w.buf, w.buf_len, rep),
-        .err => try errResult(it, "the worker vanished"),
-    };
+    ready_mask &= ~(@as(u64, 1) << w.bit); // a fresh run
+    switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .serve = .{ .idx = id } }, 0)) {
+        .ok => |rep| if (rep != .ok) return try errResult(it, "the worker refused to serve"),
+        .err => return try errResult(it, "the worker vanished"),
+    }
+    w.pending = true;
+    return null;
+}
+
+/// `socket | call $w`: serve the connection and wait for the handler's
+/// value (synchronous).
+fn callServeSocket(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!Value {
+    if (try startServe(it, w, sv)) |e| return e;
+    return try awaitWorker(it, w);
+}
+
+/// `socket | dispatch $w`: serve the connection and go on — `await`/
+/// `race` reaps the worker when it finishes (concurrent serve).
+fn dispatchServeSocket(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!Value {
+    if (try startServe(it, w, sv)) |e| return e;
+    return try okResult(it, .nothing);
 }
 
 fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {

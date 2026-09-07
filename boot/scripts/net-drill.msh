@@ -29,6 +29,28 @@ if $served != "served" { (err "socket to worker: $served")? }
 if (from-bytes (recv $wc)?)? != "over a worker" { (err "socket to worker echo failed")? }
 close $wc
 echo "script: socket to worker ok"
+# Concurrent serve: two connections, each handed to its own worker with
+# `dispatch` (async) so both serve at once, then reaped with `await`.
+# (We cannot force true simultaneity in the drill; this proves each
+# connection is served on its own worker and both come back correct.)
+let cl = (listen 8092)?
+let cc1 = (connect ::1 8092)?
+let ca1 = (accept $cl)?
+let cc2 = (connect ::1 8092)?
+let ca2 = (accept $cl)?
+send $cc1 "alpha"
+send $cc2 "beta"
+let cw1 = (spawn { let m = (from-bytes (recv $in)?)?; (send $in $m)?; "ok" })?
+let cw2 = (spawn { let m = (from-bytes (recv $in)?)?; (send $in $m)?; "ok" })?
+($ca1 | dispatch $cw1)?
+($ca2 | dispatch $cw2)?
+(await $cw1)?
+(await $cw2)?
+if (from-bytes (recv $cc1)?)? != "alpha" { (err "concurrent serve 1 wrong")? }
+if (from-bytes (recv $cc2)?)? != "beta" { (err "concurrent serve 2 wrong")? }
+close $cc1
+close $cc2
+echo "script: concurrent serve ok"
 # Bulk: more than one segment in flight, both ways — the window at work.
 def recv-all [s, want] {
   if $want <= 0 { ok (to-bytes "") } else {
