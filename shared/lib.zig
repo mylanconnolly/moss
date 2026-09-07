@@ -372,7 +372,6 @@ pub const ImageId = enum(u64) {
 
 /// Services init knows how to activate. Discovery is by protocol id over
 /// init's channel — never by global name.
-
 /// Encode a message union into the four IPC data words: word 0 is the tag,
 /// words 1..3 the payload fields (u64s, at most three). This is the seed of
 /// the comptime IDL: protocol types written once here compile identically
@@ -993,6 +992,13 @@ pub const WorkReq = union(enum(u64)) {
     /// so the worker is its agent without sharing a view buffer. Optional,
     /// set once, before the handler.
     attach_view: void,
+    /// + a network view cap (a socket handed off to this worker): the
+    /// worker's net commands work on it. Set before `serve`.
+    attach_net: void,
+    /// Run the handler with `$in` a `socket` for the handed-off socket
+    /// `idx` on the attached net view (not a data literal): a worker
+    /// serving a connection. The reply is the handler's value, as `call`.
+    serve: struct { idx: u64 },
     /// + a notification cap: the doorbell the worker rings (with bit
     /// 1<<`bit`) each time a `dispatch` finishes, so the caller can wait
     /// on the first of many to complete (`race`). Optional, set once.

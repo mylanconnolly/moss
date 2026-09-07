@@ -16,6 +16,7 @@ const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
+const netcmds = @import("netcmds.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const Value = mshl.Value;
@@ -421,6 +422,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         // request is the piped input (`x | call $w`) or the second arg.
         if (args.len < 1) return it.fail("call: a worker expected", .{});
         const in_val: Value = if (input) |v| v else if (args.len > 1) args[1] else .nothing;
+        // A socket handed to a worker: it crosses (handed off), the rest
+        // is the worker serving the connection.
+        if (in_val == .handle and is(u8, in_val.handle.kind, "socket") and !in_val.handle.closed and args[0] == .handle and is(u8, args[0].handle.kind, "worker")) {
+            const w = try workerArg(it, args[0]);
+            return try serveViaWorker(it, w, in_val);
+        }
         if (!in_val.isData()) return it.fail("call: the input is a {s}, which cannot cross to a worker (only data can)", .{in_val.typeName()});
         if (args[0] == .handle and is(u8, args[0].handle.kind, "service")) {
             if (args[0].handle.closed) return it.fail("call: the service is closed", .{});
@@ -536,6 +543,35 @@ fn loadRequest(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!union(enu
     if (in_text.items.len > w.buf_len) return .{ .err = try errResult(it, "the request is larger than the buffer") };
     @memcpy(w.buf[0..in_text.items.len], in_text.items);
     return .{ .len = in_text.items.len };
+}
+
+/// Hand a connected socket to a worker and run its handler with `$in`
+/// the socket. netsvc moves the socket to a fresh net view; that view's
+/// cap goes to the worker (attach_net), and the worker serves the socket
+/// by its number. The socket is consumed here — the caller's handle no
+/// longer owns it.
+fn serveViaWorker(it: *mshl.Interp, w: *Worker, sv: Value) mshl.Error!Value {
+    if (w.published) return try errResult(it, "the worker is published; reach it through lookup");
+    if (w.pending) return try errResult(it, "the worker is running; await it first");
+    const n: *netcmds.Net = @ptrCast(@alignCast(sv.handle.ctx));
+    const id = sv.handle.id;
+    const cap = netcmds.handoff(n, id) orelse return try errResult(it, "the socket could not be handed off");
+    switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .attach_net, cap)) {
+        .ok => |rep| if (rep != .ok) {
+            _ = usys.capDrop(cap);
+            return try errResult(it, "the worker refused the net view");
+        },
+        .err => {
+            _ = usys.capDrop(cap);
+            return try errResult(it, "the worker vanished");
+        },
+    }
+    _ = usys.capDrop(cap); // the worker holds its own ref now
+    it.closeHandle(sv); // the socket moved; our handle no longer owns it
+    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .serve = .{ .idx = id } }, 0)) {
+        .ok => |rep| try replyToValue(it, w.buf, w.buf_len, rep),
+        .err => try errResult(it, "the worker vanished"),
+    };
 }
 
 fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {

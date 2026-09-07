@@ -457,6 +457,23 @@ pub fn dropSock(ctx: *anyopaque, _: []const u8, id: u64) void {
     _ = ncall(n, .{ .tcp_close = .{ .sock = id } });
 }
 
+/// Hand a connected socket to a fresh net view; the reply's cap is a
+/// channel to that view, which owns the socket by the same number. Used
+/// to give a socket to a worker (its net view becomes the handoff view).
+pub fn handoff(n: *Net, sock: u64) ?u64 {
+    switch (usys.callTypedCap(shared.NetReq, shared.NetResp, n.chan, .{ .handoff = .{ .sock = sock } }, 0)) {
+        .ok => |ok| return if (ok.rep == .ok and ok.cap != 0) ok.cap else null,
+        .err => return null,
+    }
+}
+
+/// Wrap an existing socket number on view `n` as a `socket` handle — for
+/// a worker adopting a handed-off socket (id keeps its number on the
+/// handoff view).
+pub fn socketValue(it: *mshl.Interp, n: *Net, id: u64) mshl.Error!Value {
+    return it.newHandle("socket", id, n, dropSock);
+}
+
 fn errResult(it: *mshl.Interp, msg: []const u8) mshl.Error!Value {
     const r = try it.arena.create(mshl.Result);
     r.* = .{ .ok = false, .val = .{ .str = msg } };

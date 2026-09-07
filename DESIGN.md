@@ -2092,6 +2092,20 @@ hands the socket to a fresh view, watches its old view refused, and
 echoes on the new view. The new owner re-`watch`es the socket for its
 own doorbell (the handoff clears the old bell).
 
+A worker can now be handed a socket. `x | call $w` already takes data;
+when `x` is a socket handle instead, workcmds hands the socket off (the
+socket's value carries its net view as the handle's context and the
+number as its id), gives the worker the resulting view cap over a new
+`attach_net`, and sends a `serve { idx }` — and the worker runs its
+handler with `$in` a socket for that number on its own net view, so the
+handler's `recv`/`send` work the connection. The caller's socket handle
+is consumed (closed) since the socket has moved. Workers gained a net
+view the way they already had a filesystem view; the net-drill script
+(now holding a spawner) proves it: it accepts a loopback connection,
+hands it to a `spawn`ed worker whose handler echoes on it, and reads its
+own bytes back — "socket to worker ok". This is the mechanism a
+concurrent `serve` will use, a worker per connection.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

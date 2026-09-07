@@ -415,6 +415,42 @@ fn serveWorker(chan_h: u64, pinned: ?[]const u8) noreturn {
                 else
                     .{ .value = .{ .len = r2.len } }, 0);
             },
+            .attach_net => {
+                if (r.cap == 0) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                net = netcmds.Net.init(r.cap);
+                _ = net.?.attach();
+                _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
+            },
+            .serve => |q| {
+                const b = buf orelse {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                };
+                if (net == null) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                line_fba = std.heap.FixedBufferAllocator.init(&heap_line);
+                var interp = mshl.Interp.init(line_fba.allocator(), box_pool.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = hostCall, .signature = hostSignature });
+                const sock = netcmds.socketValue(&interp, &net.?, q.idx) catch {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                };
+                const outcome = runHandlerWith(&interp, handler_src[0..handler_len], sock);
+                const text = switch (outcome) {
+                    .value => |t| t,
+                    .failed => |t| t,
+                };
+                const n = @min(text.len, buf_len);
+                @memcpy(b[0..n], text[0..n]);
+                _ = usys.replyTyped(shared.WorkResp, chan_h, if (outcome == .failed)
+                    .{ .failed = .{ .len = n } }
+                else
+                    .{ .value = .{ .len = n } }, 0);
+            },
             .dispatch => |q| {
                 const b = buf orelse {
                     _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
@@ -480,6 +516,12 @@ fn runJob(b: [*]u8, in_len: usize, buf_len: usize) struct { len: usize, failed: 
 fn runHandler(it: *mshl.Interp, src: []const u8, in_text: []const u8) StageOut {
     const in_val: Value = if (in_text.len == 0) .nothing else (it.parseData(in_text) catch return .{ .failed = "the input is not data" });
     const tin = mshl.tableize(it.arena, in_val) catch return .{ .failed = "out of memory" };
+    return runHandlerWith(it, src, tin);
+}
+
+/// Run the handler with `$in` a pre-built value (a socket, for a serving
+/// worker) rather than a data literal; the value it returns must be data.
+fn runHandlerWith(it: *mshl.Interp, src: []const u8, tin: Value) StageOut {
     var wrapped: [handler_src.len + 8]u8 = undefined;
     if (src.len + 6 > wrapped.len) return .{ .failed = "the handler is too large" };
     @memcpy(wrapped[0..4], "fn {");

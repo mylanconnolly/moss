@@ -16,6 +16,19 @@ match (from-bytes (recv $a)?) {
   ok $other => (err "loopback mismatch: $other")?
   err $e => (err "loopback: $e")?
 }
+
+# A socket handed to a worker: the worker serves the connection on its
+# own net view (the socket crossed to it via a fabric-less handoff).
+let wl = (listen 8090)?
+let wc = (connect ::1 8090)?
+let wa = (accept $wl)?
+send $wc "over a worker"
+let echoer = (spawn { let m = (from-bytes (recv $in)?)?; (send $in $m)?; "served" })?
+let served = ($wa | call $echoer)?
+if $served != "served" { (err "socket to worker: $served")? }
+if (from-bytes (recv $wc)?)? != "over a worker" { (err "socket to worker echo failed")? }
+close $wc
+echo "script: socket to worker ok"
 # Bulk: more than one segment in flight, both ways — the window at work.
 def recv-all [s, want] {
   if $want <= 0 { ok (to-bytes "") } else {
