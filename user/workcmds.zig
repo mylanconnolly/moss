@@ -47,14 +47,21 @@ const Worker = struct {
     gen: u32 = 0,
     chan: u64 = 0, // our end of the worker's channel
     ctl: u64 = 0, // the worker domain's control cap (for teardown)
-    /// A `start` is outstanding: the worker is computing (or its result
-    /// waits unclaimed), and `await` will collect it.
+    /// A dispatch is outstanding: the worker is computing (or its result
+    /// waits unclaimed), and `await`/`race` will collect it.
     pending: bool = false,
+    /// This worker's bit in the shared doorbell (its slot index).
+    bit: u6 = 0,
     shm: u64 = 0,
     buf: [*]u8 = undefined,
     buf_len: usize = 0,
 };
 var workers: [max_workers]Worker = @splat(.{});
+/// The doorbell every worker rings when a dispatch finishes (created on
+/// first spawn), and the bits seen so far but not yet collected — how
+/// `race` learns which worker completed first.
+var doorbell: u64 = 0;
+var ready_mask: u64 = 0;
 
 pub const Conn = u64;
 
@@ -126,6 +133,17 @@ fn spawnWorker(stage_handle: u64, handler_src: []const u8) SpawnOut {
             _ = usys.capDrop(wv); // the worker holds its own ref now
         }
     }
+    // A doorbell for race: one notification the caller waits on, which
+    // every worker rings (with its own bit) when a dispatch finishes.
+    // Best-effort — without it a worker still computes; only `race`
+    // needs it.
+    if (doorbell == 0) {
+        const n = usys.notifyCreate();
+        if (n.err == .ok) doorbell = n.data[0];
+    }
+    if (doorbell != 0) {
+        _ = usys.callTyped(shared.WorkReq, shared.WorkResp, chan, .{ .attach_bell = .{ .bit = idx } }, doorbell);
+    }
     @memcpy(buf[0..handler_src.len], handler_src);
     switch (usys.callTyped(shared.WorkReq, shared.WorkResp, chan, .{ .handler = .{ .len = handler_src.len } }, 0)) {
         .ok => |rep| if (rep != .ok) {
@@ -139,7 +157,7 @@ fn spawnWorker(stage_handle: u64, handler_src: []const u8) SpawnOut {
     }
 
     const w = &workers[idx];
-    w.* = .{ .used = true, .gen = w.gen +% 1, .chan = chan, .ctl = ctl, .shm = sh.data[0], .buf = buf, .buf_len = m.data[1] * 4096 };
+    w.* = .{ .used = true, .gen = w.gen +% 1, .bit = @intCast(idx), .chan = chan, .ctl = ctl, .shm = sh.data[0], .buf = buf, .buf_len = m.data[1] * 4096 };
     return .{ .conn = idOf(idx) };
 }
 
@@ -181,6 +199,7 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "call")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "dispatch")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "await")) return .{ .params = &.{.{ .name = "worker", .shape = worker_kind }}, .input = .{ .optional = worker_kind }, .ret = call_result };
+    if (std.mem.eql(u8, name, "race")) return .{ .params = &.{.{ .name = "workers", .shape = .list }}, .input = .{ .optional = .list }, .ret = worker_result };
     return null;
 }
 
@@ -220,6 +239,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         const wv = input orelse (if (args.len > 0) args[0] else return it.fail("await: a worker expected", .{}));
         const w = try workerArg(it, wv);
         return try awaitWorker(it, w);
+    }
+    if (is(u8, name, "race")) {
+        const lv = input orelse (if (args.len > 0) args[0] else return it.fail("race: a list of workers expected", .{}));
+        if (lv != .list) return it.fail("race: a list of workers expected, got a {s}", .{lv.typeName()});
+        return try raceWorkers(it, lv.list);
     }
     // close / status on a worker handle only.
     const hv = input orelse (if (args.len > 0) args[0] else return null);
@@ -284,6 +308,7 @@ fn callWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
 /// go on. The worker acks at once; its result waits for `await`.
 fn dispatchWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value {
     if (w.pending) return try errResult(it, "the worker is already running");
+    ready_mask &= ~(@as(u64, 1) << w.bit); // a fresh run: forget any old bell
     const len = switch (try loadRequest(it, w, in_val)) {
         .len => |n| n,
         .err => |e| return e,
@@ -303,6 +328,19 @@ fn dispatchWorker(it: *mshl.Interp, w: *Worker, in_val: Value) mshl.Error!Value 
 /// Join a started worker for its result (blocks until it is done).
 fn awaitWorker(it: *mshl.Interp, w: *Worker) mshl.Error!Value {
     if (!w.pending) return try errResult(it, "nothing to await: the worker was not started");
+    // Consume this worker's doorbell bit before collecting — so `await`
+    // and `select` both drain the bell, and a ring from this run can
+    // never linger to make a later `race` on a reused slot fire early.
+    // With no doorbell, `collect` itself blocks until the worker is done.
+    if (doorbell != 0) {
+        const wanted = @as(u64, 1) << w.bit;
+        while (ready_mask & wanted == 0) {
+            const r = usys.notifyWait(doorbell);
+            if (r.err != .ok) break;
+            ready_mask |= r.data[0];
+        }
+        ready_mask &= ~wanted;
+    }
     w.pending = false;
     return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .collect, 0)) {
         .ok => |rep| try replyToValue(it, w, rep),
@@ -310,4 +348,32 @@ fn awaitWorker(it: *mshl.Interp, w: *Worker) mshl.Error!Value {
     };
 }
 
-pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await" };
+/// Wait until the first of `items` (dispatched workers) finishes, and
+/// return that worker handle — the caller `await`s it for the result.
+/// Blocks on the shared doorbell; a worker not dispatched is skipped.
+fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
+    // The bits we are waiting for: the dispatched workers among `items`.
+    var wanted: u64 = 0;
+    for (items) |v| {
+        if (v != .handle or !std.mem.eql(u8, v.handle.kind, "worker") or v.handle.closed) continue;
+        const w = slotOf(v.handle.id) orelse continue;
+        if (w.pending) wanted |= @as(u64, 1) << w.bit;
+    }
+    if (wanted == 0) return try errResult(it, "race: none of these workers is running");
+    if (doorbell == 0) return try errResult(it, "race: no doorbell");
+    // Wait until at least one wanted worker has rung.
+    while (ready_mask & wanted == 0) {
+        const r = usys.notifyWait(doorbell);
+        if (r.err != .ok) return try errResult(it, "race: the wait failed");
+        ready_mask |= r.data[0];
+    }
+    // Return the first ready worker in the list's order.
+    for (items) |v| {
+        if (v != .handle or !std.mem.eql(u8, v.handle.kind, "worker") or v.handle.closed) continue;
+        const w = slotOf(v.handle.id) orelse continue;
+        if (w.pending and (ready_mask & (@as(u64, 1) << w.bit)) != 0) return try okResult(it, v);
+    }
+    return try errResult(it, "race: no worker became ready");
+}
+
+pub const command_names = [_][]const u8{ "spawn", "call", "dispatch", "await", "race" };

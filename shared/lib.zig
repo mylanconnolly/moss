@@ -963,6 +963,10 @@ pub const WorkReq = union(enum(u64)) {
     /// so the worker is its agent without sharing a view buffer. Optional,
     /// set once, before the handler.
     attach_view: void,
+    /// + a notification cap: the doorbell the worker rings (with bit
+    /// 1<<`bit`) each time a `dispatch` finishes, so the caller can wait
+    /// on the first of many to complete (`race`). Optional, set once.
+    attach_bell: struct { bit: u64 },
     /// The handler function's source at buf[0..len]; set once, first.
     handler: struct { len: u64 },
     /// The request (the handler's `$in`) as a data literal at buf[0..len]

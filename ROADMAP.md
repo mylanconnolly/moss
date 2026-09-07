@@ -442,9 +442,16 @@ is a plan.
   primitive: the worker answers the dispatch early and stashes its result
   for `collect`. The program stage grew 256 → 384 pages (and the kernel's
   `shm_max_pages` with it) because msh, carrying every command module and
-  the interpreter, crossed 1M. Still open in (3): `select` (the first of
-  many to finish, via `notify_bind`) and a concurrent `serve` over many
-  sources, plus standalone `channel`/`spawn`.
+  the interpreter, crossed 1M. ✅ `race` (landed 2026-09-07, "stage 3b"):
+  `race $workers` returns the first of a list of dispatched workers to
+  finish, over a doorbell notification each worker rings on completion —
+  the cooperative select of the model, over workers; `await` routed
+  through the same doorbell so no ring is lost or lingers. (Named `race`,
+  not `select`, and dispatch named `dispatch`, not `start`: both plainer
+  names were already shell verbs.) Still open in (3): a concurrent
+  `serve` over many sources (the same doorbell bound into a serving recv
+  with `notify_bind`) — gated on handing a worker an open socket, which
+  needs connection migration; and standalone `channel`/`spawn`.
 - **virtio-gpu and input devices** — the graphical console.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.

@@ -415,9 +415,13 @@ joins it for the result. Two workers dispatched before either is awaited
 run at the same time, each in its own domain: `let a = (spawn { slow
 $in })?; let b = (spawn { slow $in })?; (1 | dispatch $a)?; (2 | dispatch
 $b)?; (await $a)? + (await $b)?` runs `a` and `b` together. `await` on a
-worker that was never dispatched is an err, not a hang. Waiting on the
-*first* of many to finish (`select`), serving a channel to the fabric
-(`publish`/`lookup`), and a concurrent `serve` build on this.
+worker that was never dispatched is an err, not a hang. `race $workers`
+takes a list of dispatched workers and returns the first to finish, so
+you can collect results in completion order — `let r = (race [$a, $b,
+$c])?; await $r`, again for the rest. It waits on a doorbell every worker
+rings when its dispatch completes, so it costs nothing while they run.
+Serving a channel to the fabric (`publish`/`lookup`) and a concurrent
+`serve` build on the same worker machinery.
 
 In a user session the shell also holds a badged channel to the session
 manager, and five commands use it: `share PATH NAME USER [rw]` derives

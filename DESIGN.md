@@ -1960,6 +1960,34 @@ existed precisely for the program stage, and the stage had outgrown it.
 Each shm object's page table grew by the same factor; the cost is a few
 kilobytes per live buffer.
 
+**Concurrency, stage 3b: race — the first of many (as built, 2026-09-07).**
+`await` joins one worker; `race $workers` returns whichever of a list
+finishes first, so a script can collect results in completion order
+rather than dispatch order. The mechanism is the approved cooperative
+one: a single doorbell notification the caller holds and hands to each
+worker (a notification cap over the worker channel, `attach_bell`, with
+the worker's slot as its bit). A worker rings the doorbell with its bit
+the moment a dispatch finishes; `race` waits on the doorbell
+(`notify_wait`) until one of the workers it was given has rung, and
+returns that worker for the caller to `await`. A `ready_mask` remembers
+bits seen but not yet collected, so bells that arrive together are not
+lost. `await` was routed through the same doorbell (not a bare blocking
+collect) so that every completion's bell is consumed by exactly one of
+the two — otherwise a bell from a finished-and-collected run could
+linger in the notification and make a later `race` on a reused slot fire
+early. No kernel primitive was added: `notify_wait` already returns
+immediately when bits are latched and blocks otherwise, which is exactly
+a doorbell. This is the "cooperative select" of the model, over workers;
+the same doorbell, bound into a serving recv with `notify_bind`, is how
+a concurrent `serve` over many sources will wait.
+
+Two more name collisions were paid for here, both because the shell's
+verbs and the worker verbs share one namespace: `start` was already the
+service-start command (so async dispatch is `dispatch`), and `select`
+was already the table's column projection (so the first-of-many is
+`race`). The lesson is that a new worker verb must be checked against
+every host command module, not just the workers'.
+
 ### The gate (as built, 2026-09-03)
 
 `zig build check` builds one kernel per drill and boots each under QEMU

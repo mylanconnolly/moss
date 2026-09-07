@@ -314,6 +314,10 @@ fn serveWorker(chan_h: u64) noreturn {
     var stashed = false;
     var stash_len: usize = 0;
     var stash_failed = false;
+    // The doorbell (a notification the caller holds) and this worker's
+    // bit in it: rung when a dispatch finishes, so a `select` wakes.
+    var bell: u64 = 0;
+    var bell_bit: u6 = 0;
     _ = usys.log(glog, "mshrun: worker up");
     while (true) {
         const r = usys.recvMsg(chan_h);
@@ -352,6 +356,15 @@ fn serveWorker(chan_h: u64) noreturn {
                     stores[0] = .{ .chan = own, .buf = @ptrFromInt(fsc.attachBuf(own).va), .name = "your store" };
                 }
                 fs_ctx.stores = &stores;
+                _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
+            },
+            .attach_bell => |q| {
+                if (r.cap == 0) {
+                    _ = usys.replyTyped(shared.WorkResp, chan_h, .refused, 0);
+                    continue;
+                }
+                bell = r.cap;
+                bell_bit = @intCast(q.bit & 63);
                 _ = usys.replyTyped(shared.WorkResp, chan_h, .ok, 0);
             },
             .handler => |q| {
@@ -401,6 +414,8 @@ fn serveWorker(chan_h: u64) noreturn {
                 stash_len = r2.len;
                 stash_failed = r2.failed;
                 stashed = true;
+                // Ring the doorbell: a `select` waiting on this worker wakes.
+                if (bell != 0) _ = usys.notifySignal(bell, @as(u64, 1) << bell_bit);
             },
             .collect => {
                 if (!stashed) {
