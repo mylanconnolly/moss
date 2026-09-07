@@ -1,0 +1,14 @@
+# The fabric-login drill, node 1: publish a doubling worker to the pool
+# as service 3, then stay alive so a caller on another node can look it
+# up and call it. The program store installs post-boot, so spawning the
+# worker is retried until it is ready.
+def spawn-when-ready [tries] {
+  match (spawn { (int $in)? * 2 }) {
+    ok $w => ok $w
+    err $e => if $tries > 0 { sleep 500; spawn-when-ready ($tries - 1) } else { err $e }
+  }
+}
+let w = (spawn-when-ready 120)?
+(publish 3 $w)?
+echo "script: published service 3 to the pool"
+while true { sleep 60000 }

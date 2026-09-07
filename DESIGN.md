@@ -2002,15 +2002,21 @@ existing machinery: the fabric's `forwardCall` already turns a call's
 attached shm cap into a proxied session buffer with a twin on the
 service's node (this is how `remote` ships a script and its input), so a
 looked-up service's `call` proxies the same way — nothing new on the
-wire. What is validated so far is same-node: publish stores an export in
-fabsvc and lookup retrieves it, exercising the whole mshl↔fabric surface
-and the service-handle call path; the cross-node drill (a persistent
-publisher on one node, a caller on another) is the next slice. Two
-caveats stand and are why this is a first cut: multi-client concurrency
-needs the worker to key its buffer by caller badge (the fssvc/usersvc
-pattern) rather than holding one, and a published worker dies with the
-script that spawned it, so a durable service needs a host that outlives
-the request.
+wire. The fabric-login drill proves it end to end: node 1 publishes a
+doubling worker as service 3 and stays alive, node 2 looks it up and
+calls it with 21, and its request crosses the wire to node 1's worker
+and 42 comes back — a script as a pool service, reached from another
+node. (The publisher self-guards the boot-time race: the program store
+installs post-boot, so it retries the spawn until img/ is ready, then
+publishes and sleeps.) One command was mis-gated: a fabric-only script
+with no spawner could not `lookup`, because mshrun turned the worker
+commands on only for a spawner; now it turns them on for a spawner OR a
+fabric, and each command self-guards (spawn needs the spawner, lookup
+the fabric). Two caveats stand and are why this is a first cut:
+multi-client concurrency needs the worker to key its buffer by caller
+badge (the fssvc/usersvc pattern) rather than holding one, and a
+published worker dies with the script that spawned it, so a durable
+service needs a host that outlives the request.
 
 ### The gate (as built, 2026-09-03)
 

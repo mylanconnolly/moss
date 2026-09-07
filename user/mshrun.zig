@@ -55,6 +55,8 @@ var view_buf: [*]u8 = undefined;
 /// log->chan->spawner). 0 = not granted: `spawn` is refused.
 var run_stage: loader.Stage = undefined;
 var worker_spawner: u64 = 0;
+/// The worker/service commands are wired (a spawner or a fabric).
+var workcmds_on = false;
 var has_console = false;
 
 // The interpreter's memory: an arena for the whole run (a script is one
@@ -80,7 +82,7 @@ fn resolve(it: *mshl.Interp, path: []const u8) mshl.Error!fscmds.Target {
 
 fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (fscmds.signature(name)) |sig| return sig;
-    if (worker_spawner != 0) {
+    if (workcmds_on) {
         if (workcmds.signature(name)) |sig| return sig;
     }
     if (net != null) {
@@ -96,7 +98,7 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
 
 fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     if (try fscmds.call(&fs_ctx, it, name, args, input)) |v| return v;
-    if (worker_spawner != 0) {
+    if (workcmds_on) {
         if (try workcmds.call(it, name, args, input)) |v| return v;
     }
     if (net) |*nt| {
@@ -177,6 +179,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         stores[1] = .{ .chan = st, .buf = @ptrFromInt(fsc.attachBuf(st).va), .name = "the system store" };
     }
     fs_ctx.stores = &stores;
+    const fab_chan: u64 = if (setup.has(.fabric)) setup.cap(.fabric) else 0;
     // A spawner lands at slot 2 (grant insert order log->chan->spawner);
     // we cannot read our own grants, so probe it — a spawn-gated read
     // that answers only for a real spawner. With one, a script may
@@ -187,13 +190,17 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         if (usys.sysInfo(spawner_slot).err == .ok) {
             run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(148);
             worker_spawner = spawner_slot;
-            workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, if (setup.has(.fabric)) setup.cap(.fabric) else 0);
         }
     }
+    // The worker commands turn on for a spawner (spawn/dispatch/await/race)
+    // or a fabric (publish/lookup); each command self-guards, so a script
+    // with only a fabric gets lookup, not spawn.
+    workcmds_on = worker_spawner != 0 or fab_chan != 0;
+    if (workcmds_on) workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan);
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
     tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
-    if (setup.has(.fabric)) fab = .{ .chan = setup.cap(.fabric) };
+    if (fab_chan != 0) fab = .{ .chan = fab_chan };
     const path = setup.arg();
     if (path.len == 0) fail("setup", "no script path given");
 

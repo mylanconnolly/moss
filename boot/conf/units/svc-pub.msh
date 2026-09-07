@@ -1,0 +1,6 @@
+# The fabric-login drill, node 1: publishes a worker to the pool (service
+# 3) and stays up, so the caller on node 2 can look it up and call it
+# across the wire. Holds a spawner (to run the worker), the fabric (to
+# publish), and a view + store (to stage the worker's image).
+{ image: mshrun, script: scripts/svc-pub.msh, grant: [log, spawner, bootfs], budget: { user: 20mb }, profiles: [flogin],
+  give: [{ tag: view, fs: "", ro: false }, { tag: store, fs: img, ro: true }, { tag: fabric, unit: fabsvc }] }

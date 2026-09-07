@@ -411,6 +411,7 @@ pub fn build(b: *std.Build) void {
         "conf/clock-cluster.msh",        "conf/units/dotd.msh",
         "conf/dot.msh",                  "conf/units/dot-script.msh",
         "scripts/dot-drill.msh",         "scripts/worker-demo.msh",
+        "conf/units/svc-pub.msh",        "scripts/svc-pub.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
