@@ -15,6 +15,7 @@
     { tag: buf, shm: 1 }
     { tag: net, netview: net-cluster }
     { tag: view, fs: state/fabric, ro: false, mkdir: true }
+    { tag: init, self: true }
   ]
   certify: { root: fabroot, gossip: true, spawn: true, state: state/fabric, seeds: [1] }
 }

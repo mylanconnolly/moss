@@ -358,6 +358,9 @@ var jobs: [n_workers]Job = @splat(.{});
 var worker_stacks: [n_workers][worker_stack]u8 = undefined;
 var serve_a: u64 = 0;
 var net_chan: u64 = 0;
+/// init's front channel (given { tag: init, self: true }): a remote
+/// `dial` reaches a durable service unit by asking init to connect it.
+var init_chan: u64 = 0;
 var net_buf: u64 = 0;
 var fab_buf: u64 = 0; // client shm for members listings
 const no_sock: u64 = 0xffff_ffff_ffff_ffff;
@@ -396,6 +399,10 @@ var mesh_logged = false;
 
 // One outstanding wire exchange at a time (v0 serializes).
 var got_spawn_ack = false;
+var got_connect_ack = false;
+var connect_req_id: u32 = 0;
+var connect_ack_session: u32 = 0;
+var connect_ack_code: u8 = 0;
 var spawn_req_id: u32 = 0; // the request an ack must answer to count
 var spawn_ack_session: u32 = 0;
 var spawn_ack_code: u8 = 0; // 1 = spawned, 2 = unauthorized, 0 = failed
@@ -429,6 +436,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     }
     setup.wipeSecret();
     net_chan = setup.cap(.net);
+    if (setup.has(.init)) init_chan = setup.cap(.init);
     if (setup.has(.view)) {
         state_view = setup.cap(.view);
         state_buf = @ptrFromInt(fsc.attachBuf(state_view).va);
@@ -576,6 +584,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             },
             .connect_peer => |q| freply(doConnectPeer(q.node)),
             .remote_spawn => |q| doRemoteSpawn(q.node, q.image, q.arg),
+            .remote_connect => |q| doRemoteConnect(q.node, q.service),
             .publish => |q| {
                 // Only a local holder of our channel may publish (remote
                 // callers arrive badged and are forwarded above).
@@ -1412,6 +1421,46 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             spawn_ack_code = body[8];
             got_spawn_ack = true;
         },
+        shared.fw_connect_req => {
+            // [service u16][req u32] -> start (via our init) and supervise
+            // the service unit, export its channel, ack the caller's node.
+            // Connecting can start a unit here, so it needs the peer's
+            // spawn authority (signed into its certificate).
+            if (body.len < 6) return;
+            const service = leu16(body[0..2]);
+            const req_id = leu32(body[2..6]);
+            const allowed = p.flags_theirs & fabcert.flag_spawn != 0;
+            if (!allowed) _ = usys.log(glog, "fabsvc: refused connect: peer's certificate does not authorize starting services");
+            var sid: u32 = 0;
+            var ok = false;
+            if (allowed and init_chan != 0) {
+                switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{ .connect = .{ .service = service } }, 0)) {
+                    .ok => |ic| {
+                        if (ic.rep == .connected and ic.cap != 0) {
+                            if (exportNew(ic.cap)) |eid| {
+                                sid = eid;
+                                ok = true;
+                                _ = usys.log(glog, "fabsvc: remote connect served; a service unit runs here");
+                            } else _ = usys.capDrop(ic.cap);
+                        } else if (ic.cap != 0) _ = usys.capDrop(ic.cap);
+                    },
+                    .err => {},
+                }
+            }
+            var ack: [13]u8 = undefined;
+            frameHdr(ack[0..4], 13, shared.fw_connect_ack);
+            puleu32(ack[4..8], req_id);
+            puleu32(ack[8..12], sid);
+            ack[12] = if (ok) 1 else 0;
+            _ = sendFrame(p, &ack);
+        },
+        shared.fw_connect_ack => {
+            if (body.len < 9) return;
+            if (leu32(body[0..4]) != connect_req_id) return;
+            connect_ack_session = leu32(body[4..8]);
+            connect_ack_code = body[8];
+            got_connect_ack = true;
+        },
         shared.fw_lookup_req => {
             // [service u16][req u32] -> the export behind a published
             // service, if any. Any certified member may ask: the service
@@ -1734,6 +1783,52 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
         return;
     }
     freplyCap(.{ .spawned = .{ .node = node } }, minted);
+    _ = usys.capDrop(minted);
+}
+
+/// `dial NODE SERVICE` across the wire: ask the peer to start (via its
+/// init) and supervise the service unit, and hand back a channel to it.
+/// The same shape as a remote spawn, but the peer connects a durable
+/// unit instead of spawning a raw image.
+fn doRemoteConnect(node: u64, service: u64) void {
+    const p = greetedPeer(node) orelse {
+        freply(ferr(.no_peer));
+        return;
+    };
+    got_connect_ack = false;
+    connect_req_id +%= 1;
+    if (connect_req_id == 0) connect_req_id = 1;
+    var req: [10]u8 = undefined;
+    frameHdr(req[0..4], 10, shared.fw_connect_req);
+    puleu16(req[4..6], @intCast(service));
+    puleu32(req[6..10], connect_req_id);
+    if (!sendFrame(p, &req)) {
+        freply(ferr(.disconnected));
+        return;
+    }
+    for (0..50) |_| {
+        pumpAll();
+        if (got_connect_ack) break;
+        if (p.dead) {
+            freply(ferr(.disconnected));
+            return;
+        }
+        usys.sleep(1);
+    }
+    if (!got_connect_ack) {
+        freply(ferr(.timeout));
+        return;
+    }
+    if (connect_ack_code != 1) {
+        freply(ferr(.no_peer));
+        return;
+    }
+    const minted = sessionCap(node, connect_ack_session);
+    if (minted == 0) {
+        freply(ferr(.no_space));
+        return;
+    }
+    freplyCap(.{ .found = .{ .node = node } }, minted);
     _ = usys.capDrop(minted);
 }
 

@@ -1037,6 +1037,11 @@ pub const FabReq = union(enum(u64)) {
     connect_peer: struct { node: u64 },
     /// node 0 = placement: the least-loaded live member is chosen.
     remote_spawn: struct { node: u64, image: u64, arg: u64 },
+    /// Reach a durable service UNIT on `node` through its init: the peer
+    /// starts and supervises it (`connect`), and hands a channel back —
+    /// `dial NODE SERVICE`, transparent clustering. -> found { node } +
+    /// a remote-channel cap.
+    remote_connect: struct { node: u64, service: u64 },
     attach_buf: void, // + shm cap: buffer for members listings (clients)
     /// Badge-0 only, once: the fab_cert_len certificate the root issued
     /// for this node. Verified under the cluster key and checked to name
@@ -1169,6 +1174,8 @@ pub const fw_bulk_resp: u8 = 18; // [seq u32][off u32][len u16][bytes]
 /// The holder of a remote channel is gone: the export behind it (unless
 /// published) is dropped — a remotely spawned child sees peer_dead.
 pub const fw_release: u8 = 19; // [export u32]
+pub const fw_connect_req: u8 = 20; // [service u16][req u32] -> start a service unit via the peer's init
+pub const fw_connect_ack: u8 = 21; // [req u32][session u32][code u8]
 /// A session buffer is at most this many pages (32 KB: a view's buffer).
 pub const fab_bulk_pages: u64 = 8;
 /// One bulk frame carries at most this many bytes: a whole 32 KB

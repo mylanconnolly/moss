@@ -37,4 +37,20 @@ let m2 = (20 | call $sb)?
 let m3 = (5 | call $sa)?
 if $m1 != 20 or $m2 != 40 or $m3 != 10 { (err "multi-client: $m1 $m2 $m3")? }
 echo "script: multi-client ok"
+# A durable service UNIT on node 1, reached across the wire: node 1's
+# init starts and supervises it on demand — no keep-alive loop anywhere,
+# unlike the published worker above. dial NODE SERVICE, service 4 is the
+# doubler unit. Node 1 may still be settling, so try for a while.
+def dial-on-1 [tries] {
+  match (dial 1 4) {
+    ok $s => match (7 | call $s) {
+      ok $v => ok $v
+      err $e => if $tries > 0 { sleep 500; dial-on-1 ($tries - 1) } else { err $e }
+    }
+    err $e => if $tries > 0 { sleep 500; dial-on-1 ($tries - 1) } else { err $e }
+  }
+}
+let dd = (dial-on-1 120)?
+if $dd != 14 { (err "remote dial: wrong answer $dd")? }
+echo "script: remote dial ok"
 echo "script: remote stages done"
