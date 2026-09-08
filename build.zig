@@ -99,6 +99,11 @@ pub fn build(b: *std.Build) void {
         "fs-test",
         "Run the filesystem demo: per-process namespace views on real storage (use run-blk)",
     ) orelse false;
+    const gpu_test = b.option(
+        bool,
+        "gpu-test",
+        "Run the virtio-gpu drill: bring up a scanout, screendumped over QMP by the runner",
+    ) orelse false;
     const net_test = b.option(
         bool,
         "net-test",
@@ -220,6 +225,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "sandbox_test", sandbox_test);
     build_opts.addOption(bool, "flap_test", flap_test);
     build_opts.addOption(bool, "blk_test", blk_test);
+    build_opts.addOption(bool, "gpu_test", gpu_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
@@ -274,6 +280,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "dnsd", .src = "user/dnsd.zig" },
         .{ .name = "clock", .src = "user/clock.zig" },
         .{ .name = "dotd", .src = "user/dotd.zig" },
+        .{ .name = "gpusvc", .src = "user/gpusvc.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -413,6 +420,7 @@ pub fn build(b: *std.Build) void {
         "scripts/dot-drill.msh",         "scripts/worker-demo.msh",
         "conf/units/svc-pub.msh",        "scripts/svc-pub.msh",
         "conf/units/doubler.msh",        "scripts/doubler.msh",
+        "conf/units/gpusvc.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -502,7 +510,7 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{
             "panic_test", "fault_test",  "sched_test",   "domain_test",
             "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-            "blk_test",   "fs_test",     "net_test",     "fabric_test",
+            "blk_test",   "gpu_test",    "fs_test",      "net_test",     "fabric_test",
             "shell_test", "rng_test",    "smmu_test",    "vm_test",
             "guest_test", "vmnode_test", "pan_test",     "cpu_test",
             "users_test", "login_test",  "flogin_test",  "dot_test",
@@ -871,16 +879,17 @@ pub fn build(b: *std.Build) void {
     const all_test_opts = [_][]const u8{
         "panic_test", "fault_test",  "sched_test",   "domain_test",
         "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-        "blk_test",   "fs_test",     "net_test",     "fabric_test",
+        "blk_test",   "gpu_test",    "fs_test",      "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
         "users_test", "login_test",  "flogin_test",  "dot_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc",    "init",
-        "sandbox", "flap",  "blk",   "fs",     "net",    "fabric",
-        "shell",   "rng",   "smmu",  "vm",     "guest",  "vmnode",
-        "pan",     "cpu",   "users", "login",  "flogin", "dot",
+        "sandbox", "flap",  "blk",   "gpu",    "fs",     "net",
+        "fabric",  "shell", "rng",   "smmu",   "vm",     "guest",
+        "vmnode",  "pan",   "cpu",   "users",  "login",  "flogin",
+        "dot",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

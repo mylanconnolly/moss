@@ -9,7 +9,9 @@ const usys = @import("usys.zig");
 
 pub const max_secret = 256;
 pub const max_data = 2048;
-pub const max_device_kinds = 8;
+/// Device caps are filed by DeviceKind value, which is sparse (gpu=16,
+/// input=18), so the array is indexed up to the highest kind.
+pub const max_device_kinds = shared.device_kind_count;
 /// How many caps of one tag (or devices of one kind) a program can be
 /// handed: the cap message's `kind` word is the index for ordinary
 /// tags; devices are filed by kind and take the next free index.

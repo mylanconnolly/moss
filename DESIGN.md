@@ -2192,6 +2192,58 @@ emission; virtio config space must be read at aligned offsets; and severing
 an IRQ binding must also mask the line or a level-triggered device storms
 into the void.
 
+## Graphics: the display server
+
+**Stage 1: virtio-gpu and a scanout (as built, 2026-09-07).** The M3's
+aarch64 QEMU virt boot brings no framebuffer — only x86's Limine boot
+does, which `kernel/fbcon.zig` rides — so on the development machine
+virtio-gpu is the only way to a pixel at all, and it is a userspace
+driver like every other device (`user/gpusvc.zig`, virtio device type
+16, `1af4:1050`, brought up through the same transport as blk/net/cons:
+device cap over the boot channel, IRQ-as-notification, DMA grant). The
+deliberate shape — decided before any code, because a GUI is the goal
+and the invariants would be expensive to retrofit — is that **the
+console does not own the framebuffer; a display server does, reached
+over a channel.** That single choice pays for three things at once:
+supervision (a GPU fault kills and restarts one crash-only domain, not
+the system), fabric-transparency (a surface is a channel, so a remote
+surface is just `dial NODE display` — no new mechanism), and an mshl GUI
+layer later (surfaces are the substrate a declarative toolkit renders
+into). Stage 1 builds the driver and proves the 2D path end to end;
+the surface protocol clients drive is the next stage.
+
+Bring-up is the virtio-gpu control queue speaking its command set:
+negotiate (VERSION_1 + ACCESS_PLATFORM behind the SMMU, no optional
+features), set up the control virtqueue, then `GET_DISPLAY_INFO`,
+`RESOURCE_CREATE_2D` (a B8G8R8X8 host resource), `RESOURCE_ATTACH_BACKING`,
+`SET_SCANOUT`, `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` — each a
+two-descriptor chain (the command device-readable, a response
+device-writable) submitted one at a time and waited on the device's
+interrupt. The one wrinkle is the framebuffer's size: 640×480×4 is 300
+pages, past `dma_alloc`'s 16-page cap, so the backing is a scatter-gather
+list of chunks — which is exactly what `ATTACH_BACKING` takes (an array
+of `{addr, length}` entries). A solid fill needs no cross-chunk offset
+arithmetic (every chunk holds the same pattern); glyph rendering will,
+when the terminal — the first surface client — arrives.
+
+The drill proves it **both** ways, the verification decision for the
+whole arc. Deterministic, in the gate's serial-marker model: gpusvc
+confirms the device returned OK to every command and reads its own
+backing back before it logs `gpu: scanout up` — the driver drove the
+device correctly and the memory is coherent. And real pixels: the test
+runner learned a minimal QMP-over-TCP client (`tools/runner.zig`), so
+once the marker appears it `screendump`s the scanout and asserts the
+centre pixel is exactly the fill colour (`0x3399CC` written as
+B8G8R8X8 reads back as RGB `51,153,204` — the byte order maps through
+with no fudge). The device drill boots a full system under a new `gpu`
+profile: gpusvc is the profile's one essential eager unit, and after
+holding the scanout up a moment for the screendump it exits, so the
+boot ends on a clean shutdown and the usual leak check. Extending
+`DeviceKind` for this (gpu at 16, input at 18 — the sparse virtio
+type numbers) meant the kernel's `device_register` had to validate a
+kind by enum membership (`std.enums.fromInt`) rather than a numeric
+range, since `@enumFromInt` over a gap is illegal behaviour.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

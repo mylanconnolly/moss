@@ -558,9 +558,18 @@ is a plan.
     existing virtio-pci driver recipe (`boot.take` → `setup.device
     (kind)` → `virtio.Dev.open` → `irqBind`/`notifyBind` + `dmaAlloc`),
     as `cons.zig` did for virtio-console.
-  - **Stages:** (1) `gpusvc` + scanout + minimal surface protocol
-    (fullscreen commit/flush); deterministic readback drill + QMP
-    screendump. (2) terminal as a surface client (glyph grid, scroll,
+  - **Stages:** ✅ (1) `gpusvc` + a scanout (landed 2026-09-07):
+    virtio-gpu driver (type 16) brings up scanout 0 through the control
+    queue (GET_DISPLAY_INFO, RESOURCE_CREATE_2D, ATTACH_BACKING — the
+    640×480×4 framebuffer is a scatter-gather list past dma_alloc's
+    16-page cap — SET_SCANOUT, TRANSFER, FLUSH), fills it, and proves it
+    both ways: in-guest readback + command acks behind the `gpu: scanout
+    up` marker, and the runner's QMP screendump asserting the centre
+    pixel is the fill colour. A `gpu` profile drills it; DeviceKind
+    widened (gpu=16, input=18) with the kernel's device-kind validation
+    moved to enum membership. The surface protocol (create_surface /
+    commit) is the immediate next step on this driver. (2) terminal as a
+    surface client (glyph grid, scroll,
     UTF-8, cursor); buffer checksum + screendump of known text. (3)
     `inputsvc`; QMP `input-send-event` drill (host input is inherently
     QMP-gated — no loopback). (4) the graphical *seat*: login/shell binds

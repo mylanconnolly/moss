@@ -220,6 +220,8 @@ fn report(log_h: u64, slot: u8, vendor: u16, device: u16, kind: u64, bar_pa: u64
         2 => "blk",
         3 => "console",
         4 => "rng",
+        16 => "gpu",
+        18 => "input",
         else => "other",
     });
     n = put(&m, n, " bar=0x");

@@ -368,6 +368,7 @@ pub const ImageId = enum(u64) {
     dnsd = 19,
     clock = 20,
     dotd = 21,
+    gpusvc = 22,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -646,15 +647,24 @@ pub const cap_tag_count = 23;
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
 /// can file it without asking.
+/// The virtio device types we drive, valued by their virtio device-type
+/// number (modern PCI device id = 0x1040 + this) so pcisvc files a
+/// function by `device_id - 0x1040`. The enum is SPARSE (gpu at 16,
+/// input at 18), so a raw kind must be validated by enum membership
+/// (`std.meta.intToEnum`), never `@enumFromInt` over a numeric range.
 pub const DeviceKind = enum(u64) {
     none = 0,
     net = 1,
     blk = 2,
     console = 3,
     rng = 4,
+    gpu = 16,
+    input = 18,
 };
 
-pub const device_kind_count = 5;
+/// One past the highest DeviceKind value: pcisvc's range pre-filter for
+/// virtio functions. Membership is what actually gates (intToEnum).
+pub const device_kind_count = 19;
 
 pub const BootReq = union(enum(u64)) {
     /// + cap attachment: what it is for; `kind` (DeviceKind) files a
@@ -1551,7 +1561,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

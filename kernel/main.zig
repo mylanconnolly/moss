@@ -144,6 +144,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.gpu_test) {
+        _ = sched.spawn("boot-watch", gpuTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -563,6 +568,14 @@ fn flapTestWorker(_: u64) void {
 /// bar when the drill's essential unit has exited.
 fn blkTestWorker(_: u64) void {
     systemDrill("blk");
+}
+
+/// The gpu drill: a system boot under profile "gpu" — gpusvc brings up a
+/// scanout on the virtio-gpu device; the host screendumps it over QMP.
+/// The essential gpusvc unit exits after holding the scanout up briefly,
+/// so the kernel holds the leak bar on a clean shutdown.
+fn gpuTestWorker(_: u64) void {
+    systemDrill("gpu");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

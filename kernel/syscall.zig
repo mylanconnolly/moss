@@ -205,12 +205,14 @@ fn sysDeviceRegister(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const h: shared.Handle = @bitCast(frame.arg(0));
     const widx = d.captable.?.lookup(h, .window) orelse return errno(.bad_handle);
     if (widx != 0) return errno(.denied); // the ECAM holder registers
-    const kind_raw = frame.arg(2);
-    if (kind_raw >= shared.device_kind_count) return errno(.bad_arg);
+    // DeviceKind is sparse (gpu=16, input=18), so validate membership,
+    // never @enumFromInt over a numeric range — an unhandled virtio type
+    // would otherwise be illegal behaviour.
+    const kind = std.enums.fromInt(shared.DeviceKind, frame.arg(2)) orelse return errno(.bad_arg);
     const pin: u8 = @truncate(frame.arg(5) & 0xff);
     const bar_index: u8 = @truncate((frame.arg(5) >> 8) & 0xff);
     const want_msi = (frame.arg(5) >> 16) & 1 != 0;
-    const reg = pci.register(@intCast(frame.arg(1) & 0xffff), @enumFromInt(kind_raw), bar_index, frame.arg(3), frame.arg(4), pin, want_msi) catch |e| return errno(switch (e) {
+    const reg = pci.register(@intCast(frame.arg(1) & 0xffff), kind, bar_index, frame.arg(3), frame.arg(4), pin, want_msi) catch |e| return errno(switch (e) {
         pci.Error.TableFull => .no_space,
         else => .bad_arg,
     });
