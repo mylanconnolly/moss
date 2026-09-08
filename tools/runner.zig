@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin };
 
 const Spec = struct {
     name: []const u8,
@@ -72,6 +72,7 @@ const specs = [_]Spec{
     .{ .name = "trust", .kind = .trust, .pass = "trust-test: PASS", .extra = "trust: ok", .append = "profile=trust" },
     .{ .name = "readers", .kind = .readers, .pass = "readers-test: PASS", .extra = "mover: done", .append = "profile=readers" },
     .{ .name = "gui", .kind = .gui, .pass = "gui-test: PASS", .extra = "gui: done count=1", .append = "profile=gui" },
+    .{ .name = "guilogin", .kind = .guilogin, .pass = "guilogin-test: PASS", .extra = "gui: login who=alice", .append = "profile=guilogin" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -347,7 +348,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The graphical seat / focus / trusted-path drill: both a display
         // to render on and a keyboard to type into, plus QMP to type and
         // screendump.
-        .seat, .focus, .trust, .readers, .gui => try args.appendSlice(gpa, &.{
+        .seat, .focus, .trust, .readers, .gui, .guilogin => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -406,6 +407,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gui) {
         if (!try guiDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .guilogin) {
+        if (!try guiLoginDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -952,6 +956,67 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (std.mem.indexOf(u8, content, "gui: done count=1") != null) break;
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the gui app never updated its state and closed", log_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The mshl GUI login drill (`guilogin`): mshrun runs a login form
+/// written in mshl with text-input fields. We type a username, Tab, a
+/// password, screendump the filled form, then Tab to the button and
+/// Enter to submit. The runtime hands the typed text to `update` in the
+/// event's fields; the app checks the credentials and logs the result.
+fn guiLoginDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the login form never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Type into the user field, Tab to the password field, type it.
+    if (!q.typeText("alice")) {
+        reportFailure(spec.name, "QMP could not type the username", log_path);
+        return false;
+    }
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    if (!q.typeText("secret")) {
+        reportFailure(spec.name, "QMP could not type the password", log_path);
+        return false;
+    }
+    sleepMs(250);
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    _ = q.screendump(ppm_path);
+    // Tab to the button, Enter to submit.
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    _ = q.sendKey("ret");
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: login who=alice") != null) break;
+        if (std.mem.indexOf(u8, content, "login failed") != null) {
+            reportFailure(spec.name, "the typed credentials did not reach update intact", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the login was never accepted", log_path);
             return false;
         }
     }

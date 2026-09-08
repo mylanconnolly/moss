@@ -1,0 +1,15 @@
+# The mshl GUI login drill (profile guilogin): mshrun runs the login-form
+# app, which uses text-input fields. mshrun holds a display cap (the
+# compositor with the keyboard); the host types a username and password
+# and submits, and mshrun logs the final value.
+{
+  image:     mshrun
+  script:    scripts/gui-login.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [guilogin]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+  ]
+}

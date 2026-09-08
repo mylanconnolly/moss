@@ -656,9 +656,16 @@ is a plan.
     Enter fires), and drives update/view in zig via Interp.callValue so
     the app has no loop. Compositor tweak: Tab goes to the app when there
     is only one surface. Drilled (profile gui, scripts/gui-demo.msh): a
-    counter written entirely in mshl. Open: text-input fields (login
-    form); GUI login on the trusted path; crash-isolate update in a
-    worker domain; pointer input; richer layout; fabric-remote GUI.
+    counter written entirely in mshl. ✅ Stage 2 (landed 2026-09-08):
+    a `field` text-input widget. The runtime owns the live edit
+    buffers (keyed by field id, `secret` masks them) and hands them
+    to `update` only when a button fires, in the event's `fields`
+    record — so update stays a pure function of coarse events, not
+    keystrokes. Drilled (profile guilogin, scripts/gui-login.msh): a
+    login form in mshl; the host types user/pass and submits, update
+    checks the credentials. Open: GUI login on the trusted path;
+    crash-isolate update in a worker domain; pointer input; richer
+    layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

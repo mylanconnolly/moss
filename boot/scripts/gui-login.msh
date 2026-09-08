@@ -1,0 +1,34 @@
+# The mshl GUI login form (profile guilogin): a GUI as a service, now
+# with text-input fields. `view` shows a message, two fields (the
+# password masked), and a button; the runtime holds the live text and
+# hands it to `update` in the event's `fields` only when the button
+# fires. `update` checks the credentials and threads the result into the
+# state. No loop, no drawing, no per-keystroke handling here.
+let final = (gui {
+    init:  { msg: "enter your credentials", who: "-" }
+    title: "moss login"
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: $state.msg }
+            { kind: "field", id: "user", label: "user" }
+            { kind: "field", id: "pass", label: "pass", secret: true }
+            { kind: "button", id: "login", label: "log in" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "login" => {
+            if ($ev.fields.user == "alice") and ($ev.fields.pass == "secret") {
+              { msg: ("welcome " + $ev.fields.user), who: $ev.fields.user, done: true }
+            } else {
+              { msg: "login failed", who: "-", done: false }
+            }
+          }
+          _ => $state
+        }
+      })
+  })
+"gui: login who=" + (str $final.who)

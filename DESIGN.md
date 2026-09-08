@@ -2564,10 +2564,31 @@ unaffected). The drill (profile `gui`, `boot/scripts/gui-demo.msh`) is a
 counter written entirely in mshl — `view` shows `count: N` and two
 buttons, `update` matches on `$ev.id`; the host types Enter/Tab/Enter, the
 count reaches 1, and mshrun logs the final value. A GUI, defined in mshl,
-with no zig in the app. What's left for the arc: text-input widgets (a
-login form), the GUI login on the trusted path, crash-isolating `update`
-in a worker domain, pointer input, richer layout, and the fabric-remote
-GUI the data-only design already allows.
+with no zig in the app.
+
+**Stage 2 (as built, 2026-09-08).** A `field` widget — a text input, and
+with it the first form. The tension a text field creates against a pure
+`update` is: who owns the half-typed text? Not the app — calling `update`
+per keystroke would make it manage edit buffers in its state, and drown
+the "coarse event" idea. So the *runtime* owns the live text: a small
+table of edit buffers keyed by field id (seeded from the field's `value`
+on first sight, `secret: true` renders it masked). Typing edits the
+focused field's buffer and re-renders; the buffers reach the app only
+when a button fires, in the event's `fields` record — `{ id: "login",
+fields: { user: "alice", pass: "secret" } }`. So `update` still sees a
+submit, not keystrokes, and stays a pure function of coarse events; the
+field defaults still come from state (the view seeds them), so the app
+owns the committed data and the runtime owns only the ephemeral edit.
+Tab moves focus across fields and buttons; Enter fires a button or
+advances past a field. The drill (profile `guilogin`,
+`boot/scripts/gui-login.msh`) is a login form written entirely in mshl:
+two fields (the password masked) and a button, `update` matching the
+credentials out of `$ev.fields`. The host types a username, Tab, a
+password, then submits; the app accepts `alice`/`secret` and logs
+`who=alice` — proof the typed text crossed to `update` intact. What's
+left for the arc: the GUI login on the trusted path, crash-isolating
+`update` in a worker domain, pointer input, richer layout, and the
+fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

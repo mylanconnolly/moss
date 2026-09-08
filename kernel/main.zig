@@ -194,6 +194,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.guilogin_test) {
+        _ = sched.spawn("boot-watch", guiLoginTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -684,6 +689,13 @@ fn readersTestWorker(_: u64) void {
 /// and the app updates its state and view, then closes.
 fn guiTestWorker(_: u64) void {
     systemDrill("gui");
+}
+
+/// The mshl GUI login drill: a system boot under profile "guilogin" — a
+/// login form written in mshl with text-input fields; the host types a
+/// username and password, submits, and the app checks them.
+fn guiLoginTestWorker(_: u64) void {
+    systemDrill("guilogin");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the
