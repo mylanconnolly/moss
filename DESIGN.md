@@ -2312,6 +2312,27 @@ the events crossed. Routing these events to the terminal, so the shell
 reads the keyboard on the graphical console, is the seat (stage 4); this
 stage proves the device and the decode.
 
+**Stage 4: the graphical seat (as built, 2026-09-07).** The pieces meet:
+a session runs on the graphical console, reading the keyboard and writing
+the screen through nothing but the ordinary console protocol. The join is
+that the terminal serves `ConsReq` — the very interface the virtio-console
+driver serves — so a client that speaks it (a shell) runs on the terminal
+with no change: `write` renders as glyphs, `read` returns keystrokes. In
+serve mode `term` holds a surface from gpusvc and a channel to `inputsvc`
+(which now maps keycodes to characters and serves them over `ConsReq.read`
+with a keymap), and a session binds `term` as its console. The seat is
+wired entirely as `unit` gives — the session pulls up the terminal, which
+pulls up the display server and the keyboard — so init starts and
+supervises the whole tree from one dependency. The drill's session is a
+small stand-in shell (`user/gsh.zig`) rather than the full msh, but it is
+a real console loop (prompt, read a line echoing each key, run it); the
+host types `hi⏎` over QMP, and the line travels keyboard → inputsvc →
+terminal → session (logged `gsh: line hi`) and back out to the screen,
+which the screendump confirms has glyphs. The real msh binds the same
+`ConsReq`, so running it here is a topology change, not a code one; the
+interactive `zig build run` window (`-display cocoa` and the device flags)
+is the remaining piece and lives in the arch build sections.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

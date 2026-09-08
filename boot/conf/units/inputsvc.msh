@@ -4,6 +4,7 @@
 # the boot with a clean shutdown + leak check.
 {
   image:     inputsvc
+  arg:       1
   budget:    { user: 8mb }
   profiles:  [input]
   essential: true

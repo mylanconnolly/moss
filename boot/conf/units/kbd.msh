@@ -1,0 +1,11 @@
+# The keyboard for the graphical seat: inputsvc in serve mode (arg 0),
+# mapping key presses to characters and serving them over the console
+# read protocol. Activated on demand by the terminal (a `keys` give).
+{
+  image:  inputsvc
+  arg:    0
+  budget: { user: 8mb }
+  give: [
+    { tag: device, device: input }
+  ]
+}

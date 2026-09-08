@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat };
 
 const Spec = struct {
     name: []const u8,
@@ -65,6 +65,7 @@ const specs = [_]Spec{
     .{ .name = "gpu", .kind = .gpu, .pass = "gpu-test: PASS", .extra = "gpu: surface committed", .append = "profile=gpu" },
     .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .append = "profile=term" },
     .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
+    .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -337,6 +338,13 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-qmp",
             try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
+        // The graphical seat: both a display to render on and a keyboard
+        // to type into, plus QMP to type and screendump.
+        .seat => try args.appendSlice(gpa, &.{
+            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+            "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+        }),
         else => {},
     }
     // net and dot keep their assets (trust roots) in mossfs, so they
@@ -363,6 +371,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .input) {
         if (!try inputInject(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .seat) {
+        if (!try seatDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -527,6 +538,71 @@ fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+}
+
+/// The graphical seat's host side: once the session prints its prompt,
+/// type a line on the (virtual) keyboard and confirm it travelled all the
+/// way through — inputsvc decoded it, the terminal rendered it, and the
+/// session read it back (the "gsh: line hi" marker) — then screendump and
+/// confirm the terminal actually has glyphs on screen.
+fn seatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gsh: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the graphical session never started", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!q.sendKey("h") or !q.sendKey("i") or !q.sendKey("ret")) {
+        reportFailure(spec.name, "QMP could not type the line", log_path);
+        return false;
+    }
+    // The line crossed keyboard -> inputsvc -> terminal -> session.
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gsh: line hi") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the typed line did not reach the session", log_path);
+            return false;
+        }
+    }
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    // The terminal has glyphs on screen (white pixels in the top rows).
+    var any_glyph = false;
+    var y: usize = 0;
+    while (y < 48 and y < img.h) : (y += 1) {
+        var x: usize = 0;
+        while (x < img.w) : (x += 1) {
+            if (eqRgb(pixelAt(img, x, y), 0xFF, 0xFF, 0xFF)) any_glyph = true;
+        }
+    }
+    if (!any_glyph) {
+        reportFailure(spec.name, "the terminal showed no text", log_path);
+        return false;
+    }
+    return true;
 }
 
 /// The net check's client side: once the script says it is serving,

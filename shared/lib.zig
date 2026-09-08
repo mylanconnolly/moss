@@ -372,6 +372,7 @@ pub const ImageId = enum(u64) {
     gpucli = 23,
     term = 24,
     inputsvc = 25,
+    gsh = 26,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -646,9 +647,11 @@ pub const CapTag = enum(u64) {
     /// The display server's channel (gpusvc): a client drives the surface
     /// protocol (create_surface, commit) over it.
     display = 23,
+    /// inputsvc's channel, for a console server that reads the keyboard.
+    keys = 24,
 };
 
-pub const cap_tag_count = 24;
+pub const cap_tag_count = 25;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -1602,7 +1605,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

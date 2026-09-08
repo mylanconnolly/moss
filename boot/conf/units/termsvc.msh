@@ -1,0 +1,14 @@
+# The terminal for the graphical seat: term in serve mode (arg 0). It
+# owns a surface from the display server and reads the keyboard from
+# inputsvc, and serves the console protocol (ConsReq) to a session — so a
+# shell runs on it exactly as it would on a virtio-console. Both backends
+# are pulled up through `unit` gives.
+{
+  image:  term
+  arg:    0
+  budget: { user: 16mb }
+  give: [
+    { tag: display, unit: gpusvc }
+    { tag: keys, unit: kbd }
+  ]
+}

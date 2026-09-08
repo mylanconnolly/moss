@@ -1,0 +1,15 @@
+# The graphical seat drill (profile seat): a demo session on the
+# graphical terminal — it prints a prompt, reads a line from the
+# keyboard (echoing it), and echoes the line back. Pulling in the
+# terminal (a `console` give) starts the whole seat: display server,
+# keyboard, terminal. Its exit ends the boot; the host types a line over
+# QMP and screendumps the result.
+{
+  image:     gsh
+  budget:    { user: 8mb }
+  profiles:  [seat]
+  essential: true
+  give: [
+    { tag: console, unit: termsvc }
+  ]
+}

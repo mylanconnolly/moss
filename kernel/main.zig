@@ -159,6 +159,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.seat_test) {
+        _ = sched.spawn("boot-watch", seatTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -598,6 +603,13 @@ fn termTestWorker(_: u64) void {
 /// the virtio-input event queue; the host injects key presses over QMP.
 fn inputTestWorker(_: u64) void {
     systemDrill("input");
+}
+
+/// The seat drill: a system boot under profile "seat" — a session runs on
+/// the graphical terminal, which renders to the display server and reads
+/// the keyboard from inputsvc; the host types a line over QMP.
+fn seatTestWorker(_: u64) void {
+    systemDrill("seat");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

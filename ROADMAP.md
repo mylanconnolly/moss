@@ -590,9 +590,17 @@ is a plan.
     (type 18), posts event-queue buffers, decodes EV_KEY presses; the
     runner's QMP grew `input-send-event`, the drill injects `h`/`i` and
     the driver logs their evdev keycodes (35/23) and exits on the count.
-    (4) the graphical *seat*: login/shell binds
-    the terminal surface + input, and `zig build run` gets
-    `virtio-gpu-pci` + keyboard/tablet + `-display cocoa`. (5, later, not
+    ✅ (4) the graphical *seat* (mechanism landed 2026-09-07): the
+    terminal serves `ConsReq` (the virtio-console interface) — write
+    renders, read returns keystrokes from inputsvc (which gained a keymap
+    + serves keys over ConsReq.read) — so a shell runs on it unchanged.
+    Wired as `unit` gives (session → term → {gpusvc, inputsvc}). Drilled
+    (profile seat) with a stand-in session (user/gsh.zig): the host types
+    `hi⏎` over QMP, it travels keyboard→inputsvc→term→session (`gsh: line
+    hi`) and back to the screen (screendump has glyphs). Remaining: bind
+    the real msh session (a topology change, same ConsReq) and the
+    interactive `zig build run` window (`-display cocoa` + device flags,
+    in the arch build sections — Framework 16). (5, later, not
     this arc) the compositor. The runner's QMP socket lands first, since
     stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the

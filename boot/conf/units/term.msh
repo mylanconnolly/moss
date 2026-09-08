@@ -4,6 +4,7 @@
 # with the host's screendump taken while the text is up.
 {
   image:     term
+  arg:       1
   budget:    { user: 8mb }
   profiles:  [term]
   essential: true
