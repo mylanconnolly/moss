@@ -194,6 +194,69 @@ fn dropWorker(_: *anyopaque, _: []const u8, id: u64) void {
     close(id);
 }
 
+// ------------------------------ isolation helpers for other hosts ----
+//
+// A host (the GUI runtime) can run one of its own mshl functions in a
+// worker domain for crash-isolation, without going through the `spawn`
+// command: reconstruct the function as a script that reads `$in`, spawn
+// it once, and `call` it per event. A crashed `call` comes back as
+// `.crashed` (the domain died) so the host re-spawns and carries on —
+// only data crosses, the same rule as `spawn`.
+
+/// Whether this host can spawn workers at all (holds a spawner and a way
+/// to stage the worker image).
+pub fn canSpawn() bool {
+    return spawner != 0 and loadStage != null;
+}
+
+/// Spawn a persistent worker running `handler_src` (a script reading
+/// `$in`). Returns its Conn, or null if spawning failed. `close` tears
+/// it down; the host owns it.
+pub fn spawnBlock(it: *mshl.Interp, handler_src: []const u8) ?Conn {
+    const stage_handle = loadStage.?(it) orelse return null;
+    return switch (spawnWorker(stage_handle, handler_src)) {
+        .conn => |c| c,
+        .failed => null,
+    };
+}
+
+/// The outcome of running a worker once, for a host that isolates its
+/// own callback: `.value` is the handler's returned value, unwrapped (no
+/// result envelope). `.raised` is the handler's own error (it ran but
+/// failed — the worker is alive; its message is the value). `.crashed`
+/// is a dead worker (its domain faulted, or refused the call) — the
+/// caller should re-spawn. Both `.raised` and `.crashed` mean "the call
+/// did not produce a value"; only `.crashed` needs a re-spawn.
+pub const CallOut = union(enum) { value: Value, raised: Value, crashed };
+
+/// Run a persistent worker once with `$in = in_val`, returning a
+/// `CallOut`. Unlike `call`, this keeps the crash and the handler's own
+/// error distinct, so a host can hold its last good state across either.
+pub fn callConn(it: *mshl.Interp, c: Conn, in_val: Value) mshl.Error!CallOut {
+    const w = slotOf(c) orelse return .crashed;
+    if (w.pending) return .crashed;
+    const len = switch (try loadRequest(it, w, in_val)) {
+        .len => |n| n,
+        .err => |e| return .{ .raised = e },
+    };
+    return switch (usys.callTyped(shared.WorkReq, shared.WorkResp, w.chan, .{ .call = .{ .len = len } }, 0)) {
+        .ok => |rep| switch (rep) {
+            // The handler's value as a data literal — parsed to the raw
+            // value, not the ok/err envelope `replyToValue` builds.
+            .value => |v| blk: {
+                if (v.len == 0) break :blk .{ .value = .nothing };
+                if (v.len > w.buf_len) break :blk .crashed;
+                const text = try it.arena.dupe(u8, w.buf[0..v.len]);
+                break :blk .{ .value = try mshl.tableize(it.arena, try it.parseData(text)) };
+            },
+            .ok => .{ .value = .nothing },
+            .failed => |e| .{ .raised = .{ .str = try it.arena.dupe(u8, w.buf[0..@min(e.len, w.buf_len)]) } },
+            .refused => .crashed,
+        },
+        .err => .crashed,
+    };
+}
+
 // ---------------------------------------------------------- services
 //
 // A worker `publish`ed to the pool is reached elsewhere by `lookup`,

@@ -689,8 +689,24 @@ is a plan.
     calls back doesn't deadlock the manager; usersvc replies by token
     (not token 0) now that concurrent calls are outstanding. Drilled:
     lconsole (login+console, no GUI) and gisession (the whole path — GUI
-    form → msh on the terminal → echo/exit). Open: crash-isolate update
-    in a worker domain; pointer input; richer layout; fabric-remote GUI.
+    form → msh on the terminal → echo/exit). ✅ Stage 6 (landed
+    2026-09-08): `update` crash-isolated in a worker domain — invariant 1
+    (let-it-crash) for a GUI app. Opt in with `gui { isolate: true }` and
+    the runtime runs `update` in a separate mshrun worker (the `spawn`
+    machinery, workcmds.zig): it reconstructs update's source (params +
+    body) as a `$in`-reading script, spawns the worker once, and `call`s
+    it per event with `{ state, ev }` — only data crosses. A call that
+    returns no value (the worker raised, or its domain faulted) is
+    contained: log, tear the worker down, spawn a fresh one, drop the
+    event, keep the last good state. Two lessons: workcmds.callConn
+    returns the *unwrapped* value and keeps raised/crashed distinct; and
+    an empty record `{}` now round-trips through the data parser (it was
+    read back as an empty block → nothing, so any value with an empty
+    record failed to cross the worker channel). Drilled (profile gboom,
+    scripts/gui-boom.msh): a "boom" button whose update runs away; the
+    runtime logs recovery, a later "increment" reaches count=1, and the
+    leak bar proves the discarded worker was reclaimed. Open: pointer
+    input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom };
 
 const Spec = struct {
     name: []const u8,
@@ -77,6 +77,7 @@ const specs = [_]Spec{
     .{ .name = "gsession", .kind = .gsession, .pass = "gsession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gsession", .timeout_s = 120 },
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
+    .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -279,7 +280,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -361,7 +362,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // (the shell's filesystem view).
         // The GUI front door: the graphical devices, a disk for the users
         // volume, and QMP to type and screendump.
-        .gseat, .gsession, .lconsole, .gisession => {
+        .gseat, .gsession, .lconsole, .gisession, .gboom => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -428,6 +429,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gisession) {
         if (!try gisessionDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .gboom) {
+        if (!try gboomDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -1298,6 +1302,73 @@ fn gisessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (std.mem.indexOf(u8, content, "gui: session ok who=alice") != null) break;
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or k * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the interactive session never ended from the typed exit", log_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The GUI crash-isolation drill (`gboom`): the app's `update` runs in a
+/// worker domain. Once the window is up, the focused first button is
+/// "boom", whose update runs away in unbounded recursion — the worker
+/// domain faults. We wait for the runtime to log that it detected the
+/// dead worker and recovered, then Tab to "increment" and fire it (proof
+/// the runtime survived and update still works), then Tab to "quit". The
+/// app's final value (`count=1`) confirms the increment landed after the
+/// crash; the kernel's leak bar confirms the crashed domain was reclaimed.
+fn gboomDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the gui app never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Enter fires the focused "boom" button: its update overflows the
+    // worker's stack, so the worker domain faults.
+    if (!q.sendKey("ret")) return sfail(spec, log_path, "type the boom key");
+    // The runtime should notice the dead worker, re-spawn it, and log the
+    // recovery — without this line, isolation did nothing.
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: update crashed — recovering") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the runtime never reported recovering from the update crash", log_path);
+            return false;
+        }
+    }
+    sleepMs(200);
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    _ = q.screendump(ppm_path);
+    // Tab to "increment" and fire it (count -> 1, proving update still
+    // works after the crash), then Tab to "quit" and fire it to close.
+    for ([_][]const u8{ "tab", "ret", "tab", "ret" }) |k| {
+        if (!q.sendKey(k)) return sfail(spec, log_path, "type the recovery keys");
+        sleepMs(150);
+    }
+    var k: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        k += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: session survived count=1") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or k * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the runtime did not survive the crash and increment afterward", log_path);
             return false;
         }
     }

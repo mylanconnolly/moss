@@ -1,0 +1,33 @@
+# The crash-isolation drill (profile gboom): a GUI whose `update` is run
+# in a WORKER DOMAIN (`isolate: true`). The "boom" button's update runs
+# away in unbounded self-recursion — it overflows the worker's stack, so
+# the worker domain faults. The runtime detects the dead worker, logs it,
+# re-spawns a fresh one, drops the offending event, and keeps rendering:
+# let-it-crash for a GUI app (invariant 1). Firing "increment" afterward
+# proves the runtime survived and update still works; the final count the
+# runtime reports is the proof.
+let final = (gui {
+    init:    { count: 0, done: false }
+    title:   "moss crash isolation"
+    isolate: true
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: ("count: " + (str $state.count)) }
+            { kind: "button", id: "boom", label: "boom" }
+            { kind: "button", id: "inc", label: "increment" }
+            { kind: "button", id: "quit", label: "quit" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "boom" => { let rec = fn [f, n] { $f $f ($n + 1) }; $rec $rec 0 }
+          "inc" => { { count: ($state.count + 1), done: $state.done } }
+          "quit" => { { count: $state.count, done: true } }
+          _ => $state
+        }
+      })
+  })
+"gui: session survived count=" + (str $final.count)

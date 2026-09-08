@@ -1,0 +1,20 @@
+# The GUI crash-isolation drill (profile gboom): mshrun runs a GUI whose
+# `update` is isolated in a worker domain (`gui { isolate: true }`). It
+# holds a display cap (the compositor) so `gui` can open a surface and
+# route keys, a spawner, and a filesystem view (mossfs on the disk, which
+# carries the img tier) so the runtime can stage the mshrun worker image
+# and run `update` there — a fault in the app's update then kills only the
+# worker, and the runtime re-spawns and carries on. Pulling in the
+# compositor starts the graphical stack; the view pulls up mossfs.
+{
+  image:     mshrun
+  script:    scripts/gui-boom.msh
+  grant:     [log, bootfs, spawner]
+  budget:    { user: 40mb }
+  profiles:  [gboom]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+    { tag: view, fs: "", ro: false }
+  ]
+}

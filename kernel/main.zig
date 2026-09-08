@@ -219,6 +219,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.gboom_test) {
+        _ = sched.spawn("boot-watch", gboomTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -740,6 +745,17 @@ fn lconsoleTestWorker(_: u64) void {
 
 fn gisessionTestWorker(_: u64) void {
     systemDrill("gisession");
+}
+
+/// The GUI crash-isolation drill: a system boot under profile "gboom" —
+/// an mshl GUI whose `update` runs in a worker domain (`isolate: true`).
+/// The host fires a "boom" button whose update overflows the worker's
+/// stack; the worker domain faults, the runtime re-spawns it and carries
+/// on, and a later "increment" proves the runtime survived. The leak bar
+/// (pmem byte-identical, shm at zero) proves the crashed domain was torn
+/// down clean.
+fn gboomTestWorker(_: u64) void {
+    systemDrill("gboom");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

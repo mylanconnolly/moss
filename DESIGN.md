@@ -2671,9 +2671,44 @@ then msh on the graphical terminal, `echo hi` and `exit` typed on the
 virtual keyboard. A login prompt written in mshl, on a trusted path,
 opening a real interactive shell on the user's home.
 
-What's left for the arc: crash-isolating `update` in a worker domain,
-pointer input, richer layout, and the fabric-remote GUI the data-only
-design already allows.
+**Stage 6 (as built, 2026-09-08).** `update` crash-isolated in a worker
+domain — invariant 1 (let-it-crash) for a GUI app. Today the runtime
+calls `update`/`view` in-process through `Interp.callValue`, so a blow-up
+in the app's `update` (a runaway, or any raised error) takes down the
+whole display runtime — we watched it happen: an error propagated out of
+`callValue` and the greeter's script died. Opt in with `gui { isolate:
+true }` and the runtime runs `update` in a *separate* mshrun worker
+domain (the same worker machinery `spawn`/`call` use, `user/workcmds.zig`)
+— only data crosses, exactly the GUI-as-a-service rule, so nothing is
+lost by the move. The runtime reconstructs `update`'s source (its
+`Closure.params` + `.src` body) as a small script that reads `$in` —
+`let state = $in.state; let ev = $in.ev; <body>` — spawns the worker once
+on first use, and per fired event `call`s it with a `{ state, ev }`
+record. A call that does not return a value — the worker *raised* (it ran
+and errored, still alive) or its whole domain *crashed* (a fault) — is
+handled the same way: log it, tear the worker down, spawn a fresh one
+(a runaway leaves the old worker's heap spent, so it is never reused),
+drop the offending event, and keep the last good state. The runtime lives
+on. Two paid-for lessons. First, the worker's reply is wrapped in an
+ok/err *result* envelope by the worker protocol; a new `workcmds.callConn`
+returns the *unwrapped* value and keeps "raised" and "crashed" distinct
+from a clean value (the older `call` folds a crash into an err result).
+Second — and this bit generally — an **empty record could not cross the
+worker channel**: `writeData` renders `{}`, but the strict data parser
+read `{}` back as an empty *block* (→ `nothing`), so any value carrying an
+empty record (here an event with no fields) failed to re-parse with "the
+input is not data". Data has no blocks, so `parseData` now reads `{}` as
+the empty record — an empty record round-trips, on the worker channel and
+anywhere data is serialized. The drill (profile `gboom`,
+`boot/scripts/gui-boom.msh`): an isolated GUI whose "boom" button's
+`update` runs away in unbounded self-recursion; the host fires it, the
+runtime logs `update crashed — recovering`, then the host fires
+"increment" and the app reaches `count=1` — proof the runtime survived
+and `update` still works — and the kernel's leak bar (pmem byte-identical,
+shm at zero) proves the discarded worker was reclaimed clean.
+
+What's left for the arc: pointer input, richer layout, and the
+fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

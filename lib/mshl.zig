@@ -774,6 +774,14 @@ pub const Interp = struct {
                 }
                 return .{ .record = .{ .keys = keys, .vals = vals } };
             },
+            // `{}` parses as an empty block, but data has no blocks — in a
+            // data literal it is the empty record (and is how `writeData`
+            // renders one, so an empty record round-trips through data,
+            // e.g. across a worker channel). A non-empty block is not data.
+            .block => |stmts| {
+                if (stmts.len != 0) return self.fail("data: literal expected (no commands, variables, or operators)", .{});
+                return .{ .record = .{ .keys = &.{}, .vals = &.{} } };
+            },
             .unop => |u| {
                 if (u.op == .neg) {
                     const v = try self.literal(u.operand);

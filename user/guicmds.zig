@@ -29,6 +29,7 @@
 const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
+const workcmds = @import("workcmds.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const Value = mshl.Value;
@@ -38,6 +39,14 @@ var display: u64 = 0; // the compositor channel (surface protocol + input)
 var chan: u64 = 0; // the channel a session drives: `display`, or a trusted one
 var log_h: u64 = 0;
 var trust_token: u64 = 0; // the trusted-path token, if the host was given one
+
+// Crash-isolation of `update` (opt-in `gui { isolate: true }`): the app's
+// `update` runs in a worker domain, so a fault or panic in it kills only
+// that domain — the runtime detects the dead worker, re-spawns it, drops
+// the offending event, and carries on. `iso_src` is the reconstructed
+// worker script (kept for re-spawn); `iso_conn` the live worker, if any.
+var iso_conn: ?workcmds.Conn = null;
+var iso_src: []const u8 = "";
 
 pub fn setup(display_cap: u64, log: u64, secret: []const u8) void {
     display = display_cap;
@@ -331,6 +340,72 @@ fn isDone(state: Value) bool {
     return d.asBool();
 }
 
+// ------------------------------------------------- crash-isolated update
+
+/// Reconstruct `update` (a `fn [stateParam, evParam] body`) as a worker
+/// script that reads `$in`: bind each param, by position, from the
+/// `{ state, ev }` record the runtime sends, then run the body verbatim.
+/// Only data crosses — no captures — so the worker is a pure function of
+/// the pair, exactly the GUI-as-a-service contract. The two params are
+/// bound from the input's fixed `state`/`ev` fields regardless of how the
+/// app named them. Returns null if `update` is not the expected 2-arg
+/// shape (then the caller runs it in-process, unisolated). Arena-held, so
+/// it survives across re-spawns within this `gui` call.
+fn buildUpdateSrc(it: *mshl.Interp, cl: *const mshl.Closure) mshl.Error!?[]const u8 {
+    if (cl.params.len != 2) return null;
+    const in_keys = [_][]const u8{ "state", "ev" };
+    var s: std.ArrayList(u8) = .empty;
+    for (cl.params, in_keys) |p, key| {
+        try s.appendSlice(it.arena, "let ");
+        try s.appendSlice(it.arena, p);
+        try s.appendSlice(it.arena, " = $in.");
+        try s.appendSlice(it.arena, key);
+        try s.append(it.arena, '\n');
+    }
+    try s.appendSlice(it.arena, cl.src);
+    return s.items;
+}
+
+/// The `{ state, ev }` record a worker update reads as `$in`.
+fn wrapStateEv(it: *mshl.Interp, state: Value, ev: Value) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 2);
+    keys[0] = "state";
+    keys[1] = "ev";
+    const vals = try it.arena.alloc(Value, 2);
+    vals[0] = state;
+    vals[1] = ev;
+    return .{ .record = .{ .keys = keys, .vals = vals } };
+}
+
+/// Run `update state ev`. Isolated in a worker when one is live: a clean
+/// reply is the new state; if the app's update misbehaves — raises an
+/// error, or faults its whole domain — the runtime logs it, drops the
+/// offending event, keeps the state as it was, and (on a dead domain)
+/// re-spawns a fresh worker, so it survives and keeps rendering. That is
+/// the let-it-crash contract: an app bug takes down only the worker.
+/// With no worker (isolation off, or a re-spawn that failed) it runs
+/// `update` in-process, the old behaviour.
+fn callUpdate(it: *mshl.Interp, update: Value, state: Value, ev: Value) mshl.Error!Value {
+    if (iso_conn) |c| {
+        const in = try wrapStateEv(it, state, ev);
+        const good: ?Value = switch (try workcmds.callConn(it, c, in)) {
+            .value => |v| v,
+            .raised, .crashed => null,
+        };
+        if (good) |v| return v;
+        // The update misbehaved (raised, or faulted its domain). Tear the
+        // worker down and start a fresh one — a runaway leaves the old
+        // worker's heap spent, so we never reuse it — drop the offending
+        // event, and keep the last good state. The runtime lives on.
+        _ = usys.log(log_h, "gui: update crashed — recovering");
+        workcmds.close(c);
+        iso_conn = workcmds.spawnBlock(it, iso_src);
+        if (iso_conn == null) _ = usys.log(log_h, "gui: could not re-spawn the update worker; running in-process");
+        return state;
+    }
+    return it.callValue(update, &.{ state, ev }, null, null);
+}
+
 pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     if (!std.mem.eql(u8, name, "gui")) return null;
     const spec: mshl.Record = if (args.len > 0 and args[0] == .record)
@@ -346,6 +421,22 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     var state = spec.get("init") orelse Value.nothing;
     const title = if (spec.get("title")) |t| (if (t == .str) t.str else "") else "";
     const want_trusted = spec.get("trusted") != null and (spec.get("trusted").?).asBool();
+    const want_isolate = spec.get("isolate") != null and (spec.get("isolate").?).asBool();
+
+    // Crash-isolate `update` in a worker domain when asked and able: an
+    // app fault then kills only the worker, not the display runtime. The
+    // worker lives for the whole session; `callUpdate` re-spawns it if it
+    // dies. Best-effort — no spawner, or a 2-arg `update` we cannot
+    // reconstruct, and we run `update` in-process as before.
+    iso_conn = null;
+    if (want_isolate and workcmds.canSpawn()) {
+        if (try buildUpdateSrc(it, update.func)) |src| {
+            iso_src = src;
+            iso_conn = workcmds.spawnBlock(it, iso_src);
+            if (iso_conn == null) _ = usys.log(log_h, "gui: could not spawn the update worker; running in-process");
+        }
+    }
+    defer if (iso_conn) |c| workcmds.close(c);
 
     // A `trusted: true` GUI is a login greeter: claim the trusted path so
     // the compositor makes this the login surface — the secure strip is
@@ -414,7 +505,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
         if (fired) |id| {
             const ev = try mkEvent(it, id);
-            state = try it.callValue(update, &.{ state, ev }, null, null);
+            state = try callUpdate(it, update, state, ev);
             if (isDone(state)) break;
         }
     }
