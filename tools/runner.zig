@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu };
 
 const Spec = struct {
     name: []const u8,
@@ -317,6 +317,15 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h2",
             "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),
+        // The graphical console drill: a virtio-gpu to draw on and a QMP
+        // port so the host can screendump the scanout (the real-pixels
+        // half of the "both" verification) and inject input.
+        .gpu => try args.appendSlice(gpa, &.{
+            "-device",
+            "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+            "-qmp",
+            try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+        }),
         else => {},
     }
     // net and dot keep their assets (trust roots) in mossfs, so they
@@ -335,9 +344,51 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         if (!try httpProbe(spec, log_path, polls)) return false;
         if (!try tlsProbe(spec, log_path, polls)) return false;
     }
+    if (spec.kind == .gpu) {
+        if (!try gpuScreendump(spec, log_path, polls)) return false;
+    }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
     return verdict.ok;
+}
+
+/// The graphical drill's host side: once the driver says its scanout is
+/// up, screendump the display over QMP and confirm we got a real image —
+/// the "real pixels" half of the check (the in-guest readback is the
+/// deterministic half). The exact pixel-pattern assertion is tied to
+/// what gpusvc draws and lands with it.
+fn gpuScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gpu: scanout up") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the gpu driver never brought up a scanout", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    if (img.w == 0 or img.h == 0) {
+        reportFailure(spec.name, "the screendump had no pixels", log_path);
+        return false;
+    }
+    return true;
 }
 
 /// The net check's client side: once the script says it is serving,
@@ -1212,6 +1263,111 @@ fn sockSend(stream: Io.net.Stream, bytes: []const u8) void {
 fn tcpConnect(port: u16) !Io.net.Stream {
     const addr = try Io.net.IpAddress.parse("127.0.0.1", port);
     return addr.connect(io, .{ .mode = .stream });
+}
+
+// -------------------------------------------------------------- QMP
+//
+// A minimal QMP client over TCP: enough to hand-shake and drive one
+// synchronous command at a time (screendump for real pixels, send-key /
+// input-send-event for real input) so the graphical drills can be
+// checked the way the net drill is checked from the host. QEMU speaks
+// line-delimited JSON; we scan the accumulated bytes for a top-level
+// `"return"` (ok) or `"error"` (failed), skipping the greeting and any
+// asynchronous events, which carry neither. The display drills open the
+// port with `-qmp tcp:127.0.0.1:<qmp_port>,server=on,wait=off`.
+
+const qmp_port: u16 = 31913;
+
+const Qmp = struct {
+    stream: Io.net.Stream,
+    buf: [16384]u8 = undefined,
+    len: usize = 0,
+
+    fn close(q: *Qmp) void {
+        q.stream.close(io);
+    }
+
+    fn send(q: *Qmp, line: []const u8) void {
+        sockSend(q.stream, line);
+        sockSend(q.stream, "\n");
+    }
+
+    /// Wait (bounded, ~10s) for a reply object; true on `"return"`,
+    /// false on `"error"`, timeout, or a closed connection.
+    fn awaitReply(q: *Qmp) bool {
+        q.len = 0;
+        var tries: usize = 0;
+        while (tries < 100) : (tries += 1) {
+            if (std.mem.indexOf(u8, q.buf[0..q.len], "\"return\"") != null) return true;
+            if (std.mem.indexOf(u8, q.buf[0..q.len], "\"error\"") != null) return false;
+            var pfd = [_]std.posix.pollfd{.{ .fd = q.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            const ready = std.posix.poll(&pfd, 100) catch return false;
+            if (ready == 0) continue;
+            if (q.len == q.buf.len) return false; // reply larger than we hold
+            const n = std.posix.read(q.stream.socket.handle, q.buf[q.len..]) catch return false;
+            if (n == 0) return false;
+            q.len += n;
+        }
+        return false;
+    }
+
+    fn execute(q: *Qmp, line: []const u8) bool {
+        q.send(line);
+        return q.awaitReply();
+    }
+
+    /// Write the current scanout to `ppm_path` (QEMU's binary P6).
+    fn screendump(q: *Qmp, ppm_path: []const u8) bool {
+        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{s}\"}}}}", .{ppm_path}) catch return false;
+        return q.execute(cmd);
+    }
+};
+
+/// Connect to the QMP port (retrying while QEMU comes up) and complete
+/// the capabilities handshake.
+fn qmpConnect(port: u16) !Qmp {
+    var conn: ?Io.net.Stream = null;
+    for (0..50) |_| {
+        conn = tcpConnect(port) catch {
+            sleepMs(poll_ms);
+            continue;
+        };
+        break;
+    }
+    var q = Qmp{ .stream = conn orelse return error.QmpConnect };
+    if (!q.execute("{\"execute\":\"qmp_capabilities\"}")) {
+        q.close();
+        return error.QmpHandshake;
+    }
+    return q;
+}
+
+const Ppm = struct { w: usize, h: usize, px: []const u8 };
+
+/// Parse a QEMU screendump (binary P6, maxval 255). Null on malformation.
+fn readPpm(path: []const u8) ?Ppm {
+    const data = cwd.readFileAlloc(io, path, gpa, .limited(64 << 20)) catch return null;
+    if (data.len < 2 or data[0] != 'P' or data[1] != '6') return null;
+    var i: usize = 2;
+    const w = ppmUint(data, &i) orelse return null;
+    const h = ppmUint(data, &i) orelse return null;
+    const maxv = ppmUint(data, &i) orelse return null;
+    if (maxv != 255 or i >= data.len) return null;
+    i += 1; // the single whitespace byte after maxval, then the pixels
+    const need = w * h * 3;
+    if (data.len - i < need) return null;
+    return .{ .w = w, .h = h, .px = data[i .. i + need] };
+}
+
+fn ppmUint(data: []const u8, i: *usize) ?usize {
+    while (i.* < data.len and (data[i.*] == ' ' or data[i.*] == '\n' or data[i.*] == '\t' or data[i.*] == '\r')) i.* += 1;
+    var v: usize = 0;
+    var any = false;
+    while (i.* < data.len and data[i.*] >= '0' and data[i.*] <= '9') : (i.* += 1) {
+        v = v * 10 + (data[i.*] - '0');
+        any = true;
+    }
+    return if (any) v else null;
 }
 
 /// A log as read for matching: every line's clock stamp removed (see

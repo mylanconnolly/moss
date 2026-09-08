@@ -493,7 +493,86 @@ is a plan.
   worker-level (a worker's handler may itself do http-read/http-write).
   Still open: standalone `channel`/`spawn`; the simultaneous-call race
   (true simultaneity is unforceable in the deterministic drills).
-- **virtio-gpu and input devices** — the graphical console.
+- **The graphical console: a display server, surfaces, and input**
+  (arc planned 2026-09-07). The M3's aarch64 QEMU virt boot brings no
+  framebuffer (only x86's Limine boot does, which `kernel/fbcon.zig`
+  rides), so virtio-gpu is the *only* path to a pixel on the dev
+  machine — which is what makes this the "closer to usable" step. Two
+  decisions taken up front: (a) the end goal is a **foundation for a
+  GUI**, not a bolted-on text grid — so the console does not own the
+  framebuffer, a *display server* does, and the console is its first
+  client; (b) verification is **both** deterministic in-guest readback
+  (the gate rows) *and* a new QMP channel in the runner for real
+  `screendump` pixels and `input-send-event`.
+  - **Invariants (locked 2026-09-07, from the vision):**
+    1. *Let it crash (BEAM sensibility).* gpusvc, inputsvc, and the GUI
+       framework are ordinary supervised crash-only services — a GPU
+       hang or a GUI fault kills and restarts that domain, never the
+       system. This makes surface state **reconstructable**: virtio-gpu
+       resources live host-side, so on gpusvc death a client observes
+       `peer_dead`, re-`dial`s the restarted server, and re-creates its
+       surface, and gpusvc resets the device on spawn. Designed in from
+       Stage 1, not retrofitted. Same for input.
+    2. *Fabric-transparent by construction.* A surface is reached over a
+       channel, and channels are already fabric-transparent, so a remote
+       surface is just `dial NODE display` — no new mechanism. The design
+       must assume no locality: rendering a GUI on one node and using or
+       showing it on another is the same path as remote workers/services.
+       Two modes both fall out: ship the UI *description* and render
+       locally (cheap — the declarative layer below makes this possible),
+       or stream pixels for true remote rendering.
+    3. *GUIs defined in mshl, not zig.* The zig substrate (gpusvc +
+       surfaces + inputsvc) is the bottom; above it sits an **mshl GUI
+       framework** exposing UI to scripts the way `net`/`http`/`fs`
+       commands expose drivers today. Intended shape: **declarative /
+       retained** — a script describes a UI as data (a widget tree) and
+       emits events, rather than drawing pixels per frame; it fits mshl's
+       data-orientation, rebuilds cleanly after a crash (invariant 1), and
+       ships over the fabric (invariant 2). The *programming model* is an
+       explicit LATER decision, made once the substrate works rather than
+       guessed ahead of it; the substrate must only not preclude it.
+    4. *GUI login.* Login/shell ultimately runs as a surface client
+       (Stage 4). Deferred concern for the compositor: a **trusted path**
+       so a hostile surface cannot spoof the login prompt or capture the
+       passphrase.
+  - **The seam (locked):** `gpusvc` (the virtio-gpu driver, virtio type
+    16) owns the device and the scanout and knows nothing of text or
+    windows. Its channel protocol is surface-based from day one:
+    `create_surface{w,h}` hands back a surface id and a mappable XRGB
+    pixel buffer (a badged buffer, the net/fs-view idiom); `commit
+    {surface, damage_rect}` does `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`
+    of the damaged region to the scanout. Stage 1 is one fullscreen
+    surface = the whole scanout; a compositor arbitrating many surfaces
+    onto scanouts (focus, z-order) is then an evolution of this protocol,
+    not a rewrite. The terminal is a *client* that renders the glyph grid
+    into its surface (the existing Departure Mono font moved from
+    `kernel/font/` to a shared asset) — the userspace analog of `fbcon`,
+    coexisting with future graphical apps. `inputsvc` (virtio-input,
+    type 18) exposes keyboard + tablet as a typed event channel, routed
+    to the focused surface (single focus now; real routing is the
+    compositor's).
+  - **Mechanical prep:** widen `shared.DeviceKind` (add `gpu = 16`,
+    `input = 18`; `device_kind_count` 5 → 19 so pcisvc's `kind <
+    device_kind_count` files them) and the kind-indexed Setup arrays
+    (`user/boot.zig` `max_device_kinds` 8 → ≥19). Everything else is the
+    existing virtio-pci driver recipe (`boot.take` → `setup.device
+    (kind)` → `virtio.Dev.open` → `irqBind`/`notifyBind` + `dmaAlloc`),
+    as `cons.zig` did for virtio-console.
+  - **Stages:** (1) `gpusvc` + scanout + minimal surface protocol
+    (fullscreen commit/flush); deterministic readback drill + QMP
+    screendump. (2) terminal as a surface client (glyph grid, scroll,
+    UTF-8, cursor); buffer checksum + screendump of known text. (3)
+    `inputsvc`; QMP `input-send-event` drill (host input is inherently
+    QMP-gated — no loopback). (4) the graphical *seat*: login/shell binds
+    the terminal surface + input, and `zig build run` gets
+    `virtio-gpu-pci` + keyboard/tablet + `-display cocoa`. (5, later, not
+    this arc) the compositor. The runner's QMP socket lands first, since
+    stages 1–3 all lean on it.
+  - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
+    DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
+    `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`
+    is partly in arch sections (Framework 16); the drivers and their
+    deterministic drills proceed independently of it.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 
