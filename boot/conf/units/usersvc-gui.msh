@@ -1,0 +1,19 @@
+# The session manager in serve mode (profile gsession): usersvc (arg 1,
+# no login prompt of its own — it just serves SessReq). The GUI greeter
+# holds a `sess` cap to it and drives the login. Same volume views as the
+# console login; no consoles. Started after apply wrote the records.
+{
+  image:    users
+  arg:      1
+  budget:   { user: 40mb }
+  grant:    [log, spawner, bootfs]
+  profiles: [gsession]
+  after:    apply
+  give: [
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
+    { tag: home, fs: home, ro: false }
+    { tag: shares, fs: conf/shares, ro: false, mkdir: true }
+    { tag: conf, fs: conf/app, ro: true, mkdir: true }
+    { tag: store, fs: img, ro: true }
+  ]
+}

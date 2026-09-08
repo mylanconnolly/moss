@@ -2607,10 +2607,40 @@ the scanout — the unspoofable proof this is the real login — then signs
 in and confirms the app accepted the credentials. A login prompt written
 in mshl, on a path a hostile window cannot spoof or eavesdrop.
 
-What's left for the arc: spawning a real session on a successful login
-(today the drill just confirms the credentials reached `update`),
-crash-isolating `update` in a worker domain, pointer input, richer
-layout, and the fabric-remote GUI the data-only design already allows.
+**Stage 4 (as built, 2026-09-08).** A real session behind the login —
+the front door actually opens. Where the credentials went was the
+question: not into the pure `update` (a login is a side effect, and
+`update` reads no caps), and not per-keystroke. The answer follows the
+model's own grain — the `gui` form *collects* the credentials and
+returns them in its final state, and the script then does one more step:
+`login`. So authentication is an ordinary pipeline action after the
+form, a `login NAME PASS` hosted command (`user/sesscmds.zig`, offered
+when the host holds a `sess` cap) that hands the name and passphrase to
+the session manager over `SessReq.login`. usersvc unseals the identity,
+spawns a session domain under the user's budgets with a view of their
+home, and the command runs it to completion (`wait`) and answers `ok {
+who }`. Only data crosses — the name and the passphrase — and the key
+never leaves usersvc. The greeter is thus a thin trusted front end: the
+trusted-path form for input, `login` for the effect, nothing hardcoded.
+
+The drill (profile `gsession`, `boot/scripts/gui-session.msh`) stands up
+the whole users volume stack (the encrypted volume, `apply` writing the
+records, usersvc in serve mode) *and* the graphical stack in one boot —
+the heaviest yet. The host types the real user (`alice` / `alice-pass`,
+which is why the keymap and the runner learned `-`), the form's
+credentials reach `login`, and the log tells the story: `apply: created
+user alice`, `usersvc: session opened for alice`, the session proving
+`nothing above the home is nameable` and computing its effective
+settings, `usersvc: session closed for alice`, and the greeter's `gui:
+session ok who=alice`. A login prompt written in mshl, on the trusted
+path, opening a real authenticated session on the user's home.
+
+The session here is the console-less verifier (it does its home I/O and
+exits); an *interactive* session — a shell on a graphical console handed
+off from the greeter — is the next step and wants a console argument on
+the login path. What's left for the arc after that: crash-isolating
+`update` in a worker domain, pointer input, richer layout, and the
+fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

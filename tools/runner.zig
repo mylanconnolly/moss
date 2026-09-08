@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession };
 
 const Spec = struct {
     name: []const u8,
@@ -74,6 +74,7 @@ const specs = [_]Spec{
     .{ .name = "gui", .kind = .gui, .pass = "gui-test: PASS", .extra = "gui: done count=1", .append = "profile=gui" },
     .{ .name = "guilogin", .kind = .guilogin, .pass = "guilogin-test: PASS", .extra = "gui: login who=alice", .append = "profile=guilogin" },
     .{ .name = "gtrust", .kind = .gtrust, .pass = "gtrust-test: PASS", .extra = "gui: tlogin who=alice", .append = "profile=gtrust" },
+    .{ .name = "gsession", .kind = .gsession, .pass = "gsession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gsession", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -276,7 +277,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -356,7 +357,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The real-msh seat: the graphical devices plus a disk for mossfs
         // (the shell's filesystem view).
-        .gseat => {
+        // The GUI front door: the graphical devices, a disk for the users
+        // volume, and QMP to type and screendump.
+        .gseat, .gsession => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -414,6 +417,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gtrust) {
         if (!try gtrustDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .gsession) {
+        if (!try gsessionDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -1093,6 +1099,67 @@ fn gtrustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         }
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the trusted login was never accepted", log_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The GUI front-door drill (`gsession`): the trusted login form again,
+/// but the credentials are real — `login` authenticates against the
+/// session manager, which opens a session on the user's home. We wait
+/// for the form, sign in as the real user (alice / alice-pass), and
+/// confirm the manager opened a session and the greeter reported it.
+fn gsessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the login form never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!q.typeText("alice")) {
+        reportFailure(spec.name, "QMP could not type the username", log_path);
+        return false;
+    }
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    if (!q.typeText("alice-pass")) {
+        reportFailure(spec.name, "QMP could not type the passphrase", log_path);
+        return false;
+    }
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    _ = q.sendKey("ret");
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        // Both signals: the manager opened a real session for alice, and
+        // the greeter got the answer back.
+        const ok = std.mem.indexOf(u8, content, "usersvc: session opened for alice") != null and
+            std.mem.indexOf(u8, content, "gui: session ok who=alice") != null;
+        if (ok) break;
+        if (std.mem.indexOf(u8, content, "gui: session failed") != null) {
+            reportFailure(spec.name, "the GUI credentials did not authenticate a real session", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "no session was ever opened from the GUI login", log_path);
             return false;
         }
     }
@@ -2047,6 +2114,7 @@ const Qmp = struct {
                 'a'...'z' => &.{c},
                 '0'...'9' => &.{c},
                 ' ' => "spc",
+                '-' => "minus",
                 '\n' => "ret",
                 else => continue,
             };

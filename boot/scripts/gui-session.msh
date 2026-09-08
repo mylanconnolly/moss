@@ -1,0 +1,33 @@
+# The GUI front door (profile gsession): a trusted-path login form (pure
+# view/update) collects credentials, then `login` hands them to the
+# session manager, which unseals the identity and opens a real session
+# under the user's budgets with a view of their home. The form is data;
+# the login is the one side effect, a pipeline step after the form, not
+# something inside the pure update. On success the session runs to
+# completion and is torn down; we report who signed in.
+let creds = (gui {
+    init:    { user: "", pass: "", done: false }
+    title:   "moss"
+    trusted: true
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: "sign in to moss" }
+            { kind: "field", id: "user", label: "user" }
+            { kind: "field", id: "pass", label: "pass", secret: true }
+            { kind: "button", id: "login", label: "sign in" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "login" => { { user: $ev.fields.user, pass: $ev.fields.pass, done: true } }
+          _ => $state
+        }
+      })
+  })
+match (login $creds.user $creds.pass) {
+  ok $s => { "gui: session ok who=" + $s.who }
+  err $e => { "gui: session failed " + $e }
+}

@@ -159,6 +159,11 @@ pub fn build(b: *std.Build) void {
         "gtrust-test",
         "Run the mshl trusted-login drill: an mshl login form on the trusted path (secure strip)",
     ) orelse false;
+    const gsession_test = b.option(
+        bool,
+        "gsession-test",
+        "Run the GUI front-door drill: an mshl trusted login form authenticates against usersvc and opens a real session",
+    ) orelse false;
     const net_test = b.option(
         bool,
         "net-test",
@@ -292,6 +297,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
+    build_opts.addOption(bool, "gsession_test", gsession_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
@@ -505,6 +511,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/gui-demo.msh",       "scripts/gui-demo.msh",
         "conf/units/gui-login.msh",      "scripts/gui-login.msh",
         "conf/units/gui-tlogin.msh",     "scripts/gui-tlogin.msh",
+        "conf/units/gui-session.msh",    "scripts/gui-session.msh",
+        "conf/units/usersvc-gui.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -592,15 +600,16 @@ pub fn build(b: *std.Build) void {
         const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
         const gopts = b.addOptions();
         for ([_][]const u8{
-            "panic_test",  "fault_test",   "sched_test",   "domain_test",
-            "ipc_test",    "init_test",    "sandbox_test", "flap_test",
-            "blk_test",    "gpu_test",     "term_test",    "input_test",
-            "seat_test",   "gseat_test",   "comp_test",    "focus_test",
-            "trust_test",  "readers_test", "gui_test",     "guilogin_test",
-            "gtrust_test", "fs_test",      "net_test",     "fabric_test",
-            "shell_test",  "rng_test",     "smmu_test",    "vm_test",
-            "guest_test",  "vmnode_test",  "pan_test",     "cpu_test",
-            "users_test",  "login_test",   "flogin_test",  "dot_test",
+            "panic_test",  "fault_test",    "sched_test",   "domain_test",
+            "ipc_test",    "init_test",     "sandbox_test", "flap_test",
+            "blk_test",    "gpu_test",      "term_test",    "input_test",
+            "seat_test",   "gseat_test",    "comp_test",    "focus_test",
+            "trust_test",  "readers_test",  "gui_test",     "guilogin_test",
+            "gtrust_test", "gsession_test", "fs_test",      "net_test",
+            "fabric_test", "shell_test",    "rng_test",     "smmu_test",
+            "vm_test",     "guest_test",    "vmnode_test",  "pan_test",
+            "cpu_test",    "users_test",    "login_test",   "flogin_test",
+            "dot_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -964,23 +973,25 @@ pub fn build(b: *std.Build) void {
     if (only) |o| run_check.addArgs(&.{ "--only", o });
 
     const all_test_opts = [_][]const u8{
-        "panic_test",  "fault_test",   "sched_test",   "domain_test",
-        "ipc_test",    "init_test",    "sandbox_test", "flap_test",
-        "blk_test",    "gpu_test",     "term_test",    "input_test",
-        "seat_test",   "gseat_test",   "comp_test",    "focus_test",
-        "trust_test",  "readers_test", "gui_test",     "guilogin_test",
-        "gtrust_test", "fs_test",      "net_test",     "fabric_test",
-        "shell_test",  "rng_test",     "smmu_test",    "vm_test",
-        "guest_test",  "vmnode_test",  "pan_test",     "cpu_test",
-        "users_test",  "login_test",   "flogin_test",  "dot_test",
+        "panic_test",  "fault_test",    "sched_test",   "domain_test",
+        "ipc_test",    "init_test",     "sandbox_test", "flap_test",
+        "blk_test",    "gpu_test",      "term_test",    "input_test",
+        "seat_test",   "gseat_test",    "comp_test",    "focus_test",
+        "trust_test",  "readers_test",  "gui_test",     "guilogin_test",
+        "gtrust_test", "gsession_test", "fs_test",      "net_test",
+        "fabric_test", "shell_test",    "rng_test",     "smmu_test",
+        "vm_test",     "guest_test",    "vmnode_test",  "pan_test",
+        "cpu_test",    "users_test",    "login_test",   "flogin_test",
+        "dot_test",
     };
     const variants = [_][]const u8{
-        "panic",   "fault",    "sched",  "domain", "ipc",    "init",
-        "sandbox", "flap",     "blk",    "gpu",    "term",   "input",
-        "seat",    "gseat",    "comp",   "focus",  "trust",  "readers",
-        "gui",     "guilogin", "gtrust", "fs",     "net",    "fabric",
-        "shell",   "rng",      "smmu",   "vm",     "guest",  "vmnode",
-        "pan",     "cpu",      "users",  "login",  "flogin", "dot",
+        "panic",   "fault",    "sched",  "domain",   "ipc",   "init",
+        "sandbox", "flap",     "blk",    "gpu",      "term",  "input",
+        "seat",    "gseat",    "comp",   "focus",    "trust", "readers",
+        "gui",     "guilogin", "gtrust", "gsession", "fs",    "net",
+        "fabric",  "shell",    "rng",    "smmu",     "vm",    "guest",
+        "vmnode",  "pan",      "cpu",    "users",    "login", "flogin",
+        "dot",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

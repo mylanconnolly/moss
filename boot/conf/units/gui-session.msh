@@ -1,0 +1,20 @@
+# The GUI front door drill (profile gsession): mshrun runs the trusted
+# login form, then `login`s against the session manager. It holds a
+# display cap (the compositor), a sess cap (usersvc-gui), and the boot
+# trust token (for the trusted path); the buf stages the secret. Started
+# after apply so the user records exist.
+{
+  image:     mshrun
+  script:    scripts/gui-session.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [gsession]
+  essential: true
+  after:     apply
+  give: [
+    { tag: display, unit: compositor }
+    { tag: sess, unit: usersvc-gui }
+    { tag: buf, shm: 1 }
+    { secret: conf/trust.token }
+  ]
+}

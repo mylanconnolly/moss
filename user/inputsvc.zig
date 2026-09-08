@@ -109,6 +109,7 @@ fn keymap(code: u16) u8 {
         57 => ' ',
         28 => '\n', // enter
         15 => '\t', // tab (the compositor's focus-switch key)
+        12 => '-', // minus/hyphen
         14 => 8, // backspace (ASCII BS)
         else => 0,
     };

@@ -671,9 +671,19 @@ is a plan.
     keyboard isolated); a client without the token is refused. Same
     pure view/update form as Stage 2, one flag added. Drilled
     (profile gtrust, scripts/gui-tlogin.msh): the secure strip is
-    checked lit, then sign-in. Open: spawn a real session on
-    success; crash-isolate update in a worker domain; pointer input;
-    richer layout; fabric-remote GUI.
+    checked lit, then sign-in. ✅ Stage 4 (landed 2026-09-08): a real
+    session behind the login. The `gui` form collects the credentials
+    (returns them in its final state); the script then does `login
+    NAME PASS` — a hosted command (sesscmds.zig, offered on a `sess`
+    cap) that authenticates against usersvc, which unseals the
+    identity and opens a real session on the user's home. Drilled
+    (profile gsession, scripts/gui-session.msh): the whole users
+    volume stack (apply + usersvc serve mode) plus the graphical
+    stack; the host signs in as alice/alice-pass and usersvc opens a
+    real session. The session is the console-less verifier. Open: an
+    interactive shell-on-a-graphical-console session (needs a console
+    on the login path); crash-isolate update in a worker domain;
+    pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

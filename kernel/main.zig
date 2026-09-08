@@ -204,6 +204,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.gsession_test) {
+        _ = sched.spawn("boot-watch", gsessionTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -708,6 +713,15 @@ fn guiLoginTestWorker(_: u64) void {
 /// keyboard isolated to the login surface); the host signs in.
 fn gtrustTestWorker(_: u64) void {
     systemDrill("gtrust");
+}
+
+/// The GUI front-door drill: a system boot under profile "gsession" — an
+/// mshl trusted login form collects credentials and `login`s against the
+/// session manager, which unseals the identity and opens a real session
+/// on the user's home. The whole users volume stack plus the graphical
+/// stack, in one boot.
+fn gsessionTestWorker(_: u64) void {
+    systemDrill("gsession");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the
