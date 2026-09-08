@@ -10,5 +10,7 @@
   give: [
     { tag: device, device: gpu }
     { tag: keys, unit: kbd }
+    { tag: buf, shm: 1 }
+    { secret: conf/trust.token }
   ]
 }

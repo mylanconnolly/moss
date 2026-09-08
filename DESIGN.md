@@ -2417,6 +2417,52 @@ same `@min`-narrowing bite had already cost a `@as(u64, pages) * 4096`
 earlier in this file; annotate the `@min` result `: usize` when its
 product feeds an offset.
 
+**Stage 5, the trusted path (as built, 2026-09-08).** A login prompt is
+only safe if the user can tell the real one from a hostile window
+painted to look like it, and if the passphrase they type cannot be read
+by anyone but the login. Both are the compositor's job, because it is the
+one process that owns the scanout and the keyboard. Three mechanisms,
+each small:
+
+- _Per-client identity._ The compositor had none — every client shared
+  one display channel (badge 0). A client proves the boot-provisioned
+  trust token over `attach_trusted` and the compositor mints it a badged
+  channel (`chanMint`, the fs/net/fabric idiom) to drive instead; every
+  surface made over it is owned by that badge and flagged the login
+  surface. A wrong or absent token is refused — the hostile client stays
+  badge 0.
+- _Keystroke isolation._ Each surface records its owner badge, and
+  `next_input` returns a key only to the owner of the _focused_ surface.
+  A client reading the keyboard while another's window has focus gets
+  nothing back — a keystroke for one window never reaches another, and
+  the passphrase stays with the login. (Every pre-existing client is
+  badge 0 and owns its own focused surface, so nothing changed for them.)
+- _An unspoofable indicator + secure attention._ A strip along the very
+  top of the scanout is painted last of all, after even the focus
+  border, so no client surface can draw over it; it is a distinct secure
+  colour only while the focused surface is the login surface. And a
+  non-trusted surface may not steal focus from the login surface — a
+  hostile client cannot pull the keyboard (or the indicator) away from a
+  prompt the user is answering.
+
+The gating token is a boot-provisioned shared secret (an archive file the
+seat gives both the compositor and the greeter, staged through a `buf`
+and read via `boot.Setup.secret()` — the same shape as the fabric root
+seed). A pure capability would be tidier, but the kernel has no
+cap-identity compare and no receive-on-any for a private trusted channel
+served alongside the public one, so the token is the pragmatic authority;
+possession of it is the right to make the login surface. The drill
+(profile `trust`, `user/trustcli.zig`) runs a greeter (good token → login
+surface, focused, secure strip, receives the typed key) beside a hostile
+client (no token → refused the trusted path; its twenty keyboard reads
+all come back empty — "fake blind" — while never stealing focus). The
+runner types one key and checks the verdict logs, the absence of any
+leak, and the secure strip in a screendump. One coupling to remember:
+the compositor is single-threaded, so while the greeter blocks reading
+the keyboard the hostile client's requests queue behind it — the drill
+must type the key before waiting on any of the hostile client's logs, or
+it deadlocks (the synchronous `next_input` = one reader limitation, again).
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

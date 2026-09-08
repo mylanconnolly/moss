@@ -1,0 +1,17 @@
+# The trusted-path drill's login greeter (profile trust): trustcli in
+# greeter mode (arg 0). It holds the boot-provisioned trust token, so it
+# can claim the trusted path from the compositor — its surface wears the
+# unspoofable focus indicator and the keyboard is routed to it alone.
+# Pulling in the compositor (which holds the keyboard) starts the stack.
+{
+  image:     trustcli
+  arg:       0
+  budget:    { user: 8mb }
+  profiles:  [trust]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+    { tag: buf, shm: 1 }
+    { secret: conf/trust.token }
+  ]
+}

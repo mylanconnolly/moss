@@ -375,6 +375,7 @@ pub const ImageId = enum(u64) {
     gsh = 26,
     compcli = 27,
     focuscli = 28,
+    trustcli = 29,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -757,7 +758,15 @@ pub const GpuReq = union(enum(u64)) {
     /// surface that has focus — the compositor routes the keyboard to the
     /// focused window and handles focus-switch keys itself. (Needs the
     /// compositor to hold a keyboard; only the seat/focus profiles do.)
+    /// A key is returned only to the client that owns the focused surface,
+    /// so a keystroke meant for one window never leaks to another.
     next_input: void,
+    /// Claim the trusted path by presenting the boot-provisioned trust
+    /// token. On a match the reply is `trusted` + a badged channel the
+    /// client drives instead of the shared display channel; surfaces made
+    /// over it are the login surface (unspoofable focus indicator, keys
+    /// isolated to it). A wrong or absent token is refused.
+    attach_trusted: struct { token: u64 },
 };
 pub const GpuResp = union(enum(u64)) {
     ok: void,
@@ -765,6 +774,9 @@ pub const GpuResp = union(enum(u64)) {
     created: struct { surface: u64, wh: u64 },
     /// A keystroke `ch` delivered to the focused surface.
     input: struct { surface: u64, ch: u64 },
+    /// The trust token matched: + a badged channel cap the client uses in
+    /// place of the shared display channel for all further requests.
+    trusted: void,
     gpu_err: struct { code: u64 },
 };
 
@@ -1617,7 +1629,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

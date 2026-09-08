@@ -1,0 +1,13 @@
+# The trusted-path drill's hostile client (profile trust): trustcli in
+# fake mode (arg 1), started eagerly alongside the greeter. It has NO
+# trust token, so its attempt to claim the trusted path is refused, and
+# its reads never see the keystrokes routed to the greeter's surface.
+{
+  image:    trustcli
+  arg:      1
+  budget:   { user: 8mb }
+  profiles: [trust]
+  give: [
+    { tag: display, unit: compositor }
+  ]
+}

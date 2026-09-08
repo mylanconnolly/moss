@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust };
 
 const Spec = struct {
     name: []const u8,
@@ -69,6 +69,7 @@ const specs = [_]Spec{
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
     .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
     .{ .name = "focus", .kind = .focus, .pass = "focus-test: PASS", .extra = "focus: ok", .append = "profile=focus" },
+    .{ .name = "trust", .kind = .trust, .pass = "trust-test: PASS", .extra = "trust: ok", .append = "profile=trust" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -341,9 +342,10 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-qmp",
             try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
-        // The graphical seat / focus drill: both a display to render on
-        // and a keyboard to type into, plus QMP to type and screendump.
-        .seat, .focus => try args.appendSlice(gpa, &.{
+        // The graphical seat / focus / trusted-path drill: both a display
+        // to render on and a keyboard to type into, plus QMP to type and
+        // screendump.
+        .seat, .focus, .trust => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -396,6 +398,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .focus) {
         if (!try focusDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .trust) {
+        if (!try trustDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -800,6 +805,92 @@ fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!eqRgb(pixelAt(img, 450, 42), 0x22, 0xCC, 0x22)) {
         std.debug.print("[FAIL] {s}: unfocused window has a border at (450,42): {any}\n", .{ spec.name, pixelAt(img, 450, 42) });
         reportFailure(spec.name, "the focus cue is on the wrong window", log_path);
+        return false;
+    }
+    return true;
+}
+
+/// The trusted-path drill (`trust`): a login greeter claims the trusted
+/// path — its surface takes focus, the compositor lights the secure strip
+/// along the top of the scanout, and the keystroke the host types reaches
+/// the greeter alone. A hostile client is refused the trusted path and
+/// never sees the keystroke. We wait for both to be up, type a key, and
+/// check the verdict logs plus the secure strip in a screendump.
+fn trustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    // The greeter attached: its login surface is focused and the secure
+    // strip is lit. (We do not wait for the hostile client here — the
+    // compositor is single-threaded, so once the greeter blocks reading
+    // the keyboard the hostile client's requests queue behind it; type
+    // the key first, then confirm the refusals.)
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "trust: FAKE ATTACHED") != null) {
+            reportFailure(spec.name, "a client with no token was granted the trusted path", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "trust: attached") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the login greeter never came up", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Type the "passphrase" key. It must reach the login greeter and no one else.
+    if (!q.sendKey("p")) {
+        reportFailure(spec.name, "QMP could not type the passphrase key", log_path);
+        return false;
+    }
+    // The greeter received it (trust: ok), the hostile client was refused
+    // the trusted path (trust: fake refused), and nothing ever leaked.
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "trust: LEAK") != null) {
+            reportFailure(spec.name, "the passphrase leaked to the hostile client", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "trust: FAKE ATTACHED") != null) {
+            reportFailure(spec.name, "a client with no token was granted the trusted path", log_path);
+            return false;
+        }
+        const done = std.mem.indexOf(u8, content, "trust: ok") != null and
+            std.mem.indexOf(u8, content, "trust: fake refused") != null;
+        if (done) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the trusted-path verdict was never confirmed", log_path);
+            return false;
+        }
+    }
+    // The unspoofable indicator: the strip along the very top of the
+    // scanout is the secure colour (RGB 0,102,204) while the login surface
+    // is focused, and the ground below it is not — a client cannot forge it.
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    if (!eqRgb(pixelAt(img, 320, 4), 0x00, 0x66, 0xCC)) {
+        std.debug.print("[FAIL] {s}: secure strip not lit at (320,4): {any}\n", .{ spec.name, pixelAt(img, 320, 4) });
+        reportFailure(spec.name, "the trusted-path indicator is not showing for the login surface", log_path);
+        return false;
+    }
+    if (eqRgb(pixelAt(img, 320, 40), 0x00, 0x66, 0xCC)) {
+        reportFailure(spec.name, "the secure colour bled below the reserved top strip", log_path);
         return false;
     }
     return true;

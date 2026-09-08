@@ -134,6 +134,11 @@ pub fn build(b: *std.Build) void {
         "focus-test",
         "Run the focus drill: the compositor routes keys to the focused window",
     ) orelse false;
+    const trust_test = b.option(
+        bool,
+        "trust-test",
+        "Run the trusted-path drill: a login greeter claims the trusted path; a hostile client is refused and cannot capture the keyboard",
+    ) orelse false;
     const net_test = b.option(
         bool,
         "net-test",
@@ -262,6 +267,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "gseat_test", gseat_test);
     build_opts.addOption(bool, "comp_test", comp_test);
     build_opts.addOption(bool, "focus_test", focus_test);
+    build_opts.addOption(bool, "trust_test", trust_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
@@ -323,6 +329,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "gsh", .src = "user/gsh.zig" },
         .{ .name = "compcli", .src = "user/compcli.zig" },
         .{ .name = "focuscli", .src = "user/focuscli.zig" },
+        .{ .name = "trustcli", .src = "user/trustcli.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -465,10 +472,10 @@ pub fn build(b: *std.Build) void {
         "conf/units/gpusvc.msh",         "conf/units/gpucli.msh",
         "conf/units/term.msh",           "conf/units/inputsvc.msh",
         "conf/units/kbd.msh",            "conf/units/termsvc.msh",
-        "conf/units/gsh.msh",
-        "conf/units/gshell.msh",
-        "conf/units/compcli.msh",
-        "conf/units/compositor.msh",   "conf/units/focuscli.msh",
+        "conf/units/gsh.msh",            "conf/units/gshell.msh",
+        "conf/units/compcli.msh",        "conf/units/compositor.msh",
+        "conf/units/focuscli.msh",       "conf/units/trust-greeter.msh",
+        "conf/units/trust-fake.msh",     "conf/trust.token",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -558,7 +565,9 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{
             "panic_test", "fault_test",  "sched_test",   "domain_test",
             "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-            "blk_test",   "gpu_test",    "term_test",    "input_test",   "seat_test",    "gseat_test",   "comp_test",    "focus_test",   "fs_test",      "net_test",     "fabric_test",
+            "blk_test",   "gpu_test",    "term_test",    "input_test",
+            "seat_test",  "gseat_test",  "comp_test",    "focus_test",
+            "trust_test", "fs_test",     "net_test",     "fabric_test",
             "shell_test", "rng_test",    "smmu_test",    "vm_test",
             "guest_test", "vmnode_test", "pan_test",     "cpu_test",
             "users_test", "login_test",  "flogin_test",  "dot_test",
@@ -927,18 +936,20 @@ pub fn build(b: *std.Build) void {
     const all_test_opts = [_][]const u8{
         "panic_test", "fault_test",  "sched_test",   "domain_test",
         "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-        "blk_test",   "gpu_test",    "term_test",    "input_test",   "seat_test",    "gseat_test",   "comp_test",    "focus_test",   "fs_test",      "net_test",     "fabric_test",
+        "blk_test",   "gpu_test",    "term_test",    "input_test",
+        "seat_test",  "gseat_test",  "comp_test",    "focus_test",
+        "trust_test", "fs_test",     "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
         "users_test", "login_test",  "flogin_test",  "dot_test",
     };
     const variants = [_][]const u8{
-        "panic",   "fault", "sched", "domain", "ipc",    "init",
-        "sandbox", "flap",  "blk",   "gpu",    "term",   "input",
-        "seat",    "gseat", "comp",  "focus",  "fs",     "net",
-        "fabric",  "shell", "rng",   "smmu",   "vm",     "guest",
-        "vmnode",  "pan",   "cpu",   "users",  "login",  "flogin",
-        "dot",
+        "panic",   "fault",  "sched", "domain", "ipc",   "init",
+        "sandbox", "flap",   "blk",   "gpu",    "term",  "input",
+        "seat",    "gseat",  "comp",  "focus",  "trust", "fs",
+        "net",     "fabric", "shell", "rng",    "smmu",  "vm",
+        "guest",   "vmnode", "pan",   "cpu",    "users", "login",
+        "flogin",  "dot",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

@@ -623,9 +623,17 @@ is a plan.
     the compositor draws a yellow border inside the focused surface's
     edges, composited last (on top in overlaps), only when it holds a
     keyboard; the focus drill now also screendumps and checks the border
-    is on A and not on B's own strip. Still open in (5): per-rect
-    composition, a trusted path for login, and concurrent input readers
-    (next_input is synchronous — one reader).
+    is on A and not on B's own strip. ✅ trusted-path login (landed
+    2026-09-08): the compositor gained per-client identity — a client
+    proves a boot-provisioned token over `attach_trusted` and earns a
+    badged channel whose surfaces are the login surface. Keys reach only
+    the owner of the focused surface (the passphrase cannot leak), a
+    secure strip along the top (painted last, unspoofable) lights only
+    while the login surface is focused, and a non-trusted surface may not
+    steal focus from it. Drilled (profile trust, user/trustcli.zig): a
+    greeter with the token vs. a hostile client without — refused the
+    path, blind to the keyboard. Still open in (5): per-rect composition
+    and concurrent input readers (next_input is synchronous — one reader).
     The runner's QMP socket lands first, since stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

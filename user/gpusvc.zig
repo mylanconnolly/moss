@@ -42,6 +42,12 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     dev_h = setup.device(.gpu);
     if (dev_h == 0) usys.exit(169);
     keys_chan = setup.cap(.keys);
+    // The trusted-path token: the seat gives it to the compositor and to
+    // the login greeter alike. A client that presents it over
+    // `attach_trusted` earns a badged channel whose surfaces are the
+    // login surface. No token (the display-only drills) = no trusted path.
+    const sec = setup.secret();
+    if (sec.len >= 8) trust_token = std.mem.readInt(u64, sec[0..8], .little);
     gpudrv(log_h, chan_h);
 }
 
@@ -109,6 +115,8 @@ const Surface = struct {
     w: u32 = 0,
     h: u32 = 0,
     z: u32 = 0, // stacking order; higher is nearer the top
+    owner: u64 = 0, // the badge that created it; keys route to the owner alone
+    trusted: bool = false, // the login surface: wears the secure indicator
 };
 var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
@@ -117,6 +125,18 @@ const bg_word: u32 = 0x0020_2830; // a dark slate
 /// The focus cue: a border drawn inside the focused surface's edges.
 const focus_word: u32 = 0x00FF_FF00; // X<<24|R<<16|G<<8|B -> RGB(255,255,0), yellow
 const focus_border = 4; // pixels
+
+// The trusted path. The compositor holds a boot-provisioned token; a
+// client that echoes it over `attach_trusted` gets a channel badged
+// `trusted_badge`, and every surface it makes is the login surface. The
+// secure indicator is a strip along the very top of the scanout, painted
+// last (a client cannot draw over it) in `secure_word` whenever the
+// focused surface is the trusted one — the user's cue that the keyboard
+// truly reaches the login and nothing else.
+const trusted_badge: u64 = 1;
+const trust_strip = 8; // px, the reserved indicator band at the top
+const secure_word: u32 = 0x0000_66CC; // X<<24|R<<16|G<<8|B -> RGB(0,0x66,0xCC), a deep blue
+var trust_token: u64 = 0; // 0 = the trusted path is disabled (no token)
 
 // Focus: the compositor reads the keyboard (if it holds one) and routes
 // keystrokes to the focused surface; Tab cycles focus.
@@ -290,10 +310,12 @@ fn findSurface(id: u64) ?*Surface {
     return if (sf.used) sf else null;
 }
 
-/// A surface at (x, y) of size w x h: a fresh shm both we and the client
-/// map — the client draws into it, we read it when compositing. It stacks
-/// above every existing surface. Returns the surface id and the cap.
-fn createSurface(x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, shm: u64 } {
+/// A surface at (x, y) of size w x h owned by `owner` (the caller's
+/// badge): a fresh shm both we and the client map — the client draws into
+/// it, we read it when compositing. It stacks above every existing
+/// surface. A surface owned by the trusted badge is the login surface.
+/// Returns the surface id and the cap.
+fn createSurface(owner: u64, x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, shm: u64 } {
     var idx: usize = 0;
     while (idx < max_surfaces and surfaces[idx].used) idx += 1;
     if (idx == max_surfaces) return null;
@@ -306,9 +328,13 @@ fn createSurface(x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, shm: u64 } {
         _ = usys.capDrop(s.data[0]);
         return null;
     }
-    surfaces[idx] = .{ .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096, .x = x, .y = y, .w = w, .h = h, .z = next_z };
+    surfaces[idx] = .{ .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096, .x = x, .y = y, .w = w, .h = h, .z = next_z, .owner = owner, .trusted = owner == trusted_badge };
     next_z += 1;
-    focused = idx + 1; // a new surface takes focus
+    // A new surface takes focus — but a non-trusted surface may not steal
+    // focus from the login surface: a hostile client cannot pull the
+    // keyboard away from a trusted prompt (a small secure-attention rule).
+    const trusted_has_focus = if (findSurface(focused)) |f| f.trusted else false;
+    if (!trusted_has_focus or owner == trusted_badge) focused = idx + 1;
     return .{ .id = idx + 1, .shm = s.data[0] };
 }
 
@@ -405,6 +431,15 @@ fn composite() bool {
     if (keys_chan != 0) {
         if (findSurface(focused)) |sf| drawFocusBorder(sf);
     }
+    // The trusted-path indicator: a strip across the very top of the
+    // scanout, painted last of all so no client surface can forge it. It
+    // is the secure colour only while the focused surface is the login
+    // surface — the user's proof that the keyboard reaches login alone.
+    if (trust_token != 0) {
+        const secure = if (findSurface(focused)) |sf| sf.trusted else false;
+        const word = if (secure) secure_word else bg_word;
+        for (0..trust_strip) |row| fbSpan(row * fb_stride, fb_w, word);
+    }
     return transferAndFlush();
 }
 
@@ -447,12 +482,21 @@ fn cycleFocus() void {
 
 /// The next keystroke for the focused surface: keys go to whoever has
 /// focus, and Tab cycles focus here rather than reaching a client.
-fn nextInput() struct { surface: u64, ch: u8 } {
+fn nextInput(badge: u64) ?struct { surface: u64, ch: u8 } {
+    // Keys reach only the client that owns the focused surface — a
+    // keystroke for one window never leaks to another, and a passphrase
+    // typed into the login surface stays with the login greeter.
+    const owns = if (findSurface(focused)) |sf| sf.owner == badge else false;
+    if (!owns) return null;
     while (true) {
         const ch = readKey();
         if (ch == key_switch_focus) {
             cycleFocus();
             _ = composite(); // the focus cue follows the new focus
+            // A Tab may have moved focus to a surface this caller does not
+            // own; stop here rather than hand it the next window's keys.
+            const still = if (findSurface(focused)) |sf| sf.owner == badge else false;
+            if (!still) return null;
             continue;
         }
         return .{ .surface = focused, .ch = ch };
@@ -468,6 +512,10 @@ fn serveSurfaces(chan_h: u64) noreturn {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
         if (r.err != .ok) continue;
+        // The caller's identity: base clients invoke the shared display
+        // channel (badge 0); the login greeter invokes the badged channel
+        // it earned via `attach_trusted` (badge `trusted_badge`).
+        const badge = r.badge;
         const req = shared.decodeMsg(shared.GpuReq, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
             _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 1 } }, 0);
@@ -488,17 +536,23 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 6 } }, 0);
                     continue;
                 }
-                if (createSurface(px_x, px_y, w, h)) |cs| {
+                if (createSurface(badge, px_x, px_y, w, h)) |cs| {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h) } }, cs.shm);
                 } else {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0);
                 }
             },
             .commit => |q| {
-                _ = findSurface(q.surface) orelse {
+                const sf = findSurface(q.surface) orelse {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 3 } }, 0);
                     continue;
                 };
+                // Only the owner touches its surface — a client cannot
+                // commit (or destroy) another's, the login surface least of all.
+                if (sf.owner != badge) {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0);
+                    continue;
+                }
                 // The damage rect (q.xy/q.wh) is advisory for now; recompose
                 // the whole scanout so overlapping surfaces stay correct.
                 const ok = composite();
@@ -506,6 +560,10 @@ fn serveSurfaces(chan_h: u64) noreturn {
             },
             .destroy_surface => |q| {
                 if (findSurface(q.surface)) |sf| {
+                    if (sf.owner != badge) {
+                        _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0);
+                        continue;
+                    }
                     destroySurface(sf);
                     _ = composite(); // its space returns to the ground
                 }
@@ -516,8 +574,27 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 7 } }, 0);
                     continue;
                 }
-                const in = nextInput();
-                _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .input = .{ .surface = in.surface, .ch = in.ch } }, 0);
+                if (nextInput(badge)) |in| {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .input = .{ .surface = in.surface, .ch = in.ch } }, 0);
+                } else {
+                    // Not the owner of the focused surface: no key for you.
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 9 } }, 0);
+                }
+            },
+            .attach_trusted => |q| {
+                // Prove the boot-provisioned token, earn a badged channel
+                // whose surfaces are the login surface. A wrong or absent
+                // token — or no trusted path at all — is refused.
+                if (trust_token == 0 or q.token != trust_token) {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 10 } }, 0);
+                    continue;
+                }
+                const minted = usys.chanMint(chan_h, trusted_badge);
+                if (minted.err != .ok) {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 11 } }, 0);
+                    continue;
+                }
+                _ = usys.replyTyped(shared.GpuResp, chan_h, .trusted, minted.data[1]);
             },
         }
     }

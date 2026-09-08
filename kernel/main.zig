@@ -179,6 +179,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.trust_test) {
+        _ = sched.spawn("boot-watch", trustTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -646,6 +651,14 @@ fn compTestWorker(_: u64) void {
 /// host types into two windows and the client checks who got what.
 fn focusTestWorker(_: u64) void {
     systemDrill("focus");
+}
+
+/// The trusted-path drill: a system boot under profile "trust" — a login
+/// greeter claims the trusted path (its surface wears the secure strip
+/// and holds the keyboard), while a hostile client is refused the trusted
+/// path and cannot capture the passphrase.
+fn trustTestWorker(_: u64) void {
+    systemDrill("trust");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the
