@@ -62,7 +62,7 @@ const specs = [_]Spec{
     .{ .name = "sandbox", .pass = "sandbox-test: PASS" },
     .{ .name = "flap", .pass = "flap-test: PASS" },
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
-    .{ .name = "gpu", .kind = .gpu, .pass = "gpu-test: PASS", .extra = "gpu: scanout up", .append = "profile=gpu" },
+    .{ .name = "gpu", .kind = .gpu, .pass = "gpu-test: PASS", .extra = "gpu: surface committed", .append = "profile=gpu" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -365,9 +365,9 @@ fn gpuScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         n += 1;
         polls.* += 1;
         const content = readLog(log_path);
-        if (std.mem.indexOf(u8, content, "gpu: scanout up") != null) break;
+        if (std.mem.indexOf(u8, content, "gpu: surface committed") != null) break;
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
-            reportFailure(spec.name, "the gpu driver never brought up a scanout", log_path);
+            reportFailure(spec.name, "the gpu client never committed a surface", log_path);
             return false;
         }
     }
@@ -389,21 +389,32 @@ fn gpuScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "the screendump had no pixels", log_path);
         return false;
     }
-    // gpusvc fills the scanout with 0x3399CC; the screendump is RGB, so
-    // the centre pixel must read back exactly that. This is the real
-    // proof that our resource is what the display shows.
-    const cx = img.w / 2;
-    const cy = img.h / 2;
-    const o = (cy * img.w + cx) * 3;
-    const r = img.px[o];
-    const g = img.px[o + 1];
-    const b = img.px[o + 2];
-    if (r != 0x33 or g != 0x99 or b != 0xCC) {
-        std.debug.print("[FAIL] {s}: centre pixel was ({d},{d},{d}), wanted (51,153,204)\n", .{ spec.name, r, g, b });
-        reportFailure(spec.name, "the scanout did not show gpusvc's fill", log_path);
+    // The client fills the surface with colour A and commits it, then a
+    // centred 200x120 rect with colour B and commits just that rect. So
+    // the centre pixel must be B and a pixel well outside the rect must
+    // be A — proving the surface path, a full commit, and a partial
+    // damage-rect commit (whose copy walks the framebuffer chunks).
+    const inside = pixelAt(img, img.w / 2, img.h / 2);
+    const outside = pixelAt(img, 60, 60);
+    if (!eqRgb(inside, 0xCC, 0x88, 0x22)) {
+        std.debug.print("[FAIL] {s}: centre pixel {any}, wanted (204,136,34)\n", .{ spec.name, inside });
+        reportFailure(spec.name, "the damage-rect commit did not show", log_path);
+        return false;
+    }
+    if (!eqRgb(outside, 0x22, 0x44, 0x66)) {
+        std.debug.print("[FAIL] {s}: corner pixel {any}, wanted (34,68,102)\n", .{ spec.name, outside });
+        reportFailure(spec.name, "the full commit did not show", log_path);
         return false;
     }
     return true;
+}
+
+fn pixelAt(img: Ppm, x: usize, y: usize) [3]u8 {
+    const o = (y * img.w + x) * 3;
+    return .{ img.px[o], img.px[o + 1], img.px[o + 2] };
+}
+fn eqRgb(p: [3]u8, r: u8, g: u8, b: u8) bool {
+    return p[0] == r and p[1] == g and p[2] == b;
 }
 
 /// The net check's client side: once the script says it is serving,

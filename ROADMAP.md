@@ -567,8 +567,15 @@ is a plan.
     up` marker, and the runner's QMP screendump asserting the centre
     pixel is the fill colour. A `gpu` profile drills it; DeviceKind
     widened (gpu=16, input=18) with the kernel's device-kind validation
-    moved to enum membership. The surface protocol (create_surface /
-    commit) is the immediate next step on this driver. (2) terminal as a
+    moved to enum membership. ✅ then the **surface protocol** (landed
+    2026-09-07): gpusvc became a server (shared.GpuReq/GpuResp, display
+    cap tag) — `create_surface` hands back a surface id, size, and a shm
+    pixel buffer the client draws into; `commit{surface, rect}` copies the
+    damage rect into the scanout (fbWrite walking the scatter-gather
+    chunks) and flushes. The copy is the isolation boundary; a remote
+    surface will be `dial NODE display`. Drilled by user/gpucli.zig (fill
+    + full commit, then a centred rect + partial commit; screendump
+    asserts both colours in the right places). (2) terminal as a
     surface client (glyph grid, scroll,
     UTF-8, cursor); buffer checksum + screendump of known text. (3)
     `inputsvc`; QMP `input-send-event` drill (host input is inherently

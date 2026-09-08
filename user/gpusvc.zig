@@ -37,11 +37,11 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 // The device arrives over the boot channel (BootReq cap{device}).
 var dev_h: u64 = 0;
 
-export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     const setup = boot.take(chan_h);
     dev_h = setup.device(.gpu);
     if (dev_h == 0) usys.exit(169);
-    gpudrv(log_h, chan_h, role & 0xff);
+    gpudrv(log_h, chan_h);
 }
 
 // ------------------------------------------------------------ constants
@@ -95,6 +95,11 @@ var avail_shadow: u16 = 0;
 var fb_va: [n_chunks]u64 = @splat(0);
 var fb_dev: [n_chunks]u64 = @splat(0);
 var fb_chunk_pages: [n_chunks]u64 = @splat(0);
+var fb_chunk_start: [n_chunks]u64 = @splat(0); // linear byte offset of each chunk
+
+const max_surfaces = 4;
+const Surface = struct { used: bool = false, shm: u64 = 0, va: u64 = 0, len: usize = 0 };
+var surfaces: [max_surfaces]Surface = @splat(.{});
 
 // ---------------------------------------------------- command building
 
@@ -221,9 +226,125 @@ fn readbackOk() bool {
     return true;
 }
 
+/// Write `len` bytes from `src` into the framebuffer backing at linear
+/// byte offset `off`, walking the scatter-gather chunks. Offsets within
+/// one call only increase, so the chunk cursor advances monotonically.
+fn fbWrite(off: usize, src: [*]const u8, len: usize) void {
+    var o = off;
+    var s: usize = 0;
+    var rem = len;
+    var c: usize = 0;
+    while (rem > 0) {
+        while (c < n_chunks and o >= fb_chunk_start[c] + fb_chunk_pages[c] * 4096) c += 1;
+        if (c >= n_chunks) return; // past the framebuffer: drop the rest
+        const chunk_end = fb_chunk_start[c] + fb_chunk_pages[c] * 4096;
+        const within = o - fb_chunk_start[c];
+        const n = @min(rem, chunk_end - o);
+        const dst: [*]u8 = @ptrFromInt(fb_va[c] + within);
+        @memcpy(dst[0..n], src[s .. s + n]);
+        o += n;
+        s += n;
+        rem -= n;
+    }
+}
+
+/// Ship the whole framebuffer to the host resource and flush it. Called
+/// at bring-up and after every commit (a per-rect transfer is a later
+/// optimisation; correctness only needs the damage rect to bound the
+/// copy into the backing, which commit does).
+fn transferAndFlush() bool {
+    if (submitCmd(cmdTransfer(), 64) != resp_ok_nodata) return false;
+    if (submitCmd(cmdFlush(), 64) != resp_ok_nodata) return false;
+    return true;
+}
+
+// -------------------------------------------------------- surfaces
+
+fn findSurface(id: u64) ?*Surface {
+    if (id == 0 or id > max_surfaces) return null;
+    const sf = &surfaces[id - 1];
+    return if (sf.used) sf else null;
+}
+
+/// A fullscreen surface: a fresh shm of the framebuffer's size that both
+/// we and the client map — the client draws into it, we read it on
+/// commit. Returns the surface id and the cap to hand the client.
+fn createSurface() ?struct { id: u64, shm: u64 } {
+    var idx: usize = 0;
+    while (idx < max_surfaces and surfaces[idx].used) idx += 1;
+    if (idx == max_surfaces) return null;
+    const s = usys.shmCreate(fb_pages);
+    if (s.err != .ok) return null;
+    const m = usys.shmMap(s.data[0]);
+    if (m.err != .ok) {
+        _ = usys.capDrop(s.data[0]);
+        return null;
+    }
+    surfaces[idx] = .{ .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096 };
+    return .{ .id = idx + 1, .shm = s.data[0] };
+}
+
+fn destroySurface(sf: *Surface) void {
+    if (sf.va != 0) _ = usys.shmUnmap(sf.va);
+    if (sf.shm != 0) _ = usys.capDrop(sf.shm);
+    sf.* = .{};
+}
+
+/// Serve the surface protocol on the boot channel (which is also the
+/// service channel, like the console driver): create_surface hands back
+/// a pixel buffer, commit copies its damage rect into the scanout and
+/// flushes. Runs until the last client end closes.
+fn serveSurfaces(chan_h: u64) noreturn {
+    while (true) {
+        const r = usys.recvMsg(chan_h);
+        if (r.err == .peer_dead) usys.exit(0);
+        if (r.err != .ok) continue;
+        const req = shared.decodeMsg(shared.GpuReq, r.data) orelse {
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
+            _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 1 } }, 0);
+            continue;
+        };
+        switch (req) {
+            .create_surface => {
+                if (createSurface()) |cs| {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(fb_w, fb_h) } }, cs.shm);
+                } else {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0);
+                }
+            },
+            .commit => |q| {
+                const sf = findSurface(q.surface) orelse {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 3 } }, 0);
+                    continue;
+                };
+                const x = shared.unpackHi(q.xy);
+                const y = shared.unpackLo(q.xy);
+                const w = shared.unpackHi(q.wh);
+                const h = shared.unpackLo(q.wh);
+                if (@as(u64, x) + w > fb_w or @as(u64, y) + h > fb_h) {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 4 } }, 0);
+                    continue;
+                }
+                const srcbuf: [*]const u8 = @ptrFromInt(sf.va);
+                var ry: usize = 0;
+                while (ry < h) : (ry += 1) {
+                    const row_off = (@as(usize, y) + ry) * fb_stride + @as(usize, x) * fb_bpp;
+                    fbWrite(row_off, srcbuf + row_off, @as(usize, w) * fb_bpp);
+                }
+                const ok = transferAndFlush();
+                _ = usys.replyTyped(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 5 } }, 0);
+            },
+            .destroy_surface => |q| {
+                if (findSurface(q.surface)) |sf| destroySurface(sf);
+                _ = usys.replyTyped(shared.GpuResp, chan_h, .ok, 0);
+            },
+        }
+    }
+}
+
 // ------------------------------------------------------------- driver
 
-fn gpudrv(log_h: u64, chan_h: u64, role: u64) noreturn {
+fn gpudrv(log_h: u64, chan_h: u64) noreturn {
     const n = usys.notifyCreate();
     if (n.err != .ok) usys.exit(170);
     irq_notif = n.data[0];
@@ -248,6 +369,7 @@ fn gpudrv(log_h: u64, chan_h: u64, role: u64) noreturn {
 
     // The framebuffer backing, in dma_alloc-sized chunks.
     var remaining: u64 = fb_pages;
+    var start: u64 = 0;
     for (0..n_chunks) |i| {
         const pages = @min(remaining, chunk_pages);
         const d = usys.dmaAlloc(pages);
@@ -255,6 +377,8 @@ fn gpudrv(log_h: u64, chan_h: u64, role: u64) noreturn {
         fb_va[i] = d.data[0];
         fb_dev[i] = d.data[1];
         fb_chunk_pages[i] = pages;
+        fb_chunk_start[i] = start;
+        start += @as(u64, pages) * 4096;
         remaining -= pages;
     }
 
@@ -279,16 +403,7 @@ fn gpudrv(log_h: u64, chan_h: u64, role: u64) noreturn {
     }
     _ = usys.log(log_h, "gpu: scanout up");
 
-    // Drill mode (role 1): hold the scanout up a moment so the host's QMP
-    // screendump catches it, then let the boot end cleanly. Real mode
-    // (role 0): stay up as the display server. The surface protocol that
-    // clients drive is the next stage; for now it just waits.
-    if (role == 1) {
-        usys.sleepMs(4000);
-        usys.exit(0);
-    }
-    while (true) {
-        const r = usys.recvMsg(chan_h);
-        if (r.err == .peer_dead) usys.exit(0);
-    }
+    // Now serve the surface protocol: clients create a surface and commit
+    // damage rects, and we copy each into the scanout and flush it.
+    serveSurfaces(chan_h);
 }

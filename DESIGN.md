@@ -2244,6 +2244,40 @@ type numbers) meant the kernel's `device_register` had to validate a
 kind by enum membership (`std.enums.fromInt`) rather than a numeric
 range, since `@enumFromInt` over a gap is illegal behaviour.
 
+**Stage 2: the surface protocol (as built, 2026-09-07).** This is the
+seam the whole arc turns on made real — `gpusvc` stops being a
+self-contained drill and becomes a *server* clients drive over a channel
+(`shared.GpuReq`/`GpuResp`, the display cap tag). `create_surface` hands
+back a surface id, its size, and a shm cap — a pixel buffer the client
+maps and draws XRGB into; `commit{surface, rect}` copies that damage
+rectangle from the surface into the scanout's framebuffer and flushes it
+to the host. The copy is the isolation boundary: the client scribbles its
+own buffer, never the device's DMA memory or the scanout, and a future
+compositor arbitrating many surfaces is an evolution of this same
+protocol, not a rewrite — which is what makes it a GUI foundation rather
+than a console with a framebuffer under it. It is also why the display
+is reachable over a channel at all: a channel is fabric-transparent, so a
+remote surface will be `dial NODE display` with no new mechanism.
+
+Committing a rect is where Stage 1's deferred cross-chunk arithmetic
+lands. The surface buffer is one contiguous shm (the framebuffer's size,
+300 pages — under `shm_max_pages`, since only *DMA* allocations carry the
+16-page cap), but the scanout's backing is the 19-chunk scatter-gather
+list, so `fbWrite` walks a linear framebuffer offset across chunk
+boundaries, and commit copies the rect row by row through it. The
+transfer to the host is still the whole framebuffer per commit (a
+per-rect transfer is a later optimisation; correctness only needs the
+damage rect to bound the *copy*, which it does). The drill proves it with
+a client (`user/gpucli.zig`): it fills the surface with one colour and
+commits the full rect, then paints a centred 200×120 rectangle in a
+second colour and commits only that rect. The host screendumps the result
+and asserts the centre pixel is the second colour and a corner is the
+first — the surface path, a full commit, and a partial damage-rect commit
+all at once. The client is the drill's essential unit and pulls the
+display server up through a `unit` give, so its exit ends the boot
+cleanly; the next stage is the terminal, a surface client that renders a
+glyph grid.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

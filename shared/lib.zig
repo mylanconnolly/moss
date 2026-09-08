@@ -369,6 +369,7 @@ pub const ImageId = enum(u64) {
     clock = 20,
     dotd = 21,
     gpusvc = 22,
+    gpucli = 23,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -640,9 +641,12 @@ pub const CapTag = enum(u64) {
     /// tag (a mapped buffer: a u64 length, then the bytes); the matching
     /// private key comes as a `secret`.
     cert = 22,
+    /// The display server's channel (gpusvc): a client drives the surface
+    /// protocol (create_surface, commit) over it.
+    display = 23,
 };
 
-pub const cap_tag_count = 23;
+pub const cap_tag_count = 24;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -725,6 +729,38 @@ pub const BlkResp = union(enum(u64)) {
     capacity: struct { sectors: u64 },
     io_err: struct { code: u64 },
 };
+
+/// The display server's surface protocol (gpusvc). A client creates a
+/// surface — a shared pixel buffer it draws XRGB into — and commits a
+/// damage rect, at which the server copies that rectangle into the
+/// scanout's framebuffer and flushes it to the host. Rects pack two u32
+/// into a u64 (xy = x<<32 | y, wh = w<<32 | h) to fit the four-word ABI.
+pub const GpuReq = union(enum(u64)) {
+    /// A fullscreen surface (the scanout's size). The reply carries the
+    /// surface id and its size, and a shm cap the client maps and draws.
+    create_surface: void,
+    /// Copy the damage rect from `surface` into the scanout and flush.
+    commit: struct { surface: u64, xy: u64, wh: u64 },
+    /// Release a surface and its buffer.
+    destroy_surface: struct { surface: u64 },
+};
+pub const GpuResp = union(enum(u64)) {
+    ok: void,
+    /// + a shm cap attachment: the surface's pixel buffer.
+    created: struct { surface: u64, wh: u64 },
+    gpu_err: struct { code: u64 },
+};
+
+/// Pack/unpack a rect's two u32 halves into the u64 fields above.
+pub fn packPair(a: u32, b: u32) u64 {
+    return (@as(u64, a) << 32) | b;
+}
+pub fn unpackHi(v: u64) u32 {
+    return @truncate(v >> 32);
+}
+pub fn unpackLo(v: u64) u32 {
+    return @truncate(v);
+}
 
 pub const blk_sector_size: u64 = 512;
 

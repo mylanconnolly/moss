@@ -1,15 +1,13 @@
-# The display server (virtio-gpu). Stage 1: it brings up scanout 0, fills
-# it with a known colour and proves the whole 2D path. arg 1 is drill
-# mode — it holds the scanout up a moment for the host's screendump, then
-# exits, and being essential its exit ends the boot (a clean shutdown +
-# leak check). The framebuffer backing wants ~300 DMA pages, so the
+# The display server (virtio-gpu). It brings up scanout 0 and then serves
+# the surface protocol — clients create a surface (a shared pixel buffer)
+# and commit damage rects, which it copies into the scanout and flushes.
+# Activated on demand by whoever needs a display (the gpu drill's client
+# pulls it up). The framebuffer backing wants ~300 DMA pages, so the
 # budget is generous.
 {
-  image:     gpusvc
-  arg:       1
-  budget:    { user: 16mb }
-  profiles:  [gpu]
-  essential: true
+  image:  gpusvc
+  arg:    0
+  budget: { user: 16mb }
   give: [
     { tag: device, device: gpu }
   ]

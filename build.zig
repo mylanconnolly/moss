@@ -281,6 +281,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "clock", .src = "user/clock.zig" },
         .{ .name = "dotd", .src = "user/dotd.zig" },
         .{ .name = "gpusvc", .src = "user/gpusvc.zig" },
+        .{ .name = "gpucli", .src = "user/gpucli.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -420,7 +421,7 @@ pub fn build(b: *std.Build) void {
         "scripts/dot-drill.msh",         "scripts/worker-demo.msh",
         "conf/units/svc-pub.msh",        "scripts/svc-pub.msh",
         "conf/units/doubler.msh",        "scripts/doubler.msh",
-        "conf/units/gpusvc.msh",
+        "conf/units/gpusvc.msh",         "conf/units/gpucli.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));

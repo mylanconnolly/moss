@@ -1,0 +1,15 @@
+# The display drill (profile gpu): a client that drives gpusvc's surface
+# protocol — create a surface, fill and commit it, then commit a centred
+# damage rect in a second colour. Pulling in the display server (a
+# `unit` give hands over its channel) starts and supervises it. Its exit
+# ends the boot: a clean shutdown + leak check, with the host's
+# screendump taken while the scanout is up.
+{
+  image:     gpucli
+  budget:    { user: 8mb }
+  profiles:  [gpu]
+  essential: true
+  give: [
+    { tag: display, unit: gpusvc }
+  ]
+}
