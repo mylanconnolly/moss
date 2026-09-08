@@ -3,9 +3,17 @@
 # lib/settings, unless a key is locked); the whole system's text follows
 # the result, so one `scale` change resizes every program's type at once
 # (the accessibility knob). Sizes are logical pixels, before scaling.
+#
+# `*_family` names a font by its family name; fontsvc registers every
+# .ttf under the assets/fonts tier, so installing a font (drop the file
+# there) and naming it here is all it takes. The bundled families are
+# "IBM Plex Sans", "IBM Plex Mono" and "IBM Plex Serif".
 {
   scale: 1.0
   ui:    16
   title: 22
   mono:  15
+  ui_family:    "IBM Plex Sans"
+  title_family: "IBM Plex Sans"
+  mono_family:  "IBM Plex Mono"
 }

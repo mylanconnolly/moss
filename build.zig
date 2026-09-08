@@ -573,6 +573,7 @@ pub fn build(b: *std.Build) void {
         // tier where fontsvc reads them.
         .{ .at = "assets/fonts/IBMPlexSans.ttf", .from = "assets/fonts/IBMPlexSans.ttf" },
         .{ .at = "assets/fonts/IBMPlexMono-Regular.ttf", .from = "assets/fonts/IBMPlexMono-Regular.ttf" },
+        .{ .at = "assets/fonts/IBMPlexSerif-Regular.ttf", .from = "assets/fonts/IBMPlexSerif-Regular.ttf" },
     };
     for (asset_files) |a| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));

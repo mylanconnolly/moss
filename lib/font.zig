@@ -47,6 +47,7 @@ pub const Font = struct {
     loca: []const u8,
     glyf: []const u8,
     cmap: []const u8,
+    name: []const u8,
     // The chosen Unicode cmap subtable (a slice of `cmap`), and its format.
     cmap_sub: []const u8,
     cmap_fmt: u16,
@@ -72,6 +73,7 @@ pub const Font = struct {
             .loca = &.{},
             .glyf = &.{},
             .cmap = &.{},
+            .name = &.{},
             .cmap_sub = &.{},
             .cmap_fmt = 0,
             .ascent = 0,
@@ -95,6 +97,7 @@ pub const Font = struct {
                 0x6C6F6361 => f.loca = slice, // 'loca'
                 0x676C7966 => f.glyf = slice, // 'glyf'
                 0x636D6170 => f.cmap = slice, // 'cmap'
+                0x6E616D65 => f.name = slice, // 'name'
                 else => {},
             }
         }
@@ -206,6 +209,58 @@ pub const Font = struct {
         const o = @as(usize, idx) * 4;
         if (o + 2 > f.hmtx.len) return 0;
         return u16be(f.hmtx, o);
+    }
+
+    /// The font's family name (`name` table, nameID 1), decoded ASCII into
+    /// `buf` — how the font registry keys a family. Prefers the Windows
+    /// (UTF-16BE) record, falls back to a Mac/ASCII one; empty if absent.
+    pub fn familyName(f: *const Font, buf: []u8) []const u8 {
+        const s = f.name;
+        if (s.len < 6) return "";
+        const count = u16be(s, 2);
+        const str_base = u16be(s, 4);
+        var best_off: usize = 0;
+        var best_len: usize = 0;
+        var best_win = false; // the chosen record is UTF-16BE (platform 3/0)
+        var best_score: i32 = -1;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const rec = 6 + i * 12;
+            if (rec + 12 > s.len) break;
+            const plat = u16be(s, rec);
+            const name_id = u16be(s, rec + 6);
+            if (name_id != 1) continue; // Font Family
+            const len = u16be(s, rec + 8);
+            const off = u16be(s, rec + 10);
+            const score: i32 = switch (plat) {
+                3 => 3, // Windows (UTF-16BE)
+                0 => 2, // Unicode (UTF-16BE)
+                1 => 1, // Mac (single-byte)
+                else => 0,
+            };
+            if (score > best_score) {
+                best_score = score;
+                best_off = @as(usize, str_base) + off;
+                best_len = len;
+                best_win = plat == 3 or plat == 0;
+            }
+        }
+        if (best_score < 0 or best_off + best_len > s.len) return "";
+        const raw = s[best_off .. best_off + best_len];
+        var n: usize = 0;
+        if (best_win) {
+            // UTF-16BE: take the low byte of each unit (ASCII family names).
+            var j: usize = 1;
+            while (j < raw.len and n < buf.len) : (j += 2) {
+                buf[n] = raw[j];
+                n += 1;
+            }
+        } else {
+            const m = @min(raw.len, buf.len);
+            @memcpy(buf[0..m], raw[0..m]);
+            n = m;
+        }
+        return buf[0..n];
     }
 
     /// The byte range of glyph `gid` in the `glyf` table (null = empty glyph).
@@ -695,6 +750,19 @@ fn buildTestFont(a: std.mem.Allocator) ![]u8 {
     try beU16(&cmap, a, 0); // idRangeOffset[0]
     try beU16(&cmap, a, 0); // idRangeOffset[1]
 
+    var name: std.ArrayList(u8) = .empty;
+    defer name.deinit(a);
+    try beU16(&name, a, 0); // format
+    try beU16(&name, a, 1); // count
+    try beU16(&name, a, 18); // stringOffset (6 header + 12 record)
+    try beU16(&name, a, 3); // platformID (Windows)
+    try beU16(&name, a, 1); // encodingID (UTF-16BE)
+    try beU16(&name, a, 0x409); // languageID
+    try beU16(&name, a, 1); // nameID (Font Family)
+    try beU16(&name, a, 8); // length ("Test" in UTF-16BE)
+    try beU16(&name, a, 0); // offset
+    for ("Test") |ch| try beU16(&name, a, ch); // UTF-16BE
+
     return assembleSfnt(a, &.{
         .{ .tag = 0x68656164, .bytes = head.items },
         .{ .tag = 0x6D617870, .bytes = maxp.items },
@@ -703,6 +771,7 @@ fn buildTestFont(a: std.mem.Allocator) ![]u8 {
         .{ .tag = 0x6C6F6361, .bytes = loca.items },
         .{ .tag = 0x676C7966, .bytes = glyf.items },
         .{ .tag = 0x636D6170, .bytes = cmap.items },
+        .{ .tag = 0x6E616D65, .bytes = name.items },
     });
 }
 
@@ -716,6 +785,8 @@ test "parse a minimal TrueType font and read its header + cmap" {
     try testing.expectEqual(@as(u16, 1), f.glyphIndex('A'));
     try testing.expectEqual(@as(u16, 0), f.glyphIndex('B'));
     try testing.expectEqual(@as(u16, 600), f.advance(1));
+    var nb: [64]u8 = undefined;
+    try testing.expectEqualStrings("Test", f.familyName(&nb));
 }
 
 test "rasterize a glyph to an anti-aliased coverage bitmap" {

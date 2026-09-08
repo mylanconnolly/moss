@@ -30,32 +30,93 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 
 var glog: u64 = 0;
 
-// The parsed families. A Font borrows its .ttf bytes from the boot
-// archive (mapped read-only, lives for the program), so no copy is kept.
-var sans: ?font.Font = null;
-var mono: ?font.Font = null;
+// The font registry: every .ttf found (the bundled families in the boot
+// archive's assets/fonts, and any a user installs there) parsed and keyed
+// by family name, so conf/font.msh can pick a family per role by name — a
+// custom font is "install the .ttf, name it in the settings". A Font
+// borrows its bytes from the archive (mapped read-only, lives for the
+// program), so nothing is copied.
+const max_families = 12;
+const Family = struct {
+    name: [64]u8 = undefined,
+    name_len: usize = 0,
+    font: font.Font = undefined,
+};
+var families: [max_families]Family = @splat(.{});
+var nfamilies: usize = 0;
 
-// The effective font settings. A role maps to a family and a base size in
-// logical pixels; every size is multiplied by `scale` (the accessibility
-// knob) to reach device pixels. These start at built-in defaults and are
-// replaced by conf/font.msh (the system settings layer) at startup.
+fn registerFont(bytes: []const u8) void {
+    if (nfamilies >= max_families) return;
+    const parsed = font.Font.parse(bytes) catch return;
+    var fam = &families[nfamilies];
+    fam.font = parsed;
+    const nm = fam.font.familyName(&fam.name);
+    if (nm.len == 0) return; // unnamed: cannot be selected, skip
+    fam.name_len = nm.len;
+    if (familyIndex(nm) != null) return; // already have this family
+    nfamilies += 1;
+}
+
+fn familyIndex(name: []const u8) ?u8 {
+    for (families[0..nfamilies], 0..) |*fam, i| {
+        if (std.mem.eql(u8, fam.name[0..fam.name_len], name)) return @intCast(i);
+    }
+    return null;
+}
+
+// The effective font settings: the scale, and per-role base sizes and
+// family names (conf/font.msh, the system settings layer). Every size is
+// multiplied by `scale` (the accessibility knob) to reach device pixels.
 var scale: f32 = 1.0;
 var ui_base: f32 = 16;
 var title_base: f32 = 22;
 var mono_base: f32 = 15;
-const RoleCfg = struct { mono: bool, base: f32 };
-fn roleCfg(role: u64) RoleCfg {
+const NameBuf = struct {
+    buf: [64]u8 = undefined,
+    len: usize = 0,
+    fn set(nb: *NameBuf, s: []const u8) void {
+        const n = @min(s.len, nb.buf.len);
+        @memcpy(nb.buf[0..n], s[0..n]);
+        nb.len = n;
+    }
+    fn get(nb: *const NameBuf) []const u8 {
+        return nb.buf[0..nb.len];
+    }
+};
+var ui_fam: NameBuf = .{};
+var title_fam: NameBuf = .{};
+var mono_fam: NameBuf = .{};
+
+fn roleFamilyName(role: u64) []const u8 {
     return switch (role) {
-        @intFromEnum(shared.FontRole.ui) => .{ .mono = false, .base = ui_base },
-        @intFromEnum(shared.FontRole.title) => .{ .mono = false, .base = title_base },
-        @intFromEnum(shared.FontRole.mono) => .{ .mono = true, .base = mono_base },
-        else => .{ .mono = false, .base = ui_base },
+        @intFromEnum(shared.FontRole.title) => title_fam.get(),
+        @intFromEnum(shared.FontRole.mono) => mono_fam.get(),
+        else => ui_fam.get(),
     };
+}
+fn roleBase(role: u64) f32 {
+    return switch (role) {
+        @intFromEnum(shared.FontRole.title) => title_base,
+        @intFromEnum(shared.FontRole.mono) => mono_base,
+        else => ui_base,
+    };
+}
+/// The registry index of a role's family (its configured name, else the
+/// first registered family as a fallback).
+fn roleFontIndex(role: u64) u8 {
+    return familyIndex(roleFamilyName(role)) orelse 0;
+}
+fn roleFont(role: u64) ?*font.Font {
+    if (nfamilies == 0) return null;
+    return &families[roleFontIndex(role)].font;
+}
+fn rolePx(role: u64, req_px: u64) f32 {
+    const base: f32 = if (req_px != 0) @floatFromInt(req_px) else roleBase(role);
+    return base * scale;
 }
 
 // Reading the settings file: a small mshl interp parses the data literal,
-// lib/settings merges the (future) user layer over it. Numbers only, so
-// nothing needs to outlive the parse.
+// lib/settings merges the (future) user layer over it.
 var settings_mem: [64 << 10]u8 = undefined;
 fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const mshl.Value, _: ?mshl.Value) mshl.Error!?mshl.Value {
     return null;
@@ -67,11 +128,13 @@ fn numF(v: mshl.Value) ?f32 {
         else => null,
     };
 }
+fn strOf(v: mshl.Value) ?[]const u8 {
+    return if (v == .str) v.str else null;
+}
 
 /// Read the system font settings (conf/font.msh) into the effective
-/// scale and per-role base sizes. A user layer merges over this the same
-/// way (lib/settings) once a session pushes one; for now the system layer
-/// is the whole of it.
+/// scale, per-role sizes and per-role family names. A user layer merges
+/// over this the same way (lib/settings) once a session pushes one.
 fn readSettings(text: []const u8) void {
     if (text.len == 0) return;
     var fba = std.heap.FixedBufferAllocator.init(&settings_mem);
@@ -93,15 +156,9 @@ fn readSettings(text: []const u8) void {
     if (eff.get("mono")) |x| if (numF(x)) |f| {
         mono_base = f;
     };
-}
-fn roleFont(role: u64) ?*font.Font {
-    const c = roleCfg(role);
-    if (c.mono) return if (mono) |*m| m else null;
-    return if (sans) |*s| s else null;
-}
-fn rolePx(role: u64, req_px: u64) f32 {
-    const base: f32 = if (req_px != 0) @floatFromInt(req_px) else roleCfg(role).base;
-    return base * scale;
+    if (eff.get("ui_family")) |x| if (strOf(x)) |s| ui_fam.set(s);
+    if (eff.get("title_family")) |x| if (strOf(x)) |s| title_fam.set(s);
+    if (eff.get("mono_family")) |x| if (strOf(x)) |s| mono_fam.set(s);
 }
 
 // The shared glyph atlas: an 8-bit coverage bitmap, packed by shelves.
@@ -129,10 +186,10 @@ fn packRect(w: usize, h: usize) ?struct { x: usize, y: usize } {
     return .{ .x = x, .y = y };
 }
 
-// The glyph cache: (role-family, px, codepoint) → its atlas rect + metrics.
+// The glyph cache: (family, px, codepoint) → its atlas rect + metrics.
 const Cached = struct {
     used: bool = false,
-    is_mono: bool = false,
+    fam: u8 = 0,
     px: u16 = 0,
     cp: u21 = 0,
     ax: u16 = 0,
@@ -150,11 +207,12 @@ var cache: [1024]Cached = @splat(.{});
 var raster_heap: [1 << 20]u8 = undefined;
 
 fn ensureGlyph(role: u64, px_dev: u16, cp: u21) ?*Cached {
-    const is_mono = roleCfg(role).mono;
+    if (nfamilies == 0) return null;
+    const fam = roleFontIndex(role);
     for (&cache) |*c| {
-        if (c.used and c.is_mono == is_mono and c.px == px_dev and c.cp == cp) return c;
+        if (c.used and c.fam == fam and c.px == px_dev and c.cp == cp) return c;
     }
-    const f = roleFont(role) orelse return null;
+    const f = &families[fam].font;
     var fba = std.heap.FixedBufferAllocator.init(&raster_heap);
     const gid = f.glyphIndex(cp);
     const g = font.rasterize(f, fba.allocator(), gid, @floatFromInt(px_dev)) catch return null;
@@ -176,7 +234,7 @@ fn ensureGlyph(role: u64, px_dev: u16, cp: u21) ?*Cached {
     const c = slot orelse &cache[0]; // full: clobber slot 0 (rare at these sizes)
     c.* = .{
         .used = true,
-        .is_mono = is_mono,
+        .fam = fam,
         .px = px_dev,
         .cp = cp,
         .ax = @intCast(pos.x),
@@ -200,24 +258,29 @@ fn roleMetrics(role: u64, px_dev: f32) struct { line: i32, ascent: i32 } {
 }
 
 fn loadFonts(blob: []const u8) void {
-    // The system settings layer sets the scale and per-role sizes.
-    if (shared.marcFind(blob, "conf/font.msh")) |cfg| readSettings(cfg);
-    // The bundled families are seeded into the assets tier, so the archive
-    // holds them at assets/fonts/… — read them straight from the boot
-    // archive (a Font borrows the mapped bytes), no filesystem needed.
-    if (shared.marcFind(blob, "assets/fonts/IBMPlexSans.ttf")) |bytes| {
-        sans = font.Font.parse(bytes) catch null;
+    // Register every .ttf under assets/fonts/ in the boot archive — the
+    // bundled families and any a build/user drops there. A Font borrows
+    // the mapped archive bytes, so no filesystem is needed.
+    var it = shared.marcIter(blob);
+    while (it.next()) |e| {
+        if (std.mem.startsWith(u8, e.path, "assets/fonts/") and std.mem.endsWith(u8, e.path, ".ttf")) {
+            registerFont(e.data);
+        }
     }
-    if (shared.marcFind(blob, "assets/fonts/IBMPlexMono-Regular.ttf")) |bytes| {
-        mono = font.Font.parse(bytes) catch null;
-    }
-    if (sans == null and mono == null) {
+    if (nfamilies == 0) {
         _ = usys.log(glog, "fontsvc: no fonts loaded");
         usys.exit(161);
     }
-    // If one family is missing, fall back to whichever loaded.
-    if (sans == null) sans = mono;
-    if (mono == null) mono = sans;
+    // Default role→family, then let the settings layer override sizes,
+    // scale and family names.
+    ui_fam.set("IBM Plex Sans");
+    title_fam.set("IBM Plex Sans");
+    mono_fam.set("IBM Plex Mono");
+    if (shared.marcFind(blob, "conf/font.msh")) |cfg| readSettings(cfg);
+    for (families[0..nfamilies]) |*fam| {
+        var b: [96]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: family '{s}'", .{fam.name[0..fam.name_len]}) catch "fontsvc: family");
+    }
 }
 
 export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {

@@ -2745,12 +2745,13 @@ composite glyphs, quadratic Béziers), and fills them with a 4×
 supersampled non-zero-winding scanline rasterizer into an 8-bit coverage
 bitmap. Every future format converges here — OTF/CFF, WOFF (zlib), WOFF2
 (Brotli) are additive front-ends that normalize to the SFNT it reads. (2)
-`user/fontsvc.zig` — the service: it loads the bundled families (IBM Plex
-Sans and Mono, OFL) straight from the boot archive's assets tier (no
-filesystem needed, so it runs in any profile), owns the effective font
-settings (family-per-role and a scale factor, the settings substrate the
-next step wires), and rasterizes glyphs on demand into a **shared coverage
-atlas** — a client attaches a request/response buffer, maps the atlas
+`user/fontsvc.zig` — the service: it scans the boot archive's assets/fonts
+tier and registers every `.ttf` it finds by its family name (from the
+`name` table) into a **font registry** — the bundled IBM Plex Sans, Mono
+and Serif (OFL), and any font dropped there; no filesystem needed, so it
+runs in any profile. It owns the effective font settings (a family name
+and a base size per role, plus a scale factor), and rasterizes glyphs on
+demand into a **shared coverage atlas** — a client attaches a request/response buffer, maps the atlas
 once, and `layout`s each string; fontsvc shapes it, caches each glyph in
 the atlas, and writes the glyph run (pen positions + atlas rects +
 metrics) back into the buffer. It never draws: rendering stays
@@ -2771,7 +2772,11 @@ goes through fontsvc and the GUI lays out from the *scaled* metrics, one
 `scale: 1.5` resizes the whole UI at once and the layout reflows to match
 (bigger buttons, wider fields, taller rows) — the system-wide
 accessibility knob, the thing Linux never manages because each toolkit
-scales on its own. The per-user layer plugs into the same `merge` call (a
+scales on its own. The same file names a font family per role
+(`ui_family`, `title_family`, `mono_family`); since fontsvc registers
+whatever `.ttf` is under assets/fonts by family name, installing a font is
+dropping the file there and naming it here — the system's typographic
+personality is data, not code (a serif title, say, next to a sans body). The per-user layer plugs into the same `merge` call (a
 user's `home/<user>/conf/font.msh` over the system one); wiring a session
 to push its user's effective settings — and a post-login GUI to show them
 — is the next step.
@@ -2782,10 +2787,12 @@ caps, or init deems it unwired; and the rasterizer's `top` is the bitmap's
 signed device-y offset from the baseline (negative above), so the client
 *adds* it — subtracting scattered every glyph off the line.
 
-What's left for the arc: pushing a user's font settings from their session
-(per-user scale, once a post-login GUI shows it); user-installed fonts;
-the OTF/CFF, WOFF and WOFF2 front-ends; pointer input, richer layout, and
-the fabric-remote GUI the data-only design already allows.
+What's left for the arc: reading a runtime fonts directory off the
+filesystem (installing without a rebuild) and pushing a user's font
+settings from their session (per-user family/scale, once a post-login GUI
+shows it); the OTF/CFF, WOFF and WOFF2 front-ends so any real font file
+loads; pointer input, richer layout, and the fabric-remote GUI the
+data-only design already allows.
 
 ## Distribution: the fabric
 

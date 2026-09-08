@@ -729,9 +729,16 @@ is a plan.
     lays out from the scaled metrics, so one `scale: 1.5` resizes the whole
     UI and the layout reflows (proven — 16px→24px, buttons/rows grew). The
     per-user layer plugs into the same merge; a session pushing it (and a
-    post-login GUI to show it) is next. Open: session push of per-user font
-    settings; user-installed fonts; OTF/WOFF/WOFF2 front-ends; pointer
-    input; richer layout; fabric-remote GUI.
+    post-login GUI to show it) is next. ✅ Font registry / custom fonts
+    (landed 2026-09-08): fontsvc scans assets/fonts in the archive and
+    registers every .ttf by its family name (lib/font familyName from the
+    `name` table); conf/font.msh selects a family per role (ui/title/mono),
+    so installing a font is dropping the .ttf there + naming it — the
+    system's typographic personality is data (proven: a serif title beside
+    a sans body). Three bundled: IBM Plex Sans/Mono/Serif. Open: a runtime
+    fonts dir off the filesystem (install without rebuild) + session push
+    of per-user family/scale; OTF/WOFF/WOFF2 front-ends; pointer input;
+    richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`
