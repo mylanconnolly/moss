@@ -768,7 +768,7 @@ fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         m += 1;
         polls.* += 1;
         const content = readLog(log_path);
-        if (std.mem.indexOf(u8, content, "focus: ok") != null) return true;
+        if (std.mem.indexOf(u8, content, "focus: ok") != null) break;
         if (std.mem.indexOf(u8, content, "focus: bad") != null) {
             reportFailure(spec.name, "the compositor routed keys to the wrong window", log_path);
             return false;
@@ -778,6 +778,31 @@ fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+    // Focus ended on window A (red, at 40,40) after Tab, so it wears the
+    // yellow focus border; window B (green, at 200,40) does not. The two
+    // windows overlap (A spans x40..340, B x200..500), and the focused
+    // window's border is composited last, so it sits on top in the overlap
+    // — sample B's own strip (x>340) to see it is unbordered green.
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    if (!eqRgb(pixelAt(img, 42, 42), 0xFF, 0xFF, 0x00)) {
+        std.debug.print("[FAIL] {s}: focused window had no border at (42,42): {any}\n", .{ spec.name, pixelAt(img, 42, 42) });
+        reportFailure(spec.name, "the focus cue is not on the focused window", log_path);
+        return false;
+    }
+    if (!eqRgb(pixelAt(img, 450, 42), 0x22, 0xCC, 0x22)) {
+        std.debug.print("[FAIL] {s}: unfocused window has a border at (450,42): {any}\n", .{ spec.name, pixelAt(img, 450, 42) });
+        reportFailure(spec.name, "the focus cue is on the wrong window", log_path);
+        return false;
+    }
+    return true;
 }
 
 /// The net check's client side: once the script says it is serving,

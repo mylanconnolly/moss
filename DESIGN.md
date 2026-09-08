@@ -2392,8 +2392,30 @@ reached the second window and `b` the first (Tab moved focus between
 them). For now the compositor serves one input reader synchronously
 (`next_input` blocks on the keyboard), which suits a single foreground
 session; many concurrent readers would want the deferred-reply or
-per-surface-doorbell shape, and a visible focus cue (a window border) and
-a trusted path for the login window are the remaining pieces.
+per-surface-doorbell shape, and a trusted path for the login window is
+the remaining piece.
+
+**Stage 5, the focus cue (as built, 2026-09-08).** Focus you cannot see
+is focus you cannot trust, so the compositor draws a yellow border just
+inside the focused surface's edges — but only when it holds a keyboard
+(the display-only drills have no focus to show). The cue is composited
+_last_, on top of every surface, so a focused window that overlaps others
+wears an unbroken border in the overlap too; the drill's two windows
+overlap by design (A at x40..340, B at x200..500), and after Tab moves
+focus to A its border sits over B in the shared strip, while B's own
+strip (x>340) stays unbordered green — which is what the screendump
+asserts. **Lesson (paid for here):** filling a span reaches the
+framebuffer's scatter-gather chunks 256 words at a time, and the chunk
+size came from `@min(remaining, buf.len)` against a comptime length —
+which narrows the result type to just fit that bound, so the following
+`take * fb_bpp` overflowed the narrow type and tripped a Debug safety
+panic. gpusvc's panic handler exits silently (255), and a supervised
+domain's faults are delivered to its supervisor rather than logged, so
+the symptom was a compositor that vanished mid-composite with no fault
+line — invisible until the panic handler was made to log its message. The
+same `@min`-narrowing bite had already cost a `@as(u64, pages) * 4096`
+earlier in this file; annotate the `@min` result `: usize` when its
+product feeds an offset.
 
 ## Distribution: the fabric
 

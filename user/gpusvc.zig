@@ -114,6 +114,9 @@ var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
 /// The compositor's ground, seen wherever no surface covers the scanout.
 const bg_word: u32 = 0x0020_2830; // a dark slate
+/// The focus cue: a border drawn inside the focused surface's edges.
+const focus_word: u32 = 0x00FF_FF00; // X<<24|R<<16|G<<8|B -> RGB(255,255,0), yellow
+const focus_border = 4; // pixels
 
 // Focus: the compositor reads the keyboard (if it holds one) and routes
 // keystrokes to the focused surface; Tab cycles focus.
@@ -332,6 +335,48 @@ fn blit(sf: *const Surface) void {
     }
 }
 
+/// Fill `n` pixels of the framebuffer starting at byte offset `off` with
+/// one colour word (through the scatter-gather chunks).
+fn fbSpan(off: usize, n: usize, word: u32) void {
+    var run: [256]u32 = undefined;
+    for (&run) |*p| p.* = word;
+    const src: [*]const u8 = @ptrCast(&run);
+    var done: usize = 0;
+    while (done < n) {
+        // The `: usize` is load-bearing: @min against the comptime length
+        // narrows its result type to fit 256, and `take * fb_bpp` would then
+        // overflow that narrow type (256*4 > its max). Keep the width.
+        const take: usize = @min(n - done, run.len);
+        fbWrite(off + done * fb_bpp, src, take * fb_bpp);
+        done += take;
+    }
+}
+
+/// Draw the focus cue: a border just inside the focused surface's edges,
+/// on top of everything, clipped to the scanout — so the window that has
+/// the keyboard is visibly the one.
+fn drawFocusBorder(sf: *const Surface) void {
+    var w: usize = sf.w;
+    if (@as(usize, sf.x) + w > fb_w) w = fb_w - @as(usize, sf.x);
+    var h: usize = sf.h;
+    if (@as(usize, sf.y) + h > fb_h) h = fb_h - @as(usize, sf.y);
+    if (w == 0 or h == 0) return;
+    const bw = @min(@as(usize, focus_border), @min(w, h));
+    const x0 = @as(usize, sf.x);
+    // Top and bottom bands (full width).
+    for (0..bw) |i| {
+        fbSpan((@as(usize, sf.y) + i) * fb_stride + x0 * fb_bpp, w, focus_word);
+        fbSpan((@as(usize, sf.y) + h - 1 - i) * fb_stride + x0 * fb_bpp, w, focus_word);
+    }
+    // Left and right columns (between the bands).
+    var ry: usize = bw;
+    while (ry + bw < h) : (ry += 1) {
+        const base = (@as(usize, sf.y) + ry) * fb_stride;
+        fbSpan(base + x0 * fb_bpp, bw, focus_word);
+        fbSpan(base + (x0 + w - bw) * fb_bpp, bw, focus_word);
+    }
+}
+
 /// Recompose the scanout: paint the ground, then every surface bottom to
 /// top, then ship it to the host. Full recompose per commit — simple and
 /// correct; per-rect composition is a later optimisation.
@@ -354,6 +399,11 @@ fn composite() bool {
         const sf = next orelse break;
         blit(sf);
         painted = sf.z;
+    }
+    // The focus cue goes on top, so a partially-covered focused window
+    // still shows it (only when we hold a keyboard — otherwise no focus).
+    if (keys_chan != 0) {
+        if (findSurface(focused)) |sf| drawFocusBorder(sf);
     }
     return transferAndFlush();
 }
@@ -402,6 +452,7 @@ fn nextInput() struct { surface: u64, ch: u8 } {
         const ch = readKey();
         if (ch == key_switch_focus) {
             cycleFocus();
+            _ = composite(); // the focus cue follows the new focus
             continue;
         }
         return .{ .surface = focused, .ch = ch };

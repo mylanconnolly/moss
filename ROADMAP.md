@@ -619,9 +619,13 @@ is a plan.
     surface, GpuReq.next_input returns the next key tagged with the
     focused surface, Tab cycles focus. Drilled (profile focus,
     user/focuscli.zig): two windows, `a`/Tab/`b` typed, client confirms
-    each key reached the right window. Still open in (5): per-rect
-    composition, a visible focus cue, a trusted path for login, and
-    concurrent input readers (next_input is synchronous — one reader).
+    each key reached the right window. ✅ focus cue (landed 2026-09-08):
+    the compositor draws a yellow border inside the focused surface's
+    edges, composited last (on top in overlaps), only when it holds a
+    keyboard; the focus drill now also screendumps and checks the border
+    is on A and not on B's own strip. Still open in (5): per-rect
+    composition, a trusted path for login, and concurrent input readers
+    (next_input is synchronous — one reader).
     The runner's QMP socket lands first, since stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
