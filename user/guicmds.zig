@@ -48,9 +48,24 @@ var trust_token: u64 = 0; // the trusted-path token, if the host was given one
 var iso_conn: ?workcmds.Conn = null;
 var iso_src: []const u8 = "";
 
-pub fn setup(display_cap: u64, log: u64, secret: []const u8) void {
+// The system font service, when the host holds one: text is laid out and
+// rasterized there (a shared coverage atlas), so the GUI renders in the
+// real family at the accessibility scale. Without it we fall back to the
+// built-in bitmap font — see `haveFont`/`drawStr`.
+var font_chan: u64 = 0;
+var font_buf: [*]u8 = undefined; // our request/response buffer (shm)
+var font_buf_len: usize = 0;
+var atlas: [*]const u8 = undefined; // fontsvc's coverage atlas (mapped ro)
+var atlas_w: usize = 0;
+var font_ok = false; // fontsvc is attached and usable
+const n_roles = 3;
+var role_line: [n_roles]usize = @splat(0);
+var role_asc: [n_roles]usize = @splat(0);
+
+pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64) void {
     display = display_cap;
     log_h = log;
+    font_chan = font_cap;
     if (secret.len >= 8) trust_token = std.mem.readInt(u64, secret[0..8], .little);
 }
 
@@ -68,14 +83,13 @@ pub fn signature(name: []const u8) ?mshl.Signature {
 
 // ------------------------------------------------------------ rendering
 
-// The font is the shared 8x16 bitmap, drawn at 2x with an EPX/Scale2x
-// smoothing pass (`drawGlyph`): each source pixel becomes 2x2, and a
-// diagonal edge rounds its corner instead of stair-stepping, so text is
-// larger and far less blocky than a raw blit. A glyph cell is thus 16x32.
+// Text is drawn through the system font service when the host has one
+// (real vector families, scaled centrally); the built-in 8x16 bitmap,
+// drawn 2x crisp (`drawGlyph`), is the fallback. `drawStr`/`strW` pick.
 const fsw = font.width; //  8, source
 const fsh = font.height; // 16, source
-const gw = fsw * 2; // 16, drawn
-const gh = fsh * 2; // 32, drawn
+const gw = fsw * 2; // 16, the bitmap cell width
+const gh = fsh * 2; // 32, the bitmap cell height
 
 // A centred window on the 1024x768 scanout, with room to breathe.
 const win_w = 680;
@@ -202,12 +216,134 @@ fn drawGlyph(cx: usize, cy: usize, ch: u8, fg: u32, bg: u32) void {
 }
 
 /// Draw a string at (x, y) with a foreground and background colour, one
-/// 16x32 glyph cell per character, clipped to the window.
+/// 16x32 glyph cell per character, clipped to the window (bitmap fallback).
 fn drawText(x: usize, y: usize, s: []const u8, fg: u32, bg: u32) void {
     for (s, 0..) |ch, i| {
         const cx = x + i * gw;
         if (cx + gw > win_w or y + gh > win_h) break;
         drawGlyph(cx, y, ch, fg, bg);
+    }
+}
+
+// ------------------------------------------------ system font (fontsvc)
+
+const R_UI: u64 = @intFromEnum(shared.FontRole.ui);
+const R_TITLE: u64 = @intFromEnum(shared.FontRole.title);
+
+/// Attach to the font service once: our request/response buffer, the
+/// shared atlas (mapped read-only), and each role's metrics. Sets
+/// `font_ok`; on any failure we keep the bitmap fallback.
+fn fontReady() void {
+    if (font_chan == 0) return;
+    const sh = usys.shmCreate(2); // room for the glyph run of a line
+    if (sh.err != .ok) return;
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return;
+    font_buf = @ptrFromInt(m.data[0]);
+    font_buf_len = m.data[1] * 4096;
+    switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
+        .ok => |ok| if (ok.rep != .ok) return,
+        .err => return,
+    }
+    const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
+        .ok => |ok| ok,
+        .err => return,
+    };
+    if (at.cap == 0 or at.rep != .atlas) return;
+    const am = usys.shmMap(at.cap);
+    if (am.err != .ok) return;
+    atlas = @ptrFromInt(am.data[0]);
+    atlas_w = shared.unpackHi(at.rep.atlas.wh);
+    for (0..n_roles) |role| {
+        switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .metrics = .{ .role = role } }, 0)) {
+            .ok => |rep| switch (rep) {
+                .metrics => |mm| {
+                    role_line[role] = @intCast(mm.line);
+                    role_asc[role] = @intCast(mm.ascent);
+                },
+                else => {},
+            },
+            .err => return,
+        }
+    }
+    font_ok = true;
+}
+
+/// Lay out `s` in `role` through fontsvc: the glyph run lands in `font_buf`
+/// and the pen width is returned (0 on failure). Leaves the run in the
+/// buffer for a following `blitRun` — no `layout` may intervene.
+fn fontLayout(role: u64, s: []const u8) struct { w: usize, count: usize } {
+    const len = @min(s.len, font_buf_len);
+    @memcpy(font_buf[0..len], s[0..len]);
+    return switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .layout = .{ .role = role, .px = 0, .len = len } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .laid => |l| .{ .w = shared.unpackHi(l.pen), .count = @intCast(l.count) },
+            else => .{ .w = 0, .count = 0 },
+        },
+        .err => .{ .w = 0, .count = 0 },
+    };
+}
+
+/// Blend `fg` over the pixel at (x, y) by coverage `cov` (0..255).
+fn blendPx(x: usize, y: usize, fg: u32, cov: u32) void {
+    if (x >= win_w or y >= win_h or cov == 0) return;
+    const i = y * win_w + x;
+    if (cov >= 255) {
+        px[i] = fg;
+        return;
+    }
+    const dst = px[i];
+    var out: u32 = 0;
+    inline for (.{ 0, 8, 16 }) |shf| {
+        const f = (fg >> shf) & 0xff;
+        const d = (dst >> shf) & 0xff;
+        out |= (((f * cov + d * (255 - cov)) / 255) & 0xff) << shf;
+    }
+    px[i] = out;
+}
+
+/// Blit the glyph run currently in `font_buf` (from `fontLayout`) at pen
+/// origin `x0` and baseline `by`, blending each glyph's coverage as `fg`.
+fn blitRun(x0: usize, by: usize, count: usize, fg: u32) void {
+    const run: [*]const shared.FontGlyph = @ptrCast(@alignCast(font_buf));
+    for (0..count) |i| {
+        const g = run[i];
+        var r: usize = 0;
+        while (r < g.h) : (r += 1) {
+            const arow = (@as(usize, g.atlas_y) + r) * atlas_w + g.atlas_x;
+            var c: usize = 0;
+            while (c < g.w) : (c += 1) {
+                const cov = atlas[arow + c];
+                if (cov == 0) continue;
+                const dx = @as(i64, @intCast(x0)) + g.pen_x + g.left + @as(i64, @intCast(c));
+                const dy = @as(i64, @intCast(by)) + g.top + @as(i64, @intCast(r));
+                if (dx < 0 or dy < 0) continue;
+                blendPx(@intCast(dx), @intCast(dy), fg, cov);
+            }
+        }
+    }
+}
+
+/// The pixel width of `s` in `role`.
+fn strW(role: u64, s: []const u8) usize {
+    if (font_ok) return fontLayout(role, s).w;
+    return s.len * gw;
+}
+
+/// The line height of `role` (row-to-row advance).
+fn lineOf(role: u64) usize {
+    return if (font_ok) role_line[role] else gh;
+}
+
+/// Draw `s` at content position (x, y_top) in `role`. Over the font path
+/// text blends over the already-painted background (`bg` ignored); the
+/// bitmap fallback paints `bg` behind each cell.
+fn drawStr(x: usize, y_top: usize, role: u64, s: []const u8, fg: u32, bg: u32) void {
+    if (font_ok) {
+        const l = fontLayout(role, s);
+        blitRun(x, y_top + role_asc[role], l.count, fg);
+    } else {
+        drawText(x, y_top, s, fg, bg);
     }
 }
 
@@ -224,8 +360,8 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     fillAll(c_bg);
     var y: usize = pad;
     if (title.len > 0) {
-        drawText(pad, y, title, c_title, c_bg);
-        y += gh + 12;
+        drawStr(pad, y, R_TITLE, title, c_title, c_bg);
+        y += lineOf(R_TITLE) + 10;
         fillRect(pad, y, win_w - 2 * pad, 2, c_rule); // a rule under the title
         y += 20;
     }
@@ -241,22 +377,22 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
         const kind = strField(rec, "kind");
         const focused = n < focusables.len and n == focus;
         if (std.mem.eql(u8, kind, "label")) {
-            drawText(pad, y, strField(rec, "text"), c_fg, c_bg);
-            y += gh + 12;
+            drawStr(pad, y, R_UI, strField(rec, "text"), c_fg, c_bg);
+            y += lineOf(R_UI) + 8;
         } else if (std.mem.eql(u8, kind, "button")) {
             // A padded, outlined box; filled and brightly outlined when
             // focused, a quiet fill otherwise — a button that reads as one.
             const label = strField(rec, "label");
             const bpx = 18; // horizontal padding inside the button
             const bpy = 8; // vertical padding
-            const bw = label.len * gw + 2 * bpx;
-            const bh = gh + 2 * bpy;
+            const bw = strW(R_UI, label) + 2 * bpx;
+            const bh = lineOf(R_UI) + 2 * bpy;
             const fill = if (focused) c_focus_bg else c_btn_bg;
             const edge = if (focused) c_focus_fg else c_field_edge;
             const ink = if (focused) c_focus_fg else c_btn;
             fillRect(pad, y, bw, bh, fill);
             strokeRect(pad, y, bw, bh, edge, 2);
-            drawText(pad + bpx, y + bpy, label, ink, fill);
+            drawStr(pad + bpx, y + bpy, R_UI, label, ink, fill);
             if (n < focusables.len) {
                 focusables[n] = .{ .id = strField(rec, "id"), .is_field = false };
                 n += 1;
@@ -264,14 +400,14 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
             y += bh + 16;
         } else if (std.mem.eql(u8, kind, "field")) {
             // A label over a full-width, outlined value box holding the
-            // live text (a cursor when focused). Password fields show dots.
+            // live text (a caret when focused). Password fields show dots.
             const label = strField(rec, "label");
             const id = strField(rec, "id");
             const fb = fieldFor(id, strField(rec, "value"));
-            drawText(pad, y, label, c_fg, c_bg);
-            y += gh + 6;
+            drawStr(pad, y, R_UI, label, c_fg, c_bg);
+            y += lineOf(R_UI) + 6;
             const fpy = 8; // vertical padding inside the box
-            const bh = gh + 2 * fpy;
+            const bh = lineOf(R_UI) + 2 * fpy;
             const bw = win_w - 2 * pad;
             const box_bg = if (focused) c_focus_bg else c_field_bg;
             fillRect(pad, y, bw, bh, box_bg);
@@ -279,17 +415,15 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
             const tx = pad + 12;
             const ty = y + fpy;
             const secret = rec.get("secret") != null and (rec.get("secret").?).asBool();
-            var shown: usize = fb.len;
-            if (secret) {
-                var dots: [64]u8 = undefined;
-                const m = @min(fb.len, dots.len);
-                for (0..m) |i| dots[i] = '*';
-                drawText(tx, ty, dots[0..m], c_fg, box_bg);
-                shown = m;
-            } else {
-                drawText(tx, ty, fb.buf[0..fb.len], c_fg, box_bg);
-            }
-            if (focused) drawText(tx + shown * gw, ty, "_", c_focus_fg, box_bg);
+            var dots: [64]u8 = undefined;
+            const shown: []const u8 = if (secret) blk: {
+                const mlen = @min(fb.len, dots.len);
+                for (0..mlen) |i| dots[i] = '*';
+                break :blk dots[0..mlen];
+            } else fb.buf[0..fb.len];
+            drawStr(tx, ty, R_UI, shown, c_fg, box_bg);
+            // A caret: a thin bar just past the text (cleaner than a glyph).
+            if (focused) fillRect(tx + strW(R_UI, shown) + 1, ty, 2, lineOf(R_UI), c_focus_fg);
             if (n < focusables.len) {
                 focusables[n] = .{ .id = id, .is_field = true };
                 n += 1;
@@ -505,6 +639,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (!openSurface()) return it.fail("gui: cannot open a surface", .{});
     defer closeSurface();
     resetFields();
+    if (!font_ok) fontReady(); // attach the system font once (bitmap fallback if absent)
 
     var focus: usize = 0;
     var announced = false;

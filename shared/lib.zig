@@ -377,6 +377,7 @@ pub const ImageId = enum(u64) {
     focuscli = 28,
     trustcli = 29,
     readercli = 30,
+    fontsvc = 31,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -653,9 +654,13 @@ pub const CapTag = enum(u64) {
     display = 23,
     /// inputsvc's channel, for a console server that reads the keyboard.
     keys = 24,
+    /// The system font service's channel (fontsvc): a client lays out and
+    /// rasterizes text through it (shared glyph atlas), so type is
+    /// consistent and scaled the same everywhere.
+    font = 25,
 };
 
-pub const cap_tag_count = 25;
+pub const cap_tag_count = 26;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -780,6 +785,63 @@ pub const GpuResp = union(enum(u64)) {
     trusted: void,
     gpu_err: struct { code: u64 },
 };
+
+/// The system font service (fontsvc). A client attaches a request/response
+/// buffer and maps the shared glyph atlas once, then `layout`s each string:
+/// fontsvc shapes it, rasterizes any new glyphs into the atlas, and writes
+/// the glyph run back into the buffer. Rendering stays client-side — the
+/// client blits coverage from the atlas into its own surface with its own
+/// colour — so fontsvc never draws and never learns anyone's pixels; it is
+/// the one place fonts are parsed, rasterized, cached, and scaled.
+pub const FontReq = union(enum(u64)) {
+    /// The client's request/response buffer (a shm cap): the UTF-8 string
+    /// goes in at buf[0..len], the glyph run comes back. Attached once.
+    attach_buf: void,
+    /// Hand back the shared glyph atlas (an 8-bit coverage bitmap the
+    /// client maps read-only). Reply `atlas` + the cap.
+    atlas: void,
+    /// Lay out and rasterize buf[0..len] in `role` at `px` device pixels
+    /// (0 = the role's effective size, scale already applied). fontsvc
+    /// ensures each glyph is in the atlas and writes `count` FontGlyph
+    /// records back into the buffer.
+    layout: struct { role: u64, px: u64, len: u64 },
+    /// The effective metrics for a role (its size after scaling, and the
+    /// line height) — so a client can lay a column out before drawing.
+    metrics: struct { role: u64 },
+};
+
+pub const FontResp = union(enum(u64)) {
+    ok: void,
+    /// + the atlas shm cap; `wh` = width<<32 | height (pixels).
+    atlas: struct { wh: u64 },
+    /// The glyph run is `count` FontGlyph records at buf[0..]; `pen` packs
+    /// the total advance width<<32 | line height (device px).
+    laid: struct { count: u64, pen: u64 },
+    /// Role metrics (device px): the effective size, the line height, and
+    /// the ascent (baseline offset from the top of a line).
+    metrics: struct { px: u64, line: u64, ascent: u64 },
+    font_err: struct { code: u64 },
+};
+
+/// One laid-out glyph in the run fontsvc writes into the client buffer.
+/// The client blits the `w`×`h` coverage rect at (`atlas_x`, `atlas_y`)
+/// from the atlas to (origin_x + pen_x + left, baseline_y + top), blending
+/// its own foreground by the coverage. `top` is the bitmap top edge as a
+/// signed device-y offset from the baseline — negative for the usual case
+/// of a glyph reaching above it. A 16-byte record (align 4).
+pub const FontGlyph = extern struct {
+    pen_x: i32, // cumulative advance before this glyph, device px
+    atlas_x: u16,
+    atlas_y: u16,
+    w: u16,
+    h: u16,
+    left: i16, // bitmap left edge, from the pen
+    top: i16, // bitmap top edge from the baseline (negative = above)
+};
+
+/// The text roles a client asks for; fontsvc maps each to a family and a
+/// base size, then applies the accessibility scale.
+pub const FontRole = enum(u64) { ui = 0, title = 1, mono = 2 };
 
 /// Pack/unpack a rect's two u32 halves into the u64 fields above.
 pub fn packPair(a: u32, b: u32) u64 {

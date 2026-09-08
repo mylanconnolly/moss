@@ -15,6 +15,7 @@
   essential: true
   give: [
     { tag: display, unit: compositor }
+    { tag: font, unit: fontsvc }
     { tag: view, fs: "", ro: false }
   ]
 }

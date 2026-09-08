@@ -384,6 +384,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "focuscli", .src = "user/focuscli.zig" },
         .{ .name = "trustcli", .src = "user/trustcli.zig" },
         .{ .name = "readercli", .src = "user/readercli.zig" },
+        .{ .name = "fontsvc", .src = "user/fontsvc.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -538,6 +539,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/usersvc-gui.msh",    "conf/units/login-console.msh",
         "scripts/lconsole.msh",          "conf/units/gui-isession.msh",
         "conf/units/gui-boom.msh",       "scripts/gui-boom.msh",
+        "conf/units/fontsvc.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -567,6 +569,10 @@ pub fn build(b: *std.Build) void {
         .{ .at = "assets/tls/roots.pem", .from = "lib/tls/moss-test-ca.pem" },
         .{ .at = "assets/tls/ca-bundle.pem", .from = "boot/tls/roots.pem" },
         .{ .at = "assets/tls/other-ca.pem", .from = "lib/tls/other-ca.pem" },
+        // The bundled system font families (OFL), seeded into the assets
+        // tier where fontsvc reads them.
+        .{ .at = "assets/fonts/IBMPlexSans.ttf", .from = "assets/fonts/IBMPlexSans.ttf" },
+        .{ .at = "assets/fonts/IBMPlexMono-Regular.ttf", .from = "assets/fonts/IBMPlexMono-Regular.ttf" },
     };
     for (asset_files) |a| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));

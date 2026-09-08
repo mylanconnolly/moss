@@ -13,6 +13,7 @@
   after:     apply
   give: [
     { tag: display, unit: compositor }
+    { tag: font, unit: fontsvc }
     { tag: sess, unit: usersvc-gui }
     { tag: buf, shm: 1 }
     { secret: conf/trust.token }

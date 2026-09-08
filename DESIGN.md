@@ -2733,8 +2733,43 @@ graphical drill's pixel checks were updated to the new geometry. Real
 grayscale-antialiased type is still a later arc; this is the bounded pass
 that makes the GUI look intentional.
 
-What's left for the arc: pointer input, richer layout, grayscale-AA type,
-and the fabric-remote GUI the data-only design already allows.
+**The system font service (as built, 2026-09-08).** The bitmap font was
+the ceiling on how the GUI could look; real type meant a vector-font
+stack, and the shape it took is a *service every text program goes
+through* — so type is consistent and, crucially, scaled in one place
+(accessibility, the thing Linux fumbles because every toolkit scales on
+its own). Three pieces. (1) `lib/font.zig` — a from-scratch rasterizer,
+pure and host-tested: it parses the SFNT tables (`head`/`maxp`/`hhea`/
+`hmtx`/`cmap`/`loca`/`glyf`), decodes TrueType outlines (simple and
+composite glyphs, quadratic Béziers), and fills them with a 4×
+supersampled non-zero-winding scanline rasterizer into an 8-bit coverage
+bitmap. Every future format converges here — OTF/CFF, WOFF (zlib), WOFF2
+(Brotli) are additive front-ends that normalize to the SFNT it reads. (2)
+`user/fontsvc.zig` — the service: it loads the bundled families (IBM Plex
+Sans and Mono, OFL) straight from the boot archive's assets tier (no
+filesystem needed, so it runs in any profile), owns the effective font
+settings (family-per-role and a scale factor, the settings substrate the
+next step wires), and rasterizes glyphs on demand into a **shared coverage
+atlas** — a client attaches a request/response buffer, maps the atlas
+once, and `layout`s each string; fontsvc shapes it, caches each glyph in
+the atlas, and writes the glyph run (pen positions + atlas rects +
+metrics) back into the buffer. It never draws: rendering stays
+client-side, so the trusted path is untouched and a glyph bitmap is all
+that crosses. (3) The mshl GUI runtime is the first client — it lays out
+proportionally (measured widths size the buttons and fields), blits each
+glyph's coverage from the atlas over its own background with its own
+colour, and falls back to the bitmap font when no `font` cap is present.
+The login form and the counter now render in real IBM Plex Sans, crisp
+and anti-aliased. Paid-for lessons: a service reached by a `unit:` give
+must still run init's boot handshake (answer `go`) even if it takes no
+caps, or init deems it unwired; and the rasterizer's `top` is the bitmap's
+signed device-y offset from the baseline (negative above), so the client
+*adds* it — subtracting scattered every glyph off the line.
+
+What's left for the arc: per-user font settings + the accessibility scale
+wired through `conf/font.msh`; user-installed fonts; the OTF/CFF, WOFF and
+WOFF2 front-ends; pointer input, richer layout, and the fabric-remote GUI
+the data-only design already allows.
 
 ## Distribution: the fabric
 

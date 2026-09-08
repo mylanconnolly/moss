@@ -1,0 +1,12 @@
+# The system font service. It reads the bundled font families from the
+# boot archive (the assets tier), rasterizes glyphs into a shared coverage
+# atlas, and serves layout requests — every text-rendering program goes
+# through it, so type is consistent and the accessibility scale is applied
+# in one place. No profile: it is lazy, pulled up by whoever holds a `font`
+# give (the GUI runtime, the terminal). Its life is init's, not its
+# launcher's.
+{
+  image:  fontsvc
+  grant:  [log, bootfs]
+  budget: { user: 16mb }
+}

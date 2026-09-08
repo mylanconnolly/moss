@@ -711,8 +711,21 @@ is a plan.
     (EPX and bilinear-AA both tried and rejected — blobby / blurry on a
     1-bit font), and the layout got real chrome (centred
     680×460 window, title rule, padding, outlined button/field boxes). Plus
-    `zig build run-gui` to drive any GUI profile by hand over VNC. Open:
-    pointer input; grayscale-AA type; richer layout; fabric-remote GUI.
+    `zig build run-gui` to drive any GUI profile by hand over VNC. ✅
+    System font service (landed 2026-09-08): real vector type. lib/font.zig
+    is a from-scratch TrueType rasterizer (SFNT + glyf outlines + 4×
+    supersampled AA fill, host-tested); user/fontsvc.zig loads the bundled
+    IBM Plex Sans/Mono (OFL) from the boot archive, owns the family-per-role
+    + scale settings, and rasterizes glyphs into a shared coverage atlas
+    clients blit from (it never draws — rendering stays client-side, only a
+    glyph bitmap crosses); the mshl GUI runtime is the first client (lays
+    out proportionally, falls back to the bitmap if no `font` cap). Every
+    format converges to the same rasterizer: OTF/CFF, WOFF, WOFF2 are
+    additive front-ends. The whole point — one service every text program
+    goes through, so scaling is consistent (accessibility) the way Linux
+    never manages. Open: per-user font settings + scale via conf/font.msh;
+    user-installed fonts; OTF/WOFF/WOFF2 front-ends; pointer input; richer
+    layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`
