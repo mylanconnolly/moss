@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers };
 
 const Spec = struct {
     name: []const u8,
@@ -70,6 +70,7 @@ const specs = [_]Spec{
     .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
     .{ .name = "focus", .kind = .focus, .pass = "focus-test: PASS", .extra = "focus: ok", .append = "profile=focus" },
     .{ .name = "trust", .kind = .trust, .pass = "trust-test: PASS", .extra = "trust: ok", .append = "profile=trust" },
+    .{ .name = "readers", .kind = .readers, .pass = "readers-test: PASS", .extra = "mover: done", .append = "profile=readers" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -345,7 +346,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The graphical seat / focus / trusted-path drill: both a display
         // to render on and a keyboard to type into, plus QMP to type and
         // screendump.
-        .seat, .focus, .trust => try args.appendSlice(gpa, &.{
+        .seat, .focus, .trust, .readers => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),

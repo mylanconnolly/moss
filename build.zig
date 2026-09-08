@@ -139,6 +139,11 @@ pub fn build(b: *std.Build) void {
         "trust-test",
         "Run the trusted-path drill: a login greeter claims the trusted path; a hostile client is refused and cannot capture the keyboard",
     ) orelse false;
+    const readers_test = b.option(
+        bool,
+        "readers-test",
+        "Run the concurrent-input drill: a client parks a next_input while another keeps committing — the compositor serves both",
+    ) orelse false;
     const net_test = b.option(
         bool,
         "net-test",
@@ -268,6 +273,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "comp_test", comp_test);
     build_opts.addOption(bool, "focus_test", focus_test);
     build_opts.addOption(bool, "trust_test", trust_test);
+    build_opts.addOption(bool, "readers_test", readers_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
@@ -330,6 +336,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "compcli", .src = "user/compcli.zig" },
         .{ .name = "focuscli", .src = "user/focuscli.zig" },
         .{ .name = "trustcli", .src = "user/trustcli.zig" },
+        .{ .name = "readercli", .src = "user/readercli.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -476,6 +483,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/compcli.msh",        "conf/units/compositor.msh",
         "conf/units/focuscli.msh",       "conf/units/trust-greeter.msh",
         "conf/units/trust-fake.msh",     "conf/trust.token",
+        "conf/units/readers-reader.msh", "conf/units/readers-mover.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -563,14 +571,15 @@ pub fn build(b: *std.Build) void {
         const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
         const gopts = b.addOptions();
         for ([_][]const u8{
-            "panic_test", "fault_test",  "sched_test",   "domain_test",
-            "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-            "blk_test",   "gpu_test",    "term_test",    "input_test",
-            "seat_test",  "gseat_test",  "comp_test",    "focus_test",
-            "trust_test", "fs_test",     "net_test",     "fabric_test",
-            "shell_test", "rng_test",    "smmu_test",    "vm_test",
-            "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-            "users_test", "login_test",  "flogin_test",  "dot_test",
+            "panic_test",  "fault_test",   "sched_test",   "domain_test",
+            "ipc_test",    "init_test",    "sandbox_test", "flap_test",
+            "blk_test",    "gpu_test",     "term_test",    "input_test",
+            "seat_test",   "gseat_test",   "comp_test",    "focus_test",
+            "trust_test",  "readers_test", "fs_test",      "net_test",
+            "fabric_test", "shell_test",   "rng_test",     "smmu_test",
+            "vm_test",     "guest_test",   "vmnode_test",  "pan_test",
+            "cpu_test",    "users_test",   "login_test",   "flogin_test",
+            "dot_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -934,22 +943,23 @@ pub fn build(b: *std.Build) void {
     if (only) |o| run_check.addArgs(&.{ "--only", o });
 
     const all_test_opts = [_][]const u8{
-        "panic_test", "fault_test",  "sched_test",   "domain_test",
-        "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-        "blk_test",   "gpu_test",    "term_test",    "input_test",
-        "seat_test",  "gseat_test",  "comp_test",    "focus_test",
-        "trust_test", "fs_test",     "net_test",     "fabric_test",
-        "shell_test", "rng_test",    "smmu_test",    "vm_test",
-        "guest_test", "vmnode_test", "pan_test",     "cpu_test",
-        "users_test", "login_test",  "flogin_test",  "dot_test",
+        "panic_test",  "fault_test",   "sched_test",   "domain_test",
+        "ipc_test",    "init_test",    "sandbox_test", "flap_test",
+        "blk_test",    "gpu_test",     "term_test",    "input_test",
+        "seat_test",   "gseat_test",   "comp_test",    "focus_test",
+        "trust_test",  "readers_test", "fs_test",      "net_test",
+        "fabric_test", "shell_test",   "rng_test",     "smmu_test",
+        "vm_test",     "guest_test",   "vmnode_test",  "pan_test",
+        "cpu_test",    "users_test",   "login_test",   "flogin_test",
+        "dot_test",
     };
     const variants = [_][]const u8{
-        "panic",   "fault",  "sched", "domain", "ipc",   "init",
-        "sandbox", "flap",   "blk",   "gpu",    "term",  "input",
-        "seat",    "gseat",  "comp",  "focus",  "trust", "fs",
-        "net",     "fabric", "shell", "rng",    "smmu",  "vm",
-        "guest",   "vmnode", "pan",   "cpu",    "users", "login",
-        "flogin",  "dot",
+        "panic",   "fault",  "sched",  "domain", "ipc",   "init",
+        "sandbox", "flap",   "blk",    "gpu",    "term",  "input",
+        "seat",    "gseat",  "comp",   "focus",  "trust", "readers",
+        "fs",      "net",    "fabric", "shell",  "rng",   "smmu",
+        "vm",      "guest",  "vmnode", "pan",    "cpu",   "users",
+        "login",   "flogin", "dot",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

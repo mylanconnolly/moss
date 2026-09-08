@@ -1,0 +1,13 @@
+# The concurrent-input drill's reader (profile readers): readercli in
+# reader mode (arg 0). It parks a next_input on the compositor and waits
+# — a pending read that, on the reworked compositor, holds nothing else
+# up. Non-essential; the mover ends the boot.
+{
+  image:    readercli
+  arg:      0
+  budget:   { user: 8mb }
+  profiles: [readers]
+  give: [
+    { tag: display, unit: compositor }
+  ]
+}

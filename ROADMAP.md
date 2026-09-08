@@ -636,8 +636,13 @@ is a plan.
     2026-09-08): a commit recomposes and ships only its damage rect
     (TRANSFER_TO_HOST_2D/RESOURCE_FLUSH bounded to it) instead of the
     whole 640x480; the first commit still lays the full ground, later
-    ones stay bounded. Still open in (5): concurrent input readers
-    (next_input is synchronous — one reader).
+    ones stay bounded. ✅ concurrent input readers (landed 2026-09-08):
+    a reader thread does the blocking keyboard read and rings a
+    doorbell; the serve loop parks each next_input (deferred reply)
+    and dispatches keys to the focused surface's reader, so any number
+    of clients can read at once and the compositor never blocks.
+    Drilled (profile readers): a client parks a read while another
+    keeps committing. Stage 5 is complete.
     The runner's QMP socket lands first, since stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

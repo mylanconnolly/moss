@@ -550,24 +550,100 @@ fn cycleFocus() void {
 
 /// The next keystroke for the focused surface: keys go to whoever has
 /// focus, and Tab cycles focus here rather than reaching a client.
-fn nextInput(badge: u64) ?struct { surface: u64, ch: u8 } {
-    // Keys reach only the client that owns the focused surface — a
-    // keystroke for one window never leaks to another, and a passphrase
-    // typed into the login surface stays with the login greeter.
-    const owns = if (findSurface(focused)) |sf| sf.owner == badge else false;
-    if (!owns) return null;
+// Concurrent input readers. Reading the keyboard is a blocking call to
+// inputsvc, so it cannot happen on the serve loop without stalling every
+// other client. Instead a dedicated reader thread does the blocking read,
+// pushes each key into a single-producer/single-consumer ring, and rings
+// the doorbell; the serve loop parks each `next_input` (its reply token)
+// and, woken by the doorbell, hands each key to the parked reader that
+// owns the focused surface. So any number of clients can have a read
+// pending at once and the compositor never blocks.
+var key_bell: u64 = 0;
+var key_reader_stack: [32 << 10]u8 align(16) = undefined;
+
+const key_ring_cap = 64;
+var key_ring: [key_ring_cap]u8 = undefined;
+var key_head: usize = 0; // consumer (serve loop)
+var key_tail: usize = 0; // producer (reader thread)
+
+fn keyRingPush(c: u8) void {
+    const t = @atomicLoad(usize, &key_tail, .monotonic);
+    const nt = (t + 1) % key_ring_cap;
+    if (nt == @atomicLoad(usize, &key_head, .acquire)) return; // full: drop
+    key_ring[t] = c;
+    @atomicStore(usize, &key_tail, nt, .release);
+}
+fn keyRingPeek() ?u8 {
+    const h = @atomicLoad(usize, &key_head, .monotonic);
+    if (h == @atomicLoad(usize, &key_tail, .acquire)) return null;
+    return key_ring[h];
+}
+fn keyRingPop() void {
+    const h = @atomicLoad(usize, &key_head, .monotonic);
+    @atomicStore(usize, &key_head, (h + 1) % key_ring_cap, .release);
+}
+
+/// The reader thread: block on inputsvc for a key, buffer it, ring the
+/// doorbell. On error (inputsvc gone, teardown) back off so we do not spin.
+fn keyReader(_: u64) callconv(.c) void {
     while (true) {
-        const ch = readKey();
-        if (ch == key_switch_focus) {
-            cycleFocus();
-            _ = composite(); // the focus cue follows the new focus
-            // A Tab may have moved focus to a surface this caller does not
-            // own; stop here rather than hand it the next window's keys.
-            const still = if (findSurface(focused)) |sf| sf.owner == badge else false;
-            if (!still) return null;
+        const c = readKey();
+        if (c == 0) {
+            usys.sleepMs(10);
             continue;
         }
-        return .{ .surface = focused, .ch = ch };
+        keyRingPush(c);
+        _ = usys.notifySignal(key_bell, 1);
+    }
+}
+
+// Parked readers: one outstanding `next_input` per client, named by the
+// reply token so the serve loop can answer it later.
+const max_readers = max_surfaces;
+const Reader = struct { used: bool = false, badge: u64 = 0, token: u64 = 0 };
+var readers: [max_readers]Reader = @splat(.{});
+
+fn parkReader(badge: u64, token: u64) void {
+    for (&readers) |*rd| if (rd.used and rd.badge == badge) {
+        rd.token = token; // a client re-reads: replace its (already answered) token
+        return;
+    };
+    for (&readers) |*rd| if (!rd.used) {
+        rd.* = .{ .used = true, .badge = badge, .token = token };
+        return;
+    };
+}
+fn takeReader(badge: u64) ?u64 {
+    for (&readers) |*rd| if (rd.used and rd.badge == badge) {
+        const t = rd.token;
+        rd.* = .{};
+        return t;
+    };
+    return null;
+}
+fn dropReader(badge: u64) void {
+    _ = takeReader(badge);
+}
+
+/// Hand buffered keys to the client that owns the focused surface. Tab is
+/// absorbed here (it cycles focus, never reaches a client). A key with no
+/// reader waiting on the focused surface stays in the ring until one
+/// parks — buffered, like a terminal's own fifo, never delivered elsewhere.
+fn dispatchKeys(chan_h: u64) void {
+    while (keyRingPeek()) |c| {
+        if (c == key_switch_focus) {
+            keyRingPop();
+            cycleFocus();
+            _ = composite(); // the focus cue follows the new focus
+            continue;
+        }
+        const owner = if (findSurface(focused)) |sf| sf.owner else {
+            keyRingPop(); // nothing focused: the key has nowhere to go
+            continue;
+        };
+        const token = takeReader(owner) orelse break; // hold until a reader parks
+        keyRingPop();
+        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = focused, .ch = c } }, 0, token);
     }
 }
 
@@ -579,14 +655,31 @@ fn serveSurfaces(chan_h: u64) noreturn {
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .interrupted) {
+            // The keyboard doorbell: buffered keys are ready. Drain the
+            // latched bit, then hand them to the focused surface's reader.
+            _ = usys.notifyWait(key_bell);
+            dispatchKeys(chan_h);
+            continue;
+        }
+        if (r.err == .client_dead) {
+            // A reader's channel died: forget its parked read.
+            dropReader(r.badge);
+            continue;
+        }
         if (r.err != .ok) continue;
         // The caller's identity: base clients invoke the shared display
         // channel (badge 0); the login greeter invokes the badged channel
         // it earned via `attach_trusted` (badge `trusted_badge`).
         const badge = r.badge;
+        // Reply by token, never token 0: with `next_input` deferred there
+        // can be several calls outstanding at once, and a token-0 reply
+        // goes to the *oldest* pending one — it would answer a parked
+        // reader with someone else's result.
+        const token = r.token;
         const req = shared.decodeMsg(shared.GpuReq, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
-            _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 1 } }, 0);
+            _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 1 } }, 0, token);
             continue;
         };
         switch (req) {
@@ -601,24 +694,24 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 const px_x: u32 = if (full) 0 else x;
                 const px_y: u32 = if (full) 0 else y;
                 if (@as(u64, px_x) + w > fb_w or @as(u64, px_y) + h > fb_h) {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 6 } }, 0);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 6 } }, 0, token);
                     continue;
                 }
                 if (createSurface(badge, px_x, px_y, w, h)) |cs| {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h) } }, cs.shm);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h) } }, cs.shm, token);
                 } else {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0, token);
                 }
             },
             .commit => |q| {
                 const sf = findSurface(q.surface) orelse {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 3 } }, 0);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 3 } }, 0, token);
                     continue;
                 };
                 // Only the owner touches its surface — a client cannot
                 // commit (or destroy) another's, the login surface least of all.
                 if (sf.owner != badge) {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0, token);
                     continue;
                 }
                 // Recompose and ship only the damage rect (q.xy/q.wh, in
@@ -627,45 +720,45 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // the whole scanout; later ones stay bounded to their
                 // damage, which is the point.
                 const ok = if (laid_ground) compositeRect(damageRect(sf, q.xy, q.wh)) else composite();
-                _ = usys.replyTyped(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 5 } }, 0);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 5 } }, 0, token);
             },
             .destroy_surface => |q| {
                 if (findSurface(q.surface)) |sf| {
                     if (sf.owner != badge) {
-                        _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0);
+                        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0, token);
                         continue;
                     }
                     destroySurface(sf);
                     _ = composite(); // its space returns to the ground
                 }
-                _ = usys.replyTyped(shared.GpuResp, chan_h, .ok, 0);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
             .next_input => {
                 if (keys_chan == 0) {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 7 } }, 0);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 7 } }, 0, token);
                     continue;
                 }
-                if (nextInput(badge)) |in| {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .input = .{ .surface = in.surface, .ch = in.ch } }, 0);
-                } else {
-                    // Not the owner of the focused surface: no key for you.
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 9 } }, 0);
-                }
+                // Park this read (deferred reply) and try to satisfy it
+                // from the buffer — no reply now; it comes when a key for
+                // the caller's focused surface arrives. The serve loop
+                // stays free to handle every other client meanwhile.
+                parkReader(badge, token);
+                dispatchKeys(chan_h);
             },
             .attach_trusted => |q| {
                 // Prove the boot-provisioned token, earn a badged channel
                 // whose surfaces are the login surface. A wrong or absent
                 // token — or no trusted path at all — is refused.
                 if (trust_token == 0 or q.token != trust_token) {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 10 } }, 0);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 10 } }, 0, token);
                     continue;
                 }
                 const minted = usys.chanMint(chan_h, trusted_badge);
                 if (minted.err != .ok) {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 11 } }, 0);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 11 } }, 0, token);
                     continue;
                 }
-                _ = usys.replyTyped(shared.GpuResp, chan_h, .trusted, minted.data[1]);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .trusted, minted.data[1], token);
             },
         }
     }
@@ -739,8 +832,17 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
     _ = usys.log(log_h, "gpu: scanout up");
 
     // If the seat gave us a keyboard, take it — keystrokes route to the
-    // focused surface (the compositor owns focus).
-    if (keys_chan != 0) setupKeyboard();
+    // focused surface (the compositor owns focus). A reader thread does
+    // the blocking reads and rings a doorbell bound to our recv, so the
+    // serve loop never blocks on input and many clients can read at once.
+    if (keys_chan != 0) {
+        setupKeyboard();
+        const kb = usys.notifyCreate();
+        if (kb.err != .ok) usys.exit(187);
+        key_bell = kb.data[0];
+        if (usys.threadCreate(keyReader, 0, &key_reader_stack) != .ok) usys.exit(188);
+        if (usys.notifyBind(key_bell) != .ok) usys.exit(189);
+    }
 
     // Now serve the surface protocol: clients create a surface, commit
     // damage rects (we composite), and read input for the focused surface.

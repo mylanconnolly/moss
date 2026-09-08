@@ -1,0 +1,15 @@
+# The concurrent-input drill's mover (profile readers): readercli in
+# mover mode (arg 1). It commits its window in a loop and exits; reaching
+# "mover: done" while the reader sits in next_input proves the compositor
+# kept serving — reads are concurrent, not a serialising block. Essential:
+# its clean exit ends the boot.
+{
+  image:     readercli
+  arg:       1
+  budget:    { user: 8mb }
+  profiles:  [readers]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+  ]
+}

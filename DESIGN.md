@@ -2390,11 +2390,10 @@ compositor is the single point that reads the device and steers it. The
 drill opens two windows and, since the second is created last, it starts
 focused; the host types `a`, Tab, `b`, and the client confirms `a`
 reached the second window and `b` the first (Tab moved focus between
-them). For now the compositor serves one input reader synchronously
-(`next_input` blocks on the keyboard), which suits a single foreground
-session; many concurrent readers would want the deferred-reply or
-per-surface-doorbell shape, and a trusted path for the login window is
-the remaining piece.
+them). At first the compositor served one input reader synchronously
+(`next_input` blocked on the keyboard), which stalled every other client
+until that read completed; the deferred-reply rework (below) lifted that,
+and a trusted path for the login window followed.
 
 **Stage 5, the focus cue (as built, 2026-09-08).** Focus you cannot see
 is focus you cannot trust, so the compositor draws a yellow border just
@@ -2491,6 +2490,39 @@ re-shipped. Watch the `@min`-narrowing trap once more: the border width
 `bw = @min(focus_border, …)` narrows to a type that just fits the border,
 and `2 * bw` overflows it — the third time this exact bite has been paid
 in this file, so `bw` is annotated `: usize`.
+
+**Stage 5, concurrent input readers (as built, 2026-09-08).** Reading the
+keyboard is a blocking call to inputsvc, and the compositor made it on the
+serve loop — so a single client sitting in `next_input` froze the whole
+display server, and every other client's request queued behind it. (Both
+the trusted path and per-rect drills had to tiptoe around this.) The fix
+is the standard event-loop shape (fabric and blk already use it): a
+dedicated **reader thread** does the blocking read, pushes each key into a
+single-producer/single-consumer ring, and rings a **doorbell** notification
+bound to the serve loop's recv; the serve loop **parks** each `next_input`
+(remembers its reply token) and, woken by the doorbell, hands each key to
+the parked reader that owns the focused surface. Now any number of clients
+can have a read outstanding and the loop never blocks. Tab is still
+absorbed here (it cycles focus, reaches no client); a key with no reader
+on the focused surface stays buffered in the ring, delivered when one
+parks — never handed elsewhere. Binding a doorbell to recv is the same
+move the earlier livelock warned about, but safe here for the reason the
+warning gives: the loop *drains* it (`notifyWait` + dispatch) on every
+`interrupted`, and it is a software signal, not a latched device IRQ that
+re-fires — the device IRQ stays unbound, waited on directly in `submitCmd`.
+
+The bug this shook out was latent all along: every reply used
+`replyTyped` with **token 0**, which the kernel routes to the *oldest*
+outstanding call. While reads completed synchronously that was always the
+one call in flight, so it was correct by accident. The moment a read is
+parked, a later commit's token-0 reply lands on the parked reader instead
+— it answered the reader with a commit's `ok`, and the committer hung
+forever. The readers drill (a client parks a read while another commits
+in a loop and must reach "done") caught it deterministically; the cure is
+to reply to every request by *its* token, never 0, now that several calls
+can be in flight at once. The drill also stands as the regression guard: on
+the old synchronous compositor the parked read would wedge the mover, and
+the boot would hang instead of finishing.
 
 ## Distribution: the fabric
 

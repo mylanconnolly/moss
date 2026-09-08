@@ -184,6 +184,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.readers_test) {
+        _ = sched.spawn("boot-watch", readersTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -659,6 +664,14 @@ fn focusTestWorker(_: u64) void {
 /// path and cannot capture the passphrase.
 fn trustTestWorker(_: u64) void {
     systemDrill("trust");
+}
+
+/// The concurrent-input drill: a system boot under profile "readers" — a
+/// client parks a next_input on the compositor while another keeps
+/// committing; the mover reaching "done" proves the pending read did not
+/// block the serve loop (on the old synchronous compositor it would hang).
+fn readersTestWorker(_: u64) void {
+    systemDrill("readers");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the
