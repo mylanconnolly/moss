@@ -2278,6 +2278,24 @@ display server up through a `unit` give, so its exit ends the boot
 cleanly; the next stage is the terminal, a surface client that renders a
 glyph grid.
 
+**Stage 2: the terminal (as built, 2026-09-07).** The first real surface
+client: `user/term.zig` keeps a character grid and renders it into a
+surface from gpusvc — the userspace analog of the kernel's framebuffer
+console, but an ordinary program drawing into a surface, so it coexists
+with any other graphical client rather than owning the screen. It has a
+cursor, wraps at the right edge, and scrolls when it reaches the bottom;
+text is the shared 8×16 font. That font moved out of the kernel
+(`kernel/font/console8x16.zig` → `shared/font8x16.zig`, re-exported as
+`shared.font8x16`) so the kernel's `fbcon` and the terminal draw the same
+glyphs from one source — the ROADMAP's "font as a shared asset." Rendering
+is a `writeText(bytes)` over the grid, so wiring a console channel and a
+keyboard so the shell runs here (the graphical seat, stage 4) will only
+have to feed it bytes. The drill renders a demo of more lines than fit,
+forcing a scroll, and leaves the cursor bottom-left; the host screendumps
+and checks the cursor cell is a solid white block (font-independent, so a
+deterministic anchor), the text region has glyph pixels, and a blank cell
+stayed black — glyphs, scroll, cursor, and no bleed, all at once.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

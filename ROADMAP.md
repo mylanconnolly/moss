@@ -575,7 +575,15 @@ is a plan.
     chunks) and flushes. The copy is the isolation boundary; a remote
     surface will be `dial NODE display`. Drilled by user/gpucli.zig (fill
     + full commit, then a centred rect + partial commit; screendump
-    asserts both colours in the right places). (2) terminal as a
+    asserts both colours in the right places). ✅ (2) the **terminal**
+    (landed 2026-09-07): user/term.zig, a surface client keeping a
+    character grid — glyph blit, cursor, right-edge wrap, scroll — over
+    the shared 8×16 font (moved kernel/font/console8x16.zig →
+    shared/font8x16.zig, re-exported shared.font8x16, so fbcon and the
+    terminal share one source). Rendering is a writeText(bytes) so the
+    stage-4 seat only feeds it bytes. Drilled (profile term): renders a
+    scrolling demo, host screendump asserts the cursor block, glyph
+    pixels, and a clean blank cell. Was: (2) terminal as a
     surface client (glyph grid, scroll,
     UTF-8, cursor); buffer checksum + screendump of known text. (3)
     `inputsvc`; QMP `input-send-event` drill (host input is inherently

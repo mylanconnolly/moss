@@ -20,7 +20,7 @@
 
 const std = @import("std");
 const arch = @import("arch.zig");
-const font = @import("font/console8x16.zig");
+const font = @import("shared").font8x16;
 const mem = @import("mem.zig");
 
 pub const Framebuffer = struct {

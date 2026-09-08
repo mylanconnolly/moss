@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term };
 
 const Spec = struct {
     name: []const u8,
@@ -63,6 +63,7 @@ const specs = [_]Spec{
     .{ .name = "flap", .pass = "flap-test: PASS" },
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
     .{ .name = "gpu", .kind = .gpu, .pass = "gpu-test: PASS", .extra = "gpu: surface committed", .append = "profile=gpu" },
+    .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .append = "profile=term" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -318,10 +319,10 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h2",
             "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),
-        // The graphical console drill: a virtio-gpu to draw on and a QMP
-        // port so the host can screendump the scanout (the real-pixels
-        // half of the "both" verification) and inject input.
-        .gpu => try args.appendSlice(gpa, &.{
+        // The graphical drills: a virtio-gpu to draw on and a QMP port so
+        // the host can screendump the scanout (the real-pixels half of the
+        // "both" verification) and inject input.
+        .gpu, .term => try args.appendSlice(gpa, &.{
             "-device",
             "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",
@@ -347,6 +348,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gpu) {
         if (!try gpuScreendump(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .term) {
+        if (!try termScreendump(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -415,6 +419,59 @@ fn pixelAt(img: Ppm, x: usize, y: usize) [3]u8 {
 }
 fn eqRgb(p: [3]u8, r: u8, g: u8, b: u8) bool {
     return p[0] == r and p[1] == g and p[2] == b;
+}
+
+/// The terminal drill's host side: once the terminal says it rendered,
+/// screendump and check the glyph grid — the cursor block is a solid
+/// white cell (font-independent, so a deterministic anchor), the text
+/// area has white glyph pixels, and a blank cell stayed black (no bleed).
+fn termScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "term: rendered") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the terminal never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    // The cursor block sits at cell (0,29): a solid white 8x16 rectangle.
+    if (img.w < 8 or img.h < 480 or !eqRgb(pixelAt(img, 4, 472), 0xFF, 0xFF, 0xFF)) {
+        reportFailure(spec.name, "the cursor block was not drawn", log_path);
+        return false;
+    }
+    // Glyphs in the top-left text region (some white pixels there).
+    var any_glyph = false;
+    for (0..16) |y| for (0..48) |x| {
+        if (eqRgb(pixelAt(img, x, y), 0xFF, 0xFF, 0xFF)) any_glyph = true;
+    };
+    if (!any_glyph) {
+        reportFailure(spec.name, "no glyphs were rendered", log_path);
+        return false;
+    }
+    // A blank cell (far right of a short text row) stayed black.
+    if (!eqRgb(pixelAt(img, 500, 8), 0, 0, 0)) {
+        reportFailure(spec.name, "text bled into a blank cell", log_path);
+        return false;
+    }
+    return true;
 }
 
 /// The net check's client side: once the script says it is serving,

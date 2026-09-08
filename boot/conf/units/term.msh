@@ -1,0 +1,13 @@
+# The terminal drill (profile term): the terminal renders a glyph grid
+# onto a surface it gets from the display server (pulled up through the
+# `unit` give). Its exit ends the boot — a clean shutdown + leak check,
+# with the host's screendump taken while the text is up.
+{
+  image:     term
+  budget:    { user: 8mb }
+  profiles:  [term]
+  essential: true
+  give: [
+    { tag: display, unit: gpusvc }
+  ]
+}

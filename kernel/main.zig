@@ -149,6 +149,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.term_test) {
+        _ = sched.spawn("boot-watch", termTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -576,6 +581,12 @@ fn blkTestWorker(_: u64) void {
 /// so the kernel holds the leak bar on a clean shutdown.
 fn gpuTestWorker(_: u64) void {
     systemDrill("gpu");
+}
+
+/// The terminal drill: a system boot under profile "term" — the terminal
+/// renders a glyph grid onto gpusvc's scanout; the host screendumps it.
+fn termTestWorker(_: u64) void {
+    systemDrill("term");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

@@ -370,6 +370,7 @@ pub const ImageId = enum(u64) {
     dotd = 21,
     gpusvc = 22,
     gpucli = 23,
+    term = 24,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -947,6 +948,9 @@ pub const NetReq = union(enum(u64)) {
 
 /// The calendar: Unix time to dates and back, ISO and HTTP text.
 pub const civil = @import("civil.zig");
+/// The 8x16 console font (printable ASCII), shared by the kernel's
+/// framebuffer console and the userspace terminal.
+pub const font8x16 = @import("font8x16.zig");
 
 /// Lookups are numbered from here.
 pub const lookup_base: u64 = 2000;
@@ -1597,7 +1601,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 
