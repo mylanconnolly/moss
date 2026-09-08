@@ -314,6 +314,13 @@ fn transferFlushRect(r: Rect) bool {
 
 // -------------------------------------------------------- surfaces
 
+fn anyTrusted() bool {
+    for (&surfaces) |*sf| {
+        if (sf.used and sf.trusted) return true;
+    }
+    return false;
+}
+
 fn findSurface(id: u64) ?*Surface {
     if (id == 0 or id > max_surfaces) return null;
     const sf = &surfaces[id - 1];
@@ -492,7 +499,9 @@ fn compositeRect(clip: Rect) bool {
     // scanout, painted last of all so no client surface can forge it. It
     // is the secure colour only while the focused surface is the login
     // surface — the user's proof that the keyboard reaches login alone.
-    if (trust_token != 0) {
+    // Only when a login surface actually exists: otherwise an ordinary
+    // fullscreen client (a terminal) would have its top row overpainted.
+    if (trust_token != 0 and anyTrusted()) {
         const secure = if (findSurface(focused)) |sf| sf.trusted else false;
         const word = if (secure) secure_word else bg_word;
         if (intersect(.{ .x = 0, .y = 0, .w = fb_w, .h = trust_strip }, clip)) |ir| fillRect(ir, word);

@@ -1,14 +1,13 @@
-# The terminal for the graphical seat: term in serve mode (arg 0). It
-# owns a surface from the display server and reads the keyboard from
-# inputsvc, and serves the console protocol (ConsReq) to a session — so a
-# shell runs on it exactly as it would on a virtio-console. Both backends
-# are pulled up through `unit` gives.
+# The terminal for the graphical seat: term in serve mode (arg 0). It is
+# a client of the compositor — it owns a surface and reads the keyboard
+# through the compositor's focus routing (next_input), so it coexists
+# with other windows and serves the console protocol (ConsReq) to a
+# session, exactly as a shell would see a virtio-console.
 {
   image:  term
   arg:    0
   budget: { user: 16mb }
   give: [
-    { tag: display, unit: gpusvc }
-    { tag: keys, unit: kbd }
+    { tag: display, unit: compositor }
   ]
 }

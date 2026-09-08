@@ -2319,9 +2319,14 @@ the screen through nothing but the ordinary console protocol. The join is
 that the terminal serves `ConsReq` — the very interface the virtio-console
 driver serves — so a client that speaks it (a shell) runs on the terminal
 with no change: `write` renders as glyphs, `read` returns keystrokes. In
-serve mode `term` holds a surface from gpusvc and a channel to `inputsvc`
-(which now maps keycodes to characters and serves them over `ConsReq.read`
-with a keymap), and a session binds `term` as its console. The seat is
+serve mode `term` holds a surface from the display server, and a session
+binds `term` as its console. (Input was later unified: `term` no longer
+holds its own `inputsvc` channel — it reads the keyboard through the
+*compositor's* `next_input`, so it is an ordinary compositor client that
+receives keys only while its surface holds focus. That is what lets a
+terminal coexist with other windows on the one display and keyboard —
+the groundwork for an interactive session launched from a GUI login, and
+it moves every input path through the one focus-routing point.) The seat is
 wired entirely as `unit` gives — the session pulls up the terminal, which
 pulls up the display server and the keyboard — so init starts and
 supervises the whole tree from one dependency. The drill's session is a

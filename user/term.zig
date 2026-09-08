@@ -132,7 +132,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
     // Mode 1: the stage-2 demo (render + hold for a screendump, then end
     // the boot). Mode 0: serve the console — a client writes bytes we
     // render and reads keystrokes we fetch from inputsvc (the seat).
-    if (role & 0xff == 1) demo(log_h) else serveConsole(log_h, chan_h, setup.cap(.keys));
+    if (role & 0xff == 1) demo(log_h) else serveConsole(log_h, chan_h);
 }
 
 fn demo(log_h: u64) noreturn {
@@ -151,26 +151,25 @@ fn demo(log_h: u64) noreturn {
     usys.exit(0);
 }
 
-/// Serve the console protocol to a client while reading the keyboard from
-/// inputsvc: writes render as glyphs, reads return keystrokes. The client
-/// (a shell) sees exactly the ConsReq interface the virtio-console driver
-/// gives, so it runs here unchanged.
-fn serveConsole(log_h: u64, chan_h: u64, keys: u64) noreturn {
-    if (keys == 0) {
-        _ = usys.log(log_h, "term: no keyboard channel");
-        usys.exit(170);
-    }
-    // Our own buffer shared with inputsvc, for its read replies.
-    const ks = usys.shmCreate(1);
-    if (ks.err != .ok) usys.exit(171);
-    const km = usys.shmMap(ks.data[0]);
-    if (km.err != .ok) usys.exit(172);
-    const kbuf: [*]volatile u8 = @ptrFromInt(km.data[0]);
-    switch (usys.callTyped(shared.ConsReq, shared.ConsResp, keys, .setup, ks.data[0])) {
-        .ok => {},
-        .err => usys.exit(173),
-    }
+/// The keyboard, from the compositor: it routes a keystroke to the client
+/// that owns the focused surface, so a terminal is an ordinary compositor
+/// client and coexists with other windows (a GUI login, say) — focus
+/// decides who types. Blocks until a key reaches our surface; 0 on error.
+fn nextKey() u8 {
+    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .next_input, 0)) {
+        .ok => |rep| switch (rep) {
+            .input => |x| @intCast(x.ch & 0xff),
+            else => 0,
+        },
+        .err => 0,
+    };
+}
 
+/// A shell's console over a surface: writes render as glyphs, reads
+/// return keystrokes the compositor routes to us while we hold focus.
+/// The client (a shell) sees exactly the ConsReq interface the
+/// virtio-console driver gives, so it runs here unchanged.
+fn serveConsole(log_h: u64, chan_h: u64) noreturn {
     var out_va: u64 = 0; // the client's console buffer (write source / read sink)
     var out_len: u64 = 0;
     _ = usys.log(log_h, "term: console up");
@@ -208,23 +207,22 @@ fn serveConsole(log_h: u64, chan_h: u64, keys: u64) noreturn {
                 _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .n = .{ .n = w.len } }, 0);
             },
             .read => |q| {
-                // Fetch keystrokes from inputsvc (blocks until one), then
-                // hand them to the client through its buffer.
-                const got = switch (usys.callTyped(shared.ConsReq, shared.ConsResp, keys, .{ .read = .{ .max = @min(q.max, 4096) } }, 0)) {
-                    .ok => |rep| switch (rep) {
-                        .n => |x| x.n,
-                        else => 0,
-                    },
-                    .err => 0,
-                };
-                if (out_va == 0) {
+                // One keystroke from the compositor (blocks until one
+                // reaches our surface), handed to the client's buffer. A
+                // shell reads a character at a time, so one per read is
+                // exactly its rhythm.
+                if (out_va == 0 or q.max == 0) {
                     _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0);
                     continue;
                 }
+                const ch = nextKey();
                 const dst: [*]volatile u8 = @ptrFromInt(out_va);
-                var i: u64 = 0;
-                while (i < got and i < out_len) : (i += 1) dst[i] = kbuf[i];
-                _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .n = .{ .n = i } }, 0);
+                var n: u64 = 0;
+                if (ch != 0 and out_len >= 1) {
+                    dst[0] = ch;
+                    n = 1;
+                }
+                _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .n = .{ .n = n } }, 0);
             },
         }
     }
