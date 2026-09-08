@@ -169,6 +169,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.comp_test) {
+        _ = sched.spawn("boot-watch", compTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -622,6 +627,13 @@ fn seatTestWorker(_: u64) void {
 /// the block device; the host types commands over QMP.
 fn gseatTestWorker(_: u64) void {
     systemDrill("gseat");
+}
+
+/// The compositor drill: a system boot under profile "comp" — a client
+/// opens overlapping windowed surfaces that the display server composites
+/// onto the scanout; the host screendumps and checks each region.
+fn compTestWorker(_: u64) void {
+    systemDrill("comp");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

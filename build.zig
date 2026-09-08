@@ -124,6 +124,11 @@ pub fn build(b: *std.Build) void {
         "gseat-test",
         "Run the real-msh graphical seat: msh on the terminal, commands typed over QMP",
     ) orelse false;
+    const comp_test = b.option(
+        bool,
+        "comp-test",
+        "Run the compositor drill: overlapping windowed surfaces, screendumped over QMP",
+    ) orelse false;
     const net_test = b.option(
         bool,
         "net-test",
@@ -250,6 +255,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "input_test", input_test);
     build_opts.addOption(bool, "seat_test", seat_test);
     build_opts.addOption(bool, "gseat_test", gseat_test);
+    build_opts.addOption(bool, "comp_test", comp_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
@@ -309,6 +315,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "term", .src = "user/term.zig" },
         .{ .name = "inputsvc", .src = "user/inputsvc.zig" },
         .{ .name = "gsh", .src = "user/gsh.zig" },
+        .{ .name = "compcli", .src = "user/compcli.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -453,6 +460,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/kbd.msh",            "conf/units/termsvc.msh",
         "conf/units/gsh.msh",
         "conf/units/gshell.msh",
+        "conf/units/compcli.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -542,7 +550,7 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{
             "panic_test", "fault_test",  "sched_test",   "domain_test",
             "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-            "blk_test",   "gpu_test",    "term_test",    "input_test",   "seat_test",    "gseat_test",   "fs_test",      "net_test",     "fabric_test",
+            "blk_test",   "gpu_test",    "term_test",    "input_test",   "seat_test",    "gseat_test",   "comp_test",    "fs_test",      "net_test",     "fabric_test",
             "shell_test", "rng_test",    "smmu_test",    "vm_test",
             "guest_test", "vmnode_test", "pan_test",     "cpu_test",
             "users_test", "login_test",  "flogin_test",  "dot_test",
@@ -911,7 +919,7 @@ pub fn build(b: *std.Build) void {
     const all_test_opts = [_][]const u8{
         "panic_test", "fault_test",  "sched_test",   "domain_test",
         "ipc_test",   "init_test",   "sandbox_test", "flap_test",
-        "blk_test",   "gpu_test",    "term_test",    "input_test",   "seat_test",    "gseat_test",   "fs_test",      "net_test",     "fabric_test",
+        "blk_test",   "gpu_test",    "term_test",    "input_test",   "seat_test",    "gseat_test",   "comp_test",    "fs_test",      "net_test",     "fabric_test",
         "shell_test", "rng_test",    "smmu_test",    "vm_test",
         "guest_test", "vmnode_test", "pan_test",     "cpu_test",
         "users_test", "login_test",  "flogin_test",  "dot_test",
@@ -919,9 +927,9 @@ pub fn build(b: *std.Build) void {
     const variants = [_][]const u8{
         "panic",   "fault", "sched", "domain", "ipc",    "init",
         "sandbox", "flap",  "blk",   "gpu",    "term",   "input",
-        "seat",    "gseat", "fs",    "net",    "fabric", "shell",
-        "rng",     "smmu",  "vm",    "guest",  "vmnode", "pan",
-        "cpu",     "users", "login", "flogin", "dot",
+        "seat",    "gseat", "comp",  "fs",     "net",    "fabric",
+        "shell",   "rng",   "smmu",  "vm",     "guest",  "vmnode",
+        "pan",     "cpu",   "users", "login",  "flogin", "dot",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

@@ -98,8 +98,21 @@ var fb_chunk_pages: [n_chunks]u64 = @splat(0);
 var fb_chunk_start: [n_chunks]u64 = @splat(0); // linear byte offset of each chunk
 
 const max_surfaces = 4;
-const Surface = struct { used: bool = false, shm: u64 = 0, va: u64 = 0, len: usize = 0 };
+const Surface = struct {
+    used: bool = false,
+    shm: u64 = 0,
+    va: u64 = 0,
+    len: usize = 0,
+    x: u32 = 0,
+    y: u32 = 0,
+    w: u32 = 0,
+    h: u32 = 0,
+    z: u32 = 0, // stacking order; higher is nearer the top
+};
 var surfaces: [max_surfaces]Surface = @splat(.{});
+var next_z: u32 = 1;
+/// The compositor's ground, seen wherever no surface covers the scanout.
+const bg_word: u32 = 0x0020_2830; // a dark slate
 
 // ---------------------------------------------------- command building
 
@@ -266,21 +279,24 @@ fn findSurface(id: u64) ?*Surface {
     return if (sf.used) sf else null;
 }
 
-/// A fullscreen surface: a fresh shm of the framebuffer's size that both
-/// we and the client map — the client draws into it, we read it on
-/// commit. Returns the surface id and the cap to hand the client.
-fn createSurface() ?struct { id: u64, shm: u64 } {
+/// A surface at (x, y) of size w x h: a fresh shm both we and the client
+/// map — the client draws into it, we read it when compositing. It stacks
+/// above every existing surface. Returns the surface id and the cap.
+fn createSurface(x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, shm: u64 } {
     var idx: usize = 0;
     while (idx < max_surfaces and surfaces[idx].used) idx += 1;
     if (idx == max_surfaces) return null;
-    const s = usys.shmCreate(fb_pages);
+    const pages = (@as(usize, w) * h * fb_bpp + 4095) / 4096;
+    if (pages == 0 or pages > fb_pages) return null;
+    const s = usys.shmCreate(pages);
     if (s.err != .ok) return null;
     const m = usys.shmMap(s.data[0]);
     if (m.err != .ok) {
         _ = usys.capDrop(s.data[0]);
         return null;
     }
-    surfaces[idx] = .{ .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096 };
+    surfaces[idx] = .{ .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096, .x = x, .y = y, .w = w, .h = h, .z = next_z };
+    next_z += 1;
     return .{ .id = idx + 1, .shm = s.data[0] };
 }
 
@@ -288,6 +304,49 @@ fn destroySurface(sf: *Surface) void {
     if (sf.va != 0) _ = usys.shmUnmap(sf.va);
     if (sf.shm != 0) _ = usys.capDrop(sf.shm);
     sf.* = .{};
+}
+
+/// Blit one surface onto the framebuffer at its position, clipped to the
+/// scanout. The surface is contiguous (w*bpp per row); the framebuffer is
+/// the scatter-gather chunks, so each row goes through fbWrite.
+fn blit(sf: *const Surface) void {
+    const src: [*]const u8 = @ptrFromInt(sf.va);
+    var ry: usize = 0;
+    while (ry < sf.h) : (ry += 1) {
+        const sy = @as(usize, sf.y) + ry;
+        if (sy >= fb_h) break;
+        var cols: usize = sf.w;
+        if (@as(usize, sf.x) + cols > fb_w) cols = fb_w - @as(usize, sf.x);
+        const dst_off = sy * fb_stride + @as(usize, sf.x) * fb_bpp;
+        const src_off = ry * @as(usize, sf.w) * fb_bpp;
+        fbWrite(dst_off, src + src_off, cols * fb_bpp);
+    }
+}
+
+/// Recompose the scanout: paint the ground, then every surface bottom to
+/// top, then ship it to the host. Full recompose per commit — simple and
+/// correct; per-rect composition is a later optimisation.
+fn composite() bool {
+    // Ground.
+    for (0..n_chunks) |i| {
+        const words = fb_chunk_pages[i] * 4096 / 4;
+        const p: [*]volatile u32 = @ptrFromInt(fb_va[i]);
+        var j: usize = 0;
+        while (j < words) : (j += 1) p[j] = bg_word;
+    }
+    // Surfaces, painters' order (lowest z first).
+    var painted: u32 = 0;
+    while (true) {
+        var next: ?*Surface = null;
+        for (&surfaces) |*sf| {
+            if (!sf.used or sf.z <= painted) continue;
+            if (next == null or sf.z < next.?.z) next = sf;
+        }
+        const sf = next orelse break;
+        blit(sf);
+        painted = sf.z;
+    }
+    return transferAndFlush();
 }
 
 /// Serve the surface protocol on the boot channel (which is also the
@@ -305,37 +364,41 @@ fn serveSurfaces(chan_h: u64) noreturn {
             continue;
         };
         switch (req) {
-            .create_surface => {
-                if (createSurface()) |cs| {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(fb_w, fb_h) } }, cs.shm);
+            .create_surface => |q| {
+                const x = shared.unpackHi(q.xy);
+                const y = shared.unpackLo(q.xy);
+                // A zero size means the whole scanout at (0,0) — the
+                // single-window case, so a client needn't know its size.
+                const full = shared.unpackHi(q.wh) == 0 or shared.unpackLo(q.wh) == 0;
+                const w: u32 = if (full) fb_w else shared.unpackHi(q.wh);
+                const h: u32 = if (full) fb_h else shared.unpackLo(q.wh);
+                const px_x: u32 = if (full) 0 else x;
+                const px_y: u32 = if (full) 0 else y;
+                if (@as(u64, px_x) + w > fb_w or @as(u64, px_y) + h > fb_h) {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 6 } }, 0);
+                    continue;
+                }
+                if (createSurface(px_x, px_y, w, h)) |cs| {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h) } }, cs.shm);
                 } else {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0);
                 }
             },
             .commit => |q| {
-                const sf = findSurface(q.surface) orelse {
+                _ = findSurface(q.surface) orelse {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 3 } }, 0);
                     continue;
                 };
-                const x = shared.unpackHi(q.xy);
-                const y = shared.unpackLo(q.xy);
-                const w = shared.unpackHi(q.wh);
-                const h = shared.unpackLo(q.wh);
-                if (@as(u64, x) + w > fb_w or @as(u64, y) + h > fb_h) {
-                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 4 } }, 0);
-                    continue;
-                }
-                const srcbuf: [*]const u8 = @ptrFromInt(sf.va);
-                var ry: usize = 0;
-                while (ry < h) : (ry += 1) {
-                    const row_off = (@as(usize, y) + ry) * fb_stride + @as(usize, x) * fb_bpp;
-                    fbWrite(row_off, srcbuf + row_off, @as(usize, w) * fb_bpp);
-                }
-                const ok = transferAndFlush();
+                // The damage rect (q.xy/q.wh) is advisory for now; recompose
+                // the whole scanout so overlapping surfaces stay correct.
+                const ok = composite();
                 _ = usys.replyTyped(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 5 } }, 0);
             },
             .destroy_surface => |q| {
-                if (findSurface(q.surface)) |sf| destroySurface(sf);
+                if (findSurface(q.surface)) |sf| {
+                    destroySurface(sf);
+                    _ = composite(); // its space returns to the ground
+                }
                 _ = usys.replyTyped(shared.GpuResp, chan_h, .ok, 0);
             },
         }

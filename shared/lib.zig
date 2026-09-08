@@ -373,6 +373,7 @@ pub const ImageId = enum(u64) {
     term = 24,
     inputsvc = 25,
     gsh = 26,
+    compcli = 27,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -741,10 +742,13 @@ pub const BlkResp = union(enum(u64)) {
 /// scanout's framebuffer and flushes it to the host. Rects pack two u32
 /// into a u64 (xy = x<<32 | y, wh = w<<32 | h) to fit the four-word ABI.
 pub const GpuReq = union(enum(u64)) {
-    /// A fullscreen surface (the scanout's size). The reply carries the
-    /// surface id and its size, and a shm cap the client maps and draws.
-    create_surface: void,
-    /// Copy the damage rect from `surface` into the scanout and flush.
+    /// A surface at `xy` (x<<32 | y on the scanout) of size `wh`. The
+    /// reply carries the surface id and its size, and a shm cap the client
+    /// maps and draws. Later surfaces stack above earlier ones. A
+    /// full-scanout surface at (0,0) is the single-window case.
+    create_surface: struct { xy: u64, wh: u64 },
+    /// A surface's damage rect changed (`xy`/`wh` in surface-local
+    /// coordinates); the compositor recomposites the scanout and flushes.
     commit: struct { surface: u64, xy: u64, wh: u64 },
     /// Release a surface and its buffer.
     destroy_surface: struct { surface: u64 },
@@ -1605,7 +1609,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

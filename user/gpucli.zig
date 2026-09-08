@@ -39,7 +39,7 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
 
     // Create a fullscreen surface; gpusvc replies with its size and a
     // cap to the pixel buffer we draw into.
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .create_surface, 0)) {
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .{ .create_surface = .{ .xy = 0, .wh = 0 } }, 0)) {
         .ok => |ok| ok,
         .err => {
             _ = usys.log(log_h, "gpucli: create_surface failed");

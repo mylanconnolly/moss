@@ -110,7 +110,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
         usys.exit(169);
     }
 
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .create_surface, 0)) {
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .{ .create_surface = .{ .xy = 0, .wh = 0 } }, 0)) {
         .ok => |ok| ok,
         .err => usys.exit(180),
     };

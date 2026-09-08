@@ -2354,6 +2354,27 @@ directly (`notifyWait` in `submitCmd`), so it must not bind the IRQ to
 its `recv` at all. The seat's higher commit rate and multi-domain load
 made the race likely; the simpler gpu/term drills almost never hit it.
 
+**Stage 5: the compositor (as built, 2026-09-08).** The surface protocol
+was built for this from the start, and now the display server delivers on
+it: many surfaces, each with a position and a stacking order, composited
+onto the scanout. `create_surface` gained a rect — `{xy, wh}` places and
+sizes the surface (a zero size still means the whole scanout at the
+origin, the single-window case that keeps `term`/`gpucli` unchanged);
+later surfaces stack above earlier ones. `commit` no longer copies one
+surface straight to the framebuffer — it recomposites: paint the ground,
+then blit every surface bottom to top (each row through `fbWrite`, clipped
+to the scanout), then transfer and flush. Full recompose per commit is
+the simple, correct choice; per-rect composition is a later optimisation,
+and so are focus and input routing (the compositor will own which surface
+the keyboard reaches) and a trusted path for login. The drill opens two
+overlapping windows — red at (40,40), green at (200,150) — and the host
+screendumps and checks each region: red where only the first covers,
+green where only the second does, green again in the overlap (it was
+created later, so it wins), and the ground where neither reaches. A
+compositor in one screendump. It cost one ceiling: init's `max_units`
+went 48 → 64, since the arc's units (display server, terminal, keyboard,
+their seat and drill clients) crossed the old bound.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

@@ -605,9 +605,18 @@ is a plan.
     banner, prompt, the echoed command and its output — the developer
     shell on the graphical console. Remaining: only the interactive
     `zig build run` window (`-display cocoa` + device flags, in the arch
-    build sections — Framework 16). (5, later, not
-    this arc) the compositor. The runner's QMP socket lands first, since
-    stages 1–3 all lean on it.
+    build sections — Framework 16). ✅ (5) the **compositor** (compositing
+    + z-order landed 2026-09-08): create_surface gained a rect {xy, wh}
+    (zero size = fullscreen at the origin, the single-window case);
+    commit recomposites the scanout — ground, then every surface bottom
+    to top (clipped, via fbWrite) — so surfaces have position and
+    stacking. Drilled (profile comp, user/compcli.zig): two overlapping
+    windows, the later one winning the overlap; screendump checks each
+    region + the ground. init's max_units 48→64 for the arc's units.
+    Still open in (5): focus + input routing (the compositor owning which
+    surface the keyboard reaches — inputsvc feeds it, not term directly),
+    per-rect composition, and a trusted path for login. The runner's QMP
+    socket lands first, since stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

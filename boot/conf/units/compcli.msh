@@ -1,0 +1,13 @@
+# The compositor drill (profile comp): a client opens two overlapping
+# windowed surfaces that the display server composites onto the scanout.
+# Pulling in the display server starts it; the client's exit ends the
+# boot, with the host's screendump taken while the windows are up.
+{
+  image:     compcli
+  budget:    { user: 8mb }
+  profiles:  [comp]
+  essential: true
+  give: [
+    { tag: display, unit: gpusvc }
+  ]
+}

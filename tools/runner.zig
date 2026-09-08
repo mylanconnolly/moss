@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp };
 
 const Spec = struct {
     name: []const u8,
@@ -67,6 +67,7 @@ const specs = [_]Spec{
     .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
+    .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -325,7 +326,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The graphical drills: a virtio-gpu to draw on and a QMP port so
         // the host can screendump the scanout (the real-pixels half of the
         // "both" verification) and inject input.
-        .gpu, .term => try args.appendSlice(gpa, &.{
+        .gpu, .term, .comp => try args.appendSlice(gpa, &.{
             "-device",
             "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",
@@ -388,6 +389,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gseat) {
         if (!try gseatDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .comp) {
+        if (!try compScreendump(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -672,6 +676,57 @@ fn gseatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.typeText("exit\n")) {
         reportFailure(spec.name, "QMP could not type exit", log_path);
         return false;
+    }
+    return true;
+}
+
+/// The compositor drill's host side: once the client's windows are up,
+/// screendump and check that each region shows the right thing — window A
+/// (red) where only A covers, window B (green) where only B covers, B
+/// again in the overlap (it stacks on top), and the compositor's ground
+/// where neither covers.
+fn compScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "comp: surfaces up") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the compositor client never came up", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    // A at (40,40)+300x200, B at (200,150)+300x200; B created later, so it
+    // stacks on top in the overlap. Ground is 0x302820 (RGB of 0x202830).
+    const checks = [_]struct { x: usize, y: usize, r: u8, g: u8, b: u8, what: []const u8 }{
+        .{ .x = 60, .y = 60, .r = 0xCC, .g = 0x22, .b = 0x22, .what = "window A (red)" },
+        .{ .x = 450, .y = 300, .r = 0x22, .g = 0xCC, .b = 0x22, .what = "window B (green)" },
+        .{ .x = 250, .y = 200, .r = 0x22, .g = 0xCC, .b = 0x22, .what = "the overlap (B on top)" },
+        .{ .x = 600, .y = 50, .r = 0x20, .g = 0x28, .b = 0x30, .what = "the ground" },
+    };
+    for (checks) |c| {
+        if (c.x >= img.w or c.y >= img.h or !eqRgb(pixelAt(img, c.x, c.y), c.r, c.g, c.b)) {
+            const p = if (c.x < img.w and c.y < img.h) pixelAt(img, c.x, c.y) else [3]u8{ 0, 0, 0 };
+            std.debug.print("[FAIL] {s}: {s} at ({d},{d}) was {any}, wanted ({d},{d},{d})\n", .{ spec.name, c.what, c.x, c.y, p, c.r, c.g, c.b });
+            reportFailure(spec.name, "the compositor did not paint a region correctly", log_path);
+            return false;
+        }
     }
     return true;
 }
