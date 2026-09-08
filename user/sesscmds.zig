@@ -17,9 +17,13 @@ const Value = mshl.Value;
 var sess_chan: u64 = 0;
 var sess_buf: [*]u8 = undefined;
 var attached = false;
+/// A terminal to hand the session as its console: with it, `login` opens
+/// an interactive session (a shell on that console). Sent once.
+var console_cap: u64 = 0;
 
-pub fn setup(sess_cap: u64) void {
+pub fn setup(sess_cap: u64, console: u64) void {
     sess_chan = sess_cap;
+    console_cap = console;
 }
 
 /// Whether the host holds a session manager — `login` is offered only then.
@@ -77,7 +81,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value) mshl.Error!
     const pw = sessWord(512, pass);
     defer @memset(sess_buf[0..1024], 0); // the passphrase leaves this buffer wiped
 
-    const rep = switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .login = .{ .name = nw, .pass = pw } }, 0)) {
+    const console = console_cap;
+    console_cap = 0; // sent once — it becomes the session's
+    const rep = switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .login = .{ .name = nw, .pass = pw } }, console)) {
         .ok => |r| r,
         .err => return it.fail("login: the session manager did not answer", .{}),
     };

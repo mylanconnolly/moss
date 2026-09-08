@@ -680,16 +680,17 @@ is a plan.
     (profile gsession, scripts/gui-session.msh): the whole users
     volume stack (apply + usersvc serve mode) plus the graphical
     stack; the host signs in as alice/alice-pass and usersvc opens a
-    real session. The session is the console-less verifier. ⏳ interactive
-    session (in progress 2026-09-08): groundwork landed — the terminal
-    now reads input through the compositor (a focus-routed client), so it
-    can coexist with a GUI login on the one display+keyboard. The rest
-    (usersvc.login taking a console cap → an interactive msh on the
-    terminal; deferred SessReq.wait so a session that calls back doesn't
-    deadlock; focus handoff on the form closing) is designed but not yet
-    landed — see the mshl-gui-arc memory note for the blockers. Open:
-    finish the interactive session; crash-isolate update in a worker
-    domain; pointer input; richer layout; fabric-remote GUI.
+    real session. The session is the console-less verifier. ✅ interactive
+    session (landed 2026-09-08): the front door opens onto a real shell.
+    SessReq.login takes a console cap; with it, login spawns an
+    interactive msh on a graphical terminal (a compositor client, so it
+    coexists with the login form — focus falls to it when the form
+    closes). SessReq.wait is deferred (a helper thread) so a session that
+    calls back doesn't deadlock the manager; usersvc replies by token
+    (not token 0) now that concurrent calls are outstanding. Drilled:
+    lconsole (login+console, no GUI) and gisession (the whole path — GUI
+    form → msh on the terminal → echo/exit). Open: crash-isolate update
+    in a worker domain; pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

@@ -314,6 +314,22 @@ fn transferFlushRect(r: Rect) bool {
 
 // -------------------------------------------------------- surfaces
 
+/// Focus the topmost (highest-z) live surface, or none (0) — used when
+/// the focused surface is destroyed (a GUI login closing leaves the
+/// terminal beneath it focused, so keys reach the shell).
+fn focusTopmost() void {
+    var best_id: u64 = 0;
+    var best_z: u32 = 0;
+    for (&surfaces, 0..) |*sf, i| {
+        if (!sf.used) continue;
+        if (best_id == 0 or sf.z >= best_z) {
+            best_id = i + 1;
+            best_z = sf.z;
+        }
+    }
+    focused = best_id;
+}
+
 fn anyTrusted() bool {
     for (&surfaces) |*sf| {
         if (sf.used and sf.trusted) return true;
@@ -546,6 +562,12 @@ fn readKey() u8 {
 
 /// Move focus to the next surface (by id, wrapping) — Tab's job.
 fn cycleFocus() void {
+    // Focus never leaves a login surface: a trusted prompt keeps the
+    // keyboard (secure attention), and its Tab is its own (field
+    // navigation), not the compositor's to steal.
+    if (findSurface(focused)) |sf| {
+        if (sf.trusted) return;
+    }
     var id: u64 = focused;
     var tries: u64 = 0;
     while (tries < max_surfaces) : (tries += 1) {
@@ -746,6 +768,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                         continue;
                     }
                     destroySurface(sf);
+                    if (focused == q.surface) focusTopmost();
                     _ = composite(); // its space returns to the ground
                 }
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);

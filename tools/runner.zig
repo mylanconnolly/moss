@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession };
 
 const Spec = struct {
     name: []const u8,
@@ -75,6 +75,8 @@ const specs = [_]Spec{
     .{ .name = "guilogin", .kind = .guilogin, .pass = "guilogin-test: PASS", .extra = "gui: login who=alice", .append = "profile=guilogin" },
     .{ .name = "gtrust", .kind = .gtrust, .pass = "gtrust-test: PASS", .extra = "gui: tlogin who=alice", .append = "profile=gtrust" },
     .{ .name = "gsession", .kind = .gsession, .pass = "gsession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gsession", .timeout_s = 120 },
+    .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
+    .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -277,7 +279,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -359,7 +361,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // (the shell's filesystem view).
         // The GUI front door: the graphical devices, a disk for the users
         // volume, and QMP to type and screendump.
-        .gseat, .gsession => {
+        .gseat, .gsession, .lconsole, .gisession => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -420,6 +422,12 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gsession) {
         if (!try gsessionDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .lconsole) {
+        if (!try lconsoleDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .gisession) {
+        if (!try gisessionDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -1160,6 +1168,136 @@ fn gsessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         }
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "no session was ever opened from the GUI login", log_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The login-with-console isolation drill (): login opens an
+/// interactive msh on a graphical terminal. Wait for the shell to come
+/// up, run a command and exit it, and confirm the session was real. If
+/// the session ends BEFORE the shell comes up, that is the bug under
+/// investigation — flag it (the log carries the shell's exit).
+fn lconsoleDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "msh: up, serving the console") != null) break;
+        if (std.mem.indexOf(u8, content, "login: session ok") != null or
+            std.mem.indexOf(u8, content, "login: failed") != null)
+        {
+            reportFailure(spec.name, "the session ended before an interactive shell came up", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "no interactive shell ever came up", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    sleepMs(200);
+    _ = q.typeText("echo hi");
+    _ = q.sendKey("ret");
+    sleepMs(400);
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    _ = q.screendump(ppm_path);
+    _ = q.typeText("exit");
+    _ = q.sendKey("ret");
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "login: session ok who=alice") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the interactive session never ended from the typed exit", log_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+fn sfail(spec: Spec, log_path: []const u8, what: []const u8) bool {
+    std.debug.print("[FAIL] {s}: QMP could not {s}\n", .{ spec.name, what });
+    reportFailure(spec.name, "QMP input failed", log_path);
+    return false;
+}
+
+/// The interactive GUI session drill (gisession): the trusted GUI
+/// login, then a real msh on the graphical terminal. Sign in on the
+/// form; it closes and focus falls to the terminal, so the shell (which
+/// login opened on it) gets the keyboard. Run a command and exit; the
+/// shell taking our typed  is the interactive proof.
+fn gisessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the login form never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!q.typeText("alice")) return sfail(spec, log_path, "type user");
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    if (!q.typeText("alice-pass")) return sfail(spec, log_path, "type pass");
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    _ = q.sendKey("ret");
+    // The form closes; the interactive shell comes up on the terminal.
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "msh: up, serving the console") != null) break;
+        if (std.mem.indexOf(u8, content, "gui: session failed") != null) {
+            reportFailure(spec.name, "the login did not open an interactive session", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "no interactive shell ever came up", log_path);
+            return false;
+        }
+    }
+    sleepMs(300);
+    _ = q.typeText("echo hi");
+    _ = q.sendKey("ret");
+    sleepMs(400);
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    _ = q.screendump(ppm_path);
+    _ = q.typeText("exit");
+    _ = q.sendKey("ret");
+    var k: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        k += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: session ok who=alice") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or k * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the interactive session never ended from the typed exit", log_path);
             return false;
         }
     }

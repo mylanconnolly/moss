@@ -213,7 +213,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (workcmds_on) workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, 0);
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h, setup.secret());
-    if (setup.has(.sess)) sesscmds.setup(setup.cap(.sess));
+    if (setup.has(.sess)) sesscmds.setup(setup.cap(.sess), if (setup.has(.console)) setup.cap(.console) else 0);
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
     tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
     if (fab_chan != 0) fab = .{ .chan = fab_chan };

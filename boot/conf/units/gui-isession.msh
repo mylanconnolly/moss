@@ -1,0 +1,22 @@
+# The interactive GUI session drill (profile gisession): the trusted GUI
+# login form, but the greeter hands the session manager a graphical
+# terminal (console: unit termsvc), so login opens an INTERACTIVE session
+# — a real msh on the terminal, on the user's home. The form closes on
+# submit and focus falls to the terminal, so the shell gets the keyboard.
+# Same script as gsession; only the console give differs.
+{
+  image:     mshrun
+  script:    scripts/gui-session.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [gisession]
+  essential: true
+  after:     apply
+  give: [
+    { tag: display, unit: compositor }
+    { tag: console, unit: termsvc }
+    { tag: sess, unit: usersvc-gui }
+    { tag: buf, shm: 1 }
+    { secret: conf/trust.token }
+  ]
+}

@@ -2641,11 +2641,39 @@ session ok who=alice`. A login prompt written in mshl, on the trusted
 path, opening a real authenticated session on the user's home.
 
 The session here is the console-less verifier (it does its home I/O and
-exits); an *interactive* session — a shell on a graphical console handed
-off from the greeter — is the next step and wants a console argument on
-the login path. What's left for the arc after that: crash-isolating
-`update` in a worker domain, pointer input, richer layout, and the
-fabric-remote GUI the data-only design already allows.
+exits); the *interactive* session is the next stage.
+
+**Stage 5 (as built, 2026-09-08).** The front door opens onto a real
+shell. Login now carries a console: `SessReq.login` takes an attached
+cap, and with it `authenticate` spawns the interactive session (an init
+instance running msh on that console) instead of the verifier. The
+greeter holds a graphical terminal (`console = unit termsvc`) and hands
+its `ConsReq` cap to `login`; the session's msh runs on it, so the shell
+renders on the terminal's surface and reads the keyboard through it —
+and because the terminal is now a compositor client (the input
+unification above), the greeter's login form and the shell's terminal
+coexist on the one display: the form is focused while you type
+credentials, and when it closes on submit, focus falls to the terminal
+(`focusTopmost`) so the shell has the keyboard. The form's own Tab stays
+its own — a trusted surface never yields focus to `cycleFocus` (secure
+attention). Two bugs were paid for getting here. One was the same token-0
+reply hazard as the compositor: making `wait` *deferred* (a helper thread
+replies when the session dies, so the manager keeps serving the session's
+own calls and does not deadlock) left a second call outstanding, and
+usersvc's `reply` answered the *oldest* pending — the session's
+`attach_buf` reply landed on the parked `wait`, so the shell hung in
+setup; usersvc now replies to each caller's own token. The other was
+prosaic: a script path is passed in the 24-byte arg, so a 25-byte name
+was silently truncated and not found — names for `script:` units stay
+short. The drills: `lconsole` proves the mechanics with a plain `login`
+(no GUI); `gisession` is the whole path — the trusted mshl login form,
+then msh on the graphical terminal, `echo hi` and `exit` typed on the
+virtual keyboard. A login prompt written in mshl, on a trusted path,
+opening a real interactive shell on the user's home.
+
+What's left for the arc: crash-isolating `update` in a worker domain,
+pointer input, richer layout, and the fabric-remote GUI the data-only
+design already allows.
 
 ## Distribution: the fabric
 

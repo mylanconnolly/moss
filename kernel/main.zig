@@ -209,6 +209,16 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.lconsole_test) {
+        _ = sched.spawn("boot-watch", lconsoleTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+    if (build_options.gisession_test) {
+        _ = sched.spawn("boot-watch", gisessionTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -722,6 +732,14 @@ fn gtrustTestWorker(_: u64) void {
 /// stack, in one boot.
 fn gsessionTestWorker(_: u64) void {
     systemDrill("gsession");
+}
+
+fn lconsoleTestWorker(_: u64) void {
+    systemDrill("lconsole");
+}
+
+fn gisessionTestWorker(_: u64) void {
+    systemDrill("gisession");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

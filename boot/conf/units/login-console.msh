@@ -1,0 +1,17 @@
+# The login-with-console isolation drill (profile lconsole): mshrun runs
+# the login-console script, holding a graphical terminal (console) and a
+# sess cap. login opens an interactive session on the terminal.
+{
+  image:     mshrun
+  script:    scripts/lconsole.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [lconsole]
+  essential: true
+  after:     apply
+  give: [
+    { tag: console, unit: termsvc }
+    { tag: sess, unit: usersvc-gui }
+    { tag: buf, shm: 1 }
+  ]
+}

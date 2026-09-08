@@ -245,6 +245,11 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
     stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(181);
     _ = usys.log(glog, "usersvc: up; sessions are domains, identities are keys");
+    const wb = usys.notifyCreate();
+    if (wb.err == .ok) {
+        wait_bell = wb.data[0];
+        _ = usys.threadCreate(waitThread, 0, &wait_stack);
+    }
     fab_chan = setup.cap(.fabric);
     if (fab_chan != 0) joinPool();
     if (flags & 0x100 != 0) {
@@ -286,6 +291,7 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
             continue;
         };
         const badge = r.badge;
+        cur_token = r.token; // reply to THIS caller (deferred wait leaves others pending)
         // Badge 0 (the unbadged channel: the drill, an admin) may open
         // and end sessions; a session (its own badge) may only share; a
         // caller through the fabric (the published channel's badge) may
@@ -351,33 +357,31 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
             },
             .login => |l| {
                 lock();
-                const res = login(l.name, l.pass);
+                const res = login(l.name, l.pass, r.cap);
                 unlock();
+                if (r.cap != 0 and res != .session) _ = usys.capDrop(r.cap);
                 reply(res);
             },
             .wait => |w| {
+                // Deferred: a session may call back into us while it runs
+                // (its own sess cap), so blocking the serve loop on its
+                // exit would deadlock. A helper thread waits and replies to
+                // this caller's token. One outstanding wait at a time.
                 lock();
-                const s = sessionOf(w.sid) orelse {
-                    unlock();
+                const known = sessionOf(w.sid) != null;
+                unlock();
+                if (!known) {
                     reply(.{ .sess_err = .{ .code = 2 } });
                     continue;
-                };
-                const ctl = s.ctl;
-                unlock();
-                var code: u64 = 0;
-                while (true) {
-                    const st = usys.domainStat(ctl);
-                    if (st.err != .ok) break;
-                    if (st.data[0] == @intFromEnum(shared.DomainState.dead)) {
-                        code = st.data[1];
-                        break;
-                    }
-                    usys.sleep(2);
                 }
-                lock();
-                if (sessionOf(w.sid)) |still| close(still);
-                unlock();
-                reply(.{ .exited = .{ .code = code } });
+                if (@atomicLoad(bool, &wait_active, .acquire)) {
+                    reply(.{ .sess_err = .{ .code = 3 } });
+                    continue;
+                }
+                wait_sid = w.sid;
+                wait_token = r.token;
+                @atomicStore(bool, &wait_active, true, .release);
+                _ = usys.notifySignal(wait_bell, 1);
             },
             .logout => |lo| {
                 lock();
@@ -393,8 +397,9 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     }
 }
 
+var cur_token: u64 = 0;
 fn reply(resp: shared.SessResp) void {
-    _ = usys.replyTyped(shared.SessResp, svc_chan, resp, 0);
+    _ = usys.replyTypedTo(shared.SessResp, svc_chan, resp, 0, cur_token);
 }
 
 fn sessionOf(sid: u64) ?*Session {
@@ -692,14 +697,14 @@ fn forgetShares(s: *Session) void {
 }
 
 /// The protocol's login: name and passphrase from the client's buffer.
-fn login(name_w: u64, pass_w: u64) shared.SessResp {
+fn login(name_w: u64, pass_w: u64, console: u64) shared.SessResp {
     const name_src = clientSlice(0, name_w) orelse return .denied;
     const pass_src = clientSlice(0, pass_w) orelse return .denied;
     var pass: [256]u8 = undefined;
     defer @memset(&pass, 0);
     @memcpy(pass[0..pass_src.len], pass_src);
     @memset(pass_src, 0); // the passphrase now lives only here
-    return authenticate(name_src, pass[0..pass_src.len], 0);
+    return authenticate(name_src, pass[0..pass_src.len], console);
 }
 
 /// Authenticate and open a session (with `console`, an init instance
@@ -1198,6 +1203,41 @@ fn openHome(s: *Session, voldir: u64) ?u64 {
 const max_consoles = boot.max_index;
 var console_caps: [max_consoles]u64 = @splat(0);
 var console_stacks: [max_consoles][32 << 10]u8 align(16) = undefined;
+
+// Deferred SessReq.wait: the serve loop hands one wait to this thread so
+// it can keep serving the session's own calls while the session runs.
+var wait_bell: u64 = 0;
+var wait_active: bool = false;
+var wait_sid: u64 = 0;
+var wait_token: u64 = 0;
+var wait_stack: [32 << 10]u8 align(16) = undefined;
+
+fn waitThread(_: u64) callconv(.c) void {
+    while (true) {
+        _ = usys.notifyWait(wait_bell);
+        if (!@atomicLoad(bool, &wait_active, .acquire)) continue;
+        lock();
+        const ctl = if (sessionOf(wait_sid)) |s| s.ctl else 0;
+        unlock();
+        var code: u64 = 0;
+        if (ctl != 0) {
+            while (true) {
+                const st = usys.domainStat(ctl);
+                if (st.err != .ok) break;
+                if (st.data[0] == @intFromEnum(shared.DomainState.dead)) {
+                    code = st.data[1];
+                    break;
+                }
+                usys.sleep(2);
+            }
+            lock();
+            if (sessionOf(wait_sid)) |still| close(still);
+            unlock();
+        }
+        _ = usys.replyTypedTo(shared.SessResp, svc_chan, .{ .exited = .{ .code = code } }, 0, wait_token);
+        @atomicStore(bool, &wait_active, false, .release);
+    }
+}
 var console_done: [max_consoles]bool = @splat(false);
 var ncons: usize = 0;
 var login_drill = false;

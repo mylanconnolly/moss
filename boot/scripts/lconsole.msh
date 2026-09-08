@@ -1,0 +1,11 @@
+# The login-with-console path in isolation (profile lconsole): no GUI, no
+# form — just `login` with a graphical terminal as the console, so the
+# session manager opens an interactive msh on it. Credentials hardcoded
+# (the drill's user). This isolates the interactive-session mechanics
+# (login-with-console, the session shell on the terminal, the deferred
+# wait) from the GUI form.
+let r = (login "alice" "alice-pass")
+match $r {
+  ok $s => { "login: session ok who=" + $s.who }
+  err $e => { "login: failed " + $e }
+}
