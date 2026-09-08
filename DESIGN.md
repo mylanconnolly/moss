@@ -2760,16 +2760,32 @@ proportionally (measured widths size the buttons and fields), blits each
 glyph's coverage from the atlas over its own background with its own
 colour, and falls back to the bitmap font when no `font` cap is present.
 The login form and the counter now render in real IBM Plex Sans, crisp
-and anti-aliased. Paid-for lessons: a service reached by a `unit:` give
+and anti-aliased.
+
+The effective sizes and the accessibility scale are data, not constants:
+fontsvc reads `conf/font.msh` (the system settings layer) at startup —
+parsed with mshl and run through `lib/settings.merge`, the same substrate
+every other program's settings use — for the per-role base sizes and a
+single `scale`. Every size is multiplied by `scale`, and because all text
+goes through fontsvc and the GUI lays out from the *scaled* metrics, one
+`scale: 1.5` resizes the whole UI at once and the layout reflows to match
+(bigger buttons, wider fields, taller rows) — the system-wide
+accessibility knob, the thing Linux never manages because each toolkit
+scales on its own. The per-user layer plugs into the same `merge` call (a
+user's `home/<user>/conf/font.msh` over the system one); wiring a session
+to push its user's effective settings — and a post-login GUI to show them
+— is the next step.
+
+Paid-for lessons: a service reached by a `unit:` give
 must still run init's boot handshake (answer `go`) even if it takes no
 caps, or init deems it unwired; and the rasterizer's `top` is the bitmap's
 signed device-y offset from the baseline (negative above), so the client
 *adds* it — subtracting scattered every glyph off the line.
 
-What's left for the arc: per-user font settings + the accessibility scale
-wired through `conf/font.msh`; user-installed fonts; the OTF/CFF, WOFF and
-WOFF2 front-ends; pointer input, richer layout, and the fabric-remote GUI
-the data-only design already allows.
+What's left for the arc: pushing a user's font settings from their session
+(per-user scale, once a post-login GUI shows it); user-installed fonts;
+the OTF/CFF, WOFF and WOFF2 front-ends; pointer input, richer layout, and
+the fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

@@ -723,9 +723,15 @@ is a plan.
     format converges to the same rasterizer: OTF/CFF, WOFF, WOFF2 are
     additive front-ends. The whole point — one service every text program
     goes through, so scaling is consistent (accessibility) the way Linux
-    never manages. Open: per-user font settings + scale via conf/font.msh;
-    user-installed fonts; OTF/WOFF/WOFF2 front-ends; pointer input; richer
-    layout; fabric-remote GUI.
+    never manages. ✅ Settings scale (landed 2026-09-08): fontsvc reads
+    conf/font.msh (the system settings layer, via mshl + lib/settings) for
+    the per-role sizes and a single `scale`; every size is scaled, the GUI
+    lays out from the scaled metrics, so one `scale: 1.5` resizes the whole
+    UI and the layout reflows (proven — 16px→24px, buttons/rows grew). The
+    per-user layer plugs into the same merge; a session pushing it (and a
+    post-login GUI to show it) is next. Open: session push of per-user font
+    settings; user-installed fonts; OTF/WOFF/WOFF2 front-ends; pointer
+    input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

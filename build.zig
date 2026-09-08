@@ -539,7 +539,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/usersvc-gui.msh",    "conf/units/login-console.msh",
         "scripts/lconsole.msh",          "conf/units/gui-isession.msh",
         "conf/units/gui-boom.msh",       "scripts/gui-boom.msh",
-        "conf/units/fontsvc.msh",
+        "conf/units/fontsvc.msh",        "conf/font.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));

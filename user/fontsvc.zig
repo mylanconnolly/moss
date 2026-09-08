@@ -16,6 +16,8 @@ const usys = @import("usys.zig");
 const boot = @import("boot.zig");
 const mosslib = @import("mosslib");
 const font = mosslib.font;
+const mshl = mosslib.mshl;
+const settings = mosslib.settings;
 
 comptime {
     asm (usys.imageHeader("fontsvc"));
@@ -35,16 +37,61 @@ var mono: ?font.Font = null;
 
 // The effective font settings. A role maps to a family and a base size in
 // logical pixels; every size is multiplied by `scale` (the accessibility
-// knob) to reach device pixels. Stage 1 defaults; conf/font.msh overrides
-// come next.
+// knob) to reach device pixels. These start at built-in defaults and are
+// replaced by conf/font.msh (the system settings layer) at startup.
 var scale: f32 = 1.0;
+var ui_base: f32 = 16;
+var title_base: f32 = 22;
+var mono_base: f32 = 15;
 const RoleCfg = struct { mono: bool, base: f32 };
 fn roleCfg(role: u64) RoleCfg {
     return switch (role) {
-        @intFromEnum(shared.FontRole.ui) => .{ .mono = false, .base = 16 },
-        @intFromEnum(shared.FontRole.title) => .{ .mono = false, .base = 22 },
-        @intFromEnum(shared.FontRole.mono) => .{ .mono = true, .base = 15 },
-        else => .{ .mono = false, .base = 16 },
+        @intFromEnum(shared.FontRole.ui) => .{ .mono = false, .base = ui_base },
+        @intFromEnum(shared.FontRole.title) => .{ .mono = false, .base = title_base },
+        @intFromEnum(shared.FontRole.mono) => .{ .mono = true, .base = mono_base },
+        else => .{ .mono = false, .base = ui_base },
+    };
+}
+
+// Reading the settings file: a small mshl interp parses the data literal,
+// lib/settings merges the (future) user layer over it. Numbers only, so
+// nothing needs to outlive the parse.
+var settings_mem: [64 << 10]u8 = undefined;
+fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const mshl.Value, _: ?mshl.Value) mshl.Error!?mshl.Value {
+    return null;
+}
+fn numF(v: mshl.Value) ?f32 {
+    return switch (v) {
+        .int => |i| @floatFromInt(i),
+        .float => |f| @floatCast(f),
+        else => null,
+    };
+}
+
+/// Read the system font settings (conf/font.msh) into the effective
+/// scale and per-role base sizes. A user layer merges over this the same
+/// way (lib/settings) once a session pushes one; for now the system layer
+/// is the whole of it.
+fn readSettings(text: []const u8) void {
+    if (text.len == 0) return;
+    var fba = std.heap.FixedBufferAllocator.init(&settings_mem);
+    const a = fba.allocator();
+    var ctx: u8 = 0;
+    var it = mshl.Interp.init(a, a, .{ .ctx = @ptrCast(&ctx), .call = noHost });
+    const v = it.parseData(text) catch return;
+    if (v != .record) return;
+    const eff = settings.merge(a, v.record, null, &.{}) catch return;
+    if (eff.get("scale")) |x| if (numF(x)) |f| {
+        if (f >= 0.5 and f <= 6.0) scale = f;
+    };
+    if (eff.get("ui")) |x| if (numF(x)) |f| {
+        ui_base = f;
+    };
+    if (eff.get("title")) |x| if (numF(x)) |f| {
+        title_base = f;
+    };
+    if (eff.get("mono")) |x| if (numF(x)) |f| {
+        mono_base = f;
     };
 }
 fn roleFont(role: u64) ?*font.Font {
@@ -153,6 +200,8 @@ fn roleMetrics(role: u64, px_dev: f32) struct { line: i32, ascent: i32 } {
 }
 
 fn loadFonts(blob: []const u8) void {
+    // The system settings layer sets the scale and per-role sizes.
+    if (shared.marcFind(blob, "conf/font.msh")) |cfg| readSettings(cfg);
     // The bundled families are seeded into the assets tier, so the archive
     // holds them at assets/fonts/… — read them straight from the boot
     // archive (a Font borrows the mapped bytes), no filesystem needed.
@@ -190,7 +239,15 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     atlas = @ptrFromInt(m.data[0]);
     atlas_shm = sh.data[0];
     @memset(atlas[0 .. atlas_w * atlas_h], 0);
-    _ = usys.log(glog, "fontsvc: up");
+    {
+        var b: [96]u8 = undefined;
+        const ui_eff: u32 = @intFromFloat(@round(ui_base * scale));
+        _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: up (ui {d}px, scale {d}.{d:0>2})", .{
+            ui_eff,
+            @as(u32, @intFromFloat(scale)),
+            @as(u32, @intFromFloat(@round(scale * 100))) % 100,
+        }) catch "fontsvc: up");
+    }
 
     // One client's request/response buffer (the GUI runtime). A second
     // client replaces it — per-client buffers come with multi-app use.

@@ -1,0 +1,11 @@
+# The system font settings — the layer fontsvc reads for its defaults.
+# A user overrides these in home/<user>/conf/font.msh (merged by
+# lib/settings, unless a key is locked); the whole system's text follows
+# the result, so one `scale` change resizes every program's type at once
+# (the accessibility knob). Sizes are logical pixels, before scaling.
+{
+  scale: 1.0
+  ui:    16
+  title: 22
+  mono:  15
+}
