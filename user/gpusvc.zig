@@ -354,7 +354,13 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
         usys.exit(172);
     };
     if (usys.irqBind(dev_h, irq_notif, 0) != .ok) usys.exit(173);
-    if (usys.notifyBind(irq_notif) != .ok) usys.exit(168);
+    // NB: do NOT notifyBind the device IRQ to this thread's recv. gpusvc
+    // waits on the IRQ directly (notifyWait in submitCmd); it never serves
+    // the device from recv. Binding it would let a virtio-gpu interrupt
+    // that arrives while we are blocked in recv (between surface requests)
+    // wake recv with `interrupted` — and since the serve loop just retries,
+    // a still-latched bit spins it forever (a livelock that starves the
+    // core). irqBind alone routes the IRQ to the notification for notifyWait.
 
     // DMA: page 0 = control virtqueue; page 1 = command buffer (0..2048)
     // and response buffer (2048..4096).

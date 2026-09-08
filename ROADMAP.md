@@ -597,10 +597,15 @@ is a plan.
     Wired as `unit` gives (session → term → {gpusvc, inputsvc}). Drilled
     (profile seat) with a stand-in session (user/gsh.zig): the host types
     `hi⏎` over QMP, it travels keyboard→inputsvc→term→session (`gsh: line
-    hi`) and back to the screen (screendump has glyphs). Remaining: bind
-    the real msh session (a topology change, same ConsReq) and the
-    interactive `zig build run` window (`-display cocoa` + device flags,
-    in the arch build sections — Framework 16). (5, later, not
+    hi`) and back to the screen (screendump has glyphs). ✅ then the REAL
+    msh (landed 2026-09-07): a `gseat` profile boots the actual shell
+    (msh.msh's wiring, console from the terminal instead of a
+    virtio-console) on mossfs over the block device; the drill types `echo
+    hi` then `exit` on the virtual keyboard and the screendump shows msh's
+    banner, prompt, the echoed command and its output — the developer
+    shell on the graphical console. Remaining: only the interactive
+    `zig build run` window (`-display cocoa` + device flags, in the arch
+    build sections — Framework 16). (5, later, not
     this arc) the compositor. The runner's QMP socket lands first, since
     stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the

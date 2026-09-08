@@ -1,0 +1,19 @@
+# The real shell on the graphical console (profile gseat): msh, wired
+# exactly as the serial shell (msh.msh) but with its console coming from
+# the graphical terminal instead of a virtio-console. It speaks the same
+# ConsReq, so nothing in the shell changes. Pulling in the terminal starts
+# the display server and keyboard; the filesystem view pulls up mossfs on
+# the block device. Essential: when msh exits (the drill types `exit`),
+# the system shuts down.
+{
+  image:     shell
+  budget:    { user: 24mb }
+  grant:     [log, spawner]
+  profiles:  [gseat]
+  essential: true
+  give: [
+    { tag: console, unit: termsvc }
+    { tag: view, fs: "", ro: false }
+    { tag: init, self: true }
+  ]
+}

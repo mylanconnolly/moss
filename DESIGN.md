@@ -2328,10 +2328,31 @@ small stand-in shell (`user/gsh.zig`) rather than the full msh, but it is
 a real console loop (prompt, read a line echoing each key, run it); the
 host types `hi⏎` over QMP, and the line travels keyboard → inputsvc →
 terminal → session (logged `gsh: line hi`) and back out to the screen,
-which the screendump confirms has glyphs. The real msh binds the same
-`ConsReq`, so running it here is a topology change, not a code one; the
-interactive `zig build run` window (`-display cocoa` and the device flags)
-is the remaining piece and lives in the arch build sections.
+which the screendump confirms has glyphs. And the real msh binds the same
+`ConsReq`, so it runs here with no shell change at all: a `gseat` profile
+boots the actual shell (`msh.msh`'s wiring, only its console coming from
+the terminal instead of a virtio-console) on mossfs over the block device.
+That drill types `echo hi` then `exit` on the virtual keyboard; the
+screendump shows msh's banner, its `msh>` prompt, the echoed command and
+its `hi` output, and `exit` (read from the keyboard) makes the real shell
+exit and end the boot — the developer shell, running on the graphical
+console. The one piece left is the interactive `zig build run` window
+(`-display cocoa` and the device flags), which lives in the arch build
+sections (the Framework 16).
+
+*Lesson paid for here (a one-in-eight hang under load):* `notifyBind`
+means "wake my `recv` on this notification's signal" — and a serve loop
+that treats the resulting `interrupted` as a generic retry **must drain
+the notification**, or a still-latched bit re-fires the instant it loops
+back and spins forever, starving the core (its per-CPU timer stops
+ticking — the tell in `sched.debugDump`, which grew per-thread `park`/
+affinity and per-core evict/throttled counts while this was chased).
+gpusvc had inherited the `notifyBind` from the drivers it was modelled on
+(cons/blk/inputsvc) — but those *serve the device from `recv`* and do
+drain; gpusvc serves a channel protocol and waits on the device IRQ
+directly (`notifyWait` in `submitCmd`), so it must not bind the IRQ to
+its `recv` at all. The seat's higher commit rate and multi-domain load
+made the race likely; the simpler gpu/term drills almost never hit it.
 
 ## Distribution: the fabric
 

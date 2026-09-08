@@ -164,6 +164,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.gseat_test) {
+        _ = sched.spawn("boot-watch", gseatTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -610,6 +615,13 @@ fn inputTestWorker(_: u64) void {
 /// the keyboard from inputsvc; the host types a line over QMP.
 fn seatTestWorker(_: u64) void {
     systemDrill("seat");
+}
+
+/// The real-msh graphical seat: a system boot under profile "gseat" — the
+/// real shell runs on the graphical terminal (its console), on mossfs over
+/// the block device; the host types commands over QMP.
+fn gseatTestWorker(_: u64) void {
+    systemDrill("gseat");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

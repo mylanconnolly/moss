@@ -708,13 +708,15 @@ pub fn debugDump() void {
         if (t.state == .unused) continue;
         var nb: [16]u8 = undefined;
         const on: []const u8 = if (t.block_lock) |l| ipc.describeLock(l, &nb) else "-";
-        log.info("thread {s}#{d}: {t} in_recv={} list={} slot={} on={s} w0=0x{x} badge={d} wake={d} cpu={?d} q={?d}", .{
+        log.info("thread {s}#{d}: {t} park={t} aff={?d} mask=0x{x} in_recv={} list={} slot={} on={s} w0=0x{x} badge={d} wake={d} cpu={?d} q={?d}", .{
             t.name,               t.id,
-            t.state,              t.in_recv,
-            t.block_list != null, t.block_slot != null,
-            on,                   t.ipc_data[0],
-            t.ipc_badge,          t.wake_tick,
-            t.on_cpu,             t.queued_on,
+            t.state,              t.park,
+            t.affinity,           t.cpu_mask,
+            t.in_recv,            t.block_list != null,
+            t.block_slot != null, on,
+            t.ipc_data[0],        t.ipc_badge,
+            t.wake_tick,          t.on_cpu,
+            t.queued_on,
         });
     }
     for (&cpus) |*c| {
@@ -722,8 +724,14 @@ pub fn debugDump() void {
         var qlen: usize = 0;
         var it = c.queue.first;
         while (it) |node| : (it = node.next) qlen += 1;
-        log.info("cpu{d}: qlen={d} need_resched={} current={s} ticks={d}", .{
-            c.id, qlen, c.need_resched, c.current.name, c.ticks,
+        var elen: usize = 0;
+        var eit = c.evict.first;
+        while (eit) |node| : (eit = node.next) elen += 1;
+        var tlen: usize = 0;
+        var tit = c.throttled.first;
+        while (tit) |node| : (tit = node.next) tlen += 1;
+        log.info("cpu{d}: qlen={d} evict={d} throttled={d} need_resched={} current={s} ticks={d}", .{
+            c.id, qlen, elen, tlen, c.need_resched, c.current.name, c.ticks,
         });
     }
 }

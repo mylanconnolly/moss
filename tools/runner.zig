@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat };
 
 const Spec = struct {
     name: []const u8,
@@ -66,6 +66,7 @@ const specs = [_]Spec{
     .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .append = "profile=term" },
     .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
+    .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -268,7 +269,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -345,6 +346,16 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
+        // The real-msh seat: the graphical devices plus a disk for mossfs
+        // (the shell's filesystem view).
+        .gseat => {
+            try args.appendSlice(gpa, &.{
+                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+                "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+                "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+            });
+            try appendDisk(&args, disk);
+        },
         else => {},
     }
     // net and dot keep their assets (trust roots) in mossfs, so they
@@ -374,6 +385,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .seat) {
         if (!try seatDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .gseat) {
+        if (!try gseatDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -600,6 +614,63 @@ fn seatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     }
     if (!any_glyph) {
         reportFailure(spec.name, "the terminal showed no text", log_path);
+        return false;
+    }
+    return true;
+}
+
+/// The real-msh seat's host side: once the shell is up on the graphical
+/// console, type a command on the (virtual) keyboard and screendump to
+/// confirm the terminal has the shell's output on screen, then type
+/// `exit` — the shell reads it from the keyboard and exits, ending the
+/// boot (the PASS), which proves the real shell read real keystrokes.
+fn gseatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "msh: up, serving the console") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "msh never came up on the graphical console", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!q.typeText("echo hi\n")) {
+        reportFailure(spec.name, "QMP could not type a command", log_path);
+        return false;
+    }
+    sleepMs(500); // let msh render the command and its output
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    var any_glyph = false;
+    var y: usize = 0;
+    while (y < 64 and y < img.h) : (y += 1) {
+        var x: usize = 0;
+        while (x < img.w) : (x += 1) {
+            if (eqRgb(pixelAt(img, x, y), 0xFF, 0xFF, 0xFF)) any_glyph = true;
+        }
+    }
+    if (!any_glyph) {
+        reportFailure(spec.name, "the shell rendered no text on the terminal", log_path);
+        return false;
+    }
+    // `exit` typed on the keyboard: the real shell reads it and exits.
+    if (!q.typeText("exit\n")) {
+        reportFailure(spec.name, "QMP could not type exit", log_path);
         return false;
     }
     return true;
@@ -1543,6 +1614,22 @@ const Qmp = struct {
         if (!q.execute(down)) return false;
         const up = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":false,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{qcode}) catch return false;
         return q.execute(up);
+    }
+
+    /// Type a line of lowercase letters, digits, spaces and newlines by
+    /// their qcodes (enough for a simple shell command).
+    fn typeText(q: *Qmp, s: []const u8) bool {
+        for (s) |c| {
+            const qcode: []const u8 = switch (c) {
+                'a'...'z' => &.{c},
+                '0'...'9' => &.{c},
+                ' ' => "spc",
+                '\n' => "ret",
+                else => continue,
+            };
+            if (!q.sendKey(qcode)) return false;
+        }
+        return true;
     }
 };
 
