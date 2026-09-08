@@ -138,10 +138,13 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
 fn demo(log_h: u64) noreturn {
     _ = usys.log(log_h, "term: rendering");
     writeText("moss graphical console\n");
+    // Enough lines to scroll past the bottom whatever the scanout height,
+    // so the cursor always ends on the last row (where the drill checks).
     var i: usize = 0;
     var line: [8]u8 = undefined;
-    while (i < 33) : (i += 1) {
-        line = .{ 'r', 'o', 'w', ' ', '0' + @as(u8, @intCast(i / 10)), '0' + @as(u8, @intCast(i % 10)), '\n', 0 };
+    const n_lines = rows + 6;
+    while (i < n_lines) : (i += 1) {
+        line = .{ 'r', 'o', 'w', ' ', '0' + @as(u8, @intCast((i / 10) % 10)), '0' + @as(u8, @intCast(i % 10)), '\n', 0 };
         writeText(line[0..7]);
     }
     cursorBlock(cur_c, cur_r);

@@ -8,7 +8,7 @@
 //! host side of the drill screendumps the scanout over QMP and checks the
 //! pixels are that colour.
 //!
-//! The framebuffer (640x480x4 = 300 pages) is larger than dma_alloc's
+//! The framebuffer (1024x768x4 = 768 pages) is larger than dma_alloc's
 //! 16-page cap, so its backing is a scatter-gather list of chunks —
 //! exactly what RESOURCE_ATTACH_BACKING takes. A solid fill needs no
 //! offset arithmetic across chunks (every chunk holds the same pattern);
@@ -56,14 +56,14 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
 const desc_f_next = 1;
 const desc_f_write = 2;
 
-const fb_w = 640;
-const fb_h = 480;
+const fb_w = 1024;
+const fb_h = 768;
 const fb_bpp = 4;
 const fb_stride = fb_w * fb_bpp;
-const fb_bytes = fb_stride * fb_h; // 1,228,800
-const fb_pages = fb_bytes / 4096; // 300
+const fb_bytes = fb_stride * fb_h; // 3,145,728
+const fb_pages = fb_bytes / 4096; // 768
 const chunk_pages = 16; // dma_alloc's per-call cap
-const n_chunks = (fb_pages + chunk_pages - 1) / chunk_pages; // 19
+const n_chunks = (fb_pages + chunk_pages - 1) / chunk_pages; // 48
 
 const q_ctl = 0;
 const q_num = 16;

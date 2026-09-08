@@ -533,8 +533,9 @@ fn termScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "the screendump was not a readable image", log_path);
         return false;
     };
-    // The cursor block sits at cell (0,29): a solid white 8x16 rectangle.
-    if (img.w < 8 or img.h < 480 or !eqRgb(pixelAt(img, 4, 472), 0xFF, 0xFF, 0xFF)) {
+    // The cursor block sits on the last row (the demo scrolls past the
+    // bottom): a solid white 8x16 rectangle at cell (0, rows-1).
+    if (img.w < 8 or img.h < 768 or !eqRgb(pixelAt(img, 4, img.h - 8), 0xFF, 0xFF, 0xFF)) {
         reportFailure(spec.name, "the cursor block was not drawn", log_path);
         return false;
     }

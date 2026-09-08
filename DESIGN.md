@@ -2219,7 +2219,7 @@ features), set up the control virtqueue, then `GET_DISPLAY_INFO`,
 `SET_SCANOUT`, `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` — each a
 two-descriptor chain (the command device-readable, a response
 device-writable) submitted one at a time and waited on the device's
-interrupt. The one wrinkle is the framebuffer's size: 640×480×4 is 300
+interrupt. The one wrinkle is the framebuffer's size: 1024×768×4 is 768
 pages, past `dma_alloc`'s 16-page cap, so the backing is a scatter-gather
 list of chunks — which is exactly what `ATTACH_BACKING` takes (an array
 of `{addr, length}` entries). A solid fill needs no cross-chunk offset
@@ -2470,7 +2470,7 @@ it deadlocks (the synchronous `next_input` = one reader limitation, again).
 
 **Stage 5, per-rect composition (as built, 2026-09-08).** A commit
 carries a damage rect, and until now it was ignored — every commit
-recomposed the whole 640×480 and DMA'd all 1.2 MB to the host. Now
+recomposed the whole scanout and DMA'd all of it to the host. Now
 compositing is expressed in rectangles: a `Rect`, an `intersect`, and
 three primitives — `fillRect` (ground/strip), `blitRect` (a surface's
 overlap with a rect), and a rect-clipped focus border — over which the
@@ -2707,8 +2707,34 @@ runtime logs `update crashed — recovering`, then the host fires
 and `update` still works — and the kernel's leak bar (pmem byte-identical,
 shm at zero) proves the discarded worker was reclaimed clean.
 
-What's left for the arc: pointer input, richer layout, and the
-fabric-remote GUI the data-only design already allows.
+**Rendering pass (as built, 2026-09-08).** The first look was honest but
+crude — a 400×240 window marooned on a 640×480 scanout, 1-bit 8×16 glyphs
+blitted 1:1 and then nearest-neighbour-upscaled by the viewer into hard
+blocks. Three changes, no new font asset. (1) The compositor's scanout
+went to **1024×768** (`fb_w`/`fb_h`), so there are more real pixels and the
+viewer scales less; the framebuffer is now 768 DMA pages, and a
+full-scanout *surface* (the terminal's, gpucli's) is 768 pages too — which
+overran the kernel's `shm_max_pages` (384), so that cap rose to 768 (a
+full scanout is the largest single shared buffer the system hands out).
+(2) The GUI font is drawn at **2× crisp** (`drawGlyph`): each source pixel
+becomes a solid 2×2 block — a bigger 16×32 cell, sharp, reusing the one
+bitmap font. Two smoothing passes were tried and rejected first: EPX/
+Scale2x (a sprite scaler that rounds *every* corner, including a letter's
+intended square ones — blobby) and bilinear grayscale AA (soft edges, but
+at this size it just reads blurry). A 1-bit bitmap has no detail to
+smooth *into*; the honest choices are crisp-blocky or a real larger/vector
+font (a later arc), and crisp is what a pixel font should be. (3) A
+real **layout**: a centred 680×460 window, a title with a rule under it,
+consistent padding and line spacing, and widget chrome — buttons are
+padded outlined boxes (filled and brightly outlined when focused, a quiet
+fill otherwise), fields a label over a full-width outlined value box with
+a cursor. The terminal, which sizes itself to the scanout, and every
+graphical drill's pixel checks were updated to the new geometry. Real
+grayscale-antialiased type is still a later arc; this is the bounded pass
+that makes the GUI look intentional.
+
+What's left for the arc: pointer input, richer layout, grayscale-AA type,
+and the fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

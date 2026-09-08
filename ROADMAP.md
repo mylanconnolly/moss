@@ -705,8 +705,14 @@ is a plan.
     record failed to cross the worker channel). Drilled (profile gboom,
     scripts/gui-boom.msh): a "boom" button whose update runs away; the
     runtime logs recovery, a later "increment" reaches count=1, and the
-    leak bar proves the discarded worker was reclaimed. Open: pointer
-    input; richer layout; fabric-remote GUI.
+    leak bar proves the discarded worker was reclaimed. ✅ Rendering pass
+    (landed 2026-09-08): the scanout went to 1024×768 (shm_max_pages rose
+    384→768 for a full-scanout surface), the GUI font is drawn 2× crisp
+    (EPX and bilinear-AA both tried and rejected — blobby / blurry on a
+    1-bit font), and the layout got real chrome (centred
+    680×460 window, title rule, padding, outlined button/field boxes). Plus
+    `zig build run-gui` to drive any GUI profile by hand over VNC. Open:
+    pointer input; grayscale-AA type; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

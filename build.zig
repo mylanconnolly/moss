@@ -791,7 +791,7 @@ pub fn build(b: *std.Build) void {
     // opens the macOS VNC viewer at it, and waits; the app's exit (or
     // Ctrl-C) ends it. Kernel log: zig-out/gui-run-kernel.log.
     if (arch == .aarch64) {
-        const gpu_dev = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=640,yres=480";
+        const gpu_dev = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1024,yres=768";
         const open_viewer = if (builtin.os.tag == .macos)
             "open vnc://127.0.0.1:5900"
         else

@@ -68,23 +68,34 @@ pub fn signature(name: []const u8) ?mshl.Signature {
 
 // ------------------------------------------------------------ rendering
 
-const gw = font.width; //  8
-const gh = font.height; // 16
+// The font is the shared 8x16 bitmap, drawn at 2x with an EPX/Scale2x
+// smoothing pass (`drawGlyph`): each source pixel becomes 2x2, and a
+// diagonal edge rounds its corner instead of stair-stepping, so text is
+// larger and far less blocky than a raw blit. A glyph cell is thus 16x32.
+const fsw = font.width; //  8, source
+const fsh = font.height; // 16, source
+const gw = fsw * 2; // 16, drawn
+const gh = fsh * 2; // 32, drawn
 
-// A centred window on the 640x480 scanout.
-const win_w = 400;
-const win_h = 240;
-const win_x = 120;
-const win_y = 120;
+// A centred window on the 1024x768 scanout, with room to breathe.
+const win_w = 680;
+const win_h = 460;
+const win_x = (1024 - win_w) / 2; // 172
+const win_y = (768 - win_h) / 2; // 154
+
+const pad = 24; // window inset for content
 
 // Colours as X<<24 | R<<16 | G<<8 | B, so a screendump reads them as RGB.
 const c_bg: u32 = 0x0016_1a2e; // a deep slate window ground
 const c_fg: u32 = 0x00E0_E0E0; // label text
 const c_title: u32 = 0x0066_99FF; // the title line
-const c_btn: u32 = 0x0088_BBFF; // an unfocused button
+const c_rule: u32 = 0x0033_3d55; // the rule under the title
+const c_btn: u32 = 0x0088_BBFF; // an unfocused button's label + outline
+const c_btn_bg: u32 = 0x001e_2740; // an unfocused button's fill
 const c_focus_bg: u32 = 0x0022_66CC; // the focused widget's highlight
 const c_focus_fg: u32 = 0x00FF_FFFF;
 const c_field_bg: u32 = 0x0022_2838; // an unfocused field's value box
+const c_field_edge: u32 = 0x003a_445e; // a field/button box outline
 
 var px: [*]volatile u32 = undefined; // the mapped surface, win_w*win_h
 var surf: u64 = 0;
@@ -147,6 +158,10 @@ fn fillAll(word: u32) void {
     for (0..win_w * win_h) |i| px[i] = word;
 }
 
+fn putPx(x: usize, y: usize, word: u32) void {
+    if (x < win_w and y < win_h) px[y * win_w + x] = word;
+}
+
 fn fillRect(x: usize, y: usize, w: usize, h: usize, word: u32) void {
     var yy = y;
     while (yy < y + h and yy < win_h) : (yy += 1) {
@@ -155,21 +170,44 @@ fn fillRect(x: usize, y: usize, w: usize, h: usize, word: u32) void {
     }
 }
 
-/// Blit a string at (x, y) with a foreground and background colour.
-/// Clipped to the window; a character out of the font's range is blank.
+/// A `thick`-pixel outline around the rect (x, y, w, h).
+fn strokeRect(x: usize, y: usize, w: usize, h: usize, word: u32, thick: usize) void {
+    fillRect(x, y, w, thick, word); // top
+    if (h > thick) fillRect(x, y + h - thick, w, thick, word); // bottom
+    fillRect(x, y, thick, h, word); // left
+    if (w > thick) fillRect(x + w - thick, y, thick, h, word); // right
+}
+
+/// Draw one glyph at (cx, cy), scaled 2x crisp: each source pixel becomes
+/// a solid 2x2 block — no smoothing, so the letterforms stay sharp (a
+/// clean pixel font, not blurred or rounded). The whole 16x32 cell is
+/// painted, `on` pixels `fg` and the rest `bg` (no stale pixels behind).
+fn drawGlyph(cx: usize, cy: usize, ch: u8, fg: u32, bg: u32) void {
+    const g: usize = if (ch < font.first or ch > font.last) 0 else ch - font.first;
+    const bmp = font.glyphs[g];
+    var sy: usize = 0;
+    while (sy < fsh) : (sy += 1) {
+        const bits = bmp[sy];
+        var sx: usize = 0;
+        while (sx < fsw) : (sx += 1) {
+            const word = if (bits & (@as(u8, 0x80) >> @intCast(sx)) != 0) fg else bg;
+            const ox = cx + sx * 2;
+            const oy = cy + sy * 2;
+            putPx(ox, oy, word);
+            putPx(ox + 1, oy, word);
+            putPx(ox, oy + 1, word);
+            putPx(ox + 1, oy + 1, word);
+        }
+    }
+}
+
+/// Draw a string at (x, y) with a foreground and background colour, one
+/// 16x32 glyph cell per character, clipped to the window.
 fn drawText(x: usize, y: usize, s: []const u8, fg: u32, bg: u32) void {
     for (s, 0..) |ch, i| {
         const cx = x + i * gw;
         if (cx + gw > win_w or y + gh > win_h) break;
-        const g: usize = if (ch < font.first or ch > font.last) 0 else ch - font.first;
-        const bitmap = font.glyphs[g];
-        for (0..gh) |gy| {
-            const bits = bitmap[gy];
-            const base = (y + gy) * win_w + cx;
-            for (0..gw) |gx| {
-                px[base + gx] = if (bits & (@as(u8, 0x80) >> @intCast(gx)) != 0) fg else bg;
-            }
-        }
+        drawGlyph(cx, y, ch, fg, bg);
     }
 }
 
@@ -184,10 +222,12 @@ fn strField(rec: mshl.Record, key: []const u8) []const u8 {
 /// and return the number of focusable widgets.
 fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     fillAll(c_bg);
-    var y: usize = 12;
+    var y: usize = pad;
     if (title.len > 0) {
-        drawText(12, y, title, c_title, c_bg);
-        y += gh + 8;
+        drawText(pad, y, title, c_title, c_bg);
+        y += gh + 12;
+        fillRect(pad, y, win_w - 2 * pad, 2, c_rule); // a rule under the title
+        y += 20;
     }
     var n: usize = 0;
     const children: []const Value = kids: {
@@ -201,46 +241,60 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
         const kind = strField(rec, "kind");
         const focused = n < focusables.len and n == focus;
         if (std.mem.eql(u8, kind, "label")) {
-            drawText(12, y, strField(rec, "text"), c_fg, c_bg);
-            y += gh + 4;
+            drawText(pad, y, strField(rec, "text"), c_fg, c_bg);
+            y += gh + 12;
         } else if (std.mem.eql(u8, kind, "button")) {
+            // A padded, outlined box; filled and brightly outlined when
+            // focused, a quiet fill otherwise — a button that reads as one.
             const label = strField(rec, "label");
-            if (focused) {
-                fillRect(8, y - 3, label.len * gw + 8, gh + 6, c_focus_bg);
-                drawText(12, y, label, c_focus_fg, c_focus_bg);
-            } else {
-                drawText(12, y, label, c_btn, c_bg);
-            }
+            const bpx = 18; // horizontal padding inside the button
+            const bpy = 8; // vertical padding
+            const bw = label.len * gw + 2 * bpx;
+            const bh = gh + 2 * bpy;
+            const fill = if (focused) c_focus_bg else c_btn_bg;
+            const edge = if (focused) c_focus_fg else c_field_edge;
+            const ink = if (focused) c_focus_fg else c_btn;
+            fillRect(pad, y, bw, bh, fill);
+            strokeRect(pad, y, bw, bh, edge, 2);
+            drawText(pad + bpx, y + bpy, label, ink, fill);
             if (n < focusables.len) {
                 focusables[n] = .{ .id = strField(rec, "id"), .is_field = false };
                 n += 1;
             }
-            y += gh + 10;
+            y += bh + 16;
         } else if (std.mem.eql(u8, kind, "field")) {
+            // A label over a full-width, outlined value box holding the
+            // live text (a cursor when focused). Password fields show dots.
             const label = strField(rec, "label");
             const id = strField(rec, "id");
             const fb = fieldFor(id, strField(rec, "value"));
-            // "label:" then a boxed value area holding the live text (a
-            // cursor when focused). Password fields show dots.
-            drawText(12, y, label, c_fg, c_bg);
-            const vx = 12 + (label.len + 1) * gw;
+            drawText(pad, y, label, c_fg, c_bg);
+            y += gh + 6;
+            const fpy = 8; // vertical padding inside the box
+            const bh = gh + 2 * fpy;
+            const bw = win_w - 2 * pad;
             const box_bg = if (focused) c_focus_bg else c_field_bg;
-            fillRect(vx - 2, y - 2, win_w - vx - 8, gh + 4, box_bg);
+            fillRect(pad, y, bw, bh, box_bg);
+            strokeRect(pad, y, bw, bh, if (focused) c_focus_fg else c_field_edge, 2);
+            const tx = pad + 12;
+            const ty = y + fpy;
             const secret = rec.get("secret") != null and (rec.get("secret").?).asBool();
+            var shown: usize = fb.len;
             if (secret) {
                 var dots: [64]u8 = undefined;
                 const m = @min(fb.len, dots.len);
                 for (0..m) |i| dots[i] = '*';
-                drawText(vx, y, dots[0..m], c_fg, box_bg);
+                drawText(tx, ty, dots[0..m], c_fg, box_bg);
+                shown = m;
             } else {
-                drawText(vx, y, fb.buf[0..fb.len], c_fg, box_bg);
+                drawText(tx, ty, fb.buf[0..fb.len], c_fg, box_bg);
             }
-            if (focused) drawText(vx + fb.len * gw, y, "_", c_focus_fg, box_bg);
+            if (focused) drawText(tx + shown * gw, ty, "_", c_focus_fg, box_bg);
             if (n < focusables.len) {
                 focusables[n] = .{ .id = id, .is_field = true };
                 n += 1;
             }
-            y += gh + 10;
+            y += bh + 16;
         }
     }
     return n;
