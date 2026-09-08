@@ -44,6 +44,7 @@ export fn kmain(boot_arg: u64) noreturn {
         boot_node = parseNodeArg(args);
         if (boot_node != 0) log.info("bootargs: node id {d}", .{boot_node});
         boot_profile = parseProfile(args);
+        interactive_boot = std.mem.indexOf(u8, args, "interactive") != null;
     }
 
     pmem.init(plat.regions);
@@ -303,6 +304,16 @@ export fn kmain(boot_arg: u64) noreturn {
     if (build_options.fabric_test) {
         _ = sched.spawn("boot-watch", fabricTestWorker, boot_node | (boot_drill << 8) | (boot_badkey << 16), .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
+    // `interactive` on the cmdline (no drill flag): bring the profile up
+    // for hands-on use. Any kernel can do this — it is driven by the boot
+    // args, not a build option — so the installed kernel serves
+    // `zig build run-gui`.
+    if (interactive_boot) {
+        _ = sched.spawn("gui-run", guiRunWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn gui-run: {t}", .{e});
         };
     }
 
@@ -805,6 +816,30 @@ fn shellTestWorker(_: u64) void {
 /// the boot arguments, and init starts that profile's eager units from
 /// boot/conf/units. The kernel's only remaining job is to spawn root
 /// and, when the system has shut itself down, hold the leak bar.
+/// Interactive boot for a GUI profile (`zig build run-gui`): spawn root
+/// for `boot_profile` with a real display and keyboard, and wait — no
+/// 60s deadline, no leak check, no scripted input. You drive the GUI in
+/// the QEMU window; when the app exits (root drains) the VM powers off,
+/// or quit QEMU yourself (Ctrl-A X). This is the systemDrill spawn without
+/// the harness, so it is emphatically not the gate.
+fn guiRunWorker(_: u64) void {
+    log.info("gui-run: profile {t} — interact in the QEMU window; quit the app (or Ctrl-A X) to exit", .{boot_profile});
+    const root = domain.spawn("root", .{ .blob = img(.root) }, .{
+        .arg = 2 | (@intFromEnum(boot_profile) << 8) | (boot_node << 16),
+        .grant_debug_log = true,
+        .grant_spawner = true,
+        .grant_bootfs = true,
+        .grant_windows = true,
+        .grant_entropy = true,
+        .kobj_limit = 24 << 20,
+        .user_limit = 128 << 20,
+    }) catch |e| std.debug.panic("spawn root: {t}", .{e});
+    while (!(root.state == .dying and domain.drained(root))) sched.sleep(5);
+    domain.finishTeardown(root);
+    log.info("gui-run: the app exited; powering off", .{});
+    arch.power.systemOff();
+}
+
 fn systemDrill(comptime name: []const u8) void {
     const frames_before = pmem.stats().free_bytes;
 
@@ -1301,6 +1336,10 @@ var boot_node: u64 = 0;
 var boot_drill: u64 = 0;
 var boot_badkey: u64 = 0;
 var boot_profile: shared.BootProfile = .system;
+/// `interactive` on the boot cmdline: bring the profile up under a real
+/// display and keyboard with no drill harness — for driving a GUI by
+/// hand (see `zig build run-gui`), never the gate.
+var interactive_boot: bool = false;
 
 /// `profile=<name>` in the boot arguments selects which units init starts.
 fn parseProfile(args: []const u8) shared.BootProfile {

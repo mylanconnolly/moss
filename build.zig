@@ -179,6 +179,11 @@ pub fn build(b: *std.Build) void {
         "gboom-test",
         "Run the GUI crash-isolation drill: an mshl GUI whose `update` runs in a worker domain survives an app crash",
     ) orelse false;
+    const gui_profile = b.option(
+        []const u8,
+        "gui-profile",
+        "run-gui: which GUI profile to boot interactively (gui, guilogin, gtrust, gsession, gisession, gboom). Default gui.",
+    ) orelse "gui";
     const net_test = b.option(
         bool,
         "net-test",
@@ -772,6 +777,51 @@ pub fn build(b: *std.Build) void {
     run_blk.step.dependOn(&mkdisk.step);
     const run_blk_step = b.step("run-blk", "Boot with a virtio disk attached (pairs with -Dblk-test).");
     run_blk_step.dependOn(&run_blk.step);
+
+    // run-gui: boot a GUI profile in a window and drive it by hand. No
+    // drill harness — the `interactive` cmdline key makes the kernel spawn
+    // root for the profile and wait (no deadline, no leak check), so the
+    // *installed* kernel serves it (this step depends on the install).
+    // The graphical devices (a GPU to render on, a keyboard to type into)
+    // plus a scratch disk so the disk-backed profiles (gsession,
+    // gisession, gboom) get their mossfs view (idle for the others). The
+    // display is VNC, not `-display cocoa`: cocoa mangles a small 640x480
+    // guest on a Retina Mac (it showed the scanout clipped into a corner),
+    // while VNC serves the framebuffer 1:1. The step backgrounds QEMU,
+    // opens the macOS VNC viewer at it, and waits; the app's exit (or
+    // Ctrl-C) ends it. Kernel log: zig-out/gui-run-kernel.log.
+    if (arch == .aarch64) {
+        const gpu_dev = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=640,yres=480";
+        const open_viewer = if (builtin.os.tag == .macos)
+            "open vnc://127.0.0.1:5900"
+        else
+            "echo '>> connect a VNC viewer to 127.0.0.1:5900'";
+        const script = b.fmt(
+            \\set -e
+            \\test -f zig-out/gui-disk.img || dd if=/dev/zero of=zig-out/gui-disk.img bs=1048576 count=64 2>/dev/null
+            \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 \
+            \\  -smp 4 -m 512M -nic none \
+            \\  -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
+            \\  -device {s} \
+            \\  -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+            \\  -drive if=none,file=zig-out/gui-disk.img,format=raw,id=hd \
+            \\  -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=hd \
+            \\  -display none -object secret,id=vncpw,data=moss -vnc 127.0.0.1:0,password-secret=vncpw \
+            \\  -serial file:zig-out/gui-run-kernel.log \
+            \\  -append "profile={s} interactive" \
+            \\  -kernel zig-out/bin/moss-kernel.bin &
+            \\QPID=$!
+            \\sleep 2
+            \\{s} || echo ">> connect a VNC viewer to 127.0.0.1:5900"
+            \\echo ">> moss GUI ({s}) on VNC 127.0.0.1:5900 — password: moss"
+            \\echo ">> drive with Tab/Enter/typing; quit the app or press Ctrl-C here to stop."
+            \\wait $QPID
+        , .{ gpu_dev, gui_profile, open_viewer, gui_profile });
+        const run_gui = b.addSystemCommand(&.{ "sh", "-c", script });
+        run_gui.step.dependOn(b.getInstallStep());
+        const run_gui_step = b.step("run-gui", "Boot a GUI profile on a VNC display and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom; kernel log: zig-out/gui-run-kernel.log).");
+        run_gui_step.dependOn(&run_gui.step);
+    }
 
     // run-shell: the interactive developer boot. YOUR TERMINAL IS MSH —
     // the virtio console rides stdio while the kernel log goes to a file.
