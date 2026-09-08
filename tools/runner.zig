@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input };
 
 const Spec = struct {
     name: []const u8,
@@ -64,6 +64,7 @@ const specs = [_]Spec{
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
     .{ .name = "gpu", .kind = .gpu, .pass = "gpu-test: PASS", .extra = "gpu: surface committed", .append = "profile=gpu" },
     .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .append = "profile=term" },
+    .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -328,6 +329,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-qmp",
             try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
+        // The input drill: a virtio keyboard and a QMP port to inject key
+        // presses into it.
+        .input => try args.appendSlice(gpa, &.{
+            "-device",
+            "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+            "-qmp",
+            try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+        }),
         else => {},
     }
     // net and dot keep their assets (trust roots) in mossfs, so they
@@ -351,6 +360,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .term) {
         if (!try termScreendump(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .input) {
+        if (!try inputInject(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -472,6 +484,49 @@ fn termScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     return true;
+}
+
+/// The input drill's host side: once the driver says it is ready, inject
+/// two key presses over QMP. The driver decodes them, logs each keycode,
+/// and exits after the expected count — so a clean shutdown (the PASS)
+/// is itself the proof the events were received and decoded.
+fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "input: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the input driver never became ready", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!q.sendKey("h") or !q.sendKey("i")) {
+        reportFailure(spec.name, "QMP could not inject key presses", log_path);
+        return false;
+    }
+    // Confirm the driver decoded the two presses to the right evdev
+    // keycodes (KEY_H = 35, KEY_I = 23) before the boot ends.
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "input: key 35") != null and
+            std.mem.indexOf(u8, content, "input: key 23") != null) return true;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the injected keys were not decoded (wanted codes 35 and 23)", log_path);
+            return false;
+        }
+    }
 }
 
 /// The net check's client side: once the script says it is serving,
@@ -1403,6 +1458,15 @@ const Qmp = struct {
     fn screendump(q: *Qmp, ppm_path: []const u8) bool {
         const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{s}\"}}}}", .{ppm_path}) catch return false;
         return q.execute(cmd);
+    }
+
+    /// Press and release one key (a QEMU qcode, e.g. "h"). QEMU translates
+    /// it to the guest's evdev keycode for the virtio keyboard.
+    fn sendKey(q: *Qmp, qcode: []const u8) bool {
+        const down = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":true,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{qcode}) catch return false;
+        if (!q.execute(down)) return false;
+        const up = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":false,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{qcode}) catch return false;
+        return q.execute(up);
     }
 };
 

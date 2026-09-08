@@ -1,0 +1,13 @@
+# The input driver drill (profile input): inputsvc reads key presses off
+# a virtio-input device. The host injects them over QMP; the driver logs
+# each keycode and, once it has seen the expected number, exits — ending
+# the boot with a clean shutdown + leak check.
+{
+  image:     inputsvc
+  budget:    { user: 8mb }
+  profiles:  [input]
+  essential: true
+  give: [
+    { tag: device, device: input }
+  ]
+}

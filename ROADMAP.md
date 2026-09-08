@@ -585,9 +585,12 @@ is a plan.
     scrolling demo, host screendump asserts the cursor block, glyph
     pixels, and a clean blank cell. Was: (2) terminal as a
     surface client (glyph grid, scroll,
-    UTF-8, cursor); buffer checksum + screendump of known text. (3)
-    `inputsvc`; QMP `input-send-event` drill (host input is inherently
-    QMP-gated — no loopback). (4) the graphical *seat*: login/shell binds
+    UTF-8, cursor); buffer checksum + screendump of known text. ✅ (3)
+    `inputsvc` (landed 2026-09-07): user/inputsvc.zig drives virtio-input
+    (type 18), posts event-queue buffers, decodes EV_KEY presses; the
+    runner's QMP grew `input-send-event`, the drill injects `h`/`i` and
+    the driver logs their evdev keycodes (35/23) and exits on the count.
+    (4) the graphical *seat*: login/shell binds
     the terminal surface + input, and `zig build run` gets
     `virtio-gpu-pci` + keyboard/tablet + `-display cocoa`. (5, later, not
     this arc) the compositor. The runner's QMP socket lands first, since

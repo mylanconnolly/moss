@@ -2296,6 +2296,22 @@ and checks the cursor cell is a solid white block (font-independent, so a
 deterministic anchor), the text region has glyph pixels, and a blank cell
 stayed black — glyphs, scroll, cursor, and no bleed, all at once.
 
+**Stage 3: input (as built, 2026-09-07).** The other half of a console is
+the keyboard, and it is another userspace virtio driver on the same
+recipe: `user/inputsvc.zig` drives virtio-input (device type 18,
+`1af4:1052`). It posts device-writable buffers on the event queue and
+reads back `virtio_input_event`s — `{type, code, value}` — decoding key
+presses (`EV_KEY`, value 1). The one thing that cannot be faked in the
+deterministic gate is real input, so this is where the runner's QMP grew
+its second verb: `input-send-event` injects key presses into the virtio
+keyboard from the host. The drill boots inputsvc, which posts its buffers
+and says `input: ready`; the runner then injects `h` then `i`, and the
+driver logs the evdev keycodes (35 and 23) as it decodes them and exits
+once it has the expected count — so the clean shutdown is itself the proof
+the events crossed. Routing these events to the terminal, so the shell
+reads the keyboard on the graphical console, is the seat (stage 4); this
+stage proves the device and the decode.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

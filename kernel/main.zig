@@ -154,6 +154,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.input_test) {
+        _ = sched.spawn("boot-watch", inputTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -587,6 +592,12 @@ fn gpuTestWorker(_: u64) void {
 /// renders a glyph grid onto gpusvc's scanout; the host screendumps it.
 fn termTestWorker(_: u64) void {
     systemDrill("term");
+}
+
+/// The input drill: a system boot under profile "input" — inputsvc reads
+/// the virtio-input event queue; the host injects key presses over QMP.
+fn inputTestWorker(_: u64) void {
+    systemDrill("input");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the
