@@ -2375,6 +2375,26 @@ compositor in one screendump. It cost one ceiling: init's `max_units`
 went 48 → 64, since the arc's units (display server, terminal, keyboard,
 their seat and drill clients) crossed the old bound.
 
+**Stage 5, focus and input routing (as built, 2026-09-08).** A compositor
+that shows many windows must also decide which one the keyboard reaches —
+so the compositor takes the keyboard. When the seat gives gpusvc a `keys`
+channel (the `compositor` unit does; the plain `gpusvc` for the
+display-only drills does not), gpusvc reads inputsvc itself and owns
+focus: `create_surface` gives the new surface focus, `GpuReq.next_input`
+returns the next keystroke tagged with the focused surface, and Tab is
+absorbed by the compositor to cycle focus rather than reaching a client.
+Routing input through the display server (Wayland's shape, not X's) means
+a client only ever sees the keys sent to it while it holds focus — the
+compositor is the single point that reads the device and steers it. The
+drill opens two windows and, since the second is created last, it starts
+focused; the host types `a`, Tab, `b`, and the client confirms `a`
+reached the second window and `b` the first (Tab moved focus between
+them). For now the compositor serves one input reader synchronously
+(`next_input` blocks on the keyboard), which suits a single foreground
+session; many concurrent readers would want the deferred-reply or
+per-surface-doorbell shape, and a visible focus cue (a window border) and
+a trusted path for the login window are the remaining pieces.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

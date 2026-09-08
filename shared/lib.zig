@@ -374,6 +374,7 @@ pub const ImageId = enum(u64) {
     inputsvc = 25,
     gsh = 26,
     compcli = 27,
+    focuscli = 28,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -752,11 +753,18 @@ pub const GpuReq = union(enum(u64)) {
     commit: struct { surface: u64, xy: u64, wh: u64 },
     /// Release a surface and its buffer.
     destroy_surface: struct { surface: u64 },
+    /// Block until the next keystroke, and return it tagged with the
+    /// surface that has focus — the compositor routes the keyboard to the
+    /// focused window and handles focus-switch keys itself. (Needs the
+    /// compositor to hold a keyboard; only the seat/focus profiles do.)
+    next_input: void,
 };
 pub const GpuResp = union(enum(u64)) {
     ok: void,
     /// + a shm cap attachment: the surface's pixel buffer.
     created: struct { surface: u64, wh: u64 },
+    /// A keystroke `ch` delivered to the focused surface.
+    input: struct { surface: u64, ch: u64 },
     gpu_err: struct { code: u64 },
 };
 
@@ -1609,7 +1617,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

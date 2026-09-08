@@ -174,6 +174,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.focus_test) {
+        _ = sched.spawn("boot-watch", focusTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -634,6 +639,13 @@ fn gseatTestWorker(_: u64) void {
 /// onto the scanout; the host screendumps and checks each region.
 fn compTestWorker(_: u64) void {
     systemDrill("comp");
+}
+
+/// The focus drill: a system boot under profile "focus" — the compositor
+/// routes the keyboard to the focused window and cycles focus on Tab; the
+/// host types into two windows and the client checks who got what.
+fn focusTestWorker(_: u64) void {
+    systemDrill("focus");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus };
 
 const Spec = struct {
     name: []const u8,
@@ -68,6 +68,7 @@ const specs = [_]Spec{
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
     .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
+    .{ .name = "focus", .kind = .focus, .pass = "focus-test: PASS", .extra = "focus: ok", .append = "profile=focus" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -340,9 +341,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-qmp",
             try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
-        // The graphical seat: both a display to render on and a keyboard
-        // to type into, plus QMP to type and screendump.
-        .seat => try args.appendSlice(gpa, &.{
+        // The graphical seat / focus drill: both a display to render on
+        // and a keyboard to type into, plus QMP to type and screendump.
+        .seat, .focus => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -392,6 +393,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .comp) {
         if (!try compScreendump(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .focus) {
+        if (!try focusDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -729,6 +733,51 @@ fn compScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         }
     }
     return true;
+}
+
+/// The focus drill's host side: once the client's two windows are up,
+/// type `a`, Tab, `b` on the keyboard. The compositor routes `a` to the
+/// focused (second) window, Tab moves focus to the first, and `b` goes
+/// there — the client checks the routing and logs the verdict, which the
+/// runner waits on (`focus: ok`).
+fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "focus: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the focus client never came up", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!q.sendKey("a") or !q.sendKey("tab") or !q.sendKey("b")) {
+        reportFailure(spec.name, "QMP could not type the focus sequence", log_path);
+        return false;
+    }
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "focus: ok") != null) return true;
+        if (std.mem.indexOf(u8, content, "focus: bad") != null) {
+            reportFailure(spec.name, "the compositor routed keys to the wrong window", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the focus routing was never confirmed", log_path);
+            return false;
+        }
+    }
 }
 
 /// The net check's client side: once the script says it is serving,

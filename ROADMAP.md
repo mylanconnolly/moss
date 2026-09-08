@@ -613,10 +613,16 @@ is a plan.
     stacking. Drilled (profile comp, user/compcli.zig): two overlapping
     windows, the later one winning the overlap; screendump checks each
     region + the ground. init's max_units 48→64 for the arc's units.
-    Still open in (5): focus + input routing (the compositor owning which
-    surface the keyboard reaches — inputsvc feeds it, not term directly),
-    per-rect composition, and a trusted path for login. The runner's QMP
-    socket lands first, since stages 1–3 all lean on it.
+    ✅ focus + input routing (landed 2026-09-08): when the seat gives
+    gpusvc a keyboard (the `compositor` unit; plain `gpusvc` has none) it
+    reads inputsvc itself and owns focus — create_surface focuses the new
+    surface, GpuReq.next_input returns the next key tagged with the
+    focused surface, Tab cycles focus. Drilled (profile focus,
+    user/focuscli.zig): two windows, `a`/Tab/`b` typed, client confirms
+    each key reached the right window. Still open in (5): per-rect
+    composition, a visible focus cue, a trusted path for login, and
+    concurrent input readers (next_input is synchronous — one reader).
+    The runner's QMP socket lands first, since stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

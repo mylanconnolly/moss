@@ -1,0 +1,13 @@
+# The focus drill (profile focus): a client opens two windows and reads
+# input through the compositor, which routes keystrokes to the focused
+# window and cycles focus on Tab. Pulling in the compositor (which holds
+# the keyboard) starts the whole stack.
+{
+  image:     focuscli
+  budget:    { user: 8mb }
+  profiles:  [focus]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+  ]
+}

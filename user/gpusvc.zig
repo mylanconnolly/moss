@@ -41,6 +41,7 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     const setup = boot.take(chan_h);
     dev_h = setup.device(.gpu);
     if (dev_h == 0) usys.exit(169);
+    keys_chan = setup.cap(.keys);
     gpudrv(log_h, chan_h);
 }
 
@@ -113,6 +114,13 @@ var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
 /// The compositor's ground, seen wherever no surface covers the scanout.
 const bg_word: u32 = 0x0020_2830; // a dark slate
+
+// Focus: the compositor reads the keyboard (if it holds one) and routes
+// keystrokes to the focused surface; Tab cycles focus.
+var keys_chan: u64 = 0; // inputsvc channel, 0 when the seat gives no keyboard
+var keys_buf: [*]volatile u8 = undefined;
+var focused: u64 = 0; // focused surface id, 0 = none
+const key_switch_focus: u8 = '\t';
 
 // ---------------------------------------------------- command building
 
@@ -297,6 +305,7 @@ fn createSurface(x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, shm: u64 } {
     }
     surfaces[idx] = .{ .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096, .x = x, .y = y, .w = w, .h = h, .z = next_z };
     next_z += 1;
+    focused = idx + 1; // a new surface takes focus
     return .{ .id = idx + 1, .shm = s.data[0] };
 }
 
@@ -347,6 +356,56 @@ fn composite() bool {
         painted = sf.z;
     }
     return transferAndFlush();
+}
+
+// ------------------------------------------------------------- focus
+
+/// Set up the keyboard the seat gave us: our own shm buffer for
+/// inputsvc's read replies. Called once if we hold a keys channel.
+fn setupKeyboard() void {
+    const ks = usys.shmCreate(1);
+    if (ks.err != .ok) usys.exit(171);
+    const km = usys.shmMap(ks.data[0]);
+    if (km.err != .ok) usys.exit(172);
+    keys_buf = @ptrFromInt(km.data[0]);
+    _ = usys.callTyped(shared.ConsReq, shared.ConsResp, keys_chan, .setup, ks.data[0]);
+}
+
+/// One keystroke from inputsvc (blocks until one), as a byte; 0 on error.
+fn readKey() u8 {
+    return switch (usys.callTyped(shared.ConsReq, shared.ConsResp, keys_chan, .{ .read = .{ .max = 1 } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .n => |x| if (x.n >= 1) keys_buf[0] else 0,
+            else => 0,
+        },
+        .err => 0,
+    };
+}
+
+/// Move focus to the next surface (by id, wrapping) — Tab's job.
+fn cycleFocus() void {
+    var id: u64 = focused;
+    var tries: u64 = 0;
+    while (tries < max_surfaces) : (tries += 1) {
+        id = (id % max_surfaces) + 1; // 1..max_surfaces, wrapping
+        if (findSurface(id) != null) {
+            focused = id;
+            return;
+        }
+    }
+}
+
+/// The next keystroke for the focused surface: keys go to whoever has
+/// focus, and Tab cycles focus here rather than reaching a client.
+fn nextInput() struct { surface: u64, ch: u8 } {
+    while (true) {
+        const ch = readKey();
+        if (ch == key_switch_focus) {
+            cycleFocus();
+            continue;
+        }
+        return .{ .surface = focused, .ch = ch };
+    }
 }
 
 /// Serve the surface protocol on the boot channel (which is also the
@@ -400,6 +459,14 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     _ = composite(); // its space returns to the ground
                 }
                 _ = usys.replyTyped(shared.GpuResp, chan_h, .ok, 0);
+            },
+            .next_input => {
+                if (keys_chan == 0) {
+                    _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 7 } }, 0);
+                    continue;
+                }
+                const in = nextInput();
+                _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .input = .{ .surface = in.surface, .ch = in.ch } }, 0);
             },
         }
     }
@@ -472,7 +539,11 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
     }
     _ = usys.log(log_h, "gpu: scanout up");
 
-    // Now serve the surface protocol: clients create a surface and commit
-    // damage rects, and we copy each into the scanout and flush it.
+    // If the seat gave us a keyboard, take it — keystrokes route to the
+    // focused surface (the compositor owns focus).
+    if (keys_chan != 0) setupKeyboard();
+
+    // Now serve the surface protocol: clients create a surface, commit
+    // damage rects (we composite), and read input for the focused surface.
     serveSurfaces(chan_h);
 }

@@ -1,0 +1,14 @@
+# The compositor with a keyboard (the focus drill / a real seat): gpusvc
+# in serve mode, given both the virtio-gpu device and the keyboard
+# (inputsvc via kbd), so it owns focus and routes keystrokes to the
+# focused surface. Plain `gpusvc` (no keyboard) is for the display-only
+# drills.
+{
+  image:  gpusvc
+  arg:    0
+  budget: { user: 16mb }
+  give: [
+    { tag: device, device: gpu }
+    { tag: keys, unit: kbd }
+  ]
+}
