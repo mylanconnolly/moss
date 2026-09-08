@@ -5,6 +5,7 @@
 
 pub const dns = @import("dns.zig");
 pub const fabcert = @import("fabcert.zig");
+pub const font = @import("font.zig");
 pub const http = @import("http.zig");
 pub const json = @import("json.zig");
 pub const lz4 = @import("lz4.zig");
@@ -19,6 +20,7 @@ pub const xts = @import("xts.zig");
 test {
     _ = dns;
     _ = fabcert;
+    _ = font;
     _ = http;
     _ = json;
     _ = lz4;
