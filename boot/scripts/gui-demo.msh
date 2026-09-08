@@ -1,0 +1,27 @@
+# The mshl GUI demo (profile gui): a GUI defined as a service — a pure
+# `view` (state -> a declarative widget tree) and `update` (state, event
+# -> state). The runtime owns the surface, renders the view, routes the
+# keyboard (Tab moves between the buttons, Enter fires the focused one),
+# and threads the returned state forward. No loop, no drawing here.
+let final = (gui {
+    init:  { count: 0, done: false }
+    title: "moss gui demo"
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: ("count: " + (str $state.count)) }
+            { kind: "button", id: "inc", label: "increment" }
+            { kind: "button", id: "quit", label: "quit" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "inc" => { { count: ($state.count + 1), done: $state.done } }
+          "quit" => { { count: $state.count, done: true } }
+          _ => $state
+        }
+      })
+  })
+"gui: done count=" + (str $final.count)

@@ -632,10 +632,18 @@ fn dropReader(badge: u64) void {
 fn dispatchKeys(chan_h: u64) void {
     while (keyRingPeek()) |c| {
         if (c == key_switch_focus) {
-            keyRingPop();
+            const before = focused;
             cycleFocus();
-            _ = composite(); // the focus cue follows the new focus
-            continue;
+            if (focused != before) {
+                // Focus moved to another surface — Tab is the compositor's
+                // here; absorb it and repaint the cue.
+                keyRingPop();
+                _ = composite();
+                continue;
+            }
+            // Only one focusable surface: cycleFocus was a no-op, so Tab
+            // belongs to the focused app (widget navigation) — fall through
+            // and deliver it like any other key.
         }
         const owner = if (findSurface(focused)) |sf| sf.owner else {
             keyRingPop(); // nothing focused: the key has nowhere to go

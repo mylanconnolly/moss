@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui };
 
 const Spec = struct {
     name: []const u8,
@@ -71,6 +71,7 @@ const specs = [_]Spec{
     .{ .name = "focus", .kind = .focus, .pass = "focus-test: PASS", .extra = "focus: ok", .append = "profile=focus" },
     .{ .name = "trust", .kind = .trust, .pass = "trust-test: PASS", .extra = "trust: ok", .append = "profile=trust" },
     .{ .name = "readers", .kind = .readers, .pass = "readers-test: PASS", .extra = "mover: done", .append = "profile=readers" },
+    .{ .name = "gui", .kind = .gui, .pass = "gui-test: PASS", .extra = "gui: done count=1", .append = "profile=gui" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -346,7 +347,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The graphical seat / focus / trusted-path drill: both a display
         // to render on and a keyboard to type into, plus QMP to type and
         // screendump.
-        .seat, .focus, .trust, .readers => try args.appendSlice(gpa, &.{
+        .seat, .focus, .trust, .readers, .gui => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -402,6 +403,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .trust) {
         if (!try trustDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .gui) {
+        if (!try guiDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -893,6 +897,63 @@ fn trustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (eqRgb(pixelAt(img, 320, 40), 0x00, 0x66, 0xCC)) {
         reportFailure(spec.name, "the secure colour bled below the reserved top strip", log_path);
         return false;
+    }
+    return true;
+}
+
+/// The mshl GUI drill (`gui`): mshrun runs a GUI defined in mshl as a
+/// pure view/update service. Once the window is up we type Enter (fire
+/// the focused "increment" button), Tab (move focus to "quit"), Enter
+/// (fire "quit"); the app increments its state, re-renders, and closes,
+/// and mshrun logs the final value. Proves a GUI written entirely in
+/// mshl renders, routes the keyboard, and threads state through update.
+fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the gui app never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Enter fires "increment" (count -> 1). Give the app a moment to
+    // update + re-render, then keep a screendump of the live window for
+    // the record — before we close it.
+    if (!q.sendKey("ret")) {
+        reportFailure(spec.name, "QMP could not type Enter", log_path);
+        return false;
+    }
+    sleepMs(300);
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    _ = q.screendump(ppm_path);
+    // Tab moves focus to "quit"; Enter fires it and the app closes.
+    for ([_][]const u8{ "tab", "ret" }) |k| {
+        if (!q.sendKey(k)) {
+            reportFailure(spec.name, "QMP could not type the gui keys", log_path);
+            return false;
+        }
+        sleepMs(150);
+    }
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: done count=1") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the gui app never updated its state and closed", log_path);
+            return false;
+        }
     }
     return true;
 }

@@ -1,0 +1,16 @@
+# The mshl GUI drill (profile gui): mshrun runs the GUI app script, which
+# defines a GUI as a service (pure view/update). mshrun holds a display
+# cap (the compositor, which owns the keyboard), so its `gui` command can
+# open a surface, render the view, and route keys. Pulling in the
+# compositor starts the whole stack; mshrun logs the script's final value.
+{
+  image:     mshrun
+  script:    scripts/gui-demo.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [gui]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+  ]
+}

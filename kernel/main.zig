@@ -189,6 +189,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.gui_test) {
+        _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -672,6 +677,13 @@ fn trustTestWorker(_: u64) void {
 /// block the serve loop (on the old synchronous compositor it would hang).
 fn readersTestWorker(_: u64) void {
     systemDrill("readers");
+}
+
+/// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a
+/// GUI defined in mshl (pure view/update); the host types Enter/Tab/Enter
+/// and the app updates its state and view, then closes.
+fn guiTestWorker(_: u64) void {
+    systemDrill("gui");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

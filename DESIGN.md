@@ -2524,6 +2524,51 @@ can be in flight at once. The drill also stands as the regression guard: on
 the old synchronous compositor the parked read would wedge the mover, and
 the boot would hang instead of finishing.
 
+### GUIs in mshl
+
+The console arc gave the substrate — surfaces, a compositor, keyboard
+routing. The point of it is that a GUI should be written in mshl, not
+zig, and the model (chosen once the substrate worked) is **a GUI as a
+service with a pure `update`/`view` split**: the app is two mshl
+functions — `view(state)` returns a declarative widget tree (an ordinary
+record), `update(state, event)` returns the next state — and a runtime
+owns the surface, renders the view, routes input, and threads state
+forward. The app has no loop and never blocks. Everything that crosses
+between app and runtime is *data* — the view tree, an event `{id}`, the
+state — so the same app runs with its renderer on another node unchanged
+(the fabric's "remote" rule holds), it is supervised and crash-only
+(restart re-derives from state), and the view is declarative. Handlers
+are *not* closures in the tree: a closure can't cross the fabric, so
+behavior is the one `update` function keyed by the event's id. This is
+the Elm Architecture, or a BEAM GenServer with a render function.
+
+**Stage 1 (as built, 2026-09-08).** `gui` is a hosted mshl command
+(`user/guicmds.zig`), wired into mshrun beside `net`/`fs`/`http` and
+offered only when the host holds a `display` cap — exactly how the other
+drivers are exposed. `gui { init, view, update }` opens a surface on the
+compositor and runs the loop *in zig* (so the mshl app has none): render
+`view state`, wait for a key, and on a fire call `update state {id}`,
+thread the returned state, re-render; a state with `done: true` closes
+the window and `gui` answers with the final state. The runtime calls the
+app's mshl closures in-process through `Interp.callValue` — the same
+entry `map`/`reduce` use — and builds the event record in the interp's
+arena. Rendering is client-side: the runtime rasterises the tree into the
+surface's shm with the shared 8×16 font (as the terminal does), a single
+column of `label` and `button` widgets, the focused button highlighted.
+Input is keyboard-only (no pointer yet): Tab moves focus between the
+buttons, Enter fires the focused one. That needed one compositor change —
+Tab cycles *surfaces* only when there is more than one; with a single
+window it is delivered to the app, so a GUI can use Tab for its own
+widget focus (the focus and trust drills, with two surfaces, are
+unaffected). The drill (profile `gui`, `boot/scripts/gui-demo.msh`) is a
+counter written entirely in mshl — `view` shows `count: N` and two
+buttons, `update` matches on `$ev.id`; the host types Enter/Tab/Enter, the
+count reaches 1, and mshrun logs the final value. A GUI, defined in mshl,
+with no zig in the app. What's left for the arc: text-input widgets (a
+login form), the GUI login on the trusted path, crash-isolating `update`
+in a worker domain, pointer input, richer layout, and the fabric-remote
+GUI the data-only design already allows.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

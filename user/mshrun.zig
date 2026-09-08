@@ -19,6 +19,7 @@ const httpcmds = @import("httpcmds.zig");
 const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
 const workcmds = @import("workcmds.zig");
+const guicmds = @import("guicmds.zig");
 const loader = @import("loader.zig");
 const progload = @import("progload.zig");
 const syscmds = @import("syscmds.zig");
@@ -93,6 +94,9 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (fab != null) {
         if (fabcmds.signature(name)) |sig| return sig;
     }
+    if (guicmds.on()) {
+        if (guicmds.signature(name)) |sig| return sig;
+    }
     return syscmds.signature(name);
 }
 
@@ -109,6 +113,9 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     }
     if (fab) |*fb| {
         if (try fabcmds.call(fb, it, name, args, input)) |v| return v;
+    }
+    if (guicmds.on()) {
+        if (try guicmds.call(it, name, args, input)) |v| return v;
     }
     if (try syscmds.call(it, name, args)) |v| return v;
     return null;
@@ -198,6 +205,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     workcmds_on = worker_spawner != 0 or fab_chan != 0;
     if (workcmds_on) workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, 0);
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
+    if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h);
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
     tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
     if (fab_chan != 0) fab = .{ .chan = fab_chan };
