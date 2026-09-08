@@ -632,8 +632,12 @@ is a plan.
     while the login surface is focused, and a non-trusted surface may not
     steal focus from it. Drilled (profile trust, user/trustcli.zig): a
     greeter with the token vs. a hostile client without — refused the
-    path, blind to the keyboard. Still open in (5): per-rect composition
-    and concurrent input readers (next_input is synchronous — one reader).
+    path, blind to the keyboard. ✅ per-rect composition (landed
+    2026-09-08): a commit recomposes and ships only its damage rect
+    (TRANSFER_TO_HOST_2D/RESOURCE_FLUSH bounded to it) instead of the
+    whole 640x480; the first commit still lays the full ground, later
+    ones stay bounded. Still open in (5): concurrent input readers
+    (next_input is synchronous — one reader).
     The runner's QMP socket lands first, since stages 1–3 all lean on it.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

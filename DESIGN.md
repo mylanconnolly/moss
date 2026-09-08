@@ -2264,10 +2264,11 @@ lands. The surface buffer is one contiguous shm (the framebuffer's size,
 300 pages — under `shm_max_pages`, since only *DMA* allocations carry the
 16-page cap), but the scanout's backing is the 19-chunk scatter-gather
 list, so `fbWrite` walks a linear framebuffer offset across chunk
-boundaries, and commit copies the rect row by row through it. The
-transfer to the host is still the whole framebuffer per commit (a
-per-rect transfer is a later optimisation; correctness only needs the
-damage rect to bound the *copy*, which it does). The drill proves it with
+boundaries, and commit copies the rect row by row through it. At this
+stage the transfer to the host was still the whole framebuffer per commit
+(correctness only needs the damage rect to bound the *copy*, which it
+does); per-rect transfer landed later — see "per-rect composition" under
+the compositor. The drill proves it with
 a client (`user/gpucli.zig`): it fills the surface with one colour and
 commits the full rect, then paints a centred 200×120 rectangle in a
 second colour and commits only that rect. The host screendumps the result
@@ -2363,10 +2364,10 @@ origin, the single-window case that keeps `term`/`gpucli` unchanged);
 later surfaces stack above earlier ones. `commit` no longer copies one
 surface straight to the framebuffer — it recomposites: paint the ground,
 then blit every surface bottom to top (each row through `fbWrite`, clipped
-to the scanout), then transfer and flush. Full recompose per commit is
-the simple, correct choice; per-rect composition is a later optimisation,
-and so are focus and input routing (the compositor will own which surface
-the keyboard reaches) and a trusted path for login. The drill opens two
+to the scanout), then transfer and flush. It began as a full recompose
+per commit — the simple, correct choice; per-rect composition (below) and
+focus, input routing, the focus cue, and the trusted path all followed.
+The drill opens two
 overlapping windows — red at (40,40), green at (200,150) — and the host
 screendumps and checks each region: red where only the first covers,
 green where only the second does, green again in the overlap (it was
@@ -2462,6 +2463,34 @@ the compositor is single-threaded, so while the greeter blocks reading
 the keyboard the hostile client's requests queue behind it — the drill
 must type the key before waiting on any of the hostile client's logs, or
 it deadlocks (the synchronous `next_input` = one reader limitation, again).
+
+**Stage 5, per-rect composition (as built, 2026-09-08).** A commit
+carries a damage rect, and until now it was ignored — every commit
+recomposed the whole 640×480 and DMA'd all 1.2 MB to the host. Now
+compositing is expressed in rectangles: a `Rect`, an `intersect`, and
+three primitives — `fillRect` (ground/strip), `blitRect` (a surface's
+overlap with a rect), and a rect-clipped focus border — over which the
+one `compositeRect(clip)` recomposes just `clip` and ships just `clip`
+(`TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` now take the rect, the
+transfer's backing offset being the rect's scanline offset since the
+scatter-gather backing is laid out as the linear resource). A commit
+translates its surface-local damage to the scanout, clips it to the
+surface, and recomposes only that; the full-scanout `composite()` is the
+same function over the whole framebuffer, kept for the events a single
+rect can't capture — bring-up, a focus switch (the cue moves and the
+secure strip can flip), and a destroy (it uncovers what was beneath). The
+correctness rule the per-rect path rests on: pixels outside `clip` are
+never touched, so the host keeps the value it already holds — which is
+only right if some earlier full composite established the whole scanout.
+So the **first** commit is a full composite (it lays the ground across
+the scanout, exactly as before); every commit after it stays bounded to
+its damage. The win shows directly in the gpu drill, which commits a
+full-surface fill and then a small centred rect and checks the area
+outside the rect is untouched — now that outside genuinely is never
+re-shipped. Watch the `@min`-narrowing trap once more: the border width
+`bw = @min(focus_border, …)` narrows to a type that just fits the border,
+and `2 * bw` overflows it — the third time this exact bite has been paid
+in this file, so `bw` is annotated `: usize`.
 
 ## Distribution: the fabric
 

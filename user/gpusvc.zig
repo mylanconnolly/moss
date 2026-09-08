@@ -203,17 +203,20 @@ fn cmdSetScanout() usize {
     wr32(44, res_id);
     return 48;
 }
-fn cmdTransfer() usize {
+fn cmdTransfer(x: u32, y: u32, w: u32, h: u32) usize {
     hdr(cmd_transfer_to_host_2d);
-    rect(24, 0, 0, fb_w, fb_h);
-    wr64(40, 0); // offset into the resource
+    rect(24, x, y, w, h);
+    // The backing is laid out as the linear resource, so the offset of the
+    // rect's top-left pixel is its scanline offset — the device walks the
+    // scatter-gather list from there, one resource-stride row at a time.
+    wr64(40, @as(u64, y) * fb_stride + @as(u64, x) * fb_bpp);
     wr32(48, res_id);
     wr32(52, 0); // padding
     return 56;
 }
-fn cmdFlush() usize {
+fn cmdFlush(x: u32, y: u32, w: u32, h: u32) usize {
     hdr(cmd_resource_flush);
-    rect(24, 0, 0, fb_w, fb_h);
+    rect(24, x, y, w, h);
     wr32(40, res_id);
     wr32(44, 0); // padding
     return 48;
@@ -296,9 +299,16 @@ fn fbWrite(off: usize, src: [*]const u8, len: usize) void {
 /// at bring-up and after every commit (a per-rect transfer is a later
 /// optimisation; correctness only needs the damage rect to bound the
 /// copy into the backing, which commit does).
-fn transferAndFlush() bool {
-    if (submitCmd(cmdTransfer(), 64) != resp_ok_nodata) return false;
-    if (submitCmd(cmdFlush(), 64) != resp_ok_nodata) return false;
+/// Ship one rectangle of the backing to the host resource and flush it to
+/// the scanout — the per-rect path a commit takes, so only the damaged
+/// region crosses the virtio boundary instead of the whole 640x480.
+fn transferFlushRect(r: Rect) bool {
+    const x: u32 = @intCast(r.x);
+    const y: u32 = @intCast(r.y);
+    const w: u32 = @intCast(r.w);
+    const h: u32 = @intCast(r.h);
+    if (submitCmd(cmdTransfer(x, y, w, h), 64) != resp_ok_nodata) return false;
+    if (submitCmd(cmdFlush(x, y, w, h), 64) != resp_ok_nodata) return false;
     return true;
 }
 
@@ -344,20 +354,63 @@ fn destroySurface(sf: *Surface) void {
     sf.* = .{};
 }
 
-/// Blit one surface onto the framebuffer at its position, clipped to the
-/// scanout. The surface is contiguous (w*bpp per row); the framebuffer is
-/// the scatter-gather chunks, so each row goes through fbWrite.
-fn blit(sf: *const Surface) void {
+/// A scanout rectangle, in pixels. Compositing is expressed as rectangles
+/// so a commit can recompose (and ship) just its damage instead of the
+/// whole scanout.
+const Rect = struct { x: usize, y: usize, w: usize, h: usize };
+
+/// The overlap of two rects, or null when they are disjoint.
+fn intersect(a: Rect, b: Rect) ?Rect {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + a.w, b.x + b.w);
+    const y1 = @min(a.y + a.h, b.y + b.h);
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+}
+
+/// A surface's footprint on the scanout, clipped to it.
+fn surfaceRect(sf: *const Surface) Rect {
+    var w: usize = sf.w;
+    if (@as(usize, sf.x) + w > fb_w) w = fb_w - @as(usize, sf.x);
+    var h: usize = sf.h;
+    if (@as(usize, sf.y) + h > fb_h) h = fb_h - @as(usize, sf.y);
+    return .{ .x = sf.x, .y = sf.y, .w = w, .h = h };
+}
+
+/// A commit's damage rect (surface-local `xy`/`wh`, a zero size meaning
+/// the whole surface) translated to scanout coordinates and clipped to
+/// the surface's footprint. A bogus rect falls back to the whole surface.
+fn damageRect(sf: *const Surface, xy: u64, wh: u64) Rect {
+    const sr = surfaceRect(sf);
+    const dw = shared.unpackHi(wh);
+    const dh = shared.unpackLo(wh);
+    if (dw == 0 or dh == 0) return sr;
+    const local: Rect = .{
+        .x = @as(usize, sf.x) + shared.unpackHi(xy),
+        .y = @as(usize, sf.y) + shared.unpackLo(xy),
+        .w = dw,
+        .h = dh,
+    };
+    return intersect(local, sr) orelse sr;
+}
+
+/// Fill a scanout rect (already clipped) with one colour word.
+fn fillRect(r: Rect, word: u32) void {
+    var y = r.y;
+    while (y < r.y + r.h) : (y += 1) fbSpan(y * fb_stride + r.x * fb_bpp, r.w, word);
+}
+
+/// Blit the part of a surface that falls in `r` (a rect within the
+/// surface's scanout footprint) onto the framebuffer. The surface is
+/// contiguous (w*bpp per row); the framebuffer is the scatter-gather
+/// chunks, so each row goes through fbWrite.
+fn blitRect(sf: *const Surface, r: Rect) void {
     const src: [*]const u8 = @ptrFromInt(sf.va);
-    var ry: usize = 0;
-    while (ry < sf.h) : (ry += 1) {
-        const sy = @as(usize, sf.y) + ry;
-        if (sy >= fb_h) break;
-        var cols: usize = sf.w;
-        if (@as(usize, sf.x) + cols > fb_w) cols = fb_w - @as(usize, sf.x);
-        const dst_off = sy * fb_stride + @as(usize, sf.x) * fb_bpp;
-        const src_off = ry * @as(usize, sf.w) * fb_bpp;
-        fbWrite(dst_off, src + src_off, cols * fb_bpp);
+    var y = r.y;
+    while (y < r.y + r.h) : (y += 1) {
+        const src_off = (y - @as(usize, sf.y)) * @as(usize, sf.w) * fb_bpp + (r.x - @as(usize, sf.x)) * fb_bpp;
+        fbWrite(y * fb_stride + r.x * fb_bpp, src + src_off, r.w * fb_bpp);
     }
 }
 
@@ -381,40 +434,46 @@ fn fbSpan(off: usize, n: usize, word: u32) void {
 /// Draw the focus cue: a border just inside the focused surface's edges,
 /// on top of everything, clipped to the scanout — so the window that has
 /// the keyboard is visibly the one.
-fn drawFocusBorder(sf: *const Surface) void {
-    var w: usize = sf.w;
-    if (@as(usize, sf.x) + w > fb_w) w = fb_w - @as(usize, sf.x);
-    var h: usize = sf.h;
-    if (@as(usize, sf.y) + h > fb_h) h = fb_h - @as(usize, sf.y);
-    if (w == 0 or h == 0) return;
-    const bw = @min(@as(usize, focus_border), @min(w, h));
-    const x0 = @as(usize, sf.x);
-    // Top and bottom bands (full width).
-    for (0..bw) |i| {
-        fbSpan((@as(usize, sf.y) + i) * fb_stride + x0 * fb_bpp, w, focus_word);
-        fbSpan((@as(usize, sf.y) + h - 1 - i) * fb_stride + x0 * fb_bpp, w, focus_word);
+fn drawFocusBorder(sf: *const Surface, clip: Rect) void {
+    const sr = surfaceRect(sf);
+    if (sr.w == 0 or sr.h == 0) return;
+    // `: usize` is load-bearing — @min against the comptime border width
+    // narrows the result type to fit it, and `2 * bw` would overflow that.
+    const bw: usize = @min(@as(usize, focus_border), @min(sr.w, sr.h));
+    // Four bands: top, bottom, and the left/right columns between them.
+    // Each is clipped to the recompose rect so a per-rect commit only
+    // repaints the part of the border that its damage actually touches.
+    var bands: [4]Rect = .{
+        .{ .x = sr.x, .y = sr.y, .w = sr.w, .h = bw },
+        .{ .x = sr.x, .y = sr.y + sr.h - bw, .w = sr.w, .h = bw },
+        undefined,
+        undefined,
+    };
+    var n: usize = 2;
+    if (sr.h > 2 * bw) {
+        const col_h = sr.h - 2 * bw;
+        bands[2] = .{ .x = sr.x, .y = sr.y + bw, .w = bw, .h = col_h };
+        bands[3] = .{ .x = sr.x + sr.w - bw, .y = sr.y + bw, .w = bw, .h = col_h };
+        n = 4;
     }
-    // Left and right columns (between the bands).
-    var ry: usize = bw;
-    while (ry + bw < h) : (ry += 1) {
-        const base = (@as(usize, sf.y) + ry) * fb_stride;
-        fbSpan(base + x0 * fb_bpp, bw, focus_word);
-        fbSpan(base + (x0 + w - bw) * fb_bpp, bw, focus_word);
+    for (bands[0..n]) |b| {
+        if (intersect(b, clip)) |ir| fillRect(ir, focus_word);
     }
 }
 
 /// Recompose the scanout: paint the ground, then every surface bottom to
 /// top, then ship it to the host. Full recompose per commit — simple and
 /// correct; per-rect composition is a later optimisation.
-fn composite() bool {
+/// Recompose one scanout rectangle and ship just that rectangle to the
+/// host. `clip` must already be within the scanout. The full-scanout
+/// `composite()` is this over the whole framebuffer; a commit passes its
+/// (translated, clipped) damage rect so only what changed is repainted
+/// and transferred. Every step is clipped to `clip`, so pixels outside it
+/// keep the value the host already holds.
+fn compositeRect(clip: Rect) bool {
     // Ground.
-    for (0..n_chunks) |i| {
-        const words = fb_chunk_pages[i] * 4096 / 4;
-        const p: [*]volatile u32 = @ptrFromInt(fb_va[i]);
-        var j: usize = 0;
-        while (j < words) : (j += 1) p[j] = bg_word;
-    }
-    // Surfaces, painters' order (lowest z first).
+    fillRect(clip, bg_word);
+    // Surfaces, painters' order (lowest z first), each clipped to `clip`.
     var painted: u32 = 0;
     while (true) {
         var next: ?*Surface = null;
@@ -423,13 +482,11 @@ fn composite() bool {
             if (next == null or sf.z < next.?.z) next = sf;
         }
         const sf = next orelse break;
-        blit(sf);
+        if (intersect(surfaceRect(sf), clip)) |ir| blitRect(sf, ir);
         painted = sf.z;
     }
-    // The focus cue goes on top, so a partially-covered focused window
-    // still shows it (only when we hold a keyboard — otherwise no focus).
     if (keys_chan != 0) {
-        if (findSurface(focused)) |sf| drawFocusBorder(sf);
+        if (findSurface(focused)) |sf| drawFocusBorder(sf, clip);
     }
     // The trusted-path indicator: a strip across the very top of the
     // scanout, painted last of all so no client surface can forge it. It
@@ -438,10 +495,21 @@ fn composite() bool {
     if (trust_token != 0) {
         const secure = if (findSurface(focused)) |sf| sf.trusted else false;
         const word = if (secure) secure_word else bg_word;
-        for (0..trust_strip) |row| fbSpan(row * fb_stride, fb_w, word);
+        if (intersect(.{ .x = 0, .y = 0, .w = fb_w, .h = trust_strip }, clip)) |ir| fillRect(ir, word);
     }
-    return transferAndFlush();
+    return transferFlushRect(clip);
 }
+
+/// Recompose and ship the whole scanout. Used at bring-up and whenever a
+/// change is not confined to one damage rect (a focus switch moves the
+/// cue and can flip the secure strip; a destroy uncovers whatever was
+/// beneath). It also lays the ground across the scanout, which the
+/// per-rect commits below then preserve outside their own rects.
+fn composite() bool {
+    laid_ground = true;
+    return compositeRect(.{ .x = 0, .y = 0, .w = fb_w, .h = fb_h });
+}
+var laid_ground: bool = false;
 
 // ------------------------------------------------------------- focus
 
@@ -553,9 +621,12 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     _ = usys.replyTyped(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0);
                     continue;
                 }
-                // The damage rect (q.xy/q.wh) is advisory for now; recompose
-                // the whole scanout so overlapping surfaces stay correct.
-                const ok = composite();
+                // Recompose and ship only the damage rect (q.xy/q.wh, in
+                // surface-local pixels; a zero size means the whole
+                // surface). The very first commit lays the ground across
+                // the whole scanout; later ones stay bounded to their
+                // damage, which is the point.
+                const ok = if (laid_ground) compositeRect(damageRect(sf, q.xy, q.wh)) else composite();
                 _ = usys.replyTyped(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 5 } }, 0);
             },
             .destroy_surface => |q| {
@@ -658,8 +729,8 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
     if (submitCmd(cmdAttachBacking(), 64) != resp_ok_nodata) usys.exit(182);
     fillFb();
     if (submitCmd(cmdSetScanout(), 64) != resp_ok_nodata) usys.exit(183);
-    if (submitCmd(cmdTransfer(), 64) != resp_ok_nodata) usys.exit(184);
-    if (submitCmd(cmdFlush(), 64) != resp_ok_nodata) usys.exit(185);
+    if (submitCmd(cmdTransfer(0, 0, fb_w, fb_h), 64) != resp_ok_nodata) usys.exit(184);
+    if (submitCmd(cmdFlush(0, 0, fb_w, fb_h), 64) != resp_ok_nodata) usys.exit(185);
 
     if (!readbackOk()) {
         _ = usys.log(log_h, "gpusvc: framebuffer readback mismatch");
