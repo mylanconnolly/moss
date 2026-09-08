@@ -1,0 +1,36 @@
+# The mshl GUI login on the trusted path (profile gtrust): the same login
+# form as gui-login, but `trusted: true` — so the runtime claims the
+# trusted path from the compositor with its boot token. The surface
+# becomes the login surface: the compositor shows the secure strip while
+# it holds focus and routes the keyboard to it alone. A hostile client
+# cannot spoof the prompt or read the passphrase. The form itself is
+# still pure view/update; only `trusted: true` and the token differ.
+let final = (gui {
+    init:    { msg: "sign in to moss", who: "-" }
+    title:   "moss"
+    trusted: true
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: $state.msg }
+            { kind: "field", id: "user", label: "user" }
+            { kind: "field", id: "pass", label: "pass", secret: true }
+            { kind: "button", id: "login", label: "sign in" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "login" => {
+            if ($ev.fields.user == "alice") and ($ev.fields.pass == "secret") {
+              { msg: ("welcome " + $ev.fields.user), who: $ev.fields.user, done: true }
+            } else {
+              { msg: "wrong credentials", who: "-", done: false }
+            }
+          }
+          _ => $state
+        }
+      })
+  })
+"gui: tlogin who=" + (str $final.who)

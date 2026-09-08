@@ -199,6 +199,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.gtrust_test) {
+        _ = sched.spawn("boot-watch", gtrustTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -696,6 +701,13 @@ fn guiTestWorker(_: u64) void {
 /// username and password, submits, and the app checks them.
 fn guiLoginTestWorker(_: u64) void {
     systemDrill("guilogin");
+}
+
+/// The mshl trusted-login drill: a system boot under profile "gtrust" —
+/// an mshl login form on the trusted path (the compositor's secure strip,
+/// keyboard isolated to the login surface); the host signs in.
+fn gtrustTestWorker(_: u64) void {
+    systemDrill("gtrust");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

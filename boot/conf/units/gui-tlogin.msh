@@ -1,0 +1,17 @@
+# The mshl trusted-login drill (profile gtrust): mshrun runs the trusted
+# login form. It holds the boot trust token (a secret give) and a display
+# cap, so its `gui { trusted: true }` claims the login surface — secure
+# strip lit, keyboard isolated. Staging the secret needs a buf give.
+{
+  image:     mshrun
+  script:    scripts/gui-tlogin.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [gtrust]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+    { tag: buf, shm: 1 }
+    { secret: conf/trust.token }
+  ]
+}

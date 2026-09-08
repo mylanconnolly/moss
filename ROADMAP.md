@@ -663,9 +663,17 @@ is a plan.
     record — so update stays a pure function of coarse events, not
     keystrokes. Drilled (profile guilogin, scripts/gui-login.msh): a
     login form in mshl; the host types user/pass and submits, update
-    checks the credentials. Open: GUI login on the trusted path;
-    crash-isolate update in a worker domain; pointer input; richer
-    layout; fabric-remote GUI.
+    checks the credentials. ✅ Stage 3 (landed 2026-09-08): the GUI
+    login on the trusted path (closes invariant 4, users log in via
+    the GUI). `gui { trusted: true }` + the boot token makes the
+    runtime attach_trusted and drive over the minted channel, so the
+    login form's surface IS the trusted surface (secure strip,
+    keyboard isolated); a client without the token is refused. Same
+    pure view/update form as Stage 2, one flag added. Drilled
+    (profile gtrust, scripts/gui-tlogin.msh): the secure strip is
+    checked lit, then sign-in. Open: spawn a real session on
+    success; crash-isolate update in a worker domain; pointer input;
+    richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

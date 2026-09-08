@@ -2585,10 +2585,32 @@ advances past a field. The drill (profile `guilogin`,
 two fields (the password masked) and a button, `update` matching the
 credentials out of `$ev.fields`. The host types a username, Tab, a
 password, then submits; the app accepts `alice`/`secret` and logs
-`who=alice` — proof the typed text crossed to `update` intact. What's
-left for the arc: the GUI login on the trusted path, crash-isolating
-`update` in a worker domain, pointer input, richer layout, and the
-fabric-remote GUI the data-only design already allows.
+`who=alice` — proof the typed text crossed to `update` intact.
+
+**Stage 3 (as built, 2026-09-08).** The GUI login on the trusted path —
+the vision's "users log in via the GUI", made safe. The two halves were
+already built: the trusted-path compositor (a client proves the boot
+token over `attach_trusted`, earns a badged channel whose surfaces are
+the login surface, wears the secure strip, and has the keyboard to
+itself) and the mshl login form. Stage 3 joins them with one spec flag:
+`gui { trusted: true, ... }`. When set, the runtime — given the same
+boot token as a `secret` — calls `attach_trusted` before opening its
+surface and drives everything (create, commit, `next_input`) over the
+minted channel instead of the shared display; so the login form's
+surface *is* the trusted surface. Everything else about the app is
+unchanged: the same declarative `view`, the same pure `update` reading
+`$ev.fields`. Only the flag and the token differ, and a client without
+the token is refused (`gui` fails), which is the gate. The drill (profile
+`gtrust`, `boot/scripts/gui-tlogin.msh`) renders the login form, the host
+screendumps and checks the compositor's secure strip is lit at the top of
+the scanout — the unspoofable proof this is the real login — then signs
+in and confirms the app accepted the credentials. A login prompt written
+in mshl, on a path a hostile window cannot spoof or eavesdrop.
+
+What's left for the arc: spawning a real session on a successful login
+(today the drill just confirms the credentials reached `update`),
+crash-isolating `update` in a worker domain, pointer input, richer
+layout, and the fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

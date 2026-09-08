@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust };
 
 const Spec = struct {
     name: []const u8,
@@ -73,6 +73,7 @@ const specs = [_]Spec{
     .{ .name = "readers", .kind = .readers, .pass = "readers-test: PASS", .extra = "mover: done", .append = "profile=readers" },
     .{ .name = "gui", .kind = .gui, .pass = "gui-test: PASS", .extra = "gui: done count=1", .append = "profile=gui" },
     .{ .name = "guilogin", .kind = .guilogin, .pass = "guilogin-test: PASS", .extra = "gui: login who=alice", .append = "profile=guilogin" },
+    .{ .name = "gtrust", .kind = .gtrust, .pass = "gtrust-test: PASS", .extra = "gui: tlogin who=alice", .append = "profile=gtrust" },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -348,7 +349,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The graphical seat / focus / trusted-path drill: both a display
         // to render on and a keyboard to type into, plus QMP to type and
         // screendump.
-        .seat, .focus, .trust, .readers, .gui, .guilogin => try args.appendSlice(gpa, &.{
+        .seat, .focus, .trust, .readers, .gui, .guilogin, .gtrust => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -410,6 +411,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .guilogin) {
         if (!try guiLoginDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .gtrust) {
+        if (!try gtrustDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -1017,6 +1021,78 @@ fn guiLoginDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         }
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the login was never accepted", log_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The mshl trusted-login drill (`gtrust`): the same login form, but on
+/// the trusted path. Once it renders we screendump and check the
+/// compositor's secure strip is lit at the top of the scanout — the
+/// unspoofable proof this is the real login surface — then sign in as in
+/// the plain login drill and confirm the app accepted the credentials.
+fn gtrustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the trusted login never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // The secure strip: a band across the very top of the scanout, the
+    // compositor's own, lit only while the login surface has focus.
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    if (readPpm(ppm_path)) |img| {
+        if (!eqRgb(pixelAt(img, 320, 4), 0x00, 0x66, 0xCC)) {
+            std.debug.print("[FAIL] {s}: secure strip not lit at (320,4): {any}\n", .{ spec.name, pixelAt(img, 320, 4) });
+            reportFailure(spec.name, "the login is not on the trusted path (no secure strip)", log_path);
+            return false;
+        }
+    }
+    // Sign in.
+    if (!q.typeText("alice")) {
+        reportFailure(spec.name, "QMP could not type the username", log_path);
+        return false;
+    }
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    if (!q.typeText("secret")) {
+        reportFailure(spec.name, "QMP could not type the password", log_path);
+        return false;
+    }
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    _ = q.sendKey("ret");
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: tlogin who=alice") != null) break;
+        if (std.mem.indexOf(u8, content, "wrong credentials") != null) {
+            reportFailure(spec.name, "the typed credentials did not reach update intact", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the trusted login was never accepted", log_path);
             return false;
         }
     }

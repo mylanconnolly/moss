@@ -35,11 +35,14 @@ const Value = mshl.Value;
 const font = shared.font8x16;
 
 var display: u64 = 0; // the compositor channel (surface protocol + input)
+var chan: u64 = 0; // the channel a session drives: `display`, or a trusted one
 var log_h: u64 = 0;
+var trust_token: u64 = 0; // the trusted-path token, if the host was given one
 
-pub fn setup(display_cap: u64, log: u64) void {
+pub fn setup(display_cap: u64, log: u64, secret: []const u8) void {
     display = display_cap;
     log_h = log;
+    if (secret.len >= 8) trust_token = std.mem.readInt(u64, secret[0..8], .little);
 }
 
 /// Whether the host holds a display — `gui` is offered only then.
@@ -236,8 +239,26 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
 
 // ---------------------------------------------------- surface + input
 
+/// Claim the trusted path: present the token and switch `chan` to the
+/// badged channel the compositor mints, so surfaces made over it are the
+/// login surface. False if there is no token or the compositor refuses.
+fn attachTrusted() bool {
+    if (trust_token == 0) return false;
+    switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, display, .{ .attach_trusted = .{ .token = trust_token } }, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .trusted => {
+                if (ok.cap == 0) return false;
+                chan = ok.cap;
+                return true;
+            },
+            else => return false,
+        },
+        .err => return false,
+    }
+}
+
 fn openSurface() bool {
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, display, .{ .create_surface = .{ .xy = shared.packPair(win_x, win_y), .wh = shared.packPair(win_w, win_h) } }, 0)) {
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(win_x, win_y), .wh = shared.packPair(win_w, win_h) } }, 0)) {
         .ok => |ok| ok,
         .err => return false,
     };
@@ -253,19 +274,19 @@ fn openSurface() bool {
 }
 
 fn commitSurface() bool {
-    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, display, .{ .commit = .{ .surface = surf, .xy = 0, .wh = shared.packPair(win_w, win_h) } }, 0)) {
+    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .commit = .{ .surface = surf, .xy = 0, .wh = shared.packPair(win_w, win_h) } }, 0)) {
         .ok => true,
         .err => false,
     };
 }
 
 fn closeSurface() void {
-    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, display, .{ .destroy_surface = .{ .surface = surf } }, 0);
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = surf } }, 0);
 }
 
 /// The next keystroke routed to our surface, or null if the channel died.
 fn nextInput() ?u8 {
-    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, display, .next_input, 0)) {
+    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0)) {
         .ok => |rep| switch (rep) {
             .input => |x| @intCast(x.ch & 0xff),
             else => 0,
@@ -324,6 +345,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (view != .func or update != .func) return it.fail("gui: `view` and `update` must be functions", .{});
     var state = spec.get("init") orelse Value.nothing;
     const title = if (spec.get("title")) |t| (if (t == .str) t.str else "") else "";
+    const want_trusted = spec.get("trusted") != null and (spec.get("trusted").?).asBool();
+
+    // A `trusted: true` GUI is a login greeter: claim the trusted path so
+    // the compositor makes this the login surface — the secure strip is
+    // shown while it holds focus and its keystrokes reach nobody else. It
+    // needs the boot-provisioned token (a `secret` give); without it the
+    // compositor refuses, and so do we.
+    chan = display;
+    if (want_trusted) {
+        if (!attachTrusted()) return it.fail("gui: the trusted path was refused (no token, or the wrong one)", .{});
+    }
 
     if (!openSurface()) return it.fail("gui: cannot open a surface", .{});
     defer closeSurface();

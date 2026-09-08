@@ -154,6 +154,11 @@ pub fn build(b: *std.Build) void {
         "guilogin-test",
         "Run the mshl GUI login drill: a login form in mshl with text-input fields",
     ) orelse false;
+    const gtrust_test = b.option(
+        bool,
+        "gtrust-test",
+        "Run the mshl trusted-login drill: an mshl login form on the trusted path (secure strip)",
+    ) orelse false;
     const net_test = b.option(
         bool,
         "net-test",
@@ -286,6 +291,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "readers_test", readers_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
+    build_opts.addOption(bool, "gtrust_test", gtrust_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
@@ -498,6 +504,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/readers-reader.msh", "conf/units/readers-mover.msh",
         "conf/units/gui-demo.msh",       "scripts/gui-demo.msh",
         "conf/units/gui-login.msh",      "scripts/gui-login.msh",
+        "conf/units/gui-tlogin.msh",     "scripts/gui-tlogin.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -590,10 +597,10 @@ pub fn build(b: *std.Build) void {
             "blk_test",    "gpu_test",     "term_test",    "input_test",
             "seat_test",   "gseat_test",   "comp_test",    "focus_test",
             "trust_test",  "readers_test", "gui_test",     "guilogin_test",
-            "fs_test",     "net_test",     "fabric_test",  "shell_test",
-            "rng_test",    "smmu_test",    "vm_test",      "guest_test",
-            "vmnode_test", "pan_test",     "cpu_test",     "users_test",
-            "login_test",  "flogin_test",  "dot_test",
+            "gtrust_test", "fs_test",      "net_test",     "fabric_test",
+            "shell_test",  "rng_test",     "smmu_test",    "vm_test",
+            "guest_test",  "vmnode_test",  "pan_test",     "cpu_test",
+            "users_test",  "login_test",   "flogin_test",  "dot_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -962,18 +969,18 @@ pub fn build(b: *std.Build) void {
         "blk_test",    "gpu_test",     "term_test",    "input_test",
         "seat_test",   "gseat_test",   "comp_test",    "focus_test",
         "trust_test",  "readers_test", "gui_test",     "guilogin_test",
-        "fs_test",     "net_test",     "fabric_test",  "shell_test",
-        "rng_test",    "smmu_test",    "vm_test",      "guest_test",
-        "vmnode_test", "pan_test",     "cpu_test",     "users_test",
-        "login_test",  "flogin_test",  "dot_test",
+        "gtrust_test", "fs_test",      "net_test",     "fabric_test",
+        "shell_test",  "rng_test",     "smmu_test",    "vm_test",
+        "guest_test",  "vmnode_test",  "pan_test",     "cpu_test",
+        "users_test",  "login_test",   "flogin_test",  "dot_test",
     };
     const variants = [_][]const u8{
-        "panic",   "fault",    "sched", "domain", "ipc",    "init",
-        "sandbox", "flap",     "blk",   "gpu",    "term",   "input",
-        "seat",    "gseat",    "comp",  "focus",  "trust",  "readers",
-        "gui",     "guilogin", "fs",    "net",    "fabric", "shell",
-        "rng",     "smmu",     "vm",    "guest",  "vmnode", "pan",
-        "cpu",     "users",    "login", "flogin", "dot",
+        "panic",   "fault",    "sched",  "domain", "ipc",    "init",
+        "sandbox", "flap",     "blk",    "gpu",    "term",   "input",
+        "seat",    "gseat",    "comp",   "focus",  "trust",  "readers",
+        "gui",     "guilogin", "gtrust", "fs",     "net",    "fabric",
+        "shell",   "rng",      "smmu",   "vm",     "guest",  "vmnode",
+        "pan",     "cpu",      "users",  "login",  "flogin", "dot",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves
