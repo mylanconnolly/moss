@@ -773,6 +773,12 @@ pub const GpuReq = union(enum(u64)) {
     /// A key is returned only to the client that owns the focused surface,
     /// so a keystroke meant for one window never leaks to another.
     next_input: void,
+    /// Like `next_input`, but the reader also wants a periodic *tick*: if
+    /// no real input arrives within `ms` (rounded to the 100ms timer), the
+    /// compositor answers with a `kind` 2 event (arg 0) so a client can
+    /// re-render on a clock — a live GUI without a busy-wait. The client
+    /// re-issues it to keep ticking; `ms` 0 behaves as plain `next_input`.
+    next_input_tick: struct { ms: u64 },
     /// Claim the trusted path by presenting the boot-provisioned trust
     /// token. On a match the reply is `trusted` + a badged channel the
     /// client drives instead of the shared display channel; surfaces made
@@ -792,7 +798,8 @@ pub const GpuResp = union(enum(u64)) {
     /// (`x`/`y` fit 16 bits each on this scanout, `btn` bit0 = left).
     /// Pointer events arrive on a button change or while a button is held
     /// (a drag), never on a bare move — a hovering cursor never wakes the
-    /// client.
+    /// client. `kind` 2 is a timer *tick* (arg 0): no input happened, the
+    /// deadline from `next_input_tick` elapsed — the client re-renders.
     input: struct { surface: u64, kind: u64 = 0, arg: u64 = 0 },
     /// The trust token matched: + a badged channel cap the client uses in
     /// place of the shared display channel for all further requests.

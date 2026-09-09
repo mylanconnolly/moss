@@ -3044,6 +3044,44 @@ the previous frame's garbage; that bounds *any* long-running GUI (a
 counter clicked a thousand times, a shell reopened all afternoon), not
 just this one. A drill that cycles apply a dozen times guards it.
 
+**Rounded widgets and a live clock (as built, 2026-09-09).** Two things a
+person asked for after living with the flat look: softer shapes and a
+login that shows the time. The renderer grew anti-aliased rounded
+rectangles — `fillRoundRect` fills the straight bands solid and feathers
+each corner's quarter-disc with `blendPx` (coverage = `r + 0.5 − dist`, a
+~1px edge), and `panel` draws a rounded fill inside a rounded border of a
+given thickness, its inner corners AA against the border, the outer
+against the ground. Buttons and fields are `panel`s now (radius 10 / 8);
+focus is one mechanism with the border — a bright, thicker ring plus a
+one-shade lift of the fill (still a double cue, never colour alone) — and
+a hair of top highlight stands in for the old hard depth bars. Spacing
+opened up a little. The window itself stays square (its surface is opaque,
+so rounding it would only paint the ground colour into the corners); the
+rounding is on the controls, where it reads.
+
+The clock needed the display loop to wake without input, which it never
+did — `next_input` parks forever in the compositor. So the protocol grew
+`next_input_tick { ms }`: the reader also asks for a periodic tick, and if
+no real input arrives the compositor answers with a `kind` 2 event so the
+client re-renders. The compositor rides its existing input doorbell — a
+kernel timer (`timer_arm`) signals `key_bell` with a distinct bit (2), the
+serve loop reads the latched bits from `notify_wait` and, on the tick bit,
+hands a tick to every ticking reader with a parked token; the timer is
+armed only while some reader wants ticks (the shortest period any asks)
+and disarmed when none do, so an idle compositor never wakes. The mshl
+`gui` spec gained `tick: <ms>` (or `true` → 1s); on a tick the runtime
+recomputes the *view* from the unchanged state (no `update`), so a `view`
+that reads `(date)` refreshes on its own — a live GUI with no busy-wait.
+Local apps only (a remote view would need a round trip per tick). The
+front door (`gui-session.msh`) now shows a big `HH:MM:SS` over a `Sep 9,
+2026` date above the fields; the time comes from `(date)` (the RTC read at
+boot, no cap needed), month names from a small `match` in the script
+because the `date` record carries only numeric parts and a bare ISO
+string — a locale-agnostic source (CLDR) is stashed for later. The
+`gsession`/`gisession`/`guishell` drills still drive the login green with
+the clock ticking under them; the widget hit-boxes do not move because the
+clock is a label and the column lays out by height, not width.
+
 **The fabric GUI (as built, 2026-09-09).** The payoff of the GUI-as-a-
 service model: a GUI can run on another node. Because an mshl GUI is a
 pure `update`/`view` over a declarative tree, the whole app is data — the

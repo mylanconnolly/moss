@@ -5,14 +5,51 @@
 # the login is the one side effect, a pipeline step after the form, not
 # something inside the pure update. On success the session runs to
 # completion and is torn down; we report who signed in.
+#
+# `tick: 1000` makes the runtime re-render every second even with no
+# input, so the clock the `view` reads from `(date)` stays live. The time
+# is read fresh on each render; a system with no wall clock shows dashes.
+
+def pad2 [n] { if $n < 10 { "0" + (str $n) } else { str $n } }
+
+# HH:MM:SS from the wall clock, or dashes when there is no clock yet.
+def clock-now [] {
+  match (date) {
+    ok $d => (pad2 $d.hour) + ":" + (pad2 $d.minute) + ":" + (pad2 $d.second)
+    err _ => "--:--:--"
+  }
+}
+
+# A short month name from its number (the Date record carries the parts;
+# its `iso` string is bare ISO-8601, no names).
+def month-name [m] {
+  match $m {
+    1 => "Jan" 2 => "Feb" 3 => "Mar" 4 => "Apr"
+    5 => "May" 6 => "Jun" 7 => "Jul" 8 => "Aug"
+    9 => "Sep" 10 => "Oct" 11 => "Nov" 12 => "Dec"
+    _ => "?"
+  }
+}
+
+# "Sep 9, 2026" from the wall clock's parts.
+def date-now [] {
+  match (date) {
+    ok $d => (month-name $d.month) + " " + (str $d.day) + ", " + (str $d.year)
+    err _ => ""
+  }
+}
+
 let creds = (gui {
     init:    { user: "", pass: "", done: false }
     title:   "moss"
     trusted: true
+    tick:    1000
     view: (fn [state] {
         {
           kind: "column"
           children: [
+            { kind: "label", role: "title", text: (clock-now) }
+            { kind: "label", muted: true, text: (date-now) }
             { kind: "label", text: "sign in to moss" }
             { kind: "field", id: "user", label: "user" }
             { kind: "field", id: "pass", label: "pass", secret: true }

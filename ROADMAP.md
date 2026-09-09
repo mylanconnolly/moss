@@ -964,9 +964,17 @@ is a plan.
     file (save writes, cat reads back for the push), so a setting outlives
     the session and resizes it live. guishell drill drives it: login auto-
     applies saved 1.5 (24px) → smaller+apply persists+pushes 1.25 (20px),
-    panel reopens → logout reverts (16px). Open: subpixel (deferred — only
-    pays off at 1:1 on a real panel, not the VNC/2× dev path),
-    fabric-remote GUI.
+    panel reopens → logout reverts (16px). ✅ fabric-remote GUI (landed
+    2026-09-09: `gui { node: N }`, the runtime a pure viewer — see the mshl
+    GUI arc). ✅ rounded widgets + a live clock (landed 2026-09-09):
+    anti-aliased `fillRoundRect`/`panel` give buttons and fields soft
+    corners and a focus ring; `next_input_tick { ms }` + a compositor timer
+    on the input doorbell let a GUI re-render on a tick with no busy-wait,
+    and the login (`gui-session.msh`) shows a live `HH:MM:SS` + date from
+    `(date)`. Open: subpixel (deferred — only pays off at 1:1 on a real
+    panel, not the VNC/2× dev path); locale-agnostic date formatting
+    (CLDR + tz data fetched at build, refreshed at runtime — the GUI clock
+    hardcodes English month names for now).
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

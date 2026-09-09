@@ -339,6 +339,58 @@ fn strokeRect(x: usize, y: usize, w: usize, h: usize, word: u32, thick: usize) v
     if (w > thick) fillRect(x + w - thick, y, thick, h, word); // right
 }
 
+/// One rounded corner: the quarter-disc of radius `r` centred at (cx, cy),
+/// filling the r×r box that extends in the (qx, qy) direction. Each pixel
+/// is coverage-blended (a ~1px feather at the arc), so the curve reads
+/// smooth against whatever is already painted there — no jaggies.
+fn roundCorner(cx: usize, cy: usize, r: usize, word: u32, qx: i2, qy: i2) void {
+    const cxf: f32 = @floatFromInt(cx);
+    const cyf: f32 = @floatFromInt(cy);
+    const rf: f32 = @floatFromInt(r);
+    var iy: usize = 0;
+    while (iy < r) : (iy += 1) {
+        var ix: usize = 0;
+        while (ix < r) : (ix += 1) {
+            const pxu = if (qx < 0) cx - r + ix else cx + ix;
+            const pyu = if (qy < 0) cy - r + iy else cy + iy;
+            const dx = (@as(f32, @floatFromInt(pxu)) + 0.5) - cxf;
+            const dy = (@as(f32, @floatFromInt(pyu)) + 0.5) - cyf;
+            const cov = rf + 0.5 - @sqrt(dx * dx + dy * dy); // 1px feather
+            if (cov <= 0) continue;
+            blendPx(pxu, pyu, word, if (cov >= 1) 255 else @intFromFloat(cov * 255));
+        }
+    }
+}
+
+/// A filled rectangle with rounded, anti-aliased corners. Straight regions
+/// are solid fills; the four corners are feathered discs. `r` is clamped
+/// to half the shorter side (r == 0 degrades to a plain fill).
+fn fillRoundRect(x: usize, y: usize, w: usize, h: usize, r_in: usize, word: u32) void {
+    if (measuring or w == 0 or h == 0) return;
+    var r = r_in;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    if (r == 0) return fillRect(x, y, w, h, word);
+    fillRect(x, y + r, w, h - 2 * r, word); // the full-width middle band
+    fillRect(x + r, y, w - 2 * r, r, word); // top edge between corners
+    fillRect(x + r, y + h - r, w - 2 * r, r, word); // bottom edge
+    roundCorner(x + r, y + r, r, word, -1, -1); // TL
+    roundCorner(x + w - r, y + r, r, word, 1, -1); // TR
+    roundCorner(x + r, y + h - r, r, word, -1, 1); // BL
+    roundCorner(x + w - r, y + h - r, r, word, 1, 1); // BR
+}
+
+/// A rounded panel with a rounded border of thickness `bw`: the border
+/// colour as the outer shape, the fill inset by `bw`. Both sets of corners
+/// are AA — the outer against the ground, the inner against the border.
+fn panel(x: usize, y: usize, w: usize, h: usize, r: usize, fill: u32, border: u32, bw: usize) void {
+    fillRoundRect(x, y, w, h, r, border);
+    if (w > 2 * bw and h > 2 * bw) {
+        const ir = if (r > bw) r - bw else 0;
+        fillRoundRect(x + bw, y + bw, w - 2 * bw, h - 2 * bw, ir, fill);
+    }
+}
+
 /// Draw one glyph at (cx, cy), scaled 2x crisp: each source pixel becomes
 /// a solid 2x2 block — no smoothing, so the letterforms stay sharp (a
 /// clean pixel font, not blurred or rounded). The whole 16x32 cell is
@@ -545,11 +597,13 @@ fn strField(rec: mshl.Record, key: []const u8) []const u8 {
 /// and return the number of focusable widgets.
 const Size = struct { w: usize, h: usize };
 
-const gap = 14; // vertical/horizontal space between siblings
-const bpx = 18; // button horizontal padding
-const bpy = 9; // button vertical padding
-const fpx = 12; // field horizontal padding
-const fpy = 9; // field vertical padding
+const gap = 16; // vertical/horizontal space between siblings
+const bpx = 20; // button horizontal padding
+const bpy = 11; // button vertical padding
+const fpx = 14; // field horizontal padding
+const fpy = 11; // field vertical padding
+const r_btn = 10; // button corner radius
+const r_field = 8; // field corner radius
 
 // Focus recording during a layout pass (draw order over the tree).
 var nfoc: usize = 0;
@@ -650,13 +704,16 @@ fn drawButton(rec: mshl.Record, x: usize, y: usize) Size {
         fill = pal.danger;
         ink = pal.danger_ink;
     }
-    fillRect(x, y, w, h, fill);
-    // Depth: a highlight along the top, a shade along the bottom.
-    fillRect(x, y, w, 2, shade(fill, 5, 4));
-    if (h > 2) fillRect(x, y + h - 2, w, 2, shade(fill, 3, 4));
-    strokeRect(x, y, w, h, pal.border, pal.border_w);
+    // A rounded panel. Focus is a double cue (never colour alone): the
+    // border becomes a bright, thicker ring AND the fill lifts a shade.
+    const ring = if (focused) pal.focus else pal.border;
+    const ring_w = if (focused) pal.focus_w else pal.border_w;
+    if (focused) fill = shade(fill, 9, 8);
+    panel(x, y, w, h, r_btn, fill, ring, ring_w);
+    // A soft top highlight inside the rounded fill — a hint of depth, not
+    // a hard bar (kept clear of the corners so it never pokes past them).
+    fillRect(x + r_btn, y + ring_w, w - 2 * r_btn, 1, shade(fill, 6, 5));
     drawStr(x + bpx, y + bpy, R_UI, label, ink, fill);
-    if (focused) strokeRect(x, y, w, h, pal.focus, pal.focus_w);
     if (nfoc < focusables.len) {
         focusables[nfoc] = .{ .id = strField(rec, "id"), .is_field = false, .bx = x, .by = y, .bw = w, .bh = h };
         nfoc += 1;
@@ -677,8 +734,9 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         yy += lineOf(R_UI) + 6;
     }
     const bh = lineOf(R_UI) + 2 * fpy;
-    fillRect(x, yy, avail_w, bh, pal.field_bg);
-    strokeRect(x, yy, avail_w, bh, pal.border, pal.border_w);
+    const ring = if (focused) pal.focus else pal.border;
+    const ring_w = if (focused) pal.focus_w else pal.border_w;
+    panel(x, yy, avail_w, bh, r_field, pal.field_bg, ring, ring_w);
     const tx = x + fpx;
     const ty = yy + fpy;
     const secret = rec.get("secret") != null and (rec.get("secret").?).asBool();
@@ -689,10 +747,8 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         break :blk dots[0..mlen];
     } else fb.buf[0..fb.len];
     drawStr(tx, ty, R_UI, shown, pal.text, pal.field_bg);
-    if (focused) {
-        fillRect(tx + strW(R_UI, shown) + 1, ty, 2, lineOf(R_UI), pal.focus);
-        strokeRect(x, yy, avail_w, bh, pal.focus, pal.focus_w);
-    }
+    // The focus ring is already drawn by `panel`; add the caret.
+    if (focused) fillRect(tx + strW(R_UI, shown) + 1, ty, 2, lineOf(R_UI), pal.focus);
     if (nfoc < focusables.len) {
         focusables[nfoc] = .{ .id = id, .is_field = true, .bx = x, .by = yy, .bw = avail_w, .bh = bh };
         nfoc += 1;
@@ -768,9 +824,18 @@ fn closeSurface() void {
 const Event = struct { kind: u64, ch: u8 = 0, x: usize = 0, y: usize = 0, btn: u64 = 0 };
 
 /// The next input event routed to our surface, or null if the channel died.
+// When > 0, the app asked for a live clock: read input with a tick so the
+// loop wakes every `tick_ms` even with no input, and re-renders. Only for
+// a local app (a remote view would need a round trip per tick).
+var tick_ms: u64 = 0;
+
 fn nextInput() ?Event {
-    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0)) {
-        .ok => |rep| switch (rep) {
+    const rep = if (tick_ms > 0 and remote_node == 0)
+        usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .next_input_tick = .{ .ms = tick_ms } }, 0)
+    else
+        usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0);
+    return switch (rep) {
+        .ok => |r| switch (r) {
             .input => |v| .{ .kind = v.kind, .ch = @intCast(v.arg & 0xff), .x = shared.ptrX(v.arg), .y = shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
             else => .{ .kind = 0, .ch = 0 },
         },
@@ -965,6 +1030,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     const title = if (spec.get("title")) |t| (if (t == .str) t.str else "") else "";
     const want_trusted = spec.get("trusted") != null and (spec.get("trusted").?).asBool();
     const want_isolate = spec.get("isolate") != null and (spec.get("isolate").?).asBool();
+    // `tick: <ms>` (or `tick: true` → 1s) asks the loop to re-render on a
+    // timer so a `view` that reads the clock updates on its own.
+    tick_ms = if (spec.get("tick")) |t| switch (t) {
+        .int => if (t.int > 0) @intCast(t.int) else 0,
+        .bool => if (t.bool) 1000 else 0,
+        else => 0,
+    } else 0;
 
     // `node: N` runs the whole app on node N over the fabric — the runtime
     // becomes a pure viewer, shipping each event and rendering the view
@@ -1060,8 +1132,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         // fields' text) or advances past a focused field. Each break
         // re-renders — the buffer, the focus, or the new state.
         var fired: ?[]const u8 = null;
+        var ticked = false;
         input: while (true) {
             const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            // A timer tick: no input happened, the clock deadline elapsed.
+            // Re-render so a `view` that reads the time updates itself.
+            if (ev.kind == 2) {
+                ticked = true;
+                break :input;
+            }
             // A pointer press: hit-test the widget under it. Clicking a
             // button focuses and fires it; clicking a field focuses it.
             // A release or a click on no widget just keeps waiting.
@@ -1107,6 +1186,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     }
                 },
             }
+        }
+        if (ticked and remote_node == 0) {
+            // Recompute the view from the unchanged state — no `update` on
+            // a tick — so a clock or other time-driven view refreshes.
+            tree = try it.callValue(view, &.{state}, null, null);
         }
         if (fired) |id| {
             const ev = try mkEvent(it, id);
