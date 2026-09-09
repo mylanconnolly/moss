@@ -1,0 +1,22 @@
+# The GUI front door for a graphical session (profile guishell): the same
+# trusted-path login form as gsession, but the greeter hands the session
+# manager NO console — so, the manager holding a display, login opens a
+# GRAPHICAL session (a GUI shell running as the user), not a shell on a
+# terminal. The login form closes on submit and focus falls to the
+# session shell; `login` blocks until the user logs out of it.
+{
+  image:     mshrun
+  script:    scripts/gui-session.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [guishell]
+  essential: true
+  after:     apply
+  give: [
+    { tag: display, unit: compositor }
+    { tag: font, unit: fontsvc }
+    { tag: sess, unit: usersvc-guishell }
+    { tag: buf, shm: 1 }
+    { secret: conf/trust.token }
+  ]
+}

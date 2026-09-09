@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell };
 
 const Spec = struct {
     name: []const u8,
@@ -84,6 +84,7 @@ const specs = [_]Spec{
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
+    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
@@ -287,7 +288,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -385,7 +386,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // (the shell's filesystem view).
         // The GUI front door: the graphical devices, a disk for the users
         // volume, and QMP to type and screendump.
-        .gseat, .gsession, .lconsole, .gisession, .gboom => {
+        .gseat, .gsession, .lconsole, .gisession, .gboom, .guishell => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -464,6 +465,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gboom) {
         if (!try gboomDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .guishell) {
+        if (!try guishellDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -1422,6 +1426,98 @@ fn gsessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         }
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "no session was ever opened from the GUI login", log_path);
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The post-login GUI shell drill (`guishell`): the trusted login form
+/// again, but a successful sign-in opens a real session in the user's own
+/// domain that runs a *graphical* shell — a minimal desktop with a single
+/// "log out" button, rendered through the shared font service. We sign in
+/// as the real user, wait for the session's shell surface to render (a
+/// second "gui: ready"), press Enter to fire the focused logout button,
+/// and confirm the shell exited (`gui: shell exited`) — which unwinds the
+/// session and lets the greeter report who signed in.
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, i, needle)) |at| {
+        n += 1;
+        i = at + needle.len;
+    }
+    return n;
+}
+
+fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    // Wait for the greeter's login form.
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the login form never rendered", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Sign in as the real user.
+    if (!q.typeText("alice")) {
+        reportFailure(spec.name, "QMP could not type the username", log_path);
+        return false;
+    }
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    if (!q.typeText("alice-pass")) {
+        reportFailure(spec.name, "QMP could not type the passphrase", log_path);
+        return false;
+    }
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    _ = q.sendKey("ret");
+    // Wait for the session's shell surface to render — its own second
+    // "gui: ready". The compositor gives the fresh surface focus (the
+    // greeter's window closed on submit), so the logout button is focused.
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (countOccurrences(content, "gui: ready") >= 2) break;
+        if (std.mem.indexOf(u8, content, "gui: session failed") != null) {
+            reportFailure(spec.name, "the GUI credentials did not open a real session", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the session's GUI shell never rendered", log_path);
+            return false;
+        }
+    }
+    // Let the shell settle and take focus, then press Enter to fire the
+    // focused "log out" button.
+    sleepMs(500);
+    _ = q.sendKey("ret");
+    // The shell closes, mshrun exits, the session unwinds.
+    var k: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        k += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: shell exited") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or k * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "logging out never tore the GUI session down", log_path);
             return false;
         }
     }

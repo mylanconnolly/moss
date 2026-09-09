@@ -2775,6 +2775,46 @@ runtime logs `update crashed — recovering`, then the host fires
 and `update` still works — and the kernel's leak bar (pmem byte-identical,
 shm at zero) proves the discarded worker was reclaimed clean.
 
+**Stage 7 (as built, 2026-09-09).** The post-login GUI shell — what the
+front door opens *onto*, made graphical. Stage 5's interactive session
+ran msh on a terminal; here the session's whole UI is a GUI, rendered
+through the shared font service, running as the logged-in user in their
+own session domain. The honest model was the one chosen: the graphical
+shell runs *in the user's session domain*, not in a system service, so
+the per-user isolation the session model already gives (home view,
+budgets, `nothing above the home is nameable`) holds for the desktop too
+— a compromised shell is the user's problem, confined to the user's
+domain, and the trusted-path login above it is untouched.
+
+The mechanism reuses the session machinery whole. The GUI front door's
+session manager (`usersvc-guishell`) is `users` in serve mode as before,
+but it now *holds a display and a font cap*. That single fact makes every
+session it opens graphical: `spawnSession` sees a display and picks the
+`init` image (not the verifier) in mode 3, passes a one-bit flag in the
+spawn arg (`3 | (1 << 8)`) telling init "this is a GUI session", and
+forwards the display and font caps into the new domain. init reads the
+flag and, instead of the console session template (`conf/session/`),
+loads the GUI one (`conf/sessiongui/`) — a unit that runs mshrun on
+`scripts/gui-shell.msh`, a minimal desktop (a `gui { }` with a "log out"
+button) given the forwarded display and font. The login form and the
+session's shell are thus two GUIs on the one compositor, exactly as the
+terminal case: the trusted form is focused while you type, closes on
+submit, and the session shell's fresh surface takes focus
+(`createSurface` gives a new surface focus when no *trusted* surface
+holds it) so its logout button has the keyboard. `login` blocks in the
+greeter until the shell's `update` returns `done: true`, which closes the
+window, exits mshrun, unwinds the session domain, and lets `login` report
+who signed in — the same unwind as a console session, no new teardown
+path. The drill (profile `guishell`, `boot/scripts/gui-shell.msh`): the
+host signs in as the real `alice`, waits for the session shell's own
+second `gui: ready`, presses Enter to fire the focused logout, and the
+log tells it whole — `usersvc: session opened for alice`, `init: session
+for alice`, the shell's `gui: ready` then `gui: shell exited`, `usersvc:
+session closed for alice`, and the greeter's `gui: session ok who=alice`,
+then clean shutdown. Nothing new was needed in the compositor or the GUI
+runtime; the shell is a GUI service like any other, and the session
+domain is where a user's own software has always belonged.
+
 **Rendering pass (as built, 2026-09-08).** The first look was honest but
 crude — a 400×240 window marooned on a 640×480 scanout, 1-bit 8×16 glyphs
 blitted 1:1 and then nearest-neighbour-upscaled by the viewer into hard

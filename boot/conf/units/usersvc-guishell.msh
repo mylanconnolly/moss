@@ -1,0 +1,22 @@
+# The session manager for GUI sessions (profile guishell): usersvc in
+# serve mode, plus a display and font cap. Holding a display makes every
+# session it opens a GRAPHICAL session — a mode-3 init running the GUI
+# session template as the user — and it forwards these caps to each. Same
+# volume views as the console login.
+{
+  image:    users
+  arg:      1
+  budget:   { user: 40mb }
+  grant:    [log, spawner, bootfs]
+  profiles: [guishell]
+  after:    apply
+  give: [
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
+    { tag: home, fs: home, ro: false }
+    { tag: shares, fs: conf/shares, ro: false, mkdir: true }
+    { tag: conf, fs: conf/app, ro: true, mkdir: true }
+    { tag: store, fs: img, ro: true }
+    { tag: display, unit: compositor }
+    { tag: font, unit: fontsvc }
+  ]
+}

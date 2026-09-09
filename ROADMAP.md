@@ -680,9 +680,10 @@ is a plan.
     each widget's scanout centre, the host clicks increment then quit, and
     the counter reaches count=1 by click alone. Pointer input now runs the
     whole stack: tablet → inputsvc → compositor cursor + hit-test → routed
-    event → the mshl widget under it. Remaining GUI/font work: per-user
-    scale push (needs a post-login GUI), richer layout, subpixel, a
-    settings UI, the fabric-remote GUI.
+    event → the mshl widget under it. Remaining GUI/font work: automatic
+    per-user scale push on login (the post-login GUI shell now landed is
+    the natural place to read the user's own conf/font.msh), richer
+    layout, subpixel, a settings UI, the fabric-remote GUI.
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view
@@ -744,7 +745,29 @@ is a plan.
     record failed to cross the worker channel). Drilled (profile gboom,
     scripts/gui-boom.msh): a "boom" button whose update runs away; the
     runtime logs recovery, a later "increment" reaches count=1, and the
-    leak bar proves the discarded worker was reclaimed. ✅ Rendering pass
+    leak bar proves the discarded worker was reclaimed. ✅ Post-login GUI
+    shell (landed 2026-09-09): what the front door opens onto, made
+    graphical — the session's whole UI is a GUI, running as the user in
+    their own session domain (the honest model: per-user isolation holds
+    for the desktop, the trusted login above is untouched). Reuses the
+    session machinery whole: the GUI front door's manager
+    (usersvc-guishell) holds a display + font cap, so spawnSession picks
+    the init image in mode 3, flags the spawn arg (`3 | (1<<8)`) as a GUI
+    session, and forwards the caps in; init reads the flag and loads the
+    GUI session template (conf/sessiongui/ → mshrun on
+    scripts/gui-shell.msh, a desktop with a "log out" button) instead of
+    the console one. Login form and session shell are two GUIs on the one
+    compositor — the form focused while typing, its surface closing on
+    submit, the shell's fresh surface taking focus (createSurface hands a
+    new surface focus when no trusted surface holds it) so logout has the
+    keyboard; `login` blocks until the shell returns done:true, which
+    unwinds the session domain the same way a console session does.
+    Nothing new in the compositor or GUI runtime — the shell is a GUI
+    service like any other. Drilled (profile guishell,
+    scripts/gui-shell.msh): sign in as alice, wait the session shell's
+    second `gui: ready`, Enter fires logout → `gui: shell exited` →
+    session closed → greeter's `gui: session ok who=alice` → clean
+    shutdown. ✅ Rendering pass
     (landed 2026-09-08): the scanout went to 1024×768 (shm_max_pages rose
     384→768 for a full-scanout surface), the GUI font is drawn 2× crisp
     (EPX and bilinear-AA both tried and rejected — blobby / blurry on a
@@ -828,8 +851,10 @@ is a plan.
     the system sizes, so scale 1.5 over ui:16 → effective 24px for every
     client. Drilled (profile fontscale): fontpush (the fontrescan-client
     idiom) reads a user layer, pushes it (ui→24px), reverts on logout
-    (→16px). Open: automatic push on login (needs a post-login GUI that
-    renders through fontsvc to show it); richer layout; fabric-remote GUI.
+    (→16px). Open: automatic push on login — the post-login GUI shell
+    (landed 2026-09-09, see the graphical console arc) runs as the user
+    and is the natural place to read their conf/font.msh and push it;
+    richer layout; fabric-remote GUI.
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

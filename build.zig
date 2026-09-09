@@ -164,6 +164,11 @@ pub fn build(b: *std.Build) void {
         "fontscale-test",
         "Run the per-user font-scale drill: a session pushes a user's font layer to fontsvc",
     ) orelse false;
+    const guishell_test = b.option(
+        bool,
+        "guishell-test",
+        "Run the post-login GUI shell drill: a graphical session runs as the user, ended by a log-out",
+    ) orelse false;
     const gui_test = b.option(
         bool,
         "gui-test",
@@ -343,6 +348,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "pointer_test", pointer_test);
     build_opts.addOption(bool, "guiclick_test", guiclick_test);
     build_opts.addOption(bool, "fontscale_test", fontscale_test);
+    build_opts.addOption(bool, "guishell_test", guishell_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
@@ -578,6 +584,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/compositor-ptr.msh", "conf/units/ptrcli.msh",
         "conf/units/gui-click.msh",
         "conf/units/fontpush.msh",         "conf/userscale.msh",
+        "conf/units/usersvc-guishell.msh", "conf/units/gui-guishell.msh",
+        "conf/sessiongui/shell.msh",       "scripts/gui-shell.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -690,7 +698,7 @@ pub fn build(b: *std.Build) void {
             "rng_test",    "smmu_test",     "vm_test",       "guest_test",
             "vmnode_test", "pan_test",      "cpu_test",      "users_test",
             "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test",
+            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1109,7 +1117,7 @@ pub fn build(b: *std.Build) void {
         "rng_test",    "smmu_test",     "vm_test",       "guest_test",
         "vmnode_test", "pan_test",      "cpu_test",      "users_test",
         "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test",
+        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
@@ -1119,7 +1127,7 @@ pub fn build(b: *std.Build) void {
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
         "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",     "pointer", "guiclick", "fontscale",
+        "ptr",     "pointer", "guiclick", "fontscale", "guishell",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

@@ -1,0 +1,27 @@
+# The graphical session shell (the post-login GUI): a minimal desktop that
+# runs as the logged-in user in their own session domain, rendered through
+# the shared font service. It is a GUI service like any other — a pure
+# view/update — with a single "log out" button; firing it returns a state
+# with done:true, the runtime closes the window, mshrun exits, the session
+# domain exits, and the manager tears the session down. The whole
+# session's UI, defined in mshl.
+let final = (gui {
+    init:  { done: false }
+    title: "moss"
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: "signed in to moss" }
+            { kind: "button", id: "logout", label: "log out" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "logout" => { { done: true } }
+          _ => $state
+        }
+      })
+  })
+"gui: shell exited"

@@ -210,6 +210,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.guishell_test) {
+        _ = sched.spawn("boot-watch", guishellTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.gui_test) {
         _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -772,6 +777,14 @@ fn guiclickTestWorker(_: u64) void {
 /// effective scale, then reverts on logout.
 fn fontscaleTestWorker(_: u64) void {
     systemDrill("fontscale");
+}
+
+/// The post-login GUI shell drill: a system boot under profile "guishell"
+/// — a trusted GUI login opens a GRAPHICAL session (the session manager
+/// holds a display), so the session domain runs a GUI shell as the user
+/// instead of a shell on a terminal; the host signs in and logs out of it.
+fn guishellTestWorker(_: u64) void {
+    systemDrill("guishell");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

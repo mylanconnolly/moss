@@ -166,6 +166,7 @@ var entropy_cap: u64 = 0;
 // from the home (they must outlive the parser's arena).
 var session_mode = false;
 var session_home: u64 = 0;
+var session_gui = false; // the session runs a GUI shell (a display cap was forwarded)
 var session_home_buf: [*]u8 = undefined;
 var session_caps: [shared.cap_tag_count]u64 = @splat(0);
 var session_text: [32 << 10]u8 = undefined;
@@ -610,11 +611,14 @@ fn loadSessionUnits() void {
         } else logLine("init: unit file invalid: ", name);
     }
     if (nunits > 0) return;
+    // No per-user units: fall back to the archive template — the graphical
+    // one for a GUI session, the console one otherwise.
+    const tmpl_dir = if (session_gui) shared.session_gui_unit_dir else shared.session_unit_dir;
     var ai = shared.marcIter(archive());
     while (ai.next()) |e| {
-        if (!std.mem.startsWith(u8, e.path, shared.session_unit_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
+        if (!std.mem.startsWith(u8, e.path, tmpl_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
         if (nunits == max_units) break;
-        const name = e.path[shared.session_unit_dir.len .. e.path.len - shared.unit_ext.len];
+        const name = e.path[tmpl_dir.len .. e.path.len - shared.unit_ext.len];
         fba.reset();
         const v = interp.parseData(e.data) catch continue;
         if (parseUnit(name, v)) |u| {
@@ -902,6 +906,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
 
     if (arg & 0xff == 3) {
         session_mode = true;
+        session_gui = (arg >> 8) & 1 != 0; // a GUI session (display forwarded)
         session_home = setup.cap(.view);
         if (session_home == 0) usys.exit(120);
         session_home_buf = @ptrFromInt(fsc.attachBuf(session_home).va);

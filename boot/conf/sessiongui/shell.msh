@@ -1,0 +1,23 @@
+# The graphical session template: what a GUI session runs when the user's
+# home has no conf/units/ of its own. It is mshrun in the session domain
+# (as the user, under their budgets, home as its filesystem) running the
+# session-shell script, with the display and font channels the manager
+# forwarded (`session: true` hands on the session's own caps) so it
+# renders through the shared compositor and font service. The script comes
+# from the archive (bootfs); the home is the view for the user's own files.
+{
+  image:     mshrun
+  script:    scripts/gui-shell.msh
+  budget:    { user: 24mb }
+  grant:     [log, spawner, bootfs]
+  profiles:  [session]
+  essential: true
+  give: [
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: view, fs: "", ro: false }
+    { tag: store, session: true }
+    { tag: sess, session: true }
+    { tag: init, self: true }
+  ]
+}

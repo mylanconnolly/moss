@@ -144,6 +144,12 @@ var svc_chan: u64 = 0;
 var users_view: u64 = 0;
 var users_buf: [*]u8 = undefined;
 var home_view: u64 = 0;
+// Graphical sessions: when the manager holds a display cap, each session
+// is a GUI session (a mode-3 init running a GUI shell), and these are
+// forwarded to it.
+var gui_sessions = false;
+var disp_cap: u64 = 0;
+var font_cap: u64 = 0;
 var home_buf: [*]u8 = undefined;
 var app_view: u64 = 0;
 var app_buf: [*]u8 = undefined;
@@ -240,6 +246,13 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     if (store_view != 0) store_buf = @ptrFromInt(fsc.attachBuf(store_view).va);
     shares_view = setup.cap(.shares);
     if (shares_view != 0) shares_buf = @ptrFromInt(fsc.attachBuf(shares_view).va);
+    // A display (and font) cap means sessions here are GRAPHICAL: each
+    // session domain gets these forwarded and runs a GUI shell, instead of
+    // a shell on a text console. The plain manager holds neither and opens
+    // console (or verifier) sessions as before.
+    disp_cap = setup.cap(.display);
+    font_cap = setup.cap(.font);
+    gui_sessions = disp_cap != 0;
     if (users_view == 0 or home_view == 0 or app_view == 0) usys.exit(180);
     users_buf = @ptrFromInt(fsc.attachBuf(users_view).va);
     home_buf = @ptrFromInt(fsc.attachBuf(home_view).va);
@@ -941,10 +954,14 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     };
     _ = usys.capDrop(voldir);
     defer _ = usys.capDrop(view); // the session's copy is the only one left
-    const image: shared.ImageId = if (console != 0) .init else .users;
-    const arg: u64 = 3;
+    // A GUI session is interactive too — a mode-3 init that runs a GUI
+    // shell from the graphical session template (arg's high bit selects
+    // it), rather than the verifier program a console-less session runs.
+    const interactive = console != 0 or gui_sessions;
+    const image: shared.ImageId = if (interactive) .init else .users;
+    const arg: u64 = if (gui_sessions) (3 | (1 << 8)) else 3;
     var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
-    if (console != 0) flags |= shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs;
+    if (interactive) flags |= shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs;
     if (!stage.load(blob_va, blob_len, image)) return false;
     const ch = usys.chanCreate();
     if (ch.err != .ok) return false;
@@ -980,6 +997,8 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
         if (minted.err == .ok) _ = usys.capDrop(minted.data[1]);
     }
     if (ok and console != 0) ok = boot.giveCap(b, .console, console);
+    // A GUI session gets the display and font channels to render with.
+    if (ok and gui_sessions) ok = boot.giveCap(b, .display, disp_cap) and boot.giveCap(b, .font, font_cap);
     if (ok) ok = boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
     if (!ok) {
         _ = usys.domainDestroy(s.ctl);
