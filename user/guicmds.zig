@@ -25,7 +25,7 @@
 //! supervised, crash-only, fabric-shippable service in the making (only
 //! data — the view, the event id, the state — ever crosses). `update`
 //! returning a state with `done: true` closes the window; `gui` answers
-//! with the final state. Keyboard-only for now (no pointer yet).
+//! with the final state.
 
 const std = @import("std");
 const shared = @import("shared");
@@ -99,13 +99,25 @@ const gh = fsh * 2; // 32, the bitmap cell height
 
 // A centred window on the 1024x768 scanout, with room to breathe.
 const win_w = 680;
-const win_h = 460;
 const win_x = (1024 - win_w) / 2; // 172
-const win_y = (768 - win_h) / 2; // 154
+const scanout_h = 768;
+const win_h_min = 220;
+const win_h_max = scanout_h - 48; // leave a margin top+bottom
+// The window height is sized to its content when it opens (a settings
+// panel is taller than a login form), then centred. Clamped to the
+// scanout so it never renders off-screen.
+var win_h: usize = 460;
+var win_y: usize = (scanout_h - 460) / 2;
 
 const pad = 24; // window inset for content
 
-// Colours as X<<24 | R<<16 | G<<8 | B, so a screendump reads them as RGB.
+// Measuring pass: lay the tree out to find its height without drawing
+// (the surface is sized from it before it is created). `measuring`
+// suppresses the pixel-writing primitives; sizes still compute from the
+// font metrics. `content_h` is the laid-out content height.
+var measuring = false;
+var content_h: usize = 0;
+
 // ----------------------------------------------------------- the palette
 //
 // A GUI's look is a set of SEMANTIC tokens, not scattered literals, so the
@@ -214,6 +226,8 @@ var pal: Palette = resolveTheme(.dark, .normal, .default);
 
 var px: [*]volatile u32 = undefined; // the mapped surface, win_w*win_h
 var surf: u64 = 0;
+var surf_cap: u64 = 0; // the surface buffer's shm cap (freed on close)
+var surf_va: u64 = 0; // its mapped address (unmapped on close)
 
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
@@ -282,14 +296,17 @@ fn fieldBackspace(id: []const u8) void {
 }
 
 fn fillAll(word: u32) void {
+    if (measuring) return;
     for (0..win_w * win_h) |i| px[i] = word;
 }
 
 fn putPx(x: usize, y: usize, word: u32) void {
+    if (measuring) return;
     if (x < win_w and y < win_h) px[y * win_w + x] = word;
 }
 
 fn fillRect(x: usize, y: usize, w: usize, h: usize, word: u32) void {
+    if (measuring) return;
     var yy = y;
     while (yy < y + h and yy < win_h) : (yy += 1) {
         var xx = x;
@@ -310,6 +327,7 @@ fn strokeRect(x: usize, y: usize, w: usize, h: usize, word: u32, thick: usize) v
 /// clean pixel font, not blurred or rounded). The whole 16x32 cell is
 /// painted, `on` pixels `fg` and the rest `bg` (no stale pixels behind).
 fn drawGlyph(cx: usize, cy: usize, ch: u8, fg: u32, bg: u32) void {
+    if (measuring) return;
     const g: usize = if (ch < font.first or ch > font.last) 0 else ch - font.first;
     const bmp = font.glyphs[g];
     var sy: usize = 0;
@@ -436,6 +454,7 @@ fn fontLayout(role: u64, s: []const u8) struct { w: usize, count: usize } {
 
 /// Blend `fg` over the pixel at (x, y) by coverage `cov` (0..255).
 fn blendPx(x: usize, y: usize, fg: u32, cov: u32) void {
+    if (measuring) return;
     if (x >= win_w or y >= win_h or cov == 0) return;
     const i = y * win_w + x;
     if (cov >= 255) {
@@ -455,6 +474,7 @@ fn blendPx(x: usize, y: usize, fg: u32, cov: u32) void {
 /// Blit the glyph run currently in `font_buf` (from `fontLayout`) at pen
 /// origin `x0` and baseline `by`, blending each glyph's coverage as `fg`.
 fn blitRun(x0: usize, by: usize, count: usize, fg: u32) void {
+    if (measuring) return;
     const run: [*]const shared.FontGlyph = @ptrCast(@alignCast(font_buf));
     for (0..count) |i| {
         const g = run[i];
@@ -530,9 +550,22 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     fillRect(0, 0, win_w, title_h, pal.surface);
     fillRect(0, title_h, win_w, pal.border_w, pal.border);
     if (title.len > 0) drawStr(pad, (title_h - lineOf(R_TITLE)) / 2, R_TITLE, title, pal.title, pal.surface);
-    // Content area below the titlebar.
-    _ = drawNode(tree, pad, title_h + pad, win_w - 2 * pad);
+    // Content area below the titlebar. Record the full height it wants so
+    // the window can be sized to fit before its surface is created.
+    const sz = drawNode(tree, pad, title_h + pad, win_w - 2 * pad);
+    content_h = title_h + pad + sz.h + pad;
     return nfoc;
+}
+
+/// Lay the tree out without drawing, to find the window height its content
+/// needs (clamped to the scanout), and centre the window at it.
+fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8) void {
+    const tree = it.callValue(view, &.{state}, null, null) catch return;
+    measuring = true;
+    _ = renderTree(tree, title, 0);
+    measuring = false;
+    win_h = @max(win_h_min, @min(content_h, win_h_max));
+    win_y = (scanout_h - win_h) / 2;
 }
 
 /// Lay out and draw a node at (x, y) within `avail_w`, returning its size.
@@ -671,7 +704,7 @@ fn attachTrusted() bool {
 }
 
 fn openSurface() bool {
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(win_x, win_y), .wh = shared.packPair(win_w, win_h) } }, 0)) {
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(win_x, @intCast(win_y)), .wh = shared.packPair(win_w, @intCast(win_h)) } }, 0)) {
         .ok => |ok| ok,
         .err => return false,
     };
@@ -681,13 +714,18 @@ fn openSurface() bool {
     };
     if (cs.cap == 0) return false;
     const m = usys.shmMap(cs.cap);
-    if (m.err != .ok) return false;
+    if (m.err != .ok) {
+        _ = usys.capDrop(cs.cap);
+        return false;
+    }
+    surf_cap = cs.cap;
+    surf_va = m.data[0];
     px = @ptrFromInt(m.data[0]);
     return true;
 }
 
 fn commitSurface() bool {
-    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .commit = .{ .surface = surf, .xy = 0, .wh = shared.packPair(win_w, win_h) } }, 0)) {
+    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .commit = .{ .surface = surf, .xy = 0, .wh = shared.packPair(win_w, @intCast(win_h)) } }, 0)) {
         .ok => true,
         .err => false,
     };
@@ -695,6 +733,17 @@ fn commitSurface() bool {
 
 fn closeSurface() void {
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = surf } }, 0);
+    // Free the surface buffer's mapping and cap — a GUI that reopens (the
+    // settings panel recurses on each apply) would otherwise leak a
+    // ~win_w*win_h*4 mapping per open and soon exhaust its shm quota.
+    if (surf_va != 0) {
+        _ = usys.shmUnmap(surf_va);
+        surf_va = 0;
+    }
+    if (surf_cap != 0) {
+        _ = usys.capDrop(surf_cap);
+        surf_cap = 0;
+    }
 }
 
 /// An input event routed to our surface: a key (kind 0, `ch`) or a pointer
@@ -866,11 +915,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (!attachTrusted()) return it.fail("gui: the trusted path was refused (no token, or the wrong one)", .{});
     }
 
-    if (!openSurface()) return it.fail("gui: cannot open a surface", .{});
-    defer closeSurface();
     resetFields();
     if (!font_ok) fontReady(); // attach the system font once (bitmap fallback if absent)
     refreshAppearance(); // resolve the palette from the system/user settings
+    sizeToContent(it, view, state, title); // fit the window to its content
+
+    if (!openSurface()) return it.fail("gui: cannot open a surface", .{});
+    defer closeSurface();
 
     var focus: usize = 0;
     var announced = false;

@@ -869,6 +869,7 @@ pub fn build(b: *std.Build) void {
             \\  -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
             \\  -device {s} \
             \\  -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+            \\  -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on \
             \\  -drive if=none,file=zig-out/gui-disk.img,format=raw,id=hd \
             \\  -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=hd \
             \\  -display none -object secret,id=vncpw,data=moss -vnc 127.0.0.1:0,password-secret=vncpw \

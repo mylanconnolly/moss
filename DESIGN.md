@@ -2965,6 +2965,26 @@ cb-safe, apply, and a screendump confirms the reopened window's ground is
 pure black (the Okabe-Ito accent lighting the "apply" button) before
 logging out.
 
+**Fixes from driving it by hand (2026-09-09).** Three things the drills
+missed but a person found in `run-gui`. (1) The settings panel overflowed
+the fixed 460-px window (the "apply"/"log out" row fell off the bottom);
+the window now *sizes to its content* — a measuring pass lays the tree out
+with the pixel-writing primitives suppressed (`measuring`), and the
+surface is created at that height, clamped to the scanout and re-centred,
+before it opens. (2) Repeatedly applying settings crashed the VM to a
+clean exit: each apply reopens the panel (the `def panel` recursion), and
+`closeSurface` destroyed the compositor surface but never *unmapped its
+pixel buffer or dropped its cap*, so a ~1.25-MB mapping leaked per reopen
+until the shell's shm quota was spent, `openSurface` failed, and the
+essential shell exited — taking the interactive session down with it. Now
+close unmaps and drops; the `guishell` drill cycles apply several times so
+a regression trips it. (3) There was no cursor: `run-gui` handed the guest
+only a keyboard, and the guishell profile used the keyboard-only
+compositor. The post-login shell now runs on the pointer-capable
+compositor (`compositor-ptr`), and a virtio tablet rides along in both
+`run-gui` and the drill — so clicks route to widgets, keyboard-driven
+tests still pass, and an idle cursor stays hidden (no screendump noise).
+
 **The system font service (as built, 2026-09-08).** The bitmap font was
 the ceiling on how the GUI could look; real type meant a vector-font
 stack, and the shape it took is a *service every text program goes

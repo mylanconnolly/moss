@@ -13,7 +13,7 @@
   essential: true
   after:     apply
   give: [
-    { tag: display, unit: compositor }
+    { tag: display, unit: compositor-ptr }
     { tag: font, unit: fontsvc }
     { tag: sess, unit: usersvc-guishell }
     { tag: buf, shm: 1 }

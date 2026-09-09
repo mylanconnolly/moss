@@ -386,10 +386,22 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // (the shell's filesystem view).
         // The GUI front door: the graphical devices, a disk for the users
         // volume, and QMP to type and screendump.
-        .gseat, .gsession, .lconsole, .gisession, .gboom, .guishell => {
+        .gseat, .gsession, .lconsole, .gisession, .gboom => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+                "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+            });
+            try appendDisk(&args, disk);
+        },
+        // The post-login GUI shell: like the front door, but the shell runs
+        // on the pointer-capable compositor, so a tablet (input index 1,
+        // after the keyboard) rides along for a working cursor.
+        .guishell => {
+            try args.appendSlice(gpa, &.{
+                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+                "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+                "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
             });
             try appendDisk(&args, disk);
@@ -1546,11 +1558,29 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (readPpm(ppm_path)) |img| {
             const p = pixelAt(img, 790, 300); // an empty patch of the window, right of the left-aligned content
             if (p[0] > 12 or p[1] > 12 or p[2] > 12) {
-                std.debug.print("[FAIL] {s}: high-contrast ground not black at (220,590): {any}\n", .{ spec.name, p });
+                std.debug.print("[FAIL] {s}: high-contrast ground not black at (790,300): {any}\n", .{ spec.name, p });
                 reportFailure(spec.name, "high-contrast did not darken the window ground", log_path);
                 return false;
             }
         }
+    }
+
+    // Re-apply several times to cycle the surface open/close path: each
+    // apply reopens the panel (a fresh surface). A leaked surface mapping
+    // per reopen would exhaust the shm quota and the shell would quietly
+    // exit — the regression this guards. The panel reopens with focus at 0,
+    // so Tab five times to "apply" and fire it, and watch "gui: ready"
+    // climb each cycle (greeter=1, first open=2, first apply=3, then +1).
+    var cycle: usize = 0;
+    while (cycle < 3) : (cycle += 1) {
+        var tb: usize = 0;
+        while (tb < 5) : (tb += 1) {
+            _ = q.sendKey("tab");
+            sleepMs(80);
+        }
+        _ = q.sendKey("ret"); // apply → reopen
+        if (!try waitLogN(log_path, "gui: ready", 4 + cycle, "the settings panel stopped reopening — a surface leak?", spec, polls)) return false;
+        sleepMs(300);
     }
 
     // Log out: Tab from smaller (0) to "log out" (6) and fire it; the shell
