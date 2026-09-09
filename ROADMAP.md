@@ -996,8 +996,10 @@ is a plan.
 
 **IPC**
 
-- Notifications and shared buffers do not cross the fabric (shm by
-  design; notifications not yet).
+- Shared buffers do not cross the fabric (shm by design; a session's
+  buffer *contents* do, diffed — see the bulk transport). Notifications
+  now do: a `signal` published on the fabric is rung across nodes by a
+  one-way `fw_notify` frame (landed 2026-09-09), fire-and-forget.
 - A call cannot be cancelled except by the caller's death; a server's
   `recv` waits on one channel only (no select — services multiplex
   with bound notifications and worker threads); one waiter per
