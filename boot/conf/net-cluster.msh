@@ -1,3 +1,4 @@
-# The network service's settings, cluster addressing: no resolver yet
-# (the fabric's own names come with dnsd on a node).
-{ resolvers: [] }
+# The network service's settings, cluster addressing: the resolver is the
+# node's own dnsd on loopback (dnsd-cluster serves the fabric's node-name
+# zone), so `node1.moss.test` resolves without a slirp gateway.
+{ resolvers: [::1] }

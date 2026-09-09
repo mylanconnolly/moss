@@ -1,0 +1,8 @@
+# The name server in cluster addressing (the system profile and the
+# fabric drills): serves conf/dns.msh over UDP 53 on the cluster network
+# view, so the fabric's nodes reach one another by name (node1.moss.test)
+# instead of 10.77.0.N. Each node runs its own, serving the shared static
+# zone; the cluster resolver (net-cluster) points every node at its own
+# on loopback.
+{ image: dnsd, profiles: [system, flogin, fjoin, fabgui], grant: [log],
+  give: [{ tag: net, netview: net-cluster }, { tag: buf, shm: 1 }, { file: conf/dns.msh }] }

@@ -1745,12 +1745,28 @@ moved to `shared/civil.zig` for the kernel's sake (lib/ cannot see
 shared, and http.zig takes its Date text from the host instead).
 HTTP responses carry `Date` when the clock is known. And the clock
 became the fabric's: `clock-cluster` runs in the system profile, node
-1 serving SNTP from its RTC and every node asking `10.77.0.1` (node 1
-itself, over loopback), asking again every ten seconds until the first
-answer since a peer may still be booting; the fabric-login drill
+1 serving SNTP from its RTC and every node asking for it — by *name*,
+`node1.moss.test` (2026-09-09), asking again every ten seconds until the
+first answer since a peer may still be booting; the fabric-login drill
 requires node 2 to have synced from node 1 (the `fabric` drill is the
 kernel's own driver — no init, no units — which the first cut of this
-check forgot). What stood: liveness on monotonic
+check forgot).
+
+**Fabric node names (2026-09-09).** The cluster addressed its nodes by
+literal — `10.77.0.N` in the clock's settings, the fabric's own transport
+by node id. Now the cluster profiles run `dnsd-cluster`, a name server
+beside the clock, serving the static node-name zone (`conf/dns.msh`:
+`node1`/`node2` under `moss.test`, each its `10.77.0.N` A record and
+`fdcc::N` AAAA); the cluster network view (`net-cluster`) points every
+node's resolver at its own dnsd on loopback (`::1`), so a name resolves
+without a slirp gateway (there is none on the fabric segment). Each node
+runs its own dnsd over the shared static zone — a deployment-wide hosts
+file, served, not a dynamic membership map (that would learn addresses
+from the fabric's member view — a later step). The proof rode an existing
+path: the SNTP sync's server became `node1.moss.test`, and because the
+clock retries resolution every ten seconds until it syncs, the
+boot-ordering race (dnsd not up when the clock first asks) resolves
+itself; the flogin drill's cross-node sync now goes by name end to end. What stood: liveness on monotonic
 time, certificates without expiry (a node with no RTC cannot judge
 one), records without expiry, the resolver's monotonic TTLs, shares
 that end with the session — the roadmap entry says why for each.

@@ -302,10 +302,15 @@ is a plan.
   in netsvc with a TTL cache asking the settings file's resolvers in
   order, `resolve` and names in `connect`/`udp-send`/`fetch` with
   bounded attempts per address, `dnsd` serving a zone from mshl data —
-  the gate's hermetic upstream and the fabric's names); still open:
-  search lists and a hosts file if a use case
-  asks, names for fabric nodes by default (dnsd in the cluster
-  profile); ✅ TLS (landed 2026-09-05: `lib/tls.zig` — the standard
+  the gate's hermetic upstream and the fabric's names); ✅ names for
+  fabric nodes by default (landed 2026-09-09: `dnsd-cluster` runs in the
+  system/flogin/fjoin/fabgui profiles serving the node-name zone
+  (conf/dns.msh: node1/node2 → their 10.77.0.N + fdcc::N) over the cluster
+  net view; net-cluster's resolver points every node at its own dnsd on
+  loopback; the SNTP time sync now asks `node1.moss.test`, resolved to
+  10.77.0.1 — proven by the flogin drill's cross-node sync); still open:
+  search lists and a hosts file if a use case asks; ✅ TLS (landed
+  2026-09-05: `lib/tls.zig` — the standard
   library's TLS 1.3 client, and a TLS 1.3 server written on the
   standard library's crypto since it ships none, both over a transport
   the host provides; trust roots parsed from PEM. The client:
@@ -373,7 +378,9 @@ is a plan.
   the time service syncs over SNTP (`lib/sntp.zig`) from the servers
   its settings name and serves SNTP to peers, so the fabric's time
   comes from the fabric; `date` in the language (`lib/civil.zig`).
-  Owed: dnsd beside the clock in the cluster profile. ✅ **The
+  ✅ dnsd beside the clock in the cluster profile (landed 2026-09-09):
+  `dnsd-cluster` serves the node-name zone and the SNTP sync asks
+  `node1.moss.test`, not `10.77.0.1` (see the mshl DNS entry above). ✅ **The
   re-evaluation (2026-09-05)** — every decision taken because there
   was no clock, decided again with one. *Undone as workarounds*:
   mossfs stamped files with seconds since boot (wall seconds now, 0

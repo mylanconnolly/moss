@@ -2723,9 +2723,10 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         reportFailure(spec.name, "node 2 never mounted alice's home from node 1", log2);
         return false;
     }
-    // The fabric's time: node 2 synced its clock from node 1.
-    if (std.mem.indexOf(u8, n2, "clock: synced from 10.77.0.1") == null) {
-        reportFailure(spec.name, "node 2 never synced its clock from node 1", log2);
+    // The fabric's time: node 2 synced its clock from node 1 — reached by
+    // name (node1.moss.test), resolved through the node's own dnsd.
+    if (std.mem.indexOf(u8, n2, "clock: synced from node1.moss.test") == null) {
+        reportFailure(spec.name, "node 2 never synced its clock from node 1 (by name)", log2);
         return false;
     }
     if (std.mem.indexOf(u8, n1, "home leased to a session on another node: alice") == null or

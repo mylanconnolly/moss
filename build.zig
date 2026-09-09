@@ -562,6 +562,7 @@ pub fn build(b: *std.Build) void {
         "scripts/net-drill.msh",         "conf/units/fab-script.msh",
         "scripts/fab-drill.msh",         "conf/net.msh",
         "conf/net-cluster.msh",          "conf/units/dnsd.msh",
+        "conf/units/dnsd-cluster.msh",
         "conf/dns.msh",                  "conf/units/clock.msh",
         "conf/clock.msh",                "conf/units/clock-cluster.msh",
         "conf/clock-cluster.msh",        "conf/units/dotd.msh",
