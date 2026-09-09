@@ -17,6 +17,7 @@ const boot = @import("boot.zig");
 const fsc = @import("fsclient.zig");
 const mosslib = @import("mosslib");
 const font = mosslib.font;
+const tthint = mosslib.tthint;
 const mshl = mosslib.mshl;
 const settings = mosslib.settings;
 
@@ -320,6 +321,58 @@ var cache: [1024]Cached = @splat(.{});
 // is copied into the atlas immediately, so nothing needs to persist).
 var raster_heap: [1 << 20]u8 = undefined;
 
+// The hinting-interpreter cache: one prepared TrueType hinter per
+// (family, device ppem). A hinter is dear to build (it runs the font's
+// fpgm + prep), but cheap to reuse across every glyph at that size, so we
+// keep a handful — the running set of role sizes and scales — each with
+// its own backing heap (the hinter's stack/CVT/functions live in it for
+// the hinter's life). A full cache evicts slot 0 and rebuilds.
+const max_hinters = 8;
+var hinter_heaps: [max_hinters][64 << 10]u8 = undefined;
+var hinter_fba: [max_hinters]std.heap.FixedBufferAllocator = undefined;
+const HinterSlot = struct { used: bool = false, ok: bool = false, fam: u8 = 0, ppem: u16 = 0, h: tthint.Hinter = undefined };
+var hinters: [max_hinters]HinterSlot = @splat(.{});
+
+/// A hinter prepared for (fam, ppem), or null if the font is unhinted or
+/// the interpreter's per-size setup (fpgm/prep) failed — either way the
+/// caller falls back to the unhinted rasterizer.
+fn hinterFor(fam: u8, ppem: u16) ?*tthint.Hinter {
+    const f = &families[fam].font;
+    if (!f.hasHints() or ppem == 0) return null;
+    for (&hinters) |*s| {
+        if (s.used and s.fam == fam and s.ppem == ppem) return if (s.ok) &s.h else null;
+    }
+    var idx: usize = 0;
+    for (&hinters, 0..) |*s, i| {
+        if (!s.used) {
+            idx = i;
+            break;
+        }
+    } else idx = 0; // all full: evict slot 0
+    hinter_fba[idx] = std.heap.FixedBufferAllocator.init(&hinter_heaps[idx]);
+    const lim = f.hintLimits();
+    hinters[idx] = .{ .used = true, .ok = false, .fam = fam, .ppem = ppem };
+    hinters[idx].h = tthint.Hinter.init(
+        hinter_fba[idx].allocator(),
+        f.fpgm,
+        f.prep,
+        f.cvt,
+        f.units_per_em,
+        ppem,
+        lim.stack,
+        lim.storage,
+        lim.funcs,
+        lim.twilight,
+    ) catch return null;
+    hinters[idx].ok = true;
+    var b: [96]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: hinting '{s}' at {d}px", .{
+        families[fam].name[0..families[fam].name_len],
+        ppem,
+    }) catch "fontsvc: hinting");
+    return &hinters[idx].h;
+}
+
 fn ensureGlyph(role: u64, px_dev: u16, cp: u21) ?*Cached {
     if (nfamilies == 0) return null;
     const fam = roleFontIndex(role);
@@ -329,7 +382,17 @@ fn ensureGlyph(role: u64, px_dev: u16, cp: u21) ?*Cached {
     const f = &families[fam].font;
     var fba = std.heap.FixedBufferAllocator.init(&raster_heap);
     const gid = f.glyphIndex(cp);
-    const g = font.rasterize(f, fba.allocator(), gid, @floatFromInt(px_dev)) catch return null;
+    // Grid-fit with the font's own hints when it has them; fall back to
+    // the plain fill if hinting the glyph fails (best-effort — never break
+    // rendering).
+    const g = blk: {
+        if (hinterFor(fam, px_dev)) |hn| {
+            if (font.rasterizeHinted(f, fba.allocator(), hn, gid, @floatFromInt(px_dev))) |gg| {
+                break :blk gg;
+            } else |_| fba.reset();
+        }
+        break :blk font.rasterize(f, fba.allocator(), gid, @floatFromInt(px_dev)) catch return null;
+    };
     const pos = packRect(g.w, g.h) orelse return null;
     // Copy the coverage into the atlas.
     var r: usize = 0;

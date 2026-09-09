@@ -59,7 +59,7 @@ fn mul214(a: i64, b: i64) i64 {
 }
 
 // Point flags (our own layout; the glyf on-curve bit is copied in).
-const flag_on: u8 = 1 << 0;
+pub const flag_on: u8 = 1 << 0; // on-curve (the caller sets it, reads it back)
 const flag_touch_x: u8 = 1 << 1;
 const flag_touch_y: u8 = 1 << 2;
 
@@ -116,15 +116,28 @@ pub const Hinter = struct {
     cvt: []F26Dot6, // scaled, mutable
     funcs: []Func,
     twilight: Zone,
-    glyph: Zone = .{}, // set per glyph in stage 2
+    glyph: Zone = .{}, // set per glyph
     gs: GraphicsState = .{},
+    gs_default: GraphicsState = .{}, // the graphics state prep left, restored per glyph
     call_depth: u32 = 0,
 
     const Func = struct { defined: bool = false, code: []const u8 = &.{} };
 
     /// Scale a value in font units to F26.6 pixels at this ppem.
-    fn scaleFUnit(self: *const Hinter, funits: i64) F26Dot6 {
+    pub fn scaleFUnit(self: *const Hinter, funits: i64) F26Dot6 {
         return @intCast(mulDiv(funits, @as(i64, self.ppem) * 64, self.upem));
+    }
+
+    /// Run one glyph's instructions over a prepared glyph zone (its points
+    /// already scaled to 26.6, plus the four phantom points). Starts from
+    /// the graphics state prep left; the caller reads `zone.cur` back.
+    /// Best-effort: an error means keep the unhinted outline.
+    pub fn hintGlyph(self: *Hinter, glyph_zone: Zone, instr: []const u8) Error!void {
+        self.glyph = glyph_zone;
+        self.gs = self.gs_default;
+        self.sp = 0;
+        self.call_depth = 0;
+        if (instr.len != 0) try self.run(instr);
     }
 
     /// Set up the interpreter for a size: scale the CVT, run fpgm to
@@ -179,6 +192,7 @@ pub const Hinter = struct {
             h.sp = 0;
             try h.run(prep);
         }
+        h.gs_default = h.gs; // the state each glyph program starts from
         return h;
     }
 
@@ -1130,6 +1144,33 @@ test "runs a real font's fpgm+prep (IBM Plex Mono) across sizes" {
         // The CVT scaled with ppem: at least one entry grows with size.
         try testing.expect(h.ppem == ppem);
     }
+}
+
+test "hintGlyph: a glyph program grid-fits a point (MDAP round)" {
+    const a = testing.allocator;
+    // No fpgm/prep; default graphics state (proj/free = x-axis, round to
+    // grid). A two-point zone; the program rounds point 0 to the grid.
+    var h = try Hinter.init(a, "", "", "", 1000, 16, 256, 16, 16, 16);
+    defer {
+        a.free(h.stack);
+        a.free(h.storage);
+        a.free(h.cvt);
+        a.free(h.funcs);
+        a.free(h.twilight.org);
+        a.free(h.twilight.cur);
+        a.free(h.twilight.flags);
+    }
+    var org = [_][2]F26Dot6{ .{ 100, 0 }, .{ 300, 0 } }; // 1.5625px, 4.6875px
+    var cur = org;
+    var flags = [_]u8{ flag_on, flag_on };
+    var ends = [_]u16{1};
+    const zone = Zone{ .n = 2, .org = &org, .cur = &cur, .flags = &flags, .ends = &ends, .n_contours = 1 };
+    // PUSHB[0] 0 ; MDAP[1]  — round point 0 to the grid along x.
+    const instr = [_]u8{ 0xB0, 0x00, 0x2F };
+    try h.hintGlyph(zone, &instr);
+    try testing.expectEqual(@as(F26Dot6, 128), cur[0][0]); // 100 → nearest grid (2px)
+    try testing.expectEqual(@as(F26Dot6, 300), cur[1][0]); // untouched
+    try testing.expect(flags[0] & flag_touch_x != 0); // MDAP touched it
 }
 
 test "roundSuper: grid rounding is nearest pixel" {

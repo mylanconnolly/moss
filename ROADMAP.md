@@ -874,10 +874,20 @@ is a plan.
     fpgm that defines functions), buffers use generous minimums. Bug paid
     for: MINDEX was net −2 not −1 → prep's deep MINDEX/ROLL/IF chains
     desynced the stack. Verified: a synthetic fpgm+prep unit test + IBM
-    Plex Mono's real fpgm+prep clean across ppem 8–48. Stage 2 (next):
-    glyph program + phantom points + IUP → fitted outline to the
-    rasterizer, wired through fontsvc + a drill. Open: subpixel, a
-    settings UI, fabric-remote GUI.
+    Plex Mono's real fpgm+prep clean across ppem 8–48. ✅ Stage 2 (landed
+    2026-09-09): glyph fitting, wired. rasterizeHinted loads a simple
+    glyph (composites fall back), scales points to 26.6, appends the 4
+    phantom points (side-bearing/advance + bbox top/bottom), runs the
+    glyph program via hintGlyph (the program calls IUP itself), and feeds
+    the fitted points into the same scanline fill (fillOutline split out
+    of rasterize; hinted path passes pixels with scale 1). Linear advance
+    kept, so hinting changes shape not layout. fontsvc caches one hinter
+    per (family, device ppem). Best-effort throughout: any error → plain
+    fill. Verified: a host test (IBM Plex Mono 'H' hinted has strictly
+    fewer mid-grey edge pixels than unhinted) + the term drill asserts
+    "fontsvc: hinting 'IBM Plex Mono' at 15px" live; both bundled hinted
+    families (Mono, Sans) grid-fit clean at 15/16/22/24px. Open: subpixel,
+    a settings UI, fabric-remote GUI.
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

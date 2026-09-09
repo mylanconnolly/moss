@@ -19,7 +19,7 @@ const flate = std.compress.flate;
 const woff2 = @import("woff2.zig");
 const tthint = @import("tthint.zig");
 
-pub const Error = error{ BadFont, Unsupported, OutOfMemory };
+pub const Error = error{ BadFont, Unsupported, OutOfMemory, Hint };
 
 // ------------------------------------------------------------ big-endian
 
@@ -355,6 +355,21 @@ pub const Font = struct {
         const o = @as(usize, idx) * 4;
         if (o + 2 > f.hmtx.len) return 0;
         return u16be(f.hmtx, o);
+    }
+
+    /// The left side bearing of a glyph, in font units (for a hinted
+    /// glyph's left phantom point). Glyphs past num_hmetrics share the
+    /// last advance but keep their own lsb in the trailing array.
+    pub fn leftBearing(f: *const Font, gid: u16) i16 {
+        if (f.num_hmetrics == 0) return 0;
+        if (gid < f.num_hmetrics) {
+            const o = @as(usize, gid) * 4 + 2;
+            if (o + 2 > f.hmtx.len) return 0;
+            return i16be(f.hmtx, o);
+        }
+        const o = @as(usize, f.num_hmetrics) * 4 + @as(usize, gid - f.num_hmetrics) * 2;
+        if (o + 2 > f.hmtx.len) return 0;
+        return i16be(f.hmtx, o);
     }
 
     /// The font's family name (`name` table, nameID 1), decoded ASCII into
@@ -1204,7 +1219,14 @@ pub fn rasterize(f: *const Font, a: std.mem.Allocator, gid: u16, px_size: f32) E
     defer out.deinit(a);
     if (f.is_cff) try decodeCffOutline(f, a, gid, &out) else try decodeOutline(f, a, gid, &out, 0);
     const adv = @as(f32, @floatFromInt(f.advance(gid))) * scale;
+    return fillOutline(a, &out, scale, adv);
+}
 
+/// Fill an outline whose points are in font-unit space (multiplied by
+/// `scale` and y-flipped to device pixels here) into a coverage bitmap.
+/// The hinted path (`rasterizeHinted`) passes points already in pixel
+/// space with `scale = 1`. Caller owns `Glyph.cov`.
+fn fillOutline(a: std.mem.Allocator, out: *const Outline, scale: f32, adv: f32) Error!Glyph {
     if (out.pts.items.len == 0 or out.ends.items.len == 0) {
         return .{ .w = 0, .h = 0, .cov = &.{}, .left = 0, .top = 0, .advance = adv };
     }
@@ -1316,6 +1338,188 @@ pub fn rasterize(f: *const Font, a: std.mem.Allocator, gid: u16, px_size: f32) E
     }
 
     return .{ .w = w, .h = h, .cov = cov, .left = left, .top = top, .advance = adv };
+}
+
+/// A simple glyph loaded for hinting: its points in font units (y-up),
+/// per-point on-curve flags, per-contour end indices (inclusive), its own
+/// instruction stream, and its bbox. Composite glyphs are not hinted here
+/// (the caller falls back). All slices are owned by `a`.
+const HintGlyph = struct {
+    xs: []i32,
+    ys: []i32,
+    on: []bool,
+    ends: []u16,
+    instr: []const u8,
+    xmin: i16,
+    ymin: i16,
+    xmax: i16,
+    ymax: i16,
+    fn deinit(hg: *HintGlyph, a: std.mem.Allocator) void {
+        a.free(hg.xs);
+        a.free(hg.ys);
+        a.free(hg.on);
+        a.free(hg.ends);
+    }
+};
+
+fn loadGlyphForHint(f: *const Font, a: std.mem.Allocator, gid: u16) Error!HintGlyph {
+    const r = f.glyfRange(gid) orelse return Error.Hint; // empty: nothing to hint
+    const g = f.glyf[r.start..r.end];
+    if (g.len < 10) return Error.Hint;
+    const ncont = i16be(g, 0);
+    if (ncont <= 0) return Error.Hint; // composite (or empty): fall back
+    const nc: usize = @intCast(ncont);
+    var o: usize = 10;
+    if (o + nc * 2 > g.len) return Error.Hint;
+    const ends = try a.alloc(u16, nc);
+    errdefer a.free(ends);
+    var ci: usize = 0;
+    while (ci < nc) : (ci += 1) {
+        ends[ci] = u16be(g, o);
+        o += 2;
+    }
+    const npts: usize = @as(usize, ends[nc - 1]) + 1;
+    if (o + 2 > g.len) return Error.Hint;
+    const ilen = u16be(g, o);
+    o += 2;
+    if (o + ilen > g.len) return Error.Hint;
+    const instr = g[o .. o + ilen];
+    o += ilen;
+    // Flags (run-length encoded).
+    const flags = try a.alloc(u8, npts);
+    defer a.free(flags);
+    var k: usize = 0;
+    while (k < npts) {
+        if (o >= g.len) return Error.Hint;
+        const fl = g[o];
+        o += 1;
+        flags[k] = fl;
+        k += 1;
+        if (fl & REPEAT != 0) {
+            if (o >= g.len) return Error.Hint;
+            var rep = g[o];
+            o += 1;
+            while (rep > 0 and k < npts) : (rep -= 1) {
+                flags[k] = fl;
+                k += 1;
+            }
+        }
+    }
+    const xs = try a.alloc(i32, npts);
+    errdefer a.free(xs);
+    const ys = try a.alloc(i32, npts);
+    errdefer a.free(ys);
+    const on = try a.alloc(bool, npts);
+    errdefer a.free(on);
+    var xacc: i32 = 0;
+    for (0..npts) |p| {
+        const fl = flags[p];
+        if (fl & X_SHORT != 0) {
+            if (o >= g.len) return Error.Hint;
+            const d: i32 = g[o];
+            o += 1;
+            xacc += if (fl & X_SAME_POS != 0) d else -d;
+        } else if (fl & X_SAME_POS == 0) {
+            if (o + 2 > g.len) return Error.Hint;
+            xacc += i16be(g, o);
+            o += 2;
+        }
+        xs[p] = xacc;
+        on[p] = fl & ON_CURVE != 0;
+    }
+    var yacc: i32 = 0;
+    for (0..npts) |p| {
+        const fl = flags[p];
+        if (fl & Y_SHORT != 0) {
+            if (o >= g.len) return Error.Hint;
+            const d: i32 = g[o];
+            o += 1;
+            yacc += if (fl & Y_SAME_POS != 0) d else -d;
+        } else if (fl & Y_SAME_POS == 0) {
+            if (o + 2 > g.len) return Error.Hint;
+            yacc += i16be(g, o);
+            o += 2;
+        }
+        ys[p] = yacc;
+    }
+    return .{
+        .xs = xs,
+        .ys = ys,
+        .on = on,
+        .ends = ends,
+        .instr = instr,
+        .xmin = i16be(g, 2),
+        .ymin = i16be(g, 4),
+        .xmax = i16be(g, 6),
+        .ymax = i16be(g, 8),
+    };
+}
+
+/// Rasterize glyph `gid` with the font's own TrueType hints applied at the
+/// hinter's ppem — the outline is grid-fitted so stems land on whole
+/// pixels. Simple glyphs only; returns `error.Hint` for anything the
+/// hinter cannot handle, and the caller keeps the unhinted `rasterize`.
+pub fn rasterizeHinted(f: *const Font, a: std.mem.Allocator, hinter: *tthint.Hinter, gid: u16, px_size: f32) Error!Glyph {
+    if (f.is_cff) return Error.Hint;
+    var hg = try loadGlyphForHint(f, a, gid);
+    defer hg.deinit(a);
+    const npts = hg.xs.len;
+    const nz = npts + 4; // four phantom points
+
+    const org = try a.alloc([2]tthint.F26Dot6, nz);
+    defer a.free(org);
+    const cur = try a.alloc([2]tthint.F26Dot6, nz);
+    defer a.free(cur);
+    const zflags = try a.alloc(u8, nz);
+    defer a.free(zflags);
+
+    for (0..npts) |p| {
+        org[p] = .{ hinter.scaleFUnit(hg.xs[p]), hinter.scaleFUnit(hg.ys[p]) };
+        cur[p] = org[p];
+        zflags[p] = if (hg.on[p]) tthint.flag_on else 0;
+    }
+    // Phantom points (font units → 26.6): the horizontal pair carries the
+    // side bearing and advance, the vertical pair the top/bottom.
+    const lsb = f.leftBearing(gid);
+    const advw: i32 = f.advance(gid);
+    const pp1x: i32 = @as(i32, hg.xmin) - lsb;
+    const phantom = [4][2]i32{
+        .{ pp1x, 0 },
+        .{ pp1x + advw, 0 },
+        .{ 0, hg.ymax },
+        .{ 0, hg.ymin },
+    };
+    for (0..4) |i| {
+        org[npts + i] = .{ hinter.scaleFUnit(phantom[i][0]), hinter.scaleFUnit(phantom[i][1]) };
+        cur[npts + i] = org[npts + i];
+        zflags[npts + i] = 0;
+    }
+
+    const zone = tthint.Zone{
+        .n = nz,
+        .org = org,
+        .cur = cur,
+        .flags = zflags,
+        .ends = hg.ends,
+        .n_contours = hg.ends.len,
+    };
+    try hinter.hintGlyph(zone, hg.instr);
+
+    // Fitted points (26.6, y-up) → float pixel outline; fillOutline flips
+    // y and scales by 1 (they are already in pixels).
+    var out = Outline{ .pts = .empty, .ends = .empty };
+    defer out.deinit(a);
+    for (0..npts) |p| {
+        try out.pts.append(a, .{
+            .x = @as(f32, @floatFromInt(cur[p][0])) / 64.0,
+            .y = @as(f32, @floatFromInt(cur[p][1])) / 64.0,
+            .on = zflags[p] & tthint.flag_on != 0,
+        });
+    }
+    for (hg.ends) |e| try out.ends.append(a, @as(usize, e) + 1); // exclusive
+    const scale = px_size / @as(f32, @floatFromInt(f.units_per_em));
+    const adv = @as(f32, @floatFromInt(advw)) * scale; // keep the linear advance
+    return fillOutline(a, &out, 1.0, adv);
 }
 
 const Xw = struct { x: f32, dir: i2 };
@@ -1690,4 +1894,45 @@ test "parse and rasterize a minimal CFF (Type2 charstring) font" {
     try testing.expect(g.h >= 39 and g.h <= 43);
     try testing.expectApproxEqAbs(@as(f32, 60), g.advance, 0.5);
     try testing.expect(g.cov[(g.h / 2) * g.w + g.w / 2] > 250);
+}
+
+test "hinting a real glyph (IBM Plex Mono) is crisper than the unhinted fill" {
+    const a = testing.allocator;
+    const data = @embedFile("tthint/plexmono.ttf");
+    const f = try Font.parse(data);
+    try testing.expect(f.hasHints());
+    const gid = f.glyphIndex('H'); // a glyph of vertical + horizontal stems
+    try testing.expect(gid != 0);
+
+    const lim = f.hintLimits();
+    var h = try tthint.Hinter.init(a, f.fpgm, f.prep, f.cvt, f.units_per_em, 16, lim.stack, lim.storage, lim.funcs, lim.twilight);
+    defer {
+        a.free(h.stack);
+        a.free(h.storage);
+        a.free(h.cvt);
+        a.free(h.funcs);
+        a.free(h.twilight.org);
+        a.free(h.twilight.cur);
+        a.free(h.twilight.flags);
+    }
+
+    const hinted = try rasterizeHinted(&f, a, &h, gid, 16);
+    defer a.free(hinted.cov);
+    const plain = try rasterize(&f, a, gid, 16);
+    defer a.free(plain.cov);
+
+    // Crispness metric: hinting snaps stem edges to whole pixels, so fewer
+    // pixels are left partially covered (grey anti-aliased edges) relative
+    // to solid black. Count the mid-grey pixels in each.
+    const grey = struct {
+        fn count(g: Glyph) usize {
+            var n: usize = 0;
+            for (g.cov) |c| if (c > 40 and c < 215) {
+                n += 1;
+            };
+            return n;
+        }
+    }.count;
+    try testing.expect(hinted.w > 0 and hinted.h > 0);
+    try testing.expect(grey(hinted) < grey(plain)); // sharper edges
 }

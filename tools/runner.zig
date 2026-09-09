@@ -65,7 +65,7 @@ const specs = [_]Spec{
     .{ .name = "flap", .pass = "flap-test: PASS" },
     .{ .name = "blk", .kind = .blk, .pass = "blk-test: PASS", .append = "profile=blk" },
     .{ .name = "gpu", .kind = .gpu, .pass = "gpu-test: PASS", .extra = "gpu: surface committed", .append = "profile=gpu" },
-    .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .append = "profile=term" },
+    .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .always_extra = "fontsvc: hinting 'IBM Plex Mono'", .append = "profile=term" },
     .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
     .{ .name = "ptr", .kind = .ptr, .pass = "ptr-test: PASS", .extra = "ptr: click", .append = "profile=ptr", .timeout_s = 120 },
     .{ .name = "pointer", .kind = .pointer, .pass = "pointer-test: PASS", .extra = "pointer: click", .append = "profile=pointer", .timeout_s = 120 },

@@ -3093,9 +3093,41 @@ later. Verified two ways: a synthetic fpgm+prep unit test (push,
 arithmetic, RCVT/WCVTP, storage, IF, FDEF/CALL, rounding) with asserted
 results, and a real-program smoke test running IBM Plex Mono's own
 `fpgm`+`prep` (extracted as small vectors) clean across every UI ppem
-(8–48). Stage 2 feeds a glyph's points (plus phantom points) through the
-glyph program, applies IUP, and rasterizes the fitted outline — the
-visible win — wired through fontsvc with a drill.
+(8–48).
+
+**TrueType hinting, stage 2 — glyph fitting, wired (as built,
+2026-09-09).** The visible half: run each glyph's own program and
+rasterize the *fitted* outline. `rasterizeHinted` loads a simple glyph's
+points in font units (composites fall back — they are the accented
+letters, not the stems that matter), scales them to 26.6, appends the
+four phantom points (the horizontal pair carrying the side bearing and
+advance from `hmtx`, the vertical pair the bbox top/bottom), builds the
+glyph zone and hands it to the interpreter's `hintGlyph`, which restarts
+from the graphics state prep left and runs the glyph's instructions —
+moving points onto the grid, the glyph program calling IUP itself to drag
+the untouched points along. The fitted 26.6 points come back, convert to
+pixel coordinates, and flow into the *same* scanline fill the unhinted
+path uses — a small refactor split `fillOutline` out of `rasterize` so
+both feed it, the hinted path passing points already in pixels (scale 1).
+The advance stays the linear one, so grid-fitting changes the glyph's
+shape, never the layout. Every failure path — a composite, an
+unimplemented opcode, a bound overrun — returns `error.Hint` and the
+caller keeps the plain fill, so a font moss cannot fully hint still
+renders.
+
+fontsvc drives it: a small cache holds one prepared hinter per (family,
+device ppem) — dear to build (it runs fpgm+prep), cheap to reuse across
+every glyph at that size — each in its own backing heap, evicting the
+oldest when full. A glyph is hinted when its family carries a program,
+else filled plain. Verified end to end both ways: a host test rasterizes
+IBM Plex Mono's `H` hinted and unhinted at 16px and asserts the hinted
+bitmap has strictly fewer mid-grey (anti-aliased-edge) pixels — the
+measurable signature of stems snapped to whole pixels — and the running
+system proves it live, the `term` drill asserting `fontsvc: hinting 'IBM
+Plex Mono' at 15px` while both bundled hinted families (Mono and Sans)
+grid-fit clean across every UI size (15/16/22/24px) with no drill
+regressing. Real type, from the font's own instructions, at moss's sizes.
+Open for the arc: subpixel, a settings UI, the fabric-remote GUI.
 
 ## Distribution: the fabric
 
