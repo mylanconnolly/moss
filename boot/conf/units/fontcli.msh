@@ -1,0 +1,18 @@
+# The runtime font-install drill (profile fontrescan): fontcli plays a
+# user installing a font — it copies an uninstalled .ttf from the staging
+# tier into the filesystem fonts directory and tells fontsvc (filesystem
+# mode) to rescan, which picks the new family up live. It holds a rw view
+# of the assets tier (pulls up mossfs) and a `font` cap to fontsvc-fs.
+# Essential + oneshot: it does its work and exits, ending the boot.
+{
+  image:     fontcli
+  grant:     [log, bootfs]
+  budget:    { user: 8mb }
+  profiles:  [fontrescan]
+  essential: true
+  oneshot:   true
+  give: [
+    { tag: font, unit: fontsvc-fs }
+    { tag: view, fs: "assets", ro: false }
+  ]
+}

@@ -179,6 +179,11 @@ pub fn build(b: *std.Build) void {
         "gboom-test",
         "Run the GUI crash-isolation drill: an mshl GUI whose `update` runs in a worker domain survives an app crash",
     ) orelse false;
+    const fontrescan_test = b.option(
+        bool,
+        "fontrescan-test",
+        "Run the font-install drill: a font dropped into the fs fonts dir is picked up by fontsvc on rescan",
+    ) orelse false;
     const gui_profile = b.option(
         []const u8,
         "gui-profile",
@@ -321,6 +326,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "lconsole_test", lconsole_test);
     build_opts.addOption(bool, "gisession_test", gisession_test);
     build_opts.addOption(bool, "gboom_test", gboom_test);
+    build_opts.addOption(bool, "fontrescan_test", fontrescan_test);
     build_opts.addOption(bool, "smmu_test", smmu_test);
     build_opts.addOption(bool, "vm_test", vm_test);
     build_opts.addOption(bool, "guest_test", guest_test);
@@ -385,6 +391,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "trustcli", .src = "user/trustcli.zig" },
         .{ .name = "readercli", .src = "user/readercli.zig" },
         .{ .name = "fontsvc", .src = "user/fontsvc.zig" },
+        .{ .name = "fontcli", .src = "user/fontcli.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -540,7 +547,7 @@ pub fn build(b: *std.Build) void {
         "scripts/lconsole.msh",          "conf/units/gui-isession.msh",
         "conf/units/gui-boom.msh",       "scripts/gui-boom.msh",
         "conf/units/fontsvc.msh",        "conf/font.msh",
-        "conf/units/fontsvc-fs.msh",
+        "conf/units/fontsvc-fs.msh",       "conf/units/fontcli.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -574,7 +581,10 @@ pub fn build(b: *std.Build) void {
         // tier where fontsvc reads them.
         .{ .at = "assets/fonts/IBMPlexSans.ttf", .from = "assets/fonts/IBMPlexSans.ttf" },
         .{ .at = "assets/fonts/IBMPlexMono-Regular.ttf", .from = "assets/fonts/IBMPlexMono-Regular.ttf" },
-        .{ .at = "assets/fonts/IBMPlexSerif-Regular.ttf", .from = "assets/fonts/IBMPlexSerif-Regular.ttf" },
+        // Serif ships uninstalled, in a staging tier — a font a user can
+        // install (copy into assets/fonts and rescan), which the
+        // fontrescan drill exercises.
+        .{ .at = "assets/available/IBMPlexSerif-Regular.ttf", .from = "assets/fonts/IBMPlexSerif-Regular.ttf" },
     };
     for (asset_files) |a| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));
@@ -642,7 +652,7 @@ pub fn build(b: *std.Build) void {
             "fs_test",     "net_test",      "fabric_test",   "shell_test",
             "rng_test",    "smmu_test",     "vm_test",       "guest_test",
             "vmnode_test", "pan_test",      "cpu_test",      "users_test",
-            "login_test",  "flogin_test",   "dot_test",    "gboom_test",
+            "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1060,7 +1070,7 @@ pub fn build(b: *std.Build) void {
         "fs_test",     "net_test",      "fabric_test",   "shell_test",
         "rng_test",    "smmu_test",     "vm_test",       "guest_test",
         "vmnode_test", "pan_test",      "cpu_test",      "users_test",
-        "login_test",  "flogin_test",   "dot_test",    "gboom_test",
+        "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
@@ -1069,7 +1079,7 @@ pub fn build(b: *std.Build) void {
         "gui",     "guilogin", "gtrust", "gsession", "lconsole", "gisession",
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
-        "login",   "flogin",   "dot",      "gboom",
+        "login",   "flogin",   "dot",      "gboom",    "fontrescan",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

@@ -2787,9 +2787,17 @@ On a real system with a disk that directory is on the filesystem, not just
 the archive: `fontsvc` in filesystem mode (`arg 1` + a fonts-dir view)
 lists it and reads each `.ttf` off mossfs, so a font a user drops there
 persists and loads with no OS rebuild (the diskless default reads the
-bundled families from the archive instead). The `gboom` drill exercises
-this path — it renders through a filesystem-mode fontsvc, and its families
-log tagged `(fs)`. The per-user layer plugs into the same `merge` call (a
+bundled families from the archive instead), and a `rescan` request picks
+up a font added since start-up with no restart at all — install is live.
+The `gboom` drill renders through a filesystem-mode fontsvc (families log
+tagged `(fs)`); the `fontrescan` drill installs a font at runtime — a
+client copies a `.ttf` into the fonts directory and calls `rescan`, and
+the new family registers on the spot. A paid-for lesson from that drill:
+init parses each unit file into an arena it resets before the next, and
+the mshl parser *copies* quoted strings into it — so a quoted give path
+like `fs: "assets/fonts"` dangled once enough units pushed the reuse past
+it (bare words slice the persistent archive and were fine); init now
+copies every kept give string into a pool that outlives the parse. The per-user layer plugs into the same `merge` call (a
 user's `home/<user>/conf/font.msh` over the system one); wiring a session
 to push its user's effective settings — and a post-login GUI to show them
 — is the next step.
@@ -2802,10 +2810,8 @@ signed device-y offset from the baseline (negative above), so the client
 
 What's left for the arc: pushing a user's font settings from their session
 (per-user family/scale, once a post-login GUI shows it); the OTF/CFF, WOFF
-and WOFF2 front-ends so any real font file loads; a live rescan so a
-just-dropped font appears without restarting fontsvc; pointer input,
-richer layout, and the fabric-remote GUI the data-only design already
-allows.
+and WOFF2 front-ends so any real font file loads; pointer input, richer
+layout, and the fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

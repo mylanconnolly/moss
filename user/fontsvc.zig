@@ -65,9 +65,23 @@ fn registerFont(bytes: []const u8, from_fs: bool) void {
 // install a font by dropping the .ttf in the fonts directory.
 var fs_heap: [3 << 20]u8 = undefined;
 var fs_used: usize = 0;
+var g_view: u64 = 0; // the fonts-directory view, kept for `rescan`
 
-/// Scan a filesystem fonts directory (`view`) and register every .ttf in
-/// it — the runtime install path. Best-effort: a bad file is skipped.
+// Filenames already read from the view, so a re-scan reads only the new
+// ones (and never the same file twice into the heap).
+var seen: [max_families][64]u8 = undefined;
+var seen_len: [max_families]usize = @splat(0);
+var n_seen: usize = 0;
+fn alreadySeen(name: []const u8) bool {
+    for (0..n_seen) |i| {
+        if (std.mem.eql(u8, seen[i][0..seen_len[i]], name)) return true;
+    }
+    return false;
+}
+
+/// Scan a filesystem fonts directory (`view`) and register every new .ttf
+/// in it — the runtime install path, also the `rescan` handler. Best
+/// effort: a bad file is skipped.
 fn scanView(view: u64) void {
     const ab = fsc.attachBuf(view);
     if (ab.va == 0) return;
@@ -80,7 +94,13 @@ fn scanView(view: u64) void {
     @memcpy(names[0..m], buf[0..m]);
     var it = std.mem.splitScalar(u8, names[0..m], '\n');
     while (it.next()) |name| {
-        if (name.len == 0 or !std.mem.endsWith(u8, name, ".ttf")) continue;
+        if (name.len == 0 or name.len > 64 or !std.mem.endsWith(u8, name, ".ttf")) continue;
+        if (alreadySeen(name)) continue;
+        if (n_seen < seen.len) {
+            @memcpy(seen[n_seen][0..name.len], name);
+            seen_len[n_seen] = name.len;
+            n_seen += 1;
+        }
         if (fs_used >= fs_heap.len) break;
         const bytes = fsc.readWhole(view, buf, name, fs_heap[fs_used..]) orelse continue;
         fs_used += bytes.len;
@@ -304,6 +324,7 @@ fn loadArchiveFonts(blob: []const u8) void {
 /// archive's bundled families (the diskless default), plus the view if one
 /// is given. Then default the roles and apply the settings layer.
 fn loadFonts(blob: []const u8, fs_only: bool, view: u64) void {
+    g_view = view;
     if (fs_only) {
         if (view != 0) scanView(view);
     } else {
@@ -394,6 +415,11 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                     .line = @intCast(mm.line),
                     .ascent = @intCast(mm.ascent),
                 } }, 0);
+            },
+            .rescan => {
+                // Pick up a font dropped into the view since startup.
+                if (g_view != 0) scanView(g_view);
+                _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
             },
             .layout => |q| {
                 if (req_va == 0 or q.len > req_len) {

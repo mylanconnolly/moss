@@ -6,8 +6,9 @@
 #
 # `*_family` names a font by its family name; fontsvc registers every
 # .ttf under the assets/fonts tier, so installing a font (drop the file
-# there) and naming it here is all it takes. The bundled families are
-# "IBM Plex Sans", "IBM Plex Mono" and "IBM Plex Serif".
+# there) and naming it here is all it takes. Bundled: "IBM Plex Sans"
+# and "IBM Plex Mono"; "IBM Plex Serif" ships in assets/available as an
+# example a user can install.
 {
   scale: 1.0
   ui:    16

@@ -179,6 +179,21 @@ var fba: std.heap.FixedBufferAllocator = undefined;
 var interp: mshl.Interp = undefined;
 var host_ctx: u8 = 0;
 
+// A unit is parsed into `fba`, which is reset before the next unit — but a
+// Unit keeps string slices (give names, fs paths, script) that must
+// outlive the parse. Bare words slice the (persistent) archive, but the
+// mshl parser copies *quoted* strings into `fba`, so those would dangle;
+// copy every kept string into this never-reset pool.
+var strpool: [32 << 10]u8 = undefined;
+var strpool_used: usize = 0;
+fn poolDup(s: []const u8) []const u8 {
+    if (s.len == 0 or strpool_used + s.len > strpool.len) return s;
+    const dst = strpool[strpool_used .. strpool_used + s.len];
+    @memcpy(dst, s);
+    strpool_used += s.len;
+    return dst;
+}
+
 fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const Value, _: ?Value) mshl.Error!?Value {
     return null;
 }
@@ -277,7 +292,7 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             // same delivery for bytes that are not secret (a settings
             // record from the archive), kept rather than wiped.
             if (gr.get("secret")) |x| {
-                u.gives[u.ngives] = .{ .tag = .buf, .kind = .secret, .name = str(x) orelse continue };
+                u.gives[u.ngives] = .{ .tag = .buf, .kind = .secret, .name = poolDup(str(x) orelse continue) };
                 u.ngives += 1;
                 continue;
             }
@@ -287,28 +302,28 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 if (gr.get("tag")) |t| {
                     const tag = std.meta.stringToEnum(shared.CapTag, str(t) orelse continue) orelse continue;
                     u.gives[u.ngives] = .{ .tag = tag, .kind = .file_cap, .name = str(x) orelse continue };
-                } else u.gives[u.ngives] = .{ .tag = .buf, .kind = .file, .name = str(x) orelse continue };
+                } else u.gives[u.ngives] = .{ .tag = .buf, .kind = .file, .name = poolDup(str(x) orelse continue) };
                 u.ngives += 1;
                 continue;
             }
             const tag = std.meta.stringToEnum(shared.CapTag, str(gr.get("tag")) orelse continue) orelse continue;
             var give: Give = .{ .tag = tag, .kind = .unit };
             if (gr.get("unit")) |x| {
-                give.name = str(x) orelse continue;
+                give.name = poolDup(str(x) orelse continue);
             } else if (gr.get("device")) |x| {
                 give.kind = .device;
-                give.name = str(x) orelse continue;
+                give.name = poolDup(str(x) orelse continue);
             } else if (gr.get("shm")) |x| {
                 give.kind = .shm;
                 give.pages = @intCast(int(x) orelse 1);
             } else if (gr.get("fs")) |x| {
                 give.kind = .view;
-                give.name = str(x) orelse continue;
+                give.name = poolDup(str(x) orelse continue);
                 if (gr.get("ro")) |ro| give.ro = ro.asBool();
                 if (gr.get("mkdir")) |mk| give.mkdir = mk.asBool();
             } else if (gr.get("netview")) |x| {
                 give.kind = .netview;
-                give.name = str(x) orelse continue;
+                give.name = poolDup(str(x) orelse continue);
                 if (gr.get("allow")) |al| give.allow = parseV4(str(al) orelse "") orelse continue;
                 if (gr.get("port")) |pt| give.port = @intCast(int(pt) orelse 0);
             } else if (gr.get("self") != null) {
@@ -334,8 +349,8 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
     }
     if (r.get("essential")) |e| u.essential = e.asBool();
     if (r.get("oneshot")) |e| u.oneshot = e.asBool();
-    if (r.get("after")) |a| u.after = str(a) orelse "";
-    if (r.get("script")) |sc| u.script = str(sc) orelse "";
+    if (r.get("after")) |a| u.after = poolDup(str(a) orelse "");
+    if (r.get("script")) |sc| u.script = poolDup(str(sc) orelse "");
     if (r.get("install")) |e| u.install = e.asBool();
     if (r.get("certify")) |c| {
         if (c == .record) {
@@ -347,7 +362,7 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 flags |= shared.fab_flag_spawn;
             };
             u.certify = .{
-                .root = str(c.record.get("root")) orelse return null,
+                .root = poolDup(str(c.record.get("root")) orelse return null),
                 .node = if (node_boot) nodeId() else @intCast(int(c.record.get("node")) orelse 1),
                 .flags = flags,
                 .state = str(c.record.get("state")) orelse "state/fabric",

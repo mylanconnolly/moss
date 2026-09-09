@@ -225,6 +225,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.fontrescan_test) {
+        _ = sched.spawn("boot-watch", fontrescanTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.fs_test) {
         _ = sched.spawn("boot-watch", fsTestWorker, 0, .{}) catch |e| {
@@ -767,6 +772,14 @@ fn gisessionTestWorker(_: u64) void {
 /// down clean.
 fn gboomTestWorker(_: u64) void {
     systemDrill("gboom");
+}
+
+/// The font-install drill: a system boot under profile "fontrescan" —
+/// fontcli copies an uninstalled font into the filesystem fonts directory
+/// and rescans; fontsvc picks the new family up live, then fontcli exits
+/// and the boot shuts down clean.
+fn fontrescanTestWorker(_: u64) void {
+    systemDrill("fontrescan");
 }
 
 /// The fs drill: a system boot under profile "fs" — root, init, and the

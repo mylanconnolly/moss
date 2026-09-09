@@ -745,8 +745,13 @@ is a plan.
     assets/fonts tier on mossfs and reads each .ttf off the filesystem, so
     a dropped font persists and loads with no OS rebuild (the diskless
     default still reads the archive); the gboom drill renders through it
-    and asserts the families log tagged (fs). Open: a live rescan (no
-    restart); session push of per-user family/scale; OTF/WOFF/WOFF2
+    and asserts the families log tagged (fs). ✅ Live rescan (landed
+    2026-09-08): a `rescan` request re-scans the fonts dir, so a font
+    dropped in at runtime registers with no restart; the fontrescan drill
+    (fontcli copies a .ttf in + rescans) proves it. Fixed an init bug it
+    exposed: quoted give strings (fs paths) were slices into the per-unit
+    parse arena and dangled as units grew — now copied to a persistent
+    pool. Open: session push of per-user family/scale; OTF/WOFF/WOFF2
     front-ends; pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
