@@ -1329,6 +1329,11 @@ pub const FabReq = union(enum(u64)) {
     /// node (low 16) and the 48-bit bits (high 48). Reply `ok` once the
     /// frame is sent (the peer is a reachable member), else `fab_err`.
     signal: struct { a: u64, b: u64, node_bits: u64 },
+    /// This node's live view of one member: reply `num{n}` with
+    /// n = 0 unknown (never heard of), 1 down, 2 up. A race-free
+    /// single-word query (no shared listing buffer) — dnsd resolves
+    /// `nodeN.moss.test` from it, so cluster names track membership.
+    member_state: struct { node: u64 },
 };
 
 /// Pack a node id (u16) and 48-bit signal bits into one word for

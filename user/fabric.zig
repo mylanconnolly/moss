@@ -599,6 +599,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                 freply(.ok);
             },
             .members => freply(doMembers()),
+            .member_state => |q| freply(doMemberState(q.node)),
             .stats => freply(.{ .num = .{ .n = max_inflight_seen } }),
             .poll => {
                 // Kept for callers that still tick us; the clock is ours.
@@ -828,6 +829,14 @@ fn broadcastMember(ftype: u8, node: u64) void {
     for (&peers) |*p| {
         if (p.used and !p.dead and p.greeted and p.node != node) _ = sendFrame(p, &f);
     }
+}
+
+/// One member's liveness in this node's view: 2 up, 1 down, 0 unknown.
+/// A single-word answer, so a caller (dnsd) needs no shared buffer and
+/// cannot race the members-listing buffer other clients attach.
+fn doMemberState(node: u64) shared.FabResp {
+    if (memberByNode(node)) |m| return .{ .num = .{ .n = if (m.up) 2 else 1 } };
+    return .{ .num = .{ .n = 0 } };
 }
 
 fn doMembers() shared.FabResp {

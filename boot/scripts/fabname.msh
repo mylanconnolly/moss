@@ -1,0 +1,17 @@
+# Prove the dynamic node map. `node2.moss.test` is NOT in the static zone
+# (conf/dns.msh) — it resolves only because this node is a live member of
+# the fabric and the cluster dnsd learns the address from fabsvc's
+# membership. `node1` stays static (the bootstrap seed name), so the
+# distinguishing proof is node2 resolving at all. This node IS node 2, so
+# it is a member of its own fabric from boot; dnsd and fabsvc just need a
+# moment to come up, hence the retry.
+def probe [tries] {
+  match (resolve node2.moss.test) {
+    ok $a => match ($a | len) {
+      0 => if $tries > 0 { sleep 500; probe ($tries - 1) } else { (err "fabname: node2 empty")? }
+      _ => echo ("fabname: node2 -> " + ($a | join " "))
+    }
+    err $e => if $tries > 0 { sleep 500; probe ($tries - 1) } else { (err ("fabname: node2 unresolved: " + $e))? }
+  }
+}
+probe 60

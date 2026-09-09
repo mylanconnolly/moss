@@ -305,11 +305,19 @@ is a plan.
   the gate's hermetic upstream and the fabric's names); ✅ names for
   fabric nodes by default (landed 2026-09-09: `dnsd-cluster` runs in the
   system/flogin/fjoin/fabgui profiles serving the node-name zone
-  (conf/dns.msh: node1/node2 → their 10.77.0.N + fdcc::N) over the cluster
-  net view; net-cluster's resolver points every node at its own dnsd on
-  loopback; the SNTP time sync now asks `node1.moss.test`, resolved to
-  10.77.0.1 — proven by the flogin drill's cross-node sync); still open:
-  search lists and a hosts file if a use case asks; ✅ TLS (landed
+  (conf/dns.msh) over the cluster net view; net-cluster's resolver points
+  every node at its own dnsd on loopback; the SNTP time sync now asks
+  `node1.moss.test`, resolved to 10.77.0.1 — proven by the flogin drill's
+  cross-node sync); ✅ a DYNAMIC node map (landed 2026-09-09): `dnsd-cluster`
+  is handed a fabric channel and answers `nodeN.moss.test` from fabsvc's
+  live membership (a race-free `member_state{node}` word query) — an up
+  member → 10.77.0.N/fdcc::N, a known-but-down member → NXDOMAIN, an
+  unknown node → the static zone; so names track the mesh, not a hardcoded
+  list. Only `node1` stays static (the bootstrap seed name + the plain
+  net-drill dnsd, which has no fabric); `node2.moss.test`, removed from the
+  zone, resolves on node 2 only because it is a live member (the flogin
+  drill's `fabname` check); still open: search lists and a hosts file if a
+  use case asks; ✅ TLS (landed
   2026-09-05: `lib/tls.zig` — the standard
   library's TLS 1.3 client, and a TLS 1.3 server written on the
   standard library's crypto since it ships none, both over a transport

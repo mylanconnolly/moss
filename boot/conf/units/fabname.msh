@@ -1,0 +1,7 @@
+# A joiner-side check for the dynamic node map (rides the flogin drill's
+# fjoin profile): resolves node2.moss.test, which is served only from the
+# fabric's live membership, and logs the address. Non-essential oneshot —
+# it proves the overlay without gating the drill's shutdown.
+{ image: mshrun, script: scripts/fabname.msh, grant: [log, bootfs],
+  budget: { user: 20mb }, profiles: [fjoin], oneshot: true,
+  give: [{ tag: net, netview: net-cluster }] }

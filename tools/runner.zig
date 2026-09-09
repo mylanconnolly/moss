@@ -2783,6 +2783,15 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         reportFailure(spec.name, "node 2 never synced its clock from node 1 (by name)", log2);
         return false;
     }
+    // The dynamic node map: node2.moss.test is not in the static zone, so
+    // it resolves only because the cluster dnsd learned node 2's address
+    // from fabsvc's live membership — names track the mesh, not a list.
+    if (std.mem.indexOf(u8, n2, "fabname: node2 -> ") == null or
+        std.mem.indexOf(u8, n2, "10.77.0.2") == null)
+    {
+        reportFailure(spec.name, "node 2 never resolved its own name from live membership (dynamic node map)", log2);
+        return false;
+    }
     if (std.mem.indexOf(u8, n1, "home leased to a session on another node: alice") == null or
         std.mem.indexOf(u8, n1, "lease released on the home of alice") == null)
     {

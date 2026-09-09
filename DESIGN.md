@@ -1766,7 +1766,31 @@ from the fabric's member view — a later step). The proof rode an existing
 path: the SNTP sync's server became `node1.moss.test`, and because the
 clock retries resolution every ten seconds until it syncs, the
 boot-ordering race (dnsd not up when the clock first asks) resolves
-itself; the flogin drill's cross-node sync now goes by name end to end. What stood: liveness on monotonic
+itself; the flogin drill's cross-node sync now goes by name end to end.
+
+**The dynamic node map (2026-09-09): names track membership.** The later
+step above. `dnsd-cluster` is now handed a fabric front channel
+(`give: { tag: fabric, unit: fabsvc }`), and a `nodeN.moss.test` query
+consults fabsvc's live membership instead of a hardcoded list: an up
+member answers `10.77.0.N`/`fdcc::N` — built directly as the OS's address
+words by the same convention netsvc assigns itself (`nodeIp4`,
+`fdcc::<node>`), so `fdcc::10`'s hex-vs-decimal trap never arises — a
+member the node has seen but that is now down is NXDOMAIN, and a node the
+fabric has never heard of falls through to whatever the static zone says.
+So a name appears when its node joins and stops resolving when it leaves,
+across whatever set of nodes is actually up — no zone edit. `node1` stays
+in the static zone as the bootstrap seed name (a joiner resolves its seed
+before it is a member of anything, and the plain net-drill `dnsd`, which
+has no fabric, still needs it); every other `nodeN` is left to the
+overlay. The query fabsvc answers is `member_state{node}` → a single word
+(2 up, 1 down, 0 unknown), deliberately *not* the buffer-based `members`
+listing: `fab_buf` is one shared global that every client's `attach_buf`
+overwrites, so a third concurrent reader (dnsd, beside usersvc and the
+shell) would race it — a word reply needs no buffer and cannot. The proof
+(the flogin drill): `node2.moss.test`, removed from the static zone,
+resolves on node 2 only because node 2 is a live member of its own
+fabric — `fabname: node2 -> fdcc::2 10.77.0.2` in the log, a joiner-side
+oneshot the runner checks. What stood: liveness on monotonic
 time, certificates without expiry (a node with no RTC cannot judge
 one), records without expiry, the resolver's monotonic TTLs, shares
 that end with the session — the roadmap entry says why for each.

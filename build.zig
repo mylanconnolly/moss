@@ -601,6 +601,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/fabgui-app.msh",       "scripts/fabgui.msh",
         "conf/units/fabsig.msh",           "conf/units/fabsigtx.msh",
         "scripts/fabsig-wait.msh",         "scripts/fabsig-send.msh",
+        "conf/units/fabname.msh",          "scripts/fabname.msh",
         "conf/sessiongui/shell.msh",       "scripts/gui-shell.msh",
         "conf/skel/font.msh",
     }) |f| {

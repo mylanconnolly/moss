@@ -3,6 +3,10 @@
 # view, so the fabric's nodes reach one another by name (node1.moss.test)
 # instead of 10.77.0.N. Each node runs its own, serving the shared static
 # zone; the cluster resolver (net-cluster) points every node at its own
-# on loopback.
+# on loopback. It is also handed a fabric front channel: a `nodeN.moss.test`
+# name is answered from fabsvc's live membership (up -> 10.77.0.N/fdcc::N,
+# a known-but-down node -> NXDOMAIN), so cluster names track membership
+# rather than a hardcoded list.
 { image: dnsd, profiles: [system, flogin, fjoin, fabgui], grant: [log],
-  give: [{ tag: net, netview: net-cluster }, { tag: buf, shm: 1 }, { file: conf/dns.msh }] }
+  give: [{ tag: net, netview: net-cluster }, { tag: buf, shm: 1 },
+    { file: conf/dns.msh }, { tag: fabric, unit: fabsvc }] }

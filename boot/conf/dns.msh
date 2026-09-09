@@ -1,12 +1,19 @@
 # The zone dnsd serves: names under `zone`, each a list of addresses
 # (an IPv4 address answers A, an IPv6 one AAAA), all with one TTL.
+#
+# `node1` stays here as the fabric's bootstrap name (a joiner resolves its
+# seed before it is a member of anything). Every other `nodeN` is left to
+# the live overlay: the cluster dnsd, handed a fabric channel, answers
+# `nodeN.moss.test` from fabsvc's membership (10.77.0.N/fdcc::N when up,
+# NXDOMAIN when a known member is down), so those names track the mesh
+# instead of a hardcoded list. The plain net-drill dnsd has no fabric and
+# serves only what is written here.
 {
   zone: moss.test
   ttl:  300
   names: {
     www:   [::1]
     node1: [10.77.0.1, fdcc::1]
-    node2: [10.77.0.2, fdcc::2]
     tls:   [10.0.2.2]
   }
 }
