@@ -147,6 +147,11 @@ var scale: f32 = 1.0;
 var ui_base: f32 = 16;
 var title_base: f32 = 22;
 var mono_base: f32 = 15;
+// The appearance axes (theme + accessibility), from the same settings
+// layer; a GUI client queries these to resolve its colour palette.
+var theme: shared.Theme = .dark;
+var contrast: shared.Contrast = .normal;
+var colors: shared.ColorMode = .default;
 const NameBuf = struct {
     buf: [64]u8 = undefined,
     len: usize = 0,
@@ -262,17 +267,33 @@ fn applyLayers(user_text: []const u8) void {
     if (eff.get("ui_family")) |x| if (strOf(x)) |s| ui_fam.set(s);
     if (eff.get("title_family")) |x| if (strOf(x)) |s| title_fam.set(s);
     if (eff.get("mono_family")) |x| if (strOf(x)) |s| mono_fam.set(s);
+    // Appearance axes (default first, so a dropped key reverts).
+    theme = .dark;
+    contrast = .normal;
+    colors = .default;
+    if (eff.get("theme")) |x| if (strOf(x)) |s| {
+        if (std.mem.eql(u8, s, "light")) theme = .light;
+    };
+    if (eff.get("contrast")) |x| if (strOf(x)) |s| {
+        if (std.mem.eql(u8, s, "high")) contrast = .high;
+    };
+    if (eff.get("colors")) |x| if (strOf(x)) |s| {
+        if (std.mem.eql(u8, s, "cb-safe") or std.mem.eql(u8, s, "cb_safe")) colors = .cb_safe;
+    };
 }
 
 /// Log the effective UI size and scale (at boot, and after a reconfigure).
 fn logEffective(label: []const u8) void {
-    var b: [96]u8 = undefined;
+    var b: [128]u8 = undefined;
     const ui_eff: u32 = @intFromFloat(@round(ui_base * scale));
-    _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: {s} (ui {d}px, scale {d}.{d:0>2})", .{
+    _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: {s} (ui {d}px, scale {d}.{d:0>2}) {s}{s}{s}", .{
         label,
         ui_eff,
         @as(u32, @intFromFloat(scale)),
         @as(u32, @intFromFloat(@round(scale * 100))) % 100,
+        @tagName(theme),
+        if (contrast == .high) " high-contrast" else "",
+        if (colors == .cb_safe) " cb-safe" else "",
     }) catch "fontsvc: reconfigured");
 }
 
@@ -543,6 +564,9 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                 // Pick up a font dropped into the view since startup.
                 if (g_view != 0) scanView(g_view);
                 _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
+            },
+            .appearance => {
+                _ = usys.replyTyped(shared.FontResp, chan_h, .{ .appearance = .{ .flags = shared.packAppearance(theme, contrast, colors) } }, 0);
             },
             .reconfigure => |q| {
                 // A session pushes the logged-in user's font.msh (in the

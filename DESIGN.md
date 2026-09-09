@@ -2912,6 +2912,42 @@ graphical drill's pixel checks were updated to the new geometry. Real
 grayscale-antialiased type is still a later arc; this is the bounded pass
 that makes the GUI look intentional.
 
+**Theming and accessibility (as built, 2026-09-09).** The rendering pass
+made the GUI look intentional but hardcoded its colours; this makes the
+look a *theme* — a set of semantic tokens, not scattered literals — and
+turns colour into an accessibility surface. The mshl GUI runtime
+(`user/guicmds.zig`) now draws from a `Palette` of roles (bg, surface,
+raised-surface, text, muted text, title, border, focus, primary +
+primary-ink, danger + danger-ink, field, and the border/focus
+thicknesses), resolved from three *composable* appearance axes: theme
+(dark default / light), contrast (normal / high) and colours (default /
+colourblind-safe). They combine — dark + high-contrast + colourblind-safe
+is a real, distinct palette. High contrast pushes the ground and ink to
+the extremes and bolds the outlines and the focus ring; colourblind-safe
+swaps the accent and danger hues to the Okabe-Ito set (blue vs vermillion,
+distinguishable across the common CVDs — no red/green cue), and meaning is
+never carried by colour alone: a control's raised shape and its label say
+what it is too. Widgets got depth without gradients — a button is a filled
+box with a one-shade-lighter top edge and a one-shade-darker bottom edge
+(`shade` scales the fill's channels), a border, and, when focused, a
+bright ring; a `variant` field gives it semantic colour (primary = the
+accent, danger = destructive, else the neutral surface), so the login
+form's "sign in" and the settings "apply" read as the primary action and
+"log out" as the destructive one. The renderer also grew a small layout
+engine — `column` stacks, `row` flows left-to-right, buttons auto-size to
+their label — over the old single-column walk.
+
+Where the palette comes from is the honest part: fontsvc, already the
+appearance authority (it owns the accessibility *scale* and merges the
+system + per-user settings layers), now also parses the appearance axes
+from that same `conf/font.msh` layer and serves them (`FontReq.appearance`
+→ the packed flags). guicmds queries it as each window opens and resolves
+its palette, so a user's theme and their high-contrast / colourblind-safe
+switches are *system-wide* (every GUI, the greeter included) and ride the
+same per-user push the font scale does — set them in your `conf/font.msh`
+and the next login (or a live `sessionfont` push) recolours the whole
+session. The settings UI grows the runtime toggles next.
+
 **The system font service (as built, 2026-09-08).** The bitmap font was
 the ceiling on how the GUI could look; real type meant a vector-font
 stack, and the shape it took is a *service every text program goes

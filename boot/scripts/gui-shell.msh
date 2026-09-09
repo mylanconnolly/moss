@@ -34,8 +34,8 @@ def panel [scale] {
               { kind: "label", text: ("scale " + (str $state.scale)) }
               { kind: "button", id: "smaller", label: "smaller" }
               { kind: "button", id: "larger", label: "larger" }
-              { kind: "button", id: "apply", label: "apply" }
-              { kind: "button", id: "logout", label: "log out" }
+              { kind: "button", id: "apply", label: "apply", variant: "primary" }
+              { kind: "button", id: "logout", label: "log out", variant: "danger" }
             ]
           }
         })

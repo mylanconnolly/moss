@@ -831,7 +831,31 @@ pub const FontReq = union(enum(u64)) {
     /// the logged-in user's scale/sizes/families to the shared service.
     /// `len` 0 reverts to the system layer alone (logout). Reply `ok`.
     reconfigure: struct { len: u64 },
+    /// The effective appearance (theme + accessibility) from the settings
+    /// layer, so a GUI client can resolve its palette from the same
+    /// system/user layers that carry the font scale. Reply `appearance`.
+    appearance: void,
 };
+
+/// The appearance settings a GUI resolves its colour palette from — three
+/// independent axes, so they compose (e.g. dark + high-contrast +
+/// colourblind-safe). Carried in the same settings layer as the font
+/// scale (conf/font.msh), served by fontsvc, packed into one word.
+pub const Theme = enum(u8) { dark = 0, light = 1 };
+pub const Contrast = enum(u8) { normal = 0, high = 1 };
+pub const ColorMode = enum(u8) { default = 0, cb_safe = 1 };
+pub fn packAppearance(t: Theme, c: Contrast, m: ColorMode) u64 {
+    return @as(u64, @intFromEnum(t)) | (@as(u64, @intFromEnum(c)) << 8) | (@as(u64, @intFromEnum(m)) << 16);
+}
+pub fn apTheme(flags: u64) Theme {
+    return if (flags & 0xff == @intFromEnum(Theme.light)) .light else .dark;
+}
+pub fn apContrast(flags: u64) Contrast {
+    return if ((flags >> 8) & 0xff == @intFromEnum(Contrast.high)) .high else .normal;
+}
+pub fn apColors(flags: u64) ColorMode {
+    return if ((flags >> 16) & 0xff == @intFromEnum(ColorMode.cb_safe)) .cb_safe else .default;
+}
 
 pub const FontResp = union(enum(u64)) {
     ok: void,
@@ -843,6 +867,8 @@ pub const FontResp = union(enum(u64)) {
     /// Role metrics (device px): the effective size, the line height, and
     /// the ascent (baseline offset from the top of a line).
     metrics: struct { px: u64, line: u64, ascent: u64 },
+    /// The effective appearance, packed by `packAppearance`.
+    appearance: struct { flags: u64 },
     font_err: struct { code: u64 },
 };
 

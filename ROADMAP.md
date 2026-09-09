@@ -680,11 +680,25 @@ is a plan.
     each widget's scanout centre, the host clicks increment then quit, and
     the counter reaches count=1 by click alone. Pointer input now runs the
     whole stack: tablet → inputsvc → compositor cursor + hit-test → routed
-    event → the mshl widget under it. Remaining GUI/font work: richer
-    layout, the fabric-remote GUI (subpixel deliberately deferred — only
-    pays off at 1:1 on a real panel, not the VNC/2× dev path). (Automatic
-    per-user font scale on login + the settings UI landed 2026-09-09 — see
-    the font arc.)
+    event → the mshl widget under it. ✅ Theming + accessibility (landed
+    2026-09-09): the mshl GUI runtime draws from a semantic Palette (bg/
+    surface/text/muted/title/border/focus/primary/danger/field + border &
+    focus thickness) resolved from three composable appearance axes — theme
+    (dark default/light), contrast (normal/high), colours (default/cb-safe,
+    Okabe-Ito). High contrast bolds ground/ink/outlines/focus; cb-safe
+    swaps accent+danger to colourblind-safe hues (blue vs vermillion, no
+    red/green cue); meaning never colour-only (raised shape + label too).
+    Widgets got depth (top-highlight/bottom-shade + border via `shade`),
+    semantic button `variant` (primary/danger/default), and a small layout
+    engine (row flows, column stacks, buttons auto-size). The palette comes
+    from fontsvc (the appearance authority — it owns scale + merges the
+    settings layers): it parses theme/contrast/colours from conf/font.msh
+    and serves FontReq.appearance; guicmds resolves it per window open, so
+    a user's theme + a11y switches are system-wide and ride the same push
+    as the scale. Remaining GUI/font work: settings-UI toggles for the
+    appearance axes (next), the fabric-remote GUI (subpixel deferred — only
+    pays off at 1:1 on a real panel). (Automatic per-user font scale on
+    login + the settings UI landed 2026-09-09 — see the font arc.)
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view

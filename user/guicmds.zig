@@ -106,16 +106,111 @@ const win_y = (768 - win_h) / 2; // 154
 const pad = 24; // window inset for content
 
 // Colours as X<<24 | R<<16 | G<<8 | B, so a screendump reads them as RGB.
-const c_bg: u32 = 0x0016_1a2e; // a deep slate window ground
-const c_fg: u32 = 0x00E0_E0E0; // label text
-const c_title: u32 = 0x0066_99FF; // the title line
-const c_rule: u32 = 0x0033_3d55; // the rule under the title
-const c_btn: u32 = 0x0088_BBFF; // an unfocused button's label + outline
-const c_btn_bg: u32 = 0x001e_2740; // an unfocused button's fill
-const c_focus_bg: u32 = 0x0022_66CC; // the focused widget's highlight
-const c_focus_fg: u32 = 0x00FF_FFFF;
-const c_field_bg: u32 = 0x0022_2838; // an unfocused field's value box
-const c_field_edge: u32 = 0x003a_445e; // a field/button box outline
+// ----------------------------------------------------------- the palette
+//
+// A GUI's look is a set of SEMANTIC tokens, not scattered literals, so the
+// same widget code renders every theme. The tokens are resolved from three
+// composable appearance axes (theme dark/light, contrast normal/high,
+// colours default/colourblind-safe) served by fontsvc from the settings
+// layer — so a user's choice (and the high-contrast / colourblind-safe
+// accessibility switches) reaches every GUI system-wide. Colours are
+// 0x00RRGGBB (XRGB, read straight by a screendump).
+
+const Palette = struct {
+    bg: u32, // the window ground
+    surface: u32, // an elevated area (titlebar, cards)
+    surface_hi: u32, // a raised element's fill (a default button)
+    text: u32, // body text
+    text_muted: u32, // secondary text (field labels, hints)
+    title: u32, // the title / strong heading
+    border: u32, // element outlines, the titlebar rule
+    focus: u32, // the focus ring (never the only cue — focus also lifts)
+    primary: u32, // the primary action's fill
+    primary_ink: u32, // text on `primary`
+    danger: u32, // a destructive action's fill
+    danger_ink: u32, // text on `danger`
+    field_bg: u32, // an inset text field
+    border_w: usize, // outline thickness (thicker at high contrast)
+    focus_w: usize, // focus-ring thickness
+};
+
+/// Scale each RGB channel of an XRGB colour by num/den (clamped) — for a
+/// raised element's highlight (>1) and shade (<1) edges, so buttons read
+/// with a little depth without a gradient.
+fn shade(c: u32, num: u32, den: u32) u32 {
+    const r: u32 = @min(((c >> 16) & 0xff) * num / den, 255);
+    const g: u32 = @min(((c >> 8) & 0xff) * num / den, 255);
+    const b: u32 = @min((c & 0xff) * num / den, 255);
+    return (r << 16) | (g << 8) | b;
+}
+
+fn resolveTheme(theme: shared.Theme, contrast: shared.Contrast, cmode: shared.ColorMode) Palette {
+    // Semantic accent/danger: a normal set, or the Okabe-Ito colourblind-
+    // safe set (blue vs vermillion, distinguishable across common CVDs —
+    // no red/green cue). Meaning is never carried by colour alone; the
+    // labels and the raised shape say what a control is too.
+    const cb = cmode == .cb_safe;
+    var p: Palette = switch (theme) {
+        .dark => .{
+            .bg = 0x0f1420,
+            .surface = 0x1a2133,
+            .surface_hi = 0x2a3450,
+            .text = 0xe6e9f0,
+            .text_muted = 0x9aa4bd,
+            .title = 0xf0f3fa,
+            .border = 0x39435e,
+            .focus = if (cb) 0x56b4e9 else 0x5aa2ff,
+            .primary = if (cb) 0x0072b2 else 0x3d7dff,
+            .primary_ink = 0xffffff,
+            .danger = if (cb) 0xd55e00 else 0xe5484d,
+            .danger_ink = 0xffffff,
+            .field_bg = 0x121a2b,
+            .border_w = 1,
+            .focus_w = 3,
+        },
+        .light => .{
+            .bg = 0xf2f4f8,
+            .surface = 0xffffff,
+            .surface_hi = 0xe7ebf2,
+            .text = 0x1a1f2b,
+            .text_muted = 0x5c6577,
+            .title = 0x0f1420,
+            .border = 0xc9d0dd,
+            .focus = if (cb) 0x0072b2 else 0x2563eb,
+            .primary = if (cb) 0x0072b2 else 0x2563eb,
+            .primary_ink = 0xffffff,
+            .danger = if (cb) 0xd55e00 else 0xdc2626,
+            .danger_ink = 0xffffff,
+            .field_bg = 0xffffff,
+            .border_w = 1,
+            .focus_w = 3,
+        },
+    };
+    // High contrast: push ground and ink to the extremes, bolden the
+    // outlines and the focus ring, and keep the accents bright and pure.
+    if (contrast == .high) {
+        const dark = theme == .dark;
+        p.bg = if (dark) 0x000000 else 0xffffff;
+        p.surface = p.bg;
+        p.surface_hi = p.bg;
+        p.field_bg = p.bg;
+        p.text = if (dark) 0xffffff else 0x000000;
+        p.text_muted = p.text;
+        p.title = p.text;
+        p.border = p.text;
+        p.focus = if (dark) 0xffff00 else 0x0000ff;
+        p.primary = if (cb) 0x009e73 else (if (dark) 0x2ea3ff else 0x0000cc);
+        p.primary_ink = if (dark) 0x000000 else 0xffffff;
+        p.danger = if (cb) 0xd55e00 else (if (dark) 0xff5b5b else 0xcc0000);
+        p.danger_ink = if (dark) 0x000000 else 0xffffff;
+        p.border_w = 2;
+        p.focus_w = 5;
+    }
+    return p;
+}
+
+// The live palette, refreshed from fontsvc before each render.
+var pal: Palette = resolveTheme(.dark, .normal, .default);
 
 var px: [*]volatile u32 = undefined; // the mapped surface, win_w*win_h
 var surf: u64 = 0;
@@ -309,6 +404,21 @@ fn fontReady() void {
     font_ok = true;
 }
 
+/// Refresh the palette from fontsvc's effective appearance (theme +
+/// accessibility), so a GUI follows the system/user settings and a live
+/// change is picked up when the window next opens. A no-op without a font
+/// service — the compiled-in dark default stands.
+fn refreshAppearance() void {
+    if (font_chan == 0) return;
+    switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .appearance, 0)) {
+        .ok => |rep| switch (rep) {
+            .appearance => |ap| pal = resolveTheme(shared.apTheme(ap.flags), shared.apContrast(ap.flags), shared.apColors(ap.flags)),
+            else => {},
+        },
+        .err => {},
+    }
+}
+
 /// Lay out `s` in `role` through fontsvc: the glyph run lands in `font_buf`
 /// and the pen width is returned (0 on failure). Leaves the run in the
 /// buffer for a following `blitRun` — no `layout` may intervene.
@@ -396,82 +506,148 @@ fn strField(rec: mshl.Record, key: []const u8) []const u8 {
 
 /// Render one view tree into `focusables`, highlight the focused widget,
 /// and return the number of focusable widgets.
+const Size = struct { w: usize, h: usize };
+
+const gap = 14; // vertical/horizontal space between siblings
+const bpx = 18; // button horizontal padding
+const bpy = 9; // button vertical padding
+const fpx = 12; // field horizontal padding
+const fpy = 9; // field vertical padding
+
+// Focus recording during a layout pass (draw order over the tree).
+var nfoc: usize = 0;
+var sel_focus: usize = 0;
+
+/// Draw the widget tree and return the number of focusable widgets. The
+/// window is a titlebar over a content area laid out by `drawNode`
+/// (columns stack, rows flow), everything coloured from `pal`.
 fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
-    fillAll(c_bg);
-    var y: usize = pad;
-    if (title.len > 0) {
-        drawStr(pad, y, R_TITLE, title, c_title, c_bg);
-        y += lineOf(R_TITLE) + 10;
-        fillRect(pad, y, win_w - 2 * pad, 2, c_rule); // a rule under the title
-        y += 20;
-    }
-    var n: usize = 0;
+    fillAll(pal.bg);
+    sel_focus = focus;
+    nfoc = 0;
+    // Titlebar: a raised bar with the title and a bottom rule.
+    const title_h = lineOf(R_TITLE) + 2 * 14;
+    fillRect(0, 0, win_w, title_h, pal.surface);
+    fillRect(0, title_h, win_w, pal.border_w, pal.border);
+    if (title.len > 0) drawStr(pad, (title_h - lineOf(R_TITLE)) / 2, R_TITLE, title, pal.title, pal.surface);
+    // Content area below the titlebar.
+    _ = drawNode(tree, pad, title_h + pad, win_w - 2 * pad);
+    return nfoc;
+}
+
+/// Lay out and draw a node at (x, y) within `avail_w`, returning its size.
+/// `column` stacks children, `row` flows them left-to-right; leaves are
+/// label / button / field.
+fn drawNode(node: Value, x: usize, y: usize, avail_w: usize) Size {
+    if (node != .record) return .{ .w = 0, .h = 0 };
+    const rec = node.record;
+    const kind = strField(rec, "kind");
     const children: []const Value = kids: {
-        if (tree != .record) break :kids &.{};
-        const c = tree.record.get("children") orelse break :kids &.{};
+        const c = rec.get("children") orelse break :kids &.{};
         break :kids if (c == .list) c.list else &.{};
     };
-    for (children) |child| {
-        if (child != .record) continue;
-        const rec = child.record;
-        const kind = strField(rec, "kind");
-        const focused = n < focusables.len and n == focus;
-        if (std.mem.eql(u8, kind, "label")) {
-            drawStr(pad, y, R_UI, strField(rec, "text"), c_fg, c_bg);
-            y += lineOf(R_UI) + 8;
-        } else if (std.mem.eql(u8, kind, "button")) {
-            // A padded, outlined box; filled and brightly outlined when
-            // focused, a quiet fill otherwise — a button that reads as one.
-            const label = strField(rec, "label");
-            const bpx = 18; // horizontal padding inside the button
-            const bpy = 8; // vertical padding
-            const bw = strW(R_UI, label) + 2 * bpx;
-            const bh = lineOf(R_UI) + 2 * bpy;
-            const fill = if (focused) c_focus_bg else c_btn_bg;
-            const edge = if (focused) c_focus_fg else c_field_edge;
-            const ink = if (focused) c_focus_fg else c_btn;
-            fillRect(pad, y, bw, bh, fill);
-            strokeRect(pad, y, bw, bh, edge, 2);
-            drawStr(pad + bpx, y + bpy, R_UI, label, ink, fill);
-            if (n < focusables.len) {
-                focusables[n] = .{ .id = strField(rec, "id"), .is_field = false, .bx = pad, .by = y, .bw = bw, .bh = bh };
-                n += 1;
-            }
-            y += bh + 16;
-        } else if (std.mem.eql(u8, kind, "field")) {
-            // A label over a full-width, outlined value box holding the
-            // live text (a caret when focused). Password fields show dots.
-            const label = strField(rec, "label");
-            const id = strField(rec, "id");
-            const fb = fieldFor(id, strField(rec, "value"));
-            drawStr(pad, y, R_UI, label, c_fg, c_bg);
-            y += lineOf(R_UI) + 6;
-            const fpy = 8; // vertical padding inside the box
-            const bh = lineOf(R_UI) + 2 * fpy;
-            const bw = win_w - 2 * pad;
-            const box_bg = if (focused) c_focus_bg else c_field_bg;
-            fillRect(pad, y, bw, bh, box_bg);
-            strokeRect(pad, y, bw, bh, if (focused) c_focus_fg else c_field_edge, 2);
-            const tx = pad + 12;
-            const ty = y + fpy;
-            const secret = rec.get("secret") != null and (rec.get("secret").?).asBool();
-            var dots: [64]u8 = undefined;
-            const shown: []const u8 = if (secret) blk: {
-                const mlen = @min(fb.len, dots.len);
-                for (0..mlen) |i| dots[i] = '*';
-                break :blk dots[0..mlen];
-            } else fb.buf[0..fb.len];
-            drawStr(tx, ty, R_UI, shown, c_fg, box_bg);
-            // A caret: a thin bar just past the text (cleaner than a glyph).
-            if (focused) fillRect(tx + strW(R_UI, shown) + 1, ty, 2, lineOf(R_UI), c_focus_fg);
-            if (n < focusables.len) {
-                focusables[n] = .{ .id = id, .is_field = true, .bx = pad, .by = y, .bw = bw, .bh = bh };
-                n += 1;
-            }
-            y += bh + 16;
+    if (std.mem.eql(u8, kind, "row")) {
+        var xx = x;
+        var maxh: usize = 0;
+        for (children) |child| {
+            const sz = drawNode(child, xx, y, avail_w);
+            xx += sz.w + gap;
+            if (sz.h > maxh) maxh = sz.h;
         }
+        return .{ .w = if (xx > x + gap) xx - x - gap else 0, .h = maxh };
     }
-    return n;
+    if (std.mem.eql(u8, kind, "column") or children.len != 0) {
+        var yy = y;
+        for (children) |child| {
+            const sz = drawNode(child, x, yy, avail_w);
+            yy += sz.h + gap;
+        }
+        return .{ .w = avail_w, .h = if (yy > y + gap) yy - y - gap else 0 };
+    }
+    if (std.mem.eql(u8, kind, "label")) return drawLabel(rec, x, y);
+    if (std.mem.eql(u8, kind, "button")) return drawButton(rec, x, y);
+    if (std.mem.eql(u8, kind, "field")) return drawField(rec, x, y, avail_w);
+    return .{ .w = 0, .h = 0 };
+}
+
+fn drawLabel(rec: mshl.Record, x: usize, y: usize) Size {
+    const text = strField(rec, "text");
+    const muted = rec.get("muted") != null and (rec.get("muted").?).asBool();
+    const strong = std.mem.eql(u8, strField(rec, "role"), "title");
+    const role: u64 = if (strong) R_TITLE else R_UI;
+    const ink = if (strong) pal.title else if (muted) pal.text_muted else pal.text;
+    drawStr(x, y, role, text, ink, pal.bg);
+    return .{ .w = strW(role, text), .h = lineOf(role) };
+}
+
+/// A raised button: a filled box with a lighter top edge and a darker
+/// bottom edge (a little depth, not flat), a border, and — when focused —
+/// a bright ring plus a lift. `variant` gives it semantic colour: primary
+/// (the accent), danger (destructive), or the neutral surface default.
+fn drawButton(rec: mshl.Record, x: usize, y: usize) Size {
+    const label = strField(rec, "label");
+    const variant = strField(rec, "variant");
+    const focused = nfoc == sel_focus;
+    const w = strW(R_UI, label) + 2 * bpx;
+    const h = lineOf(R_UI) + 2 * bpy;
+
+    var fill: u32 = pal.surface_hi;
+    var ink: u32 = pal.text;
+    if (std.mem.eql(u8, variant, "primary")) {
+        fill = pal.primary;
+        ink = pal.primary_ink;
+    } else if (std.mem.eql(u8, variant, "danger")) {
+        fill = pal.danger;
+        ink = pal.danger_ink;
+    }
+    fillRect(x, y, w, h, fill);
+    // Depth: a highlight along the top, a shade along the bottom.
+    fillRect(x, y, w, 2, shade(fill, 5, 4));
+    if (h > 2) fillRect(x, y + h - 2, w, 2, shade(fill, 3, 4));
+    strokeRect(x, y, w, h, pal.border, pal.border_w);
+    drawStr(x + bpx, y + bpy, R_UI, label, ink, fill);
+    if (focused) strokeRect(x, y, w, h, pal.focus, pal.focus_w);
+    if (nfoc < focusables.len) {
+        focusables[nfoc] = .{ .id = strField(rec, "id"), .is_field = false, .bx = x, .by = y, .bw = w, .bh = h };
+        nfoc += 1;
+    }
+    return .{ .w = w, .h = h };
+}
+
+/// A text field: a muted label over an inset value box (a darker fill with
+/// a bright caret when focused). A `secret` field shows dots.
+fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
+    const label = strField(rec, "label");
+    const id = strField(rec, "id");
+    const fb = fieldFor(id, strField(rec, "value"));
+    const focused = nfoc == sel_focus;
+    var yy = y;
+    if (label.len > 0) {
+        drawStr(x, yy, R_UI, label, pal.text_muted, pal.bg);
+        yy += lineOf(R_UI) + 6;
+    }
+    const bh = lineOf(R_UI) + 2 * fpy;
+    fillRect(x, yy, avail_w, bh, pal.field_bg);
+    strokeRect(x, yy, avail_w, bh, pal.border, pal.border_w);
+    const tx = x + fpx;
+    const ty = yy + fpy;
+    const secret = rec.get("secret") != null and (rec.get("secret").?).asBool();
+    var dots: [64]u8 = undefined;
+    const shown: []const u8 = if (secret) blk: {
+        const mlen = @min(fb.len, dots.len);
+        for (0..mlen) |i| dots[i] = '*';
+        break :blk dots[0..mlen];
+    } else fb.buf[0..fb.len];
+    drawStr(tx, ty, R_UI, shown, pal.text, pal.field_bg);
+    if (focused) {
+        fillRect(tx + strW(R_UI, shown) + 1, ty, 2, lineOf(R_UI), pal.focus);
+        strokeRect(x, yy, avail_w, bh, pal.focus, pal.focus_w);
+    }
+    if (nfoc < focusables.len) {
+        focusables[nfoc] = .{ .id = id, .is_field = true, .bx = x, .by = yy, .bw = avail_w, .bh = bh };
+        nfoc += 1;
+    }
+    return .{ .w = avail_w, .h = (yy - y) + bh };
 }
 
 // ---------------------------------------------------- surface + input
@@ -694,6 +870,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     defer closeSurface();
     resetFields();
     if (!font_ok) fontReady(); // attach the system font once (bitmap fallback if absent)
+    refreshAppearance(); // resolve the palette from the system/user settings
 
     var focus: usize = 0;
     var announced = false;

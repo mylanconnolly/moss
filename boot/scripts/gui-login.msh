@@ -14,7 +14,7 @@ let final = (gui {
             { kind: "label", text: $state.msg }
             { kind: "field", id: "user", label: "user" }
             { kind: "field", id: "pass", label: "pass", secret: true }
-            { kind: "button", id: "login", label: "log in" }
+            { kind: "button", id: "login", label: "log in", variant: "primary" }
           ]
         }
       })

@@ -16,7 +16,7 @@ let creds = (gui {
             { kind: "label", text: "sign in to moss" }
             { kind: "field", id: "user", label: "user" }
             { kind: "field", id: "pass", label: "pass", secret: true }
-            { kind: "button", id: "login", label: "sign in" }
+            { kind: "button", id: "login", label: "sign in", variant: "primary" }
           ]
         }
       })
