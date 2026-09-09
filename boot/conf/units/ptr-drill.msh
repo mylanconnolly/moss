@@ -1,0 +1,16 @@
+# The pointer driver drill (profile ptr): inputsvc in pointer-drill mode
+# (arg 3) reads a virtio-input tablet — absolute position and buttons. The
+# host moves the cursor and clicks over QMP; the driver logs each frame
+# and, once it has seen a left-button press, exits — ending the boot with
+# a clean shutdown + leak check. The tablet is the second input device
+# (index 1); the keyboard, present but unclaimed here, is index 0.
+{
+  image:     inputsvc
+  arg:       3
+  budget:    { user: 8mb }
+  profiles:  [ptr]
+  essential: true
+  give: [
+    { tag: device, device: input, index: 1 }
+  ]
+}

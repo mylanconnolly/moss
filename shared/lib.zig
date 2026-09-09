@@ -659,9 +659,12 @@ pub const CapTag = enum(u64) {
     /// rasterizes text through it (shared glyph atlas), so type is
     /// consistent and scaled the same everywhere.
     font = 25,
+    /// A pointer service's channel (inputsvc in pointer mode): the
+    /// compositor reads the tablet's absolute position + buttons over it.
+    ptr = 26,
 };
 
-pub const cap_tag_count = 26;
+pub const cap_tag_count = 27;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -877,6 +880,22 @@ pub const ConsResp = union(enum(u64)) {
     ok: void,
     n: struct { n: u64 },
     cons_err: struct { code: u64 },
+};
+
+/// The pointer service — inputsvc in pointer mode, driving a virtio-input
+/// tablet (absolute coordinates). A `read` blocks until the next pointer
+/// frame and returns the absolute position (0..32767 on each axis, the
+/// tablet's range) and the button bitmask (bit0 left, bit1 right, bit2
+/// middle). The compositor scales the position to the scanout and
+/// hit-tests; keeping the raw device range here leaves inputsvc unaware of
+/// the display geometry.
+pub const PtrReq = union(enum(u64)) {
+    read: void,
+};
+
+pub const PtrResp = union(enum(u64)) {
+    moved: struct { x: u64, y: u64, buttons: u64 },
+    ptr_err: struct { code: u64 },
 };
 
 // ---------------------------------------------------------------- entropy
@@ -1696,7 +1715,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

@@ -10,10 +10,10 @@
 # and "IBM Plex Mono"; "IBM Plex Serif" ships in assets/available as an
 # example a user can install.
 {
-  scale: 1.0
-  ui:    16
-  title: 22
-  mono:  15
+  scale:        1.0
+  ui:           16
+  title:        22
+  mono:         15
   ui_family:    "IBM Plex Sans"
   title_family: "IBM Plex Sans"
   mono_family:  "IBM Plex Mono"

@@ -2529,6 +2529,33 @@ can be in flight at once. The drill also stands as the regression guard: on
 the old synchronous compositor the parked read would wedge the mover, and
 the boot would hang instead of finishing.
 
+### Pointer input
+
+**The tablet driver (as built, 2026-09-09).** The whole input stack was
+keyboard-only; a mouse is the biggest missing UI primitive. The device
+choice is a **virtio tablet** (`virtio-tablet-pci`), not a mouse: a tablet
+reports *absolute* position (EV_ABS, 0..32767 per axis), so there is no
+pointer acceleration or warp to model — the position maps straight to the
+scanout. A tablet is a second `virtio-input` device beside the keyboard,
+and the device model already carries it: root enumerates every PCI device
+and hands init all of them, and init files devices by kind at the next
+free index, so two `input` devices land at `input[0]` (keyboard) and
+`input[1]` (tablet) with no kernel change — a unit addresses the tablet
+with `give { device: input, index: 1 }`. `inputsvc` grew two pointer modes
+beside its two keyboard ones (one binary, the device the unit gives decides
+which it is): a **pointer serve** mode reads the tablet and answers
+`PtrReq.read` with the current absolute position and button bitmask (bit0
+left), and a **pointer drill** mode logs frames. It accumulates EV_ABS
+position and EV_KEY buttons across an event group and, on EV_SYN, pushes a
+frame into a small ring that **coalesces pure moves but never a button
+change** — a fast click (down then up) between two reads is preserved,
+while a stream of moves collapses to the latest, so the reader is never
+flooded and never misses a press. The raw device range (0..32767) crosses
+the wire unscaled; the compositor, which knows the display geometry, does
+the scaling and hit-testing. Drilled (`ptr`): the host moves the cursor to
+the tablet's centre and clicks over QMP (`input-send-event` `abs`+`btn`),
+and the driver logs the frame at 16384 and the press.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

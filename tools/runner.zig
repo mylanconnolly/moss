@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer };
 
 const Spec = struct {
     name: []const u8,
@@ -67,6 +67,7 @@ const specs = [_]Spec{
     .{ .name = "gpu", .kind = .gpu, .pass = "gpu-test: PASS", .extra = "gpu: surface committed", .append = "profile=gpu" },
     .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .append = "profile=term" },
     .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
+    .{ .name = "ptr", .kind = .ptr, .pass = "ptr-test: PASS", .extra = "ptr: click", .append = "profile=ptr", .timeout_s = 120 },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
     .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
@@ -353,6 +354,21 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-qmp",
             try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
+        // The pointer drill: a keyboard (input index 0) then a tablet
+        // (index 1, the absolute pointer inputsvc drives), plus QMP to move
+        // the cursor and click.
+        .ptr => try args.appendSlice(gpa, &.{
+            "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+            "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
+            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+        }),
+        // The compositor pointer drill: a display, keyboard + tablet, QMP.
+        .pointer => try args.appendSlice(gpa, &.{
+            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+            "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+            "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
+            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+        }),
         // The graphical seat / focus / trusted-path drill: both a display
         // to render on and a keyboard to type into, plus QMP to type and
         // screendump.
@@ -399,6 +415,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .input) {
         if (!try inputInject(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .ptr) {
+        if (!try ptrInject(spec, log_path, polls)) return false;
     }
     if (spec.kind == .seat) {
         if (!try seatDrive(spec, log_path, polls)) return false;
@@ -581,6 +600,53 @@ fn termScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 /// two key presses over QMP. The driver decodes them, logs each keycode,
 /// and exits after the expected count — so a clean shutdown (the PASS)
 /// is itself the proof the events were received and decoded.
+/// The pointer drill: once inputsvc's tablet driver is ready, move the
+/// absolute cursor to the centre and click, then confirm the driver
+/// decoded a frame at that position and the left-button press.
+fn ptrInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "ptr: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the pointer driver never became ready", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Move to the centre of the tablet's 0..32767 range, then click.
+    if (!q.sendPointer(16384, 16384)) {
+        reportFailure(spec.name, "QMP could not move the pointer", log_path);
+        return false;
+    }
+    if (!q.sendClick(true) or !q.sendClick(false)) {
+        reportFailure(spec.name, "QMP could not click", log_path);
+        return false;
+    }
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        // The driver logs a frame at the injected position (16384) and,
+        // on the press, "ptr: click".
+        if (std.mem.indexOf(u8, content, "x=16384") != null and
+            std.mem.indexOf(u8, content, "ptr: click") != null) return true;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the pointer frames were not decoded", log_path);
+            return false;
+        }
+    }
+}
+
 fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     var n: u64 = 0;
     while (true) {
@@ -2342,6 +2408,19 @@ const Qmp = struct {
         if (!q.execute(down)) return false;
         const up = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":false,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{qcode}) catch return false;
         return q.execute(up);
+    }
+
+    /// Move the absolute pointer (a virtio tablet) to (x, y), each an
+    /// axis value in 0..32767. QEMU wants both axes in one event group.
+    fn sendPointer(q: *Qmp, x: u32, y: u32) bool {
+        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"abs\",\"data\":{{\"axis\":\"x\",\"value\":{d}}}}},{{\"type\":\"abs\",\"data\":{{\"axis\":\"y\",\"value\":{d}}}}}]}}}}", .{ x, y }) catch return false;
+        return q.execute(cmd);
+    }
+
+    /// Press or release the left pointer button.
+    fn sendClick(q: *Qmp, down: bool) bool {
+        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"btn\",\"data\":{{\"button\":\"left\",\"down\":{s}}}}}]}}}}", .{if (down) "true" else "false"}) catch return false;
+        return q.execute(cmd);
     }
 
     /// Type a line of lowercase letters, digits, spaces and newlines by

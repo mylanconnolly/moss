@@ -644,6 +644,21 @@ is a plan.
     Drilled (profile readers): a client parks a read while another
     keeps committing. Stage 5 is complete.
     The runner's QMP socket lands first, since stages 1–3 all lean on it.
+    ✅ Pointer input, stage A (landed 2026-09-09): a mouse cursor for the
+    GUI. The device is a virtio TABLET (absolute position, 0..32767 per
+    axis — no acceleration/warp to model), a second virtio-input device
+    beside the keyboard; root already hands init every device, so the two
+    land at input[0] (keyboard) and input[1] (tablet) with no kernel
+    change — a unit takes the tablet with `give { device: input, index: 1 }`.
+    inputsvc grew pointer serve + drill modes (one binary, the given device
+    decides): it accumulates EV_ABS/EV_KEY across a group and on EV_SYN
+    pushes a frame into a ring that coalesces pure moves but never a button
+    change (a fast click is never lost, moves never flood), answering
+    PtrReq.read with position + button bitmask. Drilled (profile ptr): the
+    host moves + clicks over QMP (input-send-event abs/btn), the driver
+    decodes the frame + press. Next: the compositor draws the cursor,
+    hit-tests, and routes clicks to the surface under it (stage B), then
+    the mshl GUI makes widgets clickable (stage C).
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view

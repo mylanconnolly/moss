@@ -1,14 +1,16 @@
-//! virtio-input (device type 18), in userspace — the keyboard driver. It
-//! posts device-writable buffers on the event queue and reads back
-//! `virtio_input_event`s (type, code, value); key presses are what a
-//! terminal wants. Same driver interface as the other virtio devices:
-//! device cap over the boot channel, IRQ-as-notification, DMA grant.
+//! virtio-input (device type 18), in userspace — the keyboard/pointer
+//! driver. It posts device-writable buffers on the event queue and reads
+//! back `virtio_input_event`s (type, code, value). Same driver interface
+//! as the other virtio devices: device cap over the boot channel,
+//! IRQ-as-notification, DMA grant.
 //!
-//! Two modes (arg): mode 1 is the stage-3 drill — decode a fixed number
-//! of presses, logging each keycode, then end the boot. Mode 0 is the
-//! real service — it maps keycodes to characters and serves them over the
-//! console protocol (`ConsReq.read`), so a terminal reads the keyboard
-//! the same way it reads any byte source (the graphical seat, stage 4).
+//! One binary, four modes (arg), so a keyboard and a tablet each run their
+//! own instance: 0 = keyboard serve (keycodes → characters, served over
+//! `ConsReq.read` so a terminal reads keys like any byte source); 1 =
+//! keyboard drill; 2 = pointer serve (a tablet's absolute position +
+//! buttons, served over `PtrReq.read` to the compositor); 3 = pointer
+//! drill. The device the unit gives decides which it is (a keyboard at
+//! `input` index 0, a tablet at index 1).
 
 const std = @import("std");
 const shared = @import("shared");
@@ -33,7 +35,13 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
     dev_h = setup.device(.input);
     if (dev_h == 0) usys.exit(169);
     bringUp(log_h);
-    if (role & 0xff == 1) drillLoop(log_h) else serveLoop(chan_h);
+    // role: 0 keyboard serve, 1 keyboard drill, 2 pointer serve, 3 pointer drill.
+    switch (role & 0xff) {
+        1 => drillLoop(log_h),
+        2 => servePointer(chan_h),
+        3 => drillPointer(log_h),
+        else => serveLoop(chan_h),
+    }
 }
 
 const desc_f_write = 2;
@@ -42,8 +50,16 @@ const q_event = 0;
 const q_num = 32; // event buffers in flight
 
 // virtio_input_event: { le16 type; le16 code; le32 value; } — 8 bytes.
+const ev_syn = 0; // EV_SYN (frames a group of events)
 const ev_key = 1; // EV_KEY
+const ev_abs = 3; // EV_ABS (the tablet's absolute axes)
 const ev_bytes = 8;
+// Absolute-axis codes and the pointer buttons a tablet reports.
+const abs_x = 0;
+const abs_y = 1;
+const btn_left = 0x110;
+const btn_right = 0x111;
+const btn_middle = 0x112;
 
 const Desc = extern struct { addr: u64, len: u32, flags: u16, next: u16 };
 
@@ -278,6 +294,132 @@ fn serveLoop(chan_h: u64) noreturn {
             },
             .write => {
                 _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 2 } }, 0);
+            },
+        }
+    }
+}
+
+// ------------------------------------------------- pointer (tablet) modes
+
+// A tablet reports absolute position on EV_ABS and buttons on EV_KEY,
+// framed by EV_SYN. We accumulate the current position/buttons across an
+// event group, and on each SYN push a frame into a small ring. Frames are
+// coalesced ONLY across position changes with the same button state, so a
+// fast click (button down then up) is never dropped by move traffic, while
+// a stream of pure moves collapses to the latest.
+var ptr_x: u32 = 0;
+var ptr_y: u32 = 0;
+var ptr_buttons: u32 = 0;
+
+const PtrFrame = struct { x: u32, y: u32, buttons: u32 };
+var pframes: [32]PtrFrame = undefined;
+var pf_head: usize = 0;
+var pf_tail: usize = 0;
+
+fn pushFrame() void {
+    // Coalesce into the last unread frame if the buttons match (a move).
+    if (pf_head != pf_tail) {
+        const last = (pf_tail + pframes.len - 1) % pframes.len;
+        if (pframes[last].buttons == ptr_buttons) {
+            pframes[last] = .{ .x = ptr_x, .y = ptr_y, .buttons = ptr_buttons };
+            return;
+        }
+    }
+    const nt = (pf_tail + 1) % pframes.len;
+    if (nt == pf_head) return; // full: drop the newest (moves are lossy)
+    pframes[pf_tail] = .{ .x = ptr_x, .y = ptr_y, .buttons = ptr_buttons };
+    pf_tail = nt;
+}
+
+fn applyPointerEvent(e: Event) void {
+    switch (e.etype) {
+        ev_abs => switch (e.code) {
+            abs_x => ptr_x = e.value,
+            abs_y => ptr_y = e.value,
+            else => {},
+        },
+        ev_key => {
+            const bit: u32 = switch (e.code) {
+                btn_left => 1,
+                btn_right => 2,
+                btn_middle => 4,
+                else => 0,
+            };
+            if (bit != 0) {
+                if (e.value != 0) ptr_buttons |= bit else ptr_buttons &= ~bit;
+            }
+        },
+        ev_syn => pushFrame(),
+        else => {},
+    }
+}
+
+fn drainPointer() void {
+    while (used_seen != usedIdx()) applyPointerEvent(nextEvent());
+    kick();
+}
+
+fn frameReady() bool {
+    return pf_head != pf_tail;
+}
+fn popFrame() PtrFrame {
+    const f = pframes[pf_head];
+    pf_head = (pf_head + 1) % pframes.len;
+    return f;
+}
+
+// -------------------------------------------------- mode 3: pointer drill
+
+fn drillPointer(log_h: u64) noreturn {
+    _ = usys.log(log_h, "ptr: ready");
+    var clicks: u64 = 0;
+    while (clicks < 1) {
+        while (!frameReady()) {
+            _ = usys.notifyWait(irq_notif);
+            _ = dev.isrRead();
+            drainPointer();
+        }
+        const f = popFrame();
+        var line: [48]u8 = undefined;
+        const s = std.fmt.bufPrint(&line, "ptr: x={d} y={d} b={d}", .{ f.x, f.y, f.buttons }) catch continue;
+        _ = usys.log(log_h, s);
+        if (f.buttons & 1 != 0) clicks += 1; // a left-button press
+    }
+    _ = usys.log(log_h, "ptr: click");
+    usys.exit(0);
+}
+
+// -------------------------------------------------- mode 2: pointer serve
+
+/// Serve the pointer protocol: a `read` blocks until the next pointer
+/// frame and returns the absolute position + button bitmask (single
+/// client, like the keyboard serve).
+fn servePointer(chan_h: u64) noreturn {
+    _ = usys.notifyBind(irq_notif);
+    while (true) {
+        const r = usys.recvMsg(chan_h);
+        if (r.err == .interrupted) {
+            _ = dev.isrRead();
+            drainPointer();
+            continue;
+        }
+        if (r.err == .peer_dead) usys.exit(0);
+        if (r.err != .ok) usys.exit(175);
+        const req = shared.decodeMsg(shared.PtrReq, r.data) orelse {
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
+            _ = usys.replyTyped(shared.PtrResp, chan_h, .{ .ptr_err = .{ .code = 1 } }, 0);
+            continue;
+        };
+        switch (req) {
+            .read => {
+                drainPointer();
+                while (!frameReady()) {
+                    _ = usys.notifyWait(irq_notif);
+                    _ = dev.isrRead();
+                    drainPointer();
+                }
+                const f = popFrame();
+                _ = usys.replyTyped(shared.PtrResp, chan_h, .{ .moved = .{ .x = f.x, .y = f.y, .buttons = f.buttons } }, 0);
             },
         }
     }

@@ -190,6 +190,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.ptr_test) {
+        _ = sched.spawn("boot-watch", ptrTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.gui_test) {
         _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -723,6 +728,13 @@ fn trustTestWorker(_: u64) void {
 /// block the serve loop (on the old synchronous compositor it would hang).
 fn readersTestWorker(_: u64) void {
     systemDrill("readers");
+}
+
+/// The pointer driver drill: a system boot under profile "ptr" — inputsvc
+/// in pointer mode reads a virtio-input tablet; the host moves the cursor
+/// and clicks over QMP, and inputsvc decodes the frames and the press.
+fn ptrTestWorker(_: u64) void {
+    systemDrill("ptr");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

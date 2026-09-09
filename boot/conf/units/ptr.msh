@@ -1,0 +1,13 @@
+# The pointer for the compositor: inputsvc in pointer serve mode (arg 2),
+# reading the virtio-input tablet's absolute position and buttons and
+# serving them over the pointer read protocol. Activated on demand by the
+# compositor (a `ptr` give). The tablet is input device index 1 (the
+# keyboard is index 0).
+{
+  image:  inputsvc
+  arg:    2
+  budget: { user: 8mb }
+  give: [
+    { tag: device, device: input, index: 1 }
+  ]
+}
