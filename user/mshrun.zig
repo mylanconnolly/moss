@@ -317,7 +317,11 @@ fn serveRemote(chan_h: u64) noreturn {
                     .value => .{ .value = .{ .len = n } },
                     .failed => .{ .failed = .{ .len = n } },
                 }, 0);
-                usys.exit(0); // one stage, one answer
+                // Keep serving: a one-shot `remote` caller tears the session
+                // down after its answer (peer_dead ends us), while a caller
+                // that holds the session — the fabric GUI — runs the stage
+                // again per event, paying the domain spawn only once. Each
+                // run reset the arena above, so runs do not accumulate.
             },
         }
     }

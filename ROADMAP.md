@@ -715,9 +715,16 @@ is a plan.
     profile (fabric client + graphical devices) running a counter with
     node:1; the app probes the mesh before opening, QMP fires inc×2 + quit,
     node 1 logs a remote stage per event, node 2 reports "fabgui: done
-    count=2" from the remote. Remaining GUI/font work: subpixel (deferred —
-    only pays off at 1:1 on a real panel); a persistent remote worker
-    (today each event spawns a fresh stage on the host). (Automatic per-user
+    count=2" from the remote. ✅ Persistent remote worker (landed
+    2026-09-09): the stage is spawned once when the window opens and reused
+    per event (mshrun's remote-stage loop no longer exits after one answer;
+    fabcmds.Stage open/call/close keeps the session, re-sending the small
+    app script + each event's input; the fabric proxies the kept session
+    like a remote home's), so the host pays the domain spawn once, not per
+    keystroke — node 1's log shows a single remote spawn for the session. An
+    unreachable node falls back to running the app in-process. Remaining
+    GUI/font work: subpixel (deferred — only pays off at 1:1 on a real
+    panel). (Automatic per-user
     font scale on login + the settings UI landed 2026-09-09 — see the font
     arc.)
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not

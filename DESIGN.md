@@ -3029,11 +3029,22 @@ view on node 1. The app script waits for the mesh (a `remote 1` probe
 retried like the fabric drill's) before opening the window, so the window
 appearing already proves the join and the first remote view. The runner
 presses increment twice and quit over QMP; each event round-trips to node
-1 (its log shows a `remote spawn request served … remote stage up` per
-event) and the final `fabgui: done count=2` — the count computed on node
-1 — comes back to node 2. A GUI you cannot tell is remote. (Each event
-spawns a fresh stage on the host today; a persistent remote worker is the
-obvious optimisation when it matters.)
+1 and the final `fabgui: done count=2` — the count computed on node 1 —
+comes back to node 2. A GUI you cannot tell is remote.
+
+The stage is *persistent*: opened once when the window opens and reused
+for every event, so node 1's log shows a single `remote spawn request
+served … remote stage up` for the whole session rather than one per
+event. `mshrun`'s remote-stage loop no longer exits after its one answer
+(a one-shot `remote` caller still ends it by tearing the session down —
+`peer_dead`); it resets its arena per run, so runs do not accumulate.
+`fabcmds.Stage` (open / call / close) spawns the stage once, re-sends the
+(small, unchanging) app script with each event's input on the kept
+session, and the fabric proxies that session across calls the same way a
+remote home's does. If the node is unreachable when the window opens, the
+runtime falls back to running the app in-process — its closures are
+present locally — a graceful degradation. The domain spawn on the host is
+paid once, not per keystroke.
 
 **The system font service (as built, 2026-09-08).** The bitmap font was
 the ceiling on how the GUI could look; real type meant a vector-font

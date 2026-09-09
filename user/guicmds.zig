@@ -55,6 +55,10 @@ var iso_src: []const u8 = "";
 // there each event. 0 = run in-process, as usual.
 var remote_node: u64 = 0;
 var app_src: []const u8 = "";
+// The persistent remote stage: spawned once on node `remote_node` when the
+// GUI opens, run per event, torn down when it closes — so the app's domain
+// is spawned on the host once, not per event.
+var remote_stage: ?fabcmds.Stage = null;
 
 // The system font service, when the host holds one: text is laid out and
 // rasterized there (a shared coverage atlas), so the GUI renders in the
@@ -881,18 +885,14 @@ fn wrapStep(it: *mshl.Interp, state: Value, ev: Value, apply: bool) mshl.Error!V
 /// Updates `state.*` and returns the view tree, or null on a fabric/app
 /// failure (the caller keeps the last good tree). Only data crosses.
 fn stepRemote(it: *mshl.Interp, state: *Value, ev: Value, apply: bool) mshl.Error!?Value {
+    if (remote_stage == null) return null;
     const in = try wrapStep(it, state.*, ev, apply);
-    const res = fabcmds.runRemote(fab_chan, it, remote_node, app_src, in) catch return null;
-    const r = switch (res) {
-        .result => |rp| rp,
-        else => return null,
-    };
-    if (!r.ok) {
+    const res = (try remote_stage.?.call(it, app_src, in)) orelse {
         _ = usys.log(log_h, "gui: the remote app failed");
         return null;
-    }
-    if (r.val != .record) return null;
-    const rec = r.val.record;
+    };
+    if (res != .record) return null;
+    const rec = res.record;
     const ns = rec.get("state") orelse return null;
     const tree = rec.get("tree") orelse return null;
     state.* = ns;
@@ -971,15 +971,25 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // tree that comes back. Needs a fabric cap and a 2-arg update / 1-arg
     // view (so we can reconstruct the worker); otherwise it runs locally.
     remote_node = 0;
+    remote_stage = null;
     if (fab_chan != 0) {
         if (spec.get("node")) |n| if (n == .int and n.int > 0) {
             if (try buildAppSrc(it, update.func, view.func)) |src| {
                 app_src = src;
-                remote_node = @intCast(n.int);
-                _ = usys.log(log_h, "gui: running the app on the fabric");
+                // Spawn the stage once; every event reuses it. If the node
+                // is unreachable, fall back to running the app in-process
+                // (its closures are here) — a graceful degradation.
+                remote_stage = fabcmds.Stage.open(fab_chan, @intCast(n.int));
+                if (remote_stage != null) {
+                    remote_node = @intCast(n.int);
+                    _ = usys.log(log_h, "gui: running the app on the fabric");
+                } else {
+                    _ = usys.log(log_h, "gui: the app's node is unreachable; running in-process");
+                }
             }
         };
     }
+    defer if (remote_stage) |*s| s.close();
 
     // Crash-isolate `update` in a worker domain when asked and able (and
     // not already remote): an app fault then kills only the worker, not

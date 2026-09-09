@@ -119,3 +119,81 @@ pub fn runRemote(chan: u64, it: *mshl.Interp, node: u64, script: []const u8, in_
 }
 
 pub const command_names = [_][]const u8{"remote"};
+
+/// A remote stage held open across calls — the fabric spawns the mshrun
+/// stage once and its session lives until `close`, so a caller that runs
+/// the same block many times (the fabric GUI, once per event) pays the
+/// domain spawn only once. Each `call` re-sends the script + input on the
+/// kept session; the stage resets its arena per run, so runs do not
+/// accumulate. Contrast `runRemote`, which spawns and tears down per call.
+pub const Stage = struct {
+    sess: u64, // the fabric-proxied stage channel
+    shm: u64, // our end of the twinned buffer
+    va: u64, // its mapping
+    buf: [*]u8,
+
+    /// Spawn a persistent stage on `node`, or null if the fabric could not
+    /// place it (node unreachable) or the buffer could not be attached.
+    pub fn open(chan: u64, node: u64) ?Stage {
+        const sess = switch (usys.callTypedCap(shared.FabReq, shared.FabResp, chan, .{ .remote_spawn = .{ .node = node, .image = @intFromEnum(shared.ImageId.mshrun), .arg = 1 } }, 0)) {
+            .ok => |r| switch (r.rep) {
+                .spawned => r.cap,
+                else => return null,
+            },
+            .err => return null,
+        };
+        if (sess == 0) return null;
+        const sh = usys.shmCreate(shared.fab_bulk_pages);
+        if (sh.err != .ok) {
+            _ = usys.capDrop(sess);
+            return null;
+        }
+        const m = usys.shmMap(sh.data[0]);
+        if (m.err != .ok) {
+            _ = usys.capDrop(sh.data[0]);
+            _ = usys.capDrop(sess);
+            return null;
+        }
+        switch (usys.callTyped(shared.RunReq, shared.RunResp, sess, .attach_buf, sh.data[0])) {
+            .ok => |rep| if (rep != .ok) {
+                _ = usys.shmUnmap(m.data[0]);
+                _ = usys.capDrop(sh.data[0]);
+                _ = usys.capDrop(sess);
+                return null;
+            },
+            .err => {
+                _ = usys.shmUnmap(m.data[0]);
+                _ = usys.capDrop(sh.data[0]);
+                _ = usys.capDrop(sess);
+                return null;
+            },
+        }
+        return .{ .sess = sess, .shm = sh.data[0], .va = m.data[0], .buf = @ptrFromInt(m.data[0]) };
+    }
+
+    pub fn close(self: *Stage) void {
+        _ = usys.capDrop(self.sess); // the stage sees peer_dead and exits
+        _ = usys.shmUnmap(self.va);
+        _ = usys.capDrop(self.shm);
+    }
+
+    /// Run `script` with `in_val` as `$in` on the open stage. Returns the
+    /// value on success, or null if the run failed or the session died —
+    /// the caller (the GUI viewer) keeps its last good frame.
+    pub fn call(self: *Stage, it: *mshl.Interp, script: []const u8, in_val: Value) mshl.Error!?Value {
+        if (!in_val.isData()) return null;
+        var in_text: std.ArrayList(u8) = .empty;
+        if (in_val != .nothing) try mshl.writeData(in_val, it.arena, &in_text);
+        const room = shared.fab_bulk_pages * 4096;
+        if (script.len + in_text.items.len > room) return null;
+        @memcpy(self.buf[0..script.len], script);
+        @memcpy(self.buf[script.len .. script.len + in_text.items.len], in_text.items);
+        return switch (usys.callTyped(shared.RunReq, shared.RunResp, self.sess, .{ .run = .{ .script_len = script.len, .input_len = in_text.items.len } }, 0)) {
+            .ok => |rep| switch (rep) {
+                .value => |v| if (v.len == 0) .nothing else try mshl.tableize(it.arena, try it.parseData(try it.arena.dupe(u8, self.buf[0..@min(v.len, room)]))),
+                else => null,
+            },
+            .err => null,
+        };
+    }
+};
