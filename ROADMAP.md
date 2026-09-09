@@ -341,12 +341,15 @@ is a plan.
   the wiped-disk drill); ✅ its speed (landed 2026-09-04: a 32 KB
   read-ahead window in the home service, 32 KB per exchange end to
   end, a cold 64 KB read from 55 ms to 4 ms, measured on every gate
-  run); still open: moving a home (an administrative action), a
+  run); ✅ publish and lookup from the language (landed 2026-09-07 with
+  the concurrency arc, not still pending: a script `publish`es a spawned
+  worker by name and others `lookup NODE "name"` + `call` it — the worker
+  is the typed-channel surface the old note waited for; `dial` reaches a
+  durable unit; drilled cross-node by svc-pub/fab-drill and locally by the
+  shell); still open: moving a home (an administrative action), a
   write-back cache beyond mossfs's own commit batching if a workload
-  ever asks, publish and lookup from the language
-  (a script serves no channel and a raw channel would be untyped — this
-  waits for a typed channel surface), more than one buffer per session,
-  notifications across nodes; (5) tooling, host-side in
+  ever asks, more than one buffer per session (the simultaneous-call
+  race), notifications across nodes; (5) tooling, host-side in
   tools/: ✅ a tree-sitter grammar (landed 2026-09-04:
   `tools/tree-sitter-mshl`, highlights, a corpus recorded from the
   language's examples, every `.msh` in the tree parsing clean), ✅ a
