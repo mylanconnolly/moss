@@ -84,7 +84,7 @@ const specs = [_]Spec{
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
-    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .extra2 = "fontsvc: reconfigured (ui 24px, scale 1.50)", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },

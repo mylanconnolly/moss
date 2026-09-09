@@ -1753,6 +1753,10 @@ pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with
 /// a display cap) runs when the user's home has no `conf/units/` of its own.
 pub const session_gui_unit_dir = "conf/sessiongui/";
+/// The home skeleton: files a session's init copies into a fresh home's
+/// `conf/` on first login (if absent), so a new user starts with config of
+/// their own — currently the per-user font layer (`conf/skel/font.msh`).
+pub const home_skel_dir = "conf/skel/";
 
 /// Unit files: `conf/units/<name>.msh` in the boot archive (served at
 /// boot/conf/units/ by fssvc) — mshl data literals init reads to spawn

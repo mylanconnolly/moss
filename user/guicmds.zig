@@ -79,6 +79,11 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "gui")) {
         return .{ .params = &.{.{ .name = "spec", .shape = .record }}, .input = .{ .optional = .record }, .ret = .any };
     }
+    // `sessionfont TEXT` pushes a user font layer (the text of a font.msh)
+    // to the shared font service for this session; no arg / "" reverts.
+    if (std.mem.eql(u8, name, "sessionfont")) {
+        return .{ .params = &.{.{ .name = "layer", .shape = .string, .optional = true }}, .input = .{ .optional = .string }, .ret = .any };
+    }
     return null;
 }
 
@@ -246,18 +251,40 @@ const R_TITLE: u64 = @intFromEnum(shared.FontRole.title);
 /// Attach to the font service once: our request/response buffer, the
 /// shared atlas (mapped read-only), and each role's metrics. Sets
 /// `font_ok`; on any failure we keep the bitmap fallback.
-fn fontReady() void {
-    if (font_chan == 0) return;
+/// Attach our request/response buffer to fontsvc, once. Both rendering
+/// (glyph runs) and the per-user layer push (`applyUserLayer`) stage
+/// through it, so either path may bring it up first.
+fn ensureFontBuf() bool {
+    if (font_chan == 0) return false;
+    if (font_buf_len != 0) return true;
     const sh = usys.shmCreate(2); // room for the glyph run of a line
-    if (sh.err != .ok) return;
+    if (sh.err != .ok) return false;
     const m = usys.shmMap(sh.data[0]);
-    if (m.err != .ok) return;
+    if (m.err != .ok) return false;
     font_buf = @ptrFromInt(m.data[0]);
     font_buf_len = m.data[1] * 4096;
-    switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
-        .ok => |ok| if (ok.rep != .ok) return,
-        .err => return,
-    }
+    return switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
+        .ok => |ok| ok.rep == .ok,
+        .err => false,
+    };
+}
+
+/// Push the logged-in user's font layer to the shared font service for the
+/// life of this session — the per-user accessibility scale, merged over
+/// the system layer centrally so every text client (this GUI, a terminal)
+/// follows it. An empty layer reverts to the system default (logout). We
+/// do NOT read metrics here: `fontReady` (lazy, on the first render) reads
+/// the post-push metrics, so a push before the GUI opens is reflected.
+pub fn applyUserLayer(text: []const u8) void {
+    if (!ensureFontBuf()) return;
+    const n = @min(text.len, font_buf_len);
+    if (n > 0) @memcpy(font_buf[0..n], text[0..n]);
+    _ = usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .reconfigure = .{ .len = n } }, 0);
+}
+
+fn fontReady() void {
+    if (font_chan == 0) return;
+    if (!ensureFontBuf()) return;
     const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
         .ok => |ok| ok,
         .err => return,
@@ -612,6 +639,16 @@ fn callUpdate(it: *mshl.Interp, update: Value, state: Value, ev: Value) mshl.Err
 }
 
 pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
+    if (std.mem.eql(u8, name, "sessionfont")) {
+        const text: []const u8 = if (args.len > 0 and args[0] == .str)
+            args[0].str
+        else if (input != null and input.? == .str)
+            input.?.str
+        else
+            "";
+        applyUserLayer(text);
+        return Value.nothing;
+    }
     if (!std.mem.eql(u8, name, "gui")) return null;
     const spec: mshl.Record = if (args.len > 0 and args[0] == .record)
         args[0].record

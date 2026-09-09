@@ -1,0 +1,11 @@
+# The home skeleton's font preference: a fresh home is seeded with this
+# the first time its owner logs in (the session's init copies it in if the
+# home has none), so a new user starts with a font layer of their own that
+# they can edit — the per-user accessibility scale. It merges over the
+# system layer (conf/font.msh) in fontsvc: here only `scale` is set, so the
+# system's sizes and families carry through and every program's type grows
+# together. Ships larger than 1.0 so the per-user push is visible on first
+# login; a user who wants the system size sets `scale: 1.0` (or empties it).
+{
+  scale: 1.5
+}

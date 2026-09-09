@@ -628,6 +628,43 @@ fn loadSessionUnits() void {
     }
 }
 
+/// First login into a fresh home: copy the archive's home skeleton
+/// (`conf/skel/*`) into the home's `conf/` for any file it lacks, so a new
+/// user starts with config of their own — today the per-user font layer.
+/// An existing file is never touched: the user's own choice always wins.
+fn seedHomeSkel() void {
+    var ai = shared.marcIter(archive());
+    var made_conf = false;
+    while (ai.next()) |e| {
+        if (!std.mem.startsWith(u8, e.path, shared.home_skel_dir)) continue;
+        const base = e.path[shared.home_skel_dir.len..];
+        if (base.len == 0 or std.mem.indexOfScalar(u8, base, '/') != null) continue; // top-level files only
+        var pbuf: [96]u8 = undefined;
+        if (5 + base.len > pbuf.len) continue;
+        @memcpy(pbuf[0..5], "conf/");
+        @memcpy(pbuf[5 .. 5 + base.len], base);
+        const dest = pbuf[0 .. 5 + base.len];
+        switch (fsc.fsOpen(session_home, session_home_buf, dest, 0)) {
+            .fd => |fd| {
+                fsc.fsClose(session_home, fd); // already there — leave it
+                continue;
+            },
+            .err => {},
+        }
+        if (!made_conf) {
+            _ = fsc.fsMkdir(session_home, session_home_buf, "conf");
+            made_conf = true;
+        }
+        const fd = switch (fsc.fsOpen(session_home, session_home_buf, dest, 1)) {
+            .fd => |fd| fd,
+            .err => continue,
+        };
+        _ = fsc.fsWrite(session_home, session_home_buf, fd, e.data);
+        fsc.fsClose(session_home, fd);
+        logLine("init: seeded home config ", dest);
+    }
+}
+
 /// Read a whole small file from the home into the persistent text area.
 fn readHome(path: []const u8) ?[]const u8 {
     const fd = switch (fsc.fsOpen(session_home, session_home_buf, path, 0)) {
@@ -911,6 +948,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         if (session_home == 0) usys.exit(120);
         session_home_buf = @ptrFromInt(fsc.attachBuf(session_home).va);
         inline for (std.enums.values(shared.CapTag)) |t| session_caps[@intFromEnum(t)] = setup.cap(t);
+        seedHomeSkel(); // a fresh home gets its config skeleton (the font layer)
         loadSessionUnits();
         logLine("init: session for ", setup.arg());
     } else {

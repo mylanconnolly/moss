@@ -680,10 +680,9 @@ is a plan.
     each widget's scanout centre, the host clicks increment then quit, and
     the counter reaches count=1 by click alone. Pointer input now runs the
     whole stack: tablet → inputsvc → compositor cursor + hit-test → routed
-    event → the mshl widget under it. Remaining GUI/font work: automatic
-    per-user scale push on login (the post-login GUI shell now landed is
-    the natural place to read the user's own conf/font.msh), richer
-    layout, subpixel, a settings UI, the fabric-remote GUI.
+    event → the mshl widget under it. Remaining GUI/font work: richer
+    layout, subpixel, a settings UI, the fabric-remote GUI. (Automatic
+    per-user font scale on login landed 2026-09-09 — see the font arc.)
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view
@@ -851,10 +850,19 @@ is a plan.
     the system sizes, so scale 1.5 over ui:16 → effective 24px for every
     client. Drilled (profile fontscale): fontpush (the fontrescan-client
     idiom) reads a user layer, pushes it (ui→24px), reverts on logout
-    (→16px). Open: automatic push on login — the post-login GUI shell
-    (landed 2026-09-09, see the graphical console arc) runs as the user
-    and is the natural place to read their conf/font.msh and push it;
-    richer layout; fabric-remote GUI.
+    (→16px). ✅ Automatic push on login (landed 2026-09-09): the post-login
+    GUI shell (graphical console arc) runs as the user, so it reads its own
+    home conf/font.msh and pushes it — automatically, reverting on logout.
+    Two pieces, both in the user's session domain: a HOME SKELETON (the
+    session's init, mode 3, copies the archive's conf/skel/* into a fresh
+    home's conf/ on first login for any file it lacks — today font.msh, a
+    { scale: 1.5 } starter; never overwrites the user's own) and the PUSH
+    as an mshl step (a `sessionfont TEXT` hosted command in guicmds pushes
+    a layer via reconfigure, empty reverts; the shell `cat`s conf/font.msh
+    and pushes before the window opens, reverts after it closes). The
+    guishell drill now asserts the scale rides the session (up 16px →
+    reconfigured 24px on login → reconfigured 16px on logout). Open:
+    subpixel/hinting, a settings UI, fabric-remote GUI.
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

@@ -5,6 +5,18 @@
 # with done:true, the runtime closes the window, mshrun exits, the session
 # domain exits, and the manager tears the session down. The whole
 # session's UI, defined in mshl.
+#
+# First, apply this user's font preference for the session: read their
+# own font layer from the home (conf/font.msh, seeded on first login) and
+# push it to the shared font service, which merges it over the system
+# layer — so the whole session's type follows the user's accessibility
+# scale. A home with no layer simply keeps the system default. This runs
+# before the window opens, so the shell renders at the user's scale; the
+# `sessionfont` at the end reverts it on logout.
+match (cat "conf/font.msh") {
+  ok $layer => { sessionfont $layer }
+  _ => null
+}
 let final = (gui {
     init:  { done: false }
     title: "moss"
@@ -24,4 +36,5 @@ let final = (gui {
         }
       })
   })
+sessionfont
 "gui: shell exited"

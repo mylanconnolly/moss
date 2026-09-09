@@ -2815,6 +2815,46 @@ then clean shutdown. Nothing new was needed in the compositor or the GUI
 runtime; the shell is a GUI service like any other, and the session
 domain is where a user's own software has always belonged.
 
+**Stage 7b — automatic per-user font scale on login (as built,
+2026-09-09).** The per-user font-scale *push* mechanism landed earlier
+(fontsvc's `reconfigure` merges a user's font layer over the system one,
+a `fontscale` drill proving it with a stand-in client); what it waited on
+was a post-login GUI that runs *as the user* to drive it. Stage 7 is that
+GUI, so the loop closes: the GUI session applies the logged-in user's own
+font preference for the life of the session, and reverts it on logout —
+automatically, no app or template author asking for it, the accessibility
+scale where it belongs.
+
+Two small pieces, each in the user's own session domain (never the
+sensitive session-key custodian). First, a **home skeleton**: a fresh
+home has no config of its own, so on first login the session's init
+(mode 3, holding the home's rw view) copies the archive's `conf/skel/*`
+into the home's `conf/` for any file it lacks — today `conf/font.msh`, a
+`{ scale: 1.5 }` starter (larger type, an accessibility-forward default a
+user can lower). An existing file is never touched: the user's own choice
+always wins, and the copy is a first-run event, not a per-login one.
+Second, the **push itself** is an ordinary step in the session shell's
+mshl, the same grain as `login`: a new `sessionfont TEXT` hosted command
+(offered by the GUI runtime, `user/guicmds.zig`, when it holds a font
+cap) pushes a font layer to fontsvc via `reconfigure`; an empty push
+reverts. The shell script reads its own `conf/font.msh` with `cat` and
+pushes it *before* the window opens — the runtime's font metrics are read
+lazily on the first render (`fontReady`), so the shell comes up already at
+the user's scale — then reverts with a bare `sessionfont` after the
+window closes, so the next login (a different user, or the greeter) starts
+from the system default. The push shares the GUI runtime's own fontsvc
+request buffer; a small refactor split the buffer-attach
+(`ensureFontBuf`) out of `fontReady` so either the push or the first
+render can bring it up.
+
+The drill (profile `guishell`, extended) now watches the scale ride the
+session: `fontsvc: up (ui 16px, scale 1.00)`, then on login `init: seeded
+home config conf/font.msh` and `fontsvc: reconfigured (ui 24px, scale
+1.50)` *before* the shell's own `gui: ready`, then on logout `fontsvc:
+reconfigured (ui 16px, scale 1.00)`. The per-user accessibility scale,
+read from the user's home, applied to the whole session's type, and
+unwound with the session — the honest end of the font arc's per-user work.
+
 **Rendering pass (as built, 2026-09-08).** The first look was honest but
 crude — a 400×240 window marooned on a 640×480 scanout, 1-bit 8×16 glyphs
 blitted 1:1 and then nearest-neighbour-upscaled by the viewer into hard
