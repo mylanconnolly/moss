@@ -735,10 +735,15 @@ is a plan.
     `name` table); conf/font.msh selects a family per role (ui/title/mono),
     so installing a font is dropping the .ttf there + naming it — the
     system's typographic personality is data (proven: a serif title beside
-    a sans body). Three bundled: IBM Plex Sans/Mono/Serif. Open: a runtime
-    fonts dir off the filesystem (install without rebuild) + session push
-    of per-user family/scale; OTF/WOFF/WOFF2 front-ends; pointer input;
-    richer layout; fabric-remote GUI.
+    a sans body). Three bundled: IBM Plex Sans/Mono/Serif. ✅ Terminal on
+    fontsvc (landed 2026-09-08): the console is a monospace grid that takes
+    the mono role's advance/line as its cell, caches each byte's glyph from
+    fontsvc locally (no per-char IPC once warm), and blits from the atlas —
+    so the post-login shell renders in real IBM Plex Mono at the system
+    scale (bitmap fallback kept). Open: a runtime fonts dir off the
+    filesystem (install without rebuild) + session push of per-user
+    family/scale; OTF/WOFF/WOFF2 front-ends; pointer input; richer layout;
+    fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

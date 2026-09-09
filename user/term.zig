@@ -31,7 +31,7 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 const fg: u32 = 0x00FF_FFFF;
 const bg: u32 = 0x0000_0000;
 
-const gw = font.width; // 8
+const gw = font.width; // 8, the bitmap cell (fallback)
 const gh = font.height; // 16
 
 var px: [*]volatile u32 = undefined;
@@ -43,8 +43,126 @@ var cur_r: usize = 0;
 var pxw: usize = 0;
 var pxh: usize = 0;
 
-fn cell(col: usize, row: usize, ch: u8) void {
-    const g: usize = if (ch < font.first or ch > font.last) 0 else ch - font.first;
+// The cell size: the bitmap 8x16 by default, or the system mono font's
+// advance and line height once fontsvc is attached.
+var cellw: usize = gw;
+var cellh: usize = gh;
+
+// ---------------------------------------------- system font (fontsvc)
+// When the terminal is given a `font` cap it renders in the real mono
+// family at the effective scale, the same as every other program. It is a
+// monospace grid, so it needs per-glyph coverage (not proportional
+// layout): each byte's glyph is fetched from fontsvc once and cached
+// locally by codepoint, then blitted from the shared atlas at fixed cells.
+var font_chan: u64 = 0;
+var font_buf: [*]u8 = undefined;
+var font_buf_len: usize = 0;
+var fatlas: [*]const u8 = undefined;
+var fatlas_w: usize = 0;
+var font_ok = false;
+var ascent: usize = 0;
+const mono_role: u64 = @intFromEnum(shared.FontRole.mono);
+const Gc = struct { have: bool = false, ax: u16 = 0, ay: u16 = 0, w: u16 = 0, h: u16 = 0, left: i16 = 0, top: i16 = 0 };
+var gcache: [128]Gc = @splat(.{});
+
+fn fontReady() void {
+    if (font_chan == 0) return;
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return;
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return;
+    font_buf = @ptrFromInt(m.data[0]);
+    font_buf_len = m.data[1] * 4096;
+    switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
+        .ok => |ok| if (ok.rep != .ok) return,
+        .err => return,
+    }
+    const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
+        .ok => |ok| ok,
+        .err => return,
+    };
+    if (at.cap == 0 or at.rep != .atlas) return;
+    const am = usys.shmMap(at.cap);
+    if (am.err != .ok) return;
+    fatlas = @ptrFromInt(am.data[0]);
+    fatlas_w = shared.unpackHi(at.rep.atlas.wh);
+    switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .metrics = .{ .role = mono_role } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .metrics => |mm| {
+                cellh = @intCast(mm.line);
+                ascent = @intCast(mm.ascent);
+            },
+            else => return,
+        },
+        .err => return,
+    }
+    const w = layoutOne('0'); // a probe: the mono advance is the cell width
+    if (w == 0 or cellh == 0) return;
+    cellw = w;
+    font_ok = true;
+}
+
+/// Lay one byte out in the mono role: cache its glyph in `gcache[b]` and
+/// return its advance (the pen width of a one-glyph run).
+fn layoutOne(b: u8) usize {
+    if (font_buf_len == 0) return 0;
+    font_buf[0] = b;
+    return switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .layout = .{ .role = mono_role, .px = 0, .len = 1 } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .laid => |l| blk: {
+                if (l.count >= 1 and b < gcache.len) {
+                    const run: [*]const shared.FontGlyph = @ptrCast(@alignCast(font_buf));
+                    const g = run[0];
+                    gcache[b] = .{ .have = true, .ax = g.atlas_x, .ay = g.atlas_y, .w = g.w, .h = g.h, .left = g.left, .top = g.top };
+                }
+                break :blk shared.unpackHi(l.pen);
+            },
+            else => 0,
+        },
+        .err => 0,
+    };
+}
+
+fn glyphOf(b: u8) ?Gc {
+    if (b >= gcache.len) return null;
+    if (!gcache[b].have) _ = layoutOne(b);
+    return if (gcache[b].have) gcache[b] else null;
+}
+
+fn clearCell(col: usize, row: usize) void {
+    var y: usize = 0;
+    while (y < cellh) : (y += 1) {
+        const base = (row * cellh + y) * stride + col * cellw;
+        var x: usize = 0;
+        while (x < cellw and col * cellw + x < pxw) : (x += 1) px[base + x] = bg;
+    }
+}
+
+fn cell(col: usize, row: usize, chr: u8) void {
+    if (font_ok) {
+        clearCell(col, row);
+        const g = glyphOf(chr) orelse return;
+        const baseline = row * cellh + ascent;
+        var r: usize = 0;
+        while (r < g.h) : (r += 1) {
+            const arow = (@as(usize, g.ay) + r) * fatlas_w + g.ax;
+            var c: usize = 0;
+            while (c < g.w) : (c += 1) {
+                const cov: u32 = fatlas[arow + c];
+                if (cov == 0) continue;
+                const dx = @as(i64, @intCast(col * cellw)) + g.left + @as(i64, @intCast(c));
+                const dy = @as(i64, @intCast(baseline)) + g.top + @as(i64, @intCast(r));
+                if (dx < 0 or dy < 0) continue;
+                const ux: usize = @intCast(dx);
+                const uy: usize = @intCast(dy);
+                if (ux >= pxw or uy >= pxh) continue;
+                // white text on black: coverage is the grey level directly.
+                px[uy * stride + ux] = cov << 16 | cov << 8 | cov;
+            }
+        }
+        return;
+    }
+    const g: usize = if (chr < font.first or chr > font.last) 0 else chr - font.first;
     const bitmap = font.glyphs[g];
     for (0..gh) |gy| {
         const bits = bitmap[gy];
@@ -57,9 +175,11 @@ fn cell(col: usize, row: usize, ch: u8) void {
 
 /// Solid block, drawn where the cursor rests.
 fn cursorBlock(col: usize, row: usize) void {
-    for (0..gh) |gy| {
-        const base = (row * gh + gy) * stride + col * gw;
-        for (0..gw) |gx| px[base + gx] = fg;
+    var y: usize = 0;
+    while (y < cellh) : (y += 1) {
+        const base = (row * cellh + y) * stride + col * cellw;
+        var x: usize = 0;
+        while (x < cellw and col * cellw + x < pxw) : (x += 1) px[base + x] = fg;
     }
 }
 
@@ -69,7 +189,7 @@ fn clear() void {
 
 /// Shift the grid up one text row and clear the bottom row.
 fn scroll() void {
-    const shift = gh * stride;
+    const shift = cellh * stride;
     const total = pxh * stride;
     var i: usize = 0;
     while (i + shift < total) : (i += 1) px[i] = px[i + shift];
@@ -109,6 +229,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
         _ = usys.log(log_h, "term: no display channel");
         usys.exit(169);
     }
+    if (setup.has(.font)) font_chan = setup.cap(.font);
 
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .{ .create_surface = .{ .xy = 0, .wh = 0 } }, 0)) {
         .ok => |ok| ok,
@@ -125,8 +246,9 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
     if (m.err != .ok) usys.exit(183);
     px = @ptrFromInt(m.data[0]);
     stride = pxw;
-    cols = pxw / gw;
-    rows = pxh / gh;
+    fontReady(); // sets cellw/cellh (mono metrics) + font_ok; else the 8x16 bitmap
+    cols = pxw / cellw;
+    rows = pxh / cellh;
     clear();
 
     // Mode 1: the stage-2 demo (render + hold for a screendump, then end

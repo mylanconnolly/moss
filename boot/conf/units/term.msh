@@ -10,5 +10,6 @@
   essential: true
   give: [
     { tag: display, unit: gpusvc }
+    { tag: font, unit: fontsvc }
   ]
 }

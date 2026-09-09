@@ -2761,7 +2761,13 @@ proportionally (measured widths size the buttons and fields), blits each
 glyph's coverage from the atlas over its own background with its own
 colour, and falls back to the bitmap font when no `font` cap is present.
 The login form and the counter now render in real IBM Plex Sans, crisp
-and anti-aliased.
+and anti-aliased. The terminal is the second client: a monospace grid, so
+it does not want proportional layout — it takes the mono role's advance
+and line height as the cell size, fetches each byte's glyph from fontsvc
+once (caching it locally by codepoint, so a warmed console does no IPC per
+character), and blits coverage at fixed cells. So the shell console — the
+post-login seat — is real IBM Plex Mono too, at the same scale as
+everything else, with the same bitmap fallback.
 
 The effective sizes and the accessibility scale are data, not constants:
 fontsvc reads `conf/font.msh` (the system settings layer) at startup —

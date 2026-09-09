@@ -534,22 +534,40 @@ fn termScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     // The cursor block sits on the last row (the demo scrolls past the
-    // bottom): a solid white 8x16 rectangle at cell (0, rows-1).
-    if (img.w < 8 or img.h < 768 or !eqRgb(pixelAt(img, 4, img.h - 8), 0xFF, 0xFF, 0xFF)) {
+    // bottom): a solid white cell at column 0. The cell size depends on the
+    // font, so scan the bottom-left corner for the solid-white block rather
+    // than a fixed pixel.
+    if (img.w < 8 or img.h < 480) {
+        reportFailure(spec.name, "the terminal surface was too small", log_path);
+        return false;
+    }
+    var cursor = false;
+    {
+        var y: usize = img.h - 44;
+        while (y < img.h) : (y += 1) {
+            var x: usize = 0;
+            while (x < 10) : (x += 1) {
+                if (eqRgb(pixelAt(img, x, y), 0xFF, 0xFF, 0xFF)) cursor = true;
+            }
+        }
+    }
+    if (!cursor) {
         reportFailure(spec.name, "the cursor block was not drawn", log_path);
         return false;
     }
-    // Glyphs in the top-left text region (some white pixels there).
+    // Glyphs in the top-left text region (anti-aliased, so any bright
+    // pixel, not necessarily pure white).
     var any_glyph = false;
-    for (0..16) |y| for (0..48) |x| {
-        if (eqRgb(pixelAt(img, x, y), 0xFF, 0xFF, 0xFF)) any_glyph = true;
+    for (0..24) |y| for (0..64) |x| {
+        const p = pixelAt(img, x, y);
+        if (p[0] > 0x80 and p[1] > 0x80 and p[2] > 0x80) any_glyph = true;
     };
     if (!any_glyph) {
         reportFailure(spec.name, "no glyphs were rendered", log_path);
         return false;
     }
-    // A blank cell (far right of a short text row) stayed black.
-    if (!eqRgb(pixelAt(img, 500, 8), 0, 0, 0)) {
+    // The right half of a short text row stayed black (no run-away fill).
+    if (!eqRgb(pixelAt(img, 600, 8), 0, 0, 0)) {
         reportFailure(spec.name, "text bled into a blank cell", log_path);
         return false;
     }
