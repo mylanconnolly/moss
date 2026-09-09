@@ -17,6 +17,7 @@
 const std = @import("std");
 const flate = std.compress.flate;
 const woff2 = @import("woff2.zig");
+const tthint = @import("tthint.zig");
 
 pub const Error = error{ BadFont, Unsupported, OutOfMemory };
 
@@ -139,6 +140,11 @@ pub const Font = struct {
     glyf: []const u8,
     cmap: []const u8,
     name: []const u8,
+    // TrueType hinting programs (empty if unhinted): the font program
+    // (functions), the control-value program (per-size setup) and the CVT.
+    fpgm: []const u8,
+    prep: []const u8,
+    cvt: []const u8,
     // The chosen Unicode cmap subtable (a slice of `cmap`), and its format.
     cmap_sub: []const u8,
     cmap_fmt: u16,
@@ -172,6 +178,9 @@ pub const Font = struct {
             .glyf = &.{},
             .cmap = &.{},
             .name = &.{},
+            .fpgm = &.{},
+            .prep = &.{},
+            .cvt = &.{},
             .cmap_sub = &.{},
             .cmap_fmt = 0,
             .ascent = 0,
@@ -202,6 +211,9 @@ pub const Font = struct {
                 0x636D6170 => f.cmap = slice, // 'cmap'
                 0x6E616D65 => f.name = slice, // 'name'
                 0x43464620 => f.cff = slice, // 'CFF ' (OpenType/PostScript)
+                0x6670676D => f.fpgm = slice, // 'fpgm' (font program)
+                0x70726570 => f.prep = slice, // 'prep' (control-value program)
+                0x63767420 => f.cvt = slice, // 'cvt ' (control-value table)
                 else => {},
             }
         }
@@ -309,6 +321,31 @@ pub const Font = struct {
             if (cp >= start and cp <= end) return @intCast(gid + (cp - start));
         }
         return 0;
+    }
+
+    /// Whether this font carries a TrueType hint program worth running
+    /// (glyf outlines with a prep or fpgm). CFF fonts never do.
+    pub fn hasHints(f: *const Font) bool {
+        return !f.is_cff and (f.prep.len != 0 or f.fpgm.len != 0);
+    }
+
+    /// Generous interpreter buffer sizes, from `maxp` but never trusting
+    /// its (routinely under-reported) values — a font that defines
+    /// functions while claiming maxFunctionDefs=0 is common. Hinting is
+    /// best-effort, so over-provisioning is cheap and under-provisioning
+    /// merely trips the fallback.
+    pub const HintLimits = struct { stack: usize, storage: usize, funcs: usize, twilight: usize };
+    pub fn hintLimits(f: *const Font) HintLimits {
+        const stack = if (f.maxp.len >= 26) u16be(f.maxp, 24) else 0;
+        const storage = if (f.maxp.len >= 20) u16be(f.maxp, 18) else 0;
+        const funcs = if (f.maxp.len >= 22) u16be(f.maxp, 20) else 0;
+        const twilight = if (f.maxp.len >= 18) u16be(f.maxp, 16) else 0;
+        return .{
+            .stack = @max(@as(usize, stack), 256) + 256,
+            .storage = @max(@as(usize, storage) + 8, 64),
+            .funcs = @max(@as(usize, funcs), 256),
+            .twilight = @max(@as(usize, twilight) + 4, 16),
+        };
     }
 
     /// The advance width of a glyph, in font units.

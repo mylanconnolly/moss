@@ -861,8 +861,23 @@ is a plan.
     a layer via reconfigure, empty reverts; the shell `cat`s conf/font.msh
     and pushes before the window opens, reverts after it closes). The
     guishell drill now asserts the scale rides the session (up 16px →
-    reconfigured 24px on login → reconfigured 16px on logout). Open:
-    subpixel/hinting, a settings UI, fabric-remote GUI.
+    reconfigured 24px on login → reconfigured 16px on logout). ✅ TrueType
+    hinting, stage 1 (landed 2026-09-09): lib/tthint.zig, a from-scratch
+    TrueType bytecode interpreter — a 26.6 stack machine with the full
+    graphics state (proj/free/dual vectors, ref points, zone pointers,
+    super-round, cut-ins, deltas), storage, a scaled CVT, user functions
+    and glyph+twilight zones. Runs fpgm (define functions) + prep (per-size
+    setup); essentially the whole opcode set is implemented (a called
+    function uses any of it). Best-effort: any error → fall back to the
+    unhinted outline, so rendering never breaks. maxp is NOT trusted (real
+    fonts under-report — IBM Plex Mono claims maxFunctionDefs=0 with an
+    fpgm that defines functions), buffers use generous minimums. Bug paid
+    for: MINDEX was net −2 not −1 → prep's deep MINDEX/ROLL/IF chains
+    desynced the stack. Verified: a synthetic fpgm+prep unit test + IBM
+    Plex Mono's real fpgm+prep clean across ppem 8–48. Stage 2 (next):
+    glyph program + phantom points + IUP → fitted outline to the
+    rasterizer, wired through fontsvc + a drill. Open: subpixel, a
+    settings UI, fabric-remote GUI.
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

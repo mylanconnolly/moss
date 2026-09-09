@@ -3050,10 +3050,52 @@ rasterizes byte-identically; the reconstructed `glyf` even matches the
 declared `origLength`. The `fontrescan` drill now installs all three
 front-ends live (WOFF, OTF/CFF, WOFF2), each registering its family.
 
-What's left for the arc: automatic per-user font push on login (the
-mechanism is built; it wants a post-login GUI that renders through fontsvc
-to show it); richer layout; and the fabric-remote GUI the data-only design
-already allows. (Pointer input and the per-user push mechanism landed.)
+What's left for the arc: richer layout, subpixel, and the fabric-remote
+GUI the data-only design already allows. (Pointer input, the per-user
+scale push, and TrueType hinting have landed.)
+
+**TrueType hinting, stage 1 — the interpreter (as built, 2026-09-09).**
+A glyph's outline, scaled to a small pixel size and filled, blurs its
+stems across pixel boundaries; the crispness real type has at UI sizes
+comes from *hinting* — a bytecode program, shipped in the font, that
+grid-fits the outline so stems land on whole pixels. moss reads real
+fonts (IBM Plex Mono/Sans both carry hint programs), so the honest thing
+is to run them: `lib/tthint.zig` is a from-scratch TrueType instruction
+interpreter. It is a stack machine over 26.6 fixed-point pixel
+coordinates with the full graphics state (projection/freedom/dual
+vectors, three reference points, three zone pointers, a super-round
+state, loop counter, minimum distance, cut-ins, delta base/shift), a
+storage area, a scaled control-value table (CVT), user-defined functions,
+and two point zones (the glyph and the twilight scratch zone). Stage 1 is
+the VM and the two size-independent/per-size programs it runs: `fpgm`
+(once, to define functions) and `prep` (per size, to set the graphics
+state and scale the CVT). Essentially the whole instruction set is
+implemented — pushes, the stack ops, arithmetic and logic in 26.6,
+rounding in every mode, control flow (IF/ELSE/JMPR/JROT/JROF),
+FDEF/CALL/LOOPCALL, storage and CVT reads/writes, the graphics-state
+setters, measurement (GC/MD/MPPEM), the point-movement family
+(MDAP/MIAP/MDRP/MIRP/IP/SHP/IUP/…) and deltas — because a called function
+uses any of it. Two decisions shape the design. First, **hinting is
+best-effort**: any malformed program, unimplemented corner, or bound
+overrun returns `error.Hint`, and the caller (stage 2) simply keeps the
+unhinted outline — so rendering never breaks and the opcode set can grow
+under real fonts. Second, **`maxp` is not trusted**: real fonts routinely
+under-report (IBM Plex Mono declares maxFunctionDefs=0 while its fpgm
+defines functions, and maxSizeOfInstructions=3 while glyphs carry 58+
+instruction bytes), so the stack, storage, function table and twilight
+zone are provisioned from generous minimums, not the font's claims. The
+paid-for bug was in MINDEX: it must move the k-th stack element to the
+top (net −1, for the popped index), but an extra decrement made it net
+−2, and IBM Plex Mono's prep — which threads values through deep
+MINDEX/ROLL/IF chains to pick a CVT value for the current ppem —
+desynced the stack and tripped a SWAP underflow a hundred instructions
+later. Verified two ways: a synthetic fpgm+prep unit test (push,
+arithmetic, RCVT/WCVTP, storage, IF, FDEF/CALL, rounding) with asserted
+results, and a real-program smoke test running IBM Plex Mono's own
+`fpgm`+`prep` (extracted as small vectors) clean across every UI ppem
+(8–48). Stage 2 feeds a glyph's points (plus phantom points) through the
+glyph program, applies IUP, and rasterizes the fitted outline — the
+visible win — wired through fontsvc with a drill.
 
 ## Distribution: the fabric
 
