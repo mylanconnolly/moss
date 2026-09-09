@@ -351,10 +351,16 @@ is a plan.
   worker by name and others `lookup NODE "name"` + `call` it — the worker
   is the typed-channel surface the old note waited for; `dial` reaches a
   durable unit; drilled cross-node by svc-pub/fab-drill and locally by the
-  shell); still open: moving a home (an administrative action), a
+  shell); ✅ notifications across nodes (landed 2026-09-09: a `signal`
+  primitive in the language — `wait` blocks on it, `publish` names it on
+  the fabric, `notify NODE NAME BITS` rings it from anywhere; a one-way
+  `fw_notify` frame routes by published name to the holder's notification
+  cap, so a signaler on one node wakes a waiter on another with no reply
+  and no shared clock; drilled by fabsignal — node 2 rings, node 1 wakes
+  `bits=5`); still open: moving a home (an administrative action), a
   write-back cache beyond mossfs's own commit batching if a workload
   ever asks, more than one buffer per session (the simultaneous-call
-  race), notifications across nodes; (5) tooling, host-side in
+  race); (5) tooling, host-side in
   tools/: ✅ a tree-sitter grammar (landed 2026-09-04:
   `tools/tree-sitter-mshl`, highlights, a corpus recorded from the
   language's examples, every `.msh` in the tree parsing clean), ✅ a

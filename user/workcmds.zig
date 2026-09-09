@@ -300,6 +300,42 @@ fn dropService(_: *anyopaque, _: []const u8, id: u64) void {
     closeService(id);
 }
 
+// A signal: a notification this script waits on (`wait`), publishable to
+// the pool so a peer can ring it by name (`notify NODE NAME`). The cap is
+// shared — the script keeps waiting on it while a copy goes to fabsvc.
+const max_signals = 8;
+const Signal = struct { used: bool = false, gen: u32 = 0, notif: u64 = 0 };
+var signals: [max_signals]Signal = @splat(.{});
+
+fn sigId(idx: usize) u64 {
+    return @as(u64, signals[idx].gen) << 8 | idx;
+}
+fn sigSlot(c: u64) ?*Signal {
+    const idx: usize = @intCast(c & 0xff);
+    if (idx >= max_signals) return null;
+    const s = &signals[idx];
+    if (!s.used or s.gen != c >> 8) return null;
+    return s;
+}
+fn closeSignal(c: u64) void {
+    const s = sigSlot(c) orelse return;
+    if (s.notif != 0) _ = usys.capDrop(s.notif);
+    s.used = false;
+}
+fn dropSignal(_: *anyopaque, _: []const u8, id: u64) void {
+    closeSignal(id);
+}
+fn newSignalHandle(it: *mshl.Interp) mshl.Error!Value {
+    var idx: usize = 0;
+    while (idx < max_signals and signals[idx].used) idx += 1;
+    if (idx == max_signals) return try errResult(it, "too many signals");
+    const n = usys.notifyCreate();
+    if (n.err != .ok) return try errResult(it, "the kernel gave no notification");
+    const s = &signals[idx];
+    s.* = .{ .used = true, .gen = s.gen +% 1, .notif = n.data[0] };
+    return try okResult(it, try it.newHandle("signal", sigId(idx), &signals, dropSignal));
+}
+
 /// Give the service its own shared buffer the first time it is called.
 fn ensureServiceBuf(sv: *Service) bool {
     if (sv.attached) return true;
@@ -361,6 +397,35 @@ fn publishWorker(it: *mshl.Interp, name: []const u8, w: *Worker) mshl.Error!Valu
                 w.published = true;
                 break :blk try okResult(it, .nothing);
             },
+            .fab_err => |e| try errResult(it, fabErr(e.code)),
+            else => try errResult(it, "the fabric gave an unexpected reply"),
+        },
+        .err => try errResult(it, "the fabric did not answer"),
+    };
+}
+
+/// Publish a signal to the pool under `name`: a copy of the notification
+/// cap goes to fabsvc (we keep ours to `wait` on it), which rings it when
+/// a peer `notify`s that name.
+fn publishSignal(it: *mshl.Interp, name: []const u8, notif: u64) mshl.Error!Value {
+    const nw = shared.strToWords(name);
+    return switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .publish_signal = .{ .a = nw[0], .b = nw[1] } }, notif)) {
+        .ok => |rep| switch (rep) {
+            .ok => try okResult(it, .nothing),
+            .fab_err => |e| try errResult(it, fabErr(e.code)),
+            else => try errResult(it, "the fabric gave an unexpected reply"),
+        },
+        .err => try errResult(it, "the fabric did not answer"),
+    };
+}
+
+/// Ring the signal `node` published under `name`, carrying `bits`. Ok once
+/// the fabric sent it (a reachable member); an err if not.
+fn signalRemote(it: *mshl.Interp, node: u64, name: []const u8, bits: u64) mshl.Error!Value {
+    const nw = shared.strToWords(name);
+    return switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .{ .signal = .{ .a = nw[0], .b = nw[1], .node_bits = shared.packNodeBits(node, bits) } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .ok => try okResult(it, .nothing),
             .fab_err => |e| try errResult(it, fabErr(e.code)),
             else => try errResult(it, "the fabric gave an unexpected reply"),
         },
@@ -453,15 +518,21 @@ const callable_kind: Shape = .{ .one_of = &.{ worker_kind, service_kind } };
 const call_result = mshl.resultShape(.any, .string);
 const listener_kind: Shape = .{ .kind = "listener" };
 const serve_result = mshl.resultShape(.int, .string);
+const signal_kind: Shape = .{ .kind = "signal" };
+const signal_result = mshl.resultShape(signal_kind, .string);
+const publishable_kind: Shape = .{ .one_of = &.{ worker_kind, signal_kind } };
 
 pub fn signature(name: []const u8) ?mshl.Signature {
+    if (std.mem.eql(u8, name, "signal")) return .{ .ret = signal_result };
+    if (std.mem.eql(u8, name, "wait")) return .{ .params = &.{.{ .name = "signal", .shape = signal_kind, .optional = true }}, .input = .{ .optional = signal_kind }, .ret = .int };
+    if (std.mem.eql(u8, name, "notify")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "name", .shape = .string }, .{ .name = "bits", .shape = .int, .optional = true } }, .ret = call_result };
     if (std.mem.eql(u8, name, "spawn")) return .{ .params = &.{.{ .name = "handler", .shape = .function }}, .ret = worker_result };
     if (std.mem.eql(u8, name, "serve")) return .{ .params = &.{ .{ .name = "listener", .shape = listener_kind }, .{ .name = "handler", .shape = .function }, .{ .name = "count", .shape = .int, .optional = true } }, .ret = serve_result };
     if (std.mem.eql(u8, name, "call")) return .{ .params = &.{ .{ .name = "worker", .shape = callable_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "dispatch")) return .{ .params = &.{ .{ .name = "worker", .shape = worker_kind }, .{ .name = "input", .optional = true } }, .input = .{ .optional = .any }, .ret = call_result };
     if (std.mem.eql(u8, name, "await")) return .{ .params = &.{.{ .name = "worker", .shape = worker_kind }}, .input = .{ .optional = worker_kind }, .ret = call_result };
     if (std.mem.eql(u8, name, "race")) return .{ .params = &.{.{ .name = "workers", .shape = .list }}, .input = .{ .optional = .list }, .ret = worker_result };
-    if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "name", .shape = .string }, .{ .name = "worker", .shape = worker_kind } }, .ret = call_result };
+    if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "name", .shape = .string }, .{ .name = "target", .shape = publishable_kind } }, .ret = call_result };
     if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "name", .shape = .string } }, .ret = service_result };
     if (std.mem.eql(u8, name, "dial")) return .{ .params = &.{ .{ .name = "node_or_name", .shape = .{ .one_of = &.{ .string, .int } } }, .{ .name = "name", .shape = .string, .optional = true } }, .ret = service_result };
     return null;
@@ -542,10 +613,35 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (lv != .list) return it.fail("race: a list of workers expected, got a {s}", .{lv.typeName()});
         return try raceWorkers(it, lv.list);
     }
+    if (is(u8, name, "signal")) {
+        return try newSignalHandle(it);
+    }
+    if (is(u8, name, "wait")) {
+        const hv = input orelse (if (args.len > 0) args[0] else return it.fail("wait: a signal expected", .{}));
+        if (hv != .handle or !is(u8, hv.handle.kind, "signal")) return it.fail("wait: a signal expected, got a {s}", .{hv.typeName()});
+        const s = sigSlot(hv.handle.id) orelse return it.fail("wait: this signal is closed", .{});
+        const w = usys.notifyWait(s.notif);
+        if (w.err != .ok) return it.fail("wait: the notification failed", .{});
+        return .{ .int = @intCast(w.data[0]) };
+    }
+    if (is(u8, name, "notify")) {
+        if (fab_chan == 0) return it.fail("notify: this program has no fabric", .{});
+        if (args.len < 2 or args[0] != .int or args[1] != .str) return it.fail("notify: NODE NAME [BITS] expected", .{});
+        if (args[1].str.len == 0 or args[1].str.len > 16) return it.fail("notify: a signal name is 1..16 bytes", .{});
+        const node: u64 = @intCast(@max(args[0].int, 0));
+        const bits: u64 = if (args.len >= 3 and args[2] == .int) @intCast(@max(args[2].int, 0)) else 1;
+        return try signalRemote(it, node, args[1].str, bits);
+    }
     if (is(u8, name, "publish")) {
         if (fab_chan == 0) return it.fail("publish: this program has no fabric", .{});
-        if (args.len < 2 or args[0] != .str) return it.fail("publish: NAME WORKER expected", .{});
+        if (args.len < 2 or args[0] != .str) return it.fail("publish: NAME WORKER|SIGNAL expected", .{});
         if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("publish: a service name is 1..16 bytes", .{});
+        // A signal handle publishes as a signal export; a worker as a
+        // callable service.
+        if (args[1] == .handle and is(u8, args[1].handle.kind, "signal")) {
+            const s = sigSlot(args[1].handle.id) orelse return it.fail("publish: this signal is closed", .{});
+            return try publishSignal(it, args[0].str, s.notif);
+        }
         const w = try workerArg(it, args[1]);
         return try publishWorker(it, args[0].str, w);
     }
@@ -890,4 +986,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "signal", "wait", "notify" };

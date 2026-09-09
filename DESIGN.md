@@ -3062,6 +3062,37 @@ runtime falls back to running the app in-process — its closures are
 present locally — a graceful degradation. The domain spawn on the host is
 paid once, not per keystroke.
 
+**Cross-node notifications: a signal primitive (as built, 2026-09-09).**
+The fabric could move state and calls; it could not, until now, let one
+node *wake* another. The primitive is a `signal`: `(signal)` creates one
+(a mshl handle over a kernel notification cap the runtime holds), `wait`
+blocks on it and returns the bits that woke it, and `notify NODE NAME
+BITS` rings it from anywhere in the mesh. A signal is named on the fabric
+by the same `publish` the concurrency arc already had — `publish` is
+overloaded on its argument's shape (a worker handle publishes a channel,
+a signal handle publishes a notification), so a waiter does `let s =
+(signal); publish "evt" $s; wait $s` and any node fires `notify 1 "evt"
+5`. The wake is a single one-way wire frame — `fw_notify` (frame type 22,
+wire version bumped 6→7), `[a][b][bits]` three little-endian words, no
+reply and no ack. `fabsvc` on the naming node holds the published
+signal's notification cap in its `Export` (a new `notif` field); when
+`fw_notify` lands it does `findPublished(name)` and signals a copy of
+that cap, so the sender's `wait` returns with the bits. Fire-and-forget
+by design: like a doorbell, a lost ring is simply not heard — there is no
+shared clock to assume and nothing to retransmit. Local `notify` (same
+node) skips the wire and signals the export directly, so the primitive
+reads the same whether the waiter is here or across the mesh.
+
+The drill (`fabsignal`) is a two-node exchange with no display and no
+console: node 1 (profile `fabsig`, the fabric seed) publishes `"evt"` and
+blocks in `wait`; node 2 (profile `fabsigtx`) joins over the socket and
+fires `notify 1 "evt" 5` forty times over ~20s, so the first frame to
+land wakes node 1 — its log shows `fabsig: woke bits=5` four milliseconds
+after node 2 reports the join, then a clean essential-unit shutdown. The
+`notify NODE NAME BITS` argument packing reuses a single `FabReq` word
+(`packNodeBits`: 16-bit node, 48-bit bits), so the request stays within
+the three-word payload the fabric control channel already carried.
+
 **The system font service (as built, 2026-09-08).** The bitmap font was
 the ceiling on how the GUI could look; real type meant a vector-font
 stack, and the shape it took is a *service every text program goes

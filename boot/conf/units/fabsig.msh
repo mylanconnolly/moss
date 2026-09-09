@@ -1,0 +1,7 @@
+# Cross-node signal drill, node 1 (the waiter): mshrun runs a script that
+# publishes a "evt" signal to the pool and blocks on it. Holding a fabric
+# give pulls the node's fabric stack up (as fab-script does). Essential:
+# when the wait wakes and the script ends, the node shuts down clean.
+{ image: mshrun, script: scripts/fabsig-wait.msh, grant: [log, bootfs], budget: { user: 20mb },
+  profiles: [fabsig], essential: true,
+  give: [{ tag: fabric, unit: fabsvc }] }

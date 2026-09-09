@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal };
 
 const Spec = struct {
     name: []const u8,
@@ -86,6 +86,7 @@ const specs = [_]Spec{
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
     .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .extra2 = "fontsvc: reconfigured (ui 20px, scale 1.25)", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
+    .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
@@ -288,6 +289,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .login) return runLogin(spec, bin, polls);
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
     if (spec.kind == .fabgui) return runFabGui(spec, bin, polls);
+    if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
     if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell) try makeDisk(disk);
@@ -2596,6 +2598,58 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const verdict = watch(log2, spec, spec.extra, polls);
     if (!verdict.ok) {
         reportFailure(spec.name, verdict.why, log2);
+        return false;
+    }
+    return true;
+}
+
+/// The cross-node signal drill. Node 1 (profile `fabsig`) is the fabric
+/// seed: it creates a notification signal, publishes it on the fabric as
+/// "evt", and blocks in `wait`. Node 2 (profile `fabsigtx`) joins over the
+/// socket and rings the bell — `notify 1 "evt" 5`, forty times over ~20s —
+/// so the very first frame that lands wakes node 1 with bits=5. No display,
+/// no QMP: the whole exchange is a one-way `fw_notify` frame across the
+/// wire. We watch node 1's log for the wake, then for its clean shutdown.
+fn runFabSignal(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
+    const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
+    for ([_][]const u8{ disk1, disk2, log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
+    try makeDisk(disk1);
+    try makeDisk(disk2);
+
+    // Node 1: the fabric seed on the hub, listening for node 2, running the
+    // waiter that publishes "evt" and blocks in `wait`.
+    var args1: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args1, log1, bin, "fabsig-node1", "profile=fabsig node=1");
+    try appendDisk(&args1, disk1);
+    try args1.appendSlice(gpa, &.{
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+    });
+    var c1 = try spawnQemu(args1.items);
+    defer c1.kill(io);
+    sleepMs(1000);
+
+    // Node 2: the signaler — joins the fabric and rings the bell.
+    var args2: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args2, log2, bin, "fabsig-node2", "profile=fabsigtx node=2");
+    try appendDisk(&args2, disk2);
+    try args2.appendSlice(gpa, &.{
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+    });
+    var c2 = try spawnQemu(args2.items);
+    defer c2.kill(io);
+
+    // Node 1 wakes (bits=5) only after node 2's notify frame crosses the
+    // wire, so this line proves the whole path; then it shuts down clean.
+    const verdict = watch(log1, spec, spec.extra, polls);
+    if (!verdict.ok) {
+        reportFailure(spec.name, verdict.why, log1);
         return false;
     }
     return true;

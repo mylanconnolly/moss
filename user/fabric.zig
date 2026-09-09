@@ -285,6 +285,9 @@ const Export = struct {
     published: bool = false,
     name: [16]u8 = @splat(0),
     name_len: u8 = 0,
+    /// A *signal* export: a notification cap this node waits on, which a
+    /// peer's `fw_notify` rings by name. 0 = an ordinary channel export.
+    notif: u64 = 0,
     /// The twin of the remote caller's buffer, attached to chan_b, and
     /// a shadow of what the caller holds.
     buf_va: u64 = 0,
@@ -637,8 +640,60 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
                 freply(.ok);
             },
             .lookup => |q| doLookup(q.node, q.a, q.b),
+            .publish_signal => |q| {
+                var nb: [16]u8 = undefined;
+                const name = nameBytes(&nb, q.a, q.b);
+                if (r.cap == 0 or name.len == 0) {
+                    if (r.cap != 0) _ = usys.capDrop(r.cap);
+                    freply(ferr(.refused));
+                    continue;
+                }
+                if (findPublished(name)) |eid| {
+                    const e = &exports[eid];
+                    if (e.notif != 0) _ = usys.capDrop(e.notif);
+                    e.notif = r.cap;
+                    freply(.ok);
+                    continue;
+                }
+                const eid = exportNew(0) orelse {
+                    _ = usys.capDrop(r.cap);
+                    freply(ferr(.no_space));
+                    continue;
+                };
+                const e = &exports[eid];
+                e.published = true;
+                e.notif = r.cap;
+                e.name_len = @intCast(name.len);
+                @memcpy(e.name[0..name.len], name);
+                _ = usys.log(glog, "fabsvc: signal published to the pool");
+                freply(.ok);
+            },
+            .signal => |q| doSignal(shared.nbNode(q.node_bits), q.a, q.b, shared.nbBits(q.node_bits)),
         }
     }
+}
+
+/// Ring the signal a peer published under NAME: on this node, notify the
+/// local export directly; on another, send it a one-way `fw_notify`. Reply
+/// `ok` once done/sent; `no_peer` if the node is not a reachable member.
+fn doSignal(node: u64, a: u64, b: u64, bits: u64) void {
+    var nb: [16]u8 = undefined;
+    const name = nameBytes(&nb, a, b);
+    if (name.len == 0) return freply(ferr(.refused));
+    if (node == my_node) {
+        if (findPublished(name)) |eid| {
+            if (exports[eid].notif != 0) _ = usys.notifySignal(exports[eid].notif, bits);
+            freply(.ok);
+        } else freply(ferr(.no_peer));
+        return;
+    }
+    const p = greetedPeer(node) orelse return freply(ferr(.no_peer));
+    var f: [28]u8 = undefined;
+    frameHdr(f[0..4], 28, shared.fw_notify);
+    puleu64(f[4..12], a);
+    puleu64(f[12..20], b);
+    puleu64(f[20..28], bits);
+    if (sendFrame(p, &f)) freply(.ok) else freply(ferr(.disconnected));
 }
 
 /// The token of the control request being served: with forwarded calls
@@ -1582,6 +1637,20 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
             j.words = w;
             j.state.store(1, .release);
             _ = usys.notifySignal(j.bell, 1);
+        },
+        shared.fw_notify => {
+            // [name a u64][name b u64][bits u64]: a peer rings a signal we
+            // published. Find it by name and set the bits on the local
+            // notification (waking whoever waits on it); a name we do not
+            // host is dropped. One-way — no reply.
+            if (body.len < 24) return;
+            var nb: [16]u8 = undefined;
+            const name = nameBytes(&nb, leu64(body[0..8]), leu64(body[8..16]));
+            const bits = leu64(body[16..24]);
+            if (name.len == 0) return;
+            if (findPublished(name)) |eid| {
+                if (exports[eid].notif != 0) _ = usys.notifySignal(exports[eid].notif, bits);
+            }
         },
         shared.fw_release => {
             // [export u32]: nobody on the peer holds the channel to this

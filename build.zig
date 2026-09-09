@@ -174,6 +174,11 @@ pub fn build(b: *std.Build) void {
         "fabgui-test",
         "Run the fabric GUI drill: a GUI whose app runs on another node over the fabric",
     ) orelse false;
+    const fabsignal_test = b.option(
+        bool,
+        "fabsignal-test",
+        "Run the cross-node signal drill: one node rings a notification another waits on",
+    ) orelse false;
     const gui_test = b.option(
         bool,
         "gui-test",
@@ -355,6 +360,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "fontscale_test", fontscale_test);
     build_opts.addOption(bool, "guishell_test", guishell_test);
     build_opts.addOption(bool, "fabgui_test", fabgui_test);
+    build_opts.addOption(bool, "fabsignal_test", fabsignal_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
@@ -593,6 +599,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/fontpush.msh",         "conf/userscale.msh",
         "conf/units/usersvc-guishell.msh", "conf/units/gui-guishell.msh",
         "conf/units/fabgui-app.msh",       "scripts/fabgui.msh",
+        "conf/units/fabsig.msh",           "conf/units/fabsigtx.msh",
+        "scripts/fabsig-wait.msh",         "scripts/fabsig-send.msh",
         "conf/sessiongui/shell.msh",       "scripts/gui-shell.msh",
         "conf/skel/font.msh",
     }) |f| {
@@ -707,7 +715,7 @@ pub fn build(b: *std.Build) void {
             "rng_test",    "smmu_test",     "vm_test",       "guest_test",
             "vmnode_test", "pan_test",      "cpu_test",      "users_test",
             "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test",
+            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1127,7 +1135,7 @@ pub fn build(b: *std.Build) void {
         "rng_test",    "smmu_test",     "vm_test",       "guest_test",
         "vmnode_test", "pan_test",      "cpu_test",      "users_test",
         "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test",
+        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
@@ -1137,7 +1145,7 @@ pub fn build(b: *std.Build) void {
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
         "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "fabgui",
+        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "fabgui", "fabsignal",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

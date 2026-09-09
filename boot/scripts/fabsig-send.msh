@@ -1,0 +1,12 @@
+# Cross-node signal drill, node 2 (the signaler): ring node 1's "evt"
+# signal, carrying bits 5. Fire repeatedly over a window so one lands
+# after node 2 has joined and node 1 has published.
+def fire [n] {
+  notify 1 "evt" 5
+  match ($n > 0) {
+    true => { sleep 500; fire ($n - 1) }
+    _ => null
+  }
+}
+fire 40
+echo "fabsig: done sending"

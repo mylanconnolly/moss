@@ -1,0 +1,6 @@
+# Cross-node signal drill, node 2 (the signaler): mshrun rings node 1's
+# "evt" signal across the fabric. A oneshot — it fires over a window and
+# exits; the node's fabsvc stays up meanwhile so the frames reach node 1.
+{ image: mshrun, script: scripts/fabsig-send.msh, grant: [log, bootfs], budget: { user: 20mb },
+  profiles: [fabsigtx], oneshot: true,
+  give: [{ tag: fabric, unit: fabsvc }] }

@@ -1260,7 +1260,7 @@ pub const WorkResp = union(enum(u64)) {
 // node N is 10.77.0.N / fdcc::N.
 
 pub const fabric_port: u64 = 7100;
-pub const fabric_ver: u8 = 6; // v6: bulk transport (session buffers); v5: published services; v4: per-node identities
+pub const fabric_ver: u8 = 7; // v7: cross-node signals (fw_notify); v6: bulk transport (session buffers); v5: published services; v4: per-node identities
 
 /// set_identity record: [identity seed 32][cluster key 32]; set_cert
 /// then delivers the fab_cert_len certificate (lib/fabcert.zig layout).
@@ -1320,7 +1320,29 @@ pub const FabReq = union(enum(u64)) {
     /// words): the reply is `found { node }` with a remote-channel cap
     /// (a local copy of the export when node is this node).
     lookup: struct { node: u64, a: u64, b: u64 },
+    /// + a notification cap: publish it to the pool under a NAME (two
+    /// words) as a *signal* export, so a peer can `signal` it by name and
+    /// ring the notification this node waits on. Local (unbadged) only.
+    publish_signal: struct { a: u64, b: u64 },
+    /// Ring the signal a peer published under NAME (two words): send a
+    /// one-way `fw_notify` to `node` carrying `bits`. `node_bits` packs the
+    /// node (low 16) and the 48-bit bits (high 48). Reply `ok` once the
+    /// frame is sent (the peer is a reachable member), else `fab_err`.
+    signal: struct { a: u64, b: u64, node_bits: u64 },
 };
+
+/// Pack a node id (u16) and 48-bit signal bits into one word for
+/// `FabReq.signal`; the fabric surface's `signal NODE NAME BITS` is
+/// limited to 48-bit bits because they ride packed with the node.
+pub fn packNodeBits(node: u64, bits: u64) u64 {
+    return (node & 0xffff) | ((bits & 0xffff_ffff_ffff) << 16);
+}
+pub fn nbNode(nb: u64) u64 {
+    return nb & 0xffff;
+}
+pub fn nbBits(nb: u64) u64 {
+    return (nb >> 16) & 0xffff_ffff_ffff;
+}
 
 pub const FabResp = union(enum(u64)) {
     ok: void,
@@ -1432,6 +1454,12 @@ pub const fw_bulk_resp: u8 = 18; // [seq u32][off u32][len u16][bytes]
 pub const fw_release: u8 = 19; // [export u32]
 pub const fw_connect_req: u8 = 20; // [service u16][req u32] -> start a service unit via the peer's init
 pub const fw_connect_ack: u8 = 21; // [req u32][session u32][code u8]
+// A cross-node signal: set `bits` on the notification a peer published
+// under NAME (two words). One-way, no reply — the peer's fabsvc finds the
+// signal export by name and rings the local notification; a name it does
+// not host is dropped. `bits` is 48-bit (it rides the control call packed
+// with the node id).
+pub const fw_notify: u8 = 22; // [name a u64][name b u64][bits u64]
 /// A session buffer is at most this many pages (32 KB: a view's buffer).
 pub const fab_bulk_pages: u64 = 8;
 /// One bulk frame carries at most this many bytes: a whole 32 KB
@@ -1773,7 +1801,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with

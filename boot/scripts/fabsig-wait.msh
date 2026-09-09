@@ -1,0 +1,8 @@
+# Cross-node signal drill, node 1 (the waiter): create a notification,
+# publish it to the pool as "evt", and block on it. A peer that `notify`s
+# "evt" rings it across the fabric; we wake with the bits it carried.
+let s = (signal)?
+(publish "evt" $s)?
+echo "fabsig: waiting on evt"
+let bits = (wait $s)
+echo ("fabsig: woke bits=" + (str $bits))
