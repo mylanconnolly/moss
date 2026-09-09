@@ -1,5 +1,5 @@
 //! fontcli — the runtime font-install drill's client. It plays a user
-//! installing a font: copy an uninstalled .ttf from the staging tier into
+//! installing a font: copy an uninstalled font (a WOFF) from the staging tier into
 //! the filesystem fonts directory, then tell fontsvc to `rescan`. fontsvc
 //! (in filesystem mode) picks the new family up with no restart, which is
 //! the whole point — a font a user drops in appears live.
@@ -47,11 +47,11 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     const buf: [*]u8 = @ptrFromInt(ab.va);
 
     // Read the uninstalled font from the staging tier.
-    const src = "available/IBMPlexSerif-Regular.ttf";
+    const src = "available/IBMPlexSerif.woff";
     const bytes = fsc.readWhole(view, buf, src, &font_data) orelse fail("fontcli: cannot read the staged font");
 
     // Install it: write it into the fonts directory fontsvc watches.
-    const dst = "fonts/IBMPlexSerif-Regular.ttf";
+    const dst = "fonts/IBMPlexSerif.woff";
     const fd = switch (fsc.fsOpen(view, buf, dst, 1)) {
         .fd => |f| f,
         .err => fail("fontcli: cannot create the font file"),

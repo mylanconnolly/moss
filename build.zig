@@ -584,7 +584,7 @@ pub fn build(b: *std.Build) void {
         // Serif ships uninstalled, in a staging tier — a font a user can
         // install (copy into assets/fonts and rescan), which the
         // fontrescan drill exercises.
-        .{ .at = "assets/available/IBMPlexSerif-Regular.ttf", .from = "assets/fonts/IBMPlexSerif-Regular.ttf" },
+        .{ .at = "assets/available/IBMPlexSerif.woff", .from = "assets/fonts/IBMPlexSerif.woff" },
     };
     for (asset_files) |a| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));

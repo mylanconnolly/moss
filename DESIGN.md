@@ -2808,10 +2808,22 @@ caps, or init deems it unwired; and the rasterizer's `top` is the bitmap's
 signed device-y offset from the baseline (negative above), so the client
 *adds* it — subtracting scattered every glyph off the line.
 
-What's left for the arc: pushing a user's font settings from their session
-(per-user family/scale, once a post-login GUI shows it); the OTF/CFF, WOFF
-and WOFF2 front-ends so any real font file loads; pointer input, richer
-layout, and the fabric-remote GUI the data-only design already allows.
+**Font formats (WOFF as built, 2026-09-08).** The formats are additive
+front-ends that converge on the SFNT the parser already reads: a `toSfnt`
+step normalises the input before `Font.parse`. WOFF is the first — a
+zlib-per-table wrapper: `toSfnt` reads the WOFF directory and decompresses
+each table (via `std.compress.flate`, which compiles freestanding) into a
+reassembled SFNT; an SFNT input is returned untouched, so only a
+compressed font costs anything. fontsvc keeps a decompress heap for the
+result (a `Font` borrows its bytes). The `fontrescan` drill now installs a
+real WOFF (IBM Plex Serif, latin) — proof the decompress path works end to
+end. OTF/CFF (PostScript charstring outlines) and WOFF2 (Brotli + table
+transforms) are the remaining front-ends.
+
+What's left for the arc: OTF/CFF and WOFF2 so every real font file loads;
+pushing a user's font settings from their session (per-user family/scale,
+once a post-login GUI shows it); pointer input, richer layout, and the
+fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

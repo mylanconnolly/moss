@@ -751,8 +751,11 @@ is a plan.
     (fontcli copies a .ttf in + rescans) proves it. Fixed an init bug it
     exposed: quoted give strings (fs paths) were slices into the per-unit
     parse arena and dangled as units grew — now copied to a persistent
-    pool. Open: session push of per-user family/scale; OTF/WOFF/WOFF2
-    front-ends; pointer input; richer layout; fabric-remote GUI.
+    pool. ✅ WOFF (landed 2026-09-08): a `toSfnt` front-end decompresses
+    a zlib-wrapped SFNT (std.compress.flate, freestanding) before parse; an
+    SFNT input passes through untouched. The fontrescan drill installs a
+    real WOFF. Open: OTF/CFF + WOFF2 front-ends; session push of per-user
+    family/scale; pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

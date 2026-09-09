@@ -14,6 +14,7 @@
 //! and cached by the service, so clarity beats cleverness here.
 
 const std = @import("std");
+const flate = std.compress.flate;
 
 pub const Error = error{ BadFont, Unsupported, OutOfMemory };
 
@@ -27,6 +28,87 @@ fn i16be(b: []const u8, off: usize) i16 {
 }
 fn u32be(b: []const u8, off: usize) u32 {
     return @as(u32, b[off]) << 24 | @as(u32, b[off + 1]) << 16 | @as(u32, b[off + 2]) << 8 | b[off + 3];
+}
+fn wr16be(b: []u8, off: usize, v: u16) void {
+    b[off] = @intCast(v >> 8);
+    b[off + 1] = @intCast(v & 0xff);
+}
+fn wr32be(b: []u8, off: usize, v: u32) void {
+    b[off] = @intCast((v >> 24) & 0xff);
+    b[off + 1] = @intCast((v >> 16) & 0xff);
+    b[off + 2] = @intCast((v >> 8) & 0xff);
+    b[off + 3] = @intCast(v & 0xff);
+}
+
+// ------------------------------------------------ front-ends → SFNT
+//
+// Every container converges to an SFNT (a table directory) the parser
+// below reads. TrueType/OpenType are already SFNT; WOFF wraps one with
+// per-table zlib compression; WOFF2 (later) is Brotli plus transforms.
+// `toSfnt` normalises the input into `out` and returns the SFNT bytes —
+// or the input itself, untouched, when it is already an SFNT.
+
+const sfnt_true = 0x00010000; // TrueType outlines
+const sfnt_ttcf = 0x74746366; // 'ttcf' collection (unsupported)
+const tag_true = 0x74727565; // 'true'
+const tag_otto = 0x4F54544F; // 'OTTO' (OpenType/CFF)
+const tag_woff = 0x774F4646; // 'wOFF'
+const tag_woff2 = 0x774F4632; // 'wOF2'
+
+/// Decompress a zlib stream into `out` (exactly `out.len` bytes expected).
+fn zlibInto(comp: []const u8, out: []u8) bool {
+    var in = std.Io.Reader.fixed(comp);
+    var window: [flate.max_window_len]u8 = undefined;
+    var dc = flate.Decompress.init(&in, .zlib, &window);
+    dc.reader.readSliceAll(out) catch return false;
+    return true;
+}
+
+/// Normalise a font file to SFNT bytes. SFNT input is returned as-is;
+/// WOFF is decompressed/reassembled into `out`. `out` must hold the whole
+/// SFNT (WOFF states its size).
+pub fn toSfnt(input: []const u8, out: []u8) Error![]const u8 {
+    if (input.len < 4) return Error.BadFont;
+    const magic = u32be(input, 0);
+    if (magic == sfnt_true or magic == tag_true or magic == tag_otto) return input;
+    if (magic == tag_woff2) return Error.Unsupported; // Brotli front-end, later
+    if (magic != tag_woff) return Error.BadFont;
+    // WOFF: a 44-byte header, then numTables 20-byte directory entries.
+    if (input.len < 44) return Error.BadFont;
+    const flavor = u32be(input, 4);
+    const num = u16be(input, 12);
+    const total = u32be(input, 16); // totalSfntSize
+    if (total > out.len) return Error.BadFont;
+    // The reassembled SFNT: header, directory, then each table (4-aligned).
+    wr32be(out, 0, flavor);
+    wr16be(out, 4, num);
+    wr16be(out, 6, 0); // searchRange / entrySelector / rangeShift: the
+    wr16be(out, 8, 0); // parser recomputes from numTables, so leave zero.
+    wr16be(out, 10, 0);
+    var dst: usize = (12 + @as(usize, num) * 16 + 3) & ~@as(usize, 3);
+    var i: usize = 0;
+    while (i < num) : (i += 1) {
+        const e = 44 + i * 20;
+        if (e + 20 > input.len) return Error.BadFont;
+        const tag = u32be(input, e);
+        const off = u32be(input, e + 4);
+        const comp = u32be(input, e + 8);
+        const orig = u32be(input, e + 12);
+        const csum = u32be(input, e + 16);
+        if (off + comp > input.len or dst + orig > out.len) return Error.BadFont;
+        if (comp < orig) {
+            if (!zlibInto(input[off .. off + comp], out[dst .. dst + orig])) return Error.BadFont;
+        } else {
+            @memcpy(out[dst .. dst + orig], input[off .. off + comp]);
+        }
+        const de = 12 + i * 16;
+        wr32be(out, de, tag);
+        wr32be(out, de + 4, csum);
+        wr32be(out, de + 8, @intCast(dst));
+        wr32be(out, de + 12, orig);
+        dst = (dst + orig + 3) & ~@as(usize, 3);
+    }
+    return out[0..dst];
 }
 
 // ------------------------------------------------------------ the font
@@ -806,4 +888,20 @@ test "rasterize a glyph to an anti-aliased coverage bitmap" {
     const e = try rasterize(&f, a, 0, 100);
     defer a.free(e.cov);
     try testing.expectEqual(@as(usize, 0), e.w);
+}
+
+test "zlib decompress (the WOFF table path)" {
+    const comp = [_]u8{ 0x78, 0xda, 0xcb, 0xcd, 0x2f, 0x2e, 0x56, 0x48, 0xcb, 0xcf, 0x2b, 0x29, 0xb6, 0x52, 0xa8, 0xca, 0xc9, 0x4c, 0x52, 0x28, 0xca, 0x2f, 0xcd, 0x4b, 0xd1, 0x2d, 0x29, 0xca, 0x2c, 0x00, 0x00, 0x8f, 0xc7, 0x0a, 0x4c };
+    var out: [27]u8 = undefined;
+    try testing.expect(zlibInto(&comp, &out));
+    try testing.expectEqualStrings("moss fonts: zlib round-trip", &out);
+}
+
+test "toSfnt returns an SFNT input unchanged" {
+    const a = testing.allocator;
+    const data = try buildTestFont(a);
+    defer a.free(data);
+    var scratch: [16]u8 = undefined;
+    const sfnt = try toSfnt(data, &scratch);
+    try testing.expect(sfnt.ptr == data.ptr); // no copy for an SFNT
 }

@@ -46,15 +46,26 @@ const Family = struct {
 var families: [max_families]Family = @splat(.{});
 var nfamilies: usize = 0;
 
+// A WOFF font is decompressed here into a full SFNT (a Font borrows the
+// result, so it must persist); TTF/OTF pass through untouched.
+var decomp_heap: [4 << 20]u8 = undefined;
+var decomp_used: usize = 0;
+
 fn registerFont(bytes: []const u8, from_fs: bool) void {
     if (nfamilies >= max_families) return;
-    const parsed = font.Font.parse(bytes) catch return;
+    // Normalise any container (WOFF today) to SFNT; SFNT input is returned
+    // as-is, so only a compressed font consumes the decompress heap.
+    const sfnt = font.toSfnt(bytes, decomp_heap[decomp_used..]) catch return;
+    const parsed = font.Font.parse(sfnt) catch return;
     var fam = &families[nfamilies];
     fam.font = parsed;
     const nm = fam.font.familyName(&fam.name);
     if (nm.len == 0) return; // unnamed: cannot be selected, skip
     fam.name_len = nm.len;
     if (familyIndex(nm) != null) return; // already have this family
+    // The font is kept: if it was decompressed, commit its heap so a later
+    // font does not overwrite the bytes this Font borrows.
+    if (sfnt.ptr != bytes.ptr) decomp_used += sfnt.len;
     nfamilies += 1;
     var b: [96]u8 = undefined;
     _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: family '{s}'{s}", .{ nm, if (from_fs) " (fs)" else "" }) catch "fontsvc: family");
@@ -79,6 +90,13 @@ fn alreadySeen(name: []const u8) bool {
     return false;
 }
 
+/// A font file we try to load (by extension); toSfnt/parse reject any we
+/// cannot actually decode (e.g. WOFF2 for now).
+fn isFontFile(name: []const u8) bool {
+    return std.mem.endsWith(u8, name, ".ttf") or std.mem.endsWith(u8, name, ".otf") or
+        std.mem.endsWith(u8, name, ".woff") or std.mem.endsWith(u8, name, ".woff2");
+}
+
 /// Scan a filesystem fonts directory (`view`) and register every new .ttf
 /// in it — the runtime install path, also the `rescan` handler. Best
 /// effort: a bad file is skipped.
@@ -94,7 +112,7 @@ fn scanView(view: u64) void {
     @memcpy(names[0..m], buf[0..m]);
     var it = std.mem.splitScalar(u8, names[0..m], '\n');
     while (it.next()) |name| {
-        if (name.len == 0 or name.len > 64 or !std.mem.endsWith(u8, name, ".ttf")) continue;
+        if (name.len == 0 or name.len > 64 or !isFontFile(name)) continue;
         if (alreadySeen(name)) continue;
         if (n_seen < seen.len) {
             @memcpy(seen[n_seen][0..name.len], name);
@@ -313,7 +331,7 @@ fn loadArchiveFonts(blob: []const u8) void {
     // bundled families. A Font borrows the mapped archive bytes.
     var it = shared.marcIter(blob);
     while (it.next()) |e| {
-        if (std.mem.startsWith(u8, e.path, "assets/fonts/") and std.mem.endsWith(u8, e.path, ".ttf")) {
+        if (std.mem.startsWith(u8, e.path, "assets/fonts/") and isFontFile(e.path)) {
             registerFont(e.data, false);
         }
     }
