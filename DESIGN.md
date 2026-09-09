@@ -2985,6 +2985,25 @@ compositor (`compositor-ptr`), and a virtio tablet rides along in both
 `run-gui` and the drill — so clicks route to widgets, keyboard-driven
 tests still pass, and an idle cursor stays hidden (no screendump noise).
 
+**The settings shell's memory (2026-09-09).** The surface-buffer leak
+above was real but not the whole story: freeing it, the shell still fell
+over after ~7 applies with `mshrun: out of memory` — the interpreter's,
+not the compositor's. Two causes, both from a GUI that *reopens*
+repeatedly. First, the shell looped by **recursion** (`def panel … panel
+…`), and a never-returning tail call keeps every prior frame's scope
+alive, so the call chain and its bindings grew without bound; it is now a
+`while` loop that reads the saved appearance each pass, so a pass's state
+is dead once it ends. Second — the deeper one — the GUI runtime's own
+event loop never **reclaimed** the per-render view trees: each render
+calls `view` and builds a fresh widget tree, and mshl retains escaping
+values in reference-counted boxes that are only swept at statement
+boundaries — but a `gui` call is one long statement, so the dead trees
+piled up across every render of every panel until the box heap was spent.
+The runtime now calls `it.reclaim()` at the top of each render, draining
+the previous frame's garbage; that bounds *any* long-running GUI (a
+counter clicked a thousand times, a shell reopened all afternoon), not
+just this one. A drill that cycles apply a dozen times guards it.
+
 **The system font service (as built, 2026-09-08).** The bitmap font was
 the ceiling on how the GUI could look; real type meant a vector-font
 stack, and the shape it took is a *service every text program goes

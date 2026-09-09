@@ -1572,7 +1572,7 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // so Tab five times to "apply" and fire it, and watch "gui: ready"
     // climb each cycle (greeter=1, first open=2, first apply=3, then +1).
     var cycle: usize = 0;
-    while (cycle < 3) : (cycle += 1) {
+    while (cycle < 12) : (cycle += 1) {
         var tb: usize = 0;
         while (tb < 5) : (tb += 1) {
             _ = q.sendKey("tab");

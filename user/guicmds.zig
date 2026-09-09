@@ -926,6 +926,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     var focus: usize = 0;
     var announced = false;
     while (true) {
+        // Reclaim the previous render's dead boxes: a long-running GUI (or
+        // one that reopens per apply, like the settings shell) would
+        // otherwise pile up per-render trees until the interpreter runs
+        // out of memory.
+        it.reclaim();
         const tree = try it.callValue(view, &.{state}, null, null);
         const nfocus = renderTree(tree, title, focus);
         if (nfocus > 0 and focus >= nfocus) focus = nfocus - 1;
