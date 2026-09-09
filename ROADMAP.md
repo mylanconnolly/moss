@@ -817,8 +817,20 @@ is a plan.
     installs like any font. Validated byte-identical rasterization of every
     glyph of Source Code Pro (296) and IBM Plex Sans (1025, 485 composites).
     The fontrescan drill installs all three front-ends live (WOFF/OTF/WOFF2).
-    Every real font file now loads. Open: session push of per-user
-    family/scale; pointer input; richer layout; fabric-remote GUI.
+    Every real font file now loads. ✅ Per-user font-scale push (landed
+    2026-09-09): fontsvc is a singleton (one atlas, one scale), so a
+    per-user scale = the logged-in user's scale pushed to the shared
+    service for their session. fontsvc keeps the system layer's text +
+    gained a `reconfigure` request: a client stages the user's font.msh in
+    the request buffer, fontsvc merges it over the system layer (same
+    lib/settings.merge, locked keys) and re-applies scale/sizes/families;
+    an empty push reverts (logout). A user overriding only `scale` keeps
+    the system sizes, so scale 1.5 over ui:16 → effective 24px for every
+    client. Drilled (profile fontscale): fontpush (the fontrescan-client
+    idiom) reads a user layer, pushes it (ui→24px), reverts on logout
+    (→16px). Open: automatic push on login (needs a post-login GUI that
+    renders through fontsvc to show it); richer layout; fabric-remote GUI.
+    (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

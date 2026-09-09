@@ -2868,9 +2868,26 @@ the mshl parser *copies* quoted strings into it — so a quoted give path
 like `fs: "assets/fonts"` dangled once enough units pushed the reuse past
 it (bare words slice the persistent archive and were fine); init now
 copies every kept give string into a pool that outlives the parse. The per-user layer plugs into the same `merge` call (a
-user's `home/<user>/conf/font.msh` over the system one); wiring a session
-to push its user's effective settings — and a post-login GUI to show them
-— is the next step.
+user's `home/<user>/conf/font.msh` over the system one), and a session now
+pushes it. **The per-user scale push (as built, 2026-09-09).** fontsvc is a
+singleton — one atlas, one effective scale — so a per-user scale is the
+logged-in user's scale applied to the shared service for the life of their
+session. fontsvc keeps the system layer's text and gains a `reconfigure`
+request: a client stages the user's `font.msh` in the request buffer and
+fontsvc merges it over the system layer (the same `lib/settings.merge`,
+locked keys and all) and re-applies scale, sizes and families; an empty
+push reverts to the system layer alone (logout). New sizes just produce new
+atlas entries on a client's next layout, so the change is picked up with no
+invalidation. Because a user overriding only `scale` keeps the system's
+sizes, `scale: 1.5` over a system `ui: 16` yields an effective 24 px — and
+every client that lays out through fontsvc renders larger, which is the
+accessibility knob made personal. Drilled (`fontscale`): a session-stand-in
+(`fontpush`, the same idiom as the `fontrescan` client) reads a user's font
+layer, pushes it, reads back the ui role's size (24 px), then reverts on
+logout (back to 16 px) — fontsvc logs each reconfigure. Wiring this into the
+automatic login flow — usersvc or the session pushing on sign-in — waits on
+a post-login GUI that renders through fontsvc to show it (today post-login
+is the bitmap-fallback terminal); the mechanism is proven and ready for it.
 
 Paid-for lessons: a service reached by a `unit:` give
 must still run init's boot handshake (answer `go`) even if it takes no
@@ -2953,9 +2970,10 @@ rasterizes byte-identically; the reconstructed `glyf` even matches the
 declared `origLength`. The `fontrescan` drill now installs all three
 front-ends live (WOFF, OTF/CFF, WOFF2), each registering its family.
 
-What's left for the arc: pushing a user's font settings from their session
-(per-user family/scale, once a post-login GUI shows it); pointer input,
-richer layout, and the fabric-remote GUI the data-only design already allows.
+What's left for the arc: automatic per-user font push on login (the
+mechanism is built; it wants a post-login GUI that renders through fontsvc
+to show it); richer layout; and the fabric-remote GUI the data-only design
+already allows. (Pointer input and the per-user push mechanism landed.)
 
 ## Distribution: the fabric
 

@@ -380,6 +380,7 @@ pub const ImageId = enum(u64) {
     fontsvc = 31,
     fontcli = 32,
     ptrcli = 33,
+    fontpush = 34,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -824,6 +825,12 @@ pub const FontReq = union(enum(u64)) {
     /// Re-scan the filesystem fonts directory: a font dropped there since
     /// startup is registered without restarting the service. Reply `ok`.
     rescan: void,
+    /// Apply a per-user settings layer: buf[0..len] holds the user's
+    /// `font.msh` (an mshl data literal), which fontsvc merges over the
+    /// system layer (lib/settings) and re-applies — so a session can push
+    /// the logged-in user's scale/sizes/families to the shared service.
+    /// `len` 0 reverts to the system layer alone (logout). Reply `ok`.
+    reconfigure: struct { len: u64 },
 };
 
 pub const FontResp = union(enum(u64)) {
@@ -1740,7 +1747,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 

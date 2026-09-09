@@ -205,6 +205,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.fontscale_test) {
+        _ = sched.spawn("boot-watch", fontscaleTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.gui_test) {
         _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -759,6 +764,14 @@ fn pointerTestWorker(_: u64) void {
 /// hit-tests each click against the widget boxes), not by tabbing.
 fn guiclickTestWorker(_: u64) void {
     systemDrill("guiclick");
+}
+
+/// The per-user font-scale drill: a system boot under profile "fontscale"
+/// — a session-stand-in reads a user's font layer and pushes it to
+/// fontsvc, which merges it over the system layer and re-applies the
+/// effective scale, then reverts on logout.
+fn fontscaleTestWorker(_: u64) void {
+    systemDrill("fontscale");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

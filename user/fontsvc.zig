@@ -207,18 +207,45 @@ fn strOf(v: mshl.Value) ?[]const u8 {
     return if (v == .str) v.str else null;
 }
 
-/// Read the system font settings (conf/font.msh) into the effective
-/// scale, per-role sizes and per-role family names. A user layer merges
-/// over this the same way (lib/settings) once a session pushes one.
-fn readSettings(text: []const u8) void {
-    if (text.len == 0) return;
+// The system settings layer (conf/font.msh), kept so a pushed per-user
+// layer can be merged over it (lib/settings) whenever a session applies
+// one — and dropped back to the system layer alone on logout.
+var system_text: [4 << 10]u8 = undefined;
+var system_len: usize = 0;
+
+/// Remember the system layer's text (from the boot archive).
+fn setSystemLayer(text: []const u8) void {
+    const n = @min(text.len, system_text.len);
+    @memcpy(system_text[0..n], text[0..n]);
+    system_len = n;
+}
+
+/// Apply the effective settings for a merge of the system layer with an
+/// optional per-user layer (`user_text`, empty = system layer alone):
+/// re-derive scale, per-role sizes and per-role family names. New sizes
+/// simply produce new atlas entries on the next layout, so a client sees
+/// the change when it next renders; the old cached glyphs are harmless.
+fn applyLayers(user_text: []const u8) void {
+    if (system_len == 0) return;
     var fba = std.heap.FixedBufferAllocator.init(&settings_mem);
     const a = fba.allocator();
     var ctx: u8 = 0;
     var it = mshl.Interp.init(a, a, .{ .ctx = @ptrCast(&ctx), .call = noHost });
-    const v = it.parseData(text) catch return;
-    if (v != .record) return;
-    const eff = settings.merge(a, v.record, null, &.{}) catch return;
+    const sv = it.parseData(system_text[0..system_len]) catch return;
+    if (sv != .record) return;
+    var user: ?mshl.Record = null;
+    if (user_text.len > 0) {
+        const uv = it.parseData(user_text) catch return;
+        if (uv == .record) user = uv.record;
+    }
+    const eff = settings.merge(a, sv.record, user, &.{}) catch return;
+    // Reset to system defaults first, so a user layer that drops a key
+    // reverts it (merge already handles present keys; this covers the
+    // logout case, applyLayers("")).
+    scale = 1.0;
+    ui_base = 16;
+    title_base = 22;
+    mono_base = 15;
     if (eff.get("scale")) |x| if (numF(x)) |f| {
         if (f >= 0.5 and f <= 6.0) scale = f;
     };
@@ -234,6 +261,18 @@ fn readSettings(text: []const u8) void {
     if (eff.get("ui_family")) |x| if (strOf(x)) |s| ui_fam.set(s);
     if (eff.get("title_family")) |x| if (strOf(x)) |s| title_fam.set(s);
     if (eff.get("mono_family")) |x| if (strOf(x)) |s| mono_fam.set(s);
+}
+
+/// Log the effective UI size and scale (at boot, and after a reconfigure).
+fn logEffective(label: []const u8) void {
+    var b: [96]u8 = undefined;
+    const ui_eff: u32 = @intFromFloat(@round(ui_base * scale));
+    _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: {s} (ui {d}px, scale {d}.{d:0>2})", .{
+        label,
+        ui_eff,
+        @as(u32, @intFromFloat(scale)),
+        @as(u32, @intFromFloat(@round(scale * 100))) % 100,
+    }) catch "fontsvc: reconfigured");
 }
 
 // The shared glyph atlas: an 8-bit coverage bitmap, packed by shelves.
@@ -362,7 +401,10 @@ fn loadFonts(blob: []const u8, fs_only: bool, view: u64) void {
     ui_fam.set("IBM Plex Sans");
     title_fam.set("IBM Plex Sans");
     mono_fam.set("IBM Plex Mono");
-    if (shared.marcFind(blob, "conf/font.msh")) |cfg| readSettings(cfg);
+    if (shared.marcFind(blob, "conf/font.msh")) |cfg| {
+        setSystemLayer(cfg);
+        applyLayers(""); // the system layer alone until a session pushes one
+    }
 }
 
 export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
@@ -387,13 +429,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     atlas_shm = sh.data[0];
     @memset(atlas[0 .. atlas_w * atlas_h], 0);
     {
-        var b: [96]u8 = undefined;
-        const ui_eff: u32 = @intFromFloat(@round(ui_base * scale));
-        _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: up (ui {d}px, scale {d}.{d:0>2})", .{
-            ui_eff,
-            @as(u32, @intFromFloat(scale)),
-            @as(u32, @intFromFloat(@round(scale * 100))) % 100,
-        }) catch "fontsvc: up");
+        logEffective("up");
     }
 
     // One client's request/response buffer (the GUI runtime). A second
@@ -443,6 +479,19 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             .rescan => {
                 // Pick up a font dropped into the view since startup.
                 if (g_view != 0) scanView(g_view);
+                _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
+            },
+            .reconfigure => |q| {
+                // A session pushes the logged-in user's font.msh (in the
+                // request buffer); merge it over the system layer and
+                // re-apply. len 0 reverts to the system layer (logout).
+                if (q.len > req_len or (q.len > 0 and req_va == 0)) {
+                    _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 5 } }, 0);
+                    continue;
+                }
+                const user_text: []const u8 = if (q.len > 0) @as([*]const u8, @ptrFromInt(req_va))[0..@intCast(q.len)] else "";
+                applyLayers(user_text);
+                logEffective("reconfigured");
                 _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
             },
             .layout => |q| {

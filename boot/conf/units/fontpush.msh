@@ -1,0 +1,14 @@
+# The per-user font-scale drill (profile fontscale): fontpush reads a
+# user's font layer from the archive and pushes it to fontsvc (which
+# merges it over the system layer), confirms the effective ui size grew,
+# then reverts on logout. Pulling in the `font` give starts fontsvc.
+{
+  image:     fontpush
+  grant:     [log, bootfs]
+  budget:    { user: 8mb }
+  profiles:  [fontscale]
+  essential: true
+  give: [
+    { tag: font, unit: fontsvc }
+  ]
+}

@@ -1,0 +1,8 @@
+# A per-user font layer (a stand-in for home/<user>/conf/font.msh): the
+# logged-in user prefers larger type. Only `scale` is overridden; the
+# system layer's sizes and families (conf/font.msh) merge through, so the
+# fontscale drill's client pushes this over the system layer and the
+# effective ui size becomes 16 * 1.5 = 24 px.
+{
+  scale: 1.5
+}
