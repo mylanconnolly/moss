@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick };
 
 const Spec = struct {
     name: []const u8,
@@ -69,6 +69,7 @@ const specs = [_]Spec{
     .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
     .{ .name = "ptr", .kind = .ptr, .pass = "ptr-test: PASS", .extra = "ptr: click", .append = "profile=ptr", .timeout_s = 120 },
     .{ .name = "pointer", .kind = .pointer, .pass = "pointer-test: PASS", .extra = "pointer: click", .append = "profile=pointer", .timeout_s = 120 },
+    .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
     .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
@@ -363,8 +364,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
-        // The compositor pointer drill: a display, keyboard + tablet, QMP.
-        .pointer => try args.appendSlice(gpa, &.{
+        // The compositor pointer drill and the mshl GUI click drill: a
+        // display, keyboard + tablet, QMP.
+        .pointer, .guiclick => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -422,6 +424,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .pointer) {
         if (!try pointerDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .guiclick) {
+        if (!try guiclickDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .seat) {
         if (!try seatDrive(spec, log_path, polls)) return false;
@@ -722,6 +727,85 @@ fn pointerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     return true;
+}
+
+/// The scanout centre a GUI logged for a widget id ("gui: widget <id> at
+/// X,Y"), or null if not present yet.
+fn widgetCenter(content: []const u8, id: []const u8) ?[2]u32 {
+    var buf: [64]u8 = undefined;
+    const marker = std.fmt.bufPrint(&buf, "gui: widget {s} at ", .{id}) catch return null;
+    const i = std.mem.indexOf(u8, content, marker) orelse return null;
+    var p = i + marker.len;
+    var x: u32 = 0;
+    while (p < content.len and content[p] >= '0' and content[p] <= '9') : (p += 1) x = x * 10 + (content[p] - '0');
+    if (p >= content.len or content[p] != ',') return null;
+    p += 1;
+    var y: u32 = 0;
+    while (p < content.len and content[p] >= '0' and content[p] <= '9') : (p += 1) y = y * 10 + (content[p] - '0');
+    return .{ x, y };
+}
+
+/// Move the cursor over a scanout point and click (down then up). Scanout
+/// coordinates scale to the tablet's 0..32767 range.
+fn clickScanout(q: *Qmp, cx: u32, cy: u32) bool {
+    const ax = @as(u32, @intCast(@as(u64, cx) * 32768 / 1024));
+    const ay = @as(u32, @intCast(@as(u64, cy) * 32768 / 768));
+    if (!q.sendPointer(ax, ay)) return false;
+    return q.sendClick(true) and q.sendClick(false);
+}
+
+/// The mshl GUI pointer drill: click the counter's "increment" then
+/// "quit" buttons (by the scanout centres the runtime logged) and confirm
+/// the app updated its state via the clicks (final count = 1).
+fn guiclickDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    var inc: [2]u32 = undefined;
+    var quit: [2]u32 = undefined;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (widgetCenter(content, "inc")) |c1| {
+            if (widgetCenter(content, "quit")) |c2| {
+                inc = c1;
+                quit = c2;
+                break;
+            }
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the GUI never advertised its widget boxes", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Click increment; give the app a moment to update and re-park before
+    // clicking quit (a pointer event with no reader parked is dropped).
+    if (!clickScanout(&q, inc[0], inc[1])) {
+        reportFailure(spec.name, "QMP could not click increment", log_path);
+        return false;
+    }
+    sleepMs(500);
+    if (!clickScanout(&q, quit[0], quit[1])) {
+        reportFailure(spec.name, "QMP could not click quit", log_path);
+        return false;
+    }
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "gui: done count=1") != null) return true;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the clicks did not drive the GUI to count=1", log_path);
+            return false;
+        }
+    }
 }
 
 fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {

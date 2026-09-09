@@ -670,8 +670,19 @@ is a plan.
     event (kind 0 key, kind 1 pointer with x/y/btn packed into one word, a
     payload being 3 words). Drilled (profile pointer): the host clicks a
     client's window, the client confirms the event at local (150,99) and a
-    screendump confirms the arrow drawn there. Next: the mshl GUI makes
-    widgets clickable (stage C).
+    screendump confirms the arrow drawn there. ✅ Pointer input, stage C
+    (landed 2026-09-09): clickable mshl widgets. renderTree records each
+    focusable's clickable box; the GUI runtime's next_input became a tagged
+    event, and a pointer press hit-tests the widget under it, focuses it,
+    and fires a button just as Enter does (update stays a pure function of
+    coarse events). Nothing about an app changes — the same view/update
+    counter now takes clicks. Drilled (profile guiclick): the runtime logs
+    each widget's scanout centre, the host clicks increment then quit, and
+    the counter reaches count=1 by click alone. Pointer input now runs the
+    whole stack: tablet → inputsvc → compositor cursor + hit-test → routed
+    event → the mshl widget under it. Remaining GUI/font work: per-user
+    scale push (needs a post-login GUI), richer layout, subpixel, a
+    settings UI, the fabric-remote GUI.
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view

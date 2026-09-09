@@ -1,0 +1,17 @@
+# The mshl GUI pointer drill (profile guiclick): the same counter GUI as
+# gui-demo, but its display is the compositor with a pointer
+# (compositor-ptr), so the host can CLICK the buttons instead of tabbing
+# to them. mshrun runs the app; the runtime hit-tests each click against
+# the widget boxes and fires the button under it.
+{
+  image:     mshrun
+  script:    scripts/gui-demo.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [guiclick]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+  ]
+}

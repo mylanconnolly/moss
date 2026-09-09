@@ -2580,6 +2580,23 @@ routed event landed on its surface at the right local coordinates
 (150,99 — the window's centre), and a screendump confirms the arrow drawn
 there over the window's fill.
 
+**Clickable mshl widgets (as built, 2026-09-09).** The last piece makes the
+declarative GUI runtime pointer-driven. `renderTree` already lays each
+widget out top-to-bottom; now it records each focusable's clickable box
+(the button box, the field's value box) alongside its id. `next_input`
+became a tagged event, and the input loop handles a pointer press: it
+hit-tests the widget box under the surface-local click, focuses it, and —
+for a button — fires it, exactly as Enter does (so `update` runs on the
+same coarse event, still a pure function). A release or a click on empty
+space just keeps waiting; the runtime re-renders only when focus or state
+changes, as before. Nothing about the app changes — the same
+`view`/`update` counter now responds to clicks as well as the keyboard.
+Drilled (`guiclick`): the runtime logs each widget's scanout centre, and
+the host clicks "increment" then "quit" (over the pointer-capable
+compositor); the counter reaches `count=1` by click alone. With that,
+pointer input runs the whole stack — tablet → inputsvc → compositor cursor
+and hit-test → routed event → the mshl widget under it.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

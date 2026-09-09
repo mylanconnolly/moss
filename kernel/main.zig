@@ -200,6 +200,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.guiclick_test) {
+        _ = sched.spawn("boot-watch", guiclickTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.gui_test) {
         _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -747,6 +752,13 @@ fn ptrTestWorker(_: u64) void {
 /// routes the host's click to that surface's client.
 fn pointerTestWorker(_: u64) void {
     systemDrill("pointer");
+}
+
+/// The mshl GUI pointer drill: a system boot under profile "guiclick" — an
+/// mshl GUI whose buttons the host fires by clicking (the runtime
+/// hit-tests each click against the widget boxes), not by tabbing.
+fn guiclickTestWorker(_: u64) void {
+    systemDrill("guiclick");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

@@ -16,9 +16,10 @@
 //!             } })
 //!   }
 //!
-//! The runtime owns the surface: it renders `view state`, routes the
-//! keyboard (Tab moves focus between the focusable widgets, Enter fires
-//! the focused one), and on each fire calls `update state {id}`, threads
+//! The runtime owns the surface: it renders `view state`, routes input
+//! (the keyboard — Tab moves focus between the focusable widgets, Enter
+//! fires the focused one — and the pointer — a click focuses the widget
+//! under it and fires a button), and on each fire calls `update state {id}`, threads
 //! the returned state forward, and re-renders. The app never loops and
 //! never blocks — it is a pure function of state and event, so it is a
 //! supervised, crash-only, fabric-shippable service in the making (only
@@ -114,10 +115,22 @@ const c_field_edge: u32 = 0x003a_445e; // a field/button box outline
 var px: [*]volatile u32 = undefined; // the mapped surface, win_w*win_h
 var surf: u64 = 0;
 
-// A focusable widget: its id, and whether it is a text field (which
-// eats typing) or a button (which fires on Enter).
-const Focus = struct { id: []const u8, is_field: bool };
+// A focusable widget: its id, whether it is a text field (which eats
+// typing) or a button (which fires on Enter), and its clickable box on
+// the surface (so a pointer press can hit-test which widget it landed on).
+const Focus = struct { id: []const u8, is_field: bool, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
 var focusables: [16]Focus = undefined;
+
+/// The focusable whose box contains (x, y) — surface-local, the pointer's
+/// coordinates — or null. Topmost-last wins (widgets do not overlap).
+fn hitWidget(n: usize, x: usize, y: usize) ?usize {
+    var i: usize = 0;
+    while (i < n and i < focusables.len) : (i += 1) {
+        const f = focusables[i];
+        if (x >= f.bx and x < f.bx + f.bw and y >= f.by and y < f.by + f.bh) return i;
+    }
+    return null;
+}
 
 // The runtime owns the live text of each field (keyed by id), seeded from
 // the view's `value` when the field first appears. The app's `update`
@@ -394,7 +407,7 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
             strokeRect(pad, y, bw, bh, edge, 2);
             drawStr(pad + bpx, y + bpy, R_UI, label, ink, fill);
             if (n < focusables.len) {
-                focusables[n] = .{ .id = strField(rec, "id"), .is_field = false };
+                focusables[n] = .{ .id = strField(rec, "id"), .is_field = false, .bx = pad, .by = y, .bw = bw, .bh = bh };
                 n += 1;
             }
             y += bh + 16;
@@ -425,7 +438,7 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
             // A caret: a thin bar just past the text (cleaner than a glyph).
             if (focused) fillRect(tx + strW(R_UI, shown) + 1, ty, 2, lineOf(R_UI), c_focus_fg);
             if (n < focusables.len) {
-                focusables[n] = .{ .id = id, .is_field = true };
+                focusables[n] = .{ .id = id, .is_field = true, .bx = pad, .by = y, .bw = bw, .bh = bh };
                 n += 1;
             }
             y += bh + 16;
@@ -481,12 +494,16 @@ fn closeSurface() void {
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = surf } }, 0);
 }
 
-/// The next keystroke routed to our surface, or null if the channel died.
-fn nextInput() ?u8 {
+/// An input event routed to our surface: a key (kind 0, `ch`) or a pointer
+/// event (kind 1, surface-local `x`/`y` and button bitmask `btn`).
+const Event = struct { kind: u64, ch: u8 = 0, x: usize = 0, y: usize = 0, btn: u64 = 0 };
+
+/// The next input event routed to our surface, or null if the channel died.
+fn nextInput() ?Event {
     return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0)) {
         .ok => |rep| switch (rep) {
-            .input => |x| @intCast(x.arg & 0xff),
-            else => 0,
+            .input => |v| .{ .kind = v.kind, .ch = @intCast(v.arg & 0xff), .x = shared.ptrX(v.arg), .y = shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
+            else => .{ .kind = 0, .ch = 0 },
         },
         .err => null,
     };
@@ -650,6 +667,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (!commitSurface()) return it.fail("gui: commit failed", .{});
         if (!announced) {
             _ = usys.log(log_h, "gui: ready");
+            // Log each focusable widget's clickable centre in scanout
+            // coordinates, so a host driving the pointer can click it.
+            for (0..nfocus) |i| {
+                const f = focusables[i];
+                var l: [96]u8 = undefined;
+                _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: widget {s} at {d},{d}", .{ f.id, win_x + f.bx + f.bw / 2, win_y + f.by + f.bh / 2 }) catch continue);
+            }
             announced = true;
         }
 
@@ -659,7 +683,21 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         // re-renders — the buffer, the focus, or the new state.
         var fired: ?[]const u8 = null;
         input: while (true) {
-            const ch = nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            // A pointer press: hit-test the widget under it. Clicking a
+            // button focuses and fires it; clicking a field focuses it.
+            // A release or a click on no widget just keeps waiting.
+            if (ev.kind == 1) {
+                if (ev.btn & 1 != 0) {
+                    if (hitWidget(nfocus, ev.x, ev.y)) |wi| {
+                        focus = wi;
+                        if (!focusables[wi].is_field) fired = focusables[wi].id;
+                        break :input;
+                    }
+                }
+                continue :input;
+            }
+            const ch = ev.ch;
             const cur: ?Focus = if (nfocus > 0) focusables[focus] else null;
             switch (ch) {
                 '\t' => {
