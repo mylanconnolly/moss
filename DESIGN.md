@@ -2782,7 +2782,14 @@ scales on its own. The same file names a font family per role
 (`ui_family`, `title_family`, `mono_family`); since fontsvc registers
 whatever `.ttf` is under assets/fonts by family name, installing a font is
 dropping the file there and naming it here — the system's typographic
-personality is data, not code (a serif title, say, next to a sans body). The per-user layer plugs into the same `merge` call (a
+personality is data, not code (a serif title, say, next to a sans body).
+On a real system with a disk that directory is on the filesystem, not just
+the archive: `fontsvc` in filesystem mode (`arg 1` + a fonts-dir view)
+lists it and reads each `.ttf` off mossfs, so a font a user drops there
+persists and loads with no OS rebuild (the diskless default reads the
+bundled families from the archive instead). The `gboom` drill exercises
+this path — it renders through a filesystem-mode fontsvc, and its families
+log tagged `(fs)`. The per-user layer plugs into the same `merge` call (a
 user's `home/<user>/conf/font.msh` over the system one); wiring a session
 to push its user's effective settings — and a post-login GUI to show them
 — is the next step.
@@ -2793,12 +2800,12 @@ caps, or init deems it unwired; and the rasterizer's `top` is the bitmap's
 signed device-y offset from the baseline (negative above), so the client
 *adds* it — subtracting scattered every glyph off the line.
 
-What's left for the arc: reading a runtime fonts directory off the
-filesystem (installing without a rebuild) and pushing a user's font
-settings from their session (per-user family/scale, once a post-login GUI
-shows it); the OTF/CFF, WOFF and WOFF2 front-ends so any real font file
-loads; pointer input, richer layout, and the fabric-remote GUI the
-data-only design already allows.
+What's left for the arc: pushing a user's font settings from their session
+(per-user family/scale, once a post-login GUI shows it); the OTF/CFF, WOFF
+and WOFF2 front-ends so any real font file loads; a live rescan so a
+just-dropped font appears without restarting fontsvc; pointer input,
+richer layout, and the fabric-remote GUI the data-only design already
+allows.
 
 ## Distribution: the fabric
 

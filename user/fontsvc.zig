@@ -14,6 +14,7 @@ const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const boot = @import("boot.zig");
+const fsc = @import("fsclient.zig");
 const mosslib = @import("mosslib");
 const font = mosslib.font;
 const mshl = mosslib.mshl;
@@ -45,7 +46,7 @@ const Family = struct {
 var families: [max_families]Family = @splat(.{});
 var nfamilies: usize = 0;
 
-fn registerFont(bytes: []const u8) void {
+fn registerFont(bytes: []const u8, from_fs: bool) void {
     if (nfamilies >= max_families) return;
     const parsed = font.Font.parse(bytes) catch return;
     var fam = &families[nfamilies];
@@ -55,6 +56,36 @@ fn registerFont(bytes: []const u8) void {
     fam.name_len = nm.len;
     if (familyIndex(nm) != null) return; // already have this family
     nfamilies += 1;
+    var b: [96]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: family '{s}'{s}", .{ nm, if (from_fs) " (fs)" else "" }) catch "fontsvc: family");
+}
+
+// Fonts read from a filesystem view are copied here (a Font borrows its
+// bytes, and fs files are not in the mapped archive), so a user can
+// install a font by dropping the .ttf in the fonts directory.
+var fs_heap: [3 << 20]u8 = undefined;
+var fs_used: usize = 0;
+
+/// Scan a filesystem fonts directory (`view`) and register every .ttf in
+/// it — the runtime install path. Best-effort: a bad file is skipped.
+fn scanView(view: u64) void {
+    const ab = fsc.attachBuf(view);
+    if (ab.va == 0) return;
+    const buf: [*]u8 = @ptrFromInt(ab.va);
+    const n = fsc.fsList(view, buf, "") orelse return;
+    // The listing (\n-separated names) lives in `buf`, which readWhole
+    // reuses — copy it out first.
+    var names: [4096]u8 = undefined;
+    const m = @min(n, names.len);
+    @memcpy(names[0..m], buf[0..m]);
+    var it = std.mem.splitScalar(u8, names[0..m], '\n');
+    while (it.next()) |name| {
+        if (name.len == 0 or !std.mem.endsWith(u8, name, ".ttf")) continue;
+        if (fs_used >= fs_heap.len) break;
+        const bytes = fsc.readWhole(view, buf, name, fs_heap[fs_used..]) orelse continue;
+        fs_used += bytes.len;
+        registerFont(bytes, true);
+    }
 }
 
 fn familyIndex(name: []const u8) ?u8 {
@@ -257,43 +288,51 @@ fn roleMetrics(role: u64, px_dev: f32) struct { line: i32, ascent: i32 } {
     return .{ .line = @intFromFloat(@round(asc - desc)), .ascent = @intFromFloat(@round(asc)) };
 }
 
-fn loadFonts(blob: []const u8) void {
+fn loadArchiveFonts(blob: []const u8) void {
     // Register every .ttf under assets/fonts/ in the boot archive — the
-    // bundled families and any a build/user drops there. A Font borrows
-    // the mapped archive bytes, so no filesystem is needed.
+    // bundled families. A Font borrows the mapped archive bytes.
     var it = shared.marcIter(blob);
     while (it.next()) |e| {
         if (std.mem.startsWith(u8, e.path, "assets/fonts/") and std.mem.endsWith(u8, e.path, ".ttf")) {
-            registerFont(e.data);
+            registerFont(e.data, false);
         }
+    }
+}
+
+/// `fs_only`: read fonts from the filesystem view alone (a real system's
+/// installable fonts directory), skipping the archive; otherwise the
+/// archive's bundled families (the diskless default), plus the view if one
+/// is given. Then default the roles and apply the settings layer.
+fn loadFonts(blob: []const u8, fs_only: bool, view: u64) void {
+    if (fs_only) {
+        if (view != 0) scanView(view);
+    } else {
+        loadArchiveFonts(blob);
+        if (view != 0) scanView(view);
     }
     if (nfamilies == 0) {
         _ = usys.log(glog, "fontsvc: no fonts loaded");
         usys.exit(161);
     }
-    // Default role→family, then let the settings layer override sizes,
-    // scale and family names.
     ui_fam.set("IBM Plex Sans");
     title_fam.set("IBM Plex Sans");
     mono_fam.set("IBM Plex Mono");
     if (shared.marcFind(blob, "conf/font.msh")) |cfg| readSettings(cfg);
-    for (families[0..nfamilies]) |*fam| {
-        var b: [96]u8 = undefined;
-        _ = usys.log(glog, std.fmt.bufPrint(&b, "fontsvc: family '{s}'", .{fam.name[0..fam.name_len]}) catch "fontsvc: family");
-    }
 }
 
-export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
+export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
-    // Consume init's boot handshake on the serve channel (no caps needed —
-    // the fonts come from the archive blob — but init's `go` must be
+    // Consume init's boot handshake on the serve channel (the fonts come
+    // from the archive and/or a fonts view, but init's `go` must be
     // answered or it deems the unit unwired). Then serve FontReq on it.
-    _ = boot.take(chan_h);
+    const setup = boot.take(chan_h);
     if (blob_va == 0) {
         _ = usys.log(glog, "fontsvc: no boot archive");
         usys.exit(162);
     }
-    loadFonts(@as([*]const u8, @ptrFromInt(blob_va))[0..blob_len]);
+    // arg 1 = read fonts from the filesystem view only (installable fonts).
+    const view: u64 = if (setup.has(.view)) setup.cap(.view) else 0;
+    loadFonts(@as([*]const u8, @ptrFromInt(blob_va))[0..blob_len], arg == 1, view);
 
     const sh = usys.shmCreate(atlas_pages);
     if (sh.err != .ok) usys.exit(163);

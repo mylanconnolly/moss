@@ -1348,6 +1348,13 @@ fn gboomDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+    // The GUI here renders through fontsvc in filesystem mode: it loaded
+    // its families from the mossfs fonts directory (the install path), not
+    // the boot archive — so the family log must be tagged "(fs)".
+    if (std.mem.indexOf(u8, readLog(log_path), "(fs)") == null) {
+        reportFailure(spec.name, "fontsvc did not load fonts from the filesystem", log_path);
+        return false;
+    }
     var q = qmpConnect(qmp_port) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;

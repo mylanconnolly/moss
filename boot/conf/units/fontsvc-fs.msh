@@ -1,0 +1,15 @@
+# The font service in filesystem mode (arg 1): it reads the installable
+# fonts directory off the filesystem (the assets/fonts tier, seeded at
+# first boot and writable), not the boot archive — so a user installs a
+# font by dropping the .ttf there. Needs a disk (the assets tier lives on
+# mossfs); pulled up by whoever holds a `font` give to it. Still reads
+# conf/font.msh from the archive (bootfs) for the settings.
+{
+  image:  fontsvc
+  arg:    1
+  grant:  [log, bootfs]
+  budget: { user: 20mb }
+  give: [
+    { tag: view, fs: "assets/fonts", ro: true }
+  ]
+}

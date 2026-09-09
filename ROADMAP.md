@@ -740,10 +740,14 @@ is a plan.
     the mono role's advance/line as its cell, caches each byte's glyph from
     fontsvc locally (no per-char IPC once warm), and blits from the atlas —
     so the post-login shell renders in real IBM Plex Mono at the system
-    scale (bitmap fallback kept). Open: a runtime fonts dir off the
-    filesystem (install without rebuild) + session push of per-user
-    family/scale; OTF/WOFF/WOFF2 front-ends; pointer input; richer layout;
-    fabric-remote GUI.
+    scale (bitmap fallback kept). ✅ Filesystem font install (landed
+    2026-09-08): fontsvc in fs mode (arg 1 + a fonts-dir view) lists the
+    assets/fonts tier on mossfs and reads each .ttf off the filesystem, so
+    a dropped font persists and loads with no OS rebuild (the diskless
+    default still reads the archive); the gboom drill renders through it
+    and asserts the families log tagged (fs). Open: a live rescan (no
+    restart); session push of per-user family/scale; OTF/WOFF/WOFF2
+    front-ends; pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`
