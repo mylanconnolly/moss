@@ -1,0 +1,69 @@
+{
+ "tag": "ja-JP",
+ "cldr": "48.2.0",
+ "numberSystem": "latn",
+ "symbols": {
+  "decimal": ".",
+  "group": ",",
+  "minus": "-"
+ },
+ "decimalPattern": "#,##0.###",
+ "currencyPattern": "¤#,##0.00",
+ "monthsAbbr": [
+  "1月",
+  "2月",
+  "3月",
+  "4月",
+  "5月",
+  "6月",
+  "7月",
+  "8月",
+  "9月",
+  "10月",
+  "11月",
+  "12月"
+ ],
+ "monthsWide": [
+  "1月",
+  "2月",
+  "3月",
+  "4月",
+  "5月",
+  "6月",
+  "7月",
+  "8月",
+  "9月",
+  "10月",
+  "11月",
+  "12月"
+ ],
+ "daysAbbr": [
+  "日",
+  "月",
+  "火",
+  "水",
+  "木",
+  "金",
+  "土"
+ ],
+ "am": "午前",
+ "pm": "午後",
+ "dateMedium": "y/MM/dd",
+ "dateLong": "y年M月d日",
+ "timeMedium": "H:mm:ss",
+ "defaultCurrency": "JPY",
+ "currencies": {
+  "USD": {
+   "symbol": "$",
+   "frac": 2
+  },
+  "EUR": {
+   "symbol": "€",
+   "frac": 2
+  },
+  "JPY": {
+   "symbol": "￥",
+   "frac": 0
+  }
+ }
+}

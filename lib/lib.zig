@@ -9,6 +9,7 @@ pub const fabcert = @import("fabcert.zig");
 pub const font = @import("font.zig");
 pub const http = @import("http.zig");
 pub const json = @import("json.zig");
+pub const locale = @import("locale.zig");
 pub const lz4 = @import("lz4.zig");
 pub const mshl = @import("mshl.zig");
 pub const pool = @import("pool.zig");
@@ -27,6 +28,7 @@ test {
     _ = font;
     _ = http;
     _ = json;
+    _ = locale;
     _ = lz4;
     _ = mshl;
     _ = pool;

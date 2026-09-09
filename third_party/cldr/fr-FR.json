@@ -1,0 +1,69 @@
+{
+ "tag": "fr-FR",
+ "cldr": "48.2.0",
+ "numberSystem": "latn",
+ "symbols": {
+  "decimal": ",",
+  "group": " ",
+  "minus": "-"
+ },
+ "decimalPattern": "#,##0.###",
+ "currencyPattern": "#,##0.00 ¤",
+ "monthsAbbr": [
+  "janv.",
+  "févr.",
+  "mars",
+  "avr.",
+  "mai",
+  "juin",
+  "juil.",
+  "août",
+  "sept.",
+  "oct.",
+  "nov.",
+  "déc."
+ ],
+ "monthsWide": [
+  "janvier",
+  "février",
+  "mars",
+  "avril",
+  "mai",
+  "juin",
+  "juillet",
+  "août",
+  "septembre",
+  "octobre",
+  "novembre",
+  "décembre"
+ ],
+ "daysAbbr": [
+  "dim.",
+  "lun.",
+  "mar.",
+  "mer.",
+  "jeu.",
+  "ven.",
+  "sam."
+ ],
+ "am": "AM",
+ "pm": "PM",
+ "dateMedium": "d MMM y",
+ "dateLong": "d MMMM y",
+ "timeMedium": "HH:mm:ss",
+ "defaultCurrency": "EUR",
+ "currencies": {
+  "USD": {
+   "symbol": "$US",
+   "frac": 2
+  },
+  "EUR": {
+   "symbol": "€",
+   "frac": 2
+  },
+  "JPY": {
+   "symbol": "JPY",
+   "frac": 0
+  }
+ }
+}

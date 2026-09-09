@@ -535,6 +535,23 @@ pub fn build(b: *std.Build) void {
     dot_responder.root_module.addImport("mosslib", host_lib_mod);
     b.installArtifact(dot_responder);
 
+    // cldrgen: distill third_party/cldr projections into assets/locale/cldr.db.
+    // Run offline (`zig build cldrgen`) to regenerate the vendored blob after a
+    // CLDR refresh; the gate just bundles the committed output.
+    const cldrgen = b.addExecutable(.{
+        .name = "cldrgen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/cldrgen.zig"),
+            .target = host_target,
+            .optimize = .Debug,
+        }),
+    });
+    cldrgen.root_module.addImport("mosslib", host_lib_mod);
+    b.installArtifact(cldrgen);
+    const cldrgen_run = b.addRunArtifact(cldrgen);
+    cldrgen_run.addArgs(&.{ "assets/locale/cldr.db", "third_party/cldr", "en-US", "de-DE", "fr-FR", "ja-JP" });
+    b.step("cldrgen", "Regenerate assets/locale/cldr.db from third_party/cldr").dependOn(&cldrgen_run.step);
+
     const pack = b.addRunArtifact(mkmarc);
     const marc_out = pack.addOutputFileArg("bootfs.marc");
     // The guest kernel's archive: the same tree minus the guest kernel
@@ -648,6 +665,9 @@ pub fn build(b: *std.Build) void {
         // TrueType-flavoured WOFF2. Its own family name (Source Code Pro
         // ExtraLight) keeps it distinct from the OTF above, so both register.
         .{ .at = "assets/available/SourceCodeProExtraLight.woff2", .from = "lib/woff2/scp.woff2" },
+        // The CLDR locale database (tools/cldrgen from third_party/cldr),
+        // seeded where the locale service reads it and swaps it live.
+        .{ .at = "assets/locale/cldr.db", .from = "assets/locale/cldr.db" },
     };
     for (asset_files) |a| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));
