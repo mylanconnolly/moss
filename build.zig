@@ -588,6 +588,10 @@ pub fn build(b: *std.Build) void {
         // OTF (`CFF ` Type2 charstrings, cubic outlines).
         .{ .at = "assets/available/IBMPlexSerif.woff", .from = "assets/fonts/IBMPlexSerif.woff" },
         .{ .at = "assets/available/SourceCodePro.otf", .from = "assets/fonts/SourceCodePro-Regular.otf" },
+        // The WOFF2 installable (Brotli + glyf transform) — a real, small
+        // TrueType-flavoured WOFF2. Its own family name (Source Code Pro
+        // ExtraLight) keeps it distinct from the OTF above, so both register.
+        .{ .at = "assets/available/SourceCodeProExtraLight.woff2", .from = "lib/woff2/scp.woff2" },
     };
     for (asset_files) |a| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));

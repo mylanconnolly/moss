@@ -16,6 +16,7 @@ pub const settings = @import("settings.zig");
 pub const sntp = @import("sntp.zig");
 pub const tls = @import("tls.zig");
 pub const usercred = @import("usercred.zig");
+pub const woff2 = @import("woff2.zig");
 pub const xts = @import("xts.zig");
 
 test {
@@ -32,5 +33,6 @@ test {
     _ = sntp;
     _ = tls;
     _ = usercred;
+    _ = woff2;
     _ = xts;
 }

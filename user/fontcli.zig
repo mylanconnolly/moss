@@ -46,12 +46,14 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     if (ab.va == 0) fail("fontcli: no view buffer");
     const buf: [*]u8 = @ptrFromInt(ab.va);
 
-    // Install two uninstalled fonts from the staging tier, covering both
-    // container front-ends: a WOFF (zlib) and an OpenType/CFF (Type2
-    // charstrings). Each is copied into the fonts directory fontsvc watches.
+    // Install three uninstalled fonts from the staging tier, covering every
+    // container front-end: a WOFF (zlib), an OpenType/CFF (Type2 charstrings),
+    // and a WOFF2 (Brotli + glyf transform). Each is copied into the fonts
+    // directory fontsvc watches.
     const jobs = [_]struct { src: []const u8, dst: []const u8 }{
         .{ .src = "available/IBMPlexSerif.woff", .dst = "fonts/IBMPlexSerif.woff" },
         .{ .src = "available/SourceCodePro.otf", .dst = "fonts/SourceCodePro.otf" },
+        .{ .src = "available/SourceCodeProExtraLight.woff2", .dst = "fonts/SourceCodeProExtraLight.woff2" },
     };
     for (jobs) |j| {
         const bytes = fsc.readWhole(view, buf, j.src, &font_data) orelse fail("fontcli: cannot read the staged font");

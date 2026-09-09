@@ -2745,8 +2745,8 @@ TrueType (`glyf`, simple + composite, quadratic Béziers) and
 OpenType/PostScript (`CFF ` Type2 charstrings, cubic Béziers) — and fills
 either with one 4× supersampled non-zero-winding scanline rasterizer into
 an 8-bit coverage bitmap. Every format converges here — WOFF (zlib) and
-WOFF2 (Brotli) are additive container front-ends that normalize to the
-SFNT it reads. (2)
+WOFF2 (Brotli + a glyf/loca transform, lib/woff2.zig over lib/brotli.zig)
+are additive container front-ends that normalize to the SFNT it reads. (2)
 `user/fontsvc.zig` — the service: it scans the boot archive's assets/fonts
 tier and registers every `.ttf` it finds by its family name (from the
 `name` table) into a **font registry** — the bundled IBM Plex Sans, Mono
@@ -2861,13 +2861,33 @@ logic is independent. Validated by fuzzing 70 corpora (empty, tiny, binary,
 random, text, CSS, font bytes, a real WOFF2) across every quality level
 against the reference `brotli`, plus committed vectors (dictionary, copy,
 store paths). Freestanding-safe (arena over a caller heap), so fontsvc can
-use it directly. Remaining: the WOFF2 container + glyf/loca transforms on
-top (stage 2).
+use it directly.
 
-What's left for the arc: the WOFF2 container/transforms over this decoder;
-pushing a user's font settings from their session (per-user family/scale,
-once a post-login GUI shows it); pointer input, richer layout, and the
-fabric-remote GUI the data-only design already allows.
+**WOFF2 (as built, 2026-09-08).** `lib/woff2.zig` sits on the Brotli decoder
+and completes the container: parse the WOFF2 header + table directory (with
+its UIntBase128 and 255UInt16 compact integers and the 63-entry known-tag
+table), Brotli-decompress the concatenated table data, and reverse the
+`glyf`/`loca` transform. That transform is the substance: the outlines are
+split across seven sub-streams (contour counts, per-contour point counts,
+point flags, the coordinate triplet stream, composite data, an explicit-bbox
+bitmap + values, and instructions), and reconstruction walks them per glyph —
+decoding the triplet-packed coordinates, re-encoding standard `glyf` flags +
+delta runs, computing the bbox where the font omitted it (simple glyphs),
+sizing composites from their component flags — then rebuilds `loca` from the
+resulting glyph offsets. Untransformed tables are copied; the rare `hmtx`
+transform is refused. The reassembled SFNT flows into the same `Font.parse`.
+`toSfnt` gained an allocator (used only here); fontsvc passes a reset-per-font
+scratch heap, and `.woff2` is a recognised font extension, so a WOFF2 dropped
+in the fonts dir installs like any other. Validated hard: every glyph of two
+real fonts — Source Code Pro (296 glyphs) against a fontTools reference, and
+IBM Plex Sans (1025 glyphs, 485 of them composites) against the original TTF —
+rasterizes byte-identically; the reconstructed `glyf` even matches the
+declared `origLength`. The `fontrescan` drill now installs all three
+front-ends live (WOFF, OTF/CFF, WOFF2), each registering its family.
+
+What's left for the arc: pushing a user's font settings from their session
+(per-user family/scale, once a post-login GUI shows it); pointer input,
+richer layout, and the fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
 

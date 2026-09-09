@@ -26,6 +26,8 @@ const Spec = struct {
     extra: ?[]const u8 = null,
     /// Marker required on every run (persistence runs included).
     always_extra: ?[]const u8 = null,
+    /// A further marker that must also appear (a third required substring).
+    extra2: ?[]const u8 = null,
     /// For panic-path tests, "KERNEL PANIC" is the point, not a failure.
     panic_is_failure: bool = true,
     /// Second run on the same disk (persistence); this marker must appear.
@@ -78,7 +80,7 @@ const specs = [_]Spec{
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
-    .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
+    .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
     .{ .name = "guest", .pass = "guest-test: PASS", .extra = "guest| [info ] smp: 4 cores online", .always_extra = "guest-hello: hello from EL0, inside a moss guest of moss" },
@@ -2507,7 +2509,9 @@ fn watch(log_path: []const u8, spec: Spec, extra: ?[]const u8, polls: *u64) Verd
         const have_extra = extra == null or std.mem.indexOf(u8, content, extra.?) != null;
         const have_always = spec.always_extra == null or
             std.mem.indexOf(u8, content, spec.always_extra.?) != null;
-        if (have_pass and have_extra and have_always) return .{ .ok = true };
+        const have_extra2 = spec.extra2 == null or
+            std.mem.indexOf(u8, content, spec.extra2.?) != null;
+        if (have_pass and have_extra and have_always and have_extra2) return .{ .ok = true };
 
         if (n * poll_ms / 1000 > spec.timeout_s) {
             return .{ .ok = false, .why = "timeout" };

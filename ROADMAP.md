@@ -767,8 +767,18 @@ is a plan.
     static dictionary + word transforms embedded as RFC data from the MIT
     reference); straight-through (output buffer is the window, size known);
     fuzz-validated against `brotli` across 70 corpora × all quality levels;
-    freestanding-safe for fontsvc. Open: the WOFF2 container + glyf/loca
-    table transforms on top (stage 2); session push of per-user
+    freestanding-safe for fontsvc. ✅ WOFF2 (landed 2026-09-08):
+    lib/woff2.zig over the Brotli decoder — parses the WOFF2 header/directory
+    (UIntBase128, 255UInt16, known-tag table), Brotli-decompresses the table
+    data, and reverses the glyf/loca transform (seven sub-streams → per-glyph
+    outline reconstruction: triplet-packed coords, re-encoded flags + deltas,
+    bbox computed where omitted, composites sized from their flags, loca
+    rebuilt); untransformed tables copied, rare hmtx transform refused. toSfnt
+    gained an allocator (fontsvc passes a reset-per-font scratch); .woff2
+    installs like any font. Validated byte-identical rasterization of every
+    glyph of Source Code Pro (296) and IBM Plex Sans (1025, 485 composites).
+    The fontrescan drill installs all three front-ends live (WOFF/OTF/WOFF2).
+    Every real font file now loads. Open: session push of per-user
     family/scale; pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

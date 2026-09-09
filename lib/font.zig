@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const flate = std.compress.flate;
+const woff2 = @import("woff2.zig");
 
 pub const Error = error{ BadFont, Unsupported, OutOfMemory };
 
@@ -45,9 +46,10 @@ fn wr32be(b: []u8, off: usize, v: u32) void {
 //
 // Every container converges to an SFNT (a table directory) the parser
 // below reads. TrueType/OpenType are already SFNT; WOFF wraps one with
-// per-table zlib compression; WOFF2 (later) is Brotli plus transforms.
-// `toSfnt` normalises the input into `out` and returns the SFNT bytes —
-// or the input itself, untouched, when it is already an SFNT.
+// per-table zlib compression; WOFF2 is Brotli plus a glyf/loca transform
+// (lib/woff2.zig). `toSfnt` normalises the input into `out` and returns the
+// SFNT bytes — or the input itself, untouched, when it is already an SFNT.
+// The allocator is used only by the WOFF2 path (Brotli + reconstruction).
 
 const sfnt_true = 0x00010000; // TrueType outlines
 const sfnt_ttcf = 0x74746366; // 'ttcf' collection (unsupported)
@@ -66,13 +68,19 @@ fn zlibInto(comp: []const u8, out: []u8) bool {
 }
 
 /// Normalise a font file to SFNT bytes. SFNT input is returned as-is;
-/// WOFF is decompressed/reassembled into `out`. `out` must hold the whole
-/// SFNT (WOFF states its size).
-pub fn toSfnt(input: []const u8, out: []u8) Error![]const u8 {
+/// WOFF/WOFF2 are decompressed/reassembled into `out`. `out` must hold the
+/// whole SFNT (both formats state its size). `a` backs the WOFF2 path.
+pub fn toSfnt(a: std.mem.Allocator, input: []const u8, out: []u8) Error![]const u8 {
     if (input.len < 4) return Error.BadFont;
     const magic = u32be(input, 0);
     if (magic == sfnt_true or magic == tag_true or magic == tag_otto) return input;
-    if (magic == tag_woff2) return Error.Unsupported; // Brotli front-end, later
+    if (magic == tag_woff2) {
+        return woff2.decode(a, input, out) catch |e| switch (e) {
+            error.OutOfMemory => Error.OutOfMemory,
+            error.Unsupported => Error.Unsupported,
+            error.BadFont => Error.BadFont,
+        };
+    }
     if (magic != tag_woff) return Error.BadFont;
     // WOFF: a 44-byte header, then numTables 20-byte directory entries.
     if (input.len < 44) return Error.BadFont;
@@ -1496,7 +1504,7 @@ test "toSfnt returns an SFNT input unchanged" {
     const data = try buildTestFont(a);
     defer a.free(data);
     var scratch: [16]u8 = undefined;
-    const sfnt = try toSfnt(data, &scratch);
+    const sfnt = try toSfnt(a, data, &scratch);
     try testing.expect(sfnt.ptr == data.ptr); // no copy for an SFNT
 }
 

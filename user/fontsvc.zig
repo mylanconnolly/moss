@@ -46,16 +46,21 @@ const Family = struct {
 var families: [max_families]Family = @splat(.{});
 var nfamilies: usize = 0;
 
-// A WOFF font is decompressed here into a full SFNT (a Font borrows the
-// result, so it must persist); TTF/OTF pass through untouched.
+// A WOFF/WOFF2 font is decompressed here into a full SFNT (a Font borrows
+// the result, so it must persist); TTF/OTF pass through untouched.
 var decomp_heap: [4 << 20]u8 = undefined;
 var decomp_used: usize = 0;
+// Transient scratch for the WOFF2 path (Brotli arena + glyf reconstruction);
+// reset per font, since only the produced SFNT is kept.
+var woff2_scratch: [2 << 20]u8 = undefined;
 
 fn registerFont(bytes: []const u8, from_fs: bool) void {
     if (nfamilies >= max_families) return;
-    // Normalise any container (WOFF today) to SFNT; SFNT input is returned
-    // as-is, so only a compressed font consumes the decompress heap.
-    const sfnt = font.toSfnt(bytes, decomp_heap[decomp_used..]) catch return;
+    // Normalise any container (WOFF/WOFF2) to SFNT; SFNT input is returned
+    // as-is, so only a compressed font consumes the decompress heap. WOFF2
+    // also needs a working allocator (reset each call).
+    var fba = std.heap.FixedBufferAllocator.init(&woff2_scratch);
+    const sfnt = font.toSfnt(fba.allocator(), bytes, decomp_heap[decomp_used..]) catch return;
     const parsed = font.Font.parse(sfnt) catch return;
     var fam = &families[nfamilies];
     fam.font = parsed;
@@ -90,8 +95,9 @@ fn alreadySeen(name: []const u8) bool {
     return false;
 }
 
-/// A font file we try to load (by extension); toSfnt/parse reject any we
-/// cannot actually decode (e.g. WOFF2 for now).
+/// A font file we try to load (by extension). All four are supported:
+/// TTF/OTF (SFNT), WOFF (zlib), WOFF2 (Brotli); toSfnt/parse reject any file
+/// that does not actually decode.
 fn isFontFile(name: []const u8) bool {
     return std.mem.endsWith(u8, name, ".ttf") or std.mem.endsWith(u8, name, ".otf") or
         std.mem.endsWith(u8, name, ".woff") or std.mem.endsWith(u8, name, ".woff2");
