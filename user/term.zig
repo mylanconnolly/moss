@@ -283,7 +283,7 @@ fn demo(log_h: u64) noreturn {
 fn nextKey() u8 {
     return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .next_input, 0)) {
         .ok => |rep| switch (rep) {
-            .input => |x| @intCast(x.ch & 0xff),
+            .input => |x| @intCast(x.arg & 0xff),
             else => 0,
         },
         .err => 0,

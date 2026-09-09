@@ -68,6 +68,7 @@ const specs = [_]Spec{
     .{ .name = "term", .kind = .term, .pass = "term-test: PASS", .extra = "term: rendered", .append = "profile=term" },
     .{ .name = "input", .kind = .input, .pass = "input-test: PASS", .extra = "input: key", .append = "profile=input" },
     .{ .name = "ptr", .kind = .ptr, .pass = "ptr-test: PASS", .extra = "ptr: click", .append = "profile=ptr", .timeout_s = 120 },
+    .{ .name = "pointer", .kind = .pointer, .pass = "pointer-test: PASS", .extra = "pointer: click", .append = "profile=pointer", .timeout_s = 120 },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
     .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
@@ -419,6 +420,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     if (spec.kind == .ptr) {
         if (!try ptrInject(spec, log_path, polls)) return false;
     }
+    if (spec.kind == .pointer) {
+        if (!try pointerDrive(spec, log_path, polls)) return false;
+    }
     if (spec.kind == .seat) {
         if (!try seatDrive(spec, log_path, polls)) return false;
     }
@@ -645,6 +649,79 @@ fn ptrInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+}
+
+/// The compositor pointer drill: once the client's window is up, move the
+/// absolute cursor over it and click, confirm the client received the
+/// routed pointer event on its surface, and screendump to confirm the
+/// compositor drew the cursor arrow there.
+fn pointerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "pointer: ready") != null) break;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the pointer client never came up", log_path);
+            return false;
+        }
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // The client's window is (200,150)+300x200 on a 1024x768 scanout; aim
+    // for its centre (350,250). abs = pos * 32768 / dim.
+    if (!q.sendPointer(11200, 10666)) {
+        reportFailure(spec.name, "QMP could not move the pointer", log_path);
+        return false;
+    }
+    if (!q.sendClick(true) or !q.sendClick(false)) {
+        reportFailure(spec.name, "QMP could not click", log_path);
+        return false;
+    }
+    var m: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        m += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (std.mem.indexOf(u8, content, "pointer: click") != null) break;
+        if (std.mem.indexOf(u8, content, "pointer: wrong-surface") != null) {
+            reportFailure(spec.name, "the click was routed to the wrong surface", log_path);
+            return false;
+        }
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, "the click never reached the client", log_path);
+            return false;
+        }
+    }
+    // The cursor's hotspot is the tip at (350,249): its outline is black
+    // there and its white fill is a pixel down-right, over the window's
+    // solid blue fill (0,68,136). Confirm the compositor drew it.
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (!q.screendump(ppm_path)) {
+        reportFailure(spec.name, "QMP screendump failed", log_path);
+        return false;
+    }
+    const img = readPpm(ppm_path) orelse {
+        reportFailure(spec.name, "the screendump was not a readable image", log_path);
+        return false;
+    };
+    if (!eqRgb(pixelAt(img, 351, 251), 0xFF, 0xFF, 0xFF)) {
+        std.debug.print("[FAIL] {s}: no cursor fill at (351,251): {any}\n", .{ spec.name, pixelAt(img, 351, 251) });
+        reportFailure(spec.name, "the compositor did not draw the cursor", log_path);
+        return false;
+    }
+    if (!eqRgb(pixelAt(img, 260, 320), 0, 68, 136)) {
+        std.debug.print("[FAIL] {s}: window fill wrong at (260,320): {any}\n", .{ spec.name, pixelAt(img, 260, 320) });
+        reportFailure(spec.name, "the client window did not render", log_path);
+        return false;
+    }
+    return true;
 }
 
 fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {

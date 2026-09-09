@@ -42,6 +42,7 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     dev_h = setup.device(.gpu);
     if (dev_h == 0) usys.exit(169);
     keys_chan = setup.cap(.keys);
+    ptr_chan = setup.cap(.ptr);
     // The trusted-path token: the seat gives it to the compositor and to
     // the login greeter alike. A client that presents it over
     // `attach_trusted` earns a badged channel whose surfaces are the
@@ -522,6 +523,9 @@ fn compositeRect(clip: Rect) bool {
         const word = if (secure) secure_word else bg_word;
         if (intersect(.{ .x = 0, .y = 0, .w = fb_w, .h = trust_strip }, clip)) |ir| fillRect(ir, word);
     }
+    // The pointer cursor, last of all — the compositor draws it (trusted),
+    // so it may sit over any surface and even the secure strip.
+    drawCursor(clip);
     return transferFlushRect(clip);
 }
 
@@ -682,7 +686,198 @@ fn dispatchKeys(chan_h: u64) void {
         };
         const token = takeReader(owner) orelse break; // hold until a reader parks
         keyRingPop();
-        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = focused, .ch = c } }, 0, token);
+        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = focused, .kind = 0, .arg = c } }, 0, token);
+    }
+}
+
+// ----------------------------------------------------------- pointer
+//
+// A virtio tablet (inputsvc in pointer mode, reached over `ptr_chan`)
+// gives the compositor an absolute cursor. A second reader thread does
+// the blocking pointer reads and pushes frames into its own SPSC ring,
+// ringing the same input doorbell the keyboard uses; the serve loop
+// drains both. The cursor is compositor-drawn (trusted) on top of
+// everything, so moving it recomposites only the small rectangle it
+// vacates and the one it enters. A button change (or a move while a
+// button is held — a drag) is routed to the surface under the cursor;
+// a press also gives that surface focus (click-to-focus). Pure moves
+// only slide the cursor — a hovering pointer never wakes a client.
+var ptr_chan: u64 = 0;
+var ptr_reader_stack: [32 << 10]u8 align(16) = undefined;
+
+var cursor_x: usize = fb_w / 2;
+var cursor_y: usize = fb_h / 2;
+var cursor_shown: bool = false; // drawn once the first frame arrives
+var prev_buttons: u32 = 0;
+
+const cursor_w = 11;
+const cursor_h = 16;
+// A classic arrow: '.' = outline (black), '#' = fill (white), ' ' =
+// transparent. The hotspot is the top-left tip at (cursor_x, cursor_y).
+const cursor_rows = [cursor_h][]const u8{
+    ".          ",
+    "..         ",
+    ".#.        ",
+    ".##.       ",
+    ".###.      ",
+    ".####.     ",
+    ".#####.    ",
+    ".######.   ",
+    ".#######.  ",
+    ".########. ",
+    ".#####.....",
+    ".##.##.    ",
+    ".#. .##.   ",
+    "..  .##.   ",
+    "     .##.  ",
+    "      ..   ",
+};
+const cursor_fill: u32 = 0x00FF_FFFF; // white
+const cursor_edge: u32 = 0x0000_0000; // black
+
+const PtrEv = struct { x: u32, y: u32, buttons: u32 };
+const ptr_ring_cap = 64;
+var ptr_ring: [ptr_ring_cap]PtrEv = undefined;
+var ptr_head: usize = 0; // consumer (serve loop)
+var ptr_tail: usize = 0; // producer (reader thread)
+
+fn ptrRingPush(e: PtrEv) void {
+    const t = @atomicLoad(usize, &ptr_tail, .monotonic);
+    const nt = (t + 1) % ptr_ring_cap;
+    if (nt == @atomicLoad(usize, &ptr_head, .acquire)) return; // full: drop
+    ptr_ring[t] = e;
+    @atomicStore(usize, &ptr_tail, nt, .release);
+}
+fn ptrRingPop() ?PtrEv {
+    const h = @atomicLoad(usize, &ptr_head, .monotonic);
+    if (h == @atomicLoad(usize, &ptr_tail, .acquire)) return null;
+    const e = ptr_ring[h];
+    @atomicStore(usize, &ptr_head, (h + 1) % ptr_ring_cap, .release);
+    return e;
+}
+
+/// One pointer frame from inputsvc (blocks until one), or null on error.
+fn readPtr() ?PtrEv {
+    return switch (usys.callTyped(shared.PtrReq, shared.PtrResp, ptr_chan, .read, 0)) {
+        .ok => |rep| switch (rep) {
+            .moved => |m| .{ .x = @intCast(m.x), .y = @intCast(m.y), .buttons = @intCast(m.buttons) },
+            else => null,
+        },
+        .err => null,
+    };
+}
+
+fn ptrReader(_: u64) callconv(.c) void {
+    while (true) {
+        const e = readPtr() orelse {
+            usys.sleepMs(10);
+            continue;
+        };
+        ptrRingPush(e);
+        _ = usys.notifySignal(key_bell, 1);
+    }
+}
+
+fn cursorRect() Rect {
+    return .{ .x = cursor_x, .y = cursor_y, .w = cursor_w, .h = cursor_h };
+}
+
+/// The bounding box of two rects.
+fn unionRect(a: Rect, b: Rect) Rect {
+    const x0 = @min(a.x, b.x);
+    const y0 = @min(a.y, b.y);
+    const x1 = @max(a.x + a.w, b.x + b.w);
+    const y1 = @max(a.y + a.h, b.y + b.h);
+    return .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+}
+
+/// Move the cursor to (nx, ny): recomposite just the rectangle it leaves
+/// and the one it enters (the cursor is redrawn in compositeRect's tail).
+fn moveCursor(nx: usize, ny: usize) void {
+    if (cursor_shown and nx == cursor_x and ny == cursor_y) return;
+    const old = cursorRect();
+    cursor_x = nx;
+    cursor_y = ny;
+    const shown_before = cursor_shown;
+    cursor_shown = true;
+    const dirty = if (shown_before) unionRect(old, cursorRect()) else cursorRect();
+    _ = compositeRect(if (intersect(dirty, .{ .x = 0, .y = 0, .w = fb_w, .h = fb_h })) |r| r else return);
+}
+
+/// One pixel into the framebuffer backing (the cursor draws these).
+fn fbPx(x: usize, y: usize, word: u32) void {
+    var w = word;
+    fbWrite((y * fb_w + x) * fb_bpp, @ptrCast(&w), fb_bpp);
+}
+
+/// Draw the cursor arrow, clipped to `clip` and the scanout — last in
+/// compositeRect, so it sits over every surface and the secure strip.
+fn drawCursor(clip: Rect) void {
+    if (!cursor_shown) return;
+    for (cursor_rows, 0..) |row, ry| {
+        for (row, 0..) |ch, rx| {
+            if (ch == ' ') continue;
+            const px = cursor_x + rx;
+            const py = cursor_y + ry;
+            if (px >= fb_w or py >= fb_h) continue;
+            if (px < clip.x or px >= clip.x + clip.w or py < clip.y or py >= clip.y + clip.h) continue;
+            fbPx(px, py, if (ch == '#') cursor_fill else cursor_edge);
+        }
+    }
+}
+
+/// The id (1-based) of the topmost live surface under the cursor, or 0.
+fn surfaceUnderCursor() u64 {
+    var best_id: u64 = 0;
+    var best_z: u32 = 0;
+    for (&surfaces, 0..) |*sf, i| {
+        if (!sf.used) continue;
+        if (cursor_x < sf.x or cursor_x >= sf.x + sf.w) continue;
+        if (cursor_y < sf.y or cursor_y >= sf.y + sf.h) continue;
+        if (best_id == 0 or sf.z > best_z) {
+            best_id = i + 1;
+            best_z = sf.z;
+        }
+    }
+    return best_id;
+}
+
+/// Give a surface focus on a click, honouring the same secure-attention
+/// rule as createSurface: a non-trusted surface may not steal focus from
+/// the login surface.
+fn focusSurface(id: u64) void {
+    if (id == focused) return;
+    const target = findSurface(id) orelse return;
+    const trusted_has_focus = if (findSurface(focused)) |f| f.trusted else false;
+    if (trusted_has_focus and !target.trusted) return;
+    focused = id;
+    _ = composite(); // the focus cue (and maybe the secure strip) moved
+}
+
+/// Drain buffered pointer frames: slide the cursor, and on a button
+/// change or a drag deliver a pointer event (surface-local) to the
+/// surface under the cursor, giving it focus on a press.
+fn dispatchPointer(chan_h: u64) void {
+    while (ptrRingPop()) |e| {
+        const nx = @min(@as(usize, e.x) * fb_w / 32768, fb_w - 1);
+        const ny = @min(@as(usize, e.y) * fb_h / 32768, fb_h - 1);
+        moveCursor(nx, ny);
+        const buttons = e.buttons;
+        const changed = buttons != prev_buttons;
+        const press = (buttons & ~prev_buttons) != 0; // a newly-pressed button
+        if (changed or buttons != 0) {
+            const id = surfaceUnderCursor();
+            if (id != 0) {
+                if (press) focusSurface(id);
+                const sf = findSurface(id).?;
+                if (takeReader(sf.owner)) |token| {
+                    const lx: u64 = cursor_x - sf.x;
+                    const ly: u64 = cursor_y - sf.y;
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = 1, .arg = shared.ptrArg(lx, ly, buttons) } }, 0, token);
+                }
+            }
+        }
+        prev_buttons = buttons;
     }
 }
 
@@ -695,10 +890,11 @@ fn serveSurfaces(chan_h: u64) noreturn {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
         if (r.err == .interrupted) {
-            // The keyboard doorbell: buffered keys are ready. Drain the
-            // latched bit, then hand them to the focused surface's reader.
+            // The input doorbell: buffered keys and/or pointer frames are
+            // ready. Drain the latched bit, then hand each to its reader.
             _ = usys.notifyWait(key_bell);
             dispatchKeys(chan_h);
+            dispatchPointer(chan_h);
             continue;
         }
         if (r.err == .client_dead) {
@@ -774,7 +970,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
             .next_input => {
-                if (keys_chan == 0) {
+                if (keys_chan == 0 and ptr_chan == 0) {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 7 } }, 0, token);
                     continue;
                 }
@@ -784,6 +980,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // stays free to handle every other client meanwhile.
                 parkReader(badge, token);
                 dispatchKeys(chan_h);
+                dispatchPointer(chan_h);
             },
             .attach_trusted => |q| {
                 // Prove the boot-provisioned token, earn a badged channel
@@ -871,17 +1068,23 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
     }
     _ = usys.log(log_h, "gpu: scanout up");
 
-    // If the seat gave us a keyboard, take it — keystrokes route to the
-    // focused surface (the compositor owns focus). A reader thread does
-    // the blocking reads and rings a doorbell bound to our recv, so the
-    // serve loop never blocks on input and many clients can read at once.
-    if (keys_chan != 0) {
-        setupKeyboard();
+    // If the seat gave us a keyboard and/or a pointer, take them — input
+    // routes to the surface with focus / under the cursor (the compositor
+    // owns both). A reader thread per device does the blocking reads and
+    // rings one shared doorbell bound to our recv, so the serve loop never
+    // blocks on input and many clients can read at once.
+    if (keys_chan != 0 or ptr_chan != 0) {
         const kb = usys.notifyCreate();
         if (kb.err != .ok) usys.exit(187);
         key_bell = kb.data[0];
-        if (usys.threadCreate(keyReader, 0, &key_reader_stack) != .ok) usys.exit(188);
         if (usys.notifyBind(key_bell) != .ok) usys.exit(189);
+        if (keys_chan != 0) {
+            setupKeyboard();
+            if (usys.threadCreate(keyReader, 0, &key_reader_stack) != .ok) usys.exit(188);
+        }
+        if (ptr_chan != 0) {
+            if (usys.threadCreate(ptrReader, 0, &ptr_reader_stack) != .ok) usys.exit(190);
+        }
     }
 
     // Now serve the surface protocol: clients create a surface, commit

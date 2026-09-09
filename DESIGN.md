@@ -2556,6 +2556,30 @@ the scaling and hit-testing. Drilled (`ptr`): the host moves the cursor to
 the tablet's centre and clicks over QMP (`input-send-event` `abs`+`btn`),
 and the driver logs the frame at 16384 and the press.
 
+**The cursor and routing (as built, 2026-09-09).** The compositor owns the
+cursor, as it owns focus. Given a `ptr` channel (a second inputsvc, the
+`compositor-ptr` unit), it runs a **second reader thread** beside the
+keyboard's — the same shape, its own SPSC ring, ringing the same input
+doorbell the serve loop already drains. Each frame scales the tablet's
+0..32767 to the scanout, and the cursor is a small arrow the compositor
+draws **last in `compositeRect`** — over every surface and even the secure
+strip, since it is the compositor's own (trusted) pixels. A move recomposits
+only the union of the rectangle the cursor left and the one it entered, so
+it is cheap. Routing follows the display server's rule (Wayland's shape):
+a **button change, or a move while a button is held (a drag), goes to the
+surface *under the cursor*** — hit-tested topmost-by-z — not the focused
+one, and a press also gives that surface focus (click-to-focus). A bare
+move only slides the cursor; a hovering pointer never wakes a client. The
+event reuses `next_input`'s parked-reader machinery (delivered to the hit
+surface's owner) and rides the existing `GpuResp.input` reply, now a
+tagged event — `kind` 0 a key (the character in `arg`), `kind` 1 a pointer
+event (surface-local x/y and the button bitmask packed into `arg`, since a
+message payload is only three words). Drilled (`pointer`): the host moves
+the cursor over a client's window and clicks; the client confirms the
+routed event landed on its surface at the right local coordinates
+(150,99 — the window's centre), and a screendump confirms the arrow drawn
+there over the window's fill.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

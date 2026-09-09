@@ -395,10 +395,12 @@ fn drillPointer(log_h: u64) noreturn {
 /// frame and returns the absolute position + button bitmask (single
 /// client, like the keyboard serve).
 fn servePointer(chan_h: u64) noreturn {
-    _ = usys.notifyBind(irq_notif);
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .interrupted) {
+            // Drain the doorbell (clear the latched bit) as well as the
+            // device, or the still-set notification re-fires recv forever.
+            _ = usys.notifyWait(irq_notif);
             _ = dev.isrRead();
             drainPointer();
             continue;

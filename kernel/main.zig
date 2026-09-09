@@ -195,6 +195,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.pointer_test) {
+        _ = sched.spawn("boot-watch", pointerTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.gui_test) {
         _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -735,6 +740,13 @@ fn readersTestWorker(_: u64) void {
 /// and clicks over QMP, and inputsvc decodes the frames and the press.
 fn ptrTestWorker(_: u64) void {
     systemDrill("ptr");
+}
+
+/// The compositor pointer drill: a system boot under profile "pointer" —
+/// the compositor draws the cursor, hit-tests the surface under it, and
+/// routes the host's click to that surface's client.
+fn pointerTestWorker(_: u64) void {
+    systemDrill("pointer");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

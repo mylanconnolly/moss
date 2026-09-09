@@ -400,6 +400,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "gsh", .src = "user/gsh.zig" },
         .{ .name = "compcli", .src = "user/compcli.zig" },
         .{ .name = "focuscli", .src = "user/focuscli.zig" },
+        .{ .name = "ptrcli", .src = "user/ptrcli.zig" },
         .{ .name = "trustcli", .src = "user/trustcli.zig" },
         .{ .name = "readercli", .src = "user/readercli.zig" },
         .{ .name = "fontsvc", .src = "user/fontsvc.zig" },
@@ -561,6 +562,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/fontsvc.msh",        "conf/font.msh",
         "conf/units/fontsvc-fs.msh",       "conf/units/fontcli.msh",
         "conf/units/ptr-drill.msh",      "conf/units/ptr.msh",
+        "conf/units/compositor-ptr.msh", "conf/units/ptrcli.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -1102,7 +1104,7 @@ pub fn build(b: *std.Build) void {
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
         "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",
+        "ptr",     "pointer",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

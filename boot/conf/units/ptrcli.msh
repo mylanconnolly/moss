@@ -1,0 +1,13 @@
+# The pointer drill client (profile pointer): opens a window on the
+# compositor (with keyboard + pointer) and reads input; the host moves the
+# cursor over the window and clicks, and the client confirms the routed
+# pointer event landed on its surface.
+{
+  image:     ptrcli
+  budget:    { user: 8mb }
+  profiles:  [pointer]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+  ]
+}

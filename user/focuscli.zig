@@ -47,7 +47,7 @@ const Input = struct { surface: u64, ch: u8 };
 fn nextInput() Input {
     return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .next_input, 0)) {
         .ok => |rep| switch (rep) {
-            .input => |x| .{ .surface = x.surface, .ch = @intCast(x.ch & 0xff) },
+            .input => |x| .{ .surface = x.surface, .ch = @intCast(x.arg & 0xff) },
             else => .{ .surface = 0, .ch = 0 },
         },
         .err => .{ .surface = 0, .ch = 0 },

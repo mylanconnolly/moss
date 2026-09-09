@@ -379,6 +379,7 @@ pub const ImageId = enum(u64) {
     readercli = 30,
     fontsvc = 31,
     fontcli = 32,
+    ptrcli = 33,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -782,8 +783,16 @@ pub const GpuResp = union(enum(u64)) {
     ok: void,
     /// + a shm cap attachment: the surface's pixel buffer.
     created: struct { surface: u64, wh: u64 },
-    /// A keystroke `ch` delivered to the focused surface.
-    input: struct { surface: u64, ch: u64 },
+    /// An input event delivered to a surface (a message payload is only
+    /// three words, so the event packs into `arg`). `kind` 0 is a keystroke
+    /// to the focused surface: `arg` is the character. `kind` 1 is a
+    /// pointer event to the surface under the cursor: `arg` packs the
+    /// surface-local position and button bitmask as `ptrArg(x, y, btn)`
+    /// (`x`/`y` fit 16 bits each on this scanout, `btn` bit0 = left).
+    /// Pointer events arrive on a button change or while a button is held
+    /// (a drag), never on a bare move — a hovering cursor never wakes the
+    /// client.
+    input: struct { surface: u64, kind: u64 = 0, arg: u64 = 0 },
     /// The trust token matched: + a badged channel cap the client uses in
     /// place of the shared display channel for all further requests.
     trusted: void,
@@ -859,6 +868,22 @@ pub fn unpackHi(v: u64) u32 {
 }
 pub fn unpackLo(v: u64) u32 {
     return @truncate(v);
+}
+
+/// Pack a pointer event's surface-local position and button bitmask into
+/// one word (GpuResp.input `arg` when kind is 1): x in bits 32..47, y in
+/// bits 16..31, buttons in bits 0..15.
+pub fn ptrArg(x: u64, y: u64, btn: u64) u64 {
+    return ((x & 0xffff) << 32) | ((y & 0xffff) << 16) | (btn & 0xffff);
+}
+pub fn ptrX(arg: u64) u64 {
+    return (arg >> 32) & 0xffff;
+}
+pub fn ptrY(arg: u64) u64 {
+    return (arg >> 16) & 0xffff;
+}
+pub fn ptrBtn(arg: u64) u64 {
+    return arg & 0xffff;
 }
 
 pub const blk_sector_size: u64 = 512;

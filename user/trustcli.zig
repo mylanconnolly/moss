@@ -61,7 +61,7 @@ fn readKey(chan: u64, leaked: *bool) u8 {
     switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0)) {
         .ok => |rep| switch (rep) {
             .input => |x| {
-                const ch: u8 = @intCast(x.ch & 0xff);
+                const ch: u8 = @intCast(x.arg & 0xff);
                 if (ch != 0) leaked.* = true;
                 return ch;
             },

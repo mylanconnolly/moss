@@ -656,9 +656,22 @@ is a plan.
     change (a fast click is never lost, moves never flood), answering
     PtrReq.read with position + button bitmask. Drilled (profile ptr): the
     host moves + clicks over QMP (input-send-event abs/btn), the driver
-    decodes the frame + press. Next: the compositor draws the cursor,
-    hit-tests, and routes clicks to the surface under it (stage B), then
-    the mshl GUI makes widgets clickable (stage C).
+    decodes the frame + press. ✅ Pointer input, stage B (landed
+    2026-09-09): the compositor owns the cursor. Given a `ptr` channel (a
+    second inputsvc, the compositor-ptr unit), it runs a second reader
+    thread beside the keyboard's — same shape, own ring, same doorbell —
+    scales the tablet range to the scanout, and draws a small arrow LAST in
+    compositeRect (over everything, its own trusted pixels); a move
+    recomposits only the union of the vacated + entered cursor rects.
+    Routing is Wayland's shape: a button change or a drag goes to the
+    surface UNDER the cursor (hit-tested topmost-by-z), a press also gives
+    it focus (click-to-focus); a bare move never wakes a client. The event
+    reuses next_input's parked-reader path; GpuResp.input became a tagged
+    event (kind 0 key, kind 1 pointer with x/y/btn packed into one word, a
+    payload being 3 words). Drilled (profile pointer): the host clicks a
+    client's window, the client confirms the event at local (150,99) and a
+    screendump confirms the arrow drawn there. Next: the mshl GUI makes
+    widgets clickable (stage C).
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view

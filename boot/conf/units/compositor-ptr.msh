@@ -1,0 +1,18 @@
+# The compositor with a keyboard and a pointer (the pointer drill / a seat
+# with a mouse): gpusvc in serve mode, given the virtio-gpu device, the
+# keyboard (inputsvc via kbd, input index 0) and the tablet (inputsvc via
+# ptr, input index 1), so it owns focus + the cursor and routes both
+# keystrokes and pointer events. Separate from `compositor` because the
+# ptr give needs a tablet device the keyboard-only drills do not have.
+{
+  image:  gpusvc
+  arg:    0
+  budget: { user: 16mb }
+  give: [
+    { tag: device, device: gpu }
+    { tag: keys, unit: kbd }
+    { tag: ptr, unit: ptr }
+    { tag: buf, shm: 1 }
+    { secret: conf/trust.token }
+  ]
+}
