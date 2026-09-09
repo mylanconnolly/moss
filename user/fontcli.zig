@@ -46,24 +46,28 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     if (ab.va == 0) fail("fontcli: no view buffer");
     const buf: [*]u8 = @ptrFromInt(ab.va);
 
-    // Read the uninstalled font from the staging tier.
-    const src = "available/IBMPlexSerif.woff";
-    const bytes = fsc.readWhole(view, buf, src, &font_data) orelse fail("fontcli: cannot read the staged font");
-
-    // Install it: write it into the fonts directory fontsvc watches.
-    const dst = "fonts/IBMPlexSerif.woff";
-    const fd = switch (fsc.fsOpen(view, buf, dst, 1)) {
-        .fd => |f| f,
-        .err => fail("fontcli: cannot create the font file"),
+    // Install two uninstalled fonts from the staging tier, covering both
+    // container front-ends: a WOFF (zlib) and an OpenType/CFF (Type2
+    // charstrings). Each is copied into the fonts directory fontsvc watches.
+    const jobs = [_]struct { src: []const u8, dst: []const u8 }{
+        .{ .src = "available/IBMPlexSerif.woff", .dst = "fonts/IBMPlexSerif.woff" },
+        .{ .src = "available/SourceCodePro.otf", .dst = "fonts/SourceCodePro.otf" },
     };
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const n = @min(shared.fs_max_io, bytes.len - off);
-        if (!fsc.fsWriteAt(view, buf, fd, off, bytes[off .. off + n])) fail("fontcli: write failed");
-        off += n;
+    for (jobs) |j| {
+        const bytes = fsc.readWhole(view, buf, j.src, &font_data) orelse fail("fontcli: cannot read the staged font");
+        const fd = switch (fsc.fsOpen(view, buf, j.dst, 1)) {
+            .fd => |f| f,
+            .err => fail("fontcli: cannot create the font file"),
+        };
+        var off: usize = 0;
+        while (off < bytes.len) {
+            const n = @min(shared.fs_max_io, bytes.len - off);
+            if (!fsc.fsWriteAt(view, buf, fd, off, bytes[off .. off + n])) fail("fontcli: write failed");
+            off += n;
+        }
+        fsc.fsClose(view, fd);
     }
-    fsc.fsClose(view, fd);
-    _ = usys.log(glog, "fontcli: installed a font into the fonts directory");
+    _ = usys.log(glog, "fontcli: installed fonts into the fonts directory");
 
     // Tell fontsvc to pick it up live — no restart.
     switch (usys.callTyped(shared.FontReq, shared.FontResp, fontc, .rescan, 0)) {

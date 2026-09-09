@@ -719,9 +719,9 @@ is a plan.
     + scale settings, and rasterizes glyphs into a shared coverage atlas
     clients blit from (it never draws — rendering stays client-side, only a
     glyph bitmap crosses); the mshl GUI runtime is the first client (lays
-    out proportionally, falls back to the bitmap if no `font` cap). Every
-    format converges to the same rasterizer: OTF/CFF, WOFF, WOFF2 are
-    additive front-ends. The whole point — one service every text program
+    out proportionally, falls back to the bitmap if no `font` cap). Both
+    outline flavours (TrueType `glyf` + OpenType `CFF `) and every container
+    (WOFF, WOFF2) converge on the same rasterizer. The whole point — one service every text program
     goes through, so scaling is consistent (accessibility) the way Linux
     never manages. ✅ Settings scale (landed 2026-09-08): fontsvc reads
     conf/font.msh (the system settings layer, via mshl + lib/settings) for
@@ -753,9 +753,16 @@ is a plan.
     parse arena and dangled as units grew — now copied to a persistent
     pool. ✅ WOFF (landed 2026-09-08): a `toSfnt` front-end decompresses
     a zlib-wrapped SFNT (std.compress.flate, freestanding) before parse; an
-    SFNT input passes through untouched. The fontrescan drill installs a
-    real WOFF. Open: OTF/CFF + WOFF2 front-ends; session push of per-user
-    family/scale; pointer input; richer layout; fabric-remote GUI.
+    SFNT input passes through untouched. ✅ OTF/CFF (landed 2026-09-08):
+    Font.parse accepts a `CFF ` table (no glyf/loca) and a Type2 charstring
+    interpreter (INDEX/DICT parse → CharStrings + global/local subrs →
+    moveto/lineto/curveto with cubic Béziers, hint + subr ops, width dropped)
+    emits an all-on-curve outline the same scanline fill renders; non-CID
+    only (CID → Unsupported). The fontrescan drill now installs two real
+    fonts live — IBM Plex Serif (WOFF) + Source Code Pro (OTF/CFF) — and a
+    host test rasterizes a hand-built minimal CFF. Open: WOFF2 front-end
+    (Brotli + table transforms); session push of per-user family/scale;
+    pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

@@ -2740,11 +2740,13 @@ through* — so type is consistent and, crucially, scaled in one place
 (accessibility, the thing Linux fumbles because every toolkit scales on
 its own). Three pieces. (1) `lib/font.zig` — a from-scratch rasterizer,
 pure and host-tested: it parses the SFNT tables (`head`/`maxp`/`hhea`/
-`hmtx`/`cmap`/`loca`/`glyf`), decodes TrueType outlines (simple and
-composite glyphs, quadratic Béziers), and fills them with a 4×
-supersampled non-zero-winding scanline rasterizer into an 8-bit coverage
-bitmap. Every future format converges here — OTF/CFF, WOFF (zlib), WOFF2
-(Brotli) are additive front-ends that normalize to the SFNT it reads. (2)
+`hmtx`/`cmap`/`loca`/`glyf`, or `CFF `), decodes both outline flavours —
+TrueType (`glyf`, simple + composite, quadratic Béziers) and
+OpenType/PostScript (`CFF ` Type2 charstrings, cubic Béziers) — and fills
+either with one 4× supersampled non-zero-winding scanline rasterizer into
+an 8-bit coverage bitmap. Every format converges here — WOFF (zlib) and
+WOFF2 (Brotli) are additive container front-ends that normalize to the
+SFNT it reads. (2)
 `user/fontsvc.zig` — the service: it scans the boot archive's assets/fonts
 tier and registers every `.ttf` it finds by its family name (from the
 `name` table) into a **font registry** — the bundled IBM Plex Sans, Mono
@@ -2815,14 +2817,34 @@ zlib-per-table wrapper: `toSfnt` reads the WOFF directory and decompresses
 each table (via `std.compress.flate`, which compiles freestanding) into a
 reassembled SFNT; an SFNT input is returned untouched, so only a
 compressed font costs anything. fontsvc keeps a decompress heap for the
-result (a `Font` borrows its bytes). The `fontrescan` drill now installs a
-real WOFF (IBM Plex Serif, latin) — proof the decompress path works end to
-end. OTF/CFF (PostScript charstring outlines) and WOFF2 (Brotli + table
-transforms) are the remaining front-ends.
+result (a `Font` borrows its bytes).
 
-What's left for the arc: OTF/CFF and WOFF2 so every real font file loads;
-pushing a user's font settings from their session (per-user family/scale,
-once a post-login GUI shows it); pointer input, richer layout, and the
+**OTF/CFF (as built, 2026-09-08).** OpenType/PostScript fonts carry their
+outlines not as `glyf`/`loca` but as a `CFF ` table: a compact structure of
+INDEXes (Name, Top DICT, String, Global Subrs, CharStrings) and DICTs
+(operator-follows-operands key/value blocks) whose glyphs are Type2
+charstrings — a little stack machine of moveto/lineto/curveto ops with
+**cubic** Béziers, hint operators, and subroutine calls (`callsubr`/
+`callgsubr`, biased indices into a shared subr INDEX). `Font.parse` now
+accepts a `CFF ` table (no `glyf`): `parseCff` walks the INDEXes and the
+Top/Private DICTs down to the three INDEXes the interpreter needs
+(CharStrings, global subrs, local subrs), and `rasterize` dispatches to a
+Type2 interpreter (`execCharstring`) that emits an all-on-curve outline —
+cubics flattened by `flattenCubic`, everything else identical to the glyf
+path, so **one** scanline fill serves both. Non-CID only (a single Top +
+Private DICT); CID-keyed fonts (FDArray/FDSelect) return `Unsupported`, a
+later refinement. Width operands (which the first stack-clearing op may
+carry) are detected and dropped — advances come from `hmtx`. `toSfnt`
+already passed `OTTO` through untouched, so an OTF drops straight in. The
+`fontrescan` drill now installs *two* real fonts live — IBM Plex Serif
+(WOFF/zlib) and Source Code Pro (OTF/CFF) — covering both container
+front-ends end to end; a host test also parses+rasterizes a hand-built
+minimal CFF (a Type2 square) as a fast regression. WOFF2 (Brotli + table
+transforms) is the remaining front-end.
+
+What's left for the arc: WOFF2 so every real font file loads; pushing a
+user's font settings from their session (per-user family/scale, once a
+post-login GUI shows it); pointer input, richer layout, and the
 fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric

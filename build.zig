@@ -581,10 +581,13 @@ pub fn build(b: *std.Build) void {
         // tier where fontsvc reads them.
         .{ .at = "assets/fonts/IBMPlexSans.ttf", .from = "assets/fonts/IBMPlexSans.ttf" },
         .{ .at = "assets/fonts/IBMPlexMono-Regular.ttf", .from = "assets/fonts/IBMPlexMono-Regular.ttf" },
-        // Serif ships uninstalled, in a staging tier — a font a user can
-        // install (copy into assets/fonts and rescan), which the
-        // fontrescan drill exercises.
+        // Serif (WOFF) and Source Code Pro (OpenType/CFF) ship uninstalled,
+        // in a staging tier — fonts a user can install (copy into
+        // assets/fonts and rescan), which the fontrescan drill exercises.
+        // Between them they cover both container front-ends: WOFF (zlib) and
+        // OTF (`CFF ` Type2 charstrings, cubic outlines).
         .{ .at = "assets/available/IBMPlexSerif.woff", .from = "assets/fonts/IBMPlexSerif.woff" },
+        .{ .at = "assets/available/SourceCodePro.otf", .from = "assets/fonts/SourceCodePro-Regular.otf" },
     };
     for (asset_files) |a| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{a.at}), b.path(a.from));

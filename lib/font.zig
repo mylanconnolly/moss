@@ -5,9 +5,10 @@
 //!
 //! Every font format moss will support converges here: an SFNT container
 //! (a table directory) whose glyph outlines are filled by one rasterizer.
-//! This stage parses TrueType (`glyf`, quadratic outlines); OpenType
-//! (`CFF ` cubic charstrings), WOFF (zlib) and WOFF2 (Brotli) are additive
-//! front-ends — they decompress/transform to the same SFNT this reads.
+//! Two outline flavours land in the same coverage bitmap: TrueType (`glyf`,
+//! quadratic curves) and OpenType/PostScript (`CFF `, Type2 charstrings with
+//! cubic curves). WOFF (zlib) and WOFF2 (Brotli) are additive front-ends —
+//! they decompress/transform to the same SFNT this reads.
 //!
 //! The rasterizer is a supersampled scanline fill with non-zero winding:
 //! simple and correct, and a glyph is rasterized once per (glyph, size)
@@ -135,6 +136,13 @@ pub const Font = struct {
     cmap_fmt: u16,
     ascent: i16,
     descent: i16,
+    // OpenType/CFF (`CFF ` table): when present the outlines are Type2
+    // charstrings, not `glyf`. `is_cff` picks the outline decoder.
+    is_cff: bool,
+    cff: []const u8,
+    cff_charstrings: Index,
+    cff_gsubrs: Index,
+    cff_lsubrs: Index,
 
     pub fn parse(data: []const u8) Error!Font {
         if (data.len < 12) return Error.BadFont;
@@ -160,6 +168,11 @@ pub const Font = struct {
             .cmap_fmt = 0,
             .ascent = 0,
             .descent = 0,
+            .is_cff = false,
+            .cff = &.{},
+            .cff_charstrings = Index.empty(),
+            .cff_gsubrs = Index.empty(),
+            .cff_lsubrs = Index.empty(),
         };
         var i: usize = 0;
         const dir = 12;
@@ -180,6 +193,7 @@ pub const Font = struct {
                 0x676C7966 => f.glyf = slice, // 'glyf'
                 0x636D6170 => f.cmap = slice, // 'cmap'
                 0x6E616D65 => f.name = slice, // 'name'
+                0x43464620 => f.cff = slice, // 'CFF ' (OpenType/PostScript)
                 else => {},
             }
         }
@@ -191,7 +205,12 @@ pub const Font = struct {
         f.descent = i16be(f.hhea, 6);
         f.num_hmetrics = u16be(f.hhea, 34);
         if (f.units_per_em == 0) return Error.BadFont;
-        if (f.glyf.len == 0 or f.loca.len == 0) return Error.Unsupported; // CFF (OTF) is a later front-end
+        if (f.glyf.len != 0 and f.loca.len != 0) {
+            f.is_cff = false;
+        } else if (f.cff.len != 0) {
+            f.is_cff = true;
+            try f.parseCff();
+        } else return Error.Unsupported; // neither TrueType nor CFF outlines
         try f.pickCmap();
         return f;
     }
@@ -363,7 +382,210 @@ pub const Font = struct {
         if (end <= start or end > f.glyf.len) return null; // empty (space) glyph
         return .{ .start = start, .end = end };
     }
+
+    /// Parse the `CFF ` table down to the three INDEXes the Type2 charstring
+    /// interpreter needs: CharStrings (one per glyph), global subrs, and the
+    /// local subrs named by the Private DICT. Non-CID only (a single Top +
+    /// Private DICT) — the CID case (FDArray/FDSelect) is a later refinement.
+    fn parseCff(f: *Font) Error!void {
+        const c = f.cff;
+        if (c.len < 4) return Error.BadFont;
+        const hdr_size = c[2];
+        if (hdr_size < 4 or hdr_size > c.len) return Error.BadFont;
+        // Name, Top DICT, String, Global Subr INDEXes, back to back.
+        const name_idx = try parseIndex(c, hdr_size);
+        const top_idx = try parseIndex(c, name_idx.end);
+        const string_idx = try parseIndex(c, top_idx.end);
+        const gsubr_idx = try parseIndex(c, string_idx.end);
+        if (top_idx.count == 0) return Error.BadFont;
+        const td = try parseTopDict(top_idx.item(0));
+        if (td.is_cid) return Error.Unsupported; // CID-keyed: FDArray/FDSelect
+        if (td.cstype != 2) return Error.Unsupported; // Type1 charstrings
+        if (td.charstrings == 0) return Error.BadFont;
+        const cs_idx = try parseIndex(c, td.charstrings);
+        // The Private DICT gives the local subrs (offset relative to itself).
+        var lsubr = Index.empty();
+        if (td.priv_size > 0 and td.priv_off + td.priv_size <= c.len) {
+            const pd = try parsePrivDict(c[td.priv_off .. td.priv_off + td.priv_size]);
+            if (pd.subrs != 0 and td.priv_off + pd.subrs < c.len) {
+                lsubr = try parseIndex(c, td.priv_off + pd.subrs);
+            }
+        }
+        f.cff_charstrings = cs_idx;
+        f.cff_gsubrs = gsubr_idx;
+        f.cff_lsubrs = lsubr;
+    }
 };
+
+// ---------------------------------------------------------------- CFF
+
+/// A CFF INDEX: a count-prefixed array of variable-length objects, indexed
+/// by an offset array. Borrows the `CFF ` table bytes.
+const Index = struct {
+    bytes: []const u8,
+    count: u32,
+    off_size: u8,
+    off_arr: usize, // byte offset of the offset array
+    data_off: usize, // object-data base minus 1 (offsets are 1-based)
+    end: usize, // one past the whole INDEX
+
+    fn empty() Index {
+        return .{ .bytes = &.{}, .count = 0, .off_size = 1, .off_arr = 0, .data_off = 0, .end = 0 };
+    }
+
+    fn readOff(self: Index, i: u32) usize {
+        var v: usize = 0;
+        const p = self.off_arr + @as(usize, i) * self.off_size;
+        var k: usize = 0;
+        while (k < self.off_size) : (k += 1) v = (v << 8) | self.bytes[p + k];
+        return v;
+    }
+
+    /// Object `i` (empty slice if out of range or malformed).
+    fn item(self: Index, i: u32) []const u8 {
+        if (i >= self.count) return &.{};
+        const s = self.data_off + self.readOff(i);
+        const e = self.data_off + self.readOff(i + 1);
+        if (s > e or e > self.bytes.len) return &.{};
+        return self.bytes[s..e];
+    }
+};
+
+fn parseIndex(bytes: []const u8, at: usize) Error!Index {
+    if (at + 2 > bytes.len) return Error.BadFont;
+    const count = u16be(bytes, at);
+    if (count == 0) return .{ .bytes = bytes, .count = 0, .off_size = 1, .off_arr = at + 2, .data_off = at + 2, .end = at + 2 };
+    if (at + 3 > bytes.len) return Error.BadFont;
+    const off_size = bytes[at + 2];
+    if (off_size < 1 or off_size > 4) return Error.BadFont;
+    const off_arr = at + 3;
+    const n_off = @as(usize, count) + 1;
+    if (off_arr + n_off * off_size > bytes.len) return Error.BadFont;
+    const data_off = off_arr + n_off * off_size - 1;
+    var idx = Index{ .bytes = bytes, .count = count, .off_size = off_size, .off_arr = off_arr, .data_off = data_off, .end = 0 };
+    idx.end = data_off + idx.readOff(count);
+    if (idx.end > bytes.len or idx.end < data_off) return Error.BadFont;
+    return idx;
+}
+
+// --- DICT parsing (operands precede their operator) ---
+
+const DictOp = struct { val: f64, next: usize };
+
+/// Read one DICT operand at `i` (integers exact; reals skipped as 0 — the
+/// operators we read take integers).
+fn readDictOperand(d: []const u8, i: usize) Error!DictOp {
+    const b0 = d[i];
+    if (b0 == 28) {
+        if (i + 3 > d.len) return Error.BadFont;
+        return .{ .val = @floatFromInt(i16be(d, i + 1)), .next = i + 3 };
+    }
+    if (b0 == 29) {
+        if (i + 5 > d.len) return Error.BadFont;
+        return .{ .val = @floatFromInt(@as(i32, @bitCast(u32be(d, i + 1)))), .next = i + 5 };
+    }
+    if (b0 == 30) {
+        // Real number: BCD nibbles terminated by an 0xf nibble.
+        var j = i + 1;
+        while (j < d.len) {
+            const byte = d[j];
+            j += 1;
+            if ((byte >> 4) == 0xf or (byte & 0xf) == 0xf) break;
+        }
+        return .{ .val = 0, .next = j };
+    }
+    if (b0 >= 32 and b0 <= 246) return .{ .val = @floatFromInt(@as(i32, b0) - 139), .next = i + 1 };
+    if (b0 >= 247 and b0 <= 250) {
+        if (i + 2 > d.len) return Error.BadFont;
+        return .{ .val = @floatFromInt((@as(i32, b0) - 247) * 256 + @as(i32, d[i + 1]) + 108), .next = i + 2 };
+    }
+    if (b0 >= 251 and b0 <= 254) {
+        if (i + 2 > d.len) return Error.BadFont;
+        return .{ .val = @floatFromInt(-(@as(i32, b0) - 251) * 256 - @as(i32, d[i + 1]) - 108), .next = i + 2 };
+    }
+    return Error.BadFont;
+}
+
+const TopDict = struct {
+    charstrings: usize = 0,
+    priv_size: usize = 0,
+    priv_off: usize = 0,
+    cstype: u8 = 2,
+    is_cid: bool = false,
+};
+
+fn parseTopDict(d: []const u8) Error!TopDict {
+    var td = TopDict{};
+    var ops: [48]f64 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < d.len) {
+        const b = d[i];
+        if (b <= 21) {
+            var op: u16 = b;
+            i += 1;
+            if (b == 12) {
+                if (i >= d.len) return Error.BadFont;
+                op = 0x0c00 | @as(u16, d[i]);
+                i += 1;
+            }
+            switch (op) {
+                17 => if (n >= 1) {
+                    td.charstrings = @intFromFloat(ops[0]);
+                },
+                18 => if (n >= 2) {
+                    td.priv_size = @intFromFloat(ops[0]);
+                    td.priv_off = @intFromFloat(ops[1]);
+                },
+                0x0c06 => if (n >= 1) {
+                    td.cstype = @intFromFloat(ops[0]);
+                },
+                0x0c1e => td.is_cid = true, // ROS: CID-keyed font
+                else => {},
+            }
+            n = 0;
+        } else {
+            const r = try readDictOperand(d, i);
+            if (n < ops.len) {
+                ops[n] = r.val;
+                n += 1;
+            }
+            i = r.next;
+        }
+    }
+    return td;
+}
+
+const PrivDict = struct { subrs: usize = 0 };
+
+fn parsePrivDict(d: []const u8) Error!PrivDict {
+    var pd = PrivDict{};
+    var ops: [48]f64 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < d.len) {
+        const b = d[i];
+        if (b <= 21) {
+            var op: u16 = b;
+            i += 1;
+            if (b == 12) {
+                if (i >= d.len) return Error.BadFont;
+                op = 0x0c00 | @as(u16, d[i]);
+                i += 1;
+            }
+            if (op == 19 and n >= 1) pd.subrs = @intFromFloat(ops[0]); // Subrs
+            n = 0;
+        } else {
+            const r = try readDictOperand(d, i);
+            if (n < ops.len) {
+                ops[n] = r.val;
+                n += 1;
+            }
+            i = r.next;
+        }
+    }
+    return pd;
+}
 
 // -------------------------------------------------------------- outlines
 
@@ -514,6 +736,378 @@ fn decodeComposite(f: *const Font, a: std.mem.Allocator, g: []const u8, out: *Ou
     }
 }
 
+// ------------------------------------------------------ CFF outlines
+
+/// Flatten a cubic Bézier into the outline as on-curve points (p0 already
+/// present; emit p1 last). Font units, y-up — same space as glyf points,
+/// so the shared rasterizer walk below treats every point as on-curve.
+fn flattenCubic(a: std.mem.Allocator, out: *Outline, p0: [2]f32, c0: [2]f32, c1: [2]f32, p1: [2]f32) Error!void {
+    const n = 8;
+    var i: usize = 1;
+    while (i <= n) : (i += 1) {
+        const t = @as(f32, @floatFromInt(i)) / n;
+        const mt = 1 - t;
+        const x = mt * mt * mt * p0[0] + 3 * mt * mt * t * c0[0] + 3 * mt * t * t * c1[0] + t * t * t * p1[0];
+        const y = mt * mt * mt * p0[1] + 3 * mt * mt * t * c0[1] + 3 * mt * t * t * c1[1] + t * t * t * p1[1];
+        try out.pts.append(a, .{ .x = x, .y = y, .on = true });
+    }
+}
+
+/// A running Type2 charstring interpretation: the current point, the
+/// operand stack, hint-count (for hintmask sizing), width/contour state,
+/// and the outline being built (all-on-curve points, closed by contour).
+const CffState = struct {
+    f: *const Font,
+    a: std.mem.Allocator,
+    out: *Outline,
+    x: f32 = 0,
+    y: f32 = 0,
+    stack: [48]f32 = undefined,
+    sp: usize = 0,
+    nstems: u32 = 0,
+    width_parsed: bool = false,
+    open: bool = false,
+    done: bool = false,
+
+    fn push(st: *CffState, v: f32) void {
+        if (st.sp < st.stack.len) {
+            st.stack[st.sp] = v;
+            st.sp += 1;
+        }
+    }
+    fn closeContour(st: *CffState) Error!void {
+        if (st.open) {
+            try st.out.ends.append(st.a, st.out.pts.items.len);
+            st.open = false;
+        }
+    }
+    fn moveTo(st: *CffState, nx: f32, ny: f32) Error!void {
+        try st.closeContour();
+        st.x = nx;
+        st.y = ny;
+        try st.out.pts.append(st.a, .{ .x = nx, .y = ny, .on = true });
+        st.open = true;
+    }
+    fn lineTo(st: *CffState, nx: f32, ny: f32) Error!void {
+        st.x = nx;
+        st.y = ny;
+        try st.out.pts.append(st.a, .{ .x = nx, .y = ny, .on = true });
+    }
+    fn curveTo(st: *CffState, c0x: f32, c0y: f32, c1x: f32, c1y: f32, nx: f32, ny: f32) Error!void {
+        try flattenCubic(st.a, st.out, .{ st.x, st.y }, .{ c0x, c0y }, .{ c1x, c1y }, .{ nx, ny });
+        st.x = nx;
+        st.y = ny;
+    }
+    /// hstem/vstem/hintmask: count stems (pairs), consuming a leading width
+    /// operand the first time the stack is cleared.
+    fn countStems(st: *CffState) void {
+        var n = st.sp;
+        if (!st.width_parsed and (n & 1) == 1) n -= 1; // leading width
+        st.width_parsed = true;
+        st.nstems += @intCast(n / 2);
+        st.sp = 0;
+    }
+};
+
+fn cffBias(n: u32) i32 {
+    if (n < 1240) return 107;
+    if (n < 33900) return 1131;
+    return 32768;
+}
+
+/// Decode CFF glyph `gid` into an all-on-curve outline (cubics flattened),
+/// then the shared rasterizer path fills it exactly like a glyf outline.
+fn decodeCffOutline(f: *const Font, a: std.mem.Allocator, gid: u16, out: *Outline) Error!void {
+    var st = CffState{ .f = f, .a = a, .out = out };
+    const cs = f.cff_charstrings.item(gid);
+    if (cs.len == 0) return; // empty glyph
+    try execCharstring(&st, cs, 0);
+    try st.closeContour();
+}
+
+fn execCharstring(st: *CffState, code: []const u8, depth: u8) Error!void {
+    if (depth > 10) return Error.BadFont;
+    var i: usize = 0;
+    while (i < code.len and !st.done) {
+        const b0 = code[i];
+        if (b0 >= 32 or b0 == 28) {
+            // An operand (number).
+            if (b0 == 28) {
+                if (i + 3 > code.len) return Error.BadFont;
+                st.push(@floatFromInt(i16be(code, i + 1)));
+                i += 3;
+            } else if (b0 < 247) {
+                st.push(@floatFromInt(@as(i32, b0) - 139));
+                i += 1;
+            } else if (b0 < 251) {
+                if (i + 2 > code.len) return Error.BadFont;
+                st.push(@floatFromInt((@as(i32, b0) - 247) * 256 + @as(i32, code[i + 1]) + 108));
+                i += 2;
+            } else if (b0 < 255) {
+                if (i + 2 > code.len) return Error.BadFont;
+                st.push(@floatFromInt(-(@as(i32, b0) - 251) * 256 - @as(i32, code[i + 1]) - 108));
+                i += 2;
+            } else {
+                // 255: 16.16 fixed.
+                if (i + 5 > code.len) return Error.BadFont;
+                const raw: i32 = @bitCast(u32be(code, i + 1));
+                st.push(@as(f32, @floatFromInt(raw)) / 65536.0);
+                i += 5;
+            }
+            continue;
+        }
+        // An operator.
+        i += 1;
+        switch (b0) {
+            1, 3, 18, 23 => st.countStems(), // hstem/vstem/hstemhm/vstemhm
+            19, 20 => { // hintmask, cntrmask
+                st.countStems();
+                i += (st.nstems + 7) / 8; // skip the mask bytes
+            },
+            21 => { // rmoveto
+                var k: usize = 0;
+                if (!st.width_parsed and st.sp > 2) k = 1;
+                st.width_parsed = true;
+                if (st.sp >= k + 2) try st.moveTo(st.x + st.stack[k], st.y + st.stack[k + 1]);
+                st.sp = 0;
+            },
+            22 => { // hmoveto
+                var k: usize = 0;
+                if (!st.width_parsed and st.sp > 1) k = 1;
+                st.width_parsed = true;
+                if (st.sp >= k + 1) try st.moveTo(st.x + st.stack[k], st.y);
+                st.sp = 0;
+            },
+            4 => { // vmoveto
+                var k: usize = 0;
+                if (!st.width_parsed and st.sp > 1) k = 1;
+                st.width_parsed = true;
+                if (st.sp >= k + 1) try st.moveTo(st.x, st.y + st.stack[k]);
+                st.sp = 0;
+            },
+            5 => { // rlineto
+                var k: usize = 0;
+                while (k + 2 <= st.sp) : (k += 2) try st.lineTo(st.x + st.stack[k], st.y + st.stack[k + 1]);
+                st.sp = 0;
+            },
+            6, 7 => { // hlineto / vlineto (alternating)
+                var k: usize = 0;
+                var horiz = b0 == 6;
+                while (k < st.sp) : (k += 1) {
+                    if (horiz) try st.lineTo(st.x + st.stack[k], st.y) else try st.lineTo(st.x, st.y + st.stack[k]);
+                    horiz = !horiz;
+                }
+                st.sp = 0;
+            },
+            8 => { // rrcurveto
+                var k: usize = 0;
+                while (k + 6 <= st.sp) : (k += 6) {
+                    const c0x = st.x + st.stack[k];
+                    const c0y = st.y + st.stack[k + 1];
+                    const c1x = c0x + st.stack[k + 2];
+                    const c1y = c0y + st.stack[k + 3];
+                    try st.curveTo(c0x, c0y, c1x, c1y, c1x + st.stack[k + 4], c1y + st.stack[k + 5]);
+                }
+                st.sp = 0;
+            },
+            24 => { // rcurveline: curves then a final line
+                var k: usize = 0;
+                while (k + 8 <= st.sp) : (k += 6) {
+                    const c0x = st.x + st.stack[k];
+                    const c0y = st.y + st.stack[k + 1];
+                    const c1x = c0x + st.stack[k + 2];
+                    const c1y = c0y + st.stack[k + 3];
+                    try st.curveTo(c0x, c0y, c1x, c1y, c1x + st.stack[k + 4], c1y + st.stack[k + 5]);
+                }
+                if (k + 2 <= st.sp) try st.lineTo(st.x + st.stack[k], st.y + st.stack[k + 1]);
+                st.sp = 0;
+            },
+            25 => { // rlinecurve: lines then a final curve
+                var k: usize = 0;
+                while (k + 8 <= st.sp) : (k += 2) try st.lineTo(st.x + st.stack[k], st.y + st.stack[k + 1]);
+                if (k + 6 <= st.sp) {
+                    const c0x = st.x + st.stack[k];
+                    const c0y = st.y + st.stack[k + 1];
+                    const c1x = c0x + st.stack[k + 2];
+                    const c1y = c0y + st.stack[k + 3];
+                    try st.curveTo(c0x, c0y, c1x, c1y, c1x + st.stack[k + 4], c1y + st.stack[k + 5]);
+                }
+                st.sp = 0;
+            },
+            26 => { // vvcurveto
+                var k: usize = 0;
+                var dx1: f32 = 0;
+                if ((st.sp & 3) == 1) {
+                    dx1 = st.stack[0];
+                    k = 1;
+                }
+                while (k + 4 <= st.sp) : (k += 4) {
+                    const c0x = st.x + dx1;
+                    const c0y = st.y + st.stack[k];
+                    const c1x = c0x + st.stack[k + 1];
+                    const c1y = c0y + st.stack[k + 2];
+                    try st.curveTo(c0x, c0y, c1x, c1y, c1x, c1y + st.stack[k + 3]);
+                    dx1 = 0;
+                }
+                st.sp = 0;
+            },
+            27 => { // hhcurveto
+                var k: usize = 0;
+                var dy1: f32 = 0;
+                if ((st.sp & 3) == 1) {
+                    dy1 = st.stack[0];
+                    k = 1;
+                }
+                while (k + 4 <= st.sp) : (k += 4) {
+                    const c0x = st.x + st.stack[k];
+                    const c0y = st.y + dy1;
+                    const c1x = c0x + st.stack[k + 1];
+                    const c1y = c0y + st.stack[k + 2];
+                    try st.curveTo(c0x, c0y, c1x, c1y, c1x + st.stack[k + 3], c1y);
+                    dy1 = 0;
+                }
+                st.sp = 0;
+            },
+            30, 31 => { // vhcurveto / hvcurveto (alternating tangents)
+                var k: usize = 0;
+                var horiz = b0 == 31;
+                while (st.sp - k >= 4) {
+                    const last = (st.sp - k == 5);
+                    if (horiz) {
+                        const c0x = st.x + st.stack[k];
+                        const c0y = st.y;
+                        const c1x = c0x + st.stack[k + 1];
+                        const c1y = c0y + st.stack[k + 2];
+                        const py = c1y + st.stack[k + 3];
+                        const px = if (last) c1x + st.stack[k + 4] else c1x;
+                        try st.curveTo(c0x, c0y, c1x, c1y, px, py);
+                    } else {
+                        const c0x = st.x;
+                        const c0y = st.y + st.stack[k];
+                        const c1x = c0x + st.stack[k + 1];
+                        const c1y = c0y + st.stack[k + 2];
+                        const px = c1x + st.stack[k + 3];
+                        const py = if (last) c1y + st.stack[k + 4] else c1y;
+                        try st.curveTo(c0x, c0y, c1x, c1y, px, py);
+                    }
+                    k += 4;
+                    horiz = !horiz;
+                }
+                st.sp = 0;
+            },
+            10 => { // callsubr (local)
+                if (st.sp == 0) return Error.BadFont;
+                st.sp -= 1;
+                const idx = @as(i32, @intFromFloat(st.stack[st.sp])) + cffBias(st.f.cff_lsubrs.count);
+                if (idx < 0 or idx >= st.f.cff_lsubrs.count) return Error.BadFont;
+                try execCharstring(st, st.f.cff_lsubrs.item(@intCast(idx)), depth + 1);
+            },
+            29 => { // callgsubr (global)
+                if (st.sp == 0) return Error.BadFont;
+                st.sp -= 1;
+                const idx = @as(i32, @intFromFloat(st.stack[st.sp])) + cffBias(st.f.cff_gsubrs.count);
+                if (idx < 0 or idx >= st.f.cff_gsubrs.count) return Error.BadFont;
+                try execCharstring(st, st.f.cff_gsubrs.item(@intCast(idx)), depth + 1);
+            },
+            11 => return, // return from subr
+            14 => { // endchar
+                if (!st.width_parsed and (st.sp == 1 or st.sp == 5)) {
+                    // A leading width operand (4 trailing args = deprecated seac).
+                }
+                st.width_parsed = true;
+                st.done = true;
+                return;
+            },
+            12 => { // two-byte flex operators
+                if (i >= code.len) return Error.BadFont;
+                const b1 = code[i];
+                i += 1;
+                try execFlex(st, b1);
+                st.sp = 0;
+            },
+            else => st.sp = 0, // unknown/ignored operator: drop its operands
+        }
+    }
+}
+
+/// The four flex operators (12 34..37): two joined cubics, expressed with
+/// various implicit zero coordinates. All resolve to two `curveTo`s.
+fn execFlex(st: *CffState, sub: u8) Error!void {
+    const s = &st.stack;
+    switch (sub) {
+        34 => { // hflex: 7 args, flat ends
+            if (st.sp < 7) return;
+            const c0x = st.x + s[0];
+            const c0y = st.y;
+            const c1x = c0x + s[1];
+            const c1y = c0y + s[2];
+            const jx = c1x + s[3];
+            const jy = c1y;
+            try st.curveTo(c0x, c0y, c1x, c1y, jx, jy);
+            const d0x = jx + s[4];
+            const d0y = jy;
+            const d1x = d0x + s[5];
+            const d1y = st.y; // back to the original y
+            try st.curveTo(d0x, d0y, d1x, d1y, d1x + s[6], st.y);
+        },
+        35 => { // flex: 13 args (last is fd, ignored)
+            if (st.sp < 13) return;
+            const c0x = st.x + s[0];
+            const c0y = st.y + s[1];
+            const c1x = c0x + s[2];
+            const c1y = c0y + s[3];
+            const jx = c1x + s[4];
+            const jy = c1y + s[5];
+            try st.curveTo(c0x, c0y, c1x, c1y, jx, jy);
+            const d0x = jx + s[6];
+            const d0y = jy + s[7];
+            const d1x = d0x + s[8];
+            const d1y = d0y + s[9];
+            try st.curveTo(d0x, d0y, d1x, d1y, d1x + s[10], d1y + s[11]);
+        },
+        36 => { // hflex1: 9 args, flat ends in y
+            if (st.sp < 9) return;
+            const start_y = st.y;
+            const c0x = st.x + s[0];
+            const c0y = st.y + s[1];
+            const c1x = c0x + s[2];
+            const c1y = c0y + s[3];
+            const jx = c1x + s[4];
+            const jy = c1y;
+            try st.curveTo(c0x, c0y, c1x, c1y, jx, jy);
+            const d0x = jx + s[5];
+            const d0y = jy;
+            const d1x = d0x + s[6];
+            const d1y = d0y + s[7];
+            try st.curveTo(d0x, d0y, d1x, d1y, d1x + s[8], start_y);
+        },
+        37 => { // flex1: 11 args, last coord returns to start
+            if (st.sp < 11) return;
+            const start_x = st.x;
+            const start_y = st.y;
+            const c0x = st.x + s[0];
+            const c0y = st.y + s[1];
+            const c1x = c0x + s[2];
+            const c1y = c0y + s[3];
+            const jx = c1x + s[4];
+            const jy = c1y + s[5];
+            try st.curveTo(c0x, c0y, c1x, c1y, jx, jy);
+            const d0x = jx + s[6];
+            const d0y = jy + s[7];
+            const d1x = d0x + s[8];
+            const d1y = d0y + s[9];
+            const sum_dx = s[0] + s[2] + s[4] + s[6] + s[8];
+            const sum_dy = s[1] + s[3] + s[5] + s[7] + s[9];
+            if (@abs(sum_dx) > @abs(sum_dy)) {
+                try st.curveTo(d0x, d0y, d1x, d1y, d1x + s[10], start_y);
+            } else {
+                try st.curveTo(d0x, d0y, d1x, d1y, start_x, d1y + s[10]);
+            }
+        },
+        else => {},
+    }
+}
+
 // ------------------------------------------------------------ rasterize
 
 /// A rasterized glyph: an 8-bit coverage bitmap (0..255), its size, the
@@ -563,7 +1157,7 @@ pub fn rasterize(f: *const Font, a: std.mem.Allocator, gid: u16, px_size: f32) E
     const scale = px_size / @as(f32, @floatFromInt(f.units_per_em));
     var out = Outline{ .pts = .empty, .ends = .empty };
     defer out.deinit(a);
-    try decodeOutline(f, a, gid, &out, 0);
+    if (f.is_cff) try decodeCffOutline(f, a, gid, &out) else try decodeOutline(f, a, gid, &out, 0);
     const adv = @as(f32, @floatFromInt(f.advance(gid))) * scale;
 
     if (out.pts.items.len == 0 or out.ends.items.len == 0) {
@@ -904,4 +1498,151 @@ test "toSfnt returns an SFNT input unchanged" {
     var scratch: [16]u8 = undefined;
     const sfnt = try toSfnt(data, &scratch);
     try testing.expect(sfnt.ptr == data.ptr); // no copy for an SFNT
+}
+
+// --- CFF (OpenType/PostScript) ---
+
+/// Assemble a CFF INDEX (count-prefixed variable-length objects).
+fn cffIndex(l: *std.ArrayList(u8), a: std.mem.Allocator, items: []const []const u8) !void {
+    const count: u16 = @intCast(items.len);
+    try beU16(l, a, count);
+    if (count == 0) return;
+    var total: usize = 0;
+    for (items) |it| total += it.len;
+    const off_size: u8 = if (total + 1 <= 0xff) 1 else if (total + 1 <= 0xffff) 2 else 4;
+    try l.append(a, off_size);
+    var acc: usize = 1;
+    // The offset array: count+1 entries, 1-based, `off_size` bytes each.
+    var e: usize = 0;
+    while (e <= count) : (e += 1) {
+        if (e > 0) acc += items[e - 1].len;
+        var b: usize = off_size;
+        while (b > 0) : (b -= 1) try l.append(a, @intCast((acc >> @intCast((b - 1) * 8)) & 0xff));
+    }
+    for (items) |it| try l.appendSlice(a, it);
+}
+
+fn buildCffTestFont(a: std.mem.Allocator) ![]u8 {
+    // A CFF table whose glyph 1 is the same 100..500 square as the glyf font,
+    // drawn by a Type2 charstring; glyph 0 (.notdef) is empty.
+    const cs_notdef = [_]u8{14}; // endchar
+    // rmoveto 100 100; rlineto 400 0; rlineto 0 400; rlineto -400 0; endchar.
+    // 100 = 239 (b0-139); 400 = 28,0x01,0x90; 0 = 139; -400 = 28,0xFE,0x70.
+    const cs_square = [_]u8{
+        239, 239, 21, // rmoveto 100 100
+        28, 0x01, 0x90, 139, 5, // rlineto 400 0
+        139, 28, 0x01, 0x90, 5, // rlineto 0 400
+        28, 0xFE, 0x70, 139, 5, // rlineto -400 0
+        14, // endchar
+    };
+    var charstrings: std.ArrayList(u8) = .empty;
+    defer charstrings.deinit(a);
+    try cffIndex(&charstrings, a, &.{ &cs_notdef, &cs_square });
+
+    var name_index: std.ArrayList(u8) = .empty;
+    defer name_index.deinit(a);
+    try cffIndex(&name_index, a, &.{"A"});
+
+    // Layout: header(4) name TopDICT-INDEX string(empty,2) gsubr(empty,2) CharStrings.
+    // The Top DICT encodes the CharStrings offset with the fixed 5-byte int
+    // form (op 29) so the Top DICT INDEX length is known before we place it.
+    const top_dict_len = 6; // [29 b1 b2 b3 b4] + [17]
+    const top_index_len = 2 + 1 + 2 + top_dict_len; // count,offSize,2 one-byte offsets,data
+    const cs_off = 4 + name_index.items.len + top_index_len + 2 + 2;
+
+    var cff: std.ArrayList(u8) = .empty;
+    defer cff.deinit(a);
+    try cff.appendSlice(a, &.{ 1, 0, 4, 1 }); // header: v1.0, hdrSize 4, offSize 1
+    try cff.appendSlice(a, name_index.items);
+    // Top DICT INDEX (one entry).
+    var top_dict: std.ArrayList(u8) = .empty;
+    defer top_dict.deinit(a);
+    try top_dict.append(a, 29); // 5-byte integer operand
+    try beU32(&top_dict, a, @intCast(cs_off));
+    try top_dict.append(a, 17); // CharStrings operator
+    try cffIndex(&cff, a, &.{top_dict.items});
+    try cffIndex(&cff, a, &.{}); // String INDEX (empty)
+    try cffIndex(&cff, a, &.{}); // Global Subr INDEX (empty)
+    try testing.expectEqual(cs_off, cff.items.len); // CharStrings land where the DICT says
+    try cff.appendSlice(a, charstrings.items);
+
+    // The rest of the SFNT: reuse the minimal tables (no glyf/loca).
+    var head: std.ArrayList(u8) = .empty;
+    defer head.deinit(a);
+    try head.appendNTimes(a, 0, 54);
+    head.items[18] = 0x03;
+    head.items[19] = 0xE8; // unitsPerEm = 1000
+
+    var maxp: std.ArrayList(u8) = .empty;
+    defer maxp.deinit(a);
+    try beU32(&maxp, a, 0x00005000); // version 0.5 (CFF)
+    try beU16(&maxp, a, 2); // numGlyphs
+
+    var hhea: std.ArrayList(u8) = .empty;
+    defer hhea.deinit(a);
+    try hhea.appendNTimes(a, 0, 36);
+    hhea.items[4] = 0x03;
+    hhea.items[5] = 0x20; // ascent 800
+    hhea.items[34] = 0x00;
+    hhea.items[35] = 0x02; // numberOfHMetrics = 2
+
+    var hmtx: std.ArrayList(u8) = .empty;
+    defer hmtx.deinit(a);
+    try beU16(&hmtx, a, 600);
+    try beI16(&hmtx, a, 0);
+    try beU16(&hmtx, a, 600);
+    try beI16(&hmtx, a, 100);
+
+    var cmap: std.ArrayList(u8) = .empty;
+    defer cmap.deinit(a);
+    try beU16(&cmap, a, 0);
+    try beU16(&cmap, a, 1);
+    try beU16(&cmap, a, 3);
+    try beU16(&cmap, a, 1);
+    try beU32(&cmap, a, 12);
+    try beU16(&cmap, a, 4); // format 4
+    try beU16(&cmap, a, 32);
+    try beU16(&cmap, a, 0);
+    try beU16(&cmap, a, 4);
+    try beU16(&cmap, a, 0);
+    try beU16(&cmap, a, 0);
+    try beU16(&cmap, a, 0);
+    try beU16(&cmap, a, 0x41);
+    try beU16(&cmap, a, 0xffff);
+    try beU16(&cmap, a, 0);
+    try beU16(&cmap, a, 0x41);
+    try beU16(&cmap, a, 0xffff);
+    try beU16(&cmap, a, 0xFFC0);
+    try beU16(&cmap, a, 0x0001);
+    try beU16(&cmap, a, 0);
+    try beU16(&cmap, a, 0);
+
+    return assembleSfnt(a, &.{
+        .{ .tag = 0x68656164, .bytes = head.items },
+        .{ .tag = 0x6D617870, .bytes = maxp.items },
+        .{ .tag = 0x68686561, .bytes = hhea.items },
+        .{ .tag = 0x686D7478, .bytes = hmtx.items },
+        .{ .tag = 0x636D6170, .bytes = cmap.items },
+        .{ .tag = 0x43464620, .bytes = cff.items }, // 'CFF '
+    });
+}
+
+test "parse and rasterize a minimal CFF (Type2 charstring) font" {
+    const a = testing.allocator;
+    const data = try buildCffTestFont(a);
+    defer a.free(data);
+    var f = try Font.parse(data);
+    try testing.expect(f.is_cff);
+    try testing.expectEqual(@as(u16, 1000), f.units_per_em);
+    try testing.expectEqual(@as(u16, 2), f.num_glyphs);
+    try testing.expectEqual(@as(u32, 2), f.cff_charstrings.count);
+    const gid = f.glyphIndex('A');
+    try testing.expectEqual(@as(u16, 1), gid);
+    // The charstring square rasterizes just like the glyf one: ~40×40, filled.
+    const g = try rasterize(&f, a, gid, 100);
+    defer a.free(g.cov);
+    try testing.expect(g.w >= 39 and g.w <= 43);
+    try testing.expect(g.h >= 39 and g.h <= 43);
+    try testing.expectApproxEqAbs(@as(f32, 60), g.advance, 0.5);
+    try testing.expect(g.cov[(g.h / 2) * g.w + g.w / 2] > 250);
 }
