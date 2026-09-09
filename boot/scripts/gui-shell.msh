@@ -1,63 +1,86 @@
 # The graphical session shell (the post-login GUI): a small settings
 # desktop that runs as the logged-in user in their own session domain,
-# rendered through the shared font service. It is a GUI service like any
-# other — a pure view/update — that adjusts the accessibility text scale
-# and, on "apply", persists it to the user's own home (conf/font.msh) and
-# pushes it live to the shared font service, so the whole session's type
-# resizes at once. "log out" reverts to the system layer and exits, the
-# runtime closes the window, mshrun exits, the session domain exits, and
-# the manager tears the session down. The whole session's UI, in mshl.
+# rendered through the shared font service. A pure view/update GUI that
+# edits the user's appearance — the accessibility text scale and the theme
+# (dark/light), plus the high-contrast and colourblind-safe accessibility
+# switches. "apply" persists the choices to the user's own home
+# (conf/font.msh) and pushes them live to the shared font service, so the
+# whole session's type and palette change at once (the panel reopens at
+# the new look). "log out" reverts to the system layer and exits, the
+# runtime closes the window, mshrun exits, and the manager tears the
+# session down. The whole session's UI, in mshl.
 #
-# First, apply this user's saved font preference for the session: read
-# their own layer from the home (seeded on first login) and push it, so
-# the shell opens at the user's scale.
+# Apply this user's saved appearance for the session first (read their own
+# layer from the home, seeded on first login, and push it), then open the
+# panel seeded from it.
 match (cat "conf/font.msh") {
   ok $layer => { sessionfont $layer }
   _ => null
 }
-let start = match (cat "conf/font.msh") {
-  ok $l => { (from-data $l) | get "scale" }
-  _ => 1.0
+let cfg = match (cat "conf/font.msh") {
+  ok $l => { from-data $l }
+  _ => { { scale: 1.0, theme: "dark", contrast: "normal", colors: "default" } }
 }
 
-# The settings panel: adjust the scale with smaller/larger (pure state),
-# then apply (persist + push live, reopening at the new scale) or log out.
-def panel [scale] {
+def panel [s] {
   let r = (gui {
-      init:  { scale: $scale, action: "" }
+      init:  $s
       title: "moss settings"
       view: (fn [state] {
           {
             kind: "column"
             children: [
-              { kind: "label", text: "text size" }
+              { kind: "label", role: "title", text: "settings" }
+              { kind: "label", muted: true, text: "text size" }
               { kind: "label", text: ("scale " + (str $state.scale)) }
-              { kind: "button", id: "smaller", label: "smaller" }
-              { kind: "button", id: "larger", label: "larger" }
-              { kind: "button", id: "apply", label: "apply", variant: "primary" }
-              { kind: "button", id: "logout", label: "log out", variant: "danger" }
+              {
+                kind: "row"
+                children: [
+                  { kind: "button", id: "smaller", label: "smaller" }
+                  { kind: "button", id: "larger", label: "larger" }
+                ]
+              }
+              { kind: "label", muted: true, text: "appearance" }
+              {
+                kind: "row"
+                children: [
+                  { kind: "button", id: "theme", label: ("theme: " + $state.theme) }
+                  { kind: "button", id: "contrast", label: ("contrast: " + $state.contrast) }
+                  { kind: "button", id: "colors", label: ("colours: " + $state.colors) }
+                ]
+              }
+              {
+                kind: "row"
+                children: [
+                  { kind: "button", id: "apply", label: "apply", variant: "primary" }
+                  { kind: "button", id: "logout", label: "log out", variant: "danger" }
+                ]
+              }
             ]
           }
         })
       update: (fn [state, ev] {
           match $ev.id {
-            "smaller" => { { scale: (match (($state.scale - 0.25) < 1.0) { true => 1.0; _ => ($state.scale - 0.25) }), action: "" } }
-            "larger" => { { scale: (match (($state.scale + 0.25) > 3.0) { true => 3.0; _ => ($state.scale + 0.25) }), action: "" } }
-            "apply" => { { scale: $state.scale, action: "apply", done: true } }
-            "logout" => { { scale: $state.scale, action: "logout", done: true } }
+            "smaller" => { { scale: (match (($state.scale - 0.25) < 1.0) { true => 1.0; _ => ($state.scale - 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, action: "" } }
+            "larger" => { { scale: (match (($state.scale + 0.25) > 3.0) { true => 3.0; _ => ($state.scale + 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, action: "" } }
+            "theme" => { { scale: $state.scale, theme: (match $state.theme { "dark" => "light"; _ => "dark" }), contrast: $state.contrast, colors: $state.colors, action: "" } }
+            "contrast" => { { scale: $state.scale, theme: $state.theme, contrast: (match $state.contrast { "high" => "normal"; _ => "high" }), colors: $state.colors, action: "" } }
+            "colors" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: (match $state.colors { "cb-safe" => "default"; _ => "cb-safe" }), action: "" } }
+            "apply" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, action: "apply", done: true } }
+            "logout" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, action: "logout", done: true } }
             _ => $state
           }
         })
     })
   match $r.action {
     "apply" => {
-      save "conf/font.msh" { scale: $r.scale }
+      save "conf/font.msh" (to-data { scale: $r.scale, theme: $r.theme, contrast: $r.contrast, colors: $r.colors })
       sessionfont (cat "conf/font.msh")?
-      panel $r.scale
+      panel { scale: $r.scale, theme: $r.theme, contrast: $r.contrast, colors: $r.colors, action: "" }
     }
     _ => { sessionfont }
   }
 }
 
-panel $start
+panel { scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), action: "" }
 "gui: shell exited"

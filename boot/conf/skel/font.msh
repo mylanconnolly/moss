@@ -1,11 +1,20 @@
-# The home skeleton's font preference: a fresh home is seeded with this
-# the first time its owner logs in (the session's init copies it in if the
-# home has none), so a new user starts with a font layer of their own that
-# they can edit — the per-user accessibility scale. It merges over the
-# system layer (conf/font.msh) in fontsvc: here only `scale` is set, so the
-# system's sizes and families carry through and every program's type grows
-# together. Ships larger than 1.0 so the per-user push is visible on first
-# login; a user who wants the system size sets `scale: 1.0` (or empties it).
+# The home skeleton's appearance preference: a fresh home is seeded with
+# this the first time its owner logs in (the session's init copies it in
+# if the home has none), so a new user starts with appearance settings of
+# their own that the settings UI edits. It merges over the system layer
+# (conf/font.msh) in fontsvc and every GUI resolves its palette + scale
+# from the result.
+#
+#   scale     the accessibility text scale (1.0 = system size)
+#   theme     dark | light
+#   contrast  normal | high        (high-contrast accessibility)
+#   colors    default | cb-safe    (colourblind-safe, Okabe-Ito hues)
+#
+# Ships a larger scale than 1.0 so the per-user push is visible on first
+# login; a user lowers it (or any of these) from the settings UI.
 {
-  scale: 1.5
+  scale:    1.5
+  theme:    dark
+  contrast: normal
+  colors:   default
 }

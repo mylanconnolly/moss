@@ -2946,7 +2946,24 @@ its palette, so a user's theme and their high-contrast / colourblind-safe
 switches are *system-wide* (every GUI, the greeter included) and ride the
 same per-user push the font scale does — set them in your `conf/font.msh`
 and the next login (or a live `sessionfont` push) recolours the whole
-session. The settings UI grows the runtime toggles next.
+session.
+
+The settings desktop drives all of it. The post-login shell's panel grew
+an *appearance* section — theme, contrast and colours, each a button that
+cycles its axis — beside the text-scale controls, laid out in `row`
+groups. "apply" writes the whole appearance (`to-data { scale, theme,
+contrast, colours }`, so the hyphenated `cb-safe` is quoted and
+round-trips) to the user's home and pushes it live, and the panel reopens
+recoloured; the accessibility switches persist for the next login. One
+bug surfaced the layered-settings contract: `lib/settings.merge` keeps the
+*system* layer's keys and lets a user override them, so a key the user
+sets but the system layer never declared is dropped — the theme toggled
+in the panel but reverted on apply until `theme`/`contrast`/`colors` were
+added to the system `conf/font.msh` too. The `guishell` drill now drives
+the appearance round trip: sign in, turn contrast high and colours
+cb-safe, apply, and a screendump confirms the reopened window's ground is
+pure black (the Okabe-Ito accent lighting the "apply" button) before
+logging out.
 
 **The system font service (as built, 2026-09-08).** The bitmap font was
 the ceiling on how the GUI could look; real type meant a vector-font

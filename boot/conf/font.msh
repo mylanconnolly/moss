@@ -9,6 +9,14 @@
 # there) and naming it here is all it takes. Bundled: "IBM Plex Sans"
 # and "IBM Plex Mono"; "IBM Plex Serif" ships in assets/available as an
 # example a user can install.
+#
+# The appearance axes a GUI resolves its colour palette from — the theme
+# and the accessibility switches. Every key here must be present for a
+# user's override to take (lib/settings.merge keeps the system layer's
+# keys), so the defaults live here and a user layer overrides them:
+#   theme     dark | light
+#   contrast  normal | high        (high-contrast accessibility)
+#   colors    default | cb-safe    (colourblind-safe, Okabe-Ito hues)
 {
   scale:        1.0
   ui:           16
@@ -17,4 +25,7 @@
   ui_family:    "IBM Plex Sans"
   title_family: "IBM Plex Sans"
   mono_family:  "IBM Plex Mono"
+  theme:        dark
+  contrast:     normal
+  colors:       default
 }

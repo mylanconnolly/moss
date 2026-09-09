@@ -1509,30 +1509,57 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 24px, scale 1.50)", 1, "the session did not apply the user's saved scale on login", spec, polls)) return false;
     sleepMs(500);
 
-    // Change the setting: the settings panel focuses "smaller" first —
-    // Enter fires it (scale 1.50 → 1.25, the panel re-renders in place),
-    // then Tab, Tab moves to "apply" and Enter fires it: the shell saves
-    // the new scale to the user's home and pushes it live.
-    _ = q.sendKey("ret"); // smaller
+    // Change the settings. The panel's focusable order is
+    //   0 smaller, 1 larger, 2 theme, 3 contrast, 4 colours, 5 apply, 6 log out
+    // Fire "smaller" (scale 1.50 → 1.25, re-renders in place), then Tab to
+    // "contrast" and turn it high, Tab to "colours" and turn it cb-safe,
+    // then Tab to "apply" and fire it — the shell saves the whole
+    // appearance to the user's home and pushes it live.
+    _ = q.sendKey("ret"); // smaller (focus 0)
     sleepMs(200);
-    _ = q.sendKey("tab"); // → larger
+    _ = q.sendKey("tab"); // → 1 larger
     sleepMs(100);
-    _ = q.sendKey("tab"); // → apply
+    _ = q.sendKey("tab"); // → 2 theme
+    sleepMs(100);
+    _ = q.sendKey("tab"); // → 3 contrast
+    sleepMs(100);
+    _ = q.sendKey("ret"); // contrast → high
+    sleepMs(200);
+    _ = q.sendKey("tab"); // → 4 colours
+    sleepMs(100);
+    _ = q.sendKey("ret"); // colours → cb-safe
+    sleepMs(200);
+    _ = q.sendKey("tab"); // → 5 apply
     sleepMs(100);
     _ = q.sendKey("ret"); // apply
     if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 20px, scale 1.25)", 1, "the settings change was not applied and pushed", spec, polls)) return false;
-    // Apply reopens the panel at the new scale (a third "gui: ready").
+    if (!try waitLogN(log_path, "high-contrast cb-safe", 1, "the accessibility switches were not applied", spec, polls)) return false;
+    // Apply reopens the panel at the new appearance (a third "gui: ready").
     if (!try waitLogN(log_path, "gui: ready", 3, "the settings panel did not reopen after apply", spec, polls)) return false;
-    sleepMs(500);
+    sleepMs(600);
 
-    // Log out: Tab past smaller/larger/apply to "log out" and fire it; the
-    // shell reverts the font layer and exits, unwinding the session.
-    _ = q.sendKey("tab");
-    sleepMs(100);
-    _ = q.sendKey("tab");
-    sleepMs(100);
-    _ = q.sendKey("tab");
-    sleepMs(100);
+    // The reopened panel is high-contrast dark: the window ground is pure
+    // black (a slate #0f1420 in the normal theme). Screendump and check an
+    // empty patch of the window's content area.
+    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
+    if (q.screendump(ppm_path)) {
+        if (readPpm(ppm_path)) |img| {
+            const p = pixelAt(img, 790, 300); // an empty patch of the window, right of the left-aligned content
+            if (p[0] > 12 or p[1] > 12 or p[2] > 12) {
+                std.debug.print("[FAIL] {s}: high-contrast ground not black at (220,590): {any}\n", .{ spec.name, p });
+                reportFailure(spec.name, "high-contrast did not darken the window ground", log_path);
+                return false;
+            }
+        }
+    }
+
+    // Log out: Tab from smaller (0) to "log out" (6) and fire it; the shell
+    // reverts the font layer and exits, unwinding the session.
+    var t: usize = 0;
+    while (t < 6) : (t += 1) {
+        _ = q.sendKey("tab");
+        sleepMs(100);
+    }
     _ = q.sendKey("ret");
     if (!try waitLogN(log_path, "gui: shell exited", 1, "logging out never tore the GUI session down", spec, polls)) return false;
     return true;
