@@ -760,9 +760,16 @@ is a plan.
     emits an all-on-curve outline the same scanline fill renders; non-CID
     only (CID → Unsupported). The fontrescan drill now installs two real
     fonts live — IBM Plex Serif (WOFF) + Source Code Pro (OTF/CFF) — and a
-    host test rasterizes a hand-built minimal CFF. Open: WOFF2 front-end
-    (Brotli + table transforms); session push of per-user family/scale;
-    pointer input; richer layout; fabric-remote GUI.
+    host test rasterizes a hand-built minimal CFF. ✅ Brotli decoder (WOFF2
+    stage 1, landed 2026-09-08): lib/brotli.zig, a from-scratch RFC 7932
+    decompressor (LSB-first bit reader, bit-reversed canonical prefix
+    codes, block/context machinery, distance ring buffer, the 122 KB
+    static dictionary + word transforms embedded as RFC data from the MIT
+    reference); straight-through (output buffer is the window, size known);
+    fuzz-validated against `brotli` across 70 corpora × all quality levels;
+    freestanding-safe for fontsvc. Open: the WOFF2 container + glyf/loca
+    table transforms on top (stage 2); session push of per-user
+    family/scale; pointer input; richer layout; fabric-remote GUI.
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`

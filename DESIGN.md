@@ -2842,9 +2842,31 @@ front-ends end to end; a host test also parses+rasterizes a hand-built
 minimal CFF (a Type2 square) as a fast regression. WOFF2 (Brotli + table
 transforms) is the remaining front-end.
 
-What's left for the arc: WOFF2 so every real font file loads; pushing a
-user's font settings from their session (per-user family/scale, once a
-post-login GUI shows it); pointer input, richer layout, and the
+**Brotli decoder (WOFF2 stage 1, as built, 2026-09-08).** WOFF2's tables
+are a raw Brotli stream, so WOFF2 needs a Brotli decompressor — a large one,
+with no equivalent in std. `lib/brotli.zig` is a from-scratch RFC 7932
+decoder: an LSB-first bit reader, canonical prefix codes decoded through a
+bit-reversed lookup table (Brotli packs codes LSB-first, unlike Deflate — a
+puff.c-style MSB walk silently mis-decodes same-length symbols, the bug that
+cost the most here), the full meta-block machinery (block-type/count
+switching, literal/distance context maps with RLE + inverse-MTF, the
+insert-and-copy command split via the cell-position table, the distance
+ring buffer and its roll compensation), and the 122 KB static dictionary +
+121 word transforms for dictionary references. It is a straight-through
+decoder: the decompressed size is known (WOFF2 states it), so the output
+buffer is the window and there is no ring-buffer wrap or resumable state.
+The fixed tables (dictionary, context lookup, transforms) are RFC-defined
+data lifted verbatim from the reference (MIT, `lib/brotli/LICENSE`); the
+logic is independent. Validated by fuzzing 70 corpora (empty, tiny, binary,
+random, text, CSS, font bytes, a real WOFF2) across every quality level
+against the reference `brotli`, plus committed vectors (dictionary, copy,
+store paths). Freestanding-safe (arena over a caller heap), so fontsvc can
+use it directly. Remaining: the WOFF2 container + glyf/loca transforms on
+top (stage 2).
+
+What's left for the arc: the WOFF2 container/transforms over this decoder;
+pushing a user's font settings from their session (per-user family/scale,
+once a post-login GUI shows it); pointer input, richer layout, and the
 fabric-remote GUI the data-only design already allows.
 
 ## Distribution: the fabric
