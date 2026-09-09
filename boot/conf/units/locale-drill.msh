@@ -1,0 +1,7 @@
+# The locale drill (profile locale): a oneshot mshrun that formats through
+# the CLDR database in assets/locale. The read-only view give lazily pulls
+# up the filesystem (mossfs) and seeds the assets tier, so the db is there
+# to read. Essential: the boot follows it and shuts down when it exits.
+{ image: mshrun, script: scripts/locale-drill.msh, grant: [log, bootfs],
+  budget: { user: 20mb }, profiles: [locale], oneshot: true, essential: true,
+  give: [{ tag: locale, fs: "assets/locale", ro: true }] }

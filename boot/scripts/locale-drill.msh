@@ -1,0 +1,21 @@
+# The locale drill (profile locale): mshrun holds a read-only view of the
+# assets/locale tier, loads the CLDR database, and formats numbers, money
+# and dates through it. Asserts the locale-invariant number groupings
+# (deterministic; dates depend on the wall clock, so those are only shown).
+def check-num [tag, expected] {
+  let got = (fmt-number 1234.56 $tag)
+  match ($got == $expected) {
+    true => echo ("loc " + $tag + ": " + $got)
+    _ => (err ("locale " + $tag + " number: " + $got + " != " + $expected))?
+  }
+}
+(check-num "en-US" "1,234.56")
+(check-num "de-DE" "1.234,56")
+(check-num "ja-JP" "1,234.56")
+echo ("money: " + (fmt-money 1234.56 "USD" "en-US") + " " + (fmt-money 1234.56 "EUR" "de-DE") + " " + (fmt-money 1234.56 "JPY" "ja-JP"))
+match (fmt-date "ja-JP" "long") {
+  ok $d => echo ("date ja: " + $d)
+  err $e => echo ("date ja: (" + $e + ")")
+}
+let names = (locales)
+echo ("locale: CLDR " + $names.cldr + " formatted")

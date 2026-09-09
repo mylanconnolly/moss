@@ -3,7 +3,7 @@
 {
   image:    rng
   arg:      1
-  profiles: [system, users, login, flogin, fjoin, net, dot, gsession, lconsole, gisession, guishell, fabgui, fabsig, fabsigtx]
+  profiles: [system, users, login, flogin, fjoin, net, dot, gsession, lconsole, gisession, guishell, fabgui, fabsig, fabsigtx, locale]
   give: [
     { tag: device, device: rng }
     { tag: entropy, device: entropy }

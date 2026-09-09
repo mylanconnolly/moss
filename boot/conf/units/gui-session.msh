@@ -16,6 +16,7 @@
     { tag: font, unit: fontsvc }
     { tag: sess, unit: usersvc-gui }
     { tag: buf, shm: 1 }
+    { tag: locale, fs: "assets/locale", ro: true }
     { secret: conf/trust.token }
   ]
 }

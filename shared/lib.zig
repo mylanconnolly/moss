@@ -664,9 +664,12 @@ pub const CapTag = enum(u64) {
     /// A pointer service's channel (inputsvc in pointer mode): the
     /// compositor reads the tablet's absolute position + buttons over it.
     ptr = 26,
+    /// A read-only view of the locale-data directory (assets/locale):
+    /// a holder loads and live-reloads `cldr.db` (lib/locale).
+    locale = 27,
 };
 
-pub const cap_tag_count = 27;
+pub const cap_tag_count = 28;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -1813,7 +1816,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with

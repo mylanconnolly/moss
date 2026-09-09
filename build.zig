@@ -179,6 +179,11 @@ pub fn build(b: *std.Build) void {
         "fabsignal-test",
         "Run the cross-node signal drill: one node rings a notification another waits on",
     ) orelse false;
+    const locale_test = b.option(
+        bool,
+        "locale-test",
+        "Run the locale drill: CLDR number/date/money formatting from assets/locale",
+    ) orelse false;
     const gui_test = b.option(
         bool,
         "gui-test",
@@ -361,6 +366,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "guishell_test", guishell_test);
     build_opts.addOption(bool, "fabgui_test", fabgui_test);
     build_opts.addOption(bool, "fabsignal_test", fabsignal_test);
+    build_opts.addOption(bool, "locale_test", locale_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
@@ -619,6 +625,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/fabsig.msh",           "conf/units/fabsigtx.msh",
         "scripts/fabsig-wait.msh",         "scripts/fabsig-send.msh",
         "conf/units/fabname.msh",          "scripts/fabname.msh",
+        "conf/units/locale-drill.msh",     "scripts/locale-drill.msh",
         "conf/sessiongui/shell.msh",       "scripts/gui-shell.msh",
         "conf/skel/font.msh",
     }) |f| {
@@ -736,7 +743,7 @@ pub fn build(b: *std.Build) void {
             "rng_test",    "smmu_test",     "vm_test",       "guest_test",
             "vmnode_test", "pan_test",      "cpu_test",      "users_test",
             "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test",
+            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test", "locale_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1156,7 +1163,7 @@ pub fn build(b: *std.Build) void {
         "rng_test",    "smmu_test",     "vm_test",       "guest_test",
         "vmnode_test", "pan_test",      "cpu_test",      "users_test",
         "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test",
+        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test", "locale_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
@@ -1166,7 +1173,7 @@ pub fn build(b: *std.Build) void {
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
         "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "fabgui", "fabsignal",
+        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "fabgui", "fabsignal", "locale",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

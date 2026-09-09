@@ -972,9 +972,16 @@ is a plan.
     on the input doorbell let a GUI re-render on a tick with no busy-wait,
     and the login (`gui-session.msh`) shows a live `HH:MM:SS` + date from
     `(date)`. Open: subpixel (deferred — only pays off at 1:1 on a real
-    panel, not the VNC/2× dev path); locale-agnostic date formatting
-    (CLDR + tz data fetched at build, refreshed at runtime — the GUI clock
-    hardcodes English month names for now).
+    panel, not the VNC/2× dev path); ✅ locale-agnostic formatting from
+    CLDR (stages 1–2 landed 2026-09-09: `lib/locale.zig` formats numbers,
+    dates and money from a compact `assets/locale/cldr.db` distilled by
+    `tools/cldrgen` from vendored CLDR 48.2.0; en-US/de-DE/fr-FR/ja-JP;
+    `fmt-number`/`fmt-int`/`fmt-money`/`fmt-date`/`fmt-time`/`locales`
+    commands, the GUI clock migrated onto them, the `locale` drill; read
+    and live-reloaded from the assets tier the trust-roots way). Open: a
+    network auto-updater that fetches a fresher `cldr.db` on a timer over
+    TLS and installs it into the assets tier (stage 3); more locales,
+    plural rules, relative time, and tz data as schema extensions.
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

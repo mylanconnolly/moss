@@ -87,6 +87,7 @@ const specs = [_]Spec{
     .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .extra2 = "fontsvc: reconfigured (ui 20px, scale 1.25)", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
+    .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },

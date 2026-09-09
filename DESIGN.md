@@ -1924,6 +1924,43 @@ turn untrusted with no restart. This is the one way reference data ships
 and updates; a package manager, if it ever comes, would sit on top of
 it, not replace it.
 
+**Locale formatting from CLDR (as built, 2026-09-09).** The locale
+database the assets note foretold. Numbers, dates and money read
+differently in every place — `1,234.56` / `1.234,56` / `1 234,56`,
+`$1,234.56` / `1.234,56 €` / `￥1,235`, `Sep 9, 2026` / `2026年9月9日` — and
+that knowledge is Unicode CLDR's, ~50 MB of it. moss carries a distilled
+slice: `lib/locale.zig` is a pure, freestanding, host-tested formatter
+over a compact 1 KB blob (`assets/locale/cldr.db`) holding, per locale,
+the number symbols and grouping/fraction rules, month and day names, am/pm
+markers, the CLDR date/time patterns, and a small currency table. It
+parses the blob with no allocator (borrowing its bytes) and renders CLDR
+patterns straight — a run of a letter is a field of that width, quotes and
+non-ASCII bytes like 年月日 pass through — so the 12-hour-with-a-marker vs
+24-hour clock, the month names, and the field order all follow the locale.
+Region tags fall back to language (`de-AT` → de-DE), and JPY's zero
+fraction digits come from CLDR's supplemental data, not a guess.
+
+The pipeline stays hermetic. `third_party/cldr/*.json` are faithful
+projections of CLDR 48.2.0 — a few hundred bytes each, every value
+verbatim; `tools/cldrgen` distills them into the blob (parsing the CLDR
+number patterns into structured fields, and reusing `lib/locale`'s own
+serializer so writer and reader cannot drift), run offline as `zig build
+cldrgen` like `mkfont`. The blob is seeded into the assets tier and read
+the same self-owned, live-reload way trust roots are: `user/localecmds.zig`
+holds a read-only `assets/locale` view (given under `{ tag: locale }`),
+loads `cldr.db`, and reloads it when the file's mtime or size changes — so
+the auto-updater dropping a fresher database in takes effect with no
+restart. It adds the shell/script commands `fmt-number`, `fmt-int`,
+`fmt-money`, `fmt-date`, `fmt-time`, and `locales`, compiled into mshrun
+(no service — the formatter is pure and the data is small). The GUI login
+clock, which had hardcoded English month names, now reads `fmt-time` /
+`fmt-date`. The `locale` drill boots the fs stack from a lone view give
+(lazily, like fontcli), formats the four launch locales, and asserts the
+groupings; the `gsession`/`gisession`/`guishell` drills still pass with
+the localized clock. The four launch locales are en-US, de-DE, fr-FR,
+ja-JP; more, plurals, and relative time are a schema extension away, and a
+network auto-updater on the assets tier is the next stage.
+
 **Concurrency, stage 1: workers (as built, 2026-09-06).** The language
 has no threads — shared mutable interpreter state is the race the model
 refuses. Concurrency is *domains*: `spawn { handler }` starts a worker
