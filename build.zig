@@ -212,7 +212,7 @@ pub fn build(b: *std.Build) void {
     const gui_profile = b.option(
         []const u8,
         "gui-profile",
-        "run-gui: which GUI profile to boot interactively (gui, guilogin, gtrust, gsession, gisession, gboom). Default gui.",
+        "run-gui: which GUI profile to boot interactively (gui, guilogin, gtrust, gsession, gisession, gboom, guishell). Default gui.",
     ) orelse "gui";
     const net_test = b.option(
         bool,
@@ -884,7 +884,7 @@ pub fn build(b: *std.Build) void {
         , .{ gpu_dev, gui_profile, open_viewer, gui_profile });
         const run_gui = b.addSystemCommand(&.{ "sh", "-c", script });
         run_gui.step.dependOn(b.getInstallStep());
-        const run_gui_step = b.step("run-gui", "Boot a GUI profile on a VNC display and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom; kernel log: zig-out/gui-run-kernel.log).");
+        const run_gui_step = b.step("run-gui", "Boot a GUI profile on a VNC display and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom|guishell; kernel log: zig-out/gui-run-kernel.log).");
         run_gui_step.dependOn(&run_gui.step);
     }
 

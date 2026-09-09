@@ -2855,6 +2855,37 @@ reconfigured (ui 16px, scale 1.00)`. The per-user accessibility scale,
 read from the user's home, applied to the whole session's type, and
 unwound with the session — the honest end of the font arc's per-user work.
 
+**Stage 7c — the settings UI (as built, 2026-09-09).** The post-login
+shell, until now a single "log out" button, becomes a small settings
+desktop: the user adjusts the accessibility text scale and it takes
+effect. It is still a pure mshl GUI, and the pure-`update` rule (no caps
+in `update`) shapes the interaction exactly as `login` did — the panel's
+`update` only changes state (smaller/larger step the scale ±0.25, clamped
+to [1.0, 3.0]; apply and log out set a done flag with an action), and the
+side effects are pipeline steps *after* the GUI returns. On "apply" the
+script does two ordinary commands — `save "conf/font.msh" { scale }` into
+the user's own home (a data record rendered to msh, the same layer format
+fontsvc reads) and `sessionfont (cat "conf/font.msh")?` to push it live —
+then *recurses* (`def panel [scale]` calling itself with the new scale),
+reopening the panel at the new size, so the change is visible immediately
+and the session stays up. "log out" reverts the layer (a bare
+`sessionfont`) and falls out of the recursion, ending the shell. So the
+whole loop — read the saved scale (`from-data (cat …) | get "scale"`),
+adjust, persist, apply live, repeat — is a dozen lines of mshl over the
+`gui`, `save`, `cat` and `sessionfont` primitives that already existed;
+no new machinery. Persist and apply are the same file: `save` writes it,
+`cat` reads it back for the push, so a session's setting outlives the
+session (the next login's auto-scale reads it), and the live push resizes
+the running session's type at once.
+
+The `guishell` drill now drives the round trip end to end: sign in as
+alice, watch the shell auto-apply her saved scale on login (`fontsvc:
+reconfigured (ui 24px, scale 1.50)`), press *smaller* then *apply* and
+watch the new scale persist and push (`(ui 20px, scale 1.25)`) with the
+panel reopening at it, then log out and watch it revert (`(ui 16px, scale
+1.00)`). A settings UI written in mshl, editing the user's own home,
+applied through the one shared font service.
+
 **Rendering pass (as built, 2026-09-08).** The first look was honest but
 crude — a 400×240 window marooned on a 640×480 scanout, 1-bit 8×16 glyphs
 blitted 1:1 and then nearest-neighbour-upscaled by the viewer into hard

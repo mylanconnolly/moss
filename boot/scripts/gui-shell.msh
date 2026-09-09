@@ -1,40 +1,63 @@
-# The graphical session shell (the post-login GUI): a minimal desktop that
-# runs as the logged-in user in their own session domain, rendered through
-# the shared font service. It is a GUI service like any other — a pure
-# view/update — with a single "log out" button; firing it returns a state
-# with done:true, the runtime closes the window, mshrun exits, the session
-# domain exits, and the manager tears the session down. The whole
-# session's UI, defined in mshl.
+# The graphical session shell (the post-login GUI): a small settings
+# desktop that runs as the logged-in user in their own session domain,
+# rendered through the shared font service. It is a GUI service like any
+# other — a pure view/update — that adjusts the accessibility text scale
+# and, on "apply", persists it to the user's own home (conf/font.msh) and
+# pushes it live to the shared font service, so the whole session's type
+# resizes at once. "log out" reverts to the system layer and exits, the
+# runtime closes the window, mshrun exits, the session domain exits, and
+# the manager tears the session down. The whole session's UI, in mshl.
 #
-# First, apply this user's font preference for the session: read their
-# own font layer from the home (conf/font.msh, seeded on first login) and
-# push it to the shared font service, which merges it over the system
-# layer — so the whole session's type follows the user's accessibility
-# scale. A home with no layer simply keeps the system default. This runs
-# before the window opens, so the shell renders at the user's scale; the
-# `sessionfont` at the end reverts it on logout.
+# First, apply this user's saved font preference for the session: read
+# their own layer from the home (seeded on first login) and push it, so
+# the shell opens at the user's scale.
 match (cat "conf/font.msh") {
   ok $layer => { sessionfont $layer }
   _ => null
 }
-let final = (gui {
-    init:  { done: false }
-    title: "moss"
-    view: (fn [state] {
-        {
-          kind: "column"
-          children: [
-            { kind: "label", text: "signed in to moss" }
-            { kind: "button", id: "logout", label: "log out" }
-          ]
-        }
-      })
-    update: (fn [state, ev] {
-        match $ev.id {
-          "logout" => { { done: true } }
-          _ => $state
-        }
-      })
-  })
-sessionfont
+let start = match (cat "conf/font.msh") {
+  ok $l => { (from-data $l) | get "scale" }
+  _ => 1.0
+}
+
+# The settings panel: adjust the scale with smaller/larger (pure state),
+# then apply (persist + push live, reopening at the new scale) or log out.
+def panel [scale] {
+  let r = (gui {
+      init:  { scale: $scale, action: "" }
+      title: "moss settings"
+      view: (fn [state] {
+          {
+            kind: "column"
+            children: [
+              { kind: "label", text: "text size" }
+              { kind: "label", text: ("scale " + (str $state.scale)) }
+              { kind: "button", id: "smaller", label: "smaller" }
+              { kind: "button", id: "larger", label: "larger" }
+              { kind: "button", id: "apply", label: "apply" }
+              { kind: "button", id: "logout", label: "log out" }
+            ]
+          }
+        })
+      update: (fn [state, ev] {
+          match $ev.id {
+            "smaller" => { { scale: (match (($state.scale - 0.25) < 1.0) { true => 1.0; _ => ($state.scale - 0.25) }), action: "" } }
+            "larger" => { { scale: (match (($state.scale + 0.25) > 3.0) { true => 3.0; _ => ($state.scale + 0.25) }), action: "" } }
+            "apply" => { { scale: $state.scale, action: "apply", done: true } }
+            "logout" => { { scale: $state.scale, action: "logout", done: true } }
+            _ => $state
+          }
+        })
+    })
+  match $r.action {
+    "apply" => {
+      save "conf/font.msh" { scale: $r.scale }
+      sessionfont (cat "conf/font.msh")?
+      panel $r.scale
+    }
+    _ => { sessionfont }
+  }
+}
+
+panel $start
 "gui: shell exited"

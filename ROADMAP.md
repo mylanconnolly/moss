@@ -681,8 +681,10 @@ is a plan.
     the counter reaches count=1 by click alone. Pointer input now runs the
     whole stack: tablet → inputsvc → compositor cursor + hit-test → routed
     event → the mshl widget under it. Remaining GUI/font work: richer
-    layout, subpixel, a settings UI, the fabric-remote GUI. (Automatic
-    per-user font scale on login landed 2026-09-09 — see the font arc.)
+    layout, the fabric-remote GUI (subpixel deliberately deferred — only
+    pays off at 1:1 on a real panel, not the VNC/2× dev path). (Automatic
+    per-user font scale on login + the settings UI landed 2026-09-09 — see
+    the font arc.)
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view
@@ -886,8 +888,19 @@ is a plan.
     fill. Verified: a host test (IBM Plex Mono 'H' hinted has strictly
     fewer mid-grey edge pixels than unhinted) + the term drill asserts
     "fontsvc: hinting 'IBM Plex Mono' at 15px" live; both bundled hinted
-    families (Mono, Sans) grid-fit clean at 15/16/22/24px. Open: subpixel,
-    a settings UI, fabric-remote GUI.
+    families (Mono, Sans) grid-fit clean at 15/16/22/24px. ✅ Settings UI
+    (landed 2026-09-09): the post-login shell became a font-scale settings
+    desktop (mshl). update stays pure (smaller/larger step ±0.25 clamped
+    [1,3]); apply/logout are pipeline steps after the gui returns — apply
+    does `save "conf/font.msh" { scale }` into the user's home + `sessionfont
+    (cat …)?` to push live, then recurses (def panel) to reopen at the new
+    scale; logout reverts (bare sessionfont). Persist and apply are the same
+    file (save writes, cat reads back for the push), so a setting outlives
+    the session and resizes it live. guishell drill drives it: login auto-
+    applies saved 1.5 (24px) → smaller+apply persists+pushes 1.25 (20px),
+    panel reopens → logout reverts (16px). Open: subpixel (deferred — only
+    pays off at 1:1 on a real panel, not the VNC/2× dev path),
+    fabric-remote GUI.
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

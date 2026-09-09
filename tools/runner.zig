@@ -84,7 +84,7 @@ const specs = [_]Spec{
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
-    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .extra2 = "fontsvc: reconfigured (ui 24px, scale 1.50)", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .extra2 = "fontsvc: reconfigured (ui 20px, scale 1.25)", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
@@ -1450,6 +1450,23 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     return n;
 }
 
+/// Poll the log until `needle` has appeared at least `n_needed` times (a
+/// KERNEL PANIC or the timeout fails the drill with `why`).
+fn waitLogN(log_path: []const u8, needle: []const u8, n_needed: usize, why: []const u8, spec: Spec, polls: *u64) !bool {
+    var n: u64 = 0;
+    while (true) {
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+        const content = readLog(log_path);
+        if (countOccurrences(content, needle) >= n_needed) return true;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            reportFailure(spec.name, why, log_path);
+            return false;
+        }
+    }
+}
+
 fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // Wait for the greeter's login form.
     var n: u64 = 0;
@@ -1485,42 +1502,39 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     _ = q.sendKey("tab");
     sleepMs(100);
     _ = q.sendKey("ret");
-    // Wait for the session's shell surface to render — its own second
-    // "gui: ready". The compositor gives the fresh surface focus (the
-    // greeter's window closed on submit), so the logout button is focused.
-    var m: u64 = 0;
-    while (true) {
-        sleepMs(poll_ms);
-        m += 1;
-        polls.* += 1;
-        const content = readLog(log_path);
-        if (countOccurrences(content, "gui: ready") >= 2) break;
-        if (std.mem.indexOf(u8, content, "gui: session failed") != null) {
-            reportFailure(spec.name, "the GUI credentials did not open a real session", log_path);
-            return false;
-        }
-        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
-            reportFailure(spec.name, "the session's GUI shell never rendered", log_path);
-            return false;
-        }
-    }
-    // Let the shell settle and take focus, then press Enter to fire the
-    // focused "log out" button.
+    // The session's settings shell renders (its own second "gui: ready"),
+    // and its first act is to apply the user's saved scale (1.5, seeded on
+    // first login) — the auto-scale-on-login path.
+    if (!try waitLogN(log_path, "gui: ready", 2, "the session's settings shell never rendered", spec, polls)) return false;
+    if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 24px, scale 1.50)", 1, "the session did not apply the user's saved scale on login", spec, polls)) return false;
     sleepMs(500);
+
+    // Change the setting: the settings panel focuses "smaller" first —
+    // Enter fires it (scale 1.50 → 1.25, the panel re-renders in place),
+    // then Tab, Tab moves to "apply" and Enter fires it: the shell saves
+    // the new scale to the user's home and pushes it live.
+    _ = q.sendKey("ret"); // smaller
+    sleepMs(200);
+    _ = q.sendKey("tab"); // → larger
+    sleepMs(100);
+    _ = q.sendKey("tab"); // → apply
+    sleepMs(100);
+    _ = q.sendKey("ret"); // apply
+    if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 20px, scale 1.25)", 1, "the settings change was not applied and pushed", spec, polls)) return false;
+    // Apply reopens the panel at the new scale (a third "gui: ready").
+    if (!try waitLogN(log_path, "gui: ready", 3, "the settings panel did not reopen after apply", spec, polls)) return false;
+    sleepMs(500);
+
+    // Log out: Tab past smaller/larger/apply to "log out" and fire it; the
+    // shell reverts the font layer and exits, unwinding the session.
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
+    _ = q.sendKey("tab");
+    sleepMs(100);
     _ = q.sendKey("ret");
-    // The shell closes, mshrun exits, the session unwinds.
-    var k: u64 = 0;
-    while (true) {
-        sleepMs(poll_ms);
-        k += 1;
-        polls.* += 1;
-        const content = readLog(log_path);
-        if (std.mem.indexOf(u8, content, "gui: shell exited") != null) break;
-        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or k * poll_ms / 1000 > spec.timeout_s) {
-            reportFailure(spec.name, "logging out never tore the GUI session down", log_path);
-            return false;
-        }
-    }
+    if (!try waitLogN(log_path, "gui: shell exited", 1, "logging out never tore the GUI session down", spec, polls)) return false;
     return true;
 }
 

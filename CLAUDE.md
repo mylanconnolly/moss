@@ -31,7 +31,8 @@ frontier — every unstarted arc and every residual, kept current; the
   display and drive it by hand (keyboard: Tab/Enter/typing); the step
   opens the macOS VNC viewer at `127.0.0.1:5900` (password: `moss`) — VNC,
   not `-display cocoa`, which mangles the small 640×480 guest on a Retina Mac.
-  Profiles: `gui`, `guilogin`, `gtrust`, `gsession`, `gisession`, `gboom`.
+  Profiles: `gui`, `guilogin`, `gtrust`, `gsession`, `gisession`, `gboom`,
+  `guishell` (the post-login graphical shell: sign in alice/alice-pass).
   No drill harness (the `interactive` cmdline key, not a `-test` flag);
   the app's exit ends it. Kernel log: `zig-out/gui-run-kernel.log`. M3.
 - `zig build -Darch=x86_64 check` — the x86_64 port's gate: the same 30
