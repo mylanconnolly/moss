@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui };
 
 const Spec = struct {
     name: []const u8,
@@ -85,6 +85,7 @@ const specs = [_]Spec{
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
     .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .extra2 = "fontsvc: reconfigured (ui 20px, scale 1.25)", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
@@ -286,6 +287,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .shell) return runShell(spec, bin, polls);
     if (spec.kind == .login) return runLogin(spec, bin, polls);
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
+    if (spec.kind == .fabgui) return runFabGui(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
     if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell) try makeDisk(disk);
@@ -2524,6 +2526,80 @@ const flogin_script2 = [_]FloginStep{
     .{ .send = "let t = (now); let n = (cat big.txt? | len); let d = ((now) - $t); echo \"remote home: 64 KB read cold in $d ms ($n bytes)\"", .expect = "remote home: 64 KB read cold in" },
     .{ .send = "exit", .expect = "bye", .prompt = "" },
 };
+
+/// The fabric GUI drill: two nodes. Node 1 is a fabric host (the proven
+/// `flogin` node, which accepts remote stages); node 2 boots the `fabgui`
+/// profile — a fabric client with a display, running a GUI whose app lives
+/// on node 1. The app's update+view run over the wire (only the view tree
+/// and the events cross); node 2 renders and drives. We wait for node 2's
+/// window (it opens only once the fabric has joined node 1 and the initial
+/// remote view has come back), press increment twice and quit over QMP,
+/// and require node 2 to report the count it got back from the remote app.
+fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
+    const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
+    for ([_][]const u8{ disk1, disk2, log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
+    try makeDisk(disk1);
+    try makeDisk(disk2);
+
+    // Node 1: the fabric host on the hub, listening for node 2.
+    var args1: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args1, log1, bin, "fabgui-node1", "profile=flogin node=1");
+    try appendDisk(&args1, disk1);
+    try args1.appendSlice(gpa, &.{
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+    });
+    var c1 = try spawnQemu(args1.items);
+    defer c1.kill(io);
+    sleepMs(1000);
+
+    // Node 2: the viewer — a fabric client with the graphical devices and
+    // QMP to drive it. Its GUI app runs on node 1 (`node: 1`).
+    var args2: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args2, log2, bin, "fabgui-node2", "profile=fabgui node=2");
+    try appendDisk(&args2, disk2);
+    try args2.appendSlice(gpa, &.{
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+        "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+    });
+    var c2 = try spawnQemu(args2.items);
+    defer c2.kill(io);
+
+    // The window opens only after node 2 joins the fabric and the first
+    // view comes back from node 1 — so this proves the remote path is live.
+    if (!try waitLogN(log2, "gui: ready", 1, "the fabric GUI never rendered (node 1 unreachable, or the join failed)", spec, polls)) return false;
+
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log2);
+        return false;
+    };
+    defer q.close();
+    // Focus starts on "increment": fire it twice (each event round-trips to
+    // node 1 and comes back with the new count in the view), Tab to "quit",
+    // and fire it — the final state (count 2) comes back from the remote.
+    _ = q.sendKey("ret");
+    sleepMs(300);
+    _ = q.sendKey("ret");
+    sleepMs(300);
+    _ = q.sendKey("tab");
+    sleepMs(200);
+    _ = q.sendKey("ret");
+
+    const verdict = watch(log2, spec, spec.extra, polls);
+    if (!verdict.ok) {
+        reportFailure(spec.name, verdict.why, log2);
+        return false;
+    }
+    return true;
+}
 
 fn runFlogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });

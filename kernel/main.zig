@@ -215,6 +215,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.fabgui_test) {
+        _ = sched.spawn("boot-watch", fabguiTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.gui_test) {
         _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -785,6 +790,15 @@ fn fontscaleTestWorker(_: u64) void {
 /// instead of a shell on a terminal; the host signs in and logs out of it.
 fn guishellTestWorker(_: u64) void {
     systemDrill("guishell");
+}
+
+/// The fabric GUI drill: node 2 (profile "fabgui") runs a GUI whose app
+/// lives on node 1 over the fabric — a pure viewer shipping events and
+/// rendering the view trees that come back. The node completes (PASS)
+/// when the app quits and its essential unit exits cleanly; node 1 is a
+/// plain fabric host the runner tears down.
+fn fabguiTestWorker(_: u64) void {
+    systemDrill("fabgui");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

@@ -60,7 +60,16 @@ pub fn call(f: *Fab, it: *mshl.Interp, name: []const u8, args: []const Value, in
         .str => |t| t,
         else => return it.fail("remote: a function or script text expected, got a {s}", .{args[1].typeName()}),
     };
-    const in_val = input orelse .nothing;
+    return try runRemote(f.chan, it, node, script, input orelse .nothing);
+}
+
+/// Run `script` on `node` with `in_val` as its `$in`, as a pipeline stage
+/// would — the fabric spawns a fresh mshrun stage there, proxies the
+/// buffer across the wire, and the value comes back. Returns a Result
+/// (ok value / err word). Shared by the `remote` command and the GUI
+/// runtime (which ships a reconstructed update+view per event to a node).
+pub fn runRemote(chan: u64, it: *mshl.Interp, node: u64, script: []const u8, in_val_in: Value) mshl.Error!Value {
+    const in_val = in_val_in;
     if (!in_val.isData()) return it.fail("remote: the input is a {s}, which cannot cross the wire (only data can)", .{in_val.typeName()});
     var in_text: std.ArrayList(u8) = .empty;
     if (in_val != .nothing) try mshl.writeData(in_val, it.arena, &in_text);
@@ -68,7 +77,7 @@ pub fn call(f: *Fab, it: *mshl.Interp, name: []const u8, args: []const Value, in
     if (script.len + in_text.items.len > room) return it.fail("remote: script and input exceed the {d}-byte buffer", .{room});
 
     // A stage on that node: mshrun in its remote role, behind a channel.
-    const sess = switch (usys.callTypedCap(shared.FabReq, shared.FabResp, f.chan, .{ .remote_spawn = .{ .node = node, .image = @intFromEnum(shared.ImageId.mshrun), .arg = 1 } }, 0)) {
+    const sess = switch (usys.callTypedCap(shared.FabReq, shared.FabResp, chan, .{ .remote_spawn = .{ .node = node, .image = @intFromEnum(shared.ImageId.mshrun), .arg = 1 } }, 0)) {
         .ok => |r| switch (r.rep) {
             .spawned => r.cap,
             .fab_err => |e| return try errResult(it, fabErrName(e.code)),

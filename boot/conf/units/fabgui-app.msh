@@ -1,0 +1,19 @@
+# The fabric GUI drill, node 2 (the viewer): mshrun runs a GUI whose app
+# lives on node 1 (`node: 1` in the script). It holds a display (the
+# compositor, keyboard) and a font service to render locally, and a fabric
+# cap to reach node 1 — the runtime ships each event over the fabric and
+# renders the view tree that comes back. Like fab-script, holding a
+# `fabric` give pulls the node's fabric stack up.
+{
+  image:     mshrun
+  script:    scripts/fabgui.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [fabgui]
+  essential: true
+  give: [
+    { tag: display, unit: compositor }
+    { tag: font, unit: fontsvc }
+    { tag: fabric, unit: fabsvc }
+  ]
+}

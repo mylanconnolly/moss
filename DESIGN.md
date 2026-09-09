@@ -3004,6 +3004,37 @@ the previous frame's garbage; that bounds *any* long-running GUI (a
 counter clicked a thousand times, a shell reopened all afternoon), not
 just this one. A drill that cycles apply a dozen times guards it.
 
+**The fabric GUI (as built, 2026-09-09).** The payoff of the GUI-as-a-
+service model: a GUI can run on another node. Because an mshl GUI is a
+pure `update`/`view` over a declarative tree, the whole app is data — the
+view tree that comes out, the event id that goes in — so it ships across
+the fabric with nothing lost. `gui { …, node: N }` makes the runtime a
+pure *viewer*: it reconstructs the app (update + view) as one worker
+script that reads `$in = { state, ev, apply }` and returns `{ state, tree
+}` — the same trick the crash-isolation path already used for `update`
+alone, now covering `view` too — and runs it on node N over the fabric
+(`fabcmds.runRemote`, the very code the `remote` command uses) once per
+event. The viewer holds no app logic: it renders the tree that comes
+back, routes input, threads the returned state, and on a dropped round
+trip keeps the last good frame (let-it-crash across the wire). The window
+sizes and the initial view still work locally because the app closures
+*are* present locally — the definition lives in the script and is shipped
+to execute elsewhere, exactly as a `remote` block is.
+
+The drill (`fabgui`) is the repo's first display on a fabric node: node 1
+is the proven `flogin` fabric host (it accepts remote stages), node 2
+boots the new `fabgui` profile — a fabric client with the graphical
+devices — and runs a counter whose `node: 1` puts its state, update and
+view on node 1. The app script waits for the mesh (a `remote 1` probe
+retried like the fabric drill's) before opening the window, so the window
+appearing already proves the join and the first remote view. The runner
+presses increment twice and quit over QMP; each event round-trips to node
+1 (its log shows a `remote spawn request served … remote stage up` per
+event) and the final `fabgui: done count=2` — the count computed on node
+1 — comes back to node 2. A GUI you cannot tell is remote. (Each event
+spawns a fresh stage on the host today; a persistent remote worker is the
+obvious optimisation when it matters.)
+
 **The system font service (as built, 2026-09-08).** The bitmap font was
 the ceiling on how the GUI could look; real type meant a vector-font
 stack, and the shape it took is a *service every text program goes

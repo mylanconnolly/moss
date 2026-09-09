@@ -31,6 +31,7 @@ const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const workcmds = @import("workcmds.zig");
+const fabcmds = @import("fabcmds.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const Value = mshl.Value;
@@ -49,11 +50,22 @@ var trust_token: u64 = 0; // the trusted-path token, if the host was given one
 var iso_conn: ?workcmds.Conn = null;
 var iso_src: []const u8 = "";
 
+// A `gui { node: N }` runs the whole app on node N: `remote_node` is N and
+// `app_src` is the reconstructed worker (update+view over `$in`) shipped
+// there each event. 0 = run in-process, as usual.
+var remote_node: u64 = 0;
+var app_src: []const u8 = "";
+
 // The system font service, when the host holds one: text is laid out and
 // rasterized there (a shared coverage atlas), so the GUI renders in the
 // real family at the accessibility scale. Without it we fall back to the
 // built-in bitmap font — see `haveFont`/`drawStr`.
 var font_chan: u64 = 0;
+// The fabric, when the host holds one: a `gui { node: N }` runs the app
+// (its update+view) on node N — the fabric-transparent GUI. The runtime
+// stays a pure viewer here: it renders the view tree the remote returns
+// and ships each event, only data crossing.
+var fab_chan: u64 = 0;
 var font_buf: [*]u8 = undefined; // our request/response buffer (shm)
 var font_buf_len: usize = 0;
 var atlas: [*]const u8 = undefined; // fontsvc's coverage atlas (mapped ro)
@@ -63,10 +75,11 @@ const n_roles = 3;
 var role_line: [n_roles]usize = @splat(0);
 var role_asc: [n_roles]usize = @splat(0);
 
-pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64) void {
+pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64, fabric_cap: u64) void {
     display = display_cap;
     log_h = log;
     font_chan = font_cap;
+    fab_chan = fabric_cap;
     if (secret.len >= 8) trust_token = std.mem.readInt(u64, secret[0..8], .little);
 }
 
@@ -823,6 +836,69 @@ fn buildUpdateSrc(it: *mshl.Interp, cl: *const mshl.Closure) mshl.Error!?[]const
     return s.items;
 }
 
+/// Reconstruct the whole app — `update` and `view` — as one worker script
+/// that reads `$in = { state, ev, apply }` and returns `{ state, tree }`:
+/// apply the event (when `apply`), then render the new state. Only data
+/// crosses, so this runs anywhere — the fabric-transparent GUI. Returns
+/// null unless update is 2-arg and view is 1-arg (then the caller stays
+/// in-process). Arena-held.
+fn buildAppSrc(it: *mshl.Interp, update: *const mshl.Closure, view: *const mshl.Closure) mshl.Error!?[]const u8 {
+    if (update.params.len != 2 or view.params.len != 1) return null;
+    var s: std.ArrayList(u8) = .empty;
+    try s.appendSlice(it.arena, "let ");
+    try s.appendSlice(it.arena, update.params[0]);
+    try s.appendSlice(it.arena, " = $in.state\n");
+    try s.appendSlice(it.arena, "let ");
+    try s.appendSlice(it.arena, update.params[1]);
+    try s.appendSlice(it.arena, " = $in.ev\n");
+    try s.appendSlice(it.arena, "let __ns = match $in.apply {\n  true => ");
+    try s.appendSlice(it.arena, update.src);
+    try s.appendSlice(it.arena, "\n  _ => $in.state\n}\n");
+    try s.appendSlice(it.arena, "let ");
+    try s.appendSlice(it.arena, view.params[0]);
+    try s.appendSlice(it.arena, " = $__ns\n");
+    try s.appendSlice(it.arena, "{ state: $__ns, tree: ");
+    try s.appendSlice(it.arena, view.src);
+    try s.appendSlice(it.arena, " }\n");
+    return s.items;
+}
+
+/// The `{ state, ev, apply }` record the remote app worker reads as `$in`.
+fn wrapStep(it: *mshl.Interp, state: Value, ev: Value, apply: bool) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 3);
+    keys[0] = "state";
+    keys[1] = "ev";
+    keys[2] = "apply";
+    const vals = try it.arena.alloc(Value, 3);
+    vals[0] = state;
+    vals[1] = ev;
+    vals[2] = .{ .bool = apply };
+    return .{ .record = .{ .keys = keys, .vals = vals } };
+}
+
+/// One step of the remote app: ship `{ state, ev, apply }` to node
+/// `remote_node`, which runs update+view and returns `{ state, tree }`.
+/// Updates `state.*` and returns the view tree, or null on a fabric/app
+/// failure (the caller keeps the last good tree). Only data crosses.
+fn stepRemote(it: *mshl.Interp, state: *Value, ev: Value, apply: bool) mshl.Error!?Value {
+    const in = try wrapStep(it, state.*, ev, apply);
+    const res = fabcmds.runRemote(fab_chan, it, remote_node, app_src, in) catch return null;
+    const r = switch (res) {
+        .result => |rp| rp,
+        else => return null,
+    };
+    if (!r.ok) {
+        _ = usys.log(log_h, "gui: the remote app failed");
+        return null;
+    }
+    if (r.val != .record) return null;
+    const rec = r.val.record;
+    const ns = rec.get("state") orelse return null;
+    const tree = rec.get("tree") orelse return null;
+    state.* = ns;
+    return tree;
+}
+
 /// The `{ state, ev }` record a worker update reads as `$in`.
 fn wrapStateEv(it: *mshl.Interp, state: Value, ev: Value) mshl.Error!Value {
     const keys = try it.arena.alloc([]const u8, 2);
@@ -890,13 +966,28 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     const want_trusted = spec.get("trusted") != null and (spec.get("trusted").?).asBool();
     const want_isolate = spec.get("isolate") != null and (spec.get("isolate").?).asBool();
 
-    // Crash-isolate `update` in a worker domain when asked and able: an
-    // app fault then kills only the worker, not the display runtime. The
-    // worker lives for the whole session; `callUpdate` re-spawns it if it
-    // dies. Best-effort — no spawner, or a 2-arg `update` we cannot
-    // reconstruct, and we run `update` in-process as before.
+    // `node: N` runs the whole app on node N over the fabric — the runtime
+    // becomes a pure viewer, shipping each event and rendering the view
+    // tree that comes back. Needs a fabric cap and a 2-arg update / 1-arg
+    // view (so we can reconstruct the worker); otherwise it runs locally.
+    remote_node = 0;
+    if (fab_chan != 0) {
+        if (spec.get("node")) |n| if (n == .int and n.int > 0) {
+            if (try buildAppSrc(it, update.func, view.func)) |src| {
+                app_src = src;
+                remote_node = @intCast(n.int);
+                _ = usys.log(log_h, "gui: running the app on the fabric");
+            }
+        };
+    }
+
+    // Crash-isolate `update` in a worker domain when asked and able (and
+    // not already remote): an app fault then kills only the worker, not
+    // the display runtime. The worker lives for the whole session;
+    // `callUpdate` re-spawns it if it dies. Best-effort — no spawner, or a
+    // 2-arg `update` we cannot reconstruct, and we run it in-process.
     iso_conn = null;
-    if (want_isolate and workcmds.canSpawn()) {
+    if (remote_node == 0 and want_isolate and workcmds.canSpawn()) {
         if (try buildUpdateSrc(it, update.func)) |src| {
             iso_src = src;
             iso_conn = workcmds.spawnBlock(it, iso_src);
@@ -925,13 +1016,20 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
 
     var focus: usize = 0;
     var announced = false;
+    // The current view tree: the initial view of the initial state, then
+    // recomputed after each fired event — locally (update then view) or,
+    // for a `node: N` app, on that node in one round trip.
+    var tree: Value = if (remote_node != 0)
+        (try stepRemote(it, &state, Value.nothing, false)) orelse
+            return it.fail("gui: the remote app did not answer", .{})
+    else
+        try it.callValue(view, &.{state}, null, null);
     while (true) {
         // Reclaim the previous render's dead boxes: a long-running GUI (or
         // one that reopens per apply, like the settings shell) would
         // otherwise pile up per-render trees until the interpreter runs
         // out of memory.
         it.reclaim();
-        const tree = try it.callValue(view, &.{state}, null, null);
         const nfocus = renderTree(tree, title, focus);
         if (nfocus > 0 and focus >= nfocus) focus = nfocus - 1;
         if (!commitSurface()) return it.fail("gui: commit failed", .{});
@@ -1002,8 +1100,19 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
         if (fired) |id| {
             const ev = try mkEvent(it, id);
-            state = try callUpdate(it, update, state, ev);
-            if (isDone(state)) break;
+            if (remote_node != 0) {
+                // The app runs on the fabric: ship the event, render the
+                // tree that comes back. A dropped round trip keeps the last
+                // good tree and state (let-it-crash across the wire).
+                if (try stepRemote(it, &state, ev, true)) |t| {
+                    tree = t;
+                    if (isDone(state)) break;
+                }
+            } else {
+                state = try callUpdate(it, update, state, ev);
+                tree = try it.callValue(view, &.{state}, null, null);
+                if (isDone(state)) break;
+            }
         }
     }
     _ = usys.log(log_h, "gui: closed");

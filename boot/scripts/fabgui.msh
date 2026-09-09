@@ -1,0 +1,30 @@
+# The fabric-transparent GUI: the app — its state, update and view — runs
+# on another node (node 1) over the fabric, while this node is a pure
+# viewer. `node: 1` tells the gui runtime to ship each event to node 1 and
+# render the view tree that comes back; only data crosses (the tree out,
+# the event id in), which is exactly what makes an mshl GUI shippable. The
+# app itself is an ordinary counter — you cannot tell it is remote.
+let final = (gui {
+    init:  { count: 0, done: false }
+    title: "moss (fabric)"
+    node:  1
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", role: "title", text: "fabric app" }
+            { kind: "label", text: ("count " + (str $state.count)) }
+            { kind: "button", id: "inc", label: "increment", variant: "primary" }
+            { kind: "button", id: "quit", label: "quit", variant: "danger" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "inc" => { { count: ($state.count + 1), done: false } }
+          "quit" => { { count: $state.count, done: true } }
+          _ => $state
+        }
+      })
+  })
+"fabgui: done count=" + (str $final.count)

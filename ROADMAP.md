@@ -703,10 +703,23 @@ is a plan.
     merge keeps the SYSTEM layer's keys, so theme/contrast/colors had to be
     added to the system conf/font.msh too (else a user-only key is dropped).
     guishell drill drives contrast=high + colours=cb-safe and screendump-
-    asserts the reopened ground is black. Remaining GUI/font work: the
-    fabric-remote GUI (subpixel deferred — only pays off at 1:1 on a real
-    panel). (Automatic per-user font scale on login + the settings UI landed
-    2026-09-09 — see the font arc.)
+    asserts the reopened ground is black. ✅ Fabric GUI (landed 2026-09-09):
+    `gui { node: N }` runs the whole app (state+update+view) on node N over
+    the fabric; the runtime becomes a pure viewer — it reconstructs update+
+    view as one worker ({state,ev,apply} → {state,tree}, extending the
+    isolate trick to view too), runs it per event via fabcmds.runRemote (the
+    `remote` transport), renders the returned tree, threads state, and keeps
+    the last good frame on a dropped round trip. Only data crosses (tree
+    out, event id in). Drill `fabgui` (repo's first display on a fabric
+    node): node 1 = the proven flogin fabric host, node 2 = a new `fabgui`
+    profile (fabric client + graphical devices) running a counter with
+    node:1; the app probes the mesh before opening, QMP fires inc×2 + quit,
+    node 1 logs a remote stage per event, node 2 reports "fabgui: done
+    count=2" from the remote. Remaining GUI/font work: subpixel (deferred —
+    only pays off at 1:1 on a real panel); a persistent remote worker
+    (today each event spawns a fresh stage on the host). (Automatic per-user
+    font scale on login + the settings UI landed 2026-09-09 — see the font
+    arc.)
   - **The mshl GUI layer** (the arc's whole point — GUIs in mshl, not
     zig). Model (locked 2026-09-08): a GUI is a SERVICE with a pure
     `update(state,event)->state` + `view(state)->tree` split; the view
