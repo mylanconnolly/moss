@@ -1758,11 +1758,12 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "settings: admin=true", 1, "the session did not detect the admin's writable conf view", spec, polls)) return false;
 
     // The USER pane. Focus order (alice, an admin):
-    //   0 smaller 1 larger 2 theme 3 contrast 4 colours 5 apply
-    //   6 change-locale 7 save-system 8 log out
+    //   0 smaller 1 larger 2 theme 3 contrast 4 colours 5 locale 6 apply
+    //   7 change-locale 8 save-system 9 log out
     // Fire "smaller" (1.50 → 1.25), set THEME light (it is system-locked, so
     // the push is ignored and the effective theme stays dark), set contrast
-    // high and colours cb-safe (both unlocked), then apply.
+    // high and colours cb-safe (both unlocked), cycle the user's locale to
+    // de-DE, then apply.
     _ = q.sendKey("ret"); // smaller (focus 0) → scale 1.25
     sleepMs(200);
     _ = q.sendKey("tab"); // → 1 larger
@@ -1779,15 +1780,21 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(100);
     _ = q.sendKey("ret"); // colours → cb-safe
     sleepMs(200);
-    _ = q.sendKey("tab"); // → 5 apply
+    _ = q.sendKey("tab"); // → 5 locale
     sleepMs(100);
-    _ = q.sendKey("ret"); // apply — save the home layer and push it live
+    _ = q.sendKey("ret"); // locale → de-DE (the user's own preference)
+    sleepMs(200);
+    _ = q.sendKey("tab"); // → 6 apply
+    sleepMs(100);
+    _ = q.sendKey("ret"); // apply — save the home layers and push them live
     if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 20px, scale 1.25)", 1, "the appearance change was not applied and pushed", spec, polls)) return false;
-    // One line proves it all: the user set theme=light, contrast=high,
+    // One line proves the appearance: the user set theme=light, contrast=high,
     // colours=cb-safe. The effective appearance the font service applies is
     // "dark high-contrast cb-safe" — contrast and colours (unlocked) took,
     // but the theme is still the system's DARK: the locked key held.
     if (!try waitLogN(log_path, "dark high-contrast cb-safe", 1, "a locked key (theme) was overridden, or the unlocked switches did not apply", spec, polls)) return false;
+    // And the user's locale preference was applied to the session's formatter.
+    if (!try waitLogN(log_path, "locale: de-DE", 1, "the user's locale preference was not applied", spec, polls)) return false;
     // Apply reopens the panel (a third "gui: ready").
     if (!try waitLogN(log_path, "gui: ready", 3, "the settings panel did not reopen after apply", spec, polls)) return false;
     sleepMs(400);
@@ -1795,16 +1802,16 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // The SYSTEM pane, as an admin: change the system default locale and
     // save it — a write to the system settings layer (conf/app/locale.msh)
     // through the read-write conf view the manager granted this session.
-    // Focus resets to 0 on reopen; Tab to change-locale (6) and fire it
-    // (en-US → de-DE), Tab to save-system (7) and fire it.
+    // Focus resets to 0 on reopen; Tab to change-locale (7) and fire it
+    // (en-US → de-DE), Tab to save-system (8) and fire it.
     var tl: usize = 0;
-    while (tl < 6) : (tl += 1) {
+    while (tl < 7) : (tl += 1) {
         _ = q.sendKey("tab");
         sleepMs(80);
     }
     _ = q.sendKey("ret"); // change locale → de-DE
     sleepMs(200);
-    _ = q.sendKey("tab"); // → 7 save system
+    _ = q.sendKey("tab"); // → 8 save system
     sleepMs(100);
     _ = q.sendKey("ret"); // save system
     if (!try waitLogN(log_path, "sysconf: saved locale", 1, "the admin could not write the system settings layer", spec, polls)) return false;
@@ -1814,12 +1821,12 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // The surface-open/close path under repeated reopen: each apply reopens
     // the panel (a fresh surface). A leaked mapping per reopen would exhaust
     // the shm quota and the shell would quietly exit — the regression this
-    // guards. Focus resets to 0 each reopen; Tab five times to "apply" and
+    // guards. Focus resets to 0 each reopen; Tab six times to "apply" and
     // fire it, watching "gui: ready" climb from 4.
     var cycle: usize = 0;
     while (cycle < 8) : (cycle += 1) {
         var tb: usize = 0;
-        while (tb < 5) : (tb += 1) {
+        while (tb < 6) : (tb += 1) {
             _ = q.sendKey("tab");
             sleepMs(80);
         }
@@ -1828,10 +1835,10 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         sleepMs(250);
     }
 
-    // Log out: Tab from smaller (0) to "log out" (8) and fire it; the shell
+    // Log out: Tab from smaller (0) to "log out" (9) and fire it; the shell
     // reverts the font layer and exits, unwinding the session.
     var t: usize = 0;
-    while (t < 8) : (t += 1) {
+    while (t < 9) : (t += 1) {
         _ = q.sendKey("tab");
         sleepMs(100);
     }

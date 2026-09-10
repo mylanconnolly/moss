@@ -2,16 +2,16 @@
 # settings desktop that runs as the logged-in user in their own session
 # domain, rendered through the shared font service.
 #
-#   YOU (the user pane): this user's own appearance — the accessibility
-#   text scale, the theme, and the high-contrast and colourblind-safe
-#   switches. "apply" persists them to the user's home (conf/font.msh) and
-#   pushes them live to the shared font service, so the whole session's
-#   type and palette change at once. Note `theme` is locked by the system
+#   YOU (the user pane): this user's own appearance (the accessibility text
+#   scale, the theme, the high-contrast and colourblind-safe switches) and
+#   their preferred locale (a live sample shows a date and a number in it).
+#   "apply" persists both to the user's home (conf/font.msh, conf/locale.msh)
+#   and pushes them live — the font layer to the shared font service, the
+#   locale to this session's formatter. `theme` is locked by the system
 #   layer here (an org mandate): a user may set it, but the effective theme
-#   stays the system's — the settings app reads the effective appearance
-#   back after applying, so a locked key is visible for what it is.
+#   the font service applies stays the system's.
 #
-#   SYSTEM (the system pane): the system default locale, from the system
+#   SYSTEM (the system pane): the system DEFAULT locale, from the system
 #   settings layer (conf/app/locale.msh) reached through the session's conf
 #   view. An administrator — whose conf view the session manager granted
 #   read-write — changes it with "save system"; everyone else's view is
@@ -20,9 +20,23 @@
 # "log out" reverts the user's font layer and exits; the runtime closes the
 # window, mshrun exits, and the manager tears the session down.
 
-# Apply this user's saved appearance for the session first.
+# A live sample of a locale: a medium date and a formatted number, so the
+# user sees what their choice does. The formatters take the tag explicitly.
+def loc-sample [tag] {
+  let num = (fmt-number 1234.5 $tag)
+  match (fmt-date $tag "medium") {
+    ok $d => ($d + "     " + $num)
+    _ => $num
+  }
+}
+
+# Apply this user's saved appearance and locale for the session first.
 match (cat "conf/font.msh") {
   ok $layer => { sessionfont $layer }
+  _ => null
+}
+match (cat "conf/locale.msh") {
+  ok $l => { sessionlocale ($l | from-data | get "locale") }
   _ => null
 }
 
@@ -36,12 +50,16 @@ while $running {
     ok $l => { from-data $l }
     _ => { { scale: 1.0, theme: "dark", contrast: "normal", colors: "default" } }
   }
+  let myloc = match (cat "conf/locale.msh") {
+    ok $l => { ($l | from-data | get "locale") }
+    _ => "en-US"
+  }
   let sysloc = match (sysconf-read "locale") {
     ok $t => { ($t | from-data | get "default") }
     _ => "en-US"
   }
   let r = (gui {
-      init:  { scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), sysloc: $sysloc, admin: $admin, action: "" }
+      init:  { scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), myloc: $myloc, sysloc: $sysloc, admin: $admin, action: "" }
       title: "moss settings"
       view: (fn [state] {
           {
@@ -65,6 +83,13 @@ while $running {
                   { kind: "button", id: "colors", label: ("colours: " + $state.colors) }
                 ]
               }
+              {
+                kind: "row"
+                children: [
+                  { kind: "button", id: "myloc", label: ("locale: " + $state.myloc) }
+                  { kind: "label", muted: true, text: (loc-sample $state.myloc) }
+                ]
+              }
               { kind: "button", id: "apply", label: "apply", variant: "primary" }
               { kind: "label", muted: true, text: "system" }
               { kind: "label", text: ("default locale: " + $state.sysloc) }
@@ -84,15 +109,16 @@ while $running {
         })
       update: (fn [state, ev] {
           match $ev.id {
-            "smaller" => { { scale: (match (($state.scale - 0.25) < 1.0) { true => 1.0; _ => ($state.scale - 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "larger" => { { scale: (match (($state.scale + 0.25) > 3.0) { true => 3.0; _ => ($state.scale + 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "theme" => { { scale: $state.scale, theme: (match $state.theme { "dark" => "light"; _ => "dark" }), contrast: $state.contrast, colors: $state.colors, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "contrast" => { { scale: $state.scale, theme: $state.theme, contrast: (match $state.contrast { "high" => "normal"; _ => "high" }), colors: $state.colors, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "colors" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: (match $state.colors { "cb-safe" => "default"; _ => "cb-safe" }), sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "cycleloc" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, sysloc: (match $state.sysloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }), admin: $state.admin, action: "" } }
-            "apply" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, sysloc: $state.sysloc, admin: $state.admin, action: "apply", done: true } }
-            "savesys" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, sysloc: $state.sysloc, admin: $state.admin, action: "savesys", done: true } }
-            "logout" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, sysloc: $state.sysloc, admin: $state.admin, action: "logout", done: true } }
+            "smaller" => { { scale: (match (($state.scale - 0.25) < 1.0) { true => 1.0; _ => ($state.scale - 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
+            "larger" => { { scale: (match (($state.scale + 0.25) > 3.0) { true => 3.0; _ => ($state.scale + 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
+            "theme" => { { scale: $state.scale, theme: (match $state.theme { "dark" => "light"; _ => "dark" }), contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
+            "contrast" => { { scale: $state.scale, theme: $state.theme, contrast: (match $state.contrast { "high" => "normal"; _ => "high" }), colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
+            "colors" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: (match $state.colors { "cb-safe" => "default"; _ => "cb-safe" }), myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
+            "myloc" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: (match $state.myloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }), sysloc: $state.sysloc, admin: $state.admin, action: "" } }
+            "cycleloc" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: (match $state.sysloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }), admin: $state.admin, action: "" } }
+            "apply" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "apply", done: true } }
+            "savesys" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "savesys", done: true } }
+            "logout" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "logout", done: true } }
             _ => $state
           }
         })
@@ -101,6 +127,8 @@ while $running {
     "apply" => {
       save "conf/font.msh" (to-data { scale: $r.scale, theme: $r.theme, contrast: $r.contrast, colors: $r.colors })
       sessionfont (cat "conf/font.msh")?
+      save "conf/locale.msh" (to-data { locale: $r.myloc })
+      sessionlocale $r.myloc
     }
     "savesys" => {
       # Write the system default locale (confcmds logs the outcome: an

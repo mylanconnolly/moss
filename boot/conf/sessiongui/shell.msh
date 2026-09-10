@@ -19,6 +19,7 @@
     { tag: store, session: true }
     { tag: sess, session: true }
     { tag: conf, session: true }
+    { tag: locale, session: true }
     { tag: init, self: true }
   ]
 }

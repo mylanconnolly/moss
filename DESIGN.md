@@ -2841,11 +2841,27 @@ The `guishell` drill drives it end to end: alice (an admin) logs in, the
 shell reports `settings: admin=true`, the appearance apply proves the theme
 lock held, and changing + saving the system locale writes the tier
 (`sysconf: saved locale`) — a write an ordinary user's read-only view would
-have refused. Owed next (stage 4b): a per-user locale *preference* in the
-you-pane (the system pane sets only the default today), the locale applied
-session-wide (a shared locale service, the way fontsvc is shared — today the
-default is per-process), rendering locked keys as visibly non-editable, and
-a non-admin drill that watches the read-only path refuse a write.
+have refused.
+
+**Stage 4b, part 1 — a per-user locale (as built, 2026-09-10).** The
+you-pane gained a locale preference: the user cycles among the shipped
+locales and a live sample renders a date and a number in the choice
+(`fmt-date`/`fmt-number` called straight from the view, the way the login
+clock is). "apply" saves it to the home layer (`conf/locale.msh`) alongside
+the appearance and pushes it with `sessionlocale`, which sets this session's
+default locale for bare `fmt-*` — so it parallels the font-scale push
+exactly. The session manager forwards a locale view to each GUI session
+(like the display and font caps) so the shell's formatter has the CLDR data;
+`sessionlocale` logs the applied tag from Zig (a GUI script sets it inside
+its event loop, where mshl discards a statement's value). The `guishell`
+drill cycles the user's locale to de-DE and confirms `locale: de-DE` after
+apply. Owed still (stage 4b, rest): the locale applied *session-wide* (a
+shared locale service, the way fontsvc is shared — today each process holds
+its own CLDR view and default, so the setting reaches only the processes
+that push it); locked keys rendered as visibly non-editable; and a non-admin
+drill watching the read-only path refuse a write (the one-shot login greeter
+makes a second in-boot login costly — the ro path is the well-trodden
+default that every pre-admin session used).
 
 ### GUIs in mshl
 

@@ -1031,11 +1031,16 @@ is a plan.
   list from its system layer (`conf/font.msh` locks `theme`), so a locked
   key can't be overridden by a user's layer — `lib/settings.merge` already
   supported it; nothing used it before. The `guishell` drill proves
-  admin-write + locked-theme end to end. Open: **stage 4b** a per-user
-  locale preference in the you-pane; the locale applied session-wide (a
-  shared locale service like fontsvc — today it is per-process); locked
-  keys rendered visibly non-editable; a non-admin drill exercising the
-  read-only refusal. Also owed: the dock does not yet clear a pill's
+  admin-write + locked-theme end to end. ✅ Stage 4b part 1 — a per-user
+  locale (landed 2026-09-10): the you-pane gained a locale preference with a
+  live date/number sample, saved to the home layer (conf/locale.msh) and
+  pushed with `sessionlocale` (parallels the font-scale push); the manager
+  forwards a locale view to each GUI session; the guishell drill cycles it to
+  de-DE. Open (stage 4b, rest): the locale applied SESSION-WIDE (a shared
+  locale service like fontsvc — today each process holds its own CLDR view +
+  default); locked keys rendered visibly non-editable; a non-admin drill
+  exercising the read-only refusal (the one-shot greeter makes a second
+  in-boot login costly). Also owed: the dock does not yet clear a pill's
   *running* mark when the app exits (needs watching the app's domain); a
   subtler focus cue than the login's yellow border; minimize/maximize (max
   needs surface resize); and a wallpaper (the ground is a solid fill

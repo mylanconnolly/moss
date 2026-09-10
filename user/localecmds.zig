@@ -23,6 +23,7 @@ const Value = mshl.Value;
 var view: u64 = 0;
 var buf: [*]u8 = undefined; // the view's IPC staging buffer (attachBuf)
 var buf_ok = false;
+var log_h: u64 = 0;
 var db_store: [64 << 10]u8 = undefined; // the blob; Db borrows into it
 var db: locale.Db = .{};
 var db_ok = false;
@@ -57,8 +58,9 @@ fn setDefault(tag: []const u8) bool {
     return true;
 }
 
-pub fn setup(view_cap: u64) void {
+pub fn setup(view_cap: u64, glog: u64) void {
     view = view_cap;
+    log_h = glog;
     if (view == 0) return;
     const ab = fsc.attachBuf(view);
     if (ab.va == 0) return;
@@ -160,6 +162,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, _: ?Value) 
     if (std.mem.eql(u8, name, "sessionlocale")) {
         const tag = strAt(args, 0) orelse "";
         if (!setDefault(tag)) return try it.mkResult(false, try strValue(it, "no_locale"));
+        // Log the applied default: a GUI script sets it inside its event
+        // loop, where mshl discards a statement's value, so the shell cannot
+        // echo it itself (same reason confcmds logs its writes).
+        var b: [48]u8 = undefined;
+        const cur = defaultTag();
+        @memcpy(b[0..8], "locale: ");
+        const n = @min(cur.len, b.len - 8);
+        @memcpy(b[8 .. 8 + n], cur[0..n]);
+        _ = usys.log(log_h, b[0 .. 8 + n]);
         return try it.mkResult(true, try strValue(it, defaultTag()));
     }
     if (std.mem.eql(u8, name, "locale-default")) {
