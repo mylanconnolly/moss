@@ -63,14 +63,21 @@ fn reader(log_h: u64) noreturn {
     const s = window(300, 150, 200, 150, reader_colour);
     if (s == 0) usys.exit(180);
     _ = usys.log(log_h, "reader: ready");
-    // Park a read. It may never be answered (nothing types to us) — the
-    // point is only that waiting here holds nothing else up.
-    switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .next_input, 0)) {
-        .ok => |rep| switch (rep) {
-            .input => _ = usys.log(log_h, "reader: got a key"),
-            else => {},
-        },
-        .err => {},
+    // Park a read. It may never be answered (nothing types a key to us) —
+    // the point is only that waiting here holds nothing else up. Skip the
+    // non-key events the compositor also delivers (a focus change is
+    // kind 4): they must not be mistaken for the keystroke that never comes.
+    while (true) {
+        switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .next_input, 0)) {
+            .ok => |rep| switch (rep) {
+                .input => |x| if (x.kind == 0) {
+                    _ = usys.log(log_h, "reader: got a key");
+                    break;
+                },
+                else => break,
+            },
+            .err => break,
+        }
     }
     usys.sleepMs(1000);
     usys.exit(0);

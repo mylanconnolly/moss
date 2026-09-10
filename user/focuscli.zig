@@ -45,13 +45,17 @@ fn window(x: u32, y: u32, w: u32, h: u32, colour: u32) u64 {
 
 const Input = struct { surface: u64, ch: u8 };
 fn nextInput() Input {
-    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .next_input, 0)) {
-        .ok => |rep| switch (rep) {
-            .input => |x| .{ .surface = x.surface, .ch = @intCast(x.arg & 0xff) },
-            else => .{ .surface = 0, .ch = 0 },
-        },
-        .err => .{ .surface = 0, .ch = 0 },
-    };
+    // Only keystrokes (kind 0) matter here; skip the non-key events the
+    // compositor also delivers on this channel (a focus change is kind 4).
+    while (true) {
+        switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .next_input, 0)) {
+            .ok => |rep| switch (rep) {
+                .input => |x| if (x.kind == 0) return .{ .surface = x.surface, .ch = @intCast(x.arg & 0xff) },
+                else => return .{ .surface = 0, .ch = 0 },
+            },
+            .err => return .{ .surface = 0, .ch = 0 },
+        }
+    }
 }
 
 export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {

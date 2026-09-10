@@ -61,6 +61,10 @@ fn readKey(chan: u64, leaked: *bool) u8 {
     switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0)) {
         .ok => |rep| switch (rep) {
             .input => |x| {
+                // Only a keystroke (kind 0) counts; the compositor also
+                // delivers focus changes (kind 4) on this channel, whose
+                // arg must not be mistaken for a leaked character.
+                if (x.kind != 0) return 0;
                 const ch: u8 = @intCast(x.arg & 0xff);
                 if (ch != 0) leaked.* = true;
                 return ch;

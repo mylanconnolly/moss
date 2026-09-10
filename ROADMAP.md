@@ -1079,10 +1079,16 @@ is a plan.
   list (init reports a dead unit as down) and the dock's `view` calls it per
   pill with a 1 s `tick` re-render, so the dot lights on launch and clears
   on its own when the app exits (a crash as much as a clean exit); the dock
-  keeps no *running* state. Also owed (desktop polish, separate): a
-  subtler focus cue than the login's yellow border; maximize (needs surface
-  resize); and a wallpaper (the ground is a solid fill
-  today). Decisions: client-drawn decorations via the shared runtime +
+  keeps no *running* state. **A subtler focus cue** landed 2026-09-10: the
+  loud yellow compositor border is gone; instead a window dims its own
+  chrome (grey traffic lights + muted title) when unfocused, the macOS
+  convention. The compositor tells a window its focus changed with a new
+  `kind` 4 input event (`pumpFocus` diffs each surface's focus against what
+  its owner was last told), and the runtime redraws accordingly; raw input
+  clients now filter to keystrokes since the channel also carries ticks,
+  restores, and focus events. Also owed (desktop polish, separate):
+  maximize (needs surface resize); and a wallpaper (the ground is a solid
+  fill today). Decisions: client-drawn decorations via the shared runtime +
   compositor move/raise; real multi-process windows; admin = a policy bit
   on the record, not an identity, surfaced as a writable cap.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.

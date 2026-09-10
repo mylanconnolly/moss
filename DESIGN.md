@@ -2983,8 +2983,7 @@ the Demo pill again, and confirms `gui: restored` with no new `gui: ready`
 subtlety worth keeping: because the retained buffer is what reappears, a
 restore needs no cooperation from the app for the *pixels* — the wake event
 is for the app to resume its own logic (a clock that paused while hidden),
-not to redraw. Owed next: a subtler focus cue, and maximize (which needs
-surface resize).
+not to redraw. Owed next: maximize (which needs surface resize).
 
 **The dock clears a pill when its app exits (as built, 2026-09-10).** Stage
 3 left *running* as dock state set at launch and never cleared — the dock
@@ -3004,6 +3003,33 @@ state; it is derived, not remembered. `renderDock` logs a pill's state only
 when it flips (`dock: running <unit>=<bool>`), so the change is observable
 without spamming every tick; the `guishell` drill launches the demo (the
 dot lights), then closes it and confirms the dot clears.
+
+**A subtler focus cue — dimmed chrome (as built, 2026-09-10).** The focus
+cue had been the compositor painting a thick yellow border around the
+focused surface (stage 5). It read as loud and web-like on the composed
+desktop, so it is replaced by the macOS convention: the focused window
+shows full-colour chrome (red/amber/green traffic lights, a crisp title);
+an unfocused window dims its own — the dots go a uniform grey, the title
+muted. The border is gone entirely. Because a window draws its own chrome
+(the compositor owns focus), the compositor must tell a window when its
+focus changes: a new `kind` 4 input event (arg 1 = focused, 0 = not),
+delivered by `pumpFocus` to the owner's parked reader whenever the focused
+surface changes — a click, a new window, a minimize, a restore, or a Tab
+switch. `pumpFocus` runs after every request and after the input doorbell,
+diffing each surface's real focus against what its owner was last told
+(`Surface.notified_focus`, seeded true to match a client's assumption that
+a fresh window is focused, so a window that opens *behind* the focus is the
+one told to dim). A window busy at the instant focus changes has no parked
+reader; its state stays pending and is flushed the moment it re-parks. The
+window runtime tracks `win_focused` and redraws its titlebar accordingly;
+the `desktop` drill (two real windows) asserts the one losing focus logs
+`gui: unfocused`, and the `focus` drill keeps proving the routing itself
+(its plain solid-colour windows have no chrome to dim, so its old
+border-pixel screendump assertion is retired). Raw input clients that only
+want keystrokes (`focuscli`, `readercli`, `trustcli`) now filter to `kind`
+0, since the compositor delivers ticks, restores, and focus changes on the
+same channel — a keystroke is no longer the only thing a `next_input` can
+return.
 
 ### GUIs in mshl
 

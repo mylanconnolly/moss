@@ -121,14 +121,16 @@ const Surface = struct {
     hidden: bool = false, // minimized: retained but not composited, not focusable
     title: [16]u8 = @splat(0), // the window title, so the dock can restore it by name
     title_len: u8 = 0,
+    // What we last told this surface's owner about its focus. Defaults true
+    // to match a client's assumption that a fresh window is focused: a
+    // window created focused needs no event, but one that opens behind the
+    // focus (a second window) is told it is unfocused so it dims its chrome.
+    notified_focus: bool = true,
 };
 var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
 /// The compositor's ground, seen wherever no surface covers the scanout.
 const bg_word: u32 = 0x0020_2830; // a dark slate
-/// The focus cue: a border drawn inside the focused surface's edges.
-const focus_word: u32 = 0x00FF_FF00; // X<<24|R<<16|G<<8|B -> RGB(255,255,0), yellow
-const focus_border = 4; // pixels
 
 // The trusted path. The compositor holds a boot-provisioned token; a
 // client that echoes it over `attach_trusted` gets a channel badged
@@ -467,36 +469,6 @@ fn fbSpan(off: usize, n: usize, word: u32) void {
     }
 }
 
-/// Draw the focus cue: a border just inside the focused surface's edges,
-/// on top of everything, clipped to the scanout — so the window that has
-/// the keyboard is visibly the one.
-fn drawFocusBorder(sf: *const Surface, clip: Rect) void {
-    const sr = surfaceRect(sf);
-    if (sr.w == 0 or sr.h == 0) return;
-    // `: usize` is load-bearing — @min against the comptime border width
-    // narrows the result type to fit it, and `2 * bw` would overflow that.
-    const bw: usize = @min(@as(usize, focus_border), @min(sr.w, sr.h));
-    // Four bands: top, bottom, and the left/right columns between them.
-    // Each is clipped to the recompose rect so a per-rect commit only
-    // repaints the part of the border that its damage actually touches.
-    var bands: [4]Rect = .{
-        .{ .x = sr.x, .y = sr.y, .w = sr.w, .h = bw },
-        .{ .x = sr.x, .y = sr.y + sr.h - bw, .w = sr.w, .h = bw },
-        undefined,
-        undefined,
-    };
-    var n: usize = 2;
-    if (sr.h > 2 * bw) {
-        const col_h = sr.h - 2 * bw;
-        bands[2] = .{ .x = sr.x, .y = sr.y + bw, .w = bw, .h = col_h };
-        bands[3] = .{ .x = sr.x + sr.w - bw, .y = sr.y + bw, .w = bw, .h = col_h };
-        n = 4;
-    }
-    for (bands[0..n]) |b| {
-        if (intersect(b, clip)) |ir| fillRect(ir, focus_word);
-    }
-}
-
 /// Recompose the scanout: paint the ground, then every surface bottom to
 /// top, then ship it to the host. Full recompose per commit — simple and
 /// correct; per-rect composition is a later optimisation.
@@ -521,9 +493,9 @@ fn compositeRect(clip: Rect) bool {
         if (intersect(surfaceRect(sf), clip)) |ir| blitRect(sf, ir);
         painted = sf.z;
     }
-    if (keys_chan != 0) {
-        if (findSurface(focused)) |sf| drawFocusBorder(sf, clip);
-    }
+    // Focus is shown by the client dimming its own chrome (titlebar +
+    // traffic lights) when it is not focused — see `pumpFocus`, which tells
+    // each window its focus state — so the compositor draws no focus border.
     // The trusted-path indicator: a strip across the very top of the
     // scanout, painted last of all so no client surface can forge it. It
     // is the secure colour only while the focused surface is the login
@@ -707,6 +679,36 @@ fn wakeReader(chan_h: u64, badge: u64, surface: u64, kind: u64) void {
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = surface, .kind = kind, .arg = 0 } }, 0, t);
         return;
     };
+}
+
+/// Tell each surface whose focus state changed about it — a `kind` 4 event
+/// (arg 1 = now focused, 0 = not) to its owner's parked reader — so a
+/// window dims or brightens its own chrome. Only a surface with a reader
+/// waiting is told; one without keeps its state pending (its owner is busy
+/// and will re-park) and is caught on a later call. Called after every
+/// request (and after the input doorbell), so any focus change — a click,
+/// a new window, a minimize, a restore, a Tab switch — reaches both the
+/// window losing focus and the one gaining it. A parked reader delivering
+/// a focus event is consumed, so the client re-issues `next_input`, exactly
+/// as for a key or tick.
+fn pumpFocus(chan_h: u64) void {
+    for (&surfaces, 0..) |*sf, i| {
+        if (!sf.used) continue;
+        const desired = focused == i + 1 and !sf.hidden;
+        if (sf.notified_focus == desired) continue;
+        var delivered = false;
+        for (&readers) |*rd| if (rd.used and rd.badge == sf.owner and rd.token != 0) {
+            const t = rd.token;
+            rd.token = 0;
+            _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 4, .arg = @intFromBool(desired) } }, 0, t);
+            delivered = true;
+            break;
+        };
+        if (delivered) {
+            sf.notified_focus = desired;
+            refreshTicks();
+        }
+    }
 }
 
 fn takeReader(badge: u64) ?u64 {
@@ -991,6 +993,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
             dispatchKeys(chan_h);
             dispatchPointer(chan_h);
             if (bits & tick_bit != 0) dispatchTicks(chan_h);
+            pumpFocus(chan_h); // a click may have moved focus between windows
             continue;
         }
         if (r.err == .client_dead) {
@@ -1213,6 +1216,10 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .trusted, minted.data[1], token);
             },
         }
+        // Flush any focus change this request caused (a create takes focus,
+        // a destroy/minimize hands it on, a restore claims it) to a window
+        // waiting to hear it — and to a client that just re-parked.
+        pumpFocus(chan_h);
     }
 }
 

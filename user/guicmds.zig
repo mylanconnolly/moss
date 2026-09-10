@@ -165,6 +165,10 @@ const tl_max: u32 = 0x0028_c840; // green
 var title_h: usize = 0; // set each render; the drag-handle band height
 var dots_cx: [3]usize = @splat(0);
 var dots_cy: usize = 0;
+// Whether this window holds focus (the compositor tells us with a `kind` 4
+// event). An unfocused window dims its chrome — grey traffic lights, a
+// muted title — the desktop's focus cue. A fresh window opens focused.
+var win_focused = true;
 // A drag in progress, and where in the window it was grabbed.
 var dragging = false;
 var drag_grab_x: usize = 0;
@@ -709,15 +713,22 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     dots_cy = title_h / 2;
     const first_cx = 16 + dot_r;
     for (0..3) |i| dots_cx[i] = first_cx + i * dot_gap;
-    fillDot(dots_cx[0], dots_cy, dot_r, tl_close);
-    fillDot(dots_cx[1], dots_cy, dot_r, tl_min);
-    fillDot(dots_cx[2], dots_cy, dot_r, tl_max);
+    // Focused: the macOS red/amber/green. Unfocused: all three a uniform
+    // grey, and the title muted — the window visibly does not hold the
+    // keyboard, without a loud border.
+    const c_close = if (win_focused) tl_close else pal.border;
+    const c_min = if (win_focused) tl_min else pal.border;
+    const c_max = if (win_focused) tl_max else pal.border;
+    fillDot(dots_cx[0], dots_cy, dot_r, c_close);
+    fillDot(dots_cx[1], dots_cy, dot_r, c_min);
+    fillDot(dots_cx[2], dots_cy, dot_r, c_max);
     if (title.len > 0) {
         const tw = strW(R_TITLE, title);
         const after_dots = dots_cx[2] + dot_r + 12;
         const centered = if (win_w > tw) (win_w - tw) / 2 else 0;
         const tx = @max(centered, after_dots);
-        drawStr(tx, (title_h - lineOf(R_TITLE)) / 2, R_TITLE, title, pal.title, pal.surface);
+        const t_ink = if (win_focused) pal.title else pal.text_muted;
+        drawStr(tx, (title_h - lineOf(R_TITLE)) / 2, R_TITLE, title, t_ink, pal.surface);
     }
     // Content area below the titlebar. Record the full height it wants so
     // the window can be sized to fit before its surface is created.
@@ -1733,10 +1744,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
 
     resetFields();
     // A fresh window: no drag in flight (module state persists across
-    // `gui` calls in one process).
+    // `gui` calls in one process), and it opens focused (the compositor
+    // sets a new surface as focused; a later `kind` 4 corrects us if not).
     dragging = false;
     ptr_down = false;
     pending_dot = null;
+    win_focused = true;
     // Width: `width: N` narrows the window (a desktop lays out several
     // smaller windows); default is the roomy single-window width.
     win_w = win_w_default;
@@ -1811,6 +1824,16 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var closed = false;
         input: while (true) {
             const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            // A focus change: the compositor tells us we gained or lost the
+            // keyboard (arg 1/0). Re-render so the chrome dims or brightens.
+            if (ev.kind == 4) {
+                const now = ev.ch != 0;
+                if (now == win_focused) continue :input;
+                win_focused = now;
+                _ = usys.log(log_h, if (now) "gui: focused" else "gui: unfocused");
+                if (minimized) continue :input; // nothing on screen to redraw
+                break :input;
+            }
             // A restore: the dock brought this minimized window back. Clear
             // the minimized state and re-render so its content repaints.
             if (ev.kind == 3) {
