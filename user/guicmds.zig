@@ -1210,6 +1210,13 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
         if (!commitSurface()) return it.fail("gui: bar commit failed", .{});
         if (!announced) {
             _ = usys.log(log_h, "topbar: ready");
+            // Log each menu title's hit-box centre so a drill can click it
+            // precisely at any scale (the bar's size follows the font scale),
+            // the way the dock logs its pills.
+            for (bar_menus[0..bar_nmenus]) |m| {
+                var mb: [64]u8 = undefined;
+                _ = usys.log(log_h, std.fmt.bufPrint(&mb, "topbar: menu {s} cx={d} cy={d}", .{ m.id, m.bx + m.bw / 2, win_h / 2 }) catch "topbar: menu");
+            }
             announced = true;
         }
         var fired_menu: ?[]const u8 = null;

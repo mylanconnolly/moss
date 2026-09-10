@@ -664,7 +664,10 @@ pub fn build(b: *std.Build) void {
         "scripts/win-alpha.msh",           "scripts/win-beta.msh",
         "conf/units/topbar.msh",           "scripts/topbar.msh",
         "conf/units/dock.msh",             "scripts/dock.msh",
-        "conf/sessiongui/shell.msh",       "scripts/gui-shell.msh",
+        "conf/sessiongui/topbar.msh",      "scripts/dtopbar.msh",
+        "conf/sessiongui/dock.msh",        "scripts/ddock.msh",
+        "conf/sessiongui/settings.msh",    "conf/sessiongui/win-demo.msh",
+        "scripts/gui-shell.msh",
         "conf/skel/font.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));

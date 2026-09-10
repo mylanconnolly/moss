@@ -1,0 +1,23 @@
+# The settings app (lazy — no `profiles`, so it starts only when launched by
+# the dock or the top bar's "Settings…", via the session init front channel).
+# The full two-pane settings window: the you-pane (appearance + locale, saved
+# to the home and pushed live) and the system pane (the default locale,
+# writable only by an admin — via the read-write conf view the manager grants
+# an admin session). Non-essential: closing its window ends only this app.
+{
+  image:     mshrun
+  script:    scripts/gui-shell.msh
+  budget:    { user: 16mb }
+  grant:     [log, spawner, bootfs]
+  essential: false
+  give: [
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: view, fs: "", ro: false }
+    { tag: store, session: true }
+    { tag: sess, session: true }
+    { tag: conf, session: true }
+    { tag: locale, session: true }
+    { tag: init, self: true }
+  ]
+}

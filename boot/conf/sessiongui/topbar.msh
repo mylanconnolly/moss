@@ -1,0 +1,21 @@
+# The desktop's top bar (the composed GUI session's persistent chrome, and
+# the session's ESSENTIAL unit — its "Log Out" ends the session). mshrun runs
+# the bar script as the user, with the display/font/locale channels the
+# manager forwarded (`session: true`) and a read-only view of the home (to
+# read the user's saved appearance/locale), plus the session's own init front
+# channel (`init: self`) so its "Settings…" can launch the settings app.
+{
+  image:     mshrun
+  script:    scripts/dtopbar.msh
+  budget:    { user: 16mb }
+  grant:     [log, spawner, bootfs]
+  profiles:  [session]
+  essential: true
+  give: [
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: locale, session: true }
+    { tag: view, fs: "", ro: true }
+    { tag: init, self: true }
+  ]
+}

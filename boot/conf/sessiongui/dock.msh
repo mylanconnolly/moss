@@ -1,0 +1,16 @@
+# The desktop dock (resident, eager, non-essential): a bottom bar that
+# launches the session's apps through the session init front channel. Not
+# essential — if it exits the session lives on (the top bar is the anchor).
+{
+  image:     mshrun
+  script:    scripts/ddock.msh
+  budget:    { user: 16mb }
+  grant:     [log, bootfs]
+  profiles:  [session]
+  essential: false
+  give: [
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: init, self: true }
+  ]
+}

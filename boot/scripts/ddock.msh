@@ -1,0 +1,21 @@
+# The desktop dock — a resident bottom bar that launches the session's apps.
+# Each pill launches a session unit by name through the session's init front
+# channel (`launch NAME`): "Settings" opens the settings app, "Files" a demo
+# window. The launched app opens its own window on the shared compositor.
+let final = (gui {
+    dock: true
+    init: { open: "" }
+    view: (fn [state] {
+        {
+          items: [
+            { title: "Settings", unit: "settings", running: ($state.open == "settings") }
+            { title: "Files", unit: "win-demo", running: ($state.open == "win-demo") }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        launch $ev.unit
+        { open: $ev.unit }
+      })
+  })
+echo "dock: exit"

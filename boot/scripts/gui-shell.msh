@@ -116,7 +116,7 @@ while $running {
                   }
                   _ => { kind: "label", muted: true, text: "read-only (not an administrator)" }
                 })
-              { kind: "button", id: "logout", label: "log out", variant: "danger" }
+              { kind: "button", id: "logout", label: "close", variant: "danger" }
             ]
           }
         })
@@ -150,7 +150,9 @@ while $running {
       # would drop an echo's output anyway.
       sysconf-write "locale" (to-data { default: $r.sysloc })
     }
-    _ => { sessionfont }
+    # "close" just ends the settings window; the session (and its appearance)
+    # lives on — reverting is the top bar's job at log-out, not ours.
+    _ => null
   }
   let running = (match $r.action { "logout" => false; _ => true })
 }

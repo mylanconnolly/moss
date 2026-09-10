@@ -1,0 +1,15 @@
+# A demo app window the dock launches ("Files"): lazy, non-essential, a
+# simple movable window (the stage-1 traffic-light window). Shows the dock
+# launching an ordinary app — its own process, its own window on the shared
+# compositor — alongside the settings app.
+{
+  image:     mshrun
+  script:    scripts/win-alpha.msh
+  budget:    { user: 16mb }
+  grant:     [log, bootfs]
+  essential: false
+  give: [
+    { tag: display, session: true }
+    { tag: font, session: true }
+  ]
+}

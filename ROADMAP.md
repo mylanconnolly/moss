@@ -1049,7 +1049,21 @@ is a plan.
   label, not a button; and a `guishellro` drill signs in bob (non-admin) and
   confirms admin=false + a read-only system pane — the other side of the
   admin gate. **Stage 4 is complete** (both panes, the admin gate, locked
-  keys enforced and shown, per-user + session-wide locale). Also owed
+  keys enforced and shown, per-user + session-wide locale). ✅ **THE COMPOSED
+  DESKTOP (landed 2026-09-10) — the end product.** The post-login GUI session
+  (`conf/sessiongui/`, the `guishell` profile) is now a full desktop: it runs
+  the top bar + dock (eager) together on the shared compositor/fontsvc/
+  localesvc and launches app windows on demand (the settings app + a demo,
+  lazy units the dock/`Settings…` start via the session init's front
+  channel). The top bar owns session appearance (applies the user's saved
+  font/locale at login — its own clock follows the shared locale — reverts on
+  Log Out) and is the essential unit. Pure composition — no kernel/session
+  change. The `guishell` drill is now the full integration test (login →
+  bar+dock → launch a window + settings → log out via the bar → teardown);
+  `guishellro` runs it as a non-admin. Lessons: a session's budget must cover
+  every concurrent unit (bumped user 12→96 MB, per-unit 24→16 MB after a
+  `QuotaExceeded`); the unit `script:` path caps at 24 bytes. `run-gui
+  -Dgui-profile=guishell` boots it interactively. Also owed
   (desktop polish, separate): the dock does not yet clear a pill's
   *running* mark when the app exits (needs watching the app's domain); a
   subtler focus cue than the login's yellow border; minimize/maximize (max

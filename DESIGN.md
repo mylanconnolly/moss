@@ -2899,6 +2899,47 @@ layer down, where a read-only view denies a write (the fs drill's ground).
 Between alice (guishell) and bob (guishellro) both sides of the admin gate
 are now exercised.
 
+**The composed desktop (as built, 2026-09-10) — the end product.** The four
+desktop pieces (movable windows, the top bar, the dock, the settings app),
+each built and drilled in isolation, are now assembled into one running
+desktop: the post-login GUI session (`conf/sessiongui/`, the `guishell`
+profile) went from a single settings window to a full desktop. The session
+runs, together on the one shared compositor/fontsvc/localesvc, the **top
+bar** and the **dock** (both `profiles: [session]` → eager at login) and
+launches app **windows** on demand. Nothing new in the kernel or the session
+machinery made this possible — it is purely composition of what already
+existed: a session is a mode-3 init running the units in its template dir,
+and those units already knew how to take forwarded caps (`session: true`) and
+the session init's own front channel (`init: self`).
+
+Roles: the **top bar** is the session's persistent identity and the owner of
+its appearance — at login it reads the user's home `conf/font.msh` /
+`conf/locale.msh` and pushes them, so the whole desktop (its own clock
+included, which reads the shared session locale) renders in the user's
+choices; its system menu's "Settings…" runs `launch "settings"` over the
+session init's front channel, and "Log Out" reverts to the system defaults
+and exits. It is the session's one **essential** unit, so its exit tears the
+whole session down. The **dock** (eager, non-essential) launches the settings
+app and a demo window — session units that are *lazy* (no `profiles:`), so
+they exist in the session's unit set but start only when the dock's `launch`
+issues a `connect_named` for them. The **settings app** and **demo window**
+are ordinary non-essential app windows; closing one ends only that app.
+
+Two things the composition taught, both paid for on the drill: a mode-3
+session's whole memory budget is the user's record budget, and it must cover
+*every* concurrent unit — four mshrun processes (bar, dock, settings, demo)
+overflowed the old 12 MB, so the session budget went to 96 MB and each unit's
+to 16 MB (a spawn refused with `QuotaExceeded` is the signature); and a unit
+`script:` path is capped at 24 bytes, so `scripts/desktop-topbar.msh` (26)
+silently truncated to `…topbar.m` and failed to open — the session scripts
+are `dtopbar.msh` / `ddock.msh`. The `guishell` drill is now the full
+integration test: sign in, the bar + dock come up in the user's scale, the
+dock launches a window and the settings app (admin-editable for alice), and
+the top bar's menu logs out — login, a multi-process session sharing all
+three services, launching, and teardown, end to end. `guishellro` runs the
+same for bob (non-admin: settings read-only). `run-gui -Dgui-profile=guishell`
+boots it to play with by hand.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

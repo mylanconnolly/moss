@@ -87,8 +87,8 @@ const specs = [_]Spec{
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
-    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "gui: session ok who=alice", .always_extra = "gui: shell exited", .extra2 = "fontsvc: reconfigured (ui 20px, scale 1.25)", .append = "profile=guishell", .timeout_s = 120 },
-    .{ .name = "guishellro", .kind = .guishellro, .pass = "guishellro-test: PASS", .extra = "settings: admin=false", .always_extra = "settings: system read-only", .extra2 = "gui: shell exited", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "dock: launch settings", .always_extra = "settings: admin=true", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "guishellro", .kind = .guishellro, .pass = "guishellro-test: PASS", .extra = "settings: admin=false", .always_extra = "settings: system read-only", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
     .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
@@ -1715,8 +1715,52 @@ fn waitLogN(log_path: []const u8, needle: []const u8, n_needed: usize, why: []co
     }
 }
 
-fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
-    // Wait for the greeter's login form.
+/// Parse `topbar: menu system cx=X cy=Y` — the system-menu title's hit-box
+/// centre, which the bar logs so a drill can click it at any font scale.
+fn parseTopbarMenu(content: []const u8) ?[2]u32 {
+    const key = "topbar: menu system cx=";
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    var rest = content[at + key.len ..];
+    const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    rest = rest[0..eol];
+    if (rest.len > 0 and rest[rest.len - 1] == '\r') rest = rest[0 .. rest.len - 1];
+    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const cy_at = std.mem.indexOf(u8, rest, "cy=") orelse return null;
+    const cx = std.fmt.parseInt(u32, rest[0..sp], 10) catch return null;
+    const cy = std.fmt.parseInt(u32, rest[cy_at + 3 ..], 10) catch return null;
+    return .{ cx, cy };
+}
+
+/// Log out through the top bar's system menu: click "moss" (its logged
+/// hit-box), wait for the dropdown, click the last item ("Log Out"). The bar
+/// is the session's essential unit, so this ends the whole session.
+fn desktopLogout(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
+    const menu = parseTopbarMenu(readLog(log_path)) orelse {
+        reportFailure(spec.name, "could not find the top bar's system menu", log_path);
+        return false;
+    };
+    if (!clickScanout(q, menu[0], menu[1])) {
+        reportFailure(spec.name, "QMP could not click the system menu", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "topbar: popup at", 1, "the system menu did not open a dropdown", spec, polls)) return false;
+    sleepMs(300);
+    const p = parsePopup(readLog(log_path)) orelse {
+        reportFailure(spec.name, "could not parse the dropdown geometry", log_path);
+        return false;
+    };
+    const last = if (p[3] > 0) p[3] - 1 else 0; // "Log Out" is the last item
+    const iy = p[1] + 4 + last * p[2] + p[2] / 2;
+    if (!clickScanout(q, p[0] + 30, iy)) {
+        reportFailure(spec.name, "QMP could not click Log Out", log_path);
+        return false;
+    }
+    return waitLogN(log_path, "topbar: exit note=logging out", 1, "Log Out did not end the session", spec, polls);
+}
+
+/// Wait for the greeter's login form, connect QMP, and type a user's
+/// credentials + submit. Returns false (with a failure reported) on trouble.
+fn desktopSignIn(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, user: []const u8, pass: []const u8) !bool {
     var n: u64 = 0;
     while (true) {
         sleepMs(poll_ms);
@@ -1729,20 +1773,14 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
-        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
-        return false;
-    };
-    defer q.close();
-    // Sign in as the real user.
-    if (!q.typeText("alice")) {
+    if (!q.typeText(user)) {
         reportFailure(spec.name, "QMP could not type the username", log_path);
         return false;
     }
     sleepMs(100);
     _ = q.sendKey("tab");
     sleepMs(100);
-    if (!q.typeText("alice-pass")) {
+    if (!q.typeText(pass)) {
         reportFailure(spec.name, "QMP could not type the passphrase", log_path);
         return false;
     }
@@ -1750,159 +1788,91 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     _ = q.sendKey("tab");
     sleepMs(100);
     _ = q.sendKey("ret");
-    // The session's settings shell renders (its own second "gui: ready"),
-    // and its first act is to apply the user's saved scale (1.5, seeded on
-    // first login) — the auto-scale-on-login path.
-    if (!try waitLogN(log_path, "gui: ready", 2, "the session's settings shell never rendered", spec, polls)) return false;
-    if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 24px, scale 1.50)", 1, "the session did not apply the user's saved scale on login", spec, polls)) return false;
-    sleepMs(500);
-
-    // Alice is an administrator: the shell reports it, and its system pane
-    // is editable (the manager granted this session a read-write conf view).
-    if (!try waitLogN(log_path, "settings: admin=true", 1, "the session did not detect the admin's writable conf view", spec, polls)) return false;
-    // `theme` is locked by the system layer; the font service reports it and
-    // the shell renders that control as a non-editable label, not a button.
-    if (!try waitLogN(log_path, "settings: theme locked", 1, "the settings app did not learn the theme axis is locked", spec, polls)) return false;
-
-    // The USER pane. Focus order (alice, an admin) — the locked `theme` is a
-    // label, so it is NOT in the tab order:
-    //   0 smaller 1 larger 2 contrast 3 colours 4 locale 5 apply
-    //   6 change-locale 7 save-system 8 log out
-    // Fire "smaller" (1.50 → 1.25), set contrast high and colours cb-safe,
-    // cycle the user's locale to de-DE, then apply.
-    _ = q.sendKey("ret"); // smaller (focus 0) → scale 1.25
-    sleepMs(200);
-    _ = q.sendKey("tab"); // → 1 larger
-    sleepMs(100);
-    _ = q.sendKey("tab"); // → 2 contrast
-    sleepMs(100);
-    _ = q.sendKey("ret"); // contrast → high
-    sleepMs(200);
-    _ = q.sendKey("tab"); // → 3 colours
-    sleepMs(100);
-    _ = q.sendKey("ret"); // colours → cb-safe
-    sleepMs(200);
-    _ = q.sendKey("tab"); // → 4 locale
-    sleepMs(100);
-    _ = q.sendKey("ret"); // locale → de-DE (the user's own preference)
-    sleepMs(200);
-    _ = q.sendKey("tab"); // → 5 apply
-    sleepMs(100);
-    _ = q.sendKey("ret"); // apply — save the home layers and push them live
-    if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 20px, scale 1.25)", 1, "the appearance change was not applied and pushed", spec, polls)) return false;
-    // The effective appearance: theme is the system's DARK (the user cannot
-    // touch the locked control), with the unlocked contrast=high and
-    // colours=cb-safe the user set.
-    if (!try waitLogN(log_path, "dark high-contrast cb-safe", 1, "the unlocked accessibility switches did not apply", spec, polls)) return false;
-    // And the user's locale preference was applied to the session's formatter.
-    if (!try waitLogN(log_path, "locale: de-DE", 1, "the user's locale preference was not applied", spec, polls)) return false;
-    // Apply reopens the panel (a third "gui: ready").
-    if (!try waitLogN(log_path, "gui: ready", 3, "the settings panel did not reopen after apply", spec, polls)) return false;
-    sleepMs(400);
-
-    // The SYSTEM pane, as an admin: change the system default locale and
-    // save it — a write to the system settings layer (conf/app/locale.msh)
-    // through the read-write conf view the manager granted this session.
-    // Focus resets to 0 on reopen; Tab to change-locale (6) and fire it
-    // (en-US → de-DE), Tab to save-system (7) and fire it.
-    var tl: usize = 0;
-    while (tl < 6) : (tl += 1) {
-        _ = q.sendKey("tab");
-        sleepMs(80);
-    }
-    _ = q.sendKey("ret"); // change locale → de-DE
-    sleepMs(200);
-    _ = q.sendKey("tab"); // → 7 save system
-    sleepMs(100);
-    _ = q.sendKey("ret"); // save system
-    if (!try waitLogN(log_path, "sysconf: saved locale", 1, "the admin could not write the system settings layer", spec, polls)) return false;
-    if (!try waitLogN(log_path, "gui: ready", 4, "the settings panel did not reopen after saving the system layer", spec, polls)) return false;
-    sleepMs(400);
-
-    // The surface-open/close path under repeated reopen: each apply reopens
-    // the panel (a fresh surface). A leaked mapping per reopen would exhaust
-    // the shm quota and the shell would quietly exit — the regression this
-    // guards. Focus resets to 0 each reopen; Tab five times to "apply" and
-    // fire it, watching "gui: ready" climb from 4.
-    var cycle: usize = 0;
-    while (cycle < 8) : (cycle += 1) {
-        var tb: usize = 0;
-        while (tb < 5) : (tb += 1) {
-            _ = q.sendKey("tab");
-            sleepMs(80);
-        }
-        _ = q.sendKey("ret"); // apply → reopen
-        if (!try waitLogN(log_path, "gui: ready", 5 + cycle, "the settings panel stopped reopening — a surface leak?", spec, polls)) return false;
-        sleepMs(250);
-    }
-
-    // Log out: Tab from smaller (0) to "log out" (8) and fire it; the shell
-    // reverts the font layer and exits, unwinding the session.
-    var t: usize = 0;
-    while (t < 8) : (t += 1) {
-        _ = q.sendKey("tab");
-        sleepMs(100);
-    }
-    _ = q.sendKey("ret");
-    if (!try waitLogN(log_path, "gui: shell exited", 1, "logging out never tore the GUI session down", spec, polls)) return false;
     return true;
 }
 
-/// The non-admin settings drill (`guishellro`): the same graphical login as
-/// guishell, but the host signs in as bob, who has no `admin: true`. The
-/// settings app must report admin=false and render its system pane
-/// read-only — the capability gate refusing a non-admin a writable view of
-/// the system settings tier (bob's session got the conf view read-only).
-fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
-    var n: u64 = 0;
-    while (true) {
-        sleepMs(poll_ms);
-        n += 1;
-        polls.* += 1;
-        const content = readLog(log_path);
-        if (std.mem.indexOf(u8, content, "gui: ready") != null) break;
-        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
-            reportFailure(spec.name, "the login form never rendered", log_path);
-            return false;
-        }
-    }
+/// The composed desktop drill (`guishell`) — the full integration test. A
+/// graphical login opens a session that runs, together on one compositor,
+/// the top bar + the dock (both resident) and launches app windows on
+/// demand. The host signs in as alice (an admin), the desktop comes up (the
+/// bar applies her saved scale to the whole session), the dock launches the
+/// settings app (admin-editable) and a demo window, and the top bar's system
+/// menu logs her out — tearing the whole session down.
+fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     var q = qmpConnect(qmp_port) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
     defer q.close();
-    // Sign in as bob (bob-pass) — a user with no `admin: true`.
-    if (!q.typeText("bob")) {
-        reportFailure(spec.name, "QMP could not type the username", log_path);
+    if (!try desktopSignIn(spec, log_path, polls, &q, "alice", "alice-pass")) return false;
+    // The desktop comes up: top bar + dock (eager), and the bar applies the
+    // user's saved scale (1.5, seeded on first login) to the whole session.
+    if (!try waitLogN(log_path, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 24px, scale 1.50)", 1, "the top bar did not apply the user's scale at login", spec, polls)) return false;
+    sleepMs(500);
+    // Launch the settings app from the dock (pill 0 — the dock logged its
+    // centre). Launch the demo window FIRST (a small window near the top-left
+    // — the dock stays clear for the next click), from pill 1 ("Files").
+    const dem = parseDockItem(readLog(log_path), 1) orelse {
+        reportFailure(spec.name, "could not parse the dock's Files pill", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, dem[0], dem[1])) {
+        reportFailure(spec.name, "QMP could not click the Files pill", log_path);
         return false;
     }
-    sleepMs(100);
-    _ = q.sendKey("tab");
-    sleepMs(100);
-    if (!q.typeText("bob-pass")) {
-        reportFailure(spec.name, "QMP could not type the passphrase", log_path);
+    if (!try waitLogN(log_path, "dock: launch win-demo", 1, "the Files pill did not launch the demo window", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: ready", 2, "the demo window never opened", spec, polls)) return false;
+    sleepMs(500);
+    // Then the settings app (pill 0). At this scale it is a tall window that
+    // covers the dock — fine, we are done clicking the dock. alice is an
+    // admin, so settings reports so.
+    const set = parseDockItem(readLog(log_path), 0) orelse {
+        reportFailure(spec.name, "could not parse the dock's Settings pill", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, set[0], set[1])) {
+        reportFailure(spec.name, "QMP could not click the Settings pill", log_path);
         return false;
     }
-    sleepMs(100);
-    _ = q.sendKey("tab");
-    sleepMs(100);
-    _ = q.sendKey("ret");
-    // bob's settings shell renders (a second "gui: ready") and reports the
-    // gate: not an admin, so the system pane is read-only.
-    if (!try waitLogN(log_path, "gui: ready", 2, "bob's settings shell never rendered", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: launch settings", 1, "the Settings pill did not launch the app", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: ready", 3, "the settings window never opened", spec, polls)) return false;
+    if (!try waitLogN(log_path, "settings: admin=true", 1, "the admin's settings did not detect admin", spec, polls)) return false;
+    sleepMs(500);
+    // Log out from the top bar — its menu sits above the windows — ending the
+    // whole session.
+    return desktopLogout(spec, log_path, polls, &q);
+}
+
+/// The non-admin composed-desktop drill (`guishellro`): the same desktop, but
+/// the host signs in as bob (no `admin: true`). The dock launches settings,
+/// which must report admin=false and a read-only system pane — the admin gate
+/// on the composed desktop — then the top bar logs bob out.
+fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!try desktopSignIn(spec, log_path, polls, &q, "bob", "bob-pass")) return false;
+    if (!try waitLogN(log_path, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
+    sleepMs(500);
+    // Launch settings from the dock; bob is not an admin.
+    const set = parseDockItem(readLog(log_path), 0) orelse {
+        reportFailure(spec.name, "could not parse the dock's Settings pill", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, set[0], set[1])) {
+        reportFailure(spec.name, "QMP could not click the Settings pill", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "gui: ready", 2, "bob's settings window never opened", spec, polls)) return false;
     if (!try waitLogN(log_path, "settings: admin=false", 1, "bob was wrongly treated as an administrator", spec, polls)) return false;
     if (!try waitLogN(log_path, "settings: system read-only", 1, "bob's system pane was not read-only", spec, polls)) return false;
-    sleepMs(400);
-    // Log out. bob's panel has no admin controls, so the focus order is
-    //   0 smaller 1 larger 2 contrast 3 colours 4 locale 5 apply 6 log out
-    // (the locked theme is a label). Tab to log out and fire it.
-    var t: usize = 0;
-    while (t < 6) : (t += 1) {
-        _ = q.sendKey("tab");
-        sleepMs(100);
-    }
-    _ = q.sendKey("ret");
-    return waitLogN(log_path, "gui: shell exited", 1, "logging out never tore bob's session down", spec, polls);
+    sleepMs(500);
+    return desktopLogout(spec, log_path, polls, &q);
 }
 
 /// The login-with-console isolation drill (): login opens an
