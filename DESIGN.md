@@ -1958,8 +1958,36 @@ clock, which had hardcoded English month names, now reads `fmt-time` /
 (lazily, like fontcli), formats the four launch locales, and asserts the
 groupings; the `gsession`/`gisession`/`guishell` drills still pass with
 the localized clock. The four launch locales are en-US, de-DE, fr-FR,
-ja-JP; more, plurals, and relative time are a schema extension away, and a
-network auto-updater on the assets tier is the next stage.
+ja-JP; more, plurals, and relative time are a schema extension away.
+
+**The locale auto-updater (as built, 2026-09-09).** The mechanism that
+keeps the database fresh — and moss's first service that reaches the
+internet on a timer. `user/localeupd.zig` is the dotd model turned around:
+where dotd *reads* trust roots from a view, this *writes* a locale database
+into one. On a schedule it fetches a fresher `cldr.db` from a configured
+upstream over TLS (the same `lib/tls` client dotd uses — roots loaded from
+the assets view and hot-reloaded, certificates dated by the wall clock),
+validates it by parsing it (`lib/locale`, so a truncated or garbage blob is
+refused and the good one kept), and, if it differs from what is installed,
+writes it to a temp file and renames it over `assets/locale/cldr.db` — an
+atomic swap a reader never catches half-written. The consumers reload on
+mtime/size, so the new data flows out with no restart and no coordination.
+It fetches the *pre-built blob* (cldrgen's output, served upstream), never
+raw CLDR — no megabytes of JSON parsed on-device. Config
+(`conf/locale.msh`, read from the boot data buffer like clock's): the
+upstream URL, the certificate name (the upstream is reached by IP, so the
+name is separate), the roots path, and `interval` — 0 fetches once and
+exits, > 0 loops on a `timer_arm` notification every that-many seconds. It
+is not in the `system` profile: a test OS has no real CLDR upstream, so it
+runs only in its drill (and a deployment adds it with a real endpoint).
+
+The `localeupd` drill is the assets-swap loop end to end, the way the `dot`
+drill is for trust roots: `openssl s_server -WWW` serves a rel-bumped
+fixture blob (`tools/testdata/cldr-fixture.db`, cldrgen with `--rel`) over
+TLS on the host, the guest reaches it through slirp as 10.0.2.2, and the
+updater fetches, validates, installs, and logs `installed CLDR
+48.2.0-upd` — a release string only the fetched blob carries, so the log
+proves the new bytes came off the wire and landed in the tier.
 
 **Concurrency, stage 1: workers (as built, 2026-09-06).** The language
 has no threads — shared mutable interpreter state is the race the model

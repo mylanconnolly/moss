@@ -1,0 +1,11 @@
+# The locale-database auto-updater (profile localeupd): fetches a fresher
+# cldr.db from the configured upstream over TLS and installs it into the
+# assets tier, where the locale consumers reload it. The net view lazily
+# pulls up netsvc (slirp), the rw assets view pulls up mossfs and gives it
+# somewhere to write; it reads the trust roots from the same view. Essential
+# + interval 0 (see conf/locale.msh): it fetches once and exits, ending the
+# drill.
+{ image: localeupd, grant: [log], budget: { user: 12mb },
+  profiles: [localeupd], essential: true,
+  give: [{ tag: net, netview: net }, { tag: view, fs: "assets", ro: false },
+    { tag: buf, shm: 1 }, { file: conf/locale.msh }] }

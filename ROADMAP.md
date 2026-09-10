@@ -978,10 +978,15 @@ is a plan.
     `tools/cldrgen` from vendored CLDR 48.2.0; en-US/de-DE/fr-FR/ja-JP;
     `fmt-number`/`fmt-int`/`fmt-money`/`fmt-date`/`fmt-time`/`locales`
     commands, the GUI clock migrated onto them, the `locale` drill; read
-    and live-reloaded from the assets tier the trust-roots way). Open: a
-    network auto-updater that fetches a fresher `cldr.db` on a timer over
-    TLS and installs it into the assets tier (stage 3); more locales,
-    plural rules, relative time, and tz data as schema extensions.
+    and live-reloaded from the assets tier the trust-roots way); ✅ the
+    network auto-updater (stage 3 landed 2026-09-09: `user/localeupd.zig`
+    fetches a fresher `cldr.db` over TLS on a `timer_arm` interval,
+    validates it by parsing, and atomically installs it into the assets
+    tier — moss's first internet-auto-update path; the `localeupd` drill
+    proves the loop with an openssl `-WWW` fixture like the `dot` drill's
+    roots-swap). Open: more locales, plural rules, relative time, and tz
+    data as schema extensions; a per-user default locale (seed the
+    formatter's default the font-scale way).
     (Pointer input landed — see the graphical console arc.)
   - **Boundary:** `gpusvc`/`inputsvc`/terminal are `user/*.zig` and the
     DeviceKind/font changes are `shared/`+`user/` — all M3. The QMP,

@@ -1,0 +1,16 @@
+# The locale-database auto-updater's settings. `upstream` is the URL of a
+# pre-built cldr.db (cldrgen's output) served over TLS; `name` is the
+# certificate name to verify (the upstream is reached by IP here, so the
+# name is given separately); `roots` and the install path are relative to
+# the assets view. `interval` 0 fetches once and exits (the drill); a
+# deployment sets it to the seconds between checks, e.g. 86400.
+#
+# The gate's fixture: openssl serves a rel-bumped cldr.db on the host,
+# reached through slirp as 10.0.2.2, with the moss test cert for
+# tls.moss.test.
+{
+  upstream: "https://10.0.2.2:31912/tools/testdata/cldr-fixture.db"
+  name:     "tls.moss.test"
+  roots:    "tls/roots.pem"
+  interval: 0
+}

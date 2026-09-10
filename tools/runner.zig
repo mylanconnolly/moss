@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal, localeupd };
 
 const Spec = struct {
     name: []const u8,
@@ -88,6 +88,7 @@ const specs = [_]Spec{
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
     .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
+    .{ .name = "localeupd", .kind = .localeupd, .pass = "localeupd-test: PASS", .extra = "localeupd: installed CLDR 48.2.0-upd", .append = "profile=localeupd", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
     .{ .name = "smmu", .kind = .blk, .pass = "smmu-test: PASS", .extra = "smmu: DMA refused", .extra_x86 = "vtd: DMA refused" },
     .{ .name = "vm", .pass = "vm-test: PASS", .extra = "guest> guest: tick 3" },
@@ -155,6 +156,7 @@ const tls_port: u16 = 31910;
 /// Where the host reaches the moss server's own TLS listener (`serve`
 /// over a tls-listener), forwarded to the guest's :8443.
 const tls_srv_port: u16 = 31911;
+const locale_upd_port: u16 = 31912; // openssl -WWW serving the locale fixture
 /// The fabric-login drill's own hub port: a listener the three-node
 /// drill left in TIME_WAIT must never be the one node 2 dials.
 const flogin_port = "31911";
@@ -293,7 +295,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -336,6 +338,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             "-device",
             "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
+        }),
+        // The locale updater: a plain slirp NIC (the guest reaches the host
+        // fixture server as 10.0.2.2) and an entropy device for the TLS
+        // handshake.
+        .localeupd => try args.appendSlice(gpa, &.{
+            "-netdev", "user,id=n0",
+            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+            "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),
         // Two NICs on one hub (host node 1, guest node 2) and a second
         // entropy device for the guest.
@@ -415,11 +425,18 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     // net and dot keep their assets (trust roots) in mossfs, so they
     // boot a scratch disk alongside the NIC.
-    if (spec.kind == .net or spec.kind == .dot) try appendDisk(&args, disk);
+    if (spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd) try appendDisk(&args, disk);
 
     var tls_server: ?std.process.Child = null;
     if (spec.kind == .net) tls_server = try spawnQemu(&.{
         "openssl", "s_server",                     "-accept", std.fmt.comptimePrint("127.0.0.1:{d}", .{tls_port}), "-www", "-tls1_3", "-quiet",
+        "-cert",   "lib/tls/moss-test-server.pem", "-key",    "lib/tls/moss-test-server.key",
+    });
+    // The locale updater fetches its fixture blob over TLS: openssl in
+    // file-serving mode (-WWW), the moss test cert, files relative to the
+    // repo root (so GET /tools/testdata/cldr-fixture.db works).
+    if (spec.kind == .localeupd) tls_server = try spawnQemu(&.{
+        "openssl", "s_server",                     "-accept", std.fmt.comptimePrint("127.0.0.1:{d}", .{locale_upd_port}), "-WWW", "-tls1_3", "-quiet",
         "-cert",   "lib/tls/moss-test-server.pem", "-key",    "lib/tls/moss-test-server.key",
     });
     defer if (tls_server) |*t| t.kill(io);

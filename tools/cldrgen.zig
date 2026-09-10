@@ -23,11 +23,22 @@ pub fn main(init: std.process.Init) !u8 {
     const gpa = init.arena.allocator();
     const cwd = std.Io.Dir.cwd();
 
-    var argv: std.ArrayList([]const u8) = .empty;
+    var raw: std.ArrayList([]const u8) = .empty;
     var ait = std.process.Args.Iterator.init(init.minimal.args);
-    while (ait.next()) |a| try argv.append(gpa, try gpa.dupe(u8, a));
+    while (ait.next()) |a| try raw.append(gpa, try gpa.dupe(u8, a));
+    // Pull out an optional `--rel <string>` (override the release stamp, so
+    // a test can build a distinguishable fixture blob); keep the rest.
+    var rel_override: ?[]const u8 = null;
+    var argv: std.ArrayList([]const u8) = .empty;
+    var ai: usize = 0;
+    while (ai < raw.items.len) : (ai += 1) {
+        if (std.mem.eql(u8, raw.items[ai], "--rel") and ai + 1 < raw.items.len) {
+            rel_override = raw.items[ai + 1];
+            ai += 1;
+        } else try argv.append(gpa, raw.items[ai]);
+    }
     if (argv.items.len < 4) {
-        std.debug.print("usage: cldrgen <out.db> <cldr-dir> <tag>...\n", .{});
+        std.debug.print("usage: cldrgen [--rel X] <out.db> <cldr-dir> <tag>...\n", .{});
         return 2;
     }
     const out_path = argv.items[1];
@@ -35,7 +46,7 @@ pub fn main(init: std.process.Init) !u8 {
     const tags = argv.items[3..];
 
     var rel_buf: [16]u8 = undefined;
-    var rel: []const u8 = "unknown";
+    var rel: []const u8 = rel_override orelse "unknown";
 
     var locales: std.ArrayList(locale.LocaleData) = .empty;
     // Keep every parsed JSON alive until the blob is written (LocaleData
@@ -49,11 +60,11 @@ pub fn main(init: std.process.Init) !u8 {
         try docs.append(gpa, parsed);
         const o = parsed.value.object;
 
-        if (o.get("cldr")) |v| {
+        if (rel_override == null) if (o.get("cldr")) |v| {
             const s = v.string;
             @memcpy(rel_buf[0..s.len], s);
             rel = rel_buf[0..s.len];
-        }
+        };
 
         const dec = try parseDecimalPattern(strOf(o, "decimalPattern"));
         const cur = parseCurrencyPattern(strOf(o, "currencyPattern"));
