@@ -18,6 +18,6 @@
     { tag: store, fs: img, ro: true }
     { tag: display, unit: compositor-ptr }
     { tag: font, unit: fontsvc }
-    { tag: locale, fs: "assets/locale", ro: true }
+    { tag: locale, unit: localesvc }
   ]
 }

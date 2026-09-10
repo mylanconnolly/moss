@@ -18,7 +18,7 @@
     { tag: console, unit: termsvc }
     { tag: sess, unit: usersvc-gui }
     { tag: buf, shm: 1 }
-    { tag: locale, fs: "assets/locale", ro: true }
+    { tag: locale, unit: localesvc }
     { secret: conf/trust.token }
   ]
 }

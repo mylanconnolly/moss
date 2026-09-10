@@ -382,6 +382,7 @@ pub const ImageId = enum(u64) {
     ptrcli = 33,
     fontpush = 34,
     localeupd = 35,
+    localesvc = 36,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -665,8 +666,11 @@ pub const CapTag = enum(u64) {
     /// A pointer service's channel (inputsvc in pointer mode): the
     /// compositor reads the tablet's absolute position + buttons over it.
     ptr = 26,
-    /// A read-only view of the locale-data directory (assets/locale):
-    /// a holder loads and live-reloads `cldr.db` (lib/locale).
+    /// The locale service's channel (localesvc): a client formats numbers,
+    /// dates and money through it and reads/sets the session's locale, so the
+    /// whole session's formatting follows one shared choice — the way a
+    /// display or font cap is a channel to its service. (Was a read-only view
+    /// of assets/locale, when each process parsed the CLDR db itself.)
     locale = 27,
 };
 
@@ -903,6 +907,47 @@ pub const FontResp = union(enum(u64)) {
     /// attached (the client uses it for every later request).
     registered: void,
     font_err: struct { code: u64 },
+};
+
+/// The locale service (localesvc): a client formats numbers/dates/money and
+/// reads/sets the session's locale through it, so one shared choice drives
+/// every text a session shows. Like fontsvc, a client `register`s for a
+/// badged channel and attaches its own request/response buffer (strings —
+/// the locale tag, a currency code, the formatted result — cross through
+/// it, keyed by badge so concurrent clients do not trample one buffer).
+pub const LocaleReq = union(enum(u64)) {
+    /// A badged channel so several clients each get their own buffer.
+    register: void,
+    /// The client's request/response buffer (a shm cap). Attached once.
+    attach_buf: void,
+    /// Format a value and write the result back into the buffer. `arg` is
+    /// the value — f64 bits (number/money) or an i64 (int); ignored for
+    /// date/time. `meta` packs the rest (a typed message holds only its tag
+    /// plus three payload words, so the small fields share one):
+    /// `kind` in bits 0..7 (0 number, 1 int, 2 money, 3 date, 4 time),
+    /// `taglen` in bits 8..31 (the locale tag is `buf[0..taglen]`, empty =
+    /// the session default), and `extra` in bits 32..63 — for money the
+    /// currency-code length (it follows the tag in the buffer), for
+    /// date/time the width (0 medium, 1 long). Reply `formatted` + the byte
+    /// length, or `loc_err` (unknown locale / no clock).
+    fmt: struct { arg: u64, meta: u64 },
+    /// The known locales: the CLDR release then each tag, newline-joined,
+    /// written into the buffer. Reply `formatted` + the length.
+    locales: void,
+    /// Set the session's default locale to `buf[0..taglen]` (empty reverts
+    /// to the built-in default). Reply `ok` or `loc_err` for an unknown tag.
+    set_default: struct { taglen: u64 },
+    /// The current session default locale tag, into the buffer. Reply
+    /// `formatted` + the length.
+    get_default: void,
+};
+pub const LocaleResp = union(enum(u64)) {
+    ok: void,
+    /// A channel badged with a fresh client id is attached.
+    registered: void,
+    /// The result string is in the client buffer at [0..len].
+    formatted: struct { len: u64 },
+    loc_err: struct { code: u64 },
 };
 
 /// One laid-out glyph in the run fontsvc writes into the client buffer.

@@ -1,95 +1,56 @@
 //! Locale-aware formatting commands for the shell and scripts: fmt-number,
-//! fmt-int, fmt-money, fmt-date, fmt-time, and `locales`. They format
-//! against Unicode CLDR data (`lib/locale.zig`) loaded from the compact
-//! `assets/locale/cldr.db` the system ships.
+//! fmt-int, fmt-money, fmt-date, fmt-time, `locales`, and the session-locale
+//! controls (sessionlocale / locale-default). They are a thin client of the
+//! shared locale service (localesvc): the values and locale tag go over the
+//! service's request buffer and the formatted string comes back, so the
+//! whole session formats against one CLDR parse and one shared locale — set
+//! `sessionlocale de-DE` in one program and every program's `fmt-*` follows,
+//! the way a font-scale push reaches every text client through fontsvc.
 //!
-//! This module holds its own read-only view of the assets/locale directory
-//! (given under `{ tag: locale }`) and reloads the blob when its mtime or
-//! size changes — the same self-owned-asset, live-reload pattern dotd uses
-//! for trust roots. So the locale auto-updater dropping a fresher db into
-//! the assets tier takes effect here with no restart. No formatting logic
-//! lives here; it is all in the pure `lib/locale` the tests cover.
+//! No formatting or CLDR parsing lives here any more; it is all in localesvc
+//! (over the pure `lib/locale` the host tests cover). This module only
+//! marshals a request and hands back the string the service produced.
 
 const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const mosslib = @import("mosslib");
-const fsc = @import("fsclient.zig");
 const mshl = mosslib.mshl;
-const locale = mosslib.locale;
-const civil = shared.civil;
 const Value = mshl.Value;
 
-var view: u64 = 0;
-var buf: [*]u8 = undefined; // the view's IPC staging buffer (attachBuf)
+var chan: u64 = 0; // the localesvc channel (badged after register)
+var buf: [*]u8 = undefined; // our request/response buffer, shared with localesvc
+var buf_len: usize = 0;
 var buf_ok = false;
 var log_h: u64 = 0;
-var db_store: [64 << 10]u8 = undefined; // the blob; Db borrows into it
-var db: locale.Db = .{};
-var db_ok = false;
-var db_mtime: u64 = 0;
-var db_size: u64 = 0;
 
-/// The locale a bare `fmt-*` uses when none is named. en-US to start; a
-/// session sets it from the system default and the user's own preference
-/// via `sessionlocale`, the way the font scale is pushed. Runtime state,
-/// per process (locale is not a shared service yet — the setting is stored
-/// and applied within the process that formats).
-const fallback_tag = "en-US";
-var default_buf: [24]u8 = undefined;
-var default_len: usize = 0;
-
-fn defaultTag() []const u8 {
-    return if (default_len > 0) default_buf[0..default_len] else fallback_tag;
-}
-
-/// Set the process's default locale (`sessionlocale TAG`), or revert to
-/// the built-in default (no arg / empty). The tag must be one the data
-/// knows; an unknown tag is refused so a typo cannot silently blank dates.
-fn setDefault(tag: []const u8) bool {
-    if (tag.len == 0) {
-        default_len = 0;
-        return true;
-    }
-    if (tag.len > default_buf.len) return false;
-    if (localeFor(tag) == null) return false;
-    @memcpy(default_buf[0..tag.len], tag);
-    default_len = tag.len;
-    return true;
-}
-
-pub fn setup(view_cap: u64, glog: u64) void {
-    view = view_cap;
+pub fn setup(locale_chan: u64, glog: u64) void {
+    chan = locale_chan;
     log_h = glog;
-    if (view == 0) return;
-    const ab = fsc.attachBuf(view);
-    if (ab.va == 0) return;
-    buf = @ptrFromInt(ab.va);
-    buf_ok = true;
-    _ = ensureDb();
+    if (chan == 0) return;
+    // Register for a badged channel so our buffer is our own (concurrent
+    // clients on one localesvc otherwise trample a shared buffer — the same
+    // reason fontsvc registers its clients).
+    switch (usys.callTypedCap(shared.LocaleReq, shared.LocaleResp, chan, .register, 0)) {
+        .ok => |ok| if (ok.rep == .registered and ok.cap != 0) {
+            chan = ok.cap;
+        },
+        .err => {},
+    }
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return;
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return;
+    buf = @ptrFromInt(m.data[0]);
+    buf_len = m.data[1] * 4096;
+    switch (usys.callTypedCap(shared.LocaleReq, shared.LocaleResp, chan, .attach_buf, sh.data[0])) {
+        .ok => |ok| buf_ok = ok.rep == .ok,
+        .err => {},
+    }
 }
 
 pub fn on() bool {
-    return view != 0;
-}
-
-/// Load the blob if we have not, or reload it if the file changed on disk
-/// (an updater swapped it). Cheap: one stat per call, a read only on change.
-fn ensureDb() bool {
-    if (!buf_ok) return db_ok;
-    const st = fsc.fsStat(view, buf, "cldr.db") orelse return db_ok;
-    if (db_ok and st.mtime == db_mtime and st.size == db_size) return true;
-    const bytes = fsc.readWhole(view, buf, "cldr.db", &db_store) orelse return db_ok;
-    db = locale.Db.parse(bytes) catch return db_ok;
-    db_ok = true;
-    db_mtime = st.mtime;
-    db_size = st.size;
-    return true;
-}
-
-fn localeFor(tag: []const u8) ?*const locale.Locale {
-    if (!ensureDb()) return null;
-    return db.find(tag);
+    return chan != 0 and buf_ok;
 }
 
 // -------------------------------------------------------------- arguments
@@ -107,84 +68,110 @@ fn strAt(args: []const Value, i: usize) ?[]const u8 {
     return null;
 }
 
-fn nowDt() ?locale.DateTime {
-    const ms = usys.wallMs() orelse return null;
-    const c = civil.fromUnix(@intCast(ms / 1000));
-    return .{
-        .year = c.year,
-        .month = @intCast(c.month),
-        .day = @intCast(c.day),
-        .hour = @intCast(c.hour),
-        .minute = @intCast(c.minute),
-        .second = @intCast(c.second),
-        .weekday = @intCast(c.weekday),
-    };
-}
-
 fn strValue(it: *mshl.Interp, s: []const u8) mshl.Error!Value {
     return .{ .str = try it.arena.dupe(u8, s) };
+}
+
+/// Send one `fmt` to localesvc: stage the tag (and, for money, the currency
+/// code) in the buffer, ask for `kind`, and return the formatted string in
+/// the buffer, or a loc_err code. `tag` empty = the session default.
+const FmtOut = union(enum) { s: []const u8, err: u64 };
+fn fmtCall(kind: u64, arg: u64, tag: []const u8, currency: []const u8, width: u64) FmtOut {
+    if (!on()) return .{ .err = 0 };
+    if (tag.len + currency.len > buf_len) return .{ .err = 0 };
+    @memcpy(buf[0..tag.len], tag);
+    if (currency.len > 0) @memcpy(buf[tag.len .. tag.len + currency.len], currency);
+    // `extra`: the currency length for money, the width for date/time.
+    const extra: u64 = if (kind == 2) currency.len else width;
+    const meta: u64 = (kind & 0xff) | (@as(u64, tag.len) << 8) | (extra << 32);
+    return switch (usys.callTyped(shared.LocaleReq, shared.LocaleResp, chan, .{ .fmt = .{ .arg = arg, .meta = meta } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .formatted => |f| .{ .s = buf[0..@intCast(@min(f.len, buf_len))] },
+            .loc_err => |e| .{ .err = e.code },
+            else => .{ .err = 0 },
+        },
+        .err => .{ .err = 0 },
+    };
 }
 
 // -------------------------------------------------------------- dispatch
 
 pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, _: ?Value) mshl.Error!?Value {
     if (!on()) return null;
-    var out: [128]u8 = undefined;
 
     if (std.mem.eql(u8, name, "fmt-number")) {
         const v = numOf(args[0]) orelse return it.fail("fmt-number: a number expected", .{});
-        const loc = localeFor(strAt(args, 1) orelse defaultTag()) orelse return it.fail("fmt-number: no locale data", .{});
-        return try strValue(it, loc.formatNumber(&out, v, loc.dec_min_frac, loc.dec_max_frac));
+        return switch (fmtCall(0, @bitCast(v), strAt(args, 1) orelse "", "", 0)) {
+            .s => |s| try strValue(it, s),
+            .err => it.fail("fmt-number: no locale data", .{}),
+        };
     }
     if (std.mem.eql(u8, name, "fmt-int")) {
         if (args[0] != .int) return it.fail("fmt-int: an integer expected", .{});
-        const loc = localeFor(strAt(args, 1) orelse defaultTag()) orelse return it.fail("fmt-int: no locale data", .{});
-        return try strValue(it, loc.formatInt(&out, args[0].int));
+        return switch (fmtCall(1, @bitCast(args[0].int), strAt(args, 1) orelse "", "", 0)) {
+            .s => |s| try strValue(it, s),
+            .err => it.fail("fmt-int: no locale data", .{}),
+        };
     }
     if (std.mem.eql(u8, name, "fmt-money")) {
         const v = numOf(args[0]) orelse return it.fail("fmt-money: a number expected", .{});
         if (args[1] != .str) return it.fail("fmt-money: a currency code expected", .{});
-        const loc = localeFor(strAt(args, 2) orelse defaultTag()) orelse return it.fail("fmt-money: no locale data", .{});
-        return try strValue(it, loc.formatMoney(&out, v, args[1].str));
+        return switch (fmtCall(2, @bitCast(v), strAt(args, 2) orelse "", args[1].str, 0)) {
+            .s => |s| try strValue(it, s),
+            .err => it.fail("fmt-money: no locale data", .{}),
+        };
     }
     if (std.mem.eql(u8, name, "fmt-date") or std.mem.eql(u8, name, "fmt-time")) {
         const is_time = name[4] == 't';
-        const tag = strAt(args, 0) orelse defaultTag();
-        const width: locale.Width = if (strAt(args, 1)) |w|
-            (if (std.mem.eql(u8, w, "long")) .long else .medium)
-        else
-            .medium;
-        const loc = localeFor(tag) orelse return try it.mkResult(false, .{ .str = "no_locale" });
-        const dt = nowDt() orelse return try it.mkResult(false, .{ .str = "no_clock" });
-        const s = if (is_time) loc.formatTime(&out, dt) else loc.formatDate(&out, dt, width);
-        return try it.mkResult(true, try strValue(it, s));
+        const tag = strAt(args, 0) orelse "";
+        const width: u64 = if (strAt(args, 1)) |w| (if (std.mem.eql(u8, w, "long")) 1 else 0) else 0;
+        return switch (fmtCall(if (is_time) 4 else 3, 0, tag, "", width)) {
+            .s => |s| try it.mkResult(true, try strValue(it, s)),
+            .err => |code| try it.mkResult(false, .{ .str = if (code == 10) "no_clock" else "no_locale" }),
+        };
     }
     if (std.mem.eql(u8, name, "sessionlocale")) {
         const tag = strAt(args, 0) orelse "";
-        if (!setDefault(tag)) return try it.mkResult(false, try strValue(it, "no_locale"));
-        // Log the applied default: a GUI script sets it inside its event
-        // loop, where mshl discards a statement's value, so the shell cannot
-        // echo it itself (same reason confcmds logs its writes).
-        var b: [48]u8 = undefined;
-        const cur = defaultTag();
-        @memcpy(b[0..8], "locale: ");
-        const n = @min(cur.len, b.len - 8);
-        @memcpy(b[8 .. 8 + n], cur[0..n]);
-        _ = usys.log(log_h, b[0 .. 8 + n]);
-        return try it.mkResult(true, try strValue(it, defaultTag()));
+        if (tag.len > buf_len) return it.fail("sessionlocale: tag too long", .{});
+        @memcpy(buf[0..tag.len], tag);
+        return switch (usys.callTyped(shared.LocaleReq, shared.LocaleResp, chan, .{ .set_default = .{ .taglen = tag.len } }, 0)) {
+            .ok => |rep| switch (rep) {
+                .ok => try it.mkResult(true, try strValue(it, if (tag.len > 0) tag else "en-US")),
+                else => try it.mkResult(false, try strValue(it, "no_locale")),
+            },
+            .err => it.fail("sessionlocale: the locale service did not answer", .{}),
+        };
     }
     if (std.mem.eql(u8, name, "locale-default")) {
-        return try strValue(it, defaultTag());
+        return switch (usys.callTyped(shared.LocaleReq, shared.LocaleResp, chan, .get_default, 0)) {
+            .ok => |rep| switch (rep) {
+                .formatted => |f| try strValue(it, buf[0..@intCast(@min(f.len, buf_len))]),
+                else => try strValue(it, "en-US"),
+            },
+            .err => try strValue(it, "en-US"),
+        };
     }
     if (std.mem.eql(u8, name, "locales")) {
-        if (!ensureDb()) return it.fail("locales: no locale data", .{});
+        const len: usize = switch (usys.callTyped(shared.LocaleReq, shared.LocaleResp, chan, .locales, 0)) {
+            .ok => |rep| switch (rep) {
+                .formatted => |f| @intCast(@min(f.len, buf_len)),
+                else => return it.fail("locales: no locale data", .{}),
+            },
+            .err => return it.fail("locales: the locale service did not answer", .{}),
+        };
+        // "rel\ntag1\ntag2..." — the release on the first line, then the tags.
+        var lines = std.mem.splitScalar(u8, buf[0..len], '\n');
+        const rel = lines.first();
         var rows: std.ArrayList(Value) = .empty;
-        for (db.locales[0..db.n]) |*l| try rows.append(it.arena, try strValue(it, l.tag));
+        while (lines.next()) |tag| {
+            if (tag.len == 0) continue;
+            try rows.append(it.arena, try strValue(it, tag));
+        }
         const keys = try it.arena.alloc([]const u8, 2);
         keys[0] = "cldr";
         keys[1] = "locales";
         const vals = try it.arena.alloc(Value, 2);
-        vals[0] = try strValue(it, db.rel);
+        vals[0] = try strValue(it, rel);
         vals[1] = .{ .list = try rows.toOwnedSlice(it.arena) };
         return .{ .record = .{ .keys = keys, .vals = vals } };
     }

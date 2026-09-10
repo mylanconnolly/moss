@@ -1960,6 +1960,31 @@ groupings; the `gsession`/`gisession`/`guishell` drills still pass with
 the localized clock. The four launch locales are en-US, de-DE, fr-FR,
 ja-JP; more, plurals, and relative time are a schema extension away.
 
+**A shared locale service (as built, 2026-09-10).** The formatter began
+as a per-process library: each program parsed `cldr.db` itself and held its
+own default locale, so a locale choice in one program (the settings app)
+never reached another (the top-bar clock). `user/localesvc.zig` centralises
+it into a system service, the way fontsvc centralises type — it parses the
+CLDR db once (through the `assets/locale` view, live-reloaded when the
+updater swaps it), holds the session's current locale, and formats numbers,
+integers, money, dates and times on request. `user/localecmds.zig` is now a
+thin client: `fmt-*` marshal the value and locale tag over the service's
+request buffer and read the formatted string back, and `sessionlocale`
+sets the service's default — so one push drives the whole session's
+formatting at once. The client model is fontsvc's exactly: a client
+`register`s for a badged channel and attaches its own buffer, keyed by
+badge so concurrent clients (a greeter's clock and a settings sample) never
+trample one buffer; the `.locale` cap changed from a read-only view into
+the service channel, and the service holds the view instead. A typed
+message carries only its tag plus three payload words, so the format
+request packs `kind`, the tag length and the width/currency length into one
+`meta` word beside the value (the same four-word ceiling that shaped
+statfs). The service logs the applied locale on a push (a durable trace,
+and what a drill keys on). Every locale consumer — the `locale` drill, the
+auto-updater, the top bar, the greeters, the settings app — now formats
+through the one service; formatting output is unchanged (still the pure
+`lib/locale`), so the drills pass verbatim.
+
 **The locale auto-updater (as built, 2026-09-09).** The mechanism that
 keeps the database fresh — and moss's first service that reaches the
 internet on a timer. `user/localeupd.zig` is the dotd model turned around:
@@ -2850,18 +2875,17 @@ locales and a live sample renders a date and a number in the choice
 clock is). "apply" saves it to the home layer (`conf/locale.msh`) alongside
 the appearance and pushes it with `sessionlocale`, which sets this session's
 default locale for bare `fmt-*` — so it parallels the font-scale push
-exactly. The session manager forwards a locale view to each GUI session
-(like the display and font caps) so the shell's formatter has the CLDR data;
-`sessionlocale` logs the applied tag from Zig (a GUI script sets it inside
-its event loop, where mshl discards a statement's value). The `guishell`
-drill cycles the user's locale to de-DE and confirms `locale: de-DE` after
-apply. Owed still (stage 4b, rest): the locale applied *session-wide* (a
-shared locale service, the way fontsvc is shared — today each process holds
-its own CLDR view and default, so the setting reaches only the processes
-that push it); locked keys rendered as visibly non-editable; and a non-admin
-drill watching the read-only path refuse a write (the one-shot login greeter
-makes a second in-boot login costly — the ro path is the well-trodden
-default that every pre-admin session used).
+exactly. The session manager forwards a locale cap to each GUI session
+(like the display and font caps) so the shell can format; `sessionlocale`
+sets the shared locale service's default. The `guishell` drill cycles the
+user's locale to de-DE and confirms `locale: de-DE` after apply. This became
+truly *session-wide* when the locale turned into a shared service (see "A
+shared locale service" above): a push now reaches every process on the
+session's localesvc, not just the one that made it. Owed still (stage 4b,
+rest): locked keys rendered as visibly non-editable; and a non-admin drill
+watching the read-only path refuse a write (the one-shot login greeter makes
+a second in-boot login costly — the ro path is the well-trodden default that
+every pre-admin session used).
 
 ### GUIs in mshl
 

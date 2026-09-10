@@ -4,4 +4,4 @@
 # to read. Essential: the boot follows it and shuts down when it exits.
 { image: mshrun, script: scripts/locale-drill.msh, grant: [log, bootfs],
   budget: { user: 20mb }, profiles: [locale], oneshot: true, essential: true,
-  give: [{ tag: locale, fs: "assets/locale", ro: true }] }
+  give: [{ tag: locale, unit: localesvc }] }

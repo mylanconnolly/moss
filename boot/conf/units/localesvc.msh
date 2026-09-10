@@ -1,0 +1,15 @@
+# The system locale service. It parses the CLDR database once
+# (assets/locale/cldr.db, read through the view and live-reloaded when the
+# auto-updater swaps it), holds the session's current locale, and formats
+# numbers, dates and money on request — so one locale choice drives the
+# whole session's formatting, the way fontsvc makes type consistent. No
+# profile: it is lazy, pulled up by whoever holds a `locale` give (the top
+# bar's clock, the settings app, a shell's fmt-*). Its life is init's.
+{
+  image:  localesvc
+  grant:  [log]
+  budget: { user: 12mb }
+  give: [
+    { tag: view, fs: "assets/locale", ro: true }
+  ]
+}

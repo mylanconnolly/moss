@@ -1035,12 +1035,17 @@ is a plan.
   locale (landed 2026-09-10): the you-pane gained a locale preference with a
   live date/number sample, saved to the home layer (conf/locale.msh) and
   pushed with `sessionlocale` (parallels the font-scale push); the manager
-  forwards a locale view to each GUI session; the guishell drill cycles it to
-  de-DE. Open (stage 4b, rest): the locale applied SESSION-WIDE (a shared
-  locale service like fontsvc — today each process holds its own CLDR view +
-  default); locked keys rendered visibly non-editable; a non-admin drill
-  exercising the read-only refusal (the one-shot greeter makes a second
-  in-boot login costly). Also owed: the dock does not yet clear a pill's
+  forwards a locale cap to each GUI session; the guishell drill cycles it to
+  de-DE. ✅ Stage 4b part 2 — a shared locale service (landed 2026-09-10):
+  `localesvc` parses the CLDR db once and formats numbers/dates/money on
+  request (fontsvc's client model: register + per-client buffers), holding
+  the session's locale; localecmds became a thin client and the `.locale`
+  cap turned from an assets view into the service channel — so a
+  `sessionlocale` push now drives every process on the session (the top-bar
+  clock, a shell's fmt-*), truly session-wide. Open (stage 4b, rest): locked
+  keys rendered visibly non-editable; a non-admin drill exercising the
+  read-only refusal (the one-shot greeter makes a second in-boot login
+  costly). Also owed: the dock does not yet clear a pill's
   *running* mark when the app exits (needs watching the app's domain); a
   subtler focus cue than the login's yellow border; minimize/maximize (max
   needs surface resize); and a wallpaper (the ground is a solid fill
