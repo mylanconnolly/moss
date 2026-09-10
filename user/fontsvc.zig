@@ -244,7 +244,22 @@ fn applyLayers(user_text: []const u8) void {
         const uv = it.parseData(user_text) catch return;
         if (uv == .record) user = uv.record;
     }
-    const eff = settings.merge(a, sv.record, user, &.{}) catch return;
+    // Keys the system layer marks `locked: [ ... ]` cannot be overridden by
+    // a per-user layer — an administrator's enforced appearance (say a
+    // mandated colour scheme). The list is read from the system layer
+    // itself, so the policy travels with the defaults it guards.
+    var locked_buf: [8][]const u8 = undefined;
+    var nlocked: usize = 0;
+    if (sv.record.get("locked")) |lv| if (lv == .list) {
+        for (lv.list) |k| {
+            if (nlocked >= locked_buf.len) break;
+            if (k == .str) {
+                locked_buf[nlocked] = k.str;
+                nlocked += 1;
+            }
+        }
+    };
+    const eff = settings.merge(a, sv.record, user, locked_buf[0..nlocked]) catch return;
     // Reset to system defaults first, so a user layer that drops a key
     // reverts it (merge already handles present keys; this covers the
     // logout case, applyLayers("")).

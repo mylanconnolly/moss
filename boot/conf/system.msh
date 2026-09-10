@@ -12,10 +12,14 @@
 # to conf/app/<name>.msh when it differs from what is there.
 {
   users: [
-    { name: alice, passphrase: "alice-pass", budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
+    { name: alice, passphrase: "alice-pass", budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 }, admin: true }
     { name: bob, passphrase: "bob-pass", budget: { kobj: 2mb, user: 12mb, cpu: 500 }, kdf: { ln: 11 } }
   ]
   settings: {
     editor: { theme: dark, tab_width: 4, telemetry: false }
+    # The system locale default: the locale bare fmt-* use for a session
+    # that has no per-user override. An admin changes it in the settings
+    # app (a read-write conf view); everyone else sees it read-only.
+    locale: { default: "en-US" }
   }
 }

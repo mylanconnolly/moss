@@ -28,4 +28,11 @@
   theme:        dark
   contrast:     normal
   colors:       default
+  # Keys a user's layer may NOT override — an administrator's enforced
+  # appearance. `theme` is locked here (the organisation mandates the dark
+  # theme): a user's font.msh can change scale, contrast and colours, but a
+  # `theme` it sets is ignored and the system value above (dark) stands.
+  # fontsvc reads this list and lib/settings honours it in every per-user
+  # merge, so the lock holds for every program's type and palette at once.
+  locked: ["theme"]
 }

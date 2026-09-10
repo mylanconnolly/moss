@@ -30,8 +30,32 @@ var db_mtime: u64 = 0;
 var db_size: u64 = 0;
 
 /// The locale a bare `fmt-*` uses when none is named. en-US to start; a
-/// per-user default can seed this later, the way the font scale does.
-const default_tag = "en-US";
+/// session sets it from the system default and the user's own preference
+/// via `sessionlocale`, the way the font scale is pushed. Runtime state,
+/// per process (locale is not a shared service yet — the setting is stored
+/// and applied within the process that formats).
+const fallback_tag = "en-US";
+var default_buf: [24]u8 = undefined;
+var default_len: usize = 0;
+
+fn defaultTag() []const u8 {
+    return if (default_len > 0) default_buf[0..default_len] else fallback_tag;
+}
+
+/// Set the process's default locale (`sessionlocale TAG`), or revert to
+/// the built-in default (no arg / empty). The tag must be one the data
+/// knows; an unknown tag is refused so a typo cannot silently blank dates.
+fn setDefault(tag: []const u8) bool {
+    if (tag.len == 0) {
+        default_len = 0;
+        return true;
+    }
+    if (tag.len > default_buf.len) return false;
+    if (localeFor(tag) == null) return false;
+    @memcpy(default_buf[0..tag.len], tag);
+    default_len = tag.len;
+    return true;
+}
 
 pub fn setup(view_cap: u64) void {
     view = view_cap;
@@ -107,23 +131,23 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, _: ?Value) 
 
     if (std.mem.eql(u8, name, "fmt-number")) {
         const v = numOf(args[0]) orelse return it.fail("fmt-number: a number expected", .{});
-        const loc = localeFor(strAt(args, 1) orelse default_tag) orelse return it.fail("fmt-number: no locale data", .{});
+        const loc = localeFor(strAt(args, 1) orelse defaultTag()) orelse return it.fail("fmt-number: no locale data", .{});
         return try strValue(it, loc.formatNumber(&out, v, loc.dec_min_frac, loc.dec_max_frac));
     }
     if (std.mem.eql(u8, name, "fmt-int")) {
         if (args[0] != .int) return it.fail("fmt-int: an integer expected", .{});
-        const loc = localeFor(strAt(args, 1) orelse default_tag) orelse return it.fail("fmt-int: no locale data", .{});
+        const loc = localeFor(strAt(args, 1) orelse defaultTag()) orelse return it.fail("fmt-int: no locale data", .{});
         return try strValue(it, loc.formatInt(&out, args[0].int));
     }
     if (std.mem.eql(u8, name, "fmt-money")) {
         const v = numOf(args[0]) orelse return it.fail("fmt-money: a number expected", .{});
         if (args[1] != .str) return it.fail("fmt-money: a currency code expected", .{});
-        const loc = localeFor(strAt(args, 2) orelse default_tag) orelse return it.fail("fmt-money: no locale data", .{});
+        const loc = localeFor(strAt(args, 2) orelse defaultTag()) orelse return it.fail("fmt-money: no locale data", .{});
         return try strValue(it, loc.formatMoney(&out, v, args[1].str));
     }
     if (std.mem.eql(u8, name, "fmt-date") or std.mem.eql(u8, name, "fmt-time")) {
         const is_time = name[4] == 't';
-        const tag = strAt(args, 0) orelse default_tag;
+        const tag = strAt(args, 0) orelse defaultTag();
         const width: locale.Width = if (strAt(args, 1)) |w|
             (if (std.mem.eql(u8, w, "long")) .long else .medium)
         else
@@ -132,6 +156,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, _: ?Value) 
         const dt = nowDt() orelse return try it.mkResult(false, .{ .str = "no_clock" });
         const s = if (is_time) loc.formatTime(&out, dt) else loc.formatDate(&out, dt, width);
         return try it.mkResult(true, try strValue(it, s));
+    }
+    if (std.mem.eql(u8, name, "sessionlocale")) {
+        const tag = strAt(args, 0) orelse "";
+        if (!setDefault(tag)) return try it.mkResult(false, try strValue(it, "no_locale"));
+        return try it.mkResult(true, try strValue(it, defaultTag()));
+    }
+    if (std.mem.eql(u8, name, "locale-default")) {
+        return try strValue(it, defaultTag());
     }
     if (std.mem.eql(u8, name, "locales")) {
         if (!ensureDb()) return it.fail("locales: no locale data", .{});
@@ -167,7 +199,11 @@ pub fn signature(name: []const u8) ?mshl.Signature {
         return .{ .params = &.{loc_param}, .ret = dt_result };
     if (std.mem.eql(u8, name, "locales"))
         return .{ .ret = .record };
+    if (std.mem.eql(u8, name, "sessionlocale"))
+        return .{ .params = &.{.{ .name = "tag", .shape = .string, .optional = true }}, .ret = dt_result };
+    if (std.mem.eql(u8, name, "locale-default"))
+        return .{ .ret = .string };
     return null;
 }
 
-pub const command_names = [_][]const u8{ "fmt-number", "fmt-int", "fmt-money", "fmt-date", "fmt-time", "locales" };
+pub const command_names = [_][]const u8{ "fmt-number", "fmt-int", "fmt-money", "fmt-date", "fmt-time", "locales", "sessionlocale", "locale-default" };

@@ -1053,7 +1053,10 @@ pub const FsResp = union(enum(u64)) {
     view: struct { badge: u64 },
     num: struct { n: u64 },
     stat: struct { typ: u64, size: u64, mtime: u64 }, // typ: FsType
-    statfs: struct { free_blocks: u64, total_blocks: u64, encrypted: u64 },
+    // `flags`: bit 0 = the volume is encrypted, bit 1 = this view is
+    // read-only. Packed into one word because a typed message carries only
+    // its tag plus three payload words.
+    statfs: struct { free_blocks: u64, total_blocks: u64, flags: u64 },
     fs_err: struct { code: u64 },
 };
 

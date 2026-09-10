@@ -14,7 +14,7 @@
     { tag: view, fs: conf/users, ro: false, mkdir: true }
     { tag: home, fs: home, ro: false }
     { tag: shares, fs: conf/shares, ro: false, mkdir: true }
-    { tag: conf, fs: conf/app, ro: true, mkdir: true }
+    { tag: conf, fs: conf/app, ro: false, mkdir: true }
     { tag: store, fs: img, ro: true }
     { tag: display, unit: compositor-ptr }
     { tag: font, unit: fontsvc }

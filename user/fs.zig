@@ -185,7 +185,7 @@ fn serve() noreturn {
             .symlink => |sl| reply(doSymlink(v, sl.path, sl.target)),
             .readlink => |rl| reply(doReadlink(v, rl.path_off, rl.path_len)),
             .sync => reply(doSync()),
-            .statfs => reply(doStatfs()),
+            .statfs => reply(doStatfs(v)),
             .close => |c| reply(doClose(v, c.fd)),
         }
         // Batched durability: commit between ops when enough is dirty.
@@ -1098,13 +1098,13 @@ fn doClose(v: *View, fdn: u64) shared.FsResp {
     return .ok;
 }
 
-fn doStatfs() shared.FsResp {
+fn doStatfs(v: *View) shared.FsResp {
     if (!disk_ok) return ferr(.io);
     const free = mfs.freeBlocksTotal() catch |err| return mapErr(err);
     return .{ .statfs = .{
         .free_blocks = free,
         .total_blocks = mfs.nsecs / mossfs.spb,
-        .encrypted = @intFromBool(mfs.enc),
+        .flags = @as(u64, @intFromBool(mfs.enc)) | (@as(u64, @intFromBool(v.ro)) << 1),
     } };
 }
 

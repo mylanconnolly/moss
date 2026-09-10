@@ -16,6 +16,7 @@ const fsc = @import("fsclient.zig");
 const fscmds = @import("fscmds.zig");
 const netcmds = @import("netcmds.zig");
 const localecmds = @import("localecmds.zig");
+const confcmds = @import("confcmds.zig");
 const httpcmds = @import("httpcmds.zig");
 const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
@@ -102,6 +103,9 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (sesscmds.on()) {
         if (sesscmds.signature(name)) |sig| return sig;
     }
+    if (confcmds.on()) {
+        if (confcmds.signature(name)) |sig| return sig;
+    }
     if (localecmds.on()) {
         if (localecmds.signature(name)) |sig| return sig;
     }
@@ -127,6 +131,9 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     }
     if (sesscmds.on()) {
         if (try sesscmds.call(it, name, args)) |v| return v;
+    }
+    if (confcmds.on()) {
+        if (try confcmds.call(it, name, args, input)) |v| return v;
     }
     if (localecmds.on()) {
         if (try localecmds.call(it, name, args, input)) |v| return v;
@@ -222,6 +229,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (workcmds_on) workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, init_cap);
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     if (setup.has(.locale)) localecmds.setup(setup.cap(.locale));
+    if (setup.has(.conf)) confcmds.setup(setup.cap(.conf), log_h);
     if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h, setup.secret(), if (setup.has(.font)) setup.cap(.font) else 0, fab_chan);
     if (setup.has(.sess)) sesscmds.setup(setup.cap(.sess), if (setup.has(.console)) setup.cap(.console) else 0);
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);

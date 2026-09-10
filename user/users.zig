@@ -123,8 +123,11 @@ const Session = struct {
     home_node: u64 = 0,
 };
 
-/// A record's budgets, and the node its home lives on (0: here).
-const Budget = struct { kobj_kb: u64 = 1 << 10, user_kb: u64 = 4 << 10, cpu_permille: u64 = 0, home_node: u64 = 0 };
+/// A record's budgets, the node its home lives on (0: here), and whether
+/// the user is an administrator — a policy bit, not an identity: an admin's
+/// GUI session is handed a read-WRITE view of the system settings layer, so
+/// they can change the defaults; everyone else gets it read-only.
+const Budget = struct { kobj_kb: u64 = 1 << 10, user_kb: u64 = 4 << 10, cpu_permille: u64 = 0, home_node: u64 = 0, admin: bool = false };
 
 /// Homes leased to sessions on other nodes: one lease or one local
 /// session per home at a time. A lease is born at the challenge (so
@@ -934,6 +937,7 @@ fn readRecord(name: []const u8, budget: *Budget) ?usercred.Record {
         }
     }
     if (int(r.get("home"))) |h| budget.home_node = @intCast(@max(h, 0));
+    if (r.get("admin")) |a| budget.admin = a == .bool and a.bool;
     return rec;
 }
 
@@ -980,8 +984,15 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     // carries one attached buffer on the service, so two sessions on
     // one badge would trample each other's, and a dead session's would
     // linger until the badge died with us.
-    const conf_view = fsc.fsDerive(app_view, app_buf, "", true) orelse return false;
+    // An admin's GUI session gets the system settings layer read-WRITE, so
+    // the settings app can change the defaults; everyone else gets it
+    // read-only. Only a GUI session has the settings app, and only then is
+    // our own app_view rw (the guishell manager holds conf/app rw); a
+    // console manager holds it ro, so this stays ro there.
+    const conf_rw = gui_sessions and budget.admin;
+    const conf_view = fsc.fsDerive(app_view, app_buf, "", !conf_rw) orelse return false;
     defer _ = usys.capDrop(conf_view);
+    if (conf_rw) logName("usersvc: admin session (system settings writable) for ", name);
     const sess_store: u64 = if (store_view != 0) (fsc.fsDerive(store_view, store_buf, "", true) orelse return false) else 0;
     defer if (sess_store != 0) {
         _ = usys.capDrop(sess_store);
@@ -1477,6 +1488,7 @@ fn apply(chan_h: u64) noreturn {
                     if (int(b.record.get("cpu"))) |x| budget.cpu_permille = @intCast(@max(x, 0));
                 }
             }
+            if (u.record.get("admin")) |ad| budget.admin = ad == .bool and ad.bool;
             var seed: [usercred.seed_len]u8 = undefined;
             var salt: [usercred.salt_len]u8 = undefined;
             randomOrDie(&seed);
@@ -1606,7 +1618,9 @@ fn renderRecord(out: *[1024]u8, rec: usercred.Record, budget: Budget) []const u8
     n = putNum(out, n, budget.user_kb);
     n = putStr(out, n, "kb, cpu: ");
     n = putNum(out, n, budget.cpu_permille);
-    n = putStr(out, n, " } }\n");
+    n = putStr(out, n, " }");
+    if (budget.admin) n = putStr(out, n, ",\n  admin: true");
+    n = putStr(out, n, " }\n");
     return out[0..n];
 }
 

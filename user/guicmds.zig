@@ -101,6 +101,12 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "sessionfont")) {
         return .{ .params = &.{.{ .name = "layer", .shape = .string, .optional = true }}, .input = .{ .optional = .string }, .ret = .any };
     }
+    // `appearance` reports the EFFECTIVE theme/contrast/colours the font
+    // service is applying now (after locked keys), for a settings app to
+    // display or a drill to check what a push actually took.
+    if (std.mem.eql(u8, name, "appearance")) {
+        return .{ .ret = .record };
+    }
     return null;
 }
 
@@ -1520,6 +1526,31 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             "";
         applyUserLayer(text);
         return Value.nothing;
+    }
+    if (std.mem.eql(u8, name, "appearance")) {
+        var theme: shared.Theme = .dark;
+        var contrast: shared.Contrast = .normal;
+        var colors: shared.ColorMode = .default;
+        if (font_chan != 0) switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .appearance, 0)) {
+            .ok => |rep| switch (rep) {
+                .appearance => |ap| {
+                    theme = shared.apTheme(ap.flags);
+                    contrast = shared.apContrast(ap.flags);
+                    colors = shared.apColors(ap.flags);
+                },
+                else => {},
+            },
+            .err => {},
+        };
+        const keys = try it.arena.alloc([]const u8, 3);
+        keys[0] = "theme";
+        keys[1] = "contrast";
+        keys[2] = "colors";
+        const vals = try it.arena.alloc(Value, 3);
+        vals[0] = .{ .str = @tagName(theme) };
+        vals[1] = .{ .str = @tagName(contrast) };
+        vals[2] = .{ .str = if (colors == .cb_safe) "cb-safe" else "default" };
+        return Value{ .record = .{ .keys = keys, .vals = vals } };
     }
     if (!std.mem.eql(u8, name, "gui")) return null;
     const spec: mshl.Record = if (args.len > 0 and args[0] == .record)

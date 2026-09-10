@@ -1016,14 +1016,32 @@ is a plan.
   its window — no new syscall, `connect_named` ignores the boot profile so
   a lazy unit starts on demand); Escape ends the dock (the keymap learned
   Escape → 27, which also lit the top bar's dead Escape-dismiss); the
-  `dock` drill launches a window, closes it, and Escapes to shut down. Open:
-  **stage 4** a settings app, user vs system panes, capability-gated
-  (locked-keys + rw/ro conf views). Also owed: the dock does not yet clear
-  a pill's *running* mark when the app exits (needs watching the app's
-  domain); a subtler focus cue than the login's yellow border;
-  minimize/maximize (max needs surface resize); and a wallpaper (the
-  ground is a solid fill today). Decisions: client-drawn decorations via
-  the shared runtime + compositor move/raise; real multi-process windows.
+  `dock` drill launches a window, closes it, and Escapes to shut down.
+  ✅ Stage 4 — settings, capability-gated (landed 2026-09-10): the
+  post-login shell became a two-pane settings app (you: appearance, saved
+  to the home layer + pushed live; system: the default locale). It
+  introduced moss's first privileged-user notion — `admin: true` on a
+  `system.msh` user entry, written into the record by `apply` and read at
+  login; an admin's GUI session gets a read-WRITE view of the system
+  settings tier (`conf/app`), everyone else read-only (the writable cap IS
+  the gate). A `sysconf-*` command group (confcmds) reads/writes
+  `conf/app/<name>.msh` and reports writability via `statfs` (its
+  `encrypted`+`read_only` folded into one `flags` word — a 4th message
+  field overflowed the 4-word IPC). fontsvc now honours a `locked: [...]`
+  list from its system layer (`conf/font.msh` locks `theme`), so a locked
+  key can't be overridden by a user's layer — `lib/settings.merge` already
+  supported it; nothing used it before. The `guishell` drill proves
+  admin-write + locked-theme end to end. Open: **stage 4b** a per-user
+  locale preference in the you-pane; the locale applied session-wide (a
+  shared locale service like fontsvc — today it is per-process); locked
+  keys rendered visibly non-editable; a non-admin drill exercising the
+  read-only refusal. Also owed: the dock does not yet clear a pill's
+  *running* mark when the app exits (needs watching the app's domain); a
+  subtler focus cue than the login's yellow border; minimize/maximize (max
+  needs surface resize); and a wallpaper (the ground is a solid fill
+  today). Decisions: client-drawn decorations via the shared runtime +
+  compositor move/raise; real multi-process windows; admin = a policy bit
+  on the record, not an identity, surfaced as a writable cap.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

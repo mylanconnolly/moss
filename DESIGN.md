@@ -2791,6 +2791,62 @@ untouched. Owed next: the dock does not yet clear *running* when an app it
 launched exits (that needs the dock to watch the app's domain); today
 *running* means "launched from here this session".
 
+**Settings, stage 4 of the desktop — capability-gated system settings (as
+built, 2026-09-10).** The post-login shell became a two-pane settings app
+(`boot/scripts/gui-shell.msh`): a **you** pane editing this user's own
+appearance (scale/theme/contrast/colours, saved to the home layer and
+pushed live as before) and a **system** pane showing the system default
+locale, editable only by an administrator. Two mechanisms landed under it.
+
+*The admin gate.* moss had no notion of a privileged user — `usercred` is
+identity-only, and every session got the same caps. Stage 4 adds one
+policy bit: a user entry in `system.msh` may carry `admin: true`; `apply`
+writes it into the user's record (alongside the budget — a policy field,
+not an identity one), and at login the session manager reads it. An admin's
+GUI session is handed a **read-write** view of the system settings tier
+(`conf/app`); everyone else's is read-only — the only difference between an
+admin session and any other is the writability of that one cap. The manager
+holds `conf/app` read-write itself now (it did read-only before) and
+derives the per-session view read-only unless the user is an admin *and* the
+session is graphical (a console session, whose manager still holds it
+read-only, cannot escalate). So "may this user change the system defaults?"
+is answered by whether they hold a writable cap, nothing more.
+
+*Reaching the tier from a script.* mshrun gained a small `sysconf-*`
+command group (`user/confcmds.zig`) over the one `conf` view a unit or
+session was handed: `sysconf-read NAME` and `sysconf-write NAME TEXT` read
+and write `conf/app/<name>.msh`, and `sysconf-admin` reports whether the
+view is writable. That last is the honest capability check — it asks the fs
+service, over `statfs`, whether the view is read-only (the service tracks it
+per badge); there is no admin flag in the script to spoof, only the cap. To
+carry the read-only bit, `statfs` folded `encrypted` and `read_only` into
+one `flags` word — a typed message holds only its tag plus three payload
+words, and a fourth field overflowed it (a paid-for lesson: the four-word
+IPC is a hard ceiling on a message's fields). The settings app reads the
+system locale with `sysconf-read locale` and, as an admin, writes it with
+`sysconf-write`; the write logs its outcome to the kernel log from Zig,
+because a GUI script runs its writes inside its event loop where mshl
+discards a statement's value — the shell cannot echo the result itself.
+
+*Locked keys.* `lib/settings.merge` already took a locked-key list but every
+real caller passed none. fontsvc now reads a `locked: [ ... ]` list from its
+system font layer and honours it in every per-user merge, so a key the
+system locks cannot be overridden by a user's home layer. `boot/conf/font.msh`
+locks `theme` (an org mandate for the dark theme): the drill has the user set
+theme=light and apply it, and the effective appearance the font service
+reports is still `dark high-contrast cb-safe` — contrast and colours (both
+unlocked) took, the theme did not.
+
+The `guishell` drill drives it end to end: alice (an admin) logs in, the
+shell reports `settings: admin=true`, the appearance apply proves the theme
+lock held, and changing + saving the system locale writes the tier
+(`sysconf: saved locale`) — a write an ordinary user's read-only view would
+have refused. Owed next (stage 4b): a per-user locale *preference* in the
+you-pane (the system pane sets only the default today), the locale applied
+session-wide (a shared locale service, the way fontsvc is shared — today the
+default is per-process), rendering locked keys as visibly non-editable, and
+a non-admin drill that watches the read-only path refuse a write.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

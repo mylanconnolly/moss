@@ -248,7 +248,7 @@ pub fn fsSync(chan: u64) bool {
     }
 }
 
-pub const Statfs = struct { free_blocks: u64, total_blocks: u64, encrypted: bool };
+pub const Statfs = struct { free_blocks: u64, total_blocks: u64, encrypted: bool, read_only: bool = false };
 
 pub fn fsStatfs(chan: u64) ?Statfs {
     switch (usys.callTyped(shared.FsReq, shared.FsResp, chan, .statfs, 0)) {
@@ -256,7 +256,8 @@ pub fn fsStatfs(chan: u64) ?Statfs {
             .statfs => |st| return .{
                 .free_blocks = st.free_blocks,
                 .total_blocks = st.total_blocks,
-                .encrypted = st.encrypted != 0,
+                .encrypted = st.flags & 1 != 0,
+                .read_only = st.flags & 2 != 0,
             },
             else => return null,
         },

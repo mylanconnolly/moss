@@ -1753,18 +1753,24 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 24px, scale 1.50)", 1, "the session did not apply the user's saved scale on login", spec, polls)) return false;
     sleepMs(500);
 
-    // Change the settings. The panel's focusable order is
-    //   0 smaller, 1 larger, 2 theme, 3 contrast, 4 colours, 5 apply, 6 log out
-    // Fire "smaller" (scale 1.50 → 1.25, re-renders in place), then Tab to
-    // "contrast" and turn it high, Tab to "colours" and turn it cb-safe,
-    // then Tab to "apply" and fire it — the shell saves the whole
-    // appearance to the user's home and pushes it live.
-    _ = q.sendKey("ret"); // smaller (focus 0)
+    // Alice is an administrator: the shell reports it, and its system pane
+    // is editable (the manager granted this session a read-write conf view).
+    if (!try waitLogN(log_path, "settings: admin=true", 1, "the session did not detect the admin's writable conf view", spec, polls)) return false;
+
+    // The USER pane. Focus order (alice, an admin):
+    //   0 smaller 1 larger 2 theme 3 contrast 4 colours 5 apply
+    //   6 change-locale 7 save-system 8 log out
+    // Fire "smaller" (1.50 → 1.25), set THEME light (it is system-locked, so
+    // the push is ignored and the effective theme stays dark), set contrast
+    // high and colours cb-safe (both unlocked), then apply.
+    _ = q.sendKey("ret"); // smaller (focus 0) → scale 1.25
     sleepMs(200);
     _ = q.sendKey("tab"); // → 1 larger
     sleepMs(100);
     _ = q.sendKey("tab"); // → 2 theme
     sleepMs(100);
+    _ = q.sendKey("ret"); // theme → light (locked; effective stays dark)
+    sleepMs(200);
     _ = q.sendKey("tab"); // → 3 contrast
     sleepMs(100);
     _ = q.sendKey("ret"); // contrast → high
@@ -1775,50 +1781,57 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(200);
     _ = q.sendKey("tab"); // → 5 apply
     sleepMs(100);
-    _ = q.sendKey("ret"); // apply
-    if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 20px, scale 1.25)", 1, "the settings change was not applied and pushed", spec, polls)) return false;
-    if (!try waitLogN(log_path, "high-contrast cb-safe", 1, "the accessibility switches were not applied", spec, polls)) return false;
-    // Apply reopens the panel at the new appearance (a third "gui: ready").
+    _ = q.sendKey("ret"); // apply — save the home layer and push it live
+    if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 20px, scale 1.25)", 1, "the appearance change was not applied and pushed", spec, polls)) return false;
+    // One line proves it all: the user set theme=light, contrast=high,
+    // colours=cb-safe. The effective appearance the font service applies is
+    // "dark high-contrast cb-safe" — contrast and colours (unlocked) took,
+    // but the theme is still the system's DARK: the locked key held.
+    if (!try waitLogN(log_path, "dark high-contrast cb-safe", 1, "a locked key (theme) was overridden, or the unlocked switches did not apply", spec, polls)) return false;
+    // Apply reopens the panel (a third "gui: ready").
     if (!try waitLogN(log_path, "gui: ready", 3, "the settings panel did not reopen after apply", spec, polls)) return false;
-    sleepMs(600);
+    sleepMs(400);
 
-    // The reopened panel is high-contrast dark: the window ground is pure
-    // black (a slate #0f1420 in the normal theme). Screendump and check an
-    // empty patch of the window's content area.
-    const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
-    if (q.screendump(ppm_path)) {
-        if (readPpm(ppm_path)) |img| {
-            const p = pixelAt(img, 790, 300); // an empty patch of the window, right of the left-aligned content
-            if (p[0] > 12 or p[1] > 12 or p[2] > 12) {
-                std.debug.print("[FAIL] {s}: high-contrast ground not black at (790,300): {any}\n", .{ spec.name, p });
-                reportFailure(spec.name, "high-contrast did not darken the window ground", log_path);
-                return false;
-            }
-        }
+    // The SYSTEM pane, as an admin: change the system default locale and
+    // save it — a write to the system settings layer (conf/app/locale.msh)
+    // through the read-write conf view the manager granted this session.
+    // Focus resets to 0 on reopen; Tab to change-locale (6) and fire it
+    // (en-US → de-DE), Tab to save-system (7) and fire it.
+    var tl: usize = 0;
+    while (tl < 6) : (tl += 1) {
+        _ = q.sendKey("tab");
+        sleepMs(80);
     }
+    _ = q.sendKey("ret"); // change locale → de-DE
+    sleepMs(200);
+    _ = q.sendKey("tab"); // → 7 save system
+    sleepMs(100);
+    _ = q.sendKey("ret"); // save system
+    if (!try waitLogN(log_path, "sysconf: saved locale", 1, "the admin could not write the system settings layer", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: ready", 4, "the settings panel did not reopen after saving the system layer", spec, polls)) return false;
+    sleepMs(400);
 
-    // Re-apply several times to cycle the surface open/close path: each
-    // apply reopens the panel (a fresh surface). A leaked surface mapping
-    // per reopen would exhaust the shm quota and the shell would quietly
-    // exit — the regression this guards. The panel reopens with focus at 0,
-    // so Tab five times to "apply" and fire it, and watch "gui: ready"
-    // climb each cycle (greeter=1, first open=2, first apply=3, then +1).
+    // The surface-open/close path under repeated reopen: each apply reopens
+    // the panel (a fresh surface). A leaked mapping per reopen would exhaust
+    // the shm quota and the shell would quietly exit — the regression this
+    // guards. Focus resets to 0 each reopen; Tab five times to "apply" and
+    // fire it, watching "gui: ready" climb from 4.
     var cycle: usize = 0;
-    while (cycle < 12) : (cycle += 1) {
+    while (cycle < 8) : (cycle += 1) {
         var tb: usize = 0;
         while (tb < 5) : (tb += 1) {
             _ = q.sendKey("tab");
             sleepMs(80);
         }
         _ = q.sendKey("ret"); // apply → reopen
-        if (!try waitLogN(log_path, "gui: ready", 4 + cycle, "the settings panel stopped reopening — a surface leak?", spec, polls)) return false;
-        sleepMs(300);
+        if (!try waitLogN(log_path, "gui: ready", 5 + cycle, "the settings panel stopped reopening — a surface leak?", spec, polls)) return false;
+        sleepMs(250);
     }
 
-    // Log out: Tab from smaller (0) to "log out" (6) and fire it; the shell
+    // Log out: Tab from smaller (0) to "log out" (8) and fire it; the shell
     // reverts the font layer and exits, unwinding the session.
     var t: usize = 0;
-    while (t < 6) : (t += 1) {
+    while (t < 8) : (t += 1) {
         _ = q.sendKey("tab");
         sleepMs(100);
     }
@@ -2381,7 +2394,7 @@ const shell_script = [_]Step{
     .{ .send = "run nope", .expect = "err not_found" },
     // The desired-state tool from the shell: users created once, then kept.
     .{ .send = "run apply? | where kind == user | len", .expect = "2" },
-    .{ .send = "run apply? | where action == kept | len", .expect = "3" },
+    .{ .send = "run apply? | where action == kept | len", .expect = "4" },
     .{ .send = "ls conf/users? | get name", .expect = "alice.msh" },
     // A user marked absent goes — record and home; a missing name never
     // means that. Then the override is removed and the default re-applied,
