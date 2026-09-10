@@ -30,6 +30,12 @@ def loc-sample [tag] {
   }
 }
 
+# Whether the system layer locks `theme` (the font service reports it). A
+# locked axis is shown as a non-editable label, not a button.
+def theme-locked [] {
+  (appearance) | get "theme_locked"
+}
+
 # Apply this user's saved appearance and locale for the session first.
 match (cat "conf/font.msh") {
   ok $layer => { sessionfont $layer }
@@ -40,9 +46,13 @@ match (cat "conf/locale.msh") {
   _ => null
 }
 
-# Whether this session may write the system settings layer (an admin).
+# Whether this session may write the system settings layer (an admin). The
+# system pane is editable only then; everyone else's conf view is read-only.
 let admin = (sysconf-admin)
 echo ("settings: admin=" + (match $admin { true => "true"; _ => "false" }))
+echo ("settings: system " + (match $admin { true => "editable"; _ => "read-only" }))
+
+echo ("settings: theme " + (match (theme-locked) { true => "locked"; _ => "editable" }))
 
 let running = true
 while $running {
@@ -78,7 +88,10 @@ while $running {
               {
                 kind: "row"
                 children: [
-                  { kind: "button", id: "theme", label: ("theme: " + $state.theme + " (system-locked)") }
+                  (match (theme-locked) {
+                      true => { kind: "label", muted: true, text: ("theme: " + $state.theme + " (system-locked)") }
+                      _ => { kind: "button", id: "theme", label: ("theme: " + $state.theme) }
+                    })
                   { kind: "button", id: "contrast", label: ("contrast: " + $state.contrast) }
                   { kind: "button", id: "colors", label: ("colours: " + $state.colors) }
                 ]

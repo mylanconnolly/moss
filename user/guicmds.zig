@@ -1551,25 +1551,35 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var theme: shared.Theme = .dark;
         var contrast: shared.Contrast = .normal;
         var colors: shared.ColorMode = .default;
+        var locked: u64 = 0;
         if (font_chan != 0) switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .appearance, 0)) {
             .ok => |rep| switch (rep) {
                 .appearance => |ap| {
                     theme = shared.apTheme(ap.flags);
                     contrast = shared.apContrast(ap.flags);
                     colors = shared.apColors(ap.flags);
+                    locked = shared.apLocked(ap.flags);
                 },
                 else => {},
             },
             .err => {},
         };
-        const keys = try it.arena.alloc([]const u8, 3);
+        // { theme, contrast, colors, and a *_locked bool per axis the system
+        // layer locks — so a settings UI renders that control non-editable }.
+        const keys = try it.arena.alloc([]const u8, 6);
         keys[0] = "theme";
         keys[1] = "contrast";
         keys[2] = "colors";
-        const vals = try it.arena.alloc(Value, 3);
+        keys[3] = "theme_locked";
+        keys[4] = "contrast_locked";
+        keys[5] = "colors_locked";
+        const vals = try it.arena.alloc(Value, 6);
         vals[0] = .{ .str = @tagName(theme) };
         vals[1] = .{ .str = @tagName(contrast) };
         vals[2] = .{ .str = if (colors == .cb_safe) "cb-safe" else "default" };
+        vals[3] = .{ .bool = locked & 1 != 0 };
+        vals[4] = .{ .bool = locked & 2 != 0 };
+        vals[5] = .{ .bool = locked & 4 != 0 };
         return Value{ .record = .{ .keys = keys, .vals = vals } };
     }
     if (!std.mem.eql(u8, name, "gui")) return null;

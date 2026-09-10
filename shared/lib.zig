@@ -878,8 +878,13 @@ pub const FontReq = union(enum(u64)) {
 pub const Theme = enum(u8) { dark = 0, light = 1 };
 pub const Contrast = enum(u8) { normal = 0, high = 1 };
 pub const ColorMode = enum(u8) { default = 0, cb_safe = 1 };
-pub fn packAppearance(t: Theme, c: Contrast, m: ColorMode) u64 {
-    return @as(u64, @intFromEnum(t)) | (@as(u64, @intFromEnum(c)) << 8) | (@as(u64, @intFromEnum(m)) << 16);
+/// Pack the effective appearance for fontsvc's `appearance` reply: the
+/// theme/contrast/colours in bytes 0/1/2, and which of those axes the
+/// system layer LOCKS (a user cannot override) in byte 3 — bit 0 theme,
+/// bit 1 contrast, bit 2 colours — so a settings UI can render a locked
+/// control as non-editable.
+pub fn packAppearance(t: Theme, c: Contrast, m: ColorMode, locked: u64) u64 {
+    return @as(u64, @intFromEnum(t)) | (@as(u64, @intFromEnum(c)) << 8) | (@as(u64, @intFromEnum(m)) << 16) | ((locked & 0x7) << 24);
 }
 pub fn apTheme(flags: u64) Theme {
     return if (flags & 0xff == @intFromEnum(Theme.light)) .light else .dark;
@@ -889,6 +894,10 @@ pub fn apContrast(flags: u64) Contrast {
 }
 pub fn apColors(flags: u64) ColorMode {
     return if ((flags >> 16) & 0xff == @intFromEnum(ColorMode.cb_safe)) .cb_safe else .default;
+}
+/// The locked-axes mask (bit 0 theme, 1 contrast, 2 colours).
+pub fn apLocked(flags: u64) u64 {
+    return (flags >> 24) & 0x7;
 }
 
 pub const FontResp = union(enum(u64)) {

@@ -215,6 +215,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.guishellro_test) {
+        _ = sched.spawn("boot-watch", guishellroTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.fabgui_test) {
         _ = sched.spawn("boot-watch", fabguiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -820,6 +825,12 @@ fn fontscaleTestWorker(_: u64) void {
 /// instead of a shell on a terminal; the host signs in and logs out of it.
 fn guishellTestWorker(_: u64) void {
     systemDrill("guishell");
+}
+/// The non-admin settings drill: the same guishell profile (via -append),
+/// but the host signs in as bob (no `admin: true`), so the session's conf
+/// view is read-only and the settings app's system pane is not editable.
+fn guishellroTestWorker(_: u64) void {
+    systemDrill("guishellro");
 }
 
 /// The fabric GUI drill: node 2 (profile "fabgui") runs a GUI whose app

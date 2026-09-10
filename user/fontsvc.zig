@@ -152,6 +152,12 @@ var mono_base: f32 = 15;
 var theme: shared.Theme = .dark;
 var contrast: shared.Contrast = .normal;
 var colors: shared.ColorMode = .default;
+// Which appearance axes the system layer locks (a user layer cannot
+// override them) — reported to a GUI client so it renders the control as
+// non-editable. Set from the `locked` list each applyLayers.
+var locked_theme = false;
+var locked_contrast = false;
+var locked_colors = false;
 const NameBuf = struct {
     buf: [64]u8 = undefined,
     len: usize = 0,
@@ -250,12 +256,18 @@ fn applyLayers(user_text: []const u8) void {
     // itself, so the policy travels with the defaults it guards.
     var locked_buf: [8][]const u8 = undefined;
     var nlocked: usize = 0;
+    locked_theme = false;
+    locked_contrast = false;
+    locked_colors = false;
     if (sv.record.get("locked")) |lv| if (lv == .list) {
         for (lv.list) |k| {
             if (nlocked >= locked_buf.len) break;
             if (k == .str) {
                 locked_buf[nlocked] = k.str;
                 nlocked += 1;
+                if (std.mem.eql(u8, k.str, "theme")) locked_theme = true;
+                if (std.mem.eql(u8, k.str, "contrast")) locked_contrast = true;
+                if (std.mem.eql(u8, k.str, "colors")) locked_colors = true;
             }
         }
     };
@@ -620,7 +632,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                 _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
             },
             .appearance => {
-                _ = usys.replyTyped(shared.FontResp, chan_h, .{ .appearance = .{ .flags = shared.packAppearance(theme, contrast, colors) } }, 0);
+                const lmask: u64 = (@as(u64, @intFromBool(locked_theme))) | (@as(u64, @intFromBool(locked_contrast)) << 1) | (@as(u64, @intFromBool(locked_colors)) << 2);
+                _ = usys.replyTyped(shared.FontResp, chan_h, .{ .appearance = .{ .flags = shared.packAppearance(theme, contrast, colors, lmask) } }, 0);
             },
             .reconfigure => |q| {
                 // A session pushes the logged-in user's font.msh (in the

@@ -1042,10 +1042,15 @@ is a plan.
   the session's locale; localecmds became a thin client and the `.locale`
   cap turned from an assets view into the service channel — so a
   `sessionlocale` push now drives every process on the session (the top-bar
-  clock, a shell's fmt-*), truly session-wide. Open (stage 4b, rest): locked
-  keys rendered visibly non-editable; a non-admin drill exercising the
-  read-only refusal (the one-shot greeter makes a second in-boot login
-  costly). Also owed: the dock does not yet clear a pill's
+  clock, a shell's fmt-*), truly session-wide. ✅ Stage 4b part 3 — the
+  finishing touches (landed 2026-09-10): the font service reports which
+  appearance axes the system layer locks (packed into the appearance reply)
+  and the settings app renders a locked control (theme) as a non-editable
+  label, not a button; and a `guishellro` drill signs in bob (non-admin) and
+  confirms admin=false + a read-only system pane — the other side of the
+  admin gate. **Stage 4 is complete** (both panes, the admin gate, locked
+  keys enforced and shown, per-user + session-wide locale). Also owed
+  (desktop polish, separate): the dock does not yet clear a pill's
   *running* mark when the app exits (needs watching the app's domain); a
   subtler focus cue than the login's yellow border; minimize/maximize (max
   needs surface resize); and a wallpaper (the ground is a solid fill

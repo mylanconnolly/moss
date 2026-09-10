@@ -2881,11 +2881,23 @@ sets the shared locale service's default. The `guishell` drill cycles the
 user's locale to de-DE and confirms `locale: de-DE` after apply. This became
 truly *session-wide* when the locale turned into a shared service (see "A
 shared locale service" above): a push now reaches every process on the
-session's localesvc, not just the one that made it. Owed still (stage 4b,
-rest): locked keys rendered as visibly non-editable; and a non-admin drill
-watching the read-only path refuse a write (the one-shot login greeter makes
-a second in-boot login costly — the ro path is the well-trodden default that
-every pre-admin session used).
+session's localesvc, not just the one that made it.
+
+**Stage 4b, the rest (as built, 2026-09-10).** Two finishing touches. (1)
+*Locked keys shown non-editable.* The font service now reports which
+appearance axes the system layer locks — the `locked` list it already reads
+for the merge is packed into byte 3 of the `appearance` reply's flag word
+(bit per axis) — and the settings app renders a locked control (theme, here)
+as a muted label, not a button, so it is visibly not editable rather than a
+button whose press is quietly ignored. (2) *The non-admin path, proven.* A
+`guishellro` drill reuses the guishell profile but the host signs in as bob,
+who has no `admin: true`: his session's conf view is read-only, so the shell
+reports `settings: admin=false` and renders the system pane read-only. bob's
+panel has no write controls at all — the gate is the cap, not a checked
+button — so there is nothing for him to be refused; the refusal lives one
+layer down, where a read-only view denies a write (the fs drill's ground).
+Between alice (guishell) and bob (guishellro) both sides of the admin gate
+are now exercised.
 
 ### GUIs in mshl
 
