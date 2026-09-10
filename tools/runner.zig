@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal, localeupd, desktop, topbar };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal, localeupd, desktop, topbar, dock };
 
 const Spec = struct {
     name: []const u8,
@@ -72,6 +72,7 @@ const specs = [_]Spec{
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
+    .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: launch win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
     .{ .name = "fontscale", .pass = "fontscale-test: PASS", .extra = "fontpush: login ui=24px", .always_extra = "fontsvc: reconfigured (ui 24px, scale 1.50)", .extra2 = "fontpush: logout ui=16px", .append = "profile=fontscale", .timeout_s = 120 },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
@@ -385,7 +386,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
-        .pointer, .guiclick, .desktop, .topbar => try args.appendSlice(gpa, &.{
+        .pointer, .guiclick, .desktop, .topbar, .dock => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -471,6 +472,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .topbar) {
         if (!try topbarDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .dock) {
+        if (!try dockDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .seat) {
         if (!try seatDrive(spec, log_path, polls)) return false;
@@ -989,6 +993,68 @@ fn topbarDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     return waitLogN(log_path, "topbar: exit note=logging out", 1, "selecting Log Out did not close the bar", spec, polls);
+}
+
+/// Parse `dock: item <i> cx=X cy=Y` (the pill centre the dock logs for the
+/// click router) for a given item index. Returns { cx, cy }.
+fn parseDockItem(content: []const u8, idx: usize) ?[2]u32 {
+    var kb: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&kb, "dock: item {d} cx=", .{idx}) catch return null;
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    var rest = content[at + key.len ..];
+    const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    rest = rest[0..eol];
+    if (rest.len > 0 and rest[rest.len - 1] == '\r') rest = rest[0 .. rest.len - 1];
+    // "X cy=Y"
+    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const cy_at = std.mem.indexOf(u8, rest, "cy=") orelse return null;
+    const cx = std.fmt.parseInt(u32, rest[0..sp], 10) catch return null;
+    const cy = std.fmt.parseInt(u32, rest[cy_at + 3 ..], 10) catch return null;
+    return .{ cx, cy };
+}
+
+/// The dock drill: a resident bottom dock launches app units. Click the
+/// "Alpha" pill → the dock launches win-alpha through init → it opens its
+/// own window; close that window; refocus the dock and press Escape to end
+/// the session (the dock is essential, so the system shuts down clean).
+fn dockDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "dock: ready", 1, "the dock never came up", spec, polls)) return false;
+    sleepMs(300);
+    const item = parseDockItem(readLog(log_path), 0) orelse {
+        reportFailure(spec.name, "could not parse the dock's first pill geometry", log_path);
+        return false;
+    };
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Click the first pill: the dock launches win-alpha through init.
+    if (!clickScanout(&q, item[0], item[1])) {
+        reportFailure(spec.name, "QMP could not click the Alpha pill", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "dock: launch win-alpha", 1, "clicking the pill did not launch the app", spec, polls)) return false;
+    // The launched window comes up on the compositor.
+    if (!try waitLogN(log_path, "gui: ready", 1, "the launched app never opened its window", spec, polls)) return false;
+    sleepMs(500);
+    // Close the launched window by its red traffic-light dot. win-alpha opens
+    // at at:{x:120,y:200}; the close dot sits at (win_x+22, win_y+30).
+    if (!clickScanout(&q, 120 + 22, 200 + 30)) {
+        reportFailure(spec.name, "QMP could not click the launched window's close dot", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "win-alpha: closed", 1, "the launched window did not close", spec, polls)) return false;
+    sleepMs(500);
+    // Refocus the dock (a click on its empty left edge — no pill there) so
+    // the keyboard goes to it, then Escape ends the session.
+    _ = clickScanout(&q, 30, item[1]);
+    sleepMs(300);
+    if (!q.sendKey("esc")) {
+        reportFailure(spec.name, "QMP could not send Escape to the dock", log_path);
+        return false;
+    }
+    return waitLogN(log_path, "dock: exit", 1, "Escape did not end the dock session", spec, polls);
 }
 
 fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {

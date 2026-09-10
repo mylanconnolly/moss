@@ -501,6 +501,28 @@ fn dialService(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
     };
 }
 
+/// Start (or restart) a unit through init and let go — fire-and-forget,
+/// unlike `dial`, which keeps a callable handle. The desktop dock launches
+/// GUI app units this way: init starts the unit, the unit's own
+/// `{ tag: display, session: true }` give opens its surface on the
+/// compositor, and the dock never needs to talk to it. The returned
+/// channel is dropped (init supervises the unit; it is not ours). Returns
+/// the unit name on success.
+fn launchUnit(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
+    const w = shared.strToWords(name);
+    return switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_chan, .{ .connect_named = .{ .a = w[0], .b = w[1] } }, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .connected => blk: {
+                if (ok.cap != 0) _ = usys.capDrop(ok.cap);
+                break :blk try okResult(it, .{ .str = try it.arena.dupe(u8, name) });
+            },
+            .failed => try errResult(it, "refused"),
+            else => try errResult(it, "init gave an unexpected reply"),
+        },
+        .err => try errResult(it, "init did not answer"),
+    };
+}
+
 // ---------------------------------------------------------- commands
 
 fn errResult(it: *mshl.Interp, msg: []const u8) mshl.Error!Value {
@@ -535,6 +557,7 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "publish")) return .{ .params = &.{ .{ .name = "name", .shape = .string }, .{ .name = "target", .shape = publishable_kind } }, .ret = call_result };
     if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "name", .shape = .string } }, .ret = service_result };
     if (std.mem.eql(u8, name, "dial")) return .{ .params = &.{ .{ .name = "node_or_name", .shape = .{ .one_of = &.{ .string, .int } } }, .{ .name = "name", .shape = .string, .optional = true } }, .ret = service_result };
+    if (std.mem.eql(u8, name, "launch")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = call_result };
     return null;
 }
 
@@ -667,6 +690,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (args[0] != .str) return it.fail("dial: a service name expected, got a {s}", .{args[0].typeName()});
         if (args[0].str.len > 16) return it.fail("dial: a service name is at most 16 bytes", .{});
         return try dialService(it, args[0].str);
+    }
+    if (is(u8, name, "launch")) {
+        if (init_chan == 0) return it.fail("launch: this program cannot reach init", .{});
+        if (args.len == 0 or args[0] != .str) return it.fail("launch: a unit name expected", .{});
+        if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("launch: a unit name is 1..16 bytes", .{});
+        return try launchUnit(it, args[0].str);
     }
     // close / status on a service handle.
     const hv = input orelse (if (args.len > 0) args[0] else return null);
@@ -986,4 +1015,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "signal", "wait", "notify" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify" };

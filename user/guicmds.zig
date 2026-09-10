@@ -1236,6 +1236,155 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
     return state;
 }
 
+// ----------------------------------------------------------- the dock
+
+const dock_vpad = 8;
+const dock_hpad = 16;
+const dock_gap = 10;
+
+const DockHit = struct { unit: []const u8, bx: usize, bw: usize };
+var dock_items: [12]DockHit = undefined;
+var dock_nitems: usize = 0;
+
+/// Draw the dock — a resident bottom bar of app buttons (rounded pills),
+/// laid out centred across the width. An item is
+/// `{ title, unit, running? }`; a running app gets the primary fill and a
+/// dot below it. Each pill's hit box is recorded for the click router.
+fn renderDock(tree: Value) void {
+    dock_nitems = 0;
+    fillAll(pal.surface);
+    fillRect(0, 0, win_w, pal.border_w, pal.border); // the rule against the desktop
+    if (tree != .record) return;
+    const items: []const Value = if (tree.record.get("items")) |iv| (if (iv == .list) iv.list else &.{}) else &.{};
+    var total: usize = 0;
+    var n: usize = 0;
+    for (items) |item| {
+        if (item != .record) continue;
+        total += strW(R_UI, strField(item.record, "title")) + 2 * dock_hpad;
+        n += 1;
+    }
+    if (n > 1) total += (n - 1) * dock_gap;
+    const pill_h = lineOf(R_UI) + 2 * item_vpad;
+    const py = if (win_h > pill_h) (win_h - pill_h) / 2 else 0;
+    var x: usize = if (win_w > total) (win_w - total) / 2 else dock_gap;
+    for (items) |item| {
+        if (item != .record) continue;
+        const r = item.record;
+        const title = strField(r, "title");
+        const unit = strField(r, "unit");
+        const running = r.get("running") != null and (r.get("running").?).asBool();
+        const w = strW(R_UI, title) + 2 * dock_hpad;
+        const fill = if (running) pal.primary else pal.surface_hi;
+        const ink = if (running) pal.primary_ink else pal.text;
+        fillRoundRect(x, py, w, pill_h, 10, fill);
+        drawStr(x + dock_hpad, py + item_vpad, R_UI, title, ink, fill);
+        if (running and win_h > 4) fillDot(x + w / 2, win_h - 4, 2, pal.primary);
+        if (dock_nitems < dock_items.len) {
+            dock_items[dock_nitems] = .{ .unit = unit, .bx = x, .bw = w };
+            dock_nitems += 1;
+        }
+        x += w + dock_gap;
+    }
+}
+
+/// The dock item under a click (surface-local x), or null.
+fn dockItemAt(lx: usize) ?usize {
+    for (dock_items[0..dock_nitems], 0..) |d, i| {
+        if (lx >= d.bx and lx < d.bx + d.bw) return i;
+    }
+    return null;
+}
+
+/// The `{ item, unit }` event a dock click fires into `update` (the app's
+/// update typically calls `launch $ev.unit`).
+fn mkDockEvent(it: *mshl.Interp, unit: []const u8) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 2);
+    keys[0] = "item";
+    keys[1] = "unit";
+    const vals = try it.arena.alloc(Value, 2);
+    vals[0] = .{ .str = try it.arena.dupe(u8, unit) };
+    vals[1] = .{ .str = try it.arena.dupe(u8, unit) };
+    return .{ .record = .{ .keys = keys, .vals = vals } };
+}
+
+/// The resident dock loop (`gui { dock: true, ... }`): a bottom bar of app
+/// buttons, pinned full-width, chrome-less — not a window. view(state)
+/// returns `{ items: [ { title, unit, running? } ] }`; clicking a pill
+/// fires update(state, { item, unit }), whose update launches the app unit
+/// (`launch $ev.unit` reaches init through this process's init front
+/// channel). `done: true` ends it.
+fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
+    if (!font_ok) fontReady();
+    refreshAppearance();
+    if (client_chan == 0) client_chan = registerClient();
+    if (client_chan != 0) chan = client_chan;
+    const pill_h = lineOf(R_UI) + 2 * item_vpad;
+    win_w = scanout_w;
+    win_h = pill_h + 2 * dock_vpad + pal.border_w;
+    win_x = 0;
+    win_y = if (scanout_h > win_h) scanout_h - win_h else 0;
+    dragging = false;
+    ptr_down = false;
+    if (!openSurface()) return it.fail("gui: cannot open the dock surface", .{});
+    defer closeSurface();
+
+    var state = init_state;
+    var tree = try it.callValue(view, &.{state}, null, null);
+    var announced = false;
+    while (true) {
+        it.reclaim();
+        renderDock(tree);
+        if (!commitSurface()) return it.fail("gui: dock commit failed", .{});
+        if (!announced) {
+            var lb: [64]u8 = undefined;
+            _ = usys.log(log_h, std.fmt.bufPrint(&lb, "dock: ready n={d}", .{dock_nitems}) catch "dock: ready n=0");
+            // The click router needs each pill's centre; log them so a drill
+            // can aim precisely (like the top bar's popup geometry).
+            for (dock_items[0..dock_nitems], 0..) |d, i| {
+                var ib: [64]u8 = undefined;
+                _ = usys.log(log_h, std.fmt.bufPrint(&ib, "dock: item {d} cx={d} cy={d}", .{ i, d.bx + d.bw / 2, win_y + win_h / 2 }) catch "dock: item");
+            }
+            announced = true;
+        }
+        var fired_unit: ?[]const u8 = null;
+        var quit = false;
+        input: while (true) {
+            const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            if (ev.kind == 2) {
+                tree = try it.callValue(view, &.{state}, null, null); // tick refresh
+                break :input;
+            }
+            if (ev.kind == 1) {
+                const down = ev.btn & 1 != 0;
+                const press = down and !ptr_down;
+                ptr_down = down;
+                if (press and ev.surface == surf) {
+                    if (dockItemAt(ev.x)) |idx| {
+                        fired_unit = dock_items[idx].unit;
+                        break :input;
+                    }
+                }
+                continue :input;
+            }
+            if (ev.ch == 27) { // Escape ends the dock (and the session)
+                quit = true;
+                break :input;
+            }
+        }
+        if (quit) break;
+        if (fired_unit) |unit| {
+            var lb: [64]u8 = undefined;
+            _ = usys.log(log_h, std.fmt.bufPrint(&lb, "dock: launch {s}", .{unit}) catch "dock: launch");
+            const ev = try mkDockEvent(it, unit);
+            state = try it.callValue(update, &.{ state, ev }, null, null);
+            tree = try it.callValue(view, &.{state}, null, null);
+            if (isDone(state)) break;
+        }
+    }
+    _ = usys.log(log_h, "dock: closed");
+    return state;
+}
+
 // ------------------------------------------------- crash-isolated update
 
 /// Reconstruct `update` (a `fn [stateParam, evParam] body`) as a worker
@@ -1398,6 +1547,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // (pinned, chrome-less, with dropdown menus), not a window.
     if (spec.get("bar") != null and (spec.get("bar").?).asBool()) {
         return try runBar(it, view, update, state);
+    }
+    // `dock: true` is the resident bottom dock — a bar of app buttons that
+    // launch their units on a click, pinned full-width, not a window.
+    if (spec.get("dock") != null and (spec.get("dock").?).asBool()) {
+        return try runDock(it, view, update, state);
     }
 
     // `node: N` runs the whole app on node N over the fabric — the runtime

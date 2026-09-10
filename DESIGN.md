@@ -2760,6 +2760,37 @@ runtime logs the dropdown's geometry so the click is exact) and selects
 Log Out — the bar renders, the menu opens a real popup surface, the item
 fires `update`, and the bar exits, all end to end.
 
+**The dock, stage 3 of the desktop (as built, 2026-09-10).** A resident
+macOS-style dock pinned at the *bottom*: a centred row of rounded app
+pills, each of which **launches** its app on a click. `gui { dock: true }`
+selects a third render/loop in the runtime (`runDock`, a sibling of the
+top bar's `runBar`); `view(state)` returns `{ items: [ { title, unit,
+running? } ] }`, and clicking a pill fires `update(state, { item, unit })`.
+The launch itself is the point: an app is a *unit*, and a GUI process that
+holds init's front channel (`{ tag: init, self: true }`) can ask init to
+start one. mshrun now wires that cap through to the worker commands (it was
+being dropped), and a new `launch NAME` command sends init a
+`connect_named` and lets go — fire-and-forget, unlike `dial`, which keeps a
+callable handle. init starts the unit; the unit's own `{ tag: display,
+session: true }` give opens its surface on the compositor; the dock never
+talks to it. So the dock's `update` is just `launch $ev.unit`, and a real
+second process — a movable window from stage 1 — appears. The launched
+app is marked *running* (a primary-filled pill with a dot), state the app
+threads through `view`. Escape ends the dock (and, since the dock is the
+session's essential unit, the session) — which meant teaching the keyboard
+map Escape (linux keycode 1 → ASCII 27); that also lit up the top bar's
+until-now-dead Escape-to-dismiss. The `dock` drill clicks the Alpha pill
+(the runtime logs each pill's centre so the click is exact), waits for the
+launched window to come up, closes it, and presses Escape to shut down
+clean. Two things fit this to moss's grain: launching reuses init's
+ordinary lazy-start path (no new "spawn a window" syscall — a launched app
+is a supervised unit like any other, `connect_named` ignoring the boot
+profile so a lazy unit starts on demand), and a dead app is init's to
+reap, not the dock's — closing the launched window leaves the dock
+untouched. Owed next: the dock does not yet clear *running* when an app it
+launched exits (that needs the dock to watch the app's domain); today
+*running* means "launched from here this session".
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

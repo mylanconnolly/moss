@@ -1007,12 +1007,21 @@ is a plan.
   chrome-less menu bar — a system menu whose dropdown is a real second
   surface (opaque surfaces can't overlay in-place), a live clock+date via
   `fmt-time`, and a reserved strut so windows open below it; the `topbar`
-  drill opens the menu and selects Log Out. Open: **stage 3**
-  a dock of running/launchable apps (needs launching apps from the GUI —
-  the session `init` front channel starts a unit with a display give);
+  drill opens the menu and selects Log Out. ✅ Stage 3 — the dock (landed
+  2026-09-10): `gui { dock: true }` is a resident, pinned bottom bar of app
+  pills that **launch** their units on a click; a GUI process holding
+  init's front channel gains a `launch NAME` command (mshrun now wires the
+  init cap to the worker commands, and `launch` fire-and-forgets a
+  `connect_named` so init starts the unit and its own display give opens
+  its window — no new syscall, `connect_named` ignores the boot profile so
+  a lazy unit starts on demand); Escape ends the dock (the keymap learned
+  Escape → 27, which also lit the top bar's dead Escape-dismiss); the
+  `dock` drill launches a window, closes it, and Escapes to shut down. Open:
   **stage 4** a settings app, user vs system panes, capability-gated
-  (locked-keys + rw/ro conf views). Also owed: a subtler focus cue than
-  the login's yellow border, minimize/maximize, and a wallpaper (the
+  (locked-keys + rw/ro conf views). Also owed: the dock does not yet clear
+  a pill's *running* mark when the app exits (needs watching the app's
+  domain); a subtler focus cue than the login's yellow border;
+  minimize/maximize (max needs surface resize); and a wallpaper (the
   ground is a solid fill today). Decisions: client-drawn decorations via
   the shared runtime + compositor move/raise; real multi-process windows.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.

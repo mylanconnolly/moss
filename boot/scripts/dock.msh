@@ -1,0 +1,22 @@
+# The desktop dock (stage 3): a resident bottom bar of app buttons. Clicking
+# a pill launches that app's unit through init (the `launch` command reaches
+# init over this process's front channel); the app opens its own movable
+# window on the compositor. The launched app is marked running — a primary
+# pill with a dot. Builds on the top bar (stage 2) and movable windows.
+let final = (gui {
+    dock: true
+    init: { open: "" }
+    view: (fn [state] {
+        {
+          items: [
+            { title: "Alpha", unit: "win-alpha", running: ($state.open == "win-alpha") }
+            { title: "Beta", unit: "win-beta", running: ($state.open == "win-beta") }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        launch $ev.unit
+        { open: $ev.unit }
+      })
+  })
+echo "dock: exit"

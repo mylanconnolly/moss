@@ -1,0 +1,18 @@
+# The desktop dock, stage 3 of the shell (profile dock): mshrun runs a
+# resident bottom bar of app buttons on the pointer-capable compositor.
+# Clicking a pill launches that app's unit — the `{ tag: init, self: true }`
+# front channel lets the dock ask init to start it, and the app's own
+# display give opens its window. Essential: the boot follows the dock.
+{
+  image:     mshrun
+  script:    scripts/dock.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [dock]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: init, self: true }
+  ]
+}
