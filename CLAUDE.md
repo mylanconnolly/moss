@@ -27,14 +27,16 @@ frontier — every unstarted arc and every residual, kept current; the
 - `zig build run-shell` — interactive msh console on your terminal.
 - `zig build run-login` — multi-user boot: login prompts on your terminal
   and on `nc 127.0.0.1 31905` (alice / alice-pass, bob / bob-pass).
-- `zig build run-gui -Dgui-profile=gui` — boot a GUI profile on a VNC
-  display and drive it by hand (keyboard: Tab/Enter/typing); the step
-  opens the macOS VNC viewer at `127.0.0.1:5900` (password: `moss`) — VNC,
-  not `-display cocoa`, which mangles the small 640×480 guest on a Retina Mac.
+- `zig build run-gui -Dgui-profile=gui` — boot a GUI profile in a native
+  cocoa window and drive it by hand (Tab/Enter/typing + mouse); QEMU 11's
+  cocoa backend shows the 1024×768 scanout 1:1 and crisp on a Retina Mac
+  (`-display cocoa,zoom-to-fit=off`; VNC was the old workaround from when
+  the scanout was a tiny 640×480 that cocoa clipped into a corner).
   Profiles: `gui`, `guilogin`, `gtrust`, `gsession`, `gisession`, `gboom`,
   `guishell` (the post-login graphical shell: sign in alice/alice-pass).
   No drill harness (the `interactive` cmdline key, not a `-test` flag);
-  the app's exit ends it. Kernel log: `zig-out/gui-run-kernel.log`. M3.
+  closing the window or the app's exit ends it. Kernel log:
+  `zig-out/gui-run-kernel.log`. M3.
 - `zig build -Darch=x86_64 check` — the x86_64 port's gate: the same 30
   rows on OVMF + Limine with VT-d and nested AMD-V under KVM, ~4 min;
   `-Dtcg` runs it without KVM (how it runs on the Mac; also passes,

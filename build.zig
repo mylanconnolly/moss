@@ -943,14 +943,19 @@ pub fn build(b: *std.Build) void {
     // Ctrl-C) ends it. Kernel log: zig-out/gui-run-kernel.log.
     if (arch == .aarch64) {
         const gpu_dev = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1024,yres=768";
-        const open_viewer = if (builtin.os.tag == .macos)
-            "open vnc://127.0.0.1:5900"
-        else
-            "echo '>> connect a VNC viewer to 127.0.0.1:5900'";
+        // The display is QEMU's native cocoa window (Retina-aware in
+        // QEMU 11), shown 1:1 at the 1024x768 scanout — `zoom-to-fit=off`
+        // keeps it crisp rather than stretched. QEMU runs in the
+        // foreground and owns the window; closing the window or quitting
+        // the app (or Ctrl-C here) ends it. Kernel log:
+        // zig-out/gui-run-kernel.log. (VNC was the workaround when the
+        // scanout was a tiny 640x480 that cocoa clipped into a corner.)
         const script = b.fmt(
             \\set -e
             \\test -f zig-out/gui-disk.img || dd if=/dev/zero of=zig-out/gui-disk.img bs=1048576 count=64 2>/dev/null
-            \\qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 \
+            \\echo ">> moss GUI ({s}) in a native window; drive with Tab/Enter/typing/mouse."
+            \\echo ">> quit the app, close the window, or press Ctrl-C here to stop."
+            \\exec qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 \
             \\  -smp 4 -m 512M -nic none \
             \\  -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
             \\  -device {s} \
@@ -958,20 +963,14 @@ pub fn build(b: *std.Build) void {
             \\  -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on \
             \\  -drive if=none,file=zig-out/gui-disk.img,format=raw,id=hd \
             \\  -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=hd \
-            \\  -display none -object secret,id=vncpw,data=moss -vnc 127.0.0.1:0,password-secret=vncpw \
+            \\  -display cocoa,zoom-to-fit=off,show-cursor=on \
             \\  -serial file:zig-out/gui-run-kernel.log \
             \\  -append "profile={s} interactive" \
-            \\  -kernel zig-out/bin/moss-kernel.bin &
-            \\QPID=$!
-            \\sleep 2
-            \\{s} || echo ">> connect a VNC viewer to 127.0.0.1:5900"
-            \\echo ">> moss GUI ({s}) on VNC 127.0.0.1:5900 — password: moss"
-            \\echo ">> drive with Tab/Enter/typing; quit the app or press Ctrl-C here to stop."
-            \\wait $QPID
-        , .{ gpu_dev, gui_profile, open_viewer, gui_profile });
+            \\  -kernel zig-out/bin/moss-kernel.bin
+        , .{ gui_profile, gpu_dev, gui_profile });
         const run_gui = b.addSystemCommand(&.{ "sh", "-c", script });
         run_gui.step.dependOn(b.getInstallStep());
-        const run_gui_step = b.step("run-gui", "Boot a GUI profile on a VNC display and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom|guishell; kernel log: zig-out/gui-run-kernel.log).");
+        const run_gui_step = b.step("run-gui", "Boot a GUI profile in a native cocoa window and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom|guishell; kernel log: zig-out/gui-run-kernel.log).");
         run_gui_step.dependOn(&run_gui.step);
     }
 
