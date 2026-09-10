@@ -3839,7 +3839,21 @@ system proves it live, the `term` drill asserting `fontsvc: hinting 'IBM
 Plex Mono' at 15px` while both bundled hinted families (Mono and Sans)
 grid-fit clean across every UI size (15/16/22/24px) with no drill
 regressing. Real type, from the font's own instructions, at moss's sizes.
-Open for the arc: subpixel, a settings UI, the fabric-remote GUI.
+
+**Smoother proportional text (as built, 2026-09-10).** Once the scanout
+went to 1280×1024 and the window is shown on a Retina 2× display, the
+grid-fit look — crisp but a touch digital — was worth trading for shape
+fidelity on the *proportional* UI text (the macOS approach: minimal
+hinting, heavy AA). Two changes. The rasterizer's supersampling went 4→8
+per axis (16→64 samples/pixel), so curve edges carry a finer coverage
+gradient; glyphs are cached in the atlas, so it is a one-time cost per
+glyph and size. And fontsvc now hints only the **mono** role — the
+terminal, where snapped stems and even spacing matter (and the `term`
+drill's hinting assertion lives) — while the `ui` and `title` roles render
+*unhinted*, their outlines following the true curve for the AA to smooth.
+The hinting interpreter and stage-2 fitting stay exactly as built; only
+which roles ask for them changed. Open for the arc: subpixel, the
+fabric-remote GUI.
 
 ## Distribution: the fabric
 

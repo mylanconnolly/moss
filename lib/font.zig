@@ -1182,7 +1182,7 @@ pub const Glyph = struct {
     advance: f32,
 };
 
-const ss = 4; // supersampling per axis (16 samples/pixel)
+const ss = 8; // supersampling per axis (64 samples/pixel) — smooth curve edges
 
 /// A flattened edge in pixel space (y grows down), for the scanline fill.
 const Edge = struct { x0: f32, y0: f32, x1: f32, y1: f32, dir: i2 };

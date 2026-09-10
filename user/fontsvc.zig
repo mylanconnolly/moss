@@ -430,14 +430,21 @@ fn ensureGlyph(role: u64, px_dev: u16, cp: u21) ?*Cached {
     const f = &families[fam].font;
     var fba = std.heap.FixedBufferAllocator.init(&raster_heap);
     const gid = f.glyphIndex(cp);
-    // Grid-fit with the font's own hints when it has them; fall back to
-    // the plain fill if hinting the glyph fails (best-effort — never break
-    // rendering).
+    // Hinting is grid-fitting — it snaps stems to the pixel grid for crisp,
+    // even monospace, so the terminal (the `mono` role) uses it. Proportional
+    // UI text renders *unhinted* instead: its outlines follow the true curve
+    // and the heavy supersampled AA smooths them, the macOS look (softer, not
+    // grid-snapped), which reads better on the high-res/Retina display than
+    // grid-fit small type. Hinting a glyph is best-effort — any failure falls
+    // back to the plain fill so rendering never breaks.
+    const want_hint = role == @intFromEnum(shared.FontRole.mono);
     const g = blk: {
-        if (hinterFor(fam, px_dev)) |hn| {
-            if (font.rasterizeHinted(f, fba.allocator(), hn, gid, @floatFromInt(px_dev))) |gg| {
-                break :blk gg;
-            } else |_| fba.reset();
+        if (want_hint) {
+            if (hinterFor(fam, px_dev)) |hn| {
+                if (font.rasterizeHinted(f, fba.allocator(), hn, gid, @floatFromInt(px_dev))) |gg| {
+                    break :blk gg;
+                } else |_| fba.reset();
+            }
         }
         break :blk font.rasterize(f, fba.allocator(), gid, @floatFromInt(px_dev)) catch return null;
     };
