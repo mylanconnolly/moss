@@ -1300,9 +1300,10 @@ const dock_vpad = 8;
 const dock_hpad = 16;
 const dock_gap = 10;
 
-const DockHit = struct { unit: []const u8, title: []const u8, bx: usize, bw: usize };
+const DockHit = struct { unit: []const u8, title: []const u8, running: bool = false, bx: usize, bw: usize };
 var dock_items: [12]DockHit = undefined;
 var dock_nitems: usize = 0;
+var dock_running_known = false; // false until the first render logs a baseline
 
 /// Draw the dock — a resident bottom bar of app buttons (rounded pills),
 /// laid out centred across the width. An item is
@@ -1338,11 +1339,20 @@ fn renderDock(tree: Value) void {
         drawStr(x + dock_hpad, py + item_vpad, R_UI, title, ink, fill);
         if (running and win_h > 4) fillDot(x + w / 2, win_h - 4, 2, pal.primary);
         if (dock_nitems < dock_items.len) {
-            dock_items[dock_nitems] = .{ .unit = unit, .title = title, .bx = x, .bw = w };
+            // Log a pill's running state only when it flips (never the
+            // first render's baseline), so a launch lights the dot and an
+            // exit clears it observably (the view polls `unit-up` each tick)
+            // without spamming every tick.
+            if (dock_running_known and dock_items[dock_nitems].running != running) {
+                var rb: [64]u8 = undefined;
+                _ = usys.log(log_h, std.fmt.bufPrint(&rb, "dock: running {s}={}", .{ unit, running }) catch "dock: running");
+            }
+            dock_items[dock_nitems] = .{ .unit = unit, .title = title, .running = running, .bx = x, .bw = w };
             dock_nitems += 1;
         }
         x += w + dock_gap;
     }
+    dock_running_known = true;
 }
 
 /// The dock item under a click (surface-local x), or null.

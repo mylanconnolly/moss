@@ -483,6 +483,37 @@ fn remoteConnect(it: *mshl.Interp, node: u64, name: []const u8) mshl.Error!Value
     };
 }
 
+/// Whether init currently has `name` up (its domain alive). Asks init for
+/// its unit list (the same request `svc` renders) and reads that unit's
+/// `up` bit — init reports a unit whose domain has died as down, so this is
+/// the honest "is the app still running" the dock needs. Any error (no
+/// buffer, init unreachable, the unit unknown) reads as down.
+fn unitUp(name: []const u8) bool {
+    if (init_chan == 0) return false;
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return false;
+    defer _ = usys.capDrop(sh.data[0]);
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return false;
+    defer _ = usys.shmUnmap(m.data[0]);
+    const buf: [*]u8 = @ptrFromInt(m.data[0]);
+    const n = switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .list, sh.data[0])) {
+        .ok => |rep| switch (rep) {
+            .listed => |l| l.n,
+            else => return false,
+        },
+        .err => return false,
+    };
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const rec = shared.UnitRec.decode(buf[i * shared.UnitRec.size ..][0..shared.UnitRec.size]);
+        var nlen: usize = 0;
+        while (nlen < 16 and rec.name[nlen] != 0) nlen += 1;
+        if (std.mem.eql(u8, rec.name[0..nlen], name)) return rec.up != 0;
+    }
+    return false;
+}
+
 /// Dial a durable service unit through init: init starts it (or restarts
 /// a stopped one) and supervises it, and hands back a channel we wrap as
 /// a callable `service` handle. The service outlives us — it is init's.
@@ -558,6 +589,11 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "lookup")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "name", .shape = .string } }, .ret = service_result };
     if (std.mem.eql(u8, name, "dial")) return .{ .params = &.{ .{ .name = "node_or_name", .shape = .{ .one_of = &.{ .string, .int } } }, .{ .name = "name", .shape = .string, .optional = true } }, .ret = service_result };
     if (std.mem.eql(u8, name, "launch")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = call_result };
+    // `unit-up NAME` reports whether init has that unit up right now (its
+    // domain alive) — the desktop dock polls it to clear a pill's *running*
+    // mark when the app it launched exits. Reachable only from a program
+    // that holds init's front channel.
+    if (std.mem.eql(u8, name, "unit-up")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
     return null;
 }
 
@@ -696,6 +732,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (args.len == 0 or args[0] != .str) return it.fail("launch: a unit name expected", .{});
         if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("launch: a unit name is 1..16 bytes", .{});
         return try launchUnit(it, args[0].str);
+    }
+    if (is(u8, name, "unit-up")) {
+        if (init_chan == 0) return it.fail("unit-up: this program cannot reach init", .{});
+        if (args.len == 0 or args[0] != .str) return it.fail("unit-up: a unit name expected", .{});
+        if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("unit-up: a unit name is 1..16 bytes", .{});
+        return .{ .bool = unitUp(args[0].str) };
     }
     // close / status on a service handle.
     const hv = input orelse (if (args.len > 0) args[0] else return null);

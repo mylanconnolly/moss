@@ -6,21 +6,28 @@
 # its window — and the window is brought back (`restore-window TITLE`)
 # instead of the app relaunching. The pill's `title` is the window title the
 # compositor restores by, so they must match ("Settings", "Demo").
+#
+# A pill's *running* dot is not remembered state — it is polled live: the
+# view asks init `unit-up NAME` for each app, and a `tick` re-renders once a
+# second, so the dot lights when the app is up and clears on its own when
+# the app exits (init reports a dead unit as down). No teardown signal has
+# to reach the dock.
 let final = (gui {
     dock: true
-    init: { open: "" }
+    tick: 1000
+    init: { }
     view: (fn [state] {
         {
           items: [
-            { title: "Settings", unit: "settings", running: ($state.open == "settings") }
-            { title: "Demo", unit: "win-demo", running: ($state.open == "win-demo") }
+            { title: "Settings", unit: "settings", running: (unit-up "settings") }
+            { title: "Demo", unit: "win-demo", running: (unit-up "win-demo") }
           ]
         }
       })
     update: (fn [state, ev] {
         match (restore-window $ev.title) {
-          ok _ => { { open: $ev.unit } }
-          _ => { launch $ev.unit; { open: $ev.unit } }
+          ok _ => { { } }
+          _ => { launch $ev.unit; { } }
         }
       })
   })

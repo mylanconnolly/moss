@@ -1017,15 +1017,14 @@ fn parseDockItem(content: []const u8, idx: usize) ?[2]u32 {
     return .{ cx, cy };
 }
 
-/// The scanout centre of the amber (minimize) traffic-light dot, from the
-/// most recent "gui: dots ... min=X,Y ..." a window logs when it opens.
-fn parseMinDot(content: []const u8) ?[2]u32 {
-    const key = "min=";
+/// The scanout centre of a traffic-light dot (`key` = "close=" / "min=" /
+/// "max=") from the most recent "gui: dots close=X,Y min=X,Y max=X,Y" line.
+fn parseDot(content: []const u8, key: []const u8) ?[2]u32 {
     const at = std.mem.lastIndexOf(u8, content, "gui: dots ") orelse return null;
     const line = content[at..];
     const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
-    const min_at = std.mem.indexOf(u8, line[0..eol], key) orelse return null;
-    var rest = line[min_at + key.len .. eol];
+    const k_at = std.mem.indexOf(u8, line[0..eol], key) orelse return null;
+    var rest = line[k_at + key.len .. eol];
     const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
     rest = rest[0..sp];
     const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
@@ -1841,10 +1840,12 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     }
     if (!try waitLogN(log_path, "dock: activate win-demo", 1, "the Demo pill did not launch the demo window", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: ready", 2, "the demo window never opened", spec, polls)) return false;
+    // The dock polls init and lights the pill's running dot once the app is up.
+    if (!try waitLogN(log_path, "dock: running win-demo=true", 1, "the dock did not mark the launched app running", spec, polls)) return false;
     sleepMs(500);
     // Minimize the demo window with its amber traffic-light dot: the window
     // hides but the app keeps running.
-    const dot = parseMinDot(readLog(log_path)) orelse {
+    const dot = parseDot(readLog(log_path), "min=") orelse {
         reportFailure(spec.name, "could not parse the demo window's minimize dot", log_path);
         return false;
     };
@@ -1872,6 +1873,19 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "restoring the window opened a new one instead", log_path);
         return false;
     }
+    sleepMs(500);
+    // Close the demo with its red traffic-light: the app exits, and the dock
+    // — polling init, not tracking the launch — clears the pill's running dot
+    // on its own within a tick.
+    const cdot = parseDot(readLog(log_path), "close=") orelse {
+        reportFailure(spec.name, "could not parse the demo window's close dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, cdot[0], cdot[1])) {
+        reportFailure(spec.name, "QMP could not click the demo's close dot", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "dock: running win-demo=false", 1, "the dock did not clear the pill when the app exited", spec, polls)) return false;
     sleepMs(500);
     // Then the settings app (pill 0). At this scale it is a tall window that
     // covers the dock — fine, we are done clicking the dock. alice is an

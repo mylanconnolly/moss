@@ -1074,8 +1074,12 @@ is a plan.
   `launch`es when nothing by that title is up, so a pill click restores
   rather than relaunches (the per-click log became "dock: activate"). The
   `guishell` drill minimizes the demo window and restores it from its pill.
-  Also owed (desktop polish, separate): the dock does not yet clear a pill's
-  *running* mark when the app exits (needs watching the app's domain); a
+  **Dock running-mark clearing** landed 2026-09-10: a pill's *running* dot
+  is polled live — a new `unit-up NAME` mshl command asks init for its unit
+  list (init reports a dead unit as down) and the dock's `view` calls it per
+  pill with a 1 s `tick` re-render, so the dot lights on launch and clears
+  on its own when the app exits (a crash as much as a clean exit); the dock
+  keeps no *running* state. Also owed (desktop polish, separate): a
   subtler focus cue than the login's yellow border; maximize (needs surface
   resize); and a wallpaper (the ground is a solid fill
   today). Decisions: client-drawn decorations via the shared runtime +

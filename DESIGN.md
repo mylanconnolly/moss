@@ -2983,8 +2983,27 @@ the Demo pill again, and confirms `gui: restored` with no new `gui: ready`
 subtlety worth keeping: because the retained buffer is what reappears, a
 restore needs no cooperation from the app for the *pixels* — the wake event
 is for the app to resume its own logic (a clock that paused while hidden),
-not to redraw. Owed next, as before: the dock clearing *running* when an
-app exits, a subtler focus cue, and maximize (which needs surface resize).
+not to redraw. Owed next: a subtler focus cue, and maximize (which needs
+surface resize).
+
+**The dock clears a pill when its app exits (as built, 2026-09-10).** Stage
+3 left *running* as dock state set at launch and never cleared — the dock
+had no signal that a launched app had gone. Rather than teach the dock to
+watch each app's domain (a cap it does not hold), the pill's dot is now
+*polled live* against init's own truth. A new `unit-up NAME` mshl command
+(`user/workcmds.zig`, reachable from a program that holds init's front
+channel) asks init for its unit list — the same `list` request `svc`
+renders — and reads that unit's `up` bit; init already reports a unit whose
+domain has died as down, so this is the honest "is the app still running".
+The dock's `view` calls `unit-up` per pill and a `tick: 1000` re-renders
+once a second (the same clock-refresh path the top bar uses), so the dot
+lights when the app comes up and clears on its own when it exits — no
+teardown signal has to reach the dock, and it is correct across a crash as
+much as a clean exit. The dock's `update` no longer threads any *running*
+state; it is derived, not remembered. `renderDock` logs a pill's state only
+when it flips (`dock: running <unit>=<bool>`), so the change is observable
+without spamming every tick; the `guishell` drill launches the demo (the
+dot lights), then closes it and confirms the dot clears.
 
 ### GUIs in mshl
 
