@@ -127,8 +127,17 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "appearance")) {
         return .{ .ret = .record };
     }
+    // `restore-window TITLE` brings a running window with that title
+    // forward (unhiding a minimized one) — the dock uses it so a pill for
+    // an already-running app restores it instead of relaunching. `ok` when
+    // one matched, an error otherwise (nothing by that title is up).
+    if (std.mem.eql(u8, name, "restore-window")) {
+        return .{ .params = &.{.{ .name = "title", .shape = .string }}, .ret = restore_result };
+    }
     return null;
 }
+
+const restore_result = mshl.resultShape(.string, .string);
 
 // ------------------------------------------------------------ rendering
 
@@ -941,6 +950,22 @@ fn moveSurface(nx: usize, ny: usize) void {
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .move_surface = .{ .surface = surf, .xy = shared.packPair(@intCast(nx), @intCast(ny)) } }, 0);
 }
 
+/// Name this window's surface so the dock can restore it by title.
+fn setSurfaceTitle(title: []const u8) void {
+    if (surf == 0) return;
+    const w = shared.strToWords(title);
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .set_title = .{ .surface = surf, .a = w[0], .b = w[1] } }, 0);
+}
+
+/// Minimize (hide) or restore (show) this window's surface. The amber
+/// traffic-light hides it; the compositor drops focus to the window behind
+/// and its buffer is kept, so a `restore_titled` from the dock brings it
+/// straight back.
+fn setSurfaceVisible(visible: bool) void {
+    if (surf == 0) return;
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .set_visible = .{ .surface = surf, .visible = @intFromBool(visible) } }, 0);
+}
+
 /// New window origin during a drag: `cur + (local - grab)`, clamped so the
 /// window stays on the scanout. Signed math because a leftward/upward drag
 /// makes the delta negative.
@@ -1275,7 +1300,7 @@ const dock_vpad = 8;
 const dock_hpad = 16;
 const dock_gap = 10;
 
-const DockHit = struct { unit: []const u8, bx: usize, bw: usize };
+const DockHit = struct { unit: []const u8, title: []const u8, bx: usize, bw: usize };
 var dock_items: [12]DockHit = undefined;
 var dock_nitems: usize = 0;
 
@@ -1313,7 +1338,7 @@ fn renderDock(tree: Value) void {
         drawStr(x + dock_hpad, py + item_vpad, R_UI, title, ink, fill);
         if (running and win_h > 4) fillDot(x + w / 2, win_h - 4, 2, pal.primary);
         if (dock_nitems < dock_items.len) {
-            dock_items[dock_nitems] = .{ .unit = unit, .bx = x, .bw = w };
+            dock_items[dock_nitems] = .{ .unit = unit, .title = title, .bx = x, .bw = w };
             dock_nitems += 1;
         }
         x += w + dock_gap;
@@ -1328,24 +1353,27 @@ fn dockItemAt(lx: usize) ?usize {
     return null;
 }
 
-/// The `{ item, unit }` event a dock click fires into `update` (the app's
-/// update typically calls `launch $ev.unit`).
-fn mkDockEvent(it: *mshl.Interp, unit: []const u8) mshl.Error!Value {
-    const keys = try it.arena.alloc([]const u8, 2);
+/// The `{ item, unit, title }` event a dock click fires into `update`
+/// (the app's update restores the window by `title` or launches `unit`).
+fn mkDockEvent(it: *mshl.Interp, unit: []const u8, title: []const u8) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 3);
     keys[0] = "item";
     keys[1] = "unit";
-    const vals = try it.arena.alloc(Value, 2);
+    keys[2] = "title";
+    const vals = try it.arena.alloc(Value, 3);
     vals[0] = .{ .str = try it.arena.dupe(u8, unit) };
     vals[1] = .{ .str = try it.arena.dupe(u8, unit) };
+    vals[2] = .{ .str = try it.arena.dupe(u8, title) };
     return .{ .record = .{ .keys = keys, .vals = vals } };
 }
 
 /// The resident dock loop (`gui { dock: true, ... }`): a bottom bar of app
 /// buttons, pinned full-width, chrome-less — not a window. view(state)
 /// returns `{ items: [ { title, unit, running? } ] }`; clicking a pill
-/// fires update(state, { item, unit }), whose update launches the app unit
-/// (`launch $ev.unit` reaches init through this process's init front
-/// channel). `done: true` ends it.
+/// fires update(state, { item, unit, title }), whose update restores the
+/// app if it is already up (`restore-window $ev.title`) or launches it
+/// otherwise (`launch $ev.unit` reaches init through this process's init
+/// front channel). `done: true` ends it.
 fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
     if (!font_ok) fontReady();
     refreshAppearance();
@@ -1379,7 +1407,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
             }
             announced = true;
         }
-        var fired_unit: ?[]const u8 = null;
+        var fired: ?usize = null;
         var quit = false;
         input: while (true) {
             const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
@@ -1393,7 +1421,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
                 ptr_down = down;
                 if (press and ev.surface == surf) {
                     if (dockItemAt(ev.x)) |idx| {
-                        fired_unit = dock_items[idx].unit;
+                        fired = idx;
                         break :input;
                     }
                 }
@@ -1405,10 +1433,11 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
             }
         }
         if (quit) break;
-        if (fired_unit) |unit| {
+        if (fired) |idx| {
+            const unit = dock_items[idx].unit;
             var lb: [64]u8 = undefined;
-            _ = usys.log(log_h, std.fmt.bufPrint(&lb, "dock: launch {s}", .{unit}) catch "dock: launch");
-            const ev = try mkDockEvent(it, unit);
+            _ = usys.log(log_h, std.fmt.bufPrint(&lb, "dock: activate {s}", .{unit}) catch "dock: activate");
+            const ev = try mkDockEvent(it, unit, dock_items[idx].title);
             state = try it.callValue(update, &.{ state, ev }, null, null);
             tree = try it.callValue(view, &.{state}, null, null);
             if (isDone(state)) break;
@@ -1589,6 +1618,19 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         vals[5] = .{ .bool = locked & 4 != 0 };
         return Value{ .record = .{ .keys = keys, .vals = vals } };
     }
+    if (std.mem.eql(u8, name, "restore-window")) {
+        if (display == 0) return it.fail("restore-window: no display", .{});
+        if (args.len == 0 or args[0] != .str) return it.fail("restore-window: a window title expected", .{});
+        const w = shared.strToWords(args[0].str);
+        const ok = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, display, .{ .restore_titled = .{ .a = w[0], .b = w[1] } }, 0)) {
+            .ok => |r| r == .ok,
+            .err => false,
+        };
+        return if (ok)
+            try it.mkResult(true, .{ .str = try it.arena.dupe(u8, args[0].str) })
+        else
+            try it.mkResult(false, .{ .str = "not running" });
+    }
     if (!std.mem.eql(u8, name, "gui")) return null;
     const spec: mshl.Record = if (args.len > 0 and args[0] == .record)
         args[0].record
@@ -1710,8 +1752,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
 
     if (!openSurface()) return it.fail("gui: cannot open a surface", .{});
     defer closeSurface();
+    // Name the surface so the dock can restore this window by its title
+    // after the amber traffic-light minimizes it.
+    if (title.len > 0) setSurfaceTitle(title);
 
     var focus: usize = 0;
+    var minimized = false; // the amber dot hid us; a restore event brings us back
     var announced = false;
     // The current view tree: the initial view of the initial state, then
     // recomputed after each fired event — locally (update then view) or,
@@ -1732,6 +1778,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (!commitSurface()) return it.fail("gui: commit failed", .{});
         if (!announced) {
             _ = usys.log(log_h, "gui: ready");
+            // The traffic-light dot centres in scanout coordinates, so a
+            // host can click close/minimize/maximize precisely.
+            var dl: [96]u8 = undefined;
+            _ = usys.log(log_h, std.fmt.bufPrint(&dl, "gui: dots close={d},{d} min={d},{d} max={d},{d}", .{ win_x + dots_cx[0], win_y + dots_cy, win_x + dots_cx[1], win_y + dots_cy, win_x + dots_cx[2], win_y + dots_cy }) catch "gui: dots");
             // Log each focusable widget's clickable centre in scanout
             // coordinates, so a host driving the pointer can click it.
             for (0..nfocus) |i| {
@@ -1751,10 +1801,18 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var closed = false;
         input: while (true) {
             const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            // A restore: the dock brought this minimized window back. Clear
+            // the minimized state and re-render so its content repaints.
+            if (ev.kind == 3) {
+                minimized = false;
+                _ = usys.log(log_h, "gui: restored");
+                break :input;
+            }
             // A timer tick: re-render so a `view` reading the time updates
-            // — but never mid-drag (a ticking clock must not drop a drag).
+            // — but never mid-drag (a ticking clock must not drop a drag),
+            // and never while minimized (nothing is on screen to update).
             if (ev.kind == 2) {
-                if (dragging) continue :input;
+                if (dragging or minimized) continue :input;
                 ticked = true;
                 break :input;
             }
@@ -1804,7 +1862,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         if (ev.y < title_h and hitDot(ev.x, ev.y) == d) {
                             switch (d) {
                                 0 => closed = true, // red: close the window
-                                1 => _ = usys.log(log_h, "gui: minimize (not yet)"),
+                                1 => { // amber: minimize — hide, keep running
+                                    setSurfaceVisible(false);
+                                    minimized = true;
+                                    pending_dot = null;
+                                    _ = usys.log(log_h, "gui: minimized");
+                                    continue :input; // stay parked until a restore
+                                },
                                 else => _ = usys.log(log_h, "gui: maximize (not yet)"),
                             }
                         }

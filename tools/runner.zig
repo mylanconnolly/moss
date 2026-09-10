@@ -72,7 +72,7 @@ const specs = [_]Spec{
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
-    .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: launch win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
+    .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
     .{ .name = "fontscale", .pass = "fontscale-test: PASS", .extra = "fontpush: login ui=24px", .always_extra = "fontsvc: reconfigured (ui 24px, scale 1.50)", .extra2 = "fontpush: logout ui=16px", .append = "profile=fontscale", .timeout_s = 120 },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
@@ -87,7 +87,7 @@ const specs = [_]Spec{
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
-    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "dock: launch settings", .always_extra = "settings: admin=true", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "dock: activate settings", .always_extra = "settings: admin=true", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "guishellro", .kind = .guishellro, .pass = "guishellro-test: PASS", .extra = "settings: admin=false", .always_extra = "settings: system read-only", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
@@ -1017,6 +1017,23 @@ fn parseDockItem(content: []const u8, idx: usize) ?[2]u32 {
     return .{ cx, cy };
 }
 
+/// The scanout centre of the amber (minimize) traffic-light dot, from the
+/// most recent "gui: dots ... min=X,Y ..." a window logs when it opens.
+fn parseMinDot(content: []const u8) ?[2]u32 {
+    const key = "min=";
+    const at = std.mem.lastIndexOf(u8, content, "gui: dots ") orelse return null;
+    const line = content[at..];
+    const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+    const min_at = std.mem.indexOf(u8, line[0..eol], key) orelse return null;
+    var rest = line[min_at + key.len .. eol];
+    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    rest = rest[0..sp];
+    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
+    const x = std.fmt.parseInt(u32, rest[0..comma], 10) catch return null;
+    const y = std.fmt.parseInt(u32, rest[comma + 1 ..], 10) catch return null;
+    return .{ x, y };
+}
+
 /// The dock drill: a resident bottom dock launches app units. Click the
 /// "Alpha" pill → the dock launches win-alpha through init → it opens its
 /// own window; close that window; refocus the dock and press Escape to end
@@ -1038,7 +1055,7 @@ fn dockDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "QMP could not click the Alpha pill", log_path);
         return false;
     }
-    if (!try waitLogN(log_path, "dock: launch win-alpha", 1, "clicking the pill did not launch the app", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: activate win-alpha", 1, "clicking the pill did not launch the app", spec, polls)) return false;
     // The launched window comes up on the compositor.
     if (!try waitLogN(log_path, "gui: ready", 1, "the launched app never opened its window", spec, polls)) return false;
     sleepMs(500);
@@ -1811,19 +1828,50 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
     if (!try waitLogN(log_path, "fontsvc: reconfigured (ui 24px, scale 1.50)", 1, "the top bar did not apply the user's scale at login", spec, polls)) return false;
     sleepMs(500);
-    // Launch the settings app from the dock (pill 0 — the dock logged its
-    // centre). Launch the demo window FIRST (a small window near the top-left
-    // — the dock stays clear for the next click), from pill 1 ("Files").
+    // Launch the demo window FIRST (a small window near the top-left, so the
+    // dock stays clear for the next click), from pill 1 ("Demo"); the
+    // settings app (pill 0) comes after.
     const dem = parseDockItem(readLog(log_path), 1) orelse {
-        reportFailure(spec.name, "could not parse the dock's Files pill", log_path);
+        reportFailure(spec.name, "could not parse the dock's Demo pill", log_path);
         return false;
     };
     if (!clickScanout(&q, dem[0], dem[1])) {
-        reportFailure(spec.name, "QMP could not click the Files pill", log_path);
+        reportFailure(spec.name, "QMP could not click the Demo pill", log_path);
         return false;
     }
-    if (!try waitLogN(log_path, "dock: launch win-demo", 1, "the Files pill did not launch the demo window", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: activate win-demo", 1, "the Demo pill did not launch the demo window", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: ready", 2, "the demo window never opened", spec, polls)) return false;
+    sleepMs(500);
+    // Minimize the demo window with its amber traffic-light dot: the window
+    // hides but the app keeps running.
+    const dot = parseMinDot(readLog(log_path)) orelse {
+        reportFailure(spec.name, "could not parse the demo window's minimize dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, dot[0], dot[1])) {
+        reportFailure(spec.name, "QMP could not click the minimize dot", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "gui: minimized", 1, "the amber dot did not minimize the window", spec, polls)) return false;
+    sleepMs(500);
+    // Click the Demo pill again: it restores the running window (rather than
+    // relaunching), and the app repaints.
+    const dem2 = parseDockItem(readLog(log_path), 1) orelse {
+        reportFailure(spec.name, "could not re-parse the dock's Demo pill", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, dem2[0], dem2[1])) {
+        reportFailure(spec.name, "QMP could not click the Demo pill to restore", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "gui: restored", 1, "the dock pill did not restore the minimized window", spec, polls)) return false;
+    // A restore must NOT open a fresh window: only the running app receives
+    // the restore event, so no new "gui: ready" appears — still two windows
+    // (the demo and, earlier, settings' first render is yet to come).
+    if (countOccurrences(readLog(log_path), "gui: ready") != 2) {
+        reportFailure(spec.name, "restoring the window opened a new one instead", log_path);
+        return false;
+    }
     sleepMs(500);
     // Then the settings app (pill 0). At this scale it is a tall window that
     // covers the dock — fine, we are done clicking the dock. alice is an
@@ -1836,7 +1884,7 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "QMP could not click the Settings pill", log_path);
         return false;
     }
-    if (!try waitLogN(log_path, "dock: launch settings", 1, "the Settings pill did not launch the app", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: activate settings", 1, "the Settings pill did not launch the app", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: ready", 3, "the settings window never opened", spec, polls)) return false;
     if (!try waitLogN(log_path, "settings: admin=true", 1, "the admin's settings did not detect admin", spec, polls)) return false;
     sleepMs(500);

@@ -1063,11 +1063,21 @@ is a plan.
   `guishellro` runs it as a non-admin. Lessons: a session's budget must cover
   every concurrent unit (bumped user 12→96 MB, per-unit 24→16 MB after a
   `QuotaExceeded`); the unit `script:` path caps at 24 bytes. `run-gui
-  -Dgui-profile=guishell` boots it interactively. Also owed
-  (desktop polish, separate): the dock does not yet clear a pill's
+  -Dgui-profile=guishell` boots it interactively. **Minimize/restore**
+  landed 2026-09-10: the amber traffic-light hides a window (a new
+  compositor `set_visible` flag — retained buffer, focus falls to the
+  topmost visible surface — not a teardown), and clicking the app's dock
+  pill again restores it. The compositor gained `set_title` (a window names
+  its surface, ≤16 bytes) and `restore_titled` (show + raise + focus by
+  title, waking the owner with a new `kind` 3 restore event to repaint);
+  the dock's `update` now `restore-window $ev.title` first and only
+  `launch`es when nothing by that title is up, so a pill click restores
+  rather than relaunches (the per-click log became "dock: activate"). The
+  `guishell` drill minimizes the demo window and restores it from its pill.
+  Also owed (desktop polish, separate): the dock does not yet clear a pill's
   *running* mark when the app exits (needs watching the app's domain); a
-  subtler focus cue than the login's yellow border; minimize/maximize (max
-  needs surface resize); and a wallpaper (the ground is a solid fill
+  subtler focus cue than the login's yellow border; maximize (needs surface
+  resize); and a wallpaper (the ground is a solid fill
   today). Decisions: client-drawn decorations via the shared runtime +
   compositor move/raise; real multi-process windows; admin = a policy bit
   on the record, not an identity, surfaced as a writable cap.

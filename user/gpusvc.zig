@@ -118,6 +118,9 @@ const Surface = struct {
     z: u32 = 0, // stacking order; higher is nearer the top
     owner: u64 = 0, // the badge that created it; keys route to the owner alone
     trusted: bool = false, // the login surface: wears the secure indicator
+    hidden: bool = false, // minimized: retained but not composited, not focusable
+    title: [16]u8 = @splat(0), // the window title, so the dock can restore it by name
+    title_len: u8 = 0,
 };
 var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
@@ -327,7 +330,7 @@ fn focusTopmost() void {
     var best_id: u64 = 0;
     var best_z: u32 = 0;
     for (&surfaces, 0..) |*sf, i| {
-        if (!sf.used) continue;
+        if (!sf.used or sf.hidden) continue;
         if (best_id == 0 or sf.z >= best_z) {
             best_id = i + 1;
             best_z = sf.z;
@@ -511,7 +514,7 @@ fn compositeRect(clip: Rect) bool {
     while (true) {
         var next: ?*Surface = null;
         for (&surfaces) |*sf| {
-            if (!sf.used or sf.z <= painted) continue;
+            if (!sf.used or sf.hidden or sf.z <= painted) continue;
             if (next == null or sf.z < next.?.z) next = sf;
         }
         const sf = next orelse break;
@@ -691,6 +694,21 @@ fn dispatchTicks(chan_h: u64) void {
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = focused, .kind = 2, .arg = 0 } }, 0, t);
     }
 }
+/// Hand one event of `kind` (for a given `surface`) to a specific badge's
+/// parked reader, if one waits — used to wake a minimized window's owner
+/// so it repaints on restore. No reader parked (or none for that badge):
+/// nothing happens; the surface is shown regardless, so its retained
+/// pixels are already back — the wake only prompts a fresh repaint.
+fn wakeReader(chan_h: u64, badge: u64, surface: u64, kind: u64) void {
+    for (&readers) |*rd| if (rd.used and rd.badge == badge and rd.token != 0) {
+        const t = rd.token;
+        rd.token = 0;
+        refreshTicks();
+        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = surface, .kind = kind, .arg = 0 } }, 0, t);
+        return;
+    };
+}
+
 fn takeReader(badge: u64) ?u64 {
     for (&readers) |*rd| if (rd.used and rd.badge == badge) {
         const t = rd.token;
@@ -880,7 +898,7 @@ fn surfaceUnderCursor() u64 {
     var best_id: u64 = 0;
     var best_z: u32 = 0;
     for (&surfaces, 0..) |*sf, i| {
-        if (!sf.used) continue;
+        if (!sf.used or sf.hidden) continue;
         if (cursor_x < sf.x or cursor_x >= sf.x + sf.w) continue;
         if (cursor_y < sf.y or cursor_y >= sf.y + sf.h) continue;
         if (best_id == 0 or sf.z > best_z) {
@@ -1070,6 +1088,70 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 const bx1 = @max(old.x + old.w, nu.x + nu.w);
                 const by1 = @max(old.y + old.h, nu.y + nu.h);
                 _ = compositeRect(.{ .x = bx0, .y = by0, .w = bx1 - bx0, .h = by1 - by0 });
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .set_title => |q| {
+                const sf = findSurface(q.surface) orelse {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 9 } }, 0, token);
+                    continue;
+                };
+                if (sf.owner != badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0, token);
+                    continue;
+                }
+                var tbuf: [24]u8 = undefined;
+                const t = shared.wordsToStr(&tbuf, .{ q.a, q.b, 0 });
+                const n = @min(t.len, sf.title.len);
+                @memcpy(sf.title[0..n], t[0..n]);
+                sf.title_len = @intCast(n);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .set_visible => |q| {
+                const sf = findSurface(q.surface) orelse {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 9 } }, 0, token);
+                    continue;
+                };
+                if (sf.owner != badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0, token);
+                    continue;
+                }
+                const show = q.visible != 0;
+                if (sf.hidden != !show) {
+                    sf.hidden = !show;
+                    if (show) {
+                        raiseSurface(q.surface);
+                        focusSurface(q.surface);
+                    } else if (focused == q.surface) focusTopmost();
+                    _ = composite(); // its area returns to the ground, or reappears
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .restore_titled => |q| {
+                // The dock's pill for a running app was clicked: bring the
+                // window titled `a`/`b` forward (unhiding it if it was
+                // minimized) and wake its owner to repaint. Any client may
+                // ask — it only shows and focuses an existing surface, never
+                // creates or hides one, so it cannot be used to spy.
+                var nbuf: [24]u8 = undefined;
+                const want = shared.wordsToStr(&nbuf, .{ q.a, q.b, 0 });
+                var hit: u64 = 0;
+                for (&surfaces, 0..) |*sf, i| {
+                    if (!sf.used) continue;
+                    if (std.mem.eql(u8, sf.title[0..sf.title_len], want)) {
+                        hit = i + 1;
+                        break;
+                    }
+                }
+                if (hit == 0) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 14 } }, 0, token);
+                    continue;
+                }
+                const sf = findSurface(hit).?;
+                sf.hidden = false;
+                raiseSurface(hit);
+                focusSurface(hit);
+                _ = composite();
+                wakeReader(chan_h, sf.owner, hit, 3);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
             .next_input => {

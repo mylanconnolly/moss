@@ -2940,6 +2940,52 @@ three services, launching, and teardown, end to end. `guishellro` runs the
 same for bob (non-admin: settings read-only). `run-gui -Dgui-profile=guishell`
 boots it to play with by hand.
 
+**Minimize and restore (as built, 2026-09-10).** The amber traffic-light
+was a stub since stage 1 (it logged "minimize (not yet)"); it now hides the
+window, and the app's dock pill brings it back. A minimized window is not
+destroyed — it stops compositing but keeps its buffer and its process — so
+minimize is a new compositor state, not a teardown. The compositor gained
+three requests. `set_visible { surface, visible }` (owner-only) toggles a
+surface's `hidden` flag: hiding drops focus to the topmost *visible*
+surface and recomposits (the window's area returns to the ground); showing
+raises and refocuses it. `set_title { surface, a, b }` (owner-only) names a
+surface with up to 16 bytes, sent once right after `create_surface`, so a
+window can be found again by name. `restore_titled { a, b }` finds the
+surface with that title, shows + raises + focuses it, and **wakes its
+owner** — a new `kind` 3 input event delivered to the owner's parked
+reader — so the app clears its minimized state and repaints. `hidden`
+surfaces are skipped everywhere they must be: compositing, `focusTopmost`,
+and the pointer hit-test.
+
+The window runtime wires it to the traffic-light: the amber dot sends
+`set_visible false`, sets a local `minimized` flag, and keeps looping
+(ignoring ticks while hidden — nothing is on screen to update); a `kind` 3
+restore event clears the flag and re-renders. The dock is the restore
+trigger. `restore_titled` is *not* owner-gated — any display client may
+ask, but it only shows and focuses an existing surface, never creates or
+hides one, so it cannot spy — which lets the dock, a different process,
+restore an app it does not own. A new `restore-window TITLE` mshl command
+sends it (over the shared display cap) and returns `ok`/error; the dock's
+`update` is now `match (restore-window $ev.title) { ok _ => …; _ => launch
+$ev.unit }`, so a pill click restores a running window (unhiding a
+minimized one, or just raising a visible one) and falls back to launching
+when nothing by that title is up. The pill's title is therefore the window
+title the compositor keys on, so the two must match — the settings window
+is titled "Settings" to match its pill (it was "moss settings"). The
+runtime's per-click log went from "dock: launch" to the neutral "dock:
+activate", since a click no longer always launches.
+
+The `guishell` drill exercises the round trip: after the demo window opens
+it clicks the amber dot (the runtime logs the traffic-light centres, like
+it logs widgets, so the click is exact), confirms `gui: minimized`, clicks
+the Demo pill again, and confirms `gui: restored` with no new `gui: ready`
+— the running window came back rather than a fresh one launching. One
+subtlety worth keeping: because the retained buffer is what reappears, a
+restore needs no cooperation from the app for the *pixels* — the wake event
+is for the app to resume its own logic (a clock that paused while hidden),
+not to redraw. Owed next, as before: the dock clearing *running* when an
+app exits, a subtler focus cue, and maximize (which needs surface resize).
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

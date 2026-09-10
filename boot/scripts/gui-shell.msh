@@ -70,7 +70,7 @@ while $running {
   }
   let r = (gui {
       init:  { scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), myloc: $myloc, sysloc: $sysloc, admin: $admin, action: "" }
-      title: "moss settings"
+      title: "Settings"
       view: (fn [state] {
           {
             kind: "column"

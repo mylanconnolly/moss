@@ -1,7 +1,11 @@
 # The desktop dock — a resident bottom bar that launches the session's apps.
-# Each pill launches a session unit by name through the session's init front
-# channel (`launch NAME`): "Settings" opens the settings app, "Files" a demo
-# window. The launched app opens its own window on the shared compositor.
+# Each pill opens a session unit's window on the shared compositor. A pill
+# doubles as the app's presence: click it once and the app launches
+# (`launch NAME` through the session's init front channel); click it again
+# while the app is up — including after the amber traffic-light minimized
+# its window — and the window is brought back (`restore-window TITLE`)
+# instead of the app relaunching. The pill's `title` is the window title the
+# compositor restores by, so they must match ("Settings", "Demo").
 let final = (gui {
     dock: true
     init: { open: "" }
@@ -14,8 +18,10 @@ let final = (gui {
         }
       })
     update: (fn [state, ev] {
-        launch $ev.unit
-        { open: $ev.unit }
+        match (restore-window $ev.title) {
+          ok _ => { { open: $ev.unit } }
+          _ => { launch $ev.unit; { open: $ev.unit } }
+        }
       })
   })
 echo "dock: exit"

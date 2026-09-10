@@ -779,6 +779,25 @@ pub const GpuReq = union(enum(u64)) {
     /// repaints the vacated and the newly-covered area. A window's own
     /// runtime sends this as the user drags its titlebar. -> ok.
     move_surface: struct { surface: u64, xy: u64 },
+    /// Name a surface (its owner only): `a`/`b` carry up to 16 bytes of a
+    /// title (`strToWords`). The compositor keeps it so a window can be
+    /// found again by name — the dock restores a minimized window by its
+    /// title (`restore_titled`). Sent once, right after `create_surface`.
+    /// -> ok.
+    set_title: struct { surface: u64, a: u64, b: u64 },
+    /// Show or hide a surface (its owner only): `visible` 0 hides it (it
+    /// stops compositing and drops focus to the topmost visible surface,
+    /// its buffer retained), non-zero shows it again. A window minimizes
+    /// itself by hiding (the amber traffic-light); the dock restores it.
+    /// -> ok.
+    set_visible: struct { surface: u64, visible: u64 },
+    /// Restore (show, raise, and focus) the surface whose title matches the
+    /// 16 bytes in `a`/`b` (`strToWords`) — the dock sends this when its
+    /// pill for an already-running app is clicked, so a minimized window
+    /// comes back instead of the app relaunching. The owner is woken with a
+    /// `kind` 3 restore event so it repaints. -> ok when one matched, else
+    /// `gpu_err` (nothing by that title) so the dock launches instead.
+    restore_titled: struct { a: u64, b: u64 },
     /// Earn a uniquely-badged channel so several windows from different
     /// processes are told apart (their surfaces and input readers are keyed
     /// by badge). An ordinary GUI client registers once on start and drives
@@ -818,6 +837,9 @@ pub const GpuResp = union(enum(u64)) {
     /// (a drag), never on a bare move — a hovering cursor never wakes the
     /// client. `kind` 2 is a timer *tick* (arg 0): no input happened, the
     /// deadline from `next_input_tick` elapsed — the client re-renders.
+    /// `kind` 3 is a *restore* (arg 0): the compositor un-minimized this
+    /// surface (a `restore_titled` from the dock) — the client clears its
+    /// minimized state and repaints.
     input: struct { surface: u64, kind: u64 = 0, arg: u64 = 0 },
     /// The trust token matched: + a badged channel cap the client uses in
     /// place of the shared display channel for all further requests.
