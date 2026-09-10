@@ -154,6 +154,9 @@ while $running {
     # lives on — reverting is the top bar's job at log-out, not ours.
     _ => null
   }
-  let running = (match $r.action { "logout" => false; _ => true })
+  # Reopen only to re-render after a change (apply/save re-lay the window at
+  # the new look); "close" and the red traffic-light (which return with no
+  # action) end the app.
+  let running = (match $r.action { "apply" => true; "savesys" => true; _ => false })
 }
 "gui: shell exited"

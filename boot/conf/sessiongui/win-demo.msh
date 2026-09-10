@@ -4,7 +4,7 @@
 # compositor — alongside the settings app.
 {
   image:     mshrun
-  script:    scripts/win-alpha.msh
+  script:    scripts/demo.msh
   budget:    { user: 16mb }
   grant:     [log, bootfs]
   essential: false

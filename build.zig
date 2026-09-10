@@ -667,6 +667,7 @@ pub fn build(b: *std.Build) void {
         "conf/sessiongui/topbar.msh",      "scripts/dtopbar.msh",
         "conf/sessiongui/dock.msh",        "scripts/ddock.msh",
         "conf/sessiongui/settings.msh",    "conf/sessiongui/win-demo.msh",
+        "scripts/demo.msh",
         "scripts/gui-shell.msh",
         "conf/skel/font.msh",
     }) |f| {

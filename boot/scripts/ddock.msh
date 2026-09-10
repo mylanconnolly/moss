@@ -9,7 +9,7 @@ let final = (gui {
         {
           items: [
             { title: "Settings", unit: "settings", running: ($state.open == "settings") }
-            { title: "Files", unit: "win-demo", running: ($state.open == "win-demo") }
+            { title: "Demo", unit: "win-demo", running: ($state.open == "win-demo") }
           ]
         }
       })

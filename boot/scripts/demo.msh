@@ -1,0 +1,27 @@
+# A tiny demo app the dock launches — a placeholder for a real application
+# (a file browser, an editor…), here just to show the dock launching an
+# ordinary app: its own process, its own movable window on the shared
+# compositor. Close it (the red traffic-light) to quit.
+let final = (gui {
+    init:  { n: 0 }
+    title: "Demo"
+    width: 340
+    at:    { x: 120, y: 180 }
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: "a demo app launched from the dock" }
+            { kind: "label", muted: true, text: ("taps: " + (str $state.n)) }
+            { kind: "button", id: "tap", label: "tap me", variant: "primary" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "tap" => { { n: ($state.n + 1) } }
+          _ => $state
+        }
+      })
+  })
+echo "demo: closed"
