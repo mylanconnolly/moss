@@ -1086,9 +1086,14 @@ is a plan.
   `kind` 4 input event (`pumpFocus` diffs each surface's focus against what
   its owner was last told), and the runtime redraws accordingly; raw input
   clients now filter to keystrokes since the channel also carries ticks,
-  restores, and focus events. Also owed (desktop polish, separate):
-  maximize (needs surface resize); and a wallpaper (the ground is a solid
-  fill today). Decisions: client-drawn decorations via the shared runtime +
+  restores, and focus events. **Maximize** landed 2026-09-10: the green
+  traffic-light fills the work area (below the bar, above the dock) and a
+  second press restores the previous geometry; since surfaces are fixed-size
+  a resize is a destroy + recreate at the new geometry (reusing close/open),
+  and the work area is computed the same way the dock sizes itself so the
+  maximized window stops above it. Also owed (desktop polish, separate): a
+  wallpaper (the ground is a solid fill today). Decisions: client-drawn
+  decorations via the shared runtime +
   compositor move/raise; real multi-process windows; admin = a policy bit
   on the record, not an identity, surfaced as a writable cap.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.

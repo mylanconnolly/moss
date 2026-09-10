@@ -169,6 +169,15 @@ var dots_cy: usize = 0;
 // event). An unfocused window dims its chrome — grey traffic lights, a
 // muted title — the desktop's focus cue. A fresh window opens focused.
 var win_focused = true;
+// Maximize (the green traffic-light) is a toggle: it fills the work area
+// (below the top bar, above the dock) and remembers the window's previous
+// geometry to restore on a second press. Surfaces are fixed-size, so the
+// resize is a destroy + recreate of the surface at the new geometry.
+var maximized = false;
+var saved_x: usize = 0;
+var saved_y: usize = 0;
+var saved_w: usize = 0;
+var saved_h: usize = 0;
 // A drag in progress, and where in the window it was grabbed.
 var dragging = false;
 var drag_grab_x: usize = 0;
@@ -961,6 +970,23 @@ fn moveSurface(nx: usize, ny: usize) void {
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .move_surface = .{ .surface = surf, .xy = shared.packPair(@intCast(nx), @intCast(ny)) } }, 0);
 }
 
+/// The dock's height at the current scale — the same expression `runDock`
+/// uses (same font service, same palette, so it matches the real dock), so
+/// a maximized window can stop just above it.
+fn dockHeight() usize {
+    return lineOf(R_UI) + 2 * item_vpad + 2 * dock_vpad + pal.border_w;
+}
+
+/// The desktop work area a maximized window fills: full width, from just
+/// below the top bar's strut down to just above the dock.
+const Geom = struct { x: usize, y: usize, w: usize, h: usize };
+fn workArea() Geom {
+    const dh = dockHeight();
+    const reserved = top_strut + dh;
+    const h = if (scanout_h > reserved) scanout_h - reserved else scanout_h - top_strut;
+    return .{ .x = 0, .y = top_strut, .w = scanout_w, .h = h };
+}
+
 /// Name this window's surface so the dock can restore it by title.
 fn setSurfaceTitle(title: []const u8) void {
     if (surf == 0) return;
@@ -1750,6 +1776,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     ptr_down = false;
     pending_dot = null;
     win_focused = true;
+    maximized = false;
     // Width: `width: N` narrows the window (a desktop lays out several
     // smaller windows); default is the roomy single-window width.
     win_w = win_w_default;
@@ -1782,6 +1809,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     var focus: usize = 0;
     var minimized = false; // the amber dot hid us; a restore event brings us back
     var announced = false;
+    var relog_geom = false; // a resize moved the traffic lights; re-log them
     // The current view tree: the initial view of the initial state, then
     // recomputed after each fired event — locally (update then view) or,
     // for a `node: N` app, on that node in one round trip.
@@ -1799,12 +1827,16 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         const nfocus = renderTree(tree, title, focus);
         if (nfocus > 0 and focus >= nfocus) focus = nfocus - 1;
         if (!commitSurface()) return it.fail("gui: commit failed", .{});
-        if (!announced) {
-            _ = usys.log(log_h, "gui: ready");
-            // The traffic-light dot centres in scanout coordinates, so a
-            // host can click close/minimize/maximize precisely.
+        // The traffic-light dot centres in scanout coordinates, so a host
+        // can click close/minimize/maximize precisely. Logged on the first
+        // render, and again after a resize (maximize) moves them.
+        if (!announced or relog_geom) {
+            relog_geom = false;
             var dl: [96]u8 = undefined;
             _ = usys.log(log_h, std.fmt.bufPrint(&dl, "gui: dots close={d},{d} min={d},{d} max={d},{d}", .{ win_x + dots_cx[0], win_y + dots_cy, win_x + dots_cx[1], win_y + dots_cy, win_x + dots_cx[2], win_y + dots_cy }) catch "gui: dots");
+        }
+        if (!announced) {
+            _ = usys.log(log_h, "gui: ready");
             // Log each focusable widget's clickable centre in scanout
             // coordinates, so a host driving the pointer can click it.
             for (0..nfocus) |i| {
@@ -1902,7 +1934,35 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                     _ = usys.log(log_h, "gui: minimized");
                                     continue :input; // stay parked until a restore
                                 },
-                                else => _ = usys.log(log_h, "gui: maximize (not yet)"),
+                                else => { // green: maximize / restore (toggle)
+                                    if (maximized) {
+                                        win_x = saved_x;
+                                        win_y = saved_y;
+                                        win_w = saved_w;
+                                        win_h = saved_h;
+                                        maximized = false;
+                                    } else {
+                                        saved_x = win_x;
+                                        saved_y = win_y;
+                                        saved_w = win_w;
+                                        saved_h = win_h;
+                                        const wa = workArea();
+                                        win_x = wa.x;
+                                        win_y = wa.y;
+                                        win_w = wa.w;
+                                        win_h = wa.h;
+                                        maximized = true;
+                                    }
+                                    // A surface is fixed-size, so the resize
+                                    // is a fresh surface at the new geometry
+                                    // (it re-takes focus and the front).
+                                    closeSurface();
+                                    if (!openSurface()) return it.fail("gui: cannot resize the window", .{});
+                                    if (title.len > 0) setSurfaceTitle(title);
+                                    relog_geom = true; // the dots moved with the window
+                                    _ = usys.log(log_h, if (maximized) "gui: maximized" else "gui: unmaximized");
+                                    break :input; // re-render into the new surface
+                                },
                             }
                         }
                         if (closed) break :input;

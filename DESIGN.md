@@ -2983,7 +2983,23 @@ the Demo pill again, and confirms `gui: restored` with no new `gui: ready`
 subtlety worth keeping: because the retained buffer is what reappears, a
 restore needs no cooperation from the app for the *pixels* — the wake event
 is for the app to resume its own logic (a clock that paused while hidden),
-not to redraw. Owed next: maximize (which needs surface resize).
+not to redraw. Owed next: a wallpaper (the ground is a solid fill).
+
+**Maximize (as built, 2026-09-10).** The green traffic-light, a stub since
+stage 1, now maximizes the window to fill the work area — full width, from
+just below the top bar's strut down to just above the dock — and a second
+press restores it to its previous geometry (the runtime remembers it).
+moss surfaces are fixed-size at create, so a resize is a destroy + recreate
+of the surface at the new geometry — which the runtime already does for
+close/open, so maximize reuses `closeSurface` + `openSurface`; the recreated
+surface re-takes focus and the front, and the title is re-set. The work
+area is computed the same way the dock sizes itself (`dockHeight`, from the
+UI font role and paddings at the current scale, so it matches the real
+dock), and the maximized window stops above it so the dock stays visible.
+The runtime re-logs the traffic-light centres after the resize (they move
+with the window) so a host can find the green dot again to restore; the
+`guishell` drill maximizes the demo window, confirms `gui: maximized`, then
+clicks the dot at its new position and confirms `gui: unmaximized`.
 
 **The dock clears a pill when its app exits (as built, 2026-09-10).** Stage
 3 left *running* as dock state set at launch and never cleared — the dock

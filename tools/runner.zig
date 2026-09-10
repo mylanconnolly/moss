@@ -1026,9 +1026,12 @@ fn parseDockItem(content: []const u8, idx: usize) ?[2]u32 {
 fn parseDot(content: []const u8, key: []const u8) ?[2]u32 {
     const at = std.mem.lastIndexOf(u8, content, "gui: dots ") orelse return null;
     const line = content[at..];
-    const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+    var eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+    if (eol > 0 and line[eol - 1] == '\r') eol -= 1; // a serial log ends lines CRLF
     const k_at = std.mem.indexOf(u8, line[0..eol], key) orelse return null;
     var rest = line[k_at + key.len .. eol];
+    // "max=" is the last field (no trailing space), so bound it at the CR-
+    // trimmed end; a mid-line field ("close="/"min=") ends at its space.
     const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
     rest = rest[0..sp];
     const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
@@ -1859,6 +1862,29 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "restoring the window opened a new one instead", log_path);
         return false;
     }
+    sleepMs(500);
+    // Maximize the demo with its green traffic-light: the window fills the
+    // work area (the runtime re-logs the dots at the new geometry), then a
+    // second click restores it to where it was.
+    const gdot = parseDot(readLog(log_path), "max=") orelse {
+        reportFailure(spec.name, "could not parse the demo window's maximize dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, gdot[0], gdot[1])) {
+        reportFailure(spec.name, "QMP could not click the maximize dot", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "gui: maximized", 1, "the green dot did not maximize the window", spec, polls)) return false;
+    sleepMs(500);
+    const gdot2 = parseDot(readLog(log_path), "max=") orelse {
+        reportFailure(spec.name, "could not parse the maximized window's maximize dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, gdot2[0], gdot2[1])) {
+        reportFailure(spec.name, "QMP could not click the maximize dot to restore", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "gui: unmaximized", 1, "a second green-dot click did not restore the window size", spec, polls)) return false;
     sleepMs(500);
     // Close the demo with its red traffic-light: the app exits, and the dock
     // — polling init, not tracking the launch — clears the pill's running dot
