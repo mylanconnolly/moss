@@ -85,6 +85,26 @@ pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64, fabr
     font_chan = font_cap;
     fab_chan = fabric_cap;
     if (secret.len >= 8) trust_token = std.mem.readInt(u64, secret[0..8], .little);
+    // Register with the font service for a badged channel, so this process's
+    // request buffer is its own — several GUI clients on one fontsvc (a
+    // desktop's windows, the greeter + the session shell) no longer trample
+    // a single shared buffer. Falls back to the unbadged channel (a shared
+    // slot) if the service does not offer it.
+    if (font_chan != 0) {
+        const badged = registerFont();
+        if (badged != 0) font_chan = badged;
+    }
+}
+
+/// Ask the font service for a channel badged with a unique client id.
+fn registerFont() u64 {
+    return switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .register, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .registered => if (ok.cap != 0) ok.cap else 0,
+            else => 0,
+        },
+        .err => 0,
+    };
 }
 
 /// Whether the host holds a display — `gui` is offered only then.

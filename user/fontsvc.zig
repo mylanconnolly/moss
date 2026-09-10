@@ -506,6 +506,32 @@ fn loadFonts(blob: []const u8, fs_only: bool, view: u64) void {
     }
 }
 
+// Per-client request/response buffers, keyed by the badge the client
+// invokes with. A GUI client `register`s for a fresh badge (2..) so several
+// windows each get their own buffer; an unregistered client keeps badge 0 —
+// one shared slot, the single-client legacy (the terminal, a drill). Without
+// this, a second client's `attach_buf` unmapped and repointed one global
+// buffer, so the first client's next layout read a stale/foreign buffer and
+// faulted (the `desktop` drill's two windows racing on it).
+const max_clients = 8;
+const FontClient = struct { used: bool = false, badge: u64 = 0, req_va: u64 = 0, req_len: usize = 0 };
+var fclients: [max_clients]FontClient = @splat(.{});
+var next_font_badge: u64 = 2;
+const max_font_badge: u64 = 250;
+
+fn fclientFor(badge: u64) ?*FontClient {
+    for (&fclients) |*c| if (c.used and c.badge == badge) return c;
+    return null;
+}
+fn fclientAlloc(badge: u64) ?*FontClient {
+    if (fclientFor(badge)) |c| return c;
+    for (&fclients) |*c| if (!c.used) {
+        c.* = .{ .used = true, .badge = badge };
+        return c;
+    };
+    return null;
+}
+
 export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
     // Consume init's boot handshake on the serve channel (the fonts come
@@ -531,11 +557,6 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         logEffective("up");
     }
 
-    // One client's request/response buffer (the GUI runtime). A second
-    // client replaces it — per-client buffers come with multi-app use.
-    var req_va: u64 = 0;
-    var req_len: usize = 0;
-
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
@@ -557,10 +578,28 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                     _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 3 } }, 0);
                     continue;
                 }
-                if (req_va != 0) _ = usys.shmUnmap(req_va);
-                req_va = cm.data[0];
-                req_len = cm.data[1] * 4096;
+                const c = fclientAlloc(r.badge) orelse {
+                    _ = usys.shmUnmap(cm.data[0]);
+                    _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 6 } }, 0);
+                    continue;
+                };
+                if (c.req_va != 0) _ = usys.shmUnmap(c.req_va);
+                c.req_va = cm.data[0];
+                c.req_len = cm.data[1] * 4096;
                 _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
+            },
+            .register => {
+                if (next_font_badge > max_font_badge) {
+                    _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 7 } }, 0);
+                    continue;
+                }
+                const minted = usys.chanMint(chan_h, next_font_badge);
+                if (minted.err != .ok) {
+                    _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 8 } }, 0);
+                    continue;
+                }
+                next_font_badge += 1;
+                _ = usys.replyTyped(shared.FontResp, chan_h, .registered, minted.data[1]);
             },
             .atlas => {
                 // Hand back a copy of the atlas cap for the client to map.
@@ -587,16 +626,22 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                 // A session pushes the logged-in user's font.msh (in the
                 // request buffer); merge it over the system layer and
                 // re-apply. len 0 reverts to the system layer (logout).
-                if (q.len > req_len or (q.len > 0 and req_va == 0)) {
+                const rc = fclientFor(r.badge);
+                const rc_va: u64 = if (rc) |c| c.req_va else 0;
+                const rc_len: usize = if (rc) |c| c.req_len else 0;
+                if (q.len > rc_len or (q.len > 0 and rc_va == 0)) {
                     _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 5 } }, 0);
                     continue;
                 }
-                const user_text: []const u8 = if (q.len > 0) @as([*]const u8, @ptrFromInt(req_va))[0..@intCast(q.len)] else "";
+                const user_text: []const u8 = if (q.len > 0) @as([*]const u8, @ptrFromInt(rc_va))[0..@intCast(q.len)] else "";
                 applyLayers(user_text);
                 logEffective("reconfigured");
                 _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
             },
             .layout => |q| {
+                const lc = fclientFor(r.badge);
+                const req_va: u64 = if (lc) |c| c.req_va else 0;
+                const req_len: usize = if (lc) |c| c.req_len else 0;
                 if (req_va == 0 or q.len > req_len) {
                     _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 4 } }, 0);
                     continue;

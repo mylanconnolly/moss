@@ -858,6 +858,13 @@ pub const FontReq = union(enum(u64)) {
     /// layer, so a GUI client can resolve its palette from the same
     /// system/user layers that carry the font scale. Reply `appearance`.
     appearance: void,
+    /// Ask for a channel badged with a fresh client id, so several GUI
+    /// clients (windows) that share this service are told apart and each
+    /// gets its own request buffer — without it their `attach_buf`s would
+    /// trample one global buffer. Reply `registered` + the badged cap. An
+    /// unregistered client keeps badge 0 (one shared slot, the single-client
+    /// legacy: the terminal, a drill).
+    register: void,
 };
 
 /// The appearance settings a GUI resolves its colour palette from — three
@@ -892,6 +899,9 @@ pub const FontResp = union(enum(u64)) {
     metrics: struct { px: u64, line: u64, ascent: u64 },
     /// The effective appearance, packed by `packAppearance`.
     appearance: struct { flags: u64 },
+    /// `register`'s answer: a channel badged with a fresh client id is
+    /// attached (the client uses it for every later request).
+    registered: void,
     font_err: struct { code: u64 },
 };
 

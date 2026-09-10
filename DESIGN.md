@@ -3388,7 +3388,16 @@ and a base size per role, plus a scale factor), and rasterizes glyphs on
 demand into a **shared coverage atlas** — a client attaches a request/response buffer, maps the atlas
 once, and `layout`s each string; fontsvc shapes it, caches each glyph in
 the atlas, and writes the glyph run (pen positions + atlas rects +
-metrics) back into the buffer. It never draws: rendering stays
+metrics) back into the buffer. **Per-client buffers (2026-09-10):** the
+buffer was a single global, so a second client's `attach_buf` unmapped and
+repointed it and the first client's next `layout` read a stale, foreign
+buffer and faulted — the race behind the `desktop` drill's flake (its two
+windows are the only two GUI processes sharing one fontsvc, and under load
+their requests interleaved). fontsvc now keys each buffer by the badge the
+client invokes with: a GUI client `register`s (like the compositor) for a
+fresh badge (2..) so its buffer is its own; an unregistered client keeps
+badge 0, one shared slot — the single-client legacy (the terminal, a
+drill), unchanged. It never draws: rendering stays
 client-side, so the trusted path is untouched and a glyph bitmap is all
 that crosses. (3) The mshl GUI runtime is the first client — it lays out
 proportionally (measured widths size the buttons and fields), blits each
