@@ -149,9 +149,9 @@ const fsh = font.height; // 16, source
 const gw = fsw * 2; // 16, the bitmap cell width
 const gh = fsh * 2; // 32, the bitmap cell height
 
-// A centred window on the 1024x768 scanout, with room to breathe.
+// A centred window on the 1280x1024 scanout, with room to breathe.
 const win_w_default = 680;
-const scanout_w = 1024;
+const scanout_w = 1280;
 var win_w: usize = win_w_default; // the app may narrow it (a desktop window)
 var win_x: usize = (scanout_w - win_w_default) / 2; // centred unless placed
 
@@ -184,7 +184,7 @@ var drag_grab_x: usize = 0;
 var drag_grab_y: usize = 0;
 var ptr_down = false; // previous pointer button state (edge detection)
 var pending_dot: ?usize = null; // a traffic-light pressed, awaiting release
-const scanout_h = 768;
+const scanout_h = 1024;
 const win_h_min = 220;
 const win_h_max = scanout_h - 48; // leave a margin top+bottom
 // The window height is sized to its content when it opens (a settings

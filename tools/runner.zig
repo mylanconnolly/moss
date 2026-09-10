@@ -733,9 +733,12 @@ fn pointerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
-    // The client's window is (200,150)+300x200 on a 1024x768 scanout; aim
-    // for its centre (350,250). abs = pos * 32768 / dim.
-    if (!q.sendPointer(11200, 10666)) {
+    // The client's window is (200,150)+300x200 on the scanout; aim the
+    // cursor at (350,249) (its centre), so the hotspot's white fill lands at
+    // (351,251) over the window's blue. abs = pos * 32768 / dim.
+    const cax = @as(u32, @intCast(@as(u64, 350) * 32768 / scanout_w));
+    const cay = @as(u32, @intCast(@as(u64, 249) * 32768 / scanout_h));
+    if (!q.sendPointer(cax, cay)) {
         reportFailure(spec.name, "QMP could not move the pointer", log_path);
         return false;
     }
@@ -800,11 +803,16 @@ fn widgetCenter(content: []const u8, id: []const u8) ?[2]u32 {
     return .{ x, y };
 }
 
+/// The compositor's scanout size (gpusvc's fb_w/fb_h); the tablet is
+/// absolute (0..32767), so a scanout point scales by these to a tablet one.
+const scanout_w = 1280;
+const scanout_h = 1024;
+
 /// Move the cursor over a scanout point and click (down then up). Scanout
 /// coordinates scale to the tablet's 0..32767 range.
 fn clickScanout(q: *Qmp, cx: u32, cy: u32) bool {
-    const ax = @as(u32, @intCast(@as(u64, cx) * 32768 / 1024));
-    const ay = @as(u32, @intCast(@as(u64, cy) * 32768 / 768));
+    const ax = @as(u32, @intCast(@as(u64, cx) * 32768 / scanout_w));
+    const ay = @as(u32, @intCast(@as(u64, cy) * 32768 / scanout_h));
     if (!q.sendPointer(ax, ay)) return false;
     return q.sendClick(true) and q.sendClick(false);
 }
@@ -872,14 +880,14 @@ fn dragScanout(q: *Qmp, fx: u32, fy: u32, tx: u32, ty: u32) bool {
             return @intCast(@as(u64, v) * 32768 / span);
         }
     }.f;
-    if (!q.sendPointer(ax(fx, 1024), ax(fy, 768))) return false;
+    if (!q.sendPointer(ax(fx, scanout_w), ax(fy, scanout_h))) return false;
     if (!q.sendClick(true)) return false;
     const steps: i64 = 6;
     var i: i64 = 1;
     while (i <= steps) : (i += 1) {
         const x: i64 = @as(i64, fx) + @divTrunc((@as(i64, tx) - @as(i64, fx)) * i, steps);
         const y: i64 = @as(i64, fy) + @divTrunc((@as(i64, ty) - @as(i64, fy)) * i, steps);
-        if (!q.sendPointer(ax(@intCast(x), 1024), ax(@intCast(y), 768))) return false;
+        if (!q.sendPointer(ax(@intCast(x), scanout_w), ax(@intCast(y), scanout_h))) return false;
         sleepMs(140);
     }
     return q.sendClick(false);

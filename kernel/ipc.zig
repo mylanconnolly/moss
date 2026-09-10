@@ -35,7 +35,7 @@ const trace = @import("trace.zig");
 const max_channels = 64;
 const max_notifications = 64;
 const max_shms = 64;
-pub const shm_max_pages = 768; // 3M: a full-scanout surface at 1024x768x4 (the compositor's scanout) is 768 pages; before that a program stage — msh, with every command module and the mshl interpreter, crossed 1M, and the blk data window needs 8 x 32K slots
+pub const shm_max_pages = 1280; // 5M: a full-scanout surface at 1280x1024x4 (the compositor's scanout, and a maximized window) is 1280 pages; before that a program stage — msh, with every command module and the mshl interpreter, crossed 1M, and the blk data window needs 8 x 32K slots
 
 pub const Side = enum { a, b };
 
@@ -128,7 +128,7 @@ var timers_lock: lock.SpinLock = .{};
 /// Shared-memory pages are charged here for now; per-domain accounting for
 /// objects that outlive their creator arrives with real object lifetimes in
 /// Phase 5.
-pub var shm_account: kalloc.Account = .{ .limit = 16 << 20 };
+pub var shm_account: kalloc.Account = .{ .limit = 64 << 20 };
 
 pub const Error = error{NoObjects};
 

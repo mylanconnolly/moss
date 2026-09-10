@@ -261,7 +261,11 @@ fn sysIrqAck(d: *domain.Domain, handle_bits: u64, offset: u64) u64 {
 
 fn sysDmaAlloc(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const npages = frame.arg(0);
-    if (npages == 0 or npages > 16) return errno(.bad_arg);
+    // Up to 64 contiguous pages per call. The compositor's framebuffer (a
+    // 1280x1024 scanout = 1280 pages) is a scatter-gather list of these, and
+    // a per-domain address space holds only `max_mappings` windows, so bigger
+    // chunks mean fewer of them — 20 chunks, not 80, well under the cap.
+    if (npages == 0 or npages > 64) return errno(.bad_arg);
     const r = domain.mapDma(d, npages) catch return errno(.no_space);
     frame.set(1, r.va);
     frame.set(2, r.dev);

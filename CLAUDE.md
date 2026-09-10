@@ -29,7 +29,7 @@ frontier — every unstarted arc and every residual, kept current; the
   and on `nc 127.0.0.1 31905` (alice / alice-pass, bob / bob-pass).
 - `zig build run-gui -Dgui-profile=gui` — boot a GUI profile in a native
   cocoa window and drive it by hand (Tab/Enter/typing + mouse); QEMU 11's
-  cocoa backend shows the 1024×768 scanout 1:1 and crisp on a Retina Mac
+  cocoa backend shows the 1280×1024 scanout 1:1 and crisp on a Retina Mac
   (`-display cocoa,zoom-to-fit=off`; VNC was the old workaround from when
   the scanout was a tiny 640×480 that cocoa clipped into a corner).
   Profiles: `gui`, `guilogin`, `gtrust`, `gsession`, `gisession`, `gboom`,

@@ -942,9 +942,9 @@ pub fn build(b: *std.Build) void {
     // opens the macOS VNC viewer at it, and waits; the app's exit (or
     // Ctrl-C) ends it. Kernel log: zig-out/gui-run-kernel.log.
     if (arch == .aarch64) {
-        const gpu_dev = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1024,yres=768";
+        const gpu_dev = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
         // The display is QEMU's native cocoa window (Retina-aware in
-        // QEMU 11), shown 1:1 at the 1024x768 scanout — `zoom-to-fit=off`
+        // QEMU 11), shown 1:1 at the 1280x1024 scanout — `zoom-to-fit=off`
         // keeps it crisp rather than stretched. QEMU runs in the
         // foreground and owns the window; closing the window or quitting
         // the app (or Ctrl-C here) ends it. Kernel log:

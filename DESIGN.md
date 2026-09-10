@@ -3001,6 +3001,25 @@ with the window) so a host can find the green dot again to restore; the
 `guishell` drill maximizes the demo window, confirms `gui: maximized`, then
 clicks the dot at its new position and confirms `gui: unmaximized`.
 
+**A higher-resolution scanout — 1280×1024 (as built, 2026-09-10).** The
+scanout grew from 1024×768 to 1280×1024 for more desktop room. The size
+lives in two constants — gpusvc's `fb_w`/`fb_h` (the resource it creates and
+the backing it allocates) and the runtime's `scanout_w`/`scanout_h` (window
+layout) — plus the `run-gui` device's `xres`/`yres`; the drills' screendump
+asserts are mostly relative (`img.w/2`, or a fixed app-window position), and
+the pointer/click helpers convert scanout→tablet through named `scanout_w`/
+`scanout_h`, so they followed. Three limits had to move with it, all paid
+for on the first run: a full-scanout surface is now 1280 pages, so
+`ipc.shm_max_pages` went 768→1280 and the global `shm_account` 16→64 MB (a
+maximized window is ~5 MB, and several surfaces plus the font atlas share
+that pool); and — the subtle one — the framebuffer's scatter-gather backing
+is one address-space mapping per chunk, and at the old 16-page `dma_alloc`
+cap 1280 pages meant 80 chunks, past a domain's `max_mappings` (64), so the
+compositor ran out of mapping windows before it could map its keyboard and
+surfaces. Raising the `dma_alloc` per-call cap to 64 pages makes the
+framebuffer 20 chunks (20 mappings), well clear of the cap with room for
+surfaces — bigger DMA chunks, not a bigger mapping table.
+
 **The dock clears a pill when its app exits (as built, 2026-09-10).** Stage
 3 left *running* as dock state set at launch and never cleared — the dock
 had no signal that a launched app had gone. Rather than teach the dock to

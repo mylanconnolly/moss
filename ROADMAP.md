@@ -1091,7 +1091,13 @@ is a plan.
   second press restores the previous geometry; since surfaces are fixed-size
   a resize is a destroy + recreate at the new geometry (reusing close/open),
   and the work area is computed the same way the dock sizes itself so the
-  maximized window stops above it. Also owed (desktop polish, separate): a
+  maximized window stops above it. The **scanout grew to 1280×1024** (from
+  1024×768) 2026-09-10 for more room: gpusvc `fb_w`/`fb_h` + runtime
+  `scanout_w`/`scanout_h` + run-gui `xres`/`yres`, and three limits moved
+  with it — `shm_max_pages` 768→1280 (a full-scanout surface), the global
+  `shm_account` 16→64 MB, and the `dma_alloc` per-call cap 16→64 pages so
+  the framebuffer's scatter-gather backing is 20 mapping-windows not 80
+  (past a domain's `max_mappings`). Also owed (desktop polish, separate): a
   wallpaper (the ground is a solid fill today). Decisions: client-drawn
   decorations via the shared runtime +
   compositor move/raise; real multi-process windows; admin = a policy bit

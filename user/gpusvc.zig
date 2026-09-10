@@ -8,8 +8,8 @@
 //! host side of the drill screendumps the scanout over QMP and checks the
 //! pixels are that colour.
 //!
-//! The framebuffer (1024x768x4 = 768 pages) is larger than dma_alloc's
-//! 16-page cap, so its backing is a scatter-gather list of chunks —
+//! The framebuffer (1280x1024x4 = 1280 pages) is larger than dma_alloc's
+//! per-call cap, so its backing is a scatter-gather list of chunks —
 //! exactly what RESOURCE_ATTACH_BACKING takes. A solid fill needs no
 //! offset arithmetic across chunks (every chunk holds the same pattern);
 //! glyph rendering, when the terminal (a surface client) arrives, will.
@@ -57,14 +57,16 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
 const desc_f_next = 1;
 const desc_f_write = 2;
 
-const fb_w = 1024;
-const fb_h = 768;
+const fb_w = 1280;
+const fb_h = 1024;
 const fb_bpp = 4;
 const fb_stride = fb_w * fb_bpp;
-const fb_bytes = fb_stride * fb_h; // 3,145,728
-const fb_pages = fb_bytes / 4096; // 768
-const chunk_pages = 16; // dma_alloc's per-call cap
-const n_chunks = (fb_pages + chunk_pages - 1) / chunk_pages; // 48
+const fb_bytes = fb_stride * fb_h; // 5,242,880
+const fb_pages = fb_bytes / 4096; // 1280
+const chunk_pages = 64; // dma_alloc's per-call cap; big chunks keep the
+// framebuffer's mapping-window count low (1280/64 = 20, not 80) so the
+// compositor stays well under a domain's max_mappings alongside its surfaces.
+const n_chunks = (fb_pages + chunk_pages - 1) / chunk_pages; // 20
 
 const q_ctl = 0;
 const q_num = 16;
