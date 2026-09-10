@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal, localeupd, desktop };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal, localeupd, desktop, topbar };
 
 const Spec = struct {
     name: []const u8,
@@ -71,6 +71,7 @@ const specs = [_]Spec{
     .{ .name = "pointer", .kind = .pointer, .pass = "pointer-test: PASS", .extra = "pointer: click", .append = "profile=pointer", .timeout_s = 120 },
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
+    .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "fontscale", .pass = "fontscale-test: PASS", .extra = "fontpush: login ui=24px", .always_extra = "fontsvc: reconfigured (ui 24px, scale 1.50)", .extra2 = "fontpush: logout ui=16px", .append = "profile=fontscale", .timeout_s = 120 },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
@@ -296,7 +297,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .topbar) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -384,7 +385,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
-        .pointer, .guiclick, .desktop => try args.appendSlice(gpa, &.{
+        .pointer, .guiclick, .desktop, .topbar => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -426,7 +427,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     // net and dot keep their assets (trust roots) in mossfs, so they
     // boot a scratch disk alongside the NIC.
-    if (spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd) try appendDisk(&args, disk);
+    if (spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .topbar) try appendDisk(&args, disk);
 
     var tls_server: ?std.process.Child = null;
     if (spec.kind == .net) tls_server = try spawnQemu(&.{
@@ -467,6 +468,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .desktop) {
         if (!try desktopDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .topbar) {
+        if (!try topbarDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .seat) {
         if (!try seatDrive(spec, log_path, polls)) return false;
@@ -932,6 +936,59 @@ fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     return waitLogN(log_path, "win-beta: closed", 1, "Beta's close box did not close it", spec, polls);
+}
+
+/// Parse `topbar: popup at X,Y ih=H n=N` (the dropdown geometry the runtime
+/// logs when a menu opens) into {x, y, item_height, count}.
+fn parsePopup(content: []const u8) ?[4]u32 {
+    const key = "topbar: popup at ";
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    var rest = content[at + key.len ..];
+    const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    rest = rest[0..eol];
+    if (rest.len > 0 and rest[rest.len - 1] == '\r') rest = rest[0 .. rest.len - 1];
+    // "X,Y ih=H n=N"
+    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
+    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const ih_at = std.mem.indexOf(u8, rest, "ih=") orelse return null;
+    const n_at = std.mem.indexOf(u8, rest, "n=") orelse return null;
+    const x = std.fmt.parseInt(u32, rest[0..comma], 10) catch return null;
+    const y = std.fmt.parseInt(u32, rest[comma + 1 .. sp], 10) catch return null;
+    const ih = std.fmt.parseInt(u32, rest[ih_at + 3 .. n_at - 1], 10) catch return null;
+    const n = std.fmt.parseInt(u32, rest[n_at + 2 ..], 10) catch return null;
+    return .{ x, y, ih, n };
+}
+
+/// The top-bar drill: open the system menu, then click its last item
+/// ("Log Out") in the dropdown popup — proving the bar renders, the menu
+/// opens a real popup surface, an item click fires `update`, and the bar
+/// exits. The dropdown geometry the runtime logs makes the item click exact.
+fn topbarDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "topbar: ready", 1, "the top bar never came up", spec, polls)) return false;
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // The system menu title "moss" sits at the far left of the bar.
+    if (!clickScanout(&q, 40, 14)) {
+        reportFailure(spec.name, "QMP could not click the system menu", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "topbar: popup at", 1, "the system menu did not open a dropdown", spec, polls)) return false;
+    sleepMs(300);
+    const p = parsePopup(readLog(log_path)) orelse {
+        reportFailure(spec.name, "could not parse the dropdown geometry", log_path);
+        return false;
+    };
+    // Click the last item ("Log Out"): item i is centred at y + 4 + i*ih + ih/2.
+    const last = if (p[3] > 0) p[3] - 1 else 0;
+    const iy = p[1] + 4 + last * p[2] + p[2] / 2;
+    if (!clickScanout(&q, p[0] + 30, iy)) {
+        reportFailure(spec.name, "QMP could not click the Log Out item", log_path);
+        return false;
+    }
+    return waitLogN(log_path, "topbar: exit note=logging out", 1, "selecting Log Out did not close the bar", spec, polls);
 }
 
 fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {

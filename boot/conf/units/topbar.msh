@@ -1,0 +1,17 @@
+# The desktop top bar (profile topbar): mshrun runs the resident menu bar on
+# the pointer-capable compositor. Holds a display (compositor-ptr), a font
+# cap, and a read-only locale view for the clock. Essential: the boot follows
+# it — it runs until "Log Out".
+{
+  image:     mshrun
+  script:    scripts/topbar.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [topbar]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: locale, fs: "assets/locale", ro: true }
+  ]
+}

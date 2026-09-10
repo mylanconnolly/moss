@@ -240,6 +240,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.topbar_test) {
+        _ = sched.spawn("boot-watch", topbarTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.gui_test) {
         _ = sched.spawn("boot-watch", guiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -835,6 +840,10 @@ fn localeupdTestWorker(_: u64) void {
 
 fn desktopTestWorker(_: u64) void {
     systemDrill("desktop");
+}
+
+fn topbarTestWorker(_: u64) void {
+    systemDrill("topbar");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

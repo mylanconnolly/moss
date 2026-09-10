@@ -194,6 +194,11 @@ pub fn build(b: *std.Build) void {
         "desktop-test",
         "Run the desktop drill: two movable windows on one compositor (move/raise/close)",
     ) orelse false;
+    const topbar_test = b.option(
+        bool,
+        "topbar-test",
+        "Run the top-bar drill: a resident menu bar with a clock and a dropdown system menu",
+    ) orelse false;
     const gui_test = b.option(
         bool,
         "gui-test",
@@ -379,6 +384,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "locale_test", locale_test);
     build_opts.addOption(bool, "localeupd_test", localeupd_test);
     build_opts.addOption(bool, "desktop_test", desktop_test);
+    build_opts.addOption(bool, "topbar_test", topbar_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
@@ -642,6 +648,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/localeupd.msh",        "conf/locale.msh",
         "conf/units/win-alpha.msh",        "conf/units/win-beta.msh",
         "scripts/win-alpha.msh",           "scripts/win-beta.msh",
+        "conf/units/topbar.msh",           "scripts/topbar.msh",
         "conf/sessiongui/shell.msh",       "scripts/gui-shell.msh",
         "conf/skel/font.msh",
     }) |f| {
@@ -759,7 +766,7 @@ pub fn build(b: *std.Build) void {
             "rng_test",    "smmu_test",     "vm_test",       "guest_test",
             "vmnode_test", "pan_test",      "cpu_test",      "users_test",
             "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test",
+            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1179,7 +1186,7 @@ pub fn build(b: *std.Build) void {
         "rng_test",    "smmu_test",     "vm_test",       "guest_test",
         "vmnode_test", "pan_test",      "cpu_test",      "users_test",
         "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test",
+        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
@@ -1189,7 +1196,7 @@ pub fn build(b: *std.Build) void {
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
         "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "fabgui", "fabsignal", "locale", "localeupd", "desktop",
+        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "fabgui", "fabsignal", "locale", "localeupd", "desktop", "topbar",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

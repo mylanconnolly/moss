@@ -1002,9 +1002,12 @@ is a plan.
   `register`s for a unique compositor badge so several coexist; a fast
   drag no longer drops its release (the compositor queues pointer events
   for a client that is briefly unparked); `width`/`at` place windows; the
-  `desktop` drill drives two windows (move/raise/close). Open: **stage 2**
-  a resident top bar (system menu + a live clock via `fmt-time` + app
-  menus — needs dropdown popup surfaces and a reserved strut); **stage 3**
+  `desktop` drill drives two windows (move/raise/close). ✅ Stage 2 — the
+  top bar (landed 2026-09-09): `gui { bar: true }` is a resident, pinned,
+  chrome-less menu bar — a system menu whose dropdown is a real second
+  surface (opaque surfaces can't overlay in-place), a live clock+date via
+  `fmt-time`, and a reserved strut so windows open below it; the `topbar`
+  drill opens the menu and selects Log Out. Open: **stage 3**
   a dock of running/launchable apps (needs launching apps from the GUI —
   the session `init` front channel starts a unit with a display give);
   **stage 4** a settings app, user vs system panes, capability-gated

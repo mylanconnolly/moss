@@ -699,7 +699,9 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     _ = renderTree(tree, title, 0);
     measuring = false;
     win_h = @max(win_h_min, @min(content_h, win_h_max));
-    win_y = (scanout_h - win_h) / 2;
+    // Centre in the area below the top-bar strut, so a window never opens
+    // under the menu bar.
+    win_y = @max(top_strut + 8, top_strut + (scanout_h - top_strut - win_h) / 2);
 }
 
 /// Lay out and draw a node at (x, y) within `avail_w`, returning its size.
@@ -899,7 +901,7 @@ fn closeSurface() void {
 
 /// An input event routed to our surface: a key (kind 0, `ch`) or a pointer
 /// event (kind 1, surface-local `x`/`y` and button bitmask `btn`).
-const Event = struct { kind: u64, ch: u8 = 0, x: usize = 0, y: usize = 0, btn: u64 = 0 };
+const Event = struct { kind: u64, surface: u64 = 0, ch: u8 = 0, x: usize = 0, y: usize = 0, btn: u64 = 0 };
 
 /// The next input event routed to our surface, or null if the channel died.
 // When > 0, the app asked for a live clock: read input with a tick so the
@@ -930,7 +932,7 @@ fn nextInput() ?Event {
         usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0);
     return switch (rep) {
         .ok => |r| switch (r) {
-            .input => |v| .{ .kind = v.kind, .ch = @intCast(v.arg & 0xff), .x = shared.ptrX(v.arg), .y = shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
+            .input => |v| .{ .kind = v.kind, .surface = v.surface, .ch = @intCast(v.arg & 0xff), .x = shared.ptrX(v.arg), .y = shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
             else => .{ .kind = 0, .ch = 0 },
         },
         .err => null,
@@ -971,6 +973,267 @@ fn isDone(state: Value) bool {
     if (state != .record) return false;
     const d = state.record.get("done") orelse return false;
     return d.asBool();
+}
+
+// -------------------------------------------------------------- the top bar
+//
+// A resident menu bar pinned at the top of the scanout: menu titles at the
+// left, right-aligned items (a live clock) at the right. A menu opens a
+// DROPDOWN — a second, transient surface, because moss surfaces are opaque,
+// so a menu overlaying windows must be its own surface; it is dismissed on a
+// selection, a click elsewhere, or Escape. The bar's `view(state)` returns
+// `{ left: [...], right: [...] }` of `{kind:menu,...}` / `{kind:label,...}`;
+// a selected item fires `update(state, { menu, item })`. Windows open below
+// the bar (a reserved strut), so it is never covered.
+pub const top_strut = 34; // px reserved at the top for the bar
+
+const bar_vpad = 8;
+const menu_hpad = 12;
+const item_vpad = 8;
+
+const MenuHit = struct { id: []const u8, bx: usize, bw: usize, items: []const Value };
+var bar_menus: [8]MenuHit = undefined;
+var bar_nmenus: usize = 0;
+
+// The dropdown popup — the bar process's second surface.
+var pop_surf: u64 = 0;
+var pop_px: [*]volatile u32 = undefined;
+var pop_cap: u64 = 0;
+var pop_va: u64 = 0;
+var pop_x: usize = 0;
+var pop_y: usize = 0;
+var pop_w: usize = 0;
+var pop_h: usize = 0;
+var pop_open = false;
+var pop_menu_id: []const u8 = "";
+var pop_items: []const Value = &.{};
+var pop_item_h: usize = 0;
+
+fn barItemWidth(item: Value) usize {
+    if (item != .record) return 0;
+    const rec = item.record;
+    const kind = strField(rec, "kind");
+    const text = if (std.mem.eql(u8, kind, "menu")) strField(rec, "title") else strField(rec, "text");
+    return strW(R_UI, text) + 2 * menu_hpad;
+}
+
+/// Draw one bar item (a menu title or a label) at (x, cy_top); record a menu
+/// title's hit box. Returns the advance width.
+fn drawBarItem(item: Value, x: usize, cy: usize) usize {
+    if (item != .record) return 0;
+    const rec = item.record;
+    const kind = strField(rec, "kind");
+    if (std.mem.eql(u8, kind, "menu")) {
+        const title = strField(rec, "title");
+        const w = strW(R_UI, title) + 2 * menu_hpad;
+        const id = strField(rec, "id");
+        if (pop_open and std.mem.eql(u8, pop_menu_id, id)) fillRect(x, 0, w, win_h - pal.border_w, pal.surface_hi);
+        drawStr(x + menu_hpad, cy, R_UI, title, pal.title, pal.surface);
+        if (bar_nmenus < bar_menus.len) {
+            const items: []const Value = if (rec.get("items")) |iv| (if (iv == .list) iv.list else &.{}) else &.{};
+            bar_menus[bar_nmenus] = .{ .id = id, .bx = x, .bw = w, .items = items };
+            bar_nmenus += 1;
+        }
+        return w;
+    }
+    const text = strField(rec, "text");
+    const muted = rec.get("muted") != null and (rec.get("muted").?).asBool();
+    drawStr(x + menu_hpad, cy, R_UI, text, if (muted) pal.text_muted else pal.text, pal.surface);
+    return strW(R_UI, text) + 2 * menu_hpad;
+}
+
+fn renderBar(tree: Value) void {
+    bar_nmenus = 0;
+    fillAll(pal.surface);
+    fillRect(0, win_h - pal.border_w, win_w, pal.border_w, pal.border);
+    const cy = if (win_h > lineOf(R_UI)) (win_h - lineOf(R_UI)) / 2 else 0;
+    if (tree != .record) return;
+    const rec = tree.record;
+    var x: usize = menu_hpad / 2;
+    if (rec.get("left")) |lv| if (lv == .list) for (lv.list) |item| {
+        x += drawBarItem(item, x, cy);
+    };
+    if (rec.get("right")) |rv| if (rv == .list) {
+        var tot: usize = 0;
+        for (rv.list) |item| tot += barItemWidth(item);
+        var rx = if (win_w > tot + menu_hpad) win_w - tot - menu_hpad else x;
+        for (rv.list) |item| rx += drawBarItem(item, rx, cy);
+    };
+}
+
+/// The menu title under a bar click (surface-local), or null.
+fn menuAt(lx: usize) ?usize {
+    for (bar_menus[0..bar_nmenus], 0..) |m, i| {
+        if (lx >= m.bx and lx < m.bx + m.bw) return i;
+    }
+    return null;
+}
+
+/// The dropdown item under a popup click (surface-local), or null.
+fn popItemAt(ly: usize) ?usize {
+    if (pop_item_h == 0 or ly < 4) return null;
+    const idx = (ly - 4) / pop_item_h;
+    if (idx < pop_items.len) return idx;
+    return null;
+}
+
+fn renderPopup() void {
+    // Retarget the drawing primitives at the popup buffer for the duration.
+    const save_px = px;
+    const save_w = win_w;
+    const save_h = win_h;
+    px = pop_px;
+    win_w = pop_w;
+    win_h = pop_h;
+    panel(0, 0, pop_w, pop_h, 8, pal.surface, pal.border, pal.border_w);
+    const cyoff = (pop_item_h - lineOf(R_UI)) / 2;
+    for (pop_items, 0..) |it, i| {
+        if (it != .str) continue;
+        drawStr(menu_hpad, 4 + i * pop_item_h + cyoff, R_UI, it.str, pal.text, pal.surface);
+    }
+    px = save_px;
+    win_w = save_w;
+    win_h = save_h;
+}
+
+fn openPopup(m: MenuHit) void {
+    if (pop_open) closePopup();
+    if (m.items.len == 0) return;
+    pop_menu_id = m.id;
+    pop_items = m.items;
+    pop_item_h = lineOf(R_UI) + 2 * item_vpad;
+    var maxw: usize = 80;
+    for (pop_items) |it| if (it == .str) {
+        const w = strW(R_UI, it.str);
+        if (w > maxw) maxw = w;
+    };
+    pop_w = maxw + 2 * menu_hpad;
+    pop_h = pop_items.len * pop_item_h + 8;
+    pop_x = @min(win_x + m.bx, scanout_w - pop_w);
+    pop_y = win_y + win_h;
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(pop_x), @intCast(pop_y)), .wh = shared.packPair(@intCast(pop_w), @intCast(pop_h)) } }, 0)) {
+        .ok => |ok| ok,
+        .err => return,
+    };
+    pop_surf = switch (cs.rep) {
+        .created => |c| c.surface,
+        else => return,
+    };
+    if (cs.cap == 0) return;
+    const mp = usys.shmMap(cs.cap);
+    if (mp.err != .ok) {
+        _ = usys.capDrop(cs.cap);
+        return;
+    }
+    pop_cap = cs.cap;
+    pop_va = mp.data[0];
+    pop_px = @ptrFromInt(mp.data[0]);
+    pop_open = true;
+    renderPopup();
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .commit = .{ .surface = pop_surf, .xy = 0, .wh = shared.packPair(@intCast(pop_w), @intCast(pop_h)) } }, 0);
+    var lb: [96]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&lb, "topbar: popup at {d},{d} ih={d} n={d}", .{ pop_x, pop_y, pop_item_h, pop_items.len }) catch "topbar: popup");
+}
+
+fn closePopup() void {
+    if (!pop_open) return;
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = pop_surf } }, 0);
+    if (pop_va != 0) _ = usys.shmUnmap(pop_va);
+    if (pop_cap != 0) _ = usys.capDrop(pop_cap);
+    pop_surf = 0;
+    pop_cap = 0;
+    pop_va = 0;
+    pop_open = false;
+    pop_menu_id = "";
+}
+
+fn mkMenuEvent(it: *mshl.Interp, menu: []const u8, item: []const u8) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 2);
+    keys[0] = "menu";
+    keys[1] = "item";
+    const vals = try it.arena.alloc(Value, 2);
+    vals[0] = .{ .str = try it.arena.dupe(u8, menu) };
+    vals[1] = .{ .str = try it.arena.dupe(u8, item) };
+    return .{ .record = .{ .keys = keys, .vals = vals } };
+}
+
+/// The resident top-bar loop (`gui { bar: true, ... }`): render the bar,
+/// tick the clock, open/close dropdowns, and fire the selected menu item.
+fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
+    if (!font_ok) fontReady();
+    refreshAppearance();
+    if (client_chan == 0) client_chan = registerClient();
+    if (client_chan != 0) chan = client_chan;
+    win_x = 0;
+    win_y = 0;
+    win_w = scanout_w;
+    win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
+    dragging = false;
+    ptr_down = false;
+    pop_open = false;
+    if (!openSurface()) return it.fail("gui: cannot open the bar surface", .{});
+    defer closeSurface();
+    defer closePopup();
+
+    var state = init_state;
+    var tree = try it.callValue(view, &.{state}, null, null);
+    var announced = false;
+    while (true) {
+        it.reclaim();
+        renderBar(tree);
+        if (!commitSurface()) return it.fail("gui: bar commit failed", .{});
+        if (!announced) {
+            _ = usys.log(log_h, "topbar: ready");
+            announced = true;
+        }
+        var fired_menu: ?[]const u8 = null;
+        var fired_item: ?[]const u8 = null;
+        input: while (true) {
+            const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            if (ev.kind == 2) {
+                tree = try it.callValue(view, &.{state}, null, null); // refresh the clock
+                break :input;
+            }
+            if (ev.kind == 1) {
+                const down = ev.btn & 1 != 0;
+                const press = down and !ptr_down;
+                ptr_down = down;
+                if (press) {
+                    if (pop_open and ev.surface == pop_surf) {
+                        if (popItemAt(ev.y)) |idx| {
+                            fired_menu = pop_menu_id;
+                            fired_item = pop_items[idx].str;
+                            closePopup();
+                            break :input;
+                        }
+                    } else if (ev.surface == surf) {
+                        if (menuAt(ev.x)) |mi| {
+                            const was_this = pop_open and std.mem.eql(u8, pop_menu_id, bar_menus[mi].id);
+                            closePopup();
+                            if (!was_this) openPopup(bar_menus[mi]);
+                            break :input; // re-render the highlight
+                        } else if (pop_open) {
+                            closePopup();
+                            break :input;
+                        }
+                    }
+                }
+                continue :input;
+            }
+            if (ev.ch == 27 and pop_open) { // Escape
+                closePopup();
+                break :input;
+            }
+        }
+        if (fired_item) |item| {
+            const ev = try mkMenuEvent(it, fired_menu orelse "", item);
+            state = try it.callValue(update, &.{ state, ev }, null, null);
+            tree = try it.callValue(view, &.{state}, null, null);
+            if (isDone(state)) break;
+        }
+    }
+    _ = usys.log(log_h, "topbar: closed");
+    return state;
 }
 
 // ------------------------------------------------- crash-isolated update
@@ -1131,6 +1394,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         .bool => if (t.bool) 1000 else 0,
         else => 0,
     } else 0;
+    // `bar: true` is the resident top menu bar — a distinct render/loop
+    // (pinned, chrome-less, with dropdown menus), not a window.
+    if (spec.get("bar") != null and (spec.get("bar").?).asBool()) {
+        return try runBar(it, view, update, state);
+    }
 
     // `node: N` runs the whole app on node N over the fabric — the runtime
     // becomes a pure viewer, shipping each event and rendering the view

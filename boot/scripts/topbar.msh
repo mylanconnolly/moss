@@ -1,0 +1,46 @@
+# The desktop top bar (stage 2): a resident menu bar pinned at the top, with
+# a system menu on the left (its dropdown opens on click) and a live clock +
+# date on the right. `bar: true` selects the bar runtime (chrome-less,
+# pinned, with dropdown popups); `tick: 1000` keeps the clock live.
+#
+# Selecting "Log Out" ends the bar (done: true). "About This System" and
+# "Settings…" just record the choice for now (the settings app is a later
+# stage); the bar keeps running.
+def pad2 [n] { if $n < 10 { "0" + (str $n) } else { str $n } }
+def clock-now [] {
+  match (fmt-time "en-US") {
+    ok $t => $t
+    err _ => "--:--:--"
+  }
+}
+def date-now [] {
+  match (fmt-date "en-US" "medium") {
+    ok $d => $d
+    err _ => ""
+  }
+}
+
+let final = (gui {
+    init: { note: "" }
+    bar:  true
+    tick: 1000
+    view: (fn [state] {
+        {
+          left: [
+            { kind: "menu", id: "system", title: "moss", items: ["About This System", "Settings…", "Log Out"] }
+            { kind: "label", muted: true, text: $state.note }
+          ]
+          right: [
+            { kind: "label", muted: true, text: (date-now) }
+            { kind: "label", text: (clock-now) }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.item {
+          "Log Out" => { { note: "logging out", done: true } }
+          _ => { { note: ("selected: " + $ev.item) } }
+        }
+      })
+  })
+echo ("topbar: exit note=" + (str $final.note))

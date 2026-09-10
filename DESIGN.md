@@ -2739,6 +2739,27 @@ host raises one by clicking its titlebar, drags it by the titlebar (the
 runtime logs where it lands), and closes both by their red dots — move,
 raise, and close, proven end to end.
 
+**The top bar, stage 2 of the desktop (as built, 2026-09-09).** A resident
+macOS-style menu bar pinned at the top: menu titles at the left, a live
+clock and date at the right. `gui { bar: true, … }` selects a distinct
+render and loop in the runtime (chrome-less, pinned, no titlebar), leaving
+the window path untouched; its `view(state)` returns `{ left, right }` of
+`{kind:menu}` / `{kind:label}` items, the clock a `label` reading
+`fmt-time` refreshed by the tick. Windows open below a reserved top strut,
+so the bar is never covered. The hard part was the dropdown: moss surfaces
+are opaque, so a menu that overlays windows cannot be an overlay inside the
+bar — it is its own **second surface**, created below the menu title when
+clicked and destroyed on a selection, a click elsewhere, or Escape. The bar
+process now drives two surfaces on one input stream — pointer events carry
+the surface id (added to the runtime's event), so a click routes to the bar
+or the popup by which surface it landed on — and the popup is drawn by
+briefly retargeting the shared primitives at its buffer. A selected item
+fires `update(state, { menu, item })`; the topbar app's "Log Out" returns
+`done`, ending the session. The `topbar` drill opens the system menu (the
+runtime logs the dropdown's geometry so the click is exact) and selects
+Log Out — the bar renders, the menu opens a real popup surface, the item
+fires `update`, and the bar exits, all end to end.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard
