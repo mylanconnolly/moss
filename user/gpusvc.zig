@@ -105,7 +105,7 @@ var fb_dev: [n_chunks]u64 = @splat(0);
 var fb_chunk_pages: [n_chunks]u64 = @splat(0);
 var fb_chunk_start: [n_chunks]u64 = @splat(0); // linear byte offset of each chunk
 
-const max_surfaces = 4;
+const max_surfaces = 16;
 const Surface = struct {
     used: bool = false,
     shm: u64 = 0,
@@ -135,6 +135,10 @@ const focus_border = 4; // pixels
 // focused surface is the trusted one — the user's cue that the keyboard
 // truly reaches the login and nothing else.
 const trusted_badge: u64 = 1;
+// Ordinary GUI clients register for a unique badge (2..); the ceiling keeps
+// it well inside the surface/reader tables.
+var next_client_badge: u64 = 2;
+const max_client_badge: u64 = 250;
 const trust_strip = 8; // px, the reserved indicator band at the top
 const secure_word: u32 = 0x0000_66CC; // X<<24|R<<16|G<<8|B -> RGB(0,0x66,0xCC), a deep blue
 var trust_token: u64 = 0; // 0 = the trusted path is disabled (no token)
@@ -144,6 +148,7 @@ var trust_token: u64 = 0; // 0 = the trusted path is disabled (no token)
 var keys_chan: u64 = 0; // inputsvc channel, 0 when the seat gives no keyboard
 var keys_buf: [*]volatile u8 = undefined;
 var focused: u64 = 0; // focused surface id, 0 = none
+var comp_log: u64 = 0; // the compositor's log handle (set in gpudrv)
 const key_switch_focus: u8 = '\t';
 
 // ---------------------------------------------------- command building
@@ -369,6 +374,10 @@ fn createSurface(owner: u64, x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, 
     // keyboard away from a trusted prompt (a small secure-attention rule).
     const trusted_has_focus = if (findSurface(focused)) |f| f.trusted else false;
     if (!trusted_has_focus or owner == trusted_badge) focused = idx + 1;
+    // Focus moved to the new window: its first commit must lay the whole
+    // ground again, so a previously-focused window's stale focus border is
+    // cleared instead of lingering (per-rect commits never touch it).
+    laid_ground = false;
     return .{ .id = idx + 1, .shm = s.data[0] };
 }
 
@@ -790,6 +799,11 @@ fn ptrRingPop() ?PtrEv {
     @atomicStore(usize, &ptr_head, (h + 1) % ptr_ring_cap, .release);
     return e;
 }
+fn ptrRingPeek() ?PtrEv {
+    const h = @atomicLoad(usize, &ptr_head, .monotonic);
+    if (h == @atomicLoad(usize, &ptr_tail, .acquire)) return null;
+    return ptr_ring[h];
+}
 
 /// One pointer frame from inputsvc (blocks until one), or null on error.
 fn readPtr() ?PtrEv {
@@ -889,29 +903,55 @@ fn focusSurface(id: u64) void {
     _ = composite(); // the focus cue (and maybe the secure strip) moved
 }
 
+/// Bring a surface to the front (a click raises the window it lands on,
+/// the way a desktop expects). Only restacks when it is not already the
+/// topmost, so an idle click on the front window costs nothing.
+fn raiseSurface(id: u64) void {
+    const sf = findSurface(id) orelse return;
+    var top: u32 = 0;
+    for (&surfaces) |*o| {
+        if (o.used and o.z > top) top = o.z;
+    }
+    if (sf.z == top) return;
+    sf.z = next_z;
+    next_z += 1;
+    _ = composite();
+    _ = usys.log(comp_log, "comp: surface raised");
+}
+
 /// Drain buffered pointer frames: slide the cursor, and on a button
 /// change or a drag deliver a pointer event (surface-local) to the
 /// surface under the cursor, giving it focus on a press.
 fn dispatchPointer(chan_h: u64) void {
-    while (ptrRingPop()) |e| {
+    // Peek, don't pop, until an event is either delivered or belongs to no
+    // one: a button event whose target surface has no reader parked yet is
+    // LEFT in the ring (we break) and delivered when that client next parks
+    // (next_input re-runs us). Without this, a fast drag's events — a
+    // dropped button release above all — vanish while the client is briefly
+    // between parks, and a window sticks to the cursor.
+    while (ptrRingPeek()) |e| {
         const nx = @min(@as(usize, e.x) * fb_w / 32768, fb_w - 1);
         const ny = @min(@as(usize, e.y) * fb_h / 32768, fb_h - 1);
         moveCursor(nx, ny);
         const buttons = e.buttons;
         const changed = buttons != prev_buttons;
         const press = (buttons & ~prev_buttons) != 0; // a newly-pressed button
+        // A bare hover (no button, no change) reaches no client — consume it.
         if (changed or buttons != 0) {
             const id = surfaceUnderCursor();
             if (id != 0) {
-                if (press) focusSurface(id);
                 const sf = findSurface(id).?;
-                if (takeReader(sf.owner)) |token| {
-                    const lx: u64 = cursor_x - sf.x;
-                    const ly: u64 = cursor_y - sf.y;
-                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = 1, .arg = shared.ptrArg(lx, ly, buttons) } }, 0, token);
+                const token = takeReader(sf.owner) orelse break; // no reader: wait
+                if (press) {
+                    focusSurface(id); // give it the keyboard
+                    raiseSurface(id); // and bring it to the front
                 }
+                const lx: u64 = cursor_x - sf.x;
+                const ly: u64 = cursor_y - sf.y;
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = 1, .arg = shared.ptrArg(lx, ly, buttons) } }, 0, token);
             }
         }
+        _ = ptrRingPop();
         prev_buttons = buttons;
     }
 }
@@ -1007,6 +1047,31 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 }
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
+            .move_surface => |q| {
+                const sf = findSurface(q.surface) orelse {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 9 } }, 0, token);
+                    continue;
+                };
+                if (sf.owner != badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 8 } }, 0, token);
+                    continue;
+                }
+                // Clamp so the window stays on the scanout; repaint the
+                // union of where it was and where it lands (the vacated
+                // area returns to the ground, the new area gets the window).
+                const nx: u32 = @intCast(@min(shared.unpackHi(q.xy), if (fb_w > sf.w) fb_w - sf.w else 0));
+                const ny: u32 = @intCast(@min(shared.unpackLo(q.xy), if (fb_h > sf.h) fb_h - sf.h else 0));
+                const old: Rect = .{ .x = sf.x, .y = sf.y, .w = sf.w, .h = sf.h };
+                sf.x = nx;
+                sf.y = ny;
+                const nu: Rect = .{ .x = nx, .y = ny, .w = sf.w, .h = sf.h };
+                const bx0 = @min(old.x, nu.x);
+                const by0 = @min(old.y, nu.y);
+                const bx1 = @max(old.x + old.w, nu.x + nu.w);
+                const by1 = @max(old.y + old.h, nu.y + nu.h);
+                _ = compositeRect(.{ .x = bx0, .y = by0, .w = bx1 - bx0, .h = by1 - by0 });
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
             .next_input => {
                 if (keys_chan == 0 and ptr_chan == 0) {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 7 } }, 0, token);
@@ -1033,6 +1098,23 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 dispatchKeys(chan_h);
                 dispatchPointer(chan_h);
             },
+            .register => {
+                // Hand back a channel badged with a fresh client id, so
+                // this window's surfaces and input reader are told apart
+                // from every other client's. Badges 2.. (0 = unbadged, 1 =
+                // the trusted login).
+                if (next_client_badge > max_client_badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 12 } }, 0, token);
+                    continue;
+                }
+                const minted = usys.chanMint(chan_h, next_client_badge);
+                if (minted.err != .ok) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 13 } }, 0, token);
+                    continue;
+                }
+                next_client_badge += 1;
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .registered, minted.data[1], token);
+            },
             .attach_trusted => |q| {
                 // Prove the boot-provisioned token, earn a badged channel
                 // whose surfaces are the login surface. A wrong or absent
@@ -1055,6 +1137,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
 // ------------------------------------------------------------- driver
 
 fn gpudrv(log_h: u64, chan_h: u64) noreturn {
+    comp_log = log_h;
     const n = usys.notifyCreate();
     if (n.err != .ok) usys.exit(170);
     irq_notif = n.data[0];

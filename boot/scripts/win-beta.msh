@@ -1,0 +1,25 @@
+# A movable demo window (the desktop drill, window B). It opens narrow,
+# where the `at` places it, with a draggable traffic-light titlebar (the
+# runtime draws it). Closing it (the red dot) ends the app.
+let final = (gui {
+    init:  { n: 0 }
+    title: "Beta"
+    width: 320
+    at:    { x: 560, y: 240 }
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: ("clicks: " + (str $state.n)) }
+            { kind: "button", id: "tap", label: "tap me", variant: "primary" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "tap" => { { n: ($state.n + 1) } }
+          _ => $state
+        }
+      })
+  })
+echo "win-beta: closed"

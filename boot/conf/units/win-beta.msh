@@ -1,0 +1,16 @@
+# The desktop drill, window B (profile desktop): mshrun runs a movable GUI
+# window on the pointer-capable compositor. Two such windows share one
+# compositor; the drill drags one, clicks the other to raise it, and closes
+# both by their traffic-light dots. Essential: the boot follows them.
+{
+  image:     mshrun
+  script:    scripts/win-beta.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [desktop]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+  ]
+}

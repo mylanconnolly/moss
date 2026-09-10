@@ -115,8 +115,27 @@ const gw = fsw * 2; // 16, the bitmap cell width
 const gh = fsh * 2; // 32, the bitmap cell height
 
 // A centred window on the 1024x768 scanout, with room to breathe.
-const win_w = 680;
-const win_x = (1024 - win_w) / 2; // 172
+const win_w_default = 680;
+const scanout_w = 1024;
+var win_w: usize = win_w_default; // the app may narrow it (a desktop window)
+var win_x: usize = (scanout_w - win_w_default) / 2; // centred unless placed
+
+// A macOS-style titlebar: three traffic-light dots (close / minimize /
+// maximize) at the left, the title centred, and the rest a drag handle.
+const dot_r = 6; // dot radius
+const dot_gap = 20; // spacing between dot centres
+const tl_close: u32 = 0x00ff_5f57; // red
+const tl_min: u32 = 0x00fe_bc2e; // amber
+const tl_max: u32 = 0x0028_c840; // green
+var title_h: usize = 0; // set each render; the drag-handle band height
+var dots_cx: [3]usize = @splat(0);
+var dots_cy: usize = 0;
+// A drag in progress, and where in the window it was grabbed.
+var dragging = false;
+var drag_grab_x: usize = 0;
+var drag_grab_y: usize = 0;
+var ptr_down = false; // previous pointer button state (edge detection)
+var pending_dot: ?usize = null; // a traffic-light pressed, awaiting release
 const scanout_h = 768;
 const win_h_min = 220;
 const win_h_max = scanout_h - 48; // leave a margin top+bottom
@@ -383,6 +402,36 @@ fn fillRoundRect(x: usize, y: usize, w: usize, h: usize, r_in: usize, word: u32)
 /// A rounded panel with a rounded border of thickness `bw`: the border
 /// colour as the outer shape, the fill inset by `bw`. Both sets of corners
 /// are AA — the outer against the ground, the inner against the border.
+/// A filled, anti-aliased disc — a traffic-light dot.
+fn fillDot(cx: usize, cy: usize, r: usize, word: u32) void {
+    if (measuring) return;
+    const cxf: f32 = @floatFromInt(cx);
+    const cyf: f32 = @floatFromInt(cy);
+    const rf: f32 = @floatFromInt(r);
+    var y = if (cy > r) cy - r else 0;
+    while (y <= cy + r and y < win_h) : (y += 1) {
+        var x = if (cx > r) cx - r else 0;
+        while (x <= cx + r and x < win_w) : (x += 1) {
+            const dx = (@as(f32, @floatFromInt(x)) + 0.5) - cxf;
+            const dy = (@as(f32, @floatFromInt(y)) + 0.5) - cyf;
+            const cov = rf + 0.5 - @sqrt(dx * dx + dy * dy);
+            if (cov <= 0) continue;
+            blendPx(x, y, word, if (cov >= 1) 255 else @intFromFloat(cov * 255));
+        }
+    }
+}
+
+/// Which traffic-light dot (0 close, 1 min, 2 max) surface-local (lx, ly)
+/// lands on, or null. A little slop makes the small targets forgiving.
+fn hitDot(lx: usize, ly: usize) ?usize {
+    for (dots_cx, 0..) |cx, i| {
+        const dx = @abs(@as(i64, @intCast(lx)) - @as(i64, @intCast(cx)));
+        const dy = @abs(@as(i64, @intCast(ly)) - @as(i64, @intCast(dots_cy)));
+        if (dx <= dot_r + 3 and dy <= dot_r + 3) return i;
+    }
+    return null;
+}
+
 fn panel(x: usize, y: usize, w: usize, h: usize, r: usize, fill: u32, border: u32, bw: usize) void {
     fillRoundRect(x, y, w, h, r, border);
     if (w > 2 * bw and h > 2 * bw) {
@@ -616,11 +665,25 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     fillAll(pal.bg);
     sel_focus = focus;
     nfoc = 0;
-    // Titlebar: a raised bar with the title and a bottom rule.
-    const title_h = lineOf(R_TITLE) + 2 * 14;
+    // Titlebar: a raised bar, three traffic-light dots at the left, the
+    // title centred, a bottom rule. The bar (minus the dots) is a drag
+    // handle; the dots are close / minimize / maximize.
+    title_h = lineOf(R_TITLE) + 2 * 14;
     fillRect(0, 0, win_w, title_h, pal.surface);
     fillRect(0, title_h, win_w, pal.border_w, pal.border);
-    if (title.len > 0) drawStr(pad, (title_h - lineOf(R_TITLE)) / 2, R_TITLE, title, pal.title, pal.surface);
+    dots_cy = title_h / 2;
+    const first_cx = 16 + dot_r;
+    for (0..3) |i| dots_cx[i] = first_cx + i * dot_gap;
+    fillDot(dots_cx[0], dots_cy, dot_r, tl_close);
+    fillDot(dots_cx[1], dots_cy, dot_r, tl_min);
+    fillDot(dots_cx[2], dots_cy, dot_r, tl_max);
+    if (title.len > 0) {
+        const tw = strW(R_TITLE, title);
+        const after_dots = dots_cx[2] + dot_r + 12;
+        const centered = if (win_w > tw) (win_w - tw) / 2 else 0;
+        const tx = @max(centered, after_dots);
+        drawStr(tx, (title_h - lineOf(R_TITLE)) / 2, R_TITLE, title, pal.title, pal.surface);
+    }
     // Content area below the titlebar. Record the full height it wants so
     // the window can be sized to fit before its surface is created.
     const sz = drawNode(tree, pad, title_h + pad, win_w - 2 * pad);
@@ -761,6 +824,21 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
 /// Claim the trusted path: present the token and switch `chan` to the
 /// badged channel the compositor mints, so surfaces made over it are the
 /// login surface. False if there is no token or the compositor refuses.
+// The badged channel earned from `register`, cached for the process's life.
+var client_chan: u64 = 0;
+
+/// Register with the compositor for a uniquely-badged channel; 0 if it does
+/// not support it (then we stay badge 0, fine for a single window).
+fn registerClient() u64 {
+    return switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, display, .register, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .registered => if (ok.cap != 0) ok.cap else 0,
+            else => 0,
+        },
+        .err => 0,
+    };
+}
+
 fn attachTrusted() bool {
     if (trust_token == 0) return false;
     switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, display, .{ .attach_trusted = .{ .token = trust_token } }, 0)) {
@@ -777,7 +855,7 @@ fn attachTrusted() bool {
 }
 
 fn openSurface() bool {
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(win_x, @intCast(win_y)), .wh = shared.packPair(win_w, @intCast(win_h)) } }, 0)) {
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)) } }, 0)) {
         .ok => |ok| ok,
         .err => return false,
     };
@@ -798,7 +876,7 @@ fn openSurface() bool {
 }
 
 fn commitSurface() bool {
-    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .commit = .{ .surface = surf, .xy = 0, .wh = shared.packPair(win_w, @intCast(win_h)) } }, 0)) {
+    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .commit = .{ .surface = surf, .xy = 0, .wh = shared.packPair(@intCast(win_w), @intCast(win_h)) } }, 0)) {
         .ok => true,
         .err => false,
     };
@@ -828,6 +906,22 @@ const Event = struct { kind: u64, ch: u8 = 0, x: usize = 0, y: usize = 0, btn: u
 // loop wakes every `tick_ms` even with no input, and re-renders. Only for
 // a local app (a remote view would need a round trip per tick).
 var tick_ms: u64 = 0;
+
+/// Ask the compositor to move this window's surface to (nx, ny).
+fn moveSurface(nx: usize, ny: usize) void {
+    if (surf == 0) return;
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .move_surface = .{ .surface = surf, .xy = shared.packPair(@intCast(nx), @intCast(ny)) } }, 0);
+}
+
+/// New window origin during a drag: `cur + (local - grab)`, clamped so the
+/// window stays on the scanout. Signed math because a leftward/upward drag
+/// makes the delta negative.
+fn dragOrigin(cur: usize, local: usize, grab: usize, max_pos: usize) usize {
+    const np = @as(i64, @intCast(cur)) + (@as(i64, @intCast(local)) - @as(i64, @intCast(grab)));
+    if (np < 0) return 0;
+    if (np > @as(i64, @intCast(max_pos))) return max_pos;
+    return @intCast(np);
+}
 
 fn nextInput() ?Event {
     const rep = if (tick_ms > 0 and remote_node == 0)
@@ -1086,12 +1180,43 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     chan = display;
     if (want_trusted) {
         if (!attachTrusted()) return it.fail("gui: the trusted path was refused (no token, or the wrong one)", .{});
+    } else {
+        // An ordinary window: register once for a unique badge so the
+        // compositor tells this process's surfaces and input apart from
+        // other windows'. Cached across `gui` calls (a reopening shell
+        // keeps its badge). Falls back to badge 0 if the compositor is old.
+        if (client_chan == 0) client_chan = registerClient();
+        if (client_chan != 0) chan = client_chan;
     }
 
     resetFields();
+    // A fresh window: no drag in flight (module state persists across
+    // `gui` calls in one process).
+    dragging = false;
+    ptr_down = false;
+    pending_dot = null;
+    // Width: `width: N` narrows the window (a desktop lays out several
+    // smaller windows); default is the roomy single-window width.
+    win_w = win_w_default;
+    if (spec.get("width")) |wv| {
+        if (wv == .int and wv.int >= 200) win_w = @min(@as(usize, @intCast(wv.int)), scanout_w);
+    }
+    win_x = (scanout_w - win_w) / 2;
     if (!font_ok) fontReady(); // attach the system font once (bitmap fallback if absent)
     refreshAppearance(); // resolve the palette from the system/user settings
     sizeToContent(it, view, state, title); // fit the window to its content
+    // `at: { x, y }` places the window instead of centring it (a desktop
+    // that lays several windows out uses this).
+    if (spec.get("at")) |a| {
+        if (a == .record) {
+            if (a.record.get("x")) |xv| {
+                if (xv == .int and xv.int >= 0) win_x = @min(@as(usize, @intCast(xv.int)), scanout_w - win_w);
+            }
+            if (a.record.get("y")) |yv| {
+                if (yv == .int and yv.int >= 0) win_y = @min(@as(usize, @intCast(yv.int)), scanout_h - win_h);
+            }
+        }
+    }
 
     if (!openSurface()) return it.fail("gui: cannot open a surface", .{});
     defer closeSurface();
@@ -1133,23 +1258,67 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         // re-renders — the buffer, the focus, or the new state.
         var fired: ?[]const u8 = null;
         var ticked = false;
+        var closed = false;
         input: while (true) {
             const ev = nextInput() orelse return it.fail("gui: the display channel closed", .{});
-            // A timer tick: no input happened, the clock deadline elapsed.
-            // Re-render so a `view` that reads the time updates itself.
+            // A timer tick: re-render so a `view` reading the time updates
+            // — but never mid-drag (a ticking clock must not drop a drag).
             if (ev.kind == 2) {
+                if (dragging) continue :input;
                 ticked = true;
                 break :input;
             }
-            // A pointer press: hit-test the widget under it. Clicking a
-            // button focuses and fires it; clicking a field focuses it.
-            // A release or a click on no widget just keeps waiting.
+            // Pointer. Edge-detect press vs release; the titlebar is a drag
+            // handle with three traffic-light dots, the content area has the
+            // widgets.
             if (ev.kind == 1) {
-                if (ev.btn & 1 != 0) {
-                    if (hitWidget(nfocus, ev.x, ev.y)) |wi| {
+                const down = ev.btn & 1 != 0;
+                const press = down and !ptr_down;
+                const release = !down and ptr_down;
+                ptr_down = down;
+                if (press) {
+                    if (ev.y < title_h) {
+                        if (hitDot(ev.x, ev.y)) |d| {
+                            pending_dot = d; // fire on release if still on it
+                        } else {
+                            dragging = true; // grab the titlebar to move
+                            drag_grab_x = ev.x;
+                            drag_grab_y = ev.y;
+                        }
+                    } else if (hitWidget(nfocus, ev.x, ev.y)) |wi| {
                         focus = wi;
-                        if (!focusables[wi].is_field) fired = focusables[wi].id;
-                        break :input;
+                        if (!focusables[wi].is_field) {
+                            fired = focusables[wi].id;
+                            break :input;
+                        }
+                    }
+                    continue :input;
+                }
+                if (down and dragging) {
+                    const nx = dragOrigin(win_x, ev.x, drag_grab_x, scanout_w - win_w);
+                    const ny = dragOrigin(win_y, ev.y, drag_grab_y, scanout_h - win_h);
+                    if (nx != win_x or ny != win_y) {
+                        moveSurface(nx, ny);
+                        win_x = nx;
+                        win_y = ny;
+                    }
+                    continue :input;
+                }
+                if (release) {
+                    if (dragging) {
+                        dragging = false;
+                        var lb: [96]u8 = undefined;
+                        _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: {s} moved to {d},{d}", .{ title, win_x, win_y }) catch "gui: moved");
+                    } else if (pending_dot) |d| {
+                        pending_dot = null;
+                        if (ev.y < title_h and hitDot(ev.x, ev.y) == d) {
+                            switch (d) {
+                                0 => closed = true, // red: close the window
+                                1 => _ = usys.log(log_h, "gui: minimize (not yet)"),
+                                else => _ = usys.log(log_h, "gui: maximize (not yet)"),
+                            }
+                        }
+                        if (closed) break :input;
                     }
                 }
                 continue :input;
@@ -1187,6 +1356,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 },
             }
         }
+        // The close box was clicked: end the app (its `gui` call returns
+        // the last state, like a `done`).
+        if (closed) break;
         if (ticked and remote_node == 0) {
             // Recompute the view from the unchanged state — no `update` on
             // a tick — so a clock or other time-driven view refreshes.

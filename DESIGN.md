@@ -2702,6 +2702,43 @@ compositor); the counter reaches `count=1` by click alone. With that,
 pointer input runs the whole stack — tablet → inputsvc → compositor cursor
 and hit-test → routed event → the mshl widget under it.
 
+**Movable windows, stage 1 of the desktop (as built, 2026-09-09).** The
+compositor could stack surfaces but never restack or move them — their
+x/y and z were frozen at creation, so a "window" could not be dragged or
+brought to front. This is the window-management foundation. The compositor
+gained `move_surface { surface, xy }` (its owner repaints the vacated and
+newly-covered rects only, clamped to the scanout) and raises the surface a
+pointer press lands on to the front (a click brings its window forward,
+like a desktop); `max_surfaces` went 4 → 16. The mshl runtime turned its
+decorative titlebar into a real one: three macOS traffic-light dots (close
+/ minimize / maximize) at the left, the title centred, and the rest a drag
+handle — a titlebar drag sends `move_surface` (the window follows the
+cursor, the grab point staying under it), the red dot closes the window,
+minimize/maximize are stubs for now. A `width` and an `at { x, y }` on the
+`gui` spec let a desktop lay several narrower windows out instead of one
+centred one.
+
+Two gaps surfaced and closed on the way. First, **every ordinary GUI
+client reached the compositor unbadged (badge 0)** — fine for one window,
+but two windows then shared an owner and the compositor misrouted one's
+input to the other. So a client now `register`s once for a
+uniquely-badged channel (the same mint the trusted login earns, but badges
+2..), and its surfaces and input reader are keyed by that badge. Second,
+**a fast drag dropped pointer events — a button release above all** —
+because the compositor delivered a pointer event only if a reader was
+parked at that instant and dropped it otherwise, and a window would stick
+to the cursor when its release vanished. Now `dispatchPointer` peeks
+rather than pops: an event whose target has no reader parked is left in
+the ring and delivered when that client next parks (`next_input` re-runs
+the dispatch), so nothing is lost. A stale focus border (a new window took
+focus but the old window's yellow cue was never repainted over) closed by
+laying the whole ground again on the next commit after a surface is
+created. The `desktop` drill is the repo's first multi-window scene: two
+processes open a window each on one pointer-capable compositor, and the
+host raises one by clicking its titlebar, drags it by the titlebar (the
+runtime logs where it lands), and closes both by their red dots — move,
+raise, and close, proven end to end.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

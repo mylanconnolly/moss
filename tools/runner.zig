@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal, localeupd };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, fabgui, fabsignal, localeupd, desktop };
 
 const Spec = struct {
     name: []const u8,
@@ -70,6 +70,7 @@ const specs = [_]Spec{
     .{ .name = "ptr", .kind = .ptr, .pass = "ptr-test: PASS", .extra = "ptr: click", .append = "profile=ptr", .timeout_s = 120 },
     .{ .name = "pointer", .kind = .pointer, .pass = "pointer-test: PASS", .extra = "pointer: click", .append = "profile=pointer", .timeout_s = 120 },
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
+    .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "fontscale", .pass = "fontscale-test: PASS", .extra = "fontpush: login ui=24px", .always_extra = "fontsvc: reconfigured (ui 24px, scale 1.50)", .extra2 = "fontpush: logout ui=16px", .append = "profile=fontscale", .timeout_s = 120 },
     .{ .name = "seat", .kind = .seat, .pass = "seat-test: PASS", .extra = "gsh: line hi", .append = "profile=seat" },
     .{ .name = "gseat", .kind = .gseat, .pass = "gseat-test: PASS", .extra = "msh: up, serving the console", .append = "profile=gseat", .timeout_s = 120 },
@@ -383,7 +384,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
-        .pointer, .guiclick => try args.appendSlice(gpa, &.{
+        .pointer, .guiclick, .desktop => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -463,6 +464,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .guiclick) {
         if (!try guiclickDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .desktop) {
+        if (!try desktopDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .seat) {
         if (!try seatDrive(spec, log_path, polls)) return false;
@@ -845,6 +849,89 @@ fn guiclickDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+}
+
+/// Press the titlebar at (fx, fy) and drag to (tx, ty) in scanout pixels,
+/// stepping so the window (which follows the cursor) keeps it over the
+/// grabbed titlebar the whole way. Scanout → absolute tablet inside.
+fn dragScanout(q: *Qmp, fx: u32, fy: u32, tx: u32, ty: u32) bool {
+    const ax = struct {
+        fn f(v: u32, span: u64) u32 {
+            return @intCast(@as(u64, v) * 32768 / span);
+        }
+    }.f;
+    if (!q.sendPointer(ax(fx, 1024), ax(fy, 768))) return false;
+    if (!q.sendClick(true)) return false;
+    const steps: i64 = 6;
+    var i: i64 = 1;
+    while (i <= steps) : (i += 1) {
+        const x: i64 = @as(i64, fx) + @divTrunc((@as(i64, tx) - @as(i64, fx)) * i, steps);
+        const y: i64 = @as(i64, fy) + @divTrunc((@as(i64, ty) - @as(i64, fy)) * i, steps);
+        if (!q.sendPointer(ax(@intCast(x), 1024), ax(@intCast(y), 768))) return false;
+        sleepMs(140);
+    }
+    return q.sendClick(false);
+}
+
+/// Parse `gui: <title> moved to X,Y` (the last such line) into {X, Y}.
+fn parseMovedTo(content: []const u8, title: []const u8) ?[2]u32 {
+    var buf: [64]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "gui: {s} moved to ", .{title}) catch return null;
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    var rest = content[at + key.len ..];
+    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
+    const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    if (comma >= eol) return null;
+    var ys = rest[comma + 1 .. eol];
+    if (ys.len > 0 and ys[ys.len - 1] == '\r') ys = ys[0 .. ys.len - 1];
+    const x = std.fmt.parseInt(u32, rest[0..comma], 10) catch return null;
+    const y = std.fmt.parseInt(u32, ys, 10) catch return null;
+    return .{ x, y };
+}
+
+/// The desktop-shell drill: two movable windows share one compositor. Raise
+/// window A by clicking its titlebar (it opened beneath B), drag it by the
+/// titlebar (the runtime asks the compositor to move its surface), then
+/// close both by their red traffic-light dots — proving move, raise, and
+/// close, the window-management foundation.
+fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    // Both windows must be up (each logs "gui: ready").
+    if (!try waitLogN(log_path, "gui: ready", 2, "the two windows never came up", spec, polls)) return false;
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Alpha (320px) opened at (120,200), Beta at (560,240) — no overlap; a
+    // titlebar is ~50px, its drag band clear of the dots at x≈120..170.
+    // Click Alpha's titlebar to raise it above Beta (which opened later).
+    if (!clickScanout(&q, 280, 225)) {
+        reportFailure(spec.name, "QMP could not click Alpha's titlebar", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "comp: surface raised", 1, "clicking a window did not raise it", spec, polls)) return false;
+    sleepMs(300);
+    // Drag Alpha's titlebar to a new spot.
+    if (!dragScanout(&q, 280, 225, 500, 450)) {
+        reportFailure(spec.name, "QMP could not drag Alpha", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "gui: Alpha moved to", 1, "dragging the titlebar did not move the window", spec, polls)) return false;
+    sleepMs(300);
+    // Close Alpha by its red dot, at (win_x+22, win_y+30) of where it landed.
+    const pos = parseMovedTo(readLog(log_path), "Alpha") orelse [2]u32{ 120, 200 };
+    if (!clickScanout(&q, pos[0] + 22, pos[1] + 30)) {
+        reportFailure(spec.name, "QMP could not click Alpha's close box", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "win-alpha: closed", 1, "Alpha's close box did not close it", spec, polls)) return false;
+    sleepMs(300);
+    // Close Beta by its red dot (it never moved: 560,240).
+    if (!clickScanout(&q, 560 + 22, 240 + 30)) {
+        reportFailure(spec.name, "QMP could not click Beta's close box", log_path);
+        return false;
+    }
+    return waitLogN(log_path, "win-beta: closed", 1, "Beta's close box did not close it", spec, polls);
 }
 
 fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {

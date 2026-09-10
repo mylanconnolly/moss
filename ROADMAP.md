@@ -993,6 +993,25 @@ is a plan.
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`
     is partly in arch sections (Framework 16); the drivers and their
     deterministic drills proceed independently of it.
+- **A desktop shell (macOS-inspired)**: movable windows with titlebars, a
+  dock of running apps, a top menu bar (clock + system menu + app menus),
+  and capability-gated user/system settings. ✅ Stage 1 — movable windows
+  (landed 2026-09-09): the compositor gained `move_surface` + click-to-raise
+  and 16 surfaces; the mshl runtime draws a macOS traffic-light titlebar
+  (close works, min/max stubbed) that drags the window; each window
+  `register`s for a unique compositor badge so several coexist; a fast
+  drag no longer drops its release (the compositor queues pointer events
+  for a client that is briefly unparked); `width`/`at` place windows; the
+  `desktop` drill drives two windows (move/raise/close). Open: **stage 2**
+  a resident top bar (system menu + a live clock via `fmt-time` + app
+  menus — needs dropdown popup surfaces and a reserved strut); **stage 3**
+  a dock of running/launchable apps (needs launching apps from the GUI —
+  the session `init` front channel starts a unit with a display give);
+  **stage 4** a settings app, user vs system panes, capability-gated
+  (locked-keys + rw/ro conf views). Also owed: a subtler focus cue than
+  the login's yellow border, minimize/maximize, and a wallpaper (the
+  ground is a solid fill today). Decisions: client-drawn decorations via
+  the shared runtime + compositor move/raise; real multi-process windows.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

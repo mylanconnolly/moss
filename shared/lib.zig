@@ -770,7 +770,17 @@ pub const GpuReq = union(enum(u64)) {
     commit: struct { surface: u64, xy: u64, wh: u64 },
     /// Release a surface and its buffer.
     destroy_surface: struct { surface: u64 },
-    /// Block until the next keystroke, and return it tagged with the
+    /// Reposition a surface (its owner only): `xy` packs the new top-left
+    /// as `packPair(x, y)`, clamped to the scanout. The compositor
+    /// repaints the vacated and the newly-covered area. A window's own
+    /// runtime sends this as the user drags its titlebar. -> ok.
+    move_surface: struct { surface: u64, xy: u64 },
+    /// Earn a uniquely-badged channel so several windows from different
+    /// processes are told apart (their surfaces and input readers are keyed
+    /// by badge). An ordinary GUI client registers once on start and drives
+    /// the badged channel thereafter; the trusted login uses `attach_trusted`
+    /// instead. -> registered + a badged channel cap.
+    register: void,
     /// surface that has focus — the compositor routes the keyboard to the
     /// focused window and handles focus-switch keys itself. (Needs the
     /// compositor to hold a keyboard; only the seat/focus profiles do.)
@@ -808,6 +818,8 @@ pub const GpuResp = union(enum(u64)) {
     /// The trust token matched: + a badged channel cap the client uses in
     /// place of the shared display channel for all further requests.
     trusted: void,
+    /// A `register` succeeded: + a uniquely-badged channel cap.
+    registered: void,
     gpu_err: struct { code: u64 },
 };
 
@@ -1817,7 +1829,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with
