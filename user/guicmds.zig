@@ -316,8 +316,62 @@ var surf_va: u64 = 0; // its mapped address (unmapped on close)
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
 // the surface (so a pointer press can hit-test which widget it landed on).
-const Focus = struct { id: []const u8, is_field: bool, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
+const Focus = struct { id: []const u8, is_field: bool, is_list: bool = false, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
 var focusables: [16]Focus = undefined;
+
+// A scrollable list's interaction state — its scroll offset and selected
+// row — is owned by the runtime and keyed by the widget's id (like a text
+// field's edit buffer), so the mshl app stays declarative: it emits the
+// rows, we remember where the user is in them. `key` resets scroll and
+// selection when the list's content changes (a new directory, say).
+const max_lists = 4;
+const ListState = struct {
+    used: bool = false,
+    id: [32]u8 = undefined,
+    id_len: usize = 0,
+    key: [48]u8 = undefined,
+    key_len: usize = 0,
+    scroll: usize = 0, // index of the first visible row
+    sel: usize = 0, // selected row index
+    nrows: usize = 0, // rows the last render laid out (for clamping)
+    vis: usize = 0, // rows that fit the viewport (for paging)
+    last_click: i64 = -1, // last row a click landed on (reclick = activate)
+};
+var list_states: [max_lists]ListState = @splat(.{});
+
+fn resetLists() void {
+    list_states = @splat(.{});
+}
+
+/// The interaction state for a list id, created on first sight. `key` is
+/// the content identity; when it changes, scroll and selection reset to the
+/// top so a new directory does not inherit the old one's cursor.
+fn listFor(id: []const u8, key: []const u8) *ListState {
+    var slot: ?*ListState = null;
+    for (&list_states) |*l| {
+        if (l.used and std.mem.eql(u8, l.id[0..l.id_len], id)) {
+            slot = l;
+            break;
+        }
+    }
+    if (slot == null) {
+        for (&list_states) |*l| if (!l.used) {
+            l.* = .{ .used = true };
+            l.id_len = @min(id.len, l.id.len);
+            @memcpy(l.id[0..l.id_len], id[0..l.id_len]);
+            slot = l;
+            break;
+        };
+    }
+    const l = slot orelse &list_states[0];
+    if (!std.mem.eql(u8, l.key[0..l.key_len], key)) {
+        l.key_len = @min(key.len, l.key.len);
+        @memcpy(l.key[0..l.key_len], key[0..l.key_len]);
+        l.scroll = 0;
+        l.sel = 0;
+    }
+    return l;
+}
 
 /// The focusable whose box contains (x, y) — surface-local, the pointer's
 /// coordinates — or null. Topmost-last wins (widgets do not overlap).
@@ -379,6 +433,30 @@ fn fieldBackspace(id: []const u8) void {
     if (f.len > 0) f.len -= 1;
 }
 
+// Arrow keys arrive as private control bytes (inputsvc maps them); a
+// focused scrollable list uses them to move its selection.
+const key_up: u8 = 17;
+const key_down: u8 = 18;
+const key_left: u8 = 19;
+const key_right: u8 = 20;
+
+// A clip rectangle the drawing primitives honour, so a scrollable list can
+// paint rows into a viewport and have anything past its edges cut rather
+// than spilling over the window. Reset to the whole window each render.
+var clip_x0: usize = 0;
+var clip_y0: usize = 0;
+var clip_x1: usize = scanout_w;
+var clip_y1: usize = scanout_h;
+fn clipReset() void {
+    clip_x0 = 0;
+    clip_y0 = 0;
+    clip_x1 = win_w;
+    clip_y1 = win_h;
+}
+fn inClip(x: usize, y: usize) bool {
+    return x >= clip_x0 and x < clip_x1 and y >= clip_y0 and y < clip_y1;
+}
+
 fn fillAll(word: u32) void {
     if (measuring) return;
     for (0..win_w * win_h) |i| px[i] = word;
@@ -386,15 +464,19 @@ fn fillAll(word: u32) void {
 
 fn putPx(x: usize, y: usize, word: u32) void {
     if (measuring) return;
-    if (x < win_w and y < win_h) px[y * win_w + x] = word;
+    if (x < win_w and y < win_h and inClip(x, y)) px[y * win_w + x] = word;
 }
 
 fn fillRect(x: usize, y: usize, w: usize, h: usize, word: u32) void {
     if (measuring) return;
     var yy = y;
     while (yy < y + h and yy < win_h) : (yy += 1) {
+        if (yy < clip_y0 or yy >= clip_y1) continue;
         var xx = x;
-        while (xx < x + w and xx < win_w) : (xx += 1) px[yy * win_w + xx] = word;
+        while (xx < x + w and xx < win_w) : (xx += 1) {
+            if (xx < clip_x0 or xx >= clip_x1) continue;
+            px[yy * win_w + xx] = word;
+        }
     }
 }
 
@@ -622,6 +704,7 @@ fn fontLayout(role: u64, s: []const u8) struct { w: usize, count: usize } {
 fn blendPx(x: usize, y: usize, fg: u32, cov: u32) void {
     if (measuring) return;
     if (x >= win_w or y >= win_h or cov == 0) return;
+    if (!inClip(x, y)) return;
     const i = y * win_w + x;
     if (cov >= 255) {
         px[i] = fg;
@@ -710,9 +793,11 @@ var sel_focus: usize = 0;
 /// window is a titlebar over a content area laid out by `drawNode`
 /// (columns stack, rows flow), everything coloured from `pal`.
 fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
+    clipReset();
     fillAll(pal.bg);
     sel_focus = focus;
     nfoc = 0;
+    nlisthit = 0;
     // Titlebar: a raised bar, three traffic-light dots at the left, the
     // title centred, a bottom rule. The bar (minus the dots) is a drag
     // handle; the dots are close / minimize / maximize.
@@ -791,6 +876,8 @@ fn drawNode(node: Value, x: usize, y: usize, avail_w: usize) Size {
     if (std.mem.eql(u8, kind, "label")) return drawLabel(rec, x, y);
     if (std.mem.eql(u8, kind, "button")) return drawButton(rec, x, y);
     if (std.mem.eql(u8, kind, "field")) return drawField(rec, x, y, avail_w);
+    if (std.mem.eql(u8, kind, "list")) return drawList(rec, x, y, avail_w);
+    if (std.mem.eql(u8, kind, "split")) return drawSplit(rec, x, y, avail_w);
     return .{ .w = 0, .h = 0 };
 }
 
@@ -874,6 +961,279 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         nfoc += 1;
     }
     return .{ .w = avail_w, .h = (yy - y) + bh };
+}
+
+fn intField(rec: mshl.Record, key: []const u8, dflt: i64) i64 {
+    return if (rec.get(key)) |v| (if (v == .int) v.int else dflt) else dflt;
+}
+
+fn u8clen(b: u8) usize {
+    return if (b < 0x80) 1 else if (b >> 5 == 0b110) 2 else if (b >> 4 == 0b1110) 3 else if (b >> 3 == 0b11110) 4 else 1;
+}
+
+/// Draw `s` in `role`, truncated with an ellipsis to fit `maxw` pixels
+/// (never splitting a UTF-8 character) — for list cells in a fixed column.
+fn drawStrTrunc(x: usize, y: usize, role: u64, s: []const u8, maxw: usize, fg: u32, bg: u32) void {
+    if (strW(role, s) <= maxw) {
+        drawStr(x, y, role, s, fg, bg);
+        return;
+    }
+    const ell = "…";
+    const ellw = strW(role, ell);
+    var buf: [192]u8 = undefined;
+    var i: usize = 0;
+    while (i < s.len and i + 8 < buf.len) {
+        const cl = u8clen(s[i]);
+        if (i + cl > s.len) break;
+        if (strW(role, s[0 .. i + cl]) + ellw > maxw) break;
+        i += cl;
+    }
+    @memcpy(buf[0..i], s[0..i]);
+    @memcpy(buf[i .. i + ell.len], ell);
+    drawStr(x, y, role, buf[0 .. i + ell.len], fg, bg);
+}
+
+// A rendered list's geometry, so a click maps to a row (and the scrollbar
+// to a page). Recorded each render, like `focusables`.
+const ListHit = struct {
+    id: []const u8,
+    x: usize = 0,
+    rows_top: usize = 0,
+    rows_w: usize = 0,
+    row_h: usize = 0,
+    sb_x: usize = 0, // scrollbar centre (surface-local), 0 = no scrollbar
+    st: *ListState = undefined,
+};
+var list_hits: [max_lists]ListHit = undefined;
+var nlisthit: usize = 0;
+
+const list_row_vpad = 6; // vertical padding within a list row
+const list_cell_pad = 10; // left inset of the first cell
+
+// A list's `rows` come as either a plain list of `{id, cells}` records or —
+// when built with `map`, which tableizes uniform records — a table with
+// those fields as columns. These read both shapes the same way.
+fn rowsLen(rv: Value) usize {
+    return switch (rv) {
+        .list => |l| l.len,
+        .table => |t| t.rows.len,
+        else => 0,
+    };
+}
+fn colIndex(cols: []const []const u8, name: []const u8) ?usize {
+    for (cols, 0..) |c, i| if (std.mem.eql(u8, c, name)) return i;
+    return null;
+}
+fn rowField(rv: Value, i: usize, name: []const u8) Value {
+    switch (rv) {
+        .list => |l| if (i < l.len and l[i] == .record) return l[i].record.get(name) orelse .nothing,
+        .table => |t| if (i < t.rows.len) {
+            if (colIndex(t.cols, name)) |ci| if (ci < t.rows[i].len) return t.rows[i][ci];
+        },
+        else => {},
+    }
+    return .nothing;
+}
+fn cellAt(cellsv: Value, ci: usize) []const u8 {
+    if (cellsv == .list and ci < cellsv.list.len and cellsv.list[ci] == .str) return cellsv.list[ci].str;
+    return "";
+}
+
+/// A scrollable, selectable list. Record fields: `id` (interaction key),
+/// `key` (content identity — a new value resets scroll/selection), `h`
+/// (viewport height in px), optional `cols` [{title, w, right?}] for a
+/// header + column layout, and `rows` [{id, cells:[str]}]. The runtime owns
+/// the scroll offset and selection (see `ListState`); the app just emits
+/// the rows. Registers one focusable (the whole list), so its rows never
+/// eat the focusable budget.
+fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
+    const id = strField(rec, "id");
+    const key = strField(rec, "key");
+    const rowsv: Value = rec.get("rows") orelse Value.nothing;
+    const nrows = rowsLen(rowsv);
+    const cols: []const Value = if (rec.get("cols")) |cv| (if (cv == .list) cv.list else &.{}) else &.{};
+    const box_h: usize = @intCast(@max(intField(rec, "h", 240), 40));
+    const w = avail_w;
+    const line = lineOf(R_UI);
+    const row_h = line + 2 * list_row_vpad;
+    const header_h: usize = if (cols.len > 0) line + 2 * list_row_vpad else 0;
+
+    panel(x, y, w, box_h, r_field, pal.field_bg, pal.border, pal.border_w);
+
+    // Header: muted column titles + a rule beneath them.
+    if (cols.len > 0) {
+        var hx = x + list_cell_pad;
+        for (cols) |cv| {
+            if (cv != .record) continue;
+            const cw: usize = @intCast(@max(intField(cv.record, "w", 80), 8));
+            drawStrTrunc(hx, y + list_row_vpad, R_UI, strField(cv.record, "title"), cw -| 8, pal.text_muted, pal.field_bg);
+            hx += cw;
+        }
+        fillRect(x + pal.border_w, y + header_h, w - 2 * pal.border_w, pal.border_w, pal.border);
+    }
+
+    const rows_top = y + header_h;
+    const inner_h = if (box_h > header_h + pal.border_w) box_h - header_h - pal.border_w else 0;
+    var vis = inner_h / row_h;
+    if (vis == 0) vis = 1;
+
+    const st = listFor(id, key);
+    st.nrows = nrows;
+    st.vis = vis;
+    if (nrows == 0) st.sel = 0 else if (st.sel >= nrows) st.sel = nrows - 1;
+    // Only clamp the scroll to the last page here; following the selection
+    // into view is done when the selection *moves* (a click or arrow key),
+    // so a free scroll (the scrollbar) is not undone by a stale selection.
+    const max_scroll = if (nrows > vis) nrows - vis else 0;
+    if (st.scroll > max_scroll) st.scroll = max_scroll;
+
+    const has_sb = nrows > vis;
+    const sb_w: usize = if (has_sb) 8 else 0;
+    const rows_w = if (w > 2 * pal.border_w + sb_w) w - 2 * pal.border_w - sb_w else 0;
+
+    // Clip the rows to the viewport (below the header, above the bottom edge,
+    // left of the scrollbar), so a partial bottom row is cut cleanly.
+    const sx0 = clip_x0;
+    const sy0 = clip_y0;
+    const sx1 = clip_x1;
+    const sy1 = clip_y1;
+    clip_x0 = @max(clip_x0, x + pal.border_w);
+    clip_y0 = @max(clip_y0, rows_top);
+    clip_x1 = @min(clip_x1, x + pal.border_w + rows_w);
+    clip_y1 = @min(clip_y1, y + box_h - pal.border_w);
+
+    var i = st.scroll;
+    var ry = rows_top;
+    while (i < nrows and i < st.scroll + vis) : (i += 1) {
+        const selected = i == st.sel;
+        if (selected) fillRect(x + pal.border_w, ry, rows_w, row_h, pal.primary);
+        const ink = if (selected) pal.primary_ink else pal.text;
+        const cell_bg = if (selected) pal.primary else pal.field_bg;
+        const ty = ry + list_row_vpad;
+        const cellsv = rowField(rowsv, i, "cells");
+        if (cols.len > 0) {
+            var cx = x + list_cell_pad;
+            for (cols, 0..) |cv, ci| {
+                if (cv != .record) continue;
+                const cw: usize = @intCast(@max(intField(cv.record, "w", 80), 8));
+                drawStrTrunc(cx, ty, R_UI, cellAt(cellsv, ci), cw -| 8, ink, cell_bg);
+                cx += cw;
+            }
+        } else {
+            drawStrTrunc(x + list_cell_pad, ty, R_UI, cellAt(cellsv, 0), rows_w -| (2 * list_cell_pad), ink, cell_bg);
+        }
+        ry += row_h;
+    }
+    clip_x0 = sx0;
+    clip_y0 = sy0;
+    clip_x1 = sx1;
+    clip_y1 = sy1;
+
+    // Scrollbar: a track and a proportional thumb on the right edge.
+    if (has_sb) {
+        const track_x = x + w - sb_w - pal.border_w;
+        const track_top = rows_top;
+        const track_h = inner_h;
+        fillRect(track_x, track_top, sb_w, track_h, shade(pal.field_bg, 5, 4));
+        const thumb_h = @max(track_h * vis / nrows, 16);
+        const span = track_h -| thumb_h;
+        const thumb_y = track_top + (if (max_scroll > 0) span * st.scroll / max_scroll else 0);
+        fillRect(track_x + 1, thumb_y, sb_w -| 2, thumb_h, pal.text_muted);
+    }
+
+    if (nlisthit < list_hits.len) {
+        const sb_x = if (has_sb) x + w - sb_w / 2 - pal.border_w else 0;
+        list_hits[nlisthit] = .{ .id = id, .x = x, .rows_top = rows_top, .rows_w = rows_w, .row_h = row_h, .sb_x = sb_x, .st = st };
+        nlisthit += 1;
+    }
+    if (nfoc < focusables.len) {
+        focusables[nfoc] = .{ .id = id, .is_field = false, .is_list = true, .bx = x, .by = y, .bw = w, .bh = box_h };
+        nfoc += 1;
+    }
+    return .{ .w = w, .h = box_h };
+}
+
+/// A two-pane split: a fixed-width `left` node, a divider, and a `right`
+/// node filling the rest. `left_w` sets the sidebar width (default 220).
+fn drawSplit(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
+    const left = rec.get("left");
+    const right = rec.get("right");
+    const left_w: usize = @intCast(@max(intField(rec, "left_w", 220), 80));
+    const div = 1 + gap; // a hairline rule plus breathing room each side
+    const lh = if (left) |l| drawNode(l, x, y, @min(left_w, avail_w)) else Size{ .w = 0, .h = 0 };
+    const rx = x + left_w + div;
+    const rw = if (avail_w > left_w + div) avail_w - left_w - div else 0;
+    // The divider, as tall as the taller pane (measured from left first).
+    const rh = if (right) |r| drawNode(r, rx, y, rw) else Size{ .w = 0, .h = 0 };
+    const h = @max(lh.h, rh.h);
+    fillRect(x + left_w + gap / 2, y, pal.border_w, h, pal.border);
+    return .{ .w = avail_w, .h = h };
+}
+
+/// Find the `rows` value (a list or a tableized list) of the `list` widget
+/// with this id anywhere in the tree (searching children and split panes) —
+/// so a fired list event can carry the selected row's own id.
+fn findListRows(node: Value, id: []const u8) ?Value {
+    if (node != .record) return null;
+    const rec = node.record;
+    if (std.mem.eql(u8, strField(rec, "kind"), "list") and std.mem.eql(u8, strField(rec, "id"), id)) {
+        return rec.get("rows") orelse Value.nothing;
+    }
+    if (rec.get("children")) |c| if (c == .list) for (c.list) |ch| {
+        if (findListRows(ch, id)) |r| return r;
+    };
+    if (rec.get("left")) |l| if (findListRows(l, id)) |r| return r;
+    if (rec.get("right")) |r2| if (findListRows(r2, id)) |r| return r;
+    return null;
+}
+
+fn listRowId(tree: Value, id: []const u8, idx: usize) []const u8 {
+    const rowsv = findListRows(tree, id) orelse return "";
+    const idv = rowField(rowsv, idx, "id");
+    return if (idv == .str) idv.str else "";
+}
+
+fn listStateById(id: []const u8) ?*ListState {
+    for (&list_states) |*l| {
+        if (l.used and std.mem.eql(u8, l.id[0..l.id_len], id)) return l;
+    }
+    return null;
+}
+
+/// Scroll a list so its selection is on screen — called when the selection
+/// moves (a click or an arrow key), never on a plain render, so free
+/// scrolling (the scrollbar) is not clamped back to the selection.
+fn keepSelVisible(st: *ListState) void {
+    if (st.sel < st.scroll) st.scroll = st.sel;
+    if (st.vis > 0 and st.sel >= st.scroll + st.vis) st.scroll = st.sel + 1 - st.vis;
+}
+
+const ListClick = struct { fire: bool = false, activated: bool = false, row: usize = 0 };
+
+/// Route a click at (x, y) inside the list `id`: a row click moves the
+/// selection (a reclick on the same row activates it); a scrollbar-track
+/// click pages. Returns whether to fire a list event and for which row.
+fn listClick(id: []const u8, x: usize, y: usize) ListClick {
+    for (list_hits[0..nlisthit]) |lh| {
+        if (!std.mem.eql(u8, lh.id, id)) continue;
+        const st = lh.st;
+        // The scrollbar sits to the right of the rows: click the upper or
+        // lower half of the track to page up or down.
+        if (x >= lh.x + lh.rows_w) {
+            const mid = lh.rows_top + lh.row_h * st.vis / 2;
+            if (y < mid) st.scroll = st.scroll -| st.vis else st.scroll += st.vis;
+            return .{};
+        }
+        if (y < lh.rows_top) return .{};
+        const row = st.scroll + (y - lh.rows_top) / lh.row_h;
+        if (row >= st.nrows) return .{};
+        const activated = st.last_click == @as(i64, @intCast(row));
+        st.sel = row;
+        st.last_click = @intCast(row);
+        keepSelVisible(st);
+        return .{ .fire = true, .activated = activated, .row = row };
+    }
+    return .{};
 }
 
 // ---------------------------------------------------- surface + input
@@ -1054,6 +1414,21 @@ fn mkEvent(it: *mshl.Interp, id: []const u8) mshl.Error!Value {
     const vals = try it.arena.alloc(Value, 2);
     vals[0] = .{ .str = try it.arena.dupe(u8, id) };
     vals[1] = fields;
+    return .{ .record = .{ .keys = keys, .vals = vals } };
+}
+
+/// The event a list fires: `{ id: <listId>, row: <rowId>, activated: bool }`
+/// — `activated` true for Enter or a reclick (open), false for a plain
+/// selection (the app updates a preview). The app maps `row` to its data.
+fn mkListEvent(it: *mshl.Interp, id: []const u8, row: []const u8, activated: bool) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 3);
+    keys[0] = "id";
+    keys[1] = "row";
+    keys[2] = "activated";
+    const vals = try it.arena.alloc(Value, 3);
+    vals[0] = .{ .str = try it.arena.dupe(u8, id) };
+    vals[1] = .{ .str = try it.arena.dupe(u8, row) };
+    vals[2] = .{ .bool = activated };
     return .{ .record = .{ .keys = keys, .vals = vals } };
 }
 
@@ -1769,6 +2144,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     }
 
     resetFields();
+    resetLists();
     // A fresh window: no drag in flight (module state persists across
     // `gui` calls in one process), and it opens focused (the compositor
     // sets a new surface as focused; a later `kind` 4 corrects us if not).
@@ -1844,6 +2220,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 var l: [96]u8 = undefined;
                 _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: widget {s} at {d},{d}", .{ f.id, win_x + f.bx + f.bw / 2, win_y + f.by + f.bh / 2 }) catch continue);
             }
+            // Each list's row geometry in scanout coordinates, so a host can
+            // click a specific row (rows_top + row * row_h) and the scrollbar.
+            for (list_hits[0..nlisthit]) |lh| {
+                var l: [96]u8 = undefined;
+                _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: list {s} cx={d} rows_top={d} row_h={d} sb={d}", .{ lh.id, win_x + lh.x + lh.rows_w / 2, win_y + lh.rows_top, lh.row_h, if (lh.sb_x > 0) win_x + lh.sb_x else 0 }) catch continue);
+            }
             announced = true;
         }
 
@@ -1852,6 +2234,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         // fields' text) or advances past a focused field. Each break
         // re-renders — the buffer, the focus, or the new state.
         var fired: ?[]const u8 = null;
+        // A list fire carries the selected row id and whether it was
+        // activated (Enter / reclick) vs merely selected — see mkListEvent.
+        var fired_list = false;
+        var fired_row: []const u8 = "";
+        var fired_activated = false;
         var ticked = false;
         var closed = false;
         input: while (true) {
@@ -1900,6 +2287,16 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         }
                     } else if (hitWidget(nfocus, ev.x, ev.y)) |wi| {
                         focus = wi;
+                        if (focusables[wi].is_list) {
+                            const lc = listClick(focusables[wi].id, ev.x, ev.y);
+                            if (lc.fire) {
+                                fired = focusables[wi].id;
+                                fired_list = true;
+                                fired_row = listRowId(tree, focusables[wi].id, lc.row);
+                                fired_activated = lc.activated;
+                            }
+                            break :input; // re-render (selection or scroll moved)
+                        }
                         if (!focusables[wi].is_field) {
                             fired = focusables[wi].id;
                             break :input;
@@ -1981,11 +2378,35 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     if (cur) |c| {
                         if (c.is_field) {
                             focus = (focus + 1) % nfocus; // advance past a field
+                        } else if (c.is_list) {
+                            if (listStateById(c.id)) |st| {
+                                fired = c.id;
+                                fired_list = true;
+                                fired_row = listRowId(tree, c.id, st.sel);
+                                fired_activated = true; // Enter opens the selection
+                            }
                         } else {
                             fired = c.id; // a button submits
                         }
                         break :input;
                     }
+                },
+                key_up, key_down => {
+                    // Move a focused list's selection; a preview follows it
+                    // (fired but not activated). Keyboard motion breaks the
+                    // reclick pairing so the next click just selects.
+                    if (cur) |c| if (c.is_list) {
+                        if (listStateById(c.id)) |st| {
+                            if (ch == key_up) st.sel = st.sel -| 1 else if (st.sel + 1 < st.nrows) st.sel += 1;
+                            keepSelVisible(st);
+                            st.last_click = -1;
+                            fired = c.id;
+                            fired_list = true;
+                            fired_row = listRowId(tree, c.id, st.sel);
+                            fired_activated = false;
+                            break :input;
+                        }
+                    };
                 },
                 8 => { // backspace
                     if (cur) |c| if (c.is_field) {
@@ -2012,7 +2433,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             tree = try it.callValue(view, &.{state}, null, null);
         }
         if (fired) |id| {
-            const ev = try mkEvent(it, id);
+            const ev = if (fired_list) try mkListEvent(it, id, fired_row, fired_activated) else try mkEvent(it, id);
             if (remote_node != 0) {
                 // The app runs on the fabric: ship the event, render the
                 // tree that comes back. A dropped round trip keeps the last

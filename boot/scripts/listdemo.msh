@@ -1,0 +1,53 @@
+# A standalone exercise of the scrollable, selectable list widget: a two-
+# column list with more rows than fit. Arrow keys (or a click) move the
+# selection and scroll it into view; Enter (or a reclick) "opens" the row,
+# which ends the app and reports which one — the drill drives this to prove
+# selection and scrolling end to end.
+let final = (gui {
+    init:  { opened: "" }
+    title: "List Demo"
+    width: 560
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", role: "title", text: "list demo" }
+            { kind: "label", muted: true, text: ("selected: " + $state.opened) }
+            {
+              kind: "list"
+              id:   "items"
+              key:  "demo"
+              h:    260
+              cols: [{ title: "Name", w: 360 } { title: "Kind", w: 120 }]
+              rows: [
+                { id: "row0", cells: ["alpha", "file"] }
+                { id: "row1", cells: ["bravo", "file"] }
+                { id: "row2", cells: ["charlie", "dir"] }
+                { id: "row3", cells: ["delta", "file"] }
+                { id: "row4", cells: ["echo", "file"] }
+                { id: "row5", cells: ["foxtrot", "dir"] }
+                { id: "row6", cells: ["golf", "file"] }
+                { id: "row7", cells: ["hotel", "file"] }
+                { id: "row8", cells: ["india", "dir"] }
+                { id: "row9", cells: ["juliet", "file"] }
+                { id: "row10", cells: ["kilo", "file"] }
+                { id: "row11", cells: ["lima", "dir"] }
+                { id: "row12", cells: ["mike", "file"] }
+                { id: "row13", cells: ["november", "file"] }
+                { id: "row14", cells: ["oscar", "dir"] }
+              ]
+            }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "items" => (match $ev.activated {
+              true => { { opened: $ev.row, done: true } }
+              _ => { { opened: $ev.row } }
+            })
+          _ => $state
+        }
+      })
+  })
+echo ("listdemo: opened " + $final.opened)

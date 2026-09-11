@@ -993,6 +993,24 @@ is a plan.
     `-display`, and `-device` wiring in `tools/runner.zig` and `build.zig`
     is partly in arch sections (Framework 16); the drivers and their
     deterministic drills proceed independently of it.
+- **A graphical file explorer**: browse files and showcase moss's FS — the
+  capability-scoped views (open a folder as a read-only sub-view; revoke),
+  the encrypted/read-only volume badges — and its mesh. Chosen scope
+  (2026-09-10): a two-pane sidebar UI, and *remote browsing* over the fabric
+  (a real distributed-fs subsystem, since browsing another node's disk is
+  not wired today). Staged: (1) UI — a scrollable/selectable list + two-pane
+  split widget; (2) the local two-pane explorer app; (3) an `fs-derive` mshl
+  command for read-only sub-views; (4) the remote-browse subsystem (an
+  inline, fabric-friendly browse protocol + a per-node read-only browse
+  service reached by name; the sidebar lists live nodes and browses one).
+  ✅ Stage 1 (2026-09-10): the `list` widget (a clipped, scrollable viewport
+  over `{id, cells}` rows with optional columns, a scrollbar, runtime-owned
+  scroll/selection keyed by id, click + arrow-key + Enter, firing `{id, row,
+  activated}`) and the `split` widget (sidebar + content); arrow keys added
+  to the keymap; the `listdemo` drill. Lesson: a `map`-built view value held
+  across GUI renders corrupts (mshl frees the call scope it lives in between
+  renders); literal and `ls`-arena rows are stable, so the explorer (rows
+  from `ls`) is unaffected. Stages 2–4 open.
 - **A desktop shell (macOS-inspired)**: movable windows with titlebars, a
   dock of running apps, a top menu bar (clock + system menu + app menus),
   and capability-gated user/system settings. ✅ Stage 1 — movable windows

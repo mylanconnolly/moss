@@ -128,6 +128,12 @@ fn keymap(code: u16) u8 {
         1 => 27, // escape (ASCII ESC — dismiss a popup, close the dock)
         12 => '-', // minus/hyphen
         14 => 8, // backspace (ASCII BS)
+        // Arrow keys → private control bytes a GUI uses for navigation
+        // (a scrollable list moves its selection); no ASCII of their own.
+        103 => 17, // up    (DC1)
+        108 => 18, // down  (DC2)
+        105 => 19, // left  (DC3)
+        106 => 20, // right (DC4)
         else => 0,
     };
 }

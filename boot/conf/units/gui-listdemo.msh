@@ -1,0 +1,17 @@
+# The scrollable-list UI drill (profile listdemo): mshrun runs a GUI whose
+# view is a columned `list` of 30 rows, on the pointer-capable compositor so
+# the host can click rows as well as arrow-key through them. It proves the
+# new list/split widgets — selection, scrolling, and activation — in
+# isolation before the file explorer builds on them.
+{
+  image:     mshrun
+  script:    scripts/listdemo.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [listdemo]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+  ]
+}

@@ -209,6 +209,11 @@ pub fn build(b: *std.Build) void {
         "dock-test",
         "Run the dock drill: a resident dock launches an app unit through init, which opens its window",
     ) orelse false;
+    const listdemo_test = b.option(
+        bool,
+        "listdemo-test",
+        "Run the list-widget drill: a scrollable, selectable columned list -- selection, scrolling, activation",
+    ) orelse false;
     const gui_test = b.option(
         bool,
         "gui-test",
@@ -397,6 +402,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "desktop_test", desktop_test);
     build_opts.addOption(bool, "topbar_test", topbar_test);
     build_opts.addOption(bool, "dock_test", dock_test);
+    build_opts.addOption(bool, "listdemo_test", listdemo_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
@@ -640,6 +646,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/trust-fake.msh",     "conf/trust.token",
         "conf/units/readers-reader.msh", "conf/units/readers-mover.msh",
         "conf/units/gui-demo.msh",       "scripts/gui-demo.msh",
+        "conf/units/gui-listdemo.msh",   "scripts/listdemo.msh",
         "conf/units/gui-login.msh",      "scripts/gui-login.msh",
         "conf/units/gui-tlogin.msh",     "scripts/gui-tlogin.msh",
         "conf/units/gui-session.msh",    "scripts/gui-session.msh",
@@ -785,7 +792,7 @@ pub fn build(b: *std.Build) void {
             "rng_test",    "smmu_test",     "vm_test",       "guest_test",
             "vmnode_test", "pan_test",      "cpu_test",      "users_test",
             "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test",
+            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1204,7 +1211,7 @@ pub fn build(b: *std.Build) void {
         "rng_test",    "smmu_test",     "vm_test",       "guest_test",
         "vmnode_test", "pan_test",      "cpu_test",      "users_test",
         "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test",
+        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
@@ -1214,7 +1221,7 @@ pub fn build(b: *std.Build) void {
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
         "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "guishellro", "fabgui", "fabsignal", "locale", "localeupd", "desktop", "topbar", "dock",
+        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "guishellro", "fabgui", "fabsignal", "locale", "localeupd", "desktop", "topbar", "dock", "listdemo",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

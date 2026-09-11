@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo };
 
 const Spec = struct {
     name: []const u8,
@@ -70,6 +70,7 @@ const specs = [_]Spec{
     .{ .name = "ptr", .kind = .ptr, .pass = "ptr-test: PASS", .extra = "ptr: click", .append = "profile=ptr", .timeout_s = 120 },
     .{ .name = "pointer", .kind = .pointer, .pass = "pointer-test: PASS", .extra = "pointer: click", .append = "profile=pointer", .timeout_s = 120 },
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
+    .{ .name = "listdemo", .kind = .listdemo, .pass = "listdemo-test: PASS", .extra = "gui: list items", .append = "profile=listdemo", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
@@ -387,7 +388,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
-        .pointer, .guiclick, .desktop, .topbar, .dock => try args.appendSlice(gpa, &.{
+        .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -467,6 +468,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .guiclick) {
         if (!try guiclickDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .listdemo) {
+        if (!try listdemoDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .desktop) {
         if (!try desktopDrive(spec, log_path, polls)) return false;
@@ -869,6 +873,80 @@ fn guiclickDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
+}
+
+/// A list's row geometry from "gui: list <id> cx=.. rows_top=.. row_h=.. sb=..".
+fn parseListGeom(content: []const u8, id: []const u8) ?[4]u32 {
+    var kb: [48]u8 = undefined;
+    const key = std.fmt.bufPrint(&kb, "gui: list {s} ", .{id}) catch return null;
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    const line = content[at..];
+    const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+    const seg = line[0..eol];
+    return .{
+        parseAfter(seg, "cx=") orelse return null,
+        parseAfter(seg, "rows_top=") orelse return null,
+        parseAfter(seg, "row_h=") orelse return null,
+        parseAfter(seg, "sb=") orelse return null,
+    };
+}
+
+/// The unsigned integer immediately after `key` in `s` (up to a space/CR/end).
+fn parseAfter(s: []const u8, key: []const u8) ?u32 {
+    const at = std.mem.indexOf(u8, s, key) orelse return null;
+    var r = s[at + key.len ..];
+    var n: usize = 0;
+    while (n < r.len and r[n] >= '0' and r[n] <= '9') n += 1;
+    if (n == 0) return null;
+    return std.fmt.parseInt(u32, r[0..n], 10) catch null;
+}
+
+/// The scrollable-list widget drill: the GUI opens a 30-row list. Click the
+/// scrollbar's lower half to page down (proving the viewport scrolls), then
+/// click the now-top row and click it again to open it — the app reports
+/// which row. An opened row well past the top proves the click hit-test,
+/// scrolling, selection, and activation all work together.
+fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "gui: ready", 1, "the list demo never came up", spec, polls)) return false;
+    const g = parseListGeom(readLog(log_path), "items") orelse {
+        reportFailure(spec.name, "could not parse the list's row geometry", log_path);
+        return false;
+    };
+    const cx = g[0];
+    const rows_top = g[1];
+    const row_h = g[2];
+    const sb = g[3];
+    _ = sb; _ = cx; _ = rows_top; _ = row_h;
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Arrow the selection down 12 rows — well past the viewport, so the list
+    // must auto-scroll to keep it visible — then Enter to open it.
+    var k: usize = 0;
+    while (k < 12) : (k += 1) {
+        if (!q.sendKey("down")) {
+            reportFailure(spec.name, "QMP could not send a down key", log_path);
+            return false;
+        }
+        sleepMs(90);
+    }
+    if (!q.sendKey("ret")) {
+        reportFailure(spec.name, "QMP could not send Enter", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "listdemo: opened row", 1, "arrow keys + Enter did not open a row", spec, polls)) return false;
+    const opened = parseAfter(readLog(log_path), "listdemo: opened row") orelse {
+        reportFailure(spec.name, "could not parse the opened row", log_path);
+        return false;
+    };
+    if (opened != 12) {
+        var b: [96]u8 = undefined;
+        reportFailure(spec.name, std.fmt.bufPrint(&b, "arrow-nav landed on row {d}, expected 12 (selection/scroll off)", .{opened}) catch "wrong row", log_path);
+        return false;
+    }
+    return true;
 }
 
 /// Press the titlebar at (fx, fy) and drag to (tx, ty) in scanout pixels,

@@ -3855,6 +3855,44 @@ The hinting interpreter and stage-2 fitting stay exactly as built; only
 which roles ask for them changed. Open for the arc: subpixel, the
 fabric-remote GUI.
 
+**A scrollable list and a two-pane split (as built, 2026-09-10).** The
+widget set (label/button/field/row/column) had no way to show more items
+than fit, which a file explorer needs, so two widgets landed. A **`list`**
+is a viewport of a fixed pixel height (`h`) over its `rows` (each `{id,
+cells}`), with optional `cols` (`{title, w}`) for a header and column
+layout: it clips its rows to the viewport, draws a proportional scrollbar
+when the rows overflow, highlights the selected row, and truncates a cell
+that overruns its column with an ellipsis. A **`split`** places a
+fixed-width `left` node beside a `right` node that fills the rest, divided
+by a hairline — the sidebar layout. Two pieces of machinery made the list
+work against the immediate-mode renderer. First, a **clip rectangle** the
+drawing primitives honour (`putPx`/`fillRect`/`blendPx`), reset to the
+whole window each render and narrowed to the viewport while rows are drawn,
+so a partial bottom row is cut cleanly rather than spilling. Second, the
+list's **interaction state — scroll offset and selection — is owned by the
+runtime and keyed by the widget's id** (like a text field's edit buffer,
+in `ListState`), with a `key` that resets scroll/selection when the
+content changes (a new directory), so the mshl app stays declarative: it
+emits the rows, the runtime remembers where the user is in them. A list is
+one focusable (its rows never eat the 16-focusable budget); a click hit-
+tests to a row (a reclick opens it), the scrollbar pages, and — once arrow
+keys were added to the keymap (evdev up/down → private control bytes) — the
+selection moves by key with the view scrolling to keep it visible, Enter
+opening it. Selection follows the selection *only when it moves* (a click
+or arrow), never on a plain render, so a free scroll (the scrollbar) is not
+clamped back. A list fires `{id, row, activated}` — `activated` true for
+Enter or a reclick (open), false for a plain selection — and the app maps
+`row` to its data. The `listdemo` drill drives it end to end: arrow the
+selection down past the viewport (proving it auto-scrolls) and Enter to
+open the row it lands on. **Lesson (paid for here):** a value a `view`
+builds with `map` lives in the interpreter's *call scopes*, which `reclaim`
+collects between renders — so a list whose rows are `map`-generated and
+held across renders has its backing overwritten (a corrupt tree, a
+vanishing widget). Rows from a literal or from a command like `ls` (which
+dupes into the bump arena) are stable; the file explorer builds its rows
+from `ls`, so it is unaffected, but a `map`-in-`view` that is retained is a
+trap until the interpreter promotes such results out of the call scope.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
