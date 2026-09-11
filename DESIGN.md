@@ -2598,6 +2598,19 @@ the keyboard the hostile client's requests queue behind it — the drill
 must type the key before waiting on any of the hostile client's logs, or
 it deadlocks (the synchronous `next_input` = one reader limitation, again).
 
+**A login greeter's window controls are inert (as built, 2026-09-11).** The
+greeter is an ordinary `gui { trusted: true }` window, so the runtime draws
+it the same macOS titlebar as every other window — three traffic-light dots.
+But there is no dock or task switcher at the login, so a closed or minimized
+greeter could never be brought back: dismissing it is a dead end. So a
+trusted window's dots are disabled — drawn grey (like macOS's dimmed
+controls, and like an unfocused window's chrome, rather than a loud
+absence) and inert: a press on any of them is swallowed, neither firing the
+control nor starting a titlebar drag. The `guishell`/`guishellro` drills now
+click the greeter's close dot before signing in and assert it did not close
+(no `gui: closed`), so a regression that re-enabled the control would fail
+the login round trip loudly.
+
 **Stage 5, per-rect composition (as built, 2026-09-08).** A commit
 carries a damage rect, and until now it was ignored — every commit
 recomposed the whole scanout and DMA'd all of it to the host. Now

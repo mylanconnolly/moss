@@ -1999,6 +1999,17 @@ fn desktopSignIn(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, user: [
             return false;
         }
     }
+    // The login greeter must not be dismissable: clicking its (disabled)
+    // close dot must NOT close it, or there would be no way to get it back.
+    sleepMs(300);
+    if (parseDot(readLog(log_path), "close=")) |dot| {
+        _ = clickScanout(q, dot[0], dot[1]);
+        sleepMs(400);
+        if (countOccurrences(readLog(log_path), "gui: closed") != 0) {
+            reportFailure(spec.name, "the login window was dismissed by its close dot", log_path);
+            return false;
+        }
+    }
     if (!q.typeText(user)) {
         reportFailure(spec.name, "QMP could not type the username", log_path);
         return false;

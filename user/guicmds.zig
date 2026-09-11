@@ -169,6 +169,11 @@ var dots_cy: usize = 0;
 // event). An unfocused window dims its chrome — grey traffic lights, a
 // muted title — the desktop's focus cue. A fresh window opens focused.
 var win_focused = true;
+// A trusted (login greeter) window: its traffic lights are drawn but
+// disabled — a login must not be closed, minimized or maximized, because
+// nothing could bring it back (there is no dock or task switcher at the
+// login). The dots stay for visual consistency but read as inert (grey).
+var win_trusted = false;
 // Maximize (the green traffic-light) is a toggle: it fills the work area
 // (below the top bar, above the dock) and remembers the window's previous
 // geometry to restore on a second press. Surfaces are fixed-size, so the
@@ -809,10 +814,13 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     for (0..3) |i| dots_cx[i] = first_cx + i * dot_gap;
     // Focused: the macOS red/amber/green. Unfocused: all three a uniform
     // grey, and the title muted — the window visibly does not hold the
-    // keyboard, without a loud border.
-    const c_close = if (win_focused) tl_close else pal.border;
-    const c_min = if (win_focused) tl_min else pal.border;
-    const c_max = if (win_focused) tl_max else pal.border;
+    // keyboard, without a loud border. A trusted login window's controls
+    // are disabled (it cannot be closed/minimized/maximized), so its dots
+    // are always grey — visibly inert, like macOS's dimmed controls.
+    const lit = win_focused and !win_trusted;
+    const c_close = if (lit) tl_close else pal.border;
+    const c_min = if (lit) tl_min else pal.border;
+    const c_max = if (lit) tl_max else pal.border;
     fillDot(dots_cx[0], dots_cy, dot_r, c_close);
     fillDot(dots_cx[1], dots_cy, dot_r, c_min);
     fillDot(dots_cx[2], dots_cy, dot_r, c_max);
@@ -2160,6 +2168,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     ptr_down = false;
     pending_dot = null;
     win_focused = true;
+    win_trusted = want_trusted;
     maximized = false;
     // Width: `width: N` narrows the window (a desktop lays out several
     // smaller windows); default is the roomy single-window width.
@@ -2287,7 +2296,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 if (press) {
                     if (ev.y < title_h) {
                         if (hitDot(ev.x, ev.y)) |d| {
-                            pending_dot = d; // fire on release if still on it
+                            // A login greeter's controls are inert: swallow the
+                            // press so it neither fires the dot nor drags.
+                            if (!win_trusted) pending_dot = d; // fire on release if still on it
                         } else {
                             dragging = true; // grab the titlebar to move
                             drag_grab_x = ev.x;
