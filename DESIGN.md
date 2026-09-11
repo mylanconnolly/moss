@@ -3075,6 +3075,23 @@ a release in mid-screen still just moves the window. The `desktop` drill
 drags a window to the left, right, and top edges and confirms
 `gui: snapped left`, `gui: snapped right`, and `gui: maximized`.
 
+**A shared window frame (as built, 2026-09-11).** All of the above — the
+titlebar and its traffic-light dots, dragging, edge-snapping, minimize /
+maximize, focus dimming — plus the surface lifecycle (create / commit /
+move / resize / destroy) and the drawing primitives and system font that
+paint them, now live in `user/windowframe.zig`, not inside the mshl GUI
+runtime. It is module state, not a struct, because a process drives one
+window at a time (a transient popup swaps the buffer in place), matching
+how the runtime was already written. A client draws only its CONTENT into
+`contentRect()` (the area below the titlebar) and routes pointer events
+through `onPointer(ev, title)`, which returns what the frame did — `.content`
+(a press for the client to hit-test), `.close`, `.minimized`, `.moved`,
+`.resized(zone)` — the frame having already done any surface move or
+destroy+recreate itself. `guicmds` is the frame's first client (its content
+is a widget tree); the terminal is the second (its content is a glyph grid),
+so the two share one implementation of the chrome rather than duplicating
+the drag/snap/focus logic. Pure refactor: every GUI drill passed unchanged.
+
 **A higher-resolution scanout — 1280×1024 (as built, 2026-09-10).** The
 scanout grew from 1024×768 to 1280×1024 for more desktop room. The size
 lives in two constants — gpusvc's `fb_w`/`fb_h` (the resource it creates and
