@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer };
 
 const Spec = struct {
     name: []const u8,
@@ -71,6 +71,7 @@ const specs = [_]Spec{
     .{ .name = "pointer", .kind = .pointer, .pass = "pointer-test: PASS", .extra = "pointer: click", .append = "profile=pointer", .timeout_s = 120 },
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "listdemo", .kind = .listdemo, .pass = "listdemo-test: PASS", .extra = "gui: list items", .append = "profile=listdemo", .timeout_s = 120 },
+    .{ .name = "explorer", .kind = .explorer, .pass = "explorer-test: PASS", .extra = "gui: list files", .append = "profile=explorer", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
@@ -300,7 +301,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar or spec.kind == .explorer) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -417,7 +418,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The post-login GUI shell: like the front door, but the shell runs
         // on the pointer-capable compositor, so a tablet (input index 1,
         // after the keyboard) rides along for a working cursor.
-        .guishell, .guishellro => {
+        .guishell, .guishellro, .explorer => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -471,6 +472,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .listdemo) {
         if (!try listdemoDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .explorer) {
+        if (!try explorerDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .desktop) {
         if (!try desktopDrive(spec, log_path, polls)) return false;
@@ -944,6 +948,58 @@ fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (opened != 12) {
         var b: [96]u8 = undefined;
         reportFailure(spec.name, std.fmt.bufPrint(&b, "arrow-nav landed on row {d}, expected 12 (selection/scroll off)", .{opened}) catch "wrong row", log_path);
+        return false;
+    }
+    return true;
+}
+
+/// The file explorer drill: the two-pane explorer opens at the disk root.
+/// Click the first row (directories sort first, so it is a folder) to
+/// select it, Enter to open it, then close the window — the app reports the
+/// path it was at. A non-empty closing path proves the click hit-test,
+/// activation, and navigation into a directory worked.
+fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "gui: ready", 1, "the explorer never came up", spec, polls)) return false;
+    // The right pane (id "files") lists the current directory.
+    const g = parseListGeom(readLog(log_path), "files") orelse {
+        reportFailure(spec.name, "could not parse the file list's geometry", log_path);
+        return false;
+    };
+    const cx = g[0];
+    const rows_top = g[1];
+    const row_h = g[2];
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Click the first row (a directory), then Enter to open it.
+    if (!clickScanout(&q, cx, rows_top + row_h / 2)) {
+        reportFailure(spec.name, "QMP could not click a folder", log_path);
+        return false;
+    }
+    sleepMs(300);
+    if (!q.sendKey("ret")) {
+        reportFailure(spec.name, "QMP could not send Enter", log_path);
+        return false;
+    }
+    sleepMs(400);
+    // Close the window (the "close" button's logged centre).
+    const c = widgetCenter(readLog(log_path), "close") orelse {
+        reportFailure(spec.name, "could not find the close button", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, c[0], c[1])) {
+        reportFailure(spec.name, "QMP could not click close", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "explorer: closed at /", 1, "the explorer never closed", spec, polls)) return false;
+    // The closing path must be non-empty (we descended into a folder).
+    const content = readLog(log_path);
+    const at = std.mem.lastIndexOf(u8, content, "explorer: closed at /") orelse return false;
+    const after = content[at + "explorer: closed at /".len ..];
+    if (after.len == 0 or after[0] == '\n' or after[0] == '\r') {
+        reportFailure(spec.name, "the explorer did not navigate into a folder (closed at the root)", log_path);
         return false;
     }
     return true;

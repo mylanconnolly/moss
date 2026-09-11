@@ -1,0 +1,17 @@
+# The Files app (lazy — no `profiles`, started when the dock launches it via
+# the session init front channel). The two-pane explorer, browsing this
+# user's home through the session's own view (fs: "" derives the home, not
+# the disk root — a session sees only its home). Non-essential: closing its
+# window ends only this app.
+{
+  image:     mshrun
+  script:    scripts/explorer.msh
+  budget:    { user: 16mb }
+  grant:     [log, bootfs]
+  essential: false
+  give: [
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: view, fs: "", ro: false }
+  ]
+}

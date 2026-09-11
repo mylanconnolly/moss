@@ -21,6 +21,7 @@ let final = (gui {
           items: [
             { title: "Settings", unit: "settings", running: (unit-up "settings") }
             { title: "Demo", unit: "win-demo", running: (unit-up "win-demo") }
+            { title: "Files", unit: "explorer", running: (unit-up "explorer") }
           ]
         }
       })

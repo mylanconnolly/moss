@@ -1,0 +1,18 @@
+# The file explorer drill (profile explorer): mshrun runs the two-pane
+# explorer on the pointer-capable compositor (so rows can be clicked), with
+# a read-write view of the disk root (`view fs: ""` pulls up mossfs on the
+# block device — the std hierarchy conf/img/state/data/home/assets). The
+# host clicks into a directory and closes it; the app reports where it was.
+{
+  image:     mshrun
+  script:    scripts/explorer.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [explorer]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: view, fs: "", ro: false }
+  ]
+}

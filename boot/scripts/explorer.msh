@@ -1,0 +1,88 @@
+# A two-pane file explorer. The left pane is Places (Home); the right pane
+# lists the current directory (name / kind / size), directories first. A
+# folder is entered by opening it (double-click or Enter); "Up" goes to the
+# parent. The footer shows the volume's capability facts — encrypted vs
+# plain, read-only vs read-write — straight from the filesystem, not a
+# guess. Rows come from `fs-rows` (arena-stable, so the list can hold them
+# across renders; a `map`-built list would not survive the interpreter's
+# per-render reclaim).
+
+# Join a directory path and a child name (no leading slash at the root).
+def join-path [base, name] {
+  match $base {
+    "" => $name
+    _ => ($base + "/" + $name)
+  }
+}
+
+# The current directory's rows, or an empty list if it cannot be read.
+def dir-rows [path] {
+  match (fs-rows $path) {
+    ok $r => $r
+    _ => []
+  }
+}
+
+# The volume's capability facts, from `df` (statfs under the hood).
+def vol-line [] {
+  let d = (df)
+  let enc = (match ($d | get "encrypted") { true => "encrypted"; _ => "plain" })
+  let rw = (match ($d | get "read_only") { true => "read-only"; _ => "read-write" })
+  ("volume: " + $enc + " · " + $rw + " · " + (str ($d | get "free_kb")) + " KB free")
+}
+
+let final = (gui {
+    init:  { path: "" }
+    title: "Files"
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            {
+              kind: "row"
+              children: [
+                { kind: "button", id: "up", label: "Up" }
+                { kind: "label", muted: true, text: ("/" + $state.path) }
+              ]
+            }
+            {
+              kind:   "split"
+              left_w: 200
+              left: {
+                kind: "list"
+                id:   "places"
+                key:  "places"
+                h:    420
+                rows: [{ id: "", cells: ["Home"] }]
+              }
+              right: {
+                kind: "list"
+                id:   "files"
+                key:  $state.path
+                h:    420
+                cols: [{ title: "Name", w: 320 } { title: "Kind", w: 110 } { title: "Size", w: 120 }]
+                rows: (dir-rows $state.path)
+              }
+            }
+            { kind: "label", muted: true, text: (vol-line) }
+            { kind: "button", id: "close", label: "close", variant: "danger" }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "up" => { { path: (fs-parent $state.path) } }
+          "close" => { { path: $state.path, done: true } }
+          "places" => { { path: $ev.row } }
+          "files" => (match $ev.activated {
+              true => (match (fs-rows (join-path $state.path $ev.row)) {
+                  ok _ => { { path: (join-path $state.path $ev.row) } }
+                  _ => $state
+                })
+              _ => $state
+            })
+          _ => $state
+        }
+      })
+  })
+echo ("explorer: closed at /" + $final.path)

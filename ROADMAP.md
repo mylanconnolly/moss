@@ -1010,7 +1010,14 @@ is a plan.
   to the keymap; the `listdemo` drill. Lesson: a `map`-built view value held
   across GUI renders corrupts (mshl frees the call scope it lives in between
   renders); literal and `ls`-arena rows are stable, so the explorer (rows
-  from `ls`) is unaffected. Stages 2–4 open.
+  from `ls`) is unaffected. ✅ Stage 2 (2026-09-10): the local two-pane
+  explorer (`boot/scripts/explorer.msh`) — a Places sidebar + a file list
+  (name/kind/size, dirs first), Up/breadcrumb, and a footer stating the
+  volume's capability facts (encrypted, read-only). New `fs-rows` command
+  builds arena-stable `{id, cells}` rows; `df` gained a `read_only` field;
+  `fs-parent` backs Up. The `explorer` drill browses the disk root; a Files
+  pill launches it in the desktop over the session's home view. Stages 3
+  (fs-derive read-only sub-views) and 4 (remote browse) open.
 - **A desktop shell (macOS-inspired)**: movable windows with titlebars, a
   dock of running apps, a top menu bar (clock + system menu + app menus),
   and capability-gated user/system settings. ✅ Stage 1 — movable windows

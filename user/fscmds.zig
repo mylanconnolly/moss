@@ -48,7 +48,7 @@ pub const Fs = struct {
 /// One entry, as `stat` answers and `ls` lists.
 pub const Stat = struct { name: []const u8, type: shared.FsType, size: i64, mtime: i64 };
 /// `df`.
-pub const Df = struct { free_kb: i64, total_kb: i64, encrypted: bool };
+pub const Df = struct { free_kb: i64, total_kb: i64, encrypted: bool, read_only: bool };
 
 const fs_err = mshl.shapeOf(shared.FsErr);
 const stat_result = mshl.resultShape(mshl.shapeOf(Stat), fs_err);
@@ -63,7 +63,14 @@ const module_result = mshl.resultShape(.string, module_err);
 const df_shape = mshl.shapeOf(Df);
 const path_param = Param{ .name = "path", .shape = .string };
 
-pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module" };
+pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module", "fs-rows", "fs-parent" };
+
+// `fs-rows` returns rows ready for the GUI `list` widget: `{ id, cells }`
+// where cells are display strings (name with a trailing `/` for a folder,
+// its kind, a human size), directories first then alphabetical. Built with
+// arena strings so a GUI can hold the rows across renders (unlike a
+// `map`-built value, which lives in a reclaimed call scope).
+const rows_result = mshl.resultShape(.list, fs_err);
 
 /// The signature of a file command; null when the name is not one.
 pub fn signature(name: []const u8) ?Signature {
@@ -79,6 +86,10 @@ pub fn signature(name: []const u8) ?Signature {
     if (is(name, "readlink")) return .{ .params = &.{path_param}, .ret = text_result };
     if (is(name, "sync")) return .{ .ret = done_result };
     if (is(name, "df")) return .{ .ret = df_shape };
+    if (is(name, "fs-rows")) return .{ .params = &.{.{ .name = "path", .shape = .string, .optional = true }}, .ret = rows_result };
+    // `fs-parent PATH` → the parent view-path ("" at the root); a pure
+    // string op the explorer uses for its "Up" button.
+    if (is(name, "fs-parent")) return .{ .params = &.{path_param}, .ret = .string };
     if (is(name, "source")) return .{ .params = &.{path_param}, .ret = done_result };
     if (is(name, "module")) return .{ .params = &.{.{ .name = "name", .shape = .string }}, .ret = module_result };
     return null;
@@ -102,6 +113,12 @@ fn okv(it: *mshl.Interp, v: Value) mshl.Error!Value {
 pub fn call(fs: *const Fs, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     const a = it.arena;
     if (is(name, "ls")) return try lsTable(fs, it, if (args.len > 0) args[0].str else "");
+    if (is(name, "fs-rows")) return try fsRows(fs, it, if (args.len > 0) args[0].str else "");
+    if (is(name, "fs-parent")) {
+        const p = args[0].str;
+        const cut = std.mem.lastIndexOfScalar(u8, p, '/') orelse return .{ .str = "" };
+        return .{ .str = try a.dupe(u8, p[0..cut]) };
+    }
     if (is(name, "tree")) {
         var path: []const u8 = "";
         var depth: usize = 8;
@@ -179,7 +196,7 @@ pub fn call(fs: *const Fs, it: *mshl.Interp, name: []const u8, args: []const Val
     if (is(name, "sync")) return try doneResult(it, fsc.fsSyncR(fs.root));
     if (is(name, "df")) {
         const st = fsc.fsStatfs(fs.root) orelse return it.fail("df: the filesystem did not answer", .{});
-        return try mshl.toValue(a, Df{ .free_kb = @intCast(st.free_blocks * 4), .total_kb = @intCast(st.total_blocks * 4), .encrypted = st.encrypted });
+        return try mshl.toValue(a, Df{ .free_kb = @intCast(st.free_blocks * 4), .total_kb = @intCast(st.total_blocks * 4), .encrypted = st.encrypted, .read_only = st.read_only });
     }
     if (is(name, "source")) {
         const text = switch (try readFileR(fs, it, args[0].str)) {
@@ -259,6 +276,72 @@ pub fn lsTable(fs: *const Fs, it: *mshl.Interp, path_arg: []const u8) mshl.Error
     // An empty listing is still a table with the columns.
     if (rows.items.len == 0) return try okv(it, .{ .table = .{ .cols = &.{ "name", "type", "size", "mtime" }, .rows = &.{} } });
     return try okv(it, try mshl.toValue(a, @as([]const Stat, rows.items)));
+}
+
+/// A human-readable byte count ("2.1 KB"), in the interpreter's arena.
+fn humanSize(a: std.mem.Allocator, bytes: i64) mshl.Error![]const u8 {
+    const b: u64 = if (bytes < 0) 0 else @intCast(bytes);
+    if (b < 1024) return try std.fmt.allocPrint(a, "{d} B", .{b});
+    const units = [_][]const u8{ "KB", "MB", "GB", "TB" };
+    var v: u64 = b;
+    var rem: u64 = 0;
+    var u: usize = 0;
+    while (v >= 1024 and u < units.len) : (u += 1) {
+        rem = v % 1024;
+        v /= 1024;
+    }
+    // One decimal from the remainder (rem/1024 * 10).
+    const tenths = rem * 10 / 1024;
+    return try std.fmt.allocPrint(a, "{d}.{d} {s}", .{ v, tenths, units[u - 1] });
+}
+
+/// Directories before files, then case-sensitive by name — a stable order
+/// so the explorer's list does not jump around between listings.
+fn lessStat(_: void, x: Stat, y: Stat) bool {
+    const xd = x.type == .dir;
+    const yd = y.type == .dir;
+    if (xd != yd) return xd;
+    return std.mem.lessThan(u8, x.name, y.name);
+}
+
+/// The `fs-rows` command — see the note by `command_names`.
+pub fn fsRows(fs: *const Fs, it: *mshl.Interp, path_arg: []const u8) mshl.Error!Value {
+    const a = it.arena;
+    const t = try fs.resolve(it, path_arg);
+    const path = t.path;
+    const count = switch (fsc.fsListR(t.chan, t.buf, path)) {
+        .ok => |n| n,
+        .err => |e| return try errWord(it, e),
+    };
+    const names = try a.dupe(u8, t.buf[0..count]);
+    var stats: std.ArrayList(Stat) = .empty;
+    var split = std.mem.splitScalar(u8, names, '\n');
+    while (split.next()) |name| {
+        if (name.len == 0) continue;
+        var full: [256]u8 = undefined;
+        const fl = joinPath(&full, path, name);
+        const st = fsc.fsStat(t.chan, t.buf, full[0..fl]) orelse continue;
+        try stats.append(a, try statOf(it, name, st));
+    }
+    std.sort.insertion(Stat, stats.items, {}, lessStat);
+    const out = try a.alloc(Value, stats.items.len);
+    for (stats.items, 0..) |st, i| {
+        const isdir = st.type == .dir;
+        const dname = if (isdir) try std.fmt.allocPrint(a, "{s}/", .{st.name}) else st.name;
+        const size = if (isdir) "\u{2014}" else try humanSize(a, st.size); // — for a folder
+        const cells = try a.alloc(Value, 3);
+        cells[0] = .{ .str = dname };
+        cells[1] = .{ .str = @tagName(st.type) };
+        cells[2] = .{ .str = size };
+        const keys = try a.alloc([]const u8, 2);
+        keys[0] = "id";
+        keys[1] = "cells";
+        const vals = try a.alloc(Value, 2);
+        vals[0] = .{ .str = st.name };
+        vals[1] = .{ .list = cells };
+        out[i] = .{ .record = .{ .keys = keys, .vals = vals } };
+    }
+    return try okv(it, .{ .list = out });
 }
 
 pub fn treeInto(fs: *const Fs, it: *mshl.Interp, text: *std.ArrayList(u8), path_arg: []const u8, indent: []const u8, depth: usize) mshl.Error!void {

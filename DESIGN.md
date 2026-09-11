@@ -3893,6 +3893,33 @@ dupes into the bump arena) are stable; the file explorer builds its rows
 from `ls`, so it is unaffected, but a `map`-in-`view` that is retained is a
 trap until the interpreter promotes such results out of the call scope.
 
+**The file explorer, local (as built, 2026-09-10).** A two-pane explorer
+written in mshl (`boot/scripts/explorer.msh`): a **Places** sidebar (Home)
+and a file list of the current directory — name, kind, size, directories
+first — in a `split`, with an "Up" button, a breadcrumb, and a footer
+showing the volume's capability facts. Navigation is state: the app keeps a
+`path` string, "Up" is `fs-parent`, opening a folder appends the child; a
+row's activation only navigates if the target lists as a directory (it
+tries `fs-rows` on it and stays put on an error), so a file open is a
+no-op rather than a broken path. The rows come from a new Zig command,
+**`fs-rows [path]`** (`user/fscmds.zig`): it does the `ls` listing, sorts
+directories first then by name, and returns `{id, cells}` rows with display
+strings (a folder's name carries a trailing `/`, a human size like `2.1
+KB`) — built with arena strings so the list widget can hold them across
+renders, the point the stage-1 lesson made. The footer reads `df`, which
+gained a **`read_only`** field (the bit was already on the `statfs` wire,
+just never surfaced to a script) beside `encrypted` — so the explorer
+states, from the filesystem itself, whether the volume is encrypted and
+whether this view is read-only, the capability facts a browser should show.
+An `fs-parent PATH` command (a pure string op) backs "Up". The standalone
+`explorer` drill boots it over a read-write view of the disk root, clicks
+the first folder, opens it, and closes — the app reporting a non-empty
+path proves the click, activation, and descent. The desktop dock gained a
+**Files** pill (a lazy session unit, `conf/sessiongui/explorer.msh`, over
+the session's own home view), so it launches like Settings and Demo. Still
+local — browsing a remote node's files (the chosen end goal) is the arc's
+next, larger, stage.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
