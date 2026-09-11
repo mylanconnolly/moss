@@ -270,6 +270,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.cascade_test) {
+        _ = sched.spawn("boot-watch", cascadeTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.topbar_test) {
         _ = sched.spawn("boot-watch", topbarTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -900,6 +905,13 @@ fn browseTestWorker(_: u64) void {
 /// node 1's files from its Network sidebar. The runner drives node 2.
 fn netbrowseTestWorker(_: u64) void {
     systemDrill("netbrowse");
+}
+
+/// The window-cascade drill: two windows both open at the centre; the
+/// compositor must place the second off the first. One system boot under
+/// profile "cascade"; the runner reads the two origins and closes them.
+fn cascadeTestWorker(_: u64) void {
+    systemDrill("cascade");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

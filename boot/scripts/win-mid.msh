@@ -1,0 +1,21 @@
+# A plain movable window that opens where the compositor centres it (no
+# `at:`). The cascade drill runs two of these: both ask for the centre, and
+# the compositor must nudge the second off the first so they do not open
+# dead-on top of each other. Closing it (the red traffic-light dot) ends the
+# app.
+let final = (gui {
+    init:  { n: 0 }
+    title: "Window"
+    width: 360
+    view: (fn [state] {
+        {
+          kind: "column"
+          children: [
+            { kind: "label", text: "a window" }
+            { kind: "button", id: "ok", label: "ok", variant: "primary" }
+          ]
+        }
+      })
+    update: (fn [state, ev] { $state })
+  })
+echo "win-mid: closed"

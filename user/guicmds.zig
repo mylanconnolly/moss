@@ -1272,12 +1272,20 @@ fn attachTrusted() bool {
 }
 
 fn openSurface() bool {
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)) } }, 0)) {
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = shared.gpu_place_cascade } }, 0)) {
         .ok => |ok| ok,
         .err => return false,
     };
     surf = switch (cs.rep) {
-        .created => |c| c.surface,
+        .created => |c| blk: {
+            // The compositor may have nudged the window off another it would
+            // have covered (cascade); adopt where it actually landed so
+            // hit-testing, the logged dot/widget coordinates and later drags
+            // all speak the same position.
+            win_x = shared.unpackHi(c.xy);
+            win_y = shared.unpackLo(c.xy);
+            break :blk c.surface;
+        },
         else => return false,
     };
     if (cs.cap == 0) return false;

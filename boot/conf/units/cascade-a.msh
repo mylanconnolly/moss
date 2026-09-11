@@ -1,0 +1,17 @@
+# The window-cascade drill, window A (profile cascade): a centred window on
+# the pointer-capable compositor. Window B opens at the same centre, so the
+# compositor must cascade it off this one; the drill confirms the two land
+# at different origins (the bug was two apps opening dead-on top of each
+# other, reading as a single window). Non-essential: the boot follows B.
+{
+  image:     mshrun
+  script:    scripts/win-mid.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [cascade]
+  essential: false
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+  ]
+}

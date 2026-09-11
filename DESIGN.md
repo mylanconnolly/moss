@@ -3020,6 +3020,27 @@ surfaces. Raising the `dma_alloc` per-call cap to 64 pages makes the
 framebuffer 20 chunks (20 mappings), well clear of the cap with room for
 surfaces — bigger DMA chunks, not a bigger mapping table.
 
+**Cascading overlapping windows (as built, 2026-09-11).** Every GUI app
+that does not name an `at:` opens where the runtime centres it — so the file
+explorer and the settings window both asked for the same spot, and the
+second landed within a dozen pixels of the first, all but hiding it. It read
+as "only one window opens at a time" (both were up; one sat squarely behind
+the other). The fix is a **cascade** in the compositor: when a client sets
+`gpu_place_cascade` on `create_surface`, `cascadePlace` nudges the origin by
+28px steps off any visible surface it would land right on top of, stopping
+before it runs off the scanout. The client owns window position (it drives
+`create_surface` and, on a drag, `move_surface`), so the compositor cannot
+silently move a window without desyncing the client's hit-testing — the
+`created` reply now carries the origin it actually placed the window at, and
+the runtime adopts it as its `win_x`/`win_y`. The flag is opt-in: only
+movable app windows set it (they adopt the reply), while menus and the
+single-window test clients place exactly. A full-scanout window never
+cascades (the off-scanout guard stops it at once), so maximise still fills.
+Windows the client places at distinct spots — the desktop drill's Alpha and
+Beta — are far apart and never trigger it. The `cascade` drill is the guard:
+two windows both open centred and it confirms they land at least a titlebar
+apart, then closes both by their traffic-light dots.
+
 **The dock clears a pill when its app exits (as built, 2026-09-10).** Stage
 3 left *running* as dock state set at launch and never cleared — the dock
 had no signal that a launched app had gone. Rather than teach the dock to

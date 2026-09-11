@@ -1152,7 +1152,15 @@ is a plan.
   with it — `shm_max_pages` 768→1280 (a full-scanout surface), the global
   `shm_account` 16→64 MB, and the `dma_alloc` per-call cap 16→64 pages so
   the framebuffer's scatter-gather backing is 20 mapping-windows not 80
-  (past a domain's `max_mappings`). Also owed (desktop polish, separate): a
+  (past a domain's `max_mappings`). **Windows cascade** 2026-09-11: apps
+  without an explicit `at:` all open centred, so two of them (the file
+  explorer + settings) landed a dozen pixels apart — the newer all but
+  hiding the older, reading as "one window at a time." The compositor now
+  nudges a window (opt-in `gpu_place_cascade` on `create_surface`) off any
+  it would land squarely on; since the client owns position, `created`
+  returns the placed origin and the runtime adopts it. The `cascade` drill
+  opens two centred windows and asserts they land a titlebar apart. Also
+  owed (desktop polish, separate): a
   wallpaper (the ground is a solid fill today). Decisions: client-drawn
   decorations via the shared runtime +
   compositor move/raise; real multi-process windows; admin = a policy bit

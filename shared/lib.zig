@@ -763,12 +763,19 @@ pub const BlkResp = union(enum(u64)) {
 /// damage rect, at which the server copies that rectangle into the
 /// scanout's framebuffer and flushes it to the host. Rects pack two u32
 /// into a u64 (xy = x<<32 | y, wh = w<<32 | h) to fit the four-word ABI.
+/// `create_surface` flag: cascade this window off any it would fully cover.
+pub const gpu_place_cascade: u64 = 1;
+
 pub const GpuReq = union(enum(u64)) {
     /// A surface at `xy` (x<<32 | y on the scanout) of size `wh`. The
     /// reply carries the surface id and its size, and a shm cap the client
     /// maps and draws. Later surfaces stack above earlier ones. A
-    /// full-scanout surface at (0,0) is the single-window case.
-    create_surface: struct { xy: u64, wh: u64 },
+    /// full-scanout surface at (0,0) is the single-window case. `flags`:
+    /// `gpu_place_cascade` asks the compositor to nudge the window off any
+    /// it would land squarely on top of, returning the final origin in the
+    /// reply's `xy` (movable app windows set it; menus/exact placements
+    /// leave it 0). Other bits reserved, pass 0.
+    create_surface: struct { xy: u64, wh: u64, flags: u64 = 0 },
     /// A surface's damage rect changed (`xy`/`wh` in surface-local
     /// coordinates); the compositor recomposites the scanout and flushes.
     commit: struct { surface: u64, xy: u64, wh: u64 },
@@ -825,8 +832,12 @@ pub const GpuReq = union(enum(u64)) {
 };
 pub const GpuResp = union(enum(u64)) {
     ok: void,
-    /// + a shm cap attachment: the surface's pixel buffer.
-    created: struct { surface: u64, wh: u64 },
+    /// + a shm cap attachment: the surface's pixel buffer. `xy` is the
+    /// origin the compositor actually placed it at (`packPair(x, y)`) —
+    /// usually what the client asked for, but nudged when it would have
+    /// landed on top of another window (see `cascadePlace`), so the client
+    /// adopts it for hit-testing and later moves.
+    created: struct { surface: u64, wh: u64, xy: u64 },
     /// An input event delivered to a surface (a message payload is only
     /// three words, so the event packs into `arg`). `kind` 0 is a keystroke
     /// to the focused surface: `arg` is the character. `kind` 1 is a
@@ -1918,7 +1929,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with

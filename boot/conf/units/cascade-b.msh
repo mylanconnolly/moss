@@ -1,0 +1,16 @@
+# The window-cascade drill, window B (profile cascade): a second centred
+# window sharing the compositor with A. Essential, so closing it ends the
+# boot; the drill closes both windows once it has checked they cascaded to
+# distinct origins.
+{
+  image:     mshrun
+  script:    scripts/win-mid.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [cascade]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+  ]
+}

@@ -361,10 +361,41 @@ fn findSurface(id: u64) ?*Surface {
 /// it, we read it when compositing. It stacks above every existing
 /// surface. A surface owned by the trusted badge is the login surface.
 /// Returns the surface id and the cap.
-fn createSurface(owner: u64, x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, shm: u64 } {
+/// Nudge a new window off any visible one it would land right on top of, so
+/// two apps that both open centred (the file explorer and settings both do —
+/// same x, a dozen pixels apart) don't perfectly overlap and read as a
+/// single window. Windows the client placed at distinct spots (the desktop
+/// drill's Alpha and Beta, a demo's explicit `at`) are far apart and never
+/// collide, so they keep their exact positions. Stops before running the
+/// window off the scanout — a heavily populated desktop just stacks again.
+fn cascadePlace(xp: *u32, yp: *u32, w: u32, h: u32) void {
+    const step: u32 = 28;
+    var tries: u32 = 0;
+    while (tries < max_surfaces) : (tries += 1) {
+        var hit = false;
+        for (&surfaces) |*sf| {
+            if (!sf.used or sf.hidden) continue;
+            const dx = if (sf.x > xp.*) sf.x - xp.* else xp.* - sf.x;
+            const dy = if (sf.y > yp.*) sf.y - yp.* else yp.* - sf.y;
+            if (dx < step and dy < step) {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) return;
+        if (@as(usize, xp.*) + step + w > fb_w or @as(usize, yp.*) + step + h > fb_h) return;
+        xp.* += step;
+        yp.* += step;
+    }
+}
+
+fn createSurface(owner: u64, x_req: u32, y_req: u32, w: u32, h: u32, cascade: bool) ?struct { id: u64, shm: u64, x: u32, y: u32 } {
     var idx: usize = 0;
     while (idx < max_surfaces and surfaces[idx].used) idx += 1;
     if (idx == max_surfaces) return null;
+    var x = x_req;
+    var y = y_req;
+    if (cascade) cascadePlace(&x, &y, w, h);
     const pages = (@as(usize, w) * h * fb_bpp + 4095) / 4096;
     if (pages == 0 or pages > fb_pages) return null;
     const s = usys.shmCreate(pages);
@@ -385,7 +416,7 @@ fn createSurface(owner: u64, x: u32, y: u32, w: u32, h: u32) ?struct { id: u64, 
     // ground again, so a previously-focused window's stale focus border is
     // cleared instead of lingering (per-rect commits never touch it).
     laid_ground = false;
-    return .{ .id = idx + 1, .shm = s.data[0] };
+    return .{ .id = idx + 1, .shm = s.data[0], .x = x, .y = y };
 }
 
 fn destroySurface(sf: *Surface) void {
@@ -1033,8 +1064,9 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 6 } }, 0, token);
                     continue;
                 }
-                if (createSurface(badge, px_x, px_y, w, h)) |cs| {
-                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h) } }, cs.shm, token);
+                const cascade = q.flags & shared.gpu_place_cascade != 0 and !full;
+                if (createSurface(badge, px_x, px_y, w, h, cascade)) |cs| {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h), .xy = shared.packPair(cs.x, cs.y) } }, cs.shm, token);
                 } else {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0, token);
                 }

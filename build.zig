@@ -229,6 +229,11 @@ pub fn build(b: *std.Build) void {
         "netbrowse-test",
         "Run the networked-explorer drill: node 2's GUI explorer browses node 1's files over the fabric",
     ) orelse false;
+    const cascade_test = b.option(
+        bool,
+        "cascade-test",
+        "Run the window-cascade drill: two centred windows must open at distinct origins",
+    ) orelse false;
     const gui_test = b.option(
         bool,
         "gui-test",
@@ -421,6 +426,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "explorer_test", explorer_test);
     build_opts.addOption(bool, "browse_test", browse_test);
     build_opts.addOption(bool, "netbrowse_test", netbrowse_test);
+    build_opts.addOption(bool, "cascade_test", cascade_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
@@ -669,6 +675,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/browse.msh",         "scripts/browse.msh",
         "conf/units/browse-client.msh",  "scripts/browse-cli.msh",
         "conf/units/gui-netbrowse.msh",
+        "conf/units/cascade-a.msh",      "scripts/win-mid.msh",
+        "conf/units/cascade-b.msh",
         "conf/units/gui-login.msh",      "scripts/gui-login.msh",
         "conf/units/gui-tlogin.msh",     "scripts/gui-tlogin.msh",
         "conf/units/gui-session.msh",    "scripts/gui-session.msh",
@@ -815,7 +823,7 @@ pub fn build(b: *std.Build) void {
             "rng_test",    "smmu_test",     "vm_test",       "guest_test",
             "vmnode_test", "pan_test",      "cpu_test",      "users_test",
             "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test", "explorer_test", "browse_test", "netbrowse_test",
+            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test", "explorer_test", "browse_test", "netbrowse_test", "cascade_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1234,7 +1242,7 @@ pub fn build(b: *std.Build) void {
         "rng_test",    "smmu_test",     "vm_test",       "guest_test",
         "vmnode_test", "pan_test",      "cpu_test",      "users_test",
         "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test", "explorer_test", "browse_test", "netbrowse_test",
+        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test", "explorer_test", "browse_test", "netbrowse_test", "cascade_test",
     };
     const variants = [_][]const u8{
         "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
@@ -1244,7 +1252,7 @@ pub fn build(b: *std.Build) void {
         "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
         "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
         "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "guishellro", "fabgui", "fabsignal", "locale", "localeupd", "desktop", "topbar", "dock", "listdemo", "explorer", "browse", "netbrowse",
+        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "guishellro", "fabgui", "fabsignal", "locale", "localeupd", "desktop", "topbar", "dock", "listdemo", "explorer", "browse", "netbrowse", "cascade",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

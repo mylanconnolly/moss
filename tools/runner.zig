@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade };
 
 const Spec = struct {
     name: []const u8,
@@ -95,6 +95,7 @@ const specs = [_]Spec{
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
     .{ .name = "browse", .kind = .browse, .pass = "browse-test: PASS", .extra = "browse: node 2 root has", .append = "profile=browse", .timeout_s = 180 },
     .{ .name = "netbrowse", .kind = .netbrowse, .pass = "netbrowse-test: PASS", .extra = "node=1 rows=", .append = "profile=netbrowse", .timeout_s = 180 },
+    .{ .name = "cascade", .kind = .cascade, .pass = "cascade-test: PASS", .extra = "win-mid: closed", .append = "profile=cascade", .timeout_s = 120 },
     .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
     .{ .name = "localeupd", .kind = .localeupd, .pass = "localeupd-test: PASS", .extra = "localeupd: installed CLDR 48.2.0-upd", .append = "profile=localeupd", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
@@ -393,7 +394,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
-        .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo => try args.appendSlice(gpa, &.{
+        .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo, .cascade => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -524,6 +525,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .gboom) {
         if (!try gboomDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .cascade) {
+        if (!try cascadeDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .guishell) {
         if (!try guishellDrive(spec, log_path, polls)) return false;
@@ -1073,6 +1077,56 @@ fn parseMovedTo(content: []const u8, title: []const u8) ?[2]u32 {
 /// titlebar (the runtime asks the compositor to move its surface), then
 /// close both by their red traffic-light dots — proving move, raise, and
 /// close, the window-management foundation.
+/// Like parseDot, but the FIRST "gui: dots" line rather than the last —
+/// so a two-window drill can read each window's origin.
+fn parseDotFirst(content: []const u8, key: []const u8) ?[2]u32 {
+    const at = std.mem.indexOf(u8, content, "gui: dots ") orelse return null;
+    const end = std.mem.indexOfScalarPos(u8, content, at, '\n') orelse content.len;
+    return parseDot(content[at..end], key);
+}
+
+/// The window-cascade drill: two windows both open where the compositor
+/// centres them, so the second must be nudged off the first. Confirm they
+/// landed at distinct origins (the bug had a new window open dead-on top of
+/// an existing one, so it read as "only one window at a time"), then close
+/// both by their traffic-light dots — the essential one ends the boot.
+fn cascadeDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "gui: ready", 2, "the two windows never came up", spec, polls)) return false;
+    sleepMs(300);
+    const content = readLog(log_path);
+    const first = parseDotFirst(content, "close=") orelse {
+        reportFailure(spec.name, "could not parse the first window's origin", log_path);
+        return false;
+    };
+    const second = parseDot(content, "close=") orelse {
+        reportFailure(spec.name, "could not parse the second window's origin", log_path);
+        return false;
+    };
+    // A titlebar's worth of separation in at least one axis: the two must
+    // not sit dead-on top of each other.
+    const dx = if (first[0] > second[0]) first[0] - second[0] else second[0] - first[0];
+    const dy = if (first[1] > second[1]) first[1] - second[1] else second[1] - first[1];
+    if (dx < 24 and dy < 24) {
+        reportFailure(spec.name, "two centred windows opened almost on top of each other (no cascade) — one hides the other", log_path);
+        return false;
+    }
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    // Close both by their close dots (top one first); whichever is the
+    // essential unit ends the boot.
+    if (!clickScanout(&q, second[0], second[1])) {
+        reportFailure(spec.name, "QMP could not click the top window's close dot", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "win-mid: closed", 1, "the close dot did not close the window", spec, polls)) return false;
+    sleepMs(300);
+    _ = clickScanout(&q, first[0], first[1]);
+    return true;
+}
+
 fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // Both windows must be up (each logs "gui: ready").
     if (!try waitLogN(log_path, "gui: ready", 2, "the two windows never came up", spec, polls)) return false;
