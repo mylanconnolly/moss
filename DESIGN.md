@@ -3059,6 +3059,22 @@ with the window) so a host can find the green dot again to restore; the
 `guishell` drill maximizes the demo window, confirms `gui: maximized`, then
 clicks the dot at its new position and confirms `gui: unmaximized`.
 
+**Window snapping (as built, 2026-09-11).** Flinging a window's titlebar to
+a screen edge tiles it: the left edge fills the left half of the work area,
+the right edge the right half, the top maximizes — the Aero-Snap / macOS
+gesture. It rides the existing drag: on release the runtime takes the
+cursor's scanout position (the window origin plus the release point within
+it — valid throughout a drag, since the window brackets the cursor even when
+its own motion clamps at an edge) and, if it lands in an edge band
+(`snap_edge`, 24 px), resizes to that region. The resize is the same
+destroy + recreate maximize uses, and it reuses maximize's saved-geometry
+slot: a snap remembers the floating geometry (only when coming *from*
+floating, so re-snapping between halves keeps the original), and the green
+traffic-light un-snaps back to it. A trusted (login) window never snaps, and
+a release in mid-screen still just moves the window. The `desktop` drill
+drags a window to the left, right, and top edges and confirms
+`gui: snapped left`, `gui: snapped right`, and `gui: maximized`.
+
 **A higher-resolution scanout — 1280×1024 (as built, 2026-09-10).** The
 scanout grew from 1024×768 to 1280×1024 for more desktop room. The size
 lives in two constants — gpusvc's `fb_w`/`fb_h` (the resource it creates and

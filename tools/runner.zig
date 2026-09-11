@@ -1155,9 +1155,40 @@ fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     }
     if (!try waitLogN(log_path, "gui: Alpha moved to", 1, "dragging the titlebar did not move the window", spec, polls)) return false;
     sleepMs(300);
-    // Close Alpha by its red dot, at (win_x+22, win_y+30) of where it landed.
-    const pos = parseMovedTo(readLog(log_path), "Alpha") orelse [2]u32{ 120, 200 };
-    if (!clickScanout(&q, pos[0] + 22, pos[1] + 30)) {
+    // Window snapping: fling Alpha's titlebar to each screen edge and
+    // confirm it tiles — left half, right half, and (the top) maximized.
+    // After each snap the runtime re-logs the dots, so the next grab reads
+    // the titlebar's new spot from `gui: dots close=`.
+    {
+        const Snap = struct { tx: u32, ty: u32, want: []const u8 };
+        // Grab band: right of the three dots (x = close_x + 120), on the
+        // titlebar row (close_y). Target: the named edge.
+        const g0 = parseMovedTo(readLog(log_path), "Alpha") orelse [2]u32{ 500, 450 };
+        var grab_x: u32 = g0[0] + 150;
+        var grab_y: u32 = g0[1] + 18;
+        const steps = [_]Snap{
+            .{ .tx = 6, .ty = 500, .want = "gui: snapped left" },
+            .{ .tx = 1274, .ty = 500, .want = "gui: snapped right" },
+            .{ .tx = 640, .ty = 6, .want = "gui: maximized" },
+        };
+        for (steps) |s| {
+            if (!dragScanout(&q, grab_x, grab_y, s.tx, s.ty)) {
+                reportFailure(spec.name, "QMP could not drag Alpha to an edge", log_path);
+                return false;
+            }
+            if (!try waitLogN(log_path, s.want, 1, "dragging to a screen edge did not snap the window", spec, polls)) return false;
+            sleepMs(300);
+            const dots = parseDot(readLog(log_path), "close=") orelse {
+                reportFailure(spec.name, "could not read the snapped window's titlebar", log_path);
+                return false;
+            };
+            grab_x = dots[0] + 120;
+            grab_y = dots[1];
+        }
+    }
+    // Close Alpha by its (snapped) red dot — re-read from the last dots line.
+    const adot = parseDot(readLog(log_path), "close=") orelse [2]u32{ 142, 215 };
+    if (!clickScanout(&q, adot[0], adot[1])) {
         reportFailure(spec.name, "QMP could not click Alpha's close box", log_path);
         return false;
     }

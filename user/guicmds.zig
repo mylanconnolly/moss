@@ -1363,6 +1363,29 @@ fn workArea() Geom {
     return .{ .x = 0, .y = top_strut, .w = scanout_w, .h = h };
 }
 
+// Window snapping: dragging the cursor to a screen edge, then releasing,
+// resizes the window to fill that half (left/right) or the whole work area
+// (top) — the Aero-Snap / macOS-tile gesture. Detected from the cursor's
+// scanout position at release; the edge band is generous enough to hit by
+// flinging the pointer to the side.
+const SnapZone = enum { none, left, right, max };
+const snap_edge = 24;
+fn snapZoneAt(cx: usize, cy: usize) SnapZone {
+    if (cx < snap_edge) return .left;
+    if (cx + snap_edge >= scanout_w) return .right;
+    if (cy < top_strut + snap_edge) return .max; // up to the top bar
+    return .none;
+}
+fn snapRegion(zone: SnapZone) Geom {
+    const wa = workArea();
+    const half = wa.w / 2;
+    return switch (zone) {
+        .left => .{ .x = wa.x, .y = wa.y, .w = half, .h = wa.h },
+        .right => .{ .x = wa.x + half, .y = wa.y, .w = wa.w - half, .h = wa.h },
+        .max, .none => wa,
+    };
+}
+
 /// Name this window's surface so the dock can restore it by title.
 fn setSurfaceTitle(title: []const u8) void {
     if (surf == 0) return;
@@ -2336,6 +2359,42 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 if (release) {
                     if (dragging) {
                         dragging = false;
+                        // Snap if the cursor was flung to a screen edge. The
+                        // cursor's scanout position is the window origin plus
+                        // the release point within it (valid through a drag:
+                        // the window brackets the cursor even when clamped).
+                        const cx = @min(win_x + ev.x, scanout_w);
+                        const cy = @min(win_y + ev.y, scanout_h);
+                        const zone = snapZoneAt(cx, cy);
+                        if (zone != .none and !win_trusted) {
+                            // Remember the floating geometry to restore (the
+                            // green dot un-snaps), but only when coming from
+                            // floating — re-snapping keeps the original.
+                            if (!maximized) {
+                                saved_x = win_x;
+                                saved_y = win_y;
+                                saved_w = win_w;
+                                saved_h = win_h;
+                            }
+                            const g = snapRegion(zone);
+                            win_x = g.x;
+                            win_y = g.y;
+                            win_w = g.w;
+                            win_h = g.h;
+                            maximized = true; // a saved-geometry zoom state
+                            // Fixed-size surface: resize is destroy + recreate.
+                            closeSurface();
+                            if (!openSurface()) return it.fail("gui: cannot snap the window", .{});
+                            if (title.len > 0) setSurfaceTitle(title);
+                            relog_geom = true;
+                            _ = usys.log(log_h, switch (zone) {
+                                .left => "gui: snapped left",
+                                .right => "gui: snapped right",
+                                .max => "gui: maximized",
+                                .none => unreachable,
+                            });
+                            break :input; // re-render into the new surface
+                        }
                         var lb: [96]u8 = undefined;
                         _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: {s} moved to {d},{d}", .{ title, win_x, win_y }) catch "gui: moved");
                     } else if (pending_dot) |d| {
