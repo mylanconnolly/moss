@@ -2752,10 +2752,13 @@ uniquely-badged channel (the same mint the trusted login earns, but badges
 **a fast drag dropped pointer events — a button release above all** —
 because the compositor delivered a pointer event only if a reader was
 parked at that instant and dropped it otherwise, and a window would stick
-to the cursor when its release vanished. Now `dispatchPointer` peeks
-rather than pops: an event whose target has no reader parked is left in
-the ring and delivered when that client next parks (`next_input` re-runs
-the dispatch), so nothing is lost. A stale focus border (a new window took
+to the cursor when its release vanished. The first cut left an
+undeliverable event at the ring's head and stopped draining until that
+client re-parked — which turned out to be a worse bug (see below), so the
+compositor now drains the ring unconditionally and **queues** what it
+cannot deliver onto the target surface, one small FIFO per surface (moves
+coalesce onto the tail; every button transition is kept), flushing one per
+re-park. A stale focus border (a new window took
 focus but the old window's yellow cue was never repainted over) closed by
 laying the whole ground again on the next commit after a surface is
 created. The `desktop` drill is the repo's first multi-window scene: two
@@ -3040,6 +3043,31 @@ Windows the client places at distinct spots — the desktop drill's Alpha and
 Beta — are far apart and never trigger it. The `cascade` drill is the guard:
 two windows both open centred and it confirms they land at least a titlebar
 apart, then closes both by their traffic-light dots.
+
+**A busy client must not wedge the pointer ring (as built, 2026-09-11).**
+Opening one app, then a second from the dock, would leave the second never
+launching — no window, no running dot — on real hardware, though every
+drill launched several apps fine. The cause was the pointer dispatch's
+"leave the undeliverable event at the ring's head until the client
+re-parks" rule. When you click a dock pill, the dock is handed the press,
+then blocks for tens of milliseconds in the `launch` (init spawns and wires
+a whole domain) with no reader parked. The click's *release* arrives during
+that window, cannot be delivered, and pins the head of the 64-slot ring —
+so nothing drains. A real mouse pours a steady stream of motion events into
+the ring while it travels to the next pill (a high-poll mouse easily fills
+64 slots in those milliseconds), and `ptrRingPush` drops on a full ring —
+so the *next* click's button event is silently lost. QMP could never
+reproduce it: the monitor delivers input far too slowly to fill the ring
+inside a launch, so the harness always saw the release drain and the next
+click land. The fix drains the ring unconditionally and, when a client has
+no reader, queues the event on the target surface (a small per-surface FIFO
+that coalesces consecutive moves but keeps every button transition),
+delivering one per re-park. The ring can no longer wedge or overflow, so no
+click is dropped; a busy client still catches up to the whole gesture — a
+whole press-then-release that lands while it launches still arrives in
+order — the moment it parks again. Raising and focusing on a press are the
+compositor's own bookkeeping, so they now happen immediately, before the
+per-client delivery, whether or not the client is ready.
 
 **The dock clears a pill when its app exits (as built, 2026-09-10).** Stage
 3 left *running* as dock state set at launch and never cleared — the dock

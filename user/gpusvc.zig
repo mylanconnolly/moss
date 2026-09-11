@@ -128,7 +128,22 @@ const Surface = struct {
     // window created focused needs no event, but one that opens behind the
     // focus (a second window) is told it is unfocused so it dims its chrome.
     notified_focus: bool = true,
+    // Pointer events that arrived while this surface's owner had no reader
+    // parked (it was busy — e.g. the dock blocked launching an app). Rather
+    // than wedge the whole pointer ring on the undeliverable event (which
+    // stalls every later event and, under a real mouse's steady stream,
+    // fills the 64-slot ring so a subsequent click is dropped — the "second
+    // app won't open" bug), we queue them here and pop the ring. They are
+    // delivered one per re-park. Consecutive moves coalesce onto the tail so
+    // move spam can't overflow the queue, but every button transition is
+    // kept, so a whole click that lands while the client is busy still
+    // arrives as a press then a release.
+    pend: [pend_cap]PendEv = undefined,
+    pend_head: usize = 0,
+    pend_tail: usize = 0,
 };
+const PendEv = struct { lx: u64, ly: u64, buttons: u32 };
+const pend_cap = 8;
 var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
 /// The compositor's ground, seen wherever no surface covers the scanout.
@@ -976,36 +991,77 @@ fn raiseSurface(id: u64) void {
 /// change or a drag deliver a pointer event (surface-local) to the
 /// surface under the cursor, giving it focus on a press.
 fn dispatchPointer(chan_h: u64) void {
-    // Peek, don't pop, until an event is either delivered or belongs to no
-    // one: a button event whose target surface has no reader parked yet is
-    // LEFT in the ring (we break) and delivered when that client next parks
-    // (next_input re-runs us). Without this, a fast drag's events — a
-    // dropped button release above all — vanish while the client is briefly
-    // between parks, and a window sticks to the cursor.
-    while (ptrRingPeek()) |e| {
+    // First, flush any pointer event that had to wait for a busy client to
+    // park a reader again (see the coalescing below): the client is back, so
+    // hand it the latest cursor + button state it missed.
+    flushPendingPtr(chan_h);
+    // Drain the ring completely. An event whose target has no reader parked
+    // (the client is busy — e.g. the dock blocking on a launch) is NOT left
+    // to wedge the ring — that stalls every later event and, under a real
+    // mouse's steady stream, fills the 64-slot ring so a subsequent click is
+    // dropped (the "second app won't open" bug). Instead we coalesce it onto
+    // the target surface and pop, so the ring always drains; it is delivered
+    // when the client re-parks.
+    while (ptrRingPop()) |e| {
         const nx = @min(@as(usize, e.x) * fb_w / 32768, fb_w - 1);
         const ny = @min(@as(usize, e.y) * fb_h / 32768, fb_h - 1);
         moveCursor(nx, ny);
         const buttons = e.buttons;
         const changed = buttons != prev_buttons;
         const press = (buttons & ~prev_buttons) != 0; // a newly-pressed button
-        // A bare hover (no button, no change) reaches no client — consume it.
-        if (changed or buttons != 0) {
-            const id = surfaceUnderCursor();
-            if (id != 0) {
-                const sf = findSurface(id).?;
-                const token = takeReader(sf.owner) orelse break; // no reader: wait
-                if (press) {
-                    focusSurface(id); // give it the keyboard
-                    raiseSurface(id); // and bring it to the front
-                }
-                const lx: u64 = cursor_x - sf.x;
-                const ly: u64 = cursor_y - sf.y;
+        prev_buttons = buttons;
+        // A bare hover (no button, no change) reaches no client — skip it.
+        if (!changed and buttons == 0) continue;
+        const id = surfaceUnderCursor();
+        if (id == 0) continue;
+        const sf = findSurface(id).?;
+        // Raising/focusing on press is the compositor's own bookkeeping, so
+        // do it now even if the client is busy — the window still comes to
+        // the front and takes the keyboard.
+        if (press) {
+            focusSurface(id);
+            raiseSurface(id);
+        }
+        const lx: u64 = cursor_x - sf.x;
+        const ly: u64 = cursor_y - sf.y;
+        // A queued event for this surface must be delivered before this new
+        // one, or order breaks — so if anything is pending, append (don't
+        // deliver live out of order).
+        if (sf.pend_head == sf.pend_tail) {
+            if (takeReader(sf.owner)) |token| {
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = 1, .arg = shared.ptrArg(lx, ly, buttons) } }, 0, token);
+                continue;
             }
         }
-        _ = ptrRingPop();
-        prev_buttons = buttons;
+        pendPush(sf, .{ .lx = lx, .ly = ly, .buttons = buttons });
+    }
+}
+
+/// Queue a pointer event for a busy surface. Consecutive moves (buttons
+/// unchanged from the tail) overwrite the tail so move spam cannot overflow;
+/// a button change always appends. On overflow the oldest is dropped.
+fn pendPush(sf: *Surface, e: PendEv) void {
+    if (sf.pend_head != sf.pend_tail) {
+        const last = (sf.pend_tail + pend_cap - 1) % pend_cap;
+        if (sf.pend[last].buttons == e.buttons) {
+            sf.pend[last] = e; // coalesce a move onto the tail
+            return;
+        }
+    }
+    sf.pend[sf.pend_tail] = e;
+    sf.pend_tail = (sf.pend_tail + 1) % pend_cap;
+    if (sf.pend_tail == sf.pend_head) sf.pend_head = (sf.pend_head + 1) % pend_cap; // full: drop oldest
+}
+
+/// Hand each busy surface one queued pointer event, now that it may have
+/// re-parked — one per park keeps the client's button transitions in order.
+fn flushPendingPtr(chan_h: u64) void {
+    for (&surfaces, 0..) |*sf, i| {
+        if (!sf.used or sf.pend_head == sf.pend_tail) continue;
+        const token = takeReader(sf.owner) orelse continue;
+        const e = sf.pend[sf.pend_head];
+        sf.pend_head = (sf.pend_head + 1) % pend_cap;
+        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 1, .arg = shared.ptrArg(e.lx, e.ly, e.buttons) } }, 0, token);
     }
 }
 
