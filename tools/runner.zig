@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal };
 
 const Spec = struct {
     name: []const u8,
@@ -96,6 +96,7 @@ const specs = [_]Spec{
     .{ .name = "browse", .kind = .browse, .pass = "browse-test: PASS", .extra = "browse: node 2 root has", .append = "profile=browse", .timeout_s = 180 },
     .{ .name = "netbrowse", .kind = .netbrowse, .pass = "netbrowse-test: PASS", .extra = "node=1 rows=", .append = "profile=netbrowse", .timeout_s = 180 },
     .{ .name = "cascade", .kind = .cascade, .pass = "cascade-test: PASS", .extra = "win-mid: closed", .append = "profile=cascade", .timeout_s = 120 },
+    .{ .name = "terminal", .kind = .terminal, .pass = "terminal-test: PASS", .extra = "term: console up", .append = "profile=terminal", .timeout_s = 120 },
     .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
     .{ .name = "localeupd", .kind = .localeupd, .pass = "localeupd-test: PASS", .extra = "localeupd: installed CLDR 48.2.0-upd", .append = "profile=localeupd", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
@@ -306,7 +307,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar or spec.kind == .explorer) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -423,7 +424,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The post-login GUI shell: like the front door, but the shell runs
         // on the pointer-capable compositor, so a tablet (input index 1,
         // after the keyboard) rides along for a working cursor.
-        .guishell, .guishellro, .explorer => {
+        .guishell, .guishellro, .explorer, .terminal => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -528,6 +529,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .cascade) {
         if (!try cascadeDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .terminal) {
+        if (!try terminalDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .guishell) {
         if (!try guishellDrive(spec, log_path, polls)) return false;
@@ -1124,6 +1128,40 @@ fn cascadeDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "win-mid: closed", 1, "the close dot did not close the window", spec, polls)) return false;
     sleepMs(300);
     _ = clickScanout(&q, first[0], first[1]);
+    return true;
+}
+
+/// The desktop-terminal drill: a windowed terminal (term in the shared
+/// frame) with a full msh behind it. Wait for the window, type a command
+/// and then `exit` — the shell only exits cleanly if the keystrokes reached
+/// it through the frame, so a clean shutdown asserts the whole
+/// keyboard→terminal→shell path, not merely that a window opened.
+fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "term: console up", 1, "the terminal never wired to a shell", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: ready", 1, "the terminal window never rendered", spec, polls)) return false;
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    sleepMs(600); // let msh print its banner + first prompt
+    // A real command first (exercises the read path), then `exit`.
+    if (!q.typeText("df")) {
+        reportFailure(spec.name, "QMP could not type into the terminal", log_path);
+        return false;
+    }
+    sleepMs(120);
+    _ = q.sendKey("ret");
+    sleepMs(400);
+    sleepMs(200);
+    if (!q.typeText("exit")) {
+        reportFailure(spec.name, "QMP could not type exit", log_path);
+        return false;
+    }
+    sleepMs(120);
+    _ = q.sendKey("ret");
+    // The shell exits, its console (the terminal) dies, both tear down, and
+    // systemDrill logs the PASS — which the generic watch below waits for.
     return true;
 }
 

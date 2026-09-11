@@ -1,0 +1,13 @@
+# The windowed terminal (drill profile terminal): term in windowed serve
+# mode (arg 2) — a desktop window drawn with the shared frame, serving the
+# console protocol to a shell. A client of the pointer-capable compositor so
+# its titlebar can be clicked. Pulled up as the shell's console (no profile).
+{
+  image:  term
+  arg:    2
+  budget: { user: 24mb }
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+  ]
+}

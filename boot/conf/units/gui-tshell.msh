@@ -1,0 +1,17 @@
+# The shell behind the windowed terminal (profile terminal): msh, wired
+# exactly like the serial/graphical-seat shell but with its console coming
+# from the windowed terminal (gui-term). Pulling in the console starts the
+# terminal window; the view pulls up mossfs. Essential: closing the terminal
+# window ends msh (its console dies), which shuts the drill down.
+{
+  image:     shell
+  budget:    { user: 24mb }
+  grant:     [log, spawner]
+  profiles:  [terminal]
+  essential: true
+  give: [
+    { tag: console, unit: gui-term }
+    { tag: view, fs: "", ro: false }
+    { tag: init, self: true }
+  ]
+}

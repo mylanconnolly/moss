@@ -1,0 +1,13 @@
+# The desktop terminal window (a session app): term windowed (arg 2), its
+# display and font forwarded from the session. Pulled up as the console of
+# the session shell (terminal.msh). Non-essential: closing it ends only the
+# terminal.
+{
+  image:  term
+  arg:    2
+  budget: { user: 16mb }
+  give: [
+    { tag: display, session: true }
+    { tag: font, session: true }
+  ]
+}

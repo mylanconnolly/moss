@@ -3092,6 +3092,33 @@ is a widget tree); the terminal is the second (its content is a glyph grid),
 so the two share one implementation of the chrome rather than duplicating
 the drag/snap/focus logic. Pure refactor: every GUI drill passed unchanged.
 
+**A windowed terminal (as built, 2026-09-11).** `user/term.zig` gained a
+third mode (arg 2, beside full-screen arg 0 and the screendump demo arg 1):
+it opens a surface through the shared window frame and renders its glyph
+grid into `contentRect()` rather than the whole scanout. The grid drawing
+gained an offset+extent (`gox`/`goy`/`grid_w`/`grid_h`) so every cell, the
+cursor block, clear and scroll address the content area under the titlebar;
+scroll became a rectangular per-row copy. `pumpKey` folds the frame's
+pointer/focus/repaint events in with keystrokes: a `.close` or a failed
+resize ends the process, `.resized` re-lays-the-grid and repaints, a
+compositor repaint or focus-change event redraws the chrome. It serves the
+same `ConsReq` (write/read) a shell already speaks, so the windowed terminal
+is wired like the serial and graphical-seat shells — `console = unit
+gui-term` — and needs no shell change; the standalone `terminal` drill
+(profile `terminal`, units `gui-tshell` + `gui-term`) types a command and
+`exit`, and the desktop dock gained a Terminal pill that launches the
+session's own `terminal` unit (`conf/sessiongui/terminal.msh` + `sterm.msh`,
+a full msh in a window on the user's home). *Lesson (paid for twice):* the
+check runner is **sequential** — one QEMU at a time — so a drill that hangs
+is never starved by "concurrent" drills; there is no contention to blame.
+When `guishellro` hung after adding the Terminal pill, the honest read was
+the kernel dump (all threads idle, root never `.dying`) and the trace ring,
+not a starvation story — and the hang turned out to be a **stale marc
+archive** during active editing (the pill referenced a session unit the
+packed archive did not yet carry). A rebuilt tree is green; the earlier
+"raise the watchdog / widen the timeouts" reflex was reverted, because the
+watchdog was never the problem.
+
 **A higher-resolution scanout — 1280×1024 (as built, 2026-09-10).** The
 scanout grew from 1024×768 to 1280×1024 for more desktop room. The size
 lives in two constants — gpusvc's `fb_w`/`fb_h` (the resource it creates and

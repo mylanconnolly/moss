@@ -1165,6 +1165,27 @@ is a plan.
   decorations via the shared runtime +
   compositor move/raise; real multi-process windows; admin = a policy bit
   on the record, not an identity, surfaced as a writable cap.
+- **A terminal app**: a full interactive msh REPL in a desktop window,
+  clean chrome, with scrollback, resize reflow, copy/paste (critical), and
+  a tabbed interface for several terminals. ✅ Stage 0 — the shared window
+  frame (landed 2026-09-11): the titlebar/traffic-lights/drag/snap/focus
+  chrome + surface lifecycle + drawing prims + system font moved out of the
+  mshl runtime into `user/windowframe.zig`, so `guicmds` and the terminal
+  share one implementation (pure refactor; every GUI drill unchanged). ✅
+  Stage 1 — a windowed terminal (landed 2026-09-11): `user/term.zig` gained
+  a windowed mode (arg 2) that renders its glyph grid into the frame's
+  `contentRect()`; `pumpKey` folds the frame's pointer/focus/repaint events
+  in with keystrokes (close ends it, resize re-lays the grid). It serves the
+  same `ConsReq` a shell speaks, so it is wired like the serial shell
+  (`console = unit gui-term`); the standalone `terminal` drill types a
+  command + `exit`, and a dock Terminal pill launches the session's own
+  `terminal` unit (a full msh in a window on the user's home). *Lesson:* the
+  check runner is sequential — a hung drill is never starved by other
+  drills, so read the kernel dump/trace ring, not a contention story; this
+  hang was a stale marc archive during editing, and the watchdog/timeout
+  widening was reverted. Open: Stage 2 scrollback, Stage 3 resize reflow (a
+  size event over `ConsReq` to msh), Stage 4 copy/paste (a clipboard
+  primitive), Stage 5 tabs (N grid+msh sessions in one window).
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

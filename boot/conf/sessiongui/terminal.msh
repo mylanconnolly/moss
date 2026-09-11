@@ -1,0 +1,15 @@
+# The Terminal app (lazy — the dock launches it). A full msh in this user's
+# session: its console is a windowed terminal (sterm), its view is the
+# user's home, and it holds init + a spawner so `run`, `svc` and workers
+# work — a real shell in a window. Non-essential: closing it ends only this.
+{
+  image:     shell
+  budget:    { user: 24mb }
+  grant:     [log, spawner, bootfs]
+  essential: false
+  give: [
+    { tag: console, unit: sterm }
+    { tag: view, fs: "", ro: false }
+    { tag: init, self: true }
+  ]
+}
