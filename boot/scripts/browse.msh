@@ -1,0 +1,10 @@
+# The browse service handler (node-local): given a request { path }, list
+# that directory in this node's OWN read-only view and return the rows.
+# `fs-rows` reads the local view — the view never crosses the fabric, only
+# the rows value (a data list) does, riding the session-buffer transport
+# back to the caller. Unwrap the result to a plain list (data), since a
+# result value cannot cross.
+match (fs-rows ($in | get "path")) {
+  ok $r => $r
+  _ => []
+}

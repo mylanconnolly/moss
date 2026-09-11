@@ -1,0 +1,20 @@
+# The browse service, node 2 (profile browsehost): a durable mshl service
+# (arg 3) holding a READ-ONLY view of its own disk root. Giving `fabric`
+# pulls up fabsvc so this node joins the mesh and is reachable by name; a
+# peer's `dial NODE browse` reaches this unit through init's connect_named.
+# Each call runs the handler (fs-rows) against the local view and returns
+# the rows — the view stays here, only the data crosses. Essential + a
+# never-exiting server, so the node stays up and joined.
+{
+  image:     mshrun
+  arg:       3
+  script:    scripts/browse.msh
+  grant:     [log, bootfs]
+  budget:    { user: 20mb }
+  profiles:  [browsehost]
+  essential: true
+  give: [
+    { tag: fabric, unit: fabsvc }
+    { tag: view, fs: "", ro: true }
+  ]
+}

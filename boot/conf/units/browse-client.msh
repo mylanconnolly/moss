@@ -1,0 +1,15 @@
+# The remote-browse client, node 1 (profile browse): mshrun dials node 2's
+# browse service over the fabric and lists its root. Holding a fabric give
+# pulls the node's fabric stack up (node 1 is the seed). Essential: when the
+# listing prints and the script ends, the node shuts down clean.
+{
+  image:     mshrun
+  script:    scripts/browse-cli.msh
+  grant:     [log, bootfs]
+  budget:    { user: 20mb }
+  profiles:  [browse]
+  essential: true
+  give: [
+    { tag: fabric, unit: fabsvc }
+  ]
+}

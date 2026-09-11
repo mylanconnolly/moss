@@ -260,6 +260,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.browse_test) {
+        _ = sched.spawn("boot-watch", browseTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.topbar_test) {
         _ = sched.spawn("boot-watch", topbarTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -879,6 +884,9 @@ fn listdemoTestWorker(_: u64) void {
 }
 fn explorerTestWorker(_: u64) void {
     systemDrill("explorer");
+}
+fn browseTestWorker(_: u64) void {
+    systemDrill("browse");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

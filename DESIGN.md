@@ -3941,6 +3941,27 @@ reports read-only (`ro=yes`) even though the base disk view is read-write —
 the narrowing is genuine, not faked. Still local — browsing a remote node's
 files (the chosen end goal) is the arc's next, larger stage.
 
+**Remote file listing over the fabric (as built, 2026-09-10).** Browsing
+another node's disk needs no new kernel or fabric machinery — it is a named
+service over the existing dial/call transport. A per-node **browse service**
+(`boot/scripts/browse.msh`, unit `browse`) is given a *read-only* view of its
+disk (`{tag: view, ro: true}`) plus `{fabric, unit: fabsvc}`, and publishes
+itself under the name `"browse"`; its whole body is `match (fs-rows ($in |
+get "path")) { ok $r => $r; _ => [] }` — it answers a call carrying a `path`
+with that folder's arena-stable `{id, cells}` rows, the same shape the local
+explorer's list already renders. A client on another node (`browse-cli.msh`)
+`dial`s the node by number and `call`s the service; the rows come back inline
+over the fabric session buffer (a directory page fits well under the 32 KB
+bulk limit). The 2-node **`browse`** drill proves the round trip: node 1
+reports "node 2 root has 8 entries" — a real remote directory read, gated by
+a read-only capability at the source. Two lessons paid for here: (1) any
+profile whose units certify a fabric identity **must include `rngd`** —
+`getrandom` is fail-closed until the virtio-rng pool is seeded, so a profile
+missing it makes `certifySecret` spin its 50×100ms retry and time out at 5s,
+and the fabric unit silently never wires; (2) the 24-byte unit script-path
+field truncates without complaint (`scripts/browse-client.msh` → `…client.ms`
+→ "not in the boot archive"), so unit script names must stay short.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

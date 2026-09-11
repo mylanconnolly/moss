@@ -1,0 +1,18 @@
+# The remote-browse client (node 1): dial node 2's "browse" service over
+# the fabric and ask it to list its root, retrying until node 2 has joined
+# and the service is up. The rows come back as a data value across the
+# fabric's session buffer — a directory listing from another node's disk.
+def attempt [n] {
+  let r = (match (dial 2 "browse") {
+      ok $s => (call $s { path: "" })
+      _ => null
+    })
+  match $r {
+    ok $rows => { echo ("browse: node 2 root has " + (str (len $rows)) + " entries") }
+    _ => (match ($n > 0) {
+        true => { sleep 500; attempt ($n - 1) }
+        _ => { echo "browse: node 2 unreachable" }
+      })
+  }
+}
+attempt 60

@@ -1024,7 +1024,18 @@ is a plan.
   `fs-derive`/`fs-leave`/`fs-derived` commands as `fscmds` host hooks);
   monotone read-only is a real capability boundary. The drill mints a
   read-only sub-view and confirms `depth=1 ro=yes` over a read-write base.
-  Stage 4 (remote browse over the fabric) open.
+  ✅ Stage 4a — remote file listing over the fabric (2026-09-10): a per-node
+  read-only browse service (`boot/scripts/browse.msh`, unit `browse`, given a
+  read-only view + `{fabric, unit:fabsvc}`) publishes itself as `"browse"`;
+  a client (`browse-cli.msh`) on another node `dial`s node 2 and `call`s it
+  with a path, receiving that folder's `fs-rows` back inline over the session
+  buffer. The 2-node `browse` drill proves it: node 1 reports "node 2 root
+  has 8 entries." Lessons: (1) a profile that certifies a fabric identity
+  must include `rngd` — `getrandom` is fail-closed, so without the seeded
+  pool `certifySecret` times out at 5s and the unit never wires; (2) the
+  24-byte unit script-path cap silently truncates (`browse-client.msh` →
+  `browse-client.ms`, "not in the boot archive") — keep script names short.
+  Stage 4b (wire remote browse into the explorer GUI) open.
 - **A desktop shell (macOS-inspired)**: movable windows with titlebars, a
   dock of running apps, a top menu bar (clock + system menu + app menus),
   and capability-gated user/system settings. ✅ Stage 1 — movable windows

@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse };
 
 const Spec = struct {
     name: []const u8,
@@ -93,6 +93,7 @@ const specs = [_]Spec{
     .{ .name = "guishellro", .kind = .guishellro, .pass = "guishellro-test: PASS", .extra = "settings: admin=false", .always_extra = "settings: system read-only", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
+    .{ .name = "browse", .kind = .browse, .pass = "browse-test: PASS", .extra = "browse: node 2 root has", .append = "profile=browse", .timeout_s = 180 },
     .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
     .{ .name = "localeupd", .kind = .localeupd, .pass = "localeupd-test: PASS", .extra = "localeupd: installed CLDR 48.2.0-upd", .append = "profile=localeupd", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
@@ -299,6 +300,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
     if (spec.kind == .fabgui) return runFabGui(spec, bin, polls);
     if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
+    if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
     if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar or spec.kind == .explorer) try makeDisk(disk);
@@ -3163,6 +3165,59 @@ fn runFabSignal(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const verdict = watch(log1, spec, spec.extra, polls);
     if (!verdict.ok) {
         reportFailure(spec.name, verdict.why, log1);
+        return false;
+    }
+    return true;
+}
+
+/// The remote-browse drill: node 1 (the fabric seed) dials node 2's
+/// `browse` service over the fabric and lists node 2's disk root; node 2
+/// runs the durable browse service over a read-only view of its own disk.
+/// A non-empty listing crossing the wire proves remote file browsing.
+fn runBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
+    const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
+    for ([_][]const u8{ disk1, disk2, log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
+    try makeDisk(disk1);
+    try makeDisk(disk2);
+
+    // Node 1: the fabric seed on the hub, running the browse client.
+    var args1: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args1, log1, bin, "browse-node1", "profile=browse node=1");
+    try appendDisk(&args1, disk1);
+    try args1.appendSlice(gpa, &.{
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+    });
+    var c1 = try spawnQemu(args1.items);
+    defer c1.kill(io);
+    sleepMs(1000);
+
+    // Node 2: joins the fabric and serves the browse service over its disk.
+    var args2: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args2, log2, bin, "browse-node2", "profile=browsehost node=2");
+    try appendDisk(&args2, disk2);
+    try args2.appendSlice(gpa, &.{
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+    });
+    var c2 = try spawnQemu(args2.items);
+    defer c2.kill(io);
+
+    // Node 1 prints the count only after its call reaches node 2, node 2
+    // lists its local view, and the rows cross back — the whole path.
+    const verdict = watch(log1, spec, spec.extra, polls);
+    if (!verdict.ok) {
+        reportFailure(spec.name, verdict.why, log1);
+        return false;
+    }
+    // The listing must be non-empty (node 2's disk root has the hierarchy).
+    if (std.mem.indexOf(u8, readLog(log1), "browse: node 2 root has 0 entries") != null) {
+        reportFailure(spec.name, "the remote listing came back empty", log1);
         return false;
     }
     return true;
