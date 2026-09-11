@@ -1157,7 +1157,7 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // page up to the very top and page back down to following. The terminal
     // logs the view state on each scroll, so the markers prove it.
     var i: usize = 0;
-    while (i < 60) : (i += 1) {
+    while (i < 90) : (i += 1) {
         _ = q.sendKey("ret");
         sleepMs(20);
     }
@@ -1174,6 +1174,25 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         sleepMs(60);
     }
     if (!try waitLogN(log_path, "term: scroll following", 1, "page down did not return to following the bottom", spec, polls)) return false;
+    // Reflow: maximize the window by its green dot. The grid refits and the
+    // scrollback re-wraps at the new width — the model, not the pixels, is
+    // what survives, so paging to the top must still reach it.
+    const maxdot = parseDot(readLog(log_path), "max=") orelse {
+        reportFailure(spec.name, "could not parse the maximize dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, maxdot[0], maxdot[1])) {
+        reportFailure(spec.name, "QMP could not click the maximize dot", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "term: reflow", 1, "maximizing did not reflow the grid", spec, polls)) return false;
+    sleepMs(200);
+    var up2: usize = 0;
+    while (up2 < 8) : (up2 += 1) {
+        _ = q.sendKey("pgup");
+        sleepMs(60);
+    }
+    if (!try waitLogN(log_path, "term: scroll at-top", 2, "the scrollback did not survive the reflow", spec, polls)) return false;
     // Typing must snap back to the bottom, then exit.
     if (!q.typeText("exit")) {
         reportFailure(spec.name, "QMP could not type exit", log_path);

@@ -685,6 +685,8 @@ fn pumpKey(log_h: u64) u8 {
                     layoutGrid();
                     repaintWin();
                     logDots(log_h); // the dots moved with the window
+                    var l: [56]u8 = undefined;
+                    _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: reflow cols={d} rows={d}", .{ cols, rows }) catch "term: reflow");
                 },
                 else => {}, // none / moved / minimized (frame hid it) / content — keep pumping
             },

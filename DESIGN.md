@@ -3140,6 +3140,20 @@ pages to the top (`term: scroll at-top`) and back to following
 (`term: scroll following`). The full-screen console seat (the graphical
 login shell) shares the model, so it gained scrollback too.
 
+**Resize reflow (as built, 2026-09-11).** Because the model is
+width-independent, reflow is not a pixel operation: when the window resizes
+(the green maximize dot, or an edge snap), the frame recreates the surface
+and the terminal re-fits the grid and re-renders the same logical lines at
+the new column count — long lines re-wrap, short lines un-wrap, and the
+scrollback survives intact (the `terminal` drill maximizes and pages back to
+the top to prove it). No `ConsReq` size event was added: nothing adapts its
+output to the terminal width — `msh`'s table renderer sizes columns from
+content, and its line editor is width-agnostic (the terminal tracks the
+cursor as a logical column, so editing stays correct across a wrap without
+the editor knowing the width). A size event is the right hook the day a
+width-aware program (a pager, a columnated `ls`) arrives; until then it
+would be an API with no caller.
+
 **A higher-resolution scanout — 1280×1024 (as built, 2026-09-10).** The
 scanout grew from 1024×768 to 1280×1024 for more desktop room. The size
 lives in two constants — gpusvc's `fb_w`/`fb_h` (the resource it creates and

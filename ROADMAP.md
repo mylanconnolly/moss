@@ -1189,10 +1189,15 @@ is a plan.
   (`\r`, `\x1b[C/D/K/J/H`) folding a shell's escapes into the model and a
   renderer soft-wrapping it to the viewport. Scrollback pages with Page
   Up/Down (inputsvc maps them to two private bytes the terminal intercepts);
-  a width-independent model is what makes reflow nearly free. Open: Stage 3
-  resize reflow (re-render on resize + tell programs the new size), Stage 4
-  copy/paste (a clipboard primitive), Stage 5 tabs (N grid+msh sessions in
-  one window).
+  a width-independent model is what makes reflow nearly free. ✅ Stage 3 —
+  resize reflow (landed 2026-09-11): resizing (the green maximize dot, or an
+  edge snap) re-fits the grid and re-renders the model at the new width — long
+  lines re-wrap, scrollback survives (the drill maximizes and pages back to
+  the top). No `ConsReq` size event was added: nothing adapts to terminal
+  width today (tables size from content, the editor is width-agnostic), so it
+  would be an API with no caller — deferred to the first width-aware program.
+  Open: Stage 4 copy/paste (a clipboard primitive), Stage 5 tabs (N grid+msh
+  sessions in one window).
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 
