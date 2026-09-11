@@ -31,8 +31,17 @@ def vol-line [] {
   ("volume: " + $enc + " · " + $rw + " · " + (str ($d | get "free_kb")) + " KB free")
 }
 
+# The crumb line: the current path, marked when we are inside a scoped
+# (capability-derived) sub-view rather than the whole home.
+def crumb [state] {
+  match ($state | get "depth") {
+    0 => ("/" + ($state | get "path"))
+    _ => ("[scoped] /" + ($state | get "path"))
+  }
+}
+
 let final = (gui {
-    init:  { path: "" }
+    init:  { path: "", depth: 0 }
     title: "Files"
     view: (fn [state] {
         {
@@ -42,7 +51,12 @@ let final = (gui {
               kind: "row"
               children: [
                 { kind: "button", id: "up", label: "Up" }
-                { kind: "label", muted: true, text: ("/" + $state.path) }
+                { kind: "button", id: "lock", label: "Open read-only" }
+                (match $state.depth {
+                    0 => { kind: "label", muted: true, text: "" }
+                    _ => { kind: "button", id: "leave", label: "Leave view", variant: "primary" }
+                  })
+                { kind: "label", muted: true, text: (crumb $state) }
               ]
             }
             {
@@ -71,12 +85,20 @@ let final = (gui {
       })
     update: (fn [state, ev] {
         match $ev.id {
-          "up" => { { path: (fs-parent $state.path) } }
-          "close" => { { path: $state.path, done: true } }
-          "places" => { { path: $ev.row } }
+          "up" => { { path: (fs-parent $state.path), depth: $state.depth } }
+          "close" => { { path: $state.path, depth: $state.depth, done: true } }
+          "places" => { { path: $ev.row, depth: $state.depth } }
+          "lock" => (match (fs-derive $state.path true) {
+              true => { { path: "", depth: ($state.depth + 1) } }
+              _ => $state
+            })
+          "leave" => (match (fs-leave) {
+              true => { { path: "", depth: ($state.depth - 1) } }
+              _ => $state
+            })
           "files" => (match $ev.activated {
               true => (match (fs-rows (join-path $state.path $ev.row)) {
-                  ok _ => { { path: (join-path $state.path $ev.row) } }
+                  ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth } }
                   _ => $state
                 })
               _ => $state
@@ -85,4 +107,5 @@ let final = (gui {
         }
       })
   })
-echo ("explorer: closed at /" + $final.path)
+let ro = (match ((df) | get "read_only") { true => "yes"; _ => "no" })
+echo ("explorer: closed at /" + $final.path + " depth=" + (str $final.depth) + " ro=" + $ro)

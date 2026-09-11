@@ -69,7 +69,7 @@ var heap_line: [1 << 20]u8 = undefined;
 var line_fba: std.heap.FixedBufferAllocator = undefined;
 var box_pool: mosslib.pool.Pool(256, 2048) = .{};
 var host_ctx: u8 = 0;
-var fs_ctx = fscmds.Fs{ .resolve = resolve, .root = 0 };
+var fs_ctx = fscmds.Fs{ .resolve = resolve, .root = 0, .derive = viewDerive, .leave = viewLeave, .depth = viewDepth };
 /// The stores `use NAME` reads a module from: `img/` in the view when
 /// there is one, and the system store when the manifest gives it.
 var stores: [2]?fscmds.Store = .{ null, null };
@@ -82,6 +82,50 @@ var blob: []const u8 = "";
 fn resolve(it: *mshl.Interp, path: []const u8) mshl.Error!fscmds.Target {
     if (view_chan == 0) return it.fail("no filesystem view was given to this script", .{});
     return .{ .chan = view_chan, .buf = view_buf, .path = path };
+}
+
+// Capability-scoped views: a stack of derived sub-views over the base view.
+// `view_chan`/`view_buf` always point at the active (top) one; each frame
+// remembers the parent to restore and the derived cap/buffer to revoke and
+// free on the way out. This is how `fs-derive`/`fs-leave` narrow the file
+// explorer to a read-only subtree and back.
+const ViewFrame = struct { chan: u64, buf_va: u64, buf_cap: u64, badge: u64, parent_chan: u64, parent_buf: [*]u8 };
+var view_stack: [6]ViewFrame = undefined;
+var view_depth: usize = 0;
+
+fn viewDerive(it: *mshl.Interp, path: []const u8, ro: bool) mshl.Error!bool {
+    if (view_chan == 0) return it.fail("fs-derive: no filesystem view", .{});
+    if (view_depth >= view_stack.len) return it.fail("fs-derive: views nested too deep", .{});
+    const d = fsc.fsDeriveBadged(view_chan, view_buf, path, ro) orelse return false;
+    const ab = fsc.attachBuf(d.cap);
+    if (ab.va == 0) {
+        _ = usys.capDrop(d.cap);
+        return false;
+    }
+    view_stack[view_depth] = .{ .chan = d.cap, .buf_va = ab.va, .buf_cap = ab.cap, .badge = d.badge, .parent_chan = view_chan, .parent_buf = view_buf };
+    view_depth += 1;
+    view_chan = d.cap;
+    view_buf = @ptrFromInt(ab.va);
+    fs_ctx.root = view_chan;
+    return true;
+}
+
+fn viewLeave(_: *mshl.Interp) mshl.Error!bool {
+    if (view_depth == 0) return false;
+    view_depth -= 1;
+    const f = view_stack[view_depth];
+    _ = fsc.fsRevoke(f.parent_chan, f.badge); // withdraw the view we minted
+    _ = usys.shmUnmap(f.buf_va);
+    _ = usys.capDrop(f.buf_cap);
+    _ = usys.capDrop(f.chan);
+    view_chan = f.parent_chan;
+    view_buf = f.parent_buf;
+    fs_ctx.root = view_chan;
+    return true;
+}
+
+fn viewDepth() usize {
+    return view_depth;
 }
 
 fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {

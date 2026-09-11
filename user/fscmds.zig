@@ -38,6 +38,14 @@ pub const Fs = struct {
     /// The stores `use NAME` consults, in order (the user's own, then
     /// the system's); absent ones are null.
     stores: []const ?Store = &.{},
+    // Capability-scoped views, when the host supports them. `derive` mints
+    // a narrower (subtree, optionally read-only) view of the *current* view
+    // and makes it the active one — `fs-derive`; `leave` revokes it and
+    // restores the parent — `fs-leave`; `depth` is how many are stacked —
+    // `fs-derived`. Null host = the commands say the host cannot scope views.
+    derive: ?*const fn (it: *mshl.Interp, path: []const u8, ro: bool) mshl.Error!bool = null,
+    leave: ?*const fn (it: *mshl.Interp) mshl.Error!bool = null,
+    depth: ?*const fn () usize = null,
 };
 
 // ------------------------------------------------------------ the shapes
@@ -63,7 +71,7 @@ const module_result = mshl.resultShape(.string, module_err);
 const df_shape = mshl.shapeOf(Df);
 const path_param = Param{ .name = "path", .shape = .string };
 
-pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module", "fs-rows", "fs-parent" };
+pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module", "fs-rows", "fs-parent", "fs-derive", "fs-leave", "fs-derived" };
 
 // `fs-rows` returns rows ready for the GUI `list` widget: `{ id, cells }`
 // where cells are display strings (name with a trailing `/` for a folder,
@@ -90,6 +98,10 @@ pub fn signature(name: []const u8) ?Signature {
     // `fs-parent PATH` → the parent view-path ("" at the root); a pure
     // string op the explorer uses for its "Up" button.
     if (is(name, "fs-parent")) return .{ .params = &.{path_param}, .ret = .string };
+    // Capability-scoped views (a host that supports them):
+    if (is(name, "fs-derive")) return .{ .params = &.{ path_param, .{ .name = "ro", .shape = .bool, .optional = true } }, .ret = .bool };
+    if (is(name, "fs-leave")) return .{ .ret = .bool };
+    if (is(name, "fs-derived")) return .{ .ret = .int };
     if (is(name, "source")) return .{ .params = &.{path_param}, .ret = done_result };
     if (is(name, "module")) return .{ .params = &.{.{ .name = "name", .shape = .string }}, .ret = module_result };
     return null;
@@ -118,6 +130,19 @@ pub fn call(fs: *const Fs, it: *mshl.Interp, name: []const u8, args: []const Val
         const p = args[0].str;
         const cut = std.mem.lastIndexOfScalar(u8, p, '/') orelse return .{ .str = "" };
         return .{ .str = try a.dupe(u8, p[0..cut]) };
+    }
+    if (is(name, "fs-derive")) {
+        const d = fs.derive orelse return it.fail("fs-derive: this program cannot scope views", .{});
+        const ro = args.len > 1 and args[1] == .bool and args[1].bool;
+        return .{ .bool = try d(it, args[0].str, ro) };
+    }
+    if (is(name, "fs-leave")) {
+        const l = fs.leave orelse return it.fail("fs-leave: this program cannot scope views", .{});
+        return .{ .bool = try l(it) };
+    }
+    if (is(name, "fs-derived")) {
+        const dp = fs.depth orelse return .{ .int = 0 };
+        return .{ .int = @intCast(dp()) };
     }
     if (is(name, "tree")) {
         var path: []const u8 = "";

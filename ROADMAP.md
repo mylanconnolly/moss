@@ -1016,8 +1016,15 @@ is a plan.
   volume's capability facts (encrypted, read-only). New `fs-rows` command
   builds arena-stable `{id, cells}` rows; `df` gained a `read_only` field;
   `fs-parent` backs Up. The `explorer` drill browses the disk root; a Files
-  pill launches it in the desktop over the session's home view. Stages 3
-  (fs-derive read-only sub-views) and 4 (remote browse) open.
+  pill launches it in the desktop over the session's home view. ✅ Stage 3
+  (2026-09-10): capability-scoped views in the explorer — "Open read-only"
+  derives a narrower, read-only sub-view of the current folder and browses
+  inside it (crumb `[scoped]`, footer read-only, Up cannot escape), "Leave
+  view" revokes it. A view stack in mshrun (`view_chan`/`view_buf` + three
+  `fs-derive`/`fs-leave`/`fs-derived` commands as `fscmds` host hooks);
+  monotone read-only is a real capability boundary. The drill mints a
+  read-only sub-view and confirms `depth=1 ro=yes` over a read-write base.
+  Stage 4 (remote browse over the fabric) open.
 - **A desktop shell (macOS-inspired)**: movable windows with titlebars, a
   dock of running apps, a top menu bar (clock + system menu + app menus),
   and capability-gated user/system settings. ✅ Stage 1 — movable windows

@@ -3916,9 +3916,30 @@ An `fs-parent PATH` command (a pure string op) backs "Up". The standalone
 the first folder, opens it, and closes — the app reporting a non-empty
 path proves the click, activation, and descent. The desktop dock gained a
 **Files** pill (a lazy session unit, `conf/sessiongui/explorer.msh`, over
-the session's own home view), so it launches like Settings and Demo. Still
-local — browsing a remote node's files (the chosen end goal) is the arc's
-next, larger, stage.
+the session's own home view), so it launches like Settings and Demo.
+
+**Capability-scoped views in the explorer (as built, 2026-09-10).** The
+filesystem's standout feature — a view is a capability you can narrow and
+hand off — is now something you *do* in the explorer. "Open read-only"
+derives a narrower, read-only sub-view rooted at the current folder and
+makes it the explorer's active view: you are now browsing inside that
+capability, the crumb reads `[scoped]`, the footer flips to read-only, and
+"Up" cannot climb above the sub-view's root — you cannot escape what you
+were handed. "Leave view" revokes it and restores the parent. The mechanism
+is a **view stack in mshrun**: `view_chan`/`view_buf` always point at the
+active view, and three commands (added to `fscmds` as optional host hooks,
+so the one place that lists fs commands still owns them) drive it —
+`fs-derive PATH [ro]` mints the sub-view (`fsDeriveBadged`), attaches its
+buffer, pushes the parent, and switches to it; `fs-leave` revokes
+(`fsRevoke` against the parent, with the derived badge), frees the derived
+buffer and cap, and pops; `fs-derived` reports the depth. The read-only
+flag is monotone in the service (a read-only view cannot derive a
+read-write child), so this is a real capability boundary, not a UI toggle.
+The `explorer` drill opens a folder, mints a read-only sub-view of it, and
+confirms at close that it is inside a derived view (`depth=1`) whose volume
+reports read-only (`ro=yes`) even though the base disk view is read-write —
+the narrowing is genuine, not faked. Still local — browsing a remote node's
+files (the chosen end goal) is the arc's next, larger stage.
 
 ## Distribution: the fabric
 

@@ -984,7 +984,19 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     sleepMs(400);
-    // Close the window (the "close" button's logged centre).
+    // Now mint a read-only sub-view of this folder ("Open read-only"): the
+    // explorer derives a narrower, read-only capability and browses inside
+    // it — the standout filesystem feature.
+    const lock = widgetCenter(readLog(log_path), "lock") orelse {
+        reportFailure(spec.name, "could not find the Open read-only button", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, lock[0], lock[1])) {
+        reportFailure(spec.name, "QMP could not click Open read-only", log_path);
+        return false;
+    }
+    sleepMs(400);
+    // Close (the "close" button moved when the crumb changed — re-read it).
     const c = widgetCenter(readLog(log_path), "close") orelse {
         reportFailure(spec.name, "could not find the close button", log_path);
         return false;
@@ -994,12 +1006,21 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     if (!try waitLogN(log_path, "explorer: closed at /", 1, "the explorer never closed", spec, polls)) return false;
-    // The closing path must be non-empty (we descended into a folder).
-    const content = readLog(log_path);
-    const at = std.mem.lastIndexOf(u8, content, "explorer: closed at /") orelse return false;
-    const after = content[at + "explorer: closed at /".len ..];
-    if (after.len == 0 or after[0] == '\n' or after[0] == '\r') {
-        reportFailure(spec.name, "the explorer did not navigate into a folder (closed at the root)", log_path);
+    // depth=1 proves the read-only sub-view was minted and is active (the
+    // app increments depth only when fs-derive succeeds).
+    const depth = parseAfter(readLog(log_path), "depth=") orelse {
+        reportFailure(spec.name, "could not parse the explorer's view depth", log_path);
+        return false;
+    };
+    if (depth != 1) {
+        var b: [96]u8 = undefined;
+        reportFailure(spec.name, std.fmt.bufPrint(&b, "expected to be in a derived read-only view (depth 1), got depth {d}", .{depth}) catch "wrong depth", log_path);
+        return false;
+    }
+    // The derived view must be genuinely read-only, though the base disk
+    // view is read-write — proving the capability was narrowed, not faked.
+    if (std.mem.indexOf(u8, readLog(log_path), "depth=1 ro=yes") == null) {
+        reportFailure(spec.name, "the derived sub-view was not read-only", log_path);
         return false;
     }
     return true;
