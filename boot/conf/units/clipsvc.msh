@@ -1,0 +1,11 @@
+# The system clipboard service. One shared text value: a client copies a
+# selection into it and another pastes it out, so text crosses between apps
+# (a selection in the terminal pastes into the explorer's path field). No
+# profile: it is lazy, pulled up by whoever holds a `clip` give (the
+# terminal today). It needs no caps of its own — the clipboard is pure
+# state. Its life is init's.
+{
+  image:  clipsvc
+  grant:  [log]
+  budget: { user: 8mb }
+}

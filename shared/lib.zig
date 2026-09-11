@@ -383,6 +383,7 @@ pub const ImageId = enum(u64) {
     fontpush = 34,
     localeupd = 35,
     localesvc = 36,
+    clipsvc = 37,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -672,9 +673,14 @@ pub const CapTag = enum(u64) {
     /// display or font cap is a channel to its service. (Was a read-only view
     /// of assets/locale, when each process parsed the CLDR db itself.)
     locale = 27,
+    /// The clipboard service's channel (clipsvc): a client copies text to
+    /// and pastes it from the one shared clipboard through it, so a
+    /// selection made in one app can be pasted into another — the same
+    /// service-behind-a-cap shape as the font and locale services.
+    clip = 28,
 };
 
-pub const cap_tag_count = 28;
+pub const cap_tag_count = 29;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -991,6 +997,32 @@ pub const LocaleResp = union(enum(u64)) {
     /// The result string is in the client buffer at [0..len].
     formatted: struct { len: u64 },
     loc_err: struct { code: u64 },
+};
+
+/// The system clipboard service (clipsvc). One shared text value; a client
+/// `register`s for a badged channel and attaches its own byte buffer (the
+/// same per-client-buffer model fontsvc and localesvc use), then `set`s
+/// the clipboard from its buffer or `get`s the clipboard into it — so a
+/// selection copied in one app pastes into another. Text only (bytes), no
+/// interpretation; the value is capped and truncates rather than fails.
+pub const ClipReq = union(enum(u64)) {
+    /// -> registered (+ a uniquely-badged channel cap).
+    register: void,
+    /// + a shm cap: this client's request/response byte buffer.
+    attach_buf: void,
+    /// Copy buf[0..len] into the clipboard. -> ok.
+    set: struct { len: u64 },
+    /// Copy the clipboard into buf; -> data{len} (bytes at buf[0..len]).
+    get: void,
+};
+
+pub const ClipResp = union(enum(u64)) {
+    ok: void,
+    /// A channel badged with a fresh client id is attached.
+    registered: void,
+    /// The clipboard is in the client buffer at [0..len].
+    data: struct { len: u64 },
+    clip_err: struct { code: u64 },
 };
 
 /// One laid-out glyph in the run fontsvc writes into the client buffer.

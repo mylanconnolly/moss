@@ -1196,8 +1196,15 @@ is a plan.
   the top). No `ConsReq` size event was added: nothing adapts to terminal
   width today (tables size from content, the editor is width-agnostic), so it
   would be an API with no caller — deferred to the first width-aware program.
-  Open: Stage 4 copy/paste (a clipboard primitive), Stage 5 tabs (N grid+msh
-  sessions in one window).
+  ✅ Stage 4 — copy/paste (landed 2026-09-11): a new clipboard service
+  `clipsvc` (the fontsvc/localesvc shape — register + attach a buffer +
+  set/get one shared value), reached as the `clip` cap and instantiated
+  per-session so a copy stays private to a user. In the terminal, a mouse
+  drag selects text (tracked in model coordinates, so it survives scroll and
+  reflow), releasing copies it, and a middle-click pastes (the X11 gesture —
+  inputsvc gives no Ctrl modifier, so Ctrl-V is unavailable); a paste drains
+  one byte per read as if typed. Open: Stage 5 tabs (N grid+msh sessions in
+  one window).
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

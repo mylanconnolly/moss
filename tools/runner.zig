@@ -837,6 +837,13 @@ fn clickScanout(q: *Qmp, cx: u32, cy: u32) bool {
     return q.sendClick(true) and q.sendClick(false);
 }
 
+/// Move the absolute pointer to a scanout pixel (no click).
+fn moveScanout(q: *Qmp, cx: u32, cy: u32) bool {
+    const ax = @as(u32, @intCast(@as(u64, cx) * 32768 / scanout_w));
+    const ay = @as(u32, @intCast(@as(u64, cy) * 32768 / scanout_h));
+    return q.sendPointer(ax, ay);
+}
+
 /// The mshl GUI pointer drill: click the counter's "increment" then
 /// "quit" buttons (by the scanout centres the runtime logged) and confirm
 /// the app updated its state via the clicks (final count = 1).
@@ -1193,16 +1200,58 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         sleepMs(60);
     }
     if (!try waitLogN(log_path, "term: scroll at-top", 2, "the scrollback did not survive the reflow", spec, polls)) return false;
-    // Typing must snap back to the bottom, then exit.
+    // Copy/paste: the view is at the top, so the banner is display row 1.
+    // Drag-select it (auto-copies on release), then middle-click to paste
+    // it back — the clipboard service carried the text out and back in.
+    const g = readLog(log_path);
+    const ox = parseGridField(g, "ox=") orelse return gridFail(spec, log_path);
+    const oy = parseGridField(g, "oy=") orelse return gridFail(spec, log_path);
+    const cw = parseGridField(g, "cw=") orelse return gridFail(spec, log_path);
+    const ch = parseGridField(g, "ch=") orelse return gridFail(spec, log_path);
+    const gcols = parseGridField(g, "cols=") orelse return gridFail(spec, log_path);
+    const rowy = oy + ch + ch / 2; // centre of display row 1 (the banner)
+    const x0 = ox + cw / 2;
+    const x1 = ox + (gcols - 1) * cw;
+    _ = moveScanout(&q, x0, rowy);
+    _ = q.sendClick(true);
+    _ = moveScanout(&q, (x0 + x1) / 2, rowy);
+    _ = moveScanout(&q, x1, rowy);
+    _ = q.sendClick(false);
+    if (!try waitLogN(log_path, "term: copied", 1, "the drag-selection did not copy to the clipboard", spec, polls)) return false;
+    _ = moveScanout(&q, x0, rowy);
+    _ = q.sendButton("middle", true);
+    _ = q.sendButton("middle", false);
+    if (!try waitLogN(log_path, "term: pasted", 1, "middle-click did not paste the clipboard", spec, polls)) return false;
+    const copied = parseNumAfter(readLog(log_path), "term: copied ") orelse 0;
+    const pasted = parseNumAfter(readLog(log_path), "term: pasted ") orelse 0;
+    if (copied == 0 or pasted != copied) {
+        reportFailure(spec.name, "the pasted text did not match the copied selection", log_path);
+        return false;
+    }
+    // The paste put the copied text into the shell's input line; clear it
+    // with backspaces (typing snaps the view to the bottom), then exit
+    // cleanly so the drill ends (closing the window instead would kill the
+    // shell's console, which the profile treats as a crash and restarts).
+    var bs: usize = 0;
+    while (bs < pasted + 10) : (bs += 1) {
+        _ = q.sendKey("backspace");
+        sleepMs(10);
+    }
+    sleepMs(150);
     if (!q.typeText("exit")) {
         reportFailure(spec.name, "QMP could not type exit", log_path);
         return false;
     }
     sleepMs(120);
     _ = q.sendKey("ret");
-    // The shell exits, its console (the terminal) dies, both tear down, and
-    // systemDrill logs the PASS — which the generic watch below waits for.
+    // The shell exits cleanly, its console (the terminal) dies, both tear
+    // down, and systemDrill logs the PASS — which the generic watch awaits.
     return true;
+}
+
+fn gridFail(spec: Spec, log_path: []const u8) bool {
+    reportFailure(spec.name, "could not parse the terminal grid geometry", log_path);
+    return false;
 }
 
 fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
@@ -1353,6 +1402,29 @@ fn parseDockItem(content: []const u8, idx: usize) ?[2]u32 {
 
 /// The scanout centre of a traffic-light dot (`key` = "close=" / "min=" /
 /// "max=") from the most recent "gui: dots close=X,Y min=X,Y max=X,Y" line.
+/// The u32 value after `key` (e.g. "ox=") in the LAST "term: grid" line.
+fn parseGridField(content: []const u8, key: []const u8) ?u32 {
+    const at = std.mem.lastIndexOf(u8, content, "term: grid ") orelse return null;
+    var eol = std.mem.indexOfScalarPos(u8, content, at, '\n') orelse content.len;
+    if (eol > at and content[eol - 1] == '\r') eol -= 1;
+    const line = content[at..eol];
+    const k_at = std.mem.indexOf(u8, line, key) orelse return null;
+    var rest = line[k_at + key.len ..];
+    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    rest = rest[0..sp];
+    return std.fmt.parseInt(u32, rest, 10) catch null;
+}
+
+/// The decimal number immediately after `prefix` (its last occurrence).
+fn parseNumAfter(content: []const u8, prefix: []const u8) ?u64 {
+    const at = std.mem.lastIndexOf(u8, content, prefix) orelse return null;
+    const rest = content[at + prefix.len ..];
+    var i: usize = 0;
+    while (i < rest.len and rest[i] >= '0' and rest[i] <= '9') i += 1;
+    if (i == 0) return null;
+    return std.fmt.parseInt(u64, rest[0..i], 10) catch null;
+}
+
 fn parseDot(content: []const u8, key: []const u8) ?[2]u32 {
     const at = std.mem.lastIndexOf(u8, content, "gui: dots ") orelse return null;
     const line = content[at..];
@@ -3746,7 +3818,12 @@ const Qmp = struct {
 
     /// Press or release the left pointer button.
     fn sendClick(q: *Qmp, down: bool) bool {
-        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"btn\",\"data\":{{\"button\":\"left\",\"down\":{s}}}}}]}}}}", .{if (down) "true" else "false"}) catch return false;
+        return q.sendButton("left", down);
+    }
+
+    /// Press or release a named pointer button ("left", "middle", "right").
+    fn sendButton(q: *Qmp, button: []const u8, down: bool) bool {
+        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"btn\",\"data\":{{\"button\":\"{s}\",\"down\":{s}}}}}]}}}}", .{ button, if (down) "true" else "false" }) catch return false;
         return q.execute(cmd);
     }
 

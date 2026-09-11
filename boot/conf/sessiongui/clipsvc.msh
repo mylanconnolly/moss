@@ -1,0 +1,9 @@
+# The session's clipboard service (a per-session instance, so a copy is
+# private to this user's session, never shared across users). Lazy: pulled
+# up by whoever holds a `clip` give (the session terminal). Its life is the
+# session init's.
+{
+  image:  clipsvc
+  grant:  [log]
+  budget: { user: 8mb }
+}

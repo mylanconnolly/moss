@@ -510,6 +510,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "fontcli", .src = "user/fontcli.zig" },
         .{ .name = "localeupd", .src = "user/localeupd.zig" },
         .{ .name = "localesvc", .src = "user/localesvc.zig" },
+        .{ .name = "clipsvc", .src = "user/clipsvc.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -703,7 +704,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/fabname.msh",          "scripts/fabname.msh",
         "conf/units/locale-drill.msh",     "scripts/locale-drill.msh",
         "conf/units/localeupd.msh",        "conf/locale.msh",
-        "conf/units/localesvc.msh",
+        "conf/units/localesvc.msh",        "conf/units/clipsvc.msh",
         "conf/units/win-alpha.msh",        "conf/units/win-beta.msh",
         "scripts/win-alpha.msh",           "scripts/win-beta.msh",
         "conf/units/topbar.msh",           "scripts/topbar.msh",
@@ -713,6 +714,7 @@ pub fn build(b: *std.Build) void {
         "conf/sessiongui/settings.msh",    "conf/sessiongui/win-demo.msh",
         "conf/sessiongui/explorer.msh",
         "conf/sessiongui/sterm.msh",       "conf/sessiongui/terminal.msh",
+        "conf/sessiongui/clipsvc.msh",
         "scripts/demo.msh",
         "scripts/gui-shell.msh",
         "conf/skel/font.msh",

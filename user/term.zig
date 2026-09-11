@@ -36,9 +36,11 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
 
-// XRGB / B8G8R8X8 words: white text on a black ground.
+// XRGB / B8G8R8X8 words: white text on a black ground, a blue wash under a
+// selection.
 const fg: u32 = 0x00FF_FFFF;
 const bg: u32 = 0x0000_0000;
+const sel_bg: u32 = 0x0026_507a;
 
 const gw = font.width; // 8, the bitmap cell (fallback)
 const gh = font.height; // 16
@@ -183,6 +185,124 @@ fn writeText(s: []const u8) void {
     for (s) |b| writeByte(b);
 }
 
+// ------------------------------------------------ selection, copy & paste
+//
+// A selection is a pair of model positions (logical line, byte offset) — a
+// mouse drag sets it, the render highlights it, and releasing the drag
+// copies its text to the clipboard service. Middle-click pastes: the
+// clipboard text is queued and drained one byte per read, exactly as if it
+// were typed. Positions are model coordinates, so a selection survives
+// scrolling and reflow.
+
+const Pos = struct { line: usize, off: usize };
+
+fn posLE(a: Pos, b: Pos) bool {
+    return a.line < b.line or (a.line == b.line and a.off <= b.off);
+}
+fn posLT(a: Pos, b: Pos) bool {
+    return a.line < b.line or (a.line == b.line and a.off < b.off);
+}
+
+var sel_on = false;
+var sel_a: Pos = .{ .line = 0, .off = 0 }; // anchor
+var sel_b: Pos = .{ .line = 0, .off = 0 }; // moving end
+
+fn selLo() Pos {
+    return if (posLE(sel_a, sel_b)) sel_a else sel_b;
+}
+fn selHi() Pos {
+    return if (posLE(sel_a, sel_b)) sel_b else sel_a;
+}
+fn inSel(line: usize, off: usize) bool {
+    if (!sel_on) return false;
+    const p = Pos{ .line = line, .off = off };
+    return posLE(selLo(), p) and posLT(p, selHi());
+}
+
+/// The active line is stored at logical index `total`; every committed
+/// line is below it. Return the bytes of a line by model index.
+fn modelLine(li: usize) []const u8 {
+    return if (li >= total) act[0..act_len] else bytesAt(li);
+}
+
+// The clipboard service (clipsvc), reached through the `clip` give.
+var clip_chan: u64 = 0;
+var clip_buf: [*]u8 = undefined;
+var clip_buf_len: usize = 0;
+var clip_ok = false;
+
+fn setupClip() void {
+    if (clip_chan == 0) return;
+    switch (usys.callTypedCap(shared.ClipReq, shared.ClipResp, clip_chan, .register, 0)) {
+        .ok => |ok| if (ok.rep == .registered and ok.cap != 0) {
+            clip_chan = ok.cap;
+        },
+        .err => return,
+    }
+    const sh = usys.shmCreate(4); // 16 KB transfer buffer
+    if (sh.err != .ok) return;
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return;
+    clip_buf = @ptrFromInt(m.data[0]);
+    clip_buf_len = m.data[1] * 4096;
+    switch (usys.callTypedCap(shared.ClipReq, shared.ClipResp, clip_chan, .attach_buf, sh.data[0])) {
+        .ok => |ok| clip_ok = ok.rep == .ok,
+        .err => {},
+    }
+}
+
+/// Copy the current selection's text into the clipboard; returns the byte
+/// count (0 if nothing/no clipboard). Lines are joined with '\n'.
+fn copySelection() usize {
+    if (!clip_ok or !sel_on) return 0;
+    const lo = selLo();
+    const hi = selHi();
+    var n: usize = 0;
+    var li = lo.line;
+    while (li <= hi.line and n < clip_buf_len) : (li += 1) {
+        const lb = modelLine(li);
+        const from = if (li == lo.line) @min(lo.off, lb.len) else 0;
+        const to = if (li == hi.line) @min(hi.off, lb.len) else lb.len;
+        var c = from;
+        while (c < to and n < clip_buf_len) : (c += 1) {
+            clip_buf[n] = lb[c];
+            n += 1;
+        }
+        if (li < hi.line and n < clip_buf_len) {
+            clip_buf[n] = '\n';
+            n += 1;
+        }
+    }
+    switch (usys.callTyped(shared.ClipReq, shared.ClipResp, clip_chan, .{ .set = .{ .len = n } }, 0)) {
+        .ok => {},
+        .err => return 0,
+    }
+    return n;
+}
+
+// A paste feeds the clipboard's bytes to the shell one read at a time, as
+// if typed.
+var paste_buf: [16 << 10]u8 = undefined;
+var paste_len: usize = 0;
+var paste_pos: usize = 0;
+
+fn pasteFromClip(log_h: u64) void {
+    if (!clip_ok) return;
+    const len = switch (usys.callTyped(shared.ClipReq, shared.ClipResp, clip_chan, .get, 0)) {
+        .ok => |rep| switch (rep) {
+            .data => |d| @min(@as(usize, @intCast(d.len)), paste_buf.len),
+            else => return,
+        },
+        .err => return,
+    };
+    @memcpy(paste_buf[0..len], clip_buf[0..len]);
+    paste_len = len;
+    paste_pos = 0;
+    scroll_off = 0; // a paste snaps the view back to the bottom, like typing
+    var l: [40]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: pasted {d} bytes", .{len}) catch "term: pasted");
+}
+
 // -------------------------------------------------------- system font (fontsvc)
 // When the terminal is given a `font` cap it renders in the real mono
 // family at the effective scale: each byte's glyph is fetched from fontsvc
@@ -314,29 +434,38 @@ fn drawGlyphAt(col: usize, row: usize, b: u8) void {
     }
 }
 
-/// A solid block where the cursor rests.
-fn drawCursorAt(col: usize, row: usize) void {
+/// Fill cell (col, row) with a solid word (selection wash / cursor).
+fn fillCell(col: usize, row: usize, word: u32) void {
     var y: usize = 0;
     while (y < cellh and row * cellh + y < grid_h) : (y += 1) {
         const base = (goy + row * cellh + y) * stride + gox + col * cellw;
         var x: usize = 0;
-        while (x < cellw and col * cellw + x < grid_w) : (x += 1) px[base + x] = fg;
+        while (x < cellw and col * cellw + x < grid_w) : (x += 1) px[base + x] = word;
     }
 }
 
-/// Draw the sub-rows of one logical line that fall inside the viewport
-/// [top, top+rows); returns the display row after this line.
-fn drawLogical(dr0: usize, top: usize, bytes: []const u8) usize {
-    const nsub = wrapRows(bytes.len);
+/// A solid block where the cursor rests.
+fn drawCursorAt(col: usize, row: usize) void {
+    fillCell(col, row, fg);
+}
+
+/// Draw the sub-rows of logical line `li` (bytes `b`) that fall inside the
+/// viewport [top, top+rows), washing selected cells first; returns the
+/// display row after this line.
+fn drawLogical(dr0: usize, top: usize, li: usize, b: []const u8) usize {
+    const nsub = wrapRows(b.len);
     var s: usize = 0;
     while (s < nsub) : (s += 1) {
         const dr = dr0 + s;
         if (dr >= top and dr < top + rows) {
             const vr = dr - top;
             const from = s * cols;
-            const to = @min(from + cols, bytes.len);
+            const to = @min(from + cols, b.len);
             var c: usize = from;
-            while (c < to) : (c += 1) drawGlyphAt(c - from, vr, bytes[c]);
+            while (c < to) : (c += 1) {
+                if (inSel(li, c)) fillCell(c - from, vr, sel_bg);
+                drawGlyphAt(c - from, vr, b[c]);
+            }
         }
     }
     return dr0 + nsub;
@@ -378,8 +507,8 @@ fn render() void {
     // Pass 2: draw the committed lines, then the active line, then the cursor.
     var dr: usize = 0;
     li = vis0;
-    while (li < total) : (li += 1) dr = drawLogical(dr, top, bytesAt(li));
-    _ = drawLogical(committed_dr, top, act[0..act_len]);
+    while (li < total) : (li += 1) dr = drawLogical(dr, top, li, bytesAt(li));
+    _ = drawLogical(committed_dr, top, total, act[0..act_len]);
 
     const cursor_dr = committed_dr + cursor_sub;
     if (cursor_dr >= top and cursor_dr < top + rows) {
@@ -404,6 +533,39 @@ fn scrollBy(up: bool, log_h: u64) void {
     _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: scroll {s} top={d} of {d}", .{ state, last_top, last_w }) catch "term: scroll");
 }
 
+/// Map a display row + column (viewport-relative col, absolute display row)
+/// to a model position — the reverse of the render walk. Clamps to the line
+/// it lands on. Uses the wrap layout the last render computed.
+fn drColToPos(dr: usize, col: usize) Pos {
+    var acc: usize = 0;
+    const vis0 = firstVisible();
+    var li = vis0;
+    while (li <= total) : (li += 1) {
+        const b = modelLine(li);
+        const nsub = wrapRows(b.len);
+        if (dr < acc + nsub) {
+            const sub = dr - acc;
+            const off = @min(sub * cols + col, b.len);
+            return .{ .line = li, .off = off };
+        }
+        acc += nsub;
+    }
+    // Past the end: the end of the active line.
+    return .{ .line = total, .off = act_len };
+}
+
+/// Map a surface-local pixel (x, y) to a model position.
+fn posAt(x: usize, y: usize) Pos {
+    if (cols == 0 or rows == 0) return .{ .line = total, .off = act_len };
+    const relx = if (x >= gox) x - gox else 0;
+    const rely = if (y >= goy) y - goy else 0;
+    var col = relx / cellw;
+    if (col >= cols) col = cols - 1;
+    var vr = rely / cellh;
+    if (vr >= rows) vr = rows - 1;
+    return drColToPos(last_top + vr, col);
+}
+
 // -------------------------------------------------------------- geometry
 
 /// Recompute the columns and rows for the current grid rectangle.
@@ -423,6 +585,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
         usys.exit(169);
     }
     if (setup.has(.font)) font_chan = setup.cap(.font);
+    if (setup.has(.clip)) clip_chan = setup.cap(.clip);
 
     // Mode 2: a WINDOWED terminal — a desktop window (shared frame chrome)
     // serving a shell, launched from the dock. Modes 0/1 are the console
@@ -616,6 +779,15 @@ fn logDots(log_h: u64) void {
     }) catch "gui: dots");
 }
 
+/// The grid's cell geometry in SCANOUT coordinates, so a host (a drill) can
+/// aim the pointer at a given cell to select or paste.
+fn logGrid(log_h: u64) void {
+    var l: [96]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: grid ox={d} oy={d} cw={d} ch={d} cols={d} rows={d}", .{
+        wf.win_x + gox, wf.win_y + goy, cellw, cellh, cols, rows,
+    }) catch "term: grid");
+}
+
 /// Repaint the titlebar + the grid and push the whole window.
 fn repaintWin() void {
     wf.drawChrome("Terminal");
@@ -640,20 +812,102 @@ fn windowedMain(log_h: u64, chan_h: u64) noreturn {
     // drawChrome sets title_h, which contentRect() (hence layoutGrid's grid
     // origin) depends on — so paint the titlebar BEFORE laying out the grid,
     // or the grid starts at y=0 and overwrites the titlebar.
+    setupClip(); // the clipboard service, for copy/paste
     wf.drawChrome("Terminal");
     layoutGrid();
     render();
     if (!wf.commitSurface()) usys.exit(186);
     logDots(log_h);
+    logGrid(log_h);
     _ = usys.log(log_h, "gui: ready");
     serveConsole(log_h, chan_h, true);
 }
 
+// Pointer gesture ownership: a left-drag that starts in the titlebar drives
+// the frame (move / snap / dots); one that starts in the content drives a
+// text selection. A gesture keeps its owner until the button is released,
+// so dragging a selection up over the titlebar does not turn into a move.
+var ptr_left = false;
+var frame_gesture = false;
+var content_gesture = false;
+var prev_mid = false;
+
+/// The frame recreated the surface at a new size: re-point at its buffer,
+/// refit the grid, REFLOW (re-render the model at the new width) and repaint.
+fn onResized(log_h: u64) void {
+    px = wf.px;
+    stride = wf.win_w;
+    pxw = wf.win_w;
+    pxh = wf.win_h;
+    layoutGrid();
+    repaintWin();
+    logDots(log_h); // the dots moved with the window
+    logGrid(log_h); // and so did the grid cells
+    var l: [56]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: reflow cols={d} rows={d}", .{ cols, rows }) catch "term: reflow");
+}
+
+/// A pointer event in the content area: a left drag selects text (releasing
+/// copies it), a middle click pastes the clipboard.
+fn onContent(ev: wf.Event, log_h: u64, press: bool, left: bool) void {
+    const mid = ev.btn & 4 != 0;
+    if (mid and !prev_mid) pasteFromClip(log_h);
+    prev_mid = mid;
+    if (press) {
+        sel_a = posAt(ev.x, ev.y);
+        sel_b = sel_a;
+        sel_on = true;
+        render();
+        _ = wf.commitSurface();
+    } else if (left) { // dragging
+        sel_b = posAt(ev.x, ev.y);
+        render();
+        _ = wf.commitSurface();
+    } else if (content_gesture) { // release
+        sel_b = posAt(ev.x, ev.y);
+        const n = copySelection();
+        render();
+        _ = wf.commitSurface();
+        var l: [40]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: copied {d} bytes", .{n}) catch "term: copied");
+    }
+}
+
+fn routePointer(ev: wf.Event, log_h: u64) void {
+    const left = ev.btn & 1 != 0;
+    const press = left and !ptr_left;
+    const in_title = ev.y < wf.title_h;
+    ptr_left = left;
+    if (press and in_title and !content_gesture) {
+        frame_gesture = true;
+    } else if (press and !in_title and !frame_gesture) {
+        content_gesture = true;
+    }
+    if (content_gesture) {
+        onContent(ev, log_h, press, left);
+        if (!left) content_gesture = false;
+    } else if (frame_gesture or in_title) {
+        switch (wf.onPointer(ev, "Terminal")) {
+            .close, .resize_failed => usys.exit(0), // red dot, or a fatal resize: end
+            .resized => onResized(log_h),
+            else => {}, // none / moved / minimized — keep pumping
+        }
+        if (!left) frame_gesture = false;
+    } else {
+        onContent(ev, log_h, false, false); // middle-click paste / hover
+    }
+}
+
 /// Pump frame input until a keystroke arrives, handling the titlebar (drag /
-/// snap / close), focus, restore and scrollback (page up/down) along the
-/// way. Returns the key byte, or 0 if the display channel died.
+/// snap / close), focus, restore, scrollback (page up/down) and selection /
+/// paste along the way. Returns the key byte, or 0 if the display channel died.
 fn pumpKey(log_h: u64) u8 {
     while (true) {
+        if (paste_pos < paste_len) { // drain a paste, one byte per read
+            const b = paste_buf[paste_pos];
+            paste_pos += 1;
+            return b;
+        }
         const ev = wf.nextInput() orelse return 0;
         switch (ev.kind) {
             0 => { // a keystroke: scrollback keys are ours, the rest go to the shell
@@ -672,24 +926,7 @@ fn pumpKey(log_h: u64) u8 {
                 }
                 return ev.ch;
             },
-            1 => switch (wf.onPointer(ev, "Terminal")) {
-                .close, .resize_failed => usys.exit(0), // red dot, or a fatal resize: end (the shell follows)
-                .resized => {
-                    // The frame recreated the surface at a new size: re-point
-                    // at its buffer, refit the grid, REFLOW (re-render the
-                    // model at the new width) and repaint the chrome.
-                    px = wf.px;
-                    stride = wf.win_w;
-                    pxw = wf.win_w;
-                    pxh = wf.win_h;
-                    layoutGrid();
-                    repaintWin();
-                    logDots(log_h); // the dots moved with the window
-                    var l: [56]u8 = undefined;
-                    _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: reflow cols={d} rows={d}", .{ cols, rows }) catch "term: reflow");
-                },
-                else => {}, // none / moved / minimized (frame hid it) / content — keep pumping
-            },
+            1 => routePointer(ev, log_h),
             3 => repaintWin(), // restored from the dock: repaint (the compositor unhid us)
             4 => { // focus changed: dim / brighten the chrome
                 wf.win_focused = ev.ch != 0;

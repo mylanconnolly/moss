@@ -3154,6 +3154,30 @@ the editor knowing the width). A size event is the right hook the day a
 width-aware program (a pager, a columnated `ls`) arrives; until then it
 would be an API with no caller.
 
+**A clipboard and copy/paste (as built, 2026-09-11).** Copy/paste needs
+shared state between apps, so it is a service reached as a capability —
+`clipsvc`, the same shape as fontsvc/localesvc: a client `register`s for a
+badged channel, attaches its own byte buffer, then `set`s the one clipboard
+value from it or `get`s it back. clipsvc holds pure state (no caps of its
+own); it is lazy and init-supervised, pulled up by whoever holds the `clip`
+give. It is instantiated **per session** (a `conf/sessiongui/clipsvc.msh`
+beside the system one), so a copy is private to a user's session rather than
+leaking across users. The terminal is its first client. Selection is a mouse
+drag over the grid, tracked in MODEL coordinates (logical line + byte
+offset) so it survives scrolling and reflow; releasing the drag copies the
+selected text (lines joined by `\n`) to the clipboard, and a **middle-click
+pastes** — the classic X11 gesture, chosen because inputsvc delivers keys as
+single bytes with no Ctrl modifier, so Ctrl-Shift-V is not available. A
+paste is queued and drained one byte per `read`, exactly as if typed (and
+snaps the view to the bottom). Content pointer events route separately from
+the frame's: the terminal owns a drag that starts in the grid (selection)
+and hands the frame a drag that starts in the titlebar (move/snap/dots),
+each keeping its owner until the button releases — because `windowframe`'s
+`onPointer` only surfaces the initial content press, not the moves and
+releases a selection needs. The drill drag-selects the banner line,
+middle-clicks to paste it, and checks the pasted byte count equals the
+copied one.
+
 **A higher-resolution scanout — 1280×1024 (as built, 2026-09-10).** The
 scanout grew from 1024×768 to 1280×1024 for more desktop room. The size
 lives in two constants — gpusvc's `fb_w`/`fb_h` (the resource it creates and

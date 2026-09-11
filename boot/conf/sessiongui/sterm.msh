@@ -9,5 +9,6 @@
   give: [
     { tag: display, session: true }
     { tag: font, session: true }
+    { tag: clip, unit: clipsvc }
   ]
 }

@@ -9,5 +9,6 @@
   give: [
     { tag: display, unit: compositor-ptr }
     { tag: font, unit: fontsvc }
+    { tag: clip, unit: clipsvc }
   ]
 }
