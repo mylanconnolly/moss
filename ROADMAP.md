@@ -1035,7 +1035,19 @@ is a plan.
   pool `certifySecret` times out at 5s and the unit never wires; (2) the
   24-byte unit script-path cap silently truncates (`browse-client.msh` →
   `browse-client.ms`, "not in the boot archive") — keep script names short.
-  Stage 4b (wire remote browse into the explorer GUI) open.
+  ✅ Stage 4b — remote browse in the explorer GUI (2026-09-11): the
+  explorer's sidebar gained a **Network** section listing live fabric peers
+  (`net-rows`, from `FabReq.members`); selecting one browses that node's
+  files in the right pane over the fabric (`browse-rows NODE PATH` dials the
+  node's `browse` service — cached per node — and returns its `fs-rows`),
+  the same two-pane UI whether the files are local or a node away. Both new
+  commands build arena-stable rows (like `fs-rows`), so the GUI holds them
+  across renders. The `netbrowse` drill proves it end to end: node 2's GUI
+  explorer lists and reads node 1's files ("node=1 rows=8") over a certified
+  fabric link. **The file-explorer arc is complete.** (`workcmds` is now
+  always wired — every command self-guards on its cap — so the one explorer
+  script runs local-only or networked; a fabric-free GUI's `net-rows` just
+  returns no peers.)
 - **A desktop shell (macOS-inspired)**: movable windows with titlebars, a
   dock of running apps, a top menu bar (clock + system menu + app menus),
   and capability-gated user/system settings. ✅ Stage 1 — movable windows

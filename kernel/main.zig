@@ -265,6 +265,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.netbrowse_test) {
+        _ = sched.spawn("boot-watch", netbrowseTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.topbar_test) {
         _ = sched.spawn("boot-watch", topbarTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -887,6 +892,14 @@ fn explorerTestWorker(_: u64) void {
 }
 fn browseTestWorker(_: u64) void {
     systemDrill("browse");
+}
+
+/// The networked file-explorer drill: two nodes. Node 1 (profile
+/// browsehost) serves its files over the fabric; node 2 (profile
+/// netbrowse) runs the two-pane explorer with a fabric cap and browses
+/// node 1's files from its Network sidebar. The runner drives node 2.
+fn netbrowseTestWorker(_: u64) void {
+    systemDrill("netbrowse");
 }
 
 /// The mshl GUI drill: a system boot under profile "gui" — mshrun runs a

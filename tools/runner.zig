@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse };
 
 const Spec = struct {
     name: []const u8,
@@ -94,6 +94,7 @@ const specs = [_]Spec{
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
     .{ .name = "browse", .kind = .browse, .pass = "browse-test: PASS", .extra = "browse: node 2 root has", .append = "profile=browse", .timeout_s = 180 },
+    .{ .name = "netbrowse", .kind = .netbrowse, .pass = "netbrowse-test: PASS", .extra = "node=1 rows=", .append = "profile=netbrowse", .timeout_s = 180 },
     .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
     .{ .name = "localeupd", .kind = .localeupd, .pass = "localeupd-test: PASS", .extra = "localeupd: installed CLDR 48.2.0-upd", .append = "profile=localeupd", .timeout_s = 120 },
     .{ .name = "fontrescan", .kind = .blk, .pass = "fontrescan-test: PASS", .extra = "IBM Plex Serif' (fs)", .always_extra = "Source Code Pro' (fs)", .extra2 = "Source Code Pro ExtraLight' (fs)", .append = "profile=fontrescan", .timeout_s = 120 },
@@ -299,6 +300,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .login) return runLogin(spec, bin, polls);
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
     if (spec.kind == .fabgui) return runFabGui(spec, bin, polls);
+    if (spec.kind == .netbrowse) return runNetBrowse(spec, bin, polls);
     if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
@@ -3113,6 +3115,103 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const verdict = watch(log2, spec, spec.extra, polls);
     if (!verdict.ok) {
         reportFailure(spec.name, verdict.why, log2);
+        return false;
+    }
+    return true;
+}
+
+/// The networked file-explorer drill: two nodes. Node 1 (profile
+/// `browsehost`) is the fabric seed serving its files under the name
+/// "browse"; node 2 (profile `netbrowse`) boots the two-pane explorer with
+/// the graphical devices and a fabric cap. We wait for node 2's window,
+/// click the one peer in its Network sidebar (node 1), and close — the
+/// explorer re-lists that node over the fabric on the way out and reports
+/// the node it browsed and the row count, so a non-empty listing from
+/// node=1 proves the whole remote path.
+fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
+    const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
+    for ([_][]const u8{ disk1, disk2, log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
+    try makeDisk(disk1);
+    try makeDisk(disk2);
+
+    // Node 1: the fabric seed on the hub, serving its files as "browse".
+    var args1: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args1, log1, bin, "netbrowse-node1", "profile=browsehost node=1");
+    try appendDisk(&args1, disk1);
+    try args1.appendSlice(gpa, &.{
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+    });
+    var c1 = try spawnQemu(args1.items);
+    defer c1.kill(io);
+    sleepMs(1000);
+
+    // Node 2: the explorer — a fabric client with the graphical devices
+    // (gpu + keyboard + tablet, so rows can be clicked) and QMP to drive it.
+    var args2: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args2, log2, bin, "netbrowse-node2", "profile=netbrowse node=2");
+    try appendDisk(&args2, disk2);
+    try args2.appendSlice(gpa, &.{
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+        "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+        "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
+        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+    });
+    var c2 = try spawnQemu(args2.items);
+    defer c2.kill(io);
+
+    if (!try waitLogN(log2, "gui: ready", 1, "the explorer never came up on node 2", spec, polls)) return false;
+
+    var q = qmpConnect(qmp_port) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log2);
+        return false;
+    };
+    defer q.close();
+    // The Network sidebar lists node 1 (the one live peer); click its row to
+    // browse it. The list only appears once node 1 has joined and gossiped
+    // its membership, so poll the geometry until it is logged.
+    var geom: ?[4]u32 = parseListGeom(readLog(log2), "network");
+    var tries: usize = 0;
+    while (geom == null and tries < 40) : (tries += 1) {
+        sleepMs(250);
+        geom = parseListGeom(readLog(log2), "network");
+    }
+    const g = geom orelse {
+        reportFailure(spec.name, "the Network sidebar never listed a peer", log2);
+        return false;
+    };
+    if (!clickScanout(&q, g[0], g[1] + g[2] / 2)) {
+        reportFailure(spec.name, "QMP could not click the peer", log2);
+        return false;
+    }
+    sleepMs(600); // let the click switch to remote mode and re-list node 1
+    // Close the window; the explorer echoes the node it browsed and the row
+    // count on its way out.
+    const c = widgetCenter(readLog(log2), "close") orelse {
+        reportFailure(spec.name, "could not find the close button", log2);
+        return false;
+    };
+    if (!clickScanout(&q, c[0], c[1])) {
+        reportFailure(spec.name, "QMP could not click close", log2);
+        return false;
+    }
+    // node=1 proves the peer was selected; a non-empty listing proves node
+    // 2 read node 1's files over the fabric. The close echo reads
+    // "explorer: closed at /<path> depth=N ro=.. node=1 rows=N".
+    if (!try waitLogN(log2, "node=1 rows=", 1, "the explorer never browsed node 1", spec, polls)) return false;
+    const rows = parseAfter(readLog(log2), "rows=") orelse {
+        reportFailure(spec.name, "could not parse the remote row count", log2);
+        return false;
+    };
+    if (rows == 0) {
+        reportFailure(spec.name, "node 1's listing came back empty over the fabric", log2);
         return false;
     }
     return true;

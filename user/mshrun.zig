@@ -264,13 +264,15 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             worker_spawner = spawner_slot;
         }
     }
-    // The worker commands turn on for a spawner (spawn/dispatch/await/race),
-    // a fabric (publish/lookup), or an init front channel (dial/launch:
-    // the dock launches app units through it); each command self-guards, so
-    // a script with only a fabric gets lookup, not spawn.
+    // The worker commands are always wired; each self-guards on the cap it
+    // needs, so `spawn` without a spawner, `dial` without a fabric, etc.
+    // fail with a clear message rather than reading as an unknown command.
+    // This also lets a fabric-free GUI (the local file explorer) name the
+    // network commands: `net-rows` returns an empty peer list without a
+    // fabric, so the same explorer script runs local-only or networked.
     const init_cap: u64 = if (setup.has(.init)) setup.cap(.init) else 0;
-    workcmds_on = worker_spawner != 0 or fab_chan != 0 or init_cap != 0;
-    if (workcmds_on) workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, init_cap);
+    workcmds_on = true;
+    workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, init_cap);
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
     if (setup.has(.locale)) localecmds.setup(setup.cap(.locale), log_h);
     if (setup.has(.conf)) confcmds.setup(setup.cap(.conf), log_h);

@@ -1,0 +1,23 @@
+# The networked file explorer, node 2 (profile netbrowse): the two-pane
+# explorer with a fabric cap, so its Network sidebar lists live peers
+# (net-rows) and it browses a chosen node's files over the fabric (dial
+# NODE "browse" + call, via browse-rows). It also holds a local read-write
+# view of its own disk (Home). Holding a `fabric` give pulls the node's
+# fabric stack up (fabsvc → fabroot → netsvc → net-cluster), `display` the
+# pointer-capable compositor and `font` the font service — so this one unit
+# brings the whole GUI + fabric node up as its dependencies. Essential: the
+# boot follows the app, and the runner drives it to browse node 1.
+{
+  image:     mshrun
+  script:    scripts/explorer.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [netbrowse]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: fabric, unit: fabsvc }
+    { tag: view, fs: "", ro: false }
+  ]
+}

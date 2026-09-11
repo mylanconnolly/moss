@@ -1,11 +1,17 @@
-# A two-pane file explorer. The left pane is Places (Home); the right pane
-# lists the current directory (name / kind / size), directories first. A
-# folder is entered by opening it (double-click or Enter); "Up" goes to the
-# parent. The footer shows the volume's capability facts — encrypted vs
-# plain, read-only vs read-write — straight from the filesystem, not a
-# guess. Rows come from `fs-rows` (arena-stable, so the list can hold them
-# across renders; a `map`-built list would not survive the interpreter's
-# per-render reclaim).
+# A two-pane file explorer. The left pane has two sections: Places (Home,
+# the local view) and Network (the live fabric peers, from `net-rows`).
+# The right pane lists the current directory — the local view when we are
+# Home, or a remote node's files over the fabric when a peer is selected.
+# A folder is entered by opening it (double-click or Enter); "Up" goes to
+# the parent. The footer shows the volume's capability facts (encrypted vs
+# plain, read-only vs read-write) when local, or which node we are browsing
+# when remote. Rows come from `fs-rows` (local) or `browse-rows` (remote),
+# both arena-stable so the list can hold them across renders; a `map`-built
+# list would not survive the interpreter's per-render reclaim.
+#
+# State: { path, depth, node }. node 0 = the local view (Home); node N>0 =
+# browsing peer N over the fabric. Capability-scoped views (Open read-only)
+# apply to the local view only — a remote node enforces read-only itself.
 
 # Join a directory path and a child name (no leading slash at the root).
 def join-path [base, name] {
@@ -15,11 +21,27 @@ def join-path [base, name] {
   }
 }
 
-# The current directory's rows, or an empty list if it cannot be read.
+# The current directory's local rows, or an empty list on error.
 def dir-rows [path] {
   match (fs-rows $path) {
     ok $r => $r
     _ => []
+  }
+}
+
+# A remote node's rows over the fabric, or an empty list if unreachable.
+def remote-rows [node, path] {
+  match (browse-rows $node $path) {
+    ok $r => $r
+    _ => []
+  }
+}
+
+# The right pane's rows for the current state: local or remote.
+def rows-for [state] {
+  match ($state | get "node") {
+    0 => (dir-rows ($state | get "path"))
+    _ => (remote-rows ($state | get "node") ($state | get "path"))
   }
 }
 
@@ -31,17 +53,28 @@ def vol-line [] {
   ("volume: " + $enc + " · " + $rw + " · " + (str ($d | get "free_kb")) + " KB free")
 }
 
-# The crumb line: the current path, marked when we are inside a scoped
-# (capability-derived) sub-view rather than the whole home.
+# The footer: the local volume's facts, or the remote node we browse.
+def footer [state] {
+  match ($state | get "node") {
+    0 => (vol-line)
+    _ => ("fabric · browsing node " + (str ($state | get "node")) + " (read-only)")
+  }
+}
+
+# The crumb line: the current path, marked for a scoped (capability-derived)
+# local sub-view, or prefixed with the node when browsing a remote peer.
 def crumb [state] {
-  match ($state | get "depth") {
-    0 => ("/" + ($state | get "path"))
-    _ => ("[scoped] /" + ($state | get "path"))
+  match ($state | get "node") {
+    0 => (match ($state | get "depth") {
+        0 => ("/" + ($state | get "path"))
+        _ => ("[scoped] /" + ($state | get "path"))
+      })
+    _ => ("node " + (str ($state | get "node")) + ": /" + ($state | get "path"))
   }
 }
 
 let final = (gui {
-    init:  { path: "", depth: 0 }
+    init:  { path: "", depth: 0, node: 0 }
     title: "Files"
     view: (fn [state] {
         {
@@ -51,10 +84,16 @@ let final = (gui {
               kind: "row"
               children: [
                 { kind: "button", id: "up", label: "Up" }
-                { kind: "button", id: "lock", label: "Open read-only" }
-                (match $state.depth {
-                    0 => { kind: "label", muted: true, text: "" }
-                    _ => { kind: "button", id: "leave", label: "Leave view", variant: "primary" }
+                (match $state.node {
+                    0 => { kind: "button", id: "lock", label: "Open read-only" }
+                    _ => { kind: "label", muted: true, text: "" }
+                  })
+                (match $state.node {
+                    0 => (match $state.depth {
+                        0 => { kind: "label", muted: true, text: "" }
+                        _ => { kind: "button", id: "leave", label: "Leave view", variant: "primary" }
+                      })
+                    _ => { kind: "label", muted: true, text: "" }
                   })
                 { kind: "label", muted: true, text: (crumb $state) }
               ]
@@ -63,43 +102,67 @@ let final = (gui {
               kind:   "split"
               left_w: 200
               left: {
-                kind: "list"
-                id:   "places"
-                key:  "places"
-                h:    420
-                rows: [{ id: "", cells: ["Home"] }]
+                kind: "column"
+                children: [
+                  { kind: "label", muted: true, text: "Places" }
+                  {
+                    kind: "list"
+                    id:   "places"
+                    key:  "places"
+                    h:    56
+                    rows: [{ id: "", cells: ["Home"] }]
+                  }
+                  { kind: "label", muted: true, text: "Network" }
+                  {
+                    kind: "list"
+                    id:   "network"
+                    key:  "net"
+                    h:    320
+                    rows: (net-rows)
+                  }
+                ]
               }
               right: {
                 kind: "list"
                 id:   "files"
-                key:  $state.path
+                key:  ((str $state.node) + ":" + $state.path)
                 h:    420
                 cols: [{ title: "Name", w: 320 } { title: "Kind", w: 110 } { title: "Size", w: 120 }]
-                rows: (dir-rows $state.path)
+                rows: (rows-for $state)
               }
             }
-            { kind: "label", muted: true, text: (vol-line) }
+            { kind: "label", muted: true, text: (footer $state) }
             { kind: "button", id: "close", label: "close", variant: "danger" }
           ]
         }
       })
     update: (fn [state, ev] {
         match $ev.id {
-          "up" => { { path: (fs-parent $state.path), depth: $state.depth } }
-          "close" => { { path: $state.path, depth: $state.depth, done: true } }
-          "places" => { { path: $ev.row, depth: $state.depth } }
+          "up" => { { path: (fs-parent $state.path), depth: $state.depth, node: $state.node } }
+          "close" => { { path: $state.path, depth: $state.depth, node: $state.node, done: true } }
+          "places" => { { path: "", depth: 0, node: 0 } }
+          "network" => (match (int $ev.row) {
+              ok $n => { { path: "", depth: 0, node: $n } }
+              _ => $state
+            })
           "lock" => (match (fs-derive $state.path true) {
-              true => { { path: "", depth: ($state.depth + 1) } }
+              true => { { path: "", depth: ($state.depth + 1), node: 0 } }
               _ => $state
             })
           "leave" => (match (fs-leave) {
-              true => { { path: "", depth: ($state.depth - 1) } }
+              true => { { path: "", depth: ($state.depth - 1), node: 0 } }
               _ => $state
             })
           "files" => (match $ev.activated {
-              true => (match (fs-rows (join-path $state.path $ev.row)) {
-                  ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth } }
-                  _ => $state
+              true => (match $state.node {
+                  0 => (match (fs-rows (join-path $state.path $ev.row)) {
+                      ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth, node: 0 } }
+                      _ => $state
+                    })
+                  _ => (match (browse-rows $state.node (join-path $state.path $ev.row)) {
+                      ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth, node: $state.node } }
+                      _ => $state
+                    })
                 })
               _ => $state
             })
@@ -108,4 +171,5 @@ let final = (gui {
       })
   })
 let ro = (match ((df) | get "read_only") { true => "yes"; _ => "no" })
-echo ("explorer: closed at /" + $final.path + " depth=" + (str $final.depth) + " ro=" + $ro)
+let rows = (rows-for $final)
+echo ("explorer: closed at /" + $final.path + " depth=" + (str $final.depth) + " ro=" + $ro + " node=" + (str $final.node) + " rows=" + (str (len $rows)))

@@ -574,8 +574,144 @@ const serve_result = mshl.resultShape(.int, .string);
 const signal_kind: Shape = .{ .kind = "signal" };
 const signal_result = mshl.resultShape(signal_kind, .string);
 const publishable_kind: Shape = .{ .one_of = &.{ worker_kind, signal_kind } };
+const rows_result = mshl.resultShape(.list, .string);
+
+// -------------------------------------------------- remote browse
+//
+// The file explorer's Network sidebar lists live fabric members
+// (`net-rows`) and browses a chosen node's files (`browse-rows`), reusing
+// the per-node `browse` service (a durable mshl unit that answers a call
+// carrying a `path` with that folder's fs-rows). Both build their rows in
+// the interpreter arena, so a GUI can hold them across renders — the same
+// contract fs-rows keeps for local rows; a `map`-built list would not
+// survive the interpreter's per-render reclaim. The dialed browse service
+// is cached by node, so re-listing on navigation costs one call, not a
+// fresh dial each render.
+var browse_node: u64 = 0; // the node the cached browse service reaches; 0 = none
+var browse_conn: Conn = 0; // its service slot id; 0 = none
+
+/// The browse service for `node`, dialing (and caching) it on first use or
+/// when the node changes. null when there is no fabric or the node is
+/// unreachable.
+fn browseServiceFor(node: u64) ?*Service {
+    if (fab_chan == 0 or node == 0) return null;
+    if (browse_node == node) {
+        if (svcSlot(browse_conn)) |sv| return sv; // still connected to this node
+    }
+    if (browse_conn != 0) closeService(browse_conn);
+    browse_conn = 0;
+    browse_node = 0;
+    const w = shared.strToWords("browse");
+    const cap = switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab_chan, .{ .remote_connect = .{ .node = node, .a = w[0], .b = w[1] } }, 0)) {
+        .ok => |ok| switch (ok.rep) {
+            .found => ok.cap,
+            else => return null,
+        },
+        .err => return null,
+    };
+    if (cap == 0) return null;
+    var idx: usize = 0;
+    while (idx < max_services and services[idx].used) idx += 1;
+    if (idx == max_services) {
+        _ = usys.capDrop(cap);
+        return null;
+    }
+    const sv = &services[idx];
+    sv.* = .{ .used = true, .gen = sv.gen +% 1, .chan = cap };
+    browse_conn = svcId(idx);
+    browse_node = node;
+    return sv;
+}
+
+/// `browse-rows NODE PATH` → the folder's rows from that node's browse
+/// service, `{id, cells}` ready for the list widget (ok rows / err word).
+fn browseRows(it: *mshl.Interp, node: u64, path: []const u8) mshl.Error!Value {
+    const sv = browseServiceFor(node) orelse return try errResult(it, "unreachable");
+    const Req = struct { path: []const u8 };
+    const req = try mshl.toValue(it.arena, Req{ .path = path });
+    // The browse handler returns its fs-rows list directly, so callService
+    // wraps it as `ok <rows>` — exactly the shape the view matches on.
+    const r = try callService(it, sv, req);
+    // A dropped session drops the cache, so the next render re-dials.
+    if (r == .result and !r.result.ok) {
+        closeService(browse_conn);
+        browse_conn = 0;
+        browse_node = 0;
+    }
+    return r;
+}
+
+// The members-listing buffer, attached to fabsvc once and reused: the
+// explorer's view calls net-rows every render, and fabsvc does not unmap a
+// previous attach_buf, so re-attaching each render would leak a mapping
+// there. One buffer, attached lazily, held for the program's life (this is
+// the sole members client — dnsd uses the race-free member_state query).
+var members_shm: u64 = 0;
+var members_va: usize = 0;
+
+fn membersBuf() ?[*]u8 {
+    if (members_va != 0) return @ptrFromInt(members_va);
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return null;
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) {
+        _ = usys.capDrop(sh.data[0]);
+        return null;
+    }
+    switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .attach_buf, sh.data[0])) {
+        .ok => {},
+        .err => {
+            _ = usys.shmUnmap(m.data[0]);
+            _ = usys.capDrop(sh.data[0]);
+            return null;
+        },
+    }
+    members_shm = sh.data[0];
+    members_va = m.data[0];
+    return @ptrFromInt(members_va);
+}
+
+/// `net-rows` → one `{id, cells}` row per live fabric member other than
+/// this node (id = the node number, cells = ["Node N", "F MB"]), built in
+/// the arena for the Network sidebar. An empty list when there is no
+/// fabric or the query fails — the sidebar simply shows no peers.
+fn netRows(it: *mshl.Interp) mshl.Error!Value {
+    const a = it.arena;
+    if (fab_chan == 0) return .{ .list = &.{} };
+    const buf = membersBuf() orelse return .{ .list = &.{} };
+    const n = switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .members, 0)) {
+        .ok => |rep| switch (rep) {
+            .num => |q| q.n,
+            else => return .{ .list = &.{} },
+        },
+        .err => return .{ .list = &.{} },
+    };
+    var rows: std.ArrayList(Value) = .empty;
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        const rec = buf[i * shared.fab_member_size ..];
+        const node: u64 = @as(u64, rec[0]) | (@as(u64, rec[1]) << 8);
+        const up = rec[2] != 0;
+        const self = rec[3] != 0;
+        const free_mb: u64 = @as(u64, rec[4]) | (@as(u64, rec[5]) << 8);
+        if (self or !up) continue; // only reachable peers a user can browse
+        const cells = try a.alloc(Value, 2);
+        cells[0] = .{ .str = try std.fmt.allocPrint(a, "Node {d}", .{node}) };
+        cells[1] = .{ .str = try std.fmt.allocPrint(a, "{d} MB", .{free_mb}) };
+        const keys = try a.alloc([]const u8, 2);
+        keys[0] = "id";
+        keys[1] = "cells";
+        const vals = try a.alloc(Value, 2);
+        vals[0] = .{ .str = try std.fmt.allocPrint(a, "{d}", .{node}) };
+        vals[1] = .{ .list = cells };
+        try rows.append(a, .{ .record = .{ .keys = keys, .vals = vals } });
+    }
+    return .{ .list = try a.dupe(Value, rows.items) };
+}
 
 pub fn signature(name: []const u8) ?mshl.Signature {
+    if (std.mem.eql(u8, name, "net-rows")) return .{ .ret = .list };
+    if (std.mem.eql(u8, name, "browse-rows")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "path", .shape = .string } }, .ret = rows_result };
     if (std.mem.eql(u8, name, "signal")) return .{ .ret = signal_result };
     if (std.mem.eql(u8, name, "wait")) return .{ .params = &.{.{ .name = "signal", .shape = signal_kind, .optional = true }}, .input = .{ .optional = signal_kind }, .ret = .int };
     if (std.mem.eql(u8, name, "notify")) return .{ .params = &.{ .{ .name = "node", .shape = .int }, .{ .name = "name", .shape = .string }, .{ .name = "bits", .shape = .int, .optional = true } }, .ret = call_result };
@@ -726,6 +862,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (args[0] != .str) return it.fail("dial: a service name expected, got a {s}", .{args[0].typeName()});
         if (args[0].str.len > 16) return it.fail("dial: a service name is at most 16 bytes", .{});
         return try dialService(it, args[0].str);
+    }
+    if (is(u8, name, "net-rows")) {
+        return try netRows(it);
+    }
+    if (is(u8, name, "browse-rows")) {
+        if (fab_chan == 0) return it.fail("browse-rows: this program has no fabric", .{});
+        if (args.len < 2 or args[0] != .int or args[1] != .str) return it.fail("browse-rows: NODE PATH expected", .{});
+        return try browseRows(it, @intCast(@max(args[0].int, 0)), args[1].str);
     }
     if (is(u8, name, "launch")) {
         if (init_chan == 0) return it.fail("launch: this program cannot reach init", .{});
@@ -1057,4 +1201,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "net-rows", "browse-rows" };

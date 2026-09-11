@@ -3962,6 +3962,36 @@ and the fabric unit silently never wires; (2) the 24-byte unit script-path
 field truncates without complaint (`scripts/browse-client.msh` → `…client.ms`
 → "not in the boot archive"), so unit script names must stay short.
 
+**Remote browse in the explorer GUI (as built, 2026-09-11).** The explorer
+became fabric-aware without a second script. Its Places sidebar gained a
+**Network** section listing the live peers, and selecting one browses that
+node's files in the right pane — the same two-pane UI whether the rows are
+local or a node away. Two new commands back it, both in `workcmds` (the
+module that already holds the fabric channel): **`net-rows`** asks
+`FabReq.members` for the membership and returns one `{id, cells}` row per
+live peer other than this node (id = the node number, cells = its label and
+free space); **`browse-rows NODE PATH`** dials that node's `browse` service
+and calls it with the path, returning the folder's rows. Both build their
+rows in the interpreter arena — the same contract `fs-rows` keeps — so the
+view can hold them across the per-render reclaim; a `map`-built list could
+not. The members buffer is attached to `fabsvc` once and reused (the view
+calls `net-rows` every render, and `fabsvc` does not unmap a prior
+`attach_buf`, so re-attaching each frame would leak a mapping there — the
+explorer is the sole members client, since `dnsd` uses the race-free
+`member_state` query instead), and the dialed browse service is cached by
+node, so switching nodes dials once and re-listing on navigation costs a
+single call. The `netbrowse` drill is the end-to-end proof: two nodes, node
+1 (`browsehost`) serving its files and node 2 (`netbrowse`) running the
+explorer with a fabric cap and the graphical devices; the runner clicks the
+one peer in the Network sidebar and reads back "node=1 rows=8" — node 2's
+GUI listed node 1's disk over a certified fabric link. One design change
+fell out of it: `workcmds` is now **always wired** (each command already
+self-guards on the capability it needs, so `spawn` without a spawner or
+`browse-rows` without a fabric fails with a clear message, not an "unknown
+command"), which lets the *same* explorer script run local-only — where
+`net-rows` simply returns no peers — or networked, rather than forking into
+two scripts.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
