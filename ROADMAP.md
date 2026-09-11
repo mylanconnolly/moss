@@ -1183,9 +1183,16 @@ is a plan.
   check runner is sequential — a hung drill is never starved by other
   drills, so read the kernel dump/trace ring, not a contention story; this
   hang was a stale marc archive during editing, and the watchdog/timeout
-  widening was reverted. Open: Stage 2 scrollback, Stage 3 resize reflow (a
-  size event over `ConsReq` to msh), Stage 4 copy/paste (a clipboard
-  primitive), Stage 5 tabs (N grid+msh sessions in one window).
+  widening was reverted. ✅ Stage 2 — scrollback + a real text model (landed
+  2026-09-11): the terminal stopped drawing glyphs straight to pixels and now
+  keeps a ring of logical lines + an active line, with a small VT parser
+  (`\r`, `\x1b[C/D/K/J/H`) folding a shell's escapes into the model and a
+  renderer soft-wrapping it to the viewport. Scrollback pages with Page
+  Up/Down (inputsvc maps them to two private bytes the terminal intercepts);
+  a width-independent model is what makes reflow nearly free. Open: Stage 3
+  resize reflow (re-render on resize + tell programs the new size), Stage 4
+  copy/paste (a clipboard primitive), Stage 5 tabs (N grid+msh sessions in
+  one window).
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 

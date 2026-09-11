@@ -134,6 +134,10 @@ fn keymap(code: u16) u8 {
         108 => 18, // down  (DC2)
         105 => 19, // left  (DC3)
         106 => 20, // right (DC4)
+        // Page up/down → private control bytes a scrollback client
+        // (the terminal) intercepts; no ASCII, ignored by everyone else.
+        104 => 0x1e, // page up   (RS)
+        109 => 0x1f, // page down (US)
         else => 0,
     };
 }

@@ -1145,7 +1145,7 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     };
     defer q.close();
     sleepMs(600); // let msh print its banner + first prompt
-    // A real command first (exercises the read path), then `exit`.
+    // A real command first (exercises the read path).
     if (!q.typeText("df")) {
         reportFailure(spec.name, "QMP could not type into the terminal", log_path);
         return false;
@@ -1153,7 +1153,28 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(120);
     _ = q.sendKey("ret");
     sleepMs(400);
+    // Scrollback: fill well past the viewport with empty prompt lines, then
+    // page up to the very top and page back down to following. The terminal
+    // logs the view state on each scroll, so the markers prove it.
+    var i: usize = 0;
+    while (i < 60) : (i += 1) {
+        _ = q.sendKey("ret");
+        sleepMs(20);
+    }
     sleepMs(200);
+    var up: usize = 0;
+    while (up < 8) : (up += 1) {
+        _ = q.sendKey("pgup");
+        sleepMs(60);
+    }
+    if (!try waitLogN(log_path, "term: scroll at-top", 1, "page up did not reach the top of the scrollback", spec, polls)) return false;
+    var dn: usize = 0;
+    while (dn < 8) : (dn += 1) {
+        _ = q.sendKey("pgdn");
+        sleepMs(60);
+    }
+    if (!try waitLogN(log_path, "term: scroll following", 1, "page down did not return to following the bottom", spec, polls)) return false;
+    // Typing must snap back to the bottom, then exit.
     if (!q.typeText("exit")) {
         reportFailure(spec.name, "QMP could not type exit", log_path);
         return false;

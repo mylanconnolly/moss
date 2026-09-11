@@ -3119,6 +3119,27 @@ packed archive did not yet carry). A rebuilt tree is green; the earlier
 "raise the watchdog / widen the timeouts" reflex was reverted, because the
 watchdog was never the problem.
 
+**Scrollback and a real text model (as built, 2026-09-11).** Stage 1's
+terminal drew glyphs straight to pixels — it kept no text, and rendered a
+shell's escape sequences (`\r`, `\x1b[C/D/K/J/H`) as garbage boxes. Stage 2
+replaced that with a MODEL: a fixed ring of logical lines (the text between
+hard newlines) plus the active line a shell's line editor rewrites in place,
+and a small VT parser that folds those escapes into edits of the model
+(cursor left/right, erase-to-EOL, erase-screen, home). A renderer soft-wraps
+the model to the current column count and paints only the visible viewport,
+drawing the cursor from the active line's column. Two payoffs fall out of a
+width-independent model: SCROLLBACK is just keeping old lines plus a view
+offset — inputsvc now maps Page Up/Down to two private control bytes
+(`0x1e`/`0x1f`) the terminal intercepts (they never reach the shell), paging
+the viewport and snapping back to the bottom when a key is typed; and REFLOW
+(Stage 3, below) is a re-render at the new width, never a pixel reflow. The
+active line's cursor is tracked as a logical column, so `\x1b[nD` lands the
+cursor correctly even across a soft wrap — better than a real terminal for
+the width-agnostic editor. The `terminal` drill fills past the viewport,
+pages to the top (`term: scroll at-top`) and back to following
+(`term: scroll following`). The full-screen console seat (the graphical
+login shell) shares the model, so it gained scrollback too.
+
 **A higher-resolution scanout — 1280×1024 (as built, 2026-09-10).** The
 scanout grew from 1024×768 to 1280×1024 for more desktop room. The size
 lives in two constants — gpusvc's `fb_w`/`fb_h` (the resource it creates and
