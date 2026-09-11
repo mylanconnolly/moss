@@ -2134,6 +2134,23 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "dock: activate settings", 1, "the Settings pill did not launch the app", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: ready", 3, "the settings window never opened", spec, polls)) return false;
     if (!try waitLogN(log_path, "settings: admin=true", 1, "the admin's settings did not detect admin", spec, polls)) return false;
+    sleepMs(1500); // let settings fully render and allocate before the next launch
+    // With Settings still open, launch Files too (its pill sits below the
+    // Settings window, so it stays clickable): a second app must open
+    // alongside the first. This guards the session's memory budget — too
+    // small a session quota refuses the second spawn (QuotaExceeded), which
+    // read as "only one window at a time".
+    const files = parseDockItem(readLog(log_path), 2) orelse {
+        reportFailure(spec.name, "could not parse the dock's Files pill", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, files[0], files[1])) {
+        reportFailure(spec.name, "QMP could not click the Files pill", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "dock: activate explorer", 1, "the Files pill did not reach the dock", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: ready", 4, "the second app (Files) never opened alongside Settings", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: running explorer=true", 1, "Files launched but did not stay running beside Settings", spec, polls)) return false;
     sleepMs(500);
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.

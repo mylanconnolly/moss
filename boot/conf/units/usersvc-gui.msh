@@ -2,10 +2,15 @@
 # no login prompt of its own — it just serves SessReq). The GUI greeter
 # holds a `sess` cap to it and drives the login. Same volume views as the
 # console login; no consoles. Started after apply wrote the records.
+#
+# The budget hosts the whole session tree (see usersvc-guishell): every
+# window the session opens is a domain nested here, so it must exceed a
+# session record's own grant (kobj 4mb, user 96mb) plus overhead, or a
+# second app is refused with QuotaExceeded.
 {
   image:    users
   arg:      1
-  budget:   { user: 40mb }
+  budget:   { kobj: 8mb, user: 112mb }
   grant:    [log, spawner, bootfs]
   profiles: [gsession, lconsole, gisession]
   after:    apply

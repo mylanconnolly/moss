@@ -3,10 +3,20 @@
 # session it opens a GRAPHICAL session — a mode-3 init running the GUI
 # session template as the user — and it forwards these caps to each. Same
 # volume views as the console login.
+#
+# The budget must HOST a whole graphical session's tree, not just usersvc:
+# every unit the session opens (the shell, top bar, dock, and each app
+# window the user launches) is a domain nested under this one, and its
+# memory + kobj charge up here. A GUI app is heavy (its own mshl runtime,
+# font client buffers, a window surface), so two or three open at once need
+# real room — 40mb/1mb (the old user-only budget, kobj defaulting to 1mb)
+# fit only one app, so launching a second was refused with QuotaExceeded.
+# Sized to comfortably exceed a session record's own grant (kobj 4mb, user
+# 96mb) plus usersvc's overhead.
 {
   image:    users
   arg:      1
-  budget:   { user: 40mb }
+  budget:   { kobj: 8mb, user: 112mb }
   grant:    [log, spawner, bootfs]
   profiles: [guishell]
   after:    apply

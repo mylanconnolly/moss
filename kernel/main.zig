@@ -1033,8 +1033,8 @@ fn guiRunWorker(_: u64) void {
         .grant_bootfs = true,
         .grant_windows = true,
         .grant_entropy = true,
-        .kobj_limit = 24 << 20,
-        .user_limit = 128 << 20,
+        .kobj_limit = 48 << 20,
+        .user_limit = 192 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
     while (!(root.state == .dying and domain.drained(root))) sched.sleep(5);
     domain.finishTeardown(root);
@@ -1053,8 +1053,8 @@ fn systemDrill(comptime name: []const u8) void {
         .grant_bootfs = true,
         .grant_windows = true,
         .grant_entropy = true,
-        .kobj_limit = 24 << 20,
-        .user_limit = 128 << 20,
+        .kobj_limit = 48 << 20,
+        .user_limit = 192 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
 
     // A hang is a failure with a dump, not a runner timeout on a silent
@@ -1266,7 +1266,7 @@ fn smmuTestWorker(_: u64) void {
         .grant_bootfs = true,
         .grant_windows = true,
         .grant_entropy = true,
-        .kobj_limit = 24 << 20,
+        .kobj_limit = 48 << 20,
         .user_limit = 96 << 20,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
     while (!(root.state == .dying and domain.drained(root))) sched.sleep(2);

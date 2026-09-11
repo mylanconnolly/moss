@@ -2933,7 +2933,32 @@ session's whole memory budget is the user's record budget, and it must cover
 *every* concurrent unit — four mshrun processes (bar, dock, settings, demo)
 overflowed the old 12 MB, so the session budget went to 96 MB and each unit's
 to 16 MB (a spawn refused with `QuotaExceeded` is the signature); and a unit
-`script:` path is capped at 24 bytes, so `scripts/desktop-topbar.msh` (26)
+`script:` path is capped at 24 bytes (covered below).
+
+**But that record budget is only real if the session MANAGER can host it (as
+built, 2026-09-11).** A session is a domain nested under `usersvc-guishell`
+(the manager that opened it), and memory charges propagate up the parent
+chain — so the session, and every window it launches under it, are all
+bounded by the *manager's* budget, whichever ancestor limit is tightest.
+The manager was left at `{ user: 40mb }` (with `kobj` defaulting to a tiny
+1 MB), well under the 96 MB / 4 MB the session record grants — so once one
+GUI app was up (a mshrun runtime, font buffers, a window surface), opening a
+second was refused with `QuotaExceeded`, which read to the user as "only one
+window opens at a time." The managers (`usersvc-guishell`, `usersvc-gui`)
+are now `{ kobj: 8mb, user: 112mb }` — comfortably above the grant they
+forward — and root's interactive/drill budgets went to 192 MB user / 48 MB
+kobj (of 512 MB RAM) so the whole tree has room. The rule: **a session
+manager's budget must exceed the per-session grant it hands out, in both
+memory and kobj** (kobj is easy to forget — omit it from a unit budget and
+it silently defaults to 1 MB). It never showed up in the harness: a fresh,
+seconds-old drill session allocates far less than a real one, so two or
+three apps fit even at 40 MB there; the bug surfaced only on a persistent
+hand-run desktop, and its one-line signature was in the kernel log
+(`spawn by init refused: QuotaExceeded`). The `guishell` drill now launches
+a second app (Files) beside the settings window and asserts it stays
+running, guarding the manager budget against a future cut.
+
+A separate `script:` cap: a unit path is 24 bytes, so `scripts/desktop-topbar.msh` (26)
 silently truncated to `…topbar.m` and failed to open — the session scripts
 are `dtopbar.msh` / `ddock.msh`. The `guishell` drill is now the full
 integration test: sign in, the bar + dock come up in the user's scale, the
