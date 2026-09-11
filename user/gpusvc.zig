@@ -440,6 +440,29 @@ fn destroySurface(sf: *Surface) void {
     sf.* = .{};
 }
 
+/// A client's channel died — it exited without `destroy_surface`, i.e. it
+/// crashed (the crash-only case). Reap every window it owned: without this
+/// the surface slot stays `used`, its buffer stays mapped and its shm cap
+/// stays charged to the shared account, and the ghost keeps compositing
+/// (and may hold focus). A clean exit already destroys its surfaces first
+/// (guicmds' `defer closeSurface`), so this is the badge-teardown backstop
+/// the model requires. Its parked input reader goes too.
+fn reapClient(chan_h: u64, badge: u64) void {
+    dropReader(badge);
+    var reaped = false;
+    for (&surfaces, 0..) |*sf, i| {
+        if (!sf.used or sf.owner != badge) continue;
+        const was_focused = focused == i + 1;
+        destroySurface(sf);
+        if (was_focused) focusTopmost();
+        reaped = true;
+    }
+    if (reaped) {
+        _ = composite();
+        pumpFocus(chan_h); // a surviving window may have just gained focus
+    }
+}
+
 /// A scanout rectangle, in pixels. Compositing is expressed as rectangles
 /// so a commit can recompose (and ship) just its damage instead of the
 /// whole scanout.
@@ -867,11 +890,6 @@ fn ptrRingPop() ?PtrEv {
     @atomicStore(usize, &ptr_head, (h + 1) % ptr_ring_cap, .release);
     return e;
 }
-fn ptrRingPeek() ?PtrEv {
-    const h = @atomicLoad(usize, &ptr_head, .monotonic);
-    if (h == @atomicLoad(usize, &ptr_tail, .acquire)) return null;
-    return ptr_ring[h];
-}
 
 /// One pointer frame from inputsvc (blocks until one), or null on error.
 fn readPtr() ?PtrEv {
@@ -1086,8 +1104,9 @@ fn serveSurfaces(chan_h: u64) noreturn {
             continue;
         }
         if (r.err == .client_dead) {
-            // A reader's channel died: forget its parked read.
-            dropReader(r.badge);
+            // A client's channel died: reap its parked read AND any windows
+            // it left behind (a crash without destroy_surface).
+            reapClient(chan_h, r.badge);
             continue;
         }
         if (r.err != .ok) continue;

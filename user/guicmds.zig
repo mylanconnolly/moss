@@ -1279,8 +1279,14 @@ fn attachTrusted() bool {
     }
 }
 
-fn openSurface() bool {
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = shared.gpu_place_cascade } }, 0)) {
+/// Open the window's surface at (win_x, win_y, win_w, win_h). `cascade` asks
+/// the compositor to nudge the window off any it would land on — for the
+/// FIRST open of a fresh window only; a resize re-open (snap, maximize)
+/// wants exact placement, or the compositor could shift a snapped window
+/// off its edge.
+fn openSurface(cascade: bool) bool {
+    const flags: u64 = if (cascade) shared.gpu_place_cascade else 0;
+    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
         .ok => |ok| ok,
         .err => return false,
     };
@@ -1673,7 +1679,7 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
     dragging = false;
     ptr_down = false;
     pop_open = false;
-    if (!openSurface()) return it.fail("gui: cannot open the bar surface", .{});
+    if (!openSurface(false)) return it.fail("gui: cannot open the bar surface", .{});
     defer closeSurface();
     defer closePopup();
 
@@ -1847,7 +1853,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
     win_y = if (scanout_h > win_h) scanout_h - win_h else 0;
     dragging = false;
     ptr_down = false;
-    if (!openSurface()) return it.fail("gui: cannot open the dock surface", .{});
+    if (!openSurface(false)) return it.fail("gui: cannot open the dock surface", .{});
     defer closeSurface();
 
     var state = init_state;
@@ -2216,7 +2222,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
     }
 
-    if (!openSurface()) return it.fail("gui: cannot open a surface", .{});
+    if (!openSurface(true)) return it.fail("gui: cannot open a surface", .{});
     defer closeSurface();
     // Name the surface so the dock can restore this window by its title
     // after the amber traffic-light minimizes it.
@@ -2384,7 +2390,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                             maximized = true; // a saved-geometry zoom state
                             // Fixed-size surface: resize is destroy + recreate.
                             closeSurface();
-                            if (!openSurface()) return it.fail("gui: cannot snap the window", .{});
+                            if (!openSurface(false)) return it.fail("gui: cannot snap the window", .{});
                             if (title.len > 0) setSurfaceTitle(title);
                             relog_geom = true;
                             _ = usys.log(log_h, switch (zone) {
@@ -2432,7 +2438,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                     // is a fresh surface at the new geometry
                                     // (it re-takes focus and the front).
                                     closeSurface();
-                                    if (!openSurface()) return it.fail("gui: cannot resize the window", .{});
+                                    if (!openSurface(false)) return it.fail("gui: cannot resize the window", .{});
                                     if (title.len > 0) setSurfaceTitle(title);
                                     relog_geom = true; // the dots moved with the window
                                     _ = usys.log(log_h, if (maximized) "gui: maximized" else "gui: unmaximized");

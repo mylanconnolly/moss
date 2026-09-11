@@ -646,7 +646,7 @@ fn browseRows(it: *mshl.Interp, node: u64, path: []const u8) mshl.Error!Value {
 // previous attach_buf, so re-attaching each render would leak a mapping
 // there. One buffer, attached lazily, held for the program's life (this is
 // the sole members client — dnsd uses the race-free member_state query).
-var members_shm: u64 = 0;
+var members_shm: u64 = 0; // held (never dropped) to keep the buffer's cap alive for the program's life
 var members_va: usize = 0;
 
 fn membersBuf() ?[*]u8 {
@@ -706,7 +706,7 @@ fn netRows(it: *mshl.Interp) mshl.Error!Value {
         vals[1] = .{ .list = cells };
         try rows.append(a, .{ .record = .{ .keys = keys, .vals = vals } });
     }
-    return .{ .list = try a.dupe(Value, rows.items) };
+    return .{ .list = rows.items }; // arena-backed, so the slice outlives this call
 }
 
 pub fn signature(name: []const u8) ?mshl.Signature {

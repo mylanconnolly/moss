@@ -811,7 +811,8 @@ pub const GpuReq = union(enum(u64)) {
     /// the badged channel thereafter; the trusted login uses `attach_trusted`
     /// instead. -> registered + a badged channel cap.
     register: void,
-    /// surface that has focus — the compositor routes the keyboard to the
+    /// Block until the next input event, returned tagged with the surface
+    /// that has focus — the compositor routes the keyboard to the
     /// focused window and handles focus-switch keys itself. (Needs the
     /// compositor to hold a keyboard; only the seat/focus profiles do.)
     /// A key is returned only to the client that owns the focused surface,
