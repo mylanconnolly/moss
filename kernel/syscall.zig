@@ -328,6 +328,18 @@ fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
         if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b, 0);
         // The caller sees one of three errnos; the log keeps the cause.
         log.info("spawn by {s} refused: {t}", .{ d.name, e });
+        if (e == domain.Error.QuotaExceeded) {
+            // Dump the account chain so it is clear WHICH limit (memory vs
+            // kobj) at WHICH domain in the parent chain is the binding one.
+            var a: ?*domain.Domain = d;
+            while (a) |dd| : (a = dd.parent) {
+                log.info("  quota {s}: user {d}/{d} KB, kobj {d}/{d} KB", .{
+                    dd.name,
+                    dd.user_mem.used.load(.monotonic) / 1024,   dd.user_mem.limit / 1024,
+                    dd.kobj.used.load(.monotonic) / 1024,       dd.kobj.limit / 1024,
+                });
+            }
+        }
         return errno(switch (e) {
             domain.Error.QuotaExceeded => .no_space,
             domain.Error.BadImage => .bad_arg,

@@ -2950,13 +2950,30 @@ forward — and root's interactive/drill budgets went to 192 MB user / 48 MB
 kobj (of 512 MB RAM) so the whole tree has room. The rule: **a session
 manager's budget must exceed the per-session grant it hands out, in both
 memory and kobj** (kobj is easy to forget — omit it from a unit budget and
-it silently defaults to 1 MB). It never showed up in the harness: a fresh,
-seconds-old drill session allocates far less than a real one, so two or
-three apps fit even at 40 MB there; the bug surfaced only on a persistent
-hand-run desktop, and its one-line signature was in the kernel log
-(`spawn by init refused: QuotaExceeded`). The `guishell` drill now launches
-a second app (Files) beside the settings window and asserts it stays
-running, guarding the manager budget against a future cut.
+it silently defaults to 1 MB).
+
+But the manager was only half of it, and the noisier half hid the real
+cause. The tightest limit was the *session domain's own* budget — the one
+the user's credential record grants — and on a hand-run desktop it was a
+stale **12 MB**, not the 96 MB the config says. Records are created by the
+`apply` tool from `conf/system.msh` and written per user under
+`conf/users/`; `apply` **skipped a user that already existed**, so a record
+first written on an early boot (before the budget was raised) kept its old
+12 MB forever, and `run-gui` reuses its disk so that record persisted.
+`apply` now *refreshes* an existing record's policy (budget + admin) from
+the config, keeping its crypto — a budget change reaches an already-created
+account on the next boot without recreating it (which would drop the home).
+The kernel's spawn-refusal log now dumps the whole account chain
+(`quota <domain>: user used/limit, kobj used/limit`) so the binding limit
+— which domain, memory or kobj — is unambiguous; that one addition is what
+finally pinned this after two wrong guesses. It never showed up in the
+harness because the drill makes a fresh disk every run, so `apply` always
+wrote the current 96 MB and two or three apps fit; only a persistent
+hand-run session carried the stale record. The `guishell` drill now
+launches a second app (Files) beside the settings window and asserts it
+stays running — and with alice's config budget temporarily cut to 12 MB it
+reproduces the exact `QuotaExceeded` (`user 10732/12288 KB`), so the guard
+is real.
 
 A separate `script:` cap: a unit path is 24 bytes, so `scripts/desktop-topbar.msh` (26)
 silently truncated to `…topbar.m` and failed to open — the session scripts

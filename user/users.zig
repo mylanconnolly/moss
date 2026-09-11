@@ -1461,8 +1461,24 @@ fn apply(chan_h: u64) noreturn {
                 removed += 1;
                 continue;
             };
+            // The desired policy: budget + admin. Computed for an existing
+            // user (to refresh it) as well as a new one, so raising a budget
+            // in the config reaches an account that already exists.
+            var budget: Budget = .{ .kobj_kb = 2 << 10, .user_kb = 12 << 10, .cpu_permille = 500 };
+            if (u.record.get("budget")) |b| {
+                if (b == .record) {
+                    if (int(b.record.get("kobj"))) |x| budget.kobj_kb = @intCast(@max(@divTrunc(x, 1024), 0));
+                    if (int(b.record.get("user"))) |x| budget.user_kb = @intCast(@max(@divTrunc(x, 1024), 0));
+                    if (int(b.record.get("cpu"))) |x| budget.cpu_permille = @intCast(@max(x, 0));
+                }
+            }
+            if (u.record.get("admin")) |ad| budget.admin = ad == .bool and ad.bool;
             if (exists) {
-                row(&res, &rows, "user", name, "kept");
+                // Rewrite the stored record's policy (budget + admin) from
+                // the config, keeping its crypto — so a budget change reaches
+                // an already-created account without recreating it (which
+                // would drop the user's home).
+                row(&res, &rows, "user", name, if (refreshRecord(cv, cbuf, p, name, budget)) "refreshed" else "kept");
                 continue;
             }
             const pass = str(u.record.get("passphrase")) orelse {
@@ -1483,15 +1499,6 @@ fn apply(chan_h: u64) noreturn {
                 row(&res, &rows, "user", name, "kdf too costly");
                 continue;
             }
-            var budget: Budget = .{ .kobj_kb = 2 << 10, .user_kb = 12 << 10, .cpu_permille = 500 };
-            if (u.record.get("budget")) |b| {
-                if (b == .record) {
-                    if (int(b.record.get("kobj"))) |x| budget.kobj_kb = @intCast(@max(@divTrunc(x, 1024), 0));
-                    if (int(b.record.get("user"))) |x| budget.user_kb = @intCast(@max(@divTrunc(x, 1024), 0));
-                    if (int(b.record.get("cpu"))) |x| budget.cpu_permille = @intCast(@max(x, 0));
-                }
-            }
-            if (u.record.get("admin")) |ad| budget.admin = ad == .bool and ad.bool;
             var seed: [usercred.seed_len]u8 = undefined;
             var salt: [usercred.salt_len]u8 = undefined;
             randomOrDie(&seed);
@@ -1600,6 +1607,34 @@ fn randomOrDie(out: []u8) void {
 }
 
 /// A record as data: the same syntax as a unit file, hex for the bytes.
+/// Rewrite an existing record with `budget`'s policy (budget + admin),
+/// keeping its crypto (key/salt/sealed/kdf). Returns true when the file
+/// actually changed. Any parse/write trouble leaves the record untouched.
+fn refreshRecord(view: u64, vbuf: [*]u8, path: []const u8, name: []const u8, budget: Budget) bool {
+    var cur: [1024]u8 = undefined;
+    const existing = readInto(view, vbuf, path, &cur) orelse return false;
+    var pfba = std.heap.FixedBufferAllocator.init(&text_heap);
+    var pin = mshl.Interp.init(pfba.allocator(), pfba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
+    const pv = pin.parseData(existing) catch return false;
+    if (pv != .record) return false;
+    const rr = pv.record;
+    var rec: usercred.Record = .{ .pk = undefined, .salt = undefined, .sealed = undefined, .kdf = .{} };
+    _ = usercred.hexDecode(&rec.pk, str(rr.get("key")) orelse return false) orelse return false;
+    _ = usercred.hexDecode(&rec.salt, str(rr.get("salt")) orelse return false) orelse return false;
+    _ = usercred.hexDecode(&rec.sealed, str(rr.get("sealed")) orelse return false) orelse return false;
+    if (rr.get("kdf")) |k| if (k == .record) {
+        rec.kdf.ln = @intCast(@min(int(k.record.get("ln")) orelse 12, 63));
+        rec.kdf.r = @intCast(@max(int(k.record.get("r")) orelse 8, 1));
+        rec.kdf.p = @intCast(@max(int(k.record.get("p")) orelse 1, 1));
+    };
+    var rtext: [1024]u8 = undefined;
+    const rendered = renderRecord(&rtext, rec, budget);
+    if (std.mem.eql(u8, rendered, existing)) return false; // already current
+    if (!writeFile(view, vbuf, path, rendered)) return false;
+    logName("apply: refreshed policy for ", name);
+    return true;
+}
+
 fn renderRecord(out: *[1024]u8, rec: usercred.Record, budget: Budget) []const u8 {
     var n: usize = 0;
     var hex: [2 * usercred.sealed_len]u8 = undefined;
