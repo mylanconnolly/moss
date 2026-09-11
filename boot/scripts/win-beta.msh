@@ -1,6 +1,14 @@
 # A movable demo window (the desktop drill, window B). It opens narrow,
 # where the `at` places it, with a draggable traffic-light titlebar (the
 # runtime draws it). Closing it (the red dot) ends the app.
+#
+# Open deliberately second: both windows are plain `desktop` units that
+# init starts together, and the compositor stacks whoever calls
+# createSurface last on top. The drill relies on Beta being the top window
+# (it clicks Alpha to raise it), so wait a beat to let Alpha claim the
+# lower z first — otherwise, when Beta wins the race, Alpha is already on
+# top and the raising click is a silent no-op (a ~1-in-a-dozen flake).
+sleep 500
 let final = (gui {
     init:  { n: 0 }
     title: "Beta"
