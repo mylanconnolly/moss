@@ -532,6 +532,14 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
   client; (b) verification is **both** deterministic in-guest readback
   (the gate rows) *and* a new QMP channel in the runner for real
   `screendump` pixels and `input-send-event`.
+  - **Output configuration decision (2026-09-12):** the display service owns
+    mode enumeration, validation and rollback. Output control is a separately
+    delegated endpoint, not an implication of drawing authority. The virtio
+    backend starts with bounded virtual modes and host-preferred geometry;
+    real GPU timing/EDID discovery will populate this same service boundary.
+    **Open follow-ons:** physical-monitor EDID and timing validation, refresh
+    rates, hotplug/multiple outputs, and larger modes after growing the DMA
+    mapping/backing budget beyond the current 1920×1200 ceiling.
   - **Invariants (locked 2026-09-07, from the vision):**
     1. *Let it crash (BEAM sensibility).* gpusvc, inputsvc, and the GUI
        framework are ordinary supervised crash-only services — a GPU
@@ -1417,6 +1425,13 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
   and in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
+
+- ✅ **Configurable display resolutions** (2026-09-12): Settings previews
+  driver-reported modes with a compositor-owned 15-second rollback and saves
+  only confirmed choices. Dynamic scanout geometry reaches frames, terminals,
+  pointer mapping and resident bars. Output control uses a separate boot
+  export delegated to desktop components. Real-monitor EDID/timings, hotplug,
+  refresh rates and multiple outputs remain follow-ons.
 
 - ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
   one scalable, theme-colored catalog for buttons, dock items, lists, and

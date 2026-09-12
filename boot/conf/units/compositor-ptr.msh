@@ -7,7 +7,7 @@
 {
   image:  gpusvc
   arg:    0
-  budget: { user: 16mb }
+  budget: { user: 32mb }
   give: [
     { tag: device, device: gpu }
     { tag: keys, unit: kbd }

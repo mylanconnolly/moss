@@ -373,7 +373,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // "both" verification) and inject input.
         .gpu, .term, .comp => try args.appendSlice(gpa, &.{
             "-device",
-            "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+            "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
             "-qmp",
             try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
@@ -396,7 +396,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
         .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo, .cascade => try args.appendSlice(gpa, &.{
-            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -405,7 +405,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // to render on and a keyboard to type into, plus QMP to type and
         // screendump.
         .seat, .focus, .trust, .readers, .gui, .guilogin, .gtrust => try args.appendSlice(gpa, &.{
-            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
         }),
@@ -415,7 +415,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // volume, and QMP to type and screendump.
         .gseat, .gsession, .lconsole, .gisession, .gboom => {
             try args.appendSlice(gpa, &.{
-                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
             });
@@ -426,7 +426,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // after the keyboard) rides along for a working cursor.
         .guishell, .guishellro, .explorer, .terminal => {
             try args.appendSlice(gpa, &.{
-                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -2449,6 +2449,7 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (pass == 1 and current[1] != initial_small[1]) return sfail(spec, log_path, "font geometry drifted after round trip");
         _ = q.screendump(if (pass == 0) check_dir ++ "/settings-scale-100.ppm" else check_dir ++ "/settings-scale-150.ppm");
     }
+    if (!try outputSettingsDrive(spec, log_path, polls, &q)) return false;
     return desktopLogout(spec, log_path, polls, &q);
 }
 
@@ -3421,7 +3422,7 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args2.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
         "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
         "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
     });
@@ -3495,7 +3496,7 @@ fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args2.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on",
+        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
         "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
         "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
         "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
@@ -3912,15 +3913,32 @@ const Qmp = struct {
     /// their qcodes (enough for a simple shell command).
     fn typeText(q: *Qmp, s: []const u8) bool {
         for (s) |c| {
-            const qcode: []const u8 = switch (c) {
-                'a'...'z' => &.{c},
-                '0'...'9' => &.{c},
-                ' ' => "spc",
-                '-' => "minus",
-                '\n' => "ret",
-                else => continue,
+            const shifted: ?[]const u8 = switch (c) {
+                '(' => "9",
+                ')' => "0",
+                '{' => "bracket_left",
+                '}' => "bracket_right",
+                '"' => "apostrophe",
+                '?' => "slash",
+                '|' => "backslash",
+                else => null,
             };
-            if (!q.sendKey(qcode)) return false;
+            if (shifted) |key| {
+                if (!q.chord("shift", key)) return false;
+            } else {
+                const qcode: []const u8 = switch (c) {
+                    'a'...'z', '0'...'9' => &.{c},
+                    ' ' => "spc",
+                    '-' => "minus",
+                    '\n' => "ret",
+                    '/' => "slash",
+                    '.' => "dot",
+                    '=' => "equal",
+                    else => return false,
+                };
+                if (!q.sendKey(qcode)) return false;
+            }
+            sleepMs(5);
         }
         return true;
     }
@@ -4203,4 +4221,93 @@ fn makeDisk(path: []const u8) !void {
     const f = try cwd.createFile(io, path, .{ .truncate = true });
     defer f.close(io);
     try f.setLength(io, 16 * 1024 * 1024);
+}
+
+/// Exercise live mode changes through the real Settings controls, including
+/// compositor-owned expiry with no input and a confirmed round trip.
+fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
+    // Keep an existing terminal alive while the output and desktop resize.
+    const terminal = parseDockItem(readLog(log_path), 3) orelse return false;
+    if (!clickScanout(q, terminal[0], terminal[1])) return false;
+    if (!try waitLogN(log_path, "term: grid", 1, "terminal did not open for output resize", spec, polls)) return false;
+    const settings = parseDockItem(readLog(log_path), 0) orelse return false;
+    if (!clickScanout(q, settings[0], settings[1])) return false;
+    sleepMs(250);
+    var width: u32 = 1280;
+    var height: u32 = 1024;
+    var ready = countOccurrences(readLog(log_path), "gui: ready");
+    const displays = widgetCenter(readLog(log_path), "display") orelse return sfail(spec, log_path, "Displays button missing");
+    if (!clickOutput(q, displays, width, height)) return false;
+    if (!try waitLogN(log_path, "gui: ready", ready + 1, "Displays panel did not open", spec, polls)) return false;
+    sleepMs(200);
+    for ([_]usize{ 5, 0, 3 }, 0..) |row, pass| {
+        const geom = waitListGeom(spec, log_path, polls, "resolution") orelse return false;
+        if (!clickOutput(q, .{ geom[0], geom[1] + geom[2] / 2 }, width, height)) return false;
+        sleepMs(100);
+        for (0..row) |_| {
+            if (!q.sendKey("down")) return false;
+            sleepMs(90);
+        }
+        sleepMs(150);
+        ready = countOccurrences(readLog(log_path), "gui: ready");
+        const target = if (pass == 0) "gpu: output 1920x1080" else if (pass == 1) "gpu: output 1024x768" else "gpu: output 1280x1024";
+        const changes = countOccurrences(readLog(log_path), target);
+        if (!q.sendKey("tab")) return false;
+        sleepMs(100);
+        if (!q.sendKey("ret")) return false;
+        if (!try waitLogN(log_path, target, changes + 1, "resolution preview failed", spec, polls)) return false;
+        width = if (pass == 0) 1920 else if (pass == 1) 1024 else 1280;
+        height = if (pass == 0) 1080 else if (pass == 1) 768 else 1024;
+        if (!try waitLogN(log_path, "gui: ready", ready + 1, "confirmation did not open", spec, polls)) return false;
+        if (!try waitLogN(log_path, "term: reflow", if (pass == 2) 4 else pass + 1, "existing terminal did not follow output resize", spec, polls)) return false;
+        sleepMs(500);
+        _ = q.screendump(if (pass == 0) check_dir ++ "/display-1920.ppm" else if (pass == 1) check_dir ++ "/display-1024.ppm" else check_dir ++ "/display-restored.ppm");
+        if (pass == 1) {
+            const rollbacks = countOccurrences(readLog(log_path), "gpu: output 1920x1080");
+            const term = parseDockItem(readLog(log_path), 3) orelse return false;
+            if (!clickOutput(q, term, width, height)) return false;
+            sleepMs(150);
+            const exits = countOccurrences(readLog(log_path), "dock: running settings=false");
+            if (!q.typeText("stop settings") or !q.sendKey("ret")) return false;
+            if (!try waitLogN(log_path, "dock: running settings=false", exits + 1, "Settings did not stop during preview", spec, polls)) return false;
+            if (!try waitLogN(log_path, "gpu: output 1920x1080", rollbacks + 1, "preview did not revert after Settings died", spec, polls)) return false;
+            width = 1920;
+            height = 1080;
+            sleepMs(500);
+            const confirmations = countOccurrences(readLog(log_path), "display: mode confirmed");
+            if (!q.typeText("stop dock\nstart dock\n")) return false;
+            if (!try waitLogN(log_path, "display: mode confirmed", confirmations + 1, "dock did not restore the saved resolution", spec, polls)) return false;
+            sleepMs(200);
+            const restored_term = parseDockItem(readLog(log_path), 3) orelse return false;
+            if (!clickOutput(q, restored_term, width, height)) return false;
+            sleepMs(150);
+            ready = countOccurrences(readLog(log_path), "gui: ready");
+            // Only start Settings when the home file holds the CONFIRMED
+            // mode, not the abandoned 1024x768 preview.
+            if (!q.typeText("if (((cat \"conf/display.msh\")? | from-data | get \"mode\") == \"1920x1080\") { start settings }") or !q.sendKey("ret")) return false;
+            if (!try waitLogN(log_path, "gui: ready", ready + 1, "confirmed resolution was not persisted", spec, polls)) return false;
+            sleepMs(250);
+            const button = widgetCenter(readLog(log_path), "display") orelse return false;
+            ready = countOccurrences(readLog(log_path), "gui: ready");
+            if (!clickOutput(q, button, width, height)) return false;
+            if (!try waitLogN(log_path, "gui: ready", ready + 1, "Displays did not reopen", spec, polls)) return false;
+            sleepMs(200);
+            continue;
+        }
+        const action = widgetCenter(readLog(log_path), if (pass == 1) "revert" else "keep") orelse return sfail(spec, log_path, "resolution decision button missing");
+        ready = countOccurrences(readLog(log_path), "gui: ready");
+        if (!clickOutput(q, action, width, height)) return false;
+        if (!try waitLogN(log_path, "gui: ready", ready + 1, "Displays panel did not return", spec, polls)) return false;
+        sleepMs(300);
+    }
+    const back = widgetCenter(readLog(log_path), "back") orelse return false;
+    ready = countOccurrences(readLog(log_path), "gui: ready");
+    if (!clickOutput(q, back, width, height)) return false;
+    if (!try waitLogN(log_path, "gui: ready", ready + 1, "Settings did not return", spec, polls)) return false;
+    sleepMs(300);
+    return true;
+}
+fn clickOutput(q: *Qmp, point: [2]u32, width: u32, height: u32) bool {
+    if (!q.sendPointer(@intCast(@as(u64, point[0]) * 32768 / width), @intCast(@as(u64, point[1]) * 32768 / height))) return false;
+    return q.sendClick(true) and q.sendClick(false);
 }

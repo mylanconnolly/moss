@@ -152,6 +152,7 @@ var home_view: u64 = 0;
 // forwarded to it.
 var gui_sessions = false;
 var disp_cap: u64 = 0;
+var output_cap: u64 = 0;
 var font_cap: u64 = 0;
 var locale_cap: u64 = 0;
 var home_buf: [*]u8 = undefined;
@@ -255,6 +256,7 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     // a shell on a text console. The plain manager holds neither and opens
     // console (or verifier) sessions as before.
     disp_cap = setup.cap(.display);
+    output_cap = setup.cap(.display_control);
     font_cap = setup.cap(.font);
     locale_cap = setup.cap(.locale);
     gui_sessions = disp_cap != 0;
@@ -1012,6 +1014,7 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     if (ok and console != 0) ok = boot.giveCap(b, .console, console);
     // A GUI session gets the display and font channels to render with.
     if (ok and gui_sessions) ok = boot.giveCap(b, .display, disp_cap) and boot.giveCap(b, .font, font_cap);
+    if (ok and gui_sessions and output_cap != 0) ok = boot.giveCap(b, .display_control, output_cap);
     if (ok and gui_sessions and locale_cap != 0) ok = boot.giveCap(b, .locale, locale_cap);
     if (ok) ok = boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
     if (!ok) {

@@ -36,6 +36,78 @@ def theme-locked [] {
   (appearance) | get "theme_locked"
 }
 
+# Output modes come from the driver. A compositor-owned deadline protects
+# the user even if this application crashes during a preview.
+def display-settings [] {
+  let message = ""
+  let again = true
+  while $again {
+    let info = (display-info)
+    let picked = (gui {
+        title: "Settings"
+        width: 560
+        init:  { choice: "", action: "" }
+        view: (fn [state] {
+            { kind: "column", gap: 16, children: [
+                { kind: "label", role: "title", text: "Display resolution" }
+                { kind: "label", muted: true, text: ("Current: " + $info.mode) }
+                { kind: "label", muted: true, text: ("Recommended: " + (str $info.preferred_width) + " × " + (str $info.preferred_height)) }
+                { kind: "list", id: "resolution", key: "modes", h: 220, rows: (display-modes), active: ($state.choice != "") }
+                { kind: "label", muted: true, text: $message }
+                { kind: "row", children: [
+                    { kind: "button", id: "preview", label: "Preview resolution", variant: "primary", disabled: (($state.choice == "") or (not $info.can_change)) }
+                    { kind: "button", id: "back", label: "Back" }
+                  ] }
+              ] }
+          })
+        update: (fn [state, ev] {
+            match $ev.id {
+              "resolution" => { { choice: $ev.row, action: "" } }
+              "preview" => { { choice: $state.choice, action: "preview", done: true } }
+              "back" => { { choice: $state.choice, action: "", done: true } }
+              _ => $state
+            }
+          })
+      })
+    let choice = $picked.choice
+    let again = ($picked.action == "preview")
+    if $again {
+      if (display-preview $choice) {
+        let decision = (gui {
+            title: "Settings"
+            width: 560
+            tick:  200
+            init:  { keep: false }
+            view: (fn [state] {
+                let current = (display-info)
+                { kind: "column", gap: 16, children: [
+                    { kind: "label", role: "title", text: (match ($current.seconds > 0) { true => "Keep this resolution?"; _ => "Previous resolution restored" }) }
+                    { kind: "label", text: $current.mode }
+                    { kind: "label", muted: true, text: (match ($current.seconds > 0) { true => ("Reverting in " + (str $current.seconds) + " seconds."); _ => "The preview expired without confirmation." }) }
+                    { kind: "row", children: [
+                        { kind: "button", id: "keep", label: "Keep resolution", variant: "primary", disabled: ($current.seconds == 0) }
+                        { kind: "button", id: "revert", label: "Revert / Back" }
+                      ] }
+                  ] }
+              })
+            update: (fn [state, ev] { match $ev.id { "keep" => { { keep: true, done: true } }; "revert" => { { keep: false, done: true } }; _ => $state } })
+          })
+        if ($decision.keep and (display-confirm)) {
+          match (save "conf/display.msh" (to-data { mode: $choice })) {
+            ok _ => { let message = "Resolution saved for your next session." }
+            _ => { let message = "Resolution applied, but could not save your preference." }
+          }
+        } else {
+          display-revert
+          let message = "Previous resolution restored."
+        }
+      } else {
+        let message = "The display could not apply this resolution."
+      }
+    }
+  }
+}
+
 # Apply this user's saved appearance and locale for the session first.
 match (cat "conf/font.msh") {
   ok $layer => { sessionfont $layer }
@@ -76,7 +148,7 @@ while $running {
             kind: "column"
             gap:  20
             children: [
-              { kind: "label", role: "title", text: "Personal settings" }
+              { kind: "row", children: [{ kind: "label", role: "title", text: "Personal settings" } { kind: "button", id: "display", label: "Displays" }] }
               { kind: "label", muted: true, text: "Appearance and language for your session." }
               {
                 kind: "section"
@@ -141,6 +213,7 @@ while $running {
             "colors" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: (match $state.colors { "cb-safe" => "default"; _ => "cb-safe" }), myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
             "myloc" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: (match $state.myloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }), sysloc: $state.sysloc, admin: $state.admin, action: "" } }
             "cycleloc" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: (match $state.sysloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }), admin: $state.admin, action: "" } }
+            "display" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "display", done: true } }
             "apply" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "apply", done: true } }
             "savesys" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "savesys", done: true } }
             "logout" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "logout", done: true } }
@@ -148,7 +221,9 @@ while $running {
           }
         })
     })
-  match $r.action {
+  let action = $r.action
+  match $action {
+    "display" => { display-settings }
     "apply" => {
       save "conf/font.msh" (to-data { scale: $r.scale, theme: $r.theme, contrast: $r.contrast, colors: $r.colors })
       sessionfont (cat "conf/font.msh")?
@@ -169,6 +244,6 @@ while $running {
   # Reopen only to re-render after a change (apply/save re-lay the window at
   # the new look); "close" and the red traffic-light (which return with no
   # action) end the app.
-  let running = (match $r.action { "apply" => true; "savesys" => true; _ => false })
+  let running = (match $action { "apply" => true; "savesys" => true; "display" => true; _ => false })
 }
 "gui: shell exited"

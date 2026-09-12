@@ -68,6 +68,12 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     const a = window(40, 40, 300, 200, red); // red, left
     const b = window(200, 40, 300, 200, green); // green, right — created last, focused
     if (a == 0 or b == 0) usys.exit(180);
+    // A live compositor has its timer/input path available: drawing and
+    // holding focus still must not grant permission to change its output.
+    switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .preview_mode = .{ .wh = shared.packPair(1920, 1080) } }, 0)) {
+        .ok => |r| if (r != .gpu_err) usys.exit(179),
+        .err => usys.exit(179),
+    }
     _ = usys.log(log_h, "focus: ready");
 
     // Plain Tab reaches b; Alt-Tab is absorbed and moves focus to a.

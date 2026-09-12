@@ -688,7 +688,7 @@ fn inputReader(channel: u64) callconv(.c) void {
     while (true) {
         input_event = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, channel, .next_input, 0)) {
             .ok => |rep| switch (rep) {
-                .input => |v| .{ .kind = v.kind, .surface = v.surface, .ch = @intCast(v.arg & 0xff), .x = shared.ptrX(v.arg), .y = shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
+                .input => |v| .{ .kind = v.kind, .surface = v.surface, .ch = @intCast(v.arg & 0xff), .x = if (v.kind == 7) shared.unpackHi(v.arg) else shared.ptrX(v.arg), .y = if (v.kind == 7) shared.unpackLo(v.arg) else shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
                 else => .{ .kind = 255 },
             },
             .err => .{ .kind = 255 },
@@ -728,7 +728,14 @@ fn pumpWindow(log_h: u64) void {
             }
         },
         1 => routePointer(ev, log_h),
-        3 => repaintWin(),
+        3 => {
+            wf.surface_visible = true;
+            repaintWin();
+        },
+        7 => {
+            if (!wf.outputChanged(ev, "Terminal", !wf.surface_visible)) usys.exit(191);
+            onResized(log_h);
+        },
         4 => {
             wf.win_focused = ev.ch != 0;
             repaintWin();

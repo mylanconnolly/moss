@@ -12,6 +12,7 @@
   essential: false
   give: [
     { tag: display, session: true }
+    { tag: display_control, session: true }
     { tag: font, session: true }
     { tag: view, fs: "", ro: false }
     { tag: store, session: true }

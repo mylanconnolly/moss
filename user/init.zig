@@ -54,7 +54,7 @@ const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 // ------------------------------------------------------------------ units
 
 const max_units = 96;
-const max_gives = 8;
+const max_gives = 16;
 
 const GiveKind = enum { unit, device, shm, secret, file, file_cap, view, netview, self_init, session_cap };
 
@@ -62,6 +62,7 @@ const Give = struct {
     tag: shared.CapTag,
     kind: GiveKind,
     name: []const u8 = "", // unit name, device name, archive path, fs path
+    control: bool = false,
     pages: u64 = 1,
     ro: bool = true,
     allow: u32 = 0, // netview: a one-destination allowlist (v4), 0 = none
@@ -142,6 +143,7 @@ const Unit = struct {
     // The instance.
     ctl: u64 = 0,
     chan_b: u64 = 0,
+    control_cap: u64 = 0,
     up: bool = false,
     stopped: bool = false,
     activating: bool = false,
@@ -287,7 +289,11 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
     }
     if (r.get("give")) |g| {
         if (g == .list) for (g.list) |item| {
-            if (item != .record or u.ngives == max_gives) continue;
+            if (item != .record) continue;
+            if (u.ngives == max_gives) {
+                logLine("init: too many capability grants in ", name);
+                return null;
+            }
             const gr = item.record;
             // A secret is bytes, not a capability: no tag. A file is the
             // same delivery for bytes that are not secret (a settings
@@ -308,7 +314,7 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 continue;
             }
             const tag = std.meta.stringToEnum(shared.CapTag, str(gr.get("tag")) orelse continue) orelse continue;
-            var give: Give = .{ .tag = tag, .kind = .unit };
+            var give: Give = .{ .tag = tag, .kind = .unit, .control = if (gr.get("control")) |cv| cv.asBool() else false };
             if (gr.get("unit")) |x| {
                 give.name = poolDup(str(x) orelse continue);
             } else if (gr.get("device")) |x| {
@@ -409,6 +415,10 @@ fn ensureUp(u: *Unit) bool {
         const st = usys.domainStat(u.ctl);
         if (st.err == .ok and st.data[0] != @intFromEnum(shared.DomainState.dead)) return true;
         u.up = false;
+        if (u.control_cap != 0) {
+            _ = usys.capDrop(u.control_cap);
+            u.control_cap = 0;
+        }
         u.restarts += 1;
     }
     if (u.activating) return false; // a dependency cycle in the unit files
@@ -453,7 +463,15 @@ fn activate(u: *Unit) bool {
         const w = shared.strToWords(u.script);
         ok = boot.give(u.chan_b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0);
     }
-    if (ok) ok = boot.give(u.chan_b, .go, 0);
+    if (ok) {
+        if (u.control_cap != 0) _ = usys.capDrop(u.control_cap);
+        u.control_cap = 0;
+        const ready = usys.callRaw(u.chan_b, shared.encodeMsg(shared.BootReq, .go), 0);
+        ok = ready.err == .ok and (shared.decodeMsg(shared.BootResp, ready.data) orelse .refused) == .ok;
+        if (ok) u.control_cap = ready.cap else if (ready.cap != 0) {
+            _ = usys.capDrop(ready.cap);
+        }
+    }
     if (!ok) {
         logLine("init: could not wire unit ", u.name);
         _ = usys.domainDestroy(u.ctl);
@@ -474,7 +492,8 @@ fn giveOne(u: *Unit, g: Give) bool {
         .unit => {
             const dep = unitByName(g.name) orelse return false;
             if (!ensureUp(dep)) return false;
-            return boot.giveCapAt(u.chan_b, g.tag, g.index, dep.chan_b);
+            const endpoint = if (g.control) dep.control_cap else dep.chan_b;
+            return endpoint != 0 and boot.giveCapAt(u.chan_b, g.tag, g.index, endpoint);
         },
         .device => {
             // `device: entropy` is the one non-PCI "device": the kernel
@@ -880,6 +899,10 @@ fn superviseDeaths() void {
         if (st.err != .ok) continue;
         if (st.data[0] != @intFromEnum(shared.DomainState.dead)) continue;
         u.up = false;
+        if (u.control_cap != 0) {
+            _ = usys.capDrop(u.control_cap);
+            u.control_cap = 0;
+        }
         if (u.essential) {
             logLine("init: essential unit exited; shutting down: ", u.name);
             shutdown(st.data[1]);
@@ -1036,6 +1059,10 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
             const u = unitByName(name) orelse return failReply(chan, .bad_arg);
             if (u.up and u.ctl != 0) _ = usys.domainDestroy(u.ctl);
             u.up = false;
+            if (u.control_cap != 0) {
+                _ = usys.capDrop(u.control_cap);
+                u.control_cap = 0;
+            }
             u.stopped = true;
             _ = usys.replyTyped(shared.InitReply, chan, .stopped, 0);
         },

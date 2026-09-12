@@ -88,6 +88,10 @@ pub const Setup = struct {
 /// Take the whole setup. Exits loudly on a protocol violation: a program
 /// that cannot even be handed its world should not run.
 pub fn take(chan_h: u64) Setup {
+    return takeExport(chan_h, 0);
+}
+/// Return a service-owned control endpoint only to the boot supervisor.
+pub fn takeExport(chan_h: u64, exported: u64) Setup {
     var s: Setup = .{};
     while (true) {
         const r = usys.recvMsg(chan_h);
@@ -146,7 +150,7 @@ pub fn take(chan_h: u64) Setup {
                 s.arg_len = text.len;
             },
             .go => {
-                _ = usys.replyTyped(shared.BootResp, chan_h, .ok, 0);
+                _ = usys.replyTyped(shared.BootResp, chan_h, .ok, exported);
                 return s;
             },
         }

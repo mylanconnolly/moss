@@ -678,9 +678,11 @@ pub const CapTag = enum(u64) {
     /// selection made in one app can be pasted into another — the same
     /// service-behind-a-cap shape as the font and locale services.
     clip = 28,
+    /// Seat output-control endpoint; never handed to ordinary applications.
+    display_control = 29,
 };
 
-pub const cap_tag_count = 29;
+pub const cap_tag_count = 30;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -779,6 +781,13 @@ pub const gpu_no_activate: u64 = 4;
 pub const gpu_pointer_tracking: u64 = 2;
 
 pub const GpuReq = union(enum(u64)) {
+    output_info: void,
+    output_mode: struct { index: u64 },
+    /// Privileged output operations; preview reverts after 15 seconds.
+    preview_mode: struct { wh: u64 },
+    confirm_mode: void,
+    revert_mode: void,
+
     /// A surface at `xy` (x<<32 | y on the scanout) of size `wh`. The
     /// reply carries the surface id and its size, and a shm cap the client
     /// maps and draws. Later surfaces stack above earlier ones. A
@@ -845,6 +854,9 @@ pub const GpuReq = union(enum(u64)) {
     attach_trusted: struct { token: u64 },
 };
 pub const GpuResp = union(enum(u64)) {
+    output: struct { wh: u64, preferred: u64, seconds: u64 },
+    mode: struct { wh: u64 },
+
     ok: void,
     /// + a shm cap attachment: the surface's pixel buffer. `xy` is the
     /// origin the compositor actually placed it at (`packPair(x, y)`) —
@@ -865,6 +877,8 @@ pub const GpuResp = union(enum(u64)) {
     /// `kind` 3 is a *restore* (arg 0): the compositor un-minimized this
     /// surface (a `restore_titled` from the dock) — the client clears its
     /// minimized state and repaints.
+    /// Kind 7 reports an output change; arg is the clamped window origin
+    /// via packPair(x,y). Query output_info for the new dimensions.
     /// Kind 6 is opt-in tracked pointer input: ptrArg in scanout coordinates.
     input: struct { surface: u64, kind: u64 = 0, arg: u64 = 0 },
     /// The trust token matched: + a badged channel cap the client uses in
@@ -2106,6 +2120,7 @@ test {
     _ = @import("textedit.zig");
 }
 
+pub const display = @import("display.zig");
 pub const gui = @import("gui.zig");
 test {
     _ = @import("gui.zig");

@@ -58,15 +58,13 @@ const lineOf = wf.lineOf;
 const clipReset = wf.clipReset;
 const R_UI = wf.R_UI;
 const R_TITLE = wf.R_TITLE;
-const scanout_w = wf.scanout_w;
-const scanout_h = wf.scanout_h;
 const win_w_default = wf.win_w_default;
 const win_h_min = wf.win_h_min;
-const win_h_max = wf.win_h_max;
 const item_vpad = wf.item_vpad;
 const dock_vpad = wf.dock_vpad;
 const top_strut = wf.top_strut;
 
+pub var output_control: u64 = 0;
 var log_h: u64 = 0; // for the run loops' `gui:`/`topbar:`/`dock:` logging
 
 // Crash-isolation of `update` (opt-in `gui { isolate: true }`): the app's
@@ -105,6 +103,10 @@ pub fn on() bool {
 }
 
 pub fn signature(name: []const u8) ?mshl.Signature {
+    if (std.mem.eql(u8, name, "display-info")) return .{ .ret = .record };
+    if (std.mem.eql(u8, name, "display-modes")) return .{ .ret = .list };
+    if (std.mem.eql(u8, name, "display-preview")) return .{ .params = &.{.{ .name = "mode", .shape = .string }}, .ret = .bool };
+    if (std.mem.eql(u8, name, "display-confirm") or std.mem.eql(u8, name, "display-revert")) return .{ .ret = .bool };
     if (std.mem.eql(u8, name, "gui")) {
         return .{ .params = &.{.{ .name = "spec", .shape = .record }}, .input = .{ .optional = .record }, .ret = .any };
     }
@@ -335,9 +337,9 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     // Centre inside the scaled desktop work area, including the dock.
     // Using the whole scanout placed tall windows underneath the dock.
     const work_top = @max(top_strut, lineOf(R_UI) + 2 * bar_vpad + pal.border_w) + 8;
-    const work_bottom = scanout_h - wf.dockHeight() - 8;
+    const work_bottom = wf.scanout_h - wf.dockHeight() - 8;
     const available = work_bottom -| work_top;
-    wf.win_h = @min(@max(win_h_min, content_h), @min(win_h_max, available));
+    wf.win_h = @min(@max(win_h_min, content_h), @min(wf.win_h_max, available));
     wf.win_y = work_top + (available - wf.win_h) / 2;
 }
 
@@ -1028,7 +1030,7 @@ fn openPopup(m: MenuHit) void {
     };
     pop_w = maxw + 2 * menu_hpad;
     pop_h = pop_items.len * pop_item_h + 8;
-    pop_x = @min(wf.win_x + m.bx, scanout_w - pop_w);
+    pop_x = @min(wf.win_x + m.bx, wf.scanout_w - pop_w);
     pop_y = wf.win_y + wf.win_h;
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, wf.chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(pop_x), @intCast(pop_y)), .wh = shared.packPair(@intCast(pop_w), @intCast(pop_h)) } }, 0)) {
         .ok => |ok| ok,
@@ -1095,7 +1097,7 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
     wf.useOrdinaryChannel();
     wf.win_x = 0;
     wf.win_y = 0;
-    wf.win_w = scanout_w;
+    wf.win_w = wf.scanout_w;
     wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
     wf.dragging = false;
     wf.ptr_down = false;
@@ -1109,10 +1111,12 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
     var announced = false;
     while (true) {
         it.reclaim();
-        if (wf.refreshFontMetrics()) {
+        const output_changed = wf.refreshOutput();
+        if (wf.refreshFontMetrics() or output_changed) {
             wf.closeSurface();
             closePopup();
             pop_open = false;
+            wf.win_w = wf.scanout_w;
             wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
             if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
             announced = false; // hit boxes moved with the new scale
@@ -1134,7 +1138,7 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
         var fired_item: ?[]const u8 = null;
         input: while (true) {
             const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
-            if (ev.kind == 2) {
+            if (ev.kind == 2 or ev.kind == 7) {
                 tree = try it.callValue(view, &.{state}, null, null); // refresh the clock
                 break :input;
             }
@@ -1274,10 +1278,10 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
     wf.refreshAppearance();
     wf.useOrdinaryChannel();
     const pill_h = lineOf(R_UI) + 2 * item_vpad;
-    wf.win_w = scanout_w;
+    wf.win_w = wf.scanout_w;
     wf.win_h = pill_h + 2 * dock_vpad + pal.border_w;
     wf.win_x = 0;
-    wf.win_y = if (scanout_h > wf.win_h) scanout_h - wf.win_h else 0;
+    wf.win_y = if (wf.scanout_h > wf.win_h) wf.scanout_h - wf.win_h else 0;
     wf.dragging = false;
     wf.ptr_down = false;
     if (!wf.openSurface(false)) return it.fail("gui: cannot open the dock surface", .{});
@@ -1288,10 +1292,12 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
     var announced = false;
     while (true) {
         it.reclaim();
-        if (wf.refreshFontMetrics()) {
+        const output_changed = wf.refreshOutput();
+        if (wf.refreshFontMetrics() or output_changed) {
             wf.closeSurface();
+            wf.win_w = wf.scanout_w;
             wf.win_h = wf.dockHeight();
-            wf.win_y = scanout_h - wf.win_h;
+            wf.win_y = wf.scanout_h - wf.win_h;
             if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
             announced = false; // hit boxes moved with the new scale
         }
@@ -1312,7 +1318,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
         var quit = false;
         input: while (true) {
             const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
-            if (ev.kind == 2) {
+            if (ev.kind == 2 or ev.kind == 7) {
                 tree = try it.callValue(view, &.{state}, null, null); // tick refresh
                 break :input;
             }
@@ -1474,6 +1480,63 @@ fn callUpdate(it: *mshl.Interp, update: Value, state: Value, ev: Value) mshl.Err
 }
 
 pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
+    if (std.mem.eql(u8, name, "display-info")) {
+        const out = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .output_info, 0)) {
+            .ok => |r| switch (r) {
+                .output => |v| v,
+                else => return it.fail("display: output information unavailable", .{}),
+            },
+            .err => return it.fail("display: output information unavailable", .{}),
+        };
+        return try mshl.toValue(it.arena, .{ .mode = try std.fmt.allocPrint(it.arena, "{d}x{d}", .{ shared.unpackHi(out.wh), shared.unpackLo(out.wh) }), .width = shared.unpackHi(out.wh), .height = shared.unpackLo(out.wh), .preferred_width = shared.unpackHi(out.preferred), .preferred_height = shared.unpackLo(out.preferred), .seconds = out.seconds, .can_change = output_control != 0 });
+    }
+    if (std.mem.eql(u8, name, "display-modes")) {
+        var rows: std.ArrayList(Value) = .empty;
+        var i: u64 = 0;
+        var last: u64 = 0;
+        while (i < 32) : (i += 1) {
+            const rep = usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .{ .output_mode = .{ .index = i } }, 0);
+            const wh = switch (rep) {
+                .ok => |r| switch (r) {
+                    .mode => |v| v.wh,
+                    else => break,
+                },
+                .err => break,
+            };
+            if (wh == last) continue;
+            last = wh;
+            const w = shared.unpackHi(wh);
+            const h = shared.unpackLo(wh);
+            const label = try std.fmt.allocPrint(it.arena, "{d} × {d}", .{ w, h });
+            const id = try std.fmt.allocPrint(it.arena, "{d}x{d}", .{ w, h });
+            const cells = try it.arena.alloc(Value, 1);
+            cells[0] = .{ .str = label };
+            try rows.append(it.arena, try mshl.toValue(it.arena, .{ .id = id, .cells = Value{ .list = cells } }));
+        }
+        return .{ .list = rows.items };
+    }
+    if (std.mem.startsWith(u8, name, "display-")) {
+        var request: shared.GpuReq = undefined;
+        if (std.mem.eql(u8, name, "display-preview")) {
+            var parts = std.mem.splitScalar(u8, args[0].str, 'x');
+            const w = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch return .{ .bool = false };
+            const h = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch return .{ .bool = false };
+            if (parts.next() != null) return .{ .bool = false };
+            request = .{ .preview_mode = .{ .wh = shared.packPair(w, h) } };
+        } else if (std.mem.eql(u8, name, "display-confirm")) {
+            request = .confirm_mode;
+        } else if (std.mem.eql(u8, name, "display-revert")) {
+            request = .revert_mode;
+        } else return null;
+        if (output_control == 0) return .{ .bool = false };
+        const accepted = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, request, 0)) {
+            .ok => |r| r == .ok,
+            .err => false,
+        };
+        if (accepted and request == .confirm_mode) _ = usys.log(log_h, "display: mode confirmed");
+        return .{ .bool = accepted };
+    }
+
     if (std.mem.eql(u8, name, "sessionfont")) {
         const text: []const u8 = if (args.len > 0 and args[0] == .str)
             args[0].str
@@ -1630,9 +1693,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // smaller windows); default is the roomy single-window width.
     wf.win_w = win_w_default;
     if (spec.get("width")) |wv| {
-        if (wv == .int and wv.int >= 200) wf.win_w = @min(@as(usize, @intCast(wv.int)), scanout_w);
+        if (wv == .int and wv.int >= 200) wf.win_w = @min(@as(usize, @intCast(wv.int)), wf.scanout_w);
     }
-    wf.win_x = (scanout_w - wf.win_w) / 2;
+    wf.win_x = (wf.scanout_w - wf.win_w) / 2;
     wf.fontReady(); // attach the system font once (bitmap fallback if absent)
     wf.refreshAppearance(); // resolve the palette from the system/user settings
     sizeToContent(it, view, state, title); // fit the window to its content
@@ -1641,10 +1704,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (spec.get("at")) |a| {
         if (a == .record) {
             if (a.record.get("x")) |xv| {
-                if (xv == .int and xv.int >= 0) wf.win_x = @min(@as(usize, @intCast(xv.int)), scanout_w - wf.win_w);
+                if (xv == .int and xv.int >= 0) wf.win_x = @min(@as(usize, @intCast(xv.int)), wf.scanout_w - wf.win_w);
             }
             if (a.record.get("y")) |yv| {
-                if (yv == .int and yv.int >= 0) wf.win_y = @min(@as(usize, @intCast(yv.int)), scanout_h - wf.win_h);
+                if (yv == .int and yv.int >= 0) wf.win_y = @min(@as(usize, @intCast(yv.int)), wf.scanout_h - wf.win_h);
             }
         }
     }
@@ -1717,6 +1780,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var closed = false;
         input: while (true) {
             const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
+            if (ev.kind == 7) {
+                if (!wf.outputChanged(ev, title, minimized)) return it.fail("gui: output resize failed", .{});
+                hovered = null;
+                pressed = null;
+                announced = false;
+                break :input;
+            }
             // A focus change: the compositor tells us we gained or lost the
             // keyboard (arg 1/0). Re-render so the chrome dims or brightens.
             if (ev.kind == 4) {

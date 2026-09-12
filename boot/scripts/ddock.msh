@@ -12,6 +12,17 @@
 # 200 ms, so the dot lights when the app is up and clears on its own when
 # the app exits (init reports a dead unit as down). No teardown signal has
 # to reach the dock.
+# Restore only a previously confirmed preference. Unsupported modes leave
+# the driver's boot mode intact; unconfirmed previews are never persisted.
+match (cat "conf/display.msh") {
+  ok $text => {
+    match (try { from-data $text | get "mode" }) {
+      ok $mode => { if (display-preview $mode) { display-confirm } }
+      _ => null
+    }
+  }
+  _ => null
+}
 let final = (gui {
     dock: true
     tick: 200

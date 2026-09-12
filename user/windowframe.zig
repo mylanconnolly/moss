@@ -76,16 +76,16 @@ pub const gw = fsw * 2; // 16, the bitmap cell width
 pub const gh = fsh * 2; // 32, the bitmap cell height
 
 pub const win_w_default = 680;
-pub const scanout_w = 1280;
-pub const scanout_h = 1024;
+pub var scanout_w: usize = 1280;
+pub var scanout_h: usize = 1024;
 pub const win_h_min = 220;
-pub const win_h_max = scanout_h - 48; // leave a margin top+bottom
+pub var win_h_max: usize = 976; // leave a margin top+bottom
 pub const pad = shared.gui.space.inset; // window inset for content
 
 pub var win_w: usize = win_w_default;
-pub var win_x: usize = (scanout_w - win_w_default) / 2;
+pub var win_x: usize = (1280 - win_w_default) / 2;
 pub var win_h: usize = 460;
-pub var win_y: usize = (scanout_h - 460) / 2;
+pub var win_y: usize = (1024 - 460) / 2;
 
 // A macOS-style titlebar: three traffic-light dots (close / minimize /
 // maximize) at the left, the title centred, and the rest a drag handle.
@@ -243,8 +243,8 @@ var surf_va: u64 = 0; // its mapped address (unmapped on close)
 // than spilling over the window. Reset to the whole window each render.
 pub var clip_x0: usize = 0;
 pub var clip_y0: usize = 0;
-pub var clip_x1: usize = scanout_w;
-pub var clip_y1: usize = scanout_h;
+pub var clip_x1: usize = 1280;
+pub var clip_y1: usize = 1024;
 pub fn clipReset() void {
     clip_x0 = 0;
     clip_y0 = 0;
@@ -695,6 +695,7 @@ fn registerClient() u64 {
 /// compositor tells this process's surfaces and input apart from other
 /// windows'. Cached across opens. Falls back to badge 0 if unsupported.
 pub fn useOrdinaryChannel() void {
+    _ = refreshOutput();
     chan = display;
     if (client_chan == 0) client_chan = registerClient();
     if (client_chan != 0) chan = client_chan;
@@ -704,6 +705,7 @@ pub fn useOrdinaryChannel() void {
 /// channel the compositor mints, so surfaces made over it are the login
 /// surface. False if there is no token or the compositor refuses.
 pub fn attachTrusted() bool {
+    _ = refreshOutput();
     chan = display;
     if (trust_token == 0) return false;
     switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, display, .{ .attach_trusted = .{ .token = trust_token } }, 0)) {
@@ -730,6 +732,7 @@ pub fn openSurface(cascade: bool) bool {
 }
 
 pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
+    surface_visible = true;
     const flags: u64 = (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate);
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
         .ok => |ok| ok,
@@ -798,7 +801,9 @@ pub fn setSurfaceTitle(title: []const u8) void {
 /// traffic-light hides it; the compositor drops focus to the window behind
 /// and its buffer is kept, so a `restore_titled` from the dock brings it
 /// straight back.
+pub var surface_visible = true;
 pub fn setSurfaceVisible(visible: bool) void {
+    surface_visible = visible;
     if (surf == 0) return;
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .set_visible = .{ .surface = surf, .visible = @intFromBool(visible) } }, 0);
 }
@@ -834,8 +839,8 @@ pub fn nextInput() ?Event {
                 .kind = if (v.kind == 6) 1 else v.kind,
                 .surface = v.surface,
                 .ch = @intCast(v.arg & 0xff),
-                .x = if (v.kind == 6) shared.ptrX(v.arg) -| win_x else shared.ptrX(v.arg),
-                .y = if (v.kind == 6) shared.ptrY(v.arg) -| win_y else shared.ptrY(v.arg),
+                .x = if (v.kind == 7) shared.unpackHi(v.arg) else if (v.kind == 6) shared.ptrX(v.arg) -| win_x else shared.ptrX(v.arg),
+                .y = if (v.kind == 7) shared.unpackLo(v.arg) else if (v.kind == 6) shared.ptrY(v.arg) -| win_y else shared.ptrY(v.arg),
                 .screen_x = if (v.kind == 6) shared.ptrX(v.arg) else null,
                 .screen_y = if (v.kind == 6) shared.ptrY(v.arg) else null,
                 .btn = shared.ptrBtn(v.arg),
@@ -864,9 +869,9 @@ pub const top_strut = 34; // px reserved at the top for the bar
 pub const Geom = struct { x: usize, y: usize, w: usize, h: usize };
 pub fn workArea() Geom {
     const dh = dockHeight();
-    const reserved = top_strut + dh;
-    const h = if (scanout_h > reserved) scanout_h - reserved else scanout_h - top_strut;
-    return .{ .x = 0, .y = top_strut, .w = scanout_w, .h = h };
+    const top = @max(top_strut, lineOf(R_UI) + 16 + pal.border_w);
+    const h = scanout_h -| (top + dh);
+    return .{ .x = 0, .y = top, .w = scanout_w, .h = h };
 }
 
 // Window snapping: dragging the cursor to a screen edge, then releasing,
@@ -933,8 +938,8 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
         return .{ .content = ev };
     }
     if (down and dragging) {
-        const nx = if (ev.screen_x) |sx| @min(sx -| drag_grab_x, scanout_w - win_w) else dragOrigin(win_x, ev.x, drag_grab_x, scanout_w - win_w);
-        const ny = if (ev.screen_y) |sy| @min(sy -| drag_grab_y, scanout_h - win_h) else dragOrigin(win_y, ev.y, drag_grab_y, scanout_h - win_h);
+        const nx = if (ev.screen_x) |sx| @min(sx -| drag_grab_x, scanout_w -| win_w) else dragOrigin(win_x, ev.x, drag_grab_x, scanout_w -| win_w);
+        const ny = if (ev.screen_y) |sy| @min(sy -| drag_grab_y, scanout_h -| win_h) else dragOrigin(win_y, ev.y, drag_grab_y, scanout_h -| win_h);
         if (nx != win_x or ny != win_y) {
             moveSurface(nx, ny);
             win_x = nx;
@@ -1034,4 +1039,50 @@ pub fn drawIcon(x: usize, y: usize, size: usize, name: []const u8, ink: u32) voi
     for (0..size) |iy| for (0..size) |ix| {
         blendPx(x + ix, y + iy, ink, shared.gui.icons.coverage(icon, size, ix, iy));
     };
+}
+
+pub fn refreshOutput() bool {
+    const info = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, display, .output_info, 0)) {
+        .ok => |r| switch (r) {
+            .output => |v| v,
+            else => return false,
+        },
+        .err => return false,
+    };
+    const w = shared.unpackHi(info.wh);
+    const h = shared.unpackLo(info.wh);
+    if (!shared.display.valid(w, h)) return false;
+    const changed = w != scanout_w or h != scanout_h;
+    scanout_w = w;
+    scanout_h = h;
+    win_h_max = h - 48;
+    return changed;
+}
+/// Recreate a window after an output change, retaining title, focus and
+/// visibility. Existing content remains the application's responsibility.
+pub fn outputChanged(ev: Event, title: []const u8, hidden: bool) bool {
+    _ = refreshOutput();
+    closeSurface();
+    dragging = false;
+    ptr_down = false;
+    pending_dot = null;
+    const area = workArea();
+    saved_w = @min(saved_w, area.w);
+    saved_h = @min(saved_h, area.h);
+    saved_x = @min(saved_x, scanout_w -| saved_w);
+    saved_y = @min(saved_y, scanout_h -| saved_h);
+    win_w = @min(win_w, area.w);
+    win_h = @min(win_h, area.h);
+    win_x = @min(ev.x, scanout_w -| win_w);
+    win_y = std.math.clamp(ev.y, area.y, area.y + area.h - win_h);
+    if (maximized) {
+        win_x = area.x;
+        win_y = area.y;
+        win_w = area.w;
+        win_h = area.h;
+    }
+    if (!openSurfaceFocused(false, win_focused and !hidden)) return false;
+    setSurfaceTitle(title);
+    if (hidden) setSurfaceVisible(false);
+    return true;
 }

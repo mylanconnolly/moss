@@ -37,6 +37,12 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
         usys.exit(169);
     }
 
+    // Drawing authority must not grant output-control authority.
+    const forbidden = usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .preview_mode = .{ .wh = shared.packPair(1920, 1080) } }, 0);
+    switch (forbidden) {
+        .ok => |r| if (r != .gpu_err) usys.exit(179),
+        .err => usys.exit(179),
+    }
     // Create a fullscreen surface; gpusvc replies with its size and a
     // cap to the pixel buffer we draw into.
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .{ .create_surface = .{ .xy = 0, .wh = 0 } }, 0)) {

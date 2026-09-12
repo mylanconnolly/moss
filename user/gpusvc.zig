@@ -38,7 +38,10 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 var dev_h: u64 = 0;
 
 export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
-    const setup = boot.take(chan_h);
+    const control = usys.chanMint(chan_h, control_badge);
+    if (control.err != .ok) usys.exit(168);
+    const setup = boot.takeExport(chan_h, control.data[1]);
+    _ = usys.capDrop(control.data[1]);
     dev_h = setup.device(.gpu);
     if (dev_h == 0) usys.exit(169);
     keys_chan = setup.cap(.keys);
@@ -57,16 +60,15 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
 const desc_f_next = 1;
 const desc_f_write = 2;
 
-const fb_w = 1280;
-const fb_h = 1024;
+var fb_w: u32 = 1280;
+var fb_h: u32 = 1024;
 const fb_bpp = 4;
-const fb_stride = fb_w * fb_bpp;
-const fb_bytes = fb_stride * fb_h; // 5,242,880
-const fb_pages = fb_bytes / 4096; // 1280
+var fb_stride: usize = 1280 * fb_bpp;
+const fb_pages = shared.display.max_pages;
 const chunk_pages = 64; // dma_alloc's per-call cap; big chunks keep the
-// framebuffer's mapping-window count low (1280/64 = 20, not 80) so the
+// framebuffer's mapping-window count low so the
 // compositor stays well under a domain's max_mappings alongside its surfaces.
-const n_chunks = (fb_pages + chunk_pages - 1) / chunk_pages; // 20
+const n_chunks = (fb_pages + chunk_pages - 1) / chunk_pages;
 
 const q_ctl = 0;
 const q_num = 16;
@@ -82,7 +84,7 @@ const resp_ok_nodata = 0x1100;
 const resp_ok_display_info = 0x1101;
 
 const format_b8g8r8x8 = 2; // VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM
-const res_id = 1;
+var res_id: u32 = 1;
 const scanout_id = 0;
 
 /// The fill: B=0xCC, G=0x99, R=0x33, X=0x00 — a blue, laid out for
@@ -129,6 +131,7 @@ const Surface = struct {
     // focus (a second window) is told it is unfocused so it dims its chrome.
     notified_focus: bool = true,
     pointer_tracking: bool = false,
+    output_dirty: bool = false,
     // Pointer events that arrived while this surface's owner had no reader
     // parked (it was busy — e.g. the dock blocked launching an app). Rather
     // than wedge the whole pointer ring on the undeliverable event (which
@@ -158,9 +161,10 @@ const bg_word: u32 = 0x0020_2830; // a dark slate
 // focused surface is the trusted one — the user's cue that the keyboard
 // truly reaches the login and nothing else.
 const trusted_badge: u64 = 1;
-// Ordinary GUI clients register for a unique badge (2..). Identity values
+// Ordinary GUI clients register for a unique badge (3..). Identity values
 // are independent of the reusable surface/reader slots.
-var next_client_badge: u64 = 2;
+const control_badge: u64 = 2;
+var next_client_badge: u64 = 3;
 
 const trust_strip = 8; // px, the reserved indicator band at the top
 const secure_word: u32 = 0x0000_66CC; // X<<24|R<<16|G<<8|B -> RGB(0,0x66,0xCC), a deep blue
@@ -725,7 +729,7 @@ fn parkReader(badge: u64, token: u64, tick_ticks: u64) void {
 /// Arm the tick timer at the shortest period any reader wants, or disarm
 /// it when none do — so an idle compositor (no ticking client) never wakes.
 fn refreshTicks() void {
-    var want: u64 = 0;
+    var want: u64 = if (preview_deadline != 0) 1 else 0;
     for (&readers) |*rd| if (rd.used and rd.tick_ticks != 0) {
         if (want == 0 or rd.tick_ticks < want) want = rd.tick_ticks;
     };
@@ -738,6 +742,7 @@ fn refreshTicks() void {
 /// A timer fired: hand a tick event to every ticking reader with a parked
 /// token, retaining one coalesced tick for a client that is still busy.
 fn dispatchTicks(chan_h: u64) void {
+    expirePreview();
     for (&readers) |*rd| if (rd.used and rd.tick_ticks != 0) {
         rd.tick_due = true; // coalesce, but retain ticks while the client renders
     };
@@ -783,6 +788,13 @@ fn wakeReader(chan_h: u64, badge: u64, surface: u64, kind: u64) void {
 fn pumpFocus(chan_h: u64) void {
     for (&surfaces, 0..) |*sf, i| {
         if (!sf.used) continue;
+        if (sf.output_dirty) {
+            if (takeReader(sf.owner)) |t| {
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 7, .arg = shared.packPair(sf.x, sf.y) } }, 0, t);
+                sf.output_dirty = false;
+            }
+            continue;
+        }
         const desired = focused == i + 1 and !sf.hidden;
         if (sf.notified_focus == desired) continue;
         var delivered = false;
@@ -858,8 +870,8 @@ fn dispatchKeys(chan_h: u64) void {
 var ptr_chan: u64 = 0;
 var ptr_reader_stack: [32 << 10]u8 align(16) = undefined;
 
-var cursor_x: usize = fb_w / 2;
-var cursor_y: usize = fb_h / 2;
+var cursor_x: usize = 640;
+var cursor_y: usize = 512;
 var cursor_shown: bool = false; // drawn once the first frame arrives
 var prev_buttons: u32 = 0;
 var hover_surface: u64 = 0;
@@ -1124,6 +1136,7 @@ fn flushPendingPtr(chan_h: u64) void {
 fn serveSurfaces(chan_h: u64) noreturn {
     while (true) {
         const r = usys.recvMsg(chan_h);
+        expirePreview();
         if (r.err == .peer_dead) usys.exit(0);
         if (r.err == .interrupted) {
             // The input doorbell: buffered keys and/or pointer frames are
@@ -1159,6 +1172,46 @@ fn serveSurfaces(chan_h: u64) noreturn {
             continue;
         };
         switch (req) {
+            .output_info => {
+                const now = usys.cycles();
+                const remaining = if (preview_deadline > now) (preview_deadline - now) / usys.cycleHz() + 1 else 0;
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .output = .{ .wh = shared.packPair(fb_w, fb_h), .preferred = shared.packPair(preferred_mode.w, preferred_mode.h), .seconds = remaining } }, 0, token);
+            },
+            .output_mode => |q| {
+                const mode: ?shared.display.Mode = if (q.index < shared.display.modes.len) shared.display.modes[@intCast(q.index)] else if (q.index == shared.display.modes.len and preferredIsExtra()) preferred_mode else null;
+                if (mode) |m| {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .mode = .{ .wh = shared.packPair(m.w, m.h) } }, 0, token);
+                } else {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 20 } }, 0, token);
+                }
+            },
+            .preview_mode, .confirm_mode, .revert_mode => {
+                const secure = if (findSurface(focused)) |sf| sf.trusted else false;
+                var ok = badge == control_badge and !secure and key_bell != 0;
+                if (ok) switch (req) {
+                    .preview_mode => |q| {
+                        const w = shared.unpackHi(q.wh);
+                        const h = shared.unpackLo(q.wh);
+                        ok = preview_deadline == 0 and shared.display.offered(w, h, preferred_mode);
+                        if (ok) {
+                            previous_mode = .{ .w = fb_w, .h = fb_h };
+                            ok = switchMode(w, h);
+                            if (ok) preview_deadline = usys.cycles() + 15 * usys.cycleHz();
+                        }
+                    },
+                    .confirm_mode => {
+                        ok = preview_deadline != 0;
+                        if (ok) preview_deadline = 0;
+                    },
+                    .revert_mode => {
+                        if (preview_deadline != 0) ok = switchMode(previous_mode.w, previous_mode.h);
+                        if (ok) preview_deadline = 0;
+                    },
+                    else => unreachable,
+                };
+                refreshTicks();
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 21 } }, 0, token);
+            },
             .create_surface => |q| {
                 const x = shared.unpackHi(q.xy);
                 const y = shared.unpackLo(q.xy);
@@ -1429,6 +1482,14 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
         _ = usys.log(log_h, "gpusvc: GET_DISPLAY_INFO refused");
         usys.exit(180);
     }
+    const host_w = @as(*volatile u32, @ptrFromInt(resp_va + 32)).*;
+    const host_h = @as(*volatile u32, @ptrFromInt(resp_va + 36)).*;
+    preferred_mode = .{ .w = host_w, .h = host_h };
+    if (shared.display.valid(host_w, host_h)) {
+        fb_w = host_w;
+        fb_h = host_h;
+        fb_stride = @as(usize, host_w) * 4;
+    }
     if (submitCmd(cmdCreate2d(), 64) != resp_ok_nodata) usys.exit(181);
     if (submitCmd(cmdAttachBacking(), 64) != resp_ok_nodata) usys.exit(182);
     fillFb();
@@ -1464,4 +1525,62 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
     // Now serve the surface protocol: clients create a surface, commit
     // damage rects (we composite), and read input for the focused surface.
     serveSurfaces(chan_h);
+}
+
+var preferred_mode: shared.display.Mode = .{ .w = 1280, .h = 1024 };
+var previous_mode: shared.display.Mode = .{ .w = 1280, .h = 1024 };
+var preview_deadline: u64 = 0;
+fn unrefResource(id: u32) void {
+    hdr(0x0102);
+    wr32(24, id);
+    wr32(28, 0);
+    _ = submitCmd(32, 64);
+}
+/// Allocate the host resource before releasing the old one. Guest backing is
+/// bounded and reused; a refused mode leaves the old scanout usable.
+fn switchMode(w: u32, h: u32) bool {
+    if (w == fb_w and h == fb_h) return true;
+    const old_w = fb_w;
+    const old_h = fb_h;
+    const old_id = res_id;
+    fb_w = w;
+    fb_h = h;
+    fb_stride = @as(usize, w) * 4;
+    res_id = if (old_id == 1) 2 else 1;
+    const created = submitCmd(cmdCreate2d(), 64) == resp_ok_nodata;
+    if (!created or submitCmd(cmdAttachBacking(), 64) != resp_ok_nodata or submitCmd(cmdSetScanout(), 64) != resp_ok_nodata) {
+        if (created) unrefResource(res_id);
+        res_id = old_id;
+        fb_w = old_w;
+        fb_h = old_h;
+        fb_stride = @as(usize, old_w) * 4;
+        return false;
+    }
+    unrefResource(old_id);
+    for (&surfaces) |*sf| if (sf.used) {
+        sf.x = @min(sf.x, fb_w -| sf.w);
+        sf.y = @min(sf.y, fb_h -| sf.h);
+        sf.output_dirty = true;
+        sf.pend_head = 0;
+        sf.pend_tail = 0;
+    };
+    cursor_x = @min(cursor_x, fb_w - 1);
+    cursor_y = @min(cursor_y, fb_h - 1);
+    _ = composite();
+    var message: [80]u8 = undefined;
+    _ = usys.log(comp_log, std.fmt.bufPrint(&message, "gpu: output {d}x{d}", .{ w, h }) catch "gpu: output changed");
+    return true;
+}
+
+fn expirePreview() void {
+    if (preview_deadline != 0 and usys.cycles() >= preview_deadline) {
+        if (switchMode(previous_mode.w, previous_mode.h)) preview_deadline = 0;
+        refreshTicks();
+    }
+}
+
+fn preferredIsExtra() bool {
+    if (!shared.display.valid(preferred_mode.w, preferred_mode.h)) return false;
+    for (shared.display.modes) |m| if (m.w == preferred_mode.w and m.h == preferred_mode.h) return false;
+    return true;
 }

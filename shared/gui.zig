@@ -98,4 +98,5 @@ test "double clicks expire, stay on one row, and reset after activation" {
 pub const icons = @import("icons.zig");
 test {
     _ = icons;
+    _ = @import("display.zig");
 }

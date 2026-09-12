@@ -35,7 +35,7 @@ const trace = @import("trace.zig");
 const max_channels = 64;
 const max_notifications = 64;
 const max_shms = 64;
-pub const shm_max_pages = 1280; // 5M: a full-scanout surface at 1280x1024x4 (the compositor's scanout, and a maximized window) is 1280 pages; before that a program stage — msh, with every command module and the mshl interpreter, crossed 1M, and the blk data window needs 8 x 32K slots
+pub const shm_max_pages = shared.display.max_pages; // largest supported output/surface backing
 
 pub const Side = enum { a, b };
 

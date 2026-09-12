@@ -2360,6 +2360,50 @@ replenishes can drop a key, even though QMP acknowledged the injection.
 
 ## Graphics: the display server
 
+**Configurable outputs (2026-09-12).** Settings → Displays enumerates modes
+from `GpuReq.output_mode`, previews one for 15 seconds, and persists only a
+confirmed mode in the user's `conf/display.msh`. The dock reads that confirmed
+preference on session startup. The deadline lives in gpusvc, not the dialog:
+its timer remains armed even if Settings dies or no clients request ticks.
+Preview, confirmation and explicit rollback require the separate
+`display_control` endpoint; ordinary display holders can query modes and draw
+surfaces, but cannot change the output. Trusted login focus also refuses
+output changes. gpusvc mints the endpoint and returns it only in the boot
+`go` acknowledgement; init retains that export and a unit's `control: true`
+grant selects it. The GUI session manager delegates it to session init,
+which gives it to Settings and the dock. Dead/restarted services release
+init's exported endpoint. Adding the grant exposed init's silent eight-entry
+truncation: it now allows sixteen and rejects an overflowing unit explicitly.
+
+The virtio backend consumes scanout 0's preferred geometry from
+`GET_DISPLAY_INFO` and exposes seven tested virtual-mode candidates from
+1024×768 to 1920×1200, plus a usable host-preferred geometry if different.
+This is a backend catalog, not a Settings-owned resolution menu. A physical
+GPU driver will need EDID/timing enumeration and hardware validation behind
+this interface; EDID parsing, refresh-rate selection, hotplug and multiple
+outputs are not implemented yet. The current maximum is a Moss backing and
+mapping budget, not a QEMU monitor limit. Boot and regression QEMU arguments
+advertise 1280×1024 to keep the default desktop and pixel drills stable.
+
+Width, height and stride are runtime state. The driver reserves bounded DMA
+backing for its maximum mode, alternates host resource IDs, attaches and
+selects the new resource before releasing the old one, and retains the old
+scanout if resource creation/attachment/selection is refused. Surface shared
+memory permits the same maximum area; compositor budgets cover that backing
+and client mappings. On a successful switch, existing surfaces are clamped,
+stale pointer gestures are discarded, and each receives a retained kind-7
+output event. Shared frames recreate their buffers with bounded geometry;
+terminal content reflows, and desktop bars independently resize without
+stealing focus. Hidden windows remain hidden and saved zoom geometry is
+clamped before a later restore.
+
+Validation includes mode bounds on the host, refusal of mode changes over an
+ordinary display cap in the GPU drill, and the composed desktop's real
+Settings flow: larger/smaller modes with a terminal still running, a Settings
+process stopped during preview, timed rollback, and reading the confirmed
+preference before reopening Settings. QMP screenshots cover both 1920×1080
+and 1024×768 and the return to the default geometry.
+
 **Stage 1: virtio-gpu and a scanout (as built, 2026-09-07).** The M3's
 aarch64 QEMU virt boot brings no framebuffer — only x86's Limine boot
 does, which `kernel/fbcon.zig` rides — so on the development machine

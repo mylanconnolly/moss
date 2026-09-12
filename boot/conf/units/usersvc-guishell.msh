@@ -27,6 +27,7 @@
     { tag: conf, fs: conf/app, ro: false, mkdir: true }
     { tag: store, fs: img, ro: true }
     { tag: display, unit: compositor-ptr }
+    { tag: display_control, unit: compositor-ptr, control: true }
     { tag: font, unit: fontsvc }
     { tag: locale, unit: localesvc }
   ]
