@@ -191,6 +191,43 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
 
 ### Open
 
+**Near-term priorities (2026-09-12).** Complete the shared GUI foundations
+and text interaction first: the "Unified GUI framework and polish" and
+"GUI editing residuals" work below, plus the existing terminal-tabs arc.
+Build reusable behavior in the toolkit and validate it across applications,
+text scales, and resolutions. The following follow-ons are recorded for later;
+they are not prerequisites for this GUI work or a commitment to build them all
+at once.
+
+**Follow-ons from the project assessment (2026-09-12)**
+
+- **A complete document workflow.** A small text editor and shared Open/Save
+  picker, followed by create, edit, save, reopen, rename, and share flows in
+  Files. Choosing a document grants appropriately scoped file/view authority
+  rather than ambient access to the home. Exit criterion: a document survives
+  editing and session restart, and the editor cannot access unselected data.
+- **Capacity and long-session reliability.** Extend the GUI resource-capacity
+  work below to other small global pools (kernel objects, filesystem views,
+  sockets), using growing storage governed by domain quotas and explicit
+  exhaustion errors. Exercise sustained open/close/resize cycles, service
+  crashes, and remote disconnects; verify recovery and resource reclamation.
+- **Application installation, updates, and recovery.** Build on the existing
+  image store and asset-update mechanisms: obtaining applications, making
+  requested capabilities understandable, upgrading, rollback, and user-data
+  backup/restore. Design interrupted-update and restore drills before claiming
+  a complete lifecycle; preserve explicit grants and crash-only supervision.
+- **A useful distributed desktop workflow.** Build on remote browsing with one
+  end-to-end two-machine workflow for delegation, revocation, and remote work.
+  Make placement and connection failures legible; verify that either machine
+  disappearing gives an understandable failure and recovery path, without a
+  silently divergent home or transparent single-system-image assumptions.
+- **Hardware reach and independent validation.** Restore the x86 runtime gate
+  described under emulator compatibility below, then pursue the existing real
+  hardware arc. Extend the display-service interface with validated monitor
+  timings/EDID, hotplug, and multiple outputs as hardware support arrives.
+  Keep per-device DMA isolation intact and validate on actual hardware rather
+  than treating an emulator pass as equivalent evidence.
+
 **Arcs**
 
 - **Real aarch64 hardware via UEFI.** The strongest reason is the
