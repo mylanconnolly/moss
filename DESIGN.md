@@ -3134,8 +3134,8 @@ it opens a surface through the shared window frame and renders its glyph
 grid into `contentRect()` rather than the whole scanout. The grid drawing
 gained an offset+extent (`gox`/`goy`/`grid_w`/`grid_h`) so every cell, the
 cursor block, clear and scroll address the content area under the titlebar;
-scroll became a rectangular per-row copy. `pumpKey` folds the frame's
-pointer/focus/repaint events in with keystrokes: a `.close` or a failed
+scroll became a rectangular per-row copy. The main loop handles the frame's
+pointer/focus/repaint events alongside console requests: a `.close` or a failed
 resize ends the process, `.resized` re-lays-the-grid and repaints, a
 compositor repaint or focus-change event redraws the chrome. It serves the
 same `ConsReq` (write/read) a shell already speaks, so the windowed terminal
@@ -3154,6 +3154,18 @@ archive** during active editing (the pill referenced a session unit the
 packed archive did not yet carry). A rebuilt tree is green; the earlier
 "raise the watchdog / widen the timeouts" reflex was reverted, because the
 watchdog was never the problem.
+
+**Window lifetime (2026-09-12).** Windowed input no longer waits inside a
+shell `ConsReq.read`. A reader thread relays compositor events through an
+acknowledged mailbox and a bound notification; the main thread alone owns
+GUI state and rendering. Console reads defer their reply token until a
+queued byte is available. Close, move, selection, scrollback and repaint
+therefore keep working while the shell runs a command or after it exits.
+The bounded 4 KiB keyboard queue does not block window events. The desktop
+drill exits msh, waits for its running indicator to clear, closes the
+remaining terminal window and then opens Files.
+The Files/list drills wait for a complete geometry log line before parsing;
+`gui: ready` precedes widget diagnostics and is not a geometry barrier.
 
 **Scrollback and a real text model (as built, 2026-09-11).** Stage 1's
 terminal drew glyphs straight to pixels — it kept no text, and rendered a
@@ -3991,6 +4003,24 @@ must still run init's boot handshake (answer `go`) even if it takes no
 caps, or init deems it unwired; and the rasterizer's `top` is the bitmap's
 signed device-y offset from the baseline (negative above), so the client
 *adds* it — subtracting scattered every glyph off the line.
+
+**Font client lifetime (2026-09-12).** Client records grow in page-sized
+slabs, with independent request buffers keyed by the kernel-authenticated
+badge. A last-endpoint `client_dead` unmaps that buffer, clears its record
+and releases an empty slab. Fontsvc and the compositor drop their local
+minted endpoint after replying with a copy: retaining it prevents the
+kernel from ever observing the client's death. Both now use monotonic u64
+identities without the old 250-registration lifetime ceiling. Windowframe
+commits buffer setup only after a successful attach, allowing a failed
+allocation to be retried; the terminal grid registers independently from
+its frame. The fontscale drill keeps 16 clients attached with distinct
+buffers and checks glyph output across 1024 registrations.
+
+This removes fontsvc's eight-client limit, not the kernel's bounded
+resource pools: currently 64 shared-memory objects systemwide, 64 mappings
+per domain, and 256 live badges systemwide. Those pools and quotas still
+bound simultaneous use; exiting clients return their resources. General
+kernel pool growth is separate from service lifetime management.
 
 **Font formats (WOFF as built, 2026-09-08).** The formats are additive
 front-ends that converge on the SFNT the parser already reads: a `toSfnt`

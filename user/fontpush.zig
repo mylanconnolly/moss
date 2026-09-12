@@ -55,6 +55,56 @@ fn pushLayer(user_text: []const u8) u64 {
     };
 }
 
+// Keep more than the old eight slots alive, then churn beyond the old
+// 250-registration ceiling. Layout checks that each attached buffer works.
+fn exerciseClients() void {
+    var clients: [16]u64 = undefined;
+    var buffers: [16]u64 = undefined;
+    var addresses: [16]u64 = undefined;
+    for (&buffers, &addresses) |*buffer, *address| {
+        const sh = usys.shmCreate(1);
+        if (sh.err != .ok) fail("fontpush: client shm");
+        buffer.* = sh.data[0];
+        const mapped = usys.shmMap(buffer.*);
+        if (mapped.err != .ok) fail("fontpush: client map");
+        address.* = mapped.data[0];
+    }
+    defer for (buffers, addresses) |buffer, address| {
+        _ = usys.shmUnmap(address);
+        _ = usys.capDrop(buffer);
+    };
+    for (0..64) |_| {
+        for (&clients, buffers) |*client, buffer| {
+            const r = usys.callTypedCap(shared.FontReq, shared.FontResp, fontc, .register, 0);
+            client.* = switch (r) {
+                .ok => |v| if (v.rep == .registered and v.cap != 0) v.cap else fail("fontpush: register refused"),
+                .err => fail("fontpush: register failed"),
+            };
+            switch (usys.callTyped(shared.FontReq, shared.FontResp, client.*, .attach_buf, buffer)) {
+                .ok => |v| if (v != .ok) fail("fontpush: client attach refused"),
+                .err => fail("fontpush: client attach failed"),
+            }
+        }
+        for (addresses, 0..) |address, i| {
+            const buf: [*]u8 = @ptrFromInt(address);
+            @memset(buf[0 .. i + 1], 'A');
+        }
+        for (clients, 0..) |client, i| {
+            switch (usys.callTyped(shared.FontReq, shared.FontResp, client, .{ .layout = .{ .role = 0, .px = 0, .len = i + 1 } }, 0)) {
+                .ok => |v| switch (v) {
+                    .laid => |run| if (run.count != i + 1) fail("fontpush: wrong glyph count"),
+                    else => fail("fontpush: layout refused"),
+                },
+                .err => fail("fontpush: layout failed"),
+            }
+            const glyph: *const shared.FontGlyph = @ptrFromInt(addresses[i]);
+            if (glyph.pen_x != 0 or glyph.w == 0 or glyph.h == 0) fail("fontpush: wrong client buffer");
+        }
+        for (clients) |client| _ = usys.capDrop(client);
+    }
+    _ = usys.log(glog, "fontpush: 16 concurrent, 1024 lifetime clients PASS");
+}
+
 export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
     const setup = boot.take(chan_h);
@@ -63,6 +113,10 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     if (blob_va == 0) fail("fontpush: no boot archive");
     const blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
     const cfg = shared.marcFind(blob, "conf/userscale.msh") orelse fail("fontpush: no user font config");
+
+    // No legacy buffer is attached yet: every batch leaves the service
+    // with zero records, exercising empty-slab reclamation too.
+    exerciseClients();
 
     // Attach a request buffer to fontsvc; the user layer is staged there.
     const sh = usys.shmCreate(2);

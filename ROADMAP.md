@@ -1402,6 +1402,14 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
   identity through tree changes. Carry the visual system
   through Files, login, terminal, dock, and top bar; validate all themes/scales.
 
+**GUI resource capacity**
+
+- Fontsvc client records now grow and are reclaimed on disconnect; font and
+  compositor registrations no longer stop after 250 lifetime clients.
+  Remaining global kernel bounds (64 shm objects, 64 mappings per domain,
+  256 live badges) still limit concurrent applications. Replace these pools
+  with quota-accounted growing storage before claiming memory-only capacity.
+
 **GUI editing residuals**
 
 - System clipboard shortcuts in fields, undo/redo, double-click word selection,
@@ -1409,6 +1417,13 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
   and in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
+
+- ✅ **GUI client lifetime and terminal exit** (2026-09-12): dynamic font
+  client slabs, dead-client buffer reclamation, and correctly dropped minted
+  endpoint copies prevent repeated launches from exhausting font support.
+  Windowed terminal input runs independently of shell reads, retaining close
+  and repaint after `exit`; fontscale exercises 16 concurrent/1024 lifetime
+  clients, and guishell covers exit, close, then Files.
 
 - ✅ **GUI text editing and Tab ownership** (2026-09-11): text fields now
   insert at a caret, highlight and replace selections, support Shift/Option/

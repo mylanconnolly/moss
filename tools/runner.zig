@@ -910,7 +910,7 @@ fn parseListGeom(content: []const u8, id: []const u8) ?[4]u32 {
     const key = std.fmt.bufPrint(&kb, "gui: list {s} ", .{id}) catch return null;
     const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
     const line = content[at..];
-    const eol = std.mem.indexOfScalar(u8, line, '\n') orelse line.len;
+    const eol = std.mem.indexOfScalar(u8, line, '\n') orelse return null;
     const seg = line[0..eol];
     return .{
         parseAfter(seg, "cx=") orelse return null,
@@ -918,6 +918,18 @@ fn parseListGeom(content: []const u8, id: []const u8) ?[4]u32 {
         parseAfter(seg, "row_h=") orelse return null,
         parseAfter(seg, "sb=") orelse return null,
     };
+}
+
+fn waitListGeom(spec: Spec, log_path: []const u8, polls: *u64, id: []const u8) ?[4]u32 {
+    var n: u64 = 0;
+    while (true) {
+        const content = readLog(log_path);
+        if (parseListGeom(content, id)) |g| return g;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) return null;
+        sleepMs(poll_ms);
+        n += 1;
+        polls.* += 1;
+    }
 }
 
 /// The unsigned integer immediately after `key` in `s` (up to a space/CR/end).
@@ -937,7 +949,7 @@ fn parseAfter(s: []const u8, key: []const u8) ?u32 {
 /// scrolling, selection, and activation all work together.
 fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "gui: ready", 1, "the list demo never came up", spec, polls)) return false;
-    const g = parseListGeom(readLog(log_path), "items") orelse {
+    const g = waitListGeom(spec, log_path, polls, "items") orelse {
         reportFailure(spec.name, "could not parse the list's row geometry", log_path);
         return false;
     };
@@ -989,7 +1001,7 @@ fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "gui: ready", 1, "the explorer never came up", spec, polls)) return false;
     // The right pane (id "files") lists the current directory.
-    const g = parseListGeom(readLog(log_path), "files") orelse {
+    const g = waitListGeom(spec, log_path, polls, "files") orelse {
         reportFailure(spec.name, "could not parse the file list's geometry", log_path);
         return false;
     };
@@ -2344,6 +2356,20 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "settings: admin=true", 1, "the admin's settings did not detect admin", spec, polls)) return false;
     sleepMs(1500); // let settings fully render and allocate before the next launch
     _ = q.screendump(check_dir ++ "/settings.ppm");
+    // Shell exit must not stop the terminal's window event loop. Close its
+    // remaining window, then open Files (the reported font-exhaustion path).
+    const terminal = parseDockItem(readLog(log_path), 3) orelse return sfail(spec, log_path, "parse Terminal pill");
+    if (!clickScanout(&q, terminal[0], terminal[1])) return sfail(spec, log_path, "launch Terminal");
+    if (!try waitLogN(log_path, "term: console up", 1, "terminal did not open", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: running terminal=true", 1, "shell did not start", spec, polls)) return false;
+    sleepMs(500);
+    if (!q.typeText("exit")) return sfail(spec, log_path, "type exit");
+    _ = q.sendKey("ret");
+    if (!try waitLogN(log_path, "dock: running terminal=false", 1, "shell did not exit", spec, polls)) return false;
+    const term_close = parseDot(readLog(log_path), "close=") orelse return sfail(spec, log_path, "parse Terminal close dot");
+    if (!clickScanout(&q, term_close[0], term_close[1])) return sfail(spec, log_path, "close exited Terminal");
+    if (!try waitLogN(log_path, "term: window closed", 1, "exited Terminal stopped pumping window input", spec, polls)) return false;
+    sleepMs(500);
     // With Settings still open, launch Files too (its pill sits below the
     // Settings window, so it stays clickable): a second app must open
     // alongside the first. This guards the session's memory budget — too
@@ -2358,9 +2384,10 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     if (!try waitLogN(log_path, "dock: activate explorer", 1, "the Files pill did not reach the dock", spec, polls)) return false;
-    if (!try waitLogN(log_path, "gui: ready", 4, "the second app (Files) never opened alongside Settings", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: ready", 5, "the second app (Files) never opened alongside Settings", spec, polls)) return false;
     if (!try waitLogN(log_path, "dock: running explorer=true", 1, "Files launched but did not stay running beside Settings", spec, polls)) return false;
     sleepMs(500);
+    _ = q.screendump(check_dir ++ "/files-after-terminal-exit.ppm");
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.
     return desktopLogout(spec, log_path, polls, &q);

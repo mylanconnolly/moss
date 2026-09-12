@@ -50,8 +50,9 @@ pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64) void
     font_chan = font_cap;
     if (secret.len >= 8) trust_token = std.mem.readInt(u64, secret[0..8], .little);
     if (font_chan != 0) {
-        const badged = registerFont();
-        if (badged != 0) font_chan = badged;
+        // A refused registration must never attach to another client's
+        // legacy badge-0 buffer.
+        font_chan = registerFont();
     }
 }
 
@@ -422,13 +423,22 @@ fn ensureFontBuf() bool {
     const sh = usys.shmCreate(2); // room for the glyph run of a line
     if (sh.err != .ok) return false;
     const m = usys.shmMap(sh.data[0]);
-    if (m.err != .ok) return false;
-    font_buf = @ptrFromInt(m.data[0]);
-    font_buf_len = m.data[1] * 4096;
-    return switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
+    if (m.err != .ok) {
+        _ = usys.capDrop(sh.data[0]);
+        return false;
+    }
+    const attached = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
         .ok => |ok| ok.rep == .ok,
         .err => false,
     };
+    _ = usys.capDrop(sh.data[0]);
+    if (!attached) {
+        _ = usys.shmUnmap(m.data[0]);
+        return false;
+    }
+    font_buf = @ptrFromInt(m.data[0]);
+    font_buf_len = m.data[1] * 4096;
+    return true;
 }
 
 /// Push the logged-in user's font layer to the shared font service for the
@@ -453,6 +463,7 @@ pub fn fontReady() void {
     };
     if (at.cap == 0 or at.rep != .atlas) return;
     const am = usys.shmMap(at.cap);
+    _ = usys.capDrop(at.cap);
     if (am.err != .ok) return;
     atlas = @ptrFromInt(am.data[0]);
     atlas_w = shared.unpackHi(at.rep.atlas.wh);

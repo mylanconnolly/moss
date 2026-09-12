@@ -158,10 +158,10 @@ const bg_word: u32 = 0x0020_2830; // a dark slate
 // focused surface is the trusted one — the user's cue that the keyboard
 // truly reaches the login and nothing else.
 const trusted_badge: u64 = 1;
-// Ordinary GUI clients register for a unique badge (2..); the ceiling keeps
-// it well inside the surface/reader tables.
+// Ordinary GUI clients register for a unique badge (2..). Identity values
+// are independent of the reusable surface/reader slots.
 var next_client_badge: u64 = 2;
-const max_client_badge: u64 = 250;
+
 const trust_strip = 8; // px, the reserved indicator band at the top
 const secure_word: u32 = 0x0000_66CC; // X<<24|R<<16|G<<8|B -> RGB(0,0x66,0xCC), a deep blue
 var trust_token: u64 = 0; // 0 = the trusted path is disabled (no token)
@@ -1314,7 +1314,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // this window's surfaces and input reader are told apart
                 // from every other client's. Badges 2.. (0 = unbadged, 1 =
                 // the trusted login).
-                if (next_client_badge > max_client_badge) {
+                if (next_client_badge == std.math.maxInt(u64)) {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 12 } }, 0, token);
                     continue;
                 }
@@ -1325,6 +1325,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 }
                 next_client_badge += 1;
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .registered, minted.data[1], token);
+                _ = usys.capDrop(minted.data[1]);
             },
             .attach_trusted => |q| {
                 // Prove the boot-provisioned token, earn a badged channel
@@ -1340,6 +1341,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     continue;
                 }
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .trusted, minted.data[1], token);
+                _ = usys.capDrop(minted.data[1]);
             },
         }
         // Flush any focus change this request caused (a create takes focus,

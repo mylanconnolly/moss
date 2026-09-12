@@ -532,23 +532,63 @@ fn loadFonts(blob: []const u8, fs_only: bool, view: u64) void {
 // this, a second client's `attach_buf` unmapped and repointed one global
 // buffer, so the first client's next layout read a stale/foreign buffer and
 // faulted (the `desktop` drill's two windows racing on it).
-const max_clients = 8;
+// Grow in page-sized slabs rather than spending a kernel shm object on
+// every tiny client record. Empty slabs and request mappings are reclaimed.
 const FontClient = struct { used: bool = false, badge: u64 = 0, req_va: u64 = 0, req_len: usize = 0 };
-var fclients: [max_clients]FontClient = @splat(.{});
+const ClientSlab = struct {
+    next: ?*ClientSlab = null,
+    count: usize = 0,
+    clients: [(4096 - 16) / @sizeOf(FontClient)]FontClient = @splat(.{}),
+};
+comptime {
+    std.debug.assert(@sizeOf(ClientSlab) <= 4096);
+}
+var fclients: ?*ClientSlab = null;
 var next_font_badge: u64 = 2;
-const max_font_badge: u64 = 250;
 
 fn fclientFor(badge: u64) ?*FontClient {
-    for (&fclients) |*c| if (c.used and c.badge == badge) return c;
+    var cur = fclients;
+    while (cur) |slab| : (cur = slab.next) {
+        for (&slab.clients) |*c| if (c.used and c.badge == badge) return c;
+    }
     return null;
 }
 fn fclientAlloc(badge: u64) ?*FontClient {
     if (fclientFor(badge)) |c| return c;
-    for (&fclients) |*c| if (!c.used) {
-        c.* = .{ .used = true, .badge = badge };
-        return c;
-    };
-    return null;
+    var cur = fclients;
+    while (cur) |slab| : (cur = slab.next) {
+        for (&slab.clients) |*c| if (!c.used) {
+            c.* = .{ .used = true, .badge = badge };
+            slab.count += 1;
+            return c;
+        };
+    }
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return null;
+    const m = usys.shmMap(sh.data[0]);
+    _ = usys.capDrop(sh.data[0]);
+    if (m.err != .ok) return null;
+    const slab: *ClientSlab = @ptrFromInt(m.data[0]);
+    slab.* = .{ .next = fclients, .count = 1 };
+    slab.clients[0] = .{ .used = true, .badge = badge };
+    fclients = slab;
+    return &slab.clients[0];
+}
+fn fclientFree(badge: u64) void {
+    var link = &fclients;
+    while (link.*) |slab| {
+        for (&slab.clients) |*c| if (c.used and c.badge == badge) {
+            if (c.req_va != 0) _ = usys.shmUnmap(c.req_va);
+            c.* = .{};
+            slab.count -= 1;
+            if (slab.count == 0) {
+                link.* = slab.next;
+                _ = usys.shmUnmap(@intFromPtr(slab));
+            }
+            return;
+        };
+        link = &slab.next;
+    }
 }
 
 export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
@@ -579,6 +619,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .client_dead) {
+            fclientFree(r.badge);
+            continue;
+        }
         if (r.err != .ok) continue;
         const req = shared.decodeMsg(shared.FontReq, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
@@ -608,7 +652,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                 _ = usys.replyTyped(shared.FontResp, chan_h, .ok, 0);
             },
             .register => {
-                if (next_font_badge > max_font_badge) {
+                if (next_font_badge == std.math.maxInt(u64)) {
                     _ = usys.replyTyped(shared.FontResp, chan_h, .{ .font_err = .{ .code = 7 } }, 0);
                     continue;
                 }
@@ -619,6 +663,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                 }
                 next_font_badge += 1;
                 _ = usys.replyTyped(shared.FontResp, chan_h, .registered, minted.data[1]);
+                _ = usys.capDrop(minted.data[1]);
             },
             .atlas => {
                 // Hand back a copy of the atlas cap for the client to map.

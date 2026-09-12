@@ -321,22 +321,37 @@ var gcache: [128]Gc = @splat(.{});
 
 fn fontReady() void {
     if (font_chan == 0) return;
+    // The terminal grid and frame each own a separate request buffer.
+    const registered = usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .register, 0);
+    font_chan = switch (registered) {
+        .ok => |v| if (v.rep == .registered and v.cap != 0) v.cap else return,
+        .err => return,
+    };
     const sh = usys.shmCreate(1);
     if (sh.err != .ok) return;
     const m = usys.shmMap(sh.data[0]);
-    if (m.err != .ok) return;
+    if (m.err != .ok) {
+        _ = usys.capDrop(sh.data[0]);
+        return;
+    }
+    const attached = switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
+        .ok => |rep| rep == .ok,
+        .err => false,
+    };
+    _ = usys.capDrop(sh.data[0]);
+    if (!attached) {
+        _ = usys.shmUnmap(m.data[0]);
+        return;
+    }
     font_buf = @ptrFromInt(m.data[0]);
     font_buf_len = m.data[1] * 4096;
-    switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .attach_buf, sh.data[0])) {
-        .ok => |ok| if (ok.rep != .ok) return,
-        .err => return,
-    }
     const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
         .ok => |ok| ok,
         .err => return,
     };
     if (at.cap == 0 or at.rep != .atlas) return;
     const am = usys.shmMap(at.cap);
+    _ = usys.capDrop(at.cap);
     if (am.err != .ok) return;
     fatlas = @ptrFromInt(am.data[0]);
     fatlas_w = shared.unpackHi(at.rep.atlas.wh);
@@ -654,6 +669,80 @@ fn nextRaw() Raw {
     };
 }
 
+// The GUI must keep pumping even while the shell is busy or has exited.
+// A reader relays raw compositor events; the main thread alone owns the
+// frame, rendering, selection and console state. A one-event mailbox with
+// acknowledgement preserves pointer transitions without a spinning reader.
+var input_bell: u64 = 0;
+var input_ack: u64 = 0;
+var input_ready = std.atomic.Value(bool).init(false);
+var input_event: wf.Event = undefined;
+var input_stack: [16384]u8 align(16) = undefined;
+var key_queue: [4096]u8 = undefined;
+var key_head: usize = 0;
+var key_tail: usize = 0;
+
+fn inputReader(channel: u64) callconv(.c) void {
+    while (true) {
+        input_event = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, channel, .next_input, 0)) {
+            .ok => |rep| switch (rep) {
+                .input => |v| .{ .kind = v.kind, .surface = v.surface, .ch = @intCast(v.arg & 0xff), .x = shared.ptrX(v.arg), .y = shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
+                else => .{ .kind = 255 },
+            },
+            .err => .{ .kind = 255 },
+        };
+        input_ready.store(true, .release);
+        _ = usys.notifySignal(input_bell, 1);
+        _ = usys.notifyWait(input_ack);
+    }
+}
+
+fn queueKey(ch: u8) void {
+    if (key_tail -% key_head == key_queue.len) return;
+    key_queue[key_tail % key_queue.len] = ch;
+    key_tail +%= 1;
+}
+
+fn pumpWindow(log_h: u64) void {
+    if (!input_ready.load(.acquire)) return;
+    const ev = input_event;
+    input_ready.store(false, .release);
+    _ = usys.notifySignal(input_ack, 1);
+    switch (ev.kind) {
+        0 => {
+            if (ev.ch == pg_up) return scrollBy(true, log_h);
+            if (ev.ch == pg_dn) return scrollBy(false, log_h);
+            if (scroll_off != 0) {
+                scroll_off = 0;
+                render();
+                _ = wf.commitSurface();
+            }
+            if (console_keys.feed(ev.ch, false)) |first| {
+                const needed = 1 + console_keys.pending.len;
+                if (key_queue.len - (key_tail -% key_head) >= needed) {
+                    queueKey(first);
+                    while (console_keys.pop()) |ch| queueKey(ch);
+                } else console_keys.pending = ""; // never enqueue half a VT sequence
+            }
+        },
+        1 => routePointer(ev, log_h),
+        3 => repaintWin(),
+        4 => {
+            wf.win_focused = ev.ch != 0;
+            repaintWin();
+        },
+        255 => usys.exit(0),
+        else => {},
+    }
+    drainPaste();
+}
+
+fn drainPaste() void {
+    while (paste_pos < paste_len and key_tail -% key_head < key_queue.len) : (paste_pos += 1) {
+        queueKey(paste_buf[paste_pos]);
+    }
+}
+
 /// A shell's console over a surface. `windowed_mode` selects how input is
 /// pumped (the raw surface vs the frame) and how output is committed. The
 /// client (a shell) sees exactly the ConsReq interface the virtio-console
@@ -661,9 +750,25 @@ fn nextRaw() Raw {
 fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
     var out_va: u64 = 0; // the client's console buffer (write source / read sink)
     var out_len: u64 = 0;
+    var pending_read: u64 = 0;
     _ = usys.log(log_h, "term: console up");
     while (true) {
+        if (windowed_mode) {
+            drainPaste();
+            pumpWindow(log_h);
+            if (pending_read != 0 and key_head != key_tail) {
+                const dst: [*]volatile u8 = @ptrFromInt(out_va);
+                dst[0] = key_queue[key_head % key_queue.len];
+                key_head +%= 1;
+                _ = usys.replyTypedTo(shared.ConsResp, chan_h, .{ .n = .{ .n = 1 } }, 0, pending_read);
+                pending_read = 0;
+            }
+        }
         const r = usys.recvMsg(chan_h);
+        if (windowed_mode and r.err == .interrupted) {
+            _ = usys.notifyWait(input_bell);
+            continue;
+        }
         if (r.err == .peer_dead) usys.exit(0);
         if (r.err != .ok) continue;
         const req = shared.decodeMsg(shared.ConsReq, r.data) orelse {
@@ -698,11 +803,17 @@ fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
             .read => |q| {
                 // One keystroke, handed to the client's buffer. A shell
                 // reads a character at a time, so one per read is its rhythm.
-                if (out_va == 0 or (windowed_mode == false and q.max == 0)) {
+                if (out_va == 0 or out_len == 0 or q.max == 0) {
                     _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0);
                     continue;
                 }
-                const ch = consoleKey(log_h, windowed_mode);
+                if (windowed_mode) {
+                    if (pending_read != 0) {
+                        _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0);
+                    } else pending_read = r.token;
+                    continue;
+                }
+                const ch = consoleKey(log_h);
                 const dst: [*]volatile u8 = @ptrFromInt(out_va);
                 var n: u64 = 0;
                 if (ch != 0 and out_len >= 1) {
@@ -715,17 +826,15 @@ fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
     }
 }
 
-const SeatKey = struct { ch: u8, literal: bool = false };
 var console_keys: shared.keyboard.ConsoleKeys = .{};
 
-/// Translate seat navigation into VT sequences; private GUI actions never
-/// become invalid UTF-8 in the shell's edit buffer. Deliver one byte/read.
-fn consoleKey(log_h: u64, framed: bool) u8 {
+/// Translate navigation into VT sequences for the full-screen console.
+fn consoleKey(log_h: u64) u8 {
     if (console_keys.pop()) |ch| return ch;
     while (true) {
-        const input = if (framed) pumpKey(log_h) else SeatKey{ .ch = readSeatKey(log_h) };
-        if (input.ch == 0) return 0;
-        if (console_keys.feed(input.ch, input.literal)) |ch| return ch;
+        const ch = readSeatKey(log_h);
+        if (ch == 0) return 0;
+        if (console_keys.feed(ch, false)) |byte| return byte;
     }
 }
 
@@ -834,6 +943,13 @@ fn windowedMain(log_h: u64, chan_h: u64) noreturn {
     logDots(log_h);
     logGrid(log_h);
     _ = usys.log(log_h, "gui: ready");
+    const bell = usys.notifyCreate();
+    const ack = usys.notifyCreate();
+    if (bell.err != .ok or ack.err != .ok) usys.exit(187);
+    input_bell = bell.data[0];
+    input_ack = ack.data[0];
+    if (usys.notifyBind(input_bell) != .ok) usys.exit(187);
+    if (usys.threadCreate(inputReader, wf.chan, &input_stack) != .ok) usys.exit(187);
     serveConsole(log_h, chan_h, true);
 }
 
@@ -902,51 +1018,15 @@ fn routePointer(ev: wf.Event, log_h: u64) void {
         if (!left) content_gesture = false;
     } else if (frame_gesture or in_title) {
         switch (wf.onPointer(ev, "Terminal")) {
-            .close, .resize_failed => usys.exit(0), // red dot, or a fatal resize: end
+            .close, .resize_failed => {
+                _ = usys.log(log_h, "term: window closed");
+                usys.exit(0);
+            },
             .resized => onResized(log_h),
             else => {}, // none / moved / minimized — keep pumping
         }
         if (!left) frame_gesture = false;
     } else {
         onContent(ev, log_h, false, false); // middle-click paste / hover
-    }
-}
-
-/// Pump frame input until a keystroke arrives, handling the titlebar (drag /
-/// snap / close), focus, restore, scrollback (page up/down) and selection /
-/// paste along the way. Returns the key byte, or 0 if the display channel died.
-fn pumpKey(log_h: u64) SeatKey {
-    while (true) {
-        if (paste_pos < paste_len) { // drain a paste, one byte per read
-            const b = paste_buf[paste_pos];
-            paste_pos += 1;
-            return .{ .ch = b, .literal = true };
-        }
-        const ev = wf.nextInput() orelse return .{ .ch = 0 };
-        switch (ev.kind) {
-            0 => { // a keystroke: scrollback keys are ours, the rest go to the shell
-                if (ev.ch == pg_up) {
-                    scrollBy(true, log_h);
-                    continue;
-                }
-                if (ev.ch == pg_dn) {
-                    scrollBy(false, log_h);
-                    continue;
-                }
-                if (scroll_off != 0) {
-                    scroll_off = 0;
-                    render();
-                    _ = wf.commitSurface();
-                }
-                return .{ .ch = ev.ch };
-            },
-            1 => routePointer(ev, log_h),
-            3 => repaintWin(), // restored from the dock: repaint (the compositor unhid us)
-            4 => { // focus changed: dim / brighten the chrome
-                wf.win_focused = ev.ch != 0;
-                repaintWin();
-            },
-            else => {},
-        }
     }
 }
