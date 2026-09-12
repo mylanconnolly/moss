@@ -21,9 +21,9 @@ let final = (gui {
                 {
                   kind: "row"
                   children: [
-                    { kind: "button", id: "inc", label: "Increment", variant: "primary" }
-                    { kind: "button", id: "quit", label: "Close gallery" }
-                    { kind: "button", id: "unavailable", label: "Unavailable", disabled: true }
+                    { kind: "button", id: "inc", icon: "up", label: "Increment", variant: "primary" }
+                    { kind: "button", id: "quit", icon: "close", icon_only: true, label: "Close gallery" }
+                    { kind: "button", id: "unavailable", icon: "lock", label: "Unavailable", disabled: true }
                   ]
                 }
               ]

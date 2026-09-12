@@ -1418,6 +1418,12 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
+  one scalable, theme-colored catalog for buttons, dock items, lists, and
+  decorative nodes; icon-with-text and icon-only declarations share layout.
+  Desktop and Files controls adopt icons. Larger traffic lights and padded,
+  non-overlapping hit areas apply through the shared frame, including terminals.
+
 - ✅ **Files polish** (2026-09-12): compact navigation, Refresh, explicit
   empty/error states, and proportional Name/Kind/Size columns with shared
   folder/file icons and focus-aware selection. Real double-click timing

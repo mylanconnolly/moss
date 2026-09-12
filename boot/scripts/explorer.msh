@@ -94,15 +94,15 @@ let final = (gui {
             {
               kind: "row"
               children: [
-                { kind: "button", id: "up", label: "Up", disabled: ($state.path == "") }
-                { kind: "button", id: "refresh", label: "Refresh" }
+                { kind: "button", id: "up", icon: "up", label: "Up", disabled: ($state.path == "") }
+                { kind: "button", id: "refresh", icon: "refresh", label: "Refresh" }
                 (match $state.node {
-                    0 => { kind: "button", id: "lock", label: "Read-only view" }
+                    0 => { kind: "button", id: "lock", icon: "lock", label: "Read-only view" }
                     _ => { kind: "label", muted: true, text: "Read-only connection" }
                   })
                 (match $state.depth {
                     0 => { kind: "label", text: "" }
-                    _ => { kind: "button", id: "leave", label: "Leave view" }
+                    _ => { kind: "button", id: "leave", icon: "back", label: "Leave view" }
                   })
               ]
             }
@@ -118,7 +118,7 @@ let final = (gui {
                   {
                     kind: "list", id: "places", key: "places", h: 56
                     active: ($state.node == 0)
-                    rows:   [{ id: "", icon: "folder", cells: [(match $state.depth { 0 => "Home"; _ => "This view" })] }]
+                    rows:   [{ id: "", icon: "home", cells: [(match $state.depth { 0 => "Home"; _ => "This view" })] }]
                   }
                   { kind: "label", muted: true, text: "Network" }
                   {

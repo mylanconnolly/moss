@@ -405,6 +405,11 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
         }
         return .{ .w = avail_w, .h = height + 2 * inset };
     }
+    if (std.mem.eql(u8, kind, "icon")) {
+        const size = @min(avail_w, @as(usize, @intCast(std.math.clamp(intField(rec, "size", @intCast(wf.iconSize())), 12, 64))));
+        if (paint) wf.drawIcon(x, y, size, strField(rec, "name"), pal.text);
+        return .{ .w = size, .h = size };
+    }
     if (std.mem.eql(u8, kind, "label")) {
         if (paint) return drawLabel(rec, x, y, avail_w);
         const role = if (std.mem.eql(u8, strField(rec, "role"), "title")) R_TITLE else R_UI;
@@ -412,7 +417,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
     }
     if (std.mem.eql(u8, kind, "button")) {
         if (paint) return drawButton(rec, x, y, avail_w);
-        return .{ .w = @min(avail_w, strW(R_UI, strField(rec, "label")) + 2 * bpx), .h = lineOf(R_UI) + 2 * bpy };
+        return .{ .w = @min(avail_w, iconLabelWidth(rec, "label") + 2 * bpx), .h = @max(lineOf(R_UI), wf.iconSize()) + 2 * bpy };
     }
     if (std.mem.eql(u8, kind, "field")) {
         if (paint) return drawField(rec, x, y, avail_w);
@@ -446,13 +451,30 @@ fn drawLabel(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
 /// bottom edge (a little depth, not flat), a border, and — when focused —
 /// a bright ring. `variant` gives it semantic colour: primary
 /// (the accent), danger (destructive), or the neutral surface default.
+fn hasIcon(rec: mshl.Record) bool {
+    return shared.gui.icons.parse(strField(rec, "icon")) != null;
+}
+fn iconOnly(rec: mshl.Record) bool {
+    return hasIcon(rec) and (if (rec.get("icon_only")) |v| v.asBool() else false);
+}
+fn iconLabelWidth(rec: mshl.Record, field: []const u8) usize {
+    const text = if (iconOnly(rec)) "" else strField(rec, field);
+    return strW(R_UI, text) + (if (hasIcon(rec)) wf.iconSize() + (if (text.len > 0) @as(usize, 8) else 0) else 0);
+}
+fn drawIconLabel(rec: mshl.Record, field: []const u8, x: usize, y: usize, w: usize, h: usize, ink: u32, bg: u32) void {
+    const size = wf.iconSize();
+    const text = if (iconOnly(rec)) "" else strField(rec, field);
+    const inset = if (hasIcon(rec)) size + (if (text.len > 0) @as(usize, 8) else 0) else 0;
+    if (hasIcon(rec) and w >= size) wf.drawIcon(x, y + (h -| size) / 2, size, strField(rec, "icon"), ink);
+    drawStrTrunc(x + inset, y + (h -| lineOf(R_UI)) / 2, R_UI, text, w -| inset, ink, bg);
+}
+
 fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
-    const label = strField(rec, "label");
     const variant = strField(rec, "variant");
     const disabled = if (rec.get("disabled")) |v| v.asBool() else false;
     const focused = !disabled and wf.win_focused and nfoc == sel_focus;
-    const w = @min(avail_w, strW(R_UI, label) + 2 * bpx);
-    const h = lineOf(R_UI) + 2 * bpy;
+    const w = @min(avail_w, iconLabelWidth(rec, "label") + 2 * bpx);
+    const h = @max(lineOf(R_UI), wf.iconSize()) + 2 * bpy;
 
     var fill: u32 = pal.surface_hi;
     var ink: u32 = pal.text;
@@ -477,7 +499,7 @@ fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     // A soft top highlight inside the rounded fill — a hint of depth, not
     // a hard bar (kept clear of the corners so it never pokes past them).
     fillRect(x + r_btn, y + ring_w, w -| (2 * r_btn), 1, shade(fill, 6, 5));
-    drawStrTrunc(x + bpx, y + bpy, R_UI, label, w -| (2 * bpx), ink, fill);
+    drawIconLabel(rec, "label", x + bpx, y, w -| (2 * bpx), h, ink, fill);
     if (!disabled and nfoc < focusables.len) {
         focusables[nfoc] = .{ .id = strField(rec, "id"), .is_field = false, .bx = x, .by = y, .bw = w, .bh = h };
         nfoc += 1;
@@ -681,19 +703,12 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         const ink = if (selected and focused) pal.primary_ink else pal.text;
         const iconv = rowField(rowsv, i, "icon");
         const icon = if (iconv == .str) iconv.str else "";
-        const icon_pad: usize = if (icon.len > 0) 26 else 0;
-        if (icon.len > 0) {
-            const ix = x + list_cell_pad;
-            const iy = ry + (row_h - 16) / 2;
+        const icon_size = wf.iconSize();
+        const known_icon = shared.gui.icons.parse(icon) != null;
+        const icon_pad: usize = if (known_icon) icon_size + 8 else 0;
+        if (known_icon) {
             const color = if (selected and focused) pal.primary_ink else pal.primary;
-            if (std.mem.eql(u8, icon, "folder")) {
-                fillRoundRect(ix, iy + 3, 19, 13, 2, color);
-                fillRoundRect(ix + 1, iy, 8, 6, 1, color);
-            } else {
-                panel(ix + 3, iy, 12, 16, 2, cell_bg, ink, 1);
-                fillRect(ix + 6, iy + 6, 6, 1, ink);
-                fillRect(ix + 6, iy + 10, 6, 1, ink);
-            }
+            wf.drawIcon(x + list_cell_pad, ry + (row_h -| icon_size) / 2, icon_size, icon, color);
         }
         const ty = ry + list_row_vpad;
         const cellsv = rowField(rowsv, i, "cells");
@@ -1189,7 +1204,7 @@ fn renderDock(tree: Value) void {
     var n: usize = 0;
     for (items) |item| {
         if (item != .record) continue;
-        total += strW(R_UI, strField(item.record, "title")) + 2 * dock_hpad;
+        total += iconLabelWidth(item.record, "title") + 2 * dock_hpad;
         n += 1;
     }
     if (n > 1) total += (n - 1) * dock_gap;
@@ -1202,11 +1217,11 @@ fn renderDock(tree: Value) void {
         const title = strField(r, "title");
         const unit = strField(r, "unit");
         const running = r.get("running") != null and (r.get("running").?).asBool();
-        const w = strW(R_UI, title) + 2 * dock_hpad;
+        const w = iconLabelWidth(r, "title") + 2 * dock_hpad;
         const fill = if (running) pal.primary else pal.surface_hi;
         const ink = if (running) pal.primary_ink else pal.text;
         fillRoundRect(x, py, w, pill_h, 10, fill);
-        drawStr(x + dock_hpad, py + item_vpad, R_UI, title, ink, fill);
+        drawIconLabel(r, "title", x + dock_hpad, py, w -| (2 * dock_hpad), pill_h, ink, fill);
         if (running and wf.win_h > 4) fillDot(x + w / 2, wf.win_h - 4, 2, pal.primary);
         if (dock_nitems < dock_items.len) {
             // Log a pill's running state only when it flips (never the

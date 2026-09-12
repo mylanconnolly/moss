@@ -19,10 +19,10 @@ let final = (gui {
     view: (fn [state] {
         {
           items: [
-            { title: "Settings", unit: "settings", running: (unit-up "settings") }
-            { title: "Demo", unit: "win-demo", running: (unit-up "win-demo") }
-            { title: "Files", unit: "explorer", running: (unit-up "explorer") }
-            { title: "Terminal", unit: "terminal", running: (unit-up "terminal") }
+            { title: "Settings", icon: "settings", unit: "settings", running: (unit-up "settings") }
+            { title: "Demo", icon: "grid", unit: "win-demo", running: (unit-up "win-demo") }
+            { title: "Files", icon: "folder", unit: "explorer", running: (unit-up "explorer") }
+            { title: "Terminal", icon: "terminal", unit: "terminal", running: (unit-up "terminal") }
           ]
         }
       })

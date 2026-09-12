@@ -89,8 +89,7 @@ pub var win_y: usize = (scanout_h - 460) / 2;
 
 // A macOS-style titlebar: three traffic-light dots (close / minimize /
 // maximize) at the left, the title centred, and the rest a drag handle.
-const dot_r = 6; // dot radius
-const dot_gap = 20; // spacing between dot centres
+var dot_r: usize = 9; // scales with the UI font snapshot
 const tl_close: u32 = 0x00ff_5f57; // red
 const tl_min: u32 = 0x00fe_bc2e; // amber
 const tl_max: u32 = 0x0028_c840; // green
@@ -638,6 +637,8 @@ pub fn drawChrome(title: []const u8) void {
     fillRect(0, 0, win_w, title_h, pal.surface);
     fillRect(0, title_h, win_w, pal.border_w, pal.border);
     dots_cy = title_h / 2;
+    dot_r = iconSize() / 2 - 1;
+    const dot_gap = 2 * (dot_r + 5) + 2;
     const first_cx = 16 + dot_r;
     for (0..3) |i| dots_cx[i] = first_cx + i * dot_gap;
     // Focused: the macOS red/amber/green. Unfocused: all three a uniform
@@ -668,7 +669,7 @@ fn hitDot(lx: usize, ly: usize) ?usize {
     for (dots_cx, 0..) |cx, i| {
         const dx = @abs(@as(i64, @intCast(lx)) - @as(i64, @intCast(cx)));
         const dy = @abs(@as(i64, @intCast(ly)) - @as(i64, @intCast(dots_cy)));
-        if (dx <= dot_r + 3 and dy <= dot_r + 3) return i;
+        if (dx <= dot_r + 5 and dy <= dot_r + 5) return i;
     }
     return null;
 }
@@ -1021,4 +1022,16 @@ fn recreate(title: []const u8) bool {
     if (!openSurface(false)) return false;
     if (title.len > 0) setSurfaceTitle(title);
     return true;
+}
+
+/// Symbolic icons follow the same font snapshot as labels and controls.
+pub fn iconSize() usize {
+    return std.math.clamp(lineOf(R_UI), 20, 28);
+}
+pub fn drawIcon(x: usize, y: usize, size: usize, name: []const u8, ink: u32) void {
+    if (measuring) return;
+    const icon = shared.gui.icons.parse(name) orelse return;
+    for (0..size) |iy| for (0..size) |ix| {
+        blendPx(x + ix, y + iy, ink, shared.gui.icons.coverage(icon, size, ix, iy));
+    };
 }

@@ -94,3 +94,8 @@ test "double clicks expire, stay on one row, and reset after activation" {
     click = .{}; // a directory change forgets the previous row
     try std.testing.expect(!click.press(3, 1400));
 }
+
+pub const icons = @import("icons.zig");
+test {
+    _ = icons;
+}

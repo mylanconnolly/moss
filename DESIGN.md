@@ -4285,6 +4285,23 @@ path proves the click, activation, and descent. The desktop dock gained a
 **Files** pill (a lazy session unit, `conf/sessiongui/explorer.msh`, over
 the session's own home view), so it launches like Settings and Demo.
 
+**Symbolic icons and window controls (2026-09-12).** A shared catalog in
+`shared/icons.zig` draws antialiased, rounded strokes on a 24-unit grid:
+folder, file, home, settings, terminal, grid, up, refresh, lock, back,
+network, and close. Icons need neither font glyphs nor a separate service.
+Buttons and dock items accept `icon: "name"` alongside their existing
+label/title; optional `icon_only: true` hides the text while retaining the
+label/title in the declaration and dock event. Unknown names fall back to
+text. List rows use the same catalog. A decorative `{kind: "icon", name:
+"folder", size: 32}` node supports explicit sizes from 12 to 64 pixels.
+Control icons follow the font snapshot (20–28px), inherit semantic theme
+colors, and share measurement with drawing. The desktop dock and Files
+navigation now use symbols alongside text. Traffic lights scale to 18–26px
+across, with five extra pixels of hit padding and gaps between targets;
+the shared frame applies this to applications and terminals alike. Trusted
+windows retain disabled controls. Icon coverage has host checks; QEMU
+screenshots and GUI/terminal drills verify placement and window actions.
+
 **Explorer polish (2026-09-12).** Files uses a 960px window, a compact
 Locations/Network section, a separate location line, Refresh, and a quiet
 item-count/volume footer. The shared frame supplies Close. Empty folders,
