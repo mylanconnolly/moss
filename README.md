@@ -54,6 +54,10 @@ moves between form controls and completes commands in the terminal.
 Alt-Tab switches windows; Shift-Tab moves backwards through a form.
 Terminal arrows browse history and move the cursor; Home/End/Delete work too.
 
+`zig build run-gui -Dgui-profile=gui` opens the component gallery. It uses
+shared sections, wrapping rows, buttons (including an inert disabled state),
+and a text field. Settings uses the same components and theme palette.
+
 Text fields support these editing gestures:
 
 | Gesture | Action |

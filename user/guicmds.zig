@@ -138,7 +138,7 @@ const restore_result = mshl.resultShape(.string, .string);
 // widget *content*: the layout of the view tree over the frame's content
 // area, plus the field/list interaction state the runtime owns.
 
-const pad = 24; // window inset for content
+const pad = shared.gui.space.inset; // window inset for content
 
 // The laid-out content height, from the measuring pass — the frame's
 // window is sized to it before the surface is created (`sizeToContent`).
@@ -286,15 +286,18 @@ fn strField(rec: mshl.Record, key: []const u8) []const u8 {
 
 /// Render one view tree into `focusables`, highlight the focused widget,
 /// and return the number of focusable widgets.
-const Size = struct { w: usize, h: usize };
+const Size = shared.gui.Size;
+var content_bg: u32 = 0;
+var hovered: ?usize = null;
+var pressed: ?usize = null;
 
-const gap = 16; // vertical/horizontal space between siblings
-const bpx = 20; // button horizontal padding
-const bpy = 11; // button vertical padding
-const fpx = 14; // field horizontal padding
-const fpy = 11; // field vertical padding
-const r_btn = 10; // button corner radius
-const r_field = 8; // field corner radius
+const gap = shared.gui.space.medium; // vertical/horizontal space between siblings
+const bpx = shared.gui.control.button_x; // button horizontal padding
+const bpy = shared.gui.control.button_y; // button vertical padding
+const fpx = shared.gui.control.field_x; // field horizontal padding
+const fpy = shared.gui.control.field_y; // field vertical padding
+const r_btn = shared.gui.control.radius; // button corner radius
+const r_field = shared.gui.control.radius; // field corner radius
 
 // Focus recording during a layout pass (draw order over the tree).
 var nfoc: usize = 0;
@@ -306,6 +309,7 @@ var sel_focus: usize = 0;
 fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     clipReset();
     fillAll(pal.bg);
+    content_bg = pal.bg;
     sel_focus = focus;
     nfoc = 0;
     nlisthit = 0;
@@ -324,7 +328,8 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
 fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8) void {
     const tree = it.callValue(view, &.{state}, null, null) catch return;
     wf.measuring = true;
-    _ = renderTree(tree, title, 0);
+    wf.drawChrome(title);
+    content_h = wf.title_h + 2 * pad + layoutNode(tree, 0, 0, wf.win_w - 2 * pad, false).h;
     wf.measuring = false;
     wf.win_h = @max(win_h_min, @min(content_h, win_h_max));
     // Centre in the area below the top-bar strut, so a window never opens
@@ -332,62 +337,117 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     wf.win_y = @max(top_strut + 8, top_strut + (scanout_h - top_strut - wf.win_h) / 2);
 }
 
-/// Lay out and draw a node at (x, y) within `avail_w`, returning its size.
-/// `column` stacks children, `row` flows them left-to-right; leaves are
-/// label / button / field.
-fn drawNode(node: Value, x: usize, y: usize, avail_w: usize) Size {
-    if (node != .record) return .{ .w = 0, .h = 0 };
-    const rec = node.record;
-    const kind = strField(rec, "kind");
-    const children: []const Value = kids: {
-        const c = rec.get("children") orelse break :kids &.{};
-        break :kids if (c == .list) c.list else &.{};
-    };
-    if (std.mem.eql(u8, kind, "row")) {
-        var xx = x;
-        var maxh: usize = 0;
-        for (children) |child| {
-            const sz = drawNode(child, xx, y, avail_w);
-            xx += sz.w + gap;
-            if (sz.h > maxh) maxh = sz.h;
-        }
-        return .{ .w = if (xx > x + gap) xx - x - gap else 0, .h = maxh };
-    }
-    if (std.mem.eql(u8, kind, "column") or children.len != 0) {
-        var yy = y;
-        for (children) |child| {
-            const sz = drawNode(child, x, yy, avail_w);
-            yy += sz.h + gap;
-        }
-        return .{ .w = avail_w, .h = if (yy > y + gap) yy - y - gap else 0 };
-    }
-    if (std.mem.eql(u8, kind, "label")) return drawLabel(rec, x, y);
-    if (std.mem.eql(u8, kind, "button")) return drawButton(rec, x, y);
-    if (std.mem.eql(u8, kind, "field")) return drawField(rec, x, y, avail_w);
-    if (std.mem.eql(u8, kind, "list")) return drawList(rec, x, y, avail_w);
-    if (std.mem.eql(u8, kind, "split")) return drawSplit(rec, x, y, avail_w);
-    return .{ .w = 0, .h = 0 };
+/// Children remain ordinary mshl data, shared by measurement and painting.
+fn nodeChildren(rec: mshl.Record) []const Value {
+    const c = rec.get("children") orelse return &.{};
+    return if (c == .list) c.list else &.{};
 }
 
-fn drawLabel(rec: mshl.Record, x: usize, y: usize) Size {
+fn nodeGap(rec: mshl.Record) usize {
+    return @intCast(std.math.clamp(intField(rec, "gap", gap), 0, 64));
+}
+
+fn drawNode(node: Value, x: usize, y: usize, avail_w: usize) Size {
+    const old_x0 = wf.clip_x0;
+    const old_x1 = wf.clip_x1;
+    wf.clip_x0 = @max(old_x0, x);
+    wf.clip_x1 = @min(old_x1, x + avail_w);
+    defer {
+        wf.clip_x0 = old_x0;
+        wf.clip_x1 = old_x1;
+    }
+    return layoutNode(node, x, y, avail_w, true);
+}
+
+/// Measurement never creates edit buffers, focus targets, or list state.
+/// Both passes use the same layout decisions, including wrapped rows.
+fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size {
+    if (node != .record) return .{};
+    const rec = node.record;
+    const kind = strField(rec, "kind");
+    const children = nodeChildren(rec);
+    if (std.mem.eql(u8, kind, "row")) {
+        var row = shared.gui.Flow{ .width = avail_w, .gap = nodeGap(rec) };
+        var row_h: usize = 0;
+        for (children) |child| row_h = @max(row_h, layoutNode(child, 0, 0, avail_w, false).h);
+        for (children) |child| {
+            const sz = layoutNode(child, 0, 0, avail_w, false);
+            const place = row.put(.{ .w = sz.w, .h = row_h });
+            if (paint) _ = drawNode(child, x + place.x, y + place.y + (row_h - sz.h) / 2, place.w);
+        }
+        return row.size();
+    }
+    const section = std.mem.eql(u8, kind, "section");
+    if (section or std.mem.eql(u8, kind, "column") or children.len != 0) {
+        const inset: usize = if (section) @min(shared.gui.space.large, avail_w / 2) else 0;
+        const width = avail_w - 2 * inset;
+        var height: usize = 0;
+        for (children, 0..) |child, i| {
+            if (i > 0) height += nodeGap(rec);
+            height += layoutNode(child, 0, 0, width, false).h;
+        }
+        const old_bg = content_bg;
+        if (paint and section) {
+            panel(x, y, avail_w, height + 2 * inset, r_field, pal.surface, pal.border, pal.border_w);
+            content_bg = pal.surface;
+        }
+        defer content_bg = old_bg;
+        if (paint) {
+            var yy = y + inset;
+            for (children, 0..) |child, i| {
+                if (i > 0) yy += nodeGap(rec);
+                yy += drawNode(child, x + inset, yy, width).h;
+            }
+        }
+        return .{ .w = avail_w, .h = height + 2 * inset };
+    }
+    if (std.mem.eql(u8, kind, "label")) {
+        if (paint) return drawLabel(rec, x, y, avail_w);
+        const role = if (std.mem.eql(u8, strField(rec, "role"), "title")) R_TITLE else R_UI;
+        return .{ .w = @min(avail_w, strW(role, strField(rec, "text"))), .h = lineOf(role) };
+    }
+    if (std.mem.eql(u8, kind, "button")) {
+        if (paint) return drawButton(rec, x, y, avail_w);
+        return .{ .w = @min(avail_w, strW(R_UI, strField(rec, "label")) + 2 * bpx), .h = lineOf(R_UI) + 2 * bpy };
+    }
+    if (std.mem.eql(u8, kind, "field")) {
+        if (paint) return drawField(rec, x, y, avail_w);
+        return .{ .w = avail_w, .h = lineOf(R_UI) + 2 * fpy + (if (strField(rec, "label").len > 0) lineOf(R_UI) + 6 else @as(usize, 0)) };
+    }
+    if (std.mem.eql(u8, kind, "list")) {
+        if (paint) return drawList(rec, x, y, avail_w);
+        return .{ .w = avail_w, .h = @intCast(@max(intField(rec, "h", 240), 40)) };
+    }
+    if (std.mem.eql(u8, kind, "split")) {
+        if (paint) return drawSplit(rec, x, y, avail_w);
+        const lw = @min(avail_w, @as(usize, @intCast(@max(intField(rec, "left_w", 220), 80))));
+        const l = if (rec.get("left")) |v| layoutNode(v, 0, 0, lw, false) else Size{};
+        const r = if (rec.get("right")) |v| layoutNode(v, 0, 0, avail_w -| (lw + gap + 1), false) else Size{};
+        return .{ .w = avail_w, .h = @max(l.h, r.h) };
+    }
+    return .{};
+}
+
+fn drawLabel(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const text = strField(rec, "text");
     const muted = rec.get("muted") != null and (rec.get("muted").?).asBool();
     const strong = std.mem.eql(u8, strField(rec, "role"), "title");
     const role: u64 = if (strong) R_TITLE else R_UI;
     const ink = if (strong) pal.title else if (muted) pal.text_muted else pal.text;
-    drawStr(x, y, role, text, ink, pal.bg);
-    return .{ .w = strW(role, text), .h = lineOf(role) };
+    drawStrTrunc(x, y, role, text, avail_w, ink, content_bg);
+    return .{ .w = @min(avail_w, strW(role, text)), .h = lineOf(role) };
 }
 
 /// A raised button: a filled box with a lighter top edge and a darker
 /// bottom edge (a little depth, not flat), a border, and — when focused —
-/// a bright ring plus a lift. `variant` gives it semantic colour: primary
+/// a bright ring. `variant` gives it semantic colour: primary
 /// (the accent), danger (destructive), or the neutral surface default.
-fn drawButton(rec: mshl.Record, x: usize, y: usize) Size {
+fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const label = strField(rec, "label");
     const variant = strField(rec, "variant");
-    const focused = nfoc == sel_focus;
-    const w = strW(R_UI, label) + 2 * bpx;
+    const disabled = if (rec.get("disabled")) |v| v.asBool() else false;
+    const focused = !disabled and wf.win_focused and nfoc == sel_focus;
+    const w = @min(avail_w, strW(R_UI, label) + 2 * bpx);
     const h = lineOf(R_UI) + 2 * bpy;
 
     var fill: u32 = pal.surface_hi;
@@ -399,17 +459,22 @@ fn drawButton(rec: mshl.Record, x: usize, y: usize) Size {
         fill = pal.danger;
         ink = pal.danger_ink;
     }
+    if (disabled) {
+        fill = pal.surface;
+        ink = pal.text_muted;
+    }
     // A rounded panel. Focus is a double cue (never colour alone): the
-    // border becomes a bright, thicker ring AND the fill lifts a shade.
+    // border becomes a bright, thicker ring. Hover and press change the fill.
     const ring = if (focused) pal.focus else pal.border;
     const ring_w = if (focused) pal.focus_w else pal.border_w;
-    if (focused) fill = shade(fill, 9, 8);
+    if (!disabled and hovered == nfoc) fill = shade(fill, 9, 8);
+    if (!disabled and pressed == nfoc and hovered == nfoc) fill = shade(fill, 4, 5);
     panel(x, y, w, h, r_btn, fill, ring, ring_w);
     // A soft top highlight inside the rounded fill — a hint of depth, not
     // a hard bar (kept clear of the corners so it never pokes past them).
-    fillRect(x + r_btn, y + ring_w, w - 2 * r_btn, 1, shade(fill, 6, 5));
-    drawStr(x + bpx, y + bpy, R_UI, label, ink, fill);
-    if (nfoc < focusables.len) {
+    fillRect(x + r_btn, y + ring_w, w -| (2 * r_btn), 1, shade(fill, 6, 5));
+    drawStrTrunc(x + bpx, y + bpy, R_UI, label, w -| (2 * bpx), ink, fill);
+    if (!disabled and nfoc < focusables.len) {
         focusables[nfoc] = .{ .id = strField(rec, "id"), .is_field = false, .bx = x, .by = y, .bw = w, .bh = h };
         nfoc += 1;
     }
@@ -422,10 +487,10 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const label = strField(rec, "label");
     const id = strField(rec, "id");
     const fb = fieldFor(id, strField(rec, "value"));
-    const focused = nfoc == sel_focus;
+    const focused = wf.win_focused and nfoc == sel_focus;
     var yy = y;
     if (label.len > 0) {
-        drawStr(x, yy, R_UI, label, pal.text_muted, pal.bg);
+        drawStr(x, yy, R_UI, label, pal.text_muted, content_bg);
         yy += lineOf(R_UI) + 6;
     }
     const bh = lineOf(R_UI) + 2 * fpy;
@@ -550,7 +615,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
             drawStrTrunc(hx, y + list_row_vpad, R_UI, strField(cv.record, "title"), cw -| 8, pal.text_muted, pal.field_bg);
             hx += cw;
         }
-        fillRect(x + pal.border_w, y + header_h, w - 2 * pal.border_w, pal.border_w, pal.border);
+        fillRect(x + pal.border_w, y + header_h, w -| (2 * pal.border_w), pal.border_w, pal.border);
     }
 
     const rows_top = y + header_h;
@@ -905,15 +970,26 @@ fn openPopup(m: MenuHit) void {
     pop_y = wf.win_y + wf.win_h;
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, wf.chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(pop_x), @intCast(pop_y)), .wh = shared.packPair(@intCast(pop_w), @intCast(pop_h)) } }, 0)) {
         .ok => |ok| ok,
-        .err => return,
+        .err => {
+            _ = usys.log(log_h, "topbar: popup IPC failed");
+            return;
+        },
     };
     pop_surf = switch (cs.rep) {
         .created => |c| c.surface,
-        else => return,
+        else => {
+            _ = usys.log(log_h, "topbar: popup allocation refused");
+            return;
+        },
     };
-    if (cs.cap == 0) return;
+    if (cs.cap == 0) {
+        _ = usys.log(log_h, "topbar: popup missing buffer");
+        return;
+    }
     const mp = usys.shmMap(cs.cap);
     if (mp.err != .ok) {
+        _ = usys.log(log_h, "topbar: popup mapping refused");
+        _ = usys.callTyped(shared.GpuReq, shared.GpuResp, wf.chan, .{ .destroy_surface = .{ .surface = pop_surf } }, 0);
         _ = usys.capDrop(cs.cap);
         return;
     }
@@ -1462,6 +1538,8 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
 
     resetFields();
     resetLists();
+    hovered = null;
+    pressed = null;
     // A fresh window: no drag in flight (module state persists across
     // `gui` calls in one process), and it opens focused (the compositor
     // sets a new surface as focused; a later `kind` 4 corrects us if not).
@@ -1494,6 +1572,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
     }
 
+    wf.pointer_tracking = true;
     if (!wf.openSurface(true)) return it.fail("gui: cannot open a surface", .{});
     defer wf.closeSurface();
     // Name the surface so the dock can restore this window by its title
@@ -1567,7 +1646,11 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 const now = ev.ch != 0;
                 if (now == wf.win_focused) continue :input;
                 wf.win_focused = now;
-                if (!now) field_drag = null;
+                if (!now) {
+                    field_drag = null;
+                    pressed = null;
+                    hovered = null;
+                }
                 _ = usys.log(log_h, if (now) "gui: focused" else "gui: unfocused");
                 if (minimized) continue :input; // nothing on screen to redraw
                 break :input;
@@ -1583,7 +1666,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // — but never mid-drag (a ticking clock must not drop a drag),
             // and never while minimized (nothing is on screen to update).
             if (ev.kind == 2) {
-                if (wf.dragging or minimized) continue :input;
+                if (wf.dragging or minimized or pressed != null) continue :input;
                 ticked = true;
                 break :input;
             }
@@ -1600,7 +1683,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         break :input;
                     }
                 }
-                switch (wf.onPointer(ev, title)) {
+                const old_hover = hovered;
+                hovered = hitWidget(nfocus, ev.x, ev.y);
+                const pointer = wf.onPointer(ev, title);
+                if (pressed) |wi| {
+                    if (ev.btn & 1 == 0) {
+                        pressed = null;
+                        if (hovered == wi and wi < nfocus) fired = focusables[wi].id;
+                        break :input;
+                    }
+                }
+                switch (pointer) {
                     .none => {},
                     .content => |cev| {
                         if (hitWidget(nfocus, cev.x, cev.y)) |wi| {
@@ -1616,7 +1709,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                 break :input; // re-render (selection or scroll moved)
                             }
                             if (!focusables[wi].is_field) {
-                                fired = focusables[wi].id;
+                                pressed = wi;
                                 break :input;
                             }
                             // Place the caret using the same font metrics as rendering.
@@ -1649,8 +1742,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     },
                     .resize_failed => return it.fail("gui: cannot resize the window", .{}),
                 }
+                if (old_hover != hovered) break :input;
                 continue :input;
             }
+            pressed = null;
             const ch = ev.ch;
             const cur: ?Focus = if (nfocus > 0) focusables[focus] else null;
             if (cur) |c| if (c.is_field and fieldFor(c.id, "").edit.key(ch)) break :input;

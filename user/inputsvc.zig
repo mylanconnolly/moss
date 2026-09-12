@@ -279,10 +279,11 @@ var pf_head: usize = 0;
 var pf_tail: usize = 0;
 
 fn pushFrame() void {
-    // Coalesce into the last unread frame if the buttons match (a move).
+    // Preserve the transition frame; only later moves may replace a move.
     if (pf_head != pf_tail) {
         const last = (pf_tail + pframes.len - 1) % pframes.len;
-        if (pframes[last].buttons == ptr_buttons) {
+        const before: ?u32 = if (last != pf_head) pframes[(last + pframes.len - 1) % pframes.len].buttons else null;
+        if (shared.pointerCanCoalesce(before, pframes[last].buttons, ptr_buttons)) {
             pframes[last] = .{ .x = ptr_x, .y = ptr_y, .buttons = ptr_buttons };
             return;
         }

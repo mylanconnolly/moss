@@ -78,7 +78,7 @@ pub const scanout_w = 1280;
 pub const scanout_h = 1024;
 pub const win_h_min = 220;
 pub const win_h_max = scanout_h - 48; // leave a margin top+bottom
-pub const pad = 24; // window inset for content
+pub const pad = shared.gui.space.inset; // window inset for content
 
 pub var win_w: usize = win_w_default;
 pub var win_x: usize = (scanout_w - win_w_default) / 2;
@@ -172,30 +172,30 @@ pub fn resolveTheme(theme: shared.Theme, contrast: shared.Contrast, cmode: share
     const cb = cmode == .cb_safe;
     var p: Palette = switch (theme) {
         .dark => .{
-            .bg = 0x0f1420,
-            .surface = 0x1a2133,
-            .surface_hi = 0x2a3450,
+            .bg = 0x17191d,
+            .surface = 0x22252a,
+            .surface_hi = 0x30343b,
             .text = 0xe6e9f0,
-            .text_muted = 0x9aa4bd,
+            .text_muted = 0xa9afb9,
             .title = 0xf0f3fa,
-            .border = 0x39435e,
+            .border = 0x3b4049,
             .focus = if (cb) 0x56b4e9 else 0x5aa2ff,
             .primary = if (cb) 0x0072b2 else 0x3d7dff,
             .primary_ink = 0xffffff,
             .danger = if (cb) 0xd55e00 else 0xe5484d,
             .danger_ink = 0xffffff,
-            .field_bg = 0x121a2b,
+            .field_bg = 0x1b1e23,
             .border_w = 1,
             .focus_w = 3,
         },
         .light => .{
-            .bg = 0xf2f4f8,
+            .bg = 0xf3f3f1,
             .surface = 0xffffff,
-            .surface_hi = 0xe7ebf2,
+            .surface_hi = 0xedeef0,
             .text = 0x1a1f2b,
             .text_muted = 0x5c6577,
-            .title = 0x0f1420,
-            .border = 0xc9d0dd,
+            .title = 0x17191d,
+            .border = 0xd3d5d9,
             .focus = if (cb) 0x0072b2 else 0x2563eb,
             .primary = if (cb) 0x0072b2 else 0x2563eb,
             .primary_ink = 0xffffff,
@@ -693,8 +693,9 @@ pub fn attachTrusted() bool {
 /// FIRST open of a fresh window only; a resize re-open (snap, maximize)
 /// wants exact placement, or the compositor could shift a snapped window
 /// off its edge.
+pub var pointer_tracking = false;
 pub fn openSurface(cascade: bool) bool {
-    const flags: u64 = if (cascade) shared.gpu_place_cascade else 0;
+    const flags: u64 = (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0));
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
         .ok => |ok| ok,
         .err => return false,
@@ -780,7 +781,7 @@ fn dragOrigin(cur: usize, local: usize, grab: usize, max_pos: usize) usize {
 /// An input event routed to our surface: a key (kind 0, `ch`), a pointer
 /// event (kind 1, surface-local `x`/`y` and button bitmask `btn`), a tick
 /// (kind 2), a restore (kind 3), or a focus change (kind 4).
-pub const Event = struct { kind: u64, surface: u64 = 0, ch: u8 = 0, x: usize = 0, y: usize = 0, btn: u64 = 0 };
+pub const Event = struct { kind: u64, surface: u64 = 0, ch: u8 = 0, x: usize = 0, y: usize = 0, btn: u64 = 0, screen_x: ?usize = null, screen_y: ?usize = null };
 
 // When > 0, the client asked for a live clock: read input with a tick so
 // the loop wakes every `tick_ms` even with no input, and re-renders.
@@ -794,7 +795,16 @@ pub fn nextInput() ?Event {
         usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .next_input, 0);
     return switch (rep) {
         .ok => |r| switch (r) {
-            .input => |v| .{ .kind = v.kind, .surface = v.surface, .ch = @intCast(v.arg & 0xff), .x = shared.ptrX(v.arg), .y = shared.ptrY(v.arg), .btn = shared.ptrBtn(v.arg) },
+            .input => |v| .{
+                .kind = if (v.kind == 6) 1 else v.kind,
+                .surface = v.surface,
+                .ch = @intCast(v.arg & 0xff),
+                .x = if (v.kind == 6) shared.ptrX(v.arg) -| win_x else shared.ptrX(v.arg),
+                .y = if (v.kind == 6) shared.ptrY(v.arg) -| win_y else shared.ptrY(v.arg),
+                .screen_x = if (v.kind == 6) shared.ptrX(v.arg) else null,
+                .screen_y = if (v.kind == 6) shared.ptrY(v.arg) else null,
+                .btn = shared.ptrBtn(v.arg),
+            },
             else => .{ .kind = 0, .ch = 0 },
         },
         .err => null,
@@ -888,8 +898,8 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
         return .{ .content = ev };
     }
     if (down and dragging) {
-        const nx = dragOrigin(win_x, ev.x, drag_grab_x, scanout_w - win_w);
-        const ny = dragOrigin(win_y, ev.y, drag_grab_y, scanout_h - win_h);
+        const nx = if (ev.screen_x) |sx| @min(sx -| drag_grab_x, scanout_w - win_w) else dragOrigin(win_x, ev.x, drag_grab_x, scanout_w - win_w);
+        const ny = if (ev.screen_y) |sy| @min(sy -| drag_grab_y, scanout_h - win_h) else dragOrigin(win_y, ev.y, drag_grab_y, scanout_h - win_h);
         if (nx != win_x or ny != win_y) {
             moveSurface(nx, ny);
             win_x = nx;
@@ -904,8 +914,8 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
             // scanout position is the window origin plus the release point
             // within it (valid through a drag: the window brackets the
             // cursor even when clamped).
-            const cx = @min(win_x + ev.x, scanout_w);
-            const cy = @min(win_y + ev.y, scanout_h);
+            const cx = @min(ev.screen_x orelse (win_x + ev.x), scanout_w);
+            const cy = @min(ev.screen_y orelse (win_y + ev.y), scanout_h);
             const zone = snapZoneAt(cx, cy);
             if (zone != .none and !win_trusted) {
                 // Remember the floating geometry to restore (the green dot

@@ -4,24 +4,47 @@
 # keyboard (Tab moves between the buttons, Enter fires the focused one),
 # and threads the returned state forward. No loop, no drawing here.
 let final = (gui {
-    init:  { count: 0, done: false }
-    title: "moss gui demo"
+    init:  { count: 0, done: false, name: "" }
+    title: "Moss · Components"
     view: (fn [state] {
         {
           kind: "column"
+          gap:  20
           children: [
-            { kind: "label", text: ("count: " + (str $state.count)) }
-            { kind: "button", id: "inc", label: "increment" }
-            { kind: "button", id: "quit", label: "quit" }
+            { kind: "label", role: "title", text: "A place for everything" }
+            { kind: "label", muted: true, text: "The shared building blocks of a Moss window." }
+            {
+              kind: "section"
+              children: [
+                { kind: "label", text: "Actions" }
+                { kind: "label", muted: true, text: ("Count: " + (str $state.count)) }
+                {
+                  kind: "row"
+                  children: [
+                    { kind: "button", id: "inc", label: "Increment", variant: "primary" }
+                    { kind: "button", id: "quit", label: "Close gallery" }
+                    { kind: "button", id: "unavailable", label: "Unavailable", disabled: true }
+                  ]
+                }
+              ]
+            }
+            {
+              kind: "section"
+              children: [
+                { kind: "label", text: "Text input" }
+                { kind: "field", id: "name", label: "Display name", value: "Moss" }
+                { kind: "label", muted: true, text: "Select with Shift + arrows. Move with Control + A / E." }
+              ]
+            }
           ]
         }
       })
     update: (fn [state, ev] {
         match $ev.id {
-          "inc" => { { count: ($state.count + 1), done: $state.done } }
-          "quit" => { { count: $state.count, done: true } }
+          "inc" => { { count: ($state.count + 1), done: $state.done, name: $state.name } }
+          "quit" => { { count: $state.count, done: true, name: $ev.fields.name } }
           _ => $state
         }
       })
   })
-"gui: done count=" + (str $final.count)
+"gui: done count=" + (str $final.count) + " name=" + $final.name

@@ -128,6 +128,7 @@ const Surface = struct {
     // window created focused needs no event, but one that opens behind the
     // focus (a second window) is told it is unfocused so it dims its chrome.
     notified_focus: bool = true,
+    pointer_tracking: bool = false,
     // Pointer events that arrived while this surface's owner had no reader
     // parked (it was busy — e.g. the dock blocked launching an app). Rather
     // than wedge the whole pointer ring on the undeliverable event (which
@@ -435,6 +436,12 @@ fn createSurface(owner: u64, x_req: u32, y_req: u32, w: u32, h: u32, cascade: bo
 }
 
 fn destroySurface(sf: *Surface) void {
+    if (findSurface(pointer_capture)) |old| {
+        if (old == sf) pointer_capture = 0;
+    }
+    if (findSurface(hover_surface)) |old| {
+        if (old == sf) hover_surface = 0;
+    }
     if (sf.va != 0) _ = usys.shmUnmap(sf.va);
     if (sf.shm != 0) _ = usys.capDrop(sf.shm);
     sf.* = .{};
@@ -829,7 +836,7 @@ fn dispatchKeys(chan_h: u64) void {
 // vacates and the one it enters. A button change (or a move while a
 // button is held — a drag) is routed to the surface under the cursor;
 // a press also gives that surface focus (click-to-focus). Pure moves
-// only slide the cursor — a hovering pointer never wakes a client.
+// reach only surfaces that explicitly request hover input.
 var ptr_chan: u64 = 0;
 var ptr_reader_stack: [32 << 10]u8 align(16) = undefined;
 
@@ -837,6 +844,8 @@ var cursor_x: usize = fb_w / 2;
 var cursor_y: usize = fb_h / 2;
 var cursor_shown: bool = false; // drawn once the first frame arrives
 var prev_buttons: u32 = 0;
+var hover_surface: u64 = 0;
+var pointer_capture: u64 = 0;
 
 const cursor_w = 11;
 const cursor_h = 16;
@@ -998,9 +1007,9 @@ fn raiseSurface(id: u64) void {
     _ = usys.log(comp_log, "comp: surface raised");
 }
 
-/// Drain buffered pointer frames: slide the cursor, and on a button
-/// change or a drag deliver a pointer event (surface-local) to the
-/// surface under the cursor, giving it focus on a press.
+/// Drain pointer frames. Legacy surfaces receive local button/drag events;
+/// tracked surfaces receive scanout coordinates, hover, and gesture capture.
+/// Only a press changes focus.
 fn dispatchPointer(chan_h: u64) void {
     // First, flush any pointer event that had to wait for a busy client to
     // park a reader again (see the coalescing below): the client is back, so
@@ -1021,11 +1030,23 @@ fn dispatchPointer(chan_h: u64) void {
         const changed = buttons != prev_buttons;
         const press = (buttons & ~prev_buttons) != 0; // a newly-pressed button
         prev_buttons = buttons;
-        // A bare hover (no button, no change) reaches no client — skip it.
-        if (!changed and buttons == 0) continue;
-        const id = surfaceUnderCursor();
+        const under = surfaceUnderCursor();
+        if (press and pointer_capture == 0) {
+            if (findSurface(under)) |target| {
+                if (target.pointer_tracking) pointer_capture = under;
+            }
+        }
+        const id = if (pointer_capture != 0) pointer_capture else under;
+        if (buttons == 0) pointer_capture = 0;
+        if (id != hover_surface and buttons == 0 and !changed) {
+            if (findSurface(hover_surface)) |old| {
+                if (old.pointer_tracking) pendPush(old, .{ .lx = 0xffff, .ly = 0xffff, .buttons = 0 });
+            }
+        }
+        hover_surface = id;
         if (id == 0) continue;
         const sf = findSurface(id).?;
+        if (!changed and buttons == 0 and !sf.pointer_tracking) continue;
         // Raising/focusing on press is the compositor's own bookkeeping, so
         // do it now even if the client is busy — the window still comes to
         // the front and takes the keyboard.
@@ -1033,28 +1054,30 @@ fn dispatchPointer(chan_h: u64) void {
             focusSurface(id);
             raiseSurface(id);
         }
-        const lx: u64 = cursor_x - sf.x;
-        const ly: u64 = cursor_y - sf.y;
+        const lx: u64 = if (sf.pointer_tracking) cursor_x else cursor_x - sf.x;
+        const ly: u64 = if (sf.pointer_tracking) cursor_y else cursor_y - sf.y;
         // A queued event for this surface must be delivered before this new
         // one, or order breaks — so if anything is pending, append (don't
         // deliver live out of order).
         if (sf.pend_head == sf.pend_tail) {
             if (takeReader(sf.owner)) |token| {
-                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = 1, .arg = shared.ptrArg(lx, ly, buttons) } }, 0, token);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(lx, ly, buttons) } }, 0, token);
                 continue;
             }
         }
         pendPush(sf, .{ .lx = lx, .ly = ly, .buttons = buttons });
     }
+    flushPendingPtr(chan_h);
 }
 
 /// Queue a pointer event for a busy surface. Consecutive moves (buttons
-/// unchanged from the tail) overwrite the tail so move spam cannot overflow;
-/// a button change always appends. On overflow the oldest is dropped.
+/// after the initial transition) overwrite the tail so move spam cannot
+/// erase the press coordinates. On overflow the oldest is dropped.
 fn pendPush(sf: *Surface, e: PendEv) void {
     if (sf.pend_head != sf.pend_tail) {
         const last = (sf.pend_tail + pend_cap - 1) % pend_cap;
-        if (sf.pend[last].buttons == e.buttons) {
+        const before: ?u32 = if (last != sf.pend_head) sf.pend[(last + pend_cap - 1) % pend_cap].buttons else null;
+        if (shared.pointerCanCoalesce(before, sf.pend[last].buttons, e.buttons)) {
             sf.pend[last] = e; // coalesce a move onto the tail
             return;
         }
@@ -1072,7 +1095,7 @@ fn flushPendingPtr(chan_h: u64) void {
         const token = takeReader(sf.owner) orelse continue;
         const e = sf.pend[sf.pend_head];
         sf.pend_head = (sf.pend_head + 1) % pend_cap;
-        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 1, .arg = shared.ptrArg(e.lx, e.ly, e.buttons) } }, 0, token);
+        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(e.lx, e.ly, e.buttons) } }, 0, token);
     }
 }
 
@@ -1134,6 +1157,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 }
                 const cascade = q.flags & shared.gpu_place_cascade != 0 and !full;
                 if (createSurface(badge, px_x, px_y, w, h, cascade)) |cs| {
+                    findSurface(cs.id).?.pointer_tracking = q.flags & shared.gpu_pointer_tracking != 0;
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h), .xy = shared.packPair(cs.x, cs.y) } }, cs.shm, token);
                 } else {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0, token);

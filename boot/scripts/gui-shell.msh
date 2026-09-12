@@ -74,49 +74,61 @@ while $running {
       view: (fn [state] {
           {
             kind: "column"
+            gap:  20
             children: [
-              { kind: "label", role: "title", text: "settings" }
-              { kind: "label", muted: true, text: "you" }
-              { kind: "label", text: ("scale " + (str $state.scale)) }
+              { kind: "label", role: "title", text: "Personal settings" }
+              { kind: "label", muted: true, text: "Appearance and language for your session." }
               {
-                kind: "row"
+                kind: "section"
                 children: [
-                  { kind: "button", id: "smaller", label: "smaller" }
-                  { kind: "button", id: "larger", label: "larger" }
-                ]
-              }
-              {
-                kind: "row"
-                children: [
-                  (match (theme-locked) {
-                      true => { kind: "label", muted: true, text: ("theme: " + $state.theme + " (system-locked)") }
-                      _ => { kind: "button", id: "theme", label: ("theme: " + $state.theme) }
-                    })
-                  { kind: "button", id: "contrast", label: ("contrast: " + $state.contrast) }
-                  { kind: "button", id: "colors", label: ("colours: " + $state.colors) }
-                ]
-              }
-              {
-                kind: "row"
-                children: [
-                  { kind: "button", id: "myloc", label: ("locale: " + $state.myloc) }
-                  { kind: "label", muted: true, text: (loc-sample $state.myloc) }
-                ]
-              }
-              { kind: "button", id: "apply", label: "apply", variant: "primary" }
-              { kind: "label", muted: true, text: "system" }
-              { kind: "label", text: ("default locale: " + $state.sysloc) }
-              (match $state.admin {
-                  true => {
+                  { kind: "label", text: "Appearance" }
+                  { kind: "label", muted: true, text: ("Text size · " + (str $state.scale) + "×") }
+                  {
                     kind: "row"
                     children: [
-                      { kind: "button", id: "cycleloc", label: "change locale" }
-                      { kind: "button", id: "savesys", label: "save system", variant: "primary" }
+                      { kind: "button", id: "smaller", label: "Smaller" }
+                      { kind: "button", id: "larger", label: "Larger" }
                     ]
                   }
-                  _ => { kind: "label", muted: true, text: "read-only (not an administrator)" }
-                })
-              { kind: "button", id: "logout", label: "close", variant: "danger" }
+                  {
+                    kind: "row"
+                    children: [
+                      (match (theme-locked) {
+                          true => { kind: "label", muted: true, text: ("Theme: " + $state.theme + " (managed)") }
+                          _ => { kind: "button", id: "theme", label: ("Theme: " + $state.theme) }
+                        })
+                      { kind: "button", id: "contrast", label: ("Contrast: " + $state.contrast) }
+                      { kind: "button", id: "colors", label: ("Colors: " + $state.colors) }
+                    ]
+                  }
+                  {
+                    kind: "row"
+                    children: [
+                      { kind: "button", id: "myloc", label: ("Language: " + $state.myloc) }
+                      { kind: "label", muted: true, text: (loc-sample $state.myloc) }
+                    ]
+                  }
+                  { kind: "button", id: "apply", label: "Apply changes", variant: "primary" }
+                ]
+              }
+              {
+                kind: "section"
+                children: [
+                  { kind: "label", text: "System defaults" }
+                  { kind: "label", muted: true, text: ("Default language: " + $state.sysloc) }
+                  (match $state.admin {
+                      true => {
+                        kind: "row"
+                        children: [
+                          { kind: "button", id: "cycleloc", label: "Change language" }
+                          { kind: "button", id: "savesys", label: "Save system", variant: "primary" }
+                        ]
+                      }
+                      _ => { kind: "label", muted: true, text: "An administrator manages these settings." }
+                    })
+                ]
+              }
+              { kind: "button", id: "logout", label: "Close" }
             ]
           }
         })

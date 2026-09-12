@@ -873,6 +873,12 @@ fn guiclickDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    // A press dragged onto another button must cancel, not activate either
+    // action. The final count below also catches activation on mouse-down.
+    if (!moveScanout(&q, inc[0], inc[1]) or !q.sendClick(true)) return false;
+    sleepMs(150);
+    if (!moveScanout(&q, quit[0], quit[1]) or !q.sendClick(false)) return false;
+    sleepMs(150);
     // Click increment; give the app a moment to update and re-park before
     // clicking quit (a pointer event with no reader parked is dropped).
     if (!clickScanout(&q, inc[0], inc[1])) {
@@ -1878,21 +1884,22 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(300);
     const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
     _ = q.screendump(ppm_path);
-    // Tab moves focus to "quit"; Enter fires it and the app closes.
-    for ([_][]const u8{ "tab", "ret" }) |k| {
-        if (!q.sendKey(k)) {
-            reportFailure(spec.name, "QMP could not type the gui keys", log_path);
-            return false;
-        }
+    // Traverse past the disabled action into the field, edit it, then
+    // Shift-Tab returns to Close. A disabled button must never take focus.
+    for ([_][]const u8{ "tab", "tab", "x" }) |k| {
+        if (!q.sendKey(k)) return false;
         sleepMs(150);
     }
+    if (!q.chord("shift", "tab")) return false;
+    sleepMs(150);
+    if (!q.sendKey("ret")) return false;
     var m: u64 = 0;
     while (true) {
         sleepMs(poll_ms);
         m += 1;
         polls.* += 1;
         const content = readLog(log_path);
-        if (std.mem.indexOf(u8, content, "gui: done count=1") != null) break;
+        if (std.mem.indexOf(u8, content, "gui: done count=1 name=Mossx") != null) break;
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the gui app never updated its state and closed", log_path);
             return false;
@@ -2336,6 +2343,7 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "gui: ready", 3, "the settings window never opened", spec, polls)) return false;
     if (!try waitLogN(log_path, "settings: admin=true", 1, "the admin's settings did not detect admin", spec, polls)) return false;
     sleepMs(1500); // let settings fully render and allocate before the next launch
+    _ = q.screendump(check_dir ++ "/settings.ppm");
     // With Settings still open, launch Files too (its pill sits below the
     // Settings window, so it stays clickable): a second app must open
     // alongside the first. This guards the session's memory budget — too

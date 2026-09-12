@@ -3325,6 +3325,55 @@ want keystrokes (`focuscli`, `readercli`, `trustcli`) now filter to `kind`
 same channel — a keystroke is no longer the only thing a `next_input` can
 return.
 
+### Shared GUI layout and visual foundations
+
+The first toolkit polish pass keeps the declarative mshl view/update model,
+capability grants, and surface-based architecture intact. `shared/gui.zig` owns common
+spacing and control metrics plus an allocation-free row flow algorithm.
+`guicmds` measures a tree without creating fields, list state, or focus targets,
+then paints using the same layout rules. Rows center children vertically on
+uniform-height lines, wrap in declaration order and constrain oversized children to their allocation; text is ellipsized
+and painting is horizontally clipped to that allocation. `gap` (0–64 pixels)
+controls row/column spacing. A `section` groups children on the semantic surface
+with a shared inset and border; nested text uses its actual surface background.
+These are data-only widget properties, so remote views use the same path.
+
+Window chrome and widgets share a quieter neutral light/dark palette. Blue
+marks actions and focus; high contrast and colorblind-safe resolution remain
+available. Buttons have hover/pressed feedback and activate on release inside
+their target; `disabled: true` renders an inert button and excludes it from
+keyboard traversal. GUI windows opt into `gpu_pointer_tracking` on surface
+creation: kind-6 events carry scanout coordinates, hover moves coalesce, and a
+press captures delivery through release. The frame converts coordinates when
+it reads the event, so a queued move cannot become stale when the window moves.
+An outside point clears hover on leave. Other surface clients retain their
+existing input behavior. Closing Settings is an ordinary action, not a
+red destructive button. The `gui` demo is now a component gallery (actions and text input),
+and Settings groups appearance and system defaults using the same primitives.
+Run `zig build run-gui -Dgui-profile=gui` for the gallery.
+
+This is a foundation, not the completed toolkit: general vertical scrolling,
+flexible tracks, text wrapping, more controls,
+and a desktop-wide visual migration remain open. In particular a very large
+text scale can still exceed a window's vertical viewport. The row algorithm has
+host tests for wrapping, exact fits, oversize children, and zero-width bounds;
+the GUI/desktop drills exercise the shared runtime in QEMU, including disabled
+focus traversal, canceling a press over another button, and drag/snapping.
+
+Lesson: delivering hover without pointer capture exposed the existing drag
+assumption that every frame stays over the moving window. Capturing the gesture
+and retaining scanout coordinates fixes both target loss and queued-coordinate
+staleness; adding sleeps to the drag driver would only hide the problem. The trace then
+exposed a second bug: both pointer queues allowed the first mouse-down frame
+to be overwritten by a subsequent move with the same button mask. A titlebar
+press could arrive over a traffic-light control instead. Both queues now keep
+the first frame of each button state and coalesce only subsequent moves; a
+shared host test fixes that rule for presses and releases. A separate desktop
+teardown race was caused by init's status-list handler setting `u.up = false`
+when the dock polled a just-exited top bar. Supervision subsequently skipped
+that essential unit and never shut down the session. Listing now reports a
+local liveness value without consuming the supervisor's death transition.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

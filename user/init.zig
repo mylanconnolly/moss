@@ -1052,13 +1052,16 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
             var n: usize = 0;
             for (units[0..nunits]) |*u| {
                 if (n == cap_recs) break;
+                // Listing must not consume a death before superviseDeaths
+                // handles restart policy or an essential unit shutdown.
+                var reported_up = u.up;
                 if (u.up and u.ctl != 0) {
                     const st = usys.domainStat(u.ctl);
-                    if (st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.dead)) u.up = false;
+                    if (st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.dead)) reported_up = false;
                 }
                 var rec: shared.UnitRec = .{
                     .name = @splat(0),
-                    .up = @intFromBool(u.up),
+                    .up = @intFromBool(reported_up),
                     .restarts = @intCast(u.restarts),
                     .max_restarts = @intCast(u.max_restarts),
                 };

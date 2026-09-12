@@ -771,6 +771,10 @@ pub const BlkResp = union(enum(u64)) {
 /// into a u64 (xy = x<<32 | y, wh = w<<32 | h) to fit the four-word ABI.
 /// `create_surface` flag: cascade this window off any it would fully cover.
 pub const gpu_place_cascade: u64 = 1;
+/// Receive kind-6 pointer events in scanout coordinates, including hover.
+/// A press captures the pointer until all buttons release. Moves coalesce
+/// while busy; (0xffff, 0xffff) with no buttons clears hover on leave.
+pub const gpu_pointer_tracking: u64 = 2;
 
 pub const GpuReq = union(enum(u64)) {
     /// A surface at `xy` (x<<32 | y on the scanout) of size `wh`. The
@@ -780,7 +784,8 @@ pub const GpuReq = union(enum(u64)) {
     /// `gpu_place_cascade` asks the compositor to nudge the window off any
     /// it would land squarely on top of, returning the final origin in the
     /// reply's `xy` (movable app windows set it; menus/exact placements
-    /// leave it 0). Other bits reserved, pass 0.
+    /// leave it 0). `gpu_pointer_tracking` opts into scanout pointer coordinates, hover, and capture.
+    /// Other bits reserved, pass 0.
     create_surface: struct { xy: u64, wh: u64, flags: u64 = 0 },
     /// A surface's damage rect changed (`xy`/`wh` in surface-local
     /// coordinates); the compositor recomposites the scanout and flushes.
@@ -858,6 +863,7 @@ pub const GpuResp = union(enum(u64)) {
     /// `kind` 3 is a *restore* (arg 0): the compositor un-minimized this
     /// surface (a `restore_titled` from the dock) — the client clears its
     /// minimized state and repaints.
+    /// Kind 6 is opt-in tracked pointer input: ptrArg in scanout coordinates.
     input: struct { surface: u64, kind: u64 = 0, arg: u64 = 0 },
     /// The trust token matched: + a badged channel cap the client uses in
     /// place of the shared display channel for all further requests.
@@ -1056,9 +1062,24 @@ pub fn unpackLo(v: u64) u32 {
     return @truncate(v);
 }
 
-/// Pack a pointer event's surface-local position and button bitmask into
-/// one word (GpuResp.input `arg` when kind is 1): x in bits 32..47, y in
-/// bits 16..31, buttons in bits 0..15.
+/// Whether a queued move may be replaced without changing a transition.
+pub fn pointerCanCoalesce(before: ?u32, tail: u32, incoming: u32) bool {
+    // The first frame of a button state is a transition, not a move. Its
+    // position determines what was pressed and must never be overwritten.
+    return if (before) |b| b == tail and tail == incoming else false;
+}
+
+test "pointer coalescing preserves press and release coordinates" {
+    try std.testing.expect(!pointerCanCoalesce(null, 1, 1));
+    try std.testing.expect(!pointerCanCoalesce(0, 1, 1));
+    try std.testing.expect(pointerCanCoalesce(1, 1, 1));
+    try std.testing.expect(!pointerCanCoalesce(1, 1, 0));
+    try std.testing.expect(!pointerCanCoalesce(1, 0, 0));
+    try std.testing.expect(pointerCanCoalesce(0, 0, 0));
+}
+
+/// Pack local (kind 1) or scanout (kind 6) coordinates and buttons:
+/// x in bits 32..47, y in bits 16..31, buttons in bits 0..15.
 pub fn ptrArg(x: u64, y: u64, btn: u64) u64 {
     return ((x & 0xffff) << 32) | ((y & 0xffff) << 16) | (btn & 0xffff);
 }
@@ -2081,4 +2102,9 @@ pub const TextEdit = @import("textedit.zig").Editor;
 test {
     _ = @import("keyboard.zig");
     _ = @import("textedit.zig");
+}
+
+pub const gui = @import("gui.zig");
+test {
+    _ = @import("gui.zig");
 }

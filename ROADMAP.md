@@ -1371,6 +1371,11 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
   cannot run on one machine at once.
 - Timing races have no deterministic replay; the soak and the trace
   ring are the tools. `-Dsoak` repeats whole drills, not steps.
+- Desktop polish validation exposed an intermittent `guishell` menu-open
+  stall. Popup allocation/mapping failures now log instead of silently
+  returning; preserve failed logs if this recurs. The separate post-logout
+  teardown race was traced to status listing consuming init's death state;
+  listing now leaves supervision state untouched.
 - Host unit tests cover the pure libraries and the ABI, not the
   kernel; kernel code is tested only under QEMU.
 
@@ -1385,11 +1390,22 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
   gate is blocked on this compatibility work. The relevant upstream check is
   `vtd_ce_pasid_0_check` in [QEMU 11.1.1](https://github.com/qemu/qemu/blob/v11.1.1/hw/i386/intel_iommu.c).
 
+**Unified GUI framework and polish**
+
+- First slice: shared metrics, side-effect-free measurement, bounded wrapping
+  rows, declarative surface sections, subdued semantic themes, button states,
+  a component gallery, captured GUI pointer gestures, and Settings adoption. Keep GUI definitions in mshl and
+  rendering/interaction in the toolkit; no new ambient authority or local-only
+  protocol. See DESIGN's shared GUI layout section.
+- Next: flexible tracks and alignment, wrapped text, general scroll containers
+  with focus reveal at large text scales, menus/toggles/dialogs, stable widget
+  identity through tree changes. Carry the visual system
+  through Files, login, terminal, dock, and top bar; validate all themes/scales.
+
 **GUI editing residuals**
 
 - System clipboard shortcuts in fields, undo/redo, double-click word selection,
-  Unicode word/grapheme navigation, IME/non-US layouts, and drag selection
-  capture outside a window. The first editing pass provides a caret, keyboard
+  Unicode word/grapheme navigation, and IME/non-US layouts. The first editing pass provides a caret, keyboard
   and in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
