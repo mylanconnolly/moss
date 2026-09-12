@@ -1013,6 +1013,7 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    _ = q.screendump(check_dir ++ "/explorer-polish.ppm");
     // Click the first row (a directory), then Enter to open it.
     if (!clickScanout(&q, cx, rows_top + row_h / 2)) {
         reportFailure(spec.name, "QMP could not click a folder", log_path);
@@ -1036,9 +1037,9 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     sleepMs(400);
-    // Close (the "close" button moved when the crumb changed — re-read it).
-    const c = widgetCenter(readLog(log_path), "close") orelse {
-        reportFailure(spec.name, "could not find the close button", log_path);
+    // Close through the shared window frame.
+    const c = parseDot(readLog(log_path), "close=") orelse {
+        reportFailure(spec.name, "could not find the close dot", log_path);
         return false;
     };
     if (!clickScanout(&q, c[0], c[1])) {
@@ -3529,8 +3530,8 @@ fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     sleepMs(600); // let the click switch to remote mode and re-list node 1
     // Close the window; the explorer echoes the node it browsed and the row
     // count on its way out.
-    const c = widgetCenter(readLog(log2), "close") orelse {
-        reportFailure(spec.name, "could not find the close button", log2);
+    const c = parseDot(readLog(log2), "close=") orelse {
+        reportFailure(spec.name, "could not find the close dot", log2);
         return false;
     };
     if (!clickScanout(&q, c[0], c[1])) {

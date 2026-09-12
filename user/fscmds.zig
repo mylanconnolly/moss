@@ -73,9 +73,8 @@ const path_param = Param{ .name = "path", .shape = .string };
 
 pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module", "fs-rows", "fs-parent", "fs-derive", "fs-leave", "fs-derived" };
 
-// `fs-rows` returns rows ready for the GUI `list` widget: `{ id, cells }`
-// where cells are display strings (name with a trailing `/` for a folder,
-// its kind, a human size), directories first then alphabetical. Built with
+// `fs-rows` returns rows ready for the GUI `list` widget: `{ id, cells, icon }`
+// where cells are display strings (name, friendly kind, human size), directories first then alphabetical. Built with
 // arena strings so a GUI can hold the rows across renders (unlike a
 // `map`-built value, which lives in a reclaimed call scope).
 const rows_result = mshl.resultShape(.list, fs_err);
@@ -352,18 +351,20 @@ pub fn fsRows(fs: *const Fs, it: *mshl.Interp, path_arg: []const u8) mshl.Error!
     const out = try a.alloc(Value, stats.items.len);
     for (stats.items, 0..) |st, i| {
         const isdir = st.type == .dir;
-        const dname = if (isdir) try std.fmt.allocPrint(a, "{s}/", .{st.name}) else st.name;
+        const dname = st.name;
         const size = if (isdir) "\u{2014}" else try humanSize(a, st.size); // — for a folder
         const cells = try a.alloc(Value, 3);
         cells[0] = .{ .str = dname };
-        cells[1] = .{ .str = @tagName(st.type) };
+        cells[1] = .{ .str = if (isdir) "Folder" else if (st.type == .file) "File" else "Link" };
         cells[2] = .{ .str = size };
-        const keys = try a.alloc([]const u8, 2);
+        const keys = try a.alloc([]const u8, 3);
         keys[0] = "id";
         keys[1] = "cells";
-        const vals = try a.alloc(Value, 2);
+        keys[2] = "icon";
+        const vals = try a.alloc(Value, 3);
         vals[0] = .{ .str = st.name };
         vals[1] = .{ .list = cells };
+        vals[2] = .{ .str = if (isdir) "folder" else "file" };
         out[i] = .{ .record = .{ .keys = keys, .vals = vals } };
     }
     return try okv(it, .{ .list = out });

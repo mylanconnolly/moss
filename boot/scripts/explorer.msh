@@ -10,7 +10,7 @@
 # list would not survive the interpreter's per-render reclaim.
 #
 # State: { path, depth, node }. node 0 = the local view (Home); node N>0 =
-# browsing peer N over the fabric. Capability-scoped views (Open read-only)
+# browsing peer N over the fabric. Capability-scoped views (Read-only view)
 # apply to the local view only — a remote node enforces read-only itself.
 
 # Join a directory path and a child name (no leading slash at the root).
@@ -48,9 +48,9 @@ def rows-for [state] {
 # The volume's capability facts, from `df` (statfs under the hood).
 def vol-line [] {
   let d = (df)
-  let enc = (match ($d | get "encrypted") { true => "encrypted"; _ => "plain" })
-  let rw = (match ($d | get "read_only") { true => "read-only"; _ => "read-write" })
-  ("volume: " + $enc + " · " + $rw + " · " + (str ($d | get "free_kb")) + " KB free")
+  let enc = (match ($d | get "encrypted") { true => "Encrypted"; _ => "Unencrypted" })
+  let rw = (match ($d | get "read_only") { true => "Read-only"; _ => "Read & write" })
+  ($enc + " · " + $rw + " · " + (str ($d | get "free_kb")) + " KB available")
 }
 
 # The footer: the local volume's facts, or the remote node we browse.
@@ -66,8 +66,8 @@ def footer [state] {
 def crumb [state] {
   match ($state | get "node") {
     0 => (match ($state | get "depth") {
-        0 => ("/" + ($state | get "path"))
-        _ => ("[scoped] /" + ($state | get "path"))
+        0 => ("Home /" + ($state | get "path"))
+        _ => ("Read-only view /" + ($state | get "path"))
       })
     _ => ("node " + (str ($state | get "node")) + ": /" + ($state | get "path"))
   }
@@ -76,73 +76,81 @@ def crumb [state] {
 let final = (gui {
     init:  { path: "", depth: 0, node: 0 }
     title: "Files"
+    width: 960
     view: (fn [state] {
+        let listing = (match $state.node {
+            0 => (fs-rows $state.path)
+            _ => (browse-rows $state.node $state.path)
+          })
+        let rows = (match $listing { ok $r => $r; _ => [] })
+        let empty = (match $listing {
+            ok _ => "This folder is empty."
+            _ => "Unable to read this folder. Try Refresh."
+          })
         {
           kind: "column"
+          gap:  16
           children: [
             {
               kind: "row"
               children: [
-                { kind: "button", id: "up", label: "Up" }
+                { kind: "button", id: "up", label: "Up", disabled: ($state.path == "") }
+                { kind: "button", id: "refresh", label: "Refresh" }
                 (match $state.node {
-                    0 => { kind: "button", id: "lock", label: "Open read-only" }
-                    _ => { kind: "label", muted: true, text: "" }
+                    0 => { kind: "button", id: "lock", label: "Read-only view" }
+                    _ => { kind: "label", muted: true, text: "Read-only connection" }
                   })
-                (match $state.node {
-                    0 => (match $state.depth {
-                        0 => { kind: "label", muted: true, text: "" }
-                        _ => { kind: "button", id: "leave", label: "Leave view", variant: "primary" }
-                      })
-                    _ => { kind: "label", muted: true, text: "" }
+                (match $state.depth {
+                    0 => { kind: "label", text: "" }
+                    _ => { kind: "button", id: "leave", label: "Leave view" }
                   })
-                { kind: "label", muted: true, text: (crumb $state) }
               ]
             }
+            { kind: "label", text: (crumb $state) }
             {
               kind:   "split"
               left_w: 200
               left: {
-                kind: "column"
+                kind: "section"
+                gap:  12
                 children: [
-                  { kind: "label", muted: true, text: "Places" }
+                  { kind: "label", muted: true, text: "Locations" }
                   {
-                    kind: "list"
-                    id:   "places"
-                    key:  "places"
-                    h:    56
-                    rows: [{ id: "", cells: ["Home"] }]
+                    kind: "list", id: "places", key: "places", h: 56
+                    active: ($state.node == 0)
+                    rows:   [{ id: "", icon: "folder", cells: [(match $state.depth { 0 => "Home"; _ => "This view" })] }]
                   }
                   { kind: "label", muted: true, text: "Network" }
                   {
-                    kind: "list"
-                    id:   "network"
-                    key:  "net"
-                    h:    320
-                    rows: (net-rows)
+                    kind: "list", id: "network", key: "net", h: 120
+                    active: ($state.node != 0)
+                    empty:  "No peers"
+                    rows:   (net-rows)
                   }
                 ]
               }
               right: {
-                kind: "list"
-                id:   "files"
-                key:  ((str $state.node) + ":" + $state.path)
-                h:    420
-                cols: [{ title: "Name", w: 320 } { title: "Kind", w: 110 } { title: "Size", w: 120 }]
-                rows: (rows-for $state)
+                kind: "list", id: "files"
+                key:   ((str $state.node) + ":" + (str $state.depth) + ":" + $state.path)
+                h:     420
+                fit:   true
+                empty: $empty
+                cols:  [{ title: "Name", w: 5 } { title: "Kind", w: 2 } { title: "Size", w: 2, right: true }]
+                rows:  $rows
               }
             }
-            { kind: "label", muted: true, text: (footer $state) }
-            { kind: "button", id: "close", label: "close", variant: "danger" }
+            { kind: "label", muted: true, text: ((str (len $rows)) + " items · " + (footer $state)) }
           ]
         }
       })
     update: (fn [state, ev] {
         match $ev.id {
+          "refresh" => $state
           "up" => { { path: (fs-parent $state.path), depth: $state.depth, node: $state.node } }
           "close" => { { path: $state.path, depth: $state.depth, node: $state.node, done: true } }
-          "places" => { { path: "", depth: 0, node: 0 } }
+          "places" => { { path: "", depth: $state.depth, node: 0 } }
           "network" => (match (int $ev.row) {
-              ok $n => { { path: "", depth: 0, node: $n } }
+              ok $n => { { path: "", depth: $state.depth, node: $n } }
               _ => $state
             })
           "lock" => (match (fs-derive $state.path true) {

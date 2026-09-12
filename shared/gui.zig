@@ -57,3 +57,40 @@ test "empty and zero-width rows are defined" {
     try std.testing.expectEqual(@as(usize, 0), row.put(.{ .w = 100, .h = 20 }).w);
     try std.testing.expectEqual(@as(usize, 20), row.size().h);
 }
+
+/// Integer tracks share the entire available width without rounding drift.
+pub fn trackWidth(available: usize, total: usize, before: usize, weight: usize) usize {
+    if (total == 0) return 0;
+    return available * (before + weight) / total - available * before / total;
+}
+test "proportional columns fit including rounding and narrow widths" {
+    for ([_]usize{ 0, 1, 17, 701 }) |w| {
+        const a = trackWidth(w, 6, 0, 3);
+        const b = trackWidth(w, 6, 3, 2);
+        const c = trackWidth(w, 6, 5, 1);
+        try std.testing.expectEqual(w, a + b + c);
+        try std.testing.expect(a >= b);
+    }
+}
+
+/// Two presses on one row within 500 ms activate it; a later click selects.
+pub const DoubleClick = struct {
+    row: ?usize = null,
+    at_ms: u64 = 0,
+    pub fn press(self: *DoubleClick, row: usize, now_ms: u64) bool {
+        const activate = self.row == row and now_ms >= self.at_ms and now_ms - self.at_ms <= 500;
+        self.* = if (activate) .{} else .{ .row = row, .at_ms = now_ms };
+        return activate;
+    }
+};
+test "double clicks expire, stay on one row, and reset after activation" {
+    var click: DoubleClick = .{};
+    try std.testing.expect(!click.press(2, 100));
+    try std.testing.expect(!click.press(2, 800));
+    try std.testing.expect(click.press(2, 1000));
+    try std.testing.expect(!click.press(2, 1100));
+    try std.testing.expect(!click.press(3, 1200));
+    try std.testing.expect(click.press(3, 1300));
+    click = .{}; // a directory change forgets the previous row
+    try std.testing.expect(!click.press(3, 1400));
+}

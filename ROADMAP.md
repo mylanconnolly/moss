@@ -1418,6 +1418,12 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **Files polish** (2026-09-12): compact navigation, Refresh, explicit
+  empty/error states, and proportional Name/Kind/Size columns with shared
+  folder/file icons and focus-aware selection. Real double-click timing
+  replaces indefinite reclick activation; folder changes reset click history.
+  Switching locations preserves the local capability view depth.
+
 - ✅ **Consistent font-scale geometry** (2026-09-12): measurement, baselines
   and glyph layout share a device-size snapshot; Settings refreshes it on
   Apply, and resident bars resize without taking focus. Atlas mappings are

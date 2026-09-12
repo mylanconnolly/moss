@@ -166,7 +166,7 @@ const ListState = struct {
     sel: usize = 0, // selected row index
     nrows: usize = 0, // rows the last render laid out (for clamping)
     vis: usize = 0, // rows that fit the viewport (for paging)
-    last_click: i64 = -1, // last row a click landed on (reclick = activate)
+    click: shared.gui.DoubleClick = .{},
 };
 var list_states: [max_lists]ListState = @splat(.{});
 
@@ -200,6 +200,7 @@ fn listFor(id: []const u8, key: []const u8) *ListState {
         @memcpy(l.key[0..l.key_len], key[0..l.key_len]);
         l.scroll = 0;
         l.sel = 0;
+        l.click = .{};
     }
     return l;
 }
@@ -591,7 +592,9 @@ fn cellAt(cellsv: Value, ci: usize) []const u8 {
 /// A scrollable, selectable list. Record fields: `id` (interaction key),
 /// `key` (content identity — a new value resets scroll/selection), `h`
 /// (viewport height in px), optional `cols` [{title, w, right?}] for a
-/// header + column layout, and `rows` [{id, cells:[str]}]. The runtime owns
+/// header + column layout, and `rows` [{id, cells:[str], icon?}]. `fit`
+/// treats column widths as weights; `empty` supplies a placeholder and
+/// `active` controls selection highlighting. The runtime owns
 /// the scroll offset and selection (see `ListState`); the app just emits
 /// the rows. Registers one focusable (the whole list), so its rows never
 /// eat the focusable budget.
@@ -607,15 +610,29 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const row_h = line + 2 * list_row_vpad;
     const header_h: usize = if (cols.len > 0) line + 2 * list_row_vpad else 0;
 
-    panel(x, y, w, box_h, r_field, pal.field_bg, pal.border, pal.border_w);
+    const focused = wf.win_focused and nfoc == sel_focus;
+    const active = if (rec.get("active")) |v| v.asBool() else true;
+    const fit = if (rec.get("fit")) |v| v.asBool() else false;
+    var total_weight: usize = 0;
+    for (cols) |cv| if (cv == .record) {
+        total_weight += @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
+    };
+    const tracks_w = w -| (2 * list_cell_pad + 8);
+    panel(x, y, w, box_h, r_field, pal.field_bg, if (focused) pal.focus else pal.border, if (focused) pal.focus_w else pal.border_w);
 
     // Header: muted column titles + a rule beneath them.
     if (cols.len > 0) {
         var hx = x + list_cell_pad;
+        var before: usize = 0;
         for (cols) |cv| {
             if (cv != .record) continue;
-            const cw: usize = @intCast(@max(intField(cv.record, "w", 80), 8));
-            drawStrTrunc(hx, y + list_row_vpad, R_UI, strField(cv.record, "title"), cw -| 8, pal.text_muted, pal.field_bg);
+            const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
+            const cw = if (fit) shared.gui.trackWidth(tracks_w, total_weight, before, weight) else weight;
+            before += weight;
+            const text = strField(cv.record, "title");
+            const right = if (cv.record.get("right")) |v| v.asBool() else false;
+            const offset = if (right) (cw -| 8) -| strW(R_UI, text) else 0;
+            drawStrTrunc(hx + offset, y + list_row_vpad, R_UI, text, cw -| 8, pal.text_muted, pal.field_bg);
             hx += cw;
         }
         fillRect(x + pal.border_w, y + header_h, w -| (2 * pal.border_w), pal.border_w, pal.border);
@@ -651,25 +668,52 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     wf.clip_x1 = @min(wf.clip_x1, x + pal.border_w + rows_w);
     wf.clip_y1 = @min(wf.clip_y1, y + box_h - pal.border_w);
 
+    if (nrows == 0) {
+        const message = strField(rec, "empty");
+        drawStrTrunc(x + list_cell_pad, rows_top + list_row_vpad + 8, R_UI, message, rows_w -| (2 * list_cell_pad), pal.text_muted, pal.field_bg);
+    }
     var i = st.scroll;
     var ry = rows_top;
     while (i < nrows and i < st.scroll + vis) : (i += 1) {
-        const selected = i == st.sel;
-        if (selected) fillRect(x + pal.border_w, ry, rows_w, row_h, pal.primary);
-        const ink = if (selected) pal.primary_ink else pal.text;
-        const cell_bg = if (selected) pal.primary else pal.field_bg;
+        const selected = active and i == st.sel;
+        const cell_bg = if (selected) (if (focused) pal.primary else pal.surface_hi) else pal.field_bg;
+        if (selected) fillRect(x + pal.border_w, ry, rows_w, row_h, cell_bg);
+        const ink = if (selected and focused) pal.primary_ink else pal.text;
+        const iconv = rowField(rowsv, i, "icon");
+        const icon = if (iconv == .str) iconv.str else "";
+        const icon_pad: usize = if (icon.len > 0) 26 else 0;
+        if (icon.len > 0) {
+            const ix = x + list_cell_pad;
+            const iy = ry + (row_h - 16) / 2;
+            const color = if (selected and focused) pal.primary_ink else pal.primary;
+            if (std.mem.eql(u8, icon, "folder")) {
+                fillRoundRect(ix, iy + 3, 19, 13, 2, color);
+                fillRoundRect(ix + 1, iy, 8, 6, 1, color);
+            } else {
+                panel(ix + 3, iy, 12, 16, 2, cell_bg, ink, 1);
+                fillRect(ix + 6, iy + 6, 6, 1, ink);
+                fillRect(ix + 6, iy + 10, 6, 1, ink);
+            }
+        }
         const ty = ry + list_row_vpad;
         const cellsv = rowField(rowsv, i, "cells");
         if (cols.len > 0) {
             var cx = x + list_cell_pad;
+            var before: usize = 0;
             for (cols, 0..) |cv, ci| {
                 if (cv != .record) continue;
-                const cw: usize = @intCast(@max(intField(cv.record, "w", 80), 8));
-                drawStrTrunc(cx, ty, R_UI, cellAt(cellsv, ci), cw -| 8, ink, cell_bg);
+                const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
+                const cw = if (fit) shared.gui.trackWidth(tracks_w, total_weight, before, weight) else weight;
+                before += weight;
+                const text = cellAt(cellsv, ci);
+                const inset = if (ci == 0) icon_pad else 0;
+                const right = if (cv.record.get("right")) |v| v.asBool() else false;
+                const offset = if (right) (cw -| 8) -| strW(R_UI, text) else inset;
+                drawStrTrunc(cx + offset, ty, R_UI, text, cw -| (8 + offset), if (ci > 0 and !selected) pal.text_muted else ink, cell_bg);
                 cx += cw;
             }
         } else {
-            drawStrTrunc(x + list_cell_pad, ty, R_UI, cellAt(cellsv, 0), rows_w -| (2 * list_cell_pad), ink, cell_bg);
+            drawStrTrunc(x + list_cell_pad + icon_pad, ty, R_UI, cellAt(cellsv, 0), rows_w -| (2 * list_cell_pad + icon_pad), ink, cell_bg);
         }
         ry += row_h;
     }
@@ -776,9 +820,9 @@ fn listClick(id: []const u8, x: usize, y: usize) ListClick {
         if (y < lh.rows_top) return .{};
         const row = st.scroll + (y - lh.rows_top) / lh.row_h;
         if (row >= st.nrows) return .{};
-        const activated = st.last_click == @as(i64, @intCast(row));
+        const now_ms = usys.cycles() / @max(usys.cycleHz() / 1000, 1);
+        const activated = st.click.press(row, now_ms);
         st.sel = row;
-        st.last_click = @intCast(row);
         keepSelVisible(st);
         return .{ .fire = true, .activated = activated, .row = row };
     }
@@ -1797,7 +1841,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         if (listStateById(c.id)) |st| {
                             if (ch == key_up) st.sel = st.sel -| 1 else if (st.sel + 1 < st.nrows) st.sel += 1;
                             keepSelVisible(st);
-                            st.last_click = -1;
+                            st.click = .{};
                             fired = c.id;
                             fired_list = true;
                             fired_row = listRowId(tree, c.id, st.sel);

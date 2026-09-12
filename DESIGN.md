@@ -4261,7 +4261,7 @@ from `ls`, so it is unaffected, but a `map`-in-`view` that is retained is a
 trap until the interpreter promotes such results out of the call scope.
 
 **The file explorer, local (as built, 2026-09-10).** A two-pane explorer
-written in mshl (`boot/scripts/explorer.msh`): a **Places** sidebar (Home)
+written in mshl (`boot/scripts/explorer.msh`): a **Locations** sidebar (Home)
 and a file list of the current directory — name, kind, size, directories
 first — in a `split`, with an "Up" button, a breadcrumb, and a footer
 showing the volume's capability facts. Navigation is state: the app keeps a
@@ -4270,9 +4270,9 @@ row's activation only navigates if the target lists as a directory (it
 tries `fs-rows` on it and stays put on an error), so a file open is a
 no-op rather than a broken path. The rows come from a new Zig command,
 **`fs-rows [path]`** (`user/fscmds.zig`): it does the `ls` listing, sorts
-directories first then by name, and returns `{id, cells}` rows with display
-strings (a folder's name carries a trailing `/`, a human size like `2.1
-KB`) — built with arena strings so the list widget can hold them across
+directories first then by name, and returns `{id, cells, icon}` rows with
+display strings (plain names, Folder/File/Link kinds, and human sizes like
+`2.1 KB`) — built with arena strings so the list widget can hold them across
 renders, the point the stage-1 lesson made. The footer reads `df`, which
 gained a **`read_only`** field (the bit was already on the `statfs` wire,
 just never surfaced to a script) beside `encrypted` — so the explorer
@@ -4284,6 +4284,21 @@ the first folder, opens it, and closes — the app reporting a non-empty
 path proves the click, activation, and descent. The desktop dock gained a
 **Files** pill (a lazy session unit, `conf/sessiongui/explorer.msh`, over
 the session's own home view), so it launches like Settings and Demo.
+
+**Explorer polish (2026-09-12).** Files uses a 960px window, a compact
+Locations/Network section, a separate location line, Refresh, and a quiet
+item-count/volume footer. The shared frame supplies Close. Empty folders,
+missing peers, and listing errors have explicit placeholders. Shared lists
+accept proportional `fit` columns, right alignment, optional folder/file
+icons, and `active` selection state; unfocused selection is subdued. Name,
+Kind and Size therefore fit together at both supported font scales instead
+of fixed columns hiding Size beyond the viewport. Local view depth survives
+Home and Network switches. List activation requires two clicks on the same
+row within 500ms; content changes and keyboard navigation clear that
+history. A previous click must not turn a later selection into navigation.
+Host tests cover track rounding and click timing; the explorer and network
+drills exercise navigation and frame close, with desktop screenshots at
+1x and 1.5x checked for layout.
 
 **Capability-scoped views in the explorer (as built, 2026-09-10).** The
 filesystem's standout feature — a view is a capability you can narrow and
