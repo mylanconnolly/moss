@@ -2075,3 +2075,10 @@ test "handle round-trips through its integer representation" {
     try std.testing.expect(h.eql(back));
     try std.testing.expect(!h.eql(Handle.invalid));
 }
+
+pub const keyboard = @import("keyboard.zig");
+pub const TextEdit = @import("textedit.zig").Editor;
+test {
+    _ = @import("keyboard.zig");
+    _ = @import("textedit.zig");
+}

@@ -185,6 +185,10 @@ retired with a note. **Landed** is the story of what was built, entry
 by entry as it happened, with the bugs each piece found; nothing there
 is a plan.
 
+**GUI input policy:** plain Tab belongs to the focused window (widget traversal
+or terminal completion); Alt-Tab cycles windows. Fields own cursor/selection
+state and support Emacs-style editing plus Shift/Option/Command navigation.
+
 ### Open
 
 **Arcs**
@@ -641,8 +645,9 @@ is a plan.
     gpusvc a keyboard (the `compositor` unit; plain `gpusvc` has none) it
     reads inputsvc itself and owns focus — create_surface focuses the new
     surface, GpuReq.next_input returns the next key tagged with the
-    focused surface, Tab cycles focus. Drilled (profile focus,
-    user/focuscli.zig): two windows, `a`/Tab/`b` typed, client confirms
+    focused surface, Alt-Tab cycles focus (plain Tab stays in the window).
+    Drilled (profile focus,
+    user/focuscli.zig): two windows, `a`/Tab/Alt-Tab/`b` typed, client confirms
     each key reached the right window. ✅ focus cue (landed 2026-09-08):
     the compositor draws a yellow border inside the focused surface's
     edges, composited last (on top in overlaps), only when it holds a
@@ -1369,8 +1374,37 @@ is a plan.
 - Host unit tests cover the pure libraries and the ABI, not the
   kernel; kernel code is tested only under QEMU.
 
+**x86_64 emulator compatibility**
+
+- The installed QEMU 11.1.1 no longer accepts `x-scalable-mode` / `x-flts`.
+  Renaming them to `scalable-mode` / `fsts` boots the CPU drills, but device
+  drills fault with invalid PASID entry (0x5b): QEMU now validates the
+  default PASID entry, while this port shares one PASID table and uses a
+  distinct RID_PASID per device. Adapting the port must preserve per-device
+  DMA isolation; the GUI editing change was built for x86_64 but its full
+  gate is blocked on this compatibility work. The relevant upstream check is
+  `vtd_ce_pasid_0_check` in [QEMU 11.1.1](https://github.com/qemu/qemu/blob/v11.1.1/hw/i386/intel_iommu.c).
+
+**GUI editing residuals**
+
+- System clipboard shortcuts in fields, undo/redo, double-click word selection,
+  Unicode word/grapheme navigation, IME/non-US layouts, and drag selection
+  capture outside a window. The first editing pass provides a caret, keyboard
+  and in-window drag selection, local kill/yank, and stable Tab ownership.
+
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **GUI text editing and Tab ownership** (2026-09-11): text fields now
+  insert at a caret, highlight and replace selections, support Shift/Option/
+  Command navigation and Emacs-style movement and kill/yank, and scroll text
+  horizontally. Click places the caret and an in-window drag selects text.
+  Plain Tab always reaches the focused window; Alt-Tab switches surfaces.
+  Terminal navigation translates to VT sequences and Tab reaches completion.
+  Found: the compositor stole Tab whenever another surface existed; the
+  keyboard driver discarded modifiers; private arrow bytes collided with
+  ASCII control keys. Shared decoder/editor host tests and QEMU focus, login
+  and terminal regressions cover the corrected paths. DESIGN records the
+  remaining editing limits.
 - ✅ **The framebuffer console** (2026-09-04): `kernel/fbcon.zig` draws
   the log on the framebuffer the loader hands over — Limine's
   framebuffer response on x86_64, mapped write-combining through PAT

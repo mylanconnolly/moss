@@ -224,13 +224,14 @@ const FieldBuf = struct {
     used: bool = false,
     id: [32]u8 = undefined,
     id_len: usize = 0,
-    buf: [64]u8 = undefined,
-    len: usize = 0,
+    edit: shared.TextEdit = .{},
+    secret: bool = false,
 };
 var field_bufs: [max_fields]FieldBuf = @splat(.{});
 
 fn resetFields() void {
     field_bufs = @splat(.{});
+    field_drag = null;
 }
 
 /// The edit buffer for a field id, created (seeded from `seed`) on first sight.
@@ -243,33 +244,38 @@ fn fieldFor(id: []const u8, seed: []const u8) *FieldBuf {
             f.used = true;
             f.id_len = @min(id.len, f.id.len);
             @memcpy(f.id[0..f.id_len], id[0..f.id_len]);
-            f.len = @min(seed.len, f.buf.len);
-            @memcpy(f.buf[0..f.len], seed[0..f.len]);
+            f.edit.seed(seed);
             return f;
         }
     }
     return &field_bufs[0]; // more than max_fields: reuse the first slot
 }
 
-fn fieldAppend(id: []const u8, ch: u8) void {
-    const f = fieldFor(id, "");
-    if (f.len < f.buf.len) {
-        f.buf[f.len] = ch;
-        f.len += 1;
+var field_drag: ?usize = null;
+fn fieldClick(focus: Focus, x: usize, select: bool) void {
+    const f = fieldFor(focus.id, "");
+    const ed = &f.edit;
+    var dots: [64]u8 = @splat('*');
+    const shown = if (f.secret) dots[0..ed.len] else ed.buf[0..ed.len];
+    const local = x -| (focus.bx + fpx);
+    const room = focus.bw -| (2 * fpx + 3);
+    var pos = ed.first;
+    while (pos < ed.len) {
+        const next = ed.next(pos);
+        const left = strW(R_UI, shown[ed.first..pos]);
+        const right = strW(R_UI, shown[ed.first..next]);
+        if (local < (left + right) / 2 or left > room) break;
+        pos = next;
     }
-}
-
-fn fieldBackspace(id: []const u8) void {
-    const f = fieldFor(id, "");
-    if (f.len > 0) f.len -= 1;
+    ed.move(pos, select);
 }
 
 // Arrow keys arrive as private control bytes (inputsvc maps them); a
 // focused scrollable list uses them to move its selection.
-const key_up: u8 = 17;
-const key_down: u8 = 18;
-const key_left: u8 = 19;
-const key_right: u8 = 20;
+const key_up: u8 = shared.keyboard.up;
+const key_down: u8 = shared.keyboard.down;
+const key_left: u8 = shared.keyboard.left;
+const key_right: u8 = shared.keyboard.right;
 
 /// Render one view tree. Fills the window, draws the title and each child
 /// of the (single, column) layout, highlighting the focused button, and
@@ -429,15 +435,34 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const tx = x + fpx;
     const ty = yy + fpy;
     const secret = rec.get("secret") != null and (rec.get("secret").?).asBool();
+    fb.secret = secret;
     var dots: [64]u8 = undefined;
     const shown: []const u8 = if (secret) blk: {
-        const mlen = @min(fb.len, dots.len);
+        const mlen = @min(fb.edit.len, dots.len);
         for (0..mlen) |i| dots[i] = '*';
         break :blk dots[0..mlen];
-    } else fb.buf[0..fb.len];
-    drawStr(tx, ty, R_UI, shown, pal.text, pal.field_bg);
-    // The focus ring is already drawn by `panel`; add the caret.
-    if (focused) fillRect(tx + strW(R_UI, shown) + 1, ty, 2, lineOf(R_UI), pal.focus);
+    } else fb.edit.buf[0..fb.edit.len];
+    const ed = &fb.edit;
+    const room = avail_w -| (2 * fpx + 3);
+    ed.first = @min(ed.first, ed.cursor);
+    while (ed.first < ed.cursor and strW(R_UI, shown[ed.first..ed.cursor]) > room) ed.first = ed.next(ed.first);
+    var last = ed.first;
+    while (last < ed.len) {
+        const next = ed.next(last);
+        if (strW(R_UI, shown[ed.first..next]) > room) break;
+        last = next;
+    }
+    const lo = @max(ed.first, ed.low());
+    const hi = @min(last, ed.high());
+    if (focused and hi > lo) {
+        const sx = tx + strW(R_UI, shown[ed.first..lo]);
+        const sw = strW(R_UI, shown[lo..hi]);
+        fillRect(sx, ty, sw, lineOf(R_UI), pal.focus);
+        drawStr(tx, ty, R_UI, shown[ed.first..lo], pal.text, pal.field_bg);
+        drawStr(sx, ty, R_UI, shown[lo..hi], pal.bg, pal.focus);
+        drawStr(sx + sw, ty, R_UI, shown[hi..last], pal.text, pal.field_bg);
+    } else drawStr(tx, ty, R_UI, shown[ed.first..last], pal.text, pal.field_bg);
+    if (focused) fillRect(tx + strW(R_UI, shown[ed.first..ed.cursor]), ty, 2, lineOf(R_UI), pal.focus);
     if (nfoc < focusables.len) {
         focusables[nfoc] = .{ .id = id, .is_field = true, .bx = x, .by = yy, .bw = avail_w, .bh = bh };
         nfoc += 1;
@@ -708,7 +733,7 @@ fn mkEvent(it: *mshl.Interp, id: []const u8) mshl.Error!Value {
     for (field_bufs) |f| {
         if (!f.used) continue;
         fkeys[i] = try it.arena.dupe(u8, f.id[0..f.id_len]);
-        fvals[i] = .{ .str = try it.arena.dupe(u8, f.buf[0..f.len]) };
+        fvals[i] = .{ .str = try it.arena.dupe(u8, f.edit.buf[0..f.edit.len]) };
         i += 1;
     }
     const fields = Value{ .record = .{ .keys = fkeys, .vals = fvals } };
@@ -1542,6 +1567,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 const now = ev.ch != 0;
                 if (now == wf.win_focused) continue :input;
                 wf.win_focused = now;
+                if (!now) field_drag = null;
                 _ = usys.log(log_h, if (now) "gui: focused" else "gui: unfocused");
                 if (minimized) continue :input; // nothing on screen to redraw
                 break :input;
@@ -1568,6 +1594,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // widgets. The chrome logging stays here, so it reads the same
             // as before the frame was split out.
             if (ev.kind == 1) {
+                if (field_drag) |wi| {
+                    if (ev.btn & 1 == 0) field_drag = null else {
+                        if (wi < nfocus) fieldClick(focusables[wi], ev.x, true);
+                        break :input;
+                    }
+                }
                 switch (wf.onPointer(ev, title)) {
                     .none => {},
                     .content => |cev| {
@@ -1587,7 +1619,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                 fired = focusables[wi].id;
                                 break :input;
                             }
-                            // A field: focus is set; wait for the next event.
+                            // Place the caret using the same font metrics as rendering.
+                            fieldClick(focusables[wi], cev.x, false);
+                            field_drag = wi;
+                            break :input;
                         }
                     },
                     .moved => {
@@ -1618,9 +1653,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             }
             const ch = ev.ch;
             const cur: ?Focus = if (nfocus > 0) focusables[focus] else null;
+            if (cur) |c| if (c.is_field and fieldFor(c.id, "").edit.key(ch)) break :input;
             switch (ch) {
-                '\t' => {
-                    if (nfocus > 0) focus = (focus + 1) % nfocus;
+                '\t', shared.keyboard.back_tab => {
+                    if (nfocus > 0) focus = (focus + (if (ch == '\t') @as(usize, 1) else nfocus - 1)) % nfocus;
                     break :input;
                 },
                 '\n' => {
@@ -1657,20 +1693,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         }
                     };
                 },
-                8 => { // backspace
-                    if (cur) |c| if (c.is_field) {
-                        fieldBackspace(c.id);
-                        break :input;
-                    };
-                },
-                else => {
-                    if (ch >= 32 and ch < 127) {
-                        if (cur) |c| if (c.is_field) {
-                            fieldAppend(c.id, ch);
-                            break :input;
-                        };
-                    }
-                },
+                else => {},
             }
         }
         // The close box was clicked: end the app (its `gui` call returns

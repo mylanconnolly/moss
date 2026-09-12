@@ -2322,6 +2322,42 @@ emission; virtio config space must be read at aligned offsets; and severing
 an IRQ binding must also mask the line or a level-triggered device storms
 into the void.
 
+## GUI text editing and keyboard ownership
+
+Plain Tab belongs to the focused window: the GUI runtime traverses widgets,
+Shift-Tab traverses backwards, and the terminal forwards Tab to msh for
+completion. Alt-Tab is reserved by the compositor, including when only one
+window exists; trusted focus still cannot be cycled away. No protocol change:
+`shared/keyboard.zig` names the private seat bytes, tracks both sides of
+Shift/Control/Option/Command independently, handles releases and device repeat,
+and maps shifted US punctuation. Navigation uses private bytes outside ASCII
+so Ctrl-S, Ctrl-T and Ctrl-Q cannot collide with arrow keys. The terminal
+translates arrows, Home, End and Delete to VT sequences one byte per console
+read, and drops unsupported GUI actions instead of inserting them as UTF-8.
+
+Fields use `shared/textedit.zig`: bounded insertion at a caret, replacement of
+selected text, arrows/Home/End, Shift selection, Option-arrow word movement,
+Command-arrow endpoints and Command-A select all. Ctrl-A/E/B/F/H/D provide
+Emacs-style movement/deletion; Ctrl-K/U/W kill to end/start/previous word and
+Ctrl-Y yanks the last kill within that field. Clicking positions the caret;
+dragging extends a selection. The runtime draws selection highlighting and
+scrolls the visible text horizontally to keep the caret inside the field.
+UTF-8 seeds truncate and edit on code-point boundaries; the keyboard remains
+US ASCII and word motion currently uses spaces, not Unicode word rules.
+Password fields remain masked, and their kill buffer stays local to the field.
+System clipboard shortcuts, undo, double-click word selection, IME input and
+grapheme-cluster movement remain future work.
+
+Lesson: routing Tab according to the number of surfaces made completion and
+form navigation change when another window opened. Ownership must be stable.
+The two-window focus drill asserts plain Tab delivery as well as Alt-Tab
+switching; the login drill edits a username through modifier chords, and the
+terminal drill uses arrow/Delete editing followed by Tab completion to exit.
+Host tests cover UTF-8 deletion, selection replacement at capacity, kill/yank
+and literal clipboard bytes overlapping private key codes. The terminal drill
+paces navigation actions: injecting the next chord before the device queue
+replenishes can drop a key, even though QMP acknowledged the injection.
+
 ## Graphics: the display server
 
 **Stage 1: virtio-gpu and a scanout (as built, 2026-09-07).** The M3's
@@ -2517,15 +2553,15 @@ so the compositor takes the keyboard. When the seat gives gpusvc a `keys`
 channel (the `compositor` unit does; the plain `gpusvc` for the
 display-only drills does not), gpusvc reads inputsvc itself and owns
 focus: `create_surface` gives the new surface focus, `GpuReq.next_input`
-returns the next keystroke tagged with the focused surface, and Tab is
+returns the next keystroke tagged with the focused surface, and Alt-Tab is
 absorbed by the compositor to cycle focus rather than reaching a client.
 Routing input through the display server (Wayland's shape, not X's) means
 a client only ever sees the keys sent to it while it holds focus — the
 compositor is the single point that reads the device and steers it. The
 drill opens two windows and, since the second is created last, it starts
-focused; the host types `a`, Tab, `b`, and the client confirms `a`
-reached the second window and `b` the first (Tab moved focus between
-them). At first the compositor served one input reader synchronously
+focused; the host types `a`, Tab, Alt-Tab, `b`, and the client confirms `a`
+and plain Tab reached the second window and `b` the first (Alt-Tab moved
+focus between them). At first the compositor served one input reader synchronously
 (`next_input` blocked on the keyboard), which stalled every other client
 until that read completed; the deferred-reply rework (below) lifted that,
 and a trusted path for the login window followed.
@@ -3321,11 +3357,8 @@ arena. Rendering is client-side: the runtime rasterises the tree into the
 surface's shm with the shared 8×16 font (as the terminal does), a single
 column of `label` and `button` widgets, the focused button highlighted.
 Input is keyboard-only (no pointer yet): Tab moves focus between the
-buttons, Enter fires the focused one. That needed one compositor change —
-Tab cycles *surfaces* only when there is more than one; with a single
-window it is delivered to the app, so a GUI can use Tab for its own
-widget focus (the focus and trust drills, with two surfaces, are
-unaffected). The drill (profile `gui`, `boot/scripts/gui-demo.msh`) is a
+buttons, Enter fires the focused one. Plain Tab is always delivered to the focused window; Alt-Tab cycles
+surfaces. Widget traversal therefore works with any number of windows. The drill (profile `gui`, `boot/scripts/gui-demo.msh`) is a
 counter written entirely in mshl — `view` shows `count: N` and two
 buttons, `update` matches on `$ev.id`; the host types Enter/Tab/Enter, the
 count reaches 1, and mshrun logs the final value. A GUI, defined in mshl,

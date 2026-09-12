@@ -46,6 +46,29 @@ zig build -Darch=x86_64 check # its gate: the same 30 rows on OVMF + Limine, VT-
 The x86_64 boot wants Limine (`BOOTX64.EFI` under the host's share
 directory, or `-Dlimine=DIR`) and the x86_64 OVMF images QEMU ships.
 
+### GUI input
+
+On macOS, `zig build run-gui -Dgui-profile=guishell` opens the desktop
+(login: `alice` / `alice-pass`). Tab belongs to the focused window: it
+moves between form controls and completes commands in the terminal.
+Alt-Tab switches windows; Shift-Tab moves backwards through a form.
+Terminal arrows browse history and move the cursor; Home/End/Delete work too.
+
+Text fields support these editing gestures:
+
+| Gesture | Action |
+|---|---|
+| Click / drag | Place the caret / select text |
+| Left/Right, Home/End | Move the caret; add Shift to select |
+| Option-Left/Right | Move by word; add Shift to select |
+| Command-Left/Right, Command-A | Start/end of field, select all |
+| Ctrl-A/E, Ctrl-B/F | Start/end, backward/forward |
+| Ctrl-H/D | Delete backward/forward |
+| Ctrl-K/U/W, Ctrl-Y | Kill to end/start/previous word, yank the last kill |
+
+Typing replaces selected text. Kill/yank stays within each field; system
+clipboard shortcuts and undo are not implemented yet.
+
 ## Architecture at a glance
 
 ```mermaid

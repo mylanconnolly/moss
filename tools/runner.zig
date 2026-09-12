@@ -939,7 +939,10 @@ fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const rows_top = g[1];
     const row_h = g[2];
     const sb = g[3];
-    _ = sb; _ = cx; _ = rows_top; _ = row_h;
+    _ = sb;
+    _ = cx;
+    _ = rows_top;
+    _ = row_h;
     var q = qmpConnect(qmp_port) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
@@ -1238,9 +1241,14 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         sleepMs(10);
     }
     sleepMs(150);
-    if (!q.typeText("exit")) {
-        reportFailure(spec.name, "QMP could not type exit", log_path);
-        return false;
+    // Completion must reach msh: "ex" alone is not a command. Insert a
+    // typo, move left, Delete it, then Tab-complete exit and execute it.
+    if (!q.typeText("exz")) return sfail(spec, log_path, "type exit prefix");
+    // Each navigation action expands to a console sequence and a redraw.
+    // Pace the device injection so the QEMU keyboard queue can replenish.
+    for ([_][]const u8{ "left", "delete", "tab" }) |key| {
+        sleepMs(120);
+        if (!q.sendKey(key)) return sfail(spec, log_path, "terminal navigation and completion");
     }
     sleepMs(120);
     _ = q.sendKey("ret");
@@ -1699,8 +1707,8 @@ fn compScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 }
 
 /// The focus drill's host side: once the client's two windows are up,
-/// type `a`, Tab, `b` on the keyboard. The compositor routes `a` to the
-/// focused (second) window, Tab moves focus to the first, and `b` goes
+/// type `a`, Tab, Alt-Tab, `b` on the keyboard. Plain Tab stays in the
+/// focused (second) window, Alt-Tab moves focus to the first, and `b` goes
 /// there — the client checks the routing and logs the verdict, which the
 /// runner waits on (`focus: ok`).
 fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
@@ -1721,7 +1729,7 @@ fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
-    if (!q.sendKey("a") or !q.sendKey("tab") or !q.sendKey("b")) {
+    if (!q.sendKey("a") or !q.sendKey("tab") or !q.chord("alt", "tab") or !q.sendKey("b")) {
         reportFailure(spec.name, "QMP could not type the focus sequence", log_path);
         return false;
     }
@@ -1741,7 +1749,7 @@ fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    // "focus: ok" is the proof: keys reached the focused window and Tab
+    // "focus: ok" is the proof: keys reached the focused window and Alt-Tab
     // moved focus, both routed by the compositor. There is no on-screen
     // cue to sample here — focuscli draws plain solid windows with no
     // titlebar; the *visible* focus cue is a window dimming its own chrome
@@ -1916,11 +1924,12 @@ fn guiLoginDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
-    // Type into the user field, Tab to the password field, type it.
-    if (!q.typeText("alice")) {
-        reportFailure(spec.name, "QMP could not type the username", log_path);
-        return false;
-    }
+    // Edit "axice" into "alice": Emacs home/forward, Shift selection,
+    // replace, kill/yank; then reverse traversal must return to this field.
+    if (!q.typeText("axice") or !q.chord("ctrl", "a") or !q.chord("ctrl", "f") or
+        !q.chord("shift", "right") or !q.typeText("l") or !q.chord("ctrl", "k") or
+        !q.chord("ctrl", "y") or !q.sendKey("tab") or !q.chord("shift", "tab"))
+        return sfail(spec, log_path, "edit username");
     sleepMs(100);
     _ = q.sendKey("tab");
     sleepMs(100);
@@ -3807,6 +3816,14 @@ const Qmp = struct {
         if (!q.execute(down)) return false;
         const up = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":false,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{qcode}) catch return false;
         return q.execute(up);
+    }
+
+    fn chord(q: *Qmp, modifier: []const u8, key: []const u8) bool {
+        const down = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":true,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{modifier}) catch return false;
+        if (!q.execute(down)) return false;
+        const ok = q.sendKey(key);
+        const up = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":false,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{modifier}) catch return false;
+        return q.execute(up) and ok;
     }
 
     /// Move the absolute pointer (a virtio tablet) to (x, y), each an

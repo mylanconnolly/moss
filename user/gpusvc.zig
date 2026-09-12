@@ -166,12 +166,12 @@ const secure_word: u32 = 0x0000_66CC; // X<<24|R<<16|G<<8|B -> RGB(0,0x66,0xCC),
 var trust_token: u64 = 0; // 0 = the trusted path is disabled (no token)
 
 // Focus: the compositor reads the keyboard (if it holds one) and routes
-// keystrokes to the focused surface; Tab cycles focus.
+// keystrokes to the focused surface; Alt-Tab cycles focus.
 var keys_chan: u64 = 0; // inputsvc channel, 0 when the seat gives no keyboard
 var keys_buf: [*]volatile u8 = undefined;
 var focused: u64 = 0; // focused surface id, 0 = none
 var comp_log: u64 = 0; // the compositor's log handle (set in gpudrv)
-const key_switch_focus: u8 = '\t';
+const key_switch_focus: u8 = shared.keyboard.switch_window;
 
 // ---------------------------------------------------- command building
 
@@ -619,7 +619,7 @@ fn readKey() u8 {
     };
 }
 
-/// Move focus to the next surface (by id, wrapping) — Tab's job.
+/// Move focus to the next surface (by id, wrapping) — Alt-Tab's job.
 fn cycleFocus() void {
     // Focus never leaves a login surface: a trusted prompt keeps the
     // keyboard (secure attention), and its Tab is its own (field
@@ -639,7 +639,7 @@ fn cycleFocus() void {
 }
 
 /// The next keystroke for the focused surface: keys go to whoever has
-/// focus, and Tab cycles focus here rather than reaching a client.
+/// focus, and Alt-Tab cycles focus here rather than reaching a client.
 // Concurrent input readers. Reading the keyboard is a blocking call to
 // inputsvc, so it cannot happen on the serve loop without stalling every
 // other client. Instead a dedicated reader thread does the blocking read,
@@ -758,7 +758,7 @@ fn wakeReader(chan_h: u64, badge: u64, surface: u64, kind: u64) void {
 /// waiting is told; one without keeps its state pending (its owner is busy
 /// and will re-park) and is caught on a later call. Called after every
 /// request (and after the input doorbell), so any focus change — a click,
-/// a new window, a minimize, a restore, a Tab switch — reaches both the
+/// a new window, a minimize, a restore, an Alt-Tab switch — reaches both the
 /// window losing focus and the one gaining it. A parked reader delivering
 /// a focus event is consumed, so the client re-issues `next_input`, exactly
 /// as for a key or tick.
@@ -795,7 +795,7 @@ fn dropReader(badge: u64) void {
     _ = takeReader(badge);
 }
 
-/// Hand buffered keys to the client that owns the focused surface. Tab is
+/// Hand buffered keys to the client that owns the focused surface. Alt-Tab is
 /// absorbed here (it cycles focus, never reaches a client). A key with no
 /// reader waiting on the focused surface stays in the ring until one
 /// parks — buffered, like a terminal's own fifo, never delivered elsewhere.
@@ -804,16 +804,9 @@ fn dispatchKeys(chan_h: u64) void {
         if (c == key_switch_focus) {
             const before = focused;
             cycleFocus();
-            if (focused != before) {
-                // Focus moved to another surface — Tab is the compositor's
-                // here; absorb it and repaint the cue.
-                keyRingPop();
-                _ = composite();
-                continue;
-            }
-            // Only one focusable surface: cycleFocus was a no-op, so Tab
-            // belongs to the focused app (widget navigation) — fall through
-            // and deliver it like any other key.
+            keyRingPop();
+            if (focused != before) _ = composite();
+            continue; // reserved even with only one window
         }
         const owner = if (findSurface(focused)) |sf| sf.owner else {
             keyRingPop(); // nothing focused: the key has nowhere to go

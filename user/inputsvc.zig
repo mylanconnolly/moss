@@ -92,56 +92,6 @@ fn kick() void {
     dev.notify(q_event);
 }
 
-/// Unshifted US-QWERTY: evdev keycode -> ASCII, 0 for keys we don't map.
-fn keymap(code: u16) u8 {
-    return switch (code) {
-        2...11 => "1234567890"[code - 2],
-        16 => 'q',
-        17 => 'w',
-        18 => 'e',
-        19 => 'r',
-        20 => 't',
-        21 => 'y',
-        22 => 'u',
-        23 => 'i',
-        24 => 'o',
-        25 => 'p',
-        30 => 'a',
-        31 => 's',
-        32 => 'd',
-        33 => 'f',
-        34 => 'g',
-        35 => 'h',
-        36 => 'j',
-        37 => 'k',
-        38 => 'l',
-        44 => 'z',
-        45 => 'x',
-        46 => 'c',
-        47 => 'v',
-        48 => 'b',
-        49 => 'n',
-        50 => 'm',
-        57 => ' ',
-        28 => '\n', // enter
-        15 => '\t', // tab (the compositor's focus-switch key)
-        1 => 27, // escape (ASCII ESC — dismiss a popup, close the dock)
-        12 => '-', // minus/hyphen
-        14 => 8, // backspace (ASCII BS)
-        // Arrow keys → private control bytes a GUI uses for navigation
-        // (a scrollable list moves its selection); no ASCII of their own.
-        103 => 17, // up    (DC1)
-        108 => 18, // down  (DC2)
-        105 => 19, // left  (DC3)
-        106 => 20, // right (DC4)
-        // Page up/down → private control bytes a scrollback client
-        // (the terminal) intercepts; no ASCII, ignored by everyone else.
-        104 => 0x1e, // page up   (RS)
-        109 => 0x1f, // page down (US)
-        else => 0,
-    };
-}
-
 fn bringUp(log_h: u64) void {
     const n = usys.notifyCreate();
     if (n.err != .ok) usys.exit(170);
@@ -227,6 +177,7 @@ fn drillLoop(log_h: u64) noreturn {
 
 var shm_va: u64 = 0;
 var shm_len: u64 = 0;
+var keyboard: shared.keyboard.Decoder = .{};
 var fifo: [256]u8 = undefined;
 var fifo_head: usize = 0;
 var fifo_tail: usize = 0;
@@ -242,8 +193,8 @@ fn fifoPush(c: u8) void {
 fn drainEvents() void {
     while (used_seen != usedIdx()) {
         const e = nextEvent();
-        if (e.etype == ev_key and e.value == 1) {
-            const c = keymap(e.code);
+        if (e.etype == ev_key) {
+            const c = keyboard.feed(e.code, e.value);
             if (c != 0) fifoPush(c);
         }
     }

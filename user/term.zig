@@ -702,7 +702,7 @@ fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
                     _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0);
                     continue;
                 }
-                const ch = if (windowed_mode) pumpKey(log_h) else readSeatKey(log_h);
+                const ch = consoleKey(log_h, windowed_mode);
                 const dst: [*]volatile u8 = @ptrFromInt(out_va);
                 var n: u64 = 0;
                 if (ch != 0 and out_len >= 1) {
@@ -712,6 +712,20 @@ fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
                 _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .n = .{ .n = n } }, 0);
             },
         }
+    }
+}
+
+const SeatKey = struct { ch: u8, literal: bool = false };
+var console_keys: shared.keyboard.ConsoleKeys = .{};
+
+/// Translate seat navigation into VT sequences; private GUI actions never
+/// become invalid UTF-8 in the shell's edit buffer. Deliver one byte/read.
+fn consoleKey(log_h: u64, framed: bool) u8 {
+    if (console_keys.pop()) |ch| return ch;
+    while (true) {
+        const input = if (framed) pumpKey(log_h) else SeatKey{ .ch = readSeatKey(log_h) };
+        if (input.ch == 0) return 0;
+        if (console_keys.feed(input.ch, input.literal)) |ch| return ch;
     }
 }
 
@@ -901,14 +915,14 @@ fn routePointer(ev: wf.Event, log_h: u64) void {
 /// Pump frame input until a keystroke arrives, handling the titlebar (drag /
 /// snap / close), focus, restore, scrollback (page up/down) and selection /
 /// paste along the way. Returns the key byte, or 0 if the display channel died.
-fn pumpKey(log_h: u64) u8 {
+fn pumpKey(log_h: u64) SeatKey {
     while (true) {
         if (paste_pos < paste_len) { // drain a paste, one byte per read
             const b = paste_buf[paste_pos];
             paste_pos += 1;
-            return b;
+            return .{ .ch = b, .literal = true };
         }
-        const ev = wf.nextInput() orelse return 0;
+        const ev = wf.nextInput() orelse return .{ .ch = 0 };
         switch (ev.kind) {
             0 => { // a keystroke: scrollback keys are ours, the rest go to the shell
                 if (ev.ch == pg_up) {
@@ -924,7 +938,7 @@ fn pumpKey(log_h: u64) u8 {
                     render();
                     _ = wf.commitSurface();
                 }
-                return ev.ch;
+                return .{ .ch = ev.ch };
             },
             1 => routePointer(ev, log_h),
             3 => repaintWin(), // restored from the dock: repaint (the compositor unhid us)

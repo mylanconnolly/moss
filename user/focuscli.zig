@@ -1,8 +1,8 @@
 //! The focus drill's client: it opens two windows and then reads input
 //! through the compositor, which routes each keystroke to the focused
-//! window and cycles focus on Tab. The second window (green) is created
-//! last, so it starts focused. The host types `a`, Tab, `b`: `a` should
-//! reach the green window, then Tab moves focus to the red one, so `b`
+//! window and cycles focus on Alt-Tab. The second window (green) is created
+//! last, so it starts focused. The host types `a`, Tab, Alt-Tab, `b`: `a` should
+//! reach the green window, Tab stays there, then Alt-Tab moves focus to the red one, so `b`
 //! reaches red. The client checks the routing and logs the verdict.
 
 const std = @import("std");
@@ -70,12 +70,12 @@ export fn umain(log_h: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     if (a == 0 or b == 0) usys.exit(180);
     _ = usys.log(log_h, "focus: ready");
 
-    // The host types `a`, Tab, `b`. `a` -> focused (b); Tab cycles focus
-    // to a; `b` -> a. (Tab is absorbed by the compositor, so two reads.)
+    // Plain Tab reaches b; Alt-Tab is absorbed and moves focus to a.
     const in1 = nextInput();
+    const plain_tab = nextInput();
     const in2 = nextInput();
 
-    const ok = in1.surface == b and in1.ch == 'a' and in2.surface == a and in2.ch == 'b';
+    const ok = plain_tab.surface == b and plain_tab.ch == '\t' and in1.surface == b and in1.ch == 'a' and in2.surface == a and in2.ch == 'b';
     if (ok) {
         _ = usys.log(log_h, "focus: ok");
     } else {
