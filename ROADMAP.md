@@ -1418,6 +1418,12 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **Consistent font-scale geometry** (2026-09-12): measurement, baselines
+  and glyph layout share a device-size snapshot; Settings refreshes it on
+  Apply, and resident bars resize without taking focus. Atlas mappings are
+  reused across reopens. Ordinary open windows retain their snapshot until
+  reopened; live reflow of those windows remains a follow-on.
+
 - ✅ **Dock refresh fairness** (2026-09-12): input replies retain compositor
   tick subscriptions, busy clients retain a coalesced tick, and due refresh
   alternates with queued input. The dock polls running state every 200 ms;

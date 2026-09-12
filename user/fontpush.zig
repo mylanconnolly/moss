@@ -105,6 +105,17 @@ fn exerciseClients() void {
     _ = usys.log(glog, "fontpush: 16 concurrent, 1024 lifetime clients PASS");
 }
 
+fn layoutWidth(px: u64) u64 {
+    @memcpy(fbuf[0..5], "Scale");
+    return switch (usys.callTyped(shared.FontReq, shared.FontResp, fontc, .{ .layout = .{ .role = 0, .px = px, .len = 5 } }, 0)) {
+        .ok => |v| switch (v) {
+            .laid => |run| run.pen,
+            else => fail("fontpush: scale layout refused"),
+        },
+        .err => fail("fontpush: scale layout failed"),
+    };
+}
+
 export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     glog = log_h;
     const setup = boot.take(chan_h);
@@ -131,6 +142,7 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
 
     // Login: apply the user's layer; logout: revert to the system layer.
     const login_px = pushLayer(cfg);
+    if (layoutWidth(0) != layoutWidth(login_px)) fail("fontpush: explicit pixel size scaled twice");
     var l: [64]u8 = undefined;
     _ = usys.log(glog, std.fmt.bufPrint(&l, "fontpush: login ui={d}px", .{login_px}) catch "fontpush: login");
     const logout_px = pushLayer("");

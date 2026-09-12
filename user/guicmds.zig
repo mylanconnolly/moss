@@ -331,10 +331,13 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     wf.drawChrome(title);
     content_h = wf.title_h + 2 * pad + layoutNode(tree, 0, 0, wf.win_w - 2 * pad, false).h;
     wf.measuring = false;
-    wf.win_h = @max(win_h_min, @min(content_h, win_h_max));
-    // Centre in the area below the top-bar strut, so a window never opens
-    // under the menu bar.
-    wf.win_y = @max(top_strut + 8, top_strut + (scanout_h - top_strut - wf.win_h) / 2);
+    // Centre inside the scaled desktop work area, including the dock.
+    // Using the whole scanout placed tall windows underneath the dock.
+    const work_top = @max(top_strut, lineOf(R_UI) + 2 * bar_vpad + pal.border_w) + 8;
+    const work_bottom = scanout_h - wf.dockHeight() - 8;
+    const available = work_bottom -| work_top;
+    wf.win_h = @min(@max(win_h_min, content_h), @min(win_h_max, available));
+    wf.win_y = work_top + (available - wf.win_h) / 2;
 }
 
 /// Children remain ordinary mshl data, shared by measurement and painting.
@@ -1028,7 +1031,7 @@ fn mkMenuEvent(it: *mshl.Interp, menu: []const u8, item: []const u8) mshl.Error!
 /// The resident top-bar loop (`gui { bar: true, ... }`): render the bar,
 /// tick the clock, open/close dropdowns, and fire the selected menu item.
 fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
-    if (!wf.fontOk()) wf.fontReady();
+    wf.fontReady();
     wf.refreshAppearance();
     wf.useOrdinaryChannel();
     wf.win_x = 0;
@@ -1047,6 +1050,14 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
     var announced = false;
     while (true) {
         it.reclaim();
+        if (wf.refreshFontMetrics()) {
+            wf.closeSurface();
+            closePopup();
+            pop_open = false;
+            wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
+            if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
+            announced = false; // hit boxes moved with the new scale
+        }
         renderBar(tree);
         if (!wf.commitSurface()) return it.fail("gui: bar commit failed", .{});
         if (!announced) {
@@ -1200,7 +1211,7 @@ fn mkDockEvent(it: *mshl.Interp, unit: []const u8, title: []const u8) mshl.Error
 /// otherwise (`launch $ev.unit` reaches init through this process's init
 /// front channel). `done: true` ends it.
 fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
-    if (!wf.fontOk()) wf.fontReady();
+    wf.fontReady();
     wf.refreshAppearance();
     wf.useOrdinaryChannel();
     const pill_h = lineOf(R_UI) + 2 * item_vpad;
@@ -1218,6 +1229,13 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
     var announced = false;
     while (true) {
         it.reclaim();
+        if (wf.refreshFontMetrics()) {
+            wf.closeSurface();
+            wf.win_h = wf.dockHeight();
+            wf.win_y = scanout_h - wf.win_h;
+            if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
+            announced = false; // hit boxes moved with the new scale
+        }
         renderDock(tree);
         if (!wf.commitSurface()) return it.fail("gui: dock commit failed", .{});
         if (!announced) {
@@ -1556,7 +1574,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (wv == .int and wv.int >= 200) wf.win_w = @min(@as(usize, @intCast(wv.int)), scanout_w);
     }
     wf.win_x = (scanout_w - wf.win_w) / 2;
-    if (!wf.fontOk()) wf.fontReady(); // attach the system font once (bitmap fallback if absent)
+    wf.fontReady(); // attach the system font once (bitmap fallback if absent)
     wf.refreshAppearance(); // resolve the palette from the system/user settings
     sizeToContent(it, view, state, title); // fit the window to its content
     // `at: { x, y }` places the window instead of centring it (a desktop

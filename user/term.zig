@@ -311,6 +311,7 @@ fn pasteFromClip(log_h: u64) void {
 var font_chan: u64 = 0;
 var font_buf: [*]u8 = undefined;
 var font_buf_len: usize = 0;
+var mono_px: u64 = 0;
 var fatlas: [*]const u8 = undefined;
 var fatlas_w: usize = 0;
 var font_ok = false;
@@ -358,6 +359,7 @@ fn fontReady() void {
     switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .metrics = .{ .role = mono_role } }, 0)) {
         .ok => |rep| switch (rep) {
             .metrics => |mm| {
+                mono_px = mm.px;
                 cellh = @intCast(mm.line);
                 ascent = @intCast(mm.ascent);
             },
@@ -376,7 +378,7 @@ fn fontReady() void {
 fn layoutOne(b: u8) usize {
     if (font_buf_len == 0) return 0;
     font_buf[0] = b;
-    return switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .layout = .{ .role = mono_role, .px = 0, .len = 1 } }, 0)) {
+    return switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .layout = .{ .role = mono_role, .px = mono_px, .len = 1 } }, 0)) {
         .ok => |rep| switch (rep) {
             .laid => |l| blk: {
                 if (l.count >= 1 and b < gcache.len) {

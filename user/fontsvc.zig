@@ -198,8 +198,10 @@ fn roleFont(role: u64) ?*font.Font {
     return &families[roleFontIndex(role)].font;
 }
 fn rolePx(role: u64, req_px: u64) f32 {
-    const base: f32 = if (req_px != 0) @floatFromInt(req_px) else roleBase(role);
-    return base * scale;
+    // Explicit sizes are device pixels (the protocol contract), not a
+    // base size to scale again. Match metrics to the rounded raster size.
+    if (req_px != 0) return @floatFromInt(req_px);
+    return @round(roleBase(role) * scale);
 }
 
 // Reading the settings file: a small mshl interp parses the data literal,

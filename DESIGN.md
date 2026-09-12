@@ -4016,6 +4016,26 @@ caps, or init deems it unwired; and the rasterizer's `top` is the bitmap's
 signed device-y offset from the baseline (negative above), so the client
 *adds* it — subtracting scattered every glyph off the line.
 
+**Font scale and geometry (2026-09-12).** Windowframe snapshots each role's
+pixel size, line height and ascent together, and sends that explicit device
+size for layout. Fontsvc rounds the effective size before both metrics and
+rasterization; an explicit device size is not scaled a second time. This
+prevents a global scale change from drawing new-sized glyphs into cached
+old-sized controls. Settings refreshes its snapshot before measuring each
+reopened window; the atlas remains mapped once instead of leaking a mapping
+per Apply. Existing ordinary windows and terminal grids keep a consistent
+size snapshot until reopened, rather than changing glyph size underneath
+their geometry or glyph caches.
+
+The resident dock and top bar refresh their snapshots on render and recreate
+their surfaces and hit boxes when metrics change. The compositor's
+`gpu_no_activate` creation flag lets this resident chrome resize without
+stealing focus from Settings. The desktop drill applies 1.5 -> 1.0 -> 1.5 in
+one Settings process, checks geometry returns to its original position and
+captures both sizes. Window sizing centres and clamps content inside the
+work area between the scaled top bar and dock. The font drill compares implicit and explicit layout
+at the scaled size to catch double application of scale.
+
 **Font client lifetime (2026-09-12).** Client records grow in page-sized
 slabs, with independent request buffers keyed by the kernel-authenticated
 badge. A last-endpoint `client_dead` unmaps that buffer, clears its record

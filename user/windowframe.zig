@@ -39,6 +39,7 @@ var font_ok = false; // fontsvc is attached and usable
 pub const n_roles = 3;
 var role_line: [n_roles]usize = @splat(0);
 var role_asc: [n_roles]usize = @splat(0);
+var role_px: [n_roles]u64 = @splat(0);
 
 /// Wire the frame to its caps once: the compositor, the log, the
 /// trusted-path token (from a `secret` give, if any), and the font service.
@@ -457,29 +458,47 @@ pub fn applyUserLayer(text: []const u8) void {
 pub fn fontReady() void {
     if (font_chan == 0) return;
     if (!ensureFontBuf()) return;
-    const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
-        .ok => |ok| ok,
-        .err => return,
-    };
-    if (at.cap == 0 or at.rep != .atlas) return;
-    const am = usys.shmMap(at.cap);
-    _ = usys.capDrop(at.cap);
-    if (am.err != .ok) return;
-    atlas = @ptrFromInt(am.data[0]);
-    atlas_w = shared.unpackHi(at.rep.atlas.wh);
+    if (atlas_w == 0) {
+        const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
+            .ok => |ok| ok,
+            .err => return,
+        };
+        if (at.cap == 0 or at.rep != .atlas) return;
+        const am = usys.shmMap(at.cap);
+        _ = usys.capDrop(at.cap);
+        if (am.err != .ok) return;
+        atlas = @ptrFromInt(am.data[0]);
+        atlas_w = shared.unpackHi(at.rep.atlas.wh);
+    }
+    _ = refreshFontMetrics();
+}
+
+/// Snapshot metrics together; layout uses these same pixel sizes until
+/// the owner has an opportunity to lay out its controls again.
+pub fn refreshFontMetrics() bool {
+    if (font_chan == 0 or atlas_w == 0) return false;
+    var lines = role_line;
+    var ascents = role_asc;
+    var sizes = role_px;
     for (0..n_roles) |role| {
         switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .metrics = .{ .role = role } }, 0)) {
             .ok => |rep| switch (rep) {
                 .metrics => |mm| {
-                    role_line[role] = @intCast(mm.line);
-                    role_asc[role] = @intCast(mm.ascent);
+                    lines[role] = @intCast(mm.line);
+                    ascents[role] = @intCast(mm.ascent);
+                    sizes[role] = mm.px;
                 },
-                else => {},
+                else => return false,
             },
-            .err => return,
+            .err => return false,
         }
     }
+    const changed = !font_ok or !std.mem.eql(usize, &lines, &role_line) or !std.mem.eql(usize, &ascents, &role_asc) or !std.mem.eql(u64, &sizes, &role_px);
+    role_line = lines;
+    role_asc = ascents;
+    role_px = sizes;
     font_ok = true;
+    return changed;
 }
 
 pub fn fontOk() bool {
@@ -521,7 +540,7 @@ pub fn appearanceFlags() u64 {
 fn fontLayout(role: u64, s: []const u8) struct { w: usize, count: usize } {
     const len = @min(s.len, font_buf_len);
     @memcpy(font_buf[0..len], s[0..len]);
-    return switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .layout = .{ .role = role, .px = 0, .len = len } }, 0)) {
+    return switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .layout = .{ .role = role, .px = role_px[role], .len = len } }, 0)) {
         .ok => |rep| switch (rep) {
             .laid => |l| .{ .w = shared.unpackHi(l.pen), .count = @intCast(l.count) },
             else => .{ .w = 0, .count = 0 },
@@ -706,7 +725,11 @@ pub fn attachTrusted() bool {
 /// off its edge.
 pub var pointer_tracking = false;
 pub fn openSurface(cascade: bool) bool {
-    const flags: u64 = (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0));
+    return openSurfaceFocused(cascade, true);
+}
+
+pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
+    const flags: u64 = (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate);
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
         .ok => |ok| ok,
         .err => return false,

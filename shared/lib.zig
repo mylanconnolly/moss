@@ -771,6 +771,8 @@ pub const BlkResp = union(enum(u64)) {
 /// into a u64 (xy = x<<32 | y, wh = w<<32 | h) to fit the four-word ABI.
 /// `create_surface` flag: cascade this window off any it would fully cover.
 pub const gpu_place_cascade: u64 = 1;
+/// Recreate resident chrome without taking keyboard focus from an app.
+pub const gpu_no_activate: u64 = 4;
 /// Receive kind-6 pointer events in scanout coordinates, including hover.
 /// A press captures the pointer until all buttons release. Moves coalesce
 /// while busy; (0xffff, 0xffff) with no buttons clears hover on leave.

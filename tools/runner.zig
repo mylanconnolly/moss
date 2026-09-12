@@ -812,7 +812,7 @@ fn pointerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 fn widgetCenter(content: []const u8, id: []const u8) ?[2]u32 {
     var buf: [64]u8 = undefined;
     const marker = std.fmt.bufPrint(&buf, "gui: widget {s} at ", .{id}) catch return null;
-    const i = std.mem.indexOf(u8, content, marker) orelse return null;
+    const i = std.mem.lastIndexOf(u8, content, marker) orelse return null;
     var p = i + marker.len;
     var x: u32 = 0;
     while (p < content.len and content[p] >= '0' and content[p] <= '9') : (p += 1) x = x * 10 + (content[p] - '0');
@@ -2430,6 +2430,24 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "settings: admin=false", 1, "bob was wrongly treated as an administrator", spec, polls)) return false;
     if (!try waitLogN(log_path, "settings: system read-only", 1, "bob's system pane was not read-only", spec, polls)) return false;
     sleepMs(500);
+    // Reopen Settings in the same process after each Apply. Both cached
+    // metrics and the resident bars must follow 1.5 -> 1.0 -> 1.5.
+    const initial_small = widgetCenter(readLog(log_path), "smaller") orelse return sfail(spec, log_path, "initial font geometry");
+    for ([_][]const u8{ "smaller", "larger" }, 0..) |id, pass| {
+        const button = widgetCenter(readLog(log_path), id) orelse return sfail(spec, log_path, "font size button");
+        for (0..2) |_| {
+            if (!clickScanout(&q, button[0], button[1])) return sfail(spec, log_path, "change font size");
+            sleepMs(120);
+        }
+        const apply = widgetCenter(readLog(log_path), "apply") orelse return sfail(spec, log_path, "Apply geometry");
+        if (!clickScanout(&q, apply[0], apply[1])) return sfail(spec, log_path, "apply font size");
+        if (!try waitLogN(log_path, "gui: ready", 3 + pass, "Settings did not reopen after scaling", spec, polls)) return false;
+        sleepMs(600); // resident bars refresh and publish their new hit boxes
+        const current = widgetCenter(readLog(log_path), "smaller") orelse return sfail(spec, log_path, "scaled font geometry");
+        if (pass == 0 and current[1] == initial_small[1]) return sfail(spec, log_path, "scale did not reflow Settings");
+        if (pass == 1 and current[1] != initial_small[1]) return sfail(spec, log_path, "font geometry drifted after round trip");
+        _ = q.screendump(if (pass == 0) check_dir ++ "/settings-scale-100.ppm" else check_dir ++ "/settings-scale-150.ppm");
+    }
     return desktopLogout(spec, log_path, polls, &q);
 }
 

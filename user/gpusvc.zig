@@ -405,7 +405,7 @@ fn cascadePlace(xp: *u32, yp: *u32, w: u32, h: u32) void {
     }
 }
 
-fn createSurface(owner: u64, x_req: u32, y_req: u32, w: u32, h: u32, cascade: bool) ?struct { id: u64, shm: u64, x: u32, y: u32 } {
+fn createSurface(owner: u64, x_req: u32, y_req: u32, w: u32, h: u32, cascade: bool, activate: bool) ?struct { id: u64, shm: u64, x: u32, y: u32 } {
     var idx: usize = 0;
     while (idx < max_surfaces and surfaces[idx].used) idx += 1;
     if (idx == max_surfaces) return null;
@@ -427,7 +427,7 @@ fn createSurface(owner: u64, x_req: u32, y_req: u32, w: u32, h: u32, cascade: bo
     // focus from the login surface: a hostile client cannot pull the
     // keyboard away from a trusted prompt (a small secure-attention rule).
     const trusted_has_focus = if (findSurface(focused)) |f| f.trusted else false;
-    if (!trusted_has_focus or owner == trusted_badge) focused = idx + 1;
+    if (activate and (!trusted_has_focus or owner == trusted_badge)) focused = idx + 1;
     // Focus moved to the new window: its first commit must lay the whole
     // ground again, so a previously-focused window's stale focus border is
     // cleared instead of lingering (per-rect commits never touch it).
@@ -1174,7 +1174,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     continue;
                 }
                 const cascade = q.flags & shared.gpu_place_cascade != 0 and !full;
-                if (createSurface(badge, px_x, px_y, w, h, cascade)) |cs| {
+                if (createSurface(badge, px_x, px_y, w, h, cascade, q.flags & shared.gpu_no_activate == 0)) |cs| {
                     findSurface(cs.id).?.pointer_tracking = q.flags & shared.gpu_pointer_tracking != 0;
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h), .xy = shared.packPair(cs.x, cs.y) } }, cs.shm, token);
                 } else {
