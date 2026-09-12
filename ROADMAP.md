@@ -1203,8 +1203,24 @@ is a plan.
   drag selects text (tracked in model coordinates, so it survives scroll and
   reflow), releasing copies it, and a middle-click pastes (the X11 gesture —
   inputsvc gives no Ctrl modifier, so Ctrl-V is unavailable); a paste drains
-  one byte per read as if typed. Open: Stage 5 tabs (N grid+msh sessions in
-  one window).
+  one byte per read as if typed. The windowed terminal is complete and
+  usable through here. **Tabs** (several msh sessions in one window) were
+  deferred to their own future arc rather than half-built: N tabs need N
+  shells multiplexed through one terminal, and the clean design is a
+  console-multiplexing seam (an optional `register` handshake on `ConsReq`
+  so each tab's shell attaches to one terminal with its own badge, the
+  fontsvc/localesvc shape) — a deliberate change to the shared console
+  protocol worth designing on its own terms, not as a rider here.
+- **A terminal with tabs (console multiplexing)**: several `msh` sessions
+  in one terminal window, with a tab bar to open / switch / close. The
+  shape (decided against two alternatives — a terminal that spawns its own
+  shells, which would make it a privileged mini-init; and a separate
+  tab-manager process): keep shells as init units and multiplex them in the
+  terminal, giving `ConsReq` an optional `register` step so each shell
+  attaches to the one terminal with its own badge (a tab), the terminal
+  holding one text model per tab and rendering the active one. Keeps init
+  minimal and the mechanism in userspace; the open questions are dynamic vs
+  fixed-max tab count and how keystrokes route to the active tab only.
 - **MCU leaf-node runtime**: a tiny bare-metal/RTOS runtime for MCU-class devices (Pico 2 / RP2350 and kin) that speaks Moss protocols over serial/USB/network and registers with a node's fabric server, appearing in the pool as typed channels (sensors, actuators) — sandboxed and interposable like any cap, no MMU required. The `shared/` protocol types cross-compile to `thumb-freestanding` unchanged; the device *joins* the OS rather than running it.
 - POSIX personality as a userspace layer, if ever warranted.
 
