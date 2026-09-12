@@ -84,9 +84,41 @@ fn reader(log_h: u64) noreturn {
 }
 
 fn mover(log_h: u64) noreturn {
+    const registered = usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .register, 0);
+    disp = switch (registered) {
+        .ok => |v| if (v.rep == .registered and v.cap != 0) v.cap else usys.exit(182),
+        .err => usys.exit(182),
+    };
     const s = window(60, 150, 200, 150, mover_colour);
     if (s == 0) usys.exit(181);
     _ = usys.log(log_h, "mover: ready");
+    // Establish a ticking subscription, then leave no input read parked
+    // while doing work. A tick during that gap must survive and precede
+    // fresh focus input when the client reads again.
+    while (true) {
+        const rep = usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .next_input_tick = .{ .ms = 100 } }, 0);
+        switch (rep) {
+            .ok => |v| if (v == .input and v.input.kind == 2) break,
+            .err => usys.exit(183),
+        }
+    }
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .set_visible = .{ .surface = s, .visible = 0 } }, 0);
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .next_input_tick = .{ .ms = 100 } }, 0);
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .set_visible = .{ .surface = s, .visible = 1 } }, 0);
+    usys.sleepMs(300);
+    switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .next_input_tick = .{ .ms = 100 } }, 0)) {
+        .ok => |v| if (v != .input or v.input.kind != 2) usys.exit(184),
+        .err => usys.exit(184),
+    }
+    // Even if another tick becomes due during slow rendering, pending
+    // focus input gets the next turn rather than being starved by ticks.
+    usys.sleepMs(300);
+    switch (usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .next_input_tick = .{ .ms = 100 } }, 0)) {
+        .ok => |v| if (v != .input or v.input.kind != 4) usys.exit(185),
+        .err => usys.exit(185),
+    }
+    _ = usys.log(log_h, "mover: deferred tick retained");
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, disp, .{ .set_visible = .{ .surface = s, .visible = 1 } }, 0);
     // Commit in a loop. Each tick means the compositor served us — which,
     // while the reader sits in next_input, can only happen if that read
     // does not block the serve loop.

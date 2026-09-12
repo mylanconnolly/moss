@@ -1418,6 +1418,11 @@ state and support Emacs-style editing plus Shift/Option/Command navigation.
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **Dock refresh fairness** (2026-09-12): input replies retain compositor
+  tick subscriptions, busy clients retain a coalesced tick, and due refresh
+  alternates with queued input. The dock polls running state every 200 ms;
+  reader and desktop drills cover deferred ticks and close during motion.
+
 - ✅ **GUI client lifetime and terminal exit** (2026-09-12): dynamic font
   client slabs, dead-client buffer reclamation, and correctly dropped minted
   endpoint copies prevent repeated launches from exhausting font support.

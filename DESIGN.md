@@ -3300,8 +3300,8 @@ watch each app's domain (a cap it does not hold), the pill's dot is now
 channel) asks init for its unit list — the same `list` request `svc`
 renders — and reads that unit's `up` bit; init already reports a unit whose
 domain has died as down, so this is the honest "is the app still running".
-The dock's `view` calls `unit-up` per pill and a `tick: 1000` re-renders
-once a second (the same clock-refresh path the top bar uses), so the dot
+The dock's `view` calls `unit-up` per pill and a `tick: 200` re-renders
+every 200 ms (the same clock-refresh path the top bar uses), so the dot
 lights when the app comes up and clears on its own when it exits — no
 teardown signal has to reach the dock, and it is correct across a crash as
 much as a clean exit. The dock's `update` no longer threads any *running*
@@ -3309,6 +3309,17 @@ state; it is derived, not remembered. `renderDock` logs a pill's state only
 when it flips (`dock: running <unit>=<bool>`), so the change is observable
 without spamming every tick; the `guishell` drill launches the demo (the
 dot lights), then closes it and confirms the dot clears.
+
+**Refresh fairness (2026-09-12).** Consuming a compositor input reply keeps
+its reader's tick subscription; only disconnect or an ordinary untimed
+read removes it. Previously every pointer/key event removed the reader
+and could disarm/restart the shared timer, postponing the dock refresh.
+Ticks that arrive while a client is rendering coalesce into one pending
+tick. Due refresh and queued input alternate, so neither continuous input
+nor slow rendering can starve the other. The reader drill checks a tick
+survives a gap with no parked read; guishell closes Demo while continuously
+moving over the dock and requires its indicator to clear without another
+click. Minimized windows remain running and retain their indicators.
 
 **A subtler focus cue — dimmed chrome (as built, 2026-09-10).** The focus
 cue had been the compositor painting a thick yellow border around the
@@ -3812,7 +3823,8 @@ no real input arrives the compositor answers with a `kind` 2 event so the
 client re-renders. The compositor rides its existing input doorbell — a
 kernel timer (`timer_arm`) signals `key_bell` with a distinct bit (2), the
 serve loop reads the latched bits from `notify_wait` and, on the tick bit,
-hands a tick to every ticking reader with a parked token; the timer is
+hands a tick to every ticking reader with a parked token and retains a
+coalesced pending tick for busy clients; the timer is
 armed only while some reader wants ticks (the shortest period any asks)
 and disarmed when none do, so an idle compositor never wakes. The mshl
 `gui` spec gained `tick: <ms>` (or `true` → 1s); on a tick the runtime

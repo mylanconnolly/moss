@@ -698,7 +698,7 @@ fn keyReader(_: u64) callconv(.c) void {
 // reply token so the serve loop can answer it later. `tick_ticks` > 0 (a
 // `next_input_tick` reader) also wants a periodic wake — see the timer.
 const max_readers = max_surfaces;
-const Reader = struct { used: bool = false, badge: u64 = 0, token: u64 = 0, tick_ticks: u64 = 0 };
+const Reader = struct { used: bool = false, badge: u64 = 0, token: u64 = 0, tick_ticks: u64 = 0, tick_due: bool = false, yield_to_input: bool = false };
 var readers: [max_readers]Reader = @splat(.{});
 
 // The tick timer rides the input doorbell (`key_bell`) with a distinct bit
@@ -711,6 +711,7 @@ fn parkReader(badge: u64, token: u64, tick_ticks: u64) void {
     for (&readers) |*rd| if (rd.used and rd.badge == badge) {
         rd.token = token; // a client re-reads: replace its (already answered) token
         rd.tick_ticks = tick_ticks;
+        if (tick_ticks == 0) rd.tick_due = false;
         refreshTicks();
         return;
     };
@@ -735,12 +736,22 @@ fn refreshTicks() void {
 }
 
 /// A timer fired: hand a tick event to every ticking reader with a parked
-/// token (nulling the token, so the client must re-issue to keep ticking).
+/// token, retaining one coalesced tick for a client that is still busy.
 fn dispatchTicks(chan_h: u64) void {
+    for (&readers) |*rd| if (rd.used and rd.tick_ticks != 0) {
+        rd.tick_due = true; // coalesce, but retain ticks while the client renders
+    };
+    dispatchDueTicks(chan_h, false);
+}
+
+fn dispatchDueTicks(chan_h: u64, before_input: bool) void {
     for (&readers) |*rd| {
-        if (!rd.used or rd.tick_ticks == 0 or rd.token == 0) continue;
+        if (!rd.used or !rd.tick_due or rd.token == 0) continue;
+        if (before_input and rd.yield_to_input) continue;
         const t = rd.token;
         rd.token = 0;
+        rd.tick_due = false;
+        rd.yield_to_input = true;
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = focused, .kind = 2, .arg = 0 } }, 0, t);
     }
 }
@@ -753,7 +764,7 @@ fn wakeReader(chan_h: u64, badge: u64, surface: u64, kind: u64) void {
     for (&readers) |*rd| if (rd.used and rd.badge == badge and rd.token != 0) {
         const t = rd.token;
         rd.token = 0;
-        refreshTicks();
+        rd.yield_to_input = false;
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = surface, .kind = kind, .arg = 0 } }, 0, t);
         return;
     };
@@ -778,6 +789,7 @@ fn pumpFocus(chan_h: u64) void {
         for (&readers) |*rd| if (rd.used and rd.badge == sf.owner and rd.token != 0) {
             const t = rd.token;
             rd.token = 0;
+            rd.yield_to_input = false;
             _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 4, .arg = @intFromBool(desired) } }, 0, t);
             delivered = true;
             break;
@@ -790,16 +802,22 @@ fn pumpFocus(chan_h: u64) void {
 }
 
 fn takeReader(badge: u64) ?u64 {
-    for (&readers) |*rd| if (rd.used and rd.badge == badge) {
+    for (&readers) |*rd| if (rd.used and rd.badge == badge and rd.token != 0) {
         const t = rd.token;
-        rd.* = .{};
-        refreshTicks(); // this reader may have been the last ticking one
+        // Consuming input is not unsubscribing. Resetting the timer here
+        // lets repeated pointer/key events postpone refresh indefinitely.
+        rd.token = 0;
+        rd.yield_to_input = false;
         return t;
     };
     return null;
 }
 fn dropReader(badge: u64) void {
-    _ = takeReader(badge);
+    for (&readers) |*rd| if (rd.used and rd.badge == badge) {
+        rd.* = .{};
+        refreshTicks();
+        return;
+    };
 }
 
 /// Hand buffered keys to the client that owns the focused surface. Alt-Tab is
@@ -1303,11 +1321,16 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 }
                 // Like `next_input`, but this reader also wants a periodic
                 // tick (arms the timer via `parkReader`). Real input still
-                // wins; the tick only fires when the deadline elapses idle.
+                // follows an already-due tick, so input cannot starve refresh.
                 const ticks = if (q.ms == 0) 0 else @max(@as(u64, 1), q.ms / 100);
                 parkReader(badge, token, ticks);
+                // Alternate an overdue refresh with queued input, so neither
+                // continuous motion nor a slow-rendering client starves the other.
+                dispatchDueTicks(chan_h, true);
                 dispatchKeys(chan_h);
                 dispatchPointer(chan_h);
+                pumpFocus(chan_h);
+                dispatchDueTicks(chan_h, false);
             },
             .register => {
                 // Hand back a channel badged with a fresh client id, so

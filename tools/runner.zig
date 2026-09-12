@@ -81,7 +81,7 @@ const specs = [_]Spec{
     .{ .name = "comp", .kind = .comp, .pass = "comp-test: PASS", .extra = "comp: surfaces up", .append = "profile=comp" },
     .{ .name = "focus", .kind = .focus, .pass = "focus-test: PASS", .extra = "focus: ok", .append = "profile=focus" },
     .{ .name = "trust", .kind = .trust, .pass = "trust-test: PASS", .extra = "trust: ok", .append = "profile=trust" },
-    .{ .name = "readers", .kind = .readers, .pass = "readers-test: PASS", .extra = "mover: done", .append = "profile=readers" },
+    .{ .name = "readers", .kind = .readers, .pass = "readers-test: PASS", .extra = "mover: done", .extra2 = "mover: deferred tick retained", .append = "profile=readers" },
     .{ .name = "gui", .kind = .gui, .pass = "gui-test: PASS", .extra = "gui: done count=1", .append = "profile=gui" },
     .{ .name = "guilogin", .kind = .guilogin, .pass = "guilogin-test: PASS", .extra = "gui: login who=alice", .append = "profile=guilogin" },
     .{ .name = "gtrust", .kind = .gtrust, .pass = "gtrust-test: PASS", .extra = "gui: tlogin who=alice", .append = "profile=gtrust" },
@@ -2338,7 +2338,17 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "QMP could not click the demo's close dot", log_path);
         return false;
     }
-    if (!try waitLogN(log_path, "dock: running win-demo=false", 1, "the dock did not clear the pill when the app exited", spec, polls)) return false;
+    // Keep pointer input arriving while the app exits. Refresh must not
+    // depend on an idle input queue or a second click on the dock.
+    // The dock is a legacy surface: a held right button delivers motion
+    // without launching an app (plain hover is intentionally not routed).
+    if (!moveScanout(&q, dem[0], dem[1]) or !q.sendButton("right", true)) return sfail(spec, log_path, "start dock motion");
+    for (0..40) |i| {
+        if (!moveScanout(&q, dem[0] + @as(u32, @intCast(i % 2)), dem[1])) return sfail(spec, log_path, "move over dock during exit");
+        sleepMs(10);
+    }
+    if (!q.sendButton("right", false)) return sfail(spec, log_path, "end dock motion");
+    if (countOccurrences(readLog(log_path), "dock: running win-demo=false") != 1) return sfail(spec, log_path, "dock refresh stalled during pointer activity");
     sleepMs(500);
     // Then the settings app (pill 0). At this scale it is a tall window that
     // covers the dock — fine, we are done clicking the dock. alice is an

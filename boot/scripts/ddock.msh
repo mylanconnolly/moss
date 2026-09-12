@@ -8,13 +8,13 @@
 # compositor restores by, so they must match ("Settings", "Demo").
 #
 # A pill's *running* dot is not remembered state — it is polled live: the
-# view asks init `unit-up NAME` for each app, and a `tick` re-renders once a
-# second, so the dot lights when the app is up and clears on its own when
+# view asks init `unit-up NAME` for each app, and a `tick` re-renders every
+# 200 ms, so the dot lights when the app is up and clears on its own when
 # the app exits (init reports a dead unit as down). No teardown signal has
 # to reach the dock.
 let final = (gui {
     dock: true
-    tick: 1000
+    tick: 200
     init: { }
     view: (fn [state] {
         {
