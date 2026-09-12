@@ -11,6 +11,7 @@
   profiles:  [gui]
   essential: true
   give: [
+    { tag: clip, unit: clipsvc }
     { tag: display, unit: compositor }
     { tag: font, unit: fontsvc }
   ]

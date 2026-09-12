@@ -296,6 +296,14 @@ fn pushFrame() void {
 
 fn applyPointerEvent(e: Event) void {
     switch (e.etype) {
+        2 => { // EV_REL / REL_WHEEL: positive scrolls toward the beginning.
+            if (e.code == 8) {
+                const delta: i32 = @bitCast(e.value);
+                const sum = @as(i32, shared.ptrWheel(ptr_buttons)) +| delta;
+                const steps: i8 = @intCast(std.math.clamp(sum, -127, 127));
+                ptr_buttons = (ptr_buttons & 0xff) | (@as(u32, @as(u8, @bitCast(steps))) << 8);
+            }
+        },
         ev_abs => switch (e.code) {
             abs_x => ptr_x = e.value,
             abs_y => ptr_y = e.value,
@@ -312,7 +320,10 @@ fn applyPointerEvent(e: Event) void {
                 if (e.value != 0) ptr_buttons |= bit else ptr_buttons &= ~bit;
             }
         },
-        ev_syn => pushFrame(),
+        ev_syn => {
+            pushFrame();
+            ptr_buttons &= 0xff;
+        },
         else => {},
     }
 }

@@ -9,6 +9,7 @@
   grant:     [log, bootfs]
   essential: false
   give: [
+    { tag: clip, unit: clipsvc }
     { tag: display, session: true }
     { tag: font, session: true }
   ]

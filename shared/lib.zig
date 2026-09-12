@@ -1080,6 +1080,7 @@ pub fn unpackLo(v: u64) u32 {
 
 /// Whether a queued move may be replaced without changing a transition.
 pub fn pointerCanCoalesce(before: ?u32, tail: u32, incoming: u32) bool {
+    if ((tail | incoming) & 0xff00 != 0) return false; // wheel deltas are never replaceable
     // The first frame of a button state is a transition, not a move. Its
     // position determines what was pressed and must never be overwritten.
     return if (before) |b| b == tail and tail == incoming else false;
@@ -1096,6 +1097,11 @@ test "pointer coalescing preserves press and release coordinates" {
 
 /// Pack local (kind 1) or scanout (kind 6) coordinates and buttons:
 /// x in bits 32..47, y in bits 16..31, buttons in bits 0..15.
+/// Signed wheel steps share the high byte of the pointer button word.
+/// The low byte remains held buttons; wheel data never acquires focus/capture.
+pub fn ptrWheel(buttons: u64) i8 {
+    return @bitCast(@as(u8, @truncate(buttons >> 8)));
+}
 pub fn ptrArg(x: u64, y: u64, btn: u64) u64 {
     return ((x & 0xffff) << 32) | ((y & 0xffff) << 16) | (btn & 0xffff);
 }
@@ -2124,4 +2130,15 @@ pub const display = @import("display.zig");
 pub const gui = @import("gui.zig");
 test {
     _ = @import("gui.zig");
+}
+
+test "wheel deltas retain sign and are never coalesced into pointer motion" {
+    const up = ptrArg(10, 20, 0x0101);
+    const down = ptrArg(10, 20, 0xff00);
+    try std.testing.expectEqual(@as(i8, 1), ptrWheel(ptrBtn(up)));
+    try std.testing.expectEqual(@as(i8, -1), ptrWheel(ptrBtn(down)));
+    try std.testing.expectEqual(@as(u64, 10), ptrX(down));
+    try std.testing.expectEqual(@as(u64, 20), ptrY(down));
+    try std.testing.expect(!pointerCanCoalesce(0, 0xff00, 0xff00));
+    try std.testing.expect(!pointerCanCoalesce(0, 0, 0x0100));
 }

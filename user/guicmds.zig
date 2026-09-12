@@ -149,8 +149,150 @@ var content_h: usize = 0;
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
 // the surface (so a pointer press can hit-test which widget it landed on).
-const Focus = struct { id: []const u8, is_field: bool, is_list: bool = false, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
-var focusables: [16]Focus = undefined;
+const Focus = struct { sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, is_list: bool = false, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
+var focusables: [64]Focus = undefined;
+
+// Every window has an implicit viewport; explicit `scroll` nodes can nest.
+const ScrollState = struct {
+    id: [64]u8 = @splat(0),
+    len: usize = 0,
+    used: bool = false,
+    seen: bool = false,
+    state: shared.gui.Scroll = .{},
+    parent: usize = 0,
+    x: usize = 0,
+    top: isize = 0,
+    w: usize = 0,
+    h: usize = 0,
+    cy0: usize = 0,
+    cy1: usize = 0,
+    depth: usize = 0,
+};
+var scrolls: [16]ScrollState = @splat(.{});
+var scroll_owner: usize = 0;
+var reveal_focus = true;
+var layout_overflow = false;
+var scroll_dirty = false;
+fn containsScroll(node: Value, id: []const u8) bool {
+    if (node != .record) return false;
+    const rec = node.record;
+    if (std.mem.eql(u8, strField(rec, "kind"), "scroll") and std.mem.eql(u8, strField(rec, "id"), id)) return true;
+    for (nodeChildren(rec)) |child| if (containsScroll(child, id)) return true;
+    for ([_][]const u8{ "child", "left", "right" }) |key| {
+        if (rec.get(key)) |child| if (containsScroll(child, id)) return true;
+    }
+    return false;
+}
+fn scrollFor(id: []const u8) usize {
+    for (scrolls[1..], 1..) |st, i| if (st.used and std.mem.eql(u8, st.id[0..st.len], id)) {
+        if (st.seen) {
+            layout_overflow = true;
+            return 0;
+        }
+        return i;
+    };
+    for (scrolls[1..], 1..) |*st, i| if (!st.used) {
+        st.* = .{ .used = true, .len = @min(id.len, st.id.len) };
+        @memcpy(st.id[0..st.len], id[0..st.len]);
+        return i;
+    };
+    layout_overflow = true;
+    return 0;
+}
+fn recordFocus(f: Focus) void {
+    if (nfoc == focusables.len) {
+        layout_overflow = true;
+        return;
+    }
+    focusables[nfoc] = f;
+    const out = &focusables[nfoc];
+    out.sy = wf.screenY(f.by);
+    out.by = wf.clipY(f.by);
+    out.cy0 = wf.clip_y0;
+    out.cy1 = wf.clip_y1;
+    out.cx0 = wf.clip_x0;
+    out.cx1 = wf.clip_x1;
+    out.owner = scroll_owner;
+    nfoc += 1;
+}
+fn revealWidget(index: usize) bool {
+    if (index >= nfoc) return false;
+    const f = focusables[index];
+    var owner = f.owner;
+    var top = f.sy;
+    var h = f.bh;
+    var changed = false;
+    for (0..scrolls.len) |_| {
+        const st = &scrolls[owner];
+        const local: usize = @intCast(@max(0, top - st.top + @as(isize, @intCast(st.state.offset))));
+        const old = st.state.offset;
+        changed = st.state.reveal(local, h) or changed;
+        top += @as(isize, @intCast(old)) - @as(isize, @intCast(st.state.offset));
+        if (owner == 0) break;
+        h = @min(h, st.h);
+        top = @max(st.top, top);
+        owner = st.parent;
+    }
+    scroll_dirty = scroll_dirty or changed;
+    return changed;
+}
+fn scrollAt(x: usize, y: usize) usize {
+    var result: usize = 0;
+    // Nested viewports are encountered after parents during painting.
+    for (scrolls[1..], 1..) |st, i| {
+        if (st.seen and st.depth >= scrolls[result].depth and x >= st.x and x < st.x + st.w and y >= st.cy0 and y < st.cy1) result = i;
+    }
+    return result;
+}
+fn scrollStep(owner_in: usize, delta: isize) bool {
+    var owner = owner_in;
+    for (0..scrolls.len) |_| {
+        if (scrolls[owner].state.step(delta)) {
+            scroll_dirty = true;
+            return true;
+        }
+        if (owner == 0) break;
+        owner = scrolls[owner].parent;
+    }
+    return false;
+}
+fn paintViewport(node: Value, x: usize, y: usize, width: usize, height: usize, owner: usize) Size {
+    const st = &scrolls[owner];
+    st.seen = true;
+    st.parent = scroll_owner;
+    st.depth = if (owner == 0) 0 else scrolls[scroll_owner].depth + 1;
+    st.x = x;
+    st.top = wf.screenY(y);
+    st.w = width;
+    st.h = height;
+    const old_y0 = wf.clip_y0;
+    const old_y1 = wf.clip_y1;
+    const old_offset = wf.draw_offset_y;
+    const old_owner = scroll_owner;
+    wf.clip_y0 = @max(old_y0, wf.clipY(y));
+    wf.clip_y1 = @min(old_y1, wf.clipY(y + height));
+    st.cy0 = wf.clip_y0;
+    st.cy1 = wf.clip_y1;
+    var size = layoutNode(node, 0, 0, width, false);
+    const overflow = size.h > height;
+    const content_w = width -| (if (overflow) @as(usize, 14) else 0);
+    if (overflow) size = layoutNode(node, 0, 0, content_w, false);
+    st.state.fit(size.h, height);
+    scroll_owner = owner;
+    wf.draw_offset_y -= @intCast(st.state.offset);
+    _ = drawNode(node, x, y, content_w);
+    wf.draw_offset_y = old_offset;
+    scroll_owner = old_owner;
+    if (overflow and height > 0 and width >= 8) {
+        const thumb = @min(height, @max(20, height * height / @max(1, size.h)));
+        const at = (height - thumb) * st.state.offset / @max(1, st.state.limit());
+        fillRoundRect(x + width - 8, y, 6, height, 3, pal.surface);
+        fillRoundRect(x + width - 8, y + at, 6, thumb, 3, pal.text_muted);
+    }
+    wf.clip_y0 = old_y0;
+    wf.clip_y1 = old_y1;
+    return .{ .w = width, .h = height };
+}
 
 // A scrollable list's interaction state — its scroll offset and selected
 // row — is owned by the runtime and keyed by the widget's id (like a text
@@ -213,7 +355,7 @@ fn hitWidget(n: usize, x: usize, y: usize) ?usize {
     var i: usize = 0;
     while (i < n and i < focusables.len) : (i += 1) {
         const f = focusables[i];
-        if (x >= f.bx and x < f.bx + f.bw and y >= f.by and y < f.by + f.bh) return i;
+        if (x >= f.cx0 and x < f.cx1 and y >= f.cy0 and y < f.cy1 and x >= f.bx and x < f.bx + f.bw and @as(isize, @intCast(y)) >= f.sy and @as(isize, @intCast(y)) < f.sy + @as(isize, @intCast(f.bh))) return i;
     }
     return null;
 }
@@ -321,8 +463,13 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     wf.drawChrome(title);
     // Content area below the titlebar. Record the full height it wants so
     // the window can be sized to fit before its surface is created.
-    const sz = drawNode(tree, pad, wf.title_h + pad, wf.win_w - 2 * pad);
-    content_h = wf.title_h + pad + sz.h + pad;
+    for (scrolls[1..]) |*st| if (st.used and !containsScroll(tree, st.id[0..st.len])) {
+        st.* = .{};
+    };
+    for (&scrolls) |*st| st.seen = false;
+    scroll_owner = 0;
+    layout_overflow = false;
+    _ = paintViewport(tree, pad, wf.title_h + pad, wf.win_w -| (2 * pad), wf.win_h -| (wf.title_h + 2 * pad), 0);
     return nfoc;
 }
 
@@ -372,7 +519,50 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
     const rec = node.record;
     const kind = strField(rec, "kind");
     const children = nodeChildren(rec);
+    if (std.mem.eql(u8, kind, "scroll")) {
+        const child = rec.get("child") orelse return .{};
+        const height: usize = @intCast(std.math.clamp(intField(rec, "h", 240), 40, 4096));
+        if (paint) {
+            const id = strField(rec, "id");
+            if (id.len == 0 or id.len > 64) {
+                layout_overflow = true;
+                return .{};
+            }
+            const owner = scrollFor(id);
+            if (owner == 0) return .{};
+            return paintViewport(child, x, y, avail_w, height, owner);
+        }
+        return .{ .w = avail_w, .h = height };
+    }
     if (std.mem.eql(u8, kind, "row")) {
+        var total: usize = 0;
+        var fixed: usize = nodeGap(rec) * (children.len -| 1);
+        for (children) |child| {
+            const weight = flexWeight(child);
+            total += weight;
+            if (weight == 0) fixed += layoutNode(child, 0, 0, avail_w, false).w;
+        }
+        if (total > 0 and fixed < avail_w) {
+            var before: usize = 0;
+            var height: usize = 0;
+            for (children) |child| {
+                const weight = flexWeight(child);
+                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else shared.gui.trackWidth(avail_w - fixed, total, before, weight);
+                height = @max(height, layoutNode(child, 0, 0, width, false).h);
+                before += weight;
+            }
+            before = 0;
+            var xx = x;
+            for (children) |child| {
+                const weight = flexWeight(child);
+                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else shared.gui.trackWidth(avail_w - fixed, total, before, weight);
+                const size = layoutNode(child, 0, 0, width, false);
+                if (paint) _ = drawNode(child, xx, y + (height - size.h) / 2, width);
+                xx += width + nodeGap(rec);
+                before += weight;
+            }
+            return .{ .w = avail_w, .h = height };
+        }
         var row = shared.gui.Flow{ .width = avail_w, .gap = nodeGap(rec) };
         var row_h: usize = 0;
         for (children) |child| row_h = @max(row_h, layoutNode(child, 0, 0, avail_w, false).h);
@@ -413,9 +603,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
         return .{ .w = size, .h = size };
     }
     if (std.mem.eql(u8, kind, "label")) {
-        if (paint) return drawLabel(rec, x, y, avail_w);
-        const role = if (std.mem.eql(u8, strField(rec, "role"), "title")) R_TITLE else R_UI;
-        return .{ .w = @min(avail_w, strW(role, strField(rec, "text"))), .h = lineOf(role) };
+        return layoutLabel(rec, x, y, avail_w, paint);
     }
     if (std.mem.eql(u8, kind, "button")) {
         if (paint) return drawButton(rec, x, y, avail_w);
@@ -432,6 +620,11 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
     if (std.mem.eql(u8, kind, "split")) {
         if (paint) return drawSplit(rec, x, y, avail_w);
         const lw = @min(avail_w, @as(usize, @intCast(@max(intField(rec, "left_w", 220), 80))));
+        if (avail_w < lw + gap + 160) {
+            const l = if (rec.get("left")) |v| layoutNode(v, 0, 0, avail_w, false) else Size{};
+            const r = if (rec.get("right")) |v| layoutNode(v, 0, 0, avail_w, false) else Size{};
+            return .{ .w = avail_w, .h = l.h + gap + r.h };
+        }
         const l = if (rec.get("left")) |v| layoutNode(v, 0, 0, lw, false) else Size{};
         const r = if (rec.get("right")) |v| layoutNode(v, 0, 0, avail_w -| (lw + gap + 1), false) else Size{};
         return .{ .w = avail_w, .h = @max(l.h, r.h) };
@@ -439,14 +632,54 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
     return .{};
 }
 
-fn drawLabel(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
+fn flexWeight(node: Value) usize {
+    if (node != .record) return 0;
+    return @intCast(std.math.clamp(intField(node.record, "flex", 0), 0, 64));
+}
+fn layoutLabel(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
     const text = strField(rec, "text");
     const muted = rec.get("muted") != null and (rec.get("muted").?).asBool();
     const strong = std.mem.eql(u8, strField(rec, "role"), "title");
     const role: u64 = if (strong) R_TITLE else R_UI;
     const ink = if (strong) pal.title else if (muted) pal.text_muted else pal.text;
-    drawStrTrunc(x, y, role, text, avail_w, ink, content_bg);
-    return .{ .w = @min(avail_w, strW(role, text)), .h = lineOf(role) };
+    if (!(if (rec.get("wrap")) |v| v.asBool() else false) or avail_w == 0) {
+        if (paint) drawStrTrunc(x, y, role, text, avail_w, ink, content_bg);
+        return .{ .w = @min(avail_w, strW(role, text)), .h = lineOf(role) };
+    }
+    var start: usize = 0;
+    var lines: usize = 0;
+    var width: usize = 0;
+    while (start < text.len) {
+        const line_end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |at| at else text.len;
+        var end = line_end;
+        if (strW(role, text[start..end]) > avail_w) {
+            var lo = start;
+            var hi = end;
+            while (lo < hi) {
+                var mid = lo + (hi - lo + 1) / 2;
+                while (mid < line_end and text[mid] & 0xc0 == 0x80) mid += 1;
+                if (strW(role, text[start..mid]) <= avail_w) lo = mid else {
+                    hi = mid - 1;
+                    while (hi > start and text[hi] & 0xc0 == 0x80) hi -= 1;
+                }
+            }
+            end = lo;
+            if (end == start) end = @min(line_end, start + (std.unicode.utf8ByteSequenceLength(text[start]) catch 1));
+            if (end < line_end) {
+                if (std.mem.lastIndexOfScalar(u8, text[start..end], ' ')) |at| if (at > 0) {
+                    end = start + at;
+                };
+            }
+        }
+        if (paint) drawStr(x, y + lines * lineOf(role), role, text[start..end], ink, content_bg);
+        width = @max(width, @min(avail_w, strW(role, text[start..end])));
+        lines += 1;
+        start = end;
+        if (start < text.len and text[start] == '\n') start += 1 else while (start < text.len and text[start] == ' ') {
+            start += 1;
+        }
+    }
+    return .{ .w = width, .h = @max(1, lines) * lineOf(role) };
 }
 
 /// A raised button: a filled box with a lighter top edge and a darker
@@ -503,8 +736,7 @@ fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     fillRect(x + r_btn, y + ring_w, w -| (2 * r_btn), 1, shade(fill, 6, 5));
     drawIconLabel(rec, "label", x + bpx, y, w -| (2 * bpx), h, ink, fill);
     if (!disabled and nfoc < focusables.len) {
-        focusables[nfoc] = .{ .id = strField(rec, "id"), .is_field = false, .bx = x, .by = y, .bw = w, .bh = h };
-        nfoc += 1;
+        recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .bx = x, .by = y, .bw = w, .bh = h });
     }
     return .{ .w = w, .h = h };
 }
@@ -557,8 +789,7 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     } else drawStr(tx, ty, R_UI, shown[ed.first..last], pal.text, pal.field_bg);
     if (focused) fillRect(tx + strW(R_UI, shown[ed.first..ed.cursor]), ty, 2, lineOf(R_UI), pal.focus);
     if (nfoc < focusables.len) {
-        focusables[nfoc] = .{ .id = id, .is_field = true, .bx = x, .by = yy, .bw = avail_w, .bh = bh };
-        nfoc += 1;
+        recordFocus(.{ .id = id, .is_field = true, .bx = x, .by = yy, .bw = avail_w, .bh = bh });
     }
     return .{ .w = avail_w, .h = (yy - y) + bh };
 }
@@ -573,6 +804,7 @@ const ListHit = struct {
     id: []const u8,
     x: usize = 0,
     rows_top: usize = 0,
+    offset_y: isize = 0,
     rows_w: usize = 0,
     row_h: usize = 0,
     sb_x: usize = 0, // scrollbar centre (surface-local), 0 = no scrollbar
@@ -688,9 +920,9 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const sx1 = wf.clip_x1;
     const sy1 = wf.clip_y1;
     wf.clip_x0 = @max(wf.clip_x0, x + pal.border_w);
-    wf.clip_y0 = @max(wf.clip_y0, rows_top);
+    wf.clip_y0 = @max(wf.clip_y0, wf.clipY(rows_top));
     wf.clip_x1 = @min(wf.clip_x1, x + pal.border_w + rows_w);
-    wf.clip_y1 = @min(wf.clip_y1, y + box_h - pal.border_w);
+    wf.clip_y1 = @min(wf.clip_y1, wf.clipY(y + box_h - pal.border_w));
 
     if (nrows == 0) {
         const message = strField(rec, "empty");
@@ -753,12 +985,11 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
 
     if (nlisthit < list_hits.len) {
         const sb_x = if (has_sb) x + w - sb_w / 2 - pal.border_w else 0;
-        list_hits[nlisthit] = .{ .id = id, .x = x, .rows_top = rows_top, .rows_w = rows_w, .row_h = row_h, .sb_x = sb_x, .st = st };
+        list_hits[nlisthit] = .{ .id = id, .x = x, .rows_top = rows_top, .offset_y = wf.draw_offset_y, .rows_w = rows_w, .row_h = row_h, .sb_x = sb_x, .st = st };
         nlisthit += 1;
     }
     if (nfoc < focusables.len) {
-        focusables[nfoc] = .{ .id = id, .is_field = false, .is_list = true, .bx = x, .by = y, .bw = w, .bh = box_h };
-        nfoc += 1;
+        recordFocus(.{ .id = id, .is_field = false, .is_list = true, .bx = x, .by = y, .bw = w, .bh = box_h });
     }
     return .{ .w = w, .h = box_h };
 }
@@ -769,6 +1000,11 @@ fn drawSplit(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const left = rec.get("left");
     const right = rec.get("right");
     const left_w: usize = @intCast(@max(intField(rec, "left_w", 220), 80));
+    if (avail_w < left_w + gap + 160) {
+        const l = if (left) |v| drawNode(v, x, y, avail_w) else Size{};
+        const r = if (right) |v| drawNode(v, x, y + l.h + gap, avail_w) else Size{};
+        return .{ .w = avail_w, .h = l.h + gap + r.h };
+    }
     const div = 1 + gap; // a hairline rule plus breathing room each side
     const lh = if (left) |l| drawNode(l, x, y, @min(left_w, avail_w)) else Size{ .w = 0, .h = 0 };
     const rx = x + left_w + div;
@@ -792,6 +1028,7 @@ fn findListRows(node: Value, id: []const u8) ?Value {
     if (rec.get("children")) |c| if (c == .list) for (c.list) |ch| {
         if (findListRows(ch, id)) |r| return r;
     };
+    if (rec.get("child")) |c| if (findListRows(c, id)) |r| return r;
     if (rec.get("left")) |l| if (findListRows(l, id)) |r| return r;
     if (rec.get("right")) |r2| if (findListRows(r2, id)) |r| return r;
     return null;
@@ -823,10 +1060,11 @@ const ListClick = struct { fire: bool = false, activated: bool = false, row: usi
 /// Route a click at (x, y) inside the list `id`: a row click moves the
 /// selection (a reclick on the same row activates it); a scrollbar-track
 /// click pages. Returns whether to fire a list event and for which row.
-fn listClick(id: []const u8, x: usize, y: usize) ListClick {
+fn listClick(id: []const u8, x: usize, screen_y: usize) ListClick {
     for (list_hits[0..nlisthit]) |lh| {
         if (!std.mem.eql(u8, lh.id, id)) continue;
         const st = lh.st;
+        const y: usize = @intCast(@max(0, @as(isize, @intCast(screen_y)) - lh.offset_y));
         // The scrollbar sits to the right of the rows: click the upper or
         // lower half of the track to page up or down.
         if (x >= lh.x + lh.rows_w) {
@@ -1678,6 +1916,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
 
     resetFields();
     resetLists();
+    scrolls = @splat(.{});
+    scroll_dirty = false;
+    reveal_focus = true;
     hovered = null;
     pressed = null;
     // A fresh window: no drag in flight (module state persists across
@@ -1691,7 +1932,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     wf.maximized = false;
     // Width: `width: N` narrows the window (a desktop lays out several
     // smaller windows); default is the roomy single-window width.
-    wf.win_w = win_w_default;
+    wf.win_w = @min(win_w_default, wf.scanout_w);
     if (spec.get("width")) |wv| {
         if (wv == .int and wv.int >= 200) wf.win_w = @min(@as(usize, @intCast(wv.int)), wf.scanout_w);
     }
@@ -1720,6 +1961,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (title.len > 0) wf.setSurfaceTitle(title);
 
     var focus: usize = 0;
+    var focus_id: [64]u8 = undefined;
+    var focus_len: usize = 0;
+    var action_id: [64]u8 = undefined;
+    var action_len: usize = 0;
     var minimized = false; // the amber dot hid us; a restore event brings us back
     var announced = false;
     var relog_geom = false; // a resize moved the traffic lights; re-log them
@@ -1737,9 +1982,38 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         // otherwise pile up per-render trees until the interpreter runs
         // out of memory.
         it.reclaim();
-        const nfocus = renderTree(tree, title, focus);
-        if (nfocus > 0 and focus >= nfocus) focus = nfocus - 1;
+        var nfocus = renderTree(tree, title, focus);
+        if (focus_len > 0) {
+            for (focusables[0..nfocus], 0..) |f, i| if (std.mem.eql(u8, f.id, focus_id[0..focus_len])) {
+                if (focus != i) {
+                    focus = i;
+                    nfocus = renderTree(tree, title, focus);
+                }
+                break;
+            };
+        }
+        if (reveal_focus) {
+            for (0..scrolls.len) |_| {
+                if (!revealWidget(focus)) break;
+                nfocus = renderTree(tree, title, focus);
+            }
+            reveal_focus = false;
+        }
+        if (layout_overflow) return it.fail("gui: too many widgets or invalid scroll id", .{});
+        if (nfocus > 0 and focus >= nfocus) {
+            focus = nfocus - 1;
+            nfocus = renderTree(tree, title, focus);
+        }
         if (!wf.commitSurface()) return it.fail("gui: commit failed", .{});
+        if (action_len > 0) {
+            var line: [96]u8 = undefined;
+            _ = usys.log(log_h, std.fmt.bufPrint(&line, "gui: action {s}", .{action_id[0..action_len]}) catch "gui: action");
+            action_len = 0;
+        }
+        if (scroll_dirty) {
+            _ = usys.log(log_h, "gui: scrolled");
+            scroll_dirty = false;
+        }
         // The traffic-light dot centres in scanout coordinates, so a host
         // can click close/minimize/maximize precisely. Logged on the first
         // render, and again after a resize (maximize) moves them.
@@ -1784,6 +2058,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 if (!wf.outputChanged(ev, title, minimized)) return it.fail("gui: output resize failed", .{});
                 hovered = null;
                 pressed = null;
+                reveal_focus = true;
                 announced = false;
                 break :input;
             }
@@ -1824,6 +2099,24 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // widgets. The chrome logging stays here, so it reads the same
             // as before the frame was split out.
             if (ev.kind == 1) {
+                const wheel = shared.ptrWheel(ev.btn);
+                if (wheel != 0) {
+                    if (hitWidget(nfocus, ev.x, ev.y)) |wi| if (focusables[wi].is_list) {
+                        if (listStateById(focusables[wi].id)) |list| {
+                            const old = list.scroll;
+                            list.scroll = @intCast(std.math.clamp(@as(isize, @intCast(old)) - @as(isize, wheel) * 3, 0, @as(isize, @intCast(list.nrows -| list.vis))));
+                            if (list.scroll != old) break :input;
+                        }
+                    };
+                    if (ev.y >= wf.title_h + pad and ev.y < wf.win_h -| pad and ev.x >= pad and ev.x < wf.win_w -| pad and scrollStep(scrollAt(ev.x, ev.y), -@as(isize, wheel) * @as(isize, @intCast(lineOf(R_UI) * 3)))) {
+                        hovered = null;
+                        pressed = null;
+                        field_drag = null;
+                        _ = usys.log(log_h, "gui: wheel scrolled");
+                        break :input;
+                    }
+                    continue :input;
+                }
                 if (field_drag) |wi| {
                     if (ev.btn & 1 == 0) field_drag = null else {
                         if (wi < nfocus) fieldClick(focusables[wi], ev.x, true);
@@ -1843,6 +2136,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 switch (pointer) {
                     .none => {},
                     .content => |cev| {
+                        const owner = scrollAt(cev.x, cev.y);
+                        const st = &scrolls[owner];
+                        if (st.state.limit() > 0 and cev.x >= st.x + st.w -| 12 and cev.x < st.x + st.w and cev.y >= st.cy0 and cev.y < st.cy1) {
+                            const delta: isize = @intCast(@max(1, st.h -| lineOf(R_UI)));
+                            _ = st.state.step(if (@as(isize, @intCast(cev.y)) < st.top + @as(isize, @intCast(st.h / 2))) -delta else delta);
+                            break :input;
+                        }
                         if (hitWidget(nfocus, cev.x, cev.y)) |wi| {
                             focus = wi;
                             if (focusables[wi].is_list) {
@@ -1878,6 +2178,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         break :input;
                     },
                     .resized => |zone| {
+                        reveal_focus = true;
                         relog_geom = true; // the dots moved with the window
                         _ = usys.log(log_h, switch (zone) {
                             .left => "gui: snapped left",
@@ -1895,15 +2196,43 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             pressed = null;
             const ch = ev.ch;
             const cur: ?Focus = if (nfocus > 0) focusables[focus] else null;
-            if (cur) |c| if (c.is_field and fieldFor(c.id, "").edit.key(ch)) break :input;
+            if (cur) |c| if (c.is_field) {
+                const f = fieldFor(c.id, "");
+                const ed = &f.edit;
+                const keys = shared.keyboard;
+                if (ch == keys.copy or ch == keys.cut or ch == keys.paste or ch == 3 or ch == 24 or ch == 22) {
+                    ed.typing = false;
+                    if (ch == keys.paste or ch == 22) {
+                        if (@import("clipboard.zig").get()) |text| ed.paste(text);
+                    } else if (!f.secret and ed.low() != ed.high()) {
+                        if (@import("clipboard.zig").set(ed.buf[ed.low()..ed.high()]) and (ch == keys.cut or ch == 24)) _ = ed.key(8);
+                    }
+                    reveal_focus = true;
+                    break :input;
+                }
+                if (ed.key(if (ch == 26) keys.undo else ch)) {
+                    reveal_focus = true;
+                    break :input;
+                }
+            };
+            if (ch == 0x1e or ch == 0x1f or ch == shared.keyboard.home or ch == shared.keyboard.end) {
+                const owner = if (cur) |c| c.owner else 0;
+                const delta: isize = @intCast(if (ch == shared.keyboard.home or ch == shared.keyboard.end) scrolls[owner].state.extent else @max(1, scrolls[owner].h -| lineOf(R_UI)));
+                if (scrollStep(owner, if (ch == 0x1e or ch == shared.keyboard.home) -delta else delta)) break :input;
+            }
             switch (ch) {
                 '\t', shared.keyboard.back_tab => {
+                    reveal_focus = true;
+                    if (cur) |c| if (c.is_field) {
+                        fieldFor(c.id, "").edit.typing = false;
+                    };
                     if (nfocus > 0) focus = (focus + (if (ch == '\t') @as(usize, 1) else nfocus - 1)) % nfocus;
                     break :input;
                 },
                 '\n' => {
                     if (cur) |c| {
                         if (c.is_field) {
+                            reveal_focus = true;
                             focus = (focus + 1) % nfocus; // advance past a field
                         } else if (c.is_list) {
                             if (listStateById(c.id)) |st| {
@@ -1934,10 +2263,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                             break :input;
                         }
                     };
+                    if (scrollStep(if (cur) |c| c.owner else 0, (if (ch == key_up) -@as(isize, @intCast(lineOf(R_UI))) else @as(isize, @intCast(lineOf(R_UI)))))) break :input;
                 },
                 else => {},
             }
         }
+        if (focus < nfocus) {
+            focus_len = @min(focusables[focus].id.len, focus_id.len);
+            @memcpy(focus_id[0..focus_len], focusables[focus].id[0..focus_len]);
+        } else focus_len = 0;
         // The close box was clicked: end the app (its `gui` call returns
         // the last state, like a `done`).
         if (closed) break;
@@ -1947,6 +2281,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             tree = try it.callValue(view, &.{state}, null, null);
         }
         if (fired) |id| {
+            reveal_focus = true;
+            action_len = @min(id.len, action_id.len);
+            @memcpy(action_id[0..action_len], id[0..action_len]);
             const ev = if (fired_list) try mkListEvent(it, id, fired_row, fired_activated) else try mkEvent(it, id);
             if (remote_node != 0) {
                 // The app runs on the fabric: ship the event, render the

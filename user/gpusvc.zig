@@ -1056,7 +1056,7 @@ fn dispatchPointer(chan_h: u64) void {
         const nx = @min(@as(usize, e.x) * fb_w / 32768, fb_w - 1);
         const ny = @min(@as(usize, e.y) * fb_h / 32768, fb_h - 1);
         moveCursor(nx, ny);
-        const buttons = e.buttons;
+        const buttons = e.buttons & 0xff;
         const changed = buttons != prev_buttons;
         const press = (buttons & ~prev_buttons) != 0; // a newly-pressed button
         prev_buttons = buttons;
@@ -1076,7 +1076,7 @@ fn dispatchPointer(chan_h: u64) void {
         hover_surface = id;
         if (id == 0) continue;
         const sf = findSurface(id).?;
-        if (!changed and buttons == 0 and !sf.pointer_tracking) continue;
+        if (!changed and buttons == 0 and shared.ptrWheel(e.buttons) == 0 and !sf.pointer_tracking) continue;
         // Raising/focusing on press is the compositor's own bookkeeping, so
         // do it now even if the client is busy — the window still comes to
         // the front and takes the keyboard.
@@ -1091,11 +1091,11 @@ fn dispatchPointer(chan_h: u64) void {
         // deliver live out of order).
         if (sf.pend_head == sf.pend_tail) {
             if (takeReader(sf.owner)) |token| {
-                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(lx, ly, buttons) } }, 0, token);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = id, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(lx, ly, e.buttons) } }, 0, token);
                 continue;
             }
         }
-        pendPush(sf, .{ .lx = lx, .ly = ly, .buttons = buttons });
+        pendPush(sf, .{ .lx = lx, .ly = ly, .buttons = e.buttons });
     }
     flushPendingPtr(chan_h);
 }

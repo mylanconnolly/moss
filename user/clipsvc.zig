@@ -38,7 +38,7 @@ var clip_len: usize = 0;
 const CClient = struct { used: bool = false, badge: u64 = 0, va: u64 = 0, len: usize = 0 };
 var clients: [64]CClient = @splat(.{});
 var next_badge: u64 = 2;
-const max_badge: u64 = 250;
+const max_badge: u64 = std.math.maxInt(u64) - 1;
 
 fn clientFor(badge: u64) ?*CClient {
     for (&clients) |*c| if (c.used and c.badge == badge) return c;
@@ -65,6 +65,13 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .client_dead) {
+            if (clientFor(r.badge)) |c| {
+                if (c.va != 0) _ = usys.shmUnmap(c.va);
+                c.* = .{};
+            }
+            continue;
+        }
         if (r.err != .ok) continue;
         const req = shared.decodeMsg(shared.ClipReq, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);

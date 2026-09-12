@@ -241,11 +241,21 @@ var surf_va: u64 = 0; // its mapped address (unmapped on close)
 // A clip rectangle the drawing primitives honour, so a scrollable list can
 // paint rows into a viewport and have anything past its edges cut rather
 // than spilling over the window. Reset to the whole window each render.
+// Layout coordinates remain nonnegative; scrolling translates only at the
+// raster boundary, before clipping. This handles partially visible glyphs.
+pub var draw_offset_y: isize = 0;
+pub fn screenY(y: usize) isize {
+    return @as(isize, @intCast(y)) + draw_offset_y;
+}
+pub fn clipY(y: usize) usize {
+    return @intCast(@max(0, screenY(y)));
+}
 pub var clip_x0: usize = 0;
 pub var clip_y0: usize = 0;
 pub var clip_x1: usize = 1280;
 pub var clip_y1: usize = 1024;
 pub fn clipReset() void {
+    draw_offset_y = 0;
     clip_x0 = 0;
     clip_y0 = 0;
     clip_x1 = win_w;
@@ -260,21 +270,24 @@ pub fn fillAll(word: u32) void {
     for (0..win_w * win_h) |i| px[i] = word;
 }
 
-pub fn putPx(x: usize, y: usize, word: u32) void {
+pub fn putPx(x: usize, logical_y: usize, word: u32) void {
+    const sy = screenY(logical_y);
+    if (sy < 0) return;
+    const y: usize = @intCast(sy);
     if (measuring) return;
     if (x < win_w and y < win_h and inClip(x, y)) px[y * win_w + x] = word;
 }
 
 pub fn fillRect(x: usize, y: usize, w: usize, h: usize, word: u32) void {
     if (measuring) return;
-    var yy = y;
-    while (yy < y + h and yy < win_h) : (yy += 1) {
-        if (yy < clip_y0 or yy >= clip_y1) continue;
-        var xx = x;
-        while (xx < x + w and xx < win_w) : (xx += 1) {
-            if (xx < clip_x0 or xx >= clip_x1) continue;
-            px[yy * win_w + xx] = word;
-        }
+    const top = @max(@as(isize, @intCast(clip_y0)), screenY(y));
+    const bottom = @min(@as(isize, @intCast(@min(win_h, clip_y1))), screenY(y + h));
+    if (top >= bottom) return;
+    const left = @max(x, clip_x0);
+    const right = @min(x + w, @min(win_w, clip_x1));
+    if (left >= right) return;
+    for (@as(usize, @intCast(top))..@as(usize, @intCast(bottom))) |yy| {
+        @memset(px[yy * win_w + left .. yy * win_w + right], word);
     }
 }
 
@@ -334,7 +347,7 @@ pub fn fillDot(cx: usize, cy: usize, r: usize, word: u32) void {
     const cyf: f32 = @floatFromInt(cy);
     const rf: f32 = @floatFromInt(r);
     var y = if (cy > r) cy - r else 0;
-    while (y <= cy + r and y < win_h) : (y += 1) {
+    while (y <= cy + r) : (y += 1) {
         var x = if (cx > r) cx - r else 0;
         while (x <= cx + r and x < win_w) : (x += 1) {
             const dx = (@as(f32, @floatFromInt(x)) + 0.5) - cxf;
@@ -357,7 +370,10 @@ pub fn panel(x: usize, y: usize, w: usize, h: usize, r: usize, fill: u32, border
 }
 
 /// Blend `fg` over the pixel at (x, y) by coverage `cov` (0..255).
-pub fn blendPx(x: usize, y: usize, fg: u32, cov: u32) void {
+pub fn blendPx(x: usize, logical_y: usize, fg: u32, cov: u32) void {
+    const sy = screenY(logical_y);
+    if (sy < 0) return;
+    const y: usize = @intCast(sy);
     if (measuring) return;
     if (x >= win_w or y >= win_h or cov == 0) return;
     if (!inClip(x, y)) return;

@@ -1903,8 +1903,41 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (!q.sendKey(k)) return false;
         sleepMs(150);
     }
+    // Cross-field clipboard transfer, cut/undo and redo, plus focus reveal
+    // into the nested scroll viewport. Control-A keeps Emacs semantics;
+    // the Command modifier selects all and owns the familiar shortcuts.
+    for ([_][]const u8{ "a", "c", "x", "z" }) |key| {
+        if (!q.chord("meta_l", key)) return false;
+        sleepMs(150);
+    }
+    if (!q.sendKey("tab")) return false;
+    sleepMs(150);
+    if (!q.chord("meta_l", "v")) return false;
+    sleepMs(150);
+    if (!q.chord("meta_l", "z")) return false;
+    sleepMs(150);
+    // Hold Shift around Command-Z for redo.
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!q.chord("meta_l", "z")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    sleepMs(200);
+    _ = q.screendump(check_dir ++ "/gui-edit-scroll.ppm");
+    // A password selection must neither replace the clipboard nor be cut.
+    if (!q.sendKey("tab")) return false;
+    sleepMs(150);
+    for ([_][]const u8{ "a", "c", "x" }) |key| {
+        if (!q.chord("meta_l", key)) return false;
+        sleepMs(100);
+    }
     if (!q.chord("shift", "tab")) return false;
     sleepMs(150);
+    if (!q.chord("meta_l", "a") or !q.chord("meta_l", "v")) return false;
+    sleepMs(150);
+
+    for (0..2) |_| {
+        if (!q.chord("shift", "tab")) return false;
+        sleepMs(150);
+    }
     if (!q.sendKey("ret")) return false;
     var m: u64 = 0;
     while (true) {
@@ -1912,7 +1945,7 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         m += 1;
         polls.* += 1;
         const content = readLog(log_path);
-        if (std.mem.indexOf(u8, content, "gui: done count=1 name=Mossx") != null) break;
+        if (std.mem.indexOf(u8, content, "gui: done count=1 name=Mossx other=Mossx secret_len=7") != null) break;
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the gui app never updated its state and closed", log_path);
             return false;
@@ -2450,6 +2483,7 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         _ = q.screendump(if (pass == 0) check_dir ++ "/settings-scale-100.ppm" else check_dir ++ "/settings-scale-150.ppm");
     }
     if (!try outputSettingsDrive(spec, log_path, polls, &q)) return false;
+    if (!try adaptiveSettingsDrive(spec, log_path, polls, &q)) return false;
     return desktopLogout(spec, log_path, polls, &q);
 }
 
@@ -4310,4 +4344,92 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
 fn clickOutput(q: *Qmp, point: [2]u32, width: u32, height: u32) bool {
     if (!q.sendPointer(@intCast(@as(u64, point[0]) * 32768 / width), @intCast(@as(u64, point[1]) * 32768 / height))) return false;
     return q.sendClick(true) and q.sendClick(false);
+}
+
+/// Reach controls at maximum text scale and minimum output size, using
+/// keyboard focus reveal as well as actual virtio wheel events.
+fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
+    const larger = widgetCenter(readLog(log_path), "larger") orelse return false;
+    for (0..6) |_| {
+        const actions = countOccurrences(readLog(log_path), "gui: action larger");
+        if (!clickScanout(q, larger[0], larger[1])) return false;
+        if (!try waitLogN(log_path, "gui: action larger", actions + 1, "larger action lost", spec, polls)) return false;
+    }
+    var ready = countOccurrences(readLog(log_path), "gui: ready");
+    const apply = widgetCenter(readLog(log_path), "apply") orelse return false;
+    if (!clickScanout(q, apply[0], apply[1])) return false;
+    if (!try waitLogN(log_path, "gui: ready", ready + 1, "3x Settings did not open", spec, polls)) return false;
+    if (!try waitLogN(log_path, "ui 48px, scale 3.00", 1, "maximum text scale not applied", spec, polls)) return false;
+    sleepMs(300);
+    var width: u32 = 1280;
+    var height: u32 = 1024;
+    for ([_]usize{ 0, 3 }, 0..) |row, pass| {
+        // The first focus target is Displays. Home scrolls the viewport
+        // back to its top after the previous wheel exercise.
+        if (!q.sendKey("home")) return false;
+        sleepMs(150);
+        const displays = widgetCenter(readLog(log_path), "display") orelse return false;
+        ready = countOccurrences(readLog(log_path), "gui: ready");
+        if (!clickOutput(q, displays, width, height)) return false;
+        if (!try waitLogN(log_path, "gui: ready", ready + 1, "large-text Displays did not open", spec, polls)) return false;
+        // A selection event enables Preview, including for the first row.
+        sleepMs(150);
+        if (!q.sendKey("down")) return false;
+        sleepMs(100);
+        if (!q.sendKey("up")) return false;
+        sleepMs(100);
+        for (0..row) |_| {
+            if (!q.sendKey("down")) return false;
+            sleepMs(100);
+        }
+        if (!q.sendKey("tab")) return false;
+        sleepMs(150);
+        ready = countOccurrences(readLog(log_path), "gui: ready");
+        if (!q.sendKey("ret")) return false;
+        if (!try waitLogN(log_path, "gui: ready", ready + 1, "large-text preview failed", spec, polls)) return false;
+        width = if (pass == 0) 1024 else 1280;
+        height = if (pass == 0) 768 else 1024;
+        sleepMs(200);
+        ready = countOccurrences(readLog(log_path), "gui: ready");
+        if (!q.sendKey("ret")) return false; // focused Keep resolution
+        if (!try waitLogN(log_path, "gui: ready", ready + 1, "large-text confirmation failed", spec, polls)) return false;
+        sleepMs(150);
+        if (!q.chord("shift", "tab")) return false; // Back, revealed below list
+        sleepMs(150);
+        ready = countOccurrences(readLog(log_path), "gui: ready");
+        if (!q.sendKey("ret")) return false;
+        if (!try waitLogN(log_path, "gui: ready", ready + 1, "large-text Settings did not return", spec, polls)) return false;
+        sleepMs(200);
+        if (pass == 0) {
+            _ = q.screendump(check_dir ++ "/settings-300-1024-top.ppm");
+            if (!q.chord("shift", "tab")) return false; // last control, initially offscreen
+            sleepMs(200);
+            _ = q.screendump(check_dir ++ "/settings-300-1024-focus.ppm");
+            if (!q.sendKey("home")) return false;
+            sleepMs(100);
+            const wheels = countOccurrences(readLog(log_path), "gui: scrolled");
+            if (!q.sendPointer(16384, 16384)) return false;
+            if (!q.sendButton("wheel-down", true) or !q.sendButton("wheel-down", false)) return false;
+            if (!try waitLogN(log_path, "gui: scrolled", wheels + 1, "wheel did not scroll Settings", spec, polls)) return false;
+            _ = q.screendump(check_dir ++ "/settings-300-1024-wheel.ppm");
+        }
+    }
+    // Main Settings starts on Displays; Tab reveals Smaller. Restore the
+    // original scale before the desktop's existing logout exercise.
+    if (!q.sendKey("tab")) return false;
+    sleepMs(100);
+    for (0..6) |_| {
+        const actions = countOccurrences(readLog(log_path), "gui: action smaller");
+        if (!q.sendKey("ret")) return false;
+        if (!try waitLogN(log_path, "gui: action smaller", actions + 1, "smaller action lost", spec, polls)) return false;
+    }
+    for (0..5) |_| {
+        if (!q.sendKey("tab")) return false;
+        sleepMs(100);
+    }
+    ready = countOccurrences(readLog(log_path), "gui: ready");
+    if (!q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "gui: ready", ready + 1, "scale reset could not reach Apply", spec, polls)) return false;
+    sleepMs(300);
+    return true;
 }

@@ -56,7 +56,7 @@ Terminal arrows browse history and move the cursor; Home/End/Delete work too.
 
 `zig build run-gui -Dgui-profile=gui` opens the component gallery. It uses
 shared sections, wrapping rows, buttons (including an inert disabled state),
-and a text field. Settings uses the same components and theme palette.
+and scrollable text fields. Settings uses the same components and theme palette.
 
 Text fields support these editing gestures:
 
@@ -69,9 +69,19 @@ Text fields support these editing gestures:
 | Ctrl-A/E, Ctrl-B/F | Start/end, backward/forward |
 | Ctrl-H/D | Delete backward/forward |
 | Ctrl-K/U/W, Ctrl-Y | Kill to end/start/previous word, yank the last kill |
+| Command-C/X/V (or Ctrl-C/X/V) | Copy/cut selection, paste from the session clipboard |
+| Command-Z, Command-Shift-Z | Undo, redo (Ctrl-Z also undoes) |
 
-Typing replaces selected text. Kill/yank stays within each field; system
-clipboard shortcuts and undo are not implemented yet.
+Typing replaces selected text. Kill/yank stays within each field. Copy/cut
+are disabled for password fields; paste is allowed. Clipboard access requires
+a `clip` capability, provided to the session apps. Typing runs form one undo
+step; paste, cut, and deletions are separate steps (32 steps per field).
+
+Windows scroll when their content exceeds the available height. Use the mouse
+wheel, Page Up/Down, or Home/End outside a text field; Tab and Shift-Tab reveal
+the focused control automatically. Scrollbar tracks page on click. Applications
+can also use nested `{ kind: "scroll", id: "details", h: 240, child: ... }`
+viewports, `wrap: true` on labels, and positive `flex` weights on row children.
 
 ## Architecture at a glance
 

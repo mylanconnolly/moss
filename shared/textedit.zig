@@ -10,7 +10,81 @@ pub const Editor = struct {
     kill: [64]u8 = undefined,
     kill_len: usize = 0,
 
+    undo_items: [32]Snapshot = undefined,
+    redo_items: [32]Snapshot = undefined,
+    undo_len: usize = 0,
+    redo_len: usize = 0,
+    typing: bool = false,
+
+    const Snapshot = struct { buf: [64]u8, len: usize, cursor: usize, anchor: usize };
+
+    fn snapshot(self: *const Editor) Snapshot {
+        return .{ .buf = self.buf, .len = self.len, .cursor = self.cursor, .anchor = self.anchor };
+    }
+    fn push(items: *[32]Snapshot, len: *usize, value: Snapshot) void {
+        if (len.* == items.len) {
+            std.mem.copyForwards(Snapshot, items[0 .. items.len - 1], items[1..]);
+            len.* -= 1;
+        }
+        items[len.*] = value;
+        len.* += 1;
+    }
+    fn restore(self: *Editor, value: Snapshot) void {
+        self.buf = value.buf;
+        self.len = value.len;
+        self.cursor = value.cursor;
+        self.anchor = value.anchor;
+        self.first = 0;
+        self.typing = false;
+    }
+    pub fn undo(self: *Editor, redo: bool) void {
+        self.typing = false;
+        const src = if (redo) &self.redo_items else &self.undo_items;
+        const n = if (redo) &self.redo_len else &self.undo_len;
+        if (n.* == 0) return;
+        push(if (redo) &self.undo_items else &self.redo_items, if (redo) &self.undo_len else &self.redo_len, self.snapshot());
+        n.* -= 1;
+        self.restore(src[n.*]);
+    }
+    fn changed(self: *Editor, before: Snapshot, group: bool, was_typing: bool) void {
+        if (std.mem.eql(u8, before.buf[0..before.len], self.buf[0..self.len])) return;
+        if (!group or !was_typing) push(&self.undo_items, &self.undo_len, before);
+        self.redo_len = 0;
+        self.typing = group;
+    }
+    /// Paste is one undo transaction. Reject invalid UTF-8; flatten line breaks
+    /// and tabs for a single-line field, and truncate only at code-point edges.
+    pub fn paste(self: *Editor, text: []const u8) void {
+        if (!std.unicode.utf8ValidateSlice(text)) return;
+        const before = self.snapshot();
+        var clean: [64]u8 = undefined;
+        var n: usize = 0;
+        var i: usize = 0;
+        const room = self.buf.len - (self.len - (self.high() - self.low()));
+        while (i < text.len) {
+            const size = std.unicode.utf8ByteSequenceLength(text[i]) catch return;
+            if (text[i] < 32 or text[i] == 127) {
+                if (text[i] == '\r' or text[i] == '\n' or text[i] == '\t') {
+                    if (n == room) break;
+                    clean[n] = ' ';
+                    n += 1;
+                    if (text[i] == '\r' and i + 1 < text.len and text[i + 1] == '\n') i += 1;
+                }
+            } else {
+                if (n + size > room) break;
+                @memcpy(clean[n..][0..size], text[i..][0..size]);
+                n += size;
+            }
+            i += size;
+        }
+        if (n == 0) return;
+        self.insert(clean[0..n]);
+        self.changed(before, false, false);
+        self.typing = false;
+    }
     pub fn seed(self: *Editor, text: []const u8) void {
+        self.undo_len = 0;
+        self.redo_len = 0;
         var n = @min(text.len, self.buf.len);
         while (n < text.len and n > 0 and continuation(text[n])) n -= 1;
         @memcpy(self.buf[0..n], text[0..n]);
@@ -34,6 +108,7 @@ pub const Editor = struct {
         return p;
     }
     pub fn move(self: *Editor, pos: usize, select: bool) void {
+        self.typing = false;
         self.cursor = @min(pos, self.len);
         if (!select) self.anchor = self.cursor;
     }
@@ -67,6 +142,15 @@ pub const Editor = struct {
         self.move(self.cursor + bytes.len, false);
     }
     pub fn key(self: *Editor, ch: u8) bool {
+        if (ch == k.undo or ch == k.redo) {
+            self.undo(ch == k.redo);
+            return true;
+        }
+        const before = self.snapshot();
+        const was_typing = self.typing;
+        const group = ch >= 32 and ch < 127 and self.low() == self.high();
+        self.typing = false;
+        defer self.changed(before, group, was_typing);
         const selected = self.low() != self.high();
         switch (ch) {
             1, k.home => self.move(0, false),
@@ -133,4 +217,45 @@ test "full buffer replacement and word selection" {
     _ = e.key(k.select_word_left);
     _ = e.key(4);
     try std.testing.expectEqualStrings("one ", e.buf[0..e.len]);
+}
+
+test "undo groups typing, restores selection, branches redo, and bounds history" {
+    var e: Editor = .{};
+    e.seed("old");
+    _ = e.key(k.select_all);
+    e.paste("new\r\nvalue\t世界");
+    try std.testing.expectEqualStrings("new value 世界", e.buf[0..e.len]);
+    e.undo(false);
+    try std.testing.expectEqualStrings("old", e.buf[0..e.len]);
+    try std.testing.expectEqual(@as(usize, 0), e.low());
+    try std.testing.expectEqual(@as(usize, 3), e.high());
+    e.undo(true);
+    _ = e.key(k.end);
+    _ = e.key('a');
+    _ = e.key('b');
+    _ = e.key('c');
+    e.undo(false);
+    try std.testing.expectEqualStrings("new value 世界", e.buf[0..e.len]);
+    _ = e.key('!');
+    e.undo(true);
+    try std.testing.expectEqualStrings("new value 世界!", e.buf[0..e.len]);
+    for (0..80) |_| {
+        _ = e.key(8);
+        _ = e.key('x');
+    }
+    try std.testing.expect(e.undo_len <= 32);
+}
+test "paste refuses malformed data and truncates on UTF-8 boundaries" {
+    var e: Editor = .{};
+    e.seed("seed");
+    e.paste(&.{0xff});
+    try std.testing.expectEqualStrings("seed", e.buf[0..e.len]);
+    e.seed(&(@as([63]u8, @splat('x'))));
+    e.paste("é");
+    try std.testing.expectEqual(@as(usize, 63), e.len);
+    try std.testing.expectEqual(@as(usize, 0), e.undo_len);
+    _ = e.key(k.select_all);
+    e.paste("é世界");
+    e.undo(false);
+    try std.testing.expectEqual(@as(usize, 63), e.len);
 }

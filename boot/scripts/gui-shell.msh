@@ -50,10 +50,10 @@ def display-settings [] {
         view: (fn [state] {
             { kind: "column", gap: 16, children: [
                 { kind: "label", role: "title", text: "Display resolution" }
-                { kind: "label", muted: true, text: ("Current: " + $info.mode) }
-                { kind: "label", muted: true, text: ("Recommended: " + (str $info.preferred_width) + " × " + (str $info.preferred_height)) }
+                { kind: "label", wrap: true, muted: true, text: ("Current: " + $info.mode) }
+                { kind: "label", wrap: true, muted: true, text: ("Recommended: " + (str $info.preferred_width) + " × " + (str $info.preferred_height)) }
                 { kind: "list", id: "resolution", key: "modes", h: 220, rows: (display-modes), active: ($state.choice != "") }
-                { kind: "label", muted: true, text: $message }
+                { kind: "label", wrap: true, muted: true, text: $message }
                 { kind: "row", children: [
                     { kind: "button", id: "preview", label: "Preview resolution", variant: "primary", disabled: (($state.choice == "") or (not $info.can_change)) }
                     { kind: "button", id: "back", label: "Back" }
@@ -83,7 +83,7 @@ def display-settings [] {
                 { kind: "column", gap: 16, children: [
                     { kind: "label", role: "title", text: (match ($current.seconds > 0) { true => "Keep this resolution?"; _ => "Previous resolution restored" }) }
                     { kind: "label", text: $current.mode }
-                    { kind: "label", muted: true, text: (match ($current.seconds > 0) { true => ("Reverting in " + (str $current.seconds) + " seconds."); _ => "The preview expired without confirmation." }) }
+                    { kind: "label", wrap: true, muted: true, text: (match ($current.seconds > 0) { true => ("Reverting in " + (str $current.seconds) + " seconds."); _ => "The preview expired without confirmation." }) }
                     { kind: "row", children: [
                         { kind: "button", id: "keep", label: "Keep resolution", variant: "primary", disabled: ($current.seconds == 0) }
                         { kind: "button", id: "revert", label: "Revert / Back" }
@@ -148,13 +148,13 @@ while $running {
             kind: "column"
             gap:  20
             children: [
-              { kind: "row", children: [{ kind: "label", role: "title", text: "Personal settings" } { kind: "button", id: "display", label: "Displays" }] }
-              { kind: "label", muted: true, text: "Appearance and language for your session." }
+              { kind: "row", children: [{ kind: "label", flex: 1, wrap: true, role: "title", text: "Personal settings" } { kind: "button", id: "display", label: "Displays" }] }
+              { kind: "label", wrap: true, muted: true, text: "Appearance and language for your session." }
               {
                 kind: "section"
                 children: [
                   { kind: "label", text: "Appearance" }
-                  { kind: "label", muted: true, text: ("Text size · " + (str $state.scale) + "×") }
+                  { kind: "label", wrap: true, muted: true, text: ("Text size · " + (str $state.scale) + "×") }
                   {
                     kind: "row"
                     children: [
@@ -166,7 +166,7 @@ while $running {
                     kind: "row"
                     children: [
                       (match (theme-locked) {
-                          true => { kind: "label", muted: true, text: ("Theme: " + $state.theme + " (managed)") }
+                          true => { kind: "label", wrap: true, muted: true, text: ("Theme: " + $state.theme + " (managed)") }
                           _ => { kind: "button", id: "theme", label: ("Theme: " + $state.theme) }
                         })
                       { kind: "button", id: "contrast", label: ("Contrast: " + $state.contrast) }
@@ -177,7 +177,7 @@ while $running {
                     kind: "row"
                     children: [
                       { kind: "button", id: "myloc", label: ("Language: " + $state.myloc) }
-                      { kind: "label", muted: true, text: (loc-sample $state.myloc) }
+                      { kind: "label", wrap: true, muted: true, text: (loc-sample $state.myloc) }
                     ]
                   }
                   { kind: "button", id: "apply", label: "Apply changes", variant: "primary" }
@@ -187,7 +187,7 @@ while $running {
                 kind: "section"
                 children: [
                   { kind: "label", text: "System defaults" }
-                  { kind: "label", muted: true, text: ("Default language: " + $state.sysloc) }
+                  { kind: "label", wrap: true, muted: true, text: ("Default language: " + $state.sysloc) }
                   (match $state.admin {
                       true => {
                         kind: "row"
@@ -196,7 +196,7 @@ while $running {
                           { kind: "button", id: "savesys", label: "Save system", variant: "primary" }
                         ]
                       }
-                      _ => { kind: "label", muted: true, text: "An administrator manages these settings." }
+                      _ => { kind: "label", wrap: true, muted: true, text: "An administrator manages these settings." }
                     })
                 ]
               }

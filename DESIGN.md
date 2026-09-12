@@ -2345,8 +2345,22 @@ scrolls the visible text horizontally to keep the caret inside the field.
 UTF-8 seeds truncate and edit on code-point boundaries; the keyboard remains
 US ASCII and word motion currently uses spaces, not Unicode word rules.
 Password fields remain masked, and their kill buffer stays local to the field.
-System clipboard shortcuts, undo, double-click word selection, IME input and
-grapheme-cluster movement remain future work.
+Clipboard and undo/redo landed on 2026-09-12. `clipboard.zig` registers a
+client lazily through the explicitly granted `clip` capability, with a private
+one-page transfer buffer; Settings, Files, and Demo share their session's
+clipboard service with Terminal. Command-C/X/V (and Ctrl-C/X/V in fields)
+copy/cut/paste; cut deletes only after a successful copy. Secret fields refuse
+copy/cut, including their Control aliases, but permit paste. Command-Z and
+Command-Shift-Z undo/redo; Ctrl-Z also undoes, while Ctrl-Y remains local yank.
+The editor keeps 32 bounded snapshots in each direction, restoring text and
+selection. Contiguous typing is grouped until navigation/focus changes; paste
+is one transaction. A new edit clears redo. Paste validates UTF-8, flattens
+newlines/tabs for single-line fields, and truncates at code-point boundaries.
+Clipboard service client mappings are reclaimed on badge death, and its badge
+counter no longer stops after 250 lifetime registrations. Its 64 concurrent
+client records and the field's existing 64-byte text capacity remain limits.
+Double-click word selection, IME input and grapheme-cluster movement remain
+future work.
 
 Lesson: routing Tab according to the number of surfaces made completion and
 form navigation change when another window opened. Ownership must be stable.
@@ -3419,10 +3433,44 @@ red destructive button. The `gui` demo is now a component gallery (actions and t
 and Settings groups appearance and system defaults using the same primitives.
 Run `zig build run-gui -Dgui-profile=gui` for the gallery.
 
-This is a foundation, not the completed toolkit: general vertical scrolling,
-flexible tracks, text wrapping, more controls,
-and a desktop-wide visual migration remain open. In particular a very large
-text scale can still exceed a window's vertical viewport. The row algorithm has
+**Adaptive viewports (2026-09-12).** Every ordinary GUI tree is enclosed in an
+implicit vertical viewport below the chrome, bounded by the actual window
+height. Explicit `{ kind: "scroll", id, h, child }` viewports nest inside it.
+Their pixel offsets belong to the runtime and persist by ID across redraws;
+measurement remains side-effect-free. Scroll extents are recomputed and
+clamped after layout changes. The raster boundary translates logical Y
+coordinates before clipping, preserving partially visible glyphs and panels;
+focus targets and list hit-testing use the same transform. Hidden portions
+cannot receive pointer clicks. Scrollbars appear only on overflow and their
+tracks page on click. Wheel deltas survive the input/compositor queues without
+being coalesced into motion or acquiring focus/capture. Lists consume wheel
+input first, then the deepest viewport under the pointer, bubbling to parents
+at an edge. Page Up/Down and Home/End scroll the focused viewport outside text
+fields; arrows scroll when a list does not own them. Tab/Shift-Tab and editing
+reveal focused controls through their ancestor viewports. Free scrolling is
+preserved on ordinary redraws. Focus follows a copied widget ID when a new
+view reorders controls, rather than inheriting an unrelated positional index.
+
+Rows accept positive `flex` weights to divide remaining width after fixed
+children; overfull rows retain their wrapping behavior. Labels opt into
+word-wrapping with `wrap: true`, with UTF-8 character-boundary fallback for
+long words. Narrow splits stack their panes instead of allocating the right
+pane zero width. Settings uses a flexible heading and wrapped descriptions;
+the component gallery demonstrates a nested editing viewport.
+The gallery drill checks cross-field clipboard transfer, cut/undo,
+paste/undo/redo, nested focus reveal, and password copy/cut refusal. The
+Settings drill reaches 3x text at 1024x768, uses Shift-Tab to reveal Close,
+scrolls through actual virtio wheel input, changes resolution live, and
+restores its starting scale. Screenshots complement the functional assertions.
+An initial character-by-character wrapping implementation made font-service
+round trips dominate redraw time; boundary-aware binary search now finds line
+breaks with logarithmically many measurements. Repeated-action tests wait for
+a committed redraw rather than assuming that a fixed delay applied the edit.
+
+The runtime has 64 focus targets and 15 concurrent explicit scroll slots,
+with scroll IDs limited to 64 bytes. Slots for removed viewports are reclaimed
+before allocating new ones; duplicate scroll IDs are rejected. General grid tracks, additional controls, and a complete
+desktop-wide visual migration remain open. The row algorithm has
 host tests for wrapping, exact fits, oversize children, and zero-width bounds;
 the GUI/desktop drills exercise the shared runtime in QEMU, including disabled
 focus traversal, canceling a press over another button, and drag/snapping.

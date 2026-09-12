@@ -4,7 +4,7 @@
 # keyboard (Tab moves between the buttons, Enter fires the focused one),
 # and threads the returned state forward. No loop, no drawing here.
 let final = (gui {
-    init:  { count: 0, done: false, name: "" }
+    init:  { count: 0, done: false, name: "", other: "", secret_len: 0 }
     title: "Moss · Components"
     view: (fn [state] {
         {
@@ -29,22 +29,30 @@ let final = (gui {
               ]
             }
             {
-              kind: "section"
-              children: [
-                { kind: "label", text: "Text input" }
-                { kind: "field", id: "name", label: "Display name", value: "Moss" }
-                { kind: "label", muted: true, text: "Select with Shift + arrows. Move with Control + A / E." }
-              ]
+              kind: "scroll"
+              id:   "editing"
+              h:    180
+              child: {
+                kind: "section"
+                children: [
+                  { kind: "label", text: "Text input" }
+                  { kind: "field", id: "name", label: "Display name", value: "Moss" }
+                  { kind: "label", wrap: true, muted: true, text: "Copy and paste with Command + C / V. Undo with Command + Z. Scroll or Tab to reach the next field; its focus and text survive redraws." }
+                  { kind: "field", id: "other", label: "Paste here", value: "" }
+                  { kind: "field", id: "password", label: "Password (copy disabled)", value: "private", secret: true }
+                  { kind: "label", wrap: true, muted: true, text: "Control + A / E move to the start and end. Control + Y keeps its Emacs yank behavior." }
+                ]
+              }
             }
           ]
         }
       })
     update: (fn [state, ev] {
         match $ev.id {
-          "inc" => { { count: ($state.count + 1), done: $state.done, name: $state.name } }
-          "quit" => { { count: $state.count, done: true, name: $ev.fields.name } }
+          "inc" => { { count: ($state.count + 1), done: $state.done, name: $state.name, other: $state.other, secret_len: $state.secret_len } }
+          "quit" => { { count: $state.count, done: true, name: $ev.fields.name, other: $ev.fields.other, secret_len: (len $ev.fields.password) } }
           _ => $state
         }
       })
   })
-"gui: done count=" + (str $final.count) + " name=" + $final.name
+"gui: done count=" + (str $final.count) + " name=" + $final.name + " other=" + $final.other + " secret_len=" + (str $final.secret_len)

@@ -1442,9 +1442,9 @@ at once.
   a component gallery, captured GUI pointer gestures, and Settings adoption. Keep GUI definitions in mshl and
   rendering/interaction in the toolkit; no new ambient authority or local-only
   protocol. See DESIGN's shared GUI layout section.
-- Next: flexible tracks and alignment, wrapped text, general scroll containers
-  with focus reveal at large text scales, menus/toggles/dialogs, stable widget
-  identity through tree changes. Carry the visual system
+- Next: general grid tracks and alignment, menus/toggles/dialogs, and broader
+  widget identity/lifetime handling. Vertical viewports, focus reveal, wrapped
+  labels, weighted rows, and stable focus IDs landed on 2026-09-12. Carry the visual system
   through Files, login, terminal, dock, and top bar; validate all themes/scales.
 
 **GUI resource capacity**
@@ -1457,11 +1457,21 @@ at once.
 
 **GUI editing residuals**
 
-- System clipboard shortcuts in fields, undo/redo, double-click word selection,
-  Unicode word/grapheme navigation, and IME/non-US layouts. The first editing pass provides a caret, keyboard
+- Double-click word selection, Unicode word/grapheme navigation, and IME/non-US
+  layouts. Session clipboard shortcuts and undo/redo landed on 2026-09-12.
+  The first editing pass provides a caret, keyboard
   and in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
+
+- ✅ **Adaptive GUI viewports and shared editing** (2026-09-12): windows
+  scroll overflowing content; nested ID-keyed viewports support wheel and
+  keyboard scrolling and reveal focus. Wrapped labels, weighted rows, and
+  narrow stacked splits adapt layouts. Text fields use the session clipboard
+  through explicit grants and support bounded undo/redo, preserving Emacs
+  kill/yank. Password fields cannot copy/cut secrets. Scroll transforms also
+  govern list hit-testing; wheel deltas are not pointer-button transitions.
+  Clipboard client death now releases mappings and reuses client slots.
 
 - ✅ **Configurable display resolutions** (2026-09-12): Settings previews
   driver-reported modes with a compositor-owned 15-second rollback and saves

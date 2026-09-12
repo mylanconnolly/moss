@@ -21,6 +21,12 @@ pub const down = 144;
 pub const left = 145;
 pub const right = 146;
 
+pub const copy = 147;
+pub const cut = 148;
+pub const paste = 149;
+pub const undo = 150;
+pub const redo = 151;
+
 pub const Decoder = struct {
     held: [8]bool = @splat(false),
     pub fn feed(self: *Decoder, code: u16, value: u32) u8 {
@@ -45,6 +51,13 @@ pub const Decoder = struct {
         const alt = self.held[4] or self.held[5];
         const meta = self.held[6] or self.held[7];
         if (code == 15) return if (alt) switch_window else if (shift) back_tab else '\t';
+        if (meta) switch (code) {
+            46 => return copy,
+            45 => return cut,
+            47 => return paste,
+            44 => return if (shift) redo else undo,
+            else => {},
+        };
         if (meta and code == 30) return select_all;
         if (code == 105 or code == 106 or code == 102 or code == 107) {
             const to_left = code == 105 or code == 102;
@@ -186,4 +199,20 @@ test "modifiers, releases, repeat, and window Tab are distinct" {
     _ = d.feed(29, 1);
     try std.testing.expectEqual(@as(u8, 1), d.feed(30, 1));
     try std.testing.expectEqual(@as(u8, 0), d.feed(30, 0));
+}
+
+test "Command clipboard and undo preserve Control Emacs actions" {
+    var d: Decoder = .{};
+    _ = d.feed(125, 1);
+    try std.testing.expectEqual(@as(u8, copy), d.feed(46, 1));
+    try std.testing.expectEqual(@as(u8, cut), d.feed(45, 1));
+    try std.testing.expectEqual(@as(u8, paste), d.feed(47, 1));
+    try std.testing.expectEqual(@as(u8, undo), d.feed(44, 1));
+    _ = d.feed(42, 1);
+    try std.testing.expectEqual(@as(u8, redo), d.feed(44, 1));
+    _ = d.feed(125, 0);
+    _ = d.feed(42, 0);
+    _ = d.feed(29, 1);
+    try std.testing.expectEqual(@as(u8, 25), d.feed(21, 1));
+    try std.testing.expectEqual(@as(u8, 1), d.feed(30, 1));
 }
