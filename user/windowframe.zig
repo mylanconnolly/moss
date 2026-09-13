@@ -653,7 +653,7 @@ pub fn drawChrome(title: []const u8) void {
     fillRect(0, 0, win_w, title_h, pal.surface);
     fillRect(0, title_h, win_w, pal.border_w, pal.border);
     dots_cy = title_h / 2;
-    dot_r = iconSize() / 2 - 1;
+    dot_r = std.math.clamp(lineOf(R_UI), 20, 28) / 2 - 1;
     const dot_gap = 2 * (dot_r + 5) + 2;
     const first_cx = 16 + dot_r;
     for (0..3) |i| dots_cx[i] = first_cx + i * dot_gap;
@@ -1047,14 +1047,31 @@ fn recreate(title: []const u8) bool {
 
 /// Symbolic icons follow the same font snapshot as labels and controls.
 pub fn iconSize() usize {
-    return std.math.clamp(lineOf(R_UI), 20, 28);
+    return scaledIconSize(20);
 }
+pub fn scaledIconSize(base: usize) usize {
+    return shared.gui.icons.scaledSize(base, if (font_ok) @intCast(role_px[R_UI]) else 16);
+}
+// Coverage is independent of theme and position. Cache each icon at its last
+// size, so focus, hover, and ticking bars do not retessellate/rasterize it.
+const max_icon_px = 64;
+const IconMask = struct { size: usize = 0, pixels: [max_icon_px * max_icon_px]u8 = undefined };
+var icon_masks: [@typeInfo(shared.gui.icons.Icon).@"enum".fields.len]IconMask = @splat(.{});
 pub fn drawIcon(x: usize, y: usize, size: usize, name: []const u8, ink: u32) void {
     if (measuring) return;
     const icon = shared.gui.icons.parse(name) orelse return;
-    for (0..size) |iy| for (0..size) |ix| {
-        blendPx(x + ix, y + iy, ink, shared.gui.icons.coverage(icon, size, ix, iy));
-    };
+    if (size <= max_icon_px) {
+        const mask = &icon_masks[@intFromEnum(icon)];
+        if (mask.size != size) {
+            for (0..size) |iy| for (0..size) |ix| {
+                mask.pixels[iy * size + ix] = @intCast(shared.gui.icons.coverage(icon, size, ix, iy));
+            };
+            mask.size = size;
+        }
+        for (0..size) |iy| for (0..size) |ix| blendPx(x + ix, y + iy, ink, mask.pixels[iy * size + ix]);
+    } else {
+        for (0..size) |iy| for (0..size) |ix| blendPx(x + ix, y + iy, ink, shared.gui.icons.coverage(icon, size, ix, iy));
+    }
 }
 
 pub fn refreshOutput() bool {

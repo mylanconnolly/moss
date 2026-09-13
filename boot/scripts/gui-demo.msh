@@ -13,6 +13,14 @@ let final = (gui {
           children: [
             { kind: "label", role: "title", text: "A place for everything" }
             { kind: "label", muted: true, text: "The shared building blocks of a Moss window." }
+            { kind: "row", children: [
+                { kind: "icon", name: "folder", size: 32 }
+                { kind: "icon", name: "file-text", size: 32 }
+                { kind: "icon", name: "gear-six", size: 32 }
+                { kind: "icon", name: "terminal-window", size: 32 }
+                { kind: "icon", name: "house", size: 32 }
+                { kind: "icon", name: "tree-structure", size: 32 }
+              ] }
             {
               kind: "section"
               children: [

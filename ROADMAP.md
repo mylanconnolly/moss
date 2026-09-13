@@ -1483,6 +1483,9 @@ at once.
 - ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
   one scalable, theme-colored catalog for buttons, dock items, lists, and
   decorative nodes; icon-with-text and icon-only declarations share layout.
+  Phosphor Regular artwork is vendored with its MIT license and decoded at
+  compile time. Icons scale proportionally with text, including explicit
+  decorative sizes; narrow docks fit all launchers and truncate labels.
   Desktop and Files controls adopt icons. Larger traffic lights and padded,
   non-overlapping hit areas apply through the shared frame, including terminals.
 

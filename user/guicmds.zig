@@ -598,7 +598,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
         return .{ .w = avail_w, .h = height + 2 * inset };
     }
     if (std.mem.eql(u8, kind, "icon")) {
-        const size = @min(avail_w, @as(usize, @intCast(std.math.clamp(intField(rec, "size", @intCast(wf.iconSize())), 12, 64))));
+        const size = @min(avail_w, if (rec.get("size") != null) wf.scaledIconSize(@intCast(std.math.clamp(intField(rec, "size", 20), 12, 64))) else wf.iconSize());
         if (paint) wf.drawIcon(x, y, size, strField(rec, "name"), pal.text);
         return .{ .w = size, .h = size };
     }
@@ -1449,7 +1449,12 @@ fn renderDock(tree: Value) void {
         total += iconLabelWidth(item.record, "title") + 2 * dock_hpad;
         n += 1;
     }
-    if (n > 1) total += (n - 1) * dock_gap;
+    const natural_width = total;
+    const gaps = (n -| 1) * dock_gap;
+    const available = wf.win_w -| (2 * dock_gap + gaps);
+    const fitted = @min(natural_width, available);
+    total = fitted + gaps;
+    var before: usize = 0;
     const pill_h = lineOf(R_UI) + 2 * item_vpad;
     const py = if (wf.win_h > pill_h) (wf.win_h - pill_h) / 2 else 0;
     var x: usize = if (wf.win_w > total) (wf.win_w - total) / 2 else dock_gap;
@@ -1459,7 +1464,9 @@ fn renderDock(tree: Value) void {
         const title = strField(r, "title");
         const unit = strField(r, "unit");
         const running = r.get("running") != null and (r.get("running").?).asBool();
-        const w = iconLabelWidth(r, "title") + 2 * dock_hpad;
+        const natural = iconLabelWidth(r, "title") + 2 * dock_hpad;
+        const w = shared.gui.trackWidth(fitted, natural_width, before, natural);
+        before += natural;
         const fill = if (running) pal.primary else pal.surface_hi;
         const ink = if (running) pal.primary_ink else pal.text;
         fillRoundRect(x, py, w, pill_h, 10, fill);
