@@ -7,6 +7,8 @@
   profiles:  [editor]
   essential: true
   give: [
+    { tag: view, fs: data, ro: false }
+    { tag: documents, unit: editor-filepicker, control: true }
     { tag: clip, unit: clipsvc }
     { tag: display, unit: compositor-ptr }
     { tag: font, unit: fontsvc }

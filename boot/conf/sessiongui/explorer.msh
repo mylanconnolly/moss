@@ -10,6 +10,8 @@
   grant:     [log, bootfs]
   essential: false
   give: [
+    { tag: picker, unit: filepicker }
+    { tag: init, self: true }
     { tag: clip, unit: clipsvc }
     { tag: display, session: true }
     { tag: font, session: true }

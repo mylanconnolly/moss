@@ -35,6 +35,8 @@ pub const Fs = struct {
     resolve: *const fn (it: *mshl.Interp, path: []const u8) mshl.Error!Target,
     /// The channel `sync` and `df` address (the host's main view).
     root: u64,
+    /// A host-provided, capability-scoped selected-document handoff.
+    edit: ?*const fn (u64, [*]u8, []const u8) ?[]const u8 = null,
     /// The stores `use NAME` consults, in order (the user's own, then
     /// the system's); absent ones are null.
     stores: []const ?Store = &.{},
@@ -71,16 +73,18 @@ const module_result = mshl.resultShape(.string, module_err);
 const df_shape = mshl.shapeOf(Df);
 const path_param = Param{ .name = "path", .shape = .string };
 
-pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module", "fs-rows", "fs-parent", "fs-derive", "fs-leave", "fs-derived" };
+pub const command_names = [_][]const u8{ "ls", "tree", "cat", "open", "write", "save", "stat", "mkdir", "rm", "mv", "ln", "readlink", "sync", "df", "source", "module", "fs-rows", "fs-parent", "fs-derive", "fs-leave", "fs-derived", "edit-file" };
 
 // `fs-rows` returns rows ready for the GUI `list` widget: `{ id, cells, icon }`
 // where cells are display strings (name, friendly kind, human size), directories first then alphabetical. Built with
 // arena strings so a GUI can hold the rows across renders (unlike a
 // `map`-built value, which lives in a reclaimed call scope).
 const rows_result = mshl.resultShape(.list, fs_err);
+const edit_result = mshl.resultShape(.nothing, .string);
 
 /// The signature of a file command; null when the name is not one.
 pub fn signature(name: []const u8) ?Signature {
+    if (is(name, "edit-file")) return .{ .params = &.{path_param}, .ret = edit_result };
     if (is(name, "ls")) return .{ .params = &.{.{ .name = "path", .shape = .string, .optional = true }}, .ret = ls_result };
     if (is(name, "tree")) return .{ .params = &.{.{ .name = "path", .shape = .string, .optional = true }}, .rest = .any, .ret = .string };
     if (is(name, "cat") or is(name, "open")) return .{ .params = &.{path_param}, .ret = text_result };
@@ -123,6 +127,12 @@ fn okv(it: *mshl.Interp, v: Value) mshl.Error!Value {
 /// these. Arguments arrive checked against `signature`.
 pub fn call(fs: *const Fs, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     const a = it.arena;
+    if (is(name, "edit-file")) {
+        const edit = fs.edit orelse return try errName(it, "Opening in Editor is unavailable in this session.");
+        const target = try fs.resolve(it, args[0].str);
+        if (edit(target.chan, target.buf, target.path)) |why| return try errName(it, why);
+        return try okv(it, Value.nothing);
+    }
     if (is(name, "ls")) return try lsTable(fs, it, if (args.len > 0) args[0].str else "");
     if (is(name, "fs-rows")) return try fsRows(fs, it, if (args.len > 0) args[0].str else "");
     if (is(name, "fs-parent")) {

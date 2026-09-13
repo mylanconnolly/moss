@@ -23,7 +23,14 @@ const editor_file = [_]Item{
     .{ .label = "Save", .shortcut = "Cmd S", .key = k.save_document },
     .{ .label = "Save As…", .shortcut = "Shift Cmd S", .key = k.save_as },
     sep,
-    close,
+    .{ .label = "Close Tab", .shortcut = "Cmd W", .key = k.close_document },
+};
+const editor_window = [_]Item{
+    .{ .label = "Next Tab", .shortcut = "Ctrl Tab", .key = k.next_tab },
+    .{ .label = "Previous Tab", .shortcut = "Shift Ctrl Tab", .key = k.previous_tab },
+    sep,
+    .{ .label = "Minimize", .key = minimize },
+    .{ .label = "Close Window", .shortcut = "Shift Cmd W", .key = k.close_all },
 };
 const edit = [_]Item{
     .{ .label = "Undo", .shortcut = "Cmd Z", .key = k.undo },
@@ -44,7 +51,7 @@ const term_edit = [_]Item{
 const files_file = [_]Item{ .{ .label = "Open", .shortcut = "Cmd O", .key = k.open_document }, close };
 const files_go = [_]Item{ .{ .label = "Enclosing Folder", .key = up }, .{ .label = "Home", .key = home }, .{ .label = "Refresh", .key = refresh } };
 const generic = [_]Menu{.{ .title = "Window", .items = &window }};
-const editor = [_]Menu{ .{ .title = "File", .items = &editor_file }, .{ .title = "Edit", .items = &edit }, .{ .title = "Window", .items = &window } };
+const editor = [_]Menu{ .{ .title = "File", .items = &editor_file }, .{ .title = "Edit", .items = &edit }, .{ .title = "Window", .items = &editor_window } };
 const terminal = [_]Menu{ .{ .title = "Edit", .items = &term_edit }, .{ .title = "Window", .items = &window } };
 const files = [_]Menu{ .{ .title = "File", .items = &files_file }, .{ .title = "Go", .items = &files_go }, .{ .title = "Window", .items = &window } };
 const picker = [_]Menu{.{ .title = "File", .items = &.{.{ .label = "Cancel", .shortcut = "Esc", .key = k.close_window }} }};
@@ -65,7 +72,7 @@ pub fn bit(key: u8) u64 {
         27 => 4,
         k.select_all => 8,
         147...157 => @as(u64, 1) << @intCast(key - 143),
-        164...167 => @as(u64, 1) << @intCast(key - 149),
+        164...167, 169...171 => @as(u64, 1) << @intCast(key - 149),
         else => 0,
     };
 }

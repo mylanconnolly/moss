@@ -69,7 +69,7 @@ var heap_line: [1 << 20]u8 = undefined;
 var line_fba: std.heap.FixedBufferAllocator = undefined;
 var box_pool: mosslib.pool.Pool(256, 2048) = .{};
 var host_ctx: u8 = 0;
-var fs_ctx = fscmds.Fs{ .resolve = resolve, .root = 0, .derive = viewDerive, .leave = viewLeave, .depth = viewDepth };
+var fs_ctx = fscmds.Fs{ .edit = @import("documentlaunch.zig").open, .resolve = resolve, .root = 0, .derive = viewDerive, .leave = viewLeave, .depth = viewDepth };
 /// The stores `use NAME` reads a module from: `img/` in the view when
 /// there is one, and the system store when the manifest gives it.
 var stores: [2]?fscmds.Store = .{ null, null };
@@ -277,6 +277,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (setup.has(.locale)) localecmds.setup(setup.cap(.locale), log_h);
     if (setup.has(.conf)) confcmds.setup(setup.cap(.conf), log_h);
     @import("clipboard.zig").authority = setup.cap(.clip);
+    @import("documentlaunch.zig").setup(setup.cap(.picker), init_cap, setup.cap(.display));
     guicmds.output_control = setup.cap(.display_control);
     if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h, setup.secret(), if (setup.has(.font)) setup.cap(.font) else 0, fab_chan);
     if (setup.has(.sess)) sesscmds.setup(setup.cap(.sess), if (setup.has(.console)) setup.cap(.console) else 0);

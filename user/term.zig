@@ -537,7 +537,7 @@ fn menuKey(ch: u8, log_h: u64) bool {
             render();
             push();
         },
-        shared.keyboard.close_window => {
+        shared.keyboard.close_window, shared.keyboard.close_all => {
             wf.closeSurface();
             usys.exit(0);
         },

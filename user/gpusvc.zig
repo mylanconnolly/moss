@@ -363,11 +363,18 @@ fn transferFlushRect(r: Rect) bool {
 fn focusTopmost() void {
     var best_id: u64 = 0;
     var best_z: u32 = 0;
+    var best_window = false;
     for (&surfaces, 0..) |*sf, i| {
         if (!sf.used or sf.hidden) continue;
-        if (best_id == 0 or sf.z >= best_z) {
+        // A menu temporarily raises titleless resident chrome. When its
+        // target closes, keyboard focus belongs to the surviving application,
+        // matching the active menu profile. Keep titleless console-only boots
+        // as a fallback, and retain trusted surfaces as eligible windows.
+        const window = sf.title_len != 0 or sf.trusted;
+        if (best_id == 0 or (window and !best_window) or (window == best_window and sf.z >= best_z)) {
             best_id = i + 1;
             best_z = sf.z;
+            best_window = window;
         }
     }
     focused = best_id;

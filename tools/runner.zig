@@ -1227,16 +1227,41 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(100);
     if (!q.chord("meta_l", "s")) return false;
     if (!try waitLogN(log_path, "editor: saved editor-test.txt", 2, "cancelled Save As lost original document authority", spec, polls)) return false;
-    // New must discard the old file authority: its first Save prompts for
-    // a distinct name. Reopening the original proves it was never overwritten.
+    // New owns a separate tab and document authority: its first Save prompts
+    // for a distinct name while the original stays open with its own history.
     if (!q.chord("meta_l", "n")) return false;
     sleepMs(100);
     if (!q.typeText("Separate document") or !q.chord("meta_l", "s")) return false;
     if (!try waitLogN(log_path, "filepicker: save dialog", 3, "new document reused an old save authority", spec, polls)) return false;
     if (!q.chord("meta_l", "a") or !q.typeText("editor-second.txt") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "editor: saved editor-second.txt", 1, "new document did not save separately", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/editor-tabs.ppm");
+    // Cut only the second document, switch away, save the original, then
+    // return and undo the cut. This traverses real per-tab history and save
+    // authority, rather than merely proving that tab labels change.
+    if (!q.chord("meta_l", "a") or !q.chord("meta_l", "x")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!q.chord("ctrl", "tab")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    sleepMs(150);
+    if (!q.chord("meta_l", "s")) return false;
+    if (!try waitLogN(log_path, "editor: saved editor-test.txt", 3, "previous tab did not retain its save authority", spec, polls)) return false;
+    if (!q.chord("ctrl", "tab")) return false;
+    sleepMs(150);
+    if (!q.chord("meta_l", "z") or !q.chord("meta_l", "s")) return false;
+    if (!try waitLogN(log_path, "editor: saved editor-second.txt bytes=17", 2, "returning tab lost its undo history or save authority", spec, polls)) return false;
     if (!q.chord("meta_l", "o")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", 3, "original document could not be reopened", spec, polls)) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", 3, "second document could not be reopened", spec, polls)) return false;
+    if (!q.chord("meta_l", "a") or !q.typeText("editor-second.txt") or !q.sendKey("ret")) return false;
+    var second_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("Separate document", &second_digest, .{});
+    const second_log = try std.fmt.allocPrint(gpa, "editor: digest {s}", .{std.fmt.bytesToHex(second_digest, .lower)});
+    defer gpa.free(second_log);
+    if (!try waitLogN(log_path, second_log, 1, "tab switch or undo changed another document's bytes", spec, polls)) return false;
+    if (!q.chord("meta_l", "w")) return false; // close only this clean duplicate
+    sleepMs(150);
+    if (!q.chord("meta_l", "o")) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", 4, "original document could not be reopened", spec, polls)) return false;
     if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, digest_log, 2, "new document overwrote the original", spec, polls)) return false;
     // Paste the copied document, then add a change and prove Cancel keeps
@@ -1252,7 +1277,13 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.chord("meta_l", "w")) return false;
     sleepMs(150);
     if (!q.sendKey("tab") or !q.sendKey("tab") or !q.sendKey("ret")) return false;
-    return try waitLogN(log_path, "editor: discarded", 1, "dirty close did not discard after confirmation", spec, polls);
+    if (!try waitLogN(log_path, "editor: discarded", 1, "dirty close did not discard after confirmation", spec, polls)) return false;
+    // Cmd-W closes one document; the remaining clean tabs stay in the same
+    // process until Shift-Cmd-W explicitly closes the complete window.
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!q.chord("meta_l", "w")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    return try waitLogN(log_path, "editor: exit", 1, "Close Window left the editor's other tabs running", spec, polls);
 }
 
 /// The desktop-terminal drill: a windowed terminal (term in the shared
@@ -2512,6 +2543,8 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "term: console up", 1, "terminal did not open", spec, polls)) return false;
     if (!try waitLogN(log_path, "dock: running terminal=true", 1, "shell did not start", spec, polls)) return false;
     sleepMs(500);
+    if (!q.typeText("write zz-one.txt \"First Files document\"; write zz-two.txt \"Second Files document\"") or !q.sendKey("ret")) return sfail(spec, log_path, "seed Files handoff documents");
+    sleepMs(700);
     if (!q.typeText("exit")) return sfail(spec, log_path, "type exit");
     _ = q.sendKey("ret");
     if (!try waitLogN(log_path, "dock: running terminal=false", 1, "shell did not exit", spec, polls)) return false;
@@ -2561,6 +2594,55 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try openAppMenu(spec, log_path, polls, &q, "Window", 1280, 1024)) return false;
     if (!q.sendKey("end") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "dock: running explorer=false", 1, "Window Close did not close Files", spec, polls)) return false;
+
+    // Reopen Files and activate real documents through the broker. Last two
+    // root rows are the deliberately sorted zz fixtures; double-click is the
+    // same activation path used by Enter and File > Open.
+    if (!clickScanout(&q, files[0], files[1])) return false;
+    if (!try waitLogN(log_path, "dock: running explorer=true", 2, "Files did not reopen", spec, polls)) return false;
+    sleepMs(400);
+    const fg = parseListGeom(readLog(log_path), "files") orelse return sfail(spec, log_path, "Files handoff geometry");
+    const fl = std.mem.lastIndexOf(u8, readLog(log_path), "gui: list files ") orelse return false;
+    const count = parseAfter(readLog(log_path)[fl..], "count=") orelse return false;
+    if (count < 2 or count > 9) return sfail(spec, log_path, "unexpected handoff fixture listing");
+    const one_y = fg[1] + (count - 2) * fg[2] + fg[2] / 2;
+    const two_y = one_y + fg[2];
+    if (!clickScanout(&q, fg[0], one_y)) return false;
+    sleepMs(80);
+    if (!clickScanout(&q, fg[0], one_y)) return false;
+    if (!try waitLogN(log_path, "editor: loaded zz-one.txt bytes=20", 1, "double-click did not open the first selected document", spec, polls)) return false;
+    if (!q.chord("meta_l", "a") or !q.typeText("Changed first document") or !q.chord("meta_l", "s")) return false;
+    if (!try waitLogN(log_path, "editor: saved zz-one.txt", 1, "handed-off document could not save", spec, polls)) return false;
+    // Restore Files in front, then open the other document into the same app.
+    if (!clickScanout(&q, files[0], files[1])) return false;
+    sleepMs(250);
+    if (!clickScanout(&q, fg[0], two_y)) return false;
+    sleepMs(80);
+    if (!clickScanout(&q, fg[0], two_y)) return false;
+    if (!try waitLogN(log_path, "editor: loaded zz-two.txt bytes=21", 1, "second selected document did not open", spec, polls)) return false;
+    if (!try waitLogN(log_path, "editor: tab 2/2 zz-two.txt", 1, "Files launched a second Editor instead of another tab", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/files-editor-tabs.ppm");
+    // The selected view belongs to the document now; closing Files must not
+    // revoke it or leave the editor dependent on the sender process.
+    if (!clickScanout(&q, files[0], files[1])) return false;
+    sleepMs(200);
+    if (!try openAppMenu(spec, log_path, polls, &q, "Window", 1280, 1024)) return false;
+    if (!q.sendKey("end") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "dock: running explorer=false", 2, "Files did not close after handoff", spec, polls)) return false;
+    if (!q.chord2("shift", "ctrl", "tab") or !q.chord("meta_l", "a") or !q.typeText("Saved after Files exit") or !q.chord("meta_l", "s")) return false;
+    if (!try waitLogN(log_path, "editor: saved zz-one.txt", 2, "Files exit invalidated the document's save authority", spec, polls)) return false;
+    if (!q.chord2("shift", "meta_l", "w")) return false;
+    if (!try waitLogN(log_path, "editor: exit", 1, "clean handed-off tabs did not close", spec, polls)) return false;
+    // Opening the first file again proves the save used the handed-off view.
+    if (!clickScanout(&q, files[0], files[1])) return false;
+    if (!try waitLogN(log_path, "dock: running explorer=true", 3, "Files did not relaunch for persistence check", spec, polls)) return false;
+    sleepMs(200);
+    if (!clickScanout(&q, fg[0], one_y)) return false;
+    sleepMs(80);
+    if (!clickScanout(&q, fg[0], one_y)) return false;
+    if (!try waitLogN(log_path, "editor: loaded zz-one.txt bytes=22", 1, "handoff save did not persist across Editor restart", spec, polls)) return false;
+    if (!q.chord2("shift", "meta_l", "w")) return false;
+    if (!try waitLogN(log_path, "editor: exit", 2, "reopened Editor did not close", spec, polls)) return false;
 
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.
@@ -4055,6 +4137,14 @@ const Qmp = struct {
         return q.execute(up) and ok;
     }
 
+    fn chord2(q: *Qmp, first: []const u8, second: []const u8, key: []const u8) bool {
+        const down = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":true,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{first}) catch return false;
+        if (!q.execute(down)) return false;
+        const ok = q.chord(second, key);
+        const up = std.fmt.allocPrint(gpa, "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{{\"type\":\"key\",\"data\":{{\"down\":false,\"key\":{{\"type\":\"qcode\",\"data\":\"{s}\"}}}}}}]}}}}", .{first}) catch return false;
+        return q.execute(up) and ok;
+    }
+
     /// Move the absolute pointer (a virtio tablet) to (x, y), each an
     /// axis value in 0..32767. QEMU wants both axes in one event group.
     fn sendPointer(q: *Qmp, x: u32, y: u32) bool {
@@ -4104,6 +4194,7 @@ const Qmp = struct {
                     '/' => "slash",
                     '.' => "dot",
                     '=' => "equal",
+                    ';' => "semicolon",
                     else => return false,
                 };
                 if (!q.sendKey(qcode)) return false;
@@ -4550,7 +4641,7 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     // Reopening after an outside click proves dismissal does not leave a
     // stale popup intercepting the next menu or editor input.
     if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
-    if (!q.sendKey("end")) return false; // Close Window
+    if (!q.sendKey("end")) return false; // Close Tab
     sleepMs(100);
     if (!q.sendKey("ret")) return false;
     sleepMs(200);
@@ -4558,10 +4649,28 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     if (!q.sendKey("ret")) return false; // default Cancel preserves edits
     if (!try waitLogN(log_path, "editor: close cancelled", cancelled + 1, "menu Close bypassed dirty-document confirmation", spec, polls)) return false;
     sleepMs(200);
-    if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
-    if (!q.sendKey("end")) return false;
-    sleepMs(100);
-    if (!q.sendKey("ret")) return false;
+    // Force horizontal overflow at the largest text scale. New documents
+    // retain the dirty first tab, and keyboard traversal reveals an earlier
+    // tab even when only a few labels fit in the viewport.
+    for (0..8) |_| {
+        const changes = countOccurrences(readLog(log_path), "editor: tab ");
+        if (!q.chord("meta_l", "n")) return false;
+        if (!try waitLogN(log_path, "editor: tab ", changes + 1, "large-text New did not append a tab", spec, polls)) return false;
+    }
+    sleepMs(200);
+    _ = q.screendump(check_dir ++ "/editor-tabs-300-1024.ppm");
+    const changes = countOccurrences(readLog(log_path), "editor: tab ");
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!q.chord("ctrl", "tab")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!try waitLogN(log_path, "editor: tab ", changes + 1, "large-text previous-tab traversal failed", spec, polls)) return false;
+    sleepMs(150);
+    _ = q.screendump(check_dir ++ "/editor-tabs-previous-300-1024.ppm");
+    // Closing the whole window must still find the dirty first document,
+    // even though a clean overflow tab is currently selected.
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!q.chord("meta_l", "w")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
     sleepMs(200);
     return q.sendKey("tab") and q.sendKey("tab") and q.sendKey("ret"); // Discard
 }

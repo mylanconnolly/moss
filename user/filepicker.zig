@@ -1,5 +1,5 @@
-//! Session file chooser. Only this broker owns a directory view; registered
-//! clients can read/write only a document explicitly selected in its window.
+//! Session document broker. Chooser and Files selections keep directory views
+//! here; Editor clients can read/write only their explicitly selected document.
 const std = @import("std");
 const shared = @import("shared");
 const p = shared.picker;
@@ -17,7 +17,18 @@ pub const panic = std.debug.FullPanic(uPanic);
 fn uPanic(_: []const u8, _: ?usize) noreturn {
     usys.exit(255);
 }
-const Client = struct { badge: u64 = 0, va: u64 = 0, path: [256]u8 = undefined, len: usize = 0 };
+const Client = struct {
+    badge: u64 = 0,
+    va: u64 = 0,
+    path: [256]u8 = undefined,
+    len: usize = 0,
+    selected_view: u64 = 0,
+    view_va: u64 = 0,
+    held_cap: u64 = 0,
+    sender: u64 = 0,
+    queued: bool = false,
+};
+const receiver_badge: u64 = 1;
 const ClientSlab = struct {
     next: ?*ClientSlab = null,
     count: usize = 0,
@@ -66,6 +77,8 @@ fn release(badge: u64) void {
     while (link.*) |slab| {
         for (&slab.clients) |*c| if (c.badge == badge) {
             if (c.va != 0) _ = usys.shmUnmap(c.va);
+            dropSelectedView(c);
+            if (c.held_cap != 0) _ = usys.capDrop(c.held_cap);
             c.* = .{};
             slab.count -= 1;
             if (slab.count == 0) {
@@ -77,6 +90,80 @@ fn release(badge: u64) void {
         link = &slab.next;
     }
 }
+fn documentView(c: *Client) u64 {
+    return if (c.selected_view != 0) c.selected_view else view;
+}
+fn documentBuffer(c: *Client) [*]u8 {
+    return if (c.view_va != 0) @ptrFromInt(c.view_va) else buffer;
+}
+fn dropSelectedView(c: *Client) void {
+    if (c.view_va != 0) _ = usys.shmUnmap(c.view_va);
+    if (c.selected_view != 0) _ = usys.capDrop(c.selected_view);
+    c.view_va = 0;
+    c.selected_view = 0;
+}
+fn firstPending(sender: ?u64, queued: bool) ?*Client {
+    var found: ?*Client = null;
+    var slab = clients;
+    while (slab) |sl| : (slab = sl.next) {
+        for (&sl.clients) |*c| {
+            if (c.badge == 0 or c.held_cap == 0 or c.queued != queued) continue;
+            if (sender) |owner| if (c.sender != owner) continue;
+            if (found == null or c.badge < found.?.badge) found = c;
+        }
+    }
+    return found;
+}
+fn cancelUncommitted(sender: u64) void {
+    while (firstPending(sender, false)) |c| release(c.badge);
+}
+/// Takes ownership of a fresh derived parent view, never the sender's shared
+/// view/buffer. Only the selected basename is exposed through the new endpoint.
+fn offerDocument(chan: u64, sender: *Client, parent_view: u64, name_len: u64) p.Resp {
+    var transferred = false;
+    defer if (!transferred and parent_view != 0) {
+        _ = usys.capDrop(parent_view);
+    };
+    if (sender.va == 0 or parent_view == 0 or name_len == 0 or name_len > 56) return failure(error.BadPath);
+    var name: [56]u8 = undefined;
+    const source: [*]const u8 = @ptrFromInt(sender.va);
+    @memcpy(name[0..@intCast(name_len)], source[p.name_offset..][0..@intCast(name_len)]);
+    const basename = name[0..@intCast(name_len)];
+    file.validatePath(basename) catch |err| return failure(err);
+    if (std.mem.indexOfScalar(u8, basename, '/') != null) return failure(error.BadPath);
+    if (next_badge == std.math.maxInt(u64)) return failure(error.TemporaryFileBusy);
+    const badge = next_badge;
+    next_badge += 1;
+    const offered_client = allocate(badge) orelse return failure(error.TemporaryFileBusy);
+    var accepted = false;
+    defer if (!accepted) {
+        release(badge);
+    };
+    offered_client.selected_view = parent_view;
+    transferred = true;
+    const sh = usys.shmCreate(shared.fs_buf_pages);
+    if (sh.err != .ok) return failure(error.Unavailable);
+    defer _ = usys.capDrop(sh.data[0]);
+    const mapped = usys.shmMap(sh.data[0]);
+    if (mapped.err != .ok) return failure(error.Unavailable);
+    offered_client.view_va = mapped.data[0];
+    const attached = switch (usys.callTyped(shared.FsReq, shared.FsResp, parent_view, .attach_buf, sh.data[0])) {
+        .ok => |rep| rep == .ok,
+        .err => false,
+    };
+    if (!attached) return failure(error.Unavailable);
+    _ = file.load(parent_view, documentBuffer(offered_client), basename, &scratch) catch |err| return failure(err);
+    const minted = usys.chanMint(chan, badge);
+    if (minted.err != .ok) return failure(error.Unavailable);
+    offered_client.held_cap = minted.data[1];
+    offered_client.sender = sender.badge;
+    @memcpy(offered_client.path[0..basename.len], basename);
+    offered_client.len = basename.len;
+    accepted = true;
+    _ = usys.log(glog, "filepicker: document offered");
+    return .{ .offered = .{ .ticket = badge } };
+}
+
 fn failure(err: file.Error) p.Resp {
     return .{ .failed = .{ .code = @intFromEnum(switch (err) {
         error.BadPath => p.Error.bad_path,
@@ -94,7 +181,7 @@ fn failure(err: file.Error) p.Resp {
 fn metadata(c: *Client, len: usize) p.Resp {
     const dst: [*]u8 = @ptrFromInt(c.va);
     @memcpy(dst[p.name_offset..][0..c.len], c.path[0..c.len]);
-    const st = fs.fsStatfs(view);
+    const st = fs.fsStatfs(documentView(c));
     return .{ .document = .{ .len = len, .name_len = c.len, .read_only = @intFromBool(st == null or st.?.read_only) } };
 }
 
@@ -363,7 +450,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     _ = blob_va;
     _ = blob_len;
     glog = log_h;
-    const setup = boot.take(chan_h);
+    const receiver = usys.chanMint(chan_h, receiver_badge);
+    if (receiver.err != .ok) usys.exit(1);
+    const setup = boot.takeExport(chan_h, receiver.data[1]);
+    _ = usys.capDrop(receiver.data[1]);
     view = setup.cap(.view);
     const attached = fs.attachBuf(view);
     if (attached.va == 0) {
@@ -378,6 +468,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
         if (r.err == .client_dead) {
+            cancelUncommitted(r.badge);
             release(r.badge);
             continue;
         }
@@ -387,7 +478,22 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
             continue;
         };
-        if (req != .attach_buf and r.cap != 0) _ = usys.capDrop(r.cap);
+        if (req != .attach_buf and req != .offer and r.cap != 0) _ = usys.capDrop(r.cap);
+        if (req == .take) {
+            if (r.badge != receiver_badge) {
+                _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+            } else if (firstPending(null, true)) |offered_client| {
+                const cap = offered_client.held_cap;
+                offered_client.held_cap = 0;
+                offered_client.sender = 0;
+                offered_client.queued = false;
+                _ = usys.log(glog, "filepicker: document handoff claimed");
+                const replied = usys.replyTyped(p.Resp, chan_h, .selected, cap);
+                _ = usys.capDrop(cap);
+                if (replied != .ok) release(offered_client.badge);
+            } else _ = usys.replyTyped(p.Resp, chan_h, .empty, 0);
+            continue;
+        }
         if (req == .register) {
             if (next_badge == std.math.maxInt(u64)) {
                 _ = usys.replyTyped(p.Resp, chan_h, failure(error.TemporaryFileBusy), 0);
@@ -413,10 +519,30 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             continue;
         }
         const c = find(r.badge) orelse {
-            if (req == .attach_buf and r.cap != 0) _ = usys.capDrop(r.cap);
+            if ((req == .attach_buf or req == .offer) and r.cap != 0) _ = usys.capDrop(r.cap);
             _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
             continue;
         };
+        if (req == .offer) {
+            const rep = offerDocument(chan_h, c, r.cap, req.offer.path_len);
+            const replied = usys.replyTyped(p.Resp, chan_h, rep, 0);
+            if (replied != .ok and rep == .offered) release(rep.offered.ticket);
+            continue;
+        }
+        if (req == .enqueue or req == .cancel_offer) {
+            const ticket = if (req == .enqueue) req.enqueue.ticket else req.cancel_offer.ticket;
+            const offered_client = find(ticket);
+            if (offered_client == null or offered_client.?.sender != r.badge or offered_client.?.held_cap == 0) {
+                _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+            } else {
+                if (req == .enqueue) {
+                    offered_client.?.queued = true;
+                    _ = usys.log(glog, "filepicker: document queued");
+                } else release(ticket);
+                _ = usys.replyTyped(p.Resp, chan_h, .ok, 0);
+            }
+            continue;
+        }
         if (req == .attach_buf) {
             const mapped = usys.shmMap(r.cap);
             if (r.cap != 0) _ = usys.capDrop(r.cap);
@@ -438,6 +564,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
             continue;
         }
+        if (req != .open and req != .load and req != .save and req != .save_as) {
+            _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+            continue;
+        }
         const data: [*]u8 = @ptrFromInt(c.va);
         const saving = req == .save or req == .save_as;
         const n: usize = switch (req) {
@@ -456,20 +586,24 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             _ = usys.replyTyped(p.Resp, chan_h, .cancelled, 0);
             continue;
         } else c.path[0..c.len];
+        const choosing = req == .open or req == .save_as;
+        const target_view = if (choosing) view else documentView(c);
+        const target_buffer = if (choosing) buffer else documentBuffer(c);
         const len = if (saving) blk: {
-            file.save(view, buffer, path, scratch[0..n]) catch |err| {
+            file.save(target_view, target_buffer, path, scratch[0..n]) catch |err| {
                 _ = usys.replyTyped(p.Resp, chan_h, failure(err), 0);
                 continue;
             };
             break :blk n;
         } else blk: {
-            const loaded = file.load(view, buffer, path, &scratch) catch |err| {
+            const loaded = file.load(target_view, target_buffer, path, &scratch) catch |err| {
                 _ = usys.replyTyped(p.Resp, chan_h, failure(err), 0);
                 continue;
             };
             @memcpy(data[0..loaded.len], loaded);
             break :blk loaded.len;
         };
+        if (choosing) dropSelectedView(c);
         if (path.ptr != c.path[0..].ptr) @memcpy(c.path[0..path.len], path);
         c.len = path.len;
         _ = usys.replyTyped(p.Resp, chan_h, metadata(c, len), 0);

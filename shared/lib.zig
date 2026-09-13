@@ -686,9 +686,11 @@ pub const CapTag = enum(u64) {
     display_control = 29,
     /// User-mediated selected-document broker; confers no ambient filesystem view.
     picker = 30,
+    /// Privileged receiver for user-selected document handoffs.
+    documents = 31,
 };
 
-pub const cap_tag_count = 31;
+pub const cap_tag_count = 32;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver

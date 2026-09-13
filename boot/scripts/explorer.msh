@@ -74,7 +74,7 @@ def crumb [state] {
 }
 
 let final = (gui {
-    init:  { path: "", depth: 0, node: 0 }
+    init:  { path: "", depth: 0, node: 0, note: "" }
     title: "Files"
     menus: "files"
     width: 960
@@ -140,37 +140,43 @@ let final = (gui {
                 rows:  $rows
               }
             }
-            { kind: "label", muted: true, text: ((str (len $rows)) + " items · " + (footer $state)) }
+            { kind: "label", muted: true, text: (match $state.note { "" => ((str (len $rows)) + " items · " + (footer $state)); _ => $state.note }) }
           ]
         }
       })
     update: (fn [state, ev] {
         match $ev.id {
           "refresh" => $state
-          "up" => { { path: (fs-parent $state.path), depth: $state.depth, node: $state.node } }
-          "close" => { { path: $state.path, depth: $state.depth, node: $state.node, done: true } }
-          "places" => { { path: "", depth: $state.depth, node: 0 } }
+          "up" => { { path: (fs-parent $state.path), depth: $state.depth, node: $state.node, note: "" } }
+          "close" => { { path: $state.path, depth: $state.depth, node: $state.node, note: "", done: true } }
+          "places" => { { path: "", depth: $state.depth, node: 0, note: "" } }
           "network" => (match (int $ev.row) {
-              ok $n => { { path: "", depth: $state.depth, node: $n } }
+              ok $n => { { path: "", depth: $state.depth, node: $n, note: "" } }
               _ => $state
             })
           "lock" => (match (fs-derive $state.path true) {
-              true => { { path: "", depth: ($state.depth + 1), node: 0 } }
+              true => { { path: "", depth: ($state.depth + 1), node: 0, note: "" } }
               _ => $state
             })
           "leave" => (match (fs-leave) {
-              true => { { path: "", depth: ($state.depth - 1), node: 0 } }
+              true => { { path: "", depth: ($state.depth - 1), node: 0, note: "" } }
               _ => $state
             })
           "files" => (match $ev.activated {
               true => (match $state.node {
                   0 => (match (fs-rows (join-path $state.path $ev.row)) {
-                      ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth, node: 0 } }
-                      _ => $state
+                      ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth, node: 0, note: "" } }
+                      _ => (match (edit-file (join-path $state.path $ev.row)) {
+                          ok _ => {
+                            echo ("files: sent to editor " + (join-path $state.path $ev.row))
+                            { path: $state.path, depth: $state.depth, node: $state.node, note: "Sent to Editor" }
+                          }
+                          err $why => { { path: $state.path, depth: $state.depth, node: $state.node, note: $why } }
+                        })
                     })
                   _ => (match (browse-rows $state.node (join-path $state.path $ev.row)) {
-                      ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth, node: $state.node } }
-                      _ => $state
+                      ok _ => { { path: (join-path $state.path $ev.row), depth: $state.depth, node: $state.node, note: "" } }
+                      _ => { { path: $state.path, depth: $state.depth, node: $state.node, note: "Opening remote files in Editor is not available yet." } }
                     })
                 })
               _ => $state

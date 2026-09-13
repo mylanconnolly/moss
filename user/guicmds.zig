@@ -2239,8 +2239,8 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // Each list's row geometry in scanout coordinates, so a host can
             // click a specific row (rows_top + row * row_h) and the scrollbar.
             for (list_hits[0..nlisthit]) |lh| {
-                var l: [96]u8 = undefined;
-                _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: list {s} cx={d} rows_top={d} row_h={d} sb={d}", .{ lh.id, wf.win_x + lh.x + lh.rows_w / 2, wf.win_y + lh.rows_top, lh.row_h, if (lh.sb_x > 0) wf.win_x + lh.sb_x else 0 }) catch continue);
+                var l: [128]u8 = undefined;
+                _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: list {s} cx={d} rows_top={d} row_h={d} sb={d} count={d}", .{ lh.id, wf.win_x + lh.x + lh.rows_w / 2, wf.win_y + lh.rows_top, lh.row_h, if (lh.sb_x > 0) wf.win_x + lh.sb_x else 0, lh.st.nrows }) catch continue);
             }
             announced = true;
         }
@@ -2400,7 +2400,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             }
             pressed = null;
             const ch = ev.ch;
-            if (!want_trusted and ch == shared.keyboard.close_window) {
+            if (!want_trusted and (ch == shared.keyboard.close_window or ch == shared.keyboard.close_all)) {
                 closed = true;
                 break :input;
             }

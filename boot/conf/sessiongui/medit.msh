@@ -6,6 +6,7 @@
   grant:     [log]
   essential: false
   give: [
+    { tag: documents, unit: filepicker, control: true }
     { tag: clip, unit: clipsvc }
     { tag: display, session: true }
     { tag: font, session: true }

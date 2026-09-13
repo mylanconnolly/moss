@@ -4378,7 +4378,7 @@ path proves the click, activation, and descent. The desktop dock gained a
 the session's own home view), so it launches like Settings and Demo.
 
 **Native medit and selected-document picker (2026-09-12).** `user/medit.zig`
-is a single-document text editor using the shared window frame, font roles,
+is a tabbed text editor using the shared window frame, font roles,
 semantic colors, icons, clipboard, and native controls in `user/widgets.zig`.
 The desktop launches it as **Editor**. `lib/editor.zig` adapts medit's line
 buffer and Unicode-width logic (source revision recorded in `lib/medit/`),
@@ -4400,8 +4400,9 @@ protocol: there is no client-supplied path parameter. Each registered,
 badged channel remembers only its selected document; save cannot target an
 unselected name. Client records grow in quota-backed pages and reclaim their
 mappings/selection on channel death. A candidate Open uses a fresh channel;
-the editor adopts it only after the complete file loads successfully. New
-drops the previous document channel. Save As requires explicit confirmation
+the editor adopts it only after the complete file loads successfully. New and
+Open create independent tabs, keeping prior document channels. Save As requires
+explicit confirmation
 before replacing an existing file. A cancelled dialog preserves the buffer
 and its original authority. The listing transport currently returns at most
 2048 bytes of names; the picker warns when the listing may be incomplete,
@@ -4416,25 +4417,77 @@ failure; mossfs now restores its pre-operation overlays on rename failure.
 Host fault-injection and torn-write/remount tests cover replacement rollback
 and old-or-new durability. The editor transfers its already-serialized buffer
 into saved-state tracking after success, avoiding an allocation failure after
-the disk write. Close/New/Open on a dirty document require Save, Discard, or
-Cancel. Shared surface recreation retains the old backing store until its
+the disk write. Closing a dirty tab requires Save, Discard, or Cancel. Closing
+the window
+confirms every dirty tab before removing any; Cancel retains all tabs, even
+those already marked Discard during that confirmation sequence. Shared surface
+recreation retains the old backing store until its
 replacement is allocated, allowing the editor to retain unsaved text on a
 failed resize. The boot unit table now accommodates 128 entries (98 are
 packed with these two new units).
 
-Shortcuts: Cmd+N/O/S, Cmd+Shift+S (Save As), Cmd+F, Cmd+W; Cmd+C/X/V/A,
+Shortcuts: Cmd+N/O/S, Cmd+Shift+S (Save As), Cmd+F, Cmd+W (close tab),
+Shift+Cmd+W (close window), Ctrl+Tab/Shift+Ctrl+Tab (next/previous tab); Cmd+C/X/V/A,
 Cmd+Z/Shift+Cmd+Z; Shift+arrows, Option+arrows, Cmd+arrows, and Emacs-style
 Ctrl+A/E/B/F/P/N/D/K/Y. Tab inserts spaces to a four-column stop; Shift+Tab
 moves to toolbar controls. Find uses Enter for next, Shift+Tab for previous,
 and Escape to return to editing. Pointer selection, double-click words,
 vertical wheel scrolling, horizontal caret following, and live text scaling
-use the same model positions. Syntax highlighting, multiple tabs, LSP,
-Files-to-editor handoff, and external-edit conflict detection remain follow-ons.
+use the same model positions. Syntax highlighting, LSP, remote-file handoff,
+external-edit conflict detection, and session restoration remain follow-ons.
 The `editor` QEMU drill checks real keyboard editing, clipboard, save/reopen
 content hashes, Save As cancellation, preservation of the original on New,
 128 registered-client teardown cycles, unselected-save refusal, and dirty-close
 cancellation/discard, with normal quota/leak
 teardown checks.
+
+**Files handoff and shared tabs (2026-09-12).** `shared/tabs.zig` owns
+allocation-free strip geometry, selection reveal, overflow arrows and hit
+regions; `user/tabstrip.zig` renders themed, font-scaled labels, dirty dots,
+close buttons and the selected underline. Editor's dynamically allocated tabs
+own separate buffers, history, caret/selection, horizontal/vertical scroll,
+Find state, status and document channels. All model and strip capacity is
+reserved before publishing a new tab. Resource exhaustion preserves existing
+edits. A Files handoff replaces only an untouched startup placeholder;
+explicit New/Open always adds a tab. Terminal session multiplexing is separate.
+
+Files' `edit-file` binding in `user/documentlaunch.zig` derives a fresh parent
+view from the currently browsed capability and offers it with the selected
+basename to the broker. The broker validates the text before launch, retains
+its own filesystem buffer and exact basename, and exposes only load/save on
+that document. Atomic replacement needs sibling-file authority, which stays
+inside the broker; Editor never receives directory access. The filesystem
+enforces read-only restrictions and explicit revocation of the selected view.
+Save As changes the
+selected authority only after the user-mediated save succeeds. Remote Files
+listings currently lack a file-content handoff and report that limitation.
+
+The offer/commit/claim protocol avoids leaking prepared selections when launch
+fails: only the offering client can commit/cancel its ticket, and sender death
+reclaims uncommitted entries. Committed entries survive sender shutdown and
+remain available across an Editor crash until claimed or session teardown.
+Only the separate `documents` receiver capability (exported control endpoint)
+can claim them. Editor reserves tab capacity before claiming. Session Editor
+has no view grant; the editor drill alone receives a test view to exercise
+foreign-ticket rejection, prepared-request reclamation, committed-request
+survival, exact-file read-only enforcement, explicit view revocation, reused
+parent-badge isolation and single delivery. The desktop drill opens two files into one Editor and saves/reopens across app restart;
+model tests cover per-tab state, cancelled window close and allocation failure.
+
+Lesson: a path string is not a document grant. Files' current view may be
+narrower or read-only compared with the chooser's home view; resolving a handed
+off name against that home would silently widen authority. Keep the selected
+view with the broker, and publish tabs only after the entire load succeeds. The
+lifetime probes also found two filesystem cleanup bugs: revoked view slots
+were skipped on client death, and surviving children retained a reusable
+parent badge. Cleanup now releases revoked slots and orphans surviving direct
+children before reusing the parent identity, so an unrelated later client
+cannot inherit authority to revoke them. The Files-close/save drill also exposed
+keyboard focus falling back to the raised menu bar while its labels still
+showed Editor. Compositor fallback now prefers a surviving application over
+titleless resident chrome, retaining titleless-only and trusted boot surfaces.
+Independently retained views survive creator exit; root retains explicit
+revocation authority.
 
 **Global application menus and Moss branding (2026-09-12).** The resident
 bar now shows the Moss mark, the active application's name, and its menus.

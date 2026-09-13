@@ -228,8 +228,15 @@ fn doRevoke(caller: u64, badge: u64) shared.FsResp {
 /// its open files are forgotten, and the badge is free to mint again.
 fn releaseView(badge: u64) void {
     if (badge == 0) return; // the root view's holders are the side itself
-    const v = viewOf(badge) orelse return;
+    if (badge >= max_views or !views[badge].used) return;
+    const v = &views[badge]; // revoked identities must also release their slot
     if (v.buf != 0) _ = usys.shmUnmap(v.buf);
+    // A separately held derived view survives its creator. Once the creator's
+    // badge can be reused, no new holder may inherit its revocation authority.
+    // Root (badge 0) can still revoke any view explicitly.
+    for (&views) |*child| if (child.used and child.parent == badge) {
+        child.parent = ~@as(u64, 0);
+    };
     v.* = .{};
 }
 

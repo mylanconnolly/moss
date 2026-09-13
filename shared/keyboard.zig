@@ -41,6 +41,11 @@ pub const select_down = 161;
 pub const select_doc_home = 162;
 pub const select_doc_end = 163;
 pub const menu_focus = 168;
+pub const next_tab = 169;
+pub const previous_tab = 170;
+pub const close_all = 171;
+/// Cmd-W closes the active document in tabbed apps, otherwise its window.
+pub const close_document = close_window;
 
 pub const Decoder = struct {
     held: [8]bool = @splat(false),
@@ -66,7 +71,7 @@ pub const Decoder = struct {
         const alt = self.held[4] or self.held[5];
         const meta = self.held[6] or self.held[7];
         if (!alt and !meta and ((code == 68 and !ctrl and !shift) or (code == 60 and ctrl and !shift))) return menu_focus;
-        if (code == 15) return if (alt) switch_window else if (shift) back_tab else '\t';
+        if (code == 15) return if (alt) switch_window else if (ctrl) (if (shift) previous_tab else next_tab) else if (shift) back_tab else '\t';
         if (meta) switch (code) {
             46 => return copy,
             45 => return cut,
@@ -76,7 +81,7 @@ pub const Decoder = struct {
             24 => return open_document,
             31 => return if (shift) save_as else save_document,
             33 => return find,
-            17 => return close_window,
+            17 => return if (shift) close_all else close_window,
             else => {},
         };
         if (meta and code == 30) return select_all;
@@ -262,4 +267,17 @@ test "global menu keyboard entry is reserved and ignores release" {
     try std.testing.expectEqual(@as(u8, 0), d.feed(68, 0));
     _ = d.feed(29, 1);
     try std.testing.expectEqual(@as(u8, menu_focus), d.feed(60, 1));
+}
+
+test "tab navigation and close all remain distinct from widget and window traversal" {
+    var d: Decoder = .{};
+    _ = d.feed(29, 1);
+    try std.testing.expectEqual(@as(u8, next_tab), d.feed(15, 1));
+    _ = d.feed(42, 1);
+    try std.testing.expectEqual(@as(u8, previous_tab), d.feed(15, 1));
+    _ = d.feed(29, 0);
+    _ = d.feed(125, 1);
+    try std.testing.expectEqual(@as(u8, close_all), d.feed(17, 1));
+    _ = d.feed(42, 0);
+    try std.testing.expectEqual(@as(u8, close_document), d.feed(17, 1));
 }

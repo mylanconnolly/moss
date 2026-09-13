@@ -206,8 +206,8 @@ applications need menus beyond those profiles.
 **Follow-ons from the project assessment (2026-09-12)**
 
 - **Document workflow follow-through.** The native editor and capability-scoped
-  Open/Save picker have landed. Extend Files with editor handoff, rename, and
-  sharing; add multiple documents, syntax highlighting, external-edit conflict
+  Open/Save picker, Files handoff, and shared document tabs have landed. Extend
+  Files with rename and sharing; add syntax highlighting, external-edit conflict
   detection, and session restoration. Retain selection-scoped document authority
   and verify document persistence across a complete session restart.
 - **Capacity and long-session reliability.** Extend the GUI resource-capacity
@@ -1496,6 +1496,17 @@ applications need menus beyond those profiles.
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
 
+- ✅ **Files handoff and shared document tabs** (2026-09-12): double-click or
+  activate a local text file in Files to open it in the running Editor, starting
+  the app when necessary. The broker retains the selected parent view for
+  atomic save; Editor receives only a selected-document endpoint, preserving
+  read-only restrictions and explicit view revocation. Prepared requests reclaim on sender
+  death; committed requests survive until claimed or session teardown. Tabs
+  share layout/rendering/hit-testing helpers and keep independent buffers,
+  undo, cursor, scroll, search, and save authority. New/Open add tabs; Cmd+W
+  closes one, Shift+Cmd+W closes the window, and cancelling a dirty-window
+  close retains every tab. Ctrl+Tab/Shift+Ctrl+Tab switch tabs. The toolkit is
+  reusable by the later terminal-multiplexing arc without implementing it here.
 - ✅ **Native medit and document picker** (2026-09-12): reuse medit's UTF-8
   editing model with Moss controls, selection, clipboard, undo/redo, find,
   scroll, safe dirty-close prompts, and live text scaling. A separate picker
