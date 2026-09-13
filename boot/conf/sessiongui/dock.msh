@@ -8,6 +8,7 @@
   grant:     [log, bootfs]
   profiles:  [session]
   essential: false
+  restart:   { max: 5 }
   give: [
     { tag: display, session: true }
     { tag: display_control, session: true }

@@ -103,6 +103,7 @@ pub fn on() bool {
 }
 
 pub fn signature(name: []const u8) ?mshl.Signature {
+    if (std.mem.eql(u8, name, "apps")) return .{ .ret = .list };
     if (std.mem.eql(u8, name, "display-info")) return .{ .ret = .record };
     if (std.mem.eql(u8, name, "display-modes")) return .{ .ret = .list };
     if (std.mem.eql(u8, name, "display-preview")) return .{ .params = &.{.{ .name = "mode", .shape = .string }}, .ret = .bool };
@@ -149,7 +150,7 @@ var content_h: usize = 0;
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
 // the surface (so a pointer press can hit-test which widget it landed on).
-const Focus = struct { sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, is_list: bool = false, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
+const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, is_list: bool = false, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
 var focusables: [64]Focus = undefined;
 
 // Every window has an implicit viewport; explicit `scroll` nodes can nest.
@@ -452,6 +453,7 @@ var sel_focus: usize = 0;
 /// window is a titlebar over a content area laid out by `drawNode`
 /// (columns stack, rows flow), everything coloured from `pal`.
 fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
+    file_crumb = null;
     clipReset();
     fillAll(pal.bg);
     content_bg = pal.bg;
@@ -602,6 +604,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
         if (paint) wf.drawIcon(x, y, size, strField(rec, "name"), pal.text);
         return .{ .w = size, .h = size };
     }
+    if (std.mem.eql(u8, kind, "breadcrumbs")) return layoutBreadcrumb(rec, x, y, avail_w, paint);
     if (std.mem.eql(u8, kind, "label")) {
         return layoutLabel(rec, x, y, avail_w, paint);
     }
@@ -702,6 +705,99 @@ fn drawIconLabel(rec: mshl.Record, field: []const u8, x: usize, y: usize, w: usi
     const inset = if (hasIcon(rec)) size + (if (text.len > 0) @as(usize, 8) else 0) else 0;
     if (hasIcon(rec) and w >= size) wf.drawIcon(x, y + (h -| size) / 2, size, strField(rec, "icon"), ink);
     drawStrTrunc(x + inset, y + (h -| lineOf(R_UI)) / 2, R_UI, text, w -| inset, ink, bg);
+}
+
+const Crumb = struct {
+    id: [64]u8 = undefined,
+    id_len: usize = 0,
+    path: [256]u8 = undefined,
+    path_len: usize = 0,
+    root: []const u8 = "",
+    selected: usize = 0,
+    can_lock: bool = false,
+    can_leave: bool = false,
+    fn model(self: *const Crumb) shared.gui.breadcrumbs.Model {
+        return shared.gui.breadcrumbs.Model.init(self.path[0..self.path_len]).?;
+    }
+};
+var crumbs: [16]Crumb = @splat(.{});
+var file_crumb: ?*Crumb = null;
+var crumb_pressed: ?usize = null;
+fn crumbFor(id: []const u8, path: []const u8) ?*Crumb {
+    if (id.len == 0 or id.len > 64) return null;
+    var empty: ?*Crumb = null;
+    for (&crumbs) |*c| {
+        if (c.id_len == id.len and std.mem.eql(u8, c.id[0..c.id_len], id)) {
+            if (!std.mem.eql(u8, c.path[0..c.path_len], path)) {
+                @memcpy(c.path[0..path.len], path);
+                c.path_len = path.len;
+                c.selected = 0;
+            }
+            return c;
+        }
+        if (c.id_len == 0 and empty == null) empty = c;
+    }
+    const c = empty orelse return null;
+    c.* = .{};
+    @memcpy(c.id[0..id.len], id);
+    c.id_len = id.len;
+    @memcpy(c.path[0..path.len], path);
+    c.path_len = path.len;
+    return c;
+}
+fn crumbWidth(part: shared.gui.breadcrumbs.Part, last: bool, width: usize) usize {
+    return @min(width, strW(R_UI, part.label) + 20 + (if (last) @as(usize, 0) else 24));
+}
+fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: bool) Size {
+    if (width == 0) return .{};
+    const path = strField(rec, "path");
+    const model = shared.gui.breadcrumbs.Model.init(path) orelse return layoutLabel(rec, x, y, width, paint);
+    const root = strField(rec, "root");
+    const h = lineOf(R_UI) + 16;
+    const state = if (paint) crumbFor(strField(rec, "id"), path) else null;
+    if (paint and state == null) {
+        layout_overflow = true;
+        return .{};
+    }
+    if (state) |c| {
+        c.root = root;
+        c.can_lock = if (rec.get("can_lock")) |v| v.asBool() else false;
+        c.can_leave = if (rec.get("can_leave")) |v| v.asBool() else false;
+        c.selected = @min(c.selected, model.count -| 2);
+        if (std.mem.eql(u8, strField(rec, "id"), "location")) file_crumb = c;
+    }
+    var flow: shared.gui.Flow = .{ .width = width, .gap = 4 };
+    for (0..model.count) |i| {
+        const part = model.at(i, root).?;
+        const last = i + 1 == model.count;
+        const place = flow.put(.{ .w = crumbWidth(part, last, width), .h = h });
+        if (paint) {
+            const c = state.?;
+            const focused = wf.win_focused and nfoc == sel_focus and c.selected == i and !last;
+            const label_w = place.w -| (if (last) @as(usize, 0) else 24);
+            if (focused) panel(x + place.x, y + place.y, label_w, h, 4, pal.surface_hi, pal.focus, pal.focus_w);
+            drawStrTrunc(x + place.x + 10, y + place.y + 8, R_UI, part.label, label_w -| 20, if (last) pal.text else pal.focus, pal.bg);
+            if (!last and place.w >= 24) drawStr(x + place.x + place.w - 19, y + place.y + 8, R_UI, "›", pal.text_muted, pal.bg);
+        }
+    }
+    const size = flow.size();
+    if (paint and model.count > 1) recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .crumb = state, .bx = x, .by = y, .bw = width, .bh = size.h });
+    return .{ .w = width, .h = size.h };
+}
+fn crumbHit(f: Focus, x: usize, y: usize) ?usize {
+    const c = f.crumb orelse return null;
+    const model = c.model();
+    const yy = @as(isize, @intCast(y)) - f.sy;
+    if (x < f.bx or yy < 0) return null;
+    const xx = x - f.bx;
+    var flow: shared.gui.Flow = .{ .width = f.bw, .gap = 4 };
+    const h = lineOf(R_UI) + 16;
+    for (0..model.count) |i| {
+        const last = i + 1 == model.count;
+        const place = flow.put(.{ .w = crumbWidth(model.at(i, c.root).?, last, f.bw), .h = h });
+        if (!last and xx >= place.x and xx < place.x + (place.w -| 24) and yy >= place.y and yy < place.y + h) return i;
+    }
+    return null;
 }
 
 fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
@@ -1433,6 +1529,9 @@ fn mkMenuEvent(it: *mshl.Interp, menu: []const u8, item: []const u8) mshl.Error!
 /// The resident top-bar loop (`gui { bar: true, ... }`): render the bar,
 /// tick the clock, open/close dropdowns, and fire the selected menu item.
 fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
+    var epoch: @import("guieval.zig").Epoch = .{};
+    try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
+    defer epoch.deinit();
     wf.fontReady();
     wf.refreshAppearance();
     wf.useOrdinaryChannel();
@@ -1457,7 +1556,6 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
     var bar_dirty = true;
     var clock_ticks: usize = 0;
     while (true) {
-        it.reclaim();
         const output_changed = wf.refreshOutput();
         if (wf.refreshFontMetrics() or output_changed) {
             dismissPopup(true);
@@ -1480,6 +1578,9 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
             bar_dirty = true;
         }
         if (bar_dirty) {
+            // An open popup borrows this tree. Compact only when it closes;
+            // pointer/keyboard popup navigation creates no evaluation data.
+            if (!pop_open) try epoch.checkpoint(&state, &tree);
             renderBar(tree);
             if (!wf.commitSurface()) return it.fail("gui: bar commit failed", .{});
             bar_dirty = false;
@@ -1543,6 +1644,12 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
                 }
                 continue;
             }
+            if (ev.kind == 0 and ev.ch == shared.keyboard.launcher) {
+                if (pop_open) dismissPopup(false);
+                if (@import("applauncher.zig").run(output_control, log_h) and bar_nmenus > 0) openPopup(bar_menus[0]);
+                bar_dirty = true;
+                break :input;
+            }
             if (ev.kind == 0 and ev.ch == shared.keyboard.menu_focus) {
                 if (pop_open) dismissPopup(true) else if (bar_nmenus > 0) openPopup(bar_menus[0]);
                 bar_dirty = true;
@@ -1594,6 +1701,11 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
             } else {
                 // Copy event values before disposing of the popup and its
                 // borrowed menu ID; the interpreter owns the new event.
+                if (std.mem.eql(u8, entry.label[0..entry.len], "Applications…")) {
+                    dismissPopup(false);
+                    if (@import("applauncher.zig").run(output_control, log_h) and bar_nmenus > 0) openPopup(bar_menus[0]);
+                    continue;
+                }
                 const ev = try mkMenuEvent(it, pop_menu_id, entry.label[0..entry.len]);
                 dismissPopup(true);
                 state = try it.callValue(update, &.{ state, ev }, null, null);
@@ -1603,7 +1715,7 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
         }
     }
     _ = usys.log(log_h, "topbar: closed");
-    return state;
+    return epoch.finish(state);
 }
 
 // ----------------------------------------------------------- the dock
@@ -1665,7 +1777,7 @@ fn renderDock(tree: Value) void {
                 var rb: [64]u8 = undefined;
                 _ = usys.log(log_h, std.fmt.bufPrint(&rb, "dock: running {s}={}", .{ unit, running }) catch "dock: running");
             }
-            dock_items[dock_nitems] = .{ .unit = unit, .title = title, .running = running, .bx = x, .bw = w };
+            dock_items[dock_nitems] = .{ .unit = unit, .title = if (strField(r, "window").len > 0) strField(r, "window") else title, .running = running, .bx = x, .bw = w };
             dock_nitems += 1;
         }
         x += w + dock_gap;
@@ -1702,7 +1814,10 @@ fn mkDockEvent(it: *mshl.Interp, unit: []const u8, title: []const u8) mshl.Error
 /// app if it is already up (`restore-window $ev.title`) or launches it
 /// otherwise (`launch $ev.unit` reaches init through this process's init
 /// front channel). `done: true` ends it.
-fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
+fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, dismissible: bool) mshl.Error!Value {
+    var epoch: @import("guieval.zig").Epoch = .{};
+    try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
+    defer epoch.deinit();
     wf.fontReady();
     wf.refreshAppearance();
     wf.useOrdinaryChannel();
@@ -1720,7 +1835,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
     var tree = try it.callValue(view, &.{state}, null, null);
     var announced = false;
     while (true) {
-        it.reclaim();
+        try epoch.checkpoint(&state, &tree);
         const output_changed = wf.refreshOutput();
         if (wf.refreshFontMetrics() or output_changed) {
             wf.closeSurface();
@@ -1763,7 +1878,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
                 }
                 continue :input;
             }
-            if (ev.ch == 27) { // Escape ends the dock (and the session)
+            if (ev.kind == 0 and ev.ch == 27 and dismissible) { // only the standalone drill permits dismissal
                 quit = true;
                 break :input;
             }
@@ -1780,7 +1895,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl
         }
     }
     _ = usys.log(log_h, "dock: closed");
-    return state;
+    return epoch.finish(state);
 }
 
 // ------------------------------------------------- crash-isolated update
@@ -1909,6 +2024,24 @@ fn callUpdate(it: *mshl.Interp, update: Value, state: Value, ev: Value) mshl.Err
 }
 
 pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
+    if (std.mem.eql(u8, name, "apps")) {
+        const ac = @import("appsclient.zig");
+        var catalog: ac.Catalog = .{};
+        if (!catalog.refresh()) return it.fail("apps: session catalog unavailable", .{});
+        const rows = try it.arena.alloc(Value, catalog.len);
+        for (catalog.records[0..catalog.len], rows) |*app, *row| {
+            row.* = try mshl.toValue(it.arena, .{
+                .title = try it.arena.dupe(u8, std.mem.sliceTo(&app.name, 0)),
+                .description = try it.arena.dupe(u8, std.mem.sliceTo(&app.description, 0)),
+                .icon = try it.arena.dupe(u8, std.mem.sliceTo(&app.icon, 0)),
+                .unit = try it.arena.dupe(u8, std.mem.sliceTo(&app.unit, 0)),
+                .window = try it.arena.dupe(u8, std.mem.sliceTo(&app.window, 0)),
+                .running = app.flags & shared.apps.running != 0,
+                .dock = app.flags & shared.apps.dock != 0,
+            });
+        }
+        return Value{ .list = rows };
+    }
     if (std.mem.eql(u8, name, "display-info")) {
         const out = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .output_info, 0)) {
             .ok => |r| switch (r) {
@@ -2047,7 +2180,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // `dock: true` is the resident bottom dock — a bar of app buttons that
     // launch their units on a click, pinned full-width, not a window.
     if (spec.get("dock") != null and (spec.get("dock").?).asBool()) {
-        return try runDock(it, view, update, state);
+        return try runDock(it, view, update, state, if (spec.get("dismissible")) |v| v.asBool() else false);
     }
 
     // `node: N` runs the whole app on node N over the fabric — the runtime
@@ -2118,6 +2251,8 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     wf.dragging = false;
     wf.ptr_down = false;
     wf.pending_dot = null;
+    crumbs = @splat(.{});
+    crumb_pressed = null;
     wf.win_focused = true;
     wf.win_trusted = want_trusted;
     wf.maximized = false;
@@ -2130,6 +2265,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     wf.win_x = (wf.scanout_w - wf.win_w) / 2;
     wf.fontReady(); // attach the system font once (bitmap fallback if absent)
     wf.refreshAppearance(); // resolve the palette from the system/user settings
+    var epoch: @import("guieval.zig").Epoch = .{};
+    try epoch.begin(it, .{ .record = spec });
+    defer epoch.deinit();
     sizeToContent(it, view, state, title); // fit the window to its content
     // `at: { x, y }` places the window instead of centring it (a desktop
     // that lays several windows out uses this).
@@ -2169,20 +2307,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     else
         try it.callValue(view, &.{state}, null, null);
     while (true) {
-        // Reclaim the previous render's dead boxes: a long-running GUI (or
-        // one that reopens per apply, like the settings shell) would
-        // otherwise pile up per-render trees until the interpreter runs
-        // out of memory.
-        it.reclaim();
+        // Snapshot live state before discarding callback scratch allocations.
+        try epoch.checkpoint(&state, &tree);
         var nfocus = renderTree(tree, title, focus);
         if (!want_trusted) {
             var enabled = shared.menus.offered(menu_profile);
             if (menu_profile == .files) {
-                var can_up = false;
-                for (focusables[0..nfocus]) |f| if (std.mem.eql(u8, f.id, "up")) {
-                    can_up = true;
-                };
-                if (!can_up) enabled &= ~shared.menus.bit(shared.menus.up);
+                if (file_crumb == null or file_crumb.?.path_len == 0) enabled &= ~shared.menus.bit(shared.menus.up);
+                if (file_crumb == null or !file_crumb.?.can_lock) enabled &= ~shared.menus.bit(shared.menus.readonly_view);
+                if (file_crumb == null or !file_crumb.?.can_leave) enabled &= ~shared.menus.bit(shared.menus.leave_view);
                 const list = listStateById("files");
                 if (list == null or list.?.nrows == 0) enabled &= ~shared.menus.bit(shared.keyboard.open_document);
             }
@@ -2210,6 +2343,21 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             nfocus = renderTree(tree, title, focus);
         }
         if (!wf.commitSurface()) return it.fail("gui: commit failed", .{});
+        if (!announced or action_len > 0) {
+            for (focusables[0..nfocus]) |f| if (f.crumb) |c| {
+                const model = c.model();
+                var flow: shared.gui.Flow = .{ .width = f.bw, .gap = 4 };
+                for (0..model.count) |index| {
+                    const last = index + 1 == model.count;
+                    const place = flow.put(.{ .w = crumbWidth(model.at(index, c.root).?, last, f.bw), .h = lineOf(R_UI) + 16 });
+                    if (last) continue;
+                    const sy = f.sy + @as(isize, @intCast(place.y + (lineOf(R_UI) + 16) / 2));
+                    if (sy < f.cy0 or sy >= f.cy1) continue;
+                    var line: [128]u8 = undefined;
+                    _ = usys.log(log_h, std.fmt.bufPrint(&line, "gui: breadcrumb {s} index={d} at {d},{d}", .{ f.id, index, wf.win_x + f.bx + place.x + (place.w -| 24) / 2, wf.win_y + @as(usize, @intCast(sy)) }) catch continue);
+                }
+            };
+        }
         if (action_len > 0) {
             var line: [96]u8 = undefined;
             _ = usys.log(log_h, std.fmt.bufPrint(&line, "gui: action {s}", .{action_id[0..action_len]}) catch "gui: action");
@@ -2334,7 +2482,19 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 if (pressed) |wi| {
                     if (ev.btn & 1 == 0) {
                         pressed = null;
-                        if (hovered == wi and wi < nfocus) fired = focusables[wi].id;
+                        if (hovered == wi and wi < nfocus) {
+                            const f = focusables[wi];
+                            if (f.crumb) |c| {
+                                const hit = crumbHit(f, ev.x, ev.y);
+                                if (hit != null and hit == crumb_pressed) {
+                                    fired = f.id;
+                                    fired_list = true;
+                                    fired_row = c.model().at(hit.?, c.root).?.path;
+                                    fired_activated = true;
+                                }
+                            } else fired = f.id;
+                        }
+                        crumb_pressed = null;
                         break :input;
                     }
                 }
@@ -2350,6 +2510,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         }
                         if (hitWidget(nfocus, cev.x, cev.y)) |wi| {
                             focus = wi;
+                            if (focusables[wi].crumb) |c| {
+                                if (crumbHit(focusables[wi], cev.x, cev.y)) |index| {
+                                    c.selected = index;
+                                    crumb_pressed = index;
+                                    pressed = wi;
+                                }
+                                break :input;
+                            }
                             if (focusables[wi].is_list) {
                                 const lc = listClick(focusables[wi].id, cev.x, cev.y);
                                 if (lc.fire) {
@@ -2416,6 +2584,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         fired = "up";
                         break :input;
                     },
+                    shared.menus.readonly_view => {
+                        if (file_crumb != null and file_crumb.?.can_lock) fired = "lock";
+                        break :input;
+                    },
+                    shared.menus.leave_view => {
+                        if (file_crumb != null and file_crumb.?.can_leave) fired = "leave";
+                        break :input;
+                    },
                     shared.menus.refresh => {
                         fired = "refresh";
                         break :input;
@@ -2439,6 +2615,35 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 }
             }
             const cur: ?Focus = if (nfocus > 0) focusables[focus] else null;
+            if (cur) |f| if (f.crumb) |c| {
+                const model = c.model();
+                switch (ch) {
+                    shared.keyboard.left => {
+                        c.selected -|= 1;
+                        break :input;
+                    },
+                    shared.keyboard.right => {
+                        c.selected = @min(c.selected + 1, model.count -| 2);
+                        break :input;
+                    },
+                    shared.keyboard.home => {
+                        c.selected = 0;
+                        break :input;
+                    },
+                    shared.keyboard.end => {
+                        c.selected = model.count -| 2;
+                        break :input;
+                    },
+                    '\n' => {
+                        fired = f.id;
+                        fired_list = true;
+                        fired_row = model.at(c.selected, c.root).?.path;
+                        fired_activated = true;
+                        break :input;
+                    },
+                    else => {},
+                }
+            };
             if (cur) |c| if (c.is_field) {
                 const f = fieldFor(c.id, "");
                 const ed = &f.edit;
@@ -2544,5 +2749,5 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
     }
     _ = usys.log(log_h, "gui: closed");
-    return state;
+    return try epoch.finish(state);
 }

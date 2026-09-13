@@ -11,6 +11,8 @@ pub const minimize: u8 = 164;
 pub const up: u8 = 165;
 pub const refresh: u8 = 166;
 pub const home: u8 = 167;
+pub const readonly_view: u8 = 176;
+pub const leave_view: u8 = 177;
 pub const Item = struct { label: []const u8, shortcut: []const u8 = "", key: u8 = 0 };
 pub const Menu = struct { title: []const u8, items: []const Item };
 const close: Item = .{ .label = "Close Window", .shortcut = "Cmd W", .key = k.close_window };
@@ -49,7 +51,7 @@ const term_edit = [_]Item{
     .{ .label = "Paste", .shortcut = "Cmd V", .key = k.paste },
 };
 const files_file = [_]Item{ .{ .label = "Open", .shortcut = "Cmd O", .key = k.open_document }, close };
-const files_go = [_]Item{ .{ .label = "Enclosing Folder", .key = up }, .{ .label = "Home", .key = home }, .{ .label = "Refresh", .key = refresh } };
+const files_go = [_]Item{ .{ .label = "Enclosing Folder", .key = up }, .{ .label = "Home", .key = home }, .{ .label = "Refresh", .key = refresh }, sep, .{ .label = "Read-only View", .shortcut = "Shift Cmd L", .key = readonly_view }, .{ .label = "Leave View", .shortcut = "Alt Cmd L", .key = leave_view } };
 const generic = [_]Menu{.{ .title = "Window", .items = &window }};
 const editor = [_]Menu{ .{ .title = "File", .items = &editor_file }, .{ .title = "Edit", .items = &edit }, .{ .title = "Window", .items = &editor_window } };
 const terminal = [_]Menu{ .{ .title = "Edit", .items = &term_edit }, .{ .title = "Window", .items = &window } };
@@ -72,7 +74,7 @@ pub fn bit(key: u8) u64 {
         27 => 4,
         k.select_all => 8,
         147...157 => @as(u64, 1) << @intCast(key - 143),
-        164...167, 169...171 => @as(u64, 1) << @intCast(key - 149),
+        164...167, 169...171, 176...177 => @as(u64, 1) << @intCast(key - 149),
         else => 0,
     };
 }

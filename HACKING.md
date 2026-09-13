@@ -100,6 +100,34 @@ the store (`img/<name>.msh`: digest, `grant`, `give`; `fs: arg` = the
 run argument) when init installs the images. Services reachable by
 `connect` are units named after `shared.ServiceId`.
 
+**A graphical application**: add an explicit `app` block to its session
+unit (`boot/conf/sessiongui/<unit>.msh`, or the user's `conf/units/`):
+
+```msh
+app: {
+  name: "Editor"
+  description: "Create and edit text documents in tabs"
+  icon: file-text
+  window: "Editor"
+  dock: true
+  order: 50
+}
+```
+
+The unit filename is the launch identity, bounded to 16 ASCII letters,
+digits, hyphens or underscores. The required display fields are bounded
+UTF-8: `name` 48 bytes, `description` 128, `icon` 24 (an existing symbolic
+icon), and `window` 16 (the compositor's restore title). Empty values,
+control bytes and overlong values are refused, not truncated. `dock`
+defaults to false; `order` defaults to 1000 and accepts 0–65535. Metadata
+belongs to the unit because several apps may share one executable image.
+Units without it remain services and are omitted from application discovery.
+Init's `apps {start}` request fills a supplied shared buffer with
+`shared.apps.Record`s and returns `{n,total,next}`; `next:0` completes the
+catalog. Reading it never starts an app. Launch still uses `connect_named`
+and the unit's existing grants; metadata conveys no additional authority.
+Run `zig build fmt-test lint-test ls-test` after changing these manifests.
+
 **A service**: serve one channel; scope per-client state by **badge**
 (mint scoped caps with `chanMint`, hand them out in replies, drop your
 own copy). When the last cap carrying a badge dies, `recv` returns

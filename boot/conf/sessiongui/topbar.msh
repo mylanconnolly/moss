@@ -12,6 +12,7 @@
   profiles:  [session]
   essential: true
   give: [
+    { tag: clip, unit: clipsvc }
     { tag: display_control, session: true }
     { tag: display, session: true }
     { tag: font, session: true }

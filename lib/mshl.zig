@@ -454,6 +454,8 @@ pub const Scope = struct {
 /// A function call's locals: captures, parameters, `$in`, and every
 /// `let` in the body. Arena memory; gone with the line.
 const Frame = struct {
+    active_parent: ?*Frame = null,
+    active_function: Value = .nothing,
     names: std.ArrayList([]const u8) = .empty,
     vals: std.ArrayList(Value) = .empty,
     input: ?Value,
@@ -636,6 +638,8 @@ pub const Interp = struct {
     scope: ?*Scope = null,
     /// The running function's locals, or null at a top level.
     frame: ?*Frame = null,
+    /// Running calls, independent of temporary name-resolution frame changes.
+    active_frame: ?*Frame = null,
     /// Frames of calls that returned, kept for the next call: calls nest
     /// last-in first-out, so a line's frames cost its deepest nesting,
     /// not its number of calls (a `map` over ten thousand items reused
@@ -658,6 +662,69 @@ pub const Interp = struct {
 
     pub fn init(arena: std.mem.Allocator, heap: std.mem.Allocator, host: Host) Interp {
         return .{ .arena = arena, .heap = heap, .host = host };
+    }
+
+    /// A host-owned snapshot, independent of the evaluation arena. The host
+    /// must release it; nested functions and capability handles stay alive.
+    pub fn holdHostValue(self: *Interp, value: Value) Error!*Box {
+        const b = try self.heap.create(Box);
+        errdefer self.heap.destroy(b);
+        b.* = .{ .rc = 1, .arena = std.heap.ArenaAllocator.init(self.heap), .value = .nothing };
+        errdefer b.arena.deinit();
+        b.value = try dupValue(b.arena.allocator(), value);
+        retainValue(b.value);
+        return b;
+    }
+    pub fn releaseHostValue(self: *Interp, box: *Box) void {
+        self.dropBox(box);
+    }
+    /// Collect at a nested host boundary without invalidating borrowed
+    /// caller locals or the result being returned. Temporary pins require no
+    /// allocation, so retirement still works when the heap is nearly full.
+    pub fn reclaimHostBoundary(self: *Interp, extra: Value) void {
+        self.pinHostBorrowed(extra, true);
+        self.reclaim();
+        self.pinHostBorrowed(extra, false);
+    }
+    fn pinHostBorrowed(self: *Interp, extra: Value, retain: bool) void {
+        if (retain) retainValue(extra) else self.releaseValue(extra);
+        if (retain) retainValue(self.ret) else self.releaseValue(self.ret);
+        if (self.row) |row| {
+            if (retain) retainValue(.{ .record = row }) else self.releaseValue(.{ .record = row });
+        }
+        if (self.frame) |frame| for (frame.vals.items) |value| {
+            if (retain) retainValue(value) else self.releaseValue(value);
+        };
+        var frame = self.active_frame;
+        while (frame) |f| : (frame = f.active_parent) {
+            if (retain) retainValue(f.active_function) else self.releaseValue(f.active_function);
+            for (f.vals.items) |value| {
+                if (retain) retainValue(value) else self.releaseValue(value);
+            }
+            if (f.input) |value| {
+                if (retain) retainValue(value) else self.releaseValue(value);
+            }
+        }
+    }
+    /// A long-running nested host command may collect between callbacks.
+    /// Preserve borrowed values in every suspended caller, not just globals.
+    pub fn holdHostRoots(self: *Interp, extra: Value) Error!*Box {
+        self.reclaimHostBoundary(extra);
+        var scratch = std.heap.ArenaAllocator.init(self.heap);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        var values: std.ArrayList(Value) = .empty;
+        try values.append(a, extra);
+        try values.append(a, self.ret);
+        if (self.row) |row| try values.append(a, .{ .record = row });
+        if (self.frame) |frame| try values.appendSlice(a, frame.vals.items);
+        var frame = self.active_frame;
+        while (frame) |f| : (frame = f.active_parent) {
+            try values.append(a, f.active_function);
+            try values.appendSlice(a, f.vals.items);
+            if (f.input) |input| try values.append(a, input);
+        }
+        return self.holdHostValue(.{ .list = values.items });
     }
 
     /// Release everything the session holds. Nothing is leaked if every
@@ -1397,9 +1464,15 @@ pub const Interp = struct {
         const saved_scope = self.scope;
         const saved_row = self.row;
         self.frame = fr;
+        fr.active_parent = self.active_frame;
+        fr.active_function = fv;
+        self.active_frame = fr;
         self.scope = cl.scope;
         self.row = null;
         defer {
+            self.active_frame = fr.active_parent;
+            fr.active_parent = null;
+            fr.active_function = .nothing;
             self.frame = saved_frame;
             self.scope = saved_scope;
             self.row = saved_row;

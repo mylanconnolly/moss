@@ -4,8 +4,9 @@
 # window on the compositor. The launched app is marked running — a primary
 # pill with a dot. Builds on the top bar (stage 2) and movable windows.
 let final = (gui {
-    dock: true
-    init: { open: "" }
+    dock:        true
+    dismissible: true
+    init:        { open: "" }
     view: (fn [state] {
         {
           items: [

@@ -3,6 +3,7 @@
 # launching an ordinary app — its own process, its own window on the shared
 # compositor — alongside the settings app.
 {
+  app:       { name: "Demo", description: "Explore Moss controls and interface examples", icon: squares-four, window: "Demo", dock: true, order: 20 }
   image:     mshrun
   script:    scripts/demo.msh
   budget:    { user: 16mb }

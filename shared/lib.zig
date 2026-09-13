@@ -5,6 +5,7 @@
 
 const std = @import("std");
 pub const picker = @import("filepicker.zig");
+pub const apps = @import("apps.zig");
 pub const menus = @import("menus.zig");
 
 pub const version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
@@ -455,6 +456,9 @@ pub const FaultMsg = union(enum(u64)) {
 /// Init's front-channel protocol: ask to be connected to a service; the
 /// reply attaches a fresh channel-B cap for it.
 pub const InitRequest = union(enum(u64)) {
+    /// Read explicit app metadata without starting anything. +shm buffer,
+    /// filled with apps.Record; start/next are opaque unit-table cursors.
+    apps: struct { start: u64 = 0 },
     /// Connect to a service UNIT by NAME (two words, up to 16 bytes),
     /// lazily starting it (or restarting a stopped one) and supervising
     /// it — `start NAME` and `dial NAME` both reach a unit this way.
@@ -473,6 +477,7 @@ pub const InitRequest = union(enum(u64)) {
 };
 
 pub const InitReply = union(enum(u64)) {
+    apps: struct { n: u64, total: u64, next: u64 },
     connected: void,
     failed: struct { err: u64 },
     listed: struct { n: u64 },
@@ -2052,6 +2057,7 @@ pub const assets_dir = "assets/";
 
 test {
     _ = menus;
+    _ = apps;
     _ = civil;
 }
 

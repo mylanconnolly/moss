@@ -278,6 +278,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (setup.has(.conf)) confcmds.setup(setup.cap(.conf), log_h);
     @import("clipboard.zig").authority = setup.cap(.clip);
     @import("documentlaunch.zig").setup(setup.cap(.picker), init_cap, setup.cap(.display));
+    @import("appsclient.zig").authority = init_cap;
     guicmds.output_control = setup.cap(.display_control);
     if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h, setup.secret(), if (setup.has(.font)) setup.cap(.font) else 0, fab_chan);
     if (setup.has(.sess)) sesscmds.setup(setup.cap(.sess), if (setup.has(.console)) setup.cap(.console) else 0);

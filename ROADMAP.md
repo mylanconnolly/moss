@@ -1496,6 +1496,16 @@ applications need menus beyond those profiles.
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
 
+- ✅ **Persistent desktop, app discovery, and navigation** (2026-09-12):
+  fixed dock exhaustion by reclaiming GUI evaluation epochs while retaining
+  state, callbacks and handles; 10,000-refresh tests use the real script memory
+  budgets. Session dock ignores Escape and has bounded restart supervision.
+  Manifest app metadata feeds both dock and a Cmd+Space searchable overlay via
+  init's paginated catalog; service-only units stay hidden and metadata conveys
+  no authority. Editor/Files duplicate toolbars are removed; wrapping clickable
+  breadcrumbs navigate only within the active capability view. Global menus
+  retain scope actions and keyboard equivalents. Installation/catalog changes,
+  user pinning, and richer application associations remain future work.
 - ✅ **Files handoff and shared document tabs** (2026-09-12): double-click or
   activate a local text file in Files to open it in the running Editor, starting
   the app when necessary. The broker retains the selected parent view for

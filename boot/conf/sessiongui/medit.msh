@@ -1,6 +1,7 @@
 # The native editor receives GUI services and a user-mediated file picker.
 # Closing it ends the app, never the session. No spawner or global view.
 {
+  app:       { name: "Editor", description: "Create and edit text documents in tabs", icon: file-text, window: "Editor", dock: true, order: 50 }
   image:     medit
   budget:    { user: 32mb }
   grant:     [log]

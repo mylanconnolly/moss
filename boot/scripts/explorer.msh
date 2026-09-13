@@ -61,15 +61,15 @@ def footer [state] {
   }
 }
 
-# The crumb line: the current path, marked for a scoped (capability-derived)
-# local sub-view, or prefixed with the node when browsing a remote peer.
+# The breadcrumb root names the active capability view, never a path outside
+# it. Ancestors remain relative to this root; only Go > Leave View pops scope.
 def crumb [state] {
   match ($state | get "node") {
     0 => (match ($state | get "depth") {
-        0 => ("Home /" + ($state | get "path"))
-        _ => ("Read-only view /" + ($state | get "path"))
+        0 => "Home"
+        _ => "Read-only view"
       })
-    _ => ("node " + (str ($state | get "node")) + ": /" + ($state | get "path"))
+    _ => ("Node " + (str ($state | get "node")))
   }
 }
 
@@ -92,22 +92,8 @@ let final = (gui {
           kind: "column"
           gap:  16
           children: [
-            {
-              kind: "row"
-              children: [
-                { kind: "button", id: "up", icon: "up", label: "Up", disabled: ($state.path == "") }
-                { kind: "button", id: "refresh", icon: "refresh", label: "Refresh" }
-                (match $state.node {
-                    0 => { kind: "button", id: "lock", icon: "lock", label: "Read-only view" }
-                    _ => { kind: "label", muted: true, text: "Read-only connection" }
-                  })
-                (match $state.depth {
-                    0 => { kind: "label", text: "" }
-                    _ => { kind: "button", id: "leave", icon: "back", label: "Leave view" }
-                  })
-              ]
-            }
-            { kind: "label", text: (crumb $state) }
+            { kind: "breadcrumbs", id: "location", root: (crumb $state), path: $state.path,
+              can_lock: ($state.node == 0), can_leave: ($state.depth > 0) }
             {
               kind:   "split"
               left_w: 200
@@ -146,7 +132,8 @@ let final = (gui {
       })
     update: (fn [state, ev] {
         match $ev.id {
-          "refresh" => $state
+          "refresh" => { { path: $state.path, depth: $state.depth, node: $state.node, note: "" } }
+          "location" => { { path: $ev.row, depth: $state.depth, node: $state.node, note: "" } }
           "up" => { { path: (fs-parent $state.path), depth: $state.depth, node: $state.node, note: "" } }
           "close" => { { path: $state.path, depth: $state.depth, node: $state.node, note: "", done: true } }
           "places" => { { path: "", depth: $state.depth, node: 0, note: "" } }

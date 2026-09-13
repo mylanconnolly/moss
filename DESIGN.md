@@ -4441,6 +4441,52 @@ content hashes, Save As cancellation, preservation of the original on New,
 cancellation/discard, with normal quota/leak
 teardown checks.
 
+**Resident GUI lifetime, application discovery, and navigation (2026-09-12).**
+A disappearing dock was traced to `scripts/ddock.msh: out of memory` in the
+interactive kernel log; the top bar later failed the same way.
+`Interp.reclaim()` collected reference-counted boxes,
+but each refresh still allocated strings, records and callback frames in the
+script's fixed 2 MiB arena. `user/guieval.zig` now brackets GUI loops with
+resettable evaluation epochs backed by the reclaiming heap. It pins callback
+roots and suspended caller frames, snapshots state/tree before releasing the
+previous epoch, and rebuilds hit boxes before using borrowed strings again.
+Functions and capability handles in escaping values stay retained. The host
+stress test runs 10,000 refreshes with the actual 2 MiB arena and 512 KiB heap,
+checks suspended/returned closures, and verifies complete handle/chunk cleanup.
+A second test repeatedly reopens large inline views, ensuring closed views
+release their ASTs before the next window allocates its callbacks.
+Dock, top bar, and ordinary GUI windows share this lifetime discipline.
+
+A persistent session dock ignores Escape; only the standalone dock drill
+opts into dismissal. The unit has bounded restart supervision. Both dock and
+launcher discover applications through the session init's typed, paginated
+catalog. The unit manifest's `app` record declares name, description, icon,
+window title, dock preference and order; the unit filename remains the stable
+launch identity. Executable headers stay about executable loading: one image
+can host several distinct applications. Service units without metadata stay
+out of the catalog. Metadata is bounded, validated, and copied into owned
+storage, never interpreted as capabilities or a command to execute.
+
+Cmd+Space and Moss > Applications open `user/applauncher.zig`, a transient
+surface owned by the top bar, independent of the dock process. Search matches
+all words case-insensitively across names/descriptions, ranking name matches
+first. Results show icons, descriptions and running indicators. Arrows or
+Ctrl+N/P select, Enter launches/restores, and Escape or outside focus dismisses.
+The compositor routes the shortcut only to its registered resident bar and
+blocks it on trusted input surfaces. Launch uses the existing session init
+capability; catalog entries grant no new authority. The overlay uses the same
+font roles, colors and text input model as other native controls.
+
+Editor uses its global menus and keyboard shortcuts instead of a duplicate
+button toolbar. Files likewise uses File/Go/Window menus. The shared declarative
+`breadcrumbs` widget renders a wrapping path, with clickable ancestors and
+Left/Right/Home/End plus Enter navigation after Tab focus. Every destination
+is a canonical prefix of the current view-relative path. Root means the
+current capability root; it never pops or widens the view. Read-only View and
+Leave View remain explicit Go actions (Shift+Cmd+L and Alt+Cmd+L). Remote
+breadcrumbs retain the selected peer and do not turn remote names into local
+filesystem authority.
+
 **Files handoff and shared tabs (2026-09-12).** `shared/tabs.zig` owns
 allocation-free strip geometry, selection reveal, overflow arrows and hit
 regions; `user/tabstrip.zig` renders themed, font-scaled labels, dirty dots,

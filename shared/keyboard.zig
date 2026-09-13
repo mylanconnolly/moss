@@ -44,6 +44,9 @@ pub const menu_focus = 168;
 pub const next_tab = 169;
 pub const previous_tab = 170;
 pub const close_all = 171;
+pub const launcher = 172;
+pub const readonly_view = 176;
+pub const leave_view = 177;
 /// Cmd-W closes the active document in tabbed apps, otherwise its window.
 pub const close_document = close_window;
 
@@ -71,7 +74,10 @@ pub const Decoder = struct {
         const alt = self.held[4] or self.held[5];
         const meta = self.held[6] or self.held[7];
         if (!alt and !meta and ((code == 68 and !ctrl and !shift) or (code == 60 and ctrl and !shift))) return menu_focus;
+        if (meta and code == 57 and !ctrl and !alt) return launcher;
         if (code == 15) return if (alt) switch_window else if (ctrl) (if (shift) previous_tab else next_tab) else if (shift) back_tab else '\t';
+        if (meta and code == 38 and shift) return readonly_view;
+        if (meta and code == 38 and alt) return leave_view;
         if (meta) switch (code) {
             46 => return copy,
             45 => return cut,
@@ -280,4 +286,13 @@ test "tab navigation and close all remain distinct from widget and window traver
     try std.testing.expectEqual(@as(u8, close_all), d.feed(17, 1));
     _ = d.feed(42, 0);
     try std.testing.expectEqual(@as(u8, close_document), d.feed(17, 1));
+}
+
+test "application launcher is a seat shortcut and not text" {
+    var d: Decoder = .{};
+    _ = d.feed(125, 1);
+    try std.testing.expectEqual(@as(u8, launcher), d.feed(57, 1));
+    try std.testing.expectEqual(@as(u8, 0), d.feed(57, 0));
+    var console: ConsoleKeys = .{};
+    try std.testing.expectEqual(@as(?u8, null), console.feed(launcher, false));
 }

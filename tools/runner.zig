@@ -1032,14 +1032,7 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // Now mint a read-only sub-view of this folder ("Open read-only"): the
     // explorer derives a narrower, read-only capability and browses inside
     // it — the standout filesystem feature.
-    const lock = widgetCenter(readLog(log_path), "lock") orelse {
-        reportFailure(spec.name, "could not find the Open read-only button", log_path);
-        return false;
-    };
-    if (!clickScanout(&q, lock[0], lock[1])) {
-        reportFailure(spec.name, "QMP could not click Open read-only", log_path);
-        return false;
-    }
+    if (!q.chord2("shift", "meta_l", "l")) return sfail(spec, log_path, "open read-only view");
     sleepMs(400);
     // Close through the shared window frame.
     const c = parseDot(readLog(log_path), "close=") orelse {
@@ -2575,12 +2568,16 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.sendKey("ret")) return false; // Open the selected first folder.
     if (!try waitLogN(log_path, "gui: action files", 1, "File Open did not navigate Files", spec, polls)) return false;
     sleepMs(150);
-    if (!try openAppMenu(spec, log_path, polls, &q, "Go", 1280, 1024)) return false;
-    if (!q.sendKey("ret")) return false; // Enclosing Folder is now enabled.
-    if (!try waitLogN(log_path, "gui: action up", 1, "Go Enclosing Folder did not return home", spec, polls)) return false;
+    const bc_log = readLog(log_path);
+    const bc_at = std.mem.lastIndexOf(u8, bc_log, "gui: breadcrumb location index=0 at ") orelse return sfail(spec, log_path, "missing root breadcrumb");
+    const bc_x = parseAfter(bc_log[bc_at..], "at ") orelse return false;
+    const bc_comma = std.mem.indexOfScalar(u8, bc_log[bc_at..], ',') orelse return false;
+    const bc_y = parseAfter(bc_log[bc_at + bc_comma ..], ",") orelse return false;
+    if (!clickScanout(&q, bc_x, bc_y)) return false;
+    if (!try waitLogN(log_path, "gui: action location", 1, "root breadcrumb did not return to the capability root", spec, polls)) return false;
     sleepMs(150);
     if (!try openAppMenu(spec, log_path, polls, &q, "Go", 1280, 1024)) return false;
-    if (!q.sendKey("end") or !q.sendKey("ret")) return false;
+    if (!q.sendKey("home") or !q.sendKey("down") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "gui: action refresh", 1, "Go Refresh did not refresh Files", spec, polls)) return false;
     sleepMs(150);
     const minimized = countOccurrences(readLog(log_path), "gui: minimized");
@@ -2643,6 +2640,54 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "editor: loaded zz-one.txt bytes=22", 1, "handoff save did not persist across Editor restart", spec, polls)) return false;
     if (!q.chord2("shift", "meta_l", "w")) return false;
     if (!try waitLogN(log_path, "editor: exit", 2, "reopened Editor did not close", spec, polls)) return false;
+
+    // A resident dock must ignore Escape even when directly focused.
+    if (!clickScanout(&q, 5, 1000) or !q.sendKey("esc")) return false;
+    sleepMs(150);
+    if (countOccurrences(readLog(log_path), "dock: closed") != 0) return sfail(spec, log_path, "Escape dismissed resident dock");
+    if (!q.chord("meta_l", "spc")) return false;
+    if (!try waitLogN(log_path, "launcher: ready count=5", 1, "global app launcher did not open", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/launcher.ppm");
+    if (!q.typeText("zzzz")) return false;
+    sleepMs(120);
+    _ = q.screendump(check_dir ++ "/launcher-empty.ppm");
+    if (!q.chord("meta_l", "a") or !q.typeText("create tabs")) return false;
+    // Cut into the session clipboard, replace the query, then paste it back.
+    // Activation below must still select Editor by its description; a broken
+    // clipboard path would leave the deliberately unmatched replacement.
+    if (!q.chord("meta_l", "a") or !q.chord("meta_l", "x") or !q.typeText("zzzz")) return false;
+    if (!q.chord("meta_l", "a") or !q.chord("meta_l", "v")) return false;
+    sleepMs(120);
+    _ = q.screendump(check_dir ++ "/launcher-search.ppm");
+    if (!q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "launcher: activate medit", 1, "description search did not launch Editor", spec, polls)) return false;
+    if (!try waitLogN(log_path, "editor: ready", 3, "launcher did not start Editor", spec, polls)) return false;
+    // Repeated invocation restores the existing app; Escape restores input.
+    if (!q.chord("meta_l", "spc")) return false;
+    if (!try waitLogN(log_path, "launcher: ready count=5", 2, "launcher did not reopen", spec, polls)) return false;
+    if (!q.typeText("editor") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "launcher: activate medit", 2, "launcher did not restore Editor", spec, polls)) return false;
+    if (countOccurrences(readLog(log_path), "editor: ready") != 3) return sfail(spec, log_path, "launcher duplicated running Editor");
+    if (!q.chord("meta_l", "spc")) return false;
+    if (!try waitLogN(log_path, "launcher: ready count=5", 3, "launcher could not reopen for menu shortcut", spec, polls)) return false;
+    const launcher_popups = countOccurrences(readLog(log_path), "topbar: popup at");
+    if (!q.sendKey("f10")) return false;
+    if (!try waitLogN(log_path, "launcher: dismissed", 3, "F10 did not dismiss launcher", spec, polls)) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", launcher_popups + 1, "F10 in launcher did not open the system menu", spec, polls)) return false;
+    if (!q.sendKey("esc")) return false;
+    // A real Editor command proves the nested launcher/menu transition
+    // restored the application, rather than leaving focus on resident chrome.
+    const launcher_pickers = countOccurrences(readLog(log_path), "filepicker: open dialog");
+    if (!q.chord("meta_l", "o")) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", launcher_pickers + 1, "Escape after launcher F10 lost Editor focus", spec, polls)) return false;
+    if (!q.sendKey("esc")) return false;
+    sleepMs(150);
+    if (!q.chord("meta_l", "spc")) return false;
+    if (!try waitLogN(log_path, "launcher: ready count=5", 4, "launcher could not be dismissed", spec, polls)) return false;
+    if (!q.sendKey("esc")) return false;
+    if (!try waitLogN(log_path, "launcher: dismissed", 4, "Escape did not dismiss launcher", spec, polls)) return false;
+    if (!q.chord2("shift", "meta_l", "w")) return false;
+    if (!try waitLogN(log_path, "editor: exit", 3, "launcher dismissal lost Editor focus", spec, polls)) return false;
 
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.
@@ -4589,6 +4634,18 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     if (!try waitLogN(log_path, "topbar: active Editor token=", 1, "editor did not publish global menus", spec, polls)) return false;
     sleepMs(200);
     _ = q.screendump(check_dir ++ "/menubar-300-1024.ppm");
+    const launcher_ready = countOccurrences(readLog(log_path), "launcher: ready count=5");
+    const launcher_dismissed = countOccurrences(readLog(log_path), "launcher: dismissed");
+    if (!q.chord("meta_l", "spc")) return false;
+    if (!try waitLogN(log_path, "launcher: ready count=5", launcher_ready + 1, "large-text launcher did not open", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/launcher-300-1024.ppm");
+    if (!q.sendKey("esc")) return false;
+    if (!try waitLogN(log_path, "launcher: dismissed", launcher_dismissed + 1, "large-text launcher did not dismiss", spec, polls)) return false;
+    const launcher_pickers = countOccurrences(readLog(log_path), "filepicker: open dialog");
+    if (!q.chord("meta_l", "o")) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", launcher_pickers + 1, "large-text launcher dismissal lost Editor focus", spec, polls)) return false;
+    if (!q.sendKey("esc")) return false;
+    sleepMs(150);
     if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
     _ = q.screendump(check_dir ++ "/menu-file-300-1024.ppm");
     // Once a menu is open, moving across headings switches it without a

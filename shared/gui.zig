@@ -1,4 +1,5 @@
 //! Shared, allocation-free GUI metrics and bounded row layout.
+pub const appsearch = @import("appsearch.zig");
 const std = @import("std");
 pub const space = struct {
     pub const small = 8;
@@ -141,4 +142,9 @@ test "scroll clamps on resize and reveals focus without undoing free scrolling" 
     s.fit(100, 200);
     try std.testing.expectEqual(@as(usize, 0), s.offset);
     try std.testing.expect(!s.step(-100));
+}
+
+pub const breadcrumbs = @import("breadcrumbs.zig");
+test {
+    _ = breadcrumbs;
 }

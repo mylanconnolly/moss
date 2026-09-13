@@ -16,7 +16,7 @@
 //!              after a catch-all that can never match
 //!   record     the same key twice in one literal
 //!   def        a `def` that shadows a builtin command
-//!   unit       under conf/units/ and conf/session/, a top-level key the
+//!   unit       under conf/units/, conf/session/ and conf/sessiongui/, keys the
 //!              unit loader does not know (it ignores them silently)
 //!
 //! Usage: mshlint FILE...  |  mshlint --stdin [NAME]. Diagnostics are
@@ -49,7 +49,7 @@ pub const Diag = struct {
 const implicit_names = [_][]const u8{ "it", "in", "acc", "req" };
 
 /// The keys the unit loader (user/init.zig, `parseUnit`) reads.
-const unit_keys = [_][]const u8{ "image", "arg", "node", "cores", "budget", "grant", "give", "restart", "profiles", "after", "essential", "oneshot", "script", "certify", "run", "install" };
+const unit_keys = [_][]const u8{ "image", "arg", "node", "cores", "budget", "grant", "give", "restart", "profiles", "after", "essential", "oneshot", "script", "certify", "run", "install", "app" };
 
 pub const Binding = struct {
     name: []const u8,
@@ -365,7 +365,31 @@ const Linter = struct {
             var known = false;
             for (unit_keys) |k| known = known or std.mem.eql(u8, k, bare);
             if (!known) try l.warn(f, "unit: `{s}` is not a key the unit loader reads", .{key});
+            if (std.mem.eql(u8, bare, "app")) try l.appKeys(f);
         }
+    }
+
+    fn appKeys(l: *Linter, field: c.TSNode) Error!void {
+        const value = ts.field(field, "value") orelse return;
+        if (!ts.is(value, "record")) return l.warn(value, "unit app: a metadata record expected", .{});
+        const allowed = [_][]const u8{ "name", "description", "icon", "window", "dock", "order" };
+        var seen: [4]bool = @splat(false);
+        var i: u32 = 0;
+        while (i < ts.childCount(value)) : (i += 1) {
+            const entry = ts.child(value, i);
+            if (!ts.is(entry, "record_field")) continue;
+            const key = ts.text(l.src, ts.field(entry, "key").?);
+            const bare = key[0 .. key.len - 1];
+            var known = false;
+            for (allowed, 0..) |name, index| if (std.mem.eql(u8, bare, name)) {
+                known = true;
+                if (index < seen.len) seen[index] = true;
+            };
+            if (!known) try l.warn(entry, "unit app: `{s}` is not an application metadata key", .{key});
+        }
+        for (seen, 0..) |present, index| if (!present) {
+            try l.warn(value, "unit app: missing `{s}`", .{allowed[index]});
+        };
     }
 
     fn firstRecord(node: c.TSNode) ?c.TSNode {
@@ -451,7 +475,7 @@ fn boundName(node: c.TSNode) ?c.TSNode {
 }
 
 fn isUnitPath(path: []const u8) bool {
-    return std.mem.indexOf(u8, path, "conf/units/") != null or std.mem.indexOf(u8, path, "conf/session/") != null;
+    return std.mem.indexOf(u8, path, "conf/units/") != null or std.mem.indexOf(u8, path, "conf/session/") != null or std.mem.indexOf(u8, path, "conf/sessiongui/") != null;
 }
 
 /// What the lint knows about a file: its diagnostics, its scopes with
@@ -710,6 +734,17 @@ test "unit files: the loader's keys" {
     try std.testing.expectEqualStrings("unit: `args:` is not a key the unit loader reads", diags[0].msg);
     const none = try lint(arena.allocator(), "boot/scripts/x.msh", "{ image: fs, args: 1 }\n");
     try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "application metadata unit keys are explicit and required" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const good = try lint(arena.allocator(), "boot/conf/sessiongui/editor.msh", "{ image: medit, app: { name: Editor, description: \"Edit text\", icon: file, window: Editor, dock: true, order: 50 } }\n");
+    try std.testing.expectEqual(@as(usize, 0), good.len);
+    const bad = try lint(arena.allocator(), "boot/conf/units/editor.msh", "{ image: medit, app: { name: Editor, description: \"Edit text\", icon: file, windo: Editor } }\n");
+    try std.testing.expectEqual(@as(usize, 2), bad.len);
+    try std.testing.expectEqualStrings("unit app: `windo:` is not an application metadata key", bad[1].msg);
+    try std.testing.expectEqualStrings("unit app: missing `window`", bad[0].msg);
 }
 
 test "analysis: references resolve, scopes nest, names are visible" {

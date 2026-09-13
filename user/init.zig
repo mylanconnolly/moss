@@ -118,6 +118,7 @@ fn nodeId() u64 {
 const Unit = struct {
     name: []const u8,
     image: shared.ImageId,
+    app: ?shared.apps.Record = null,
     arg: u64 = 0,
     kobj_kb: u64 = 1 << 10,
     user_kb: u64 = 4 << 10,
@@ -238,6 +239,20 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
     const image_name = str(r.get("image")) orelse return null;
     const image = std.meta.stringToEnum(shared.ImageId, image_name) orelse return null;
     var u: Unit = .{ .name = name, .image = image };
+    if (r.get("app")) |app| {
+        if (app != .record) return null;
+        for (app.record.keys) |key| if (!shared.apps.knownKey(key)) return null;
+        const pinned = if (app.record.get("dock")) |value| blk: {
+            if (value != .bool) return null;
+            break :blk value.bool;
+        } else false;
+        const order = if (app.record.get("order")) |value| blk: {
+            const number = int(value) orelse return null;
+            if (number < 0 or number > 65535) return null;
+            break :blk @as(u32, @intCast(number));
+        } else @as(u32, 1000);
+        u.app = shared.apps.Record.init(name, str(app.record.get("name")) orelse return null, str(app.record.get("description")) orelse return null, str(app.record.get("icon")) orelse return null, str(app.record.get("window")) orelse return null, pinned, order) orelse return null;
+    }
     if (r.get("arg")) |a| u.arg = @intCast(int(a) orelse 0);
     // `node: boot`: the program's node id is the boot's — arg becomes
     // role | node << 8 (netsvc's and fabsvc's shape), and a certify
@@ -1046,6 +1061,36 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
         return;
     };
     switch (req) {
+        .apps => |q| {
+            if (r.cap == 0) return failReply(chan, .bad_arg);
+            const mapped = usys.shmMap(r.cap);
+            _ = usys.capDrop(r.cap);
+            if (mapped.err != .ok) return failReply(chan, .bad_arg);
+            defer _ = usys.shmUnmap(mapped.data[0]);
+            if (q.start > nunits) return failReply(chan, .bad_arg);
+            const bytes: [*]u8 = @ptrFromInt(mapped.data[0]);
+            const capacity = (mapped.data[1] * 4096) / shared.apps.Record.size;
+            var total: usize = 0;
+            for (units[0..nunits]) |u| if (u.app != null) {
+                total += 1;
+            };
+            var count: usize = 0;
+            var index: usize = @intCast(q.start);
+            while (index < nunits) : (index += 1) {
+                const u = &units[index];
+                var record = u.app orelse continue;
+                if (count == capacity) break;
+                var up = u.up;
+                if (up and u.ctl != 0) {
+                    const state = usys.domainStat(u.ctl);
+                    up = state.err == .ok and state.data[0] == @intFromEnum(shared.DomainState.alive);
+                }
+                if (up) record.flags |= shared.apps.running;
+                record.encode(bytes[count * shared.apps.Record.size ..][0..shared.apps.Record.size]);
+                count += 1;
+            }
+            _ = usys.replyTyped(shared.InitReply, chan, .{ .apps = .{ .n = count, .total = total, .next = if (index == nunits) 0 else index } }, 0);
+        },
         .connect_named => |c| {
             var nbuf: [24]u8 = undefined;
             const name = shared.wordsToStr(&nbuf, .{ c.a, c.b, 0 });

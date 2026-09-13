@@ -5,6 +5,7 @@
 # writable only by an admin — via the read-write conf view the manager grants
 # an admin session). Non-essential: closing its window ends only this app.
 {
+  app:       { name: "Settings", description: "Personalize appearance, language, and displays", icon: gear-six, window: "Settings", dock: true, order: 10 }
   image:     mshrun
   script:    scripts/gui-shell.msh
   budget:    { user: 16mb }

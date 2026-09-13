@@ -63,7 +63,6 @@ var cell: usize = 10;
 var line_h: usize = 24;
 var area: ui.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
 var gutter: usize = 50;
-var buttons: [5]ui.Rect = undefined;
 var find_rect: ui.Rect = undefined;
 const Pending = enum { none, close_tab, close_window };
 const Action = enum { new, open, close_tab, close_window };
@@ -71,8 +70,7 @@ var pending: Pending = .none;
 var confirm_focus: usize = 2;
 var confirm_buttons: [3]ui.Rect = undefined;
 var drag_select = false;
-var pressed: ?usize = null;
-var toolbar_focus: ?usize = null;
+var confirm_pressed: ?usize = null;
 var last_click: u64 = 0;
 var click_pos: core.Pos = .{ .line = 0, .col = 0 };
 fn log(comptime fmt: []const u8, args: anytype) void {
@@ -220,36 +218,19 @@ fn render() void {
     line_h = wf.lineOf(mono);
     const pad: usize = 16;
     const h = ui.height();
-    const labels = [_][]const u8{ "New", "Open", "Save", "Save As", "Find" };
-    const icons = [_][]const u8{ "file-text", "folder", "", "", "" };
-    var widths: [5]usize = undefined;
-    var total: usize = 0;
-    for (labels, icons, 0..) |label, icon, i| {
-        widths[i] = wf.strW(wf.R_UI, label) + 24 + (if (icon.len > 0) wf.iconSize() + @as(usize, 8) else 0);
-        total += widths[i];
-    }
-    const available = @min(total, wf.win_w -| pad * 2 -| 32);
-    var x = pad;
-    var before: usize = 0;
-    for (0..5) |i| {
-        const w = shared.gui.trackWidth(available, total, before, widths[i]);
-        before += widths[i];
-        buttons[i] = .{ .x = x, .y = wf.title_h + 12, .w = w, .h = h };
-        ui.Button.draw(buttons[i], labels[i], icons[i], toolbar_focus == i, false, false);
-        x += w + 8;
-    }
-    var y = wf.title_h + h + 24;
+    var y = wf.title_h + 12;
     tab_rect = .{ .x = pad, .y = y, .w = wf.win_w -| pad * 2, .h = strip.height() };
     for (tabs.items, tab_items.items) |tab, *item| item.* = .{ .label = tab.title(), .dirty = tab.ed.dirty() };
     strip.draw(tab_rect, tab_items.items, active_index, &tab_state);
     y += tab_rect.h + 12;
     const selected_document: ?*Document = if (active.doc) |*d| (if (d.name_len > 0) d else null) else null;
-    const title = if (selected_document) |d| d.title() else active.title();
-    wf.drawStrTrunc(pad, y, wf.R_UI, title, wf.win_w -| pad * 2 -| 120, wf.pal.text, wf.pal.bg);
-    const state = if (active.ed.dirty()) "Edited" else if (selected_document) |d| (if (d.read_only) "Read-only" else "Saved") else "New document";
-    const sw = wf.strW(wf.R_UI, state);
-    wf.drawStr(wf.win_w -| pad -| sw, y, wf.R_UI, state, wf.pal.text_muted, wf.pal.bg);
-    y += wf.lineOf(wf.R_UI) + 12;
+    // The tab already names the document. Only a parent path adds context.
+    if (selected_document) |d| {
+        if (std.mem.indexOfScalar(u8, d.title(), '/') != null) {
+            wf.drawStrTrunc(pad, y, wf.R_UI, d.title(), wf.win_w -| pad * 2, wf.pal.text_muted, wf.pal.bg);
+            y += wf.lineOf(wf.R_UI) + 12;
+        }
+    }
     if (active.finding) {
         find_rect = .{ .x = pad, .y = y, .w = wf.win_w -| pad * 2, .h = h };
         ui.input(find_rect, &active.query, true);
@@ -278,7 +259,7 @@ fn render() void {
         wf.drawStr(area.x + gutter - 16 - wf.strW(mono, ns), yy, mono, ns, wf.pal.text_muted, wf.pal.surface);
         drawLine(idx, yy);
     }
-    if (wf.win_focused and !active.finding and pending == .none and toolbar_focus == null and active.ed.cursor.line >= active.top and active.ed.cursor.line < active.top + rows()) {
+    if (wf.win_focused and !active.finding and pending == .none and active.ed.cursor.line >= active.top and active.ed.cursor.line < active.top + rows()) {
         const col = visualCol(active.ed.buffer.lineSlice(active.ed.cursor.line), active.ed.cursor.col);
         if (col >= active.left and col < active.left + cols()) wf.fillRect(area.x + gutter + (col - active.left) * cell, area.y + (active.ed.cursor.line - active.top) * line_h, 2, line_h, wf.pal.focus);
     }
@@ -290,7 +271,8 @@ fn render() void {
     }
     wf.fillRect(0, wf.win_h - status_h, wf.win_w, 1, wf.pal.border);
     var foot: [200]u8 = undefined;
-    const text = if (active.message_len > 0) active.message[0..active.message_len] else std.fmt.bufPrint(&foot, "Ln {d}, Col {d}   ·   UTF-8   ·   {d} lines", .{ active.ed.cursor.line + 1, visualCol(active.ed.buffer.lineSlice(active.ed.cursor.line), active.ed.cursor.col) + 1, active.ed.buffer.lineCount() }) catch "UTF-8";
+    const read_only = if (selected_document) |d| d.read_only else false;
+    const text = if (active.message_len > 0) active.message[0..active.message_len] else std.fmt.bufPrint(&foot, "{s}Ln {d}, Col {d}   ·   UTF-8   ·   {d} lines", .{ if (read_only) "Read-only · " else "", active.ed.cursor.line + 1, visualCol(active.ed.buffer.lineSlice(active.ed.cursor.line), active.ed.cursor.col) + 1, active.ed.buffer.lineCount() }) catch "UTF-8";
     wf.drawStrTrunc(pad, wf.win_h - status_h + 10, wf.R_UI, text, wf.win_w -| pad * 2, wf.pal.text_muted, wf.pal.bg);
     if (pending != .none) {
         const mw = @min(wf.win_w -| 32, @as(usize, 620));
@@ -343,8 +325,7 @@ fn activate(index: usize) void {
     active = tabs.items[index];
     tab_state.reveal(index);
     drag_select = false;
-    pressed = null;
-    toolbar_focus = null;
+    confirm_pressed = null;
     last_click = 0;
     tab_close_pressed = null;
     log("editor: tab {d}/{d} {s}", .{ index + 1, tabs.items.len, active.title() });
@@ -490,7 +471,6 @@ fn continueWindowClose() void {
 fn request(action: Action) void {
     active.initial_placeholder = false;
     active.ed.breakGroup();
-    toolbar_focus = null;
     switch (action) {
         .new => addTab(null, null) catch |err| failed(err),
         .open => {
@@ -540,25 +520,6 @@ fn confirm(which: usize) void {
         continueWindowClose();
     } else if (action == .close_tab) removeActive();
 }
-fn toolbarAction(index: usize) void {
-    toolbar_focus = null;
-    active.ed.breakGroup();
-    switch (index) {
-        0 => request(.new),
-        1 => request(.open),
-        2 => {
-            _ = save(false);
-        },
-        3 => {
-            _ = save(true);
-        },
-        4 => {
-            active.finding = !active.finding;
-            active.query = .{};
-        },
-        else => {},
-    }
-}
 fn findNext(back: bool) void {
     if (active.query.len == 0) return;
     if (active.ed.find(active.query.buf[0..active.query.len], back) catch |e| {
@@ -578,9 +539,6 @@ fn key(ch: u8) void {
         }
         return;
     }
-    // Menu commands and their keyboard equivalents act on the active text
-    // field/document even when keyboard traversal last focused the toolbar.
-    if (ch == k.undo or ch == k.redo or ch == k.cut or ch == k.copy or ch == k.paste or ch == k.select_all) toolbar_focus = null;
     if (pending != .none) {
         if (ch == 27) confirm(2) else if (ch == '\t') {
             confirm_focus = (confirm_focus + 1) % 3;
@@ -621,7 +579,6 @@ fn key(ch: u8) void {
     if (ch == k.find) {
         active.finding = true;
         active.query = .{};
-        toolbar_focus = null;
         return;
     }
     if (active.finding) {
@@ -632,18 +589,7 @@ fn key(ch: u8) void {
         }
         return;
     }
-    if (ch == k.back_tab) {
-        toolbar_focus = if (toolbar_focus) |f| (f + 4) % 5 else 4;
-        return;
-    }
-    if (toolbar_focus) |f| {
-        if (ch == '\t') {
-            if (f == 4) toolbar_focus = null else toolbar_focus = f + 1;
-        } else if (ch == '\n') toolbarAction(f) else if (ch == 27) {
-            toolbar_focus = null;
-        }
-        return;
-    }
+    if (ch == k.back_tab) return;
     active.message_len = 0;
     const movement: ?core.Movement = switch (ch) {
         k.left, k.select_left, 2 => .left,
@@ -809,14 +755,14 @@ fn pointer(ev: wf.Event) void {
         if (press) for (confirm_buttons, 0..) |r, i| {
             if (ui.contains(r, ev.x, ev.y)) {
                 confirm_focus = i;
-                pressed = i;
+                confirm_pressed = i;
             }
         };
         if (release) {
-            if (pressed) |i| {
+            if (confirm_pressed) |i| {
                 if (i < 3 and ui.contains(confirm_buttons[i], ev.x, ev.y)) confirm(i);
             }
-            pressed = null;
+            confirm_pressed = null;
         }
         return;
     }
@@ -846,14 +792,8 @@ fn pointer(ev: wf.Event) void {
         return;
     }
     if (press) {
-        for (buttons, 0..) |r, i| if (ui.contains(r, ev.x, ev.y)) {
-            pressed = i;
-            toolbar_focus = i;
-            return;
-        };
         if (ui.contains(area, ev.x, ev.y)) {
             active.finding = false;
-            toolbar_focus = null;
             const pos = hitPos(ev.x, ev.y);
             active.ed.setCursor(pos, false);
             const now = usys.cycles();
@@ -866,12 +806,6 @@ fn pointer(ev: wf.Event) void {
             }
             drag_select = true;
         }
-    }
-    if (release) {
-        if (pressed) |i| {
-            if (ui.contains(buttons[i], ev.x, ev.y)) toolbarAction(i);
-        }
-        pressed = null;
     }
 }
 export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
@@ -949,7 +883,7 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
             wf.win_focused = ev.ch != 0;
             if (!wf.win_focused) {
                 drag_select = false;
-                pressed = null;
+                confirm_pressed = null;
                 tab_close_pressed = null;
             }
         } else if (ev.kind == 3) {

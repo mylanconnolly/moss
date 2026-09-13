@@ -1242,7 +1242,15 @@ pub fn build(b: *std.Build) void {
     medit_test_mod.addImport("shared", shared_test_mod);
     medit_test_mod.addImport("mosslib", lib_test_mod);
     const medit_tests = b.addTest(.{ .root_module = medit_test_mod });
+    const guieval_test_mod = b.createModule(.{
+        .root_source_file = b.path("user/guieval.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    guieval_test_mod.addImport("mosslib", lib_test_mod);
+    const guieval_tests = b.addTest(.{ .root_module = guieval_test_mod });
     const test_step = b.step("test", "Run host-side unit tests");
+    test_step.dependOn(&b.addRunArtifact(guieval_tests).step);
     test_step.dependOn(&b.addRunArtifact(medit_tests).step);
     test_step.dependOn(&b.addRunArtifact(editorfile_tests).step);
     test_step.dependOn(&b.addRunArtifact(shared_tests).step);

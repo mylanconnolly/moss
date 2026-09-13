@@ -29,13 +29,7 @@ let final = (gui {
     init: { }
     view: (fn [state] {
         {
-          items: [
-            { title: "Settings", icon: "settings", unit: "settings", running: (unit-up "settings") }
-            { title: "Demo", icon: "grid", unit: "win-demo", running: (unit-up "win-demo") }
-            { title: "Files", icon: "folder", unit: "explorer", running: (unit-up "explorer") }
-            { title: "Terminal", icon: "terminal", unit: "terminal", running: (unit-up "terminal") }
-            { title: "Editor", icon: "file-text", unit: "medit", running: (unit-up "medit") }
-          ]
+          items: (apps | where dock)
         }
       })
     update: (fn [state, ev] {

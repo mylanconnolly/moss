@@ -901,7 +901,7 @@ fn dropReader(badge: u64) void {
 /// parks — buffered, like a terminal's own fifo, never delivered elsewhere.
 fn dispatchKeys(chan_h: u64) void {
     while (keyRingPeek()) |c| {
-        if (c == shared.keyboard.menu_focus) {
+        if (c == shared.keyboard.menu_focus or c == shared.keyboard.launcher) {
             const bar = findSurface(menu_bar);
             const secure = if (findSurface(focused)) |sf| sf.trusted else false;
             if (bar == null or bar.?.incarnation != menu_bar_incarnation or bar.?.hidden or bar.?.title_len != 0 or secure) {
