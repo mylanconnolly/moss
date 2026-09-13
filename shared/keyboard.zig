@@ -40,6 +40,7 @@ pub const select_up = 160;
 pub const select_down = 161;
 pub const select_doc_home = 162;
 pub const select_doc_end = 163;
+pub const menu_focus = 168;
 
 pub const Decoder = struct {
     held: [8]bool = @splat(false),
@@ -64,6 +65,7 @@ pub const Decoder = struct {
         const ctrl = self.held[2] or self.held[3];
         const alt = self.held[4] or self.held[5];
         const meta = self.held[6] or self.held[7];
+        if (!alt and !meta and ((code == 68 and !ctrl and !shift) or (code == 60 and ctrl and !shift))) return menu_focus;
         if (code == 15) return if (alt) switch_window else if (shift) back_tab else '\t';
         if (meta) switch (code) {
             46 => return copy,
@@ -252,4 +254,12 @@ test "document shortcuts and vertical selection remain window actions" {
     _ = d.feed(125, 0);
     try std.testing.expectEqual(@as(u8, select_down), d.feed(108, 1));
     try std.testing.expectEqualStrings("", terminal(save_document));
+}
+
+test "global menu keyboard entry is reserved and ignores release" {
+    var d: Decoder = .{};
+    try std.testing.expectEqual(@as(u8, menu_focus), d.feed(68, 1));
+    try std.testing.expectEqual(@as(u8, 0), d.feed(68, 0));
+    _ = d.feed(29, 1);
+    try std.testing.expectEqual(@as(u8, menu_focus), d.feed(60, 1));
 }

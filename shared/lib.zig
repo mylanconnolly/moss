@@ -5,6 +5,7 @@
 
 const std = @import("std");
 pub const picker = @import("filepicker.zig");
+pub const menus = @import("menus.zig");
 
 pub const version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
 
@@ -786,6 +787,16 @@ pub const gpu_no_activate: u64 = 4;
 pub const gpu_pointer_tracking: u64 = 2;
 
 pub const GpuReq = union(enum(u64)) {
+    /// Owner publishes a fixed menu profile and current action availability.
+    set_menu: struct { surface: u64, profile: u64, enabled: u64 },
+    /// Focused application's menu snapshot; titleless desktop chrome is ignored.
+    menu_info: void,
+    /// Control capability registers the resident titleless bar for F10.
+    menu_bar: struct { surface: u64 },
+    menu_title: struct { token: u64 },
+    /// Control-capability only. Tokens expire on app focus/lifecycle/state changes.
+    menu_invoke: struct { token: u64, key: u64 },
+    menu_restore: struct { token: u64 },
     output_info: void,
     output_mode: struct { index: u64 },
     /// Privileged output operations; preview reverts after 15 seconds.
@@ -859,6 +870,8 @@ pub const GpuReq = union(enum(u64)) {
     attach_trusted: struct { token: u64 },
 };
 pub const GpuResp = union(enum(u64)) {
+    menu: struct { token: u64, profile: u64, enabled: u64 },
+    menu_title: struct { a: u64, b: u64 },
     output: struct { wh: u64, preferred: u64, seconds: u64 },
     mode: struct { wh: u64 },
 
@@ -2036,6 +2049,7 @@ pub const lib_dir = "lib/";
 pub const assets_dir = "assets/";
 
 test {
+    _ = menus;
     _ = civil;
 }
 

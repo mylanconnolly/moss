@@ -199,6 +199,10 @@ text scales, and resolutions. The following follow-ons are recorded for later;
 they are not prerequisites for this GUI work or a commitment to build them all
 at once.
 
+**Menu extensions.** The global bar uses typed built-in profiles today. Add
+client-defined menu schemas, nested submenus, and scrollable overflow when
+applications need menus beyond those profiles.
+
 **Follow-ons from the project assessment (2026-09-12)**
 
 - **Document workflow follow-through.** The native editor and capability-scoped
@@ -1463,6 +1467,18 @@ at once.
   and in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
+
+- **Global menu bar and Moss mark (2026-09-12).** Focused applications now
+  publish shared File/Edit/Go/Window profiles with enabled commands; Editor,
+  Terminal, Files, and the document picker use their existing action handlers.
+  The resident bar renders keyboard-navigable popups, shortcut hints, and
+  disabled states. F10/Control-F2 enters the bar, Escape restores focus, and
+  outside clicks dismiss. Compositor tokens and explicit display-control
+  authority prevent stale or unprivileged invocation. Large text gives menus
+  priority over the clock. An original scalable mark replaces the system-menu
+  wordmark; canonical SVG and provenance live in `shared/branding/`.
+  Arbitrary client-defined menu schemas, nested submenus, and overflow scrolling
+  for menus larger than the built-in profiles remain future extensions.
 
 - ✅ **Adaptive GUI viewports and shared editing** (2026-09-12): windows
   scroll overflowing content; nested ID-keyed viewports support wheel and

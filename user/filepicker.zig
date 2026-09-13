@@ -188,6 +188,7 @@ fn enterRow() void {
     }
 }
 fn draw(saving: bool) void {
+    wf.setMenuProfile(.picker, shared.menus.offered(.picker));
     wf.refreshAppearance();
     wf.clipReset();
     wf.fillAll(wf.pal.bg);

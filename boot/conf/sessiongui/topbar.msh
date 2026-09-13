@@ -12,6 +12,7 @@
   profiles:  [session]
   essential: true
   give: [
+    { tag: display_control, session: true }
     { tag: display, session: true }
     { tag: font, session: true }
     { tag: locale, session: true }

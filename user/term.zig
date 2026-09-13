@@ -251,12 +251,27 @@ fn setupClip() void {
     }
 }
 
+/// Retained scrollback can evict the start (or all) of a selection while a
+/// menu is open. Never treat a recycled ring slot as the originally selected text.
+fn selectionBounds() ?struct { lo: Pos, hi: Pos } {
+    if (!sel_on) return null;
+    var lo = selLo();
+    var hi = selHi();
+    if (hi.line < firstVisible() or lo.line > total) return null;
+    if (lo.line < firstVisible()) lo = .{ .line = firstVisible(), .off = 0 };
+    if (hi.line > total) hi = .{ .line = total, .off = act_len };
+    lo.off = @min(lo.off, modelLine(lo.line).len);
+    hi.off = @min(hi.off, modelLine(hi.line).len);
+    return if (posLT(lo, hi)) .{ .lo = lo, .hi = hi } else null;
+}
+
 /// Copy the current selection's text into the clipboard; returns the byte
 /// count (0 if nothing/no clipboard). Lines are joined with '\n'.
 fn copySelection() usize {
-    if (!clip_ok or !sel_on) return 0;
-    const lo = selLo();
-    const hi = selHi();
+    if (!clip_ok) return 0;
+    const selected = selectionBounds() orelse return 0;
+    const lo = selected.lo;
+    const hi = selected.hi;
     var n: usize = 0;
     var li = lo.line;
     while (li <= hi.line and n < clip_buf_len) : (li += 1) {
@@ -493,7 +508,49 @@ var last_w: usize = 0;
 
 /// Repaint the visible viewport from the model. Does not touch the chrome
 /// (that lives outside the grid rectangle).
+fn publishMenu() void {
+    if (!windowed) return;
+    const menu = shared.menus;
+    var enabled = menu.offered(.terminal);
+    if (!clip_ok or selectionBounds() == null) enabled &= ~menu.bit(shared.keyboard.copy);
+    if (!clip_ok) enabled &= ~menu.bit(shared.keyboard.paste);
+    if (firstVisible() == total and act_len == 0) enabled &= ~menu.bit(shared.keyboard.select_all);
+    wf.setMenuProfile(.terminal, enabled);
+}
+
+/// Global menu actions are terminal operations, never shell input bytes.
+fn menuKey(ch: u8, log_h: u64) bool {
+    switch (ch) {
+        shared.keyboard.copy => {
+            _ = copySelection();
+        },
+        shared.keyboard.paste => {
+            pasteFromClip(log_h);
+            drainPaste();
+            render();
+            push();
+        },
+        shared.keyboard.select_all => {
+            sel_a = .{ .line = firstVisible(), .off = 0 };
+            sel_b = .{ .line = total, .off = act_len };
+            sel_on = posLT(sel_a, sel_b);
+            render();
+            push();
+        },
+        shared.keyboard.close_window => {
+            wf.closeSurface();
+            usys.exit(0);
+        },
+        shared.menus.minimize => {
+            wf.setSurfaceVisible(false);
+        },
+        else => return false,
+    }
+    return true;
+}
+
 fn render() void {
+    publishMenu();
     clearRect();
     if (cols == 0 or rows == 0) return;
 
@@ -712,6 +769,7 @@ fn pumpWindow(log_h: u64) void {
     _ = usys.notifySignal(input_ack, 1);
     switch (ev.kind) {
         0 => {
+            if (menuKey(ev.ch, log_h)) return;
             if (ev.ch == pg_up) return scrollBy(true, log_h);
             if (ev.ch == pg_dn) return scrollBy(false, log_h);
             if (scroll_off != 0) {

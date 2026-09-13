@@ -43,6 +43,7 @@ pub const Error = error{
     NoMapSlots,
     BadMapping,
     CoresBusy,
+    ParentDying,
 };
 
 pub const State = enum {
@@ -50,6 +51,7 @@ pub const State = enum {
     alive,
     dying,
     dead,
+    constructing, // exclusively reserved; never a live/reapable domain yet
 };
 
 /// The unit file, the sandbox, and (later) the remote-spawn request: what a
@@ -330,7 +332,7 @@ fn cpuOverBudget(ctx: *anyopaque) bool {
 
 fn cpuPeriodReset() void {
     for (&domains) |*d| {
-        if (d.state == .unused) continue;
+        if (d.state == .unused or d.state == .constructing) continue;
         // A domain that overran (enforcement is tick-grained: a thread
         // per core can run a whole tick past its limit) starts the next
         // period in debt, so its average converges on the limit.
@@ -357,7 +359,7 @@ pub fn cpuPermilleUsed(d: *const Domain) u64 {
 pub fn fillRecs(buf: []u8) usize {
     var n: usize = 0;
     for (&domains) |*d| {
-        if (d.state == .unused) continue;
+        if (d.state == .unused or d.state == .constructing) continue;
         if ((n + 1) * shared.DomainRec.size > buf.len) break;
         var name: [16]u8 = @splat(0);
         const len = @min(d.name.len, 16);
@@ -442,7 +444,7 @@ fn reaperLoop(_: u64) void {
 
 fn hasUnfinishedChildren(d: *const Domain) bool {
     for (&domains) |*c| {
-        if (c.parent == d and (c.state == .alive or c.state == .dying)) return true;
+        if (c.parent == d and (c.state == .constructing or c.state == .alive or c.state == .dying)) return true;
     }
     return false;
 }
@@ -458,7 +460,7 @@ fn onThreadReaped(ctx: *anyopaque) void {
 /// takes the image's self-declared name (the syscall path); the kernel's
 /// own drivers may override it for readable logs.
 pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*Domain {
-    const d = allocSlot() orelse return Error.NoDomainSlots;
+    const d = try allocSlot(manifest.parent);
     errdefer abortSpawn(d);
     d.name = name orelse "?";
     d.kobj = .{ .limit = manifest.kobj_limit };
@@ -466,7 +468,6 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     d.cpu = .{ .limit = cpuLimitCycles(manifest.cpu_permille), .permille = manifest.cpu_permille };
     d.cores = manifest.cores;
     if (d.cores != 0 and !sched.reserveCores(d.cores, @ptrCast(d))) {
-        d.* = .{ .id = d.id, .asid = d.asid, .state = .unused };
         return Error.CoresBusy;
     }
     if (manifest.parent) |p| {
@@ -599,8 +600,14 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     if (manifest.watcher) |n| ipc.refNotification(n);
     trace.record(.spawn, d.id, @intFromBool(manifest.watcher != null));
 
-    d.state = .alive;
+    // Publish and enqueue as one transaction relative to parent revocation.
+    // A parent already dying cannot acquire a new child after its subtree
+    // walk. The reserved child keeps its parent's accounts alive on rollback.
+    const publish_irqs = slots_lock.lockIrqSave();
+    defer slots_lock.unlockRestore(publish_irqs);
+    if (d.parent) |parent| if (parent.state != .alive) return Error.ParentDying;
     d.threads_alive.store(1, .release);
+    @atomicStore(State, &d.state, .alive, .release);
     _ = sched.spawn(d.name, userThreadEntry, @intFromPtr(d), .{
         .cpu_mask = d.cores,
         .user_root = d.user_root_pa,
@@ -609,6 +616,7 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
         .captable = table,
         .stack_account = &d.kobj,
     }) catch |e| {
+        @atomicStore(State, &d.state, .constructing, .release);
         d.threads_alive.store(0, .release);
         return switch (e) {
             sched.Error.NoThreadSlots => Error.NoThreadSlots,
@@ -640,6 +648,8 @@ fn abortSpawn(d: *Domain) void {
         std.debug.panic("domain {s} teardown leak: kobj={d}B user={d}B", .{
             d.name, d.kobj.balance(), d.user_mem.balance(),
         });
+    const irqs = slots_lock.lockIrqSave();
+    defer slots_lock.unlockRestore(irqs);
     d.state = .unused;
 }
 
@@ -652,9 +662,14 @@ pub fn destroy(d: *Domain) void {
     // One claimant: a domain exiting on its own core and a parent (or
     // holder of its ctl cap) revoking it on another may arrive together,
     // and only one of them may walk the threads and the cap table.
-    if (@cmpxchgStrong(State, &d.state, .alive, .dying, .acq_rel, .acquire) != null) return;
-    trace.record(.destroy, d.id, 0);
+    const irqs = slots_lock.lockIrqSave();
+    if (@cmpxchgStrong(State, &d.state, .alive, .dying, .acq_rel, .acquire) != null) {
+        slots_lock.unlockRestore(irqs);
+        return;
+    }
     d.destroying.store(true, .release);
+    slots_lock.unlockRestore(irqs);
+    trace.record(.destroy, d.id, 0);
     defer d.destroying.store(false, .release);
     // The subtree dies with the parent: one revocation, transitively.
     for (&domains) |*c| {
@@ -684,7 +699,7 @@ pub fn destroy(d: *Domain) void {
 /// thread dump: a dying domain that never drains names its leak.
 pub fn debugDump() void {
     for (&domains) |*d| {
-        if (d.state == .unused) continue;
+        if (d.state == .unused or d.state == .constructing) continue;
         log.info("domain {s}#{d}: {t} threads_alive={d} ctl_refs={d} auto_reap={} parent={s} exit={d}", .{
             d.name,                            d.id,
             d.state,                           d.threads_alive.load(.acquire),
@@ -739,17 +754,44 @@ pub fn finishTeardown(d: *Domain) void {
     if (d.ctl_governed) releaseSlotIfUnreferenced(d);
 }
 
-fn allocSlot() ?*Domain {
+fn allocSlot(parent: ?*Domain) Error!*Domain {
     const irqs = slots_lock.lockIrqSave();
     defer slots_lock.unlockRestore(irqs);
+    if (parent) |p| if (p.state != .alive) return Error.ParentDying;
     for (&domains, 0..) |*d, i| {
         if (d.state == .unused) {
-            d.* = .{ .id = next_domain_id, .asid = @intCast(i + 1), .state = .unused };
+            d.* = .{ .id = next_domain_id, .asid = @intCast(i + 1), .state = .constructing, .parent = parent };
             next_domain_id += 1;
             return d;
         }
     }
-    return null;
+    return Error.NoDomainSlots;
+}
+
+/// Domain drill: model the exact preemption point between reservation and
+/// page-table construction, without relying on a lucky scheduler interleave.
+pub fn testSpawnReservations() void {
+    const first = allocSlot(null) catch @panic("reserve first domain");
+    const id = first.id;
+    const second = allocSlot(null) catch @panic("reserve second domain");
+    std.debug.assert(first != second and first.id == id);
+    std.debug.assert(first.state == .constructing and second.state == .constructing);
+    abortSpawn(first);
+    const reused = allocSlot(null) catch @panic("reuse rolled back domain");
+    std.debug.assert(reused == first and reused.id != id);
+    abortSpawn(reused);
+    abortSpawn(second);
+    // The early core-reservation refusal must unwind before re-exposing its
+    // slot; its errdefer used to run after an eager .unused reset.
+    if (spawn("refused", .{ .blob = &.{} }, .{ .cores = 1 })) |_| {
+        @panic("reserved core zero");
+    } else |err| std.debug.assert(err == Error.CoresBusy);
+    if (spawn("bad-image", .{ .blob = &.{} }, .{})) |_| {
+        @panic("accepted empty image");
+    } else |err| std.debug.assert(err == Error.BadImage);
+    const after_failure = allocSlot(null) catch @panic("reuse failed spawn");
+    std.debug.assert(after_failure == first);
+    abortSpawn(after_failure);
 }
 
 /// Kernel-thread entry for a domain's initial thread: drop to EL0 at the

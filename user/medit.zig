@@ -163,7 +163,28 @@ fn drawLine(index: usize, y: usize) void {
         wf.fillRect(area.x + gutter + (col - left) * cell, y, cell, line_h, wf.pal.primary);
     };
 }
+fn publishMenu() void {
+    const menu = shared.menus;
+    var enabled = menu.offered(.editor);
+    if (pending != .none) {
+        // The confirmation owns document state until explicitly resolved.
+        enabled = 0;
+    } else {
+        const selected = if (finding) query.low() != query.high() else ed.selection() != null;
+        const undo_count = if (finding) query.undo_len else ed.undo_history.len;
+        const redo_count = if (finding) query.redo_len else ed.redo_history.len;
+        if (undo_count == 0) enabled &= ~menu.bit(k.undo);
+        if (redo_count == 0) enabled &= ~menu.bit(k.redo);
+        if (!selected or clip.authority == 0) enabled &= ~(menu.bit(k.cut) | menu.bit(k.copy));
+        if (clip.authority == 0) enabled &= ~menu.bit(k.paste);
+        if (doc) |d| if (d.read_only) {
+            enabled &= ~menu.bit(k.save_document);
+        };
+    }
+    wf.setMenuProfile(.editor, enabled);
+}
 fn render() void {
+    publishMenu();
     wf.clipReset();
     wf.fillAll(wf.pal.bg);
     wf.drawChrome("Editor");
@@ -373,6 +394,16 @@ fn findNext(back: bool) void {
     } else status("No matches");
 }
 fn key(ch: u8) void {
+    if (ch == shared.menus.minimize) {
+        if (pending == .none) {
+            wf.setSurfaceVisible(false);
+            hidden = true;
+        }
+        return;
+    }
+    // Menu commands and their keyboard equivalents act on the active text
+    // field/document even when keyboard traversal last focused the toolbar.
+    if (ch == k.undo or ch == k.redo or ch == k.cut or ch == k.copy or ch == k.paste or ch == k.select_all) toolbar_focus = null;
     if (pending != .none) {
         if (ch == 27) confirm(2) else if (ch == '\t') {
             confirm_focus = (confirm_focus + 1) % 3;

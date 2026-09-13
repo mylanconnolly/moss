@@ -748,6 +748,7 @@ pub fn openSurface(cascade: bool) bool {
 }
 
 pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
+    menu_surface = 0;
     surface_visible = true;
     const flags: u64 = (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate);
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
@@ -786,6 +787,7 @@ pub fn commitSurface() bool {
 }
 
 pub fn closeSurface() void {
+    menu_surface = 0;
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = surf } }, 0);
     // Free the surface buffer's mapping and cap — a window that reopens (the
     // settings panel recurses on each apply, a resize destroys + recreates)
@@ -811,6 +813,64 @@ pub fn setSurfaceTitle(title: []const u8) void {
     if (surf == 0) return;
     const w = shared.strToWords(title);
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .set_title = .{ .surface = surf, .a = w[0], .b = w[1] } }, 0);
+}
+
+pub const ActiveMenu = struct {
+    token: u64 = 0,
+    profile: shared.menus.Profile = .generic,
+    enabled: u64 = 0,
+};
+var menu_surface: u64 = 0;
+var menu_profile: shared.menus.Profile = .generic;
+var menu_enabled: u64 = 0;
+/// Publish current action availability. Re-created surfaces are republished.
+fn menuCall(channel: u64, req: shared.GpuReq) ?shared.GpuResp {
+    return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, channel, req, 0)) {
+        .ok => |rep| rep,
+        .err => null,
+    };
+}
+pub fn setMenuProfile(profile: shared.menus.Profile, enabled: u64) void {
+    if (surf == 0) return;
+    const mask = enabled & shared.menus.offered(profile);
+    if (menu_surface == surf and menu_profile == profile and menu_enabled == mask) return;
+    const rep = menuCall(chan, .{ .set_menu = .{ .surface = surf, .profile = @intFromEnum(profile), .enabled = mask } }) orelse return;
+    if (rep == .ok) {
+        menu_surface = surf;
+        menu_profile = profile;
+        menu_enabled = mask;
+    }
+}
+pub fn activeMenu() ActiveMenu {
+    const rep = menuCall(chan, .menu_info) orelse return .{};
+    return switch (rep) {
+        .menu => |m| .{ .token = m.token, .profile = shared.menus.profileFromInt(m.profile) orelse .generic, .enabled = m.enabled },
+        else => .{},
+    };
+}
+pub fn menuTitle(token: u64) [16]u8 {
+    var result: [16]u8 = @splat(0);
+    const rep = menuCall(chan, .{ .menu_title = .{ .token = token } }) orelse return result;
+    switch (rep) {
+        .menu_title => |t| {
+            var buf: [24]u8 = undefined;
+            const title = shared.wordsToStr(&buf, .{ t.a, t.b, 0 });
+            const n = @min(title.len, result.len);
+            @memcpy(result[0..n], title[0..n]);
+        },
+        else => {},
+    }
+    return result;
+}
+pub fn invokeMenu(control: u64, token: u64, key: u8) bool {
+    if (control == 0) return false;
+    const rep = menuCall(control, .{ .menu_invoke = .{ .token = token, .key = key } }) orelse return false;
+    return rep == .ok;
+}
+pub fn restoreMenuFocus(control: u64, token: u64) bool {
+    if (control == 0) return false;
+    const rep = menuCall(control, .{ .menu_restore = .{ .token = token } }) orelse return false;
+    return rep == .ok;
 }
 
 /// Minimize (hide) or restore (show) this window's surface. The amber

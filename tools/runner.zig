@@ -1472,7 +1472,8 @@ fn parsePopup(content: []const u8) ?[4]u32 {
     return .{ x, y, ih, n };
 }
 
-/// The top-bar drill: open the system menu, then click its last item
+/// The top-bar drill: enter the system menu with both keyboard shortcuts,
+/// dismiss with Escape, then click its last item
 /// ("Log Out") in the dropdown popup — proving the bar renders, the menu
 /// opens a real popup surface, an item click fires `update`, and the bar
 /// exits. The dropdown geometry the runtime logs makes the item click exact.
@@ -1483,13 +1484,16 @@ fn topbarDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
-    // The system menu title "moss" sits at the far left of the bar.
-    if (!clickScanout(&q, 40, 14)) {
-        reportFailure(spec.name, "QMP could not click the system menu", log_path);
-        return false;
-    }
-    if (!try waitLogN(log_path, "topbar: popup at", 1, "the system menu did not open a dropdown", spec, polls)) return false;
+    const popups = countOccurrences(readLog(log_path), "topbar: popup at");
+    const dismissals = countOccurrences(readLog(log_path), "topbar: dismissed");
+    if (!q.sendKey("f10")) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "F10 did not open the system menu", spec, polls)) return false;
+    if (!q.sendKey("esc")) return false;
+    if (!try waitLogN(log_path, "topbar: dismissed", dismissals + 1, "Escape did not dismiss the system menu", spec, polls)) return false;
+    if (!q.chord("ctrl", "f2")) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", popups + 2, "Control-F2 did not reopen the system menu", spec, polls)) return false;
     sleepMs(300);
+    _ = q.screendump(check_dir ++ "/menu-system-keyboard.ppm");
     const p = parsePopup(readLog(log_path)) orelse {
         reportFailure(spec.name, "could not parse the dropdown geometry", log_path);
         return false;
@@ -2282,7 +2286,12 @@ fn waitLogN(log_path: []const u8, needle: []const u8, n_needed: usize, why: []co
 /// Parse `topbar: menu system cx=X cy=Y` — the system-menu title's hit-box
 /// centre, which the bar logs so a drill can click it at any font scale.
 fn parseTopbarMenu(content: []const u8) ?[2]u32 {
-    const key = "topbar: menu system cx=";
+    return parseNamedTopbarMenu(content, "system");
+}
+
+fn parseNamedTopbarMenu(content: []const u8, name: []const u8) ?[2]u32 {
+    var key_buf: [128]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "topbar: menu {s} cx=", .{name}) catch return null;
     const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
     var rest = content[at + key.len ..];
     const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
@@ -2299,6 +2308,7 @@ fn parseTopbarMenu(content: []const u8) ?[2]u32 {
 /// hit-box), wait for the dropdown, click the last item ("Log Out"). The bar
 /// is the session's essential unit, so this ends the whole session.
 fn desktopLogout(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
+    const popups = countOccurrences(readLog(log_path), "topbar: popup at");
     const menu = parseTopbarMenu(readLog(log_path)) orelse {
         reportFailure(spec.name, "could not find the top bar's system menu", log_path);
         return false;
@@ -2307,7 +2317,7 @@ fn desktopLogout(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
         reportFailure(spec.name, "QMP could not click the system menu", log_path);
         return false;
     }
-    if (!try waitLogN(log_path, "topbar: popup at", 1, "the system menu did not open a dropdown", spec, polls)) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "the system menu did not open a dropdown", spec, polls)) return false;
     sleepMs(300);
     const p = parsePopup(readLog(log_path)) orelse {
         reportFailure(spec.name, "could not parse the dropdown geometry", log_path);
@@ -2527,6 +2537,31 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "dock: running explorer=true", 1, "Files launched but did not stay running beside Settings", spec, polls)) return false;
     sleepMs(500);
     _ = q.screendump(check_dir ++ "/files-after-terminal-exit.ppm");
+    if (!try waitLogN(log_path, "topbar: active Files token=", 1, "Files menus did not become active", spec, polls)) return false;
+    if (!try openAppMenu(spec, log_path, polls, &q, "File", 1280, 1024)) return false;
+    if (!q.sendKey("ret")) return false; // Open the selected first folder.
+    if (!try waitLogN(log_path, "gui: action files", 1, "File Open did not navigate Files", spec, polls)) return false;
+    sleepMs(150);
+    if (!try openAppMenu(spec, log_path, polls, &q, "Go", 1280, 1024)) return false;
+    if (!q.sendKey("ret")) return false; // Enclosing Folder is now enabled.
+    if (!try waitLogN(log_path, "gui: action up", 1, "Go Enclosing Folder did not return home", spec, polls)) return false;
+    sleepMs(150);
+    if (!try openAppMenu(spec, log_path, polls, &q, "Go", 1280, 1024)) return false;
+    if (!q.sendKey("end") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "gui: action refresh", 1, "Go Refresh did not refresh Files", spec, polls)) return false;
+    sleepMs(150);
+    const minimized = countOccurrences(readLog(log_path), "gui: minimized");
+    if (!try openAppMenu(spec, log_path, polls, &q, "Window", 1280, 1024)) return false;
+    if (!q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "gui: minimized", minimized + 1, "Window Minimize did not hide Files", spec, polls)) return false;
+    const restored = countOccurrences(readLog(log_path), "gui: restored");
+    if (!clickScanout(&q, files[0], files[1])) return false;
+    if (!try waitLogN(log_path, "gui: restored", restored + 1, "dock did not restore menu-minimized Files", spec, polls)) return false;
+    sleepMs(200);
+    if (!try openAppMenu(spec, log_path, polls, &q, "Window", 1280, 1024)) return false;
+    if (!q.sendKey("end") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "dock: running explorer=false", 1, "Window Close did not close Files", spec, polls)) return false;
+
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.
     return desktopLogout(spec, log_path, polls, &q);
@@ -4447,6 +4482,90 @@ fn clickOutput(q: *Qmp, point: [2]u32, width: u32, height: u32) bool {
     return q.sendClick(true) and q.sendClick(false);
 }
 
+fn openAppMenu(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, name: []const u8, width: u32, height: u32) !bool {
+    const menu = parseNamedTopbarMenu(readLog(log_path), name) orelse return sfail(spec, log_path, "focused application's menu title missing");
+    const popups = countOccurrences(readLog(log_path), "topbar: popup at");
+    if (!clickOutput(q, menu, width, height)) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "application menu did not open", spec, polls)) return false;
+    sleepMs(150);
+    return true;
+}
+
+/// Menus are exercised at maximum text scale on the smallest output. The
+/// editor is behind resident chrome throughout; actions must reach its owner,
+/// including after a picker temporarily becomes the focused application.
+fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width: u32, height: u32) !bool {
+    if (!try waitLogN(log_path, "topbar: active Editor token=", 1, "editor did not publish global menus", spec, polls)) return false;
+    sleepMs(200);
+    _ = q.screendump(check_dir ++ "/menubar-300-1024.ppm");
+    if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
+    _ = q.screendump(check_dir ++ "/menu-file-300-1024.ppm");
+    // Once a menu is open, moving across headings switches it without a
+    // second click. Use the current output dimensions after the live resize.
+    const hover_popups = countOccurrences(readLog(log_path), "topbar: popup at");
+    const edit_heading = parseNamedTopbarMenu(readLog(log_path), "Edit") orelse return false;
+    if (!q.sendPointer(@intCast(@as(u64, edit_heading[0]) * 32768 / width), @intCast(@as(u64, edit_heading[1]) * 32768 / height))) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", hover_popups + 1, "hovering Edit did not switch the open menu", spec, polls)) return false;
+    sleepMs(150);
+    _ = q.screendump(check_dir ++ "/menu-hover-300-1024.ppm");
+    const file_heading = parseNamedTopbarMenu(readLog(log_path), "File") orelse return false;
+    if (!q.sendPointer(@intCast(@as(u64, file_heading[0]) * 32768 / width), @intCast(@as(u64, file_heading[1]) * 32768 / height))) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", hover_popups + 2, "hovering File did not switch back", spec, polls)) return false;
+    if (!q.sendKey("esc")) return false;
+    sleepMs(150);
+    // Escape returns keyboard focus to the editor, rather than swallowing
+    // subsequent application shortcuts in the resident top bar.
+    const picker_count = countOccurrences(readLog(log_path), "filepicker: open dialog");
+    if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
+    if (!q.sendKey("down")) return false; // New -> Open
+    sleepMs(100);
+    const editor_activations = countOccurrences(readLog(log_path), "topbar: active Editor token=");
+    if (!q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", picker_count + 1, "global File Open did not reach the editor", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/editor-picker-300-1024.ppm");
+    sleepMs(200);
+    if (!q.sendKey("esc")) return false;
+    if (!try waitLogN(log_path, "topbar: active Editor token=", editor_activations + 1, "editor menus did not return after picker dismissal", spec, polls)) return false;
+    if (!q.typeText("Large text")) return false;
+    sleepMs(200);
+    _ = q.screendump(check_dir ++ "/editor-300-1024.ppm");
+    if (!try openAppMenu(spec, log_path, polls, q, "Edit", width, height)) return false;
+    _ = q.screendump(check_dir ++ "/menu-edit-300-1024.ppm");
+    const undos = countOccurrences(readLog(log_path), "topbar: action 150 accepted=true");
+    if (!q.sendKey("ret")) return false; // Undo is the first enabled item.
+    if (!try waitLogN(log_path, "topbar: action 150 accepted=true", undos + 1, "global Undo was not routed", spec, polls)) return false;
+    sleepMs(200);
+    if (!try openAppMenu(spec, log_path, polls, q, "Edit", width, height)) return false;
+    const redos = countOccurrences(readLog(log_path), "topbar: action 151 accepted=true");
+    // Select Redo by its stable row, independently of whether Undo remains
+    // enabled (typing can span more than one undo group on a slow guest).
+    const popup = parsePopup(readLog(log_path)) orelse return false;
+    if (!clickOutput(q, .{ popup[0] + 30, popup[1] + 4 + popup[2] + popup[2] / 2 }, width, height)) return false;
+    if (!try waitLogN(log_path, "topbar: action 151 accepted=true", redos + 1, "global Redo was not routed", spec, polls)) return false;
+    sleepMs(200);
+    if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
+    if (!clickOutput(q, .{ width - 80, height / 2 }, width, height)) return false;
+    sleepMs(200);
+    if (!q.typeText(".")) return false;
+    // Reopening after an outside click proves dismissal does not leave a
+    // stale popup intercepting the next menu or editor input.
+    if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
+    if (!q.sendKey("end")) return false; // Close Window
+    sleepMs(100);
+    if (!q.sendKey("ret")) return false;
+    sleepMs(200);
+    const cancelled = countOccurrences(readLog(log_path), "editor: close cancelled");
+    if (!q.sendKey("ret")) return false; // default Cancel preserves edits
+    if (!try waitLogN(log_path, "editor: close cancelled", cancelled + 1, "menu Close bypassed dirty-document confirmation", spec, polls)) return false;
+    sleepMs(200);
+    if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
+    if (!q.sendKey("end")) return false;
+    sleepMs(100);
+    if (!q.sendKey("ret")) return false;
+    sleepMs(200);
+    return q.sendKey("tab") and q.sendKey("tab") and q.sendKey("ret"); // Discard
+}
+
 /// Reach controls at maximum text scale and minimum output size, using
 /// keyboard focus reveal as well as actual virtio wheel events.
 fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
@@ -4520,18 +4639,7 @@ fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp)
             const launcher = parseDockItem(readLog(log_path), 4) orelse return false;
             if (!clickOutput(q, launcher, width, height)) return false;
             if (!try waitLogN(log_path, "editor: ready", editor_ready + 1, "session editor did not launch", spec, polls)) return false;
-            const picker_count = countOccurrences(readLog(log_path), "filepicker: open dialog");
-            if (!q.chord("meta_l", "o")) return false;
-            if (!try waitLogN(log_path, "filepicker: open dialog", picker_count + 1, "session picker did not launch", spec, polls)) return false;
-            _ = q.screendump(check_dir ++ "/editor-picker-300-1024.ppm");
-            if (!q.sendKey("esc")) return false;
-            sleepMs(150);
-            if (!q.typeText("Large text")) return false;
-            sleepMs(200);
-            _ = q.screendump(check_dir ++ "/editor-300-1024.ppm");
-            if (!q.chord("meta_l", "w")) return false;
-            sleepMs(150);
-            if (!q.sendKey("tab") or !q.sendKey("tab") or !q.sendKey("ret")) return false;
+            if (!try editorMenuDrive(spec, log_path, polls, q, width, height)) return false;
             if (!try waitLogN(log_path, "editor: exit", editor_exit + 1, "session editor did not close", spec, polls)) return false;
             const settings_launcher = parseDockItem(readLog(log_path), 0) orelse return false;
             if (!clickOutput(q, settings_launcher, width, height)) return false;

@@ -433,6 +433,8 @@ export fn kmain(boot_arg: u64) noreturn {
 /// watch authority be refused.
 fn domainTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
+    domain.testSpawnReservations();
+    log.info("domain-test: concurrent reservations remain distinct; rollback recycles safely", .{});
 
     log.info("domain-test: spawning 'hello' (debug_log granted)", .{});
     const hello = domain.spawn("hello", .{ .blob = img(.hello) }, .{

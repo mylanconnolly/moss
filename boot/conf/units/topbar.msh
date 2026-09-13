@@ -10,6 +10,7 @@
   profiles:  [topbar]
   essential: true
   give: [
+    { tag: display_control, unit: compositor-ptr, control: true }
     { tag: display, unit: compositor-ptr }
     { tag: font, unit: fontsvc }
     { tag: locale, unit: localesvc }

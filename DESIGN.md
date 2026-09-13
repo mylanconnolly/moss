@@ -4436,6 +4436,58 @@ content hashes, Save As cancellation, preservation of the original on New,
 cancellation/discard, with normal quota/leak
 teardown checks.
 
+**Global application menus and Moss branding (2026-09-12).** The resident
+bar now shows the Moss mark, the active application's name, and its menus.
+Editor publishes File/Edit/Window; Terminal publishes Edit/Window; Files
+publishes File/Go/Window through `gui { menus: "files", … }`; other
+scripted windows expose Window actions.
+The document picker temporarily publishes its own Cancel command. Menu
+commands reuse the same application handlers as keyboard shortcuts, including
+the editor's unsaved-document confirmation. Editor Undo/Redo and selection
+commands reflect current availability; disabled entries remain visible.
+
+`shared/menus.zig` is the allocation-free, typed catalog of built-in menu
+profiles and command IDs. A client publishes a profile and enabled-action
+mask for its own surface. The compositor supplies a snapshot token, name,
+and profile to the bar; it accepts an invocation only through the explicitly
+granted `display_control` channel and only for an enabled, offered command.
+Tokens expire on application focus changes, surface incarnation changes,
+title changes, and availability changes. A slot reused by another window
+cannot inherit an old menu target. Titleless resident chrome and dropdowns
+retain the last active application; trusted focus suppresses application
+menus and rejects invocation. One validated command can queue for a busy
+client, and is delivered before focus notifications. The bar receives the
+control grant through its unit manifest, just as Settings receives output
+control. This is a built-in catalog, not yet an arbitrary application menu
+schema; adding a profile is a shared-library change.
+
+Popups own copied labels rather than borrowing a transient mshl view. They
+render separators, disabled entries, shortcut hints, and a selection highlight.
+Pointer hover highlights entries and switches open menu headings.
+Arrow keys navigate and switch menus; Home/End select the first/last enabled
+entry; Enter invokes and Escape restores application focus. F10 or Control-F2
+enters the menu bar through a compositor-registered, incarnation-checked bar
+surface. Outside clicks dismiss the popup without reclaiming focus from the
+new target. The bar polls menu state at 100 ms, but repaints only changes and the
+once-per-second clock; at large text scales it removes
+the date and then the clock when necessary, preserving app commands. Compact separators keep every built-in command visible at 3× text; popup
+width and placement are clamped to the output.
+
+The original mark is the canonical vector `shared/branding/moss.svg`, with
+usage and provenance in the adjacent README. It is a rounded lowercase m with
+a leaf, rendered through the same antialiased path rasterizer as the Phosphor
+icons. The system menu retains its text name while presenting the mark alone.
+It follows text scale and the current foreground palette, without an external
+bitmap or font dependency.
+
+The `comp` drill exercises denied unprivileged calls, disabled/unknown actions,
+stale focus and recycled-surface tokens, and bounded command queuing. The
+`guishellro` drill exercises actual Editor menus at 3× text on 1024×768,
+keyboard Open, picker focus restoration, Undo/Redo, outside-click dismissal,
+and dirty Close cancellation/discard, with screenshots of the bar and popups.
+The admin desktop drill exercises Files Open/Enclosing Folder/Refresh and
+Window Minimize, dock restoration, and Close.
+
 **Symbolic icons and window controls (2026-09-12).** The shared catalog in
 `shared/icons.zig` uses Phosphor Regular's rounded 16-unit strokes on its
 256-unit grid. Twelve unmodified SVGs and their MIT license are vendored in
@@ -5797,3 +5849,21 @@ be changed without touching the kernel.
   Debug kernel — which never reorders — had hidden it for the project's
   whole life. The gate now runs the kernel-heavy drills under a
   ReleaseSafe kernel as well (`+rs` in the check output).
+
+**Domain slot reservation during spawn (2026-09-12).** A full gate caught a
+latent concurrent-spawn race in the non-GUI `flogin` drill: `init` faulted
+in the first `mapUserPageTagged` page-table walk with a zero root physical
+address. `allocSlot` held a lock while selecting a slot but left its state
+`unused` until the entire image was mapped. A second spawner could therefore
+reserve and zero the same Domain while the first was building it. Slots now
+enter `constructing` under the slot lock, with their parent recorded there,
+and return to `unused` only after failed-spawn cleanup finishes. Parent
+revocation and final child publication/thread enqueue share that lock: a
+child cannot become live after its dying parent's subtree walk, and a
+constructing child delays parent-account reclamation until rollback. Image
+mapping and rollback remain outside the lock. The domain drill deterministically
+reserves two unfinished domains, checks distinct identities, then exercises
+rollback/reuse and early core-reservation/bad-image failures under its existing
+byte-identical pmem and zero-quota gate. The lesson is to reserve identity
+before exposing a construction window; protecting only the slot search does
+not protect its lifetime.

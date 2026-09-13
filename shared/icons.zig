@@ -1,8 +1,9 @@
-//! Phosphor Regular icons, compiled from pinned upstream SVGs. See phosphor/README.md.
+//! Symbolic icons compiled from SVGs: Phosphor Regular plus the original Moss mark.
+//! See phosphor/README.md and branding/README.md for provenance.
 const std = @import("std");
 const path = @import("iconpath.zig");
 const Segment = path.Segment;
-pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close };
+pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close, moss };
 pub fn parse(name: []const u8) ?Icon {
     if (std.mem.eql(u8, name, "file-text")) return .file;
     if (std.mem.eql(u8, name, "house")) return .home;
@@ -31,6 +32,7 @@ fn segments(icon: Icon) []const Segment {
         .back => path.fromSvg(@embedFile("phosphor/regular/arrow-left.svg")),
         .network => path.fromSvg(@embedFile("phosphor/regular/tree-structure.svg")),
         .close => path.fromSvg(@embedFile("phosphor/regular/x.svg")),
+        .moss => path.fromSvg(@embedFile("branding/moss.svg")),
     };
 }
 /// Base sizes are logical pixels at the 16px UI font size. Icons follow the
@@ -38,7 +40,7 @@ fn segments(icon: Icon) []const Segment {
 pub fn scaledSize(base: usize, ui_px: usize) usize {
     return @max(1, (base * ui_px + 8) / 16);
 }
-/// Pixel coverage for Phosphor Regular: rounded 16-unit strokes on a 256 grid.
+/// Pixel coverage for symbolic icons: rounded 16-unit strokes on a 256 grid.
 pub fn coverage(icon: Icon, size: usize, x: usize, y: usize) u32 {
     if (size == 0 or x >= size or y >= size) return 0;
     const scale = @as(f32, @floatFromInt(size)) / 256;

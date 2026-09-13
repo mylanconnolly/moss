@@ -125,6 +125,10 @@ const Surface = struct {
     hidden: bool = false, // minimized: retained but not composited, not focusable
     title: [16]u8 = @splat(0), // the window title, so the dock can restore it by name
     title_len: u8 = 0,
+    menu_profile: shared.menus.Profile = .generic,
+    menu_enabled: u64 = 0,
+    menu_key: u8 = 0,
+    incarnation: u64 = 0,
     // What we last told this surface's owner about its focus. Defaults true
     // to match a client's assumption that a fresh window is focused: a
     // window created focused needs no event, but one that opens behind the
@@ -174,6 +178,12 @@ var trust_token: u64 = 0; // 0 = the trusted path is disabled (no token)
 // keystrokes to the focused surface; Alt-Tab cycles focus.
 var keys_chan: u64 = 0; // inputsvc channel, 0 when the seat gives no keyboard
 var keys_buf: [*]volatile u8 = undefined;
+var next_incarnation: u64 = 1;
+var menu_bar: u64 = 0;
+var menu_bar_incarnation: u64 = 0;
+var menu_app: u64 = 0;
+var menu_incarnation: u64 = 0;
+var menu_token: u64 = 1;
 var focused: u64 = 0; // focused surface id, 0 = none
 var comp_log: u64 = 0; // the compositor's log handle (set in gpudrv)
 const key_switch_focus: u8 = shared.keyboard.switch_window;
@@ -363,6 +373,43 @@ fn focusTopmost() void {
     focused = best_id;
 }
 
+/// Resident chrome is titleless and does not replace the active application.
+/// The incarnation prevents recycled surface slots from inheriting old actions.
+fn syncMenuApp() void {
+    var candidate: u64 = 0;
+    if (findSurface(focused)) |sf| {
+        if (!sf.hidden and sf.title_len != 0) candidate = focused;
+    }
+    if (candidate == 0) {
+        if (findSurface(menu_app)) |sf| {
+            if (!sf.hidden and sf.title_len != 0 and sf.incarnation == menu_incarnation) candidate = menu_app;
+        }
+    }
+    if (candidate == 0) {
+        var z: u32 = 0;
+        for (&surfaces, 0..) |*sf, i| {
+            if (sf.used and !sf.hidden and sf.title_len != 0 and sf.z >= z) {
+                candidate = i + 1;
+                z = sf.z;
+            }
+        }
+    }
+    const incarnation = if (findSurface(candidate)) |sf| sf.incarnation else 0;
+    if (candidate != menu_app or incarnation != menu_incarnation) {
+        menu_app = candidate;
+        menu_incarnation = incarnation;
+        menu_token += 1;
+    }
+}
+fn menuTarget(token: u64) ?*Surface {
+    syncMenuApp();
+    if (token == 0 or token != menu_token) return null;
+    const sf = findSurface(menu_app) orelse return null;
+    if (sf.trusted or sf.hidden) return null;
+    if (findSurface(focused)) |f| if (f.trusted) return null;
+    return sf;
+}
+
 fn anyTrusted() bool {
     for (&surfaces) |*sf| {
         if (sf.used and sf.trusted) return true;
@@ -425,7 +472,8 @@ fn createSurface(owner: u64, x_req: u32, y_req: u32, w: u32, h: u32, cascade: bo
         _ = usys.capDrop(s.data[0]);
         return null;
     }
-    surfaces[idx] = .{ .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096, .x = x, .y = y, .w = w, .h = h, .z = next_z, .owner = owner, .trusted = owner == trusted_badge };
+    surfaces[idx] = .{ .incarnation = next_incarnation, .used = true, .shm = s.data[0], .va = m.data[0], .len = m.data[1] * 4096, .x = x, .y = y, .w = w, .h = h, .z = next_z, .owner = owner, .trusted = owner == trusted_badge };
+    next_incarnation += 1;
     next_z += 1;
     // A new surface takes focus — but a non-trusted surface may not steal
     // focus from the login surface: a hostile client cannot pull the
@@ -786,8 +834,16 @@ fn wakeReader(chan_h: u64, badge: u64, surface: u64, kind: u64) void {
 /// a focus event is consumed, so the client re-issues `next_input`, exactly
 /// as for a key or tick.
 fn pumpFocus(chan_h: u64) void {
+    syncMenuApp();
     for (&surfaces, 0..) |*sf, i| {
         if (!sf.used) continue;
+        if (sf.menu_key != 0) {
+            if (takeReader(sf.owner)) |t| {
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 0, .arg = sf.menu_key } }, 0, t);
+                sf.menu_key = 0;
+            }
+            continue;
+        }
         if (sf.output_dirty) {
             if (takeReader(sf.owner)) |t| {
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 7, .arg = shared.packPair(sf.x, sf.y) } }, 0, t);
@@ -838,6 +894,18 @@ fn dropReader(badge: u64) void {
 /// parks — buffered, like a terminal's own fifo, never delivered elsewhere.
 fn dispatchKeys(chan_h: u64) void {
     while (keyRingPeek()) |c| {
+        if (c == shared.keyboard.menu_focus) {
+            const bar = findSurface(menu_bar);
+            const secure = if (findSurface(focused)) |sf| sf.trusted else false;
+            if (bar == null or bar.?.incarnation != menu_bar_incarnation or bar.?.hidden or bar.?.title_len != 0 or secure) {
+                keyRingPop();
+                continue;
+            }
+            syncMenuApp();
+            focusSurface(menu_bar);
+            // Preserve the key while the bar is busy; ordinary delivery below
+            // wakes only its owner, never the previously focused application.
+        }
         if (c == key_switch_focus) {
             const before = focused;
             cycleFocus();
@@ -1177,6 +1245,62 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 const remaining = if (preview_deadline > now) (preview_deadline - now) / usys.cycleHz() + 1 else 0;
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .output = .{ .wh = shared.packPair(fb_w, fb_h), .preferred = shared.packPair(preferred_mode.w, preferred_mode.h), .seconds = remaining } }, 0, token);
             },
+            .set_menu => |q| {
+                const sf = findSurface(q.surface);
+                const profile = shared.menus.profileFromInt(q.profile);
+                if (sf == null or sf.?.owner != badge or profile == null) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
+                    continue;
+                }
+                const mask = q.enabled & shared.menus.offered(profile.?);
+                if (sf.?.menu_profile != profile.? or sf.?.menu_enabled != mask) {
+                    sf.?.menu_profile = profile.?;
+                    sf.?.menu_enabled = mask;
+                    if (menu_app == q.surface) menu_token += 1;
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .menu_bar => |q| {
+                const sf = findSurface(q.surface);
+                const ok = badge == control_badge and sf != null and !sf.?.trusted and sf.?.title_len == 0;
+                if (ok) {
+                    menu_bar = q.surface;
+                    menu_bar_incarnation = sf.?.incarnation;
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 22 } }, 0, token);
+            },
+            .menu_info => {
+                syncMenuApp();
+                const sf = menuTarget(menu_token);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (sf) |app| .{ .menu = .{ .token = menu_token, .profile = @intFromEnum(app.menu_profile), .enabled = app.menu_enabled } } else .{ .menu = .{ .token = 0, .profile = 0, .enabled = 0 } }, 0, token);
+            },
+            .menu_title => |q| {
+                if (menuTarget(q.token)) |sf| {
+                    const words = shared.strToWords(sf.title[0..sf.title_len]);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .menu_title = .{ .a = words[0], .b = words[1] } }, 0, token);
+                } else _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
+            },
+            .menu_invoke, .menu_restore => {
+                const target_token = switch (req) {
+                    .menu_invoke => |q| q.token,
+                    .menu_restore => |q| q.token,
+                    else => unreachable,
+                };
+                const sf = if (badge == control_badge) menuTarget(target_token) else null;
+                var ok = sf != null;
+                if (sf) |app| {
+                    if (req == .menu_invoke) {
+                        const key = req.menu_invoke.key;
+                        ok = key <= 255 and app.menu_key == 0 and shared.menus.allows(app.menu_profile, app.menu_enabled, @intCast(key));
+                        if (ok) app.menu_key = @intCast(key);
+                    }
+                    if (ok) {
+                        raiseSurface(menu_app);
+                        focusSurface(menu_app);
+                    }
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 22 } }, 0, token);
+            },
             .output_mode => |q| {
                 const mode: ?shared.display.Mode = if (q.index < shared.display.modes.len) shared.display.modes[@intCast(q.index)] else if (q.index == shared.display.modes.len and preferredIsExtra()) preferred_mode else null;
                 if (mode) |m| {
@@ -1302,6 +1426,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 var tbuf: [24]u8 = undefined;
                 const t = shared.wordsToStr(&tbuf, .{ q.a, q.b, 0 });
                 const n = @min(t.len, sf.title.len);
+                if (menu_app == q.surface and !std.mem.eql(u8, sf.title[0..sf.title_len], t[0..n])) menu_token += 1;
                 @memcpy(sf.title[0..n], t[0..n]);
                 sf.title_len = @intCast(n);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);

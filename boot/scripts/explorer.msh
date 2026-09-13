@@ -76,6 +76,7 @@ def crumb [state] {
 let final = (gui {
     init:  { path: "", depth: 0, node: 0 }
     title: "Files"
+    menus: "files"
     width: 960
     view: (fn [state] {
         let listing = (match $state.node {

@@ -9,5 +9,6 @@
   essential: true
   give: [
     { tag: display, unit: gpusvc }
+    { tag: display_control, unit: gpusvc, control: true }
   ]
 }
