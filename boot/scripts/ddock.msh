@@ -34,6 +34,7 @@ let final = (gui {
             { title: "Demo", icon: "grid", unit: "win-demo", running: (unit-up "win-demo") }
             { title: "Files", icon: "folder", unit: "explorer", running: (unit-up "explorer") }
             { title: "Terminal", icon: "terminal", unit: "terminal", running: (unit-up "terminal") }
+            { title: "Editor", icon: "file-text", unit: "medit", running: (unit-up "medit") }
           ]
         }
       })

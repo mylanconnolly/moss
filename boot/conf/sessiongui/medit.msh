@@ -1,0 +1,14 @@
+# The native editor receives GUI services and a user-mediated file picker.
+# Closing it ends the app, never the session. No spawner or global view.
+{
+  image:     medit
+  budget:    { user: 32mb }
+  grant:     [log]
+  essential: false
+  give: [
+    { tag: clip, unit: clipsvc }
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: picker, unit: filepicker }
+  ]
+}

@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor };
 
 const Spec = struct {
     name: []const u8,
@@ -96,6 +96,7 @@ const specs = [_]Spec{
     .{ .name = "browse", .kind = .browse, .pass = "browse-test: PASS", .extra = "browse: node 2 root has", .append = "profile=browse", .timeout_s = 180 },
     .{ .name = "netbrowse", .kind = .netbrowse, .pass = "netbrowse-test: PASS", .extra = "node=1 rows=", .append = "profile=netbrowse", .timeout_s = 180 },
     .{ .name = "cascade", .kind = .cascade, .pass = "cascade-test: PASS", .extra = "win-mid: closed", .append = "profile=cascade", .timeout_s = 120 },
+    .{ .name = "editor", .kind = .editor, .pass = "editor-test: PASS", .extra = "editor: exit", .append = "profile=editor", .timeout_s = 120 },
     .{ .name = "terminal", .kind = .terminal, .pass = "terminal-test: PASS", .extra = "term: console up", .append = "profile=terminal", .timeout_s = 120 },
     .{ .name = "locale", .kind = .blk, .pass = "locale-test: PASS", .extra = "loc de-DE: 1.234,56", .always_extra = "loc en-US: 1,234.56", .extra2 = "locale: CLDR 48.2.0 formatted", .append = "profile=locale", .timeout_s = 120 },
     .{ .name = "localeupd", .kind = .localeupd, .pass = "localeupd-test: PASS", .extra = "localeupd: installed CLDR 48.2.0-upd", .append = "profile=localeupd", .timeout_s = 120 },
@@ -307,7 +308,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -424,7 +425,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The post-login GUI shell: like the front door, but the shell runs
         // on the pointer-capable compositor, so a tablet (input index 1,
         // after the keyboard) rides along for a working cursor.
-        .guishell, .guishellro, .explorer, .terminal => {
+        .guishell, .guishellro, .explorer, .terminal, .editor => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -529,6 +530,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .cascade) {
         if (!try cascadeDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .editor) {
+        if (!try editorDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .terminal) {
         if (!try terminalDrive(spec, log_path, polls)) return false;
@@ -1158,6 +1162,97 @@ fn cascadeDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(300);
     _ = clickScanout(&q, first[0], first[1]);
     return true;
+}
+
+/// Exercise native editing through real keyboard events, then reopen the
+/// saved file and compare its digest against the exact intended UTF-8 bytes.
+fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "editor: document clients reclaimed; unselected save denied", 1, "selected-document authority or client cleanup probe failed", spec, polls)) return false;
+    if (!try waitLogN(log_path, "editor: ready", 1, "the editor never rendered", spec, polls)) return false;
+    var q = qmpConnect(qmp_port) catch return sfail(spec, log_path, "connect editor QMP");
+    defer q.close();
+    // Cancel an initial Open before a document exists; the broker must return
+    // focus and leave the new buffer usable.
+    if (!q.chord("meta_l", "o")) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", 1, "initial Open did not render", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/editor-open-picker.ppm");
+    if (!q.sendKey("esc")) return false;
+    sleepMs(150);
+    const expected = "Moss editor\nsecond line";
+    if (!q.typeText("Moss editor") or !q.sendKey("ret") or !q.typeText("second line")) return false;
+    sleepMs(200);
+    // Cut, undo, redo, undo must restore the complete multiline document.
+    for ([_][]const u8{ "a", "c", "x", "z" }) |key| {
+        if (!q.chord("meta_l", key)) return false;
+        sleepMs(100);
+    }
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!q.chord("meta_l", "z")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    sleepMs(100);
+    if (!q.chord("meta_l", "z")) return false;
+    sleepMs(150);
+    _ = q.screendump(check_dir ++ "/editor-editing.ppm");
+    if (!q.chord("meta_l", "s")) return false;
+    if (!try waitLogN(log_path, "filepicker: save dialog", 1, "Save dialog did not open", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/editor-save-picker.ppm");
+    if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "editor: saved", 1, "editor did not save the new document", spec, polls)) return false;
+    if (!q.chord("meta_l", "n")) return false;
+    sleepMs(100);
+    if (!q.chord("meta_l", "o")) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", 2, "Open dialog did not open", spec, polls)) return false;
+    if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "editor: loaded", 1, "editor did not reopen the saved document", spec, polls)) return false;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(expected, &digest, .{});
+    const digest_log = try std.fmt.allocPrint(gpa, "editor: digest {s}", .{std.fmt.bytesToHex(digest, .lower)});
+    defer gpa.free(digest_log);
+    if (!try waitLogN(log_path, digest_log, 1, "saved document bytes differed after reopening", spec, polls)) return false;
+    // Search selects the actual matching text; Escape returns to editing.
+    if (!q.chord("meta_l", "f") or !q.typeText("second") or !q.sendKey("ret")) return false;
+    sleepMs(150);
+    _ = q.screendump(check_dir ++ "/editor-find.ppm");
+    if (!q.sendKey("esc")) return false;
+    // Save As to an existing file is a separate user decision. Cancelling
+    // it must preserve the original selected-document authority.
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!q.chord("meta_l", "s")) return false;
+    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
+    if (!try waitLogN(log_path, "filepicker: save dialog", 2, "Save As did not render", spec, polls)) return false;
+    if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "filepicker: replace confirmation", 1, "existing file overwrite was not confirmed", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/editor-replace-picker.ppm");
+    if (!q.sendKey("esc")) return false;
+    sleepMs(100);
+    if (!q.chord("meta_l", "s")) return false;
+    if (!try waitLogN(log_path, "editor: saved editor-test.txt", 2, "cancelled Save As lost original document authority", spec, polls)) return false;
+    // New must discard the old file authority: its first Save prompts for
+    // a distinct name. Reopening the original proves it was never overwritten.
+    if (!q.chord("meta_l", "n")) return false;
+    sleepMs(100);
+    if (!q.typeText("Separate document") or !q.chord("meta_l", "s")) return false;
+    if (!try waitLogN(log_path, "filepicker: save dialog", 3, "new document reused an old save authority", spec, polls)) return false;
+    if (!q.chord("meta_l", "a") or !q.typeText("editor-second.txt") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "editor: saved editor-second.txt", 1, "new document did not save separately", spec, polls)) return false;
+    if (!q.chord("meta_l", "o")) return false;
+    if (!try waitLogN(log_path, "filepicker: open dialog", 3, "original document could not be reopened", spec, polls)) return false;
+    if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, digest_log, 2, "new document overwrote the original", spec, polls)) return false;
+    // Paste the copied document, then add a change and prove Cancel keeps
+    // the window alive before explicitly discarding the unsaved revision.
+    if (!q.chord("meta_l", "a") or !q.chord("meta_l", "v")) return false;
+    sleepMs(100);
+    if (!q.sendKey("end") or !q.typeText("!")) return false;
+    if (!q.chord("meta_l", "w")) return false;
+    sleepMs(200);
+    _ = q.screendump(check_dir ++ "/editor-unsaved.ppm");
+    if (!q.sendKey("esc")) return false;
+    if (!try waitLogN(log_path, "editor: close cancelled", 1, "dirty close could not be cancelled", spec, polls)) return false;
+    if (!q.chord("meta_l", "w")) return false;
+    sleepMs(150);
+    if (!q.sendKey("tab") or !q.sendKey("tab") or !q.sendKey("ret")) return false;
+    return try waitLogN(log_path, "editor: discarded", 1, "dirty close did not discard after confirmation", spec, polls);
 }
 
 /// The desktop-terminal drill: a windowed terminal (term in the shared
@@ -3947,7 +4042,13 @@ const Qmp = struct {
     /// their qcodes (enough for a simple shell command).
     fn typeText(q: *Qmp, s: []const u8) bool {
         for (s) |c| {
+            if (c >= 'A' and c <= 'Z') {
+                if (!q.chord("shift", &.{c - 'A' + 'a'})) return false;
+                sleepMs(5);
+                continue;
+            }
             const shifted: ?[]const u8 = switch (c) {
+                '!' => "1",
                 '(' => "9",
                 ')' => "0",
                 '{' => "bracket_left",
@@ -4412,6 +4513,30 @@ fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp)
             if (!q.sendButton("wheel-down", true) or !q.sendButton("wheel-down", false)) return false;
             if (!try waitLogN(log_path, "gui: scrolled", wheels + 1, "wheel did not scroll Settings", spec, polls)) return false;
             _ = q.screendump(check_dir ++ "/settings-300-1024-wheel.ppm");
+            // Launch the real session editor with maximum text scaling. The
+            // broker uses the session home, while the editor has no view cap.
+            const editor_ready = countOccurrences(readLog(log_path), "editor: ready");
+            const editor_exit = countOccurrences(readLog(log_path), "editor: exit");
+            const launcher = parseDockItem(readLog(log_path), 4) orelse return false;
+            if (!clickOutput(q, launcher, width, height)) return false;
+            if (!try waitLogN(log_path, "editor: ready", editor_ready + 1, "session editor did not launch", spec, polls)) return false;
+            const picker_count = countOccurrences(readLog(log_path), "filepicker: open dialog");
+            if (!q.chord("meta_l", "o")) return false;
+            if (!try waitLogN(log_path, "filepicker: open dialog", picker_count + 1, "session picker did not launch", spec, polls)) return false;
+            _ = q.screendump(check_dir ++ "/editor-picker-300-1024.ppm");
+            if (!q.sendKey("esc")) return false;
+            sleepMs(150);
+            if (!q.typeText("Large text")) return false;
+            sleepMs(200);
+            _ = q.screendump(check_dir ++ "/editor-300-1024.ppm");
+            if (!q.chord("meta_l", "w")) return false;
+            sleepMs(150);
+            if (!q.sendKey("tab") or !q.sendKey("tab") or !q.sendKey("ret")) return false;
+            if (!try waitLogN(log_path, "editor: exit", editor_exit + 1, "session editor did not close", spec, polls)) return false;
+            const settings_launcher = parseDockItem(readLog(log_path), 0) orelse return false;
+            if (!clickOutput(q, settings_launcher, width, height)) return false;
+            sleepMs(200); // focus restoration follows asynchronous app teardown
+
         }
     }
     // Main Settings starts on Displays; Tab reveals Smaller. Restore the

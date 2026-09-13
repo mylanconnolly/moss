@@ -27,6 +27,20 @@ pub const paste = 149;
 pub const undo = 150;
 pub const redo = 151;
 
+// Window-level document actions, never forwarded as literal terminal bytes.
+pub const new_document = 152;
+pub const open_document = 153;
+pub const save_document = 154;
+pub const save_as = 155;
+pub const find = 156;
+pub const close_window = 157;
+pub const doc_home = 158;
+pub const doc_end = 159;
+pub const select_up = 160;
+pub const select_down = 161;
+pub const select_doc_home = 162;
+pub const select_doc_end = 163;
+
 pub const Decoder = struct {
     held: [8]bool = @splat(false),
     pub fn feed(self: *Decoder, code: u16, value: u32) u8 {
@@ -56,6 +70,11 @@ pub const Decoder = struct {
             45 => return cut,
             47 => return paste,
             44 => return if (shift) redo else undo,
+            49 => return new_document,
+            24 => return open_document,
+            31 => return if (shift) save_as else save_document,
+            33 => return find,
+            17 => return close_window,
             else => {},
         };
         if (meta and code == 30) return select_all;
@@ -64,6 +83,11 @@ pub const Decoder = struct {
             if (meta or code == 102 or code == 107) return if (shift) (if (to_left) select_home else select_end) else (if (to_left) home else end);
             if (alt) return if (shift) (if (to_left) select_word_left else select_word_right) else (if (to_left) word_left else word_right);
             return if (shift) (if (to_left) select_left else select_right) else (if (to_left) left else right);
+        }
+        if (code == 103 or code == 108) {
+            const to_up = code == 103;
+            if (meta) return if (shift) (if (to_up) select_doc_home else select_doc_end) else (if (to_up) doc_home else doc_end);
+            if (shift) return if (to_up) select_up else select_down;
         }
         if (code == 111) return delete;
         if (alt and code == 14) return delete_word;
@@ -215,4 +239,17 @@ test "Command clipboard and undo preserve Control Emacs actions" {
     _ = d.feed(29, 1);
     try std.testing.expectEqual(@as(u8, 25), d.feed(21, 1));
     try std.testing.expectEqual(@as(u8, 1), d.feed(30, 1));
+}
+
+test "document shortcuts and vertical selection remain window actions" {
+    var d: Decoder = .{};
+    _ = d.feed(125, 1);
+    try std.testing.expectEqual(@as(u8, save_document), d.feed(31, 1));
+    try std.testing.expectEqual(@as(u8, open_document), d.feed(24, 1));
+    _ = d.feed(42, 1);
+    try std.testing.expectEqual(@as(u8, save_as), d.feed(31, 1));
+    try std.testing.expectEqual(@as(u8, select_doc_home), d.feed(103, 1));
+    _ = d.feed(125, 0);
+    try std.testing.expectEqual(@as(u8, select_down), d.feed(108, 1));
+    try std.testing.expectEqualStrings("", terminal(save_document));
 }

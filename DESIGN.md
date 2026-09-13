@@ -4377,6 +4377,65 @@ path proves the click, activation, and descent. The desktop dock gained a
 **Files** pill (a lazy session unit, `conf/sessiongui/explorer.msh`, over
 the session's own home view), so it launches like Settings and Demo.
 
+**Native medit and selected-document picker (2026-09-12).** `user/medit.zig`
+is a single-document text editor using the shared window frame, font roles,
+semantic colors, icons, clipboard, and native controls in `user/widgets.zig`.
+The desktop launches it as **Editor**. `lib/editor.zig` adapts medit's line
+buffer and Unicode-width logic (source revision recorded in `lib/medit/`),
+without SDL, host filesystem APIs, dynamic grammars, or a language server.
+Selection, visual-column movement, word navigation, grouped typing, find,
+undo/redo, and saved-state tracking are independent of the UI. Replacement
+buffers are built before publishing changes: allocation failure leaves the
+live document intact. A reclaiming pool supports sustained editing; history
+holds up to 64 revisions and 2 MiB per stack. Documents are valid UTF-8,
+without NULs, up to 256 KiB and 8192 lines. Existing line endings and trailing
+newlines survive load/save; CRLF is one editing boundary and Enter copies
+the local line ending and indentation. The current clipboard transport is limited to
+4 KiB; an oversized cut is refused without deleting the selection.
+
+The editor has **no filesystem view**. The session's `filepicker` unit owns
+its home view and draws Open/Save dialogs with folder browsing and filename
+entry. `shared/filepicker.zig` exposes a register/attach/open/save/save-as
+protocol: there is no client-supplied path parameter. Each registered,
+badged channel remembers only its selected document; save cannot target an
+unselected name. Client records grow in quota-backed pages and reclaim their
+mappings/selection on channel death. A candidate Open uses a fresh channel;
+the editor adopts it only after the complete file loads successfully. New
+drops the previous document channel. Save As requires explicit confirmation
+before replacing an existing file. A cancelled dialog preserves the buffer
+and its original authority. The listing transport currently returns at most
+2048 bytes of names; the picker warns when the listing may be incomplete,
+and filename entry remains available.
+
+`user/editorfile.zig` stages an exclusive sibling file, writes and flushes
+its contents, renames it over the destination, then flushes the replacement.
+The original file is never opened for truncation. A failed final flush is
+reported as uncertain and keeps the editor dirty. Reviewing this path found
+that rename could mutate directory overlays before a later allocation
+failure; mossfs now restores its pre-operation overlays on rename failure.
+Host fault-injection and torn-write/remount tests cover replacement rollback
+and old-or-new durability. The editor transfers its already-serialized buffer
+into saved-state tracking after success, avoiding an allocation failure after
+the disk write. Close/New/Open on a dirty document require Save, Discard, or
+Cancel. Shared surface recreation retains the old backing store until its
+replacement is allocated, allowing the editor to retain unsaved text on a
+failed resize. The boot unit table now accommodates 128 entries (98 are
+packed with these two new units).
+
+Shortcuts: Cmd+N/O/S, Cmd+Shift+S (Save As), Cmd+F, Cmd+W; Cmd+C/X/V/A,
+Cmd+Z/Shift+Cmd+Z; Shift+arrows, Option+arrows, Cmd+arrows, and Emacs-style
+Ctrl+A/E/B/F/P/N/D/K/Y. Tab inserts spaces to a four-column stop; Shift+Tab
+moves to toolbar controls. Find uses Enter for next, Shift+Tab for previous,
+and Escape to return to editing. Pointer selection, double-click words,
+vertical wheel scrolling, horizontal caret following, and live text scaling
+use the same model positions. Syntax highlighting, multiple tabs, LSP,
+Files-to-editor handoff, and external-edit conflict detection remain follow-ons.
+The `editor` QEMU drill checks real keyboard editing, clipboard, save/reopen
+content hashes, Save As cancellation, preservation of the original on New,
+128 registered-client teardown cycles, unselected-save refusal, and dirty-close
+cancellation/discard, with normal quota/leak
+teardown checks.
+
 **Symbolic icons and window controls (2026-09-12).** The shared catalog in
 `shared/icons.zig` uses Phosphor Regular's rounded 16-unit strokes on its
 256-unit grid. Twelve unmodified SVGs and their MIT license are vendored in

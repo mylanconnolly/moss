@@ -115,6 +115,7 @@ var serve_a: u64 = 0;
 var glog: u64 = 0;
 
 var mfs: mossfs.Fs = undefined;
+var rename_undo: mossfs.Fs.RenameUndo = undefined;
 var disk_ok = false;
 
 fn fssvc(log_h: u64, chan_h: u64, blob_va: u64, blob_len: u64) noreturn {
@@ -1007,18 +1008,16 @@ fn doRename(v: *View, from_w: u64, to_w: u64) shared.FsResp {
     // (no parent pointers); refuse instead of risking a cycle.
     if (ent.typ == .dir and fparent != tparent) return ferr(.denied);
     const now = nowSec();
-    if (mfs.dirLookup(tparent, tname) catch |err| return mapErr(err)) |target| {
+    const replacing = mfs.dirLookup(tparent, tname) catch |err| return mapErr(err);
+    if (replacing) |target| {
         if (target.obj == ent.obj) return .ok; // rename onto itself
         if (target.typ == .dir) {
             const empty = mfs.dirIsEmpty(target.obj) catch |err| return mapErr(err);
             if (!empty) return ferr(.not_empty);
         }
-        _ = mfs.dirRemove(tparent, tname, now) catch |err| return mapErr(err);
-        mfs.freeObject(target.obj, now) catch |err| return mapErr(err);
-        dropObjRefs(target.obj);
     }
-    _ = mfs.dirRemove(fparent, fname, now) catch |err| return mapErr(err);
-    mfs.dirAdd(tparent, tname, ent.obj, ent.typ, now) catch |err| return mapErr(err);
+    mfs.dirRename(fparent, fname, tparent, tname, ent, replacing, now, &rename_undo) catch |err| return mapErr(err);
+    if (replacing) |target| dropObjRefs(target.obj);
     return .ok;
 }
 

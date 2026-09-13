@@ -239,6 +239,7 @@ pub fn build(b: *std.Build) void {
         "terminal-test",
         "Run the terminal drill: a windowed terminal runs a command and closes",
     ) orelse false;
+    const editor_test = b.option(bool, "editor-test", "Run the native editor editing and persistence drill") orelse false;
     const gui_test = b.option(
         bool,
         "gui-test",
@@ -282,7 +283,7 @@ pub fn build(b: *std.Build) void {
     const gui_profile = b.option(
         []const u8,
         "gui-profile",
-        "run-gui: which GUI profile to boot interactively (gui, guilogin, gtrust, gsession, gisession, gboom, guishell). Default gui.",
+        "run-gui: which GUI profile to boot interactively (gui, guilogin, gtrust, gsession, gisession, gboom, guishell, editor). Default gui.",
     ) orelse "gui";
     const net_test = b.option(
         bool,
@@ -433,6 +434,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "netbrowse_test", netbrowse_test);
     build_opts.addOption(bool, "cascade_test", cascade_test);
     build_opts.addOption(bool, "terminal_test", terminal_test);
+    build_opts.addOption(bool, "editor_test", editor_test);
     build_opts.addOption(bool, "gui_test", gui_test);
     build_opts.addOption(bool, "guilogin_test", guilogin_test);
     build_opts.addOption(bool, "gtrust_test", gtrust_test);
@@ -511,6 +513,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "localeupd", .src = "user/localeupd.zig" },
         .{ .name = "localesvc", .src = "user/localesvc.zig" },
         .{ .name = "clipsvc", .src = "user/clipsvc.zig" },
+        .{ .name = "medit", .src = "user/medit.zig" },
+        .{ .name = "filepicker", .src = "user/filepicker.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -718,6 +722,8 @@ pub fn build(b: *std.Build) void {
         "scripts/demo.msh",
         "scripts/gui-shell.msh",
         "conf/skel/font.msh",
+        "conf/sessiongui/medit.msh", "conf/units/gui-medit.msh",
+        "conf/sessiongui/filepicker.msh", "conf/units/editor-filepicker.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
@@ -824,17 +830,22 @@ pub fn build(b: *std.Build) void {
         const guest_blobs_src = guest_blobs.add("user_blobs.zig", "pub const bootfs = @embedFile(\"bootfs.marc\");\n");
         const gopts = b.addOptions();
         for ([_][]const u8{
-            "panic_test",  "fault_test",    "sched_test",    "domain_test",
-            "ipc_test",    "init_test",     "sandbox_test",  "flap_test",
-            "blk_test",    "gpu_test",      "term_test",     "input_test",
-            "seat_test",   "gseat_test",    "comp_test",     "focus_test",
-            "trust_test",  "readers_test",  "gui_test",      "guilogin_test",
-            "gtrust_test", "gsession_test", "lconsole_test", "gisession_test",
-            "fs_test",     "net_test",      "fabric_test",   "shell_test",
-            "rng_test",    "smmu_test",     "vm_test",       "guest_test",
-            "vmnode_test", "pan_test",      "cpu_test",      "users_test",
-            "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-            "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test", "explorer_test", "browse_test", "netbrowse_test", "cascade_test", "terminal_test",
+            "panic_test",      "fault_test",     "sched_test",      "domain_test",
+            "ipc_test",        "init_test",      "sandbox_test",    "flap_test",
+            "blk_test",        "gpu_test",       "term_test",       "input_test",
+            "seat_test",       "gseat_test",     "comp_test",       "focus_test",
+            "trust_test",      "readers_test",   "gui_test",        "guilogin_test",
+            "gtrust_test",     "gsession_test",  "lconsole_test",   "gisession_test",
+            "fs_test",         "net_test",       "fabric_test",     "shell_test",
+            "rng_test",        "smmu_test",      "vm_test",         "guest_test",
+            "vmnode_test",     "pan_test",       "cpu_test",        "users_test",
+            "login_test",      "flogin_test",    "dot_test",        "gboom_test",
+            "fontrescan_test", "ptr_test",       "pointer_test",    "guiclick_test",
+            "fontscale_test",  "guishell_test",  "guishellro_test", "fabgui_test",
+            "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
+            "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
+            "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
+            "editor_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1019,7 +1030,7 @@ pub fn build(b: *std.Build) void {
         , .{ gui_profile, gpu_dev, gui_profile });
         const run_gui = b.addSystemCommand(&.{ "sh", "-c", script });
         run_gui.step.dependOn(b.getInstallStep());
-        const run_gui_step = b.step("run-gui", "Boot a GUI profile in a native cocoa window and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom|guishell; kernel log: zig-out/gui-run-kernel.log).");
+        const run_gui_step = b.step("run-gui", "Boot a GUI profile in a native cocoa window and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom|guishell|editor; kernel log: zig-out/gui-run-kernel.log).");
         run_gui_step.dependOn(&run_gui.step);
     }
 
@@ -1216,7 +1227,15 @@ pub fn build(b: *std.Build) void {
     });
     mossfs_test_mod.addImport("mosslib", lib_test_mod);
     const mossfs_tests = b.addTest(.{ .root_module = mossfs_test_mod });
+    const editorfile_test_mod = b.createModule(.{
+        .root_source_file = b.path("user/editorfile.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    editorfile_test_mod.addImport("shared", shared_test_mod);
+    const editorfile_tests = b.addTest(.{ .root_module = editorfile_test_mod });
     const test_step = b.step("test", "Run host-side unit tests");
+    test_step.dependOn(&b.addRunArtifact(editorfile_tests).step);
     test_step.dependOn(&b.addRunArtifact(shared_tests).step);
     test_step.dependOn(&b.addRunArtifact(dt_tests).step);
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
@@ -1243,27 +1262,35 @@ pub fn build(b: *std.Build) void {
     if (only) |o| run_check.addArgs(&.{ "--only", o });
 
     const all_test_opts = [_][]const u8{
-        "panic_test",  "fault_test",    "sched_test",    "domain_test",
-        "ipc_test",    "init_test",     "sandbox_test",  "flap_test",
-        "blk_test",    "gpu_test",      "term_test",     "input_test",
-        "seat_test",   "gseat_test",    "comp_test",     "focus_test",
-        "trust_test",  "readers_test",  "gui_test",      "guilogin_test",
-        "gtrust_test", "gsession_test", "lconsole_test", "gisession_test",
-        "fs_test",     "net_test",      "fabric_test",   "shell_test",
-        "rng_test",    "smmu_test",     "vm_test",       "guest_test",
-        "vmnode_test", "pan_test",      "cpu_test",      "users_test",
-        "login_test",  "flogin_test",   "dot_test",    "gboom_test",  "fontrescan_test",
-        "ptr_test",    "pointer_test", "guiclick_test", "fontscale_test", "guishell_test", "guishellro_test", "fabgui_test", "fabsignal_test", "locale_test", "localeupd_test", "desktop_test", "topbar_test", "dock_test", "listdemo_test", "explorer_test", "browse_test", "netbrowse_test", "cascade_test", "terminal_test",
+        "panic_test",      "fault_test",     "sched_test",      "domain_test",
+        "ipc_test",        "init_test",      "sandbox_test",    "flap_test",
+        "blk_test",        "gpu_test",       "term_test",       "input_test",
+        "seat_test",       "gseat_test",     "comp_test",       "focus_test",
+        "trust_test",      "readers_test",   "gui_test",        "guilogin_test",
+        "gtrust_test",     "gsession_test",  "lconsole_test",   "gisession_test",
+        "fs_test",         "net_test",       "fabric_test",     "shell_test",
+        "rng_test",        "smmu_test",      "vm_test",         "guest_test",
+        "vmnode_test",     "pan_test",       "cpu_test",        "users_test",
+        "login_test",      "flogin_test",    "dot_test",        "gboom_test",
+        "fontrescan_test", "ptr_test",       "pointer_test",    "guiclick_test",
+        "fontscale_test",  "guishell_test",  "guishellro_test", "fabgui_test",
+        "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
+        "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
+        "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
+        "editor_test",
     };
     const variants = [_][]const u8{
-        "panic",   "fault",    "sched",  "domain",   "ipc",      "init",
-        "sandbox", "flap",     "blk",    "gpu",      "term",     "input",
-        "seat",    "gseat",    "comp",   "focus",    "trust",    "readers",
-        "gui",     "guilogin", "gtrust", "gsession", "lconsole", "gisession",
-        "fs",      "net",      "fabric", "shell",    "rng",      "smmu",
-        "vm",      "guest",    "vmnode", "pan",      "cpu",      "users",
-        "login",   "flogin",   "dot",      "gboom",    "fontrescan",
-        "ptr",     "pointer", "guiclick", "fontscale", "guishell", "guishellro", "fabgui", "fabsignal", "locale", "localeupd", "desktop", "topbar", "dock", "listdemo", "explorer", "browse", "netbrowse", "cascade", "terminal",
+        "panic",     "fault",    "sched",     "domain",    "ipc",        "init",
+        "sandbox",   "flap",     "blk",       "gpu",       "term",       "input",
+        "seat",      "gseat",    "comp",      "focus",     "trust",      "readers",
+        "gui",       "guilogin", "gtrust",    "gsession",  "lconsole",   "gisession",
+        "fs",        "net",      "fabric",    "shell",     "rng",        "smmu",
+        "vm",        "guest",    "vmnode",    "pan",       "cpu",        "users",
+        "login",     "flogin",   "dot",       "gboom",     "fontrescan", "ptr",
+        "pointer",   "guiclick", "fontscale", "guishell",  "guishellro", "fabgui",
+        "fabsignal", "locale",   "localeupd", "desktop",   "topbar",     "dock",
+        "listdemo",  "explorer", "browse",    "netbrowse", "cascade",    "terminal",
+        "editor",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

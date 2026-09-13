@@ -201,11 +201,11 @@ at once.
 
 **Follow-ons from the project assessment (2026-09-12)**
 
-- **A complete document workflow.** A small text editor and shared Open/Save
-  picker, followed by create, edit, save, reopen, rename, and share flows in
-  Files. Choosing a document grants appropriately scoped file/view authority
-  rather than ambient access to the home. Exit criterion: a document survives
-  editing and session restart, and the editor cannot access unselected data.
+- **Document workflow follow-through.** The native editor and capability-scoped
+  Open/Save picker have landed. Extend Files with editor handoff, rename, and
+  sharing; add multiple documents, syntax highlighting, external-edit conflict
+  detection, and session restoration. Retain selection-scoped document authority
+  and verify document persistence across a complete session restart.
 - **Capacity and long-session reliability.** Extend the GUI resource-capacity
   work below to other small global pools (kernel objects, filesystem views,
   sockets), using growing storage governed by domain quotas and explicit
@@ -1479,6 +1479,13 @@ at once.
   pointer mapping and resident bars. Output control uses a separate boot
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
+
+- ✅ **Native medit and document picker** (2026-09-12): reuse medit's UTF-8
+  editing model with Moss controls, selection, clipboard, undo/redo, find,
+  scroll, safe dirty-close prompts, and live text scaling. A separate picker
+  holds the filesystem view and grants per-client selected-document access;
+  staged durable saves and transactional rename rollback protect replacements.
+  Host allocation/crash tests and a QEMU save/reopen digest drill cover the flow.
 
 - ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
   one scalable, theme-colored catalog for buttons, dock items, lists, and

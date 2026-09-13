@@ -1,0 +1,12 @@
+# The editor drill's picker, confined to its disposable disk view.
+{
+  image:  filepicker
+  budget: { user: 24mb }
+  grant:  [log]
+  give: [
+    { tag: clip, unit: clipsvc }
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: view, fs: data, ro: false }
+  ]
+}

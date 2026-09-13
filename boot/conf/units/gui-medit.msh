@@ -1,0 +1,15 @@
+# A self-contained native editor drill, with a scratch filesystem view.
+{
+  image:     medit
+  arg:       1
+  budget:    { user: 32mb }
+  grant:     [log]
+  profiles:  [editor]
+  essential: true
+  give: [
+    { tag: clip, unit: clipsvc }
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: picker, unit: editor-filepicker }
+  ]
+}

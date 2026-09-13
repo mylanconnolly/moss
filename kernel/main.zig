@@ -275,6 +275,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.editor_test) {
+        _ = sched.spawn("boot-watch", editorTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.terminal_test) {
         _ = sched.spawn("boot-watch", terminalTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -922,6 +927,10 @@ fn cascadeTestWorker(_: u64) void {
 /// The desktop terminal drill: a windowed terminal (term in the shared
 /// frame) with a full msh behind it. The runner types a command, sees it
 /// run, and closes the window by its close dot.
+fn editorTestWorker(_: u64) void {
+    systemDrill("editor");
+}
+
 fn terminalTestWorker(_: u64) void {
     systemDrill("terminal");
 }

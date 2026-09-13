@@ -1069,6 +1069,42 @@ pub const Fs = struct {
         _ = try fs.writeObj(dir, @as(u64, nb) * block_size, &newb, now);
     }
 
+    /// Reusable operation undo storage, supplied outside the small service
+    /// stack. Rename changes only these overlays; it never commits, allocates
+    /// disk runs or drains deletion work. Keep this list in step with its helpers.
+    pub const RenameUndo = struct {
+        dd: [max_dirty_data]DirtyData,
+        ddn: [max_dirty_dnodes]DirtyDnode,
+        dd_count: u32,
+        free_hint: u32,
+    };
+
+    /// Rename prevalidated directory entries as one in-memory operation.
+    /// The caller checks permissions, source existence, directory cycles and
+    /// target emptiness first. On error even partial hash conversion/splitting
+    /// and deleting-set updates are undone; a later sync cannot publish them.
+    /// On success normal CoW commit publishes namespace and object reclamation
+    /// together. Invalidating external object handles is the caller's final step.
+    pub fn dirRename(fs: *Fs, from_dir: u32, from: []const u8, to_dir: u32, to: []const u8, source: DirentRef, target: ?DirentRef, now: u64, undo: *RenameUndo) Error!void {
+        if (target) |entry| if (entry.obj == source.obj) return;
+        undo.dd = fs.dd;
+        undo.ddn = fs.ddn;
+        undo.dd_count = fs.dd_count;
+        undo.free_hint = fs.free_hint;
+        errdefer {
+            fs.dd = undo.dd;
+            fs.ddn = undo.ddn;
+            fs.dd_count = undo.dd_count;
+            fs.free_hint = undo.free_hint;
+        }
+        if (target) |entry| {
+            _ = try fs.dirRemove(to_dir, to, now);
+            try fs.freeObject(entry.obj, now);
+        }
+        _ = try fs.dirRemove(from_dir, from, now);
+        try fs.dirAdd(to_dir, to, source.obj, source.typ, now);
+    }
+
     pub fn dirRemove(fs: *Fs, dir: u32, name: []const u8, now: u64) Error!bool {
         const found = (try fs.dirLookup(dir, name)) orelse return false;
         var ent: [dirent_size]u8 = @splat(0);
@@ -2210,6 +2246,154 @@ test "directories: add, lookup, remove, list, emptiness" {
     var out: [256]u8 = undefined;
     const n = try t_fs2.dirList(root_obj, &out);
     try testing.expectEqualStrings("sub\n", out[0..n]);
+}
+
+var t_rename_undo: Fs.RenameUndo = undefined;
+
+fn renameTestFiles() !struct { old: u32, fresh: u32 } {
+    const old = try t_fs.allocObject(.file, 1);
+    const fresh = try t_fs.allocObject(.file, 1);
+    try t_fs.dirAdd(root_obj, "document", old, .file, 1);
+    try t_fs.dirAdd(root_obj, "staging", fresh, .file, 1);
+    _ = try t_fs.writeObj(old, 0, "ORIGINAL", 1);
+    _ = try t_fs.writeObj(fresh, 0, "REPLACEMENT", 1);
+    try t_fs.sync(1);
+    return .{ .old = old, .fresh = fresh };
+}
+
+fn renameTestApply(fs: *Fs) !void {
+    const source = (try fs.dirLookup(root_obj, "staging")).?;
+    const target = try fs.dirLookup(root_obj, "document");
+    try fs.dirRename(root_obj, "staging", root_obj, "document", source, target, 2, &t_rename_undo);
+}
+
+test "failed rename restores target, source and deletion overlays" {
+    t_key = null;
+    var rd: RamDev = undefined;
+    const dev = freshDev(&rd);
+    try fmtDev(dev);
+    try t_fs.mount(dev);
+    const objs = try renameTestFiles();
+    // Permit the target directory's first edit, then exhaust the overlay
+    // when freeing the original appends to the deleting set. Previously the
+    // failed operation left the original name absent and could commit that.
+    for (t_fs.dd[0 .. max_dirty_data - 1], 0..) |*slot, index| {
+        slot.* = .{ .used = true, .obj = max_objs - 1, .blkidx = index };
+    }
+    t_fs.dd_count = max_dirty_data - 1;
+    try testing.expectError(Error.Overflow, renameTestApply(&t_fs));
+    try testing.expectEqual(objs.old, (try t_fs.dirLookup(root_obj, "document")).?.obj);
+    try testing.expectEqual(objs.fresh, (try t_fs.dirLookup(root_obj, "staging")).?.obj);
+    try testing.expectEqual(@as(u32, max_dirty_data - 1), t_fs.dd_count);
+    try testing.expectEqual(@as(u64, 0), (try t_fs.dnodeOf(delset_obj)).size);
+    var bytes: [32]u8 = undefined;
+    try testing.expectEqualStrings("ORIGINAL", bytes[0..try t_fs.readObj(objs.old, 0, &bytes)]);
+    // Remove only the synthetic pressure and prove the failed rename cannot
+    // sneak into a later commit; an unrelated write still persists normally.
+    for (t_fs.dd[0 .. max_dirty_data - 1]) |*slot| slot.used = false;
+    t_fs.dd_count = 0;
+    _ = try t_fs.writeObj(objs.fresh, 0, "REPLACEMENT", 3);
+    try t_fs.sync(3);
+    try t_fs2.mount(dev);
+    try testing.expectEqual(objs.old, (try t_fs2.dirLookup(root_obj, "document")).?.obj);
+    try testing.expectEqual(objs.fresh, (try t_fs2.dirLookup(root_obj, "staging")).?.obj);
+
+    // Also fail after directory bytes were edited but its dnode cannot be
+    // claimed. The checkpoint must restore data, not just slot counters.
+    try t_fs.mount(dev);
+    for (&t_fs.ddn, 0..) |*slot, index| {
+        slot.* = .{ .used = true, .obj = max_objs - 1 - @as(u32, @intCast(index)) };
+    }
+    try testing.expectError(Error.Overflow, renameTestApply(&t_fs));
+    try testing.expectEqual(objs.old, (try t_fs.dirLookup(root_obj, "document")).?.obj);
+    try testing.expectEqual(objs.fresh, (try t_fs.dirLookup(root_obj, "staging")).?.obj);
+    try testing.expectEqual(@as(u32, 0), t_fs.dd_count);
+    try t_fs.mount(dev);
+    @memset(t_fs.gfree[0..t_fs.gcount], 0);
+    try testing.expectError(Error.NoSpace, renameTestApply(&t_fs));
+    try testing.expectEqual(objs.old, (try t_fs.dirLookup(root_obj, "document")).?.obj);
+    try testing.expectEqual(objs.fresh, (try t_fs.dirLookup(root_obj, "staging")).?.obj);
+}
+
+test "failed cross-directory rename rolls back partial hash conversion" {
+    t_key = null;
+    var rd: RamDev = undefined;
+    const dev = freshDev(&rd);
+    try fmtDev(dev);
+    try t_fs.mount(dev);
+    const dir = try t_fs.allocObject(.dir, 1);
+    const obj = try t_fs.allocObject(.file, 1);
+    try t_fs.dirAdd(root_obj, "source", obj, .file, 1);
+    for (0..64) |index| {
+        var name: [16]u8 = undefined;
+        const text = try std.fmt.bufPrint(&name, "file{d}", .{index});
+        try t_fs.dirAdd(dir, text, obj, .file, 1);
+    }
+    try t_fs.sync(1);
+    // Two free overlay slots: remove source, overwrite target's linear
+    // block with a hash header, then fail while writing its first bucket.
+    for (t_fs.dd[0 .. max_dirty_data - 2], 0..) |*slot, index| {
+        slot.* = .{ .used = true, .obj = max_objs - 1, .blkidx = index };
+    }
+    t_fs.dd_count = max_dirty_data - 2;
+    const source = (try t_fs.dirLookup(root_obj, "source")).?;
+    try testing.expectError(Error.Overflow, t_fs.dirRename(root_obj, "source", dir, "moved", source, null, 2, &t_rename_undo));
+    try testing.expectEqual(obj, (try t_fs.dirLookup(root_obj, "source")).?.obj);
+    try testing.expect((try t_fs.dirLookup(dir, "moved")) == null);
+    for (0..64) |index| {
+        var name: [16]u8 = undefined;
+        const text = try std.fmt.bufPrint(&name, "file{d}", .{index});
+        try testing.expectEqual(obj, (try t_fs.dirLookup(dir, text)).?.obj);
+    }
+    try testing.expect(!Fs.isHashed(&(try t_fs.dnodeOf(dir))));
+}
+
+fn renameCrashSweep() !void {
+    var rd: RamDev = undefined;
+    var dev = freshDev(&rd);
+    try fmtDev(dev);
+    try mountKeyed(&t_fs, dev);
+    const objs = try renameTestFiles();
+    @memcpy(&t_snap, &t_storage);
+    try renameTestApply(&t_fs);
+    rd.wlog_len = 0;
+    try t_fs.sync(2);
+    const writes = rd.wlog_len;
+    try testing.expect(writes > 4);
+    for (0..2) |tear| {
+        for (0..writes + 1) |cut| {
+            @memcpy(&t_storage, &t_snap);
+            rd = .{ .secs = &t_storage, .cut_after = cut, .tear_final = tear == 1 and cut > 0 };
+            dev = rd.dev();
+            try mountKeyed(&t_fs, dev);
+            try renameTestApply(&t_fs);
+            t_fs.sync(2) catch {};
+            rd.cut_after = null;
+            rd.tear_final = false;
+            try mountKeyed(&t_fs2, dev);
+            const target = (try t_fs2.dirLookup(root_obj, "document")).?;
+            const source = try t_fs2.dirLookup(root_obj, "staging");
+            var bytes: [32]u8 = undefined;
+            const n = try t_fs2.readObj(target.obj, 0, &bytes);
+            if (target.obj == objs.old) {
+                try testing.expectEqualStrings("ORIGINAL", bytes[0..n]);
+                try testing.expectEqual(objs.fresh, source.?.obj);
+            } else {
+                try testing.expectEqual(objs.fresh, target.obj);
+                try testing.expectEqualStrings("REPLACEMENT", bytes[0..n]);
+                try testing.expect(source == null);
+                try testing.expectEqual(ObjType.free, (try t_fs2.dnodeOf(objs.old)).typ);
+            }
+        }
+    }
+}
+
+test "rename replacement crash sweep plaintext and encrypted" {
+    t_key = null;
+    try renameCrashSweep();
+    t_key = &test_master_key;
+    defer t_key = null;
+    try renameCrashSweep();
 }
 
 test "hashed directories: conversion, splits, lookup, remove, list, remount" {

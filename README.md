@@ -177,3 +177,14 @@ mshl formatter's, lint's and language server's tests and checks every
 ## License
 
 MIT — see `LICENSE`.
+
+### Native text editor
+
+Launch **Editor** from the graphical desktop, or use
+`zig build run-gui -Dgui-profile=editor` for a standalone window. It reuses
+medit's editing core with Moss's shared GUI and a capability-scoped Open/Save
+picker. Cmd+N/O/S creates, opens, and saves; Cmd+Shift+S saves a copy, Cmd+F
+finds, and Cmd+W closes with an unsaved-changes prompt. Standard clipboard,
+selection, and undo/redo shortcuts work alongside Emacs-style movement.
+This first native version handles one UTF-8 document up to 256 KiB; tabs,
+syntax highlighting, and LSP remain follow-ons.

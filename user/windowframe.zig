@@ -7,8 +7,8 @@
 //! below the titlebar (`contentRect`) and routes pointer events through
 //! `onPointer`, which returns what the frame did (a drag, a snap, a close).
 //!
-//! Two clients share it: the mshl GUI runtime (`guicmds`, whose content is
-//! a widget tree) and the terminal (`term`, whose content is a glyph grid).
+//! Clients include the mshl widget runtime, terminal glyph grid, native text
+//! editor, and capability document picker.
 //! Because a process drives one window at a time (a transient popup swaps
 //! the buffer in place), the frame is module state, not a struct — matching
 //! how `guicmds` was written before the split.
@@ -1037,10 +1037,32 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
 /// A resize is a destroy + recreate of the fixed-size surface at the new
 /// geometry (exact placement — no cascade), re-taking focus and the front,
 /// with the title re-set so the dock can still find it. False if the new
-/// surface could not be opened (fatal — `px` would be stale).
+/// surface could not be opened; the old surface remains valid. The caller
+/// restores its previous geometry before painting it again.
 fn recreate(title: []const u8) bool {
-    closeSurface();
-    if (!openSurface(false)) return false;
+    return recreateFocused(title, true);
+}
+fn recreateFocused(title: []const u8, activate: bool) bool {
+    // Allocate the replacement before releasing the old backing store. A
+    // failed resize must leave the client's document and drawable surface alive.
+    const old_surf = surf;
+    const old_cap = surf_cap;
+    const old_va = surf_va;
+    const old_px = px;
+    surf = 0;
+    surf_cap = 0;
+    surf_va = 0;
+    if (!openSurfaceFocused(false, activate)) {
+        if (surf != 0) closeSurface();
+        surf = old_surf;
+        surf_cap = old_cap;
+        surf_va = old_va;
+        px = old_px;
+        return false;
+    }
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = old_surf } }, 0);
+    if (old_va != 0) _ = usys.shmUnmap(old_va);
+    if (old_cap != 0) _ = usys.capDrop(old_cap);
     if (title.len > 0) setSurfaceTitle(title);
     return true;
 }
@@ -1095,7 +1117,6 @@ pub fn refreshOutput() bool {
 /// visibility. Existing content remains the application's responsibility.
 pub fn outputChanged(ev: Event, title: []const u8, hidden: bool) bool {
     _ = refreshOutput();
-    closeSurface();
     dragging = false;
     ptr_down = false;
     pending_dot = null;
@@ -1114,7 +1135,7 @@ pub fn outputChanged(ev: Event, title: []const u8, hidden: bool) bool {
         win_w = area.w;
         win_h = area.h;
     }
-    if (!openSurfaceFocused(false, win_focused and !hidden)) return false;
+    if (!recreateFocused(title, win_focused and !hidden)) return false;
     setSurfaceTitle(title);
     if (hidden) setSurfaceVisible(false);
     return true;

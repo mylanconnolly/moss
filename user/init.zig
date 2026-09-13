@@ -53,7 +53,8 @@ const spawner: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
 
 // ------------------------------------------------------------------ units
 
-const max_units = 96;
+// Includes lazy GUI services as well as the drill profiles in the archive.
+const max_units = 128;
 const max_gives = 16;
 
 const GiveKind = enum { unit, device, shm, secret, file, file_cap, view, netview, self_init, session_cap };
