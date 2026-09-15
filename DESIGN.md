@@ -4441,6 +4441,15 @@ content hashes, Save As cancellation, preservation of the original on New,
 cancellation/discard, with normal quota/leak
 teardown checks.
 
+**Subtle window outlines (2026-09-15).** Shared window chrome paints a
+one-pixel neutral outline after application content, with a stronger edge for
+the active window and a quieter edge for inactive windows. Light/dark palettes
+supply the colors; high contrast uses its existing two-pixel, full-contrast
+outline. The pass ignores content clipping/scroll transforms and adds no
+layout inset, preserving flush document tabs and gutters. It is tied to the
+surface that drew chrome, so resident bars and titleless launcher/popups do
+not inherit window borders. Partial terminal commits also refresh the edge.
+
 **Edge-aligned Editor and title-bar zoom (2026-09-15).** Editor's tab strip
 starts immediately below the title bar and spans the window width. The line
 number gutter/document viewport meets the strip and status bar without outer

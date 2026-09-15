@@ -153,6 +153,7 @@ pub const Palette = struct {
     text_muted: u32, // secondary text (field labels, hints)
     title: u32, // the title / strong heading
     border: u32, // element outlines, the titlebar rule
+    window_border: u32, // neutral active-window outline
     focus: u32, // the focus ring (never the only cue — focus also lifts)
     primary: u32, // the primary action's fill
     primary_ink: u32, // text on `primary`
@@ -188,6 +189,7 @@ pub fn resolveTheme(theme: shared.Theme, contrast: shared.Contrast, cmode: share
             .text_muted = 0xa9afb9,
             .title = 0xf0f3fa,
             .border = 0x3b4049,
+            .window_border = 0x565c66,
             .focus = if (cb) 0x56b4e9 else 0x5aa2ff,
             .primary = if (cb) 0x0072b2 else 0x3d7dff,
             .primary_ink = 0xffffff,
@@ -205,6 +207,7 @@ pub fn resolveTheme(theme: shared.Theme, contrast: shared.Contrast, cmode: share
             .text_muted = 0x5c6577,
             .title = 0x17191d,
             .border = 0xd3d5d9,
+            .window_border = 0xaeb2b9,
             .focus = if (cb) 0x0072b2 else 0x2563eb,
             .primary = if (cb) 0x0072b2 else 0x2563eb,
             .primary_ink = 0xffffff,
@@ -227,6 +230,7 @@ pub fn resolveTheme(theme: shared.Theme, contrast: shared.Contrast, cmode: share
         p.text_muted = p.text;
         p.title = p.text;
         p.border = p.text;
+        p.window_border = p.text;
         p.focus = if (dark) 0xffff00 else 0x0000ff;
         p.primary = if (cb) 0x009e73 else (if (dark) 0x2ea3ff else 0x0000cc);
         p.primary_ink = if (dark) 0x000000 else 0xffffff;
@@ -652,11 +656,14 @@ pub fn contentRect() Rect {
     return .{ .x = 0, .y = title_h, .w = win_w, .h = if (win_h > title_h) win_h - title_h else 0 };
 }
 
+var chrome_surface: u64 = 0;
+
 /// Draw the titlebar: a raised bar, three traffic-light dots at the left,
 /// the title centred, a bottom rule. The bar (minus the dots) is a drag
 /// handle; the dots are close / minimize / maximize. Sets `title_h`,
 /// `dots_cx`/`dots_cy` for the input router and the geometry log.
 pub fn drawChrome(title: []const u8) void {
+    if (!measuring) chrome_surface = surf;
     title_h = lineOf(R_TITLE) + 2 * 14;
     fillRect(0, 0, win_w, title_h, pal.surface);
     fillRect(0, title_h, win_w, pal.border_w, pal.border);
@@ -787,7 +794,27 @@ pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
     return true;
 }
 
+/// Draw after content so edge-aligned tabs, scrolling and partial terminal
+/// paints cannot erase the outline. Surface identity excludes resident bars
+/// and temporary titleless overlays that share this renderer.
+fn drawWindowBorder() void {
+    if (measuring or surf == 0 or chrome_surface != surf) return;
+    const bw = @min(pal.border_w, @min(win_w / 2, win_h / 2));
+    const ink = if (win_focused) pal.window_border else pal.border;
+    // Frame pixels are surface-local and deliberately independent of the
+    // application's current clip/scroll transform. No content inset is added.
+    for (0..bw) |i| {
+        @memset(px[i * win_w .. (i + 1) * win_w], ink);
+        @memset(px[(win_h - 1 - i) * win_w .. (win_h - i) * win_w], ink);
+    }
+    for (bw..win_h - bw) |y| {
+        @memset(px[y * win_w .. y * win_w + bw], ink);
+        @memset(px[(y + 1) * win_w - bw .. (y + 1) * win_w], ink);
+    }
+}
+
 pub fn commitSurface() bool {
+    drawWindowBorder();
     return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .commit = .{ .surface = surf, .xy = 0, .wh = shared.packPair(@intCast(win_w), @intCast(win_h)) } }, 0)) {
         .ok => true,
         .err => false,

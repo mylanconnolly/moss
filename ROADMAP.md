@@ -1498,6 +1498,7 @@ applications need menus beyond those profiles.
 
 - ✅ **Editor edge alignment and shared title-bar zoom** (2026-09-15):
   tabs and document viewport meet window edges without outer gutters;
+  subtle focus-aware outlines distinguish windows without adding padding;
   double-clicking ordinary title bars toggles work-area maximize/restore through
   the same geometry path as the green control, with drag/control exclusion.
 
