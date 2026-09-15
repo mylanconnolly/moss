@@ -1319,12 +1319,14 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "term: console up", 1, "the terminal never wired to a shell", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: ready", 1, "the terminal window never rendered", spec, polls)) return false;
+    if (!try waitLogN(log_path, "term: fonts frame=true grid=true", 1, "terminal frame or grid fell back to bitmap fonts", spec, polls)) return false;
     var q = qmpConnect(qmp_port) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
     defer q.close();
     sleepMs(600); // let msh print its banner + first prompt
+    _ = q.screendump(check_dir ++ "/terminal-font-title.ppm");
     // A real command first (exercises the read path).
     if (!q.typeText("df")) {
         reportFailure(spec.name, "QMP could not type into the terminal", log_path);
@@ -2576,6 +2578,19 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const term_close = parseDot(readLog(log_path), "close=") orelse return sfail(spec, log_path, "parse Terminal close dot");
     if (!clickScanout(&q, term_close[0], term_close[1])) return sfail(spec, log_path, "close exited Terminal");
     if (!try waitLogN(log_path, "term: window closed", 1, "exited Terminal stopped pumping window input", spec, polls)) return false;
+    sleepMs(500);
+    // A fresh process must initialize both font clients again, including the
+    // title atlas, rather than relying on another app having warmed fontsvc.
+    if (!clickScanout(&q, terminal[0], terminal[1])) return false;
+    if (!try waitLogN(log_path, "term: console up", 2, "Terminal did not reopen", spec, polls)) return false;
+    if (!try waitLogN(log_path, "term: fonts frame=true grid=true", 2, "reopened Terminal title fell back to bitmap", spec, polls)) return false;
+    sleepMs(250);
+    _ = q.screendump(check_dir ++ "/terminal-reopened-title.ppm");
+    if (!q.typeText("exit") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "dock: running terminal=false", 2, "reopened shell did not exit", spec, polls)) return false;
+    const reopened_close = parseDot(readLog(log_path), "close=") orelse return false;
+    if (!clickScanout(&q, reopened_close[0], reopened_close[1])) return false;
+    if (!try waitLogN(log_path, "term: window closed", 2, "reopened terminal did not close", spec, polls)) return false;
     sleepMs(500);
     // With Settings still open, launch Files too (its pill sits below the
     // Settings window, so it stays clickable): a second app must open
@@ -4568,6 +4583,7 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
     const terminal = parseDockItem(readLog(log_path), 3) orelse return false;
     if (!clickScanout(q, terminal[0], terminal[1])) return false;
     if (!try waitLogN(log_path, "term: grid", 1, "terminal did not open for output resize", spec, polls)) return false;
+    if (!try waitLogN(log_path, "term: fonts frame=true grid=true", 1, "session terminal title font was not initialized", spec, polls)) return false;
     const settings = parseDockItem(readLog(log_path), 0) orelse return false;
     if (!clickScanout(q, settings[0], settings[1])) return false;
     sleepMs(250);

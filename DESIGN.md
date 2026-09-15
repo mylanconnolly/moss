@@ -4441,6 +4441,15 @@ content hashes, Save As cancellation, preservation of the original on New,
 cancellation/discard, with normal quota/leak
 teardown checks.
 
+**Terminal title-font initialization (2026-09-15).** The windowed terminal
+registered its shared frame font client but initialized only its separate mono
+grid client. Consequently every fresh Terminal title used the bitmap fallback,
+even while shell text and other applications used system fonts. Startup now
+attaches the frame atlas and snapshots font metrics/appearance before drawing
+chrome and computing the grid origin. The two request buffers remain separate.
+The terminal and composed-desktop drills assert both clients are ready, and
+capture the rendered title; missing-font environments retain their fallback.
+
 **Rounded floating windows (2026-09-15).** Ordinary frames request the
 opt-in `gpu_rounded` surface shape: a bounded 12-pixel corner radius with
 integer subpixel coverage shared by frame borders and the compositor. The

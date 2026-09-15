@@ -988,6 +988,11 @@ fn repaintWin() void {
 fn windowedMain(log_h: u64, chan_h: u64) noreturn {
     windowed = true;
     wf.setup(disp, log_h, "", font_chan);
+    // The frame and grid are independent font clients. Registering the frame
+    // is not enough: attach its atlas/metrics before chrome establishes the
+    // title height used by the terminal grid.
+    wf.fontReady();
+    wf.refreshAppearance();
     wf.useOrdinaryChannel(); // a badged compositor channel, like any window
     wf.win_w = 760;
     wf.win_h = 520;
@@ -999,6 +1004,8 @@ fn windowedMain(log_h: u64, chan_h: u64) noreturn {
     pxw = wf.win_w;
     pxh = wf.win_h;
     fontReady(); // term's own mono font (the frame's title font is separate)
+    var font_log: [80]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&font_log, "term: fonts frame={} grid={}", .{ wf.fontOk(), font_ok }) catch "term: font status");
     // drawChrome sets title_h, which contentRect() (hence layoutGrid's grid
     // origin) depends on — so paint the titlebar BEFORE laying out the grid,
     // or the grid starts at y=0 and overwrites the titlebar.
