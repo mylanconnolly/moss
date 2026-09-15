@@ -7,6 +7,7 @@ const std = @import("std");
 pub const picker = @import("filepicker.zig");
 pub const apps = @import("apps.zig");
 pub const menus = @import("menus.zig");
+pub const windowshape = @import("windowshape.zig");
 
 pub const version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
 
@@ -786,6 +787,8 @@ pub const BlkResp = union(enum(u64)) {
 /// into a u64 (xy = x<<32 | y, wh = w<<32 | h) to fit the four-word ABI.
 /// `create_surface` flag: cascade this window off any it would fully cover.
 pub const gpu_place_cascade: u64 = 1;
+/// Mask surface corners with shared.windowshape geometry (12 pixel radius).
+pub const gpu_rounded: u64 = 8;
 /// Recreate resident chrome without taking keyboard focus from an app.
 pub const gpu_no_activate: u64 = 4;
 /// Receive kind-6 pointer events in scanout coordinates, including hover.
@@ -819,6 +822,7 @@ pub const GpuReq = union(enum(u64)) {
     /// it would land squarely on top of, returning the final origin in the
     /// reply's `xy` (movable app windows set it; menus/exact placements
     /// leave it 0). `gpu_pointer_tracking` opts into scanout pointer coordinates, hover, and capture.
+    /// `gpu_rounded` opts into rounded composition and matching pointer hit testing.
     /// Other bits reserved, pass 0.
     create_surface: struct { xy: u64, wh: u64, flags: u64 = 0 },
     /// A surface's damage rect changed (`xy`/`wh` in surface-local
@@ -2157,6 +2161,7 @@ pub const display = @import("display.zig");
 pub const gui = @import("gui.zig");
 test {
     _ = @import("gui.zig");
+    _ = windowshape;
 }
 
 test "wheel deltas retain sign and are never coalesced into pointer motion" {

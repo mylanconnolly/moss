@@ -122,6 +122,7 @@ const Surface = struct {
     z: u32 = 0, // stacking order; higher is nearer the top
     owner: u64 = 0, // the badge that created it; keys route to the owner alone
     trusted: bool = false, // the login surface: wears the secure indicator
+    rounded: bool = false,
     hidden: bool = false, // minimized: retained but not composited, not focusable
     title: [16]u8 = @splat(0), // the window title, so the dock can restore it by name
     title_len: u8 = 0,
@@ -582,11 +583,50 @@ fn fillRect(r: Rect, word: u32) void {
 /// chunks, so each row goes through fbWrite.
 fn blitRect(sf: *const Surface, r: Rect) void {
     const src: [*]const u8 = @ptrFromInt(sf.va);
+    const radius = if (sf.rounded) shared.windowshape.radius(sf.w, sf.h) else 0;
+    const left = r.x - sf.x;
+    const right = left + r.w;
     var y = r.y;
     while (y < r.y + r.h) : (y += 1) {
-        const src_off = (y - @as(usize, sf.y)) * @as(usize, sf.w) * fb_bpp + (r.x - @as(usize, sf.x)) * fb_bpp;
-        fbWrite(y * fb_stride + r.x * fb_bpp, src + src_off, r.w * fb_bpp);
+        const local_y = y - sf.y;
+        const row = local_y * @as(usize, sf.w) * fb_bpp;
+        if (radius == 0 or (local_y >= radius and local_y < sf.h - radius)) {
+            fbWrite(y * fb_stride + r.x * fb_bpp, src + row + left * fb_bpp, r.w * fb_bpp);
+            continue;
+        }
+        // Only the two small corner squares need coverage and blending.
+        // The opaque middle keeps the ordinary contiguous-row copy path.
+        const middle_left = @max(left, radius);
+        const middle_right = @min(right, sf.w - radius);
+        if (middle_left < middle_right) fbWrite(y * fb_stride + (sf.x + middle_left) * fb_bpp, src + row + middle_left * fb_bpp, (middle_right - middle_left) * fb_bpp);
+        var x = left;
+        while (x < right) {
+            if (x >= radius and x < sf.w - radius) {
+                x = @min(right, sf.w - radius);
+                continue;
+            }
+            const alpha = shared.windowshape.coverage(x, local_y, sf.w, sf.h, radius);
+            if (alpha != 0) {
+                const source = std.mem.readInt(u32, src[row + x * fb_bpp ..][0..4], .little);
+                const off = y * fb_stride + (sf.x + x) * fb_bpp;
+                var word = if (alpha == 255) source else shared.windowshape.blend(source, fbReadPixel(off), alpha);
+                fbWrite(off, @ptrCast(&word), fb_bpp);
+            }
+            x += 1;
+        }
     }
+}
+
+/// Pixel offsets and chunk boundaries are four-byte aligned, so a pixel
+/// cannot straddle the framebuffer's separately mapped backing chunks.
+fn fbReadPixel(off: usize) u32 {
+    for (0..n_chunks) |c| {
+        if (off >= fb_chunk_start[c] and off < fb_chunk_start[c] + fb_chunk_pages[c] * 4096) {
+            const p: *const [4]u8 = @ptrFromInt(fb_va[c] + off - fb_chunk_start[c]);
+            return std.mem.readInt(u32, p, .little);
+        }
+    }
+    unreachable; // callers only access an already clipped scanout rectangle
 }
 
 /// Fill `n` pixels of the framebuffer starting at byte offset `off` with
@@ -1076,6 +1116,7 @@ fn surfaceUnderCursor() u64 {
         if (!sf.used or sf.hidden) continue;
         if (cursor_x < sf.x or cursor_x >= sf.x + sf.w) continue;
         if (cursor_y < sf.y or cursor_y >= sf.y + sf.h) continue;
+        if (sf.rounded and shared.windowshape.coverage(cursor_x - sf.x, cursor_y - sf.y, sf.w, sf.h, shared.windowshape.radius(sf.w, sf.h)) == 0) continue;
         if (best_id == 0 or sf.z > best_z) {
             best_id = i + 1;
             best_z = sf.z;
@@ -1360,6 +1401,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 const cascade = q.flags & shared.gpu_place_cascade != 0 and !full;
                 if (createSurface(badge, px_x, px_y, w, h, cascade, q.flags & shared.gpu_no_activate == 0)) |cs| {
                     findSurface(cs.id).?.pointer_tracking = q.flags & shared.gpu_pointer_tracking != 0;
+                    findSurface(cs.id).?.rounded = q.flags & shared.gpu_rounded != 0;
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h), .xy = shared.packPair(cs.x, cs.y) } }, cs.shm, token);
                 } else {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0, token);

@@ -4441,6 +4441,16 @@ content hashes, Save As cancellation, preservation of the original on New,
 cancellation/discard, with normal quota/leak
 teardown checks.
 
+**Rounded floating windows (2026-09-15).** Ordinary frames request the
+opt-in `gpu_rounded` surface shape: a bounded 12-pixel corner radius with
+integer subpixel coverage shared by frame borders and the compositor. The
+compositor blends only corner pixels over the real underlying scene, preserving
+its row-copy fast path elsewhere. Pointer hit testing skips fully transparent
+corner pixels. Clients cannot read underlying pixels or acquire new authority.
+The frame paints matching border arcs after content, without adding padding;
+maximized/snapped windows and desktop bars remain rectangular. Document pickers
+use floating geometry independently of their parent window's zoom state.
+
 **Subtle window outlines (2026-09-15).** Shared window chrome paints a
 one-pixel neutral outline after application content, with a stronger edge for
 the active window and a quieter edge for inactive windows. Light/dark palettes

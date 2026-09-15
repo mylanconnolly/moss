@@ -1190,6 +1190,12 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!std.mem.eql(u32, &original, &restored)) return sfail(spec, log_path, "title restore lost original geometry");
     sleepMs(120);
     _ = q.screendump(check_dir ++ "/editor-flush-restored.ppm");
+    const rounded = readPpm(check_dir ++ "/editor-flush-restored.ppm") orelse return sfail(spec, log_path, "read rounded Editor screenshot");
+    const ground = pixelAt(rounded, original[0] - 1, original[1]);
+    for ([_][2]usize{ .{ original[0], original[1] }, .{ original[0] + original[2] - 1, original[1] }, .{ original[0], original[1] + original[3] - 1 }, .{ original[0] + original[2] - 1, original[1] + original[3] - 1 } }) |corner| {
+        if (!std.mem.eql(u8, &ground, &pixelAt(rounded, corner[0], corner[1]))) return sfail(spec, log_path, "rounded corner did not reveal desktop");
+    }
+    if (std.mem.eql(u8, &ground, &pixelAt(rounded, original[0] + original[2] / 2, original[1]))) return sfail(spec, log_path, "rounded frame lost its top border");
     // Cancel an initial Open before a document exists; the broker must return
     // focus and leave the new buffer usable.
     if (!q.chord("meta_l", "o")) return false;

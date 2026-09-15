@@ -758,6 +758,8 @@ pub fn attachTrusted() bool {
 /// wants exact placement, or the compositor could shift a snapped window
 /// off its edge.
 pub var pointer_tracking = false;
+/// Desktop bars opt out; maximized/snapped windows meet their work-area edges.
+pub var rounded = true;
 pub fn openSurface(cascade: bool) bool {
     return openSurfaceFocused(cascade, true);
 }
@@ -765,7 +767,7 @@ pub fn openSurface(cascade: bool) bool {
 pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
     menu_surface = 0;
     surface_visible = true;
-    const flags: u64 = (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate);
+    const flags: u64 = (if (rounded and !maximized) shared.gpu_rounded else @as(u64, 0)) | (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate);
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
         .ok => |ok| ok,
         .err => return false,
@@ -801,15 +803,32 @@ fn drawWindowBorder() void {
     if (measuring or surf == 0 or chrome_surface != surf) return;
     const bw = @min(pal.border_w, @min(win_w / 2, win_h / 2));
     const ink = if (win_focused) pal.window_border else pal.border;
-    // Frame pixels are surface-local and deliberately independent of the
-    // application's current clip/scroll transform. No content inset is added.
+    // Surface-local coordinates deliberately bypass content clip/scroll state.
+    const shape = shared.windowshape;
+    const radius = if (rounded and !maximized) shape.radius(win_w, win_h) else 0;
     for (0..bw) |i| {
-        @memset(px[i * win_w .. (i + 1) * win_w], ink);
-        @memset(px[(win_h - 1 - i) * win_w .. (win_h - i) * win_w], ink);
+        @memset(px[i * win_w + radius .. (i + 1) * win_w - radius], ink);
+        @memset(px[(win_h - 1 - i) * win_w + radius .. (win_h - i) * win_w - radius], ink);
     }
-    for (bw..win_h - bw) |y| {
+    for (radius..win_h - radius) |y| {
         @memset(px[y * win_w .. y * win_w + bw], ink);
         @memset(px[(y + 1) * win_w - bw .. (y + 1) * win_w], ink);
+    }
+    // The compositor anti-aliases the outer silhouette against the actual
+    // windows behind us. Paint a matching inner arc, never fake a desktop
+    // color into corner pixels. Repeated partial commits are idempotent.
+    for (0..radius) |y| {
+        for (0..radius) |x| {
+            const inner = if (x >= bw and y >= bw)
+                shape.coverage(x - bw, y - bw, win_w - 2 * bw, win_h - 2 * bw, radius -| bw)
+            else
+                0;
+            if (inner >= 128) continue;
+            px[y * win_w + x] = ink;
+            px[y * win_w + win_w - 1 - x] = ink;
+            px[(win_h - 1 - y) * win_w + x] = ink;
+            px[(win_h - 1 - y) * win_w + win_w - 1 - x] = ink;
+        }
     }
 }
 

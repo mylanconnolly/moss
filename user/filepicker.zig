@@ -316,6 +316,9 @@ fn draw(saving: bool) void {
     _ = wf.commitSurface();
 }
 fn choose(c: *Client, saving: bool, out: *[256]u8) ?[]const u8 {
+    const parent_maximized = wf.maximized;
+    wf.maximized = false;
+    defer wf.maximized = parent_maximized;
     dir_len = 0;
     edit = .{};
     focus = 0;

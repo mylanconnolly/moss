@@ -1529,6 +1529,9 @@ fn mkMenuEvent(it: *mshl.Interp, menu: []const u8, item: []const u8) mshl.Error!
 /// The resident top-bar loop (`gui { bar: true, ... }`): render the bar,
 /// tick the clock, open/close dropdowns, and fire the selected menu item.
 fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
+    const old_rounded = wf.rounded;
+    wf.rounded = false;
+    defer wf.rounded = old_rounded;
     var epoch: @import("guieval.zig").Epoch = .{};
     try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
     defer epoch.deinit();
@@ -1815,6 +1818,9 @@ fn mkDockEvent(it: *mshl.Interp, unit: []const u8, title: []const u8) mshl.Error
 /// otherwise (`launch $ev.unit` reaches init through this process's init
 /// front channel). `done: true` ends it.
 fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, dismissible: bool) mshl.Error!Value {
+    const old_rounded = wf.rounded;
+    wf.rounded = false;
+    defer wf.rounded = old_rounded;
     var epoch: @import("guieval.zig").Epoch = .{};
     try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
     defer epoch.deinit();
