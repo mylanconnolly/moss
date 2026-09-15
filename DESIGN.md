@@ -4441,6 +4441,16 @@ content hashes, Save As cancellation, preservation of the original on New,
 cancellation/discard, with normal quota/leak
 teardown checks.
 
+**Edge-aligned Editor and title-bar zoom (2026-09-15).** Editor's tab strip
+starts immediately below the title bar and spans the window width. The line
+number gutter/document viewport meets the strip and status bar without outer
+padding; text keeps its internal gutter spacing. Shared window chrome toggles
+maximize/restore on two title-bar clicks within 400 ms and four screen pixels.
+Dragging or clicking controls/content cancels the sequence; trusted windows
+retain inert zoom controls. Both the green control and double click use the
+same work-area geometry and saved floating bounds. QEMU checks isolated clicks,
+double-click maximize/restore, preserved geometry, and Editor input afterward.
+
 **Resident GUI lifetime, application discovery, and navigation (2026-09-12).**
 A disappearing dock was traced to `scripts/ddock.msh: out of memory` in the
 interactive kernel log; the top bar later failed the same way.

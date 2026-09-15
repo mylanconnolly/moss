@@ -209,6 +209,9 @@ fn publishMenu() void {
     if (tabs.items.len < 2) enabled &= ~(menu.bit(k.next_tab) | menu.bit(k.previous_tab));
     wf.setMenuProfile(.editor, enabled);
 }
+fn logFrame() void {
+    log("editor: frame x={d} y={d} w={d} h={d} title={d} maximized={}", .{ wf.win_x, wf.win_y, wf.win_w, wf.win_h, wf.title_h, wf.maximized });
+}
 fn render() void {
     publishMenu();
     wf.clipReset();
@@ -218,11 +221,11 @@ fn render() void {
     line_h = wf.lineOf(mono);
     const pad: usize = 16;
     const h = ui.height();
-    var y = wf.title_h + 12;
-    tab_rect = .{ .x = pad, .y = y, .w = wf.win_w -| pad * 2, .h = strip.height() };
+    var y = wf.title_h;
+    tab_rect = .{ .x = 0, .y = y, .w = wf.win_w, .h = strip.height() };
     for (tabs.items, tab_items.items) |tab, *item| item.* = .{ .label = tab.title(), .dirty = tab.ed.dirty() };
     strip.draw(tab_rect, tab_items.items, active_index, &tab_state);
-    y += tab_rect.h + 12;
+    y += tab_rect.h;
     const selected_document: ?*Document = if (active.doc) |*d| (if (d.name_len > 0) d else null) else null;
     // The tab already names the document. Only a parent path adds context.
     if (selected_document) |d| {
@@ -238,7 +241,7 @@ fn render() void {
         y += h + 10;
     }
     const status_h = wf.lineOf(wf.R_UI) + 20;
-    area = .{ .x = pad, .y = y, .w = wf.win_w -| pad * 2, .h = wf.win_h -| status_h -| y -| 12 };
+    area = .{ .x = 0, .y = y, .w = wf.win_w, .h = wf.win_h -| status_h -| y };
     var number: [24]u8 = undefined;
     const digits = std.fmt.bufPrint(&number, "{d}", .{active.ed.buffer.lineCount()}) catch "1";
     gutter = wf.strW(mono, digits) + 24;
@@ -747,6 +750,7 @@ fn pointer(ev: wf.Event) void {
             status("Not enough display memory to resize. Your edits are safe.");
         },
         .resized => {
+            logFrame();
             for (tabs.items) |tab| tab.needs_reveal = true;
         },
         else => {},
@@ -864,6 +868,7 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     if (!wf.openSurface(true)) usys.exit(1);
     wf.setSurfaceTitle("Editor");
     render();
+    logFrame();
     log("editor: ready", .{});
     while (running) {
         const ev = wf.nextInput() orelse break;

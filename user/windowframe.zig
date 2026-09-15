@@ -46,6 +46,7 @@ var role_px: [n_roles]u64 = @splat(0);
 /// Registers with fontsvc for a badged request buffer so several text
 /// clients on one service do not trample a single shared slot.
 pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64) void {
+    title_click = null;
     display = display_cap;
     log_h = log;
     font_chan = font_cap;
@@ -118,6 +119,13 @@ var saved_h: usize = 0;
 pub var dragging = false;
 var drag_grab_x: usize = 0;
 var drag_grab_y: usize = 0;
+var drag_start_x: usize = 0;
+var drag_start_y: usize = 0;
+var drag_moved = false;
+var title_click: ?struct { at: u64, x: usize, y: usize, surface: u64 } = null;
+fn distance(a: usize, b: usize) usize {
+    return @max(a, b) - @min(a, b);
+}
 pub var ptr_down = false; // previous pointer button state (edge detection)
 pub var pending_dot: ?usize = null; // a traffic-light pressed, awaiting release
 
@@ -1001,6 +1009,7 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
     if (press) {
         if (ev.y < title_h) {
             if (hitDot(ev.x, ev.y)) |d| {
+                title_click = null;
                 // A login greeter's controls are inert: swallow the press so
                 // it neither fires the dot nor drags.
                 if (!win_trusted) pending_dot = d; // fire on release if still on it
@@ -1008,12 +1017,22 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
                 dragging = true; // grab the titlebar to move
                 drag_grab_x = ev.x;
                 drag_grab_y = ev.y;
+                drag_start_x = ev.screen_x orelse (win_x + ev.x);
+                drag_start_y = ev.screen_y orelse (win_y + ev.y);
+                drag_moved = false;
             }
             return .none;
         }
+        title_click = null;
         return .{ .content = ev };
     }
     if (down and dragging) {
+        const cx = ev.screen_x orelse (win_x + ev.x);
+        const cy = ev.screen_y orelse (win_y + ev.y);
+        if (distance(cx, drag_start_x) > 4 or distance(cy, drag_start_y) > 4) {
+            drag_moved = true;
+            title_click = null;
+        }
         const nx = if (ev.screen_x) |sx| @min(sx -| drag_grab_x, scanout_w -| win_w) else dragOrigin(win_x, ev.x, drag_grab_x, scanout_w -| win_w);
         const ny = if (ev.screen_y) |sy| @min(sy -| drag_grab_y, scanout_h -| win_h) else dragOrigin(win_y, ev.y, drag_grab_y, scanout_h -| win_h);
         if (nx != win_x or ny != win_y) {
@@ -1032,6 +1051,18 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
             // cursor even when clamped).
             const cx = @min(ev.screen_x orelse (win_x + ev.x), scanout_w);
             const cy = @min(ev.screen_y orelse (win_y + ev.y), scanout_h);
+            if (!drag_moved and distance(cx, drag_start_x) <= 4 and distance(cy, drag_start_y) <= 4 and ev.y < title_h and hitDot(ev.x, ev.y) == null and !win_trusted) {
+                const now = usys.cycles();
+                if (title_click) |last| {
+                    if (last.surface == surf and now -| last.at <= usys.cycleHz() * 400 / 1000 and distance(cx, last.x) <= 4 and distance(cy, last.y) <= 4) {
+                        title_click = null;
+                        return toggleMaximize(title);
+                    }
+                }
+                title_click = .{ .at = now, .x = cx, .y = cy, .surface = surf };
+                return .none;
+            }
+            title_click = null;
             const zone = snapZoneAt(cx, cy);
             if (zone != .none and !win_trusted) {
                 // Remember the floating geometry to restore (the green dot
@@ -1062,36 +1093,37 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
                         setSurfaceVisible(false);
                         return .minimized;
                     },
-                    else => { // green: maximize / restore (toggle)
-                        if (maximized) {
-                            win_x = saved_x;
-                            win_y = saved_y;
-                            win_w = saved_w;
-                            win_h = saved_h;
-                            maximized = false;
-                            if (!recreate(title)) return .resize_failed;
-                            return .{ .resized = .none }; // .none = restored
-                        } else {
-                            saved_x = win_x;
-                            saved_y = win_y;
-                            saved_w = win_w;
-                            saved_h = win_h;
-                            const wa = workArea();
-                            win_x = wa.x;
-                            win_y = wa.y;
-                            win_w = wa.w;
-                            win_h = wa.h;
-                            maximized = true;
-                            if (!recreate(title)) return .resize_failed;
-                            return .{ .resized = .max };
-                        }
-                    },
+                    else => return toggleMaximize(title),
                 }
             }
             return .none;
         }
     }
     return .none;
+}
+
+/// Shared by the green control and a title-bar double click.
+fn toggleMaximize(title: []const u8) Ptr {
+    if (maximized) {
+        win_x = saved_x;
+        win_y = saved_y;
+        win_w = saved_w;
+        win_h = saved_h;
+        maximized = false;
+    } else {
+        saved_x = win_x;
+        saved_y = win_y;
+        saved_w = win_w;
+        saved_h = win_h;
+        const wa = workArea();
+        win_x = wa.x;
+        win_y = wa.y;
+        win_w = wa.w;
+        win_h = wa.h;
+        maximized = true;
+    }
+    if (!recreate(title)) return .resize_failed;
+    return .{ .resized = if (maximized) .max else .none };
 }
 
 /// A resize is a destroy + recreate of the fixed-size surface at the new
@@ -1177,6 +1209,7 @@ pub fn refreshOutput() bool {
 /// visibility. Existing content remains the application's responsibility.
 pub fn outputChanged(ev: Event, title: []const u8, hidden: bool) bool {
     _ = refreshOutput();
+    title_click = null;
     dragging = false;
     ptr_down = false;
     pending_dot = null;

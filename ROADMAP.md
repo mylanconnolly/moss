@@ -1496,6 +1496,11 @@ applications need menus beyond those profiles.
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
 
+- ✅ **Editor edge alignment and shared title-bar zoom** (2026-09-15):
+  tabs and document viewport meet window edges without outer gutters;
+  double-clicking ordinary title bars toggles work-area maximize/restore through
+  the same geometry path as the green control, with drag/control exclusion.
+
 - ✅ **Persistent desktop, app discovery, and navigation** (2026-09-12):
   fixed dock exhaustion by reclaiming GUI evaluation epochs while retaining
   state, callbacks and handles; 10,000-refresh tests use the real script memory

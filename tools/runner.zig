@@ -1164,6 +1164,32 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "editor: ready", 1, "the editor never rendered", spec, polls)) return false;
     var q = qmpConnect(qmp_port) catch return sfail(spec, log_path, "connect editor QMP");
     defer q.close();
+    const Frame = struct {
+        fn read(path: []const u8) ?[5]u32 {
+            const content = readLog(path);
+            const at = std.mem.lastIndexOf(u8, content, "editor: frame ") orelse return null;
+            const line = content[at..];
+            return .{ parseAfter(line, "x=") orelse return null, parseAfter(line, "y=") orelse return null, parseAfter(line, "w=") orelse return null, parseAfter(line, "h=") orelse return null, parseAfter(line, "title=") orelse return null };
+        }
+    };
+    const original = Frame.read(log_path) orelse return false;
+    const tx = original[0] + original[2] / 2;
+    const ty = original[1] + original[4] / 2;
+    if (!clickScanout(&q, tx, ty)) return false;
+    sleepMs(500); // Isolated title clicks must not zoom.
+    if (countOccurrences(readLog(log_path), "editor: frame ") != 1) return sfail(spec, log_path, "single title click maximized Editor");
+    if (!clickScanout(&q, tx, ty) or !clickScanout(&q, tx, ty)) return false;
+    if (!try waitLogN(log_path, "maximized=true", 1, "title double click did not maximize Editor", spec, polls)) return false;
+    sleepMs(120);
+    const expanded = Frame.read(log_path) orelse return false;
+    if (expanded[0] != 0 or expanded[2] != 1280 or expanded[3] <= original[3]) return sfail(spec, log_path, "title maximize did not fill work area");
+    _ = q.screendump(check_dir ++ "/editor-flush-maximized.ppm");
+    if (!clickScanout(&q, expanded[2] / 2, expanded[1] + expanded[4] / 2) or !clickScanout(&q, expanded[2] / 2, expanded[1] + expanded[4] / 2)) return false;
+    if (!try waitLogN(log_path, "maximized=false", 2, "title double click did not restore Editor", spec, polls)) return false;
+    const restored = Frame.read(log_path) orelse return false;
+    if (!std.mem.eql(u32, &original, &restored)) return sfail(spec, log_path, "title restore lost original geometry");
+    sleepMs(120);
+    _ = q.screendump(check_dir ++ "/editor-flush-restored.ppm");
     // Cancel an initial Open before a document exists; the broker must return
     // focus and leave the new buffer usable.
     if (!q.chord("meta_l", "o")) return false;
