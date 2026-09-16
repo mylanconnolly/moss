@@ -706,7 +706,11 @@ pub const CapTag = enum(u64) {
     /// selection made in one app can be pasted into another — the same
     /// service-behind-a-cap shape as the font and locale services.
     clip = 28,
-    /// Seat output-control endpoint; never handed to ordinary applications.
+    /// The seat's output-control endpoint: display modes, menus, struts.
+    /// One badge per compositor, handed by the session to its desktop
+    /// chrome (bar, dock, Settings) — every user's session gets one, so it
+    /// is not an admin authority; it is not given to ordinary applications,
+    /// and the compositor refuses surface and reader operations on it.
     display_control = 29,
     /// User-mediated selected-document broker; confers no ambient filesystem view.
     picker = 30,

@@ -1340,6 +1340,20 @@ fn serveSurfaces(chan_h: u64) noreturn {
             _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 1 } }, 0, token);
             continue;
         };
+        // The seat's control endpoint (one badge, held by the bar, the dock
+        // and Settings alike) is call/reply only: it may never own a
+        // surface or park a reader, because per-client state is keyed by
+        // badge and a second holder's parked read would overwrite the
+        // first's token — the shared-buffer race, by another name.
+        const surface_op = switch (req) {
+            .create_surface, .next_input, .next_input_tick, .register, .attach_trusted => true,
+            else => false,
+        };
+        if (surface_op and badge == control_badge) {
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
+            _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 24 } }, 0, token);
+            continue;
+        }
         switch (req) {
             .output_info => {
                 const now = usys.cycles();

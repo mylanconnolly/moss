@@ -76,6 +76,9 @@ fn snapshot() u64 {
 /// Real IPC authorization/lifecycle checks, before the pixel-compositing scene.
 fn menuProbe(control: u64, log_h: u64) void {
     demand(control != 0);
+    // The control endpoint is call/reply only: no surface, no parked read.
+    demand(call(control, .{ .create_surface = .{ .xy = shared.packPair(10, 10), .wh = shared.packPair(64, 64) } }) == .gpu_err);
+    demand(call(control, .next_input) == .gpu_err);
     const a = probeSurface();
     title(a, "Menu Probe");
     const close_key = shared.keyboard.close_window;

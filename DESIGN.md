@@ -3550,6 +3550,21 @@ derived in four places, none of them is the source of truth; find who
 actually owns the fact and have everyone ask — and expect one ordering
 race the old lockstep hid.
 
+**Two small decisions from the review (2026-09-16).** The seat's
+output-control endpoint is one badge held by the bar, the dock and
+Settings alike, and the compositor keys per-client state by badge, so
+nothing stopped a second holder from parking a `next_input` on it and
+overwriting the first's token — the shared-buffer race by another name.
+The compositor now refuses surface and reader operations on the control
+badge (the comp drill probes it), and the ABI comment says what the
+endpoint is: per-session chrome authority, not an admin one. And the
+kernel owns its largest-shared-buffer bound again: `shm_max_pages` had
+become `shared.display.max_pages`, so a display catalog entry sized a
+static kernel table (64 entries, ~1.15 MB) with no diff to the kernel;
+it is a kernel constant with a compile-time assert against the catalog,
+and a domain that runs out of mapping windows logs it — the class of
+silent limit that has cost days before.
+
 *Found the same afternoon, by hand:* a terminal maximized after a live
 switch to 1920×1200 wore a title bar 1280 wide over a 1920-wide black
 grid. The title was centred at 960, so the frame knew its width; only
