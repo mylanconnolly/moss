@@ -924,6 +924,10 @@ pub const GpuReq = union(enum(u64)) {
     /// The work area between the struts: what a maximized or snapped
     /// window fills and where a new window is centred. -> `work`.
     work_area: void,
+    /// The monitor's identity (EDID maker-product-serial, or the virtual
+    /// seat's size when there is no EDID), so a resolution preference can
+    /// be kept per monitor. -> `monitor`.
+    output_monitor: void,
 };
 pub const GpuResp = union(enum(u64)) {
     menu: struct { token: u64, profile: u64, enabled: u64 },
@@ -963,6 +967,8 @@ pub const GpuResp = union(enum(u64)) {
     gpu_err: struct { code: u64 },
     /// The work area (work_area): xy and wh via packPair.
     work: struct { xy: u64, wh: u64 },
+    /// The monitor id (output_monitor), a string in three words (strToWords).
+    monitor: struct { a: u64, b: u64, c: u64 },
 };
 
 /// The system font service (fontsvc). A client attaches a request/response

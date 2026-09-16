@@ -21,6 +21,7 @@
 const std = @import("std");
 const shared = @import("shared");
 const ui = @import("mosslib").ui;
+const edid = @import("mosslib").edid;
 const usys = @import("usys.zig");
 const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
@@ -76,6 +77,9 @@ const q_num = 16;
 
 // virtio-gpu control commands (§5.7.6.7) and responses.
 const cmd_get_display_info = 0x0100;
+const cmd_get_edid = 0x010a;
+const resp_ok_edid = 0x1104;
+const f_edid: u32 = 1 << 1; // VIRTIO_GPU_F_EDID
 const cmd_resource_create_2d = 0x0101;
 const cmd_set_scanout = 0x0103;
 const cmd_resource_flush = 0x0104;
@@ -233,6 +237,12 @@ fn rect(off: usize, x: u32, y: u32, w: u32, h: u32) void {
 fn cmdDisplayInfo() usize {
     hdr(cmd_get_display_info);
     return 24;
+}
+fn cmdGetEdid() usize {
+    hdr(cmd_get_edid);
+    wr32(24, 0); // scanout 0
+    wr32(28, 0); // padding
+    return 32;
 }
 fn cmdCreate2d() usize {
     hdr(cmd_resource_create_2d);
@@ -1386,6 +1396,9 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 }
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 23 } }, 0, token);
             },
+            .output_monitor => {
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .monitor = .{ .a = monitor_id[0], .b = monitor_id[1], .c = monitor_id[2] } }, 0, token);
+            },
             .work_area => {
                 const wa = workArea();
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .work = .{ .xy = shared.packPair(wa.x, wa.y), .wh = shared.packPair(wa.w, wa.h) } }, 0, token);
@@ -1742,7 +1755,7 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
         remaining -= pages;
     }
 
-    _ = dev.negotiate(0, 0) orelse usys.exit(176);
+    const features = dev.negotiate(f_edid, 0) orelse usys.exit(176);
     if (!dev.queueSetup(q_ctl, q_num, vq_dev, vq_dev + 512, vq_dev + 1024)) usys.exit(177);
     dev.driverOk();
 
@@ -1753,7 +1766,36 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
     const host_w = @as(*volatile u32, @ptrFromInt(resp_va + 32)).*;
     const host_h = @as(*volatile u32, @ptrFromInt(resp_va + 36)).*;
     preferred_mode = .{ .w = host_w, .h = host_h };
-    if (shared.display.valid(host_w, host_h)) {
+    // The monitor: its EDID names it (maker, product, serial) and carries
+    // its native mode, the highest a fixed-pixel panel shows — the boot
+    // mode, and the key a resolution preference is kept under. QEMU's
+    // virtio-gpu synthesizes an EDID for the host window, so the virtual
+    // seat and real hardware take one path; without one, the seat is
+    // known by its size.
+    if (features.lo & f_edid != 0 and submitCmd(cmdGetEdid(), 24 + 8 + 1024) == resp_ok_edid) {
+        const size = @as(*volatile u32, @ptrFromInt(resp_va + 24)).*;
+        const raw: [*]const u8 = @ptrFromInt(resp_va + 32);
+        var copy: [1024]u8 = undefined;
+        const edid_len = @min(size, copy.len);
+        for (0..edid_len) |i| copy[i] = raw[i];
+        if (edid.parse(copy[0..edid_len])) |info| {
+            monitor_id = shared.strToWords(info.idSlice());
+            if (info.preferred) |native| preferred_mode = .{ .w = native.w, .h = native.h };
+            var l: [96]u8 = undefined;
+            _ = usys.log(log_h, std.fmt.bufPrint(&l, "gpu: monitor {s} \"{s}\" native {d}x{d}", .{ info.idSlice(), info.nameSlice(), preferred_mode.w, preferred_mode.h }) catch "gpu: monitor");
+        }
+    }
+    if (monitor_id[0] == 0) {
+        var idbuf: [24]u8 = undefined;
+        monitor_id = shared.strToWords(std.fmt.bufPrint(&idbuf, "seat-{d}x{d}", .{ host_w, host_h }) catch "seat");
+        var l: [64]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&l, "gpu: monitor seat-{d}x{d} (no EDID)", .{ host_w, host_h }) catch "gpu: monitor");
+    }
+    if (shared.display.valid(preferred_mode.w, preferred_mode.h)) {
+        fb_w = preferred_mode.w;
+        fb_h = preferred_mode.h;
+        fb_stride = @as(usize, fb_w) * 4;
+    } else if (shared.display.valid(host_w, host_h)) {
         fb_w = host_w;
         fb_h = host_h;
         fb_stride = @as(usize, host_w) * 4;
@@ -1796,6 +1838,7 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
 }
 
 var preferred_mode: shared.display.Mode = .{ .w = 1280, .h = 1024 };
+var monitor_id: [3]u64 = .{ 0, 0, 0 };
 var previous_mode: shared.display.Mode = .{ .w = 1280, .h = 1024 };
 var preview_deadline: u64 = 0;
 fn unrefResource(id: u32) void {

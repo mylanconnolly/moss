@@ -4918,7 +4918,10 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
             ready = countOccurrences(readLog(log_path), "gui: ready");
             // Only start Settings when the home file holds the CONFIRMED
             // mode, not the abandoned 1024x768 preview.
-            if (!q.typeText("if (((cat \"conf/display.msh\")? | from-data | get \"mode\") == \"1920x1080\") { start settings }") or !q.sendKey("ret")) return false;
+            const monitor = monitorId(readLog(log_path)) orelse return sfail(spec, log_path, "monitor identity in the log");
+            var cmd: [160]u8 = undefined;
+            const check = std.fmt.bufPrint(&cmd, "if (((cat \"conf/display-{s}.msh\")? | from-data | get \"mode\") == \"1920x1080\") {{ start settings }}", .{monitor}) catch return false;
+            if (!q.typeText(check) or !q.sendKey("ret")) return false;
             if (!try waitLogN(log_path, "gui: ready", ready + 1, "confirmed resolution was not persisted", spec, polls)) return false;
             sleepMs(250);
             const button = widgetCenter(readLog(log_path), "display") orelse return false;
@@ -4941,6 +4944,15 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
     sleepMs(300);
     return true;
 }
+/// The monitor's identity as the compositor logged it at boot
+/// ("gpu: monitor <id> ..."), the key a resolution preference is kept under.
+fn monitorId(content: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, content, "gpu: monitor ") orelse return null;
+    const rest = content[at + "gpu: monitor ".len ..];
+    const end = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    return rest[0..end];
+}
+
 /// The terminal's traffic-light dots: it logs them just before each
 /// "term: grid" line, so the pair before the last grid line is its own
 /// (other windows log "gui: dots" too).

@@ -51,7 +51,8 @@ def display-settings [] {
             { kind: "column", gap: 16, children: [
                 { kind: "label", role: "title", text: "Display resolution" }
                 { kind: "label", wrap: true, muted: true, text: ("Current: " + $info.mode) }
-                { kind: "label", wrap: true, muted: true, text: ("Recommended: " + (str $info.preferred_width) + " × " + (str $info.preferred_height)) }
+                { kind: "label", wrap: true, muted: true, text: ("Native: " + (str $info.preferred_width) + " × " + (str $info.preferred_height)) }
+                { kind: "label", wrap: true, muted: true, text: ("Monitor: " + $info.monitor) }
                 { kind: "list", id: "resolution", key: "modes", h: 220, rows: (display-modes), active: ($state.choice != "") }
                 { kind: "label", wrap: true, muted: true, text: $message }
                 { kind: "row", children: [
@@ -93,8 +94,9 @@ def display-settings [] {
             update: (fn [state, ev] { match $ev.id { "keep" => { { keep: true, done: true } }; "revert" => { { keep: false, done: true } }; _ => $state } })
           })
         if ($decision.keep and (display-confirm)) {
-          match (save "conf/display.msh" (to-data { mode: $choice })) {
-            ok _ => { let message = "Resolution saved for your next session." }
+          # Kept per monitor: another monitor keeps its own choice.
+          match (save ("conf/display-" + $info.monitor + ".msh") (to-data { mode: $choice })) {
+            ok _ => { let message = "Resolution saved for this monitor." }
             _ => { let message = "Resolution applied, but could not save your preference." }
           }
         } else {

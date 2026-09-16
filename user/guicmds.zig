@@ -1415,7 +1415,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             },
             .err => return it.fail("display: output information unavailable", .{}),
         };
-        return try mshl.toValue(it.arena, .{ .mode = try std.fmt.allocPrint(it.arena, "{d}x{d}", .{ shared.unpackHi(out.wh), shared.unpackLo(out.wh) }), .width = shared.unpackHi(out.wh), .height = shared.unpackLo(out.wh), .preferred_width = shared.unpackHi(out.preferred), .preferred_height = shared.unpackLo(out.preferred), .seconds = out.seconds, .can_change = output_control != 0 });
+        var idbuf: [24]u8 = undefined;
+        const monitor: []const u8 = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .output_monitor, 0)) {
+            .ok => |r| switch (r) {
+                .monitor => |m| try it.arena.dupe(u8, shared.wordsToStr(&idbuf, .{ m.a, m.b, m.c })),
+                else => "",
+            },
+            .err => "",
+        };
+        return try mshl.toValue(it.arena, .{ .mode = try std.fmt.allocPrint(it.arena, "{d}x{d}", .{ shared.unpackHi(out.wh), shared.unpackLo(out.wh) }), .width = shared.unpackHi(out.wh), .height = shared.unpackLo(out.wh), .preferred_width = shared.unpackHi(out.preferred), .preferred_height = shared.unpackLo(out.preferred), .seconds = out.seconds, .can_change = output_control != 0, .monitor = monitor });
     }
     if (std.mem.eql(u8, name, "display-modes")) {
         var rows: std.ArrayList(Value) = .empty;

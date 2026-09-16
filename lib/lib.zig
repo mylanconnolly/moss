@@ -4,6 +4,7 @@
 //! matters, a capability service holds the secret instead.
 
 pub const editor = @import("editor.zig");
+pub const edid = @import("edid.zig");
 pub const ui = @import("ui.zig");
 pub const brotli = @import("brotli.zig");
 pub const dns = @import("dns.zig");
@@ -25,6 +26,7 @@ pub const xts = @import("xts.zig");
 
 test {
     _ = editor;
+    _ = edid;
     _ = ui;
     _ = brotli;
     _ = dns;

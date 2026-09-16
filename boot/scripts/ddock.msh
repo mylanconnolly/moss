@@ -13,17 +13,25 @@
 # up and clears on its own when the app exits (init reports a dead unit as
 # down). No teardown signal has to reach the dock; a click re-renders at
 # once, so a launch lights its dot without waiting for the tick.
-# Restore only a previously confirmed preference. Unsupported modes leave
-# the driver's boot mode intact; unconfirmed previews are never persisted.
-match (cat "conf/display.msh") {
-  ok $text => {
-    match (try { from-data $text | get "mode" }) {
-      ok $mode => { if (display-preview $mode) { display-confirm } }
-      _ => null
+# Restore only a previously confirmed preference, kept per monitor
+# (`conf/display-<monitor>.msh`; the pre-2026-09-16 `conf/display.msh` still
+# applies when no per-monitor file exists). Unsupported modes leave the
+# driver's boot mode — the monitor's native resolution — intact;
+# unconfirmed previews are never persisted.
+def restore-display [path] {
+  match (cat $path) {
+    ok $text => {
+      match (try { from-data $text | get "mode" }) {
+        ok $mode => { if (display-preview $mode) { display-confirm }; true }
+        _ => false
+      }
     }
+    _ => false
   }
-  _ => null
 }
+let monitor = (display-info | get "monitor")
+let restored = (restore-display ("conf/display-" + $monitor + ".msh"))
+if (not $restored) { let restored = (restore-display "conf/display.msh") }
 let final = (gui {
     dock: true
     tick: 1000

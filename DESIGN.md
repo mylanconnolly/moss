@@ -2396,8 +2396,33 @@ This is a backend catalog, not a Settings-owned resolution menu. A physical
 GPU driver will need EDID/timing enumeration and hardware validation behind
 this interface; EDID parsing, refresh-rate selection, hotplug and multiple
 outputs are not implemented yet. The current maximum is a Moss backing and
-mapping budget, not a QEMU monitor limit. Boot and regression QEMU arguments
-advertise 1280×1024 to keep the default desktop and pixel drills stable.
+mapping budget, not a QEMU monitor limit. The regression QEMU arguments
+advertise 1280×1024 to keep the pixel drills stable.
+
+**The monitor's own word (2026-09-16).** The desktop booted at whatever
+size the host window happened to be and remembered one resolution per
+user, whichever monitor was attached; the user wanted the highest
+resolution on boot and a preference that survives a change of monitor.
+Both are what EDID is for. gpusvc negotiates `VIRTIO_GPU_F_EDID` and
+reads the base block (`lib/edid.zig`, pure and host-tested): the maker's
+three letters, product code and serial become the monitor's identity
+(`RHT-1234-00000000` is QEMU's), the name descriptor its label, and the
+first detailed timing its native mode — for a fixed-pixel panel, the
+highest it shows. The native mode is the boot mode (the host geometry
+stays the fallback for a seat without EDID, known as `seat-WxH`), and
+`GpuReq.output_monitor` publishes the identity, which `display-info`
+carries to scripts. The preference lives in the user's home as
+`conf/display-<monitor>.msh`: Settings saves under the monitor it is
+looking at, the dock restores the file for the monitor it finds and
+falls back to the old `conf/display.msh` once. QEMU synthesizes an
+EDID whose native mode is the window's configured size, so the virtual
+seat and real hardware take one path — and `run-gui` now asks for a
+1920×1200 window, which is why the desktop comes up at the Mac's
+highest mode without a visit to Settings. A real GPU driver will
+validate its timings behind the same boundary; that, refresh rates,
+hotplug and multiple outputs remain. *Found on the way:* a longer
+Displays label wrapped and shifted the resolution list under the
+drill's clicks; the monitor got its own line.
 
 Width, height and stride are runtime state. The driver reserves bounded DMA
 backing for its maximum mode, alternates host resource IDs, attaches and

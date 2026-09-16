@@ -575,9 +575,11 @@ applications need menus beyond those profiles.
     delegated endpoint, not an implication of drawing authority. The virtio
     backend starts with bounded virtual modes and host-preferred geometry;
     real GPU timing/EDID discovery will populate this same service boundary.
-    **Open follow-ons:** physical-monitor EDID and timing validation, refresh
-    rates, hotplug/multiple outputs, and larger modes after growing the DMA
-    mapping/backing budget beyond the current 1920×1200 ceiling.
+    EDID identity and native-mode boot landed 2026-09-16 (`lib/edid.zig`;
+    preferences per monitor). **Open follow-ons:** physical-monitor timing
+    validation, refresh rates, hotplug/multiple outputs, and larger modes
+    after growing the DMA mapping/backing budget beyond the current
+    1920×1200 ceiling.
   - **Invariants (locked 2026-09-07, from the vision):**
     1. *Let it crash (BEAM sensibility).* gpusvc, inputsvc, and the GUI
        framework are ordinary supervised crash-only services — a GPU
@@ -1501,6 +1503,13 @@ applications need menus beyond those profiles.
   pointer mapping and resident bars. Output control uses a separate boot
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
+- ✅ **The monitor's own word** (2026-09-16): gpusvc reads the virtio-gpu
+  EDID (`lib/edid.zig`): identity (maker-product-serial), name, native mode.
+  The native mode is the boot mode; `output_monitor` publishes the identity;
+  the resolution preference is kept per monitor (`conf/display-<id>.msh`,
+  Settings saves, the dock restores, the old file is the fallback). run-gui
+  asks for a 1920×1200 window, so the Mac desktop boots at its highest.
+  Found: a wrapped Displays label shifted the list under the drill's clicks.
 
 - ✅ **Editor edge alignment and shared title-bar zoom** (2026-09-15):
   tabs and document viewport meet window edges without outer gutters;
