@@ -35,7 +35,7 @@ const workcmds = @import("workcmds.zig");
 const fabcmds = @import("fabcmds.zig");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
-const Value = mshl.Value;
+pub const Value = mshl.Value;
 const wf = @import("windowframe.zig");
 const widgets = @import("widgets.zig");
 
@@ -46,25 +46,25 @@ const widgets = @import("widgets.zig");
 // loops that route input through the frame. These aliases let the widget
 // code read as it did before the split (the frame owns the module state
 // behind them, so a redraw of the popup surface, say, is `wf.px = ...`).
-const pal = &wf.pal;
-const fillAll = wf.fillAll;
-const fillRect = wf.fillRect;
-const fillRoundRect = wf.fillRoundRect;
-const fillDot = wf.fillDot;
-const panel = wf.panel;
+pub const pal = &wf.pal;
+pub const fillAll = wf.fillAll;
+pub const fillRect = wf.fillRect;
+pub const fillRoundRect = wf.fillRoundRect;
+pub const fillDot = wf.fillDot;
+pub const panel = wf.panel;
 const shade = wf.shade;
-const drawStr = wf.drawStr;
-const drawStrTrunc = wf.drawStrTrunc;
-const strW = wf.strW;
-const lineOf = wf.lineOf;
+pub const drawStr = wf.drawStr;
+pub const drawStrTrunc = wf.drawStrTrunc;
+pub const strW = wf.strW;
+pub const lineOf = wf.lineOf;
 const clipReset = wf.clipReset;
-const R_UI = wf.R_UI;
+pub const R_UI = wf.R_UI;
 const R_TITLE = wf.R_TITLE;
 const win_w_default = wf.win_w_default;
 const win_h_min = wf.win_h_min;
-const item_vpad = 8; // a dock/menu item's vertical padding
-const dock_vpad = 8; // the dock's outer vertical padding
-fn dockHeight() usize {
+pub const item_vpad = 8; // a dock/menu item's vertical padding
+pub const dock_vpad = 8; // the dock's outer vertical padding
+pub fn dockHeight() usize {
     return lineOf(R_UI) + 2 * item_vpad + 2 * dock_vpad + pal.border_w;
 }
 /// The work area once the desktop chrome has caught up with a scale
@@ -73,7 +73,7 @@ fn dockHeight() usize {
 /// against the old ones. They are this same runtime, so their heights
 /// are known here: wait briefly for the compositor's answer to match.
 fn settledWorkArea() wf.Geom {
-    const bar_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
+    const bar_h = lineOf(R_UI) + 2 * guibar.bar_vpad + pal.border_w;
     var wa = wf.workArea();
     var tries: usize = 0;
     while (tries < 8) : (tries += 1) {
@@ -87,13 +87,13 @@ fn settledWorkArea() wf.Geom {
 }
 /// Tell the compositor the edge this chrome reserves, so every window's
 /// work area (maximize, snap, centring) follows the real bar and dock.
-fn declareStrut(edge: u64, size: usize) void {
+pub fn declareStrut(edge: u64, size: usize) void {
     if (output_control == 0 or wf.surf == 0) return;
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .{ .set_strut = .{ .surface = wf.surf, .edge = edge, .size = size } }, 0);
 }
 
 pub var output_control: u64 = 0;
-var log_h: u64 = 0; // for the run loops' `gui:`/`topbar:`/`dock:` logging
+pub var log_h: u64 = 0; // for the run loops' `gui:`/`topbar:`/`dock:` logging
 
 // Crash-isolation of `update` (opt-in `gui { isolate: true }`): the app's
 // `update` runs in a worker domain, so a fault or panic in it kills only
@@ -454,7 +454,7 @@ const key_right: u8 = shared.keyboard.right;
 /// Render one view tree. Fills the window, draws the title and each child
 /// of the (single, column) layout, highlighting the focused button, and
 /// returns the focusable widgets' ids in order (into `ids_buf`).
-fn strField(rec: mshl.Record, key: []const u8) []const u8 {
+pub fn strField(rec: mshl.Record, key: []const u8) []const u8 {
     return if (rec.get(key)) |v| (if (v == .str) v.str else "") else "";
 }
 
@@ -717,11 +717,11 @@ fn hasIcon(rec: mshl.Record) bool {
 fn iconOnly(rec: mshl.Record) bool {
     return hasIcon(rec) and (if (rec.get("icon_only")) |v| v.asBool() else false);
 }
-fn iconLabelWidth(rec: mshl.Record, field: []const u8) usize {
+pub fn iconLabelWidth(rec: mshl.Record, field: []const u8) usize {
     const text = if (iconOnly(rec)) "" else strField(rec, field);
     return strW(R_UI, text) + (if (hasIcon(rec)) wf.iconSize() + (if (text.len > 0) @as(usize, 8) else 0) else 0);
 }
-fn drawIconLabel(rec: mshl.Record, field: []const u8, x: usize, y: usize, w: usize, h: usize, ink: u32, bg: u32) void {
+pub fn drawIconLabel(rec: mshl.Record, field: []const u8, x: usize, y: usize, w: usize, h: usize, ink: u32, bg: u32) void {
     const size = wf.iconSize();
     const text = if (iconOnly(rec)) "" else strField(rec, field);
     const inset = if (hasIcon(rec)) size + (if (text.len > 0) @as(usize, 8) else 0) else 0;
@@ -1251,694 +1251,17 @@ fn mkListEvent(it: *mshl.Interp, id: []const u8, row: []const u8, activated: boo
     return .{ .record = .{ .keys = keys, .vals = vals } };
 }
 
-fn isDone(state: Value) bool {
+pub fn isDone(state: Value) bool {
     if (state != .record) return false;
     const d = state.record.get("done") orelse return false;
     return d.asBool();
 }
 
-// -------------------------------------------------------------- the top bar
-//
-// A resident menu bar pinned at the top of the scanout: menu titles at the
-// left, right-aligned items (a live clock) at the right. A menu opens a
-// DROPDOWN — a second, transient surface, because moss surfaces are opaque,
-// so a menu overlaying windows must be its own surface; it is dismissed on a
-// selection, a click elsewhere, or Escape. The bar's `view(state)` returns
-// `{ left: [...], right: [...] }` of `{kind:menu,...}` / `{kind:label,...}`;
-// a selected item fires `update(state, { menu, item })`. Windows open below
-// the bar (a strut it declares to the compositor), so it is never covered.
-
-const bar_vpad = 8;
-const menu_hpad = 12;
-
-const MenuHit = struct {
-    id: []const u8,
-    bx: usize,
-    bw: usize,
-    items: []const Value = &.{},
-    app_items: []const shared.menus.Item = &.{},
-};
-var bar_menus: [8]MenuHit = undefined;
-var bar_nmenus: usize = 0;
-var bar_app: wf.ActiveMenu = .{};
-var bar_app_name: [16]u8 = @splat(0);
-
-// Popup labels are owned: refreshing the script view must never leave a
-// dropdown referring to a reclaimed interpreter value.
-const PopupItem = struct {
-    label: [128]u8 = @splat(0),
-    len: usize = 0,
-    shortcut: []const u8 = "",
-    key: u8 = 0,
-    enabled: bool = true,
-    separator: bool = false,
-    /// A declarative bar item's runtime action (`{ text, action }`), not
-    /// an event for the script: today only "launcher".
-    launcher: bool = false,
-};
-var pop_entries: [32]PopupItem = undefined;
-var pop_count: usize = 0;
-var pop_selected: ?usize = null;
-var pop_app_token: u64 = 0;
-var pop_focus_token: u64 = 0;
-var pop_surf: u64 = 0;
-var pop_px: [*]volatile u32 = undefined;
-var pop_cap: u64 = 0;
-var pop_va: u64 = 0;
-var pop_x: usize = 0;
-var pop_y: usize = 0;
-var pop_w: usize = 0;
-var pop_h: usize = 0;
-var pop_open = false;
-var pop_menu_id: []const u8 = "";
-var pop_item_h: usize = 0;
-
-fn barItemWidth(item: Value) usize {
-    if (item != .record) return 0;
-    const rec = item.record;
-    const menu = std.mem.eql(u8, strField(rec, "kind"), "menu");
-    return (if (menu) iconLabelWidth(rec, "title") else strW(R_UI, strField(rec, "text"))) + 2 * menu_hpad;
-}
-
-fn drawBarItem(item: Value, x: usize, cy: usize) usize {
-    if (item != .record) return 0;
-    const rec = item.record;
-    const width = barItemWidth(item);
-    if (std.mem.eql(u8, strField(rec, "kind"), "menu")) {
-        const id = strField(rec, "id");
-        const bg = if (pop_open and std.mem.eql(u8, pop_menu_id, id)) pal.surface_hi else pal.surface;
-        fillRect(x, 0, width, wf.win_h - pal.border_w, bg);
-        drawIconLabel(rec, "title", x + menu_hpad, 0, width - 2 * menu_hpad, wf.win_h - pal.border_w, pal.title, bg);
-        if (bar_nmenus < bar_menus.len) {
-            const items: []const Value = if (rec.get("items")) |iv| (if (iv == .list) iv.list else &.{}) else &.{};
-            bar_menus[bar_nmenus] = .{ .id = id, .bx = x, .bw = width, .items = items };
-            bar_nmenus += 1;
-        }
-    } else {
-        const muted = if (rec.get("muted")) |v| v.asBool() else false;
-        drawStr(x + menu_hpad, cy, R_UI, strField(rec, "text"), if (muted) pal.text_muted else pal.text, pal.surface);
-    }
-    return width;
-}
-
-fn renderBar(tree: Value) void {
-    bar_nmenus = 0;
-    fillAll(pal.surface);
-    fillRect(0, wf.win_h - pal.border_w, wf.win_w, pal.border_w, pal.border);
-    const cy = (wf.win_h -| lineOf(R_UI)) / 2;
-    if (tree != .record) return;
-    const rec = tree.record;
-    var x: usize = menu_hpad / 2;
-    // App commands take precedence over transient system-menu status text.
-    if (rec.get("left")) |lv| if (lv == .list) for (lv.list) |item| {
-        if (item != .record) continue;
-        if (bar_app.token != 0 and !std.mem.eql(u8, strField(item.record, "kind"), "menu")) continue;
-        x += drawBarItem(item, x, cy);
-    };
-    if (bar_app.token != 0) {
-        const menus = shared.menus.catalog(bar_app.profile);
-        var menu_width: usize = 0;
-        for (menus) |menu| menu_width += strW(R_UI, menu.title) + 2 * menu_hpad;
-        const name = std.mem.sliceTo(&bar_app_name, 0);
-        const available = wf.win_w -| (x + menu_width + menu_hpad);
-        const name_width = @min(strW(R_UI, name) + 2 * menu_hpad, available);
-        if (name_width > 2 * menu_hpad) drawStrTrunc(x + menu_hpad, cy, R_UI, name, name_width - 2 * menu_hpad, pal.title, pal.surface);
-        x += name_width;
-        for (menus) |menu| {
-            const width = strW(R_UI, menu.title) + 2 * menu_hpad;
-            if (x + width > wf.win_w or bar_nmenus == bar_menus.len) break;
-            const bg = if (pop_open and std.mem.eql(u8, pop_menu_id, menu.title)) pal.surface_hi else pal.surface;
-            fillRect(x, 0, width, wf.win_h - pal.border_w, bg);
-            drawStr(x + menu_hpad, cy, R_UI, menu.title, pal.text, bg);
-            bar_menus[bar_nmenus] = .{ .id = menu.title, .bx = x, .bw = width, .app_items = menu.items };
-            bar_nmenus += 1;
-            x += width;
-        }
-    }
-    // Drop the date first, then the clock, instead of overlapping menus
-    // when large text or a narrow display leaves insufficient space.
-    if (rec.get("right")) |rv| if (rv == .list) {
-        var rx = wf.win_w -| menu_hpad;
-        var i = rv.list.len;
-        while (i > 0) {
-            i -= 1;
-            const width = barItemWidth(rv.list[i]);
-            if (rx < x + width + menu_hpad) break;
-            rx -= width;
-            _ = drawBarItem(rv.list[i], rx, cy);
-        }
-    };
-}
-
-fn menuAt(lx: usize) ?usize {
-    for (bar_menus[0..bar_nmenus], 0..) |m, i| {
-        if (lx >= m.bx and lx < m.bx + m.bw) return i;
-    }
-    return null;
-}
-
-fn popEntryHeight(index: usize) usize {
-    return if (pop_entries[index].separator) @max(9, lineOf(R_UI) / 3) else pop_item_h;
-}
-fn popEntryY(index: usize) usize {
-    var y: usize = 4;
-    for (0..index) |i| y += popEntryHeight(i);
-    return y;
-}
-fn popItemAt(ly: usize) ?usize {
-    var y: usize = 4;
-    for (pop_entries[0..pop_count], 0..) |entry, i| {
-        const height = popEntryHeight(i);
-        if (ly >= y and ly < y + height) return if (entry.enabled and !entry.separator) i else null;
-        y += height;
-    }
-    return null;
-}
-
-fn renderPopup() void {
-    const save_px = wf.px;
-    const save_w = wf.win_w;
-    const save_h = wf.win_h;
-    wf.px = pop_px;
-    wf.win_w = pop_w;
-    wf.win_h = pop_h;
-    defer {
-        wf.px = save_px;
-        wf.win_w = save_w;
-        wf.win_h = save_h;
-    }
-    panel(0, 0, pop_w, pop_h, 8, pal.surface, pal.border, pal.border_w);
-    const cyoff = (pop_item_h -| lineOf(R_UI)) / 2;
-    for (pop_entries[0..pop_count], 0..) |entry, i| {
-        const y = popEntryY(i);
-        if (entry.separator) {
-            fillRect(menu_hpad, y + popEntryHeight(i) / 2, pop_w -| (2 * menu_hpad), pal.border_w, pal.border);
-            continue;
-        }
-        const selected = pop_selected == i and entry.enabled;
-        const bg = if (selected) pal.primary else pal.surface;
-        const ink = if (!entry.enabled) pal.text_muted else if (selected) pal.primary_ink else pal.text;
-        if (selected) fillRoundRect(4, y, pop_w -| 8, pop_item_h, 4, bg);
-        const shortcut_w = strW(R_UI, entry.shortcut);
-        const shortcut_gap: usize = if (shortcut_w > 0) 24 else 0;
-        drawStrTrunc(menu_hpad, y + cyoff, R_UI, entry.label[0..entry.len], pop_w -| (2 * menu_hpad + shortcut_w + shortcut_gap), ink, bg);
-        if (shortcut_w > 0 and shortcut_w + 2 * menu_hpad < pop_w) drawStr(pop_w - menu_hpad - shortcut_w, y + cyoff, R_UI, entry.shortcut, ink, bg);
-    }
-}
-
-fn commitPopup() void {
-    renderPopup();
-    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, wf.chan, .{ .commit = .{ .surface = pop_surf, .xy = 0, .wh = shared.packPair(@intCast(pop_w), @intCast(pop_h)) } }, 0);
-}
-
-fn movePopupSelection(forward: bool) void {
-    if (pop_count == 0) return;
-    var idx = pop_selected orelse (if (forward) pop_count - 1 else 0);
-    for (0..pop_count) |_| {
-        idx = (idx + (if (forward) @as(usize, 1) else pop_count - 1)) % pop_count;
-        if (pop_entries[idx].enabled and !pop_entries[idx].separator) {
-            pop_selected = idx;
-            break;
-        }
-    }
-    commitPopup();
-}
-
-fn openPopup(m: MenuHit) void {
-    if (pop_open) closePopup();
-    pop_count = @min(if (m.app_items.len > 0) m.app_items.len else m.items.len, pop_entries.len);
-    if (pop_count == 0) return;
-    pop_menu_id = m.id;
-    pop_app_token = if (m.app_items.len > 0) bar_app.token else 0;
-    pop_focus_token = bar_app.token;
-    pop_selected = null;
-    pop_item_h = lineOf(R_UI) + 2 * item_vpad;
-    var maxw: usize = 80;
-    for (0..pop_count) |i| {
-        var entry: PopupItem = .{};
-        // A bar item is a string (an event for the script) or a record
-        // `{ text, action }` whose action the runtime performs itself.
-        const label = if (m.app_items.len > 0) m.app_items[i].label else if (m.items[i] == .str) m.items[i].str else if (m.items[i] == .record) strField(m.items[i].record, "text") else "";
-        if (m.app_items.len == 0 and m.items[i] == .record) entry.launcher = std.mem.eql(u8, strField(m.items[i].record, "action"), "launcher");
-        entry.len = @min(label.len, entry.label.len);
-        @memcpy(entry.label[0..entry.len], label[0..entry.len]);
-        if (m.app_items.len > 0) {
-            const item = m.app_items[i];
-            entry.key = item.key;
-            entry.shortcut = item.shortcut;
-            entry.separator = item.key == 0;
-            entry.enabled = shared.menus.allows(bar_app.profile, bar_app.enabled, item.key);
-        }
-        pop_entries[i] = entry;
-        if (pop_selected == null and entry.enabled and !entry.separator) pop_selected = i;
-        maxw = @max(maxw, strW(R_UI, label) + (if (entry.shortcut.len > 0) strW(R_UI, entry.shortcut) + 24 else 0));
-    }
-    pop_w = @min(maxw + 2 * menu_hpad, wf.scanout_w);
-    // All catalog menus fit the minimum output even at the largest text
-    // scale; clamp defensively for declarative system menus.
-    while (pop_count > 0 and popEntryY(pop_count) + 4 > wf.scanout_h -| wf.win_h) pop_count -= 1;
-    if (pop_count == 0) return;
-    pop_h = popEntryY(pop_count) + 4;
-    pop_x = @min(wf.win_x + m.bx, wf.scanout_w -| pop_w);
-    pop_y = wf.win_y + wf.win_h;
-    const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, wf.chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(pop_x), @intCast(pop_y)), .wh = shared.packPair(@intCast(pop_w), @intCast(pop_h)), .flags = shared.gpu_pointer_tracking } }, 0)) {
-        .ok => |ok| ok,
-        .err => return,
-    };
-    pop_surf = switch (cs.rep) {
-        .created => |c| c.surface,
-        else => return,
-    };
-    if (cs.cap == 0) {
-        _ = usys.callTyped(shared.GpuReq, shared.GpuResp, wf.chan, .{ .destroy_surface = .{ .surface = pop_surf } }, 0);
-        return;
-    }
-    const mp = usys.shmMap(cs.cap);
-    if (mp.err != .ok) {
-        _ = usys.callTyped(shared.GpuReq, shared.GpuResp, wf.chan, .{ .destroy_surface = .{ .surface = pop_surf } }, 0);
-        _ = usys.capDrop(cs.cap);
-        return;
-    }
-    pop_cap = cs.cap;
-    pop_va = mp.data[0];
-    pop_px = @ptrFromInt(mp.data[0]);
-    pop_open = true;
-    commitPopup();
-    var lb: [96]u8 = undefined;
-    _ = usys.log(log_h, std.fmt.bufPrint(&lb, "topbar: popup at {d},{d} ih={d} n={d}", .{ pop_x, pop_y, pop_item_h, pop_count }) catch "topbar: popup");
-}
-
-fn closePopup() void {
-    if (!pop_open) return;
-    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, wf.chan, .{ .destroy_surface = .{ .surface = pop_surf } }, 0);
-    if (pop_va != 0) _ = usys.shmUnmap(pop_va);
-    if (pop_cap != 0) _ = usys.capDrop(pop_cap);
-    pop_surf = 0;
-    pop_cap = 0;
-    pop_va = 0;
-    pop_open = false;
-    pop_menu_id = "";
-}
-
-fn dismissPopup(restore: bool) void {
-    const token = pop_focus_token;
-    closePopup();
-    wf.ptr_down = false;
-    if (restore and token != 0) _ = wf.restoreMenuFocus(output_control, token);
-    _ = usys.log(log_h, "topbar: dismissed");
-}
-
-fn mkMenuEvent(it: *mshl.Interp, menu: []const u8, item: []const u8) mshl.Error!Value {
-    const keys = try it.arena.alloc([]const u8, 2);
-    keys[0] = "menu";
-    keys[1] = "item";
-    const vals = try it.arena.alloc(Value, 2);
-    vals[0] = .{ .str = try it.arena.dupe(u8, menu) };
-    vals[1] = .{ .str = try it.arena.dupe(u8, item) };
-    return .{ .record = .{ .keys = keys, .vals = vals } };
-}
-
-/// The resident top-bar loop (`gui { bar: true, ... }`): render the bar,
-/// tick the clock, open/close dropdowns, and fire the selected menu item.
-fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
-    const old_rounded = wf.rounded;
-    wf.rounded = false;
-    defer wf.rounded = old_rounded;
-    var epoch: @import("guieval.zig").Epoch = .{};
-    try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
-    defer epoch.deinit();
-    wf.fontReady();
-    wf.refreshAppearance();
-    wf.useOrdinaryChannel();
-    wf.pointer_tracking = true;
-    wf.tick_ms = 100; // focus/menu state follows the compositor promptly
-    wf.win_x = 0;
-    wf.win_y = 0;
-    wf.win_w = wf.scanout_w;
-    wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
-    wf.dragging = false;
-    wf.ptr_down = false;
-    pop_open = false;
-    bar_app = .{};
-    if (!wf.openSurface(false)) return it.fail("gui: cannot open the bar surface", .{});
-    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
-    declareStrut(0, wf.win_h);
-    defer wf.closeSurface();
-    defer closePopup();
-
-    var state = init_state;
-    var tree = try it.callValue(view, &.{state}, null, null);
-    var announced = false;
-    var bar_dirty = true;
-    var clock_ticks: usize = 0;
-    while (true) {
-        const output_changed = wf.refreshOutput();
-        if (wf.refreshFontMetrics() or output_changed) {
-            dismissPopup(true);
-            wf.closeSurface();
-            wf.win_w = wf.scanout_w;
-            wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
-            if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
-            _ = usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
-            declareStrut(0, wf.win_h);
-            announced = false;
-            bar_dirty = true;
-        }
-        const app = wf.activeMenu();
-        if (app.token != bar_app.token) {
-            if (pop_open) dismissPopup(false);
-            bar_app = app;
-            bar_app_name = wf.menuTitle(app.token);
-            var msg: [80]u8 = undefined;
-            _ = usys.log(log_h, std.fmt.bufPrint(&msg, "topbar: active {s} token={d}", .{ std.mem.sliceTo(&bar_app_name, 0), app.token }) catch "topbar: active");
-            announced = false;
-            bar_dirty = true;
-        }
-        if (bar_dirty) {
-            // An open popup borrows this tree. Compact only when it closes;
-            // pointer/keyboard popup navigation creates no evaluation data.
-            if (!pop_open) try epoch.checkpoint(&state, &tree);
-            renderBar(tree);
-            if (!wf.commitSurface()) return it.fail("gui: bar commit failed", .{});
-            bar_dirty = false;
-        }
-        if (!announced) {
-            _ = usys.log(log_h, "topbar: ready");
-            for (bar_menus[0..bar_nmenus]) |m| {
-                var mb: [64]u8 = undefined;
-                _ = usys.log(log_h, std.fmt.bufPrint(&mb, "topbar: menu {s} cx={d} cy={d}", .{ m.id, m.bx + m.bw / 2, wf.win_h / 2 }) catch "topbar: menu");
-            }
-            announced = true;
-        }
-        var selected: ?usize = null;
-        input: while (true) {
-            const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
-            if (ev.kind == 2 or ev.kind == 7) {
-                clock_ticks += 1;
-                if (!pop_open and clock_ticks >= 10) {
-                    tree = try it.callValue(view, &.{state}, null, null);
-                    clock_ticks = 0;
-                    bar_dirty = true;
-                }
-                break :input;
-            }
-            if (ev.kind == 4) {
-                if (ev.ch == 0) {
-                    wf.ptr_down = false;
-                    if (pop_open and ev.surface == pop_surf) {
-                        dismissPopup(false);
-                        bar_dirty = true;
-                        break :input;
-                    }
-                }
-                continue;
-            }
-            if (ev.kind == 1) {
-                const down = ev.btn & 1 != 0;
-                const press = down and !wf.ptr_down;
-                wf.ptr_down = down;
-                if (pop_open and ev.surface == pop_surf) {
-                    const local_y = if (ev.screen_y) |sy| sy -| pop_y else ev.y;
-                    if (popItemAt(local_y)) |idx| {
-                        if (pop_selected != idx) {
-                            pop_selected = idx;
-                            commitPopup();
-                        }
-                        if (press) {
-                            selected = idx;
-                            break :input;
-                        }
-                    }
-                } else if (ev.surface == wf.surf and (press or (pop_open and !down))) {
-                    if (menuAt(ev.x)) |mi| {
-                        const was_this = pop_open and std.mem.eql(u8, pop_menu_id, bar_menus[mi].id);
-                        if (was_this) {
-                            if (press) dismissPopup(true);
-                        } else openPopup(bar_menus[mi]);
-                    } else if (pop_open and press) dismissPopup(true);
-                    bar_dirty = true;
-                    break :input;
-                }
-                continue;
-            }
-            if (ev.kind == 0 and ev.ch == shared.keyboard.launcher) {
-                if (pop_open) dismissPopup(false);
-                if (@import("applauncher.zig").run(output_control, log_h) and bar_nmenus > 0) openPopup(bar_menus[0]);
-                bar_dirty = true;
-                break :input;
-            }
-            if (ev.kind == 0 and ev.ch == shared.keyboard.menu_focus) {
-                if (pop_open) dismissPopup(true) else if (bar_nmenus > 0) openPopup(bar_menus[0]);
-                bar_dirty = true;
-                break :input;
-            }
-            if (ev.kind != 0 or !pop_open) continue;
-            switch (ev.ch) {
-                27 => {
-                    dismissPopup(true);
-                    bar_dirty = true;
-                    break :input;
-                },
-                shared.keyboard.up => movePopupSelection(false),
-                shared.keyboard.down => movePopupSelection(true),
-                shared.keyboard.home => {
-                    pop_selected = null;
-                    movePopupSelection(true);
-                },
-                shared.keyboard.end => {
-                    pop_selected = null;
-                    movePopupSelection(false);
-                },
-                shared.keyboard.left, shared.keyboard.right => {
-                    for (bar_menus[0..bar_nmenus], 0..) |m, idx| {
-                        if (std.mem.eql(u8, m.id, pop_menu_id)) {
-                            const next = (idx + (if (ev.ch == shared.keyboard.right) @as(usize, 1) else bar_nmenus - 1)) % bar_nmenus;
-                            openPopup(bar_menus[next]);
-                            bar_dirty = true;
-                            break;
-                        }
-                    }
-                    break :input;
-                },
-                '\n', '\r' => {
-                    selected = pop_selected;
-                    break :input;
-                },
-                else => {},
-            }
-        }
-        if (selected) |idx| {
-            bar_dirty = true;
-            const entry = pop_entries[idx];
-            if (pop_app_token != 0) {
-                const accepted = wf.invokeMenu(output_control, pop_app_token, entry.key);
-                var msg: [80]u8 = undefined;
-                _ = usys.log(log_h, std.fmt.bufPrint(&msg, "topbar: action {d} accepted={}", .{ entry.key, accepted }) catch "topbar: action");
-                dismissPopup(false);
-            } else {
-                // Copy event values before disposing of the popup and its
-                // borrowed menu ID; the interpreter owns the new event.
-                if (entry.launcher) {
-                    dismissPopup(false);
-                    if (@import("applauncher.zig").run(output_control, log_h) and bar_nmenus > 0) openPopup(bar_menus[0]);
-                    continue;
-                }
-                const ev = try mkMenuEvent(it, pop_menu_id, entry.label[0..entry.len]);
-                dismissPopup(true);
-                state = try it.callValue(update, &.{ state, ev }, null, null);
-                tree = try it.callValue(view, &.{state}, null, null);
-                if (isDone(state)) break;
-            }
-        }
-    }
-    _ = usys.log(log_h, "topbar: closed");
-    return epoch.finish(state);
-}
-
-// ----------------------------------------------------------- the dock
-
-const dock_hpad = 16;
-const dock_gap = 10;
-
-const DockHit = struct { unit: []const u8, title: []const u8, running: bool = false, bx: usize, bw: usize };
-var dock_items: [12]DockHit = undefined;
-var dock_nitems: usize = 0;
-var dock_running_known = false; // false until the first render logs a baseline
-
-/// Draw the dock — a resident bottom bar of app buttons (rounded pills),
-/// laid out centred across the width. An item is
-/// `{ title, unit, running? }`; a running app gets the primary fill and a
-/// dot below it. Each pill's hit box is recorded for the click router.
-fn renderDock(tree: Value) void {
-    dock_nitems = 0;
-    fillAll(pal.surface);
-    fillRect(0, 0, wf.win_w, pal.border_w, pal.border); // the rule against the desktop
-    if (tree != .record) return;
-    const items: []const Value = if (tree.record.get("items")) |iv| (if (iv == .list) iv.list else &.{}) else &.{};
-    var total: usize = 0;
-    var n: usize = 0;
-    for (items) |item| {
-        if (item != .record) continue;
-        total += iconLabelWidth(item.record, "title") + 2 * dock_hpad;
-        n += 1;
-    }
-    const natural_width = total;
-    const gaps = (n -| 1) * dock_gap;
-    const available = wf.win_w -| (2 * dock_gap + gaps);
-    const fitted = @min(natural_width, available);
-    total = fitted + gaps;
-    var before: usize = 0;
-    const pill_h = lineOf(R_UI) + 2 * item_vpad;
-    const py = if (wf.win_h > pill_h) (wf.win_h - pill_h) / 2 else 0;
-    var x: usize = if (wf.win_w > total) (wf.win_w - total) / 2 else dock_gap;
-    for (items) |item| {
-        if (item != .record) continue;
-        const r = item.record;
-        const title = strField(r, "title");
-        const unit = strField(r, "unit");
-        const running = r.get("running") != null and (r.get("running").?).asBool();
-        const natural = iconLabelWidth(r, "title") + 2 * dock_hpad;
-        const w = ui.flow.trackWidth(fitted, natural_width, before, natural);
-        before += natural;
-        const fill = if (running) pal.primary else pal.surface_hi;
-        const ink = if (running) pal.primary_ink else pal.text;
-        fillRoundRect(x, py, w, pill_h, 10, fill);
-        drawIconLabel(r, "title", x + dock_hpad, py, w -| (2 * dock_hpad), pill_h, ink, fill);
-        if (running and wf.win_h > 4) fillDot(x + w / 2, wf.win_h - 4, 2, pal.primary);
-        if (dock_nitems < dock_items.len) {
-            // Log a pill's running state only when it flips (never the
-            // first render's baseline), so a launch lights the dot and an
-            // exit clears it observably (the view polls `unit-up` each tick)
-            // without spamming every tick.
-            if (dock_running_known and dock_items[dock_nitems].running != running) {
-                var rb: [64]u8 = undefined;
-                _ = usys.log(log_h, std.fmt.bufPrint(&rb, "dock: running {s}={}", .{ unit, running }) catch "dock: running");
-            }
-            dock_items[dock_nitems] = .{ .unit = unit, .title = if (strField(r, "window").len > 0) strField(r, "window") else title, .running = running, .bx = x, .bw = w };
-            dock_nitems += 1;
-        }
-        x += w + dock_gap;
-    }
-    dock_running_known = true;
-}
-
-/// The dock item under a click (surface-local x), or null.
-fn dockItemAt(lx: usize) ?usize {
-    for (dock_items[0..dock_nitems], 0..) |d, i| {
-        if (lx >= d.bx and lx < d.bx + d.bw) return i;
-    }
-    return null;
-}
-
-/// The `{ item, unit, title }` event a dock click fires into `update`
-/// (the app's update restores the window by `title` or launches `unit`).
-fn mkDockEvent(it: *mshl.Interp, unit: []const u8, title: []const u8) mshl.Error!Value {
-    const keys = try it.arena.alloc([]const u8, 3);
-    keys[0] = "item";
-    keys[1] = "unit";
-    keys[2] = "title";
-    const vals = try it.arena.alloc(Value, 3);
-    vals[0] = .{ .str = try it.arena.dupe(u8, unit) };
-    vals[1] = .{ .str = try it.arena.dupe(u8, unit) };
-    vals[2] = .{ .str = try it.arena.dupe(u8, title) };
-    return .{ .record = .{ .keys = keys, .vals = vals } };
-}
-
-/// The resident dock loop (`gui { dock: true, ... }`): a bottom bar of app
-/// buttons, pinned full-width, chrome-less — not a window. view(state)
-/// returns `{ items: [ { title, unit, running? } ] }`; clicking a pill
-/// fires update(state, { item, unit, title }), whose update restores the
-/// app if it is already up (`restore-window $ev.title`) or launches it
-/// otherwise (`launch $ev.unit` reaches init through this process's init
-/// front channel). `done: true` ends it.
-fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, dismissible: bool) mshl.Error!Value {
-    const old_rounded = wf.rounded;
-    wf.rounded = false;
-    defer wf.rounded = old_rounded;
-    var epoch: @import("guieval.zig").Epoch = .{};
-    try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
-    defer epoch.deinit();
-    wf.fontReady();
-    wf.refreshAppearance();
-    wf.useOrdinaryChannel();
-    const pill_h = lineOf(R_UI) + 2 * item_vpad;
-    wf.win_w = wf.scanout_w;
-    wf.win_h = pill_h + 2 * dock_vpad + pal.border_w;
-    wf.win_x = 0;
-    wf.win_y = if (wf.scanout_h > wf.win_h) wf.scanout_h - wf.win_h else 0;
-    wf.dragging = false;
-    wf.ptr_down = false;
-    if (!wf.openSurface(false)) return it.fail("gui: cannot open the dock surface", .{});
-    declareStrut(1, wf.win_h);
-    defer wf.closeSurface();
-
-    var state = init_state;
-    var tree = try it.callValue(view, &.{state}, null, null);
-    var announced = false;
-    while (true) {
-        try epoch.checkpoint(&state, &tree);
-        const output_changed = wf.refreshOutput();
-        if (wf.refreshFontMetrics() or output_changed) {
-            wf.closeSurface();
-            wf.win_w = wf.scanout_w;
-            wf.win_h = dockHeight();
-            wf.win_y = wf.scanout_h - wf.win_h;
-            if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
-            declareStrut(1, wf.win_h);
-            announced = false; // hit boxes moved with the new scale
-        }
-        renderDock(tree);
-        if (!wf.commitSurface()) return it.fail("gui: dock commit failed", .{});
-        if (!announced) {
-            var lb: [64]u8 = undefined;
-            _ = usys.log(log_h, std.fmt.bufPrint(&lb, "dock: ready n={d}", .{dock_nitems}) catch "dock: ready n=0");
-            // The click router needs each pill's centre; log them so a drill
-            // can aim precisely (like the top bar's popup geometry).
-            for (dock_items[0..dock_nitems], 0..) |d, i| {
-                var ib: [64]u8 = undefined;
-                _ = usys.log(log_h, std.fmt.bufPrint(&ib, "dock: item {d} cx={d} cy={d}", .{ i, d.bx + d.bw / 2, wf.win_y + wf.win_h / 2 }) catch "dock: item");
-            }
-            announced = true;
-        }
-        var fired: ?usize = null;
-        var quit = false;
-        input: while (true) {
-            const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
-            if (ev.kind == 2 or ev.kind == 7) {
-                tree = try it.callValue(view, &.{state}, null, null); // tick refresh
-                break :input;
-            }
-            if (ev.kind == 1) {
-                const down = ev.btn & 1 != 0;
-                const press = down and !wf.ptr_down;
-                wf.ptr_down = down;
-                if (press and ev.surface == wf.surf) {
-                    if (dockItemAt(ev.x)) |idx| {
-                        fired = idx;
-                        break :input;
-                    }
-                }
-                continue :input;
-            }
-            if (ev.kind == 0 and ev.ch == 27 and dismissible) { // only the standalone drill permits dismissal
-                quit = true;
-                break :input;
-            }
-        }
-        if (quit) break;
-        if (fired) |idx| {
-            const unit = dock_items[idx].unit;
-            var lb: [64]u8 = undefined;
-            _ = usys.log(log_h, std.fmt.bufPrint(&lb, "dock: activate {s}", .{unit}) catch "dock: activate");
-            const ev = try mkDockEvent(it, unit, dock_items[idx].title);
-            state = try it.callValue(update, &.{ state, ev }, null, null);
-            tree = try it.callValue(view, &.{state}, null, null);
-            if (isDone(state)) break;
-        }
-    }
-    _ = usys.log(log_h, "dock: closed");
-    return epoch.finish(state);
-}
+// The desktop chrome — the top bar with its menus and the dock — lives in
+// guibar.zig and guidock.zig; they are `gui` apps with a fixed place on
+// the output rather than windows.
+const guibar = @import("guibar.zig");
+const guidock = @import("guidock.zig");
 
 // ------------------------------------------------- crash-isolated update
 
@@ -2217,12 +1540,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // `bar: true` is the resident top menu bar — a distinct render/loop
     // (pinned, chrome-less, with dropdown menus), not a window.
     if (spec.get("bar") != null and (spec.get("bar").?).asBool()) {
-        return try runBar(it, view, update, state);
+        return try guibar.runBar(it, view, update, state);
     }
     // `dock: true` is the resident bottom dock — a bar of app buttons that
     // launch their units on a click, pinned full-width, not a window.
     if (spec.get("dock") != null and (spec.get("dock").?).asBool()) {
-        return try runDock(it, view, update, state, if (spec.get("dismissible")) |v| v.asBool() else false);
+        return try guidock.runDock(it, view, update, state, if (spec.get("dismissible")) |v| v.asBool() else false);
     }
 
     // `node: N` runs the whole app on node N over the fabric — the runtime

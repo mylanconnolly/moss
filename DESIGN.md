@@ -3596,10 +3596,18 @@ disabled) and a bar item is a string (an event for the script) or a
 record `{ text, action }` whose action the runtime performs
 (`launcher`). Renaming a label cannot break the desktop any more.
 
-What this is not yet: list rows, breadcrumbs, the bar and the dock are
-still painted by the runtime, and the window chrome by the frame; the
-runtime's input loop is still one function. Those are the guicmds split
-that follows.
+**The runtime split (same day).** `guicmds.zig` had grown to 2,800
+lines: the window runtime, the widget painters, the top bar with its
+popup menus, and the dock, in one file. The desktop chrome is its own
+now — `guibar.zig` (the bar, its popups and the menu protocol) and
+`guidock.zig` (the pills and the running dots) — each importing the
+runtime for the helpers it shares (the paint wrappers, `strField`,
+`declareStrut`, the log and control handles), with a dependency surface
+of two dozen names and nothing pointing back except the two entry
+points and the bar's padding. The runtime keeps the window loop, the
+tree adapter, the leaf painters and the input loop. What this is not
+yet: list rows and breadcrumbs are still painted by the runtime, the
+window chrome by the frame, and the input loop is one function.
 
 ### Shared GUI layout and visual foundations
 

@@ -142,9 +142,10 @@ modules in `lib/ui.zig`; `zig build test` runs it all on the host with
 no QEMU. Toolkit code may import only `std` and its siblings: no
 `shared` (the wire), no key bytes, no surface. A program paints it with
 `ui.paint.<widget>(wf.brush(), …)` — `user/widgets.zig` is the binding
-for native controls, `user/guicmds.zig` for the mshl tree; if the widget
-needs a key, map the byte to a semantic command there
-(`widgets.textCommand` is the pattern).
+for native controls, `user/guicmds.zig` for the mshl tree (the desktop
+chrome is `user/guibar.zig` and `user/guidock.zig`); if the widget needs
+a key, map the byte to a semantic command there (`widgets.textCommand`
+is the pattern).
 
 **A service**: serve one channel; scope per-client state by **badge**
 (mint scoped caps with `chanMint`, hand them out in replies, drop your
