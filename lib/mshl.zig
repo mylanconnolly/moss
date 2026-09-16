@@ -454,8 +454,6 @@ pub const Scope = struct {
 /// A function call's locals: captures, parameters, `$in`, and every
 /// `let` in the body. Arena memory; gone with the line.
 const Frame = struct {
-    active_parent: ?*Frame = null,
-    active_function: Value = .nothing,
     names: std.ArrayList([]const u8) = .empty,
     vals: std.ArrayList(Value) = .empty,
     input: ?Value,
@@ -638,8 +636,6 @@ pub const Interp = struct {
     scope: ?*Scope = null,
     /// The running function's locals, or null at a top level.
     frame: ?*Frame = null,
-    /// Running calls, independent of temporary name-resolution frame changes.
-    active_frame: ?*Frame = null,
     /// Frames of calls that returned, kept for the next call: calls nest
     /// last-in first-out, so a line's frames cost its deepest nesting,
     /// not its number of calls (a `map` over ten thousand items reused
@@ -678,53 +674,74 @@ pub const Interp = struct {
     pub fn releaseHostValue(self: *Interp, box: *Box) void {
         self.dropBox(box);
     }
-    /// Collect at a nested host boundary without invalidating borrowed
-    /// caller locals or the result being returned. Temporary pins require no
-    /// allocation, so retirement still works when the heap is nearly full.
-    pub fn reclaimHostBoundary(self: *Interp, extra: Value) void {
-        self.pinHostBorrowed(extra, true);
+    /// A long-running nested host command (a GUI window) collects between
+    /// its callbacks. Boxes that reached zero earlier in the enclosing
+    /// statement — the command's own arguments among them — are owed
+    /// their lifetime until that statement ends, so the command detaches
+    /// them for its duration: its collections then see only what it let
+    /// go itself. `restoreDead` hands them back, behind whatever the
+    /// command's last release queued, for the statement's end.
+    ///
+    /// The command's *own* arguments are the exception: an inline closure
+    /// or handle handed to it can be referenced by nothing else, so the
+    /// command owns its lifetime and retires it when it finishes — a
+    /// window reopened in a loop must not leave a hundred view ASTs
+    /// queued for the loop's end. Boxes reachable from `own` (retained by
+    /// the caller first, so they are alive) leave the pending list; their
+    /// next drop to zero queues them on the command's own list.
+    pub fn detachDead(self: *Interp, own: Value) ?*Box {
+        var owned: [64]*Box = undefined;
+        var n: usize = 0;
+        collectBoxes(own, &owned, &n);
+        var pending: ?*Box = null;
+        var walk = self.dead;
+        self.dead = null;
+        while (walk) |b| {
+            const next = b.next_dead;
+            b.next_dead = null;
+            var mine = false;
+            for (owned[0..n]) |o| mine = mine or o == b;
+            if (mine) {
+                b.dead = false;
+            } else {
+                b.next_dead = pending;
+                pending = b;
+            }
+            walk = next;
+        }
+        return pending;
+    }
+    fn collectBoxes(v: Value, out: []*Box, n: *usize) void {
+        switch (v) {
+            .func => |cl| if (n.* < out.len) {
+                out[n.*] = cl.box;
+                n.* += 1;
+            },
+            .handle => |h| if (n.* < out.len) {
+                out[n.*] = h.box;
+                n.* += 1;
+            },
+            .list => |l| for (l) |x| collectBoxes(x, out, n),
+            .record => |r| for (r.vals) |x| collectBoxes(x, out, n),
+            else => {},
+        }
+    }
+    /// Collect now, keeping `keep` (a value the caller has not yet bound —
+    /// a host command's result on its way out) alive through it.
+    pub fn reclaimKeeping(self: *Interp, keep: Value) void {
+        retainValue(keep);
         self.reclaim();
-        self.pinHostBorrowed(extra, false);
+        self.releaseValue(keep);
     }
-    fn pinHostBorrowed(self: *Interp, extra: Value, retain: bool) void {
-        if (retain) retainValue(extra) else self.releaseValue(extra);
-        if (retain) retainValue(self.ret) else self.releaseValue(self.ret);
-        if (self.row) |row| {
-            if (retain) retainValue(.{ .record = row }) else self.releaseValue(.{ .record = row });
+    pub fn restoreDead(self: *Interp, pending: ?*Box) void {
+        if (pending == null) return;
+        if (self.dead == null) {
+            self.dead = pending;
+            return;
         }
-        if (self.frame) |frame| for (frame.vals.items) |value| {
-            if (retain) retainValue(value) else self.releaseValue(value);
-        };
-        var frame = self.active_frame;
-        while (frame) |f| : (frame = f.active_parent) {
-            if (retain) retainValue(f.active_function) else self.releaseValue(f.active_function);
-            for (f.vals.items) |value| {
-                if (retain) retainValue(value) else self.releaseValue(value);
-            }
-            if (f.input) |value| {
-                if (retain) retainValue(value) else self.releaseValue(value);
-            }
-        }
-    }
-    /// A long-running nested host command may collect between callbacks.
-    /// Preserve borrowed values in every suspended caller, not just globals.
-    pub fn holdHostRoots(self: *Interp, extra: Value) Error!*Box {
-        self.reclaimHostBoundary(extra);
-        var scratch = std.heap.ArenaAllocator.init(self.heap);
-        defer scratch.deinit();
-        const a = scratch.allocator();
-        var values: std.ArrayList(Value) = .empty;
-        try values.append(a, extra);
-        try values.append(a, self.ret);
-        if (self.row) |row| try values.append(a, .{ .record = row });
-        if (self.frame) |frame| try values.appendSlice(a, frame.vals.items);
-        var frame = self.active_frame;
-        while (frame) |f| : (frame = f.active_parent) {
-            try values.append(a, f.active_function);
-            try values.appendSlice(a, f.vals.items);
-            if (f.input) |input| try values.append(a, input);
-        }
-        return self.holdHostValue(.{ .list = values.items });
+        var last = self.dead.?;
+        while (last.next_dead) |n| last = n;
+        last.next_dead = pending;
     }
 
     /// Release everything the session holds. Nothing is leaked if every
@@ -1464,15 +1481,9 @@ pub const Interp = struct {
         const saved_scope = self.scope;
         const saved_row = self.row;
         self.frame = fr;
-        fr.active_parent = self.active_frame;
-        fr.active_function = fv;
-        self.active_frame = fr;
         self.scope = cl.scope;
         self.row = null;
         defer {
-            self.active_frame = fr.active_parent;
-            fr.active_parent = null;
-            fr.active_function = .nothing;
             self.frame = saved_frame;
             self.scope = saved_scope;
             self.row = saved_row;

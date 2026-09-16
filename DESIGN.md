@@ -3596,6 +3596,32 @@ disabled) and a bar item is a string (an event for the script) or a
 record `{ text, action }` whose action the runtime performs
 (`launcher`). Renaming a label cannot break the desktop any more.
 
+**The epoch, second version (same day).** A GUI window is a host command
+that runs for minutes inside one statement of the script that opened
+it, rendering thousands of trees, so it collects between renders. The
+first version (2026-09-12) made each collection safe by walking every
+suspended caller's frame and re-pinning its values around `reclaim`,
+which needed the interpreter to track an "active frame" chain for one
+caller and still missed one case: an argument evaluated but not yet
+bound — `(pair (fn [x] {…}) (gui {…}))` — was freed under `pair`. The
+interpreter's contract is that a box dropped to zero lives until the
+statement that dropped it ends; the epoch now honours it directly.
+`begin` detaches the interpreter's pending dead list, so per-render
+collections see only boxes the epoch itself let go; `deinit` collects
+once more keeping the returned value (which the caller's `let` has yet
+to retain), then hands the pending list back for the statement's end.
+The exception is the window's *own* inline arguments (its view closure,
+a handle): nothing else can reference an inline argument, and a window
+reopened a hundred times in one `while` must not queue a hundred view
+ASTs for the loop's end — so those leave the pending list at `begin`
+and are retired at `deinit`, which the existing "reopening large inline
+views" test enforces. The frame-pinning code and the active-frame chain
+are gone; a third test hands a fresh handle as a sibling argument
+across an epoch and checks it is still open. *Lesson:* when a
+collector needs to know what its caller is doing, the fix is rarely to
+look harder at the caller; it is to stop collecting what was never
+yours.
+
 **The runtime split (same day).** `guicmds.zig` had grown to 2,800
 lines: the window runtime, the widget painters, the top bar with its
 popup menus, and the dock, in one file. The desktop chrome is its own

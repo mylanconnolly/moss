@@ -1,5 +1,18 @@
-//! Bounded evaluation epochs for resident mshl views. Callbacks use scratch
-//! memory; state/tree snapshots retain functions and capabilities on the heap.
+//! Bounded evaluation epochs for resident mshl views. A GUI window is a
+//! host command that runs for minutes inside one statement of the script
+//! that opened it, rendering thousands of view trees: callbacks use
+//! scratch memory reset per render, and the state/tree snapshot retains
+//! the functions and capability handles that escape a render.
+//!
+//! The interpreter frees a box when the statement that dropped it to zero
+//! ends. Everything the enclosing statement already dropped — the
+//! command's own arguments, a closure evaluated just before it — is owed
+//! that lifetime, so the epoch detaches the interpreter's pending dead
+//! list for its duration: its per-render collections see only boxes the
+//! epoch itself let go, and `deinit` hands the pending ones back for the
+//! statement's end. (The first version instead re-pinned every suspended
+//! caller's values around each collection, and still freed an argument
+//! that had been evaluated but not yet bound.)
 const std = @import("std");
 const mshl = @import("mosslib").mshl;
 const Value = mshl.Value;
@@ -14,14 +27,16 @@ pub const Epoch = struct {
     err_msg: []const u8 = "",
     roots: ?*mshl.Box = null,
     snapshot: ?*mshl.Box = null,
+    pending: ?*mshl.Box = null,
     active: bool = false,
 
-    /// `roots` names persistent callback/spec values used by this host loop.
-    /// The interpreter additionally pins every suspended caller's values.
+    /// `roots` names the spec/callback values this host loop keeps calling;
+    /// they are held so a release during the epoch cannot retire them.
     pub fn begin(self: *Epoch, it: *mshl.Interp, roots: Value) mshl.Error!void {
         std.debug.assert(!self.active);
-        const held = try it.holdHostRoots(roots);
-        self.* = .{ .it = it, .scratch = std.heap.ArenaAllocator.init(it.heap), .outer = it.arena, .frames = it.free_frames, .out = it.out, .ret = it.ret, .err_msg = it.err_msg, .roots = held, .active = true };
+        const held = try it.holdHostValue(roots); // alive before they leave the pending list
+        const pending = it.detachDead(roots);
+        self.* = .{ .it = it, .scratch = std.heap.ArenaAllocator.init(it.heap), .outer = it.arena, .frames = it.free_frames, .out = it.out, .ret = it.ret, .err_msg = it.err_msg, .roots = held, .pending = pending, .active = true };
         it.arena = self.scratch.allocator();
         it.free_frames = .empty;
         it.out = .empty;
@@ -60,12 +75,16 @@ pub const Epoch = struct {
         self.it.free_frames = self.frames;
         self.it.out = self.out;
         self.it.ret = self.ret;
+        // The snapshot and the roots go, and what they alone kept alive is
+        // collected now — a window reopened in the same statement must not
+        // find the last one's tree still allocated — except the returned
+        // value, which the caller's `let` has yet to retain: it is queued
+        // for the enclosing statement's end, with the pending boxes.
         if (self.snapshot) |box| self.it.releaseHostValue(box);
         if (self.roots) |box| self.it.releaseHostValue(box);
-        self.it.reclaimHostBoundary(self.returned);
+        self.it.reclaimKeeping(self.returned);
+        self.it.restoreDead(self.pending);
         self.scratch.deinit();
-        // The boundary collector leaves only returned/caller-borrowed values
-        // queued for the enclosing statement; retired view ASTs are gone now.
         self.active = false;
     }
 };
@@ -84,6 +103,13 @@ test "10000 resident views fit the original 2MiB line arena and retain escaped v
             if (std.mem.eql(u8, name, "fresh")) {
                 self.created += 1;
                 return try it.newHandle("probe", self.created, ctx, drop);
+            }
+            if (std.mem.eql(u8, name, "keep")) {
+                // A handle evaluated as an earlier argument of this same
+                // statement must survive the epoch `cycle` ran in between:
+                // the last view's handle and this one are the two alive.
+                if (self.created - self.dropped != 2) return error.Runtime;
+                return args[0];
             }
             if (std.mem.eql(u8, name, "cycle")) {
                 const baseline = self.line.end_index;
@@ -129,6 +155,7 @@ test "10000 resident views fit the original 2MiB line arena and retain escaped v
         \\  let result = (cycle $view)
         \\  { result: $result, saved: ($saved 0) }
         \\}
+        \\keep (fresh) (cycle $view)
         \\$outer $view
     ) catch |err| {
         std.debug.print("epoch test: {s}\n", .{it.err_msg});
@@ -139,7 +166,7 @@ test "10000 resident views fit the original 2MiB line arena and retain escaped v
     try std.testing.expectEqual(@as(i64, 10000), state.record.get("n").?.int);
     const callback = try it.callValue(state.record.get("callback").?, &.{.{ .int = 7 }}, null, null);
     try std.testing.expectEqual(@as(i64, 10007), callback.int);
-    try std.testing.expectEqual(@as(usize, 10000), host.created);
+    try std.testing.expectEqual(@as(usize, 20001), host.created); // two cycles and the kept probe
     it.reclaim();
     try std.testing.expectEqual(host.created, host.dropped);
     it.deinit();
