@@ -104,32 +104,10 @@ fn rows() usize {
 fn cols() usize {
     return @max(1, (area.w -| gutter -| 12) / cell);
 }
-fn nextByte(s: []const u8, i: usize) usize {
-    return @min(s.len, i + (std.unicode.utf8ByteSequenceLength(s[i]) catch 1));
-}
-fn advanceCell(s: []const u8, i: usize, col: usize) usize {
-    if (s[i] == '\t') return col + 4 - col % 4;
-    if (s[i] == '\r') return col;
-    const cp = std.unicode.utf8Decode(s[i..nextByte(s, i)]) catch 0xfffd;
-    return col + core.uwidth.cellWidth(cp);
-}
-fn visualCol(s: []const u8, end: usize) usize {
-    var col: usize = 0;
-    var i: usize = 0;
-    while (i < @min(end, s.len)) : (i = nextByte(s, i)) col = advanceCell(s, i, col);
-    return col;
-}
-fn byteCol(s: []const u8, target: usize) usize {
-    var col: usize = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        const next = advanceCell(s, i, col);
-        if (next > target) break;
-        col = next;
-        i = nextByte(s, i);
-    }
-    return i;
-}
+// Display columns are the editing model's (lib/editor.zig): one arithmetic
+// for the caret, the footer, the click-to-position and the renderer.
+const visualCol = core.Editor.visualCol;
+const byteCol = core.Editor.byteCol;
 fn reveal() void {
     const r = rows();
     if (active.ed.cursor.line < active.top) active.top = active.ed.cursor.line;
@@ -154,8 +132,9 @@ fn drawLine(index: usize, y: usize) void {
     const selection = active.ed.selection();
     var i: usize = 0;
     while (i < s.len) {
-        const end = nextByte(s, i);
-        const nc = advanceCell(s, i, col);
+        const step = core.Editor.cellStep(s, i, col);
+        const end = step.next;
+        const nc = step.col;
         if (col >= active.left + cols()) break;
         if (col >= active.left and nc <= active.left + cols() and s[i] != '\r') {
             const yes = if (selection) |r| !core.Pos.lessThan(.{ .line = index, .col = i }, r.start) and core.Pos.lessThan(.{ .line = index, .col = i }, r.end) else false;
@@ -409,17 +388,6 @@ fn adoptSelected(tab: *Tab, selected: Document) void {
     digest(text);
     hidden = false;
     wf.setSurfaceVisible(true);
-}
-/// A broker-provided selection always opens a new tab; failures preserve all
-/// existing text and release the offered capability.
-pub fn openExternal(selected: Document) void {
-    const tab = prepareTab() catch |err| {
-        var rejected = selected;
-        rejected.deinit();
-        failed(err);
-        return;
-    };
-    adoptSelected(tab, selected);
 }
 fn pollHandoff() bool {
     // Reserve UI/model capacity before removing anything from the broker queue.
@@ -906,7 +874,10 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
         } else if (ev.kind == 1) pointer(ev) else key(ev.ch);
         // Finish the event on its original tab before adopting a handoff. A
         // queued keystroke must never be applied to the newly arrived file.
-        if (running and pending == .none and receiver != 0 and pollHandoff()) repaint = true;
+        // Polling reserves a tab's model first, so it is done on the tick
+        // and on window events, not for every keystroke and pointer move.
+        const poll_due = ev.kind != 0 and ev.kind != 1 and ev.kind != 6;
+        if (running and poll_due and pending == .none and receiver != 0 and pollHandoff()) repaint = true;
         if (running and !hidden and repaint) render();
     }
     freeTabs();

@@ -129,16 +129,25 @@ pub const Editor = struct {
         self.setCursor(.{ .line = 0, .col = 0 }, false);
         self.setCursor(self.buffer.endPos(), true);
     }
-    /// Monospace display column; tabs use four-cell stops and CR is invisible.
+    /// One code point's step across a monospace line: the byte after it
+    /// and the display column after it. Tabs use four-cell stops, CR is
+    /// invisible, wide and combining characters take their cell width.
+    /// The one place that arithmetic lives; the renderer walks cells with
+    /// it too.
+    pub fn cellStep(line: []const u8, i: usize, col: usize) struct { next: usize, col: usize } {
+        const n = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
+        const next = @min(line.len, i + n);
+        const cp = std.unicode.utf8Decode(line[i..next]) catch 0xfffd;
+        return .{ .next = next, .col = if (cp == '\t') col + 4 - col % 4 else if (cp == '\r') col else col + uwidth.cellWidth(cp) };
+    }
+    /// Monospace display column of byte offset `end`.
     pub fn visualCol(line: []const u8, end: usize) usize {
         var col: usize = 0;
         var i: usize = 0;
         while (i < @min(end, line.len)) {
-            const n = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
-            const next = @min(line.len, i + n);
-            const cp = std.unicode.utf8Decode(line[i..next]) catch 0xfffd;
-            col = if (cp == '\t') col + 4 - col % 4 else if (cp == '\r') col else col + uwidth.cellWidth(cp);
-            i = next;
+            const step = cellStep(line, i, col);
+            col = step.col;
+            i = step.next;
         }
         return col;
     }
@@ -147,13 +156,10 @@ pub const Editor = struct {
         var col: usize = 0;
         var i: usize = 0;
         while (i < line.len) {
-            const n = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
-            const next = @min(line.len, i + n);
-            const cp = std.unicode.utf8Decode(line[i..next]) catch 0xfffd;
-            const nc = if (cp == '\t') col + 4 - col % 4 else if (cp == '\r') col else col + uwidth.cellWidth(cp);
-            if (nc > target) break;
-            col = nc;
-            i = next;
+            const step = cellStep(line, i, col);
+            if (step.col > target) break;
+            col = step.col;
+            i = step.next;
         }
         return i;
     }

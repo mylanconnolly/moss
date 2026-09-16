@@ -220,32 +220,4 @@ pub const Buffer = struct {
         while (cur.col < l.len and classOf(l[cur.col]) == .space) cur = self.nextPos(cur);
         return cur;
     }
-
-    // --- LSP position encoding helpers ---
-
-    pub fn byteColToUtf16(self: *const Buffer, line: usize, byte_col: usize) usize {
-        const l = self.lineSlice(line);
-        var i: usize = 0;
-        var units: usize = 0;
-        while (i < l.len and i < byte_col) {
-            const len = std.unicode.utf8ByteSequenceLength(l[i]) catch 1;
-            const cp = std.unicode.utf8Decode(l[i..][0..@min(len, l.len - i)]) catch 0xFFFD;
-            units += if (cp >= 0x10000) 2 else 1;
-            i += len;
-        }
-        return units;
-    }
-
-    pub fn utf16ColToByte(self: *const Buffer, line: usize, utf16_col: usize) usize {
-        const l = self.lineSlice(line);
-        var i: usize = 0;
-        var units: usize = 0;
-        while (i < l.len and units < utf16_col) {
-            const len = std.unicode.utf8ByteSequenceLength(l[i]) catch 1;
-            const cp = std.unicode.utf8Decode(l[i..][0..@min(len, l.len - i)]) catch 0xFFFD;
-            units += if (cp >= 0x10000) 2 else 1;
-            i += len;
-        }
-        return i;
-    }
 };

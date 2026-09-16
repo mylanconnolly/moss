@@ -10,7 +10,7 @@ all newline bytes instead of synthesizing a trailing newline or removing CR.
 CRLF pairs remain byte-exact but form one navigation/deletion boundary; a
 standalone CR remains literal. The editor continues local newline style and
 indentation on Enter. The host UI, SDL, filesystem, subprocess, and LSP
-dependencies are not copied.
+dependencies are not copied, nor the LSP position-encoding helpers.
 `../editor.zig` supplies bounded transactional edit history and selection state.
 Unicode navigation is the upstream pragmatic combining-mark subset, not full
 Unicode grapheme segmentation.
