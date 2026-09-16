@@ -3564,11 +3564,42 @@ before it (run once with the fix removed: the probe fails). *Lesson:* a
 default that happens to equal the only size the system ever had is a
 constant waiting to become a bug; the resize was the tell.
 
-What this is not yet: the declarative tree's layout and painting
-(`guicmds`' `layoutNode`, list rows, breadcrumbs, the bar and dock)
-still live with the mshl runtime, and the window chrome is the frame's.
-The tree layout is the next slice; those are the remaining reasons a
-GUI change needs QEMU to be believed.
+**Stage 3, the tree layout (same day).** How a declarative view — rows,
+columns, sections, splits, scroll viewports and leaves — measures and
+places itself is `layout.Engine(Tree)`: the algorithm over a *node
+interface*, generic over whatever tree a program has. The mshl runtime
+plugs in its record tree (`MshlTree` in guicmds: `kind`, `children`,
+`gap`, `flex`, the split and scroll accessors, and the leaf, viewport,
+section and divider callbacks); a test plugs in a struct tree and
+asserts placements — a row wrapping into uniform lines with children
+centred on them, flex tracks sharing the width left by fixed children
+without drift, sections inset inside a panel, a split stacking when
+the right pane would be too narrow, a scroll node measuring as its
+viewport, and a nested tree whose paint pass returns exactly what its
+measure pass predicted. Leaves (label, button, field, list, icon,
+breadcrumbs) and the scroll viewport keep their painters in the runtime,
+because they own runtime state — edit buffers, list scroll and
+selection, scroll owners, focus targets; everything about *where*
+things go is the engine's, and the old `drawSplit` is gone because the
+engine paints the divider through a callback like everything else.
+
+With that, the runtime stopped knowing one application. It used to
+synthesize the Files app's events from private knowledge of
+`explorer.msh` — the `files` menu profile's Up, Refresh, Home, Lock,
+Leave and Open items became events named `up`, `refresh`, `places`,
+`lock`, `leave` and `files`, the breadcrumb was found by the id
+`location`, the list by `files` — and it ran the application launcher
+when a bar item's *label* was the string "Applications…". Now the
+script declares the binding (`bindings: { up, lock, leave, refresh,
+home, open, location }` beside `menus: "files"`; an unbound item is
+disabled) and a bar item is a string (an event for the script) or a
+record `{ text, action }` whose action the runtime performs
+(`launcher`). Renaming a label cannot break the desktop any more.
+
+What this is not yet: list rows, breadcrumbs, the bar and the dock are
+still painted by the runtime, and the window chrome by the frame; the
+runtime's input loop is still one function. Those are the guicmds split
+that follows.
 
 ### Shared GUI layout and visual foundations
 

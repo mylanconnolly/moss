@@ -129,6 +129,10 @@ catalog. Reading it never starts an app. Launch still uses `connect_named`
 and the unit's existing grants; metadata conveys no additional authority.
 Run `zig build fmt-test lint-test ls-test` after changing these manifests.
 
+**A container kind** (how children are placed): `lib/ui/layout.zig`'s
+`Engine`, with a test on its struct tree; the mshl runtime's `MshlTree`
+adapter in `user/guicmds.zig` maps the record's `kind` to it.
+
 **A widget**: its model — geometry, layout, state, hit arithmetic —
 goes in `lib/ui/<name>.zig` with its tests, and its painter goes in
 `lib/ui/paint.zig` as a function of a `Brush` (canvas, typeface,

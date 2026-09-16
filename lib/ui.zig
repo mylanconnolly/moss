@@ -45,6 +45,7 @@ pub const palette = @import("ui/palette.zig");
 pub const Palette = palette.Palette;
 pub const paint = @import("ui/paint.zig");
 pub const Brush = paint.Brush;
+pub const layout = @import("ui/layout.zig");
 
 test {
     _ = geometry;
@@ -61,4 +62,5 @@ test {
     _ = typeface;
     _ = palette;
     _ = paint;
+    _ = layout;
 }

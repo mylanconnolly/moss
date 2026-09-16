@@ -1562,7 +1562,11 @@ applications need menus beyond those profiles.
   clip, scroll offset, the primitives), `Typeface` (the frame over fontsvc, a
   fixed-cell face for tests), `palette`, and `paint` (button, field, tab
   strip) as functions of a `Brush` with pixel tests; widgets and tabstrip
-  became bindings. Next: the declarative tree's layout.
+  became bindings. Stage 3 the same day: `layout.Engine(Tree)`, the tree
+  layout (rows, columns, sections, splits, scroll, leaves) over a node
+  interface, with the mshl record tree plugged in and a struct tree tested;
+  the runtime no longer knows the Files app (scripts declare `bindings`) nor
+  the launcher's label (bar items carry an `action`).
 
 - ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
   one scalable, theme-colored catalog for buttons, dock items, lists, and

@@ -41,7 +41,7 @@ let final = (gui {
     view: (fn [state] {
         {
           left: [
-            { kind: "menu", id: "system", title: "Moss", icon: "moss", icon_only: true, items: ["Applications…", "About This System", "Settings…", "Log Out"] }
+            { kind: "menu", id: "system", title: "Moss", icon: "moss", icon_only: true, items: [{ text: "Applications…", action: "launcher" }, "About This System", "Settings…", "Log Out"] }
             { kind: "label", muted: true, text: $state.note }
           ]
           right: [

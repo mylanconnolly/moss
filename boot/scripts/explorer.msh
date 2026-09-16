@@ -77,7 +77,10 @@ let final = (gui {
     init:  { path: "", depth: 0, node: 0, note: "" }
     title: "Files"
     menus: "files"
-    width: 960
+    # What the Files menu profile's items mean here: the events this update
+    # handles and the widgets the view lays out. Unbound items are disabled.
+    bindings: { up: "up", lock: "lock", leave: "leave", refresh: "refresh", home: "places", open: "files", location: "location" }
+    width:    960
     view: (fn [state] {
         let listing = (match $state.node {
             0 => (fs-rows $state.path)

@@ -544,91 +544,95 @@ fn drawNode(node: Value, x: usize, y: usize, avail_w: usize) Size {
     return layoutNode(node, x, y, avail_w, true);
 }
 
+/// The tree layout is the toolkit's (lib/ui/layout.zig): this is the mshl
+/// record tree seen through its node interface. Leaves and viewports keep
+/// their painters here, because they own runtime state (fields, lists,
+/// scroll owners, focus targets); everything about *where* things go is
+/// the engine's, so measurement and painting cannot disagree.
+const MshlTree = struct {
+    pub const Node = Value;
+    pub fn kind(_: *MshlTree, n: Node) ui.layout.Kind {
+        if (n != .record) return .none;
+        const rec = n.record;
+        const k = strField(rec, "kind");
+        if (std.mem.eql(u8, k, "scroll")) return .scroll;
+        if (std.mem.eql(u8, k, "row")) return .row;
+        if (std.mem.eql(u8, k, "section")) return .section;
+        if (std.mem.eql(u8, k, "column") or nodeChildren(rec).len != 0) return .column;
+        if (std.mem.eql(u8, k, "split")) return .split;
+        return .leaf; // icon, breadcrumbs, label, button, field, list — or unknown (empty)
+    }
+    pub fn children(_: *MshlTree, n: Node) []const Node {
+        return nodeChildren(n.record);
+    }
+    pub fn gap(_: *MshlTree, n: Node) usize {
+        return nodeGap(n.record);
+    }
+    pub fn flex(_: *MshlTree, n: Node) usize {
+        return flexWeight(n);
+    }
+    pub fn scrollHeight(_: *MshlTree, n: Node) usize {
+        return @intCast(std.math.clamp(intField(n.record, "h", 240), 40, 4096));
+    }
+    pub fn scrollChild(_: *MshlTree, n: Node) ?Node {
+        return n.record.get("child");
+    }
+    pub fn splitLeft(_: *MshlTree, n: Node) ?Node {
+        return n.record.get("left");
+    }
+    pub fn splitRight(_: *MshlTree, n: Node) ?Node {
+        return n.record.get("right");
+    }
+    pub fn splitLeftWidth(_: *MshlTree, n: Node) usize {
+        return @intCast(@max(intField(n.record, "left_w", 220), 0));
+    }
+    pub fn leafMeasure(_: *MshlTree, n: Node, avail_w: usize) Size {
+        return leafLayout(n.record, 0, 0, avail_w, false);
+    }
+    pub fn leafPaint(_: *MshlTree, n: Node, x: usize, y: usize, avail_w: usize) Size {
+        return leafLayout(n.record, x, y, avail_w, true);
+    }
+    pub fn childPaint(_: *MshlTree, n: Node, x: usize, y: usize, avail_w: usize) Size {
+        return drawNode(n, x, y, avail_w);
+    }
+    pub fn viewportPaint(_: *MshlTree, n: Node, child: Node, x: usize, y: usize, w: usize, h: usize) Size {
+        const id = strField(n.record, "id");
+        if (id.len == 0 or id.len > 64) {
+            layout_overflow = true;
+            return .{};
+        }
+        const owner = scrollFor(id);
+        if (owner == 0) return .{};
+        return paintViewport(child, x, y, w, h, owner);
+    }
+    pub fn sectionBegin(_: *MshlTree, x: usize, y: usize, w: usize, h: usize) void {
+        if (section_depth < section_bg_saved.len) section_bg_saved[section_depth] = content_bg;
+        section_depth += 1;
+        panel(x, y, w, h, r_field, pal.surface, pal.border, pal.border_w);
+        content_bg = pal.surface;
+    }
+    pub fn sectionEnd(_: *MshlTree) void {
+        section_depth -= 1;
+        if (section_depth < section_bg_saved.len) content_bg = section_bg_saved[section_depth];
+    }
+    pub fn dividerPaint(_: *MshlTree, x: usize, y: usize, h: usize) void {
+        fillRect(x, y, pal.border_w, h, pal.border);
+    }
+};
+var mshl_tree: MshlTree = .{};
+var section_bg_saved: [16]u32 = undefined; // nested sections restore the text ground
+var section_depth: usize = 0;
+const Engine = ui.layout.Engine(MshlTree);
+
 /// Measurement never creates edit buffers, focus targets, or list state.
 /// Both passes use the same layout decisions, including wrapped rows.
 fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size {
-    if (node != .record) return .{};
-    const rec = node.record;
+    return if (paint) Engine.paint(&mshl_tree, node, x, y, avail_w) else Engine.measure(&mshl_tree, node, avail_w);
+}
+
+/// A leaf's own size and paint: the widgets that own runtime state.
+fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
     const kind = strField(rec, "kind");
-    const children = nodeChildren(rec);
-    if (std.mem.eql(u8, kind, "scroll")) {
-        const child = rec.get("child") orelse return .{};
-        const height: usize = @intCast(std.math.clamp(intField(rec, "h", 240), 40, 4096));
-        if (paint) {
-            const id = strField(rec, "id");
-            if (id.len == 0 or id.len > 64) {
-                layout_overflow = true;
-                return .{};
-            }
-            const owner = scrollFor(id);
-            if (owner == 0) return .{};
-            return paintViewport(child, x, y, avail_w, height, owner);
-        }
-        return .{ .w = avail_w, .h = height };
-    }
-    if (std.mem.eql(u8, kind, "row")) {
-        var total: usize = 0;
-        var fixed: usize = nodeGap(rec) * (children.len -| 1);
-        for (children) |child| {
-            const weight = flexWeight(child);
-            total += weight;
-            if (weight == 0) fixed += layoutNode(child, 0, 0, avail_w, false).w;
-        }
-        if (total > 0 and fixed < avail_w) {
-            var before: usize = 0;
-            var height: usize = 0;
-            for (children) |child| {
-                const weight = flexWeight(child);
-                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else ui.flow.trackWidth(avail_w - fixed, total, before, weight);
-                height = @max(height, layoutNode(child, 0, 0, width, false).h);
-                before += weight;
-            }
-            before = 0;
-            var xx = x;
-            for (children) |child| {
-                const weight = flexWeight(child);
-                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else ui.flow.trackWidth(avail_w - fixed, total, before, weight);
-                const size = layoutNode(child, 0, 0, width, false);
-                if (paint) _ = drawNode(child, xx, y + (height - size.h) / 2, width);
-                xx += width + nodeGap(rec);
-                before += weight;
-            }
-            return .{ .w = avail_w, .h = height };
-        }
-        var row = ui.flow.Flow{ .width = avail_w, .gap = nodeGap(rec) };
-        var row_h: usize = 0;
-        for (children) |child| row_h = @max(row_h, layoutNode(child, 0, 0, avail_w, false).h);
-        for (children) |child| {
-            const sz = layoutNode(child, 0, 0, avail_w, false);
-            const place = row.put(.{ .w = sz.w, .h = row_h });
-            if (paint) _ = drawNode(child, x + place.x, y + place.y + (row_h - sz.h) / 2, place.w);
-        }
-        return row.size();
-    }
-    const section = std.mem.eql(u8, kind, "section");
-    if (section or std.mem.eql(u8, kind, "column") or children.len != 0) {
-        const inset: usize = if (section) @min(ui.space.large, avail_w / 2) else 0;
-        const width = avail_w - 2 * inset;
-        var height: usize = 0;
-        for (children, 0..) |child, i| {
-            if (i > 0) height += nodeGap(rec);
-            height += layoutNode(child, 0, 0, width, false).h;
-        }
-        const old_bg = content_bg;
-        if (paint and section) {
-            panel(x, y, avail_w, height + 2 * inset, r_field, pal.surface, pal.border, pal.border_w);
-            content_bg = pal.surface;
-        }
-        defer content_bg = old_bg;
-        if (paint) {
-            var yy = y + inset;
-            for (children, 0..) |child, i| {
-                if (i > 0) yy += nodeGap(rec);
-                yy += drawNode(child, x + inset, yy, width).h;
-            }
-        }
-        return .{ .w = avail_w, .h = height + 2 * inset };
-    }
     if (std.mem.eql(u8, kind, "icon")) {
         const size = @min(avail_w, if (rec.get("size") != null) wf.scaledIconSize(@intCast(std.math.clamp(intField(rec, "size", 20), 12, 64))) else wf.iconSize());
         if (paint) wf.drawIcon(x, y, size, strField(rec, "name"), pal.text);
@@ -649,18 +653,6 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
     if (std.mem.eql(u8, kind, "list")) {
         if (paint) return drawList(rec, x, y, avail_w);
         return .{ .w = avail_w, .h = @intCast(@max(intField(rec, "h", 240), 40)) };
-    }
-    if (std.mem.eql(u8, kind, "split")) {
-        if (paint) return drawSplit(rec, x, y, avail_w);
-        const lw = @min(avail_w, @as(usize, @intCast(@max(intField(rec, "left_w", 220), 80))));
-        if (avail_w < lw + gap + 160) {
-            const l = if (rec.get("left")) |v| layoutNode(v, 0, 0, avail_w, false) else Size{};
-            const r = if (rec.get("right")) |v| layoutNode(v, 0, 0, avail_w, false) else Size{};
-            return .{ .w = avail_w, .h = l.h + gap + r.h };
-        }
-        const l = if (rec.get("left")) |v| layoutNode(v, 0, 0, lw, false) else Size{};
-        const r = if (rec.get("right")) |v| layoutNode(v, 0, 0, avail_w -| (lw + gap + 1), false) else Size{};
-        return .{ .w = avail_w, .h = @max(l.h, r.h) };
     }
     return .{};
 }
@@ -752,6 +744,32 @@ const Crumb = struct {
 };
 var crumbs: [16]Crumb = @splat(.{});
 var file_crumb: ?*Crumb = null;
+/// What the `files` menu profile's items mean to this app: the event ids
+/// the script handles and the widget ids it lays out, declared in its
+/// spec (`bindings: { up, lock, leave, refresh, home, open, location }`)
+/// rather than known here. An item without a binding is disabled.
+const Binding = struct {
+    buf: [32]u8 = undefined,
+    len: usize = 0,
+    fn set(self: *Binding, s: []const u8) void {
+        self.len = @min(s.len, self.buf.len);
+        @memcpy(self.buf[0..self.len], s[0..self.len]);
+    }
+    fn get(self: *const Binding) []const u8 {
+        return self.buf[0..self.len];
+    }
+    fn is(self: *const Binding, id: []const u8) bool {
+        return self.len > 0 and std.mem.eql(u8, self.get(), id);
+    }
+};
+const FilesBindings = struct { up: Binding = .{}, lock: Binding = .{}, leave: Binding = .{}, refresh: Binding = .{}, home: Binding = .{}, open: Binding = .{}, location: Binding = .{} };
+var files_bindings: FilesBindings = .{};
+fn loadBindings(spec: mshl.Record) void {
+    files_bindings = .{};
+    const b = spec.get("bindings") orelse return;
+    if (b != .record) return;
+    inline for (@typeInfo(FilesBindings).@"struct".fields) |f| @field(files_bindings, f.name).set(strField(b.record, f.name));
+}
 var crumb_pressed: ?usize = null;
 fn crumbFor(id: []const u8, path: []const u8) ?*Crumb {
     if (id.len == 0 or id.len > 64) return null;
@@ -794,7 +812,7 @@ fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: b
         c.can_lock = if (rec.get("can_lock")) |v| v.asBool() else false;
         c.can_leave = if (rec.get("can_leave")) |v| v.asBool() else false;
         c.selected = @min(c.selected, model.count -| 2);
-        if (std.mem.eql(u8, strField(rec, "id"), "location")) file_crumb = c;
+        if (files_bindings.location.is(strField(rec, "id"))) file_crumb = c;
     }
     var flow: ui.flow.Flow = .{ .width = width, .gap = 4 };
     for (0..model.count) |i| {
@@ -1120,28 +1138,6 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     return .{ .w = w, .h = box_h };
 }
 
-/// A two-pane split: a fixed-width `left` node, a divider, and a `right`
-/// node filling the rest. `left_w` sets the sidebar width (default 220).
-fn drawSplit(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
-    const left = rec.get("left");
-    const right = rec.get("right");
-    const left_w: usize = @intCast(@max(intField(rec, "left_w", 220), 80));
-    if (avail_w < left_w + gap + 160) {
-        const l = if (left) |v| drawNode(v, x, y, avail_w) else Size{};
-        const r = if (right) |v| drawNode(v, x, y + l.h + gap, avail_w) else Size{};
-        return .{ .w = avail_w, .h = l.h + gap + r.h };
-    }
-    const div = 1 + gap; // a hairline rule plus breathing room each side
-    const lh = if (left) |l| drawNode(l, x, y, @min(left_w, avail_w)) else Size{ .w = 0, .h = 0 };
-    const rx = x + left_w + div;
-    const rw = if (avail_w > left_w + div) avail_w - left_w - div else 0;
-    // The divider, as tall as the taller pane (measured from left first).
-    const rh = if (right) |r| drawNode(r, rx, y, rw) else Size{ .w = 0, .h = 0 };
-    const h = @max(lh.h, rh.h);
-    fillRect(x + left_w + gap / 2, y, pal.border_w, h, pal.border);
-    return .{ .w = avail_w, .h = h };
-}
-
 /// Find the `rows` value (a list or a tableized list) of the `list` widget
 /// with this id anywhere in the tree (searching children and split panes) —
 /// so a fired list event can carry the selected row's own id.
@@ -1296,6 +1292,9 @@ const PopupItem = struct {
     key: u8 = 0,
     enabled: bool = true,
     separator: bool = false,
+    /// A declarative bar item's runtime action (`{ text, action }`), not
+    /// an event for the script: today only "launcher".
+    launcher: bool = false,
 };
 var pop_entries: [32]PopupItem = undefined;
 var pop_count: usize = 0;
@@ -1477,7 +1476,10 @@ fn openPopup(m: MenuHit) void {
     var maxw: usize = 80;
     for (0..pop_count) |i| {
         var entry: PopupItem = .{};
-        const label = if (m.app_items.len > 0) m.app_items[i].label else if (m.items[i] == .str) m.items[i].str else "";
+        // A bar item is a string (an event for the script) or a record
+        // `{ text, action }` whose action the runtime performs itself.
+        const label = if (m.app_items.len > 0) m.app_items[i].label else if (m.items[i] == .str) m.items[i].str else if (m.items[i] == .record) strField(m.items[i].record, "text") else "";
+        if (m.app_items.len == 0 and m.items[i] == .record) entry.launcher = std.mem.eql(u8, strField(m.items[i].record, "action"), "launcher");
         entry.len = @min(label.len, entry.label.len);
         @memcpy(entry.label[0..entry.len], label[0..entry.len]);
         if (m.app_items.len > 0) {
@@ -1736,7 +1738,7 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
             } else {
                 // Copy event values before disposing of the popup and its
                 // borrowed menu ID; the interpreter owns the new event.
-                if (std.mem.eql(u8, entry.label[0..entry.len], "Applications…")) {
+                if (entry.launcher) {
                     dismissPopup(false);
                     if (@import("applauncher.zig").run(output_control, log_h) and bar_nmenus > 0) openPopup(bar_menus[0]);
                     continue;
@@ -2329,6 +2331,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // after the amber traffic-light minimizes it.
     if (title.len > 0) wf.setSurfaceTitle(title);
     const menu_profile: shared.menus.Profile = if (std.mem.eql(u8, strField(spec, "menus"), "files")) .files else .generic;
+    loadBindings(spec);
 
     var focus: usize = 0;
     var focus_id: [64]u8 = undefined;
@@ -2353,10 +2356,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (!want_trusted) {
             var enabled = shared.menus.offered(menu_profile);
             if (menu_profile == .files) {
-                if (file_crumb == null or file_crumb.?.path_len == 0) enabled &= ~shared.menus.bit(shared.menus.up);
-                if (file_crumb == null or !file_crumb.?.can_lock) enabled &= ~shared.menus.bit(shared.menus.readonly_view);
-                if (file_crumb == null or !file_crumb.?.can_leave) enabled &= ~shared.menus.bit(shared.menus.leave_view);
-                const list = listStateById("files");
+                const fb = &files_bindings;
+                if (fb.up.len == 0 or file_crumb == null or file_crumb.?.path_len == 0) enabled &= ~shared.menus.bit(shared.menus.up);
+                if (fb.lock.len == 0 or file_crumb == null or !file_crumb.?.can_lock) enabled &= ~shared.menus.bit(shared.menus.readonly_view);
+                if (fb.leave.len == 0 or file_crumb == null or !file_crumb.?.can_leave) enabled &= ~shared.menus.bit(shared.menus.leave_view);
+                if (fb.refresh.len == 0) enabled &= ~shared.menus.bit(shared.menus.refresh);
+                if (fb.home.len == 0) enabled &= ~shared.menus.bit(shared.menus.home);
+                const list = if (fb.open.len > 0) listStateById(fb.open.get()) else null;
                 if (list == null or list.?.nrows == 0) enabled &= ~shared.menus.bit(shared.keyboard.open_document);
             }
             wf.setMenuProfile(menu_profile, enabled);
@@ -2621,32 +2627,34 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             if (menu_profile == .files) {
                 switch (ch) {
                     shared.menus.up => {
-                        fired = "up";
+                        if (files_bindings.up.len > 0) fired = files_bindings.up.get();
                         break :input;
                     },
                     shared.menus.readonly_view => {
-                        if (file_crumb != null and file_crumb.?.can_lock) fired = "lock";
+                        if (files_bindings.lock.len > 0 and file_crumb != null and file_crumb.?.can_lock) fired = files_bindings.lock.get();
                         break :input;
                     },
                     shared.menus.leave_view => {
-                        if (file_crumb != null and file_crumb.?.can_leave) fired = "leave";
+                        if (files_bindings.leave.len > 0 and file_crumb != null and file_crumb.?.can_leave) fired = files_bindings.leave.get();
                         break :input;
                     },
                     shared.menus.refresh => {
-                        fired = "refresh";
+                        if (files_bindings.refresh.len > 0) fired = files_bindings.refresh.get();
                         break :input;
                     },
                     shared.menus.home => {
-                        fired = "places";
-                        fired_list = true;
-                        fired_row = "";
+                        if (files_bindings.home.len > 0) {
+                            fired = files_bindings.home.get();
+                            fired_list = true;
+                            fired_row = "";
+                        }
                         break :input;
                     },
                     shared.keyboard.open_document => {
-                        if (listStateById("files")) |st| if (st.nrows > 0) {
-                            fired = "files";
+                        if (files_bindings.open.len > 0) if (listStateById(files_bindings.open.get())) |st| if (st.nrows > 0) {
+                            fired = files_bindings.open.get();
                             fired_list = true;
-                            fired_row = listRowId(tree, "files", st.sel);
+                            fired_row = listRowId(tree, files_bindings.open.get(), st.sel);
                             fired_activated = true;
                             break :input;
                         };
