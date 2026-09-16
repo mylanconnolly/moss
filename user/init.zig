@@ -1102,6 +1102,12 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
             u.stopped = false; // connect doubles as (re)start
             _ = usys.replyTyped(shared.InitReply, chan, .connected, u.chan_b);
         },
+        .power => |p| {
+            const action: shared.PowerAction = if (p.action == @intFromEnum(shared.PowerAction.restart)) .restart else if (p.action == @intFromEnum(shared.PowerAction.off)) .off else return failReply(chan, .bad_arg);
+            _ = usys.replyTyped(shared.InitReply, chan, .powering, 0);
+            logLine("init: power request: ", if (action == .restart) "restart" else "off");
+            shutdown(shared.powerExit(action));
+        },
         .stop_named => |c| {
             var nbuf: [24]u8 = undefined;
             const name = shared.wordsToStr(&nbuf, .{ c.a, c.b, 0 });

@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart };
 
 const Spec = struct {
     name: []const u8,
@@ -92,6 +92,8 @@ const specs = [_]Spec{
     .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "dock: activate settings", .always_extra = "settings: admin=true", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "guishellro", .kind = .guishellro, .pass = "guishellro-test: PASS", .extra = "settings: admin=false", .always_extra = "settings: system read-only", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "display", .kind = .display, .pass = "display-test: PASS", .extra = "gpu: output 1920x1080", .always_extra = "display: mode confirmed", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "power", .kind = .power, .pass = "power-test: PASS", .extra = "users: session asked to shut down", .always_extra = "power-test: powered off by request", .extra2 = "init: power request: off", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "restart", .kind = .restart, .pass = "restart-test: restart requested; resetting", .extra = "users: session asked to restart", .always_extra = "root: init ended for a restart", .extra2 = "init: power request: restart", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "largetext", .kind = .largetext, .pass = "largetext-test: PASS", .extra = "ui 48px, scale 3.00", .always_extra = "editor: exit", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
@@ -438,7 +440,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -555,7 +557,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The post-login GUI shell: like the front door, but the shell runs
         // on the pointer-capable compositor, so a tablet (input index 1,
         // after the keyboard) rides along for a working cursor.
-        .guishell, .guishellro, .display, .largetext, .explorer, .terminal, .editor => {
+        .guishell, .guishellro, .display, .largetext, .power, .restart, .explorer, .terminal, .editor => {
             try args.appendSlice(gpa, &.{
                 "-device", gpu_device,
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -678,6 +680,12 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .largetext) {
         if (!try largetextDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .power) {
+        if (!try powerDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .restart) {
+        if (!try restartDrive(spec, log_path, polls)) return false;
     }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
@@ -1685,14 +1693,11 @@ fn topbarDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "topbar: popup at", popups + 2, "Control-F2 did not reopen the system menu", spec, polls)) return false;
     sleepMs(300);
     _ = q.screendump(check_dir ++ "/menu-system-keyboard.ppm");
-    const p = parsePopup(readLog(log_path)) orelse {
-        reportFailure(spec.name, "could not parse the dropdown geometry", log_path);
+    const item = popupItem(readLog(log_path), "Log Out") orelse {
+        reportFailure(spec.name, "could not find the Log Out item", log_path);
         return false;
     };
-    // Click the last item ("Log Out"): item i is centred at y + 4 + i*ih + ih/2.
-    const last = if (p[3] > 0) p[3] - 1 else 0;
-    const iy = p[1] + 4 + last * p[2] + p[2] / 2;
-    if (!clickScanout(&q, p[0] + 30, iy)) {
+    if (!clickScanout(&q, item[0], item[1])) {
         reportFailure(spec.name, "QMP could not click the Log Out item", log_path);
         return false;
     }
@@ -2510,17 +2515,51 @@ fn desktopLogout(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
     }
     if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "the system menu did not open a dropdown", spec, polls)) return false;
     sleepMs(300);
-    const p = parsePopup(readLog(log_path)) orelse {
-        reportFailure(spec.name, "could not parse the dropdown geometry", log_path);
+    return systemMenuChoose(spec, log_path, polls, q, "Log Out", "topbar: exit note=logging out", "Log Out did not end the session");
+}
+
+/// The system menu is open: click `label` and wait for `marker`.
+fn systemMenuChoose(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, label: []const u8, marker: []const u8, why: []const u8) !bool {
+    const item = popupItem(readLog(log_path), label) orelse {
+        reportFailure(spec.name, "could not find the system menu item", log_path);
         return false;
     };
-    const last = if (p[3] > 0) p[3] - 1 else 0; // "Log Out" is the last item
-    const iy = p[1] + 4 + last * p[2] + p[2] / 2;
-    if (!clickScanout(q, p[0] + 30, iy)) {
-        reportFailure(spec.name, "QMP could not click Log Out", log_path);
+    if (!clickScanout(q, item[0], item[1])) {
+        reportFailure(spec.name, "QMP could not click the system menu item", log_path);
         return false;
     }
-    return waitLogN(log_path, "topbar: exit note=logging out", 1, "Log Out did not end the session", spec, polls);
+    return waitLogN(log_path, marker, 1, why, spec, polls);
+}
+
+/// The power drill (`power`): the same desktop as guishell, but the system
+/// menu's Shut Down ends the machine: the bar asks its session init, the
+/// session manager hands the request to the system init, and root's exit
+/// code tells the kernel to power off — the drill's clean end.
+fn powerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    return powerMenuDrive(spec, log_path, polls, "Shut Down", "init: power request: off", "Shut Down did not reach the system init");
+}
+/// The restart drill (`restart`): Restart instead; root exits with the
+/// restart code and the kernel resets, which -no-reboot turns into an exit.
+fn restartDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    return powerMenuDrive(spec, log_path, polls, "Restart", "init: power request: restart", "Restart did not reach the system init");
+}
+fn powerMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, label: []const u8, marker: []const u8, why: []const u8) !bool {
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!try desktopSignIn(spec, log_path, polls, &q, "alice", "alice-pass")) return false;
+    if (!try waitLogN(log_path, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
+    sleepMs(500);
+    const popups = countOccurrences(readLog(log_path), "topbar: popup at");
+    const menu = parseTopbarMenu(readLog(log_path)) orelse return sfail(spec, log_path, "find the system menu");
+    if (!clickScanout(&q, menu[0], menu[1])) return sfail(spec, log_path, "click the system menu");
+    if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "the system menu did not open", spec, polls)) return false;
+    sleepMs(300);
+    _ = q.screendump(check_dir ++ "/power-menu.ppm");
+    return systemMenuChoose(spec, log_path, polls, &q, label, marker, why);
 }
 
 /// Wait for the greeter's login form, connect QMP, and type a user's
@@ -4944,6 +4983,26 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
     sleepMs(300);
     return true;
 }
+/// A system-menu item's click point, by label: the bar logs each popup
+/// item's row ("topbar: item y=.. h=.. <label>") after "topbar: popup at".
+fn popupItem(content: []const u8, label: []const u8) ?[2]u32 {
+    const pop_at = std.mem.lastIndexOf(u8, content, "topbar: popup at ") orelse return null;
+    const px = parseAfter(content[pop_at..], "at ") orelse return null;
+    var rest = content[pop_at..];
+    while (std.mem.indexOf(u8, rest, "topbar: item y=")) |at| {
+        const line_end = std.mem.indexOfScalar(u8, rest[at..], '\n') orelse rest.len - at;
+        const line = rest[at .. at + line_end];
+        const clean = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
+        if (std.mem.endsWith(u8, clean, label)) {
+            const y = parseAfter(line, "y=") orelse return null;
+            const h = parseAfter(line, "h=") orelse return null;
+            return .{ px + 30, y + h / 2 };
+        }
+        rest = rest[at + line_end ..];
+    }
+    return null;
+}
+
 /// The monitor's identity as the compositor logged it at boot
 /// ("gpu: monitor <id> ..."), the key a resolution preference is kept under.
 fn monitorId(content: []const u8) ?[]const u8 {

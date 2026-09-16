@@ -187,6 +187,16 @@ pub fn build(b: *std.Build) void {
         "largetext-test",
         "Run the large-text drill: Settings and the Editor's menus at 3x text on 1024x768",
     ) orelse false;
+    const power_test = b.option(
+        bool,
+        "power-test",
+        "Run the power drill: the system menu's Shut Down ends the machine through the session and system inits",
+    ) orelse false;
+    const restart_test = b.option(
+        bool,
+        "restart-test",
+        "Run the restart drill: the system menu's Restart resets the machine the same way",
+    ) orelse false;
     const fabgui_test = b.option(
         bool,
         "fabgui-test",
@@ -436,6 +446,8 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "guishellro_test", guishellro_test);
     build_opts.addOption(bool, "display_test", display_test);
     build_opts.addOption(bool, "largetext_test", largetext_test);
+    build_opts.addOption(bool, "power_test", power_test);
+    build_opts.addOption(bool, "restart_test", restart_test);
     build_opts.addOption(bool, "fabgui_test", fabgui_test);
     build_opts.addOption(bool, "fabsignal_test", fabsignal_test);
     build_opts.addOption(bool, "locale_test", locale_test);
@@ -858,7 +870,7 @@ pub fn build(b: *std.Build) void {
             "vmnode_test",     "pan_test",       "cpu_test",        "users_test",
             "login_test",      "flogin_test",    "dot_test",        "gboom_test",
             "fontrescan_test", "ptr_test",       "pointer_test",    "guiclick_test",
-            "fontscale_test",  "guishell_test",  "guishellro_test", "display_test", "largetext_test", "fabgui_test",
+            "fontscale_test",  "guishell_test",  "guishellro_test", "display_test", "largetext_test", "power_test", "restart_test", "fabgui_test",
             "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
             "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
@@ -1310,7 +1322,7 @@ pub fn build(b: *std.Build) void {
         "vmnode_test",     "pan_test",       "cpu_test",        "users_test",
         "login_test",      "flogin_test",    "dot_test",        "gboom_test",
         "fontrescan_test", "ptr_test",       "pointer_test",    "guiclick_test",
-        "fontscale_test",  "guishell_test",  "guishellro_test", "display_test", "largetext_test", "fabgui_test",
+        "fontscale_test",  "guishell_test",  "guishellro_test", "display_test", "largetext_test", "power_test", "restart_test", "fabgui_test",
         "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
         "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
@@ -1324,7 +1336,7 @@ pub fn build(b: *std.Build) void {
         "fs",        "net",      "fabric",    "shell",     "rng",        "smmu",
         "vm",        "guest",    "vmnode",    "pan",       "cpu",        "users",
         "login",     "flogin",   "dot",       "gboom",     "fontrescan", "ptr",
-        "pointer",   "guiclick", "fontscale", "guishell",  "guishellro", "display", "largetext", "fabgui",
+        "pointer",   "guiclick", "fontscale", "guishell",  "guishellro", "display", "largetext", "power", "restart", "fabgui",
         "fabsignal", "locale",   "localeupd", "desktop",   "topbar",     "dock",
         "listdemo",  "explorer", "browse",    "netbrowse", "cascade",    "terminal",
         "editor",

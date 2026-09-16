@@ -62,6 +62,14 @@ export fn umain(log_h: u64, _: u64, arg: u64, bva: u64, blen: u64) callconv(.c) 
             _ = usys.log(log_h, "root: init exited cleanly; done");
             usys.exit(0);
         }
+        // A power request ended init on purpose: pass the code up to the
+        // kernel (off or reset) rather than restart a system that asked to
+        // stop — the first time this ran, root revived init and the
+        // machine booted straight back to the greeter.
+        if (st.data[1] == shared.exit_power_off or st.data[1] == shared.exit_power_restart) {
+            _ = usys.log(log_h, if (st.data[1] == shared.exit_power_restart) "root: init ended for a restart" else "root: init ended for a shutdown");
+            usys.exit(st.data[1]);
+        }
         if (restarts == max_init_restarts) {
             _ = usys.log(log_h, "root: init keeps dying; giving up");
             usys.exit(st.data[1]);

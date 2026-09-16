@@ -197,6 +197,27 @@ pub fn cv() ui.Canvas {
 }
 var brush_canvas: ui.Canvas = .{};
 var icon_cache: ui.icons.Cache = .{};
+/// Paint into another surface for a while (a popup, an overlay): the
+/// pixel pointer, size AND clip move together, and come back together.
+pub const Target = struct { px: [*]volatile u32, w: usize, h: usize, clip: [4]usize, offset_y: isize };
+pub fn retarget(new_px: [*]volatile u32, w: usize, h: usize) Target {
+    const saved: Target = .{ .px = px, .w = win_w, .h = win_h, .clip = .{ clip_x0, clip_y0, clip_x1, clip_y1 }, .offset_y = draw_offset_y };
+    px = new_px;
+    win_w = w;
+    win_h = h;
+    clipReset();
+    return saved;
+}
+pub fn restoreTarget(t: Target) void {
+    px = t.px;
+    win_w = t.w;
+    win_h = t.h;
+    clip_x0 = t.clip[0];
+    clip_y0 = t.clip[1];
+    clip_x1 = t.clip[2];
+    clip_y1 = t.clip[3];
+    draw_offset_y = t.offset_y;
+}
 /// Everything a toolkit painter needs from this frame: the canvas, the
 /// font service as a typeface, the live palette and the icon cache.
 /// Valid until the next `brush()` (the canvas snapshot is shared).

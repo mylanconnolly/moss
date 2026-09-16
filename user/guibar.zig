@@ -190,17 +190,10 @@ fn popItemAt(ly: usize) ?usize {
 }
 
 fn renderPopup() void {
-    const save_px = wf.px;
-    const save_w = wf.win_w;
-    const save_h = wf.win_h;
-    wf.px = pop_px;
-    wf.win_w = pop_w;
-    wf.win_h = pop_h;
-    defer {
-        wf.px = save_px;
-        wf.win_w = save_w;
-        wf.win_h = save_h;
-    }
+    // The popup is its own surface: its own size and its own clip. (Painting
+    // it through the bar's clip left every row below the bar's height black.)
+    const saved = wf.retarget(pop_px, pop_w, pop_h);
+    defer wf.restoreTarget(saved);
     panel(0, 0, pop_w, pop_h, 8, pal.surface, pal.border, pal.border_w);
     const cyoff = (pop_item_h -| lineOf(R_UI)) / 2;
     for (pop_entries[0..pop_count], 0..) |entry, i| {
@@ -254,6 +247,7 @@ fn openPopup(m: MenuHit) void {
         // `{ text, action }` whose action the runtime performs itself.
         const label = if (m.app_items.len > 0) m.app_items[i].label else if (m.items[i] == .str) m.items[i].str else if (m.items[i] == .record) strField(m.items[i].record, "text") else "";
         if (m.app_items.len == 0 and m.items[i] == .record) entry.launcher = std.mem.eql(u8, strField(m.items[i].record, "action"), "launcher");
+        if (m.app_items.len == 0 and std.mem.eql(u8, label, "-")) entry.separator = true; // a rule between groups
         entry.len = @min(label.len, entry.label.len);
         @memcpy(entry.label[0..entry.len], label[0..entry.len]);
         if (m.app_items.len > 0) {
@@ -300,6 +294,12 @@ fn openPopup(m: MenuHit) void {
     commitPopup();
     var lb: [96]u8 = undefined;
     _ = usys.log(core.log_h, std.fmt.bufPrint(&lb, "topbar: popup at {d},{d} ih={d} n={d}", .{ pop_x, pop_y, pop_item_h, pop_count }) catch "topbar: popup");
+    // Each item's row, so a host can click one by its label.
+    for (pop_entries[0..pop_count], 0..) |entry, i| {
+        if (entry.separator) continue;
+        var il: [160]u8 = undefined;
+        _ = usys.log(core.log_h, std.fmt.bufPrint(&il, "topbar: item y={d} h={d} {s}", .{ pop_y + popEntryY(i), popEntryHeight(i), entry.label[0..entry.len] }) catch continue);
+    }
 }
 
 fn closePopup() void {

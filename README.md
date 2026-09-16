@@ -35,7 +35,7 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 Linux, where every boot is TCG). `run-login`'s second seat wants a `nc`.
 
 ```sh
-zig build check      # the whole test suite: every drill in build.zig's variants list under QEMU (63 today, +6 again on a ReleaseSafe kernel) + host unit tests; 3 drills at a time (~2 min)
+zig build check      # the whole test suite: every drill in build.zig's variants list under QEMU (65 today, +6 again on a ReleaseSafe kernel) + host unit tests; 3 drills at a time (~2 min)
 zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (intermittent failures);  -Djobs=1 runs one at a time
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)

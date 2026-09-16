@@ -1503,6 +1503,13 @@ applications need menus beyond those profiles.
   pointer mapping and resident bars. Output control uses a separate boot
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
+- ✅ **Shut down and restart** (2026-09-16): the system menu's Restart and
+  Shut Down (with rules between groups) climb the init tree as one
+  `InitRequest.power` — bar → session init → session manager → system init
+  → root → kernel (PSCI off/reset; `arch.power.systemReset`, 0xCF9 on x86_64).
+  Root no longer restarts an init that ended for a power request. `power`
+  and `restart` drills. Found: root revived init on the first run; the
+  popup painted black below the bar's height (clip not retargeted).
 - ✅ **The monitor's own word** (2026-09-16): gpusvc reads the virtio-gpu
   EDID (`lib/edid.zig`): identity (maker-product-serial), name, native mode.
   The native mode is the boot mode; `output_monitor` publishes the identity;

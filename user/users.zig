@@ -257,6 +257,7 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     // console (or verifier) sessions as before.
     disp_cap = setup.cap(.display);
     output_cap = setup.cap(.display_control);
+    init_chan = setup.cap(.init);
     font_cap = setup.cap(.font);
     locale_cap = setup.cap(.locale);
     gui_sessions = disp_cap != 0;
@@ -1270,10 +1271,19 @@ fn waitThread(_: u64) callconv(.c) void {
             if (sessionOf(wait_sid)) |still| close(still);
             unlock();
         }
+        if ((code == shared.exit_power_off or code == shared.exit_power_restart) and init_chan != 0) {
+            _ = usys.log(glog, if (code == shared.exit_power_restart) "users: session asked to restart" else "users: session asked to shut down");
+            const action: shared.PowerAction = if (code == shared.exit_power_restart) .restart else .off;
+            _ = usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{ .power = .{ .action = @intFromEnum(action) } }, 0);
+        }
         _ = usys.replyTypedTo(shared.SessResp, svc_chan, .{ .exited = .{ .code = code } }, 0, wait_token);
         @atomicStore(bool, &wait_active, false, .release);
     }
 }
+/// Our own init's front channel (`init: self`), for forwarding a
+/// session's power request up: the session init exits with the power
+/// code, and we ask ours to do the same.
+var init_chan: u64 = 0;
 var console_done: [max_consoles]bool = @splat(false);
 var ncons: usize = 0;
 var login_drill = false;

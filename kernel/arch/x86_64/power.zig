@@ -6,6 +6,16 @@ const acpi = @import("acpi.zig");
 const cpu = @import("cpu.zig");
 const log = @import("../../log.zig");
 
+/// Reset: the PCI reset control register (0xCF9), a full reset with
+/// SYS_RST | RST_CPU — what chipsets since the 440BX honour and QEMU's
+/// q35 answers by rebooting. Halts if nothing listens.
+pub fn systemReset() noreturn {
+    cpu.irqMaskAll();
+    cpu.outb(0xcf9, 0x02);
+    cpu.outb(0xcf9, 0x06);
+    while (true) cpu.halt();
+}
+
 pub fn systemOff() noreturn {
     cpu.irqMaskAll();
     if (acpi.fadt()) |f| {

@@ -3158,6 +3158,32 @@ split first (above) and why `-Djobs=1` is the flake-hunt mode — a hang
 seen only at width 3 is a real hang or a drill too close to the edge,
 and the dump says which.
 
+**Shut down and restart (as built, 2026-09-16).** The system menu had
+Log Out and no way to end the machine; the machine also had none — an
+interactive boot powered off only when its app exited, and a root task
+whose init died restarted it. Now the menu reads Applications… | About,
+Settings… | Log Out, Restart, Shut Down (declarative bar items accept
+`"-"` as a rule between groups), and the last two are one request that
+climbs the tree it lives in. The bar runs `power "shutdown"|"restart"`,
+a `workcmds` command over the session's own init front channel;
+`InitRequest.power` makes *any* init reply `powering`, revoke its units
+and exit with a power code (241 off, 242 restart — above every drill's
+own codes). The session init's exit code reaches the session manager,
+which forwards the same request to its init through the `init: self`
+give it now holds; the system init does the same and exits; the root
+task, which used to restart a dying init once before giving up, passes
+a power code straight up; and the kernel answers root's exit — PSCI
+SYSTEM_OFF, or SYSTEM_RESET through the new `arch.power.systemReset`
+(0xCF9 on the x86_64 port). A drill's harness accepts the power-off code
+as a clean end and turns a restart into a reset, which the runner's
+-no-reboot makes an exit; the `power` and `restart` drills choose each
+item from the menu by label (the bar now logs every popup item's row).
+Found on the way, twice: the first run rebooted straight back to the
+greeter — root revived init — and, before that, the popup's rows below
+the bar's height painted black, because the popup painter retargeted
+the frame's pixels and size but kept the bar's clip; `wf.retarget`
+moves the clip with them and restores all three together.
+
 **Minimize and restore (as built, 2026-09-10).** The amber traffic-light
 was a stub since stage 1 (it logged "minimize (not yet)"); it now hides the
 window, and the app's dock pill brings it back. A minimized window is not

@@ -730,6 +730,7 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // mark when the app it launched exits. Reachable only from a program
     // that holds init's front channel.
     if (std.mem.eql(u8, name, "unit-up")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
+    if (std.mem.eql(u8, name, "power")) return .{ .params = &.{.{ .name = "action", .shape = .string }}, .ret = .bool };
     return null;
 }
 
@@ -876,6 +877,18 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (args.len == 0 or args[0] != .str) return it.fail("launch: a unit name expected", .{});
         if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("launch: a unit name is 1..16 bytes", .{});
         return try launchUnit(it, args[0].str);
+    }
+    if (is(u8, name, "power")) {
+        // "shutdown" or "restart": ask our init to end — the session's
+        // init hands it up to the system's, whose exit the kernel answers.
+        if (init_chan == 0) return it.fail("power: this program cannot reach init", .{});
+        if (args.len == 0 or args[0] != .str) return it.fail("power: shutdown or restart expected", .{});
+        const action: shared.PowerAction = if (is(u8, args[0].str, "restart")) .restart else if (is(u8, args[0].str, "shutdown")) .off else return it.fail("power: shutdown or restart expected", .{});
+        const ok = switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{ .power = .{ .action = @intFromEnum(action) } }, 0)) {
+            .ok => |r| r == .powering,
+            .err => |e| e == .peer_dead, // init went down with the request
+        };
+        return .{ .bool = ok };
     }
     if (is(u8, name, "unit-up")) {
         if (init_chan == 0) return it.fail("unit-up: this program cannot reach init", .{});

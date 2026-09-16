@@ -30,5 +30,6 @@
     { tag: display_control, unit: compositor-ptr, control: true }
     { tag: font, unit: fontsvc }
     { tag: locale, unit: localesvc }
+    { tag: init, self: true }
   ]
 }

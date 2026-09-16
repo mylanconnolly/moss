@@ -41,7 +41,7 @@ let final = (gui {
     view: (fn [state] {
         {
           left: [
-            { kind: "menu", id: "system", title: "Moss", icon: "moss", icon_only: true, items: [{ text: "Applications…", action: "launcher" }, "About This System", "Settings…", "Log Out"] }
+            { kind: "menu", id: "system", title: "Moss", icon: "moss", icon_only: true, items: [{ text: "Applications…", action: "launcher" }, "-", "About This System", "Settings…", "-", "Log Out", "Restart", "Shut Down"] }
             { kind: "label", muted: true, text: $state.note }
           ]
           right: [
@@ -53,6 +53,14 @@ let final = (gui {
     update: (fn [state, ev] {
         match $ev.item {
           "Log Out" => { { note: "logging out", done: true } }
+          "Restart" => {
+            power "restart"
+            { note: "restarting", done: true }
+          }
+          "Shut Down" => {
+            power "shutdown"
+            { note: "shutting down", done: true }
+          }
           "Settings…" => {
             launch "settings"
             { note: "opened settings" }

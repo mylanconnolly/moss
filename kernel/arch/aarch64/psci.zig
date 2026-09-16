@@ -17,10 +17,19 @@ pub const Error = error{
 
 const fid_cpu_on: u64 = 0xc400_0003; // SMC64 CPU_ON
 const fid_system_off: u64 = 0x8400_0008;
+const fid_system_reset: u64 = 0x8400_0009;
 
 /// Power the machine off (QEMU exits). The node-kill drill's exit door.
 pub fn systemOff() noreturn {
     _ = call(fid_system_off, 0, 0, 0);
+    while (true) {
+        asm volatile ("wfi");
+    }
+}
+
+/// Reset the machine (QEMU reboots, or exits under -no-reboot).
+pub fn systemReset() noreturn {
+    _ = call(fid_system_reset, 0, 0, 0);
     while (true) {
         asm volatile ("wfi");
     }

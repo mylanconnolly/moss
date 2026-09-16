@@ -230,6 +230,16 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.power_test) {
+        _ = sched.spawn("boot-watch", powerTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+    if (build_options.restart_test) {
+        _ = sched.spawn("boot-watch", restartTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.fabgui_test) {
         _ = sched.spawn("boot-watch", fabguiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -892,6 +902,16 @@ fn displayTestWorker(_: u64) void {
 fn largetextTestWorker(_: u64) void {
     systemDrill("largetext");
 }
+/// The power drill: the desktop's Shut Down ends the machine through the
+/// session init, the session manager and the system init; root exits
+/// with the power-off code, which the drill accepts as a clean end.
+fn powerTestWorker(_: u64) void {
+    systemDrill("power");
+}
+/// The restart drill: Restart instead of Shut Down; the kernel resets.
+fn restartTestWorker(_: u64) void {
+    systemDrill("restart");
+}
 
 /// The fabric GUI drill: node 2 (profile "fabgui") runs a GUI whose app
 /// lives on node 1 over the fabric — a pure viewer shipping events and
@@ -1084,6 +1104,12 @@ fn guiRunWorker(_: u64) void {
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
     while (!(root.state == .dying and domain.drained(root))) sched.sleep(5);
     domain.finishTeardown(root);
+    // Root's exit code is the desktop's word: a restart asked for through
+    // the system menu comes back as a reset; anything else powers off.
+    if (root.exit_code == shared.exit_power_restart) {
+        log.info("gui-run: restart requested; resetting", .{});
+        arch.power.systemReset();
+    }
     log.info("gui-run: the app exited; powering off", .{});
     arch.power.systemOff();
 }
@@ -1124,7 +1150,17 @@ fn systemDrill(comptime name: []const u8) void {
 
     sched.sleep(5);
     const frames_after = pmem.stats().free_bytes;
-    if (code == 0 and frames_after == frames_before and ipc.shm_account.balance() == 0) {
+    // A power request from the desktop (the system menu's Shut Down) is
+    // a clean end too: root exits with the power-off code. A restart
+    // request resets the machine; under the runner's -no-reboot that
+    // ends QEMU, and the line before it is the drill's verdict.
+    if (code == shared.exit_power_restart) {
+        log.info(name ++ "-test: restart requested; resetting", .{});
+        arch.power.systemReset();
+    }
+    const clean = code == 0 or code == shared.exit_power_off;
+    if (clean and frames_after == frames_before and ipc.shm_account.balance() == 0) {
+        if (code == shared.exit_power_off) log.info(name ++ "-test: powered off by request", .{});
         log.info(name ++ "-test: PASS — the system booted from unit files, ran its drill, and shut down clean", .{});
         arch.power.systemOff();
     } else {

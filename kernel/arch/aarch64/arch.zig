@@ -71,4 +71,5 @@ pub const msi = struct {
 
 pub const power = struct {
     pub const systemOff = psci.systemOff;
+    pub const systemReset = psci.systemReset;
 };

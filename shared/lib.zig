@@ -502,7 +502,21 @@ pub const InitRequest = union(enum(u64)) {
     /// (+ view cap): content-addressed `img/<digest>` files plus the
     /// manifests beside them (`img/<name>.msh`). Idempotent — present images are skipped.
     install: void,
+    /// Shut the machine down (action = PowerAction) by ending this init:
+    /// it revokes its units and exits with the matching power exit code.
+    /// A session init's parent (the session manager) forwards the request
+    /// to its own init; the system init is root, whose exit code the
+    /// kernel answers with PSCI off or reset.
+    power: struct { action: u64 },
 };
+pub const PowerAction = enum(u64) { off = 1, restart = 2 };
+/// Root exit codes the kernel reads as power requests (drills' own codes
+/// stay below; 0 is a clean shutdown too).
+pub const exit_power_off: u64 = 241;
+pub const exit_power_restart: u64 = 242;
+pub fn powerExit(action: PowerAction) u64 {
+    return if (action == .restart) exit_power_restart else exit_power_off;
+}
 
 pub const InitReply = union(enum(u64)) {
     apps: struct { n: u64, total: u64, next: u64 },
@@ -511,6 +525,8 @@ pub const InitReply = union(enum(u64)) {
     listed: struct { n: u64 },
     stopped: void,
     installed: struct { n: u64 },
+    /// A power request accepted: this init is going down.
+    powering: void,
 };
 
 /// One unit as `svc` sees it, packed into a buffer by init's `list`.

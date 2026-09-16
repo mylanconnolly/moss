@@ -50,7 +50,7 @@ pub const intc = impl.intc;
 pub const msi = impl.msi;
 /// The per-core tick source: `initCore`, `rearm`, `intid`.
 pub const timer = impl.timer;
-/// `systemOff`.
+/// `systemOff`, `systemReset`.
 pub const power = impl.power;
 /// Secondary cores: `bringUp`.
 pub const smp = impl.smp;
