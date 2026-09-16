@@ -3402,7 +3402,8 @@ channel) asks init for its unit list — the same `list` request `svc`
 renders — and reads that unit's `up` bit; init already reports a unit whose
 domain has died as down, so this is the honest "is the app still running".
 The dock's `view` calls `unit-up` per pill and a `tick: 200` re-renders
-every 200 ms (the same clock-refresh path the top bar uses), so the dot
+every second (the same clock-refresh path the top bar uses; 200 ms until
+2026-09-16, when the per-poll shared-buffer churn was found), so the dot
 lights when the app comes up and clears on its own when it exits — no
 teardown signal has to reach the dock, and it is correct across a crash as
 much as a clean exit. The dock's `update` no longer threads any *running*

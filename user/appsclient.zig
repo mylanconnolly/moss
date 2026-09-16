@@ -3,6 +3,25 @@ const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 pub var authority: u64 = 0;
+// One page, created and mapped on first use and kept: the dock refreshes
+// its catalog on every tick for the life of the session, and a shared
+// buffer created, mapped, unmapped and freed per poll was churning one of
+// the kernel's small global pools several times a second.
+var page_cap: u64 = 0;
+var page_va: u64 = 0;
+fn ensurePage() bool {
+    if (page_va != 0) return true;
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return false;
+    const map = usys.shmMap(sh.data[0]);
+    if (map.err != .ok) {
+        _ = usys.capDrop(sh.data[0]);
+        return false;
+    }
+    page_cap = sh.data[0];
+    page_va = map.data[0];
+    return true;
+}
 pub const Catalog = struct {
     records: [128]shared.apps.Record = undefined,
     len: usize = 0,
@@ -12,17 +31,12 @@ pub const Catalog = struct {
         defer if (!complete) {
             self.len = 0;
         };
-        if (authority == 0) return false;
-        const sh = usys.shmCreate(1);
-        if (sh.err != .ok) return false;
-        defer _ = usys.capDrop(sh.data[0]);
-        const map = usys.shmMap(sh.data[0]);
-        if (map.err != .ok) return false;
-        defer _ = usys.shmUnmap(map.data[0]);
-        const rows: [*]const u8 = @ptrFromInt(map.data[0]);
+        if (authority == 0 or !ensurePage()) return false;
+        const rows: [*]const u8 = @ptrFromInt(page_va);
         var start: u64 = 0;
         while (true) {
-            const reply = switch (usys.callTyped(shared.InitRequest, shared.InitReply, authority, .{ .apps = .{ .start = start } }, sh.data[0])) {
+            // init maps the page for the reply and drops its copy of the cap.
+            const reply = switch (usys.callTyped(shared.InitRequest, shared.InitReply, authority, .{ .apps = .{ .start = start } }, page_cap)) {
                 .ok => |r| r,
                 .err => return false,
             };

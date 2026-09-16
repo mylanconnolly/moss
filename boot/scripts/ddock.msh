@@ -8,10 +8,11 @@
 # compositor restores by, so they must match ("Settings", "Demo").
 #
 # A pill's *running* dot is not remembered state — it is polled live: the
-# view asks init `unit-up NAME` for each app, and a `tick` re-renders every
-# 200 ms, so the dot lights when the app is up and clears on its own when
-# the app exits (init reports a dead unit as down). No teardown signal has
-# to reach the dock.
+# view reads init's application catalog (`apps`, with each unit's up flag)
+# and a `tick` re-renders every second, so the dot lights when the app is
+# up and clears on its own when the app exits (init reports a dead unit as
+# down). No teardown signal has to reach the dock; a click re-renders at
+# once, so a launch lights its dot without waiting for the tick.
 # Restore only a previously confirmed preference. Unsupported modes leave
 # the driver's boot mode intact; unconfirmed previews are never persisted.
 match (cat "conf/display.msh") {
@@ -25,7 +26,7 @@ match (cat "conf/display.msh") {
 }
 let final = (gui {
     dock: true
-    tick: 200
+    tick: 1000
     init: { }
     view: (fn [state] {
         {

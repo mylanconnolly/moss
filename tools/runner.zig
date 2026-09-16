@@ -2685,12 +2685,13 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "QMP could not click the demo's close dot", log_path);
         return false;
     }
-    // Keep pointer input arriving while the app exits. Refresh must not
-    // depend on an idle input queue or a second click on the dock.
-    // The dock is a legacy surface: a held right button delivers motion
+    // Keep pointer input arriving while the app exits, for longer than the
+    // dock's one-second tick: the refresh must land during the motion, not
+    // depend on an idle input queue or a second click on the dock. The
+    // dock is a legacy surface: a held right button delivers motion
     // without launching an app (plain hover is intentionally not routed).
     if (!moveScanout(&q, dem[0], dem[1]) or !q.sendButton("right", true)) return sfail(spec, log_path, "start dock motion");
-    for (0..40) |i| {
+    for (0..150) |i| {
         if (!moveScanout(&q, dem[0] + @as(u32, @intCast(i % 2)), dem[1])) return sfail(spec, log_path, "move over dock during exit");
         sleepMs(10);
     }
