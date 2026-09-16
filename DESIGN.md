@@ -3521,6 +3521,21 @@ typeface: fontsvc's glyph blits go through the frame's `blendPx`, so
 for the call and restores it — the frame paints into whatever canvas a
 painter holds.
 
+*Found the same afternoon, by hand:* a terminal maximized after a live
+switch to 1920×1200 wore a title bar 1280 wide over a 1920-wide black
+grid. The title was centred at 960, so the frame knew its width; only
+the bar's fill stopped short — the frame's clip rectangle. It started
+life at the boot constant 1280×1024 and was reset only by clients that
+call `clipReset` each render; the terminal never does, because it blits
+its grid straight into the surface, so its chrome had painted through a
+stale clip since the day outputs became configurable. The frame now
+resets the clip whenever it maps a surface — a new surface *is* a
+whole-window clip — and the display drill maximizes the live terminal
+at 1920 and probes a title-bar pixel past the old width against one
+before it (run once with the fix removed: the probe fails). *Lesson:* a
+default that happens to equal the only size the system ever had is a
+constant waiting to become a bug; the resize was the tell.
+
 What this is not yet: the declarative tree's layout and painting
 (`guicmds`' `layoutNode`, list rows, breadcrumbs, the bar and dock)
 still live with the mshl runtime, and the window chrome is the frame's.

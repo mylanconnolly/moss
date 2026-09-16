@@ -4855,6 +4855,41 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
         if (!try waitLogN(log_path, "term: reflow", if (pass == 2) 4 else pass + 1, "existing terminal did not follow output resize", spec, polls)) return false;
         sleepMs(500);
         _ = q.screendump(if (pass == 0) check_dir ++ "/display-1920.ppm" else if (pass == 1) check_dir ++ "/display-1024.ppm" else check_dir ++ "/display-restored.ppm");
+        if (pass == 0) {
+            // Maximize the live terminal at the wider output: its title bar
+            // must span the whole window. The frame's clip used to stay at
+            // the boot-time 1280 wide for clients that never reset it, so a
+            // maximized terminal at 1920 wore a 1280-wide title bar.
+            const term_pill = parseDockItem(readLog(log_path), 3) orelse return false;
+            if (!clickOutput(q, term_pill, width, height)) return false; // in front
+            sleepMs(250);
+            const dots = termDots(readLog(log_path)) orelse return sfail(spec, log_path, "terminal dots after resize");
+            var reflows = countOccurrences(readLog(log_path), "term: reflow");
+            if (!clickOutput(q, .{ dots[4], dots[5] }, width, height)) return false;
+            if (!try waitLogN(log_path, "term: reflow", reflows + 1, "maximize did not reflow the terminal", spec, polls)) return false;
+            sleepMs(300);
+            const grid_at = std.mem.lastIndexOf(u8, readLog(log_path), "term: grid ") orelse return false;
+            const oy = parseAfter(readLog(log_path)[grid_at..], "oy=") orelse return false;
+            _ = q.screendump(check_dir ++ "/display-1920-term-max.ppm");
+            const img = readPpm(check_dir ++ "/display-1920-term-max.ppm") orelse return sfail(spec, log_path, "read maximized terminal screenshot");
+            if (img.w != 1920) return sfail(spec, log_path, "maximized screenshot width");
+            const bar_y = oy -| 6; // inside the title band
+            const near = pixelAt(img, 600, bar_y);
+            const far = pixelAt(img, 1700, bar_y); // past the old 1280
+            if (!eqRgb(far, near[0], near[1], near[2])) {
+                reportFailure(spec.name, "maximized terminal title bar stops short of the window edge", log_path);
+                return false;
+            }
+            reflows = countOccurrences(readLog(log_path), "term: reflow");
+            const restore_dots = termDots(readLog(log_path)) orelse return false;
+            if (!clickOutput(q, .{ restore_dots[4], restore_dots[5] }, width, height)) return false;
+            if (!try waitLogN(log_path, "term: reflow", reflows + 1, "un-maximize did not reflow the terminal", spec, polls)) return false;
+            sleepMs(200);
+            // Settings back in front for the next mode, as before this detour.
+            const settings_pill = parseDockItem(readLog(log_path), 0) orelse return false;
+            if (!clickOutput(q, settings_pill, width, height)) return false;
+            sleepMs(250);
+        }
         if (pass == 1) {
             const rollbacks = countOccurrences(readLog(log_path), "gpu: output 1920x1080");
             const term = parseDockItem(readLog(log_path), 3) orelse return false;
@@ -4900,6 +4935,20 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
     sleepMs(300);
     return true;
 }
+/// The terminal's traffic-light dots: it logs them just before each
+/// "term: grid" line, so the pair before the last grid line is its own
+/// (other windows log "gui: dots" too).
+fn termDots(content: []const u8) ?[6]u32 {
+    const grid_at = std.mem.lastIndexOf(u8, content, "term: grid ") orelse return null;
+    const dots_at = std.mem.lastIndexOf(u8, content[0..grid_at], "gui: dots ") orelse return null;
+    const line = content[dots_at..];
+    return .{
+        parseAfter(line, "close=") orelse return null, parseAfter(line[std.mem.indexOf(u8, line, "close=").? + 6 ..], ",") orelse return null,
+        parseAfter(line, "min=") orelse return null,   parseAfter(line[std.mem.indexOf(u8, line, "min=").? + 4 ..], ",") orelse return null,
+        parseAfter(line, "max=") orelse return null,   parseAfter(line[std.mem.indexOf(u8, line, "max=").? + 4 ..], ",") orelse return null,
+    };
+}
+
 fn clickOutput(q: *Qmp, point: [2]u32, width: u32, height: u32) bool {
     if (!q.sendPointer(@intCast(@as(u64, point[0]) * 32768 / width), @intCast(@as(u64, point[1]) * 32768 / height))) return false;
     return q.sendClick(true) and q.sendClick(false);

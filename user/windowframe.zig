@@ -652,6 +652,11 @@ pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
     surf_cap = cs.cap;
     surf_va = m.data[0];
     px = @ptrFromInt(m.data[0]);
+    // A new surface is a whole-window clip. Clients that never call
+    // clipReset (the terminal blits its grid straight into px) painted
+    // their chrome through the boot-time 1280x1024 clip after a resize:
+    // a maximized terminal at 1920x1200 had a title bar 1280 wide.
+    clipReset();
     return true;
 }
 
