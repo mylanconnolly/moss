@@ -146,101 +146,11 @@ pub var measuring = false;
 // accessibility switches) reaches every GUI system-wide. Colours are
 // 0x00RRGGBB (XRGB, read straight by a screendump).
 
-pub const Palette = struct {
-    bg: u32, // the window ground
-    surface: u32, // an elevated area (titlebar, cards)
-    surface_hi: u32, // a raised element's fill (a default button)
-    text: u32, // body text
-    text_muted: u32, // secondary text (field labels, hints)
-    title: u32, // the title / strong heading
-    border: u32, // element outlines, the titlebar rule
-    window_border: u32, // neutral active-window outline
-    focus: u32, // the focus ring (never the only cue — focus also lifts)
-    primary: u32, // the primary action's fill
-    primary_ink: u32, // text on `primary`
-    danger: u32, // a destructive action's fill
-    danger_ink: u32, // text on `danger`
-    field_bg: u32, // an inset text field
-    border_w: usize, // outline thickness (thicker at high contrast)
-    focus_w: usize, // focus-ring thickness
-};
-
-/// Scale each RGB channel of an XRGB colour by num/den (clamped) — for a
-/// raised element's highlight (>1) and shade (<1) edges, so buttons read
-/// with a little depth without a gradient.
-pub fn shade(c: u32, num: u32, den: u32) u32 {
-    const r: u32 = @min(((c >> 16) & 0xff) * num / den, 255);
-    const g: u32 = @min(((c >> 8) & 0xff) * num / den, 255);
-    const b: u32 = @min((c & 0xff) * num / den, 255);
-    return (r << 16) | (g << 8) | b;
-}
-
+pub const Palette = ui.Palette;
+pub const shade = ui.palette.shade;
+/// The wire's appearance enums (fontsvc's flags) to the toolkit's, by value.
 pub fn resolveTheme(theme: shared.Theme, contrast: shared.Contrast, cmode: shared.ColorMode) Palette {
-    // Semantic accent/danger: a normal set, or the Okabe-Ito colourblind-
-    // safe set (blue vs vermillion, distinguishable across common CVDs —
-    // no red/green cue). Meaning is never carried by colour alone; the
-    // labels and the raised shape say what a control is too.
-    const cb = cmode == .cb_safe;
-    var p: Palette = switch (theme) {
-        .dark => .{
-            .bg = 0x17191d,
-            .surface = 0x22252a,
-            .surface_hi = 0x30343b,
-            .text = 0xe6e9f0,
-            .text_muted = 0xa9afb9,
-            .title = 0xf0f3fa,
-            .border = 0x3b4049,
-            .window_border = 0x565c66,
-            .focus = if (cb) 0x56b4e9 else 0x5aa2ff,
-            .primary = if (cb) 0x0072b2 else 0x3d7dff,
-            .primary_ink = 0xffffff,
-            .danger = if (cb) 0xd55e00 else 0xe5484d,
-            .danger_ink = 0xffffff,
-            .field_bg = 0x1b1e23,
-            .border_w = 1,
-            .focus_w = 3,
-        },
-        .light => .{
-            .bg = 0xf3f3f1,
-            .surface = 0xffffff,
-            .surface_hi = 0xedeef0,
-            .text = 0x1a1f2b,
-            .text_muted = 0x5c6577,
-            .title = 0x17191d,
-            .border = 0xd3d5d9,
-            .window_border = 0xaeb2b9,
-            .focus = if (cb) 0x0072b2 else 0x2563eb,
-            .primary = if (cb) 0x0072b2 else 0x2563eb,
-            .primary_ink = 0xffffff,
-            .danger = if (cb) 0xd55e00 else 0xdc2626,
-            .danger_ink = 0xffffff,
-            .field_bg = 0xffffff,
-            .border_w = 1,
-            .focus_w = 3,
-        },
-    };
-    // High contrast: push ground and ink to the extremes, bolden the
-    // outlines and the focus ring, and keep the accents bright and pure.
-    if (contrast == .high) {
-        const dark = theme == .dark;
-        p.bg = if (dark) 0x000000 else 0xffffff;
-        p.surface = p.bg;
-        p.surface_hi = p.bg;
-        p.field_bg = p.bg;
-        p.text = if (dark) 0xffffff else 0x000000;
-        p.text_muted = p.text;
-        p.title = p.text;
-        p.border = p.text;
-        p.window_border = p.text;
-        p.focus = if (dark) 0xffff00 else 0x0000ff;
-        p.primary = if (cb) 0x009e73 else (if (dark) 0x2ea3ff else 0x0000cc);
-        p.primary_ink = if (dark) 0x000000 else 0xffffff;
-        p.danger = if (cb) 0xd55e00 else (if (dark) 0xff5b5b else 0xcc0000);
-        p.danger_ink = if (dark) 0x000000 else 0xffffff;
-        p.border_w = 2;
-        p.focus_w = 5;
-    }
-    return p;
+    return ui.palette.resolve(@enumFromInt(@intFromEnum(theme)), @enumFromInt(@intFromEnum(contrast)), @enumFromInt(@intFromEnum(cmode)));
 }
 
 // The live palette, refreshed from fontsvc before each render.
@@ -278,131 +188,51 @@ fn inClip(x: usize, y: usize) bool {
     return x >= clip_x0 and x < clip_x1 and y >= clip_y0 and y < clip_y1;
 }
 
+/// The toolkit canvas over the current surface and clip state. The
+/// frame's pixel pointer, size, clip and scroll offset stay its own
+/// variables (popups retarget them), so the canvas is built per use.
+pub fn cv() ui.Canvas {
+    if (measuring) return ui.Canvas.empty;
+    return .{ .px = @volatileCast(px), .w = win_w, .h = win_h, .offset_y = draw_offset_y, .clip_x0 = clip_x0, .clip_y0 = clip_y0, .clip_x1 = clip_x1, .clip_y1 = clip_y1 };
+}
+var brush_canvas: ui.Canvas = .{};
+var icon_cache: ui.icons.Cache = .{};
+/// Everything a toolkit painter needs from this frame: the canvas, the
+/// font service as a typeface, the live palette and the icon cache.
+/// Valid until the next `brush()` (the canvas snapshot is shared).
+pub fn brush() ui.Brush {
+    brush_canvas = cv();
+    return .{ .canvas = &brush_canvas, .face = face(), .pal = &pal, .icons = &icon_cache, .icon_px = iconSize() };
+}
+
 pub fn fillAll(word: u32) void {
-    if (measuring) return;
-    for (0..win_w * win_h) |i| px[i] = word;
+    cv().fillAll(word);
 }
-
 pub fn putPx(x: usize, logical_y: usize, word: u32) void {
-    const sy = screenY(logical_y);
-    if (sy < 0) return;
-    const y: usize = @intCast(sy);
-    if (measuring) return;
-    if (x < win_w and y < win_h and inClip(x, y)) px[y * win_w + x] = word;
+    cv().put(x, logical_y, word);
 }
-
 pub fn fillRect(x: usize, y: usize, w: usize, h: usize, word: u32) void {
-    if (measuring) return;
-    const top = @max(@as(isize, @intCast(clip_y0)), screenY(y));
-    const bottom = @min(@as(isize, @intCast(@min(win_h, clip_y1))), screenY(y + h));
-    if (top >= bottom) return;
-    const left = @max(x, clip_x0);
-    const right = @min(x + w, @min(win_w, clip_x1));
-    if (left >= right) return;
-    for (@as(usize, @intCast(top))..@as(usize, @intCast(bottom))) |yy| {
-        @memset(px[yy * win_w + left .. yy * win_w + right], word);
-    }
+    cv().fillRect(x, y, w, h, word);
 }
-
 /// A `thick`-pixel outline around the rect (x, y, w, h).
 pub fn strokeRect(x: usize, y: usize, w: usize, h: usize, word: u32, thick: usize) void {
-    fillRect(x, y, w, thick, word); // top
-    if (h > thick) fillRect(x, y + h - thick, w, thick, word); // bottom
-    fillRect(x, y, thick, h, word); // left
-    if (w > thick) fillRect(x + w - thick, y, thick, h, word); // right
+    cv().strokeRect(x, y, w, h, word, thick);
 }
-
-/// One rounded corner: the quarter-disc of radius `r` centred at (cx, cy),
-/// filling the r×r box that extends in the (qx, qy) direction. Each pixel
-/// is coverage-blended (a ~1px feather at the arc), so the curve reads
-/// smooth against whatever is already painted there — no jaggies.
-fn roundCorner(cx: usize, cy: usize, r: usize, word: u32, qx: i2, qy: i2) void {
-    const cxf: f32 = @floatFromInt(cx);
-    const cyf: f32 = @floatFromInt(cy);
-    const rf: f32 = @floatFromInt(r);
-    var iy: usize = 0;
-    while (iy < r) : (iy += 1) {
-        var ix: usize = 0;
-        while (ix < r) : (ix += 1) {
-            const pxu = if (qx < 0) cx - r + ix else cx + ix;
-            const pyu = if (qy < 0) cy - r + iy else cy + iy;
-            const dx = (@as(f32, @floatFromInt(pxu)) + 0.5) - cxf;
-            const dy = (@as(f32, @floatFromInt(pyu)) + 0.5) - cyf;
-            const cov = rf + 0.5 - @sqrt(dx * dx + dy * dy); // 1px feather
-            if (cov <= 0) continue;
-            blendPx(pxu, pyu, word, if (cov >= 1) 255 else @intFromFloat(cov * 255));
-        }
-    }
-}
-
-/// A filled rectangle with rounded, anti-aliased corners. Straight regions
-/// are solid fills; the four corners are feathered discs. `r` is clamped
-/// to half the shorter side (r == 0 degrades to a plain fill).
+/// A filled rectangle with rounded, anti-aliased corners.
 pub fn fillRoundRect(x: usize, y: usize, w: usize, h: usize, r_in: usize, word: u32) void {
-    if (measuring or w == 0 or h == 0) return;
-    var r = r_in;
-    if (r > w / 2) r = w / 2;
-    if (r > h / 2) r = h / 2;
-    if (r == 0) return fillRect(x, y, w, h, word);
-    fillRect(x, y + r, w, h - 2 * r, word); // the full-width middle band
-    fillRect(x + r, y, w - 2 * r, r, word); // top edge between corners
-    fillRect(x + r, y + h - r, w - 2 * r, r, word); // bottom edge
-    roundCorner(x + r, y + r, r, word, -1, -1); // TL
-    roundCorner(x + w - r, y + r, r, word, 1, -1); // TR
-    roundCorner(x + r, y + h - r, r, word, -1, 1); // BL
-    roundCorner(x + w - r, y + h - r, r, word, 1, 1); // BR
+    cv().fillRoundRect(x, y, w, h, r_in, word);
 }
-
 /// A filled, anti-aliased disc — a traffic-light dot.
 pub fn fillDot(cx: usize, cy: usize, r: usize, word: u32) void {
-    if (measuring) return;
-    const cxf: f32 = @floatFromInt(cx);
-    const cyf: f32 = @floatFromInt(cy);
-    const rf: f32 = @floatFromInt(r);
-    var y = if (cy > r) cy - r else 0;
-    while (y <= cy + r) : (y += 1) {
-        var x = if (cx > r) cx - r else 0;
-        while (x <= cx + r and x < win_w) : (x += 1) {
-            const dx = (@as(f32, @floatFromInt(x)) + 0.5) - cxf;
-            const dy = (@as(f32, @floatFromInt(y)) + 0.5) - cyf;
-            const cov = rf + 0.5 - @sqrt(dx * dx + dy * dy);
-            if (cov <= 0) continue;
-            blendPx(x, y, word, if (cov >= 1) 255 else @intFromFloat(cov * 255));
-        }
-    }
+    cv().fillDot(cx, cy, r, word);
 }
-
-/// A rounded panel with a rounded border of thickness `bw`: the border
-/// colour as the outer shape, the fill inset by `bw`.
+/// A rounded panel with a rounded border of thickness `bw`.
 pub fn panel(x: usize, y: usize, w: usize, h: usize, r: usize, fill: u32, border: u32, bw: usize) void {
-    fillRoundRect(x, y, w, h, r, border);
-    if (w > 2 * bw and h > 2 * bw) {
-        const ir = if (r > bw) r - bw else 0;
-        fillRoundRect(x + bw, y + bw, w - 2 * bw, h - 2 * bw, ir, fill);
-    }
+    cv().panel(x, y, w, h, r, fill, border, bw);
 }
-
 /// Blend `fg` over the pixel at (x, y) by coverage `cov` (0..255).
 pub fn blendPx(x: usize, logical_y: usize, fg: u32, cov: u32) void {
-    const sy = screenY(logical_y);
-    if (sy < 0) return;
-    const y: usize = @intCast(sy);
-    if (measuring) return;
-    if (x >= win_w or y >= win_h or cov == 0) return;
-    if (!inClip(x, y)) return;
-    const i = y * win_w + x;
-    if (cov >= 255) {
-        px[i] = fg;
-        return;
-    }
-    const dst = px[i];
-    var out: u32 = 0;
-    inline for (.{ 0, 8, 16 }) |shf| {
-        const f = (fg >> shf) & 0xff;
-        const d = (dst >> shf) & 0xff;
-        out |= (((f * cov + d * (255 - cov)) / 255) & 0xff) << shf;
-    }
-    px[i] = out;
+    cv().blend(x, logical_y, fg, cov);
 }
 
 /// Draw one glyph at (cx, cy), scaled 2x crisp: each source pixel becomes
@@ -623,30 +453,55 @@ pub fn drawStr(x: usize, y_top: usize, role: u64, s: []const u8, fg: u32, bg: u3
     }
 }
 
-fn u8clen(b: u8) usize {
-    return if (b < 0x80) 1 else if (b >> 5 == 0b110) 2 else if (b >> 4 == 0b1110) 3 else if (b >> 3 == 0b11110) 4 else 1;
+/// Draw `s` in `role`, truncated with an ellipsis to fit `maxw` pixels.
+pub fn drawStrTrunc(x: usize, y: usize, role: u64, s: []const u8, maxw: usize, fg: u32, bg: u32) void {
+    const c = cv();
+    face().drawTrunc(&c, x, y, roleOf(role), s, maxw, fg, bg);
 }
 
-/// Draw `s` in `role`, truncated with an ellipsis to fit `maxw` pixels
-/// (never splitting a UTF-8 character) — for list cells in a fixed column.
-pub fn drawStrTrunc(x: usize, y: usize, role: u64, s: []const u8, maxw: usize, fg: u32, bg: u32) void {
-    if (strW(role, s) <= maxw) {
-        drawStr(x, y, role, s, fg, bg);
-        return;
+// The frame as a toolkit typeface: measurement and glyph runs from
+// fontsvc (or the bitmap fallback), painted into whatever canvas the
+// painter holds — for widgets, the one `brush()` built over the surface.
+fn roleOf(role: u64) ui.typeface.Role {
+    return @enumFromInt(@as(u8, @intCast(role)));
+}
+fn faceMeasure(_: *anyopaque, role: ui.typeface.Role, s: []const u8) usize {
+    return strW(@intFromEnum(role), s);
+}
+fn faceMetrics(_: *anyopaque, role: ui.typeface.Role) ui.typeface.Metrics {
+    const r: u64 = @intFromEnum(role);
+    return .{ .line = lineOf(r), .ascent = if (font_ok) role_asc[r] else gh * 3 / 4 };
+}
+fn faceDraw(_: *anyopaque, canvas: *const ui.Canvas, x: usize, y_top: usize, role: ui.typeface.Role, s: []const u8, fg: u32, bg: u32) void {
+    // Paint into the painter's canvas: swap it in as the frame's target
+    // state for the duration, since glyph blits go through blendPx.
+    const saved = .{ px, win_w, win_h, draw_offset_y, clip_x0, clip_y0, clip_x1, clip_y1, measuring };
+    px = @ptrCast(canvas.px);
+    win_w = canvas.w;
+    win_h = canvas.h;
+    draw_offset_y = canvas.offset_y;
+    clip_x0 = canvas.clip_x0;
+    clip_y0 = canvas.clip_y0;
+    clip_x1 = canvas.clip_x1;
+    clip_y1 = canvas.clip_y1;
+    measuring = canvas.w == 0;
+    defer {
+        px = saved[0];
+        win_w = saved[1];
+        win_h = saved[2];
+        draw_offset_y = saved[3];
+        clip_x0 = saved[4];
+        clip_y0 = saved[5];
+        clip_x1 = saved[6];
+        clip_y1 = saved[7];
+        measuring = saved[8];
     }
-    const ell = "…";
-    const ellw = strW(role, ell);
-    var buf: [192]u8 = undefined;
-    var i: usize = 0;
-    while (i < s.len and i + 8 < buf.len) {
-        const cl = u8clen(s[i]);
-        if (i + cl > s.len) break;
-        if (strW(role, s[0 .. i + cl]) + ellw > maxw) break;
-        i += cl;
-    }
-    @memcpy(buf[0..i], s[0..i]);
-    @memcpy(buf[i .. i + ell.len], ell);
-    drawStr(x, y, role, buf[0 .. i + ell.len], fg, bg);
+    drawStr(x, y_top, @intFromEnum(role), s, fg, bg);
+}
+const face_vtable: ui.Typeface.VTable = .{ .measure = faceMeasure, .metrics = faceMetrics, .draw = faceDraw };
+var face_ctx: u8 = 0;
+pub fn face() ui.Typeface {
+    return .{ .ctx = @ptrCast(&face_ctx), .vtable = &face_vtable };
 }
 
 // ------------------------------------------------------------ the chrome
@@ -1216,26 +1071,11 @@ pub fn iconSize() usize {
 pub fn scaledIconSize(base: usize) usize {
     return ui.icons.scaledSize(base, if (font_ok) @intCast(role_px[R_UI]) else 16);
 }
-// Coverage is independent of theme and position. Cache each icon at its last
-// size, so focus, hover, and ticking bars do not retessellate/rasterize it.
-const max_icon_px = 64;
-const IconMask = struct { size: usize = 0, pixels: [max_icon_px * max_icon_px]u8 = undefined };
-var icon_masks: [@typeInfo(ui.icons.Icon).@"enum".fields.len]IconMask = @splat(.{});
 pub fn drawIcon(x: usize, y: usize, size: usize, name: []const u8, ink: u32) void {
     if (measuring) return;
     const icon = ui.icons.parse(name) orelse return;
-    if (size <= max_icon_px) {
-        const mask = &icon_masks[@intFromEnum(icon)];
-        if (mask.size != size) {
-            for (0..size) |iy| for (0..size) |ix| {
-                mask.pixels[iy * size + ix] = @intCast(ui.icons.coverage(icon, size, ix, iy));
-            };
-            mask.size = size;
-        }
-        for (0..size) |iy| for (0..size) |ix| blendPx(x + ix, y + iy, ink, mask.pixels[iy * size + ix]);
-    } else {
-        for (0..size) |iy| for (0..size) |ix| blendPx(x + ix, y + iy, ink, ui.icons.coverage(icon, size, ix, iy));
-    }
+    const c = cv();
+    icon_cache.draw(&c, icon, size, x, y, ink);
 }
 
 pub fn refreshOutput() bool {

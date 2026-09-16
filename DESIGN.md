@@ -3487,14 +3487,45 @@ fontsvc and the palette; `user/widgets.zig` and `user/tabstrip.zig` are
 the user-side binding that draws the toolkit's rectangles with the
 frame's brushes. The frame's `Rect` *is* the toolkit's.
 
-What this is not yet: painting is still not host-testable, because the
-frame paints straight into the mapped surface with global clip state, and
-the declarative tree's layout (`guicmds`' `layoutNode`) still lives with
-its painter. The next slice is a canvas — a pixel buffer plus a text
-measurer the frame provides and a fake font can stand in for — so that
-button, field, list-row, tab and breadcrumb painters become toolkit
-functions with pixel tests, and after that the tree layout. Those are
-the two remaining reasons a GUI change needs QEMU to be believed.
+**Stage 2, the canvas (same day).** Painting is toolkit work too now.
+`canvas.Canvas` is XRGB pixels with a clip rectangle and a vertical
+scroll translation, and the primitives (`fillRect`, `fillRoundRect` with
+feathered corners, `fillDot`, `panel`, `strokeRect`, `blend`) that were
+the frame's — moved verbatim, so every pixel the desktop drills compare
+is unchanged. `typeface.Typeface` is what a painter may ask of text: a
+vtable of measure, metrics (line, ascent) and draw; the frame implements
+it over fontsvc's glyph runs and its shared atlas (with the bitmap
+fallback), and `typeface.Fixed` implements it over 8×16 cells for the
+host, so a test can find ink where a label was painted. `palette` is
+the semantic token set and its resolver, with a test that every one of
+the eight theme/contrast/colour combinations keeps ink legible on its
+ground. `paint` holds the widget painters — `button`, `field`,
+`tabStrip`/`tabStripHit`, `controlHeight` — as functions of a `Brush`
+(canvas, typeface, palette, icon cache, icon size) and a model, with
+pixel tests: a primary button's fill, edge and rounded corner; a
+disabled button's muted ink; a focus ring's colour and thickness; a
+field's inverted selection and caret; the strip's underline and close
+target. `icons.Cache` is the per-size mask cache that used to be the
+frame's.
+
+The frame kept what is genuinely its own: the surface, the glyph atlas,
+the chrome, and — deliberately — its pixel pointer, size, clip and
+offset as plain variables, because popups (the menu bar's, the
+launcher's) retarget them to paint into another surface. `wf.cv()`
+builds a `Canvas` over that state per use, the old primitive names
+forward to it, and `wf.brush()` hands a painter everything at once.
+`user/widgets.zig` and `user/tabstrip.zig` shrank to bindings: a
+`Button.draw` is `ui.paint.button(wf.brush(), …)`. One trick in the
+typeface: fontsvc's glyph blits go through the frame's `blendPx`, so
+`faceDraw` swaps the painter's canvas in as the frame's target state
+for the call and restores it — the frame paints into whatever canvas a
+painter holds.
+
+What this is not yet: the declarative tree's layout and painting
+(`guicmds`' `layoutNode`, list rows, breadcrumbs, the bar and dock)
+still live with the mshl runtime, and the window chrome is the frame's.
+The tree layout is the next slice; those are the remaining reasons a
+GUI change needs QEMU to be believed.
 
 ### Shared GUI layout and visual foundations
 

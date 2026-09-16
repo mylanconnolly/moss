@@ -59,6 +59,47 @@ pub fn coverage(icon: Icon, size: usize, x: usize, y: usize) u32 {
     }
     return @intFromFloat(std.math.clamp((8 - @sqrt(distance_squared)) * scale + 0.5, 0, 1) * 255);
 }
+/// Coverage is independent of theme and position, so a program caches
+/// each icon's mask at its last size: focus, hover and ticking bars must
+/// not re-rasterize. Sizes above `max_px` rasterize on the fly.
+pub const Cache = struct {
+    pub const max_px = 64;
+    const Mask = struct { size: usize = 0, pixels: [max_px * max_px]u8 = undefined };
+    masks: [@typeInfo(Icon).@"enum".fields.len]Mask = @splat(.{}),
+
+    pub fn draw(self: *Cache, canvas: *const Canvas, icon: Icon, size: usize, x: usize, y: usize, ink: u32) void {
+        if (size <= max_px) {
+            const mask = &self.masks[@intFromEnum(icon)];
+            if (mask.size != size) {
+                for (0..size) |iy| for (0..size) |ix| {
+                    mask.pixels[iy * size + ix] = @intCast(coverage(icon, size, ix, iy));
+                };
+                mask.size = size;
+            }
+            for (0..size) |iy| for (0..size) |ix| canvas.blend(x + ix, y + iy, ink, mask.pixels[iy * size + ix]);
+        } else {
+            for (0..size) |iy| for (0..size) |ix| canvas.blend(x + ix, y + iy, ink, coverage(icon, size, ix, iy));
+        }
+    }
+};
+const Canvas = @import("canvas.zig").Canvas;
+
+test "the cache paints an icon once per size and leaves the ground outside it" {
+    var cache: Cache = .{};
+    var buf: [40 * 40]u32 = @splat(0);
+    const c = Canvas.init(&buf, 40, 40);
+    cache.draw(&c, .close, 20, 10, 10, 0xffffff);
+    try std.testing.expectEqual(@as(usize, 20), cache.masks[@intFromEnum(Icon.close)].size);
+    var ink: usize = 0;
+    for (0..40) |y| for (0..40) |x| {
+        if (c.at(x, y) != 0) {
+            ink += 1;
+            try std.testing.expect(x >= 10 and x < 30 and y >= 10 and y < 30);
+        }
+    };
+    try std.testing.expect(ink > 0);
+}
+
 test "every named icon renders bounded nonempty coverage at supported UI scales" {
     inline for (std.meta.fields(Icon)) |field| {
         const icon = parse(field.name).?;

@@ -15,8 +15,12 @@
 //! the text editor takes semantic `text.Command`s and the user-side
 //! binding (user/widgets.zig) maps bytes to them; menu profiles and
 //! display modes are likewise wire (shared/menus.zig, shared/display.zig).
-//! Painting — surfaces, glyphs, the palette — is the frame's
-//! (user/windowframe.zig); the toolkit hands it rectangles.
+//! Painting goes through a `Canvas` (pixels, clip, scroll offset and the
+//! primitives), a `Typeface` the frame implements over the font service
+//! and a test implements over fixed cells, the `Palette`, and the widget
+//! painters in `paint` that take all three as a `Brush` — so a button's
+//! pixels can be asserted on the host. What the frame keeps for itself
+//! is the surface, the glyph atlas and the window chrome.
 pub const geometry = @import("ui/geometry.zig");
 pub const Rect = geometry.Rect;
 pub const Size = geometry.Size;
@@ -33,6 +37,14 @@ pub const breadcrumbs = @import("ui/breadcrumbs.zig");
 pub const search = @import("ui/search.zig");
 pub const icons = @import("ui/icons.zig");
 pub const shape = @import("ui/shape.zig");
+pub const canvas = @import("ui/canvas.zig");
+pub const Canvas = canvas.Canvas;
+pub const typeface = @import("ui/typeface.zig");
+pub const Typeface = typeface.Typeface;
+pub const palette = @import("ui/palette.zig");
+pub const Palette = palette.Palette;
+pub const paint = @import("ui/paint.zig");
+pub const Brush = paint.Brush;
 
 test {
     _ = geometry;
@@ -45,4 +57,8 @@ test {
     _ = search;
     _ = icons;
     _ = shape;
+    _ = canvas;
+    _ = typeface;
+    _ = palette;
+    _ = paint;
 }

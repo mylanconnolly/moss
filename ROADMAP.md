@@ -1558,8 +1558,11 @@ applications need menus beyond those profiles.
   the rounded window shape — moved out of `shared/` (the wire contract, which
   it had been quietly turning into) into a host-tested library every graphical
   program imports. The text editor takes semantic commands; `user/widgets.zig`
-  maps the wire's key bytes to them. Next slices: a canvas so painters become
-  toolkit functions with pixel tests, then the declarative tree's layout.
+  maps the wire's key bytes to them. Stage 2 the same day: `Canvas` (pixels,
+  clip, scroll offset, the primitives), `Typeface` (the frame over fontsvc, a
+  fixed-cell face for tests), `palette`, and `paint` (button, field, tab
+  strip) as functions of a `Brush` with pixel tests; widgets and tabstrip
+  became bindings. Next: the declarative tree's layout.
 
 - ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
   one scalable, theme-colored catalog for buttons, dock items, lists, and

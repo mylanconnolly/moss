@@ -129,15 +129,18 @@ catalog. Reading it never starts an app. Launch still uses `connect_named`
 and the unit's existing grants; metadata conveys no additional authority.
 Run `zig build fmt-test lint-test ls-test` after changing these manifests.
 
-**A widget or GUI model**: the pure part — geometry, layout, state,
-text, hit arithmetic — goes in `lib/ui/<name>.zig` with its tests, and
-is registered in `lib/ui.zig`; `zig build test` runs it on the host with
-no QEMU. It may import only `std` and its siblings: no `shared` (the
-wire), no key bytes, no pixels. The painting part goes in
-`user/widgets.zig` (native controls) or `user/guicmds.zig` (the mshl
-tree), drawing the model's rectangles with the frame's brushes
-(`wf.panel`, `wf.drawStr`, `wf.drawIcon`); if it needs a key, map the
-byte to a semantic command there (`widgets.textCommand` is the pattern).
+**A widget**: its model — geometry, layout, state, hit arithmetic —
+goes in `lib/ui/<name>.zig` with its tests, and its painter goes in
+`lib/ui/paint.zig` as a function of a `Brush` (canvas, typeface,
+palette, icon cache) and that model, with a pixel test on a
+`typeface.Fixed` face (the `Bench` there is the pattern). Register new
+modules in `lib/ui.zig`; `zig build test` runs it all on the host with
+no QEMU. Toolkit code may import only `std` and its siblings: no
+`shared` (the wire), no key bytes, no surface. A program paints it with
+`ui.paint.<widget>(wf.brush(), …)` — `user/widgets.zig` is the binding
+for native controls, `user/guicmds.zig` for the mshl tree; if the widget
+needs a key, map the byte to a semantic command there
+(`widgets.textCommand` is the pattern).
 
 **A service**: serve one channel; scope per-client state by **badge**
 (mint scoped caps with `chanMint`, hand them out in replies, drop your
