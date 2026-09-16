@@ -830,6 +830,11 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
             usys.exit(1);
         };
         log("editor: handoff lifecycle and readonly scope verified", .{});
+        document.probeSelfCall(chan_h) catch |err| {
+            log("editor: self-call guard FAILED: {s}", .{@errorName(err)});
+            usys.exit(1);
+        };
+        log("editor: self-call refused by the kernel", .{});
         // Exercise real registered-client teardown beyond the old small pool
         // sizes, and prove a client cannot save before a user chooses a file.
         for (0..128) |_| {

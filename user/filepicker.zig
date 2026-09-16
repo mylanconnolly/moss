@@ -125,6 +125,15 @@ fn offerDocument(chan: u64, sender: *Client, parent_view: u64, name_len: u64) p.
         _ = usys.capDrop(parent_view);
     };
     if (sender.va == 0 or parent_view == 0 or name_len == 0 or name_len > 56) return failure(error.BadPath);
+    // The broker calls on this cap (attach, load, later save), so it must
+    // be a filesystem view — an endpoint of the same service as the home
+    // view granted at setup — and never a stranger's channel, least of
+    // all one of this broker's own endpoints (a self-call would hang the
+    // whole session's document workflow; the kernel refuses it too).
+    if (!usys.chanSame(parent_view, view)) {
+        _ = usys.log(glog, "filepicker: offer refused: not a filesystem view");
+        return failure(error.Unavailable);
+    }
     var name: [56]u8 = undefined;
     const source: [*]const u8 = @ptrFromInt(sender.va);
     @memcpy(name[0..@intCast(name_len)], source[p.name_offset..][0..@intCast(name_len)]);

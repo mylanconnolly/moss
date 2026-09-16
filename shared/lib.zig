@@ -176,6 +176,15 @@ pub const Syscall = enum(u64) {
     /// bad_arg when `va` is not the base of one of this domain's shm
     /// mappings.
     shm_unmap = 40,
+    /// chan_same(cap_a, cap_b) -> x1 = 1 if both channel caps (either
+    /// side, any badge) name the same channel, else 0. Identity only —
+    /// comparing two caps the caller already holds reveals nothing it
+    /// does not hold. A service uses it to check that a cap a client
+    /// handed it is an endpoint of a service it trusts (the same channel
+    /// as a cap it was granted at setup) before it calls on it, so it
+    /// never blocks on a stranger's channel. bad_handle if either is not
+    /// a channel cap of this domain.
+    chan_same = 44,
     _,
 };
 
@@ -340,6 +349,13 @@ pub const Errno = enum(u64) {
     /// live on — but this one will never call again: release its
     /// buffer and state, then the badge may be minted afresh.
     client_dead = 11,
+    /// call only: the channel is served by the caller's own domain (the
+    /// last recv on it came from here), so the call could only be
+    /// answered by the thread that is now blocked in it — refused
+    /// instead of deadlocking. A service that calls on a cap a client
+    /// handed it meets this when the client hands back one of the
+    /// service's own endpoints.
+    self_call = 12,
     _,
 };
 

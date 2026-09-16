@@ -399,6 +399,15 @@ barriers in the virtio drivers, and `user/vmm.zig`.
 
 - Assembly may only call `export`/`callconv(.c)` functions. Zig's
   unspecified convention has hidden parameters in Debug builds.
+- A service never `call`s on a cap a client handed it unless it has
+  proved what it is: `usys.chanSame(cap, trusted)` against a cap granted
+  at setup (the filesystem view, the compositor). A cap is unforgeable
+  but not self-describing; a client can hand back one of the service's
+  own endpoints, and a call on that would wait for the thread making it.
+  The kernel refuses that one case (`Errno.self_call`, from the domain
+  recorded at each `recv`), but a stranger's slow channel still blocks
+  the caller — the check is the service's job. Paid for by the document
+  broker (2026-09-16).
 - Architecture-specific code lives under `kernel/arch/<arch>/` and is
   reached only through `kernel/arch.zig` (the HAL). No inline assembly,
   system register, interrupt-controller or page-table-format knowledge

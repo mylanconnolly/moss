@@ -69,6 +69,7 @@ pub fn dispatch(frame: *arch.trap.TrapFrame) void {
         .dma_alloc => sysDmaAlloc(d, frame),
         .notify_bind => sysNotifyBind(d, frame.arg(0)),
         .chan_mint => sysChanMint(d, frame),
+        .chan_same => sysChanSame(d, frame),
         .domain_list => sysDomainList(d, frame),
         .sysinfo => sysSysinfo(d, frame),
         .getrandom => sysGetrandom(d, frame.arg(0), frame.arg(1)),
@@ -335,8 +336,10 @@ fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
             while (a) |dd| : (a = dd.parent) {
                 log.info("  quota {s}: user {d}/{d} KB, kobj {d}/{d} KB", .{
                     dd.name,
-                    dd.user_mem.used.load(.monotonic) / 1024,   dd.user_mem.limit / 1024,
-                    dd.kobj.used.load(.monotonic) / 1024,       dd.kobj.limit / 1024,
+                    dd.user_mem.used.load(.monotonic) / 1024,
+                    dd.user_mem.limit / 1024,
+                    dd.kobj.used.load(.monotonic) / 1024,
+                    dd.kobj.limit / 1024,
                 });
             }
         }
@@ -510,6 +513,11 @@ fn sysCall(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const handle: shared.Handle = @bitCast(frame.arg(0));
     const lb = d.captable.?.lookupBadge(handle, .channel_b) orelse return errno(.bad_handle);
     const ch: *ipc.Channel = @ptrFromInt(lb.obj);
+    // A domain calling a channel it serves would wait for itself: the
+    // only thread that could answer is the one about to block. Refused
+    // here so a service handed one of its own endpoints by a client gets
+    // an error, not a hang (the document broker met exactly this).
+    if (ipc.servedBy(ch, @ptrCast(d))) return errno(.self_call);
 
     var msg: ipc.Msg = .{ .data = frame.msgWords() };
     if (frame.arg(5) != 0) {
@@ -531,6 +539,7 @@ fn sysRecv(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     var msg: ipc.Msg = .{};
     var badge: u64 = 0;
     var token: u64 = 0;
+    ipc.noteServer(ch, @ptrCast(d));
     const e = ipc.recv(ch, &msg, &badge, &token);
     frame.set(6, badge); // client_dead names the dead identity here too
     if (e != .ok) return errno(e);
@@ -554,6 +563,22 @@ fn sysChanMint(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     };
     frame.set(2, @bitCast(h));
     return errno(.ok);
+}
+
+/// chan_same(a, b): do two channel caps name one channel? Either side,
+/// any badge; the object identity is all that is compared.
+fn sysChanSame(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const a = channelOf(d, frame.arg(0)) orelse return errno(.bad_handle);
+    const b = channelOf(d, frame.arg(1)) orelse return errno(.bad_handle);
+    frame.set(1, @intFromBool(a == b));
+    return errno(.ok);
+}
+
+fn channelOf(d: *domain.Domain, handle_bits: u64) ?u64 {
+    const handle: shared.Handle = @bitCast(handle_bits);
+    if (d.captable.?.lookup(handle, .channel_a)) |obj| return obj;
+    if (d.captable.?.lookupBadge(handle, .channel_b)) |lb| return lb.obj;
+    return null;
 }
 
 fn sysReply(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {

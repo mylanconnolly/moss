@@ -59,6 +59,12 @@ pub const Channel = struct {
     callers: std.DoublyLinkedList = .{},
     /// Server thread blocked in recv(), if any.
     server_waiting: ?*sched.Thread = null,
+    /// The domain that last received on this channel (opaque: identity
+    /// only), so call() can refuse a domain calling a channel it serves —
+    /// the call could only be answered by the thread now blocked in it.
+    /// Kernel-thread receivers leave it alone. Advisory: a single word,
+    /// written under the lock, read without it.
+    server: ?*anyopaque = null,
     /// Clients whose calls were delivered and now await reply(): a server
     /// may hold several open (deferred replies), each named by the token
     /// recv returned — slot + 1 in the low byte, a serial above it so a
@@ -155,6 +161,18 @@ pub const CallResult = struct {
     err: shared.Errno,
     msg: Msg = .{},
 };
+
+/// The serving domain announces itself at each recv (see Channel.server).
+pub fn noteServer(ch: *Channel, who: *anyopaque) void {
+    const irqs = ch.lock.lockIrqSave();
+    defer ch.lock.unlockRestore(irqs);
+    ch.server = who;
+}
+
+/// Would a call from `who` on this channel wait for `who` itself?
+pub fn servedBy(ch: *const Channel, who: *anyopaque) bool {
+    return ch.server == who;
+}
 
 /// Client side: send four words (+ optional cap) and block until the reply
 /// or the peer's death. `caller_badge` is the badge minted into the cap the

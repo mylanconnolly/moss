@@ -154,6 +154,21 @@ pub fn probeQueueAuthority(authority: u64) !void {
 
 /// Real broker IPC and FS regression. This view exists only in the editor
 /// drill manifest, never in the production Editor's grants.
+/// The kernel refuses a call on a channel the caller's own domain serves
+/// (Errno.self_call) instead of parking the caller forever: mint a badge
+/// on our own setup channel — received on at boot, so this domain is its
+/// server — and call it.
+pub fn probeSelfCall(own_chan: u64) !void {
+    const minted = usys.chanMint(own_chan, 4242);
+    if (minted.err != .ok) return error.ProbeMint;
+    defer _ = usys.capDrop(minted.data[1]);
+    const rep = usys.callTyped(shared.picker.Req, shared.picker.Resp, minted.data[1], .register, 0);
+    switch (rep) {
+        .err => |e| if (e != .self_call) return error.SelfCallNotRefused,
+        .ok => return error.SelfCallAnswered,
+    }
+}
+
 pub fn probeHandoff(authority: u64, receiver: u64, test_view: u64) !void {
     const std = @import("std");
     const fs = @import("fsclient.zig");
@@ -179,6 +194,23 @@ pub fn probeHandoff(authority: u64, receiver: u64, test_view: u64) !void {
     }
     fs.fsClose(test_view, fd);
     if (!fs.fsSync(test_view)) return error.ProbeSync;
+
+    // An offer whose "parent view" is not a filesystem view is refused
+    // before the broker calls on it — here, the sender's own broker
+    // endpoint, which would have made the broker call itself and hang
+    // every client. The broker must still answer afterwards.
+    {
+        var sender = try Client.init(authority);
+        defer sender.deinit();
+        if (sender.offer(sender.chan, basename)) |ticket| {
+            sender.cancelOffer(ticket);
+            return error.StrangerViewAccepted;
+        } else |_| {}
+        const parent = fs.fsDerive(test_view, buf, folder, true) orelse return error.ProbeFilesystem;
+        defer _ = usys.capDrop(parent);
+        const ticket = sender.offer(parent, basename) catch return error.BrokerStuckAfterRefusal;
+        sender.cancelOffer(ticket);
+    }
 
     // Offers cannot be committed or cancelled by another sender.
     {

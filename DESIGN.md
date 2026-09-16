@@ -4607,6 +4607,36 @@ survival, exact-file read-only enforcement, explicit view revocation, reused
 parent-badge isolation and single delivery. The desktop drill opens two files into one Editor and saves/reopens across app restart;
 model tests cover per-tab state, cancelled window close and allocation failure.
 
+**A service never calls on a stranger's cap (2026-09-16).** The review
+of this range found the broker's one blocking hazard: `offer` arrives
+with a cap the client says is a parent view, and the broker *calls* on
+it (`attach_buf`, then the load). Caps are unforgeable but not
+self-describing — the broker could not tell a view from any other
+channel, and every registered client holds one of the broker's own
+endpoints (the `registered` reply). Hand that back as the "view" and the
+broker calls itself: the kernel parks the caller until the server
+receives, the server is the thread now parked, and every Open, Save and
+handoff in the session hangs, with client deaths never collected. Any
+app with the ordinary picker grant could do it. Two fixes, layered. The
+kernel now refuses the self-call: each `recv` from userspace records the
+receiving domain on the channel (`Channel.server`, identity only), and a
+`call` from that same domain returns `Errno.self_call` instead of
+blocking — a service handed one of its own endpoints gets an error, and
+so does any other service with the same shape. And the broker checks
+before it calls: a new syscall `chan_same(a, b)` says whether two caps
+name one channel (identity only; comparing two caps you hold reveals
+nothing you do not hold), and `offerDocument` accepts a parent view only
+if it is an endpoint of the same channel as the home view granted at
+setup — the filesystem service's — so the broker never blocks on a
+channel it does not already trust. The editor drill's handoff probe
+offers the sender's own broker endpoint (refused, and the next real
+offer still answered) and calls a badge minted on its own setup channel
+(refused by the kernel). *Lesson:* a cap from a client is authority the
+client chose to give, not a promise about what is on the other end;
+before blocking on it, prove what it is. *Rule (HACKING):* a service
+blocks only on caps it was granted at setup or has checked with
+`chan_same` against one.
+
 Lesson: a path string is not a document grant. Files' current view may be
 narrower or read-only compared with the chooser's home view; resolving a handed
 off name against that home would silently widen authority. Keep the selected

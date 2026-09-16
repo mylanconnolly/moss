@@ -285,6 +285,15 @@ pub fn chanMint(chan_a: u64, badge: u64) IpcResult {
     return syscall6(.chan_mint, chan_a, badge, 0, 0, 0, 0);
 }
 
+/// Do two channel caps (either side, any badge) name the same channel?
+/// False when either is not a channel cap of this domain. A service
+/// checks a client-handed cap against one it was granted at setup before
+/// it calls on it — see Syscall.chan_same.
+pub fn chanSame(a: u64, b: u64) bool {
+    const r = syscall6(.chan_same, a, b, 0, 0, 0, 0);
+    return r.err == .ok and r.data[0] == 1;
+}
+
 /// The cycle counter: the virtual counter (EL0 access enabled by the
 /// kernel) or the TSC.
 pub fn cycles() u64 {
