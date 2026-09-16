@@ -31,6 +31,7 @@ list, followed by the story of what has **Landed** since.
 | Namespaces | Per-process, Plan 9 style: a process's filesystem *is* the directory caps it was handed; its network *is* the network-service cap it was handed (or a filtered proxy, or nothing). | The empty sandbox is the zero value. |
 | Init | Two layers: a tiny, near-finished **root task** (dispenses boot resources, supervises only init) and a replaceable, restartable **init service** with no special kernel status. Init = capability wiring + supervision + lazy start. | Init crashing must not take the resource ledger with it; no PID-1 mystique. |
 | Filesystem hierarchy | Organized by **lifecycle and ownership**, never file type: `boot/` (immutable boot image), `img/` (immutable images, future), `conf/` (admin-written config), `state/<service>/` (private mutable state), `data/` (shared-by-grant payload), `volatile/<service>/` (cleared each boot). The hierarchy is the default view-grant policy: a service gets `state/X` + `volatile/X` rw and `conf/X` ro as separate derived views — isolation by construction, not discipline. No shared /tmp, ever. | FHS's failure modes are lifecycle confusion; capability views make the clean split enforceable for free. |
+| GUI input | Plain Tab belongs to the focused window (widget traversal, terminal completion); Alt-Tab is the compositor's and cycles windows, restoring a minimized one. (Landed 2026-09-11; recorded here 2026-09-16.) | A key the compositor steals is a key no application can rely on; one reserved chord keeps every other one predictable. |
 | Service model | The sandbox manifest **is** the unit file (one typed Zig value: budgets + caps + restart policy). Dependencies are capability wiring, never ordering — no `After=`-style graph; the channel is the synchronization point. **Channel activation** by default: init retains server ends and spawns services on first message. | Boot-ordering bugs become unrepresentable; boot time = time to first useful service; systemd's good ideas without its ambient-authority sprawl. |
 | Supervision | OTP-style supervision trees: crash-only services, restart strategies (one-for-one / all-for-one), restart budgets with backoff and escalation. Restart = domain revoke + respawn from manifest; dependents observe channel death and re-wire through init. Supervisors nest with domains. | Domain teardown makes restarts provably leak-free; crash-only means no separate graceful-shutdown protocol to get wrong. |
 | Orchestration | A unit file, a sandbox manifest, and a remote-spawn request are the **same artifact**. Node-local init and the multi-node fabric are the same operation at different radii (fabric adds placement + cap proxying). | Cluster orchestration becomes an extension of init, not a k8s-shaped bolt-on. |
@@ -184,10 +185,6 @@ kept current — an item leaves this list only when it lands or is
 retired with a note. **Landed** is the story of what was built, entry
 by entry as it happened, with the bugs each piece found; nothing there
 is a plan.
-
-**GUI input policy:** plain Tab belongs to the focused window (widget traversal
-or terminal completion); Alt-Tab cycles windows. Fields own cursor/selection
-state and support Emacs-style editing plus Shift/Option/Command navigation.
 
 ### Open
 

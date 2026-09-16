@@ -9,6 +9,15 @@ const std = @import("std");
 pub const picker = @import("filepicker.zig");
 pub const apps = @import("apps.zig");
 pub const menus = @import("menus.zig");
+pub const keyboard = @import("keyboard.zig");
+pub const display = @import("display.zig");
+test {
+    _ = picker;
+    _ = apps;
+    _ = menus;
+    _ = keyboard;
+    _ = display;
+}
 
 pub const version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
 
@@ -2186,16 +2195,6 @@ test "handle round-trips through its integer representation" {
     const back: Handle = @bitCast(bits);
     try std.testing.expect(h.eql(back));
     try std.testing.expect(!h.eql(Handle.invalid));
-}
-
-pub const keyboard = @import("keyboard.zig");
-test {
-    _ = @import("keyboard.zig");
-}
-
-pub const display = @import("display.zig");
-test {
-    _ = display;
 }
 
 test "wheel deltas retain sign and are never coalesced into pointer motion" {
