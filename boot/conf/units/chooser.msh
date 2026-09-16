@@ -1,0 +1,12 @@
+# The editor drill's dialog process, confined to the disposable disk view.
+{
+  image:  chooser
+  budget: { user: 24mb }
+  grant:  [log]
+  give: [
+    { tag: clip, unit: clipsvc }
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: view, fs: data, ro: false }
+  ]
+}

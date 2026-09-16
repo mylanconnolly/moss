@@ -760,6 +760,9 @@ pub fn attachTrusted() bool {
 pub var pointer_tracking = false;
 /// Desktop bars opt out; maximized/snapped windows meet their work-area edges.
 pub var rounded = true;
+/// A dialog window: created with gpu_dialog, so the compositor keeps it
+/// above ordinary windows (the chooser sets this).
+pub var dialog = false;
 pub fn openSurface(cascade: bool) bool {
     return openSurfaceFocused(cascade, true);
 }
@@ -767,7 +770,7 @@ pub fn openSurface(cascade: bool) bool {
 pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
     menu_surface = 0;
     surface_visible = true;
-    const flags: u64 = (if (rounded and !maximized) shared.gpu_rounded else @as(u64, 0)) | (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate);
+    const flags: u64 = (if (rounded and !maximized) shared.gpu_rounded else @as(u64, 0)) | (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate) | (if (dialog) shared.gpu_dialog else @as(u64, 0));
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
         .ok => |ok| ok,
         .err => return false,

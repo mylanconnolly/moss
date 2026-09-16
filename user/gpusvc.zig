@@ -123,6 +123,8 @@ const Surface = struct {
     owner: u64 = 0, // the badge that created it; keys route to the owner alone
     trusted: bool = false, // the login surface: wears the secure indicator
     rounded: bool = false,
+    dialog: bool = false, // a panel for `dialog_for` (gpu_dialog)
+    dialog_for: u64 = 0, // the surface focused when the dialog was created
     hidden: bool = false, // minimized: retained but not composited, not focusable
     title: [16]u8 = @splat(0), // the window title, so the dock can restore it by name
     title_len: u8 = 0,
@@ -1166,8 +1168,25 @@ fn raiseSurface(id: u64) void {
     if (sf.z == top) return;
     sf.z = next_z;
     next_z += 1;
+    // A window's dialog stays in front of it: raising the window (a dock
+    // pill's restore, a click) must not bury the panel another process is
+    // showing for it. Other windows are free to come in front of both.
+    if (!sf.dialog) {
+        if (dialogFor(id)) |d| {
+            d.z = next_z;
+            next_z += 1;
+        }
+    }
     _ = composite();
     _ = usys.log(comp_log, "comp: surface raised");
+}
+
+/// The visible dialog serving surface `id`, if one is open.
+fn dialogFor(id: u64) ?*Surface {
+    for (&surfaces) |*o| {
+        if (o.used and o.dialog and !o.hidden and o.dialog_for == id) return o;
+    }
+    return null;
 }
 
 /// Drain pointer frames. Legacy surfaces receive local button/drag events;
@@ -1416,9 +1435,14 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     continue;
                 }
                 const cascade = q.flags & shared.gpu_place_cascade != 0 and !full;
+                const prior_focus = focused; // a dialog serves the window focused as it opens
                 if (createSurface(badge, px_x, px_y, w, h, cascade, q.flags & shared.gpu_no_activate == 0)) |cs| {
                     findSurface(cs.id).?.pointer_tracking = q.flags & shared.gpu_pointer_tracking != 0;
                     findSurface(cs.id).?.rounded = q.flags & shared.gpu_rounded != 0;
+                    if (q.flags & shared.gpu_dialog != 0) {
+                        findSurface(cs.id).?.dialog = true;
+                        findSurface(cs.id).?.dialog_for = prior_focus;
+                    }
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .created = .{ .surface = cs.id, .wh = shared.packPair(w, h), .xy = shared.packPair(cs.x, cs.y) } }, cs.shm, token);
                 } else {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 2 } }, 0, token);
@@ -1541,6 +1565,13 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 sf.hidden = false;
                 raiseSurface(hit);
                 focusSurface(hit);
+                // A window waiting on its dialog cannot take keys: the
+                // restore lands on the dialog, in front of it.
+                if (dialogFor(hit)) |d| {
+                    const did = (@intFromPtr(d) - @intFromPtr(&surfaces)) / @sizeOf(Surface) + 1;
+                    raiseSurface(did);
+                    focusSurface(did);
+                }
                 _ = composite();
                 wakeReader(chan_h, sf.owner, hit, 3);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);

@@ -1,5 +1,13 @@
 //! Session document broker. Chooser and Files selections keep directory views
 //! here; Editor clients can read/write only their explicitly selected document.
+//!
+//! The broker is headless and never blocks on a human. Open and Save As
+//! need a dialog, which runs in the chooser — its own process
+//! (user/chooser.zig) that this broker starts through init and hands one
+//! private endpoint. The chooser pulls jobs (`chooser_ready`/`chooser_done`
+//! park here until one is queued); the application's own call is parked
+//! by token meanwhile, so while a dialog is up every other client's save,
+//! load and handoff is served as usual. Every reply goes by token.
 const std = @import("std");
 const shared = @import("shared");
 const p = shared.picker;
@@ -7,9 +15,6 @@ const usys = @import("usys.zig");
 const boot = @import("boot.zig");
 const fs = @import("fsclient.zig");
 const file = @import("editorfile.zig");
-const wf = @import("windowframe.zig");
-const widgets = @import("widgets.zig");
-const clipboard = @import("clipboard.zig");
 comptime {
     asm (usys.imageHeader("filepicker"));
 }
@@ -27,6 +32,7 @@ const Client = struct {
     held_cap: u64 = 0,
     sender: u64 = 0,
     queued: bool = false,
+    offered_at: u64 = 0, // cycles when the sender committed (enqueue)
 };
 const receiver_badge: u64 = 1;
 const ClientSlab = struct {
@@ -194,274 +200,208 @@ fn metadata(c: *Client, len: usize) p.Resp {
     return .{ .document = .{ .len = len, .name_len = c.len, .read_only = @intFromBool(st == null or st.?.read_only) } };
 }
 
-const Row = struct { name: [56]u8 = undefined, len: usize = 0, dir: bool = false };
-var rows: [256]Row = @splat(.{});
-var count: usize = 0;
-var directory: [256]u8 = undefined;
-var dir_len: usize = 0;
-var edit: shared.TextEdit = .{};
-var status: []const u8 = "";
-var scroll: usize = 0;
-var selected: usize = 0;
-var listing_ok = false;
-var focus: usize = 0; // filename, listing, cancel, action, up
-var replacing = false;
-var read_only = false;
-var field_rect: wf.Rect = undefined;
-var list_rect: wf.Rect = undefined;
-var cancel_rect: wf.Rect = undefined;
-var action_rect: wf.Rect = undefined;
-var up_rect: wf.Rect = undefined;
-var row_height: usize = 0;
-fn setName(name: []const u8) void {
-    edit = .{};
-    const n = @min(name.len, edit.buf.len);
-    @memcpy(edit.buf[0..n], name[0..n]);
-    edit.len = n;
-    edit.cursor = n;
-    edit.anchor = 0;
-    replacing = false;
+// ---------------------------------------------------------------- jobs
+//
+// Open and Save As need a human: the dialog runs in the chooser, so this
+// loop never blocks on one. A request becomes a Job — the caller's reply
+// is deferred by token — and the chooser takes jobs one at a time.
+const Job = struct {
+    badge: u64 = 0, // the application client; 0 = an orphan (it died meanwhile)
+    token: u64 = 0,
+    saving: bool = false,
+    len: usize = 0, // save_as: bytes to write, read from the client's buffer at completion
+    name: [256]u8 = undefined,
+    name_len: usize = 0,
+};
+const max_jobs = 4;
+var jobs: [max_jobs]Job = @splat(.{});
+var job_count: usize = 0; // jobs[0] is with the chooser while `job_active`
+var job_active = false;
+var chooser_badge: u64 = 0; // the badge minted for the chooser; 0 = not up
+var chooser_token: u64 = 0; // the chooser's parked ready/done call
+var init_cap: u64 = 0;
+
+/// A committed handoff that no Editor claims is not kept forever: the
+/// Editor may have exited between Files' connect and its enqueue, or
+/// crashed before its first poll, and nothing else would ever release the
+/// view slot and buffer it pins — or stop a much later Editor launch from
+/// silently opening that file.
+var queued_offer_ttl_s: u64 = 10; // arg 1 (the editor drill): 1 s, so a probe can see it
+
+fn ensureChooser(chan_h: u64) bool {
+    if (chooser_badge != 0) return true;
+    if (init_cap == 0) return false;
+    const name = shared.strToWords("chooser");
+    const chan = switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, init_cap, .{ .connect_named = .{ .a = name[0], .b = name[1] } }, 0)) {
+        .ok => |r| blk: {
+            if (r.rep == .connected) break :blk r.cap;
+            if (r.cap != 0) _ = usys.capDrop(r.cap);
+            break :blk 0;
+        },
+        .err => 0,
+    };
+    if (chan == 0) {
+        _ = usys.log(glog, "filepicker: chooser could not start");
+        return false;
+    }
+    defer _ = usys.capDrop(chan);
+    if (next_badge == std.math.maxInt(u64)) return false;
+    const badge = next_badge;
+    next_badge += 1;
+    _ = allocate(badge) orelse return false;
+    const minted = usys.chanMint(chan_h, badge);
+    if (minted.err != .ok) {
+        release(badge);
+        return false;
+    }
+    // The one call this broker makes on the chooser: a unit init just
+    // started for us, not a client-supplied cap, and it answers at once.
+    // Our copy of the minted endpoint goes right after the call, so the
+    // chooser's death reaches us as client_dead on its badge.
+    const hello = usys.callTypedCap(p.ChooserReq, p.ChooserResp, chan, .hello, minted.data[1]);
+    _ = usys.capDrop(minted.data[1]);
+    const ok = switch (hello) {
+        .ok => |r| r.rep == .ok,
+        .err => false,
+    };
+    if (!ok) {
+        release(badge);
+        _ = usys.log(glog, "filepicker: chooser refused the handshake");
+        return false;
+    }
+    chooser_badge = badge;
+    _ = usys.log(glog, "filepicker: chooser attached");
+    return true;
 }
-fn join(dst: []u8, name: []const u8) ?[]const u8 {
-    const extra: usize = @intFromBool(dir_len > 0);
-    if (dir_len + extra + name.len > dst.len) return null;
-    @memcpy(dst[0..dir_len], directory[0..dir_len]);
-    if (extra != 0) dst[dir_len] = '/';
-    @memcpy(dst[dir_len + extra ..][0..name.len], name);
-    return dst[0 .. dir_len + extra + name.len];
+
+/// Hand the chooser its next job, if it is parked and one is queued.
+fn dispatchJob(chan_h: u64) void {
+    if (chooser_token == 0 or job_active or job_count == 0) return;
+    const cc = find(chooser_badge) orelse return;
+    if (cc.va == 0) return;
+    const j = &jobs[0];
+    const dst: [*]u8 = @ptrFromInt(cc.va);
+    @memcpy(dst[p.name_offset..][0..j.name_len], j.name[0..j.name_len]);
+    const t = chooser_token;
+    chooser_token = 0;
+    job_active = true;
+    _ = usys.replyTypedTo(p.Resp, chan_h, .{ .job = .{ .saving = @intFromBool(j.saving), .name_len = j.name_len } }, 0, t);
 }
-fn refresh() void {
-    listing_ok = false;
-    count = 0;
-    scroll = 0;
-    selected = 0;
-    const n = fs.fsList(view, buffer, directory[0..dir_len]) orelse {
-        status = "Unable to list this folder.";
+
+fn popJob() void {
+    std.mem.copyForwards(Job, jobs[0 .. job_count - 1], jobs[1..job_count]);
+    job_count -= 1;
+    job_active = false;
+}
+
+/// The chooser's verdict on jobs[0]: load or save on our view and answer
+/// the application's parked call. An orphan is simply dropped.
+fn completeJob(chan_h: u64, path: []const u8) void {
+    const j = jobs[0];
+    popJob();
+    if (j.badge == 0) return;
+    const c = find(j.badge) orelse return;
+    if (path.len == 0) {
+        _ = usys.replyTypedTo(p.Resp, chan_h, .cancelled, 0, j.token);
+        return;
+    }
+    file.validatePath(path) catch {
+        _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.BadPath), 0, j.token);
         return;
     };
-    if (n > 2048) {
-        status = "Unable to list this folder.";
+    if (c.va == 0) {
+        _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, j.token);
         return;
     }
-    listing_ok = true;
-    if (n > 2048 - 57) status = "Folder list may be incomplete. Type a name to open an unlisted file.";
-    var names: [2048]u8 = undefined;
-    @memcpy(names[0..n], buffer[0..n]);
-    var it = std.mem.splitScalar(u8, names[0..n], '\n');
-    while (it.next()) |name| {
-        if (name.len == 0 or name.len > 56) continue;
-        if (count == rows.len) {
-            status = "Folder list is incomplete. Type a name to open an unlisted file.";
-            break;
-        }
-        var full: [256]u8 = undefined;
-        const path = join(&full, name) orelse continue;
-        const st = fs.fsStat(view, buffer, path) orelse continue;
-        if (st.typ != @intFromEnum(shared.FsType.file) and st.typ != @intFromEnum(shared.FsType.dir)) continue;
-        @memcpy(rows[count].name[0..name.len], name);
-        rows[count].len = name.len;
-        rows[count].dir = st.typ == @intFromEnum(shared.FsType.dir);
-        count += 1;
-    }
+    const data: [*]u8 = @ptrFromInt(c.va);
+    const len = if (j.saving) blk: {
+        // Read once, now, into our own scratch: the bytes the client's
+        // buffer holds at the moment of the user's decision.
+        @memcpy(scratch[0..j.len], data[0..j.len]);
+        file.save(view, buffer, path, scratch[0..j.len]) catch |err| {
+            _ = usys.replyTypedTo(p.Resp, chan_h, failure(err), 0, j.token);
+            return;
+        };
+        break :blk j.len;
+    } else blk: {
+        const loaded = file.load(view, buffer, path, &scratch) catch |err| {
+            _ = usys.replyTypedTo(p.Resp, chan_h, failure(err), 0, j.token);
+            return;
+        };
+        @memcpy(data[0..loaded.len], loaded);
+        break :blk loaded.len;
+    };
+    dropSelectedView(c);
+    @memcpy(c.path[0..path.len], path);
+    c.len = path.len;
+    _ = usys.replyTypedTo(p.Resp, chan_h, metadata(c, len), 0, j.token);
 }
-fn up() void {
-    dir_len = std.mem.lastIndexOfScalar(u8, directory[0..dir_len], '/') orelse 0;
-    refresh();
-    replacing = false;
-}
-fn enterRow() void {
-    if (selected >= count) return;
-    const r = &rows[selected];
-    if (r.dir) {
-        var full: [256]u8 = undefined;
-        const path = join(&full, r.name[0..r.len]) orelse return;
-        @memcpy(directory[0..path.len], path);
-        dir_len = path.len;
-        refresh();
-    } else {
-        setName(r.name[0..r.len]);
-        focus = 0;
-    }
-}
-fn draw(saving: bool) void {
-    wf.setMenuProfile(.picker, shared.menus.offered(.picker));
-    wf.refreshAppearance();
-    wf.clipReset();
-    wf.fillAll(wf.pal.bg);
-    wf.drawChrome(if (saving) "Save document" else "Open document");
-    const area = wf.contentRect();
-    const gap: usize = 12;
-    const h = @max(wf.lineOf(wf.R_UI), wf.iconSize()) + 20;
-    const x = area.x + gap;
-    const w = area.w -| (2 * gap);
-    up_rect = .{ .x = x, .y = area.y + gap, .w = @min(w, wf.strW(wf.R_UI, "Up") + wf.iconSize() + 36), .h = h };
-    widgets.Button.draw(up_rect, "Up", "up", focus == 4, false, dir_len == 0);
-    wf.drawStrTrunc(x + up_rect.w + gap, up_rect.y + 10, wf.R_UI, if (dir_len == 0) (if (read_only) "Home · Read-only" else "Home") else directory[0..dir_len], w -| (up_rect.w + gap), wf.pal.text, wf.pal.bg);
-    field_rect = .{ .x = x, .y = up_rect.y + h + gap, .w = w, .h = h };
-    widgets.input(field_rect, &edit, focus == 0);
-    const footer_y = area.y + area.h -| (h + gap);
-    const bw = @min(w / 2 -| 6, wf.strW(wf.R_UI, "Replace") + 40);
-    cancel_rect = .{ .x = x, .y = footer_y, .w = bw, .h = h };
-    action_rect = .{ .x = x + w -| bw, .y = footer_y, .w = bw, .h = h };
-    widgets.Button.draw(cancel_rect, "Cancel", "", focus == 2, false, false);
-    widgets.Button.draw(action_rect, if (saving) (if (replacing) "Replace" else "Save") else "Open", "", focus == 3, true, edit.len == 0 or (saving and read_only));
-    const status_y = footer_y -| (wf.lineOf(wf.R_UI) + gap);
-    wf.drawStrTrunc(x, status_y, wf.R_UI, status, w, wf.pal.text_muted, wf.pal.bg);
-    list_rect = .{ .x = x, .y = field_rect.y + h + gap, .w = w, .h = status_y -| (field_rect.y + h + gap + gap) };
-    wf.panel(list_rect.x, list_rect.y, list_rect.w, list_rect.h, 6, wf.pal.field_bg, if (focus == 1) wf.pal.focus else wf.pal.border, wf.pal.border_w);
-    row_height = @max(wf.lineOf(wf.R_UI), wf.iconSize()) + 12;
-    const visible = list_rect.h / row_height;
-    if (count == 0 and listing_ok and visible > 0) wf.drawStrTrunc(list_rect.x + 12, list_rect.y + 12, wf.R_UI, "This folder is empty.", list_rect.w -| 24, wf.pal.text_muted, wf.pal.field_bg);
-    if (selected < scroll) scroll = selected;
-    if (visible > 0 and selected >= scroll + visible) scroll = selected - visible + 1;
-    var i = scroll;
-    while (i < count and i < scroll + visible) : (i += 1) {
-        const y = list_rect.y + (i - scroll) * row_height;
-        const fill = if (selected == i and focus == 1) wf.pal.primary else wf.pal.field_bg;
-        wf.fillRect(list_rect.x + 2, y + 2, list_rect.w -| 4, row_height -| 4, fill);
-        wf.drawIcon(x + 8, y + 6, wf.iconSize(), if (rows[i].dir) "folder" else "file", wf.pal.text);
-        wf.drawStrTrunc(x + wf.iconSize() + 20, y + 6, wf.R_UI, rows[i].name[0..rows[i].len], w -| (wf.iconSize() + 28), wf.pal.text, fill);
-    }
-    _ = wf.commitSurface();
-}
-fn choose(c: *Client, saving: bool, out: *[256]u8) ?[]const u8 {
-    const parent_maximized = wf.maximized;
-    wf.maximized = false;
-    defer wf.maximized = parent_maximized;
-    dir_len = 0;
-    edit = .{};
-    focus = 0;
-    replacing = false;
-    status = if (saving) "Choose a name and folder. Existing files require confirmation." else "Choose a file, or type its name. Enter opens a folder.";
-    if (c.len > 0) {
-        if (std.mem.lastIndexOfScalar(u8, c.path[0..c.len], '/')) |slash| {
-            @memcpy(directory[0..slash], c.path[0..slash]);
-            dir_len = slash;
-            setName(c.path[slash + 1 .. c.len]);
-        } else setName(c.path[0..c.len]);
-    } else if (saving) setName("Untitled.txt");
-    const volume = fs.fsStatfs(view);
-    read_only = volume == null or volume.?.read_only;
-    if (read_only) status = if (saving) "This folder is read-only. Saving is unavailable." else "Read-only folder. You can open documents and make edits in memory.";
-    wf.fontReady();
-    wf.useOrdinaryChannel();
-    wf.ptr_down = false;
-    wf.pending_dot = null;
-    wf.dragging = false;
-    wf.win_focused = true;
-    const area = wf.workArea();
-    wf.win_w = @min(820, area.w);
-    wf.win_h = @min(680, area.h);
-    wf.win_x = area.x + (area.w - wf.win_w) / 2;
-    wf.win_y = area.y + (area.h - wf.win_h) / 2;
-    if (!wf.openSurface(false)) return null;
-    defer wf.closeSurface();
-    wf.setSurfaceTitle(if (saving) "Save document" else "Open document");
-    refresh();
-    draw(saving);
-    _ = usys.log(glog, if (saving) "filepicker: save dialog" else "filepicker: open dialog");
-    while (true) {
-        const ev = wf.nextInput() orelse return null;
-        var submit = false;
-        const wheel = if (ev.kind == 1) shared.ptrWheel(ev.btn) else 0;
-        if (wheel != 0 and count > 0 and widgets.contains(list_rect, ev.x, ev.y)) {
-            selected = if (wheel > 0) selected -| 3 else @min(count - 1, selected + 3);
-            draw(saving);
+
+/// A client died: its queued jobs go; the one with the chooser becomes an
+/// orphan, dropped when the dialog ends.
+fn dropJobsOf(badge: u64) void {
+    var i: usize = 0;
+    while (i < job_count) {
+        if (jobs[i].badge != badge) {
+            i += 1;
             continue;
         }
-        switch (ev.kind) {
-            0 => switch (ev.ch) {
-                27, shared.keyboard.close_window => return null,
-                9 => focus = (focus + 1) % 5,
-                shared.keyboard.back_tab => focus = (focus + 4) % 5,
-                13, 10 => switch (focus) {
-                    1 => {
-                        const is_file = selected < count and !rows[selected].dir;
-                        enterRow();
-                        submit = is_file;
-                    },
-                    2 => return null,
-                    4 => up(),
-                    else => submit = true,
-                },
-                shared.keyboard.up => {
-                    if (focus == 1 and selected > 0) selected -= 1;
-                },
-                shared.keyboard.down => {
-                    if (focus == 1 and selected + 1 < count) selected += 1;
-                },
-                else => {
-                    if (focus == 0) {
-                        _ = widgets.fieldKey(&edit, ev.ch);
-                        replacing = false;
-                    }
-                },
-            },
-            1 => switch (wf.onPointer(ev, if (saving) "Save document" else "Open document")) {
-                .close, .resize_failed => return null,
-                .content => |pos| {
-                    if (widgets.contains(cancel_rect, pos.x, pos.y)) return null;
-                    if (widgets.contains(action_rect, pos.x, pos.y)) {
-                        focus = 3;
-                        submit = true;
-                    }
-                    if (widgets.contains(up_rect, pos.x, pos.y)) {
-                        up();
-                        focus = 4;
-                    }
-                    if (widgets.contains(field_rect, pos.x, pos.y)) focus = 0;
-                    if (widgets.contains(list_rect, pos.x, pos.y) and row_height > 0) {
-                        const idx = scroll + (pos.y - list_rect.y) / row_height;
-                        if (idx < count) {
-                            selected = idx;
-                            focus = 1;
-                            enterRow();
-                        }
-                    }
-                },
-                .minimized => wf.setSurfaceVisible(true),
-                else => {},
-            },
-            4 => wf.win_focused = ev.ch != 0,
-            3 => wf.setSurfaceVisible(true),
-            7 => {
-                if (!wf.outputChanged(ev, "Choose document", false)) return null;
-            },
-            255 => return null,
-            else => {},
+        if (i == 0 and job_active) {
+            jobs[0].badge = 0;
+            i += 1;
+            continue;
         }
-        if (submit and edit.len > 0 and !(saving and read_only)) {
-            const path = join(out, edit.buf[0..edit.len]) orelse {
-                status = "This path is too long.";
-                draw(saving);
-                continue;
-            };
-            file.validatePath(path) catch {
-                status = "Enter a valid relative file name.";
-                draw(saving);
-                continue;
-            };
-            const st = fs.fsStat(view, buffer, path);
-            if (st != null and st.?.typ == @intFromEnum(shared.FsType.dir)) {
-                @memcpy(directory[0..path.len], path);
-                dir_len = path.len;
-                setName("");
-                refresh();
-            } else if (saving and st != null and !replacing) {
-                replacing = true;
-                status = "This file exists. Choose Replace to overwrite it.";
-                _ = usys.log(glog, "filepicker: replace confirmation");
-            } else return path;
+        std.mem.copyForwards(Job, jobs[i .. job_count - 1], jobs[i + 1 .. job_count]);
+        job_count -= 1;
+    }
+}
+
+/// The chooser died: its dialog vanished, so the application hears
+/// "cancelled"; queued jobs wait for a fresh chooser.
+fn chooserDied(chan_h: u64) void {
+    chooser_badge = 0;
+    chooser_token = 0;
+    _ = usys.log(glog, "filepicker: chooser exited");
+    if (job_active) {
+        const j = jobs[0];
+        popJob();
+        if (j.badge != 0) _ = usys.replyTypedTo(p.Resp, chan_h, .cancelled, 0, j.token);
+    }
+    if (job_count > 0 and !ensureChooser(chan_h)) {
+        while (job_count > 0) {
+            const j = jobs[0];
+            popJob();
+            if (j.badge != 0) _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.TemporaryFileBusy), 0, j.token);
         }
-        draw(saving);
+    }
+}
+
+fn expireQueued() void {
+    const hz = usys.cycleHz();
+    if (hz == 0) return;
+    while (true) {
+        const now = usys.cycles();
+        var expired: u64 = 0;
+        var slab = clients;
+        scan: while (slab) |sl| : (slab = sl.next) {
+            for (&sl.clients) |*c| {
+                if (c.badge != 0 and c.held_cap != 0 and c.queued and (now -% c.offered_at) / hz >= queued_offer_ttl_s) {
+                    expired = c.badge;
+                    break :scan;
+                }
+            }
+        }
+        if (expired == 0) return;
+        _ = usys.log(glog, "filepicker: queued document expired");
+        release(expired); // may unmap a slab: rescan from the top
     }
 }
 
 export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
-    _ = arg;
     _ = blob_va;
     _ = blob_len;
     glog = log_h;
+    if (arg == 1) queued_offer_ttl_s = 1;
     const receiver = usys.chanMint(chan_h, receiver_badge);
     if (receiver.err != .ok) usys.exit(1);
     const setup = boot.takeExport(chan_h, receiver.data[1]);
@@ -474,12 +414,19 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     }
     buffer = @ptrFromInt(attached.va);
     _ = usys.capDrop(attached.cap); // the two service mappings retain the buffer
-    wf.setup(setup.cap(.display), log_h, setup.secret(), setup.cap(.font));
-    clipboard.authority = setup.cap(.clip);
+    init_cap = setup.cap(.init);
+    if (init_cap == 0) _ = usys.log(glog, "filepicker: no init channel; dialogs unavailable");
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
+        expireQueued();
         if (r.err == .client_dead) {
+            if (r.badge != 0 and r.badge == chooser_badge) {
+                release(r.badge);
+                chooserDied(chan_h);
+                continue;
+            }
+            dropJobsOf(r.badge);
             cancelUncommitted(r.badge);
             release(r.badge);
             continue;
@@ -487,43 +434,42 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         if (r.err != .ok) continue;
         const req = shared.decodeMsg(p.Req, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
-            _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+            _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
             continue;
         };
-        if (req != .attach_buf and req != .offer and r.cap != 0) _ = usys.capDrop(r.cap);
         if (req == .take) {
             if (r.badge != receiver_badge) {
-                _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
             } else if (firstPending(null, true)) |offered_client| {
                 const cap = offered_client.held_cap;
                 offered_client.held_cap = 0;
                 offered_client.sender = 0;
                 offered_client.queued = false;
                 _ = usys.log(glog, "filepicker: document handoff claimed");
-                const replied = usys.replyTyped(p.Resp, chan_h, .selected, cap);
+                const replied = usys.replyTypedTo(p.Resp, chan_h, .selected, cap, r.token);
                 _ = usys.capDrop(cap);
                 if (replied != .ok) release(offered_client.badge);
-            } else _ = usys.replyTyped(p.Resp, chan_h, .empty, 0);
+            } else _ = usys.replyTypedTo(p.Resp, chan_h, .empty, 0, r.token);
             continue;
         }
         if (req == .register) {
             if (next_badge == std.math.maxInt(u64)) {
-                _ = usys.replyTyped(p.Resp, chan_h, failure(error.TemporaryFileBusy), 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.TemporaryFileBusy), 0, r.token);
                 continue;
             }
             _ = allocate(next_badge) orelse {
-                _ = usys.replyTyped(p.Resp, chan_h, failure(error.TemporaryFileBusy), 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.TemporaryFileBusy), 0, r.token);
                 continue;
             };
             const minted = usys.chanMint(chan_h, next_badge);
             if (minted.err != .ok) {
                 release(next_badge);
-                _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
                 continue;
             }
             const badge = next_badge;
             next_badge += 1;
-            const replied = usys.replyTyped(p.Resp, chan_h, .registered, minted.data[1]);
+            const replied = usys.replyTypedTo(p.Resp, chan_h, .registered, minted.data[1], r.token);
             // Reply copies the endpoint. Keeping our copy would prevent the
             // last real client's drop from generating client_dead forever.
             _ = usys.capDrop(minted.data[1]);
@@ -532,12 +478,12 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
         }
         const c = find(r.badge) orelse {
             if ((req == .attach_buf or req == .offer) and r.cap != 0) _ = usys.capDrop(r.cap);
-            _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+            _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
             continue;
         };
         if (req == .offer) {
             const rep = offerDocument(chan_h, c, r.cap, req.offer.path_len);
-            const replied = usys.replyTyped(p.Resp, chan_h, rep, 0);
+            const replied = usys.replyTypedTo(p.Resp, chan_h, rep, 0, r.token);
             if (replied != .ok and rep == .offered) release(rep.offered.ticket);
             continue;
         }
@@ -545,13 +491,14 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             const ticket = if (req == .enqueue) req.enqueue.ticket else req.cancel_offer.ticket;
             const offered_client = find(ticket);
             if (offered_client == null or offered_client.?.sender != r.badge or offered_client.?.held_cap == 0) {
-                _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
             } else {
                 if (req == .enqueue) {
                     offered_client.?.queued = true;
+                    offered_client.?.offered_at = usys.cycles();
                     _ = usys.log(glog, "filepicker: document queued");
                 } else release(ticket);
-                _ = usys.replyTyped(p.Resp, chan_h, .ok, 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, .ok, 0, r.token);
             }
             continue;
         }
@@ -559,25 +506,46 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             const mapped = usys.shmMap(r.cap);
             if (r.cap != 0) _ = usys.capDrop(r.cap);
             if (mapped.err != .ok) {
-                _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
                 continue;
             }
             if (mapped.data[1] < p.pages) {
                 _ = usys.shmUnmap(mapped.data[0]);
-                _ = usys.replyTyped(p.Resp, chan_h, failure(error.TooLarge), 0);
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.TooLarge), 0, r.token);
                 continue;
             }
             if (c.va != 0) _ = usys.shmUnmap(c.va);
             c.va = mapped.data[0];
-            _ = usys.replyTyped(p.Resp, chan_h, .ok, 0);
+            _ = usys.replyTypedTo(p.Resp, chan_h, .ok, 0, r.token);
+            continue;
+        }
+        if (req == .chooser_ready or req == .chooser_done) {
+            // Only the badge minted in the handshake pulls jobs: an
+            // application posing as the chooser could otherwise "choose"
+            // a path the user never picked.
+            if (chooser_badge == 0 or r.badge != chooser_badge or c.va == 0) {
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
+                continue;
+            }
+            if (req == .chooser_done and job_active) {
+                const n = req.chooser_done.path_len;
+                var path: [256]u8 = undefined;
+                if (n <= path.len) {
+                    const src: [*]const u8 = @ptrFromInt(c.va);
+                    @memcpy(path[0..@intCast(n)], src[p.name_offset..][0..@intCast(n)]);
+                    completeJob(chan_h, path[0..@intCast(n)]);
+                } else completeJob(chan_h, "");
+            }
+            chooser_token = r.token;
+            dispatchJob(chan_h);
             continue;
         }
         if (c.va == 0) {
-            _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+            _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
             continue;
         }
         if (req != .open and req != .load and req != .save and req != .save_as) {
-            _ = usys.replyTyped(p.Resp, chan_h, failure(error.Unavailable), 0);
+            _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.Unavailable), 0, r.token);
             continue;
         }
         const data: [*]u8 = @ptrFromInt(c.va);
@@ -588,36 +556,40 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             else => 0,
         };
         if (n > p.max_bytes) {
-            _ = usys.replyTyped(p.Resp, chan_h, failure(error.TooLarge), 0);
+            _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.TooLarge), 0, r.token);
             continue;
         }
-        // Snapshot hostile/shared client bytes before showing any confirmation.
-        if (saving) @memcpy(scratch[0..n], data[0..n]);
-        var chosen: [256]u8 = undefined;
-        const path = if (req == .open or req == .save_as) choose(c, saving, &chosen) orelse {
-            _ = usys.replyTyped(p.Resp, chan_h, .cancelled, 0);
+        if (req == .open or req == .save_as) {
+            // A dialog: queue the job and answer when the chooser reports.
+            if (job_count == max_jobs or !ensureChooser(chan_h)) {
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(error.TemporaryFileBusy), 0, r.token);
+                continue;
+            }
+            var j: Job = .{ .badge = r.badge, .token = r.token, .saving = saving, .len = n };
+            @memcpy(j.name[0..c.len], c.path[0..c.len]);
+            j.name_len = c.len;
+            jobs[job_count] = j;
+            job_count += 1;
+            dispatchJob(chan_h);
             continue;
-        } else c.path[0..c.len];
-        const choosing = req == .open or req == .save_as;
-        const target_view = if (choosing) view else documentView(c);
-        const target_buffer = if (choosing) buffer else documentBuffer(c);
+        }
+        // load / save: the already selected document, no dialog.
+        if (saving) @memcpy(scratch[0..n], data[0..n]);
+        const path = c.path[0..c.len];
         const len = if (saving) blk: {
-            file.save(target_view, target_buffer, path, scratch[0..n]) catch |err| {
-                _ = usys.replyTyped(p.Resp, chan_h, failure(err), 0);
+            file.save(documentView(c), documentBuffer(c), path, scratch[0..n]) catch |err| {
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(err), 0, r.token);
                 continue;
             };
             break :blk n;
         } else blk: {
-            const loaded = file.load(target_view, target_buffer, path, &scratch) catch |err| {
-                _ = usys.replyTyped(p.Resp, chan_h, failure(err), 0);
+            const loaded = file.load(documentView(c), documentBuffer(c), path, &scratch) catch |err| {
+                _ = usys.replyTypedTo(p.Resp, chan_h, failure(err), 0, r.token);
                 continue;
             };
             @memcpy(data[0..loaded.len], loaded);
             break :blk loaded.len;
         };
-        if (choosing) dropSelectedView(c);
-        if (path.ptr != c.path[0..].ptr) @memcpy(c.path[0..path.len], path);
-        c.len = path.len;
-        _ = usys.replyTyped(p.Resp, chan_h, metadata(c, len), 0);
+        _ = usys.replyTypedTo(p.Resp, chan_h, metadata(c, len), 0, r.token);
     }
 }

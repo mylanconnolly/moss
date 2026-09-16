@@ -1297,10 +1297,7 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     defer q.close();
     const Frame = struct {
         fn read(path: []const u8) ?[5]u32 {
-            const content = readLog(path);
-            const at = std.mem.lastIndexOf(u8, content, "editor: frame ") orelse return null;
-            const line = content[at..];
-            return .{ parseAfter(line, "x=") orelse return null, parseAfter(line, "y=") orelse return null, parseAfter(line, "w=") orelse return null, parseAfter(line, "h=") orelse return null, parseAfter(line, "title=") orelse return null };
+            return frameAfter(path, "editor: frame ");
         }
     };
     const original = Frame.read(log_path) orelse return false;
@@ -1330,7 +1327,7 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // Cancel an initial Open before a document exists; the broker must return
     // focus and leave the new buffer usable.
     if (!q.chord("meta_l", "o")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", 1, "initial Open did not render", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", 1, "initial Open did not render", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/editor-open-picker.ppm");
     if (!q.sendKey("esc")) return false;
     sleepMs(150);
@@ -1350,14 +1347,14 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(150);
     _ = q.screendump(check_dir ++ "/editor-editing.ppm");
     if (!q.chord("meta_l", "s")) return false;
-    if (!try waitLogN(log_path, "filepicker: save dialog", 1, "Save dialog did not open", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: save dialog", 1, "Save dialog did not open", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/editor-save-picker.ppm");
     if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "editor: saved", 1, "editor did not save the new document", spec, polls)) return false;
     if (!q.chord("meta_l", "n")) return false;
     sleepMs(100);
     if (!q.chord("meta_l", "o")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", 2, "Open dialog did not open", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", 2, "Open dialog did not open", spec, polls)) return false;
     if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "editor: loaded", 1, "editor did not reopen the saved document", spec, polls)) return false;
     var digest: [32]u8 = undefined;
@@ -1375,9 +1372,9 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
     if (!q.chord("meta_l", "s")) return false;
     if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
-    if (!try waitLogN(log_path, "filepicker: save dialog", 2, "Save As did not render", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: save dialog", 2, "Save As did not render", spec, polls)) return false;
     if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
-    if (!try waitLogN(log_path, "filepicker: replace confirmation", 1, "existing file overwrite was not confirmed", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: replace confirmation", 1, "existing file overwrite was not confirmed", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/editor-replace-picker.ppm");
     if (!q.sendKey("esc")) return false;
     sleepMs(100);
@@ -1388,7 +1385,7 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.chord("meta_l", "n")) return false;
     sleepMs(100);
     if (!q.typeText("Separate document") or !q.chord("meta_l", "s")) return false;
-    if (!try waitLogN(log_path, "filepicker: save dialog", 3, "new document reused an old save authority", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: save dialog", 3, "new document reused an old save authority", spec, polls)) return false;
     if (!q.chord("meta_l", "a") or !q.typeText("editor-second.txt") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "editor: saved editor-second.txt", 1, "new document did not save separately", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/editor-tabs.ppm");
@@ -1407,7 +1404,7 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.chord("meta_l", "z") or !q.chord("meta_l", "s")) return false;
     if (!try waitLogN(log_path, "editor: saved editor-second.txt bytes=17", 2, "returning tab lost its undo history or save authority", spec, polls)) return false;
     if (!q.chord("meta_l", "o")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", 3, "second document could not be reopened", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", 3, "second document could not be reopened", spec, polls)) return false;
     if (!q.chord("meta_l", "a") or !q.typeText("editor-second.txt") or !q.sendKey("ret")) return false;
     var second_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("Separate document", &second_digest, .{});
@@ -1417,7 +1414,7 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.chord("meta_l", "w")) return false; // close only this clean duplicate
     sleepMs(150);
     if (!q.chord("meta_l", "o")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", 4, "original document could not be reopened", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", 4, "original document could not be reopened", spec, polls)) return false;
     if (!q.chord("meta_l", "a") or !q.typeText("editor-test.txt") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, digest_log, 2, "new document overwrote the original", spec, polls)) return false;
     // Paste the copied document, then add a change and prove Cancel keeps
@@ -2819,6 +2816,36 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "editor: loaded zz-two.txt bytes=21", 1, "second selected document did not open", spec, polls)) return false;
     if (!try waitLogN(log_path, "editor: tab 2/2 zz-two.txt", 1, "Files launched a second Editor instead of another tab", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/files-editor-tabs.ppm");
+    // The dialog is its own process, so the broker keeps serving while one
+    // is up: open the Editor's Open dialog, then hand a document over from
+    // Files — the broker must queue it before the dialog is dismissed, and
+    // the Editor must claim it once its call returns.
+    const dialogs = countOccurrences(readLog(log_path), "chooser: open dialog");
+    if (!q.chord("meta_l", "o")) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", dialogs + 1, "Editor's Open dialog did not open on the desktop", spec, polls)) return false;
+    sleepMs(200);
+    const dialog = ChooserFrame.read(log_path) orelse return sfail(spec, log_path, "chooser frame geometry");
+    const queued = countOccurrences(readLog(log_path), "filepicker: document queued");
+    const claimed = countOccurrences(readLog(log_path), "filepicker: document handoff claimed");
+    if (!clickScanout(&q, files[0], files[1])) return false;
+    sleepMs(250);
+    if (!clickScanout(&q, fg[0], one_y)) return false;
+    sleepMs(80);
+    if (!clickScanout(&q, fg[0], one_y)) return false;
+    if (!try waitLogN(log_path, "filepicker: document queued", queued + 1, "broker did not queue a handoff while a dialog was open", spec, polls)) return false;
+    if (countOccurrences(readLog(log_path), "filepicker: document handoff claimed") != claimed) return sfail(spec, log_path, "a blocked Editor claimed a handoff");
+    // Focus the dialog by its title bar and cancel it; the Editor resumes
+    // and claims the queued document.
+    if (!clickScanout(&q, dialog[0] + dialog[2] / 2, dialog[1] + dialog[4] / 2)) return false;
+    sleepMs(150);
+    if (!q.sendKey("esc")) return false;
+    if (!try waitLogN(log_path, "filepicker: document handoff claimed", claimed + 1, "Editor did not claim the handoff queued during its dialog", spec, polls)) return false;
+    if (!try waitLogN(log_path, "editor: tab 3/3 zz-one.txt", 1, "claimed handoff did not open as a tab", spec, polls)) return false;
+    // Close that clean duplicate tab so the steps below see the two tabs
+    // they were written for.
+    if (!q.chord("meta_l", "w")) return false;
+    if (!try waitLogN(log_path, "editor: tab 2/2 zz-two.txt", 2, "duplicate handoff tab did not close", spec, polls)) return false;
+    sleepMs(300);
     // The selected view belongs to the document now; closing Files must not
     // revoke it or leave the editor dependent on the sender process.
     if (!clickScanout(&q, files[0], files[1])) return false;
@@ -2877,9 +2904,9 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.sendKey("esc")) return false;
     // A real Editor command proves the nested launcher/menu transition
     // restored the application, rather than leaving focus on resident chrome.
-    const launcher_pickers = countOccurrences(readLog(log_path), "filepicker: open dialog");
+    const launcher_pickers = countOccurrences(readLog(log_path), "chooser: open dialog");
     if (!q.chord("meta_l", "o")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", launcher_pickers + 1, "Escape after launcher F10 lost Editor focus", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", launcher_pickers + 1, "Escape after launcher F10 lost Editor focus", spec, polls)) return false;
     if (!q.sendKey("esc")) return false;
     sleepMs(150);
     if (!q.chord("meta_l", "spc")) return false;
@@ -3037,6 +3064,20 @@ fn lconsoleDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     }
     return true;
 }
+
+/// The last "<marker>x=.. y=.. w=.. h=.. title=.." line: a window's frame
+/// as its app logged it — x, y, w, h and the title bar's height.
+fn frameAfter(path: []const u8, marker: []const u8) ?[5]u32 {
+    const content = readLog(path);
+    const at = std.mem.lastIndexOf(u8, content, marker) orelse return null;
+    const line = content[at..];
+    return .{ parseAfter(line, "x=") orelse return null, parseAfter(line, "y=") orelse return null, parseAfter(line, "w=") orelse return null, parseAfter(line, "h=") orelse return null, parseAfter(line, "title=") orelse return null };
+}
+const ChooserFrame = struct {
+    fn read(path: []const u8) ?[5]u32 {
+        return frameAfter(path, "chooser: frame ");
+    }
+};
 
 fn sfail(spec: Spec, log_path: []const u8, what: []const u8) bool {
     std.debug.print("[FAIL] {s}: QMP could not {s}\n", .{ spec.name, what });
@@ -4887,9 +4928,9 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     _ = q.screendump(check_dir ++ "/launcher-300-1024.ppm");
     if (!q.sendKey("esc")) return false;
     if (!try waitLogN(log_path, "launcher: dismissed", launcher_dismissed + 1, "large-text launcher did not dismiss", spec, polls)) return false;
-    const launcher_pickers = countOccurrences(readLog(log_path), "filepicker: open dialog");
+    const launcher_pickers = countOccurrences(readLog(log_path), "chooser: open dialog");
     if (!q.chord("meta_l", "o")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", launcher_pickers + 1, "large-text launcher dismissal lost Editor focus", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", launcher_pickers + 1, "large-text launcher dismissal lost Editor focus", spec, polls)) return false;
     if (!q.sendKey("esc")) return false;
     sleepMs(150);
     if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
@@ -4909,13 +4950,13 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     sleepMs(150);
     // Escape returns keyboard focus to the editor, rather than swallowing
     // subsequent application shortcuts in the resident top bar.
-    const picker_count = countOccurrences(readLog(log_path), "filepicker: open dialog");
+    const picker_count = countOccurrences(readLog(log_path), "chooser: open dialog");
     if (!try openAppMenu(spec, log_path, polls, q, "File", width, height)) return false;
     if (!q.sendKey("down")) return false; // New -> Open
     sleepMs(100);
     const editor_activations = countOccurrences(readLog(log_path), "topbar: active Editor token=");
     if (!q.sendKey("ret")) return false;
-    if (!try waitLogN(log_path, "filepicker: open dialog", picker_count + 1, "global File Open did not reach the editor", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: open dialog", picker_count + 1, "global File Open did not reach the editor", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/editor-picker-300-1024.ppm");
     sleepMs(200);
     if (!q.sendKey("esc")) return false;

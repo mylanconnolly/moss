@@ -19,6 +19,14 @@ pub const Req = union(enum(u64)) {
     take: void,
     save: struct { len: u64 },
     save_as: struct { len: u64 },
+    /// Chooser only (the badge the broker minted for it in `hello`): wait
+    /// for a dialog job. The reply is `job` once an application asks to
+    /// open or save; the broker parks this call meanwhile.
+    chooser_ready: void,
+    /// Chooser only: the user chose a path (path_len bytes at name_offset
+    /// in the chooser's buffer) or cancelled (path_len 0). The reply is
+    /// the next job, as for chooser_ready.
+    chooser_done: struct { path_len: u64 },
 };
 pub const Resp = union(enum(u64)) {
     registered: void,
@@ -29,6 +37,20 @@ pub const Resp = union(enum(u64)) {
     cancelled: void,
     document: struct { len: u64, name_len: u64, read_only: u64 },
     failed: struct { code: u64 },
+    /// A dialog job for the chooser: saving or opening, with the initial
+    /// name (name_len bytes at name_offset in the chooser's buffer).
+    job: struct { saving: u64, name_len: u64 },
+};
+
+/// The broker's one call on the chooser, right after init started it: the
+/// cap is the broker endpoint minted for the chooser alone. Everything
+/// after that the chooser initiates, so the broker never blocks on it.
+pub const ChooserReq = union(enum(u64)) {
+    hello: void,
+};
+pub const ChooserResp = union(enum(u64)) {
+    ok: void,
+    refused: void,
 };
 pub const Error = enum(u64) {
     unavailable = 1,

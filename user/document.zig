@@ -300,6 +300,25 @@ pub fn probeHandoff(authority: u64, receiver: u64, test_view: u64) !void {
         c.deinit();
         return error.DuplicateHandoff;
     }
+
+    // A committed handoff nobody claims expires (the drill's broker keeps
+    // them 1 s): the Editor may have exited between Files' connect and
+    // its enqueue, and nothing else would release what the offer pins —
+    // or stop a much later Editor from silently opening that file.
+    {
+        var late_sender = try Client.init(authority);
+        defer late_sender.deinit();
+        const pv = fs.fsDerive(test_view, buf, folder, true) orelse return error.ProbeFilesystem;
+        defer _ = usys.capDrop(pv);
+        const t = try late_sender.offer(pv, basename);
+        try late_sender.enqueue(t);
+        usys.sleepMs(1500);
+        var late = try Client.take(receiver);
+        if (late) |*c| {
+            c.deinit();
+            return error.ExpiredHandoffDelivered;
+        }
+    }
 }
 
 fn probeParentReuse(authority: u64, receiver: u64, test_view: u64, buf: [*]u8, folder: []const u8, basename: []const u8, contents: []const u8) !void {

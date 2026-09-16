@@ -1,0 +1,15 @@
+# The session's Open/Save dialog: its own process, started by the document
+# broker through init and handed one private broker endpoint. It browses
+# the home view and returns a path; the broker loads and saves.
+{
+  image:     chooser
+  budget:    { user: 24mb }
+  grant:     [log]
+  essential: false
+  give: [
+    { tag: clip, unit: clipsvc }
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: view, fs: "", ro: false }
+  ]
+}

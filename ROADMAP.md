@@ -1539,6 +1539,18 @@ applications need menus beyond those profiles.
   holds the filesystem view and grants per-client selected-document access;
   staged durable saves and transactional rename rollback protect replacements.
   Host allocation/crash tests and a QEMU save/reopen digest drill cover the flow.
+- ✅ **The broker never blocks; the dialog is its own process** (2026-09-16):
+  a review found the broker calling on a client-supplied cap (self-call =
+  a session-wide hang) and its chooser modal for every client. Kernel:
+  `Errno.self_call` refuses a domain calling a channel it serves; new
+  `chan_same` syscall lets a service prove a cap is an endpoint of a service
+  it trusts before calling on it. Broker: headless; the `chooser` unit pulls
+  dialog jobs over a handshake badge; committed handoffs expire (10 s).
+  Compositor: `gpu_dialog` keeps a panel above the window it serves
+  (app-modal). Found: Files' handoff raise buried the cross-process dialog;
+  a system-modal first cut broke the drill's next click. Desktop drill
+  proves a handoff queues during a dialog; editor drill probes self-call,
+  stranger-view refusal and expiry.
 
 - ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
   one scalable, theme-colored catalog for buttons, dock items, lists, and

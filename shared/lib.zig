@@ -406,6 +406,7 @@ pub const ImageId = enum(u64) {
     clipsvc = 37,
     medit = 38,
     filepicker = 39,
+    chooser = 40,
 };
 
 /// Services init knows how to activate. Discovery is by protocol id over
@@ -811,6 +812,13 @@ pub const gpu_no_activate: u64 = 4;
 /// A press captures the pointer until all buttons release. Moves coalesce
 /// while busy; (0xffff, 0xffff) with no buttons clears hover on leave.
 pub const gpu_pointer_tracking: u64 = 2;
+/// create_surface flag: a dialog for the window that had focus when it was
+/// created — it stays above that window (a raise of the owner re-raises
+/// the dialog over it, and a dock restore of the owner focuses the dialog
+/// instead), while other applications' windows can still come in front:
+/// app-modal, the way a panel serves one window. Dialogs run in their own
+/// process here (the chooser), so nothing else could tie them together.
+pub const gpu_dialog: u64 = 16;
 
 pub const GpuReq = union(enum(u64)) {
     /// Owner publishes a fixed menu profile and current action availability.

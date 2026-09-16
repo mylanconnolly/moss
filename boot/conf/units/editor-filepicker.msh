@@ -1,12 +1,12 @@
-# The editor drill's picker, confined to its disposable disk view.
+# The editor drill's broker, confined to its disposable disk view; it
+# starts the `chooser` unit through init for dialogs.
 {
   image:  filepicker
-  budget: { user: 24mb }
+  arg:    1
+  budget: { user: 16mb }
   grant:  [log]
   give: [
-    { tag: clip, unit: clipsvc }
-    { tag: display, unit: compositor-ptr }
-    { tag: font, unit: fontsvc }
+    { tag: init, self: true }
     { tag: view, fs: data, ro: false }
   ]
 }

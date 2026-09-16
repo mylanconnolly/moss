@@ -530,6 +530,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "clipsvc", .src = "user/clipsvc.zig" },
         .{ .name = "medit", .src = "user/medit.zig" },
         .{ .name = "filepicker", .src = "user/filepicker.zig" },
+        .{ .name = "chooser", .src = "user/chooser.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -739,6 +740,7 @@ pub fn build(b: *std.Build) void {
         "conf/skel/font.msh",
         "conf/sessiongui/medit.msh", "conf/units/gui-medit.msh",
         "conf/sessiongui/filepicker.msh", "conf/units/editor-filepicker.msh",
+        "conf/sessiongui/chooser.msh",    "conf/units/chooser.msh",
     }) |f| {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));

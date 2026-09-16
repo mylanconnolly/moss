@@ -4637,6 +4637,57 @@ before blocking on it, prove what it is. *Rule (HACKING):* a service
 blocks only on caps it was granted at setup or has checked with
 `chan_same` against one.
 
+**The dialog is its own process; the broker never waits on a human
+(2026-09-16).** The broker used to draw the Open/Save chooser itself,
+inside its serve loop: while a dialog was up, every other client's save,
+load and Files handoff waited, and so did client-death reaping — "Open
+in Editor" in Files froze Files until the Editor's dialog was dismissed.
+Now the broker is headless. The dialog is `user/chooser.zig`, a unit the
+broker starts through init (`connect_named "chooser"`, so it needs the
+`init` self-give and nothing else new) on the first Open. Identity is a
+handshake: the broker mints a private badge on its own channel and hands
+it over in the one call it ever makes on the chooser (`hello` — a unit
+init just started for it, not a client-supplied cap). Only that badge may
+pull jobs, because an application posing as the chooser could otherwise
+"choose" a path the user never picked and have the Editor load it. From
+then on the chooser initiates everything: `chooser_ready` parks at the
+broker until an Open or Save As arrives, the application's own call is
+parked by token meanwhile, the dialog runs on the chooser's own home-view
+grant, and `chooser_done` carries the path back — its reply is the next
+job. No capability crosses after `hello`; the chooser returns a string
+and the broker loads or saves through its view, as before. Jobs queue
+(four; beyond that `busy`, which the Editor already words), a client's
+death drops its queued jobs and orphans the one in flight, and the
+chooser's death answers the in-flight job "cancelled" and relaunches for
+the rest. Every broker reply goes by token now, as the rule says.
+
+The split exposed one thing the single process had for free: stacking.
+Files' handoff raises the Editor (`restore_titled`), and with the dialog
+in another process that raise buried the panel under the very window it
+was blocking — a frozen Editor with its dialog hidden behind it. So the
+compositor learned dialogs: `gpu_dialog` on `create_surface` marks a
+panel for *the surface that had focus as it was created* (the Editor,
+the instant before Cmd-O's dialog appears — no protocol had to name it).
+Raising the owner re-raises its dialog over it, and a dock restore of the
+owner focuses the dialog instead of the blocked window; other
+applications' windows still come in front of both — app-modal, a panel
+serving one window, not a system-modal sheet over everything (the first
+cut pinned dialogs above every window and the drill's next click on a
+Files row hit the dialog instead).
+
+Committed handoffs also expire now (`queued_offer_ttl_s`, 10 s; the
+editor drill's broker runs with 1 s so a probe can watch it): an offer
+the Editor never claims — it exited between Files' connect and the
+enqueue, or crashed before its first poll — used to pin a filesystem view
+slot, a 65-page buffer and a client record forever, and then some much
+later Editor launch would silently open that file. The broker checks ages
+on every message it receives; no timer, since a stale offer harms nobody
+until the next request. The desktop drill proves the point of all this:
+with the Editor's Open dialog up, Files hands over a document and the
+broker queues it before the dialog is dismissed; Escape then lets the
+Editor claim it. The editor drill's probe commits an offer, sleeps past
+the TTL, and finds `take` empty.
+
 Lesson: a path string is not a document grant. Files' current view may be
 narrower or read-only compared with the chooser's home view; resolving a handed
 off name against that home would silently widen authority. Keep the selected

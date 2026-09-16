@@ -1,14 +1,14 @@
-# Per-session Open/Save broker. Only its user-mediated dialog owns the home
-# view; applications receive the selected document, never directory access.
+# Per-session document broker: headless, holds the home view, answers
+# applications' open/save/load and Files' handoffs. The dialog is the
+# `chooser` unit, which the broker starts through init on the first Open.
+# Applications receive the selected document, never directory access.
 {
   image:     filepicker
-  budget:    { user: 24mb }
+  budget:    { user: 16mb }
   grant:     [log]
   essential: false
   give: [
-    { tag: clip, unit: clipsvc }
-    { tag: display, session: true }
-    { tag: font, session: true }
+    { tag: init, self: true }
     { tag: view, fs: "", ro: false }
   ]
 }

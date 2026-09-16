@@ -408,6 +408,11 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   recorded at each `recv`), but a stranger's slow channel still blocks
   the caller — the check is the service's job. Paid for by the document
   broker (2026-09-16).
+- A service never waits on a human. A dialog lives in its own process
+  that *pulls* jobs from the service (a parked call answered when work
+  arrives) and reports back with another call; the service defers the
+  requesting client's reply by token meanwhile and keeps serving everyone
+  else. The document broker and its `chooser` are the model.
 - Architecture-specific code lives under `kernel/arch/<arch>/` and is
   reached only through `kernel/arch.zig` (the HAL). No inline assembly,
   system register, interrupt-controller or page-table-format knowledge
