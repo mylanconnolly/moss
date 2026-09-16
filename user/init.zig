@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const shared = @import("shared");
+const ui = @import("mosslib").ui;
 const usys = @import("usys.zig");
 const loader = @import("loader.zig");
 const fsc = @import("fsclient.zig");
@@ -251,7 +252,9 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             if (number < 0 or number > 65535) return null;
             break :blk @as(u32, @intCast(number));
         } else @as(u32, 1000);
-        u.app = shared.apps.Record.init(name, str(app.record.get("name")) orelse return null, str(app.record.get("description")) orelse return null, str(app.record.get("icon")) orelse return null, str(app.record.get("window")) orelse return null, pinned, order) orelse return null;
+        const icon = str(app.record.get("icon")) orelse return null;
+        if (ui.icons.parse(icon) == null) return null; // a catalog name (lib/ui/icons)
+        u.app = shared.apps.Record.init(name, str(app.record.get("name")) orelse return null, str(app.record.get("description")) orelse return null, icon, str(app.record.get("window")) orelse return null, pinned, order) orelse return null;
     }
     if (r.get("arg")) |a| u.arg = @intCast(int(a) orelse 0);
     // `node: boot`: the program's node id is the boot's — arg becomes

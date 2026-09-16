@@ -6,10 +6,10 @@ Copyright Phosphor Icons; MIT license in [LICENSE](LICENSE). The same license
 is included in the boot archive at `assets/licenses/phosphor.txt`.
 
 Moss keeps its semantic names (`settings`, `refresh`, etc.) and also accepts
-the upstream names. `shared/icons.zig` records the mapping. The regular weight
+the upstream names. `lib/ui/icons.zig` records the mapping. The regular weight
 uses rounded 16-unit strokes on a 256-unit viewBox.
 
-`shared/iconpath.zig` compiles these SVGs into line segments during the normal
+`lib/ui/iconpath.zig` compiles these SVGs into line segments during the normal
 Zig build. Circular arcs and cubic curves are flattened to 0.125 source-unit
 tolerance (less than 0.1 pixel at a 192px output size). There is no runtime SVG
 parser, network fetch, external converter, or additional asset service.

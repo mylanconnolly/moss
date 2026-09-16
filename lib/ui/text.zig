@@ -1,6 +1,43 @@
 //! Bounded single-line editor. Positions stay on UTF-8 code-point boundaries.
+//!
+//! Input is semantic: a `Command`, never a key byte. The binding that owns
+//! the keyboard (user/widgets.zig) maps the wire's bytes — including the
+//! Emacs control codes — to these; the editor and its tests know only what
+//! the user meant.
 const std = @import("std");
-const k = @import("keyboard.zig");
+
+pub const Command = union(enum) {
+    /// One printable ASCII character.
+    insert: u8,
+    home,
+    end,
+    left,
+    right,
+    word_left,
+    word_right,
+    select_left,
+    select_right,
+    select_home,
+    select_end,
+    select_word_left,
+    select_word_right,
+    select_all,
+    /// Backspace: the selection, else the code point before the caret.
+    backspace,
+    /// Forward delete: the selection, else the code point after the caret.
+    delete,
+    /// Emacs C-k: to the end of the line, into the kill buffer.
+    kill_to_end,
+    /// Emacs C-u: to the start of the line, into the kill buffer.
+    kill_to_start,
+    /// Emacs C-w: the word before the caret, into the kill buffer.
+    kill_word,
+    /// Emacs C-y: insert the kill buffer.
+    yank,
+    undo,
+    redo,
+};
+
 pub const Editor = struct {
     buf: [64]u8 = undefined,
     len: usize = 0,
@@ -141,43 +178,46 @@ pub const Editor = struct {
         self.len += bytes.len;
         self.move(self.cursor + bytes.len, false);
     }
-    pub fn key(self: *Editor, ch: u8) bool {
-        if (ch == k.undo or ch == k.redo) {
-            self.undo(ch == k.redo);
-            return true;
+    /// Apply one command. Consecutive inserts without a selection group
+    /// into one undo step; anything else ends the group.
+    pub fn apply(self: *Editor, cmd: Command) void {
+        switch (cmd) {
+            .undo => return self.undo(false),
+            .redo => return self.undo(true),
+            else => {},
         }
         const before = self.snapshot();
         const was_typing = self.typing;
-        const group = ch >= 32 and ch < 127 and self.low() == self.high();
+        const group = cmd == .insert and self.low() == self.high();
         self.typing = false;
         defer self.changed(before, group, was_typing);
         const selected = self.low() != self.high();
-        switch (ch) {
-            1, k.home => self.move(0, false),
-            5, k.end => self.move(self.len, false),
-            2, k.left => self.move(if (selected) self.low() else self.prev(self.cursor), false),
-            6, k.right => self.move(if (selected) self.high() else self.next(self.cursor), false),
-            k.word_left => self.move(self.word(true), false),
-            k.word_right => self.move(self.word(false), false),
-            k.select_left => self.move(self.prev(self.cursor), true),
-            k.select_right => self.move(self.next(self.cursor), true),
-            k.select_home => self.move(0, true),
-            k.select_end => self.move(self.len, true),
-            k.select_word_left => self.move(self.word(true), true),
-            k.select_word_right => self.move(self.word(false), true),
-            k.select_all => {
+        switch (cmd) {
+            .insert => |ch| if (ch >= 32 and ch < 127) self.insert(&.{ch}),
+            .home => self.move(0, false),
+            .end => self.move(self.len, false),
+            .left => self.move(if (selected) self.low() else self.prev(self.cursor), false),
+            .right => self.move(if (selected) self.high() else self.next(self.cursor), false),
+            .word_left => self.move(self.word(true), false),
+            .word_right => self.move(self.word(false), false),
+            .select_left => self.move(self.prev(self.cursor), true),
+            .select_right => self.move(self.next(self.cursor), true),
+            .select_home => self.move(0, true),
+            .select_end => self.move(self.len, true),
+            .select_word_left => self.move(self.word(true), true),
+            .select_word_right => self.move(self.word(false), true),
+            .select_all => {
                 self.anchor = 0;
                 self.cursor = self.len;
             },
-            8, 127 => self.erase(if (selected) self.low() else self.prev(self.cursor), self.high(), false),
-            4, k.delete => self.erase(self.low(), if (selected) self.high() else self.next(self.cursor), false),
-            11 => self.erase(if (selected) self.low() else self.cursor, if (selected) self.high() else self.len, true),
-            21 => self.erase(if (selected) self.low() else 0, self.high(), true),
-            23, k.delete_word => self.erase(if (selected) self.low() else self.word(true), self.high(), true),
-            25 => self.insert(self.kill[0..self.kill_len]),
-            else => if (ch >= 32 and ch < 127) self.insert(&.{ch}) else return false,
+            .backspace => self.erase(if (selected) self.low() else self.prev(self.cursor), self.high(), false),
+            .delete => self.erase(self.low(), if (selected) self.high() else self.next(self.cursor), false),
+            .kill_to_end => self.erase(if (selected) self.low() else self.cursor, if (selected) self.high() else self.len, true),
+            .kill_to_start => self.erase(if (selected) self.low() else 0, self.high(), true),
+            .kill_word => self.erase(if (selected) self.low() else self.word(true), self.high(), true),
+            .yank => self.insert(self.kill[0..self.kill_len]),
+            .undo, .redo => unreachable,
         }
-        return true;
     }
 };
 fn continuation(ch: u8) bool {
@@ -187,42 +227,42 @@ fn continuation(ch: u8) bool {
 test "selection replacement, collapse, UTF-8 deletion and kill/yank" {
     var e: Editor = .{};
     e.seed("héllo world");
-    _ = e.key(1);
-    _ = e.key(6);
-    _ = e.key(k.select_right);
-    _ = e.key('a');
+    e.apply(.home);
+    e.apply(.right);
+    e.apply(.select_right);
+    e.apply(.{ .insert = 'a' });
     try std.testing.expectEqualStrings("hallo world", e.buf[0..e.len]);
-    _ = e.key(k.select_end);
-    _ = e.key(k.left);
+    e.apply(.select_end);
+    e.apply(.left);
     try std.testing.expectEqual(@as(usize, 2), e.cursor);
-    _ = e.key(11);
-    _ = e.key(25);
+    e.apply(.kill_to_end);
+    e.apply(.yank);
     try std.testing.expectEqualStrings("hallo world", e.buf[0..e.len]);
-    _ = e.key(k.select_all);
-    _ = e.key(8);
+    e.apply(.select_all);
+    e.apply(.backspace);
     try std.testing.expectEqual(@as(usize, 0), e.len);
     e.seed("é");
-    _ = e.key(8);
+    e.apply(.backspace);
     try std.testing.expectEqual(@as(usize, 0), e.len);
 }
 test "full buffer replacement and word selection" {
     var e: Editor = .{};
     e.seed(&(@as([64]u8, @splat('x'))));
-    _ = e.key('y');
+    e.apply(.{ .insert = 'y' });
     try std.testing.expectEqual(@as(usize, 64), e.len);
-    _ = e.key(k.select_all);
-    _ = e.key('z');
+    e.apply(.select_all);
+    e.apply(.{ .insert = 'z' });
     try std.testing.expectEqualStrings("z", e.buf[0..e.len]);
     e.seed("one two");
-    _ = e.key(k.select_word_left);
-    _ = e.key(4);
+    e.apply(.select_word_left);
+    e.apply(.delete);
     try std.testing.expectEqualStrings("one ", e.buf[0..e.len]);
 }
 
 test "undo groups typing, restores selection, branches redo, and bounds history" {
     var e: Editor = .{};
     e.seed("old");
-    _ = e.key(k.select_all);
+    e.apply(.select_all);
     e.paste("new\r\nvalue\t世界");
     try std.testing.expectEqualStrings("new value 世界", e.buf[0..e.len]);
     e.undo(false);
@@ -230,18 +270,18 @@ test "undo groups typing, restores selection, branches redo, and bounds history"
     try std.testing.expectEqual(@as(usize, 0), e.low());
     try std.testing.expectEqual(@as(usize, 3), e.high());
     e.undo(true);
-    _ = e.key(k.end);
-    _ = e.key('a');
-    _ = e.key('b');
-    _ = e.key('c');
+    e.apply(.end);
+    e.apply(.{ .insert = 'a' });
+    e.apply(.{ .insert = 'b' });
+    e.apply(.{ .insert = 'c' });
     e.undo(false);
     try std.testing.expectEqualStrings("new value 世界", e.buf[0..e.len]);
-    _ = e.key('!');
+    e.apply(.{ .insert = '!' });
     e.undo(true);
     try std.testing.expectEqualStrings("new value 世界!", e.buf[0..e.len]);
     for (0..80) |_| {
-        _ = e.key(8);
-        _ = e.key('x');
+        e.apply(.backspace);
+        e.apply(.{ .insert = 'x' });
     }
     try std.testing.expect(e.undo_len <= 32);
 }
@@ -254,7 +294,7 @@ test "paste refuses malformed data and truncates on UTF-8 boundaries" {
     e.paste("é");
     try std.testing.expectEqual(@as(usize, 63), e.len);
     try std.testing.expectEqual(@as(usize, 0), e.undo_len);
-    _ = e.key(k.select_all);
+    e.apply(.select_all);
     e.paste("é世界");
     e.undo(false);
     try std.testing.expectEqual(@as(usize, 63), e.len);

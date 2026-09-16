@@ -2,16 +2,17 @@
 //! neither discovery nor presentation creates additional launch authority.
 const std = @import("std");
 const shared = @import("shared");
+const tk = @import("mosslib").ui;
 const wf = @import("windowframe.zig");
 const ui = @import("widgets.zig");
 const usys = @import("usys.zig");
 const apps = @import("appsclient.zig");
-const search = shared.gui.appsearch;
+const search = tk.search;
 var catalog: apps.Catalog = .{};
 var matches: [128]usize = undefined;
 var scores: [128]usize = undefined;
 var count: usize = 0;
-var query: shared.TextEdit = .{};
+var query: tk.text.Editor = .{};
 var selected: usize = 0;
 var first: usize = 0;
 var message: []const u8 = "";

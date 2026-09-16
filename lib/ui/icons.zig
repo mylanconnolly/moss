@@ -1,5 +1,7 @@
 //! Symbolic icons compiled from SVGs: Phosphor Regular plus the original Moss mark.
-//! See phosphor/README.md and branding/README.md for provenance.
+//! See lib/ui/phosphor/README.md and lib/ui/branding/README.md for provenance.
+//! `coverage` is the rasterizer: distance to the nearest stroke segment,
+//! antialiased; the frame caches its masks per size.
 const std = @import("std");
 const path = @import("iconpath.zig");
 const Segment = path.Segment;

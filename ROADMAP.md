@@ -1485,7 +1485,7 @@ applications need menus beyond those profiles.
   outside clicks dismiss. Compositor tokens and explicit display-control
   authority prevent stale or unprivileged invocation. Large text gives menus
   priority over the clock. An original scalable mark replaces the system-menu
-  wordmark; canonical SVG and provenance live in `shared/branding/`.
+  wordmark; canonical SVG and provenance live in `lib/ui/branding/`.
   Arbitrary client-defined menu schemas, nested submenus, and overflow scrolling
   for menus larger than the built-in profiles remain future extensions.
 
@@ -1551,6 +1551,15 @@ applications need menus beyond those profiles.
   a system-modal first cut broke the drill's next click. Desktop drill
   proves a handoff queues during a dialog; editor drill probes self-call,
   stranger-view refusal and expiry.
+- ✅ **The UI toolkit: lib/ui** (2026-09-16): the GUI's pure logic — geometry
+  and spacing tokens, row flow and proportional tracks, scroll state,
+  double-click timing, the single-line text editor, tab and breadcrumb
+  models, app search, the icon catalog with its SVG decoder and rasterizer,
+  the rounded window shape — moved out of `shared/` (the wire contract, which
+  it had been quietly turning into) into a host-tested library every graphical
+  program imports. The text editor takes semantic commands; `user/widgets.zig`
+  maps the wire's key bytes to them. Next slices: a canvas so painters become
+  toolkit functions with pixel tests, then the declarative tree's layout.
 
 - ✅ **Optional symbolic icons and larger window controls** (2026-09-12):
   one scalable, theme-colored catalog for buttons, dock items, lists, and

@@ -13,6 +13,7 @@
 //! after `hello`.
 const std = @import("std");
 const shared = @import("shared");
+const ui = @import("mosslib").ui;
 const p = shared.picker;
 const usys = @import("usys.zig");
 const boot = @import("boot.zig");
@@ -40,7 +41,7 @@ var rows: [256]Row = @splat(.{});
 var count: usize = 0;
 var directory: [256]u8 = undefined;
 var dir_len: usize = 0;
-var edit: shared.TextEdit = .{};
+var edit: ui.text.Editor = .{};
 var status: []const u8 = "";
 var scroll: usize = 0;
 var selected: usize = 0;

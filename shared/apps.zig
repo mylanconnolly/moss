@@ -1,7 +1,6 @@
 //! Informational application catalog. Stable IDs are unit names; metadata never
 //! grants authority or changes the unit's ordinary lazy activation policy.
 const std = @import("std");
-const icons = @import("icons.zig");
 pub const running: u32 = 1;
 pub const dock: u32 = 2;
 pub const metadata_keys = [_][]const u8{ "name", "description", "icon", "window", "dock", "order" };
@@ -20,7 +19,9 @@ pub const Record = struct {
     pub const size = 240;
     pub fn init(unit: []const u8, name: []const u8, description: []const u8, icon: []const u8, window: []const u8, pinned: bool, order: u32) ?Record {
         if (!validUnit(unit) or !validText(name, 48) or !validText(description, 128) or !validText(icon, 24) or !validText(window, 16)) return null;
-        if (icons.parse(icon) == null or order > 65535) return null;
+        // The icon is a catalog name the toolkit resolves (lib/ui/icons);
+        // init checks it against the catalog, since the wire cannot.
+        if (icon.len == 0 or order > 65535) return null;
         var r: Record = .{ .flags = if (pinned) dock else 0, .order = order };
         @memcpy(r.unit[0..unit.len], unit);
         @memcpy(r.name[0..name.len], name);
@@ -93,7 +94,7 @@ test "invalid application metadata is refused rather than truncated" {
     try std.testing.expect(Record.init("overlong-unit-name", "Editor", "Edit", "file", "Editor", false, 0) == null);
     try std.testing.expect(Record.init("medit", "Bad\nName", "Edit", "file", "Editor", false, 0) == null);
     try std.testing.expect(Record.init("medit", "Editor", "", "file", "Editor", false, 0) == null);
-    try std.testing.expect(Record.init("medit", "Editor", "Edit", "nonexistent", "Editor", false, 0) == null);
+    try std.testing.expect(Record.init("medit", "Editor", "Edit", "", "Editor", false, 0) == null); // the catalog check is init's
     try std.testing.expect(Record.init("medit", "Editor", "Edit", "file", "Too long window title", false, 0) == null);
     try std.testing.expect(Record.init("medit", "Editor", "Edit", "file", "Editor", false, 65536) == null);
     try std.testing.expect(knownKey("description"));

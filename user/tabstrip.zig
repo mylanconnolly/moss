@@ -1,6 +1,6 @@
 //! Reusable native document/session tabs. This widget does not own documents.
 const wf = @import("windowframe.zig");
-const model = @import("shared").gui.tabs;
+const model = @import("mosslib").ui.tabs;
 pub const State = model.State;
 pub const Hit = model.Hit;
 pub const Item = struct { label: []const u8, dirty: bool = false, closable: bool = true };

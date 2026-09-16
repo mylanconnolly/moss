@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const shared = @import("shared");
+const ui = @import("mosslib").ui;
 const usys = @import("usys.zig");
 const virtio = @import("virtio.zig");
 const boot = @import("boot.zig");
@@ -585,7 +586,7 @@ fn fillRect(r: Rect, word: u32) void {
 /// chunks, so each row goes through fbWrite.
 fn blitRect(sf: *const Surface, r: Rect) void {
     const src: [*]const u8 = @ptrFromInt(sf.va);
-    const radius = if (sf.rounded) shared.windowshape.radius(sf.w, sf.h) else 0;
+    const radius = if (sf.rounded) ui.shape.radius(sf.w, sf.h) else 0;
     const left = r.x - sf.x;
     const right = left + r.w;
     var y = r.y;
@@ -607,11 +608,11 @@ fn blitRect(sf: *const Surface, r: Rect) void {
                 x = @min(right, sf.w - radius);
                 continue;
             }
-            const alpha = shared.windowshape.coverage(x, local_y, sf.w, sf.h, radius);
+            const alpha = ui.shape.coverage(x, local_y, sf.w, sf.h, radius);
             if (alpha != 0) {
                 const source = std.mem.readInt(u32, src[row + x * fb_bpp ..][0..4], .little);
                 const off = y * fb_stride + (sf.x + x) * fb_bpp;
-                var word = if (alpha == 255) source else shared.windowshape.blend(source, fbReadPixel(off), alpha);
+                var word = if (alpha == 255) source else ui.shape.blend(source, fbReadPixel(off), alpha);
                 fbWrite(off, @ptrCast(&word), fb_bpp);
             }
             x += 1;
@@ -1135,7 +1136,7 @@ fn surfaceUnderCursor() u64 {
         if (!sf.used or sf.hidden) continue;
         if (cursor_x < sf.x or cursor_x >= sf.x + sf.w) continue;
         if (cursor_y < sf.y or cursor_y >= sf.y + sf.h) continue;
-        if (sf.rounded and shared.windowshape.coverage(cursor_x - sf.x, cursor_y - sf.y, sf.w, sf.h, shared.windowshape.radius(sf.w, sf.h)) == 0) continue;
+        if (sf.rounded and ui.shape.coverage(cursor_x - sf.x, cursor_y - sf.y, sf.w, sf.h, ui.shape.radius(sf.w, sf.h)) == 0) continue;
         if (best_id == 0 or sf.z > best_z) {
             best_id = i + 1;
             best_z = sf.z;

@@ -2335,7 +2335,7 @@ so Ctrl-S, Ctrl-T and Ctrl-Q cannot collide with arrow keys. The terminal
 translates arrows, Home, End and Delete to VT sequences one byte per console
 read, and drops unsupported GUI actions instead of inserting them as UTF-8.
 
-Fields use `shared/textedit.zig`: bounded insertion at a caret, replacement of
+Fields use `lib/ui/text.zig` (then `shared/textedit.zig`): bounded insertion at a caret, replacement of
 selected text, arrows/Home/End, Shift selection, Option-arrow word movement,
 Command-arrow endpoints and Command-A select all. Ctrl-A/E/B/F/H/D provide
 Emacs-style movement/deletion; Ctrl-K/U/W kill to end/start/previous word and
@@ -3449,10 +3449,57 @@ want keystrokes (`focuscli`, `readercli`, `trustcli`) now filter to `kind`
 same channel — a keystroke is no longer the only thing a `next_input` can
 return.
 
+### The UI toolkit: lib/ui (as built, 2026-09-16)
+
+The GUI's pure logic is a library now, `lib/ui`, with the same standing as
+`lib/mshl` or `lib/font`: allocation-free, freestanding-safe, host-tested
+by `zig build test`, imported by every graphical program as
+`@import("mosslib").ui`. It holds what a widget *is* rather than how it is
+painted: geometry and the spacing/control tokens (`geometry`), the greedy
+row flow and drift-free proportional tracks a view is laid out with
+(`flow`), pixel scroll state with focus reveal (`scroll`), double-click
+timing (`pointer`), the bounded single-line text editor with its undo
+history (`text`), tab-strip and breadcrumb layout models (`tabs`,
+`breadcrumbs`), application search scoring (`search`), the icon catalog
+with its compile-time SVG decoder and distance-field rasterizer (`icons`,
+`iconpath`, the vendored Phosphor and Moss artwork beside them), and the
+rounded window shape the compositor and the frame must agree on (`shape`).
+
+Where the line is drawn, and why. Before this, all of it lived in
+`shared/`, the wire-contract module, because that was the one place both
+a program and a host test could import — and a review found `shared/`
+turning into a toolkit: single-consumer layout code in the ABI, every
+mshrun paying for icon path data, the net drill's budget raised to fit.
+`lib/` cannot import `shared/` (nor the reverse): both are leaf modules,
+which is what makes them compile identically everywhere. So the toolkit
+must not know the wire. Key *bytes* are wire — inputsvc, the compositor
+and every application agree on `shared/keyboard.zig` — so the text editor
+takes a semantic `text.Command` (`.home`, `.select_word_left`,
+`.kill_to_end`, `.{ .insert = 'a' }` …) and the one place that owns the
+keyboard, `user/widgets.zig`, maps bytes to commands, Emacs control codes
+included. Menu profiles and their enabled-bit masks are wire with the
+compositor; display modes are wire with the kernel; both stay in
+`shared/`. App manifests name icons by catalog name: the wire record
+(`shared/apps.zig`) checks only that a name is present, and init checks it
+against the catalog it can see through `lib/ui`. Painting stays the
+frame's: `user/windowframe.zig` owns the surface, the glyph metrics from
+fontsvc and the palette; `user/widgets.zig` and `user/tabstrip.zig` are
+the user-side binding that draws the toolkit's rectangles with the
+frame's brushes. The frame's `Rect` *is* the toolkit's.
+
+What this is not yet: painting is still not host-testable, because the
+frame paints straight into the mapped surface with global clip state, and
+the declarative tree's layout (`guicmds`' `layoutNode`) still lives with
+its painter. The next slice is a canvas — a pixel buffer plus a text
+measurer the frame provides and a fake font can stand in for — so that
+button, field, list-row, tab and breadcrumb painters become toolkit
+functions with pixel tests, and after that the tree layout. Those are
+the two remaining reasons a GUI change needs QEMU to be believed.
+
 ### Shared GUI layout and visual foundations
 
 The first toolkit polish pass keeps the declarative mshl view/update model,
-capability grants, and surface-based architecture intact. `shared/gui.zig` owns common
+capability grants, and surface-based architecture intact. `lib/ui` (then `shared/gui.zig`) owns common
 spacing and control metrics plus an allocation-free row flow algorithm.
 `guicmds` measures a tree without creating fields, list state, or focus targets,
 then paints using the same layout rules. Rows center children vertically on
@@ -4574,7 +4621,7 @@ Leave View remain explicit Go actions (Shift+Cmd+L and Alt+Cmd+L). Remote
 breadcrumbs retain the selected peer and do not turn remote names into local
 filesystem authority.
 
-**Files handoff and shared tabs (2026-09-12).** `shared/tabs.zig` owns
+**Files handoff and shared tabs (2026-09-12).** `lib/ui/tabs.zig` (then `shared/tabs.zig`) owns
 allocation-free strip geometry, selection reveal, overflow arrows and hit
 regions; `user/tabstrip.zig` renders themed, font-scaled labels, dirty dots,
 close buttons and the selected underline. Editor's dynamically allocated tabs
@@ -4740,7 +4787,7 @@ once-per-second clock; at large text scales it removes
 the date and then the clock when necessary, preserving app commands. Compact separators keep every built-in command visible at 3× text; popup
 width and placement are clamped to the output.
 
-The original mark is the canonical vector `shared/branding/moss.svg`, with
+The original mark is the canonical vector `lib/ui/branding/moss.svg`, with
 usage and provenance in the adjacent README. It is a rounded lowercase m with
 a leaf, rendered through the same antialiased path rasterizer as the Phosphor
 icons. The system menu retains its text name while presenting the mark alone.
@@ -4756,10 +4803,10 @@ The admin desktop drill exercises Files Open/Enclosing Folder/Refresh and
 Window Minimize, dock restoration, and Close.
 
 **Symbolic icons and window controls (2026-09-12).** The shared catalog in
-`shared/icons.zig` uses Phosphor Regular's rounded 16-unit strokes on its
+`lib/ui/icons.zig` uses Phosphor Regular's rounded 16-unit strokes on its
 256-unit grid. Twelve unmodified SVGs and their MIT license are vendored in
-`shared/phosphor/`, pinned to the upstream commit recorded there; the license
-also ships in the boot archive. `shared/iconpath.zig` decodes this bounded
+`lib/ui/phosphor/`, pinned to the upstream commit recorded there; the license
+also ships in the boot archive. `lib/ui/iconpath.zig` decodes this bounded
 SVG subset at compile time, flattening curves to line segments with 0.125
 source-unit tolerance. There is no runtime SVG parser, font dependency, or
 icon service. Semantic names (folder, file, home, settings, terminal, grid,

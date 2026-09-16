@@ -1,13 +1,14 @@
 //! Cross-boundary ABI and protocol types shared by the kernel, userspace,
 //! host-side tests, and (eventually) MCU leaf nodes. This module is the IDL:
 //! everything here must compile identically for every target, so it may not
-//! import kernel or userspace code and may not allocate.
+//! import kernel or userspace code and may not allocate. It is the wire
+//! and nothing more: GUI logic that is not a contract between processes
+//! (layout, text editing, icons) lives in the toolkit, lib/ui.
 
 const std = @import("std");
 pub const picker = @import("filepicker.zig");
 pub const apps = @import("apps.zig");
 pub const menus = @import("menus.zig");
-pub const windowshape = @import("windowshape.zig");
 
 pub const version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 };
 
@@ -2175,17 +2176,13 @@ test "handle round-trips through its integer representation" {
 }
 
 pub const keyboard = @import("keyboard.zig");
-pub const TextEdit = @import("textedit.zig").Editor;
 test {
     _ = @import("keyboard.zig");
-    _ = @import("textedit.zig");
 }
 
 pub const display = @import("display.zig");
-pub const gui = @import("gui.zig");
 test {
-    _ = @import("gui.zig");
-    _ = windowshape;
+    _ = display;
 }
 
 test "wheel deltas retain sign and are never coalesced into pointer motion" {

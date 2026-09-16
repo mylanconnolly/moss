@@ -767,7 +767,7 @@ pub fn build(b: *std.Build) void {
     // the drill swaps in to prove a hot update changes trust with no
     // restart; `other-ca.pem` is a second small root for the same.
     const asset_files = [_]struct { at: []const u8, from: []const u8 }{
-        .{ .at = "assets/licenses/phosphor.txt", .from = "shared/phosphor/LICENSE" },
+        .{ .at = "assets/licenses/phosphor.txt", .from = "lib/ui/phosphor/LICENSE" },
         .{ .at = "assets/tls/roots.pem", .from = "lib/tls/moss-test-ca.pem" },
         .{ .at = "assets/tls/ca-bundle.pem", .from = "boot/tls/roots.pem" },
         .{ .at = "assets/tls/other-ca.pem", .from = "lib/tls/other-ca.pem" },

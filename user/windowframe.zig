@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const shared = @import("shared");
+const ui = @import("mosslib").ui;
 const usys = @import("usys.zig");
 const font = shared.font8x16;
 
@@ -81,7 +82,7 @@ pub var scanout_w: usize = 1280;
 pub var scanout_h: usize = 1024;
 pub const win_h_min = 220;
 pub var win_h_max: usize = 976; // leave a margin top+bottom
-pub const pad = shared.gui.space.inset; // window inset for content
+pub const pad = ui.space.inset; // window inset for content
 
 pub var win_w: usize = win_w_default;
 pub var win_x: usize = (1280 - win_w_default) / 2;
@@ -651,7 +652,7 @@ pub fn drawStrTrunc(x: usize, y: usize, role: u64, s: []const u8, maxw: usize, f
 // ------------------------------------------------------------ the chrome
 
 /// The content area below the titlebar: what a client may draw into.
-pub const Rect = struct { x: usize, y: usize, w: usize, h: usize };
+pub const Rect = ui.Rect;
 pub fn contentRect() Rect {
     return .{ .x = 0, .y = title_h, .w = win_w, .h = if (win_h > title_h) win_h - title_h else 0 };
 }
@@ -807,7 +808,7 @@ fn drawWindowBorder() void {
     const bw = @min(pal.border_w, @min(win_w / 2, win_h / 2));
     const ink = if (win_focused) pal.window_border else pal.border;
     // Surface-local coordinates deliberately bypass content clip/scroll state.
-    const shape = shared.windowshape;
+    const shape = ui.shape;
     const radius = if (rounded and !maximized) shape.radius(win_w, win_h) else 0;
     for (0..bw) |i| {
         @memset(px[i * win_w + radius .. (i + 1) * win_w - radius], ink);
@@ -1213,27 +1214,27 @@ pub fn iconSize() usize {
     return scaledIconSize(20);
 }
 pub fn scaledIconSize(base: usize) usize {
-    return shared.gui.icons.scaledSize(base, if (font_ok) @intCast(role_px[R_UI]) else 16);
+    return ui.icons.scaledSize(base, if (font_ok) @intCast(role_px[R_UI]) else 16);
 }
 // Coverage is independent of theme and position. Cache each icon at its last
 // size, so focus, hover, and ticking bars do not retessellate/rasterize it.
 const max_icon_px = 64;
 const IconMask = struct { size: usize = 0, pixels: [max_icon_px * max_icon_px]u8 = undefined };
-var icon_masks: [@typeInfo(shared.gui.icons.Icon).@"enum".fields.len]IconMask = @splat(.{});
+var icon_masks: [@typeInfo(ui.icons.Icon).@"enum".fields.len]IconMask = @splat(.{});
 pub fn drawIcon(x: usize, y: usize, size: usize, name: []const u8, ink: u32) void {
     if (measuring) return;
-    const icon = shared.gui.icons.parse(name) orelse return;
+    const icon = ui.icons.parse(name) orelse return;
     if (size <= max_icon_px) {
         const mask = &icon_masks[@intFromEnum(icon)];
         if (mask.size != size) {
             for (0..size) |iy| for (0..size) |ix| {
-                mask.pixels[iy * size + ix] = @intCast(shared.gui.icons.coverage(icon, size, ix, iy));
+                mask.pixels[iy * size + ix] = @intCast(ui.icons.coverage(icon, size, ix, iy));
             };
             mask.size = size;
         }
         for (0..size) |iy| for (0..size) |ix| blendPx(x + ix, y + iy, ink, mask.pixels[iy * size + ix]);
     } else {
-        for (0..size) |iy| for (0..size) |ix| blendPx(x + ix, y + iy, ink, shared.gui.icons.coverage(icon, size, ix, iy));
+        for (0..size) |iy| for (0..size) |ix| blendPx(x + ix, y + iy, ink, ui.icons.coverage(icon, size, ix, iy));
     }
 }
 

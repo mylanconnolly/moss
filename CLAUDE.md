@@ -16,8 +16,8 @@ frontier — every unstarted arc and every residual, kept current; the
   `-Donly=a,b+rs` for a subset, `-Dsoak=N` to repeat (flaky hunts),
   `-Djobs=1` to take contention out of a hang before reading its dump.
 - `zig build test` — host unit tests only (shared ABI, dt parser, rings,
-  lib/ lz4+xts+fabcert+mshl+usercred+settings, the full mossfs suite incl.
-  crash sweeps).
+  lib/ lz4+xts+fabcert+mshl+usercred+settings+the ui toolkit, the full
+  mossfs suite incl. crash sweeps).
   `zig test lib/mshl.zig` alone is the fast loop for shell-language work.
 - `zig build fmt-test lint-test ls-test` — the mshl tools' tests (mshfmt,
   mshlint, mshls), then `--check`/lint over every `.msh` under boot/

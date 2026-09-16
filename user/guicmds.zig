@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const shared = @import("shared");
+const ui = @import("mosslib").ui;
 const usys = @import("usys.zig");
 const workcmds = @import("workcmds.zig");
 const fabcmds = @import("fabcmds.zig");
@@ -36,6 +37,7 @@ const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const Value = mshl.Value;
 const wf = @import("windowframe.zig");
+const widgets = @import("widgets.zig");
 
 // The window frame — the chrome, the compositor surface, the drawing
 // primitives and the system font — lives in windowframe.zig, shared with
@@ -141,7 +143,7 @@ const restore_result = mshl.resultShape(.string, .string);
 // widget *content*: the layout of the view tree over the frame's content
 // area, plus the field/list interaction state the runtime owns.
 
-const pad = shared.gui.space.inset; // window inset for content
+const pad = ui.space.inset; // window inset for content
 
 // The laid-out content height, from the measuring pass — the frame's
 // window is sized to it before the surface is created (`sizeToContent`).
@@ -159,7 +161,7 @@ const ScrollState = struct {
     len: usize = 0,
     used: bool = false,
     seen: bool = false,
-    state: shared.gui.Scroll = .{},
+    state: ui.scroll.Scroll = .{},
     parent: usize = 0,
     x: usize = 0,
     top: isize = 0,
@@ -311,7 +313,7 @@ const ListState = struct {
     sel: usize = 0, // selected row index
     nrows: usize = 0, // rows the last render laid out (for clamping)
     vis: usize = 0, // rows that fit the viewport (for paging)
-    click: shared.gui.DoubleClick = .{},
+    click: ui.pointer.DoubleClick = .{},
 };
 var list_states: [max_lists]ListState = @splat(.{});
 
@@ -370,7 +372,7 @@ const FieldBuf = struct {
     used: bool = false,
     id: [32]u8 = undefined,
     id_len: usize = 0,
-    edit: shared.TextEdit = .{},
+    edit: ui.text.Editor = .{},
     secret: bool = false,
 };
 var field_bufs: [max_fields]FieldBuf = @splat(.{});
@@ -432,18 +434,18 @@ fn strField(rec: mshl.Record, key: []const u8) []const u8 {
 
 /// Render one view tree into `focusables`, highlight the focused widget,
 /// and return the number of focusable widgets.
-const Size = shared.gui.Size;
+const Size = ui.Size;
 var content_bg: u32 = 0;
 var hovered: ?usize = null;
 var pressed: ?usize = null;
 
-const gap = shared.gui.space.medium; // vertical/horizontal space between siblings
-const bpx = shared.gui.control.button_x; // button horizontal padding
-const bpy = shared.gui.control.button_y; // button vertical padding
-const fpx = shared.gui.control.field_x; // field horizontal padding
-const fpy = shared.gui.control.field_y; // field vertical padding
-const r_btn = shared.gui.control.radius; // button corner radius
-const r_field = shared.gui.control.radius; // field corner radius
+const gap = ui.space.medium; // vertical/horizontal space between siblings
+const bpx = ui.control.button_x; // button horizontal padding
+const bpy = ui.control.button_y; // button vertical padding
+const fpx = ui.control.field_x; // field horizontal padding
+const fpy = ui.control.field_y; // field vertical padding
+const r_btn = ui.control.radius; // button corner radius
+const r_field = ui.control.radius; // field corner radius
 
 // Focus recording during a layout pass (draw order over the tree).
 var nfoc: usize = 0;
@@ -549,7 +551,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
             var height: usize = 0;
             for (children) |child| {
                 const weight = flexWeight(child);
-                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else shared.gui.trackWidth(avail_w - fixed, total, before, weight);
+                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else ui.flow.trackWidth(avail_w - fixed, total, before, weight);
                 height = @max(height, layoutNode(child, 0, 0, width, false).h);
                 before += weight;
             }
@@ -557,7 +559,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
             var xx = x;
             for (children) |child| {
                 const weight = flexWeight(child);
-                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else shared.gui.trackWidth(avail_w - fixed, total, before, weight);
+                const width = if (weight == 0) layoutNode(child, 0, 0, avail_w, false).w else ui.flow.trackWidth(avail_w - fixed, total, before, weight);
                 const size = layoutNode(child, 0, 0, width, false);
                 if (paint) _ = drawNode(child, xx, y + (height - size.h) / 2, width);
                 xx += width + nodeGap(rec);
@@ -565,7 +567,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
             }
             return .{ .w = avail_w, .h = height };
         }
-        var row = shared.gui.Flow{ .width = avail_w, .gap = nodeGap(rec) };
+        var row = ui.flow.Flow{ .width = avail_w, .gap = nodeGap(rec) };
         var row_h: usize = 0;
         for (children) |child| row_h = @max(row_h, layoutNode(child, 0, 0, avail_w, false).h);
         for (children) |child| {
@@ -577,7 +579,7 @@ fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size
     }
     const section = std.mem.eql(u8, kind, "section");
     if (section or std.mem.eql(u8, kind, "column") or children.len != 0) {
-        const inset: usize = if (section) @min(shared.gui.space.large, avail_w / 2) else 0;
+        const inset: usize = if (section) @min(ui.space.large, avail_w / 2) else 0;
         const width = avail_w - 2 * inset;
         var height: usize = 0;
         for (children, 0..) |child, i| {
@@ -690,7 +692,7 @@ fn layoutLabel(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool
 /// a bright ring. `variant` gives it semantic colour: primary
 /// (the accent), danger (destructive), or the neutral surface default.
 fn hasIcon(rec: mshl.Record) bool {
-    return shared.gui.icons.parse(strField(rec, "icon")) != null;
+    return ui.icons.parse(strField(rec, "icon")) != null;
 }
 fn iconOnly(rec: mshl.Record) bool {
     return hasIcon(rec) and (if (rec.get("icon_only")) |v| v.asBool() else false);
@@ -716,8 +718,8 @@ const Crumb = struct {
     selected: usize = 0,
     can_lock: bool = false,
     can_leave: bool = false,
-    fn model(self: *const Crumb) shared.gui.breadcrumbs.Model {
-        return shared.gui.breadcrumbs.Model.init(self.path[0..self.path_len]).?;
+    fn model(self: *const Crumb) ui.breadcrumbs.Model {
+        return ui.breadcrumbs.Model.init(self.path[0..self.path_len]).?;
     }
 };
 var crumbs: [16]Crumb = @splat(.{});
@@ -745,13 +747,13 @@ fn crumbFor(id: []const u8, path: []const u8) ?*Crumb {
     c.path_len = path.len;
     return c;
 }
-fn crumbWidth(part: shared.gui.breadcrumbs.Part, last: bool, width: usize) usize {
+fn crumbWidth(part: ui.breadcrumbs.Part, last: bool, width: usize) usize {
     return @min(width, strW(R_UI, part.label) + 20 + (if (last) @as(usize, 0) else 24));
 }
 fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: bool) Size {
     if (width == 0) return .{};
     const path = strField(rec, "path");
-    const model = shared.gui.breadcrumbs.Model.init(path) orelse return layoutLabel(rec, x, y, width, paint);
+    const model = ui.breadcrumbs.Model.init(path) orelse return layoutLabel(rec, x, y, width, paint);
     const root = strField(rec, "root");
     const h = lineOf(R_UI) + 16;
     const state = if (paint) crumbFor(strField(rec, "id"), path) else null;
@@ -766,7 +768,7 @@ fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: b
         c.selected = @min(c.selected, model.count -| 2);
         if (std.mem.eql(u8, strField(rec, "id"), "location")) file_crumb = c;
     }
-    var flow: shared.gui.Flow = .{ .width = width, .gap = 4 };
+    var flow: ui.flow.Flow = .{ .width = width, .gap = 4 };
     for (0..model.count) |i| {
         const part = model.at(i, root).?;
         const last = i + 1 == model.count;
@@ -790,7 +792,7 @@ fn crumbHit(f: Focus, x: usize, y: usize) ?usize {
     const yy = @as(isize, @intCast(y)) - f.sy;
     if (x < f.bx or yy < 0) return null;
     const xx = x - f.bx;
-    var flow: shared.gui.Flow = .{ .width = f.bw, .gap = 4 };
+    var flow: ui.flow.Flow = .{ .width = f.bw, .gap = 4 };
     const h = lineOf(R_UI) + 16;
     for (0..model.count) |i| {
         const last = i + 1 == model.count;
@@ -979,7 +981,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         for (cols) |cv| {
             if (cv != .record) continue;
             const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
-            const cw = if (fit) shared.gui.trackWidth(tracks_w, total_weight, before, weight) else weight;
+            const cw = if (fit) ui.flow.trackWidth(tracks_w, total_weight, before, weight) else weight;
             before += weight;
             const text = strField(cv.record, "title");
             const right = if (cv.record.get("right")) |v| v.asBool() else false;
@@ -1034,7 +1036,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         const iconv = rowField(rowsv, i, "icon");
         const icon = if (iconv == .str) iconv.str else "";
         const icon_size = wf.iconSize();
-        const known_icon = shared.gui.icons.parse(icon) != null;
+        const known_icon = ui.icons.parse(icon) != null;
         const icon_pad: usize = if (known_icon) icon_size + 8 else 0;
         if (known_icon) {
             const color = if (selected and focused) pal.primary_ink else pal.primary;
@@ -1048,7 +1050,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
             for (cols, 0..) |cv, ci| {
                 if (cv != .record) continue;
                 const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
-                const cw = if (fit) shared.gui.trackWidth(tracks_w, total_weight, before, weight) else weight;
+                const cw = if (fit) ui.flow.trackWidth(tracks_w, total_weight, before, weight) else weight;
                 before += weight;
                 const text = cellAt(cellsv, ci);
                 const inset = if (ci == 0) icon_pad else 0;
@@ -1764,7 +1766,7 @@ fn renderDock(tree: Value) void {
         const unit = strField(r, "unit");
         const running = r.get("running") != null and (r.get("running").?).asBool();
         const natural = iconLabelWidth(r, "title") + 2 * dock_hpad;
-        const w = shared.gui.trackWidth(fitted, natural_width, before, natural);
+        const w = ui.flow.trackWidth(fitted, natural_width, before, natural);
         before += natural;
         const fill = if (running) pal.primary else pal.surface_hi;
         const ink = if (running) pal.primary_ink else pal.text;
@@ -2352,7 +2354,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (!announced or action_len > 0) {
             for (focusables[0..nfocus]) |f| if (f.crumb) |c| {
                 const model = c.model();
-                var flow: shared.gui.Flow = .{ .width = f.bw, .gap = 4 };
+                var flow: ui.flow.Flow = .{ .width = f.bw, .gap = 4 };
                 for (0..model.count) |index| {
                     const last = index + 1 == model.count;
                     const place = flow.put(.{ .w = crumbWidth(model.at(index, c.root).?, last, f.bw), .h = lineOf(R_UI) + 16 });
@@ -2652,19 +2654,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             };
             if (cur) |c| if (c.is_field) {
                 const f = fieldFor(c.id, "");
-                const ed = &f.edit;
-                const keys = shared.keyboard;
-                if (ch == keys.copy or ch == keys.cut or ch == keys.paste or ch == 3 or ch == 24 or ch == 22) {
-                    ed.typing = false;
-                    if (ch == keys.paste or ch == 22) {
-                        if (@import("clipboard.zig").get()) |text| ed.paste(text);
-                    } else if (!f.secret and ed.low() != ed.high()) {
-                        if (@import("clipboard.zig").set(ed.buf[ed.low()..ed.high()]) and (ch == keys.cut or ch == 24)) _ = ed.key(8);
-                    }
-                    reveal_focus = true;
-                    break :input;
-                }
-                if (ed.key(if (ch == 26) keys.undo else ch)) {
+                if (widgets.fieldKeyOpts(&f.edit, ch, .{ .secret = f.secret })) {
                     reveal_focus = true;
                     break :input;
                 }
