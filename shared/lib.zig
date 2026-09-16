@@ -904,6 +904,13 @@ pub const GpuReq = union(enum(u64)) {
     /// over it are the login surface (unspoofable focus indicator, keys
     /// isolated to it). A wrong or absent token is refused.
     attach_trusted: struct { token: u64 },
+    /// Desktop chrome (over the seat's control endpoint only) reserves an
+    /// edge of the output: `edge` 0 = top, 1 = bottom; `size` in pixels,
+    /// 0 to release. The strut belongs to `surface` and goes with it.
+    set_strut: struct { surface: u64, edge: u64, size: u64 },
+    /// The work area between the struts: what a maximized or snapped
+    /// window fills and where a new window is centred. -> `work`.
+    work_area: void,
 };
 pub const GpuResp = union(enum(u64)) {
     menu: struct { token: u64, profile: u64, enabled: u64 },
@@ -941,6 +948,8 @@ pub const GpuResp = union(enum(u64)) {
     /// A `register` succeeded: + a uniquely-badged channel cap.
     registered: void,
     gpu_err: struct { code: u64 },
+    /// The work area (work_area): xy and wh via packPair.
+    work: struct { xy: u64, wh: u64 },
 };
 
 /// The system font service (fontsvc). A client attaches a request/response

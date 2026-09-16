@@ -184,6 +184,18 @@ var keys_chan: u64 = 0; // inputsvc channel, 0 when the seat gives no keyboard
 var keys_buf: [*]volatile u8 = undefined;
 var next_incarnation: u64 = 1;
 var menu_bar: u64 = 0;
+// The desktop's struts: the top bar and the dock reserve an edge each
+// (set_strut over the control endpoint), so the work area — what a
+// maximized window fills — is one fact, published by work_area, instead
+// of a guess every client rebuilt from its own font snapshot.
+const Strut = struct { surface: u64 = 0, size: u32 = 0 };
+var strut_top: Strut = .{};
+var strut_bottom: Strut = .{};
+fn workArea() struct { x: u32, y: u32, w: u32, h: u32 } {
+    const top = @min(strut_top.size, fb_h);
+    const bottom = @min(strut_bottom.size, fb_h - top);
+    return .{ .x = 0, .y = top, .w = fb_w, .h = fb_h - top - bottom };
+}
 var menu_bar_incarnation: u64 = 0;
 var menu_app: u64 = 0;
 var menu_incarnation: u64 = 0;
@@ -499,6 +511,10 @@ fn createSurface(owner: u64, x_req: u32, y_req: u32, w: u32, h: u32, cascade: bo
 }
 
 fn destroySurface(sf: *Surface) void {
+    // A strut goes with the chrome that declared it.
+    const id = (@intFromPtr(sf) - @intFromPtr(&surfaces)) / @sizeOf(Surface) + 1;
+    if (strut_top.surface == id) strut_top = .{};
+    if (strut_bottom.surface == id) strut_bottom = .{};
     if (findSurface(pointer_capture)) |old| {
         if (old == sf) pointer_capture = 0;
     }
@@ -1344,6 +1360,21 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     if (menu_app == q.surface) menu_token += 1;
                 }
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .set_strut => |q| {
+                const sf = findSurface(q.surface);
+                const ok = badge == control_badge and sf != null and !sf.?.trusted and sf.?.title_len == 0 and q.edge <= 1 and q.size <= fb_h;
+                if (ok) {
+                    const strut = if (q.edge == 0) &strut_top else &strut_bottom;
+                    strut.* = .{ .surface = if (q.size == 0) 0 else q.surface, .size = @intCast(q.size) };
+                    var l: [48]u8 = undefined;
+                    _ = usys.log(comp_log, std.fmt.bufPrint(&l, "comp: strut top={d} bottom={d}", .{ strut_top.size, strut_bottom.size }) catch "comp: strut");
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 23 } }, 0, token);
+            },
+            .work_area => {
+                const wa = workArea();
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .work = .{ .xy = shared.packPair(wa.x, wa.y), .wh = shared.packPair(wa.w, wa.h) } }, 0, token);
             },
             .menu_bar => |q| {
                 const sf = findSurface(q.surface);

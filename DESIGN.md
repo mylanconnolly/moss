@@ -3521,6 +3521,34 @@ typeface: fontsvc's glyph blits go through the frame's `blendPx`, so
 for the call and restores it — the frame paints into whatever canvas a
 painter holds.
 
+**Struts: the work area is one published fact (2026-09-16).** Every
+process used to rebuild the desktop work area — what a maximized or
+snapped window fills, where a new window is centred — from its own
+font snapshot: the frame's `workArea` hard-coded a 34 px top strut plus
+the bar's private padding, `guicmds`' `sizeToContent` did the sum
+again with different margins, `snapZoneAt` used the constant, and the
+dock's height was derived in two places. Four copies of one guess, and
+they disagreed with the real bars after a font-scale change (a
+maximize then overlapped the dock until the window was reopened) and
+at large text (the snap band sat above the bar's real bottom). Now the
+bar and the dock declare the edge they reserve to the compositor
+(`set_strut` over the seat's control endpoint, re-declared whenever
+they resize; a strut dies with its surface), and `work_area` answers
+the area between them. The frame's `workArea()` is that query, with
+the whole scanout as the answer when there is no bar; the constants
+and the dock-height helper left the frame for the one file that lays
+the dock out. The first full gate found the one ordering this creates:
+the bar re-declares its strut a tick after its metrics change, and
+Settings reopening itself right after a font Apply centred against the
+old strut, so its position drifted by a few pixels across a scale round
+trip. The bar and the dock are the same runtime as the window, so
+`sizeToContent` knows what they will declare and waits (a few 40 ms
+polls) for the compositor's answer to match before placing; the
+compositor logs every strut change. *Lesson:* when the same number is
+derived in four places, none of them is the source of truth; find who
+actually owns the fact and have everyone ask — and expect one ordering
+race the old lockstep hid.
+
 *Found the same afternoon, by hand:* a terminal maximized after a live
 switch to 1920×1200 wore a title bar 1280 wide over a 1920-wide black
 grid. The title was centred at 960, so the frame knew its width; only

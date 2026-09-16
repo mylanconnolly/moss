@@ -850,22 +850,24 @@ pub fn nextInput() ?Event {
 /// The dock's height at the current scale — the same expression `runDock`
 /// uses (same font service, same palette, so it matches the real dock), so
 /// a maximized window can stop just above it.
-pub const item_vpad = 8; // a dock/menu item's vertical padding
-pub const dock_vpad = 8; // the dock's outer vertical padding
-pub fn dockHeight() usize {
-    return lineOf(R_UI) + 2 * item_vpad + 2 * dock_vpad + pal.border_w;
-}
-
-pub const top_strut = 34; // px reserved at the top for the bar
-
-/// The desktop work area a maximized window fills: full width, from just
-/// below the top bar's strut down to just above the dock.
+/// The desktop work area a maximized window fills: between the struts the
+/// top bar and the dock declared to the compositor (`work_area`), one
+/// published fact rather than a guess rebuilt here from this process's
+/// font snapshot — which drifted from the real bars after a scale change
+/// and at large text. Without a compositor answer (no display): the
+/// whole scanout.
 pub const Geom = struct { x: usize, y: usize, w: usize, h: usize };
 pub fn workArea() Geom {
-    const dh = dockHeight();
-    const top = @max(top_strut, lineOf(R_UI) + 16 + pal.border_w);
-    const h = scanout_h -| (top + dh);
-    return .{ .x = 0, .y = top, .w = scanout_w, .h = h };
+    if (display != 0) {
+        switch (usys.callTyped(shared.GpuReq, shared.GpuResp, display, .work_area, 0)) {
+            .ok => |r| switch (r) {
+                .work => |w| return .{ .x = shared.unpackHi(w.xy), .y = shared.unpackLo(w.xy), .w = shared.unpackHi(w.wh), .h = shared.unpackLo(w.wh) },
+                else => {},
+            },
+            .err => {},
+        }
+    }
+    return .{ .x = 0, .y = 0, .w = scanout_w, .h = scanout_h };
 }
 
 // Window snapping: dragging the cursor to a screen edge, then releasing,
@@ -876,7 +878,7 @@ const snap_edge = 24;
 fn snapZoneAt(cx: usize, cy: usize) SnapZone {
     if (cx < snap_edge) return .left;
     if (cx + snap_edge >= scanout_w) return .right;
-    if (cy < top_strut + snap_edge) return .max; // up to the top bar
+    if (cy < workArea().y + snap_edge) return .max; // up to the top bar
     return .none;
 }
 fn snapRegion(zone: SnapZone) Geom {

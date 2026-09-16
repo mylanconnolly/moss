@@ -62,9 +62,35 @@ const R_UI = wf.R_UI;
 const R_TITLE = wf.R_TITLE;
 const win_w_default = wf.win_w_default;
 const win_h_min = wf.win_h_min;
-const item_vpad = wf.item_vpad;
-const dock_vpad = wf.dock_vpad;
-const top_strut = wf.top_strut;
+const item_vpad = 8; // a dock/menu item's vertical padding
+const dock_vpad = 8; // the dock's outer vertical padding
+fn dockHeight() usize {
+    return lineOf(R_UI) + 2 * item_vpad + 2 * dock_vpad + pal.border_w;
+}
+/// The work area once the desktop chrome has caught up with a scale
+/// change. The bar and the dock re-declare their struts a tick after
+/// their metrics change; a window opening in that gap would centre
+/// against the old ones. They are this same runtime, so their heights
+/// are known here: wait briefly for the compositor's answer to match.
+fn settledWorkArea() wf.Geom {
+    const bar_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
+    var wa = wf.workArea();
+    var tries: usize = 0;
+    while (tries < 8) : (tries += 1) {
+        const top_ok = wa.y == 0 or wa.y == bar_h;
+        const bottom_ok = wa.y + wa.h == wf.scanout_h or wa.y + wa.h + dockHeight() == wf.scanout_h;
+        if (top_ok and bottom_ok) break;
+        usys.sleepMs(40);
+        wa = wf.workArea();
+    }
+    return wa;
+}
+/// Tell the compositor the edge this chrome reserves, so every window's
+/// work area (maximize, snap, centring) follows the real bar and dock.
+fn declareStrut(edge: u64, size: usize) void {
+    if (output_control == 0 or wf.surf == 0) return;
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .{ .set_strut = .{ .surface = wf.surf, .edge = edge, .size = size } }, 0);
+}
 
 pub var output_control: u64 = 0;
 var log_h: u64 = 0; // for the run loops' `gui:`/`topbar:`/`dock:` logging
@@ -485,10 +511,12 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     wf.drawChrome(title);
     content_h = wf.title_h + 2 * pad + layoutNode(tree, 0, 0, wf.win_w - 2 * pad, false).h;
     wf.measuring = false;
-    // Centre inside the scaled desktop work area, including the dock.
-    // Using the whole scanout placed tall windows underneath the dock.
-    const work_top = @max(top_strut, lineOf(R_UI) + 2 * bar_vpad + pal.border_w) + 8;
-    const work_bottom = wf.scanout_h - wf.dockHeight() - 8;
+    // Centre inside the desktop work area the compositor publishes (between
+    // the bar and the dock). Using the whole scanout placed tall windows
+    // underneath the dock.
+    const wa = settledWorkArea();
+    const work_top = wa.y + 8;
+    const work_bottom = (wa.y + wa.h) -| 8;
     const available = work_bottom -| work_top;
     wf.win_h = @min(@max(win_h_min, content_h), @min(wf.win_h_max, available));
     wf.win_y = work_top + (available - wf.win_h) / 2;
@@ -1242,7 +1270,7 @@ fn isDone(state: Value) bool {
 // selection, a click elsewhere, or Escape. The bar's `view(state)` returns
 // `{ left: [...], right: [...] }` of `{kind:menu,...}` / `{kind:label,...}`;
 // a selected item fires `update(state, { menu, item })`. Windows open below
-// the bar (a reserved strut `wf.top_strut`), so it is never covered.
+// the bar (a strut it declares to the compositor), so it is never covered.
 
 const bar_vpad = 8;
 const menu_hpad = 12;
@@ -1552,6 +1580,7 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
     bar_app = .{};
     if (!wf.openSurface(false)) return it.fail("gui: cannot open the bar surface", .{});
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
+    declareStrut(0, wf.win_h);
     defer wf.closeSurface();
     defer closePopup();
 
@@ -1569,6 +1598,7 @@ fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.
             wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
             if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
             _ = usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
+            declareStrut(0, wf.win_h);
             announced = false;
             bar_dirty = true;
         }
@@ -1837,6 +1867,7 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, dism
     wf.dragging = false;
     wf.ptr_down = false;
     if (!wf.openSurface(false)) return it.fail("gui: cannot open the dock surface", .{});
+    declareStrut(1, wf.win_h);
     defer wf.closeSurface();
 
     var state = init_state;
@@ -1848,9 +1879,10 @@ fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, dism
         if (wf.refreshFontMetrics() or output_changed) {
             wf.closeSurface();
             wf.win_w = wf.scanout_w;
-            wf.win_h = wf.dockHeight();
+            wf.win_h = dockHeight();
             wf.win_y = wf.scanout_h - wf.win_h;
             if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
+            declareStrut(1, wf.win_h);
             announced = false; // hit boxes moved with the new scale
         }
         renderDock(tree);
