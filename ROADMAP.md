@@ -1435,9 +1435,18 @@ applications need menus beyond those profiles.
   drills fault with invalid PASID entry (0x5b): QEMU now validates the
   default PASID entry, while this port shares one PASID table and uses a
   distinct RID_PASID per device. Adapting the port must preserve per-device
-  DMA isolation; the GUI editing change was built for x86_64 but its full
-  gate is blocked on this compatibility work. The relevant upstream check is
+  DMA isolation. The relevant upstream check is
   `vtd_ce_pasid_0_check` in [QEMU 11.1.1](https://github.com/qemu/qemu/blob/v11.1.1/hw/i386/intel_iommu.c).
+- **Outstanding (2026-09-16): the x86_64 gate has not run on anything since
+  310e3bb.** The GUI polish range 310e3bb..4f3c961 (20 commits, 2026-09-11
+  to 09-15) and the review fixes after it changed `kernel/domain.zig`
+  (domain-slot reservation), `kernel/ipc.zig`, `kernel/main.zig` and most
+  of user/ and shared/; every one of those commits only compiled for
+  x86_64. The machine that owns the port is boxed for a move, so this is
+  deliberately parked, not forgotten: when it is back, run
+  `zig build -Darch=x86_64 check` (or `-Dtcg`) on HEAD first, before any
+  new x86_64 work, and expect the QEMU property work above to be the first
+  thing in the way.
 
 **Unified GUI framework and polish**
 

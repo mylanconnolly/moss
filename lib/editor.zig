@@ -285,10 +285,13 @@ pub const Editor = struct {
         defer self.gpa.free(text);
         const r = self.selection();
         const start = self.offset(if (r) |s| (if (backwards) s.start else s.end) else self.cursor);
+        // Wrap searches the whole text, not just the part before the
+        // caret: a match that straddles the caret starts before it and
+        // ends after it, so neither half alone contains it.
         const at = if (backwards)
             std.mem.lastIndexOf(u8, text[0..start], query) orelse std.mem.lastIndexOf(u8, text, query)
         else
-            std.mem.indexOfPos(u8, text, start, query) orelse std.mem.indexOf(u8, text[0..start], query);
+            std.mem.indexOfPos(u8, text, start, query) orelse std.mem.indexOf(u8, text, query);
         const found = at orelse return false;
         const p = Buffer.advance(.{ .line = 0, .col = 0 }, text[0..found]);
         self.setCursor(p, false);
@@ -345,6 +348,15 @@ test "unicode movement, typing group and wrapped search" {
     try std.testing.expectEqual(@as(usize, 0), e.cursor.line);
     try std.testing.expectError(error.InvalidUtf8, e.insert("\xff"));
     try std.testing.expectEqualStrings("aé a", e.buffer.lineSlice(0));
+    // A match straddling the caret is found in both directions when the
+    // search wraps: the only "aa" starts before column 2 and ends after it.
+    try e.load("xaay");
+    e.setCursor(.{ .line = 0, .col = 2 }, false);
+    try std.testing.expect(try e.find("aa", false));
+    try std.testing.expectEqual(@as(usize, 1), e.selection().?.start.col);
+    e.setCursor(.{ .line = 0, .col = 2 }, false);
+    try std.testing.expect(try e.find("aa", true));
+    try std.testing.expectEqual(@as(usize, 1), e.selection().?.start.col);
 }
 fn allocationSequence(gpa: std.mem.Allocator) !void {
     var e = try Editor.init(gpa);

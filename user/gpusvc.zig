@@ -726,21 +726,38 @@ fn readKey() u8 {
 }
 
 /// Move focus to the next surface (by id, wrapping) — Alt-Tab's job.
-fn cycleFocus() void {
+fn cycleFocus(chan_h: u64) void {
     // Focus never leaves a login surface: a trusted prompt keeps the
     // keyboard (secure attention), and its Tab is its own (field
     // navigation), not the compositor's to steal.
     if (findSurface(focused)) |sf| {
         if (sf.trusted) return;
     }
+    // Only windows take part once any exist: titleless resident chrome
+    // (the bar, the dock) is never a keyboard target here — the same rule
+    // focusTopmost applies, with the same fallback for a display of raw
+    // titleless surfaces (the focus drill, a console-only boot).
+    var any_window = false;
+    for (&surfaces) |*sf| {
+        if (sf.used and (sf.title_len != 0 or sf.trusted)) any_window = true;
+    }
     var id: u64 = focused;
     var tries: u64 = 0;
     while (tries < max_surfaces) : (tries += 1) {
         id = (id % max_surfaces) + 1; // 1..max_surfaces, wrapping
-        if (findSurface(id) != null) {
-            focused = id;
-            return;
+        const sf = findSurface(id) orelse continue;
+        if (any_window and sf.title_len == 0 and !sf.trusted) continue;
+        if (sf.hidden) {
+            // Switching to a minimized window restores it — the dock
+            // pill's restore, by keyboard: unhide, raise, and wake the
+            // owner to repaint (kind 3), exactly as restore_titled does.
+            sf.hidden = false;
+            raiseSurface(id);
+            wakeReader(chan_h, sf.owner, id, 3);
+            _ = usys.log(comp_log, "comp: switch restored");
         }
+        focused = id;
+        return;
     }
 }
 
@@ -955,7 +972,7 @@ fn dispatchKeys(chan_h: u64) void {
         }
         if (c == key_switch_focus) {
             const before = focused;
-            cycleFocus();
+            cycleFocus(chan_h);
             keyRingPop();
             if (focused != before) _ = composite();
             continue; // reserved even with only one window

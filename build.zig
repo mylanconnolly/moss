@@ -10,8 +10,11 @@ pub fn build(b: *std.Build) void {
     // by default) — it has no hot loops that matter yet.
     // check: `-Dsoak=N` runs every OS test N times (intermittent failures
     // surface under repetition); `-Donly=a,b` runs only those tests (the
-    // `+rs` rows are the ReleaseSafe kernel pass, e.g. `ipc+rs`).
+    // `+rs` rows are the ReleaseSafe kernel pass, e.g. `ipc+rs`);
+    // `-Djobs=N` runs N drills at once (default a quarter of the cores,
+    // at most 4; `-Djobs=1` is the sequential flake-hunt mode).
     const soak = b.option(u32, "soak", "check: run each OS test this many times") orelse 1;
+    const jobs = b.option(u16, "jobs", "check: run this many OS tests at once (default cores/4, at most 4; 1 = sequential)") orelse 0;
     const only = b.option([]const u8, "only", "check: run only these OS tests (comma-separated; `name+rs` = ReleaseSafe pass)");
     const force_tcg = b.option(bool, "tcg", "check (x86_64): software emulation even where KVM exists — QEMU's full `max` CPU (PCIDs) instead of the host's") orelse false;
     const user_optimize = b.option(
@@ -173,6 +176,16 @@ pub fn build(b: *std.Build) void {
         bool,
         "guishellro-test",
         "Run the non-admin settings drill: bob logs in, the system pane is read-only",
+    ) orelse false;
+    const display_test = b.option(
+        bool,
+        "display-test",
+        "Run the display-settings drill: live resolution changes, expiry rollback, and the saved mode",
+    ) orelse false;
+    const largetext_test = b.option(
+        bool,
+        "largetext-test",
+        "Run the large-text drill: Settings and the Editor's menus at 3x text on 1024x768",
     ) orelse false;
     const fabgui_test = b.option(
         bool,
@@ -421,6 +434,8 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "fontscale_test", fontscale_test);
     build_opts.addOption(bool, "guishell_test", guishell_test);
     build_opts.addOption(bool, "guishellro_test", guishellro_test);
+    build_opts.addOption(bool, "display_test", display_test);
+    build_opts.addOption(bool, "largetext_test", largetext_test);
     build_opts.addOption(bool, "fabgui_test", fabgui_test);
     build_opts.addOption(bool, "fabsignal_test", fabsignal_test);
     build_opts.addOption(bool, "locale_test", locale_test);
@@ -841,7 +856,7 @@ pub fn build(b: *std.Build) void {
             "vmnode_test",     "pan_test",       "cpu_test",        "users_test",
             "login_test",      "flogin_test",    "dot_test",        "gboom_test",
             "fontrescan_test", "ptr_test",       "pointer_test",    "guiclick_test",
-            "fontscale_test",  "guishell_test",  "guishellro_test", "fabgui_test",
+            "fontscale_test",  "guishell_test",  "guishellro_test", "display_test", "largetext_test", "fabgui_test",
             "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
             "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
@@ -1276,6 +1291,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(runner);
     const run_check = b.addRunArtifact(runner);
     if (soak > 1) run_check.addArgs(&.{ "--repeat", b.fmt("{d}", .{soak}) });
+    if (jobs > 0) run_check.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
     if (only) |o| run_check.addArgs(&.{ "--only", o });
 
     const all_test_opts = [_][]const u8{
@@ -1290,7 +1306,7 @@ pub fn build(b: *std.Build) void {
         "vmnode_test",     "pan_test",       "cpu_test",        "users_test",
         "login_test",      "flogin_test",    "dot_test",        "gboom_test",
         "fontrescan_test", "ptr_test",       "pointer_test",    "guiclick_test",
-        "fontscale_test",  "guishell_test",  "guishellro_test", "fabgui_test",
+        "fontscale_test",  "guishell_test",  "guishellro_test", "display_test", "largetext_test", "fabgui_test",
         "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
         "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
@@ -1304,7 +1320,7 @@ pub fn build(b: *std.Build) void {
         "fs",        "net",      "fabric",    "shell",     "rng",        "smmu",
         "vm",        "guest",    "vmnode",    "pan",       "cpu",        "users",
         "login",     "flogin",   "dot",       "gboom",     "fontrescan", "ptr",
-        "pointer",   "guiclick", "fontscale", "guishell",  "guishellro", "fabgui",
+        "pointer",   "guiclick", "fontscale", "guishell",  "guishellro", "display", "largetext", "fabgui",
         "fabsignal", "locale",   "localeupd", "desktop",   "topbar",     "dock",
         "listdemo",  "explorer", "browse",    "netbrowse", "cascade",    "terminal",
         "editor",

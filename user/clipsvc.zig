@@ -69,6 +69,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             if (clientFor(r.badge)) |c| {
                 if (c.va != 0) _ = usys.shmUnmap(c.va);
                 c.* = .{};
+                _ = usys.log(glog, "clipsvc: client reclaimed");
             }
             continue;
         }
@@ -91,6 +92,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                 }
                 next_badge += 1;
                 _ = usys.replyTyped(shared.ClipResp, chan_h, .registered, minted.data[1]);
+                // The reply copied the endpoint. Keeping our copy would hold
+                // the badge's side open forever, so the kernel could never
+                // report client_dead and the slot above would never free.
+                _ = usys.capDrop(minted.data[1]);
             },
             .attach_buf => {
                 if (r.cap == 0) {

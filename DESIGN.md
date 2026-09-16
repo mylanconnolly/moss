@@ -2613,6 +2613,12 @@ display-only drills does not), gpusvc reads inputsvc itself and owns
 focus: `create_surface` gives the new surface focus, `GpuReq.next_input`
 returns the next keystroke tagged with the focused surface, and Alt-Tab is
 absorbed by the compositor to cycle focus rather than reaching a client.
+The cycle visits windows only once any exist — titleless resident chrome
+(bar, dock) is skipped, the rule `focusTopmost` already applied, with the
+same fallback for a display of raw titleless surfaces such as this drill's
+— and switching to a minimized window restores it (unhide, raise, wake the owner to repaint),
+the dock pill's restore by keyboard; before that (fixed 2026-09-16) the
+cycle could land on a hidden window or the bar and keystrokes vanished.
 Routing input through the display server (Wayland's shape, not X's) means
 a client only ever sees the keys sent to it while it holds focus — the
 compositor is the single point that reads the device and steers it. The
@@ -3089,8 +3095,43 @@ integration test: sign in, the bar + dock come up in the user's scale, the
 dock launches a window and the settings app (admin-editable for alice), and
 the top bar's menu logs out — login, a multi-process session sharing all
 three services, launching, and teardown, end to end. `guishellro` runs the
-same for bob (non-admin: settings read-only). `run-gui -Dgui-profile=guishell`
-boots it to play with by hand.
+same for bob (non-admin: settings read-only) plus a font-scale round trip;
+two more bob drills share its opening: `display` (live resolution changes
+with expiry rollback and the saved mode) and `largetext` (3x text on
+1024x768, with the Editor's menus). They were one drill until 2026-09-16:
+chained, it ran 47s on an idle M3 against the kernel's 60s HANG watchdog
+and had tripped it twice under load. `run-gui -Dgui-profile=guishell`
+boots the desktop to play with by hand.
+
+**The runner runs drills in parallel (as built, 2026-09-16).** The gate's
+wall time was the sum of its drill times — 337 s of drills, 337 s of wall
+— because the build already ran in parallel and `tools/runner.zig` ran
+one QEMU at a time. Now `main` collects the jobs, sorts them longest
+first (a spec's timeout is the only duration hint), and a pool of worker
+threads takes them from a shared cursor; `--jobs N` (build: `-Djobs=N`)
+sets the width, default a quarter of the host's cores, at most 4 — a
+QEMU is 4 vCPUs of TCG. What pinned the runner to one at a time was
+host state, not the drills: every host TCP port (QMP, the cluster hub,
+console sockets, the net drill's port forwards and openssl servers) was
+a constant. Each worker thread is now a *port slot*: slot 0 keeps the
+historical numbers (31901..31914), slot s adds s×20, and every port is a
+function of the thread-local slot, so a drill's QEMU and host servers
+never collide with another worker's. The exception surfaced on the first
+parallel gate: two ports are dialed *by the guest* (`net-drill.msh`
+fetches `10.0.2.2:31910`, `locale.msh` names `:31912`), so they cannot
+move with the slot; `localeupd` failed with "refused" from a worker in
+slot 1. Those two stay fixed and the `net`/`localeupd` drills hold a
+mutex for their run — a few seconds of serialization, not worth a
+guest-side port plumbing. Logs, disks and screenshots were
+already per drill name. The allocator became the thread-safe
+`smp_allocator` (nothing was ever freed; that is unchanged). `-Dsoak`
+keeps its meaning: the repeats of one label run back to back in one
+worker. The summary line reports wall time, drill time and the width.
+*Lesson:* the 60 s hang watchdog is wall-clock; under contention a drill
+that ran 47 s alone can trip it, which is why the desktop drills were
+split first (above) and why `-Djobs=1` is the flake-hunt mode — a hang
+seen only at width 3 is a real hang or a drill too close to the edge,
+and the dump says which.
 
 **Minimize and restore (as built, 2026-09-10).** The amber traffic-light
 was a stub since stage 1 (it logged "minimize (not yet)"); it now hides the
@@ -3203,9 +3244,11 @@ gui-term` — and needs no shell change; the standalone `terminal` drill
 `exit`, and the desktop dock gained a Terminal pill that launches the
 session's own `terminal` unit (`conf/sessiongui/terminal.msh` + `sterm.msh`,
 a full msh in a window on the user's home). *Lesson (paid for twice):* the
-check runner is **sequential** — one QEMU at a time — so a drill that hangs
-is never starved by "concurrent" drills; there is no contention to blame.
-When `guishellro` hung after adding the Terminal pill, the honest read was
+check runner was **sequential** then — one QEMU at a time — so a drill
+that hung was never starved by "concurrent" drills; there was no
+contention to blame (since 2026-09-16 the runner runs several at once —
+see "The runner runs drills in parallel" below — and `-Djobs=1` is how to
+take contention off the table before reading a hang). When `guishellro` hung after adding the Terminal pill, the honest read was
 the kernel dump (all threads idle, root never `.dying`) and the trace ring,
 not a starvation story — and the hang turned out to be a **stale marc
 archive** during active editing (the pill referenced a session unit the
@@ -4134,7 +4177,13 @@ badge. A last-endpoint `client_dead` unmaps that buffer, clears its record
 and releases an empty slab. Fontsvc and the compositor drop their local
 minted endpoint after replying with a copy: retaining it prevents the
 kernel from ever observing the client's death. Both now use monotonic u64
-identities without the old 250-registration lifetime ceiling. Windowframe
+identities without the old 250-registration lifetime ceiling. The 2026-09-16
+review found clipsvc and localesvc — the same register/attach client model
+— still keeping their copies: clipsvc's `client_dead` branch was
+unreachable and localesvc had none (and still the 8-client, 250-badge
+ceilings). Both now drop the copy, reclaim on death (`… client reclaimed`
+in the log) and size their tables for concurrent clients. *Lesson:* a fix
+to a shared pattern has to visit every copy of the pattern. Windowframe
 commits buffer setup only after a successful attach, allowing a failed
 allocation to be retried; the terminal grid registers independently from
 its frame. The fontscale drill keeps 16 clients attached with distinct
@@ -4619,7 +4668,7 @@ bitmap or font dependency.
 
 The `comp` drill exercises denied unprivileged calls, disabled/unknown actions,
 stale focus and recycled-surface tokens, and bounded command queuing. The
-`guishellro` drill exercises actual Editor menus at 3× text on 1024×768,
+`largetext` drill exercises actual Editor menus at 3× text on 1024×768,
 keyboard Open, picker focus restoration, Undo/Redo, outside-click dismissal,
 and dirty Close cancellation/discard, with screenshots of the bar and popups.
 The admin desktop drill exercises Files Open/Enclosing Folder/Refresh and

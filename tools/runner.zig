@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor };
 
 const Spec = struct {
     name: []const u8,
@@ -91,6 +91,8 @@ const specs = [_]Spec{
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
     .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "dock: activate settings", .always_extra = "settings: admin=true", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "guishellro", .kind = .guishellro, .pass = "guishellro-test: PASS", .extra = "settings: admin=false", .always_extra = "settings: system read-only", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "display", .kind = .display, .pass = "display-test: PASS", .extra = "gpu: output 1920x1080", .always_extra = "display: mode confirmed", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "largetext", .kind = .largetext, .pass = "largetext-test: PASS", .extra = "ui 48px, scale 3.00", .always_extra = "editor: exit", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "fabgui", .kind = .fabgui, .pass = "fabgui-test: PASS", .extra = "fabgui: done count=2", .append = "profile=fabgui", .timeout_s = 180 },
     .{ .name = "fabsignal", .kind = .fabsignal, .pass = "fabsignal-test: PASS", .extra = "fabsig: woke bits=5", .append = "profile=fabsig", .timeout_s = 180 },
     .{ .name = "browse", .kind = .browse, .pass = "browse-test: PASS", .extra = "browse: node 2 root has", .append = "profile=browse", .timeout_s = 180 },
@@ -154,32 +156,67 @@ const specs = [_]Spec{
 };
 
 const check_dir = "zig-out/check";
-const cluster_port = "31901";
-const cluster_port2 = "31902";
-const cluster_port3 = "31904"; // the imposter's hub port
-const shell_port: u16 = 31903;
+
+// Host TCP ports. Drills run concurrently (`--jobs`, one worker thread
+// per QEMU), so every host port is per worker slot: slot 0 keeps the
+// historical numbers below, slot s adds s*port_span. A worker sets `slot`
+// once, before it runs anything; everything a drill binds or dials on the
+// host goes through these.
+threadlocal var slot: u16 = 0;
+const port_base: u16 = 31900;
+const port_span: u16 = 20;
+fn hostPort(offset: u16) u16 {
+    return port_base + slot * port_span + offset;
+}
+fn clusterPort() u16 {
+    return hostPort(1);
+}
+fn clusterPort2() u16 {
+    return hostPort(2);
+}
+/// The imposter's hub port.
+fn clusterPort3() u16 {
+    return hostPort(4);
+}
+fn shellPort() u16 {
+    return hostPort(3);
+}
 /// The net check's port forward to the script's HTTP server (:8080).
-const http_port: u16 = 31909;
-/// Where the net drill's TLS server listens on the host (the guest reaches
-/// it as 10.0.2.2, slirp's name for the host): `openssl s_server -www`
-/// with the certificate for tls.moss.test under lib/tls/.
-const tls_port: u16 = 31910;
+fn httpPort() u16 {
+    return hostPort(9);
+}
 /// Where the host reaches the moss server's own TLS listener (`serve`
 /// over a tls-listener), forwarded to the guest's :8443.
-const tls_srv_port: u16 = 31911;
-const locale_upd_port: u16 = 31912; // openssl -WWW serving the locale fixture
+fn tlsSrvPort() u16 {
+    return hostPort(11);
+}
+// Two host ports are dialed BY THE GUEST (as 10.0.2.2, slirp's name for
+// the host), so the guest's own config names them and they cannot move
+// with the slot: the net drill's TLS server (`openssl s_server -www` with
+// the tls.moss.test certificate under lib/tls/; boot/scripts/net-drill.msh
+// dials :31910) and the locale updater's fixture server (`openssl -WWW`;
+// boot/conf/locale.msh dials :31912). Drills that bind them hold
+// `guest_ports_lock` for their whole run instead — two short drills, so
+// serializing them costs the gate nothing measurable.
+const guest_tls_port: u16 = 31910;
+const guest_locale_port: u16 = 31912;
+var guest_ports_lock: Io.Mutex = .init;
 /// The fabric-login drill's own hub port: a listener the three-node
 /// drill left in TIME_WAIT must never be the one node 2 dials.
-const flogin_port = "31911";
+fn floginPort() u16 {
+    return hostPort(14);
+}
 const poll_ms = 100;
 
 var io: Io = undefined;
+// Every worker allocates through this and nothing is ever freed (the
+// process is the arena): thread-safe, so the workers need no coordination.
 var gpa: std.mem.Allocator = undefined;
 const cwd = Io.Dir.cwd();
 
 pub fn main(init: std.process.Init) !u8 {
     io = init.io;
-    gpa = init.arena.allocator();
+    gpa = std.heap.smp_allocator;
 
     var argv_list: std.ArrayList([]const u8) = .empty;
     var arg_it = std.process.Args.Iterator.init(init.minimal.args);
@@ -187,11 +224,14 @@ pub fn main(init: std.process.Init) !u8 {
     const argv = argv_list.items;
     var repeat: u32 = 1;
     var only: ?[]const u8 = null;
+    var jobs_n: u16 = defaultJobs();
     var i: usize = 1;
     while (i < argv.len and std.mem.startsWith(u8, argv[i], "--")) {
         if (i + 1 >= argv.len) break;
         if (std.mem.eql(u8, argv[i], "--repeat")) {
             repeat = std.fmt.parseInt(u32, argv[i + 1], 10) catch 0;
+        } else if (std.mem.eql(u8, argv[i], "--jobs")) {
+            jobs_n = std.fmt.parseInt(u16, argv[i + 1], 10) catch 0;
         } else if (std.mem.eql(u8, argv[i], "--only")) {
             only = argv[i + 1];
         } else if (std.mem.eql(u8, argv[i], "--arch")) {
@@ -212,15 +252,14 @@ pub fn main(init: std.process.Init) !u8 {
         } else break;
         i += 2;
     }
-    if (repeat == 0 or argv.len - i < 2 or (argv.len - i) % 2 != 0) {
-        std.debug.print("usage: runner [--repeat N] [--only a,b] [--arch aarch64|x86_64] [--tcg] [--limine DIR] [--ovmf FD] [--ovmf-vars FD] <name> <kernel> ...\n", .{});
+    if (repeat == 0 or jobs_n == 0 or argv.len - i < 2 or (argv.len - i) % 2 != 0) {
+        std.debug.print("usage: runner [--repeat N] [--jobs N] [--only a,b] [--arch aarch64|x86_64] [--tcg] [--limine DIR] [--ovmf FD] [--ovmf-vars FD] <name> <kernel> ...\n", .{});
         return 2;
     }
     cwd.createDirPath(io, check_dir) catch {};
 
     var failures: u32 = 0;
-    var ran: u32 = 0;
-    var total_polls: u64 = 0;
+    var jobs: std.ArrayList(Job) = .empty;
     while (i + 1 < argv.len) : (i += 2) {
         const label = argv[i];
         const bin = argv[i + 1];
@@ -238,38 +277,124 @@ pub fn main(init: std.process.Init) !u8 {
             if (spec.pass_x86) |p| spec.pass = p;
             if (spec.extra_x86) |e| spec.extra = e;
         }
-        ran += 1;
-        var polls: u64 = 0;
-        var ok = true;
-        var runs: u32 = 0;
-        while (ok and runs < repeat) : (runs += 1) {
-            ok = runSpec(spec, bin, &polls) catch |e| blk: {
-                std.debug.print("[FAIL] {s}: runner error {t}\n", .{ label, e });
-                break :blk false;
-            };
-        }
-        total_polls += polls;
-        if (ok) {
-            if (repeat > 1) {
-                std.debug.print("[ ok ] {s:<10} {d}.{d}s  x{d}\n", .{ label, polls / 10, polls % 10, repeat });
-            } else {
-                std.debug.print("[ ok ] {s:<10} {d}.{d}s\n", .{ label, polls / 10, polls % 10 });
-            }
-        } else {
-            if (runs > 1) std.debug.print("[FAIL] {s}: failed on run {d} of {d}\n", .{ label, runs, repeat });
-            failures += 1;
-            // Keep the evidence: the next run of this label would overwrite
-            // its log, and a failure that took ten runs to show is not
-            // worth losing to an eager rerun.
-            keepFailedLog(label);
-        }
+        try jobs.append(gpa, .{ .spec = spec, .bin = bin, .repeat = repeat });
     }
+    // Longest first, so the tail of the run is short drills filling in
+    // behind the long ones, not one long drill running alone. A spec's
+    // timeout is the only duration hint there is; the sort is stable so
+    // ties keep the build's order.
+    sortLongestFirst(jobs.items);
+
+    const started = Io.Clock.awake.now(io);
+    const workers: u16 = @intCast(@min(jobs_n, @max(jobs.items.len, 1)));
+    var pool: Pool = .{ .jobs = jobs.items };
+    var threads: [max_jobs]?std.Thread = @splat(null);
+    for (0..workers) |w| {
+        threads[w] = std.Thread.spawn(.{}, Pool.worker, .{ &pool, @as(u16, @intCast(w)) }) catch |e| blk: {
+            std.debug.print("runner: could not start worker {d}: {t}\n", .{ w, e });
+            break :blk null;
+        };
+    }
+    for (threads[0..workers]) |t| if (t) |th| th.join();
+    if (pool.next.load(.monotonic) < jobs.items.len) {
+        // A worker failed to start and no thread ran; run what is left here.
+        pool.worker(0);
+    }
+    const wall = started.durationTo(Io.Clock.awake.now(io)).toMilliseconds();
+
+    var total_polls: u64 = 0;
+    for (jobs.items) |j| {
+        total_polls += j.polls;
+        if (!j.ok) failures += 1;
+    }
+    const ran = jobs.items.len;
     if (failures == 0) {
-        std.debug.print("check: all {d} OS tests passed ({d}s)\n", .{ ran, total_polls / 10 });
+        if (workers > 1) {
+            std.debug.print("check: all {d} OS tests passed ({d}s wall, {d}s of drills, {d} at a time)\n", .{ ran, @divTrunc(wall, 1000), total_polls / 10, workers });
+        } else {
+            std.debug.print("check: all {d} OS tests passed ({d}s)\n", .{ ran, total_polls / 10 });
+        }
         return 0;
     }
     std.debug.print("check: {d} of {d} FAILED\n", .{ failures, ran });
     return 1;
+}
+
+/// One drill to run: its spec (name already labelled), kernel image, and
+/// the result once a worker has run it `repeat` times.
+const Job = struct {
+    spec: Spec,
+    bin: []const u8,
+    repeat: u32,
+    ok: bool = false,
+    polls: u64 = 0,
+};
+
+/// How many drills run at once: a QEMU is 4 vCPUs of TCG, so a quarter of
+/// the host's cores, at least one, at most `max_jobs`. `--jobs 1` is the
+/// sequential mode for flake hunts, where contention must not be a factor.
+const max_jobs = 8;
+fn defaultJobs() u16 {
+    const cpus = std.Thread.getCpuCount() catch 4;
+    return @intCast(@min(@max(cpus / 4, 1), 4));
+}
+
+/// The worker pool: threads take the next job from a shared cursor; each
+/// thread is one port slot, so its QEMU and host servers never collide
+/// with another worker's. Results land in the jobs; the summary reads
+/// them once every thread has joined.
+const Pool = struct {
+    jobs: []Job,
+    next: std.atomic.Value(usize) = .init(0),
+
+    fn worker(p: *Pool, index: u16) void {
+        slot = index;
+        while (true) {
+            const n = p.next.fetchAdd(1, .monotonic);
+            if (n >= p.jobs.len) return;
+            runJob(&p.jobs[n]);
+        }
+    }
+};
+
+fn runJob(j: *Job) void {
+    const label = j.spec.name;
+    const guest_dialed = j.spec.kind == .net or j.spec.kind == .localeupd;
+    if (guest_dialed) guest_ports_lock.lockUncancelable(io);
+    defer if (guest_dialed) guest_ports_lock.unlock(io);
+    var ok = true;
+    var runs: u32 = 0;
+    while (ok and runs < j.repeat) : (runs += 1) {
+        ok = runSpec(j.spec, j.bin, &j.polls) catch |e| blk: {
+            std.debug.print("[FAIL] {s}: runner error {t}\n", .{ label, e });
+            break :blk false;
+        };
+    }
+    j.ok = ok;
+    if (ok) {
+        if (j.repeat > 1) {
+            std.debug.print("[ ok ] {s:<10} {d}.{d}s  x{d}\n", .{ label, j.polls / 10, j.polls % 10, j.repeat });
+        } else {
+            std.debug.print("[ ok ] {s:<10} {d}.{d}s\n", .{ label, j.polls / 10, j.polls % 10 });
+        }
+    } else {
+        if (runs > 1) std.debug.print("[FAIL] {s}: failed on run {d} of {d}\n", .{ label, runs, j.repeat });
+        // Keep the evidence: the next run of this label would overwrite
+        // its log, and a failure that took ten runs to show is not
+        // worth losing to an eager rerun.
+        keepFailedLog(label);
+    }
+}
+
+fn sortLongestFirst(jobs: []Job) void {
+    // Insertion sort: stable, and the list is short.
+    var i: usize = 1;
+    while (i < jobs.len) : (i += 1) {
+        var k = i;
+        while (k > 0 and jobs[k - 1].spec.timeout_s < jobs[k].spec.timeout_s) : (k -= 1) {
+            std.mem.swap(Job, &jobs[k - 1], &jobs[k]);
+        }
+    }
 }
 
 /// Copy `<label>-1.log` to `<label>-failed.log` (overwriting an older
@@ -308,7 +433,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -329,10 +454,10 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // forward from the host to the script's own server.
         .net => try args.appendSlice(gpa, &.{
             "-netdev",
-            "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat," ++
+            try std.fmt.allocPrint(gpa, "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat," ++
                 "guestfwd=tcp:10.0.2.100:9001-cmd:printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 11\\r\\n\\r\\nhello moss!'," ++
-                "hostfwd=tcp:127.0.0.1:" ++ std.fmt.comptimePrint("{d}", .{http_port}) ++ "-:8080," ++
-                "hostfwd=tcp:127.0.0.1:" ++ std.fmt.comptimePrint("{d}", .{tls_srv_port}) ++ "-:8443",
+                "hostfwd=tcp:127.0.0.1:{d}-:8080," ++
+                "hostfwd=tcp:127.0.0.1:{d}-:8443", .{ httpPort(), tlsSrvPort() }),
             "-device",
             "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             "-object",
@@ -376,7 +501,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device",
             "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
             "-qmp",
-            try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+            try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
         }),
         // The input drill: a virtio keyboard and a QMP port to inject key
         // presses into it.
@@ -384,7 +509,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device",
             "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",
-            try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+            try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
         }),
         // The pointer drill: a keyboard (input index 0) then a tablet
         // (index 1, the absolute pointer inputsvc drives), plus QMP to move
@@ -392,7 +517,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         .ptr => try args.appendSlice(gpa, &.{
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
-            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
@@ -400,7 +525,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
-            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
         }),
         // The graphical seat / focus / trusted-path drill: both a display
         // to render on and a keyboard to type into, plus QMP to type and
@@ -408,7 +533,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         .seat, .focus, .trust, .readers, .gui, .guilogin, .gtrust => try args.appendSlice(gpa, &.{
             "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
-            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+            "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
         }),
         // The real-msh seat: the graphical devices plus a disk for mossfs
         // (the shell's filesystem view).
@@ -418,19 +543,19 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
-                "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+                "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
             });
             try appendDisk(&args, disk);
         },
         // The post-login GUI shell: like the front door, but the shell runs
         // on the pointer-capable compositor, so a tablet (input index 1,
         // after the keyboard) rides along for a working cursor.
-        .guishell, .guishellro, .explorer, .terminal, .editor => {
+        .guishell, .guishellro, .display, .largetext, .explorer, .terminal, .editor => {
             try args.appendSlice(gpa, &.{
                 "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
-                "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+                "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
             });
             try appendDisk(&args, disk);
         },
@@ -442,14 +567,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
 
     var tls_server: ?std.process.Child = null;
     if (spec.kind == .net) tls_server = try spawnQemu(&.{
-        "openssl", "s_server",                     "-accept", std.fmt.comptimePrint("127.0.0.1:{d}", .{tls_port}), "-www", "-tls1_3", "-quiet",
+        "openssl", "s_server",                     "-accept", try std.fmt.allocPrint(gpa, "127.0.0.1:{d}", .{guest_tls_port}), "-www", "-tls1_3", "-quiet",
         "-cert",   "lib/tls/moss-test-server.pem", "-key",    "lib/tls/moss-test-server.key",
     });
     // The locale updater fetches its fixture blob over TLS: openssl in
     // file-serving mode (-WWW), the moss test cert, files relative to the
     // repo root (so GET /tools/testdata/cldr-fixture.db works).
     if (spec.kind == .localeupd) tls_server = try spawnQemu(&.{
-        "openssl", "s_server",                     "-accept", std.fmt.comptimePrint("127.0.0.1:{d}", .{locale_upd_port}), "-WWW", "-tls1_3", "-quiet",
+        "openssl", "s_server",                     "-accept", try std.fmt.allocPrint(gpa, "127.0.0.1:{d}", .{guest_locale_port}), "-WWW", "-tls1_3", "-quiet",
         "-cert",   "lib/tls/moss-test-server.pem", "-key",    "lib/tls/moss-test-server.key",
     });
     defer if (tls_server) |*t| t.kill(io);
@@ -543,6 +668,12 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     if (spec.kind == .guishellro) {
         if (!try guishellroDrive(spec, log_path, polls)) return false;
     }
+    if (spec.kind == .display) {
+        if (!try displayDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .largetext) {
+        if (!try largetextDrive(spec, log_path, polls)) return false;
+    }
     const verdict = watch(log_path, spec, extra, polls);
     if (!verdict.ok) reportFailure(spec.name, verdict.why, log_path);
     return verdict.ok;
@@ -566,7 +697,7 @@ fn gpuScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -629,7 +760,7 @@ fn termScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -704,7 +835,7 @@ fn ptrInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -752,7 +883,7 @@ fn pointerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -872,7 +1003,7 @@ fn guiclickDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -965,7 +1096,7 @@ fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     _ = cx;
     _ = rows_top;
     _ = row_h;
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1012,7 +1143,7 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const cx = g[0];
     const rows_top = g[1];
     const row_h = g[2];
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1140,7 +1271,7 @@ fn cascadeDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "two centred windows opened almost on top of each other (no cascade) — one hides the other", log_path);
         return false;
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1162,7 +1293,7 @@ fn cascadeDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "editor: document clients reclaimed; unselected save denied", 1, "selected-document authority or client cleanup probe failed", spec, polls)) return false;
     if (!try waitLogN(log_path, "editor: ready", 1, "the editor never rendered", spec, polls)) return false;
-    var q = qmpConnect(qmp_port) catch return sfail(spec, log_path, "connect editor QMP");
+    var q = qmpConnect(qmpPort()) catch return sfail(spec, log_path, "connect editor QMP");
     defer q.close();
     const Frame = struct {
         fn read(path: []const u8) ?[5]u32 {
@@ -1320,7 +1451,7 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "term: console up", 1, "the terminal never wired to a shell", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: ready", 1, "the terminal window never rendered", spec, polls)) return false;
     if (!try waitLogN(log_path, "term: fonts frame=true grid=true", 1, "terminal frame or grid fell back to bitmap fonts", spec, polls)) return false;
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1441,7 +1572,7 @@ fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // chrome — the desktop's focus cue, driven by the compositor telling a
     // window it lost focus.
     if (!try waitLogN(log_path, "gui: unfocused", 1, "the window that lost focus was not told to dim", spec, polls)) return false;
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1537,7 +1668,7 @@ fn parsePopup(content: []const u8) ?[4]u32 {
 /// exits. The dropdown geometry the runtime logs makes the item click exact.
 fn topbarDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "topbar: ready", 1, "the top bar never came up", spec, polls)) return false;
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1637,7 +1768,7 @@ fn dockDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "could not parse the dock's first pill geometry", log_path);
         return false;
     };
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1683,7 +1814,7 @@ fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1727,7 +1858,7 @@ fn seatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1792,7 +1923,7 @@ fn gseatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1849,7 +1980,7 @@ fn compScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1900,7 +2031,7 @@ fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -1962,7 +2093,7 @@ fn trustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2039,7 +2170,7 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2129,7 +2260,7 @@ fn guiLoginDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2191,7 +2322,7 @@ fn gtrustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2263,7 +2394,7 @@ fn gsessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2442,7 +2573,7 @@ fn desktopSignIn(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, user: [
 /// settings app (admin-editable) and a demo window, and the top bar's system
 /// menu logs her out — tearing the whole session down.
 fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2498,6 +2629,28 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // (the demo and, earlier, settings' first render is yet to come).
     if (countOccurrences(readLog(log_path), "gui: ready") != 2) {
         reportFailure(spec.name, "restoring the window opened a new one instead", log_path);
+        return false;
+    }
+    sleepMs(500);
+    // Minimize it again and switch to it with Alt-Tab: the only window on
+    // the desktop is hidden, so the switch must restore it (unhide, raise,
+    // repaint) rather than land on the titleless bar or dock, and again
+    // without opening a fresh window.
+    const dot2 = parseDot(readLog(log_path), "min=") orelse {
+        reportFailure(spec.name, "could not re-parse the demo window's minimize dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, dot2[0], dot2[1])) {
+        reportFailure(spec.name, "QMP could not click the minimize dot again", log_path);
+        return false;
+    }
+    if (!try waitLogN(log_path, "gui: minimized", 2, "the amber dot did not minimize the window a second time", spec, polls)) return false;
+    sleepMs(300);
+    if (!q.chord("alt", "tab")) return sfail(spec, log_path, "send Alt-Tab");
+    if (!try waitLogN(log_path, "comp: switch restored", 1, "Alt-Tab did not restore the minimized window", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: restored", 2, "the restored window did not repaint after Alt-Tab", spec, polls)) return false;
+    if (countOccurrences(readLog(log_path), "gui: ready") != 2) {
+        reportFailure(spec.name, "Alt-Tab restore opened a new window instead", log_path);
         return false;
     }
     sleepMs(500);
@@ -2741,17 +2894,12 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     return desktopLogout(spec, log_path, polls, &q);
 }
 
-/// The non-admin composed-desktop drill (`guishellro`): the same desktop, but
-/// the host signs in as bob (no `admin: true`). The dock launches settings,
-/// which must report admin=false and a read-only system pane — the admin gate
-/// on the composed desktop — then the top bar logs bob out.
-fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
-    var q = qmpConnect(qmp_port) catch {
-        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
-        return false;
-    };
-    defer q.close();
-    if (!try desktopSignIn(spec, log_path, polls, &q, "bob", "bob-pass")) return false;
+/// Bob's desktop with Settings open — the shared opening of the three
+/// non-admin desktop drills (guishellro, display, largetext). Sign in as
+/// bob (no `admin: true`), wait for the bar and dock, launch Settings from
+/// the dock and confirm the admin gate: admin=false, read-only system pane.
+fn bobSettingsOpen(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
+    if (!try desktopSignIn(spec, log_path, polls, q, "bob", "bob-pass")) return false;
     if (!try waitLogN(log_path, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
     if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
     sleepMs(500);
@@ -2760,7 +2908,7 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "could not parse the dock's Settings pill", log_path);
         return false;
     };
-    if (!clickScanout(&q, set[0], set[1])) {
+    if (!clickScanout(q, set[0], set[1])) {
         reportFailure(spec.name, "QMP could not click the Settings pill", log_path);
         return false;
     }
@@ -2768,6 +2916,24 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "settings: admin=false", 1, "bob was wrongly treated as an administrator", spec, polls)) return false;
     if (!try waitLogN(log_path, "settings: system read-only", 1, "bob's system pane was not read-only", spec, polls)) return false;
     sleepMs(500);
+    return true;
+}
+
+/// The non-admin composed-desktop drill (`guishellro`): the same desktop, but
+/// the host signs in as bob (no `admin: true`). The dock launches settings,
+/// which must report admin=false and a read-only system pane — the admin gate
+/// on the composed desktop — then a font-scale round trip, then the top bar
+/// logs bob out. The display and large-text exercises that once followed
+/// here are their own drills (`display`, `largetext`): chained, the three
+/// ran 47s on an idle M3 against the kernel's 60s HANG watchdog and tripped
+/// it under load.
+fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!try bobSettingsOpen(spec, log_path, polls, &q)) return false;
     // Reopen Settings in the same process after each Apply. Both cached
     // metrics and the resident bars must follow 1.5 -> 1.0 -> 1.5.
     const initial_small = widgetCenter(readLog(log_path), "smaller") orelse return sfail(spec, log_path, "initial font geometry");
@@ -2786,7 +2952,36 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (pass == 1 and current[1] != initial_small[1]) return sfail(spec, log_path, "font geometry drifted after round trip");
         _ = q.screendump(if (pass == 0) check_dir ++ "/settings-scale-100.ppm" else check_dir ++ "/settings-scale-150.ppm");
     }
+    return desktopLogout(spec, log_path, polls, &q);
+}
+
+/// The display-settings drill (`display`): bob's desktop, then live
+/// resolution changes through Settings — preview, compositor-owned expiry
+/// rollback after Settings dies mid-preview, a kept mode, and the dock
+/// restoring the saved mode on restart — while a terminal stays alive and
+/// reflows; then log out.
+fn displayDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!try bobSettingsOpen(spec, log_path, polls, &q)) return false;
     if (!try outputSettingsDrive(spec, log_path, polls, &q)) return false;
+    return desktopLogout(spec, log_path, polls, &q);
+}
+
+/// The large-text drill (`largetext`): bob's desktop at the maximum text
+/// scale (3x) on the smallest output (1024x768) — Settings scrolls by
+/// keyboard and wheel, and the Editor's global menus work behind resident
+/// chrome; the scale is put back, then log out.
+fn largetextDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!try bobSettingsOpen(spec, log_path, polls, &q)) return false;
     if (!try adaptiveSettingsDrive(spec, log_path, polls, &q)) return false;
     return desktopLogout(spec, log_path, polls, &q);
 }
@@ -2815,7 +3010,7 @@ fn lconsoleDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2867,7 +3062,7 @@ fn gisessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             return false;
         }
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -2949,7 +3144,7 @@ fn gboomDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "fontsvc did not load fonts from the filesystem", log_path);
         return false;
     }
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
@@ -3024,7 +3219,7 @@ fn httpProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     for (probes, 0..) |p, i| {
         var conn: ?Io.net.Stream = null;
         for (0..50) |_| {
-            conn = tcpConnect(http_port) catch {
+            conn = tcpConnect(httpPort()) catch {
                 sleepMs(poll_ms);
                 polls.* += 1;
                 continue;
@@ -3072,12 +3267,13 @@ fn tlsProbe(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // can read on failure. -verify_return_error makes a bad chain a
     // nonzero exit; -ign_eof keeps the request from tearing the socket
     // down before the reply arrives.
-    const err_file = std.fmt.comptimePrint("zig-out/check/tls-s_client.err", .{});
-    const cmd = std.fmt.comptimePrint(
+    const err_file = "zig-out/check/tls-s_client.err";
+    const cmd = try std.fmt.allocPrint(
+        gpa,
         "printf 'GET / HTTP/1.1\\r\\nHost: tls.moss.test\\r\\nConnection: close\\r\\n\\r\\n' | " ++
             "openssl s_client -connect 127.0.0.1:{d} -servername tls.moss.test " ++
             "-CAfile lib/tls/moss-test-ca.pem -verify_return_error -quiet -ign_eof 2>{s}",
-        .{ tls_srv_port, err_file },
+        .{ tlsSrvPort(), err_file },
     );
     var child = std.process.spawn(io, .{
         .argv = &.{ "sh", "-c", cmd },
@@ -3122,25 +3318,25 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{cluster_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{clusterPort()}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s3,listen=127.0.0.1:{s}", .{cluster_port2}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s3,listen=127.0.0.1:{d}", .{clusterPort2()}),
         "-netdev", "hubport,id=h3,hubid=0,netdev=s3",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s9,listen=127.0.0.1:{s}", .{cluster_port3}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s9,listen=127.0.0.1:{d}", .{clusterPort3()}),
         "-netdev", "hubport,id=h9,hubid=0,netdev=s9",
     });
     var c1 = try spawnQemu(args1.items);
     defer c1.kill(io);
     sleepMs(1000);
 
-    var c2 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node2", .{spec.name}), log2, bin, cluster_port, "node=2 drill=1"));
+    var c2 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node2", .{spec.name}), log2, bin, clusterPort(), "node=2 drill=1"));
     defer c2.kill(io);
-    var c3 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node3", .{spec.name}), log3, bin, cluster_port2, "node=3"));
+    var c3 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node3", .{spec.name}), log3, bin, clusterPort2(), "node=3"));
     defer c3.kill(io);
     // The imposter: wrong fabric key; the handshake must refuse it.
     const log9 = try std.fmt.allocPrint(gpa, "{s}/{s}-node9.log", .{ check_dir, spec.name });
     cwd.deleteFile(io, log9) catch {};
-    var c9 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node9", .{spec.name}), log9, bin, cluster_port3, "node=9 badkey=1"));
+    var c9 = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node9", .{spec.name}), log9, bin, clusterPort3(), "node=9 badkey=1"));
     defer c9.kill(io);
 
     // Stage: wait for the death marker, then relaunch node 2 (the rejoin).
@@ -3162,7 +3358,7 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "death never detected", log1);
         return false;
     }
-    c2b = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node2b", .{spec.name}), log2b, bin, cluster_port, "node=2 drill=0"));
+    c2b = try spawnQemu(try joinerArgs(try std.fmt.allocPrint(gpa, "{s}-node2b", .{spec.name}), log2b, bin, clusterPort(), "node=2 drill=0"));
 
     // The verdict lives in node 1's log; the gossip proof in node 3's.
     const verdict = watch(log1, spec, spec.extra, polls);
@@ -3201,11 +3397,11 @@ fn runCluster(spec: Spec, bin: []const u8, polls: *u64) !bool {
     return true;
 }
 
-fn joinerArgs(label: []const u8, log_path: []const u8, bin: []const u8, port: []const u8, append: []const u8) ![]const []const u8 {
+fn joinerArgs(label: []const u8, log_path: []const u8, bin: []const u8, port: u16, append: []const u8) ![]const []const u8 {
     var args: std.ArrayList([]const u8) = .empty;
     try appendBase(&args, log_path, bin, label, append);
     try args.appendSlice(gpa, &.{
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{port}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
     });
     return args.items;
@@ -3481,7 +3677,7 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
     try appendDisk(&args, disk);
     try args.appendSlice(gpa, &.{
         "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
-        "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{shell_port}),
+        "-chardev", try std.fmt.allocPrint(gpa, "socket,id=c0,host=127.0.0.1,port={d},server=on,wait=off", .{shellPort()}),
         "-device",  "virtconsole,chardev=c0",
         "-netdev",  "user,id=un0",
         "-device",  "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=un0",
@@ -3493,7 +3689,7 @@ fn runShellOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extr
     // Connect (QEMU binds the chardev at startup).
     var fd: ?Io.net.Stream = null;
     for (0..50) |_| {
-        fd = tcpConnect(shell_port) catch {
+        fd = tcpConnect(shellPort()) catch {
             sleepMs(100);
             polls.* += 1;
             continue;
@@ -3628,7 +3824,7 @@ fn runLogin(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}-1.log", .{ check_dir, spec.name });
     cwd.deleteFile(io, log_path) catch {};
 
-    const ports = [2]u16{ shell_port + 1, shell_port + 2 };
+    const ports = [2]u16{ shellPort() + 1, shellPort() + 2 };
     var args: std.ArrayList([]const u8) = .empty;
     try appendBase(&args, log_path, bin, spec.name, spec.append);
     try appendDisk(&args, disk);
@@ -3745,7 +3941,7 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
     });
     var c1 = try spawnQemu(args1.items);
@@ -3758,11 +3954,11 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try appendBase(&args2, log2, bin, "fabgui-node2", "profile=fabgui node=2");
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
         "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
         "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
-        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
     });
     var c2 = try spawnQemu(args2.items);
     defer c2.kill(io);
@@ -3771,7 +3967,7 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
     // view comes back from node 1 — so this proves the remote path is live.
     if (!try waitLogN(log2, "gui: ready", 1, "the fabric GUI never rendered (node 1 unreachable, or the join failed)", spec, polls)) return false;
 
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log2);
         return false;
     };
@@ -3819,7 +4015,7 @@ fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
     });
     var c1 = try spawnQemu(args1.items);
@@ -3832,19 +4028,19 @@ fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try appendBase(&args2, log2, bin, "netbrowse-node2", "profile=netbrowse node=2");
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
         "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
         "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
         "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
-        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmp_port}),
+        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
     });
     var c2 = try spawnQemu(args2.items);
     defer c2.kill(io);
 
     if (!try waitLogN(log2, "gui: ready", 1, "the explorer never came up on node 2", spec, polls)) return false;
 
-    var q = qmpConnect(qmp_port) catch {
+    var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log2);
         return false;
     };
@@ -3916,7 +4112,7 @@ fn runFabSignal(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
     });
     var c1 = try spawnQemu(args1.items);
@@ -3928,7 +4124,7 @@ fn runFabSignal(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try appendBase(&args2, log2, bin, "fabsig-node2", "profile=fabsigtx node=2");
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
     });
     var c2 = try spawnQemu(args2.items);
@@ -3964,7 +4160,7 @@ fn runBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
     });
     var c1 = try spawnQemu(args1.items);
@@ -3976,7 +4172,7 @@ fn runBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try appendBase(&args2, log2, bin, "browse-node2", "profile=browsehost node=2");
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
     });
     var c2 = try spawnQemu(args2.items);
@@ -4023,19 +4219,19 @@ fn floginBoot(spec: Spec, bin: []const u8, disk1: []const u8, disk2: []const u8,
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
         "-object", try std.fmt.allocPrint(gpa, "filter-dump,id=f1,netdev=h1,file={s}/{s}-node1-{d}.pcap", .{ check_dir, spec.name, boot }),
-        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
     });
     var c1 = try spawnQemu(args1.items);
     defer c1.kill(io);
     sleepMs(1000);
 
-    const port: u16 = shell_port + 3;
+    const port: u16 = shellPort() + 3;
     var args2: std.ArrayList([]const u8) = .empty;
     try appendBase(&args2, log2, bin, try std.fmt.allocPrint(gpa, "{s}-node2", .{spec.name}), "profile=fjoin node=2");
     try appendDisk(&args2, disk2);
     try args2.appendSlice(gpa, &.{
-        "-netdev",  try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{s}", .{flogin_port}),
+        "-netdev",  try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device",  "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
         "-object",  try std.fmt.allocPrint(gpa, "filter-dump,id=f2,netdev=n0,file={s}/{s}-node2-{d}.pcap", .{ check_dir, spec.name, boot }),
         "-device",  "virtio-serial-pci,disable-legacy=on,iommu_platform=on",
@@ -4164,9 +4360,11 @@ fn tcpConnect(port: u16) !Io.net.Stream {
 // line-delimited JSON; we scan the accumulated bytes for a top-level
 // `"return"` (ok) or `"error"` (failed), skipping the greeting and any
 // asynchronous events, which carry neither. The display drills open the
-// port with `-qmp tcp:127.0.0.1:<qmp_port>,server=on,wait=off`.
+// port with `-qmp tcp:127.0.0.1:<qmpPort()>,server=on,wait=off`.
 
-const qmp_port: u16 = 31913;
+fn qmpPort() u16 {
+    return hostPort(13);
+}
 
 const Qmp = struct {
     stream: Io.net.Stream,

@@ -35,12 +35,12 @@ Requirements: Zig **0.16.0** (pinned — see `mise.toml`) and QEMU
 Linux, where every boot is TCG). `run-login`'s second seat wants a `nc`.
 
 ```sh
-zig build check      # the whole test suite: 24 OS tests under QEMU (+6 again on a ReleaseSafe kernel) + host unit tests (~2 min)
-zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (intermittent failures)
+zig build check      # the whole test suite: every drill in build.zig's variants list under QEMU (63 today, +6 again on a ReleaseSafe kernel) + host unit tests; 3 drills at a time (~2 min)
+zig build check -Donly=fs,ipc+rs   # a subset;  -Dsoak=10 repeats each test (intermittent failures);  -Djobs=1 runs one at a time
 zig build run        # boot interactively (TCG; Ctrl-A X exits)
 zig build run-hvf    # boot with Hypervisor.framework acceleration (Apple Silicon)
 zig build -Darch=x86_64 run   # the x86_64 port (Limine on OVMF, x2APIC, VT-d, AMD-V) — KVM where available
-zig build -Darch=x86_64 check # its gate: the same 30 rows on OVMF + Limine, VT-d and nested AMD-V under KVM (-Dtcg: without KVM)
+zig build -Darch=x86_64 check # its gate: the same rows on OVMF + Limine, VT-d and nested AMD-V under KVM (-Dtcg: without KVM)
 ```
 
 The x86_64 boot wants Limine (`BOOTX64.EFI` under the host's share

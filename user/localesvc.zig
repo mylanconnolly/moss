@@ -103,11 +103,13 @@ fn nowDt() ?locale.DateTime {
 // same model fontsvc uses (see its per-client-buffer note). A client
 // registers for a fresh badge (2..); an unregistered client keeps badge 0,
 // one shared slot (the single-client legacy).
-const max_clients = 8;
+// Slots free on client_dead (see the serve loop), so the table is sized
+// for concurrent clients, not lifetime registrations.
+const max_clients = 64;
 const LClient = struct { used: bool = false, badge: u64 = 0, req_va: u64 = 0, req_len: usize = 0 };
 var clients: [max_clients]LClient = @splat(.{});
 var next_badge: u64 = 2;
-const max_badge: u64 = 250;
+const max_badge: u64 = std.math.maxInt(u64) - 1;
 
 fn clientFor(badge: u64) ?*LClient {
     for (&clients) |*c| if (c.used and c.badge == badge) return c;
@@ -151,6 +153,14 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     while (true) {
         const r = usys.recvMsg(chan_h);
         if (r.err == .peer_dead) usys.exit(0);
+        if (r.err == .client_dead) {
+            if (clientFor(r.badge)) |c| {
+                if (c.req_va != 0) _ = usys.shmUnmap(c.req_va);
+                c.* = .{};
+                _ = usys.log(glog, "localesvc: client reclaimed");
+            }
+            continue;
+        }
         if (r.err != .ok) continue;
         const req = shared.decodeMsg(shared.LocaleReq, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
@@ -170,6 +180,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
                 }
                 next_badge += 1;
                 _ = usys.replyTyped(shared.LocaleResp, chan_h, .registered, minted.data[1]);
+                // The reply copied the endpoint. Keeping our copy would hold
+                // the badge's side open forever, so the kernel could never
+                // report client_dead and the slot would never free.
+                _ = usys.capDrop(minted.data[1]);
             },
             .attach_buf => {
                 if (r.cap == 0) {

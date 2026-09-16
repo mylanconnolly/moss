@@ -15,9 +15,10 @@ done without rediscovering the sharp edges.
   the kernel follows `-Doptimize` (Debug default — ReleaseFast kernel is
   untested territory). Benchmark numbers are meaningless from a Debug
   userspace; that mistake cost a 5x mystery once.
-- `zig build check` is the gate: 23 OS tests under QEMU plus host unit
+- `zig build check` is the gate: every drill in build.zig's `variants` list under QEMU plus host unit
   tests, then the kernel-heavy drills once more under a **ReleaseSafe
-  kernel** (the `+rs` rows) — about two minutes. Run it before
+  kernel** (the `+rs` rows), several drills at a time (`-Djobs=N`,
+  default cores/4; `-Djobs=1` for flake hunts). Run it before
   committing. Logs land in `zig-out/check/` (`<name>-1.log`,
   `<name>+rs-1.log`). `-Donly=fs,ipc+rs` runs just those; `-Dsoak=10`
   runs each test ten times and stops at the first failure, leaving its
@@ -31,7 +32,7 @@ done without rediscovering the sharp edges.
   it, else TCG) from a directory QEMU exposes as a FAT volume; it wants
   Limine's `BOOTX64.EFI` (`-Dlimine=DIR`, default the host's share dir)
   and the x86_64 OVMF images beside QEMU (`-Dovmf`, `-Dovmf-vars`).
-  `zig build -Darch=x86_64 check` runs all twenty-three drills and the
+  `zig build -Darch=x86_64 check` runs every drill and the
   six `+rs` rows on the port the same way, plus the host tests; add
   `-Dtcg` to leave KVM out (QEMU's own emulation — slower, the CPU
   model `max` with what TCG has: no TSC-deadline timer, no PCIDs, no

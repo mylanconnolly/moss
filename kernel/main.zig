@@ -220,6 +220,16 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.display_test) {
+        _ = sched.spawn("boot-watch", displayTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+    if (build_options.largetext_test) {
+        _ = sched.spawn("boot-watch", largetextTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.fabgui_test) {
         _ = sched.spawn("boot-watch", fabguiTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -868,6 +878,19 @@ fn guishellTestWorker(_: u64) void {
 /// view is read-only and the settings app's system pane is not editable.
 fn guishellroTestWorker(_: u64) void {
     systemDrill("guishellro");
+}
+/// The display-settings drill: bob's desktop again, but the host drives
+/// live resolution changes through Settings (preview, expiry rollback,
+/// keep, the saved mode restored by a dock restart). Split out of
+/// guishellro so each desktop drill stays well inside the 60s watchdog.
+fn displayTestWorker(_: u64) void {
+    systemDrill("display");
+}
+/// The large-text drill: bob's desktop at the maximum text scale on the
+/// smallest output — Settings scrolls, and the Editor's menus work behind
+/// resident chrome. Split out of guishellro for the same reason.
+fn largetextTestWorker(_: u64) void {
+    systemDrill("largetext");
 }
 
 /// The fabric GUI drill: node 2 (profile "fabgui") runs a GUI whose app

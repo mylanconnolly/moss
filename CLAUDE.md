@@ -8,12 +8,13 @@ frontier — every unstarted arc and every residual, kept current; the
 
 ## Commands
 
-- `zig build check` — THE gate: 24 OS tests under QEMU, 6 of them again
-  under a ReleaseSafe kernel (`+rs` rows), + host unit tests; ~2 min on
-  the M3, ~4 on x86_64 (aarch64 TCG only); the net drill needs
-  `openssl` on PATH. Run
-  before every commit. Failure logs: `zig-out/check/*.log`.
-  `-Donly=a,b+rs` for a subset, `-Dsoak=N` to repeat (flaky hunts).
+- `zig build check` — THE gate: every drill in build.zig's `variants`
+  list under QEMU (63 today), 6 of them again under a ReleaseSafe kernel
+  (`+rs` rows), + host unit tests; drills run 3 at a time on the M3
+  (`-Djobs=N`, default cores/4), ~2 min; the net drill needs `openssl`
+  on PATH. Run before every commit. Failure logs: `zig-out/check/*.log`.
+  `-Donly=a,b+rs` for a subset, `-Dsoak=N` to repeat (flaky hunts),
+  `-Djobs=1` to take contention out of a hang before reading its dump.
 - `zig build test` — host unit tests only (shared ABI, dt parser, rings,
   lib/ lz4+xts+fabcert+mshl+usercred+settings, the full mossfs suite incl.
   crash sweeps).

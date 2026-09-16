@@ -28,7 +28,13 @@ needs (a scratch disk, a user-mode network, a cluster of nodes, console
 sockets), points the serial port at a log file, and watches that file.
 The `net` drill also needs `openssl` on the host's PATH (LibreSSL's or
 OpenSSL's): the runner serves TLS with it at `127.0.0.1:31910` for the
-script's `https` steps.
+script's `https` steps. Drills run several at a time (`-Djobs=N`,
+default a quarter of the cores, at most 4): each worker thread is a
+*port slot*, slot 0 with the historical ports (31901..31914) and slot s
+adding s×20, so concurrent drills never share a host port, log, disk
+or screenshot. The two ports the *guest* dials (the TLS server at
+31910, the locale fixture at 31912) cannot move with the slot, so the
+`net` and `localeupd` drills serialize behind a mutex instead.
 
 ```mermaid
 flowchart LR
@@ -142,7 +148,10 @@ flowchart TD
 ```
 
 `-Dsoak=N` becomes `--repeat N`: the runner runs each drill N times and
-stops that drill at its first failure. `-Donly=a,b` becomes `--only`:
+stops that drill at its first failure (the repeats of one label run back
+to back in one worker). `-Djobs=N` becomes `--jobs N`, the number of
+drills in flight; `-Djobs=1` is the sequential mode — use it when hunting
+a hang, so contention is not a factor in what the dump shows. `-Donly=a,b` becomes `--only`:
 labels not listed are skipped, and a bare name matches both its Debug
 and its `+rs` row. On any failure the runner copies the run's log to
 `<label>-failed.log`, which no later run overwrites — a failure that

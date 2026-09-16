@@ -817,6 +817,12 @@ fn drainPaste() void {
 fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
     var out_va: u64 = 0; // the client's console buffer (write source / read sink)
     var out_len: u64 = 0;
+    // A parked read: its caller's token, answered when a key arrives.
+    // Every reply below goes by token, never token 0 — token 0 means "the
+    // oldest pending caller", and while a read is parked that IS the
+    // parked read, so a second caller's reply (a write, a refused read)
+    // would land on the shell and the real caller would hang. gpusvc paid
+    // for this rule first; the terminal serves the same shape.
     var pending_read: u64 = 0;
     _ = usys.log(log_h, "term: console up");
     while (true) {
@@ -840,7 +846,7 @@ fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
         if (r.err != .ok) continue;
         const req = shared.decodeMsg(shared.ConsReq, r.data) orelse {
             if (r.cap != 0) _ = usys.capDrop(r.cap);
-            _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 1 } }, 0);
+            _ = usys.replyTypedTo(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 1 } }, 0, r.token);
             continue;
         };
         switch (req) {
@@ -854,29 +860,29 @@ fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
                     }
                     _ = usys.capDrop(r.cap);
                 }
-                _ = usys.replyTyped(shared.ConsResp, chan_h, .ok, 0);
+                _ = usys.replyTypedTo(shared.ConsResp, chan_h, .ok, 0, r.token);
             },
             .write => |w| {
                 if (out_va == 0 or w.len > out_len) {
-                    _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 2 } }, 0);
+                    _ = usys.replyTypedTo(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 2 } }, 0, r.token);
                     continue;
                 }
                 const src: [*]const u8 = @ptrFromInt(out_va);
                 writeText(src[0..w.len]);
                 render();
                 push();
-                _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .n = .{ .n = w.len } }, 0);
+                _ = usys.replyTypedTo(shared.ConsResp, chan_h, .{ .n = .{ .n = w.len } }, 0, r.token);
             },
             .read => |q| {
                 // One keystroke, handed to the client's buffer. A shell
                 // reads a character at a time, so one per read is its rhythm.
                 if (out_va == 0 or out_len == 0 or q.max == 0) {
-                    _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0);
+                    _ = usys.replyTypedTo(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0, r.token);
                     continue;
                 }
                 if (windowed_mode) {
                     if (pending_read != 0) {
-                        _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0);
+                        _ = usys.replyTypedTo(shared.ConsResp, chan_h, .{ .cons_err = .{ .code = 3 } }, 0, r.token);
                     } else pending_read = r.token;
                     continue;
                 }
@@ -887,7 +893,7 @@ fn serveConsole(log_h: u64, chan_h: u64, windowed_mode: bool) noreturn {
                     dst[0] = ch;
                     n = 1;
                 }
-                _ = usys.replyTyped(shared.ConsResp, chan_h, .{ .n = .{ .n = n } }, 0);
+                _ = usys.replyTypedTo(shared.ConsResp, chan_h, .{ .n = .{ .n = n } }, 0, r.token);
             },
         }
     }
