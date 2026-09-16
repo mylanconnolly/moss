@@ -156,6 +156,11 @@ const specs = [_]Spec{
 };
 
 const check_dir = "zig-out/check";
+/// The display drills' GPU: the boot-time scanout the desktop starts on.
+const gpu_device = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
+/// The launcher lists every `app:` unit of the session template
+/// (boot/conf/sessiongui): five today. A new app changes this once.
+const launcher_ready_line = "launcher: ready count=5";
 
 // Host TCP ports. Drills run concurrently (`--jobs`, one worker thread
 // per QEMU), so every host port is per worker slot: slot 0 keeps the
@@ -499,7 +504,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // "both" verification) and inject input.
         .gpu, .term, .comp => try args.appendSlice(gpa, &.{
             "-device",
-            "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
+            gpu_device,
             "-qmp",
             try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
         }),
@@ -522,7 +527,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
         .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo, .cascade => try args.appendSlice(gpa, &.{
-            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
+            "-device", gpu_device,
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
@@ -531,7 +536,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // to render on and a keyboard to type into, plus QMP to type and
         // screendump.
         .seat, .focus, .trust, .readers, .gui, .guilogin, .gtrust => try args.appendSlice(gpa, &.{
-            "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
+            "-device", gpu_device,
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
         }),
@@ -541,7 +546,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // volume, and QMP to type and screendump.
         .gseat, .gsession, .lconsole, .gisession, .gboom => {
             try args.appendSlice(gpa, &.{
-                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
+                "-device", gpu_device,
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
             });
@@ -552,7 +557,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // after the keyboard) rides along for a working cursor.
         .guishell, .guishellro, .display, .largetext, .explorer, .terminal, .editor => {
             try args.appendSlice(gpa, &.{
-                "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
+                "-device", gpu_device,
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
@@ -1319,7 +1324,7 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(120);
     _ = q.screendump(check_dir ++ "/editor-flush-restored.ppm");
     const rounded = readPpm(check_dir ++ "/editor-flush-restored.ppm") orelse return sfail(spec, log_path, "read rounded Editor screenshot");
-    const ground = pixelAt(rounded, original[0] - 1, original[1]);
+    const ground = pixelAt(rounded, original[0] -| 1, original[1]);
     for ([_][2]usize{ .{ original[0], original[1] }, .{ original[0] + original[2] - 1, original[1] }, .{ original[0], original[1] + original[3] - 1 }, .{ original[0] + original[2] - 1, original[1] + original[3] - 1 } }) |corner| {
         if (!std.mem.eql(u8, &ground, &pixelAt(rounded, corner[0], corner[1]))) return sfail(spec, log_path, "rounded corner did not reveal desktop");
     }
@@ -2874,7 +2879,7 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(150);
     if (countOccurrences(readLog(log_path), "dock: closed") != 0) return sfail(spec, log_path, "Escape dismissed resident dock");
     if (!q.chord("meta_l", "spc")) return false;
-    if (!try waitLogN(log_path, "launcher: ready count=5", 1, "global app launcher did not open", spec, polls)) return false;
+    if (!try waitLogN(log_path, launcher_ready_line, 1, "global app launcher did not open", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/launcher.ppm");
     if (!q.typeText("zzzz")) return false;
     sleepMs(120);
@@ -2892,12 +2897,12 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "editor: ready", 3, "launcher did not start Editor", spec, polls)) return false;
     // Repeated invocation restores the existing app; Escape restores input.
     if (!q.chord("meta_l", "spc")) return false;
-    if (!try waitLogN(log_path, "launcher: ready count=5", 2, "launcher did not reopen", spec, polls)) return false;
+    if (!try waitLogN(log_path, launcher_ready_line, 2, "launcher did not reopen", spec, polls)) return false;
     if (!q.typeText("editor") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "launcher: activate medit", 2, "launcher did not restore Editor", spec, polls)) return false;
     if (countOccurrences(readLog(log_path), "editor: ready") != 3) return sfail(spec, log_path, "launcher duplicated running Editor");
     if (!q.chord("meta_l", "spc")) return false;
-    if (!try waitLogN(log_path, "launcher: ready count=5", 3, "launcher could not reopen for menu shortcut", spec, polls)) return false;
+    if (!try waitLogN(log_path, launcher_ready_line, 3, "launcher could not reopen for menu shortcut", spec, polls)) return false;
     const launcher_popups = countOccurrences(readLog(log_path), "topbar: popup at");
     if (!q.sendKey("f10")) return false;
     if (!try waitLogN(log_path, "launcher: dismissed", 3, "F10 did not dismiss launcher", spec, polls)) return false;
@@ -2911,7 +2916,7 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.sendKey("esc")) return false;
     sleepMs(150);
     if (!q.chord("meta_l", "spc")) return false;
-    if (!try waitLogN(log_path, "launcher: ready count=5", 4, "launcher could not be dismissed", spec, polls)) return false;
+    if (!try waitLogN(log_path, launcher_ready_line, 4, "launcher could not be dismissed", spec, polls)) return false;
     if (!q.sendKey("esc")) return false;
     if (!try waitLogN(log_path, "launcher: dismissed", 4, "Escape did not dismiss launcher", spec, polls)) return false;
     if (!q.chord2("shift", "meta_l", "w")) return false;
@@ -3998,7 +4003,7 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args2.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
+        "-device", gpu_device,
         "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
         "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
     });
@@ -4072,7 +4077,7 @@ fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args2.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-        "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024",
+        "-device", gpu_device,
         "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
         "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
         "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
@@ -4971,10 +4976,10 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     if (!try waitLogN(log_path, "topbar: active Editor token=", 1, "editor did not publish global menus", spec, polls)) return false;
     sleepMs(200);
     _ = q.screendump(check_dir ++ "/menubar-300-1024.ppm");
-    const launcher_ready = countOccurrences(readLog(log_path), "launcher: ready count=5");
+    const launcher_ready = countOccurrences(readLog(log_path), launcher_ready_line);
     const launcher_dismissed = countOccurrences(readLog(log_path), "launcher: dismissed");
     if (!q.chord("meta_l", "spc")) return false;
-    if (!try waitLogN(log_path, "launcher: ready count=5", launcher_ready + 1, "large-text launcher did not open", spec, polls)) return false;
+    if (!try waitLogN(log_path, launcher_ready_line, launcher_ready + 1, "large-text launcher did not open", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/launcher-300-1024.ppm");
     if (!q.sendKey("esc")) return false;
     if (!try waitLogN(log_path, "launcher: dismissed", launcher_dismissed + 1, "large-text launcher did not dismiss", spec, polls)) return false;
