@@ -426,6 +426,15 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   recorded at each `recv`), but a stranger's slow channel still blocks
   the caller — the check is the service's job. Paid for by the document
   broker (2026-09-16).
+- Kernel lock order, outermost first: notification → channel →
+  `domain.slots_lock` → thread → run queue. `domain.spawn` holds
+  `slots_lock` (IRQs masked) across the slot's reservation *and* the
+  child's first enqueue (`sched.spawn`: pmem, `threads_lock`, the
+  thread's lock, the run queue and its SGI), and `releaseSlotIfUnreferenced`
+  is reachable under a channel lock through `ipc.releaseCap`. Nothing takes
+  `slots_lock` under a thread or run-queue lock, and nothing logs under
+  any of them. The hang dump prints `.constructing` slots too: a spawn
+  stuck between reservation and publish is the state to look for.
 - A service never waits on a human. A dialog lives in its own process
   that *pulls* jobs from the service (a parked call answered when work
   arrives) and reports back with another call; the service defers the

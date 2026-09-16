@@ -347,6 +347,10 @@ fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
             domain.Error.QuotaExceeded => .no_space,
             domain.Error.BadImage => .bad_arg,
             domain.Error.CoresBusy => .busy,
+            // A child refused because its parent is being revoked is a
+            // death, not a budget: a session manager must not read a
+            // logout race as "out of memory".
+            domain.Error.ParentDying => .peer_dead,
             else => .no_space,
         });
     };
@@ -721,10 +725,13 @@ fn sysShmMap(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const handle: shared.Handle = @bitCast(frame.arg(0));
     const obj = d.captable.?.lookup(handle, .shm) orelse return errno(.bad_handle);
     const s: *ipc.Shm = @ptrFromInt(obj);
-    const va = domain.mapShm(d, s) catch |e| return errno(switch (e) {
-        domain.Error.NoMapSlots => .no_space,
-        else => .no_space,
-    });
+    const va = domain.mapShm(d, s) catch |e| {
+        // Log the chain: "the Nth window silently won't open" has cost
+        // days before. A domain has max_mappings windows; the compositor's
+        // 1920x1200 framebuffer alone takes 36 of them.
+        if (e == domain.Error.NoMapSlots) log.info("domain {s}#{d}: out of mapping windows ({d})", .{ d.name, d.id, domain.max_mappings });
+        return errno(.no_space);
+    };
     frame.set(1, va);
     frame.set(2, s.npages); // so services can bound IO by the real window
     return errno(.ok);

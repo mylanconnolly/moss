@@ -35,7 +35,17 @@ const trace = @import("trace.zig");
 const max_channels = 64;
 const max_notifications = 64;
 const max_shms = 64;
-pub const shm_max_pages = shared.display.max_pages; // largest supported output/surface backing
+/// The largest shared buffer, in pages: 2250 (about 8.8 MB) — a full
+/// scanout surface at 1920x1200x4 (the compositor's framebuffer, and a
+/// maximized window there); before that a program stage — msh, with every
+/// command module and the mshl interpreter — crossed 1M, and the blk data
+/// window needs 8 x 32K slots. Kernel-owned: `Shm.pages` is sized by it in
+/// the static shm table (64 entries, ~1.15 MB), so a bigger display mode
+/// must raise it here deliberately, not by editing the catalog.
+pub const shm_max_pages = 2250;
+comptime {
+    std.debug.assert(shm_max_pages >= shared.display.max_pages);
+}
 
 pub const Side = enum { a, b };
 

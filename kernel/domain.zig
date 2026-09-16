@@ -699,7 +699,9 @@ pub fn destroy(d: *Domain) void {
 /// thread dump: a dying domain that never drains names its leak.
 pub fn debugDump() void {
     for (&domains) |*d| {
-        if (d.state == .unused or d.state == .constructing) continue;
+        // A slot still constructing is exactly the state a stuck spawn
+        // leaves behind; it belongs in the hang dump.
+        if (d.state == .unused) continue;
         log.info("domain {s}#{d}: {t} threads_alive={d} ctl_refs={d} auto_reap={} parent={s} exit={d}", .{
             d.name,                            d.id,
             d.state,                           d.threads_alive.load(.acquire),
