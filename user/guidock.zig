@@ -80,8 +80,9 @@ fn renderDock(tree: Value) void {
         if (dock_nitems < dock_items.len) {
             // Log a pill's running state only when it flips (never the
             // first render's baseline), so a launch lights the dot and an
-            // exit clears it observably (the view polls `unit-up` each tick)
-            // without spamming every tick.
+            // exit clears it observably (the view reads `apps` each tick,
+            // whose running flag is init's live reading) without spamming
+            // every tick.
             if (dock_running_known and dock_items[dock_nitems].running != running) {
                 var rb: [64]u8 = undefined;
                 _ = usys.log(core.log_h, std.fmt.bufPrint(&rb, "dock: running {s}={}", .{ unit, running }) catch "dock: running");
