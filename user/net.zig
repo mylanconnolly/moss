@@ -1208,16 +1208,18 @@ fn configureAtBoot(f: *Iface) void {
         return;
     }
     var cfg: shared.IfaceConfig = .{};
-    if (cluster_node != 0) {
-        if (f.index == 0) {
-            cfg = .{ .mode = .static, .ip4 = shared.nodeIp4(cluster_node), .prefix4 = 24, .ip6 = addrFromWords(0xfdcc_0000_0000_0000, cluster_node), .prefix6 = 64 };
-            f.bcast_delivery = true;
-        }
+    if (f.index == 0 and cluster_node != 0) {
+        // The cluster segment: the node's fixed address, for the fabric.
+        cfg = .{ .mode = .static, .ip4 = shared.nodeIp4(cluster_node), .prefix4 = 24, .ip6 = addrFromWords(0xfdcc_0000_0000_0000, cluster_node), .prefix6 = 64 };
+        f.bcast_delivery = true;
     } else if (f.index == 0) {
         // Slirp serves DHCP (and hands out 10.0.2.15 first); the v6 side
         // stays static — no router advertisements are read yet.
         cfg = .{ .mode = .dhcp, .ip6 = addrFromWords(shared.net_own_ip6[0], shared.net_own_ip6[1]), .prefix6 = 64, .gw6 = addrFromWords(shared.net_gw_ip6[0], shared.net_gw_ip6[1]) };
     } else {
+        // Any further NIC, in either mode, asks for a lease: a cluster
+        // node's second NIC on a user network is how the desktop reaches
+        // out (it came up `off` before 2026-09-17, and Settings showed it).
         cfg = .{ .mode = .dhcp };
     }
     applyConfig(f, cfg);

@@ -1055,6 +1055,12 @@ pub fn build(b: *std.Build) void {
         // the app (or Ctrl-C here) ends it. Kernel log:
         // zig-out/gui-run-kernel.log. (VNC was the workaround when the
         // scanout was a tiny 640x480 that cocoa clipped into a corner.)
+        // Two NICs, so the Network tab has both kinds to show: net0 on the
+        // cluster segment (the socket netdev run-cluster's node 1 listens
+        // on, so the guishell profile's fabric address 10.77.0.1 is real
+        // and a second node could join), net1 on QEMU's user network,
+        // which the service leases by DHCP (10.0.2.15, outbound through
+        // the host). Both persist what Settings applies, on the disk.
         const script = b.fmt(
             \\set -e
             \\test -f zig-out/gui-disk.img || dd if=/dev/zero of=zig-out/gui-disk.img bs=1048576 count=64 2>/dev/null
@@ -1063,6 +1069,10 @@ pub fn build(b: *std.Build) void {
             \\exec qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 \
             \\  -smp 4 -m 512M -nic none \
             \\  -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
+            \\  -netdev socket,id=n0,listen=127.0.0.1:31337 \
+            \\  -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0 \
+            \\  -netdev user,id=n1 \
+            \\  -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n1 \
             \\  -device {s} \
             \\  -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
             \\  -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on \

@@ -126,7 +126,12 @@ the status) and only an administrator's session the control endpoint;
 anyone else sees the tab read-only, with "An administrator manages
 network settings." The `guishell` drill applies a static address as
 alice and reads the service's reconfiguration and the save; the
-`guishellro` drill checks bob sees no Apply.
+`guishellro` drill checks bob sees no Apply. The interactive desktop
+(`zig build run-gui -Dgui-profile=guishell`) boots with two NICs so the
+tab has both kinds to show: net0 on the cluster segment (static
+10.77.0.1, the fabric's node address) and net1 on QEMU's user network
+(DHCP, 10.0.2.15); the disk image keeps what Settings applies across
+runs.
 
 ### Network views
 

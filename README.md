@@ -53,6 +53,10 @@ On macOS, `zig build run-gui -Dgui-profile=guishell` opens the desktop
 moves between form controls and completes commands in the terminal.
 Alt-Tab switches windows; Shift-Tab moves backwards through a form.
 Terminal arrows browse history and move the cursor; Home/End/Delete work too.
+The desktop boots with two NICs: net0 on the cluster segment (static
+10.77.0.1, the address a second `run-cluster` node would dial) and net1 on
+QEMU's user network, leased by DHCP (10.0.2.15, outbound through the host).
+Settings → Network shows both; what it applies persists on the disk image.
 
 `zig build run-gui -Dgui-profile=gui` opens the component gallery. It uses
 shared sections, wrapping rows, buttons (including an inert disabled state),
