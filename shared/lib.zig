@@ -274,13 +274,15 @@ pub const DomainRec = struct {
     exit_code: u64,
     kobj_kb: u64, // used KB << 32 | limit KB
     user_kb: u64, // used KB << 32 | limit KB
-    /// Last period's CPU spend in permille of one core << 32 | the
-    /// domain's permille limit (0 = none) | its partition core mask << 16.
-    cpu: u64,
+    /// The CPU budget: the domain's permille limit (0 = none) | its
+    /// partition core mask << 16. (Until 2026-09-17 the high word carried
+    /// the last budget period's spend, which only ticked for a domain
+    /// with a budget and read zero for everything else; `cpu_total` is
+    /// the spend.)
+    cpu_budget: u64,
     /// The parent domain's id (0 for root), so a reader can draw the tree.
     parent: u32 = 0,
-    /// Lifetime CPU cycles: two readings give a rate over any interval,
-    /// where `cpu` only ticks for a domain with a budget.
+    /// Lifetime CPU cycles: two readings give a rate over any interval.
     cpu_total: u64 = 0,
 
     pub const size = 72;
@@ -295,7 +297,7 @@ pub const DomainRec = struct {
         std.mem.writeInt(u64, out[24..32], r.exit_code, .little);
         std.mem.writeInt(u64, out[32..40], r.kobj_kb, .little);
         std.mem.writeInt(u64, out[40..48], r.user_kb, .little);
-        std.mem.writeInt(u64, out[48..56], r.cpu, .little);
+        std.mem.writeInt(u64, out[48..56], r.cpu_budget, .little);
         std.mem.writeInt(u32, out[56..60], r.parent, .little);
         @memset(out[60..64], 0);
         std.mem.writeInt(u64, out[64..72], r.cpu_total, .little);
@@ -310,7 +312,7 @@ pub const DomainRec = struct {
             .exit_code = std.mem.readInt(u64, b[24..32], .little),
             .kobj_kb = std.mem.readInt(u64, b[32..40], .little),
             .user_kb = std.mem.readInt(u64, b[40..48], .little),
-            .cpu = std.mem.readInt(u64, b[48..56], .little),
+            .cpu_budget = std.mem.readInt(u64, b[48..56], .little),
             .parent = std.mem.readInt(u32, b[56..60], .little),
             .cpu_total = std.mem.readInt(u64, b[64..72], .little),
         };
@@ -334,14 +336,14 @@ test "DomainRec codec round trip" {
         .exit_code = 0,
         .kobj_kb = (123 << 32) | 1024,
         .user_kb = (2048 << 32) | 4096,
-        .cpu = (250 << 32) | 500,
+        .cpu_budget = 500 | (0xf << 16),
         .parent = 3,
         .cpu_total = 1 << 40,
     };
     var buf: [DomainRec.size]u8 = undefined;
     r.encode(&buf);
     const d = DomainRec.decode(&buf);
-    try std.testing.expectEqual(r.cpu, d.cpu);
+    try std.testing.expectEqual(r.cpu_budget, d.cpu_budget);
     try std.testing.expectEqual(r.parent, d.parent);
     try std.testing.expectEqual(r.cpu_total, d.cpu_total);
     try std.testing.expectEqual(r.id, d.id);

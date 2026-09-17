@@ -37,7 +37,7 @@ export fn umain(_: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
     }
     var res = result.Result.init();
     const a = res.allocator();
-    const cols = [_][]const u8{ "id", "name", "state", "threads", "kobj_kb", "kobj_max", "user_kb", "user_max", "cpu_pm", "cpu_max" };
+    const cols = [_][]const u8{ "id", "name", "state", "threads", "kobj_kb", "kobj_max", "user_kb", "user_max", "cpu_ms", "cpu_max" };
     const rows = a.alloc([]const mshl.Value, r.data[0]) catch usys.exit(2);
     for (0..r.data[0]) |i| {
         const rec = shared.DomainRec.decode(recs[i * shared.DomainRec.size ..][0..shared.DomainRec.size]);
@@ -54,8 +54,10 @@ export fn umain(_: u64, chan_h: u64, _: u64) callconv(.c) noreturn {
         row[5] = .{ .int = @intCast(rec.kobj_kb & 0xffff_ffff) };
         row[6] = .{ .int = @intCast(rec.user_kb >> 32) };
         row[7] = .{ .int = @intCast(rec.user_kb & 0xffff_ffff) };
-        row[8] = .{ .int = @intCast(rec.cpu >> 32) };
-        row[9] = .{ .int = @intCast(rec.cpu & 0xffff) };
+        // Lifetime CPU in milliseconds (a one-shot tool has no interval to
+        // rate over) and the budget in permille of one core.
+        row[8] = .{ .int = @intCast(rec.cpu_total / @max(usys.cycleHz() / 1000, 1)) };
+        row[9] = .{ .int = @intCast(rec.cpu_budget & 0xffff) };
         rows[i] = row;
     }
     const table: mshl.Value = .{ .table = .{ .cols = &cols, .rows = rows } };
