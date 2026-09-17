@@ -13,6 +13,7 @@
   give: [
     { tag: init, self: true }
     { tag: display, unit: compositor-ptr }
+    { tag: display_control, unit: compositor-ptr, control: true }
     { tag: font, unit: fontsvc }
   ]
 }

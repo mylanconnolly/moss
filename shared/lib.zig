@@ -988,6 +988,14 @@ pub const GpuReq = union(enum(u64)) {
     /// `kind` 3 restore event so it repaints. -> ok when one matched, else
     /// `gpu_err` (nothing by that title) so the dock launches instead.
     restore_titled: struct { a: u64, b: u64 },
+    /// Ask the window titled `a`/`b` to close: its owner receives the
+    /// same `close_window` key the red dot or Cmd-W sends, through the
+    /// menu-key slot, and decides for itself (an editor asks about unsaved
+    /// work). The task manager's Quit, before Force Quit. Only the
+    /// display-control badge may ask, and never of a trusted surface. ->
+    /// ok, or `gpu_err` 14 (no such title), 22 (a key already queued),
+    /// 25 (not the control badge, or a trusted surface).
+    close_titled: struct { a: u64, b: u64 },
     /// Earn a uniquely-badged channel so several windows from different
     /// processes are told apart (their surfaces and input readers are keyed
     /// by badge). An ordinary GUI client registers once on start and drives

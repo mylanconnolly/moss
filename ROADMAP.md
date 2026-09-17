@@ -201,12 +201,11 @@ client-defined menu schemas, nested submenus, and scrollable overflow when
 applications need menus beyond those profiles.
 
 **Activity follow-ons (2026-09-17).** The task manager shows a session's
-own units, the machine's totals, and (an administrator) every domain.
-Next: a **graceful quit** before Force Quit — a close request routed
-through the compositor's app-menu path, which only chrome may invoke
-today; per-unit CPU history in the table (the `chart` widget exists; the
-history would be init's or the app's to keep); lists that grow with a
-maximized window (a vertical-fill rule in the layout engine).
+own units, the machine's totals, and (an administrator) every domain,
+and can ask a window to close before forcing it. Next: per-unit CPU
+history in the table (the `chart` widget exists; the history would be
+init's or the app's to keep); lists that grow with a maximized window
+(a vertical-fill rule in the layout engine).
 
 **Follow-ons from the project assessment (2026-09-12)**
 
@@ -1535,6 +1534,9 @@ maximized window (a vertical-fill rule in the layout engine).
   widget, and the rule that a session init honours an `introspect` grant
   only for an administrator's session (usersvc marks it). Found:
   `mshl.toValue` recursed forever on a string literal's array pointer.
+  Then Quit: the compositor's `close_titled` hands a window the
+  close_window key under the display-control badge; `quit-window`; the
+  drill quits Alpha (it closes itself) and force-quits Beta.
 - ✅ **Shut down and restart** (2026-09-16): the system menu's Restart and
   Shut Down (with rules between groups) climb the init tree as one
   `InitRequest.power` — bar → session init → session manager → system init

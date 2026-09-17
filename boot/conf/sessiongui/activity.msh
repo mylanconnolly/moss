@@ -15,6 +15,7 @@
   give: [
     { tag: init, self: true }
     { tag: display, session: true }
+    { tag: display_control, session: true }
     { tag: font, session: true }
   ]
 }

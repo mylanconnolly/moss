@@ -3,11 +3,12 @@
 # compositor; the drill drags one, clicks the other to raise it, and closes
 # both by their traffic-light dots. Essential: the boot follows them.
 {
+  app:       { name: "Beta", description: "The desktop drill's second window", icon: squares-four, window: "Beta", dock: false, order: 901 }
   image:     mshrun
   script:    scripts/win-beta.msh
   grant:     [log, bootfs]
   budget:    { user: 24mb }
-  profiles:  [desktop]
+  profiles:  [desktop, activity]
   essential: true
   give: [
     { tag: display, unit: compositor-ptr }

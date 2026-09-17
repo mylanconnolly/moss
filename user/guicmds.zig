@@ -161,6 +161,14 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "restore-window")) {
         return .{ .params = &.{.{ .name = "title", .shape = .string }}, .ret = restore_result };
     }
+    // `quit-window TITLE` asks the running window with that title to close
+    // itself — the close_window key its app handles like the red dot or
+    // Cmd-W, so an editor may ask about unsaved work. Needs the display
+    // control cap (the task manager's Quit, before Force Quit). `ok` when
+    // the request was accepted; the app decides what happens next.
+    if (std.mem.eql(u8, name, "quit-window")) {
+        return .{ .params = &.{.{ .name = "title", .shape = .string }}, .ret = restore_result };
+    }
     return null;
 }
 
@@ -1726,6 +1734,29 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             try it.mkResult(true, .{ .str = try it.arena.dupe(u8, args[0].str) })
         else
             try it.mkResult(false, .{ .str = "not running" });
+    }
+    if (std.mem.eql(u8, name, "quit-window")) {
+        if (output_control == 0) return it.fail("quit-window: this program holds no display control", .{});
+        if (args.len == 0 or args[0] != .str) return it.fail("quit-window: a window title expected", .{});
+        const w = shared.strToWords(args[0].str);
+        const why: []const u8 = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .{ .close_titled = .{ .a = w[0], .b = w[1] } }, 0)) {
+            .ok => |r| switch (r) {
+                .ok => "",
+                .gpu_err => |e| switch (e.code) {
+                    14 => "not running",
+                    22 => "already asked",
+                    else => "not allowed",
+                },
+                else => "not allowed",
+            },
+            .err => "no display",
+        };
+        var l: [64]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&l, "activity: quit {s} ok={}", .{ args[0].str, why.len == 0 }) catch "activity: quit");
+        return if (why.len == 0)
+            try it.mkResult(true, .{ .str = try it.arena.dupe(u8, args[0].str) })
+        else
+            try it.mkResult(false, .{ .str = why });
     }
     if (!std.mem.eql(u8, name, "gui")) return null;
     const spec: mshl.Record = if (args.len > 0 and args[0] == .record)

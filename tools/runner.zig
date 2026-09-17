@@ -72,7 +72,7 @@ const specs = [_]Spec{
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "listdemo", .kind = .listdemo, .pass = "listdemo-test: PASS", .extra = "gui: list items", .append = "profile=listdemo", .timeout_s = 120 },
     .{ .name = "explorer", .kind = .explorer, .pass = "explorer-test: PASS", .extra = "gui: list files", .append = "profile=explorer", .timeout_s = 120 },
-    .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-alpha ok=true", .always_extra = "init: stopped by request: win-alpha", .extra2 = "activity: win-alpha running=false", .append = "profile=activity", .timeout_s = 120 },
+    .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-beta ok=true", .always_extra = "init: stopped by request: win-beta", .extra2 = "win-alpha: closed", .append = "profile=activity", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
@@ -1224,33 +1224,49 @@ fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "could not parse the table's geometry", log_path);
         return false;
     };
-    const row = activityRow(readLog(log_path), "win-alpha") orelse {
-        reportFailure(spec.name, "win-alpha has no row in the table", log_path);
-        return false;
-    };
     var q = qmpConnect(qmpPort()) catch {
         reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
         return false;
     };
     defer q.close();
     _ = q.screendump(check_dir ++ "/activity.ppm");
+    // Quit: win-alpha is asked to close and closes itself, like Cmd-W.
+    const row = activityRow(readLog(log_path), "win-alpha") orelse {
+        reportFailure(spec.name, "win-alpha has no row in the table", log_path);
+        return false;
+    };
     if (!clickScanout(&q, g[0], g[1] + g[2] * row + g[2] / 2)) return sfail(spec, log_path, "click win-alpha's row");
     sleepMs(400);
     const quit = widgetCenter(readLog(log_path), "quit") orelse {
+        reportFailure(spec.name, "no Quit button was logged", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, quit[0], quit[1])) return sfail(spec, log_path, "click Quit");
+    if (!try waitLogN(log_path, "activity: quit Alpha ok=true", 1, "the quit request was not accepted", spec, polls)) return false;
+    if (!try waitLogN(log_path, "win-alpha: closed", 1, "win-alpha did not close itself", spec, polls)) return false;
+    if (!try waitLogN(log_path, "activity: win-alpha running=false", 1, "the table never showed win-alpha down", spec, polls)) return false;
+    // Force Quit: win-beta is destroyed by init, through the confirm step.
+    const row_b = activityRow(readLog(log_path), "win-beta") orelse {
+        reportFailure(spec.name, "win-beta has no row in the table", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, g[0], g[1] + g[2] * row_b + g[2] / 2)) return sfail(spec, log_path, "click win-beta's row");
+    sleepMs(400);
+    const force = widgetCenter(readLog(log_path), "force") orelse {
         reportFailure(spec.name, "no Force Quit button was logged", log_path);
         return false;
     };
-    if (!clickScanout(&q, quit[0], quit[1])) return sfail(spec, log_path, "click Force Quit");
-    if (!try waitLogN(log_path, "gui: widget confirm-quit at", 1, "the confirm step never appeared", spec, polls)) return false;
+    if (!clickScanout(&q, force[0], force[1])) return sfail(spec, log_path, "click Force Quit");
+    if (!try waitLogN(log_path, "gui: widget confirm-force at", 1, "the confirm step never appeared", spec, polls)) return false;
     sleepMs(300);
-    const confirm = widgetCenter(readLog(log_path), "confirm-quit") orelse {
+    const confirm = widgetCenter(readLog(log_path), "confirm-force") orelse {
         reportFailure(spec.name, "no confirm button was logged", log_path);
         return false;
     };
     _ = q.screendump(check_dir ++ "/activity-confirm.ppm");
     if (!clickScanout(&q, confirm[0], confirm[1])) return sfail(spec, log_path, "click the confirm button");
-    if (!try waitLogN(log_path, "activity: stop win-alpha ok=true", 1, "the stop was not accepted", spec, polls)) return false;
-    if (!try waitLogN(log_path, "activity: win-alpha running=false", 1, "the table never showed win-alpha down", spec, polls)) return false;
+    if (!try waitLogN(log_path, "activity: stop win-beta ok=true", 1, "the stop was not accepted", spec, polls)) return false;
+    if (!try waitLogN(log_path, "activity: win-beta running=false", 1, "the table never showed win-beta down", spec, polls)) return false;
     sleepMs(300);
     _ = q.screendump(check_dir ++ "/activity-stopped.ppm");
     // The System tab: every domain on the machine (this unit holds the

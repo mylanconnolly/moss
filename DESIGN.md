@@ -3267,6 +3267,22 @@ pointer to a slice, and a test feeds it literals. (The first suspect, the
 command's 30 KB of working arrays on the stack, moved to statics on the
 way; a 256 KB user stack does not leave a host command that much.)
 
+**Quit before Force Quit (same day).** A task manager that can only
+kill is a blunt one: an editor with unsaved work deserves to be asked.
+The compositor gained `close_titled`: the window with that title has its
+owner handed the `close_window` key — the one the red dot and Cmd-W
+already send, through the menu-key slot `pumpFocus` delivers from — and
+the app decides what happens next (the editor prompts, a plain window
+ends). Only the display-control badge may ask, so Activity holds the
+session's `display_control` cap like the bar and the dock; a trusted
+surface is never asked, and a window with a key already queued answers
+busy. The `quit-window TITLE` command is the mshl face of it, and
+Activity's Quit button asks by the unit's window title, enabled only for
+a running unit that has one; Force Quit stays, with its confirm row, for
+what will not go. The `activity` drill now quits Alpha, which closes
+itself, and force-quits Beta; both drill windows carry an `app:` record
+for their titles.
+
 **Shut down and restart (as built, 2026-09-16).** The system menu had
 Log Out and no way to end the machine; the machine also had none — an
 interactive boot powered off only when its app exited, and a root task

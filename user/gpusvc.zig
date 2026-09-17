@@ -1654,6 +1654,32 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 wakeReader(chan_h, sf.owner, hit, 3);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
+            .close_titled => |q| {
+                // A graceful quit: the window titled a/b gets the close_window
+                // key its owner already handles (the red dot, Cmd-W), queued
+                // in the menu-key slot pumpFocus delivers from. The desktop's
+                // control badge only — asking a window to close is the task
+                // manager's to do, not any client's — and never a trusted
+                // surface, whose keys are the seat's alone.
+                var nbuf: [24]u8 = undefined;
+                const want = shared.wordsToStr(&nbuf, .{ q.a, q.b, 0 });
+                var hit: u64 = 0;
+                for (&surfaces, 0..) |*sf, i| {
+                    if (!sf.used) continue;
+                    if (std.mem.eql(u8, sf.title[0..sf.title_len], want)) {
+                        hit = i + 1;
+                        break;
+                    }
+                }
+                const sf = findSurface(hit);
+                const code: u64 = if (badge != control_badge) 25 else if (sf == null) 14 else if (sf.?.trusted) 25 else if (sf.?.menu_key != 0) 22 else 0;
+                if (code == 0) {
+                    sf.?.menu_key = shared.keyboard.close_window;
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+                } else {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = code } }, 0, token);
+                }
+            },
             .next_input => {
                 if (keys_chan == 0 and ptr_chan == 0) {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 7 } }, 0, token);

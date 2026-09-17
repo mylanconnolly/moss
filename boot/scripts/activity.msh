@@ -5,8 +5,10 @@
 # display name and icon, a service under its unit name), with its state,
 # CPU, memory, threads and restarts, refreshed every second from
 # `unit-rows`; select a row to show its window, launch it if it is down,
-# or force-quit it (init destroys the domain; a confirm step stands
-# between the button and the kill). The System tab is every domain on
+# ask it to close (Quit: the app gets the close key it handles like the
+# red dot, and may ask about unsaved work), or force-quit it (init
+# destroys the domain; a confirm step stands between the button and the
+# kill). The System tab is every domain on
 # the machine as a tree (`domain-rows`), which the session's init grants
 # only to an administrator; anyone else sees the tab say so. Click a
 # column header to sort by it.
@@ -131,12 +133,13 @@ let final = (gui {
                     "" => { kind: "row", gap: 8, children: [
                         { kind: "button", id: "show", label: "Show Window", disabled: (not ($have and $up and $windowed)) }
                         { kind: "button", id: "launch", label: "Launch", disabled: (not ($have and (not $up))) }
-                        { kind: "button", id: "quit", label: "Force Quit", variant: "danger", disabled: (not ($have and $up)) }
+                        { kind: "button", id: "quit", label: "Quit", disabled: (not ($have and $up and $windowed)) }
+                        { kind: "button", id: "force", label: "Force Quit", variant: "danger", disabled: (not ($have and $up)) }
                         { kind: "label", muted: true, flex: 1, text: $state.note }
                       ] }
                     _ => { kind: "row", gap: 8, children: [
                         { kind: "button", id: "cancel", label: "Cancel" }
-                        { kind: "button", id: "confirm-quit", label: "Force Quit", variant: "danger" }
+                        { kind: "button", id: "confirm-force", label: "Force Quit", variant: "danger" }
                         { kind: "label", flex: 1, text: ("Force quit “" + $shown + "”? Unsaved work in it is lost.") }
                       ] }
                   })
@@ -175,9 +178,16 @@ let final = (gui {
             }
           }
           "launch" => { launch $state.sel; (with $state $state.tab $state.sort $state.sel "" ("Launched " + $state.sel)) }
-          "quit" => (with $state $state.tab $state.sort $state.sel $state.sel "")
+          "quit" => {
+            let w = ((unit-rows $state.sort $state.sel) | get "window")
+            match (quit-window $w) {
+              ok _ => (with $state $state.tab $state.sort $state.sel "" ("Asked " + $state.sel + " to close"))
+              err $why => (with $state $state.tab $state.sort $state.sel "" ("Could not ask " + $state.sel + " to close: " + $why))
+            }
+          }
+          "force" => (with $state $state.tab $state.sort $state.sel $state.sel "")
           "cancel" => (same $state)
-          "confirm-quit" => (match (unit-stop $state.confirm) {
+          "confirm-force" => (match (unit-stop $state.confirm) {
               true => (with $state $state.tab $state.sort $state.sel "" ("Stopped " + $state.confirm))
               _ => (with $state $state.tab $state.sort $state.sel "" ("Could not stop " + $state.confirm))
             })
