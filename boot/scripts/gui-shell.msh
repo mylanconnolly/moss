@@ -106,7 +106,7 @@ def network-page [state] {
   let f = ($ifs | find (fn [r] { $r.id == $state.sel }))
   { kind: "column", gap: 12, children: [
       { kind: "label", wrap: true, muted: true, text: (match (len $ifs) { 0 => "No network interfaces are available to this session."; _ => "The interfaces on this machine. Select one to see, or change, how it is addressed." }) }
-      { kind: "list", id: "ifaces", key: "ifaces", h: 96, fit: true, selected: $state.sel
+      { kind: "list", id: "ifaces", key: "ifaces", h: 200, auto: true, fit: true, selected: $state.sel
         cols: [{ title: "Name", w: 3 } { title: "Mode", w: 4 } { title: "Address", w: 5 } { title: "Gateway", w: 5 }]
         rows: $ifs }
       (match $f {

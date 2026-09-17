@@ -3389,6 +3389,19 @@ image past the smallest worker and unit budgets (4 MB), which refused
 spawns across four drills; the smaller script was the fix, not the
 bigger arena.
 
+**Two NICs in the window, and a list that sizes to its rows (same
+day).** The interactive desktop had no NIC at all (`-nic none`), so the
+new Network tab said there were none; it boots with two now, net0 on
+the cluster segment and net1 leased from QEMU's user network — and the
+first such boot showed net1 `off`, since cluster mode configured only
+the first NIC (any further one leases now, in either mode). Then the
+tab showed one row: the interface list was 96px tall, one row plus a
+header at 1×, and net1 sat behind a scrollbar nobody reads for a
+two-row table. Lists take `auto: true` now — the box sizes itself to
+its rows, `h` the most it may take — with measure and paint sharing
+the rule so the layout reserves what is drawn; the guishell drills boot
+two NICs and assert the list counts both.
+
 **Quit before Force Quit (same day).** A task manager that can only
 kill is a blunt one: an editor with unsaved work deserves to be asked.
 The compositor gained `close_titled`: the window with that title has its

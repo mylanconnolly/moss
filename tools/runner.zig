@@ -580,9 +580,15 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
                 "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
             });
+            // Two NICs, as run-gui boots: the Network tab must list both
+            // (a 96px list once showed one and hid the other behind a
+            // scrollbar). The cluster unit takes net0 static and leases
+            // net1 from its own user network.
             if (spec.kind == .guishell or spec.kind == .guishellro) try args.appendSlice(gpa, &.{
                 "-netdev", "user,id=n0",
                 "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+                "-netdev", "user,id=n1",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n1",
             });
             try appendDisk(&args, disk);
         },
@@ -1089,6 +1095,15 @@ fn parseListGeom(content: []const u8, id: []const u8) ?[4]u32 {
         parseAfter(seg, "row_h=") orelse return null,
         parseAfter(seg, "sb=") orelse return null,
     };
+}
+
+/// The row count of list `id` as last logged ("gui: list <id> … count=N").
+fn listCount(content: []const u8, id: []const u8) u32 {
+    var kb: [64]u8 = undefined;
+    const key = std.fmt.bufPrint(&kb, "gui: list {s} ", .{id}) catch return 0;
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return 0;
+    const eol = std.mem.indexOfScalarPos(u8, content, at, '\n') orelse content.len;
+    return parseAfter(content[at..eol], "count=") orelse 0;
 }
 
 fn waitListGeom(spec: Spec, log_path: []const u8, polls: *u64, id: []const u8) ?[4]u32 {
@@ -3136,6 +3151,8 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const net_tab = tabCenter(readLog(log_path), "tabs", 2) orelse return sfail(spec, log_path, "find the Network tab");
     if (!clickScanout(&q, net_tab[0], net_tab[1])) return sfail(spec, log_path, "click the Network tab");
     const ifaces = waitListGeom(spec, log_path, polls, "ifaces") orelse return sfail(spec, log_path, "the interface list was not laid out");
+    if (!try waitLogN(log_path, "netsvc: net1 dhcp bound", 1, "the second NIC never leased", spec, polls)) return false;
+    if (listCount(readLog(log_path), "ifaces") != 2) return sfail(spec, log_path, "the interface list did not show both NICs");
     if (!clickScanout(&q, ifaces[0], ifaces[1] + ifaces[2] / 2)) return sfail(spec, log_path, "select the interface");
     if (!try waitLogN(log_path, "gui: tab netmode 1 at", 1, "the mode switch never appeared", spec, polls)) return false;
     sleepMs(300);
@@ -3250,6 +3267,7 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const net_tab = tabCenter(readLog(log_path), "tabs", 2) orelse return sfail(spec, log_path, "find the Network tab");
     if (!clickScanout(&q, net_tab[0], net_tab[1])) return sfail(spec, log_path, "click the Network tab");
     const ifaces = waitListGeom(spec, log_path, polls, "ifaces") orelse return sfail(spec, log_path, "the interface list was not laid out for bob");
+    if (listCount(readLog(log_path), "ifaces") != 2) return sfail(spec, log_path, "bob's interface list did not show both NICs");
     if (!clickScanout(&q, ifaces[0], ifaces[1] + ifaces[2] / 2)) return sfail(spec, log_path, "select the interface");
     if (!try waitLogN(log_path, "gui: tab netmode 1 at", 1, "the mode switch never appeared for bob", spec, polls)) return false;
     sleepMs(300);

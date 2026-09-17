@@ -688,7 +688,7 @@ fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     }
     if (std.mem.eql(u8, kind, "list")) {
         if (paint) return drawList(rec, x, y, avail_w, avail_h);
-        return .{ .w = avail_w, .h = @max(@as(usize, @intCast(@max(intField(rec, "h", 240), 40))), avail_h) };
+        return .{ .w = avail_w, .h = listBoxHeight(rec, avail_h) };
     }
     if (std.mem.eql(u8, kind, "chart")) return layoutChart(rec, x, y, avail_w, avail_h, paint);
     if (std.mem.eql(u8, kind, "tabs")) return layoutTabs(rec, x, y, avail_w, paint);
@@ -1175,7 +1175,8 @@ fn cellAt(cellsv: Value, ci: usize) []const u8 {
 
 /// A scrollable, selectable list. Record fields: `id` (interaction key),
 /// `key` (content identity — a new value resets scroll/selection), `h`
-/// (viewport height in px), optional `cols` [{title, w, right?}] for a
+/// (viewport height in px; with `auto` the most it may take, the box
+/// sizing itself to its rows), optional `cols` [{title, w, right?}] for a
 /// header + column layout, and `rows` [{id, cells:[str | [int…]], icon?}]
 /// (a cell that is a list of permille samples draws as a sparkline). `fit`
 /// treats column widths as weights; `empty` supplies a placeholder and
@@ -1183,17 +1184,35 @@ fn cellAt(cellsv: Value, ci: usize) []const u8 {
 /// the scroll offset and selection (see `ListState`); the app just emits
 /// the rows. Registers one focusable (the whole list), so its rows never
 /// eat the focusable budget.
+/// The height a list takes: `h` (or the offer, if taller); with `auto:
+/// true` the box sizes itself to its rows (at least one, for the
+/// placeholder) and `h` is the most it may take — a short table that must
+/// show every row, whatever the text scale, with no scrollbar hiding the
+/// second one. Measure and paint share it, so the layout reserves what
+/// is drawn.
+fn listBoxHeight(rec: mshl.Record, avail_h: usize) usize {
+    const h_field: usize = @intCast(@max(intField(rec, "h", 240), 40));
+    const auto = if (rec.get("auto")) |v| v.asBool() else false;
+    if (!auto) return @max(h_field, avail_h);
+    const line = lineOf(R_UI);
+    const row_h = line + 2 * list_row_vpad;
+    const has_cols = if (rec.get("cols")) |cv| cv == .list and cv.list.len > 0 else false;
+    const header_h: usize = if (has_cols) row_h else 0;
+    const nrows = rowsLen(rec.get("rows") orelse Value.nothing);
+    return @max(@min(header_h + @max(nrows, 1) * row_h + pal.border_w, h_field), avail_h);
+}
+
 fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize) Size {
     const id = strField(rec, "id");
     const key = strField(rec, "key");
     const rowsv: Value = rec.get("rows") orelse Value.nothing;
     const nrows = rowsLen(rowsv);
     const cols: []const Value = if (rec.get("cols")) |cv| (if (cv == .list) cv.list else &.{}) else &.{};
-    const box_h: usize = @max(@as(usize, @intCast(@max(intField(rec, "h", 240), 40))), avail_h);
     const w = avail_w;
     const line = lineOf(R_UI);
     const row_h = line + 2 * list_row_vpad;
     const header_h: usize = if (cols.len > 0) line + 2 * list_row_vpad else 0;
+    const box_h = listBoxHeight(rec, avail_h);
 
     const focused = wf.win_focused and nfoc == sel_focus;
     const active = if (rec.get("active")) |v| v.asBool() else true;
