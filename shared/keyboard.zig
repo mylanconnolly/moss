@@ -40,6 +40,13 @@ pub const select_up = 160;
 pub const select_down = 161;
 pub const select_doc_home = 162;
 pub const select_doc_end = 163;
+// Actions only a menu sends: no chord produces them, but they travel the
+// same key channel as the chords beside them (a window sees "Minimize" the
+// way it sees Cmd-W), so they live in this registry to keep the codes apart.
+pub const minimize = 164;
+pub const enclosing_folder = 165;
+pub const refresh = 166;
+pub const home_folder = 167;
 pub const menu_focus = 168;
 pub const next_tab = 169;
 pub const previous_tab = 170;

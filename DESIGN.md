@@ -5034,7 +5034,14 @@ menus and rejects invocation. One validated command can queue for a busy
 client, and is delivered before focus notifications. The bar receives the
 control grant through its unit manifest, just as Settings receives output
 control. This is a built-in catalog, not yet an arbitrary application menu
-schema; adding a profile is a shared-library change.
+schema; adding a profile is a shared-library change. The action bits a
+client's enabled mask and the compositor's check share come from one
+explicit key table in the same file (2026-09-17; they were a hand-kept
+range switch that also minted bits for backspace, enter and escape, keys
+no menu carries), and the menu-only codes — Minimize, Enclosing Folder,
+Refresh, Home — are registered in `shared/keyboard.zig` beside the chords
+they travel with rather than declared twice; a test checks every table
+entry is carried by some catalog and no dead key has a bit.
 
 Popups own copied labels rather than borrowing a transient mshl view. They
 render separators, disabled entries, shortcut hints, and a selection highlight.

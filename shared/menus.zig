@@ -7,12 +7,14 @@ pub const Profile = enum(u64) { generic, editor, terminal, files, picker };
 pub fn profileFromInt(value: u64) ?Profile {
     return if (value <= @intFromEnum(Profile.picker)) @enumFromInt(value) else null;
 }
-pub const minimize: u8 = 164;
-pub const up: u8 = 165;
-pub const refresh: u8 = 166;
-pub const home: u8 = 167;
-pub const readonly_view: u8 = 176;
-pub const leave_view: u8 = 177;
+// The menu-only actions, under the names the menus use; the codes are
+// the keyboard registry's so they cannot collide with a chord.
+pub const minimize: u8 = k.minimize;
+pub const up: u8 = k.enclosing_folder;
+pub const refresh: u8 = k.refresh;
+pub const home: u8 = k.home_folder;
+pub const readonly_view: u8 = k.readonly_view;
+pub const leave_view: u8 = k.leave_view;
 pub const Item = struct { label: []const u8, shortcut: []const u8 = "", key: u8 = 0 };
 pub const Menu = struct { title: []const u8, items: []const Item };
 const close: Item = .{ .label = "Close Window", .shortcut = "Cmd W", .key = k.close_window };
@@ -66,17 +68,22 @@ pub fn catalog(profile: Profile) []const Menu {
         .picker => &picker,
     };
 }
-/// Stable action bits, independent of menu placement or duplicated Close.
+/// Every key a catalog item can carry, in bit order. A client's enabled
+/// mask and the compositor's check are both built from this table, so the
+/// order only has to agree within one build — but append rather than
+/// reorder, so a mask logged by one binary reads the same in the next.
+const actions = [_]u8{
+    k.select_all,  k.copy,         k.cut,           k.paste,            k.undo,
+    k.redo,        k.new_document, k.open_document, k.save_document,    k.save_as,
+    k.find,        k.close_window, k.minimize,      k.enclosing_folder, k.refresh,
+    k.home_folder, k.next_tab,     k.previous_tab,  k.close_all,        k.readonly_view,
+    k.leave_view,
+};
+/// Stable action bits, independent of menu placement or duplicated Close;
+/// zero for a key no menu carries.
 pub fn bit(key: u8) u64 {
-    return switch (key) {
-        8 => 1,
-        13 => 2,
-        27 => 4,
-        k.select_all => 8,
-        147...157 => @as(u64, 1) << @intCast(key - 143),
-        164...167, 169...171, 176...177 => @as(u64, 1) << @intCast(key - 149),
-        else => 0,
-    };
+    for (actions, 0..) |a, i| if (a == key) return @as(u64, 1) << @intCast(i);
+    return 0;
 }
 pub fn offered(profile: Profile) u64 {
     var mask: u64 = 0;
@@ -104,6 +111,18 @@ test "catalog actions have distinct bits and invalid profiles are rejected" {
         try std.testing.expectEqual(@as(u64, 0), seen & b);
         seen |= b;
     }
+    // Every table entry is a catalog key somewhere, and every catalog key
+    // is in the table: no dead bits, no unrouteable item.
+    for (actions) |a| {
+        var carried = false;
+        for (std.enums.values(Profile)) |profile| {
+            for (catalog(profile)) |menu| for (menu.items) |item| {
+                if (item.key == a) carried = true;
+            };
+        }
+        try std.testing.expect(carried);
+    }
+    for ([_]u8{ 8, 13, 27, k.menu_focus, k.launcher }) |dead| try std.testing.expectEqual(@as(u64, 0), bit(dead));
     for (std.enums.values(Profile)) |profile| {
         for (catalog(profile)) |menu| {
             try std.testing.expect(menu.title.len != 0);
