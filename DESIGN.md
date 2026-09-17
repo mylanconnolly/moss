@@ -3198,6 +3198,13 @@ editor lost its hand-rolled restore. The terminal also forgets a
 gesture in flight on an output change or a focus loss, since the
 release it was waiting for will never come.
 
+**Typed keys during a paste (2026-09-17).** A paste larger than the 4 KiB
+key ring drained into it at every turn of the serve loop, so a key typed
+meanwhile — or a whole arrow sequence — found no room and vanished
+without a word. The drain now leaves 32 bytes of headroom for typed
+input (the paste waits for the shell; the keystroke must not), and a
+key the ring still cannot take is counted and logged once per burst.
+
 **Minimize and restore (as built, 2026-09-10).** The amber traffic-light
 was a stub since stage 1 (it logged "minimize (not yet)"); it now hides the
 window, and the app's dock pill brings it back. A minimized window is not

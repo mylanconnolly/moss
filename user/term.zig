@@ -782,7 +782,11 @@ fn pumpWindow(log_h: u64) void {
                 if (key_queue.len - (key_tail -% key_head) >= needed) {
                     queueKey(first);
                     while (console_keys.pop()) |ch| queueKey(ch);
-                } else console_keys.pending = ""; // never enqueue half a VT sequence
+                    dropping = false;
+                } else {
+                    noteDropped(log_h, needed);
+                    console_keys.pending = ""; // never enqueue half a VT sequence
+                }
             }
         },
         1 => routePointer(ev, log_h),
@@ -810,10 +814,26 @@ fn pumpWindow(log_h: u64) void {
     drainPaste();
 }
 
+/// Room a paste in progress leaves in the key ring, so a typed key (or a
+/// whole VT sequence) still gets in while a large paste drains: the
+/// paste waits for the shell, the user's keystroke must not.
+const typed_headroom: usize = 32;
 fn drainPaste() void {
-    while (paste_pos < paste_len and key_tail -% key_head < key_queue.len) : (paste_pos += 1) {
+    while (paste_pos < paste_len and key_tail -% key_head + typed_headroom < key_queue.len) : (paste_pos += 1) {
         queueKey(paste_buf[paste_pos]);
     }
+}
+
+/// Keys the ring could not take, counted, and said once per burst rather
+/// than silently: a dropped key is a bug report waiting to happen.
+var dropped_keys: usize = 0;
+var dropping = false;
+fn noteDropped(log_h: u64, n: usize) void {
+    dropped_keys += n;
+    if (dropping) return;
+    dropping = true;
+    var l: [64]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "term: input dropped ({d} bytes so far); the ring is full", .{dropped_keys}) catch "term: input dropped");
 }
 
 /// A shell's console over a surface. `windowed_mode` selects how input is
