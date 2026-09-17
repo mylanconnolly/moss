@@ -3205,6 +3205,22 @@ without a word. The drain now leaves 32 bytes of headroom for typed
 input (the paste waits for the shell; the keystroke must not), and a
 key the ring still cannot take is counted and logged once per burst.
 
+**Compositor bookkeeping after a review (2026-09-17).** Four small
+things a read-through of `gpusvc.zig` turned up, fixed together. A mode
+switch emptied every surface's pending-event queue but left
+`pointer_capture` and `hover_surface` pointing at the old layout, so a
+drag that straddled the switch kept delivering to a window that had
+moved; both now reset with the queues and the next pointer event starts
+afresh. A client that crashed while a menu had raised the titleless bar
+over it left focus stranded on the bar (the bar's later `menu_restore` is
+refused because the menu token moved on), until the user clicked;
+`reapClient` now hands focus to the topmost application whenever the
+survivor it finds focused is titleless untrusted chrome. The cursor's
+one-pixel writer indexed the backing by `fb_w` while every other writer
+uses `fb_stride`; they agree today (stride is width × 4) and now cannot
+disagree. And the cursor's resting position was a literal centre of a
+1280×1024 scanout; it is now centred on whatever scanout boots.
+
 **Minimize and restore (as built, 2026-09-10).** The amber traffic-light
 was a stub since stage 1 (it logged "minimize (not yet)"); it now hides the
 window, and the app's dock pill brings it back. A minimized window is not

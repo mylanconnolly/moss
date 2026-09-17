@@ -370,7 +370,7 @@ fn fbWrite(off: usize, src: [*]const u8, len: usize) void {
 /// copy into the backing, which commit does).
 /// Ship one rectangle of the backing to the host resource and flush it to
 /// the scanout — the per-rect path a commit takes, so only the damaged
-/// region crosses the virtio boundary instead of the whole 640x480.
+/// region crosses the virtio boundary instead of the whole scanout.
 fn transferFlushRect(r: Rect) bool {
     const x: u32 = @intCast(r.x);
     const y: u32 = @intCast(r.y);
@@ -554,6 +554,13 @@ fn reapClient(chan_h: u64, badge: u64) void {
         reaped = true;
     }
     if (reaped) {
+        // A menu had raised titleless chrome and the application it was
+        // for died under it: the chrome's later `menu_restore` is refused
+        // (the token moved on), so focus would stay stranded on the bar
+        // until a click. Hand it to the topmost application instead.
+        if (findSurface(focused)) |sf| {
+            if (sf.title_len == 0 and !sf.trusted) focusTopmost();
+        }
         _ = composite();
         pumpFocus(chan_h); // a surviving window may have just gained focus
     }
@@ -1031,8 +1038,8 @@ fn dispatchKeys(chan_h: u64) void {
 var ptr_chan: u64 = 0;
 var ptr_reader_stack: [32 << 10]u8 align(16) = undefined;
 
-var cursor_x: usize = 640;
-var cursor_y: usize = 512;
+var cursor_x: usize = 0; // centred on the scanout once its size is known
+var cursor_y: usize = 0;
 var cursor_shown: bool = false; // drawn once the first frame arrives
 var prev_buttons: u32 = 0;
 var hover_surface: u64 = 0;
@@ -1135,7 +1142,7 @@ fn moveCursor(nx: usize, ny: usize) void {
 /// One pixel into the framebuffer backing (the cursor draws these).
 fn fbPx(x: usize, y: usize, word: u32) void {
     var w = word;
-    fbWrite((y * fb_w + x) * fb_bpp, @ptrCast(&w), fb_bpp);
+    fbWrite(y * fb_stride + x * fb_bpp, @ptrCast(&w), fb_bpp);
 }
 
 /// Draw the cursor arrow, clipped to `clip` and the scanout — last in
@@ -1800,6 +1807,8 @@ fn gpudrv(log_h: u64, chan_h: u64) noreturn {
         fb_h = host_h;
         fb_stride = @as(usize, host_w) * 4;
     }
+    cursor_x = fb_w / 2;
+    cursor_y = fb_h / 2;
     if (submitCmd(cmdCreate2d(), 64) != resp_ok_nodata) usys.exit(181);
     if (submitCmd(cmdAttachBacking(), 64) != resp_ok_nodata) usys.exit(182);
     fillFb();
@@ -1875,6 +1884,11 @@ fn switchMode(w: u32, h: u32) bool {
         sf.pend_head = 0;
         sf.pend_tail = 0;
     };
+    // The queues just emptied held any pending leave; a drag or a hover
+    // that began on the old layout ends with it, and the next pointer
+    // event finds the surface under the cursor afresh.
+    pointer_capture = 0;
+    hover_surface = 0;
     cursor_x = @min(cursor_x, fb_w - 1);
     cursor_y = @min(cursor_y, fb_h - 1);
     _ = composite();
