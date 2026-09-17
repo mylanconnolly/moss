@@ -444,6 +444,14 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   arrives) and reports back with another call; the service defers the
   requesting client's reply by token meanwhile and keeps serving everyone
   else. The document broker and its `chooser` are the model.
+- A variant added to a wire enum or tagged union in `shared/` (`enum(u64)`,
+  `union(enum(u64))`: syscalls, `GpuReq`, `InitRequest`, `CapTag`, the
+  lot) goes at the END, never inserted or prepended. The tag is the
+  variant's ordinal, so an insertion renumbers everything after it —
+  harmless in-tree today because every binary recompiles together, but
+  the numbers are what the runner's expectations, a fault dump and a
+  fabric peer built from another revision see, and appending keeps them
+  stable for free. Found in review of a batch that prepended (2026-09-16).
 - Architecture-specific code lives under `kernel/arch/<arch>/` and is
   reached only through `kernel/arch.zig` (the HAL). No inline assembly,
   system register, interrupt-controller or page-table-format knowledge
