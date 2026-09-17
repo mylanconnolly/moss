@@ -451,6 +451,13 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   arrives) and reports back with another call; the service defers the
   requesting client's reply by token meanwhile and keeps serving everyone
   else. The document broker and its `chooser` are the model.
+- A host command runs on the interpreter's stack, and a user domain's
+  stack is 256 KB (`user_stack_pages`) with the interpreter's own frames
+  already on it. Keep a command's working set static (a `var` at module
+  scope, one build at a time) rather than on the stack — 30 KB of arrays
+  in a frame ended Activity's first System tab with a data abort at the
+  stack's guard — and never pass `mshl.toValue` a type it cannot take
+  (it is recursive per type).
 - A variant added to a wire enum or tagged union in `shared/` (`enum(u64)`,
   `union(enum(u64))`: syscalls, `GpuReq`, `InitRequest`, `CapTag`, the
   lot) goes at the END, never inserted or prepended. The tag is the
