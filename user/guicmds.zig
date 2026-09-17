@@ -492,6 +492,7 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     sel_focus = focus;
     nfoc = 0;
     nlisthit = 0;
+    ntabhit = 0;
     // The frame paints the titlebar (bar, traffic-light dots, title) and
     // sets `wf.title_h` — the content area starts below it.
     wf.drawChrome(title);
@@ -666,8 +667,64 @@ fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool)
         return .{ .w = avail_w, .h = @intCast(@max(intField(rec, "h", 240), 40)) };
     }
     if (std.mem.eql(u8, kind, "chart")) return layoutChart(rec, x, y, avail_w, paint);
+    if (std.mem.eql(u8, kind, "tabs")) return layoutTabs(rec, x, y, avail_w, paint);
     if (std.mem.eql(u8, kind, "meter")) return layoutMeter(rec, x, y, avail_w, paint);
     return .{};
+}
+
+const max_tabs = 8;
+const max_tab_strips = 4;
+/// A painted tab strip, for the click that follows: its rect (surface-
+/// local, with the scroll offset it was painted under) and its labels.
+const TabHit = struct {
+    id: []const u8,
+    x: usize = 0,
+    y: usize = 0,
+    w: usize = 0,
+    h: usize = 0,
+    offset_y: isize = 0,
+    items: [max_tabs]ui.paint.TabItem = undefined,
+    n: usize = 0,
+    state: ui.tabs.State = .{},
+};
+var tab_hits: [max_tab_strips]TabHit = undefined;
+var ntabhit: usize = 0;
+
+/// `{ kind: "tabs", id, items: ["A", "B"], selected }`: the toolkit's
+/// tab strip (no close glyphs), one focusable. A click fires the list
+/// event shape with `col` = the tab's index and `row` = its label; the
+/// app keeps which tab is selected in its state.
+fn layoutTabs(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
+    const h = ui.paint.controlHeight(wf.brush());
+    if (!paint) return .{ .w = avail_w, .h = h };
+    const id = strField(rec, "id");
+    var hit: TabHit = .{ .id = id, .x = x, .y = y, .w = avail_w, .h = h, .offset_y = wf.draw_offset_y };
+    if (rec.get("items")) |iv| if (iv == .list) for (iv.list) |item| {
+        if (hit.n == max_tabs or item != .str) continue;
+        hit.items[hit.n] = .{ .label = item.str, .closable = false };
+        hit.n += 1;
+    };
+    const selected: usize = @intCast(std.math.clamp(intField(rec, "selected", 0), 0, @as(i64, @intCast(hit.n -| 1))));
+    ui.paint.tabStrip(wf.brush(), .{ .x = x, .y = y, .w = avail_w, .h = h }, hit.items[0..hit.n], selected, &hit.state);
+    if (ntabhit < max_tab_strips) {
+        tab_hits[ntabhit] = hit;
+        ntabhit += 1;
+    }
+    if (nfoc < focusables.len) recordFocus(.{ .id = id, .is_field = false, .bx = x, .by = y, .bw = avail_w, .bh = h });
+    return .{ .w = avail_w, .h = h };
+}
+
+/// The tab under a click in strip `id`, as (index, label), or null.
+fn tabClick(id: []const u8, x: usize, screen_y: usize) ?struct { index: usize, label: []const u8 } {
+    for (tab_hits[0..ntabhit]) |*th| {
+        if (!std.mem.eql(u8, th.id, id)) continue;
+        const y: usize = @intCast(@max(0, @as(isize, @intCast(screen_y)) - th.offset_y));
+        switch (ui.paint.tabStripHit(wf.brush(), .{ .x = th.x, .y = th.y, .w = th.w, .h = th.h }, th.items[0..th.n], th.state, x, y)) {
+            .select => |i| return .{ .index = i, .label = th.items[i].label },
+            else => return null,
+        }
+    }
+    return null;
 }
 
 /// The permille samples of a `values:` list, clamped to 0..1000.
@@ -1927,6 +1984,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 var l: [96]u8 = undefined;
                 _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: widget {s} at {d},{d}", .{ f.id, wf.win_x + f.bx + f.bw / 2, wf.win_y + f.by + f.bh / 2 }) catch continue);
             }
+            // Each tab strip's tabs, by index, for the same host.
+            for (tab_hits[0..ntabhit]) |*th| {
+                for (0..th.n) |i| {
+                    const span = ui.paint.tabSpan(wf.brush(), .{ .x = th.x, .y = th.y, .w = th.w, .h = th.h }, th.items[0..th.n], th.state, i) orelse continue;
+                    var l: [96]u8 = undefined;
+                    _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: tab {s} {d} at {d},{d}", .{ th.id, i, wf.win_x + th.x + span.x + span.w / 2, wf.win_y + th.y + th.h / 2 }) catch continue);
+                }
+            }
             // Each list's row geometry in scanout coordinates, so a host can
             // click a specific row (rows_top + row * row_h) and the scrollbar.
             for (list_hits[0..nlisthit]) |lh| {
@@ -2060,6 +2125,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                     crumb_pressed = index;
                                     pressed = wi;
                                 }
+                                break :input;
+                            }
+                            if (tabClick(focusables[wi].id, cev.x, cev.y)) |tc| {
+                                fired = focusables[wi].id;
+                                fired_list = true;
+                                fired_row = tc.label;
+                                fired_col = tc.index;
                                 break :input;
                             }
                             if (focusables[wi].is_list) {

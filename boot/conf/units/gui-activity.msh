@@ -6,7 +6,7 @@
 {
   image:     mshrun
   script:    scripts/activity.msh
-  grant:     [log, bootfs]
+  grant:     [log, bootfs, introspect]
   budget:    { user: 24mb }
   profiles:  [activity]
   essential: true

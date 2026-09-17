@@ -968,7 +968,10 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     // it), rather than the verifier program a console-less session runs.
     const interactive = console != 0 or gui_sessions;
     const image: shared.ImageId = if (interactive) .init else .users;
-    const arg: u64 = if (gui_sessions) (3 | (1 << 8)) else 3;
+    // arg: mode 3; bit 8 = a GUI session; bit 9 = an administrator's,
+    // which is what lets its init hand a unit the machine's ledger.
+    var arg: u64 = if (gui_sessions) (3 | (1 << 8)) else 3;
+    if (budget.admin) arg |= 1 << 9;
     var flags: u64 = shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a;
     if (interactive) flags |= shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs;
     if (!stage.load(blob_va, blob_len, image)) return false;

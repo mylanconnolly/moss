@@ -366,14 +366,19 @@ pub fn toValue(a: std.mem.Allocator, x: anytype) Error!Value {
             return .{ .record = .{ .keys = keys, .vals = vals } };
         },
         .pointer => |p| {
-            if (p.size == .one) return toValue(a, x.*);
+            if (p.size == .one) {
+                // A pointer to an array (a string literal) is a slice; going
+                // through `x.*` instead re-enters here as `x[0..]`, forever.
+                if (@typeInfo(p.child) == .array) return toValue(a, @as([]const @typeInfo(p.child).array.child, x));
+                return toValue(a, x.*);
+            }
             if (p.size != .slice) @compileError("no value for " ++ @typeName(T));
             if (p.child == u8) return .{ .str = try a.dupe(u8, x) };
             const items = try a.alloc(Value, x.len);
             for (x, 0..) |item, i| items[i] = try toValue(a, item);
             return tableize(a, .{ .list = items });
         },
-        .array => return toValue(a, x[0..]),
+        .array => |arr| return toValue(a, @as([]const arr.child, &x)),
         else => @compileError("no value for " ++ @typeName(T)),
     }
 }
@@ -4862,4 +4867,16 @@ test "records render as key: value lines; tables align" {
     const it = &t.it;
     try expectOut(it, "stat data", "type: dir\nsize: 0\n");
     try expectOut(it, "echo a b 3", "a b 3\n");
+}
+
+test "toValue takes string literals and arrays as strings and lists" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const v = try toValue(a, .{ .empty = "", .text = "abc", .nums = [_]i64{ 1, 2 } });
+    try std.testing.expectEqualStrings("", v.record.get("empty").?.str);
+    try std.testing.expectEqualStrings("abc", v.record.get("text").?.str);
+    const nums = v.record.get("nums").?;
+    try std.testing.expect(nums == .list);
+    try std.testing.expectEqual(@as(i64, 2), nums.list[1].int);
 }

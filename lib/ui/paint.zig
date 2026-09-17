@@ -201,6 +201,19 @@ pub fn tabStrip(b: Brush, r: Rect, items: []const TabItem, selected: usize, stat
 
 /// What a press at (x, y) on the strip means, using the same layout the
 /// strip was painted with.
+/// Where tab `index` sits in the strip (its body span, strip-relative),
+/// or null when it is scrolled out of view — so a host driving the
+/// pointer can be told each tab's centre.
+pub fn tabSpan(b: Brush, r: Rect, items: []const TabItem, state: tabs.State, index: usize) ?tabs.Span {
+    const first = boundedFirst(state, items.len);
+    var row = tabLayout(b, r, items, .{ .first = first });
+    for (items[first..], first..) |item, i| {
+        const tab = row.put(tabDesired(b, item, r.h), item.closable) orelse return null;
+        if (i == index) return tab.body;
+    }
+    return null;
+}
+
 pub fn tabStripHit(b: Brush, r: Rect, items: []const TabItem, state: tabs.State, x: usize, y: usize) tabs.Hit {
     if (x < r.x or y < r.y or x - r.x >= r.w or y - r.y >= r.h) return .none;
     const local = x - r.x;

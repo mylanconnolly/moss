@@ -728,6 +728,171 @@ fn sysStats(it: *mshl.Interp) mshl.Error!Value {
     });
 }
 
+const max_domain_rows = 256;
+const DomainSort = enum { name, id, state, cpu, mem, kobj, threads };
+var dom_buf: [max_domain_rows * shared.DomainRec.size]u8 = undefined;
+/// The previous reading of each domain's lifetime CPU, by id, for rates.
+var dom_prev: [max_domain_rows]struct { id: u32, total: u64 } = undefined;
+var dom_nprev: usize = 0;
+var dom_prev_now: u64 = 0;
+var dom_announced = false;
+/// The working arrays of one table build, static rather than on the
+/// stack: 256 domains' records and orderings are ~30 KB, more than the
+/// interpreter leaves a host command (a data abort at the stack's end).
+var dom_recs: [max_domain_rows]shared.DomainRec = undefined;
+var dom_pm: [max_domain_rows]u64 = undefined;
+var dom_order: [max_domain_rows]usize = undefined;
+var dom_depth: [max_domain_rows]usize = undefined;
+var dom_by_name: [max_domain_rows]usize = undefined;
+var dom_placed: [max_domain_rows]bool = undefined;
+var dom_stack: [max_domain_rows]usize = undefined;
+
+fn domainPrev(id: u32) ?u64 {
+    for (dom_prev[0..dom_nprev]) |p| if (p.id == id) return p.total;
+    return null;
+}
+
+/// The machine's ledger as list rows `{ id, cells }`: a tree (children
+/// under their parent, indented) when sorted by name, flat otherwise.
+fn domainRows(it: *mshl.Interp, sort_name: []const u8) mshl.Error!Value {
+    const a = it.arena;
+    const sort = std.meta.stringToEnum(DomainSort, sort_name) orelse .name;
+    const unavailable = try mshl.toValue(a, .{ .rows = Value{ .list = &.{} }, .available = false, .summary = "" });
+    if (spawner == 0) return unavailable;
+    const r = usys.domainList(spawner, &dom_buf);
+    if (r.err != .ok) return unavailable;
+    const n: usize = @intCast(@min(r.data[0], max_domain_rows));
+    const recs = &dom_recs;
+    for (0..n) |i| recs[i] = shared.DomainRec.decode(dom_buf[i * shared.DomainRec.size ..][0..shared.DomainRec.size]);
+    // Rates since the previous call, by domain id.
+    const now = usys.cycles();
+    const pm = &dom_pm;
+    @memset(pm, 0);
+    for (0..n) |i| {
+        if (domainPrev(recs[i].id)) |prev| {
+            if (dom_prev_now != 0 and now > dom_prev_now and recs[i].cpu_total >= prev) pm[i] = (recs[i].cpu_total - prev) * 1000 / (now - dom_prev_now);
+        }
+    }
+    dom_nprev = n;
+    for (0..n) |i| dom_prev[i] = .{ .id = recs[i].id, .total = recs[i].cpu_total };
+    dom_prev_now = now;
+    // The order: a tree by name (depth-first, siblings by name), or flat
+    // by the column asked for, descending, ties by name.
+    const order = &dom_order;
+    const depth = &dom_depth;
+    @memset(depth, 0);
+    var count: usize = 0;
+    const Ctx = struct {
+        recs: []const shared.DomainRec,
+        pm: []const u64,
+        sort: DomainSort,
+        fn key(ctx: @This(), i: usize) u64 {
+            const rec = &ctx.recs[i];
+            return switch (ctx.sort) {
+                .name => 0,
+                .id => std.math.maxInt(u32) - @as(u64, rec.id),
+                .state => @intFromBool(rec.state == .alive),
+                .cpu => ctx.pm[i],
+                .mem => rec.user_kb >> 32,
+                .kobj => rec.kobj_kb >> 32,
+                .threads => rec.threads,
+            };
+        }
+        fn less(ctx: @This(), x: usize, y: usize) bool {
+            const kx = ctx.key(x);
+            const ky = ctx.key(y);
+            if (kx != ky) return kx > ky;
+            return std.ascii.lessThanIgnoreCase(ctx.recs[x].nameSlice(), ctx.recs[y].nameSlice());
+        }
+    };
+    const ctx = Ctx{ .recs = recs[0..n], .pm = pm[0..n], .sort = sort };
+    if (sort == .name) {
+        // Roots first (a parent nobody lists is a root too), then each
+        // node's children right after it.
+        const by_name = &dom_by_name;
+        for (0..n) |i| by_name[i] = i;
+        std.mem.sort(usize, by_name[0..n], ctx, Ctx.less);
+        const placed = &dom_placed;
+        @memset(placed, false);
+        const stack = &dom_stack;
+        var sp: usize = 0;
+        for (by_name[0..n]) |root| {
+            var is_root = recs[root].parent == 0;
+            if (!is_root) {
+                is_root = true;
+                for (0..n) |j| if (recs[j].id == recs[root].parent) {
+                    is_root = false;
+                };
+            }
+            if (!is_root or placed[root]) continue;
+            stack[sp] = root;
+            sp += 1;
+            while (sp > 0) {
+                sp -= 1;
+                const i = stack[sp];
+                if (placed[i]) continue;
+                placed[i] = true;
+                order[count] = i;
+                count += 1;
+                // Children, pushed in reverse name order so the first pops first.
+                var k = n;
+                while (k > 0) : (k -= 1) {
+                    const c = by_name[k - 1];
+                    if (!placed[c] and recs[c].parent == recs[i].id and recs[c].id != recs[i].id) {
+                        depth[c] = depth[i] + 1;
+                        stack[sp] = c;
+                        sp += 1;
+                    }
+                }
+            }
+        }
+        for (by_name[0..n]) |i| if (!placed[i]) {
+            order[count] = i;
+            count += 1;
+        };
+    } else {
+        for (0..n) |i| order[i] = i;
+        std.mem.sort(usize, order[0..n], ctx, Ctx.less);
+        count = n;
+    }
+    const rows = try a.alloc(Value, count);
+    var alive: usize = 0;
+    var mem_kb: u64 = 0;
+    for (order[0..count], 0..) |i, ri| {
+        const rec = &recs[i];
+        if (rec.state == .alive) alive += 1;
+        mem_kb += rec.user_kb >> 32;
+        const cells = try a.alloc(Value, 7);
+        const indent = "                ";
+        cells[0] = .{ .str = try std.fmt.allocPrint(a, "{s}{s}", .{ indent[0..@min(depth[i] * 2, indent.len)], rec.nameSlice() }) };
+        cells[1] = .{ .str = try std.fmt.allocPrint(a, "{d}", .{rec.id}) };
+        cells[2] = .{ .str = switch (rec.state) {
+            .alive => "Alive",
+            .dying => "Dying",
+            .dead => "Dead",
+        } };
+        cells[3] = .{ .str = try std.fmt.allocPrint(a, "{d}.{d}%", .{ pm[i] / 10, pm[i] % 10 }) };
+        const used = rec.user_kb >> 32;
+        cells[4] = .{ .str = try std.fmt.allocPrint(a, "{d}.{d} / {d} MB", .{ used / 1024, (used % 1024) * 10 / 1024, (rec.user_kb & 0xffff_ffff) / 1024 }) };
+        cells[5] = .{ .str = try std.fmt.allocPrint(a, "{d} / {d} KB", .{ rec.kobj_kb >> 32, rec.kobj_kb & 0xffff_ffff }) };
+        cells[6] = .{ .str = try std.fmt.allocPrint(a, "{d}", .{rec.threads}) };
+        rows[ri] = try mshl.toValue(a, .{
+            .id = try std.fmt.allocPrint(a, "{d}", .{rec.id}),
+            .cells = Value{ .list = cells },
+        });
+    }
+    if (!dom_announced and log_h != 0) {
+        dom_announced = true;
+        var l: [64]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&l, "activity: system domains={d}", .{count}) catch "activity: system");
+    }
+    return try mshl.toValue(a, .{
+        .rows = Value{ .list = rows },
+        .available = true,
+        .summary = try std.fmt.allocPrint(a, "{d} domains, {d} alive \u{00b7} {d} MB in use \u{00b7} every domain on this machine (administrator view)", .{ count, alive, mem_kb / 1024 }),
+    });
+}
+
 /// Log what changed: the row order when it did (one line per row), and
 /// each unit whose running flag flipped since the table was last built.
 fn noteRows(recs: []const shared.UnitRec, order: []const usize, order_hash: u64) void {
@@ -1015,6 +1180,11 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // since the previous call, plus the last 60 samples of CPU and memory
     // (this program's own history, kept between calls) for a chart.
     if (std.mem.eql(u8, name, "sys-stats")) return .{ .ret = .record };
+    // `domain-rows SORT` is the machine's ledger: every domain, as a tree
+    // by name or flat by a cost, with its state, CPU over the interval,
+    // memory and kernel-object use of budget, and threads. Needs the
+    // introspect (or spawner) cap; without one, `available` is false.
+    if (std.mem.eql(u8, name, "domain-rows")) return .{ .params = &.{.{ .name = "sort", .shape = .string }}, .ret = .record };
     if (std.mem.eql(u8, name, "power")) return .{ .params = &.{.{ .name = "action", .shape = .string }}, .ret = .bool };
     return null;
 }
@@ -1185,6 +1355,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (init_chan == 0) return it.fail("unit-rows: this program cannot reach init", .{});
         if (args.len < 2 or args[0] != .str or args[1] != .str) return it.fail("unit-rows: SORT SELECTED expected", .{});
         return try unitRows(it, args[0].str, args[1].str);
+    }
+    if (is(u8, name, "domain-rows")) {
+        if (args.len == 0 or args[0] != .str) return it.fail("domain-rows: a sort column expected", .{});
+        return try domainRows(it, args[0].str);
     }
     if (is(u8, name, "sys-stats")) {
         if (init_chan == 0) return it.fail("sys-stats: this program cannot reach init", .{});
@@ -1521,4 +1695,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "net-rows", "browse-rows" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "domain-rows", "net-rows", "browse-rows" };

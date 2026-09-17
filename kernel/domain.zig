@@ -377,6 +377,8 @@ pub fn fillRecs(buf: []u8) usize {
             .kobj_kb = ((d.kobj.balance() / 1024) << 32) | (d.kobj.limit / 1024),
             .user_kb = ((d.user_mem.balance() / 1024) << 32) | (d.user_mem.limit / 1024),
             .cpu = (cpuPermilleUsed(d) << 32) | d.cpu.permille | (d.cores << 16),
+            .parent = if (d.parent) |p| p.id else 0,
+            .cpu_total = d.cpu.total.load(.monotonic),
         };
         rec.encode(buf[n * shared.DomainRec.size ..][0..shared.DomainRec.size]);
         n += 1;

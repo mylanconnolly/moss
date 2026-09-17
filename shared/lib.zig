@@ -263,7 +263,7 @@ pub const DomainState = enum(u64) {
     dead = 2,
 };
 
-/// One row of domain_list: fixed 48-byte little-endian record, written
+/// One row of domain_list: fixed 72-byte little-endian record, written
 /// into the caller's buffer by the kernel and decoded with the helpers
 /// below — typed introspection, no text scraping.
 pub const DomainRec = struct {
@@ -277,8 +277,13 @@ pub const DomainRec = struct {
     /// Last period's CPU spend in permille of one core << 32 | the
     /// domain's permille limit (0 = none) | its partition core mask << 16.
     cpu: u64,
+    /// The parent domain's id (0 for root), so a reader can draw the tree.
+    parent: u32 = 0,
+    /// Lifetime CPU cycles: two readings give a rate over any interval,
+    /// where `cpu` only ticks for a domain with a budget.
+    cpu_total: u64 = 0,
 
-    pub const size = 56;
+    pub const size = 72;
 
     pub fn encode(r: *const DomainRec, out: *[size]u8) void {
         std.mem.writeInt(u32, out[0..4], r.id, .little);
@@ -291,6 +296,9 @@ pub const DomainRec = struct {
         std.mem.writeInt(u64, out[32..40], r.kobj_kb, .little);
         std.mem.writeInt(u64, out[40..48], r.user_kb, .little);
         std.mem.writeInt(u64, out[48..56], r.cpu, .little);
+        std.mem.writeInt(u32, out[56..60], r.parent, .little);
+        @memset(out[60..64], 0);
+        std.mem.writeInt(u64, out[64..72], r.cpu_total, .little);
     }
 
     pub fn decode(b: *const [size]u8) DomainRec {
@@ -303,6 +311,8 @@ pub const DomainRec = struct {
             .kobj_kb = std.mem.readInt(u64, b[32..40], .little),
             .user_kb = std.mem.readInt(u64, b[40..48], .little),
             .cpu = std.mem.readInt(u64, b[48..56], .little),
+            .parent = std.mem.readInt(u32, b[56..60], .little),
+            .cpu_total = std.mem.readInt(u64, b[64..72], .little),
         };
     }
 
@@ -325,10 +335,15 @@ test "DomainRec codec round trip" {
         .kobj_kb = (123 << 32) | 1024,
         .user_kb = (2048 << 32) | 4096,
         .cpu = (250 << 32) | 500,
+        .parent = 3,
+        .cpu_total = 1 << 40,
     };
     var buf: [DomainRec.size]u8 = undefined;
     r.encode(&buf);
     const d = DomainRec.decode(&buf);
+    try std.testing.expectEqual(r.cpu, d.cpu);
+    try std.testing.expectEqual(r.parent, d.parent);
+    try std.testing.expectEqual(r.cpu_total, d.cpu_total);
     try std.testing.expectEqual(r.id, d.id);
     try std.testing.expectEqual(r.state, d.state);
     try std.testing.expectEqual(r.threads, d.threads);

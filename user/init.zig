@@ -179,6 +179,7 @@ var entropy_cap: u64 = 0;
 var session_mode = false;
 var session_home: u64 = 0;
 var session_gui = false; // the session runs a GUI shell (a display cap was forwarded)
+var session_admin = false; // an administrator's session: `introspect` grants are honoured
 var session_home_buf: [*]u8 = undefined;
 var session_caps: [shared.cap_tag_count]u64 = @splat(0);
 var session_text: [32 << 10]u8 = undefined;
@@ -328,7 +329,12 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
             if (std.mem.eql(u8, gn, "log")) u.flags |= shared.SpawnFlags.grant_log;
             if (std.mem.eql(u8, gn, "spawner")) u.flags |= shared.SpawnFlags.grant_spawner;
             if (std.mem.eql(u8, gn, "bootfs")) u.flags |= shared.SpawnFlags.grant_bootfs;
-            if (std.mem.eql(u8, gn, "introspect")) u.flags |= shared.SpawnFlags.grant_introspect;
+            // The machine's ledger (every domain's name and costs) is an
+            // administrator's to see: a session init grants it only when
+            // the session manager marked the session as an admin's.
+            if (std.mem.eql(u8, gn, "introspect")) {
+                if (!session_mode or session_admin) u.flags |= shared.SpawnFlags.grant_introspect else logLine("init: introspect grant refused (not an administrator's session): ", name);
+            }
             if (std.mem.eql(u8, gn, "clock")) u.flags |= shared.SpawnFlags.grant_clock;
         };
     }
@@ -1014,6 +1020,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (arg & 0xff == 3) {
         session_mode = true;
         session_gui = (arg >> 8) & 1 != 0; // a GUI session (display forwarded)
+        session_admin = (arg >> 9) & 1 != 0;
         session_home = setup.cap(.view);
         if (session_home == 0) usys.exit(120);
         session_home_buf = @ptrFromInt(fsc.attachBuf(session_home).va);

@@ -201,13 +201,12 @@ client-defined menu schemas, nested submenus, and scrollable overflow when
 applications need menus beyond those profiles.
 
 **Activity follow-ons (2026-09-17).** The task manager shows a session's
-own units and the machine's totals. Next: an admin **System** tab over
-`domain_list` (the `introspect` grant, gated like Settings' admin view)
-for every domain on the machine with the account tree; a **graceful
-quit** before Force Quit — a close request routed through the
-compositor's app-menu path, which only chrome may invoke today; per-unit
-CPU history in the table (the `chart` widget exists; the history would
-be init's or the app's to keep).
+own units, the machine's totals, and (an administrator) every domain.
+Next: a **graceful quit** before Force Quit — a close request routed
+through the compositor's app-menu path, which only chrome may invoke
+today; per-unit CPU history in the table (the `chart` widget exists; the
+history would be init's or the app's to keep); lists that grow with a
+maximized window (a vertical-fill rule in the layout engine).
 
 **Follow-ons from the project assessment (2026-09-12)**
 
@@ -1531,6 +1530,11 @@ be init's or the app's to keep).
   Found: the compositor woke every ticking client at the fastest client's
   period, so a 1 s window re-rendered at the bar's 100 ms — the "idle"
   18% of a core was its own paint; each reader now keeps its own period.
+  Then the System tab: every domain as a tree (`domain-rows` over
+  `domain_list`; `DomainRec` gained parent id and lifetime CPU), a `tabs`
+  widget, and the rule that a session init honours an `introspect` grant
+  only for an administrator's session (usersvc marks it). Found:
+  `mshl.toValue` recursed forever on a string literal's array pointer.
 - ✅ **Shut down and restart** (2026-09-16): the system menu's Restart and
   Shut Down (with rules between groups) climb the init tree as one
   `InitRequest.power` — bar → session init → session manager → system init

@@ -1,13 +1,16 @@
 # The Activity app (lazy — the launcher starts it; not on the dock, like
 # a utility). What this session is running and what it costs, with Force
 # Quit. Its init cap is the session's own front channel, so the table is
-# this session's units and nothing beyond them. Non-essential.
+# this session's units and nothing beyond them. The `introspect` grant is
+# the System tab (every domain on the machine); a session init honours it
+# only for an administrator's session, so for anyone else the tab says
+# so and shows nothing. Non-essential.
 {
   app:       { name: "Activity", description: "See what is running, what it costs, and stop an app", icon: pulse, window: "Activity", dock: false, order: 60 }
   image:     mshrun
   script:    scripts/activity.msh
   budget:    { user: 16mb }
-  grant:     [log, bootfs]
+  grant:     [log, bootfs, introspect]
   essential: false
   give: [
     { tag: init, self: true }

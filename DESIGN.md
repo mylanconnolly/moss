@@ -3237,6 +3237,36 @@ history graph with a quarter grid, title and current reading, red past
 cores), and a row can be `align: "top"` so two panels of unequal height
 share a top edge instead of centring.
 
+**The System tab (same day).** Under the panel, two tabs: Session, the
+table above, and System — every domain on the machine as a tree (root,
+init, the services under it, a session's init and its apps under the
+session manager), with id, state, CPU over the interval, memory and
+kernel-object use of budget, and threads; a parent's CPU and memory
+include its children's, because that is how the kernel's accounts
+cascade. It is read-only: the ctl caps are init's. The rows come from
+`domain-list` through a new `domain-rows` command, and `DomainRec` grew
+two appended fields for it, the parent's id (the tree) and the domain's
+lifetime CPU cycles (a rate over any interval; the budget-period permille
+it already carried only ticks for a domain with a CPU budget). The tab
+strip is a new `tabs` widget over the toolkit's tab-strip painter (no
+close glyphs; a click fires the list event shape with `col` = the tab's
+index, and the runtime logs each tab's centre for a drill).
+
+Who may see the ledger is the point. The unit asks for the `introspect`
+grant, and a *session* init honours that grant only when the session
+manager marked the session as an administrator's (a bit in the init's
+argument, set from the same `admin` policy bit that makes the system
+settings writable); for anyone else the grant is refused with a log line
+and the tab says the System view needs an administrator's session. The
+system init honours it as written, which is how the `activity` drill
+reaches the tab. Found on the way: `mshl.toValue` given a pointer to an
+array — a string literal such as `""` — went through `x.*` to the array
+branch, which sliced it back to a pointer to an array, and so on at
+runtime until the stack ran out; the pointer branch now coerces an array
+pointer to a slice, and a test feeds it literals. (The first suspect, the
+command's 30 KB of working arrays on the stack, moved to statics on the
+way; a 256 KB user stack does not leave a host command that much.)
+
 **Shut down and restart (as built, 2026-09-16).** The system menu had
 Log Out and no way to end the machine; the machine also had none — an
 interactive boot powered off only when its app exited, and a root task

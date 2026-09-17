@@ -1253,9 +1253,34 @@ fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "activity: win-alpha running=false", 1, "the table never showed win-alpha down", spec, polls)) return false;
     sleepMs(300);
     _ = q.screendump(check_dir ++ "/activity-stopped.ppm");
+    // The System tab: every domain on the machine (this unit holds the
+    // introspect grant the system init honours).
+    const tab = tabCenter(readLog(log_path), "tabs", 1) orelse {
+        reportFailure(spec.name, "the System tab was not logged", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, tab[0], tab[1])) return sfail(spec, log_path, "click the System tab");
+    if (!try waitLogN(log_path, "activity: system domains=", 1, "the System tab never listed the domains", spec, polls)) return false;
+    sleepMs(400);
+    _ = q.screendump(check_dir ++ "/activity-system.ppm");
     if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
     if (!try waitLogN(log_path, "activity: closed", 1, "Activity never closed", spec, polls)) return false;
     return true;
+}
+
+/// The scanout centre a GUI logged for tab `index` of strip `id` ("gui:
+/// tab <id> <index> at X,Y"), or null if not present yet.
+fn tabCenter(content: []const u8, id: []const u8, index: usize) ?[2]u32 {
+    var kb: [64]u8 = undefined;
+    const key = std.fmt.bufPrint(&kb, "gui: tab {s} {d} at ", .{ id, index }) catch return null;
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    const seg = content[at + key.len ..];
+    const comma = std.mem.indexOfScalar(u8, seg, ',') orelse return null;
+    const x = std.fmt.parseInt(u32, seg[0..comma], 10) catch return null;
+    var end = comma + 1;
+    while (end < seg.len and seg[end] >= '0' and seg[end] <= '9') end += 1;
+    const y = std.fmt.parseInt(u32, seg[comma + 1 .. end], 10) catch return null;
+    return .{ x, y };
 }
 
 /// The row index the Activity table last logged for `unit` ("activity:

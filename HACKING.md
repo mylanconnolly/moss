@@ -123,6 +123,10 @@ control bytes and overlong values are refused, not truncated. `dock`
 defaults to false; `order` defaults to 1000 and accepts 0–65535. Metadata
 belongs to the unit because several apps may share one executable image.
 Units without it remain services and are omitted from application discovery.
+A unit's `grant: [introspect]` (the machine's ledger, `domain_list`) is
+honoured by the system init as written and by a session init only for
+an administrator's session; a non-admin session logs the refusal and the
+unit runs without it (Activity's System tab says so).
 A new session app also changes one runner constant, `launcher_ready_line`
 in `tools/runner.zig` (the launcher logs how many apps it found), and is
 listed in `build.zig`'s archive files with its script.
