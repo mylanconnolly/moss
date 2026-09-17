@@ -3837,6 +3837,25 @@ selection, scroll owners, focus targets; everything about *where*
 things go is the engine's, and the old `drawSplit` is gone because the
 engine paints the divider through a callback like everything else.
 
+**Heights flow down as an offer (2026-09-17).** The engine laid out by
+width alone: a node reported the height it needed and a window was
+sized to its content, so a maximized window's table kept its 300 px and
+scrolled inside a room it could have filled. Now `avail_h` travels with
+`avail_w` — the height a node *may* take, 0 meaning "your natural
+height". A column measures its fixed children natural and splits what
+is left of its offer among the children that `grow` (a weight, like
+`flex` across a row), never below their natural height; rows and splits
+hand their offer through; a section keeps its inset; a list or a chart
+offered more than its own height stretches to it. The window sizes
+itself with no offer, as before, then its root viewport offers its
+content height when it paints — so the same script fills a maximized
+window and sits at its natural size otherwise, and the initial size is
+still the content's. The tree interface gained `grow` and an `avail_h`
+on the leaf and child callbacks; a test offers a column spare height
+and checks the growing child takes exactly the remainder. Activity's
+two tables `grow`, and its drill maximizes the window and checks the
+table was laid out again.
+
 With that, the runtime stopped knowing one application. It used to
 synthesize the Files app's events from private knowledge of
 `explorer.msh` — the `files` menu profile's Up, Refresh, Home, Lock,

@@ -314,14 +314,16 @@ fn paintViewport(node: Value, x: usize, y: usize, width: usize, height: usize, o
     wf.clip_y1 = @min(old_y1, wf.clipY(y + height));
     st.cy0 = wf.clip_y0;
     st.cy1 = wf.clip_y1;
-    var size = layoutNode(node, 0, 0, width, false);
+    // The viewport's height is the offer: content that grows fills it,
+    // content that does not is measured natural and may scroll.
+    var size = layoutNode(node, 0, 0, width, height, false);
     const overflow = size.h > height;
     const content_w = width -| (if (overflow) @as(usize, 14) else 0);
-    if (overflow) size = layoutNode(node, 0, 0, content_w, false);
+    if (overflow) size = layoutNode(node, 0, 0, content_w, height, false);
     st.state.fit(size.h, height);
     scroll_owner = owner;
     wf.draw_offset_y -= @intCast(st.state.offset);
-    _ = drawNode(node, x, y, content_w);
+    _ = drawNode(node, x, y, content_w, height);
     wf.draw_offset_y = old_offset;
     scroll_owner = old_owner;
     if (overflow and height > 0 and width >= 8) {
@@ -522,7 +524,7 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     const tree = it.callValue(view, &.{state}, null, null) catch return;
     wf.measuring = true;
     wf.drawChrome(title);
-    content_h = wf.title_h + 2 * pad + layoutNode(tree, 0, 0, wf.win_w - 2 * pad, false).h;
+    content_h = wf.title_h + 2 * pad + layoutNode(tree, 0, 0, wf.win_w - 2 * pad, 0, false).h;
     wf.measuring = false;
     // Centre inside the desktop work area the compositor publishes (between
     // the bar and the dock). Using the whole scanout placed tall windows
@@ -549,7 +551,7 @@ fn nodeGap(rec: mshl.Record) usize {
     return @intCast(std.math.clamp(intField(rec, "gap", gap), 0, 64));
 }
 
-fn drawNode(node: Value, x: usize, y: usize, avail_w: usize) Size {
+fn drawNode(node: Value, x: usize, y: usize, avail_w: usize, avail_h: usize) Size {
     const old_x0 = wf.clip_x0;
     const old_x1 = wf.clip_x1;
     wf.clip_x0 = @max(old_x0, x);
@@ -558,7 +560,7 @@ fn drawNode(node: Value, x: usize, y: usize, avail_w: usize) Size {
         wf.clip_x0 = old_x0;
         wf.clip_x1 = old_x1;
     }
-    return layoutNode(node, x, y, avail_w, true);
+    return layoutNode(node, x, y, avail_w, avail_h, true);
 }
 
 /// The tree layout is the toolkit's (lib/ui/layout.zig): this is the mshl
@@ -591,6 +593,17 @@ const MshlTree = struct {
     pub fn flex(_: *MshlTree, n: Node) usize {
         return flexWeight(n);
     }
+    /// `grow: true` (or a weight): this child takes the column's spare
+    /// height — a table that fills a maximized window.
+    pub fn grow(_: *MshlTree, n: Node) usize {
+        if (n != .record) return 0;
+        const v = n.record.get("grow") orelse return 0;
+        return switch (v) {
+            .bool => |b| @intFromBool(b),
+            .int => |i| @intCast(std.math.clamp(i, 0, 64)),
+            else => 0,
+        };
+    }
     pub fn scrollHeight(_: *MshlTree, n: Node) usize {
         return @intCast(std.math.clamp(intField(n.record, "h", 240), 40, 4096));
     }
@@ -606,14 +619,14 @@ const MshlTree = struct {
     pub fn splitLeftWidth(_: *MshlTree, n: Node) usize {
         return @intCast(@max(intField(n.record, "left_w", 220), 0));
     }
-    pub fn leafMeasure(_: *MshlTree, n: Node, avail_w: usize) Size {
-        return leafLayout(n.record, 0, 0, avail_w, false);
+    pub fn leafMeasure(_: *MshlTree, n: Node, avail_w: usize, avail_h: usize) Size {
+        return leafLayout(n.record, 0, 0, avail_w, avail_h, false);
     }
-    pub fn leafPaint(_: *MshlTree, n: Node, x: usize, y: usize, avail_w: usize) Size {
-        return leafLayout(n.record, x, y, avail_w, true);
+    pub fn leafPaint(_: *MshlTree, n: Node, x: usize, y: usize, avail_w: usize, avail_h: usize) Size {
+        return leafLayout(n.record, x, y, avail_w, avail_h, true);
     }
-    pub fn childPaint(_: *MshlTree, n: Node, x: usize, y: usize, avail_w: usize) Size {
-        return drawNode(n, x, y, avail_w);
+    pub fn childPaint(_: *MshlTree, n: Node, x: usize, y: usize, avail_w: usize, avail_h: usize) Size {
+        return drawNode(n, x, y, avail_w, avail_h);
     }
     pub fn viewportPaint(_: *MshlTree, n: Node, child: Node, x: usize, y: usize, w: usize, h: usize) Size {
         const id = strField(n.record, "id");
@@ -646,12 +659,14 @@ const Engine = ui.layout.Engine(MshlTree);
 
 /// Measurement never creates edit buffers, focus targets, or list state.
 /// Both passes use the same layout decisions, including wrapped rows.
-fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, paint: bool) Size {
-    return if (paint) Engine.paint(&mshl_tree, node, x, y, avail_w) else Engine.measure(&mshl_tree, node, avail_w);
+/// `avail_h` is the height offered (0 = natural); see the engine.
+fn layoutNode(node: Value, x: usize, y: usize, avail_w: usize, avail_h: usize, paint: bool) Size {
+    return if (paint) Engine.paint(&mshl_tree, node, x, y, avail_w, avail_h) else Engine.measure(&mshl_tree, node, avail_w, avail_h);
 }
 
-/// A leaf's own size and paint: the widgets that own runtime state.
-fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
+/// A leaf's own size and paint: the widgets that own runtime state. A
+/// list or a chart offered more height than its own takes the offer.
+fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize, paint: bool) Size {
     const kind = strField(rec, "kind");
     if (std.mem.eql(u8, kind, "icon")) {
         const size = @min(avail_w, if (rec.get("size") != null) wf.scaledIconSize(@intCast(std.math.clamp(intField(rec, "size", 20), 12, 64))) else wf.iconSize());
@@ -671,10 +686,10 @@ fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool)
         return .{ .w = avail_w, .h = lineOf(R_UI) + 2 * fpy + (if (strField(rec, "label").len > 0) lineOf(R_UI) + 6 else @as(usize, 0)) };
     }
     if (std.mem.eql(u8, kind, "list")) {
-        if (paint) return drawList(rec, x, y, avail_w);
-        return .{ .w = avail_w, .h = @intCast(@max(intField(rec, "h", 240), 40)) };
+        if (paint) return drawList(rec, x, y, avail_w, avail_h);
+        return .{ .w = avail_w, .h = @max(@as(usize, @intCast(@max(intField(rec, "h", 240), 40))), avail_h) };
     }
-    if (std.mem.eql(u8, kind, "chart")) return layoutChart(rec, x, y, avail_w, paint);
+    if (std.mem.eql(u8, kind, "chart")) return layoutChart(rec, x, y, avail_w, avail_h, paint);
     if (std.mem.eql(u8, kind, "tabs")) return layoutTabs(rec, x, y, avail_w, paint);
     if (std.mem.eql(u8, kind, "meter")) return layoutMeter(rec, x, y, avail_w, paint);
     return .{};
@@ -749,8 +764,8 @@ fn sampleCount(values: Value) usize {
 /// a light grid at quarters — with the title and the current reading
 /// above it. The area a chart takes is its own: `h` tall, the width
 /// offered. Loads over 80% paint in the danger colour, like a meter.
-fn layoutChart(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
-    const h: usize = @intCast(std.math.clamp(intField(rec, "h", 100), 40, 400));
+fn layoutChart(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize, paint: bool) Size {
+    const h: usize = @max(@as(usize, @intCast(std.math.clamp(intField(rec, "h", 100), 40, 400))), avail_h);
     const w = avail_w;
     if (!paint or w < 24) return .{ .w = w, .h = h };
     const line = lineOf(R_UI);
@@ -1166,13 +1181,13 @@ fn cellAt(cellsv: Value, ci: usize) []const u8 {
 /// the scroll offset and selection (see `ListState`); the app just emits
 /// the rows. Registers one focusable (the whole list), so its rows never
 /// eat the focusable budget.
-fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
+fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize) Size {
     const id = strField(rec, "id");
     const key = strField(rec, "key");
     const rowsv: Value = rec.get("rows") orelse Value.nothing;
     const nrows = rowsLen(rowsv);
     const cols: []const Value = if (rec.get("cols")) |cv| (if (cv == .list) cv.list else &.{}) else &.{};
-    const box_h: usize = @intCast(@max(intField(rec, "h", 240), 40));
+    const box_h: usize = @max(@as(usize, @intCast(@max(intField(rec, "h", 240), 40))), avail_h);
     const w = avail_w;
     const line = lineOf(R_UI);
     const row_h = line + 2 * list_row_vpad;

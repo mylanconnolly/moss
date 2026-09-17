@@ -202,10 +202,9 @@ applications need menus beyond those profiles.
 
 **Activity follow-ons (2026-09-17).** The task manager shows a session's
 own units, the machine's totals, and (an administrator) every domain,
-and can ask a window to close before forcing it. Next: per-unit CPU
-history in the table (the `chart` widget exists; the history would be
-init's or the app's to keep); lists that grow with a maximized window
-(a vertical-fill rule in the layout engine).
+can ask a window to close before forcing it, and its tables fill a
+maximized window. Next: per-unit CPU history in the table (the `chart`
+widget exists; the history would be init's or the app's to keep).
 
 **Follow-ons from the project assessment (2026-09-12)**
 
@@ -1536,7 +1535,9 @@ init's or the app's to keep); lists that grow with a maximized window
   `mshl.toValue` recursed forever on a string literal's array pointer.
   Then Quit: the compositor's `close_titled` hands a window the
   close_window key under the display-control badge; `quit-window`; the
-  drill quits Alpha (it closes itself) and force-quits Beta.
+  drill quits Alpha (it closes itself) and force-quits Beta. Then the
+  layout engine's height offer (`grow` on a column child, `avail_h` on
+  the tree interface): a maximized Activity's table fills the window.
 - ✅ **Shut down and restart** (2026-09-16): the system menu's Restart and
   Shut Down (with rules between groups) climb the init tree as one
   `InitRequest.power` — bar → session init → session manager → system init

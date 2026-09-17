@@ -112,14 +112,14 @@ let final = (gui {
             { kind: "tabs", id: "tabs", items: ["Session", "System"], selected: $state.tab }
             (match $state.tab {
                 1 => {
-                  kind: "list", id: "domains", key: "domains", h: 300, fit: true
+                  kind: "list", id: "domains", key: "domains", h: 300, fit: true, grow: true
                   sort:  (dcol-of $state.sort)
                   empty: "The System view needs an administrator's session."
                   cols:  [{ title: "Name", w: 9 } { title: "Id", w: 2, right: true } { title: "State", w: 3 } { title: "CPU", w: 3, right: true } { title: "Memory", w: 6, right: true } { title: "Kernel objects", w: 6, right: true } { title: "Threads", w: 4, right: true }]
                   rows:  $d.rows
                 }
                 _ => {
-                  kind: "list", id: "procs", key: "procs", h: 300, fit: true
+                  kind: "list", id: "procs", key: "procs", h: 300, fit: true, grow: true
                   selected: $state.sel
                   sort:     (col-of $state.sort)
                   empty:    "Nothing is running."

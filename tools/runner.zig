@@ -1279,9 +1279,42 @@ fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "activity: system domains=", 1, "the System tab never listed the domains", spec, polls)) return false;
     sleepMs(400);
     _ = q.screendump(check_dir ++ "/activity-system.ppm");
+    // Maximize: the table grows into the work area instead of scrolling.
+    const mx = activityDot(readLog(log_path), "max=") orelse {
+        reportFailure(spec.name, "could not find Activity's maximize dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, mx[0], mx[1])) return sfail(spec, log_path, "click maximize");
+    if (!try waitLogN(log_path, "gui: list domains ", 2, "the maximized table was not laid out again", spec, polls)) return false;
+    sleepMs(400);
+    _ = q.screendump(check_dir ++ "/activity-max.ppm");
     if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
     if (!try waitLogN(log_path, "activity: closed", 1, "Activity never closed", spec, polls)) return false;
     return true;
+}
+
+/// One of Activity's traffic-light dots. Activity is the one window in
+/// the drill taller than 400 px, and its placement log gives its top; its
+/// `gui: dots` line is the one whose dots sit just below that top (the
+/// drill windows log theirs interleaved, and at their own `at:` places).
+fn activityDot(content: []const u8, key: []const u8) ?[2]u32 {
+    var top: ?u32 = null;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, content, at, "gui: placed y=")) |i| {
+        const eol = std.mem.indexOfScalarPos(u8, content, i, '\n') orelse content.len;
+        if ((parseAfter(content[i..eol], "h=") orelse 0) > 400) top = parseAfter(content[i..eol], "gui: placed y=");
+        at = eol;
+    }
+    const y0 = top orelse return null;
+    at = 0;
+    while (std.mem.indexOfPos(u8, content, at, "gui: dots ")) |i| {
+        const eol = std.mem.indexOfScalarPos(u8, content, i, '\n') orelse content.len;
+        if (parseDot(content[0..eol], "close=")) |c| {
+            if (c[1] > y0 and c[1] < y0 + 80) return parseDot(content[0..eol], key);
+        }
+        at = eol;
+    }
+    return null;
 }
 
 /// The scanout centre a GUI logged for tab `index` of strip `id` ("gui:
