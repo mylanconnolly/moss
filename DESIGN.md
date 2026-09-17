@@ -3184,6 +3184,20 @@ the bar's height painted black, because the popup painter retargeted
 the frame's pixels and size but kept the bar's clip; `wf.retarget`
 moves the clip with them and restores all three together.
 
+**A failed resize is recoverable (2026-09-17).** `recreateFocused` left
+the old surface valid on failure but not the geometry: the caller had
+already written the new `win_*`, so a client that painted again indexed
+past the buffer it kept, and the terminal's answer was to exit the
+user's shell on a transient shm refusal at 1920×1200. The frame now
+remembers the live surface's geometry when it maps it and puts `win_*`
+back to it when a recreate fails (a maximize flip is undone too, and an
+output change re-clamps the kept surface onto the new output), so
+`.resize_failed` means "repaint" everywhere: the terminal, the chooser
+and the mshl runtime keep their windows and say so in the log; the
+editor lost its hand-rolled restore. The terminal also forgets a
+gesture in flight on an output change or a focus loss, since the
+release it was waiting for will never come.
+
 **Minimize and restore (as built, 2026-09-10).** The amber traffic-light
 was a stub since stage 1 (it logged "minimize (not yet)"); it now hides the
 window, and the app's dock pill brings it back. A minimized window is not

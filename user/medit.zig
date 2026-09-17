@@ -701,8 +701,6 @@ fn pointer(ev: wf.Event) void {
             reveal();
         } else drag_select = false;
     }
-    const old = wf.Geom{ .x = wf.win_x, .y = wf.win_y, .w = wf.win_w, .h = wf.win_h };
-    const was_maximized = wf.maximized;
     const event = wf.onPointer(ev, "Editor");
     switch (event) {
         .close => {
@@ -710,11 +708,7 @@ fn pointer(ev: wf.Event) void {
         },
         .minimized => hidden = true,
         .resize_failed => {
-            wf.win_x = old.x;
-            wf.win_y = old.y;
-            wf.win_w = old.w;
-            wf.win_h = old.h;
-            wf.maximized = was_maximized;
+            // The frame put the geometry back itself; only the word is ours.
             status("Not enough display memory to resize. Your edits are safe.");
         },
         .resized => {
@@ -847,15 +841,7 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
         const ev = wf.nextInput() orelse break;
         var repaint = true;
         if (ev.kind == 7) {
-            const old = wf.Geom{ .x = wf.win_x, .y = wf.win_y, .w = wf.win_w, .h = wf.win_h };
-            if (!wf.outputChanged(ev, "Editor", hidden)) {
-                wf.win_w = old.w;
-                wf.win_h = old.h;
-                wf.win_x = @min(old.x, wf.scanout_w -| old.w);
-                wf.win_y = @min(old.y, wf.scanout_h -| old.h);
-                wf.moveSurface(wf.win_x, wf.win_y);
-                status("Display resize failed. Your document is still open.");
-            }
+            if (!wf.outputChanged(ev, "Editor", hidden)) status("Display resize failed. Your document is still open.");
             for (tabs.items) |tab| tab.needs_reveal = true;
         } else if (ev.kind == 4) {
             wf.win_focused = ev.ch != 0;

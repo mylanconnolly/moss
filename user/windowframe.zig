@@ -673,6 +673,7 @@ pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
     surf_cap = cs.cap;
     surf_va = m.data[0];
     px = @ptrFromInt(m.data[0]);
+    surf_geom = .{ .x = win_x, .y = win_y, .w = win_w, .h = win_h };
     // A new surface is a whole-window clip. Clients that never call
     // clipReset (the terminal blits its grid straight into px) painted
     // their chrome through the boot-time 1280x1024 clip after a resize:
@@ -1055,15 +1056,24 @@ fn toggleMaximize(title: []const u8) Ptr {
         win_h = wa.h;
         maximized = true;
     }
-    if (!recreate(title)) return .resize_failed;
+    if (!recreate(title)) {
+        maximized = !maximized; // the flip did not happen; the geometry is already back
+        return .resize_failed;
+    }
     return .{ .resized = if (maximized) .max else .none };
 }
+
+/// The geometry the live surface actually has (what `px` is sized for):
+/// a failed resize puts `win_*` back to it, so the client can paint again
+/// without indexing past the buffer it kept.
+var surf_geom: Geom = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
 
 /// A resize is a destroy + recreate of the fixed-size surface at the new
 /// geometry (exact placement — no cascade), re-taking focus and the front,
 /// with the title re-set so the dock can still find it. False if the new
-/// surface could not be opened; the old surface remains valid. The caller
-/// restores its previous geometry before painting it again.
+/// surface could not be opened: the old surface remains valid AND `win_*`
+/// is back to its geometry — a `.resize_failed` is recoverable, the client
+/// just repaints. (The terminal used to exit the user's shell on it.)
 fn recreate(title: []const u8) bool {
     return recreateFocused(title, true);
 }
@@ -1083,6 +1093,11 @@ fn recreateFocused(title: []const u8, activate: bool) bool {
         surf_cap = old_cap;
         surf_va = old_va;
         px = old_px;
+        win_x = surf_geom.x;
+        win_y = surf_geom.y;
+        win_w = surf_geom.w;
+        win_h = surf_geom.h;
+        clipReset();
         return false;
     }
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = old_surf } }, 0);
@@ -1146,7 +1161,13 @@ pub fn outputChanged(ev: Event, title: []const u8, hidden: bool) bool {
         win_w = area.w;
         win_h = area.h;
     }
-    if (!recreateFocused(title, win_focused and !hidden)) return false;
+    if (!recreateFocused(title, win_focused and !hidden)) {
+        // The old surface stays; keep it on the (possibly smaller) output.
+        win_x = @min(win_x, scanout_w -| win_w);
+        win_y = @min(win_y, scanout_h -| win_h);
+        moveSurface(win_x, win_y);
+        return false;
+    }
     setSurfaceTitle(title);
     if (hidden) setSurfaceVisible(false);
     return true;

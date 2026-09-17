@@ -791,11 +791,17 @@ fn pumpWindow(log_h: u64) void {
             repaintWin();
         },
         7 => {
-            if (!wf.outputChanged(ev, "Terminal", !wf.surface_visible)) usys.exit(191);
-            onResized(log_h);
+            // The output changed under us: pending pointer events were
+            // discarded by the compositor, so a gesture in flight is over.
+            resetGestures();
+            if (!wf.outputChanged(ev, "Terminal", !wf.surface_visible)) {
+                _ = usys.log(log_h, "term: output resize failed; keeping the window");
+                repaintWin();
+            } else onResized(log_h);
         },
         4 => {
             wf.win_focused = ev.ch != 0;
+            if (!wf.win_focused) resetGestures();
             repaintWin();
         },
         255 => usys.exit(0),
@@ -1041,6 +1047,14 @@ var ptr_left = false;
 var frame_gesture = false;
 var content_gesture = false;
 var prev_mid = false;
+/// Forget a press in flight: after an output change or a focus loss no
+/// release will arrive, and the next press must route afresh.
+fn resetGestures() void {
+    ptr_left = false;
+    frame_gesture = false;
+    content_gesture = false;
+    prev_mid = false;
+}
 
 /// The frame recreated the surface at a new size: re-point at its buffer,
 /// refit the grid, REFLOW (re-render the model at the new width) and repaint.
@@ -1098,9 +1112,13 @@ fn routePointer(ev: wf.Event, log_h: u64) void {
         if (!left) content_gesture = false;
     } else if (frame_gesture or in_title) {
         switch (wf.onPointer(ev, "Terminal")) {
-            .close, .resize_failed => {
+            .close => {
                 _ = usys.log(log_h, "term: window closed");
                 usys.exit(0);
+            },
+            .resize_failed => {
+                _ = usys.log(log_h, "term: resize failed; keeping the window");
+                repaintWin();
             },
             .resized => onResized(log_h),
             else => {}, // none / moved / minimized — keep pumping

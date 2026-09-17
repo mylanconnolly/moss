@@ -245,7 +245,8 @@ fn choose(saving: bool, initial: []const u8, out: *[256]u8) ?[]const u8 {
                 },
             },
             1 => switch (wf.onPointer(ev, if (saving) "Save document" else "Open document")) {
-                .close, .resize_failed => return null,
+                .close => return null,
+                .resize_failed => {},
                 .content => |pos| {
                     if (widgets.contains(cancel_rect, pos.x, pos.y)) return null;
                     if (widgets.contains(action_rect, pos.x, pos.y)) {
@@ -272,7 +273,7 @@ fn choose(saving: bool, initial: []const u8, out: *[256]u8) ?[]const u8 {
             4 => wf.win_focused = ev.ch != 0,
             3 => wf.setSurfaceVisible(true),
             7 => {
-                if (!wf.outputChanged(ev, "Choose document", false)) return null;
+                if (!wf.outputChanged(ev, "Choose document", false)) _ = usys.log(glog, "chooser: output resize failed; keeping the dialog");
             },
             255 => return null,
             else => {},

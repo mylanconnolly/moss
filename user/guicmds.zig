@@ -1785,7 +1785,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         input: while (true) {
             const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
             if (ev.kind == 7) {
-                if (!wf.outputChanged(ev, title, minimized)) return it.fail("gui: output resize failed", .{});
+                if (!wf.outputChanged(ev, title, minimized)) _ = usys.log(log_h, "gui: output resize failed; keeping the window");
                 hovered = null;
                 pressed = null;
                 reveal_focus = true;
@@ -1938,7 +1938,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         });
                         break :input; // re-render into the new surface
                     },
-                    .resize_failed => return it.fail("gui: cannot resize the window", .{}),
+                    .resize_failed => {
+                        _ = usys.log(log_h, "gui: resize failed; keeping the window");
+                        break :input; // repaint into the surface we kept
+                    },
                 }
                 if (old_hover != hovered) break :input;
                 continue :input;
