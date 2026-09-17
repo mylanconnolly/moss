@@ -3298,6 +3298,22 @@ a release in mid-screen still just moves the window. The `desktop` drill
 drags a window to the left, right, and top edges and confirms
 `gui: snapped left`, `gui: snapped right`, and `gui: maximized`.
 
+**Three frame seams closed (2026-09-17).** The chrome's half of the
+application-menu protocol — reading the active menu and its title,
+invoking an item, handing focus back — sat in the window frame beside an
+application's own half (`setMenuProfile`), although only the top bar and
+the launcher call it and the invoke/restore requests need the
+`display_control` grant no ordinary window holds. It is `user/menuctl.zig`
+now; the frame keeps what every window needs. The windowed terminal mapped
+fontsvc's coverage atlas a second time for its grid, next to the frame's
+mapping of the same pages for the title (two mapping windows, and two
+places that could disagree about its width); `wf.atlasView()` lends the
+frame's mapping, and the console terminal, which has no frame, still maps
+its own. And there were three double-click windows — the titlebar's 400
+ms in cycles, the editor's 333 ms in cycles, the toolkit's 500 ms — for
+one gesture; `usys.nowMs()` is the one clock, and
+`ui.pointer.double_click_ms` the one window, everywhere.
+
 **A shared window frame (as built, 2026-09-11).** All of the above — the
 titlebar and its traffic-light dots, dragging, edge-snapping, minimize /
 maximize, focus dimming — plus the surface lifecycle (create / commit /

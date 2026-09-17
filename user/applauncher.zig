@@ -4,6 +4,7 @@ const std = @import("std");
 const shared = @import("shared");
 const tk = @import("mosslib").ui;
 const wf = @import("windowframe.zig");
+const menuctl = @import("menuctl.zig");
 const ui = @import("widgets.zig");
 const usys = @import("usys.zig");
 const apps = @import("appsclient.zig");
@@ -71,7 +72,7 @@ fn render() void {
     _ = wf.commitSurface();
 }
 pub fn run(control: u64, log: u64) bool {
-    const focus = wf.activeMenu().token;
+    const focus = menuctl.activeMenu().token;
     query = .{};
     message = if (catalog.refresh()) "" else "Applications are unavailable.";
     filter();
@@ -113,7 +114,7 @@ pub fn run(control: u64, log: u64) bool {
         wf.win_h = old[5];
         wf.clipReset();
         wf.ptr_down = false;
-        if (restore and focus != 0) _ = wf.restoreMenuFocus(control, focus);
+        if (restore and focus != 0) _ = menuctl.restoreMenuFocus(control, focus);
         _ = usys.log(log, "launcher: dismissed");
     }
     render();

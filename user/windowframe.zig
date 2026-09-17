@@ -36,6 +36,15 @@ var font_buf: [*]u8 = undefined; // our request/response buffer (shm)
 var font_buf_len: usize = 0;
 var atlas: [*]const u8 = undefined; // fontsvc's coverage atlas (mapped ro)
 var atlas_w: usize = 0;
+
+/// The atlas mapping, for a window that draws its own text beside the
+/// frame's (the terminal grid): one mapping window per process, not one
+/// per font client. Null until `fontReady` has mapped it.
+pub const AtlasView = struct { px: [*]const u8, w: usize };
+pub fn atlasView() ?AtlasView {
+    if (atlas_w == 0) return null;
+    return .{ .px = atlas, .w = atlas_w };
+}
 var font_ok = false; // fontsvc is attached and usable
 pub const n_roles = 3;
 var role_line: [n_roles]usize = @splat(0);
@@ -123,7 +132,7 @@ var drag_grab_y: usize = 0;
 var drag_start_x: usize = 0;
 var drag_start_y: usize = 0;
 var drag_moved = false;
-var title_click: ?struct { at: u64, x: usize, y: usize, surface: u64 } = null;
+var title_click: ?struct { at: u64, x: usize, y: usize, surface: u64 } = null; // `at` in ms
 fn distance(a: usize, b: usize) usize {
     return @max(a, b) - @min(a, b);
 }
@@ -755,15 +764,12 @@ pub fn setSurfaceTitle(title: []const u8) void {
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .set_title = .{ .surface = surf, .a = w[0], .b = w[1] } }, 0);
 }
 
-pub const ActiveMenu = struct {
-    token: u64 = 0,
-    profile: shared.menus.Profile = .generic,
-    enabled: u64 = 0,
-};
 var menu_surface: u64 = 0;
 var menu_profile: shared.menus.Profile = .generic;
 var menu_enabled: u64 = 0;
 /// Publish current action availability. Re-created surfaces are republished.
+/// (The chrome's side of the protocol — reading the active menu, invoking
+/// an item, restoring focus — is `menuctl.zig`; no ordinary window needs it.)
 fn menuCall(channel: u64, req: shared.GpuReq) ?shared.GpuResp {
     return switch (usys.callTyped(shared.GpuReq, shared.GpuResp, channel, req, 0)) {
         .ok => |rep| rep,
@@ -781,38 +787,6 @@ pub fn setMenuProfile(profile: shared.menus.Profile, enabled: u64) void {
         menu_enabled = mask;
     }
 }
-pub fn activeMenu() ActiveMenu {
-    const rep = menuCall(chan, .menu_info) orelse return .{};
-    return switch (rep) {
-        .menu => |m| .{ .token = m.token, .profile = shared.menus.profileFromInt(m.profile) orelse .generic, .enabled = m.enabled },
-        else => .{},
-    };
-}
-pub fn menuTitle(token: u64) [16]u8 {
-    var result: [16]u8 = @splat(0);
-    const rep = menuCall(chan, .{ .menu_title = .{ .token = token } }) orelse return result;
-    switch (rep) {
-        .menu_title => |t| {
-            var buf: [24]u8 = undefined;
-            const title = shared.wordsToStr(&buf, .{ t.a, t.b, 0 });
-            const n = @min(title.len, result.len);
-            @memcpy(result[0..n], title[0..n]);
-        },
-        else => {},
-    }
-    return result;
-}
-pub fn invokeMenu(control: u64, token: u64, key: u8) bool {
-    if (control == 0) return false;
-    const rep = menuCall(control, .{ .menu_invoke = .{ .token = token, .key = key } }) orelse return false;
-    return rep == .ok;
-}
-pub fn restoreMenuFocus(control: u64, token: u64) bool {
-    if (control == 0) return false;
-    const rep = menuCall(control, .{ .menu_restore = .{ .token = token } }) orelse return false;
-    return rep == .ok;
-}
-
 /// Minimize (hide) or restore (show) this window's surface. The amber
 /// traffic-light hides it; the compositor drops focus to the window behind
 /// and its buffer is kept, so a `restore_titled` from the dock brings it
@@ -986,9 +960,9 @@ pub fn onPointer(ev: Event, title: []const u8) Ptr {
             const cx = @min(ev.screen_x orelse (win_x + ev.x), scanout_w);
             const cy = @min(ev.screen_y orelse (win_y + ev.y), scanout_h);
             if (!drag_moved and distance(cx, drag_start_x) <= 4 and distance(cy, drag_start_y) <= 4 and ev.y < title_h and hitDot(ev.x, ev.y) == null and !win_trusted) {
-                const now = usys.cycles();
+                const now = usys.nowMs();
                 if (title_click) |last| {
-                    if (last.surface == surf and now -| last.at <= usys.cycleHz() * 400 / 1000 and distance(cx, last.x) <= 4 and distance(cy, last.y) <= 4) {
+                    if (last.surface == surf and now -| last.at <= ui.pointer.double_click_ms and distance(cx, last.x) <= 4 and distance(cy, last.y) <= 4) {
                         title_click = null;
                         return toggleMaximize(title);
                     }

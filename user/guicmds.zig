@@ -1197,8 +1197,7 @@ fn listClick(id: []const u8, x: usize, screen_y: usize) ListClick {
         if (y < lh.rows_top) return .{};
         const row = st.scroll + (y - lh.rows_top) / lh.row_h;
         if (row >= st.nrows) return .{};
-        const now_ms = usys.cycles() / @max(usys.cycleHz() / 1000, 1);
-        const activated = st.click.press(row, now_ms);
+        const activated = st.click.press(row, usys.nowMs());
         st.sel = row;
         keepSelVisible(st);
         return .{ .fire = true, .activated = activated, .row = row };

@@ -313,6 +313,12 @@ pub fn cycles() u64 {
     );
 }
 
+/// Monotonic milliseconds from the cycle counter: the clock UI timing
+/// (double clicks, hover delays) reads, the same one everywhere.
+pub fn nowMs() u64 {
+    return cycles() / @max(cycleHz() / 1000, 1);
+}
+
 var cycle_hz_cached: u64 = 0;
 
 /// The counter's rate: a register on aarch64; on x86_64 the kernel says

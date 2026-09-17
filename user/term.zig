@@ -361,16 +361,25 @@ fn fontReady() void {
     }
     font_buf = @ptrFromInt(m.data[0]);
     font_buf_len = m.data[1] * 4096;
-    const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
-        .ok => |ok| ok,
-        .err => return,
-    };
-    if (at.cap == 0 or at.rep != .atlas) return;
-    const am = usys.shmMap(at.cap);
-    _ = usys.capDrop(at.cap);
-    if (am.err != .ok) return;
-    fatlas = @ptrFromInt(am.data[0]);
-    fatlas_w = shared.unpackHi(at.rep.atlas.wh);
+    // The atlas is one shared mapping per process: windowed, the frame
+    // has already mapped it (windowedMain readies the frame first), so
+    // the grid borrows that view rather than mapping it a second time;
+    // the console terminal has no frame and maps its own.
+    if (wf.atlasView()) |v| {
+        fatlas = v.px;
+        fatlas_w = v.w;
+    } else {
+        const at = switch (usys.callTypedCap(shared.FontReq, shared.FontResp, font_chan, .atlas, 0)) {
+            .ok => |ok| ok,
+            .err => return,
+        };
+        if (at.cap == 0 or at.rep != .atlas) return;
+        const am = usys.shmMap(at.cap);
+        _ = usys.capDrop(at.cap);
+        if (am.err != .ok) return;
+        fatlas = @ptrFromInt(am.data[0]);
+        fatlas_w = shared.unpackHi(at.rep.atlas.wh);
+    }
     switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .{ .metrics = .{ .role = mono_role } }, 0)) {
         .ok => |rep| switch (rep) {
             .metrics => |mm| {

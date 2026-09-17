@@ -11,6 +11,7 @@ const usys = @import("usys.zig");
 const mshl = @import("mosslib").mshl;
 const ui = @import("mosslib").ui;
 const wf = @import("windowframe.zig");
+const menuctl = @import("menuctl.zig");
 const core = @import("guicmds.zig");
 const R_UI = core.R_UI;
 const Value = core.Value;
@@ -54,7 +55,7 @@ const MenuHit = struct {
 };
 var bar_menus: [8]MenuHit = undefined;
 var bar_nmenus: usize = 0;
-var bar_app: wf.ActiveMenu = .{};
+var bar_app: menuctl.ActiveMenu = .{};
 var bar_app_name: [16]u8 = @splat(0);
 
 // Popup labels are owned: refreshing the script view must never leave a
@@ -318,7 +319,7 @@ fn dismissPopup(restore: bool) void {
     const token = pop_focus_token;
     closePopup();
     wf.ptr_down = false;
-    if (restore and token != 0) _ = wf.restoreMenuFocus(core.output_control, token);
+    if (restore and token != 0) _ = menuctl.restoreMenuFocus(core.output_control, token);
     _ = usys.log(core.log_h, "topbar: dismissed");
 }
 
@@ -379,11 +380,11 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
             announced = false;
             bar_dirty = true;
         }
-        const app = wf.activeMenu();
+        const app = menuctl.activeMenu();
         if (app.token != bar_app.token) {
             if (pop_open) dismissPopup(false);
             bar_app = app;
-            bar_app_name = wf.menuTitle(app.token);
+            bar_app_name = menuctl.menuTitle(app.token);
             var msg: [80]u8 = undefined;
             _ = usys.log(core.log_h, std.fmt.bufPrint(&msg, "topbar: active {s} token={d}", .{ std.mem.sliceTo(&bar_app_name, 0), app.token }) catch "topbar: active");
             announced = false;
@@ -511,7 +512,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
             bar_dirty = true;
             const entry = pop_entries[idx];
             if (pop_app_token != 0) {
-                const accepted = wf.invokeMenu(core.output_control, pop_app_token, entry.key);
+                const accepted = menuctl.invokeMenu(core.output_control, pop_app_token, entry.key);
                 var msg: [80]u8 = undefined;
                 _ = usys.log(core.log_h, std.fmt.bufPrint(&msg, "topbar: action {d} accepted={}", .{ entry.key, accepted }) catch "topbar: action");
                 dismissPopup(false);

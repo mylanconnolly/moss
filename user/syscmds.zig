@@ -29,9 +29,7 @@ pub const Date = struct {
 };
 
 pub fn nowMs() i64 {
-    const hz = usys.cycleHz();
-    if (hz == 0) return 0;
-    return @intCast(usys.cycles() / (hz / 1000));
+    return @intCast(usys.nowMs());
 }
 
 /// null = not one of these.

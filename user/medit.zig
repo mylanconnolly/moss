@@ -75,7 +75,7 @@ var confirm_focus: usize = 2;
 var confirm_buttons: [3]ui.Rect = undefined;
 var drag_select = false;
 var confirm_pressed: ?usize = null;
-var last_click: u64 = 0;
+var last_click: u64 = 0; // ms; the toolkit's double-click window
 var click_pos: core.Pos = .{ .line = 0, .col = 0 };
 fn log(comptime fmt: []const u8, args: anytype) void {
     if (builtin.is_test) return;
@@ -767,8 +767,8 @@ fn pointer(ev: wf.Event) void {
             active.finding = false;
             const pos = hitPos(ev.x, ev.y);
             active.ed.setCursor(pos, false);
-            const now = usys.cycles();
-            if (pos.eql(click_pos) and now - last_click < usys.cycleHz() / 3) {
+            const now = usys.nowMs();
+            if (pos.eql(click_pos) and now - last_click < ml.ui.pointer.double_click_ms) {
                 active.ed.selectWordAt(pos);
                 last_click = 0;
             } else {
