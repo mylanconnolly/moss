@@ -147,8 +147,12 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
     var state = init_state;
     var tree = try it.callValue(view, &.{state}, null, null);
     var announced = false;
+    var evaluated = true;
     while (true) {
-        try epoch.checkpoint(&state, &tree);
+        if (evaluated) {
+            try epoch.checkpoint(&state, &tree);
+            evaluated = false;
+        }
         const output_changed = wf.refreshOutput();
         if (wf.refreshFontMetrics() or output_changed) {
             wf.closeSurface();
@@ -178,6 +182,7 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
             const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
             if (ev.kind == 2 or ev.kind == 7) {
                 tree = try it.callValue(view, &.{state}, null, null); // tick refresh
+                evaluated = true;
                 break :input;
             }
             if (ev.kind == 1) {
@@ -205,6 +210,7 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
             const ev = try mkDockEvent(it, unit, dock_items[idx].title);
             state = try it.callValue(update, &.{ state, ev }, null, null);
             tree = try it.callValue(view, &.{state}, null, null);
+            evaluated = true;
             if (isDone(state)) break;
         }
     }

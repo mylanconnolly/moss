@@ -364,6 +364,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
     var tree = try it.callValue(view, &.{state}, null, null);
     var announced = false;
     var bar_dirty = true;
+    var evaluated = true;
     var clock_ticks: usize = 0;
     while (true) {
         const output_changed = wf.refreshOutput();
@@ -390,8 +391,12 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
         }
         if (bar_dirty) {
             // An open popup borrows this tree. Compact only when it closes;
-            // pointer/keyboard popup navigation creates no evaluation data.
-            if (!pop_open) try epoch.checkpoint(&state, &tree);
+            // pointer/keyboard popup navigation creates no evaluation data —
+            // and neither does a hover, so only an evaluated turn checkpoints.
+            if (!pop_open and evaluated) {
+                try epoch.checkpoint(&state, &tree);
+                evaluated = false;
+            }
             renderBar(tree);
             if (!wf.commitSurface()) return it.fail("gui: bar commit failed", .{});
             bar_dirty = false;
@@ -411,6 +416,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
                 clock_ticks += 1;
                 if (!pop_open and clock_ticks >= 10) {
                     tree = try it.callValue(view, &.{state}, null, null);
+                    evaluated = true;
                     clock_ticks = 0;
                     bar_dirty = true;
                 }
@@ -521,6 +527,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
                 dismissPopup(true);
                 state = try it.callValue(update, &.{ state, ev }, null, null);
                 tree = try it.callValue(view, &.{state}, null, null);
+                evaluated = true;
                 if (isDone(state)) break;
             }
         }

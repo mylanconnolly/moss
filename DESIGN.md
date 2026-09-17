@@ -3710,6 +3710,18 @@ collector needs to know what its caller is doing, the fix is rarely to
 look harder at the caller; it is to stop collecting what was never
 yours.
 
+**Checkpoints only after an evaluated turn (2026-09-17).** The
+checkpoint that copies the live state and tree out of scratch and
+resets it ran at the top of every loop iteration, including the ones
+a hover, a drag or a focus flip produces, which evaluate no script
+at all: the tree was copied twice for nothing on every pointer move,
+a peak of two trees in the 512 KiB pool. The three loops (window, bar,
+dock) now carry an `evaluated` flag set by the initial view, a tick
+refresh and an event's update/view, and checkpoint only when it is
+set; a hover turn re-renders the tree it already has. The bar keeps
+its extra rule that an open popup, which borrows the tree, defers the
+checkpoint until it closes.
+
 **The runtime split (same day).** `guicmds.zig` had grown to 2,800
 lines: the window runtime, the widget painters, the top bar with its
 popup menus, and the dock, in one file. The desktop chrome is its own

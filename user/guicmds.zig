@@ -1680,9 +1680,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             return it.fail("gui: the remote app did not answer", .{})
     else
         try it.callValue(view, &.{state}, null, null);
+    // A checkpoint copies state and tree out of scratch and resets it — the
+    // right thing after an evaluation, and pure waste after a hover or a
+    // drag that evaluated nothing (peak 2x of the tree in a 512 KiB pool,
+    // on every pointer move). Only turns that ran script code pay it.
+    var evaluated = true;
     while (true) {
-        // Snapshot live state before discarding callback scratch allocations.
-        try epoch.checkpoint(&state, &tree);
+        if (evaluated) {
+            // Snapshot live state before discarding callback scratch allocations.
+            try epoch.checkpoint(&state, &tree);
+            evaluated = false;
+        }
         var nfocus = renderTree(tree, title, focus);
         if (!want_trusted) {
             var enabled = shared.menus.offered(menu_profile);
@@ -2097,8 +2105,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // Recompute the view from the unchanged state — no `update` on
             // a tick — so a clock or other time-driven view refreshes.
             tree = try it.callValue(view, &.{state}, null, null);
+            evaluated = true;
         }
         if (fired) |id| {
+            evaluated = true;
             reveal_focus = true;
             action_len = @min(id.len, action_id.len);
             @memcpy(action_id[0..action_len], id[0..action_len]);
