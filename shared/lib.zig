@@ -847,9 +847,13 @@ pub const CapTag = enum(u64) {
     picker = 30,
     /// Privileged receiver for user-selected document handoffs.
     documents = 31,
+    /// The network service's control endpoint: configure interfaces
+    /// (`iface_configure`). Held by the desktop's Settings, and by a
+    /// session only when the session manager passes it (an administrator).
+    net_control = 32,
 };
 
-pub const cap_tag_count = 32;
+pub const cap_tag_count = 33;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -1533,7 +1537,154 @@ pub const NetReq = union(enum(u64)) {
     /// yields is what the allowlist judges.
     resolve: struct { len: u64 },
     resolve_check: struct { lookup: u64 },
+    /// Interfaces (2026-09-17). `iface_count` -> num(n): how many NICs
+    /// the service drives. `iface_status { iface }` writes an IfaceStatus
+    /// record into the view's buffer -> ok. `iface_configure { iface }`
+    /// reads an IfaceConfig from the buffer and applies it live (static
+    /// addresses, DHCP, or off) -> ok; `denied` unless the view is the
+    /// control view, `bad` for a malformed record or no such interface.
+    iface_count: void,
+    iface_status: struct { iface: u64 },
+    iface_configure: struct { iface: u64 },
 };
+
+/// How an interface is addressed.
+pub const IfaceMode = enum(u8) { static = 0, dhcp = 1, off = 2 };
+
+/// What the network service says about one interface: a fixed record a
+/// task manager or a settings page renders. Addresses are 16-byte
+/// IPv6-shaped (IPv4 mapped), like the rest of the protocol.
+pub const IfaceStatus = struct {
+    name: [8]u8 = @splat(0), // "net0", NUL-padded
+    mac: [6]u8 = @splat(0),
+    /// bit 0 up (has an address), 1 link, 2 has a v4 gateway, 3 has a v6
+    /// address, 4 has a v6 gateway, 5 the addresses came from DHCP.
+    flags: u8 = 0,
+    mode: IfaceMode = .off,
+    prefix4: u8 = 0,
+    prefix6: u8 = 0,
+    n_resolvers: u8 = 0,
+    dhcp_state: u8 = 0,
+    ip4: u32 = 0,
+    gw4: u32 = 0,
+    ip6: [16]u8 = @splat(0),
+    gw6: [16]u8 = @splat(0),
+    resolvers: [4][16]u8 = @splat(@splat(0)),
+    lease_s: u32 = 0,
+    rx_frames: u64 = 0,
+    tx_frames: u64 = 0,
+
+    pub const size = 160;
+    pub const flag_up: u8 = 1;
+    pub const flag_link: u8 = 2;
+    pub const flag_gw4: u8 = 4;
+    pub const flag_ip6: u8 = 8;
+    pub const flag_gw6: u8 = 16;
+    pub const flag_leased: u8 = 32;
+
+    pub fn encode(r: *const IfaceStatus, out: *[size]u8) void {
+        @memset(out, 0);
+        @memcpy(out[0..8], &r.name);
+        @memcpy(out[8..14], &r.mac);
+        out[14] = r.flags;
+        out[15] = @intFromEnum(r.mode);
+        out[16] = r.prefix4;
+        out[17] = r.prefix6;
+        out[18] = r.n_resolvers;
+        out[19] = r.dhcp_state;
+        std.mem.writeInt(u32, out[20..24], r.ip4, .little);
+        std.mem.writeInt(u32, out[24..28], r.gw4, .little);
+        @memcpy(out[28..44], &r.ip6);
+        @memcpy(out[44..60], &r.gw6);
+        for (0..4) |i| @memcpy(out[60 + i * 16 .. 76 + i * 16], &r.resolvers[i]);
+        std.mem.writeInt(u32, out[124..128], r.lease_s, .little);
+        std.mem.writeInt(u64, out[128..136], r.rx_frames, .little);
+        std.mem.writeInt(u64, out[136..144], r.tx_frames, .little);
+    }
+    pub fn decode(b: *const [size]u8) IfaceStatus {
+        var r: IfaceStatus = .{};
+        r.name = b[0..8].*;
+        r.mac = b[8..14].*;
+        r.flags = b[14];
+        r.mode = std.enums.fromInt(IfaceMode, b[15]) orelse .off;
+        r.prefix4 = b[16];
+        r.prefix6 = b[17];
+        r.n_resolvers = b[18];
+        r.dhcp_state = b[19];
+        r.ip4 = std.mem.readInt(u32, b[20..24], .little);
+        r.gw4 = std.mem.readInt(u32, b[24..28], .little);
+        r.ip6 = b[28..44].*;
+        r.gw6 = b[44..60].*;
+        for (0..4) |i| @memcpy(&r.resolvers[i], b[60 + i * 16 .. 76 + i * 16]);
+        r.lease_s = std.mem.readInt(u32, b[124..128], .little);
+        r.rx_frames = std.mem.readInt(u64, b[128..136], .little);
+        r.tx_frames = std.mem.readInt(u64, b[136..144], .little);
+        return r;
+    }
+    pub fn nameSlice(r: *const IfaceStatus) []const u8 {
+        return std.mem.sliceTo(&r.name, 0);
+    }
+};
+
+/// What a settings page asks of an interface.
+pub const IfaceConfig = struct {
+    mode: IfaceMode = .off,
+    prefix4: u8 = 0,
+    prefix6: u8 = 0,
+    n_resolvers: u8 = 0,
+    ip4: u32 = 0,
+    gw4: u32 = 0,
+    ip6: [16]u8 = @splat(0),
+    gw6: [16]u8 = @splat(0),
+    resolvers: [4][16]u8 = @splat(@splat(0)),
+
+    pub const size = 112;
+
+    pub fn encode(r: *const IfaceConfig, out: *[size]u8) void {
+        @memset(out, 0);
+        out[0] = @intFromEnum(r.mode);
+        out[1] = r.prefix4;
+        out[2] = r.prefix6;
+        out[3] = r.n_resolvers;
+        std.mem.writeInt(u32, out[4..8], r.ip4, .little);
+        std.mem.writeInt(u32, out[8..12], r.gw4, .little);
+        @memcpy(out[12..28], &r.ip6);
+        @memcpy(out[28..44], &r.gw6);
+        for (0..4) |i| @memcpy(out[44 + i * 16 .. 60 + i * 16], &r.resolvers[i]);
+    }
+    pub fn decode(b: *const [size]u8) ?IfaceConfig {
+        var r: IfaceConfig = .{};
+        r.mode = std.enums.fromInt(IfaceMode, b[0]) orelse return null;
+        r.prefix4 = b[1];
+        r.prefix6 = b[2];
+        r.n_resolvers = b[3];
+        if (r.prefix4 > 32 or r.prefix6 > 128 or r.n_resolvers > 4) return null;
+        r.ip4 = std.mem.readInt(u32, b[4..8], .little);
+        r.gw4 = std.mem.readInt(u32, b[8..12], .little);
+        r.ip6 = b[12..28].*;
+        r.gw6 = b[28..44].*;
+        for (0..4) |i| @memcpy(&r.resolvers[i], b[44 + i * 16 .. 60 + i * 16]);
+        return r;
+    }
+};
+
+test "interface records round-trip" {
+    var st: IfaceStatus = .{ .flags = IfaceStatus.flag_up | IfaceStatus.flag_gw4, .mode = .static, .prefix4 = 24, .n_resolvers = 1, .ip4 = 0x0a00_020f, .gw4 = 0x0a00_0202, .lease_s = 3600, .rx_frames = 7, .tx_frames = 9 };
+    @memcpy(st.name[0..4], "net0");
+    st.mac = .{ 0x52, 0x54, 0, 0x12, 0x34, 0x56 };
+    st.resolvers[0][15] = 1;
+    var sb: [IfaceStatus.size]u8 = undefined;
+    st.encode(&sb);
+    const sd = IfaceStatus.decode(&sb);
+    try std.testing.expectEqualStrings("net0", sd.nameSlice());
+    try std.testing.expectEqual(st, sd);
+    const cf: IfaceConfig = .{ .mode = .dhcp, .prefix4 = 16, .ip4 = 1, .gw4 = 2 };
+    var cb: [IfaceConfig.size]u8 = undefined;
+    cf.encode(&cb);
+    try std.testing.expectEqual(cf, IfaceConfig.decode(&cb).?);
+    cb[1] = 40; // an impossible prefix is refused
+    try std.testing.expect(IfaceConfig.decode(&cb) == null);
+}
 
 /// The calendar: Unix time to dates and back, ISO and HTTP text.
 pub const civil = @import("civil.zig");
@@ -2223,7 +2374,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48, activity = 49 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48, activity = 49, netconf = 50 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with

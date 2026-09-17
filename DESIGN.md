@@ -3283,6 +3283,41 @@ was the *string* "nothing"; `nothing` is the absent literal in code now
 (data files keep `null`), with a test. The dock's per-pill poll was a
 stale comment, not a cost.
 
+**Network settings, stage 1: interfaces (as built, 2026-09-17).** The
+network service drove one NIC through module-level state — one device,
+one MAC, one address per family, the gateway's MAC in two globals —
+chosen at compile time by the unit's argument; a settings page had
+nothing to ask and nothing to set, and a laptop's second NIC nowhere to
+go. The service now drives every `device: net` it is given (the second
+and later `optional: true`, so one unit file fits every machine) as an
+interface table: queues, MAC, addresses with prefixes, gateways,
+resolvers and a neighbour cache each, with the stack above shared.
+Output is routed by prefix — on-link takes it, else the first gateway of
+the family — and the next hop's MAC comes from the interface's cache,
+asked for by ARP or neighbour solicitation on a miss (the frame is
+dropped; the protocol above retries, which TCP's retransmit and DNS's
+retry already do). A connection keeps the address it was made with. The
+mode (slirp or cluster) is now the first interface's *default*; the
+settings file, keyed by MAC, and the control endpoint configure the
+rest: `iface_count`, `iface_status` for any view, `iface_configure` for
+the control view alone, minted at start and handed to init with `ready`
+like the compositor's, reached by `{ tag: net_control, unit: net,
+control: true }` (a new cap tag, appended). In the language,
+`net-ifaces` and `net-configure`. The `netconf` drill boots two NICs on
+two user networks, configures the second statically over the control
+endpoint, echoes on both segments and takes the second down.
+
+Found on the way: the neighbour cache's "asked N ms ago" throttle
+compared against a zero that meant "never", and at boot the millisecond
+clock itself is under 500, so the first ARP was never sent and the
+service waited for a reply that could not come — the sentinel is -1
+now. A unit's script path is capped at 24 bytes and the drill's first
+name was 25 (the archive lookup fails on the truncated name; the cap is
+an old lesson, relearned). A script variable with a hyphen in its name
+is a subtraction, and the formatter helpfully spaces it out. And a
+destination on no link goes to the default gateway and fails slowly,
+which is right; the drill's first draft expected a fast refusal.
+
 **Quit before Force Quit (same day).** A task manager that can only
 kill is a blunt one: an editor with unsaved work deserves to be asked.
 The compositor gained `close_titled`: the window with that title has its

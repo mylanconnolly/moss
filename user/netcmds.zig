@@ -30,9 +30,30 @@ pub const Net = struct {
     attached: bool = false,
     /// The doorbell every socket of this host rings.
     bell: u64 = 0,
+    /// The service's control endpoint, when this program holds it
+    /// (`net_control`): `net-configure` goes over it. 0 = none.
+    control: u64 = 0,
+    control_buf: [*]u8 = undefined,
+    control_attached: bool = false,
 
     pub fn init(chan: u64) Net {
         return .{ .chan = chan };
+    }
+
+    fn attachControl(n: *Net) bool {
+        if (n.control_attached) return true;
+        if (n.control == 0) return false;
+        const s = usys.shmCreate(1);
+        if (s.err != .ok) return false;
+        const m = usys.shmMap(s.data[0]);
+        if (m.err != .ok) return false;
+        n.control_buf = @ptrFromInt(m.data[0]);
+        switch (usys.callTyped(shared.NetReq, shared.NetResp, n.control, .attach_buf, s.data[0])) {
+            .ok => |rep| if (rep != .ok) return false,
+            .err => return false,
+        }
+        n.control_attached = true;
+        return true;
     }
 
     pub fn attach(n: *Net) bool {
@@ -449,6 +470,14 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (is(u8, name, "udp-bind")) return .{ .params = &.{.{ .name = "port", .shape = .int }}, .ret = udp_result };
     if (is(u8, name, "udp-send")) return .{ .params = &.{ .{ .name = "socket", .shape = udp }, .{ .name = "addr", .shape = .string }, .{ .name = "port", .shape = .int }, .{ .name = "data", .shape = data_shape } }, .ret = sent_result };
     if (is(u8, name, "udp-recv")) return .{ .params = &.{.{ .name = "socket", .shape = udp, .optional = true }}, .input = .{ .optional = udp }, .ret = datagram_result };
+    // `net-ifaces` lists the service's interfaces — `{ index, name, mac,
+    // mode, up, address, prefix, gateway, address6, prefix6, gateway6,
+    // resolvers, rx, tx }` each — and `net-configure INDEX { mode,
+    // address, gateway, address6, gateway6, resolvers }` applies a
+    // configuration live (the control cap is the authority; without it
+    // the command answers `err not allowed`).
+    if (is(u8, name, "net-ifaces")) return .{ .ret = .list };
+    if (is(u8, name, "net-configure")) return .{ .params = &.{ .{ .name = "index", .shape = .int }, .{ .name = "config", .shape = .record } }, .ret = .result };
     return null;
 }
 
@@ -498,8 +527,143 @@ fn portArg(it: *mshl.Interp, v: Value, cmd: []const u8) mshl.Error!u64 {
 }
 
 /// null = not a network command.
+fn addrText(a: std.mem.Allocator, bytes: [16]u8) mshl.Error![]const u8 {
+    var text: [48]u8 = undefined;
+    const w: [2]u64 = .{ std.mem.readInt(u64, bytes[0..8], .big), std.mem.readInt(u64, bytes[8..16], .big) };
+    return try a.dupe(u8, shared.formatAddr(&text, w));
+}
+
+fn v4Bytes(ip: u32) [16]u8 {
+    var b: [16]u8 = @splat(0);
+    b[10] = 0xff;
+    b[11] = 0xff;
+    std.mem.writeInt(u32, b[12..16], ip, .big);
+    return b;
+}
+
+fn addrBytes(text: []const u8) ?[16]u8 {
+    const w = shared.parseAddr(text) orelse return null;
+    var b: [16]u8 = undefined;
+    std.mem.writeInt(u64, b[0..8], w[0], .big);
+    std.mem.writeInt(u64, b[8..16], w[1], .big);
+    return b;
+}
+
+fn isV4(b: [16]u8) bool {
+    for (0..10) |i| if (b[i] != 0) return false;
+    return b[10] == 0xff and b[11] == 0xff;
+}
+
+/// "a.b.c.d/nn" or "x::y/nn"; a missing prefix is /24 or /64.
+fn prefixed(text: []const u8, out: *[16]u8, prefix: *u8) bool {
+    const slash = std.mem.indexOfScalar(u8, text, '/');
+    out.* = addrBytes(if (slash) |i| text[0..i] else text) orelse return false;
+    const v4 = isV4(out.*);
+    prefix.* = if (slash) |i| (std.fmt.parseInt(u8, text[i + 1 ..], 10) catch return false) else (if (v4) 24 else 64);
+    return prefix.* <= (if (v4) @as(u8, 32) else 128);
+}
+
+fn ifaceRows(n: *Net, it: *mshl.Interp) mshl.Error!Value {
+    const a = it.arena;
+    if (!n.attach()) return it.fail("net-ifaces: cannot attach a buffer to the network view", .{});
+    const count = switch (usys.callTyped(shared.NetReq, shared.NetResp, n.chan, .iface_count, 0)) {
+        .ok => |rep| switch (rep) {
+            .num => |q| q.n,
+            else => return it.fail("net-ifaces: bad reply", .{}),
+        },
+        .err => return it.fail("net-ifaces: the network service is unreachable", .{}),
+    };
+    const rows = try a.alloc(Value, @intCast(@min(count, 8)));
+    for (rows, 0..) |*row, i| {
+        switch (usys.callTyped(shared.NetReq, shared.NetResp, n.chan, .{ .iface_status = .{ .iface = i } }, 0)) {
+            .ok => |rep| if (rep != .ok) return it.fail("net-ifaces: no such interface", .{}),
+            .err => return it.fail("net-ifaces: the network service is unreachable", .{}),
+        }
+        const st = shared.IfaceStatus.decode(n.buf[0..shared.IfaceStatus.size]);
+        const resolvers = try a.alloc(Value, st.n_resolvers);
+        for (resolvers, 0..) |*r, k| r.* = .{ .str = try addrText(a, st.resolvers[k]) };
+        var mb: [18]u8 = undefined;
+        const mac = std.fmt.bufPrint(&mb, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ st.mac[0], st.mac[1], st.mac[2], st.mac[3], st.mac[4], st.mac[5] }) catch "";
+        const up = st.flags & shared.IfaceStatus.flag_up != 0;
+        row.* = try mshl.toValue(a, .{
+            .index = @as(i64, @intCast(i)),
+            .name = try a.dupe(u8, st.nameSlice()),
+            .mac = try a.dupe(u8, mac),
+            .mode = @tagName(st.mode),
+            .up = up,
+            .address = if (up and st.ip4 != 0) try addrText(a, v4Bytes(st.ip4)) else @as([]const u8, ""),
+            .prefix = @as(i64, st.prefix4),
+            .gateway = if (st.gw4 != 0) try addrText(a, v4Bytes(st.gw4)) else @as([]const u8, ""),
+            .address6 = if (st.flags & shared.IfaceStatus.flag_ip6 != 0) try addrText(a, st.ip6) else @as([]const u8, ""),
+            .prefix6 = @as(i64, st.prefix6),
+            .gateway6 = if (st.flags & shared.IfaceStatus.flag_gw6 != 0) try addrText(a, st.gw6) else @as([]const u8, ""),
+            .resolvers = Value{ .list = resolvers },
+            .lease = @as(i64, st.lease_s),
+            .rx = @as(i64, @intCast(st.rx_frames)),
+            .tx = @as(i64, @intCast(st.tx_frames)),
+        });
+    }
+    return .{ .list = rows };
+}
+
+fn configureIface(n: *Net, it: *mshl.Interp, index: u64, rec: mshl.Record) mshl.Error!Value {
+    if (n.control == 0) return try errResult(it, "not allowed");
+    if (!n.attachControl()) return it.fail("net-configure: cannot attach a buffer to the control endpoint", .{});
+    var cfg: shared.IfaceConfig = .{};
+    const modev = rec.get("mode") orelse return try errResult(it, "a mode is required: static, dhcp or off");
+    if (modev != .str) return try errResult(it, "a mode is a word");
+    cfg.mode = std.meta.stringToEnum(shared.IfaceMode, modev.str) orelse return try errResult(it, "a mode is static, dhcp or off");
+    var b: [16]u8 = undefined;
+    var p: u8 = 0;
+    if (rec.get("address")) |v| if (v == .str and v.str.len > 0) {
+        if (!prefixed(v.str, &b, &p) or !isV4(b)) return try errResult(it, "a bad IPv4 address (a.b.c.d/nn)");
+        cfg.ip4 = std.mem.readInt(u32, b[12..16], .big);
+        cfg.prefix4 = p;
+    };
+    if (rec.get("gateway")) |v| if (v == .str and v.str.len > 0) {
+        const g = addrBytes(v.str) orelse return try errResult(it, "a bad gateway address");
+        if (!isV4(g)) return try errResult(it, "a bad gateway address");
+        cfg.gw4 = std.mem.readInt(u32, g[12..16], .big);
+    };
+    if (rec.get("address6")) |v| if (v == .str and v.str.len > 0) {
+        if (!prefixed(v.str, &b, &p) or isV4(b)) return try errResult(it, "a bad IPv6 address (x::y/nn)");
+        cfg.ip6 = b;
+        cfg.prefix6 = p;
+    };
+    if (rec.get("gateway6")) |v| if (v == .str and v.str.len > 0) {
+        const g = addrBytes(v.str) orelse return try errResult(it, "a bad IPv6 gateway");
+        if (isV4(g)) return try errResult(it, "a bad IPv6 gateway");
+        cfg.gw6 = g;
+    };
+    if (rec.get("resolvers")) |v| if (v == .list) {
+        for (v.list) |item| {
+            if (item != .str or cfg.n_resolvers == 4) continue;
+            cfg.resolvers[cfg.n_resolvers] = addrBytes(item.str) orelse return try errResult(it, "a bad resolver address");
+            cfg.n_resolvers += 1;
+        }
+    };
+    cfg.encode(n.control_buf[0..shared.IfaceConfig.size]);
+    return switch (usys.callTyped(shared.NetReq, shared.NetResp, n.control, .{ .iface_configure = .{ .iface = index } }, 0)) {
+        .ok => |rep| switch (rep) {
+            .ok => try okResult(it, .{ .int = @intCast(index) }),
+            .net_err => |e| try errResult(it, switch (std.enums.fromInt(shared.NetErr, e.code) orelse .bad) {
+                .denied => "not allowed",
+                .bad => "bad configuration or no such interface",
+                else => "refused",
+            }),
+            else => try errResult(it, "bad reply"),
+        },
+        .err => try errResult(it, "the network service is unreachable"),
+    };
+}
+
 pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     const is = std.mem.eql;
+    if (is(u8, name, "net-ifaces")) return try ifaceRows(n, it);
+    if (is(u8, name, "net-configure")) {
+        if (args.len < 2 or args[0] != .int or args[0].int < 0 or args[1] != .record) return it.fail("net-configure: INDEX and a configuration record expected", .{});
+        return try configureIface(n, it, @intCast(args[0].int), args[1].record);
+    }
     if (is(u8, name, "connect")) {
         // An address, or a name the service resolves: each address is
         // tried in turn until one answers.
@@ -651,4 +815,4 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     return null;
 }
 
-pub const command_names = [_][]const u8{ "connect", "listen", "accept", "send", "recv", "close", "status", "udp-bind", "udp-send", "udp-recv", "resolve" };
+pub const command_names = [_][]const u8{ "connect", "listen", "accept", "send", "recv", "close", "status", "udp-bind", "udp-send", "udp-recv", "resolve", "net-ifaces", "net-configure" };

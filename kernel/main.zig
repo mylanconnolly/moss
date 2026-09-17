@@ -280,6 +280,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.netconf_test) {
+        _ = sched.spawn("boot-watch", netconfTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.activity_test) {
         _ = sched.spawn("boot-watch", activityTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -959,6 +964,11 @@ fn explorerTestWorker(_: u64) void {
 /// its confirm step; init logs the requested stop and the table flips.
 fn activityTestWorker(_: u64) void {
     systemDrill("activity");
+}
+/// The interface-configuration drill: two NICs on two user networks; the
+/// script configures the second statically and echoes over both.
+fn netconfTestWorker(_: u64) void {
+    systemDrill("netconf");
 }
 fn browseTestWorker(_: u64) void {
     systemDrill("browse");

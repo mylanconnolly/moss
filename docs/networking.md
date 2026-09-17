@@ -49,12 +49,56 @@ anything in `127/8` are short-circuited: the segment is fed straight
 back into the stack, so two programs on one node speak real TCP
 without a frame ever reaching the device.
 
-Two addressing modes exist, chosen by the unit file's argument:
+### Interfaces (2026-09-17)
 
-| Mode | Own addresses | Gateways | Used by |
+The service drives every NIC it is given — `device: net` with an index
+in the unit file, the second and later ones `optional: true` so a
+machine with one NIC boots the same unit — as **interfaces** `net0`,
+`net1`, … Each has its own queues, MAC, addresses, gateways, resolvers
+and a neighbour cache; the stack above (sockets, names, TLS) is shared.
+A destination is **routed** by prefix: an interface it is on-link for
+takes it (the next hop is the destination itself), else the first
+interface with a gateway of the right family (the next hop is the
+gateway); a next hop's MAC comes from the interface's neighbour cache,
+asked for by ARP or neighbour solicitation when unknown (at most twice
+a second; the frame that needed it is dropped and the protocol above
+retries — a SYN's retransmit, a query's retry). A connection keeps the
+address it was made with, so a socket on `net1` speaks as `net1` for
+its whole life even if a default route later prefers `net0`.
+
+The unit file's argument still picks the **mode**, which is the first
+interface's default configuration:
+
+| Mode | `net0` | Gateways | Used by |
 |---|---|---|---|
-| slirp (node 0) | `10.0.2.15`, `fec0::15` | `10.0.2.2` (ARP) and `fec0::2` (NDP), resolved before serving anyone | the net drill, the shell boot |
-| cluster (node N) | `10.77.0.N`, `fdcc::N` | none: everything is on-link, delivered to the broadcast MAC | the fabric (`net-cluster.msh`, node 1; a guest node joins as 2) |
+| slirp (node 0) | `10.0.2.15/24`, `fec0::15/64` | `10.0.2.2` (ARP) and `fec0::2` (NDP), resolved before serving anyone | the net drill, the shell boot |
+| cluster (node N) | `10.77.0.N/24`, `fdcc::N/64` | none: everything is on-link, delivered to the broadcast MAC | the fabric (`net-cluster.msh`, node 1; a guest node joins as 2) |
+
+Further interfaces are **off** until configured. Configuration comes
+from the settings file — the archive's `conf/net.msh`, then, when the
+unit holds a `conf` view, the persisted `conf/app/net.msh` Settings
+writes, whose entries win — keyed by MAC:
+
+```msh
+{ resolvers: [::1, 10.0.2.3]
+  interfaces: [ { mac: "52:54:00:12:34:57", mode: static,
+                  address: "10.0.3.15/24", gateway: "10.0.3.2" } ] }
+```
+
+and, live, from the **control endpoint**: `iface_count`,
+`iface_status { iface }` (an `IfaceStatus` record into the view's
+buffer: name, MAC, flags, mode, addresses, prefixes, gateways,
+resolvers, lease, frame counters — any view may ask) and
+`iface_configure { iface }` (an `IfaceConfig` from the buffer — only
+the control view, minted at start and handed to the supervisor with
+`ready`, given on as `{ tag: net_control, unit: net, control: true }`).
+A session's Settings gets it from the session manager only for an
+administrator. In the language: `net-ifaces` lists the interfaces as
+records and `net-configure INDEX { mode, address, gateway, address6,
+gateway6, resolvers }` applies one; `mode: dhcp` is the next stage and
+leaves the interface down until it lands. The `netconf` drill boots
+two NICs on two user networks, configures the second statically, echoes
+over both segments, and takes it down again.
 
 ### Network views
 
@@ -579,6 +623,11 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 - A filtered view allows one destination, IPv4 by way of a unit file
   (`allow:` takes a dotted v4 address); an IPv6 allowlist can be made
   through `derive` directly but not from a unit file.
+- Several NICs are driven, but a link's state is not read (virtio-net
+  negotiates no STATUS feature): an interface is "up" when it has an
+  address. No DHCP client yet (an interface set to `dhcp` stays down);
+  no router advertisements; a route is on-link-by-prefix or the first
+  gateway of the family — no metrics, no per-destination routes.
 - Cluster addressing is static (node N is `10.77.0.N` / `fdcc::N`);
   dynamic addressing is a separate concern.
 - Severing an IRQ binding must also mask the line, or a level-triggered

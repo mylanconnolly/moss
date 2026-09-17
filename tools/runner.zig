@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf };
 
 const Spec = struct {
     name: []const u8,
@@ -72,6 +72,7 @@ const specs = [_]Spec{
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "listdemo", .kind = .listdemo, .pass = "listdemo-test: PASS", .extra = "gui: list items", .append = "profile=listdemo", .timeout_s = 120 },
     .{ .name = "explorer", .kind = .explorer, .pass = "explorer-test: PASS", .extra = "gui: list files", .append = "profile=explorer", .timeout_s = 120 },
+    .{ .name = "netconf", .kind = .netconf, .pass = "netconf-test: PASS", .extra = "netconf: net1 echoed", .always_extra = "netsvc: 2 nic(s) up", .extra2 = "netconf: done", .append = "profile=netconf" },
     .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-beta ok=true", .always_extra = "init: stopped by request: win-beta", .extra2 = "win-alpha: closed", .append = "profile=activity", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
@@ -542,6 +543,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device", gpu_device,
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
+        }),
+        // Two NICs on two user networks, an echo on each segment: the
+        // interface-configuration drill.
+        .netconf => try args.appendSlice(gpa, &.{
+            "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
+            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+            "-netdev", "user,id=n1,net=10.0.3.0/24,guestfwd=tcp:10.0.3.100:9000-cmd:cat",
+            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n1",
         }),
         // The real-msh seat: the graphical devices plus a disk for mossfs
         // (the shell's filesystem view).

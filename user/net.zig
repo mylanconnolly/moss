@@ -23,6 +23,7 @@ const std = @import("std");
 const shared = @import("shared");
 const usys = @import("usys.zig");
 const virtio = @import("virtio.zig");
+const fsc = @import("fsclient.zig");
 const boot = @import("boot.zig");
 const mosslib = @import("mosslib");
 const dns = mosslib.dns;
@@ -39,13 +40,21 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 }
 
 // The device arrives over the boot channel (BootReq cap{device}).
-var dev_h: u64 = 0;
-
 export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     // arg: low byte = role; byte 1 = cluster node id (0 = slirp mode).
     switch (arg & 0xff) {
         1 => {
-            takeDevice(chan_h);
+            glog = log_h;
+            // The control endpoint: a channel badged control_badge, handed
+            // to the supervisor with `ready`; whoever holds it may
+            // configure interfaces. Everyone else gets a network view.
+            const control = usys.chanMint(chan_h, control_badge);
+            if (control.err != .ok) usys.exit(168);
+            const setup = boot.takeExport(chan_h, control.data[1]);
+            _ = usys.capDrop(control.data[1]);
+            takeDevices(&setup);
+            readSettings(setup.data());
+            readPersisted(&setup);
             netsvc(log_h, chan_h, (arg >> 8) & 0xff);
         },
         2 => echosrv(log_h, boot.take(chan_h).cap(.net)),
@@ -55,39 +64,165 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     }
 }
 
-/// The boot handshake: whoever spawned us hands over the device.
-fn takeDevice(chan_h: u64) void {
-    const setup = boot.take(chan_h);
-    dev_h = setup.device(.net);
-    if (dev_h == 0) usys.exit(169);
-    readSettings(setup.data());
+var glog: u64 = 0;
+
+fn logf(comptime fmt: []const u8, args: anytype) void {
+    var l: [128]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&l, fmt, args) catch "netsvc: (log too long)");
 }
 
-/// The unit's settings file (`{ resolvers: [addr, …] }`), given as
-/// bytes from the archive; none is fine (no resolver, then).
-fn readSettings(text: []const u8) void {
-    if (text.len == 0) return;
-    var scratch: [8 << 10]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    var ctx: u8 = 0;
-    var it = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&ctx), .call = noHost });
-    const v = it.parseData(text) catch return;
-    if (v != .record) return;
-    const list = v.record.get("resolvers") orelse return;
-    if (list != .list) return;
-    for (list.list) |item| {
-        if (item != .str or n_resolvers == max_resolvers) continue;
-        const words = shared.parseAddr(item.str) orelse continue;
-        resolvers[n_resolvers] = addrFromWords(words[0], words[1]);
-        n_resolvers += 1;
+/// The boot handshake: whoever spawned us hands over the devices — one
+/// per NIC, `device: net` with an index; a machine with one NIC has one.
+fn takeDevices(setup: *const boot.Setup) void {
+    for (0..max_ifaces) |i| {
+        const h = setup.deviceAt(.net, i);
+        if (h == 0) continue;
+        ifaces[n_ifaces] = .{ .used = true, .index = @intCast(n_ifaces), .dev_h = h };
+        n_ifaces += 1;
     }
+    if (n_ifaces == 0) usys.exit(169);
 }
+
+// ------------------------------------------------------------- settings
+//
+// The unit's settings file, given as bytes from the archive, and the
+// persisted one (`conf/app/net.msh`, what Settings writes) read over the
+// `conf` view when there is one — the persisted file's entries win:
+//
+//   { resolvers: [addr, …]
+//     interfaces: [ { mac: "52:54:00:12:34:56", mode: dhcp }
+//                   { mac: "…", mode: static, address: "10.0.3.15/24",
+//                     gateway: "10.0.3.2", address6: "fdcc::5/64",
+//                     gateway6: "fdcc::1", resolvers: [addr, …] } ] }
+//
+// Interfaces are keyed by MAC, the one identity a NIC keeps across
+// boots and slot order. One not listed gets the mode's default.
+
+const IfaceConf = struct {
+    used: bool = false,
+    mac: [6]u8 = @splat(0),
+    cfg: shared.IfaceConfig = .{},
+};
+var conf_ifaces: [max_ifaces]IfaceConf = @splat(.{});
+var conf_resolvers: [max_resolvers]Addr = undefined;
+var conf_n_resolvers: usize = 0;
 
 fn noHost(_: *anyopaque, _: *mshl.Interp, _: []const u8, _: []const mshl.Value, _: ?mshl.Value) mshl.Error!?mshl.Value {
     return null;
 }
 
-// ------------------------------------------------------------- addresses
+fn parseMac(text: []const u8, out: *[6]u8) bool {
+    if (text.len != 17) return false;
+    for (0..6) |i| {
+        if (i > 0 and text[i * 3 - 1] != ':') return false;
+        out[i] = std.fmt.parseInt(u8, text[i * 3 .. i * 3 + 2], 16) catch return false;
+    }
+    return true;
+}
+
+/// "a.b.c.d/nn" or "x::y/nn" (a missing prefix means /24 or /64).
+fn parsePrefixed(text: []const u8, out: *Addr, prefix: *u8) bool {
+    const slash = std.mem.indexOfScalar(u8, text, '/');
+    const words = shared.parseAddr(if (slash) |i| text[0..i] else text) orelse return false;
+    out.* = addrFromWords(words[0], words[1]);
+    const v4 = isV4Mapped(out.*);
+    prefix.* = if (slash) |i| (std.fmt.parseInt(u8, text[i + 1 ..], 10) catch return false) else (if (v4) 24 else 64);
+    if (prefix.* > (if (v4) @as(u8, 32) else 128)) return false;
+    return true;
+}
+
+fn readSettings(text: []const u8) void {
+    if (text.len == 0) return;
+    var scratch: [24 << 10]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var ctx: u8 = 0;
+    var it = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&ctx), .call = noHost });
+    const v = it.parseData(text) catch return;
+    if (v != .record) return;
+    if (v.record.get("resolvers")) |list| if (list == .list) {
+        conf_n_resolvers = 0;
+        for (list.list) |item| {
+            if (item != .str or conf_n_resolvers == max_resolvers) continue;
+            const words = shared.parseAddr(item.str) orelse continue;
+            conf_resolvers[conf_n_resolvers] = addrFromWords(words[0], words[1]);
+            conf_n_resolvers += 1;
+        }
+    };
+    const ifs = v.record.get("interfaces") orelse return;
+    if (ifs != .list) return;
+    for (ifs.list) |item| {
+        if (item != .record) continue;
+        const r = item.record;
+        var entry: IfaceConf = .{ .used = true };
+        const macv = r.get("mac") orelse continue;
+        if (macv != .str or !parseMac(macv.str, &entry.mac)) continue;
+        const modev = r.get("mode") orelse continue;
+        if (modev != .str) continue;
+        entry.cfg.mode = std.meta.stringToEnum(shared.IfaceMode, modev.str) orelse continue;
+        var a: Addr = undefined;
+        var p: u8 = 0;
+        if (r.get("address")) |av| if (av == .str and parsePrefixed(av.str, &a, &p) and isV4Mapped(a)) {
+            entry.cfg.ip4 = v4Of(a);
+            entry.cfg.prefix4 = p;
+        };
+        if (r.get("gateway")) |gv| if (gv == .str) if (shared.parseAddr(gv.str)) |w| {
+            const g = addrFromWords(w[0], w[1]);
+            if (isV4Mapped(g)) entry.cfg.gw4 = v4Of(g);
+        };
+        if (r.get("address6")) |av| if (av == .str and parsePrefixed(av.str, &a, &p) and !isV4Mapped(a)) {
+            entry.cfg.ip6 = a;
+            entry.cfg.prefix6 = p;
+        };
+        if (r.get("gateway6")) |gv| if (gv == .str) if (shared.parseAddr(gv.str)) |w| {
+            const g = addrFromWords(w[0], w[1]);
+            if (!isV4Mapped(g)) entry.cfg.gw6 = g;
+        };
+        if (r.get("resolvers")) |list| if (list == .list) {
+            for (list.list) |rv| {
+                if (rv != .str or entry.cfg.n_resolvers == 4) continue;
+                const w = shared.parseAddr(rv.str) orelse continue;
+                entry.cfg.resolvers[entry.cfg.n_resolvers] = addrFromWords(w[0], w[1]);
+                entry.cfg.n_resolvers += 1;
+            }
+        };
+        // The persisted file's entry for a MAC replaces the archive's.
+        var slot: usize = max_ifaces;
+        for (conf_ifaces, 0..) |c, i| if (c.used and std.mem.eql(u8, &c.mac, &entry.mac)) {
+            slot = i;
+        };
+        if (slot == max_ifaces) for (conf_ifaces, 0..) |c, i| if (!c.used) {
+            slot = i;
+            break;
+        };
+        if (slot < max_ifaces) conf_ifaces[slot] = entry;
+    }
+}
+
+/// `conf/app/net.msh` through the `conf` view, when the unit has one.
+fn readPersisted(setup: *const boot.Setup) void {
+    const view = setup.cap(.conf);
+    if (view == 0) return;
+    const ab = fsc.attachBuf(view);
+    if (ab.va == 0) return;
+    const buf: [*]u8 = @ptrFromInt(ab.va);
+    const fd = switch (fsc.fsOpen(view, buf, "net.msh", 0)) {
+        .fd => |fd| fd,
+        .err => return,
+    };
+    defer fsc.fsClose(view, fd);
+    const n = fsc.fsRead(view, fd, 4096) orelse return;
+    var text: [4096]u8 = undefined;
+    @memcpy(text[0..n], buf[0..n]);
+    readSettings(text[0..n]);
+    logf("netsvc: settings read from conf/app/net.msh", .{});
+}
+
+fn confFor(mac: [6]u8) ?*const IfaceConf {
+    for (&conf_ifaces) |*c| if (c.used and std.mem.eql(u8, &c.mac, &mac)) return c;
+    return null;
+}
+
+// ------------------------------------------------------------ addresses
 
 const Addr = [16]u8;
 
@@ -102,6 +237,11 @@ fn addrEq(a: Addr, b: Addr) bool {
     for (a, b) |x, y| {
         if (x != y) return false;
     }
+    return true;
+}
+
+fn addrIsZero(a: Addr) bool {
+    for (a) |x| if (x != 0) return false;
     return true;
 }
 
@@ -124,21 +264,202 @@ fn v4Addr(ip: u32) Addr {
     return a;
 }
 
-// Slirp mode (node 0) or cluster mode (node N: static 10.77.0.N / fdcc::N,
-// everything on-link, broadcast MAC delivery — no gateways to resolve).
-var own_ip4: u32 = shared.net_own_ip4;
-var gw_ip4: u32 = shared.net_gw_ip4;
-var own_ip6: Addr = undefined;
-var gw_ip6: Addr = undefined;
-var loop6: Addr = undefined; // ::1
+fn prefixMask4(prefix: u8) u32 {
+    if (prefix == 0) return 0;
+    if (prefix >= 32) return 0xffff_ffff;
+    return @as(u32, 0xffff_ffff) << @intCast(32 - @as(u32, prefix));
+}
+
+/// Do two v6 addresses share their first `prefix` bits?
+fn samePrefix6(a: Addr, b: Addr, prefix: u8) bool {
+    var bits: usize = prefix;
+    var i: usize = 0;
+    while (bits >= 8) : (bits -= 8) {
+        if (a[i] != b[i]) return false;
+        i += 1;
+    }
+    if (bits == 0) return true;
+    const mask: u8 = @as(u8, 0xff) << @intCast(8 - bits);
+    return (a[i] & mask) == (b[i] & mask);
+}
+
+// ----------------------------------------------------------- interfaces
+//
+// One NIC each: its virtio queues, its MAC, its addresses and gateways,
+// a neighbour cache, and counters. Slirp mode (node 0) addresses the
+// first NIC 10.0.2.15/24 via 10.0.2.2 and fec0::15/64 via fec0::2 unless
+// the settings say otherwise; cluster mode (node N) is 10.77.0.N / fdcc::N
+// with every peer on-link, delivered to the broadcast MAC (no neighbour
+// discovery on that private segment). Further NICs are off until
+// configured (DHCP, next).
+
+const max_ifaces = 4;
+const max_neigh = 8;
+const loop6: Addr = blk: {
+    var a: Addr = @splat(0);
+    a[15] = 1;
+    break :blk a;
+};
+
+/// `asked_ms` -1: never asked — the clock is small at boot, so "zero
+/// milliseconds ago" must not read as "just asked".
+const Neigh = struct { used: bool = false, ip: Addr = @splat(0), mac: [6]u8 = @splat(0), asked_ms: i64 = -1, valid: bool = false };
+
+const Iface = struct {
+    used: bool = false,
+    index: u8 = 0,
+    // The device.
+    dev_h: u64 = 0,
+    dev: virtio.Dev = undefined,
+    vq_va: u64 = 0,
+    vq_dev: u64 = 0,
+    rx_va: u64 = 0,
+    rx_dev: u64 = 0,
+    tx_va: u64 = 0,
+    tx_dev: u64 = 0,
+    rx_shadow: u16 = 0,
+    rx_seen: u16 = 0,
+    tx_shadow: u16 = 0,
+    tx_seen: u16 = 0,
+    tx_free: u8 = (1 << n_tx) - 1,
+    mac: [6]u8 = @splat(0),
+    rx_frames: u64 = 0,
+    tx_frames: u64 = 0,
+    // Addressing.
+    mode: shared.IfaceMode = .off,
+    up: bool = false,
+    ip4: u32 = 0,
+    prefix4: u8 = 0,
+    gw4: u32 = 0,
+    ip6: Addr = @splat(0),
+    prefix6: u8 = 0,
+    gw6: Addr = @splat(0),
+    bcast_delivery: bool = false,
+    resolvers: [max_resolvers]Addr = undefined,
+    n_resolvers: usize = 0,
+    neigh: [max_neigh]Neigh = @splat(.{}),
+    next_neigh: usize = 0,
+
+    fn hasIp6(f: *const Iface) bool {
+        return !addrIsZero(f.ip6);
+    }
+    fn hasGw6(f: *const Iface) bool {
+        return !addrIsZero(f.gw6);
+    }
+    fn name(f: *const Iface, out: *[8]u8) []const u8 {
+        return std.fmt.bufPrint(out, "net{d}", .{f.index}) catch "net?";
+    }
+};
+
+var ifaces: [max_ifaces]Iface = @splat(.{});
+var n_ifaces: usize = 0;
 var cluster_node: u64 = 0;
 
+fn ifaceAt(i: u64) ?*Iface {
+    if (i >= n_ifaces) return null;
+    return &ifaces[i];
+}
+
+/// The interface that owns this unicast address, if any.
+fn ifaceByAddr(a: Addr) ?*Iface {
+    for (ifaces[0..n_ifaces]) |*f| {
+        if (!f.up) continue;
+        if (isV4Mapped(a)) {
+            if (f.ip4 != 0 and v4Of(a) == f.ip4) return f;
+        } else if (f.hasIp6() and addrEq(a, f.ip6)) return f;
+    }
+    return null;
+}
+
+/// Ours, or loopback: delivered straight back into the stack.
 fn isLocalAddr(a: Addr) bool {
     if (isV4Mapped(a)) {
-        const ip = v4Of(a);
-        return ip == own_ip4 or (ip >> 24) == 127;
+        if ((v4Of(a) >> 24) == 127) return true;
+    } else if (addrEq(a, loop6)) return true;
+    return ifaceByAddr(a) != null;
+}
+
+/// The address the stack speaks with when a socket has none of its own
+/// yet (a datagram to nowhere in particular): the first interface up.
+fn defaultSrc(v4: bool) ?Addr {
+    for (ifaces[0..n_ifaces]) |*f| {
+        if (!f.up) continue;
+        if (v4 and f.ip4 != 0) return v4Addr(f.ip4);
+        if (!v4 and f.hasIp6()) return f.ip6;
     }
-    return addrEq(a, own_ip6) or addrEq(a, loop6);
+    return null;
+}
+
+fn onLink(f: *const Iface, dst: Addr) bool {
+    if (f.bcast_delivery) return true;
+    if (isV4Mapped(dst)) {
+        if (f.ip4 == 0) return false;
+        const m = prefixMask4(f.prefix4);
+        return (v4Of(dst) & m) == (f.ip4 & m);
+    }
+    if (!f.hasIp6()) return false;
+    if (dst[0] == 0xff or (dst[0] == 0xfe and (dst[1] & 0xc0) == 0x80)) return true; // multicast, link-local
+    return samePrefix6(dst, f.ip6, f.prefix6);
+}
+
+const Route = struct { f: *Iface, hop: Addr };
+
+/// Where a destination goes: an interface it is on-link for (the hop is
+/// the destination itself), else the first interface with a gateway of
+/// the right family (the hop is the gateway). Null: no way out.
+fn route(dst: Addr) ?Route {
+    const v4 = isV4Mapped(dst);
+    for (ifaces[0..n_ifaces]) |*f| {
+        if (!f.up) continue;
+        if (onLink(f, dst)) return .{ .f = f, .hop = dst };
+    }
+    for (ifaces[0..n_ifaces]) |*f| {
+        if (!f.up) continue;
+        if (v4 and f.ip4 != 0 and f.gw4 != 0) return .{ .f = f, .hop = v4Addr(f.gw4) };
+        if (!v4 and f.hasIp6() and f.hasGw6()) return .{ .f = f, .hop = f.gw6 };
+    }
+    return null;
+}
+
+// ------------------------------------------------------ neighbour cache
+
+fn neighFind(f: *Iface, ip: Addr) ?*Neigh {
+    for (&f.neigh) |*n| if (n.used and addrEq(n.ip, ip)) return n;
+    return null;
+}
+
+fn neighPut(f: *Iface, ip: Addr, mac: [6]u8) void {
+    const n = neighFind(f, ip) orelse blk: {
+        const slot = &f.neigh[f.next_neigh];
+        f.next_neigh = (f.next_neigh + 1) % max_neigh;
+        slot.* = .{ .used = true, .ip = ip };
+        break :blk slot;
+    };
+    n.mac = mac;
+    n.valid = true;
+}
+
+/// The MAC a next hop is reached at: the broadcast address on a
+/// broadcast-delivery segment, a cached neighbour, or — asked for now
+/// (ARP or neighbour solicitation, at most twice a second) — nothing
+/// yet: the frame is dropped and the protocol above retries.
+fn nextHopMac(f: *Iface, hop: Addr) ?[6]u8 {
+    if (f.bcast_delivery) return @splat(0xff);
+    if (!isV4Mapped(hop) and hop[0] == 0xff) return .{ 0x33, 0x33, hop[12], hop[13], hop[14], hop[15] };
+    if (isV4Mapped(hop) and v4Of(hop) == 0xffff_ffff) return @splat(0xff);
+    const n = neighFind(f, hop) orelse blk: {
+        const slot = &f.neigh[f.next_neigh];
+        f.next_neigh = (f.next_neigh + 1) % max_neigh;
+        slot.* = .{ .used = true, .ip = hop };
+        break :blk slot;
+    };
+    if (n.valid) return n.mac;
+    const now = nowMs();
+    if (n.asked_ms < 0 or now - n.asked_ms >= 500) {
+        n.asked_ms = now;
+        if (isV4Mapped(hop)) arpRequest(f, v4Of(hop)) else ndpSolicit(f, hop);
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------- virtio
@@ -151,203 +472,186 @@ const frame_cap = 2048;
 const n_rx = 8;
 const n_tx = 4;
 
-var dev: virtio.Dev = undefined;
-var vq_va: u64 = 0;
-var vq_dev: u64 = 0;
-var rx_va: u64 = 0;
-var rx_dev: u64 = 0;
-var tx_va: u64 = 0;
-var tx_dev: u64 = 0;
 var irq_notif: u64 = 0;
-/// Bits on irq_notif: the device's interrupt (bound at bit 0) and the clock.
+
 const bit_irq: u64 = 1;
 const bit_tick: u64 = 2;
 
 const Q = struct { desc: u64, avail: u64, used: u64, idx: u32 };
 const rxq: Q = .{ .desc = 0, .avail = 128, .used = 256, .idx = 0 };
 const txq: Q = .{ .desc = 512, .avail = 640, .used = 768, .idx = 1 };
-var rx_shadow: u16 = 0;
-var rx_seen: u16 = 0;
-var tx_shadow: u16 = 0;
-var tx_seen: u16 = 0;
-var tx_free: u8 = (1 << n_tx) - 1;
 
-var mac: [6]u8 = undefined;
-var gw_mac: [6]u8 = undefined;
-var have_gw4 = false;
-var gw6_mac: [6]u8 = undefined;
-var have_gw6 = false;
-
-fn qDescs(q: Q) [*]volatile Desc {
-    return @ptrFromInt(vq_va + q.desc);
+fn qDescs(f: *Iface, q: Q) [*]volatile Desc {
+    return @ptrFromInt(f.vq_va + q.desc);
+}
+fn qAvailIdx(f: *Iface, q: Q) *volatile u16 {
+    return @ptrFromInt(f.vq_va + q.avail + 2);
+}
+fn qAvailRing(f: *Iface, q: Q) [*]volatile u16 {
+    return @ptrFromInt(f.vq_va + q.avail + 4);
+}
+fn qUsedIdx(f: *Iface, q: Q) *volatile u16 {
+    return @ptrFromInt(f.vq_va + q.used + 2);
+}
+fn qUsedElem(f: *Iface, q: Q, i: u16) *volatile extern struct { id: u32, len: u32 } {
+    return @ptrFromInt(f.vq_va + q.used + 4 + @as(u64, i % qn) * 8);
 }
 
-fn qAvailIdx(q: Q) *volatile u16 {
-    return @ptrFromInt(vq_va + q.avail + 2);
-}
-
-fn qAvailRing(q: Q) [*]volatile u16 {
-    return @ptrFromInt(vq_va + q.avail + 4);
-}
-
-fn qUsedIdx(q: Q) *volatile u16 {
-    return @ptrFromInt(vq_va + q.used + 2);
-}
-
-fn qUsedElem(q: Q, i: u16) *volatile extern struct { id: u32, len: u32 } {
-    return @ptrFromInt(vq_va + q.used + 4 + @as(u64, i % qn) * 8);
-}
-
-fn netInit() void {
-    const n = usys.notifyCreate();
-    if (n.err != .ok) usys.exit(170);
-    irq_notif = n.data[0];
-
-    dev = virtio.Dev.open(dev_h, .net) orelse {
+/// Bring one NIC up: queues, the MAC from config space, receive buffers.
+fn netInit(f: *Iface) void {
+    f.dev = virtio.Dev.open(f.dev_h, .net) orelse {
         usys.exit(172);
     };
-    if (usys.irqBind(dev_h, irq_notif, 0) != .ok) usys.exit(173);
+    if (usys.irqBind(f.dev_h, irq_notif, 0) != .ok) usys.exit(173);
 
     const dma = usys.dmaAlloc(7);
     if (dma.err != .ok) usys.exit(174);
-    vq_va = dma.data[0];
-    vq_dev = dma.data[1];
-    rx_va = vq_va + 4096;
-    rx_dev = vq_dev + 4096;
-    tx_va = vq_va + 5 * 4096;
-    tx_dev = vq_dev + 5 * 4096;
+    f.vq_va = dma.data[0];
+    f.vq_dev = dma.data[1];
+    f.rx_va = f.vq_va + 4096;
+    f.rx_dev = f.vq_dev + 4096;
+    f.tx_va = f.vq_va + 5 * 4096;
+    f.tx_dev = f.vq_dev + 5 * 4096;
 
-    _ = dev.negotiate(1 << 5, 0) orelse usys.exit(175); // MAC
+    _ = f.dev.negotiate(1 << 5, 0) orelse usys.exit(175); // MAC
     for ([_]Q{ rxq, txq }) |q| {
-        if (!dev.queueSetup(@intCast(q.idx), qn, vq_dev + q.desc, vq_dev + q.avail, vq_dev + q.used)) usys.exit(176);
+        if (!f.dev.queueSetup(@intCast(q.idx), qn, f.vq_dev + q.desc, f.vq_dev + q.avail, f.vq_dev + q.used)) usys.exit(176);
     }
-    dev.driverOk();
+    f.dev.driverOk();
 
     // Config space is read in aligned words (unaligned MMIO faults).
-    const m0 = dev.devRead32(0);
-    const m1 = dev.devRead32(4);
-    mac = .{
+    const m0 = f.dev.devRead32(0);
+    const m1 = f.dev.devRead32(4);
+    f.mac = .{
         @truncate(m0),       @truncate(m0 >> 8),
         @truncate(m0 >> 16), @truncate(m0 >> 24),
         @truncate(m1),       @truncate(m1 >> 8),
     };
 
     for (0..n_rx) |i| {
-        qDescs(rxq)[i] = .{
-            .addr = rx_dev + i * frame_cap,
+        qDescs(f, rxq)[i] = .{
+            .addr = f.rx_dev + i * frame_cap,
             .len = frame_cap,
             .flags = desc_f_write,
             .next = 0,
         };
-        qAvailRing(rxq)[rx_shadow % qn] = @intCast(i);
-        rx_shadow +%= 1;
+        qAvailRing(f, rxq)[f.rx_shadow % qn] = @intCast(i);
+        f.rx_shadow +%= 1;
     }
     usys.barrier();
-    qAvailIdx(rxq).* = rx_shadow;
+    qAvailIdx(f, rxq).* = f.rx_shadow;
     usys.barrier();
-    dev.notify(@intCast(rxq.idx));
+    f.dev.notify(@intCast(rxq.idx));
 }
 
-fn wireTx(frame: []const u8) void {
-    if (tx_free == 0) drainTxUsed();
-    if (tx_free == 0) return; // drop; stop-and-wait retransmits recover
+fn wireTx(f: *Iface, frame: []const u8) void {
+    if (f.tx_free == 0) drainTxUsed(f);
+    if (f.tx_free == 0) return; // drop; stop-and-wait retransmits recover
     var slot: u3 = 0;
-    while (tx_free & (@as(u8, 1) << slot) == 0) slot += 1;
-    tx_free &= ~(@as(u8, 1) << slot);
+    while (f.tx_free & (@as(u8, 1) << slot) == 0) slot += 1;
+    f.tx_free &= ~(@as(u8, 1) << slot);
 
-    const buf: [*]u8 = @ptrFromInt(tx_va + @as(u64, slot) * frame_cap);
+    const buf: [*]u8 = @ptrFromInt(f.tx_va + @as(u64, slot) * frame_cap);
     @memset(buf[0..vnet_hdr], 0);
     @memcpy(buf[vnet_hdr .. vnet_hdr + frame.len], frame);
-    qDescs(txq)[slot] = .{
-        .addr = tx_dev + @as(u64, slot) * frame_cap,
+    qDescs(f, txq)[slot] = .{
+        .addr = f.tx_dev + @as(u64, slot) * frame_cap,
         .len = @intCast(vnet_hdr + frame.len),
         .flags = 0,
         .next = 0,
     };
-    qAvailRing(txq)[tx_shadow % qn] = slot;
-    tx_shadow +%= 1;
+    qAvailRing(f, txq)[f.tx_shadow % qn] = slot;
+    f.tx_shadow +%= 1;
     usys.barrier();
-    qAvailIdx(txq).* = tx_shadow;
+    qAvailIdx(f, txq).* = f.tx_shadow;
     usys.barrier();
-    dev.notify(@intCast(txq.idx));
+    f.dev.notify(@intCast(txq.idx));
+    f.tx_frames += 1;
 }
 
-fn drainTxUsed() void {
-    while (tx_seen != qUsedIdx(txq).*) {
-        const e = qUsedElem(txq, tx_seen);
-        tx_free |= @as(u8, 1) << @intCast(e.id);
-        tx_seen +%= 1;
+fn drainTxUsed(f: *Iface) void {
+    while (f.tx_seen != qUsedIdx(f, txq).*) {
+        const e = qUsedElem(f, txq, f.tx_seen);
+        f.tx_free |= @as(u8, 1) << @intCast(e.id);
+        f.tx_seen +%= 1;
     }
 }
 
-fn drainRxUsed() void {
-    while (rx_seen != qUsedIdx(rxq).*) {
+fn drainRxUsed(f: *Iface) void {
+    while (f.rx_seen != qUsedIdx(f, rxq).*) {
         usys.barrier();
-        const e = qUsedElem(rxq, rx_seen);
-        const buf: [*]const u8 = @ptrFromInt(rx_va + @as(u64, e.id) * frame_cap);
-        if (e.len > vnet_hdr) etherInput(buf[vnet_hdr..e.len]);
-        qAvailRing(rxq)[rx_shadow % qn] = @intCast(e.id);
-        rx_shadow +%= 1;
+        const e = qUsedElem(f, rxq, f.rx_seen);
+        const buf: [*]const u8 = @ptrFromInt(f.rx_va + @as(u64, e.id) * frame_cap);
+        if (e.len > vnet_hdr) {
+            f.rx_frames += 1;
+            etherInput(f, buf[vnet_hdr..e.len]);
+        }
+        qAvailRing(f, rxq)[f.rx_shadow % qn] = @intCast(e.id);
+        f.rx_shadow +%= 1;
         usys.barrier();
-        qAvailIdx(rxq).* = rx_shadow;
-        rx_seen +%= 1;
+        qAvailIdx(f, rxq).* = f.rx_shadow;
+        f.rx_seen +%= 1;
     }
-    dev.notify(@intCast(rxq.idx));
+    f.dev.notify(@intCast(rxq.idx));
 }
 
 fn netTick() void {
-    drainRxUsed();
-    drainTxUsed();
+    for (ifaces[0..n_ifaces]) |*f| {
+        drainRxUsed(f);
+        drainTxUsed(f);
+    }
     retransmitScan();
     lookupScan();
 }
 
+/// One doorbell for every NIC: whichever raised it, all are drained.
 fn irqDrain() void {
-    _ = dev.isrRead();
-    _ = usys.irqAck(dev_h, 0);
+    for (ifaces[0..n_ifaces]) |*f| {
+        _ = f.dev.isrRead();
+        _ = usys.irqAck(f.dev_h, 0);
+    }
     netTick();
 }
 
 // ----------------------------------------------------------- link layer
 
-fn etherInput(frame: []const u8) void {
+fn etherInput(f: *Iface, frame: []const u8) void {
     if (frame.len < 14) return;
     const ethertype = (@as(u16, frame[12]) << 8) | frame[13];
     switch (ethertype) {
-        0x0806 => arpInput(frame[14..]),
-        0x0800 => ip4Input(frame[14..]),
-        0x86dd => ip6Input(frame[14..]),
+        0x0806 => arpInput(f, frame[14..]),
+        0x0800 => ip4Input(f, frame[14..]),
+        0x86dd => ip6Input(f, frame[14..]),
         else => {},
     }
 }
 
-fn ethSend(dst_mac: []const u8, ethertype: u16, payload: []const u8) void {
+fn ethSend(f: *Iface, dst_mac: []const u8, ethertype: u16, payload: []const u8) void {
     var frame: [14 + 40 + seg_max + 4]u8 = undefined;
     @memcpy(frame[0..6], dst_mac);
-    @memcpy(frame[6..12], &mac);
+    @memcpy(frame[6..12], &f.mac);
     frame[12] = @truncate(ethertype >> 8);
     frame[13] = @truncate(ethertype);
     @memcpy(frame[14 .. 14 + payload.len], payload);
-    wireTx(frame[0 .. 14 + payload.len]);
+    wireTx(f, frame[0 .. 14 + payload.len]);
 }
 
 // -------------------------------------------------------------- ARP (v4)
 
-fn arpInput(p: []const u8) void {
+fn arpInput(f: *Iface, p: []const u8) void {
     if (p.len < 28) return;
     const op = (@as(u16, p[6]) << 8) | p[7];
     const spa = be32(p[14..18]);
-    if (op == 2 and spa == gw_ip4) {
-        @memcpy(&gw_mac, p[8..14]);
-        have_gw4 = true;
-    } else if (op == 1 and be32(p[24..28]) == own_ip4) {
+    // Whoever speaks is learned (a reply to us, a request from a peer).
+    if (spa != 0) neighPut(f, v4Addr(spa), p[8..14].*);
+    if (op == 1 and f.ip4 != 0 and be32(p[24..28]) == f.ip4) {
         var reply: [28]u8 = undefined;
-        arpFill(&reply, 2, p[8..14], spa);
-        ethSend(p[8..14], 0x0806, &reply);
+        arpFill(f, &reply, 2, p[8..14], spa);
+        ethSend(f, p[8..14], 0x0806, &reply);
     }
 }
 
-fn arpFill(p: *[28]u8, op: u16, target_mac: []const u8, target_ip: u32) void {
+fn arpFill(f: *Iface, p: *[28]u8, op: u16, target_mac: []const u8, target_ip: u32) void {
     p[0] = 0;
     p[1] = 1;
     p[2] = 0x08;
@@ -356,24 +660,24 @@ fn arpFill(p: *[28]u8, op: u16, target_mac: []const u8, target_ip: u32) void {
     p[5] = 4;
     p[6] = @truncate(op >> 8);
     p[7] = @truncate(op);
-    @memcpy(p[8..14], &mac);
-    pbe32(p[14..18], own_ip4);
+    @memcpy(p[8..14], &f.mac);
+    pbe32(p[14..18], f.ip4);
     @memcpy(p[18..24], target_mac);
     pbe32(p[24..28], target_ip);
 }
 
-fn arpRequestGw() void {
+fn arpRequest(f: *Iface, ip: u32) void {
     var req: [28]u8 = undefined;
     const zero_mac = [_]u8{0} ** 6;
-    arpFill(&req, 1, &zero_mac, gw_ip4);
+    arpFill(f, &req, 1, &zero_mac, ip);
     const bcast = [_]u8{0xff} ** 6;
-    ethSend(&bcast, 0x0806, &req);
+    ethSend(f, &bcast, 0x0806, &req);
 }
 
 // ------------------------------------------------------------- NDP (v6)
 
-/// Emit an ICMPv6 packet (checksummed here) from own_ip6 to dst.
-fn icmp6Send(dst: Addr, dst_mac: []const u8, body: []const u8) void {
+/// Emit an ICMPv6 packet (checksummed here) from the interface's address.
+fn icmp6Send(f: *Iface, dst: Addr, dst_mac: []const u8, body: []const u8) void {
     var pkt: [40 + 64]u8 = undefined;
     pkt[0] = 0x60;
     pkt[1] = 0;
@@ -382,7 +686,7 @@ fn icmp6Send(dst: Addr, dst_mac: []const u8, body: []const u8) void {
     pbe16(pkt[4..6], @intCast(body.len));
     pkt[6] = 58; // ICMPv6
     pkt[7] = 255; // hop limit (NDP requires 255)
-    @memcpy(pkt[8..24], &own_ip6);
+    @memcpy(pkt[8..24], &f.ip6);
     @memcpy(pkt[24..40], &dst);
     @memcpy(pkt[40 .. 40 + body.len], body);
     // Checksum over pseudo-header + body.
@@ -395,66 +699,61 @@ fn icmp6Send(dst: Addr, dst_mac: []const u8, body: []const u8) void {
     const c = fold(sum);
     pkt[42] = @truncate(c >> 8);
     pkt[43] = @truncate(c);
-    ethSend(dst_mac, 0x86dd, pkt[0 .. 40 + body.len]);
+    ethSend(f, dst_mac, 0x86dd, pkt[0 .. 40 + body.len]);
 }
 
-fn ndpSolicitGw() void {
-    // NS to the solicited-node multicast of fec0::2.
+fn ndpSolicit(f: *Iface, target: Addr) void {
+    // NS to the target's solicited-node multicast.
     var body: [32]u8 = @splat(0);
     body[0] = 135; // neighbor solicitation
-    @memcpy(body[8..24], &gw_ip6);
+    @memcpy(body[8..24], &target);
     body[24] = 1; // option: source link-layer address
     body[25] = 1;
-    @memcpy(body[26..32], &mac);
+    @memcpy(body[26..32], &f.mac);
     var dst: Addr = @splat(0);
     dst[0] = 0xff;
     dst[1] = 0x02;
     dst[11] = 0x01;
     dst[12] = 0xff;
-    @memcpy(dst[13..16], gw_ip6[13..16]);
-    var dmac: [6]u8 = .{ 0x33, 0x33, 0xff, gw_ip6[13], gw_ip6[14], gw_ip6[15] };
-    icmp6Send(dst, &dmac, &body);
+    @memcpy(dst[13..16], target[13..16]);
+    const dmac: [6]u8 = .{ 0x33, 0x33, 0xff, target[13], target[14], target[15] };
+    icmp6Send(f, dst, &dmac, &body);
 }
 
 var ping_replies: u64 = 0;
 var ping_seq: u16 = 0;
 
-fn icmp6Input(src: Addr, body: []const u8) void {
+fn icmp6Input(f: *Iface, src: Addr, src_mac: [6]u8, body: []const u8) void {
     if (body.len < 8) return;
     switch (body[0]) {
-        136 => { // neighbor advertisement
+        136 => { // neighbor advertisement: learn the target's link address
             if (body.len < 24) return;
             var target: Addr = undefined;
             @memcpy(&target, body[8..24]);
-            if (addrEq(target, gw_ip6)) {
-                // Find the target link-layer option (type 2).
-                var off: usize = 24;
-                while (off + 8 <= body.len) {
-                    if (body[off] == 2 and body[off + 1] == 1) {
-                        @memcpy(&gw6_mac, body[off + 2 .. off + 8]);
-                        have_gw6 = true;
-                        return;
-                    }
-                    off += @as(usize, body[off + 1]) * 8;
-                    if (body[off - 8 + 1] == 0) return;
+            var off: usize = 24;
+            while (off + 8 <= body.len) {
+                if (body[off] == 2 and body[off + 1] == 1) {
+                    neighPut(f, target, body[off + 2 ..][0..6].*);
+                    return;
                 }
+                if (body[off + 1] == 0) return;
+                off += @as(usize, body[off + 1]) * 8;
             }
         },
-        135 => { // neighbor solicitation for us -> advertise
-            if (body.len < 24) return;
+        135 => { // neighbor solicitation for us -> advertise to the asker
+            if (body.len < 24 or !f.hasIp6()) return;
             var target: Addr = undefined;
             @memcpy(&target, body[8..24]);
-            if (!addrEq(target, own_ip6)) return;
+            if (!addrEq(target, f.ip6)) return;
+            neighPut(f, src, src_mac);
             var na: [32]u8 = @splat(0);
             na[0] = 136;
             na[4] = 0x60; // solicited + override
-            @memcpy(na[8..24], &own_ip6);
+            @memcpy(na[8..24], &f.ip6);
             na[24] = 2; // option: target link-layer address
             na[25] = 1;
-            @memcpy(na[26..32], &mac);
-            if (have_gw6) {
-                icmp6Send(src, &gw6_mac, &na);
-            }
+            @memcpy(na[26..32], &f.mac);
+            icmp6Send(f, src, &src_mac, &na);
         },
         129 => ping_replies += 1, // echo reply
         128 => { // echo request -> reply
@@ -464,7 +763,7 @@ fn icmp6Input(src: Addr, body: []const u8) void {
             rep[0] = 129;
             rep[2] = 0;
             rep[3] = 0;
-            if (have_gw6) icmp6Send(src, &gw6_mac, rep[0..n]);
+            ipSend6(null, src, 58, 64, rep[0..n], true);
         },
         else => {},
     }
@@ -481,29 +780,11 @@ fn ping6(dst: Addr) void {
         ping_replies += 1; // pinging yourself always works
         return;
     }
-    if (have_gw6) icmp6Send(dst, &gw6_mac, &body);
+    ipSend6(null, dst, 58, 64, &body, true);
 }
 
 fn ping4(ip: u32) void {
-    // v4 ICMP echo via the gateway.
-    var pkt: [20 + 16]u8 = undefined;
-    pkt[0] = 0x45;
-    pkt[1] = 0;
-    pbe16(pkt[2..4], 36);
-    pkt[4] = 0;
-    pkt[5] = 0;
-    pkt[6] = 0x40;
-    pkt[7] = 0;
-    pkt[8] = 64;
-    pkt[9] = 1; // ICMP
-    pkt[10] = 0;
-    pkt[11] = 0;
-    pbe32(pkt[12..16], own_ip4);
-    pbe32(pkt[16..20], ip);
-    const ipsum = csum(pkt[0..20], 0);
-    pkt[10] = @truncate(ipsum >> 8);
-    pkt[11] = @truncate(ipsum);
-    var b = pkt[20..];
+    var b: [16]u8 = undefined;
     b[0] = 8;
     b[1] = 0;
     b[2] = 0;
@@ -515,21 +796,94 @@ fn ping4(ip: u32) void {
     const ic = csum(b[0..16], 0);
     b[2] = @truncate(ic >> 8);
     b[3] = @truncate(ic);
-    if (have_gw4) ethSend(&gw_mac, 0x0800, &pkt);
+    if (isLocalAddr(v4Addr(ip))) {
+        ping_replies += 1;
+        return;
+    }
+    ipSend4(null, ip, 1, &b);
+}
+
+// --------------------------------------------------------------- IP send
+
+/// An IPv4 packet to `dst` by the route: the source is the socket's own
+/// address when it has one, else the outgoing interface's. Dropped, and
+/// the neighbour asked for, when the next hop's MAC is not known yet.
+fn ipSend4(src: ?u32, dst: u32, proto: u8, payload: []const u8) void {
+    const r = route(v4Addr(dst)) orelse return;
+    const dmac = nextHopMac(r.f, r.hop) orelse return;
+    var pkt: [20 + seg_max + 4]u8 = undefined;
+    const total = 20 + payload.len;
+    if (total > pkt.len) return;
+    pkt[0] = 0x45;
+    pkt[1] = 0;
+    pbe16(pkt[2..4], @intCast(total));
+    pkt[4] = 0;
+    pkt[5] = 0;
+    pkt[6] = 0x40;
+    pkt[7] = 0;
+    pkt[8] = 64;
+    pkt[9] = proto;
+    pkt[10] = 0;
+    pkt[11] = 0;
+    pbe32(pkt[12..16], src orelse r.f.ip4);
+    pbe32(pkt[16..20], dst);
+    const ipsum = csum(pkt[0..20], 0);
+    pkt[10] = @truncate(ipsum >> 8);
+    pkt[11] = @truncate(ipsum);
+    @memcpy(pkt[20..total], payload);
+    ethSend(r.f, &dmac, 0x0800, pkt[0..total]);
+}
+
+/// An IPv6 packet to `dst` by the route. `checksum_icmp`: the payload is
+/// ICMPv6 whose checksum (over the pseudo-header) is computed here once
+/// the source is known.
+fn ipSend6(src: ?Addr, dst: Addr, proto: u8, hop_limit: u8, payload: []const u8, checksum_icmp: bool) void {
+    const r = route(dst) orelse return;
+    const dmac = nextHopMac(r.f, r.hop) orelse return;
+    var pkt: [40 + seg_max + 4]u8 = undefined;
+    const total = 40 + payload.len;
+    if (total > pkt.len) return;
+    pkt[0] = 0x60;
+    pkt[1] = 0;
+    pkt[2] = 0;
+    pkt[3] = 0;
+    pbe16(pkt[4..6], @intCast(payload.len));
+    pkt[6] = proto;
+    pkt[7] = hop_limit;
+    const s = src orelse r.f.ip6;
+    @memcpy(pkt[8..24], &s);
+    @memcpy(pkt[24..40], &dst);
+    @memcpy(pkt[40..total], payload);
+    if (checksum_icmp) {
+        pkt[42] = 0;
+        pkt[43] = 0;
+        var sum: u32 = partial(pkt[8..40], 0);
+        var lenw: [4]u8 = undefined;
+        pbe32(&lenw, @intCast(payload.len));
+        sum = partial(&lenw, sum);
+        sum += proto;
+        sum = partial(pkt[40..total], sum);
+        const c = fold(sum);
+        pkt[42] = @truncate(c >> 8);
+        pkt[43] = @truncate(c);
+    }
+    ethSend(r.f, &dmac, 0x86dd, pkt[0..total]);
 }
 
 // ------------------------------------------------------------- IP input
 
-fn ip4Input(p: []const u8) void {
+fn ip4Input(f: *Iface, p: []const u8) void {
     if (p.len < 20 or p[0] >> 4 != 4) return;
     const ihl: usize = @as(usize, p[0] & 0xf) * 4;
     const total = (@as(usize, p[2]) << 8) | p[3];
     if (total > p.len or ihl < 20) return;
-    if (be32(p[16..20]) != own_ip4) return;
+    const dst_ip = be32(p[16..20]);
+    // Ours on this interface, or a broadcast (DHCP answers arrive so).
+    if (!(f.up and dst_ip == f.ip4) and dst_ip != 0xffff_ffff) return;
     const src = v4Addr(be32(p[12..16]));
     switch (p[9]) {
-        6 => tcpInput(src, p[ihl..total]),
-        17 => udpInput(src, v4Addr(own_ip4), p[ihl..total]),
+        6 => if (dst_ip != 0xffff_ffff) tcpInput(src, v4Addr(dst_ip), p[ihl..total]),
+        17 => udpInput(src, v4Addr(dst_ip), p[ihl..total]),
         1 => { // ICMP
             const b = p[ihl..total];
             if (b.len >= 8 and b[0] == 0) ping_replies += 1;
@@ -538,22 +892,145 @@ fn ip4Input(p: []const u8) void {
     }
 }
 
-fn ip6Input(p: []const u8) void {
+fn ip6Input(f: *Iface, p: []const u8) void {
     if (p.len < 40 or p[0] >> 4 != 6) return;
     const plen = (@as(usize, p[4]) << 8) | p[5];
     if (40 + plen > p.len) return;
     var dst: Addr = undefined;
     @memcpy(&dst, p[24..40]);
     // Accept our unicast plus solicited-node/all-nodes multicast.
-    if (!addrEq(dst, own_ip6) and dst[0] != 0xff) return;
+    if (!(f.up and f.hasIp6() and addrEq(dst, f.ip6)) and dst[0] != 0xff) return;
     var src: Addr = undefined;
     @memcpy(&src, p[8..24]);
+    // The frame's source MAC (14 bytes before the IP header).
+    const frame_src: [*]const u8 = p.ptr - 8;
     switch (p[6]) {
-        6 => tcpInput(src, p[40 .. 40 + plen]),
+        6 => if (dst[0] != 0xff) tcpInput(src, dst, p[40 .. 40 + plen]),
         17 => udpInput(src, dst, p[40 .. 40 + plen]),
-        58 => icmp6Input(src, p[40 .. 40 + plen]),
+        58 => icmp6Input(f, src, frame_src[0..6].*, p[40 .. 40 + plen]),
         else => {},
     }
+}
+
+// ------------------------------------------------------ configuration
+
+/// Apply the boot settings (or the mode's defaults) to a NIC once its
+/// MAC is known.
+fn configureAtBoot(f: *Iface) void {
+    if (confFor(f.mac)) |c| {
+        applyConfig(f, c.cfg);
+        return;
+    }
+    var cfg: shared.IfaceConfig = .{};
+    if (cluster_node != 0) {
+        if (f.index == 0) {
+            cfg = .{ .mode = .static, .ip4 = shared.nodeIp4(cluster_node), .prefix4 = 24, .ip6 = addrFromWords(0xfdcc_0000_0000_0000, cluster_node), .prefix6 = 64 };
+            f.bcast_delivery = true;
+        }
+    } else if (f.index == 0) {
+        cfg = .{ .mode = .static, .ip4 = shared.net_own_ip4, .prefix4 = 24, .gw4 = shared.net_gw_ip4, .ip6 = addrFromWords(shared.net_own_ip6[0], shared.net_own_ip6[1]), .prefix6 = 64, .gw6 = addrFromWords(shared.net_gw_ip6[0], shared.net_gw_ip6[1]) };
+    }
+    applyConfig(f, cfg);
+}
+
+/// Put a configuration into effect: addresses, gateways, resolvers; the
+/// neighbour cache starts over (the segment may be a different one).
+fn applyConfig(f: *Iface, cfg: shared.IfaceConfig) void {
+    f.mode = cfg.mode;
+    f.neigh = @splat(.{});
+    f.n_resolvers = 0;
+    switch (cfg.mode) {
+        .off, .dhcp => {
+            // DHCP is the next stage: until it lands an interface set to
+            // it is down, and says so.
+            f.up = false;
+            f.ip4 = 0;
+            f.prefix4 = 0;
+            f.gw4 = 0;
+            f.ip6 = @splat(0);
+            f.gw6 = @splat(0);
+        },
+        .static => {
+            f.ip4 = cfg.ip4;
+            f.prefix4 = cfg.prefix4;
+            f.gw4 = cfg.gw4;
+            f.ip6 = cfg.ip6;
+            f.prefix6 = cfg.prefix6;
+            f.gw6 = cfg.gw6;
+            for (0..cfg.n_resolvers) |i| {
+                f.resolvers[f.n_resolvers] = cfg.resolvers[i];
+                f.n_resolvers += 1;
+            }
+            f.up = f.ip4 != 0 or f.hasIp6();
+        },
+    }
+    rebuildResolvers();
+    var nb: [8]u8 = undefined;
+    var ab: [48]u8 = undefined;
+    var gb: [48]u8 = undefined;
+    logf("netsvc: {s} {s} {s}/{d} via {s}", .{ f.name(&nb), @tagName(f.mode), if (f.up) shared.formatAddr(&ab, addrWords(v4Addr(f.ip4))) else "down", f.prefix4, if (f.gw4 != 0) shared.formatAddr(&gb, addrWords(v4Addr(f.gw4))) else "-" });
+}
+
+fn addrWords(a: Addr) [2]u64 {
+    return .{ std.mem.readInt(u64, a[0..8], .big), std.mem.readInt(u64, a[8..16], .big) };
+}
+
+/// The resolvers the stack asks, in order: each interface's (DHCP or
+/// static), then the settings' global list — deduplicated, at most four.
+fn rebuildResolvers() void {
+    n_resolvers = 0;
+    for (ifaces[0..n_ifaces]) |*f| {
+        if (!f.up) continue;
+        for (f.resolvers[0..f.n_resolvers]) |r| addResolver(r);
+    }
+    for (conf_resolvers[0..conf_n_resolvers]) |r| addResolver(r);
+}
+
+fn addResolver(r: Addr) void {
+    if (n_resolvers == max_resolvers) return;
+    for (resolvers[0..n_resolvers]) |have| if (addrEq(have, r)) return;
+    resolvers[n_resolvers] = r;
+    n_resolvers += 1;
+}
+
+/// What an interface looks like to a status reader.
+fn statusOf(f: *Iface) shared.IfaceStatus {
+    var st: shared.IfaceStatus = .{ .mac = f.mac, .mode = f.mode, .prefix4 = f.prefix4, .prefix6 = f.prefix6, .ip4 = f.ip4, .gw4 = f.gw4, .ip6 = f.ip6, .gw6 = f.gw6, .rx_frames = f.rx_frames, .tx_frames = f.tx_frames };
+    var nb: [8]u8 = undefined;
+    const name = f.name(&nb);
+    @memcpy(st.name[0..name.len], name);
+    st.flags = shared.IfaceStatus.flag_link; // virtio-net has no link state; it is up when driven
+    if (f.up) st.flags |= shared.IfaceStatus.flag_up;
+    if (f.gw4 != 0) st.flags |= shared.IfaceStatus.flag_gw4;
+    if (f.hasIp6()) st.flags |= shared.IfaceStatus.flag_ip6;
+    if (f.hasGw6()) st.flags |= shared.IfaceStatus.flag_gw6;
+    st.n_resolvers = @intCast(f.n_resolvers);
+    for (0..f.n_resolvers) |i| st.resolvers[i] = f.resolvers[i];
+    return st;
+}
+
+fn opIfaceStatus(v: *NetView, iface: u64) shared.NetResp {
+    const f = ifaceAt(iface) orelse return nerr(.bad);
+    if (v.buf == 0) return nerr(.bad);
+    const out: *[shared.IfaceStatus.size]u8 = @ptrFromInt(v.buf);
+    statusOf(f).encode(out);
+    return .ok;
+}
+
+fn opIfaceConfigure(v: *NetView, iface: u64) shared.NetResp {
+    if (!v.control) return nerr(.denied);
+    const f = ifaceAt(iface) orelse return nerr(.bad);
+    if (v.buf == 0) return nerr(.bad);
+    const in: *const [shared.IfaceConfig.size]u8 = @ptrFromInt(v.buf);
+    const cfg = shared.IfaceConfig.decode(in) orelse return nerr(.bad);
+    if (cfg.mode == .static and cfg.ip4 == 0 and addrIsZero(cfg.ip6)) return nerr(.bad);
+    applyConfig(f, cfg);
+    // Ask for the gateways now, so the first packet finds them known.
+    if (f.up and !f.bcast_delivery) {
+        if (f.gw4 != 0) _ = nextHopMac(f, v4Addr(f.gw4));
+        if (f.hasGw6()) _ = nextHopMac(f, f.gw6);
+    }
+    return .ok;
 }
 
 // ------------------------------------------------------------------- UDP
@@ -660,7 +1137,12 @@ fn udpEmit(sport: u16, dst: Addr, dport: u16, payload: []const u8) void {
     @memcpy(t[8..len], payload);
     const v4 = isV4Mapped(dst);
     const local = isLocalAddr(dst);
-    const src_addr: Addr = if (local) dst else if (v4) v4Addr(own_ip4) else own_ip6;
+    // The source is the outgoing interface's address (a datagram socket
+    // has none of its own); no route, nothing sent.
+    const src_addr: Addr = if (local) dst else blk: {
+        const r = route(dst) orelse return;
+        break :blk if (v4) v4Addr(r.f.ip4) else r.f.ip6;
+    };
     const sum = udpChecksum(src_addr, dst, t[0..len]);
     t[6] = @truncate(sum >> 8);
     t[7] = @truncate(sum);
@@ -668,41 +1150,7 @@ fn udpEmit(sport: u16, dst: Addr, dport: u16, payload: []const u8) void {
         udpInput(src_addr, dst, t[0..len]);
         return;
     }
-    if (v4) {
-        var pkt: [20 + 8 + udp_dgram_cap]u8 = undefined;
-        const total = 20 + len;
-        pkt[0] = 0x45;
-        pkt[1] = 0;
-        pbe16(pkt[2..4], @intCast(total));
-        pkt[4] = 0;
-        pkt[5] = 0;
-        pkt[6] = 0x40;
-        pkt[7] = 0;
-        pkt[8] = 64;
-        pkt[9] = 17;
-        pkt[10] = 0;
-        pkt[11] = 0;
-        pbe32(pkt[12..16], own_ip4);
-        pbe32(pkt[16..20], v4Of(dst));
-        const ipsum = csum(pkt[0..20], 0);
-        pkt[10] = @truncate(ipsum >> 8);
-        pkt[11] = @truncate(ipsum);
-        @memcpy(pkt[20..total], t[0..len]);
-        if (have_gw4) ethSend(&gw_mac, 0x0800, pkt[0..total]);
-    } else {
-        var pkt: [40 + 8 + udp_dgram_cap]u8 = undefined;
-        pkt[0] = 0x60;
-        pkt[1] = 0;
-        pkt[2] = 0;
-        pkt[3] = 0;
-        pbe16(pkt[4..6], @intCast(len));
-        pkt[6] = 17;
-        pkt[7] = 64;
-        @memcpy(pkt[8..24], &own_ip6);
-        @memcpy(pkt[24..40], &dst);
-        @memcpy(pkt[40 .. 40 + len], t[0..len]);
-        if (have_gw6) ethSend(&gw6_mac, 0x86dd, pkt[0 .. 40 + len]);
-    }
+    if (v4) ipSend4(v4Of(src_addr), v4Of(dst), 17, t[0..len]) else ipSend6(src_addr, dst, 17, 64, t[0..len], false);
 }
 
 fn opUdpBind(v: *NetView, badge: u64, port: u64) shared.NetResp {
@@ -879,6 +1327,7 @@ fn queryId() u16 {
 
 /// Send the queries the lookup still lacks to its current resolver.
 fn lookupSend(l: *Lookup) void {
+    if (l.resolver >= n_resolvers) return; // the list shrank under a reconfigure
     const types = [_]dns.Type{ .aaaa, .a };
     for (types, 0..) |t, k| {
         if (l.got[k]) continue;
@@ -1048,6 +1497,9 @@ const Sock = struct {
     badge: u64 = 0,
     state: shared.TcpState = .closed,
     lport: u16 = 0,
+    /// Our address for this connection (the interface's, or the one the
+    /// peer reached); zero until known.
+    laddr: Addr = @splat(0),
     raddr: Addr = @splat(0),
     rport: u16 = 0,
     /// Send side. Bytes [snd_una, snd_end) live in snd_buf (a ring at
@@ -1180,7 +1632,12 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8)
 
     const v4 = isV4Mapped(s.raddr);
     const local = isLocalAddr(s.raddr);
-    const src_addr: Addr = if (local) s.raddr else if (v4) v4Addr(own_ip4) else own_ip6;
+    // A connection keeps the address it was made with (its interface's,
+    // or the one the peer reached); loopback speaks as the peer.
+    const src_addr: Addr = if (local) s.raddr else if (!addrIsZero(s.laddr)) s.laddr else blk: {
+        const r = route(s.raddr) orelse return;
+        break :blk if (v4) v4Addr(r.f.ip4) else r.f.ip6;
+    };
 
     // Checksum: v4 and v6 pseudo-headers differ only in shape.
     var sum: u32 = 0;
@@ -1205,44 +1662,10 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8)
     t[17] = @truncate(tsum);
 
     if (local) {
-        tcpInput(src_addr, t[0..tcp_len]);
+        tcpInput(src_addr, s.raddr, t[0..tcp_len]);
         return;
     }
-    if (v4) {
-        var pkt: [20 + seg_max + 4]u8 = undefined;
-        const total = 20 + tcp_len;
-        pkt[0] = 0x45;
-        pkt[1] = 0;
-        pbe16(pkt[2..4], @intCast(total));
-        pkt[4] = 0;
-        pkt[5] = 0;
-        pkt[6] = 0x40;
-        pkt[7] = 0;
-        pkt[8] = 64;
-        pkt[9] = 6;
-        pkt[10] = 0;
-        pkt[11] = 0;
-        pbe32(pkt[12..16], own_ip4);
-        pbe32(pkt[16..20], v4Of(s.raddr));
-        const ipsum = csum(pkt[0..20], 0);
-        pkt[10] = @truncate(ipsum >> 8);
-        pkt[11] = @truncate(ipsum);
-        @memcpy(pkt[20 .. 20 + tcp_len], t[0..tcp_len]);
-        if (have_gw4) ethSend(&gw_mac, 0x0800, pkt[0..total]);
-    } else {
-        var pkt: [40 + seg_max + 4]u8 = undefined;
-        pkt[0] = 0x60;
-        pkt[1] = 0;
-        pkt[2] = 0;
-        pkt[3] = 0;
-        pbe16(pkt[4..6], @intCast(tcp_len));
-        pkt[6] = 6;
-        pkt[7] = 64;
-        @memcpy(pkt[8..24], &own_ip6);
-        @memcpy(pkt[24..40], &s.raddr);
-        @memcpy(pkt[40 .. 40 + tcp_len], t[0..tcp_len]);
-        if (have_gw6) ethSend(&gw6_mac, 0x86dd, pkt[0 .. 40 + tcp_len]);
-    }
+    if (v4) ipSend4(v4Of(src_addr), v4Of(s.raddr), 6, t[0..tcp_len]) else ipSend6(src_addr, s.raddr, 6, 64, t[0..tcp_len], false);
 }
 
 /// The MSS option we announce.
@@ -1374,7 +1797,7 @@ fn sockDead(s: *Sock) void {
     ring(s);
 }
 
-fn tcpInput(src: Addr, seg: []const u8) void {
+fn tcpInput(src: Addr, dst: Addr, seg: []const u8) void {
     if (seg.len < 20) return;
     const sport = be16(seg[0..2]);
     const dport = be16(seg[2..4]);
@@ -1402,6 +1825,7 @@ fn tcpInput(src: Addr, seg: []const u8) void {
             c.badge = l.badge;
             c.state = .syn_rcvd;
             c.lport = dport;
+            c.laddr = dst;
             c.raddr = src;
             c.rport = sport;
             c.rcv_nxt = seq +% 1;
@@ -1520,51 +1944,49 @@ const max_views = 16;
 const NetView = struct {
     used: bool = false,
     filtered: bool = false,
+    /// The control view (badge control_badge): may configure interfaces.
+    control: bool = false,
     allow: Addr = @splat(0),
     allow_port: u16 = 0,
     buf: u64 = 0,
 };
+/// The last view slot is the control endpoint, minted at start and
+/// handed to the supervisor with `ready`.
+const control_badge: u64 = max_views - 1;
 
 var views: [max_views]NetView = @splat(.{});
 var serve_a: u64 = 0;
 
 fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     cluster_node = node;
-    loop6 = @splat(0);
-    loop6[15] = 1;
-    if (node == 0) {
-        own_ip6 = addrFromWords(shared.net_own_ip6[0], shared.net_own_ip6[1]);
-        gw_ip6 = addrFromWords(shared.net_gw_ip6[0], shared.net_gw_ip6[1]);
-    } else {
-        own_ip4 = shared.nodeIp4(node);
-        own_ip6 = addrFromWords(0xfdcc_0000_0000_0000, node);
-        gw_ip6 = @splat(0);
-    }
-
     serve_a = chan_h;
     resolverInit();
-    netInit();
-    _ = usys.log(log_h, "netsvc: nic up, resolving gateways");
-
-    if (node == 0) {
-        // Slirp: resolve both gateways before serving anyone.
-        var tries: u32 = 0;
-        while (!have_gw4 or !have_gw6) {
-            if (!have_gw4) arpRequestGw();
-            if (!have_gw6) ndpSolicitGw();
-            _ = usys.notifyWait(irq_notif);
-            irqDrain();
-            tries += 1;
-            if (tries > 50) usys.exit(177);
-        }
-    } else {
-        // Cluster: a private segment of known peers; broadcast delivery
-        // stands in for neighbor discovery (peers filter by IP).
-        gw_mac = @splat(0xff);
-        gw6_mac = @splat(0xff);
-        have_gw4 = true;
-        have_gw6 = true;
+    const n = usys.notifyCreate();
+    if (n.err != .ok) usys.exit(170);
+    irq_notif = n.data[0];
+    for (ifaces[0..n_ifaces]) |*f| {
+        netInit(f);
+        configureAtBoot(f);
     }
+    logf("netsvc: {d} nic(s) up, resolving gateways", .{n_ifaces});
+
+    // Resolve every configured gateway before serving anyone: the first
+    // client's first packet should not be the one that asks. A cluster
+    // segment has none (broadcast delivery); a gateway that never answers
+    // (a NIC on a dead segment) is given up on, not waited for forever.
+    var tries: u32 = 0;
+    while (tries < 50) : (tries += 1) {
+        var pending = false;
+        for (ifaces[0..n_ifaces]) |*f| {
+            if (!f.up or f.bcast_delivery) continue;
+            if (f.gw4 != 0 and nextHopMac(f, v4Addr(f.gw4)) == null) pending = true;
+            if (f.hasGw6() and nextHopMac(f, f.gw6) == null) pending = true;
+        }
+        if (!pending) break;
+        _ = usys.notifyWait(irq_notif);
+        irqDrain();
+    }
+    if (tries == 50) logf("netsvc: a gateway did not answer; serving anyway", .{});
     if (usys.notifyBind(irq_notif) != .ok) usys.exit(178);
     // The clock: retransmission must run even when nobody calls and no
     // frame arrives — a client sleeping on its doorbell after a lost SYN
@@ -1573,6 +1995,7 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     if (usys.timerArm(irq_notif, 1, bit_tick) != .ok) usys.exit(180);
     _ = usys.log(log_h, "netsvc: virtio-net up, serving");
 
+    views[control_badge] = .{ .used = true, .control = true };
     views[0] = .{ .used = true }; // badge 0: unrestricted root view
 
     while (true) {
@@ -1626,6 +2049,9 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             .derive => |q| opDerive(v, q.ip_hi, q.ip_lo, q.port),
             .handoff => |q| opHandoff(r.badge, q.sock),
             .watch => |q| nreply(opWatch(r.badge, q.sock, r.cap)),
+            .iface_count => nreply(.{ .num = .{ .n = n_ifaces } }),
+            .iface_status => |q| nreply(opIfaceStatus(v, q.iface)),
+            .iface_configure => |q| nreply(opIfaceConfigure(v, q.iface)),
         }
     }
 }
@@ -1661,6 +2087,11 @@ fn opConnect(v: *NetView, badge: u64, hi: u64, lo: u64, port: u64) shared.NetRes
     if (v.filtered) {
         if (!addrEq(dst, v.allow) or port != v.allow_port) return nerr(.denied);
     }
+    // No interface can reach it: refused now rather than a SYN to nowhere.
+    const laddr: Addr = if (isLocalAddr(dst)) dst else blk: {
+        const r = route(dst) orelse return nerr(.refused);
+        break :blk if (isV4Mapped(dst)) v4Addr(r.f.ip4) else r.f.ip6;
+    };
     const i = sockAlloc() orelse return nerr(.no_space);
     const s = &socks[i];
     s.badge = badge;
@@ -1668,6 +2099,7 @@ fn opConnect(v: *NetView, badge: u64, hi: u64, lo: u64, port: u64) shared.NetRes
     s.lport = next_eph;
     next_eph +%= 1;
     if (next_eph < 40000) next_eph = 40000;
+    s.laddr = laddr;
     s.raddr = dst;
     s.rport = @intCast(port);
     s.snd_nxt = @truncate(usys.cycles());

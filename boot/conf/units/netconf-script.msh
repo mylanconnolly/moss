@@ -1,0 +1,7 @@
+# The interface-configuration drill (profile netconf): two NICs, both on
+# QEMU user networks. net0 comes up with the slirp defaults; the script
+# configures net1 statically over the service's control endpoint, reaches
+# the second segment's echo, and reads both interfaces back. Essential:
+# its exit ends the boot.
+{ image: mshrun, script: scripts/netconf.msh, grant: [log, bootfs], budget: { user: 16mb }, profiles: [netconf], essential: true,
+  give: [{ tag: net, netview: net }, { tag: net_control, unit: net, control: true }, { tag: buf, shm: 1 }] }

@@ -123,6 +123,13 @@ control bytes and overlong values are refused, not truncated. `dock`
 defaults to false; `order` defaults to 1000 and accepts 0–65535. Metadata
 belongs to the unit because several apps may share one executable image.
 Units without it remain services and are omitted from application discovery.
+A give may be `optional: true` — a device the machine lacks (`{ tag:
+device, device: net, index: 1, optional: true }`), a settings view on a
+boot with no disk — and is then skipped with a log line rather than
+failing the unit; the program sees the tag absent. A service's control
+endpoint (the compositor's `display_control`, the network service's
+`net_control`) is minted by the service, handed to init with `ready`,
+and given on with `{ tag: …, unit: …, control: true }`.
 A unit's `grant: [introspect]` (the machine's ledger, `domain_list`) is
 honoured by the system init as written and by a session init only for
 an administrator's session; a non-admin session logs the refusal and the

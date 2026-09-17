@@ -242,6 +242,11 @@ pub fn build(b: *std.Build) void {
         "explorer-test",
         "Run the file-explorer drill: a two-pane explorer browses the disk hierarchy",
     ) orelse false;
+    const netconf_test = b.option(
+        bool,
+        "netconf-test",
+        "Run the interface-configuration drill: two NICs, a static configuration over the control endpoint, echo on both segments",
+    ) orelse false;
     const activity_test = b.option(
         bool,
         "activity-test",
@@ -463,6 +468,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "listdemo_test", listdemo_test);
     build_opts.addOption(bool, "explorer_test", explorer_test);
     build_opts.addOption(bool, "activity_test", activity_test);
+    build_opts.addOption(bool, "netconf_test", netconf_test);
     build_opts.addOption(bool, "browse_test", browse_test);
     build_opts.addOption(bool, "netbrowse_test", netbrowse_test);
     build_opts.addOption(bool, "cascade_test", cascade_test);
@@ -721,6 +727,7 @@ pub fn build(b: *std.Build) void {
         "scripts/listdemo.msh",           "conf/units/gui-explorer.msh",
         "scripts/explorer.msh",           "conf/units/browse.msh",
         "scripts/activity.msh",           "conf/units/gui-activity.msh",
+        "scripts/netconf.msh",            "conf/units/netconf-script.msh",
         "conf/sessiongui/activity.msh",   "scripts/browse.msh",
         "conf/units/browse-client.msh",   "scripts/browse-cli.msh",
         "conf/units/gui-netbrowse.msh",   "conf/units/cascade-a.msh",
@@ -881,7 +888,7 @@ pub fn build(b: *std.Build) void {
             "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
             "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
-            "editor_test",     "activity_test",
+            "editor_test",     "activity_test",  "netconf_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1334,7 +1341,7 @@ pub fn build(b: *std.Build) void {
         "fabsignal_test",  "locale_test",    "localeupd_test",  "desktop_test",
         "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
-        "editor_test",     "activity_test",
+        "editor_test",     "activity_test",  "netconf_test",
     };
     const variants = [_][]const u8{
         "panic",     "fault",     "sched",     "domain",   "ipc",        "init",
@@ -1348,6 +1355,7 @@ pub fn build(b: *std.Build) void {
         "largetext", "power",     "restart",   "fabgui",   "fabsignal",  "locale",
         "localeupd", "desktop",   "topbar",    "dock",     "listdemo",   "explorer",
         "browse",    "netbrowse", "cascade",   "terminal", "editor",     "activity",
+        "netconf",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

@@ -9,7 +9,7 @@ frontier — every unstarted arc and every residual, kept current; the
 ## Commands
 
 - `zig build check` — THE gate: every drill in build.zig's `variants`
-  list under QEMU (66 today), 6 of them again under a ReleaseSafe kernel
+  list under QEMU (67 today), 6 of them again under a ReleaseSafe kernel
   (`+rs` rows), + host unit tests; drills run 3 at a time on the M3
   (`-Djobs=N`, default cores/4), ~2 min; the net drill needs `openssl`
   on PATH. Run before every commit. Failure logs: `zig-out/check/*.log`.

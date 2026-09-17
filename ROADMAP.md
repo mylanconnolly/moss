@@ -200,6 +200,26 @@ at once.
 client-defined menu schemas, nested submenus, and scrollable overflow when
 applications need menus beyond those profiles.
 
+**Network settings (2026-09-17, in progress).** A Network tab in
+Settings — every NIC, DHCP or static addresses, gateway, resolvers —
+over a stack that can be configured at all. Stages, one commit each:
+(1) ✅ interfaces: the service drives every NIC as an interface with
+its own addresses and neighbour cache, routes by prefix, answers
+`iface_status` and takes `iface_configure` over a control endpoint;
+`net-ifaces` / `net-configure`; the `netconf` drill. (2) a DHCPv4 client
+per interface — discover, offer, request, ack, renewal, the lease's
+router and resolvers; DHCP the default for slirp boots (QEMU's user
+network serves it and hands out 10.0.2.15 first, so nothing existing
+moves). (3) persistence: `conf/app/net.msh` written by Settings through
+the admin-gated `sysconf-write`, read by the service at boot over a
+`conf` view, pushed live through configure. (4) the Settings tab —
+tabs across the top (Personal, Displays, Network), the Displays button
+folded in — with an interface card per NIC, a DHCP/Static choice, the
+fields, Apply and Revert; read-only for a non-administrator. (5) a
+guishell step that drives the tab. Out of scope, said so: IPv6
+autoconfiguration (router advertisements), link state (virtio-net has
+none), routing metrics.
+
 **Activity follow-ons (2026-09-17).** All landed: the session's units
 with per-unit CPU history, the machine's totals, an administrator's
 System tab, Quit before Force Quit, tables that fill a maximized window.
@@ -1510,6 +1530,19 @@ supervises), and memory history per unit beside the CPU one.
   pointer mapping and resident bars. Output control uses a separate boot
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
+- ✅ **Network settings, stage 1: interfaces** (2026-09-17): the
+  network service drives every NIC it is given as an interface (queues,
+  MAC, prefixed addresses, gateways, resolvers, a neighbour cache each),
+  routes by prefix with ARP/NDP on a miss, keeps a connection's address,
+  and answers `iface_count`/`iface_status` to any view and
+  `iface_configure` to a control view minted at start (`net_control`
+  tag, `{ unit: net, control: true }`); the settings file is keyed by
+  MAC; `optional: true` on a unit give; `net-ifaces` / `net-configure`;
+  the `netconf` drill (two user networks, static over the control
+  endpoint, echo on both). Found: the neighbour-ask throttle's zero
+  sentinel against a boot-time clock under 500 ms (no ARP ever sent);
+  the 24-byte script-path cap, relearned; a hyphenated script variable
+  is a subtraction.
 - ✅ **Activity, the task manager** (2026-09-17): an mshl app over init's
   unit table — every session app and every service that has run, with
   state, CPU, memory of budget, threads and restarts; sortable headers, a

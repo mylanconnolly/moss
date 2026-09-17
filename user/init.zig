@@ -73,6 +73,10 @@ const Give = struct {
     /// Which of several: the i-th device of a kind, or the index the
     /// receiver files the cap under (a program handed two consoles).
     index: u64 = 0,
+    /// `optional: true`: a give that cannot be made (a second NIC the
+    /// machine does not have, a settings view on a boot with no disk)
+    /// is skipped, not fatal — the program sees the tag absent.
+    optional: bool = false,
 };
 
 fn parseV4(s: []const u8) ?u32 {
@@ -390,6 +394,7 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 give.kind = .session_cap;
             } else continue;
             if (gr.get("index")) |ix| give.index = @intCast(@max(int(ix) orelse 0, 0));
+            if (gr.get("optional")) |ov| give.optional = ov.asBool();
             u.gives[u.ngives] = give;
             u.ngives += 1;
         };
@@ -504,7 +509,10 @@ fn activate(u: *Unit) bool {
     for (u.gives[0..u.ngives]) |g| {
         if (!ok) break;
         ok = giveOne(u, g);
-        if (!ok) logLine("init: give failed: ", @tagName(g.kind));
+        if (!ok and g.optional) {
+            logLine("init: optional give skipped: ", @tagName(g.kind));
+            ok = true;
+        } else if (!ok) logLine("init: give failed: ", @tagName(g.kind));
     }
     if (ok and u.certify != null) {
         ok = certifySecret(u);

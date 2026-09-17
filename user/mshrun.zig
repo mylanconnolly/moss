@@ -285,6 +285,9 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, init_cap);
     workcmds.log_h = log_h;
     if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
+    if (setup.has(.net_control)) if (net) |*n| {
+        n.control = setup.cap(.net_control);
+    };
     if (setup.has(.locale)) localecmds.setup(setup.cap(.locale), log_h);
     if (setup.has(.conf)) confcmds.setup(setup.cap(.conf), log_h);
     @import("clipboard.zig").authority = setup.cap(.clip);
