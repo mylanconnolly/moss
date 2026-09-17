@@ -29,6 +29,7 @@
 const std = @import("std");
 const ts = @import("mshtree");
 const mshl = @import("mshl");
+const shared = @import("shared");
 const c = ts.c;
 
 pub const Error = ts.Error;
@@ -372,8 +373,8 @@ const Linter = struct {
     fn appKeys(l: *Linter, field: c.TSNode) Error!void {
         const value = ts.field(field, "value") orelse return;
         if (!ts.is(value, "record")) return l.warn(value, "unit app: a metadata record expected", .{});
-        const allowed = [_][]const u8{ "name", "description", "icon", "window", "dock", "order" };
-        var seen: [4]bool = @splat(false);
+        const allowed = shared.apps.metadata_keys;
+        var seen: [shared.apps.required]bool = @splat(false);
         var i: u32 = 0;
         while (i < ts.childCount(value)) : (i += 1) {
             const entry = ts.child(value, i);

@@ -3,7 +3,11 @@
 const std = @import("std");
 pub const running: u32 = 1;
 pub const dock: u32 = 2;
+/// The `app:` record's vocabulary. The first `required` are what a
+/// record must carry for init to admit it (`Record.init`); the rest are
+/// optional. The lint checks unit files against this same list.
 pub const metadata_keys = [_][]const u8{ "name", "description", "icon", "window", "dock", "order" };
+pub const required = 4;
 pub fn knownKey(key: []const u8) bool {
     for (metadata_keys) |known| if (std.mem.eql(u8, key, known)) return true;
     return false;
