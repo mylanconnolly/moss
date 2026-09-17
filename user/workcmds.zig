@@ -38,6 +38,9 @@ var fab_chan: u64 = 0;
 var init_chan: u64 = 0;
 /// The host's log, for the unit table's change notes (a drill reads them).
 pub var log_h: u64 = 0;
+/// A cap that reads the machine's ledger (`domain_list`): the spawner
+/// when we have one, else an introspect grant; 0 = neither.
+pub var introspect: u64 = 0;
 
 pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8, fabric: u64, init: u64) void {
     spawner = spawner_cap;
@@ -784,8 +787,14 @@ fn domainRows(it: *mshl.Interp, sort_name: []const u8) mshl.Error!Value {
     const a = it.arena;
     const sort = std.meta.stringToEnum(DomainSort, sort_name) orelse .name;
     const unavailable = try mshl.toValue(a, .{ .rows = Value{ .list = &.{} }, .available = false, .summary = "" });
-    if (spawner == 0) return unavailable;
-    const r = usys.domainList(spawner, &dom_buf);
+    if (introspect == 0) {
+        if (!dom_announced and log_h != 0) {
+            dom_announced = true;
+            _ = usys.log(log_h, "activity: system unavailable (no introspect grant)");
+        }
+        return unavailable;
+    }
+    const r = usys.domainList(introspect, &dom_buf);
     if (r.err != .ok) return unavailable;
     const n: usize = @intCast(@min(r.data[0], max_domain_rows));
     const recs = &dom_recs;

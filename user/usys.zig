@@ -297,6 +297,13 @@ pub fn chanMint(chan_a: u64, badge: u64) IpcResult {
 /// False when either is not a channel cap of this domain. A service
 /// checks a client-handed cap against one it was granted at setup before
 /// it calls on it — see Syscall.chan_same.
+/// cap_kind: what one of our own capabilities is, or null for no cap.
+pub fn capKind(h: u64) ?shared.CapKind {
+    const r = syscall6(.cap_kind, h, 0, 0, 0, 0, 0);
+    if (r.err != .ok) return null;
+    return std.enums.fromInt(shared.CapKind, r.data[0]) orelse .none;
+}
+
 pub fn chanSame(a: u64, b: u64) bool {
     const r = syscall6(.chan_same, a, b, 0, 0, 0, 0);
     return r.err == .ok and r.data[0] == 1;

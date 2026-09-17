@@ -258,10 +258,20 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     // offload work: `spawn { handler }` and `x | call $w`, workers being
     // mshrun in its serving mode, staged from our own stores.
     {
-        const spawner_slot: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
-        if (usys.sysInfo(spawner_slot).err == .ok) {
-            run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(148);
-            worker_spawner = spawner_slot;
+        // Slot 2 is the first granted authority beyond the log: a spawner
+        // when the unit has one, else an introspect cap when it has that.
+        // `cap_kind` tells which; a ledger-reader is not a spawner (the
+        // old `sysinfo` probe took it for one and staged workers it could
+        // never spawn).
+        const slot2: u64 = @bitCast(shared.Handle{ .slot = 2, .generation = 1 });
+        switch (usys.capKind(slot2) orelse .none) {
+            .spawner => {
+                run_stage = loader.Stage.init(loader.Stage.default_pages) orelse usys.exit(148);
+                worker_spawner = slot2;
+                workcmds.introspect = slot2; // a spawner reads the ledger too
+            },
+            .introspect => workcmds.introspect = slot2,
+            else => {},
         }
     }
     // The worker commands are always wired; each self-guards on the cap it

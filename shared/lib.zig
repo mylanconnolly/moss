@@ -195,7 +195,31 @@ pub const Syscall = enum(u64) {
     /// never blocks on a stranger's channel. bad_handle if either is not
     /// a channel cap of this domain.
     chan_same = 44,
+    /// cap_kind(handle) -> x1 = CapKind: what a capability in the caller's
+    /// own table is. A program cannot read its grants, only probe them;
+    /// mshrun used to probe slot 2 with `sysinfo`, which an introspect cap
+    /// passes too, and took a ledger-reader for a spawner.
+    cap_kind = 45,
     _,
+};
+
+/// What `cap_kind` answers: the capability types a user program can hold.
+pub const CapKind = enum(u64) {
+    none = 0,
+    debug_log = 1,
+    channel_a = 2,
+    channel_b = 3,
+    notification = 4,
+    shm = 5,
+    spawner = 6,
+    domain_ctl = 7,
+    window = 8,
+    device = 9,
+    entropy = 10,
+    introspect = 11,
+    hypervisor = 12,
+    clock = 13,
+    vm = 14,
 };
 
 /// The enumerator's service: `next` hands over the next device cap.

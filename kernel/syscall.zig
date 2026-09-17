@@ -70,6 +70,7 @@ pub fn dispatch(frame: *arch.trap.TrapFrame) void {
         .notify_bind => sysNotifyBind(d, frame.arg(0)),
         .chan_mint => sysChanMint(d, frame),
         .chan_same => sysChanSame(d, frame),
+        .cap_kind => sysCapKind(d, frame),
         .domain_list => sysDomainList(d, frame),
         .sysinfo => sysSysinfo(d, frame),
         .getrandom => sysGetrandom(d, frame.arg(0), frame.arg(1)),
@@ -622,6 +623,31 @@ fn sysChanSame(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const a = channelOf(d, frame.arg(0)) orelse return errno(.bad_handle);
     const b = channelOf(d, frame.arg(1)) orelse return errno(.bad_handle);
     frame.set(1, @intFromBool(a == b));
+    return errno(.ok);
+}
+
+/// cap_kind(handle): what the caller's capability is, as shared.CapKind.
+fn sysCapKind(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    const h: shared.Handle = @bitCast(frame.arg(0));
+    const t = d.captable.?.kindOf(h) orelse return errno(.bad_handle);
+    const kind: shared.CapKind = switch (t) {
+        .empty => .none,
+        .debug_log => .debug_log,
+        .channel_a => .channel_a,
+        .channel_b => .channel_b,
+        .notification => .notification,
+        .shm => .shm,
+        .spawner => .spawner,
+        .domain_ctl => .domain_ctl,
+        .window => .window,
+        .device => .device,
+        .entropy => .entropy,
+        .introspect => .introspect,
+        .hypervisor => .hypervisor,
+        .clock => .clock,
+        .vm => .vm,
+    };
+    frame.set(1, @intFromEnum(kind));
     return errno(.ok);
 }
 

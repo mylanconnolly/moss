@@ -98,6 +98,14 @@ pub const Table = struct {
         return .{ .obj = e.object, .badge = e.badge };
     }
 
+    /// The type of a live capability, whatever it is (null: no such cap).
+    pub fn kindOf(self: *Table, handle: shared.Handle) ?CapType {
+        if (handle.slot >= slots) return null;
+        const e = &self.entries[handle.slot];
+        if (e.generation != handle.generation or e.cap_type == .empty) return null;
+        return e.cap_type;
+    }
+
     pub fn lookup(self: *Table, handle: shared.Handle, expect: CapType) ?u64 {
         if (handle.slot >= slots) return null;
         const e = &self.entries[handle.slot];
