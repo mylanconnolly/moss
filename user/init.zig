@@ -211,14 +211,33 @@ fn archive() []const u8 {
 }
 
 /// Read every conf/units/*.msh in the archive into `units`.
+/// Is this unit up right now? `up` is init's bookkeeping, set at spawn
+/// and cleared when superviseDeaths reaps; between the death and the
+/// reap the domain is dying or dead, and every query (the `svc` table,
+/// the dock's running dot, the launcher) reports that the same way
+/// rather than each with its own reading. Stat only observes; it does
+/// not consume the death superviseDeaths still has to handle.
+fn liveUp(u: *const Unit) bool {
+    if (!u.up) return false;
+    if (u.ctl == 0) return true;
+    const st = usys.domainStat(u.ctl);
+    return st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.alive);
+}
+
+/// Room in the unit table for one more; says so in the log when not.
+/// A unit silently dropped past the cap is a service that never comes
+/// up with nothing to explain why.
+fn roomForUnit(path: []const u8) bool {
+    if (nunits < max_units) return true;
+    logLine("init: TOO MANY UNITS; ignoring ", path);
+    return false;
+}
+
 fn loadUnits() void {
     var it = shared.marcIter(archive());
     while (it.next()) |e| {
         if (!std.mem.startsWith(u8, e.path, shared.unit_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
-        if (nunits == max_units) {
-            logLine("init: TOO MANY UNITS; ignoring ", e.path);
-            continue;
-        }
+        if (!roomForUnit(e.path)) continue;
         const name = e.path[shared.unit_dir.len .. e.path.len - shared.unit_ext.len];
         fba.reset();
         const v = interp.parseData(e.data) catch {
@@ -632,7 +651,7 @@ fn loadSessionUnits() void {
     @memcpy(names[0..k], session_home_buf[0..k]);
     var it = std.mem.splitScalar(u8, names[0..k], '\n');
     while (it.next()) |fname| {
-        if (!std.mem.endsWith(u8, fname, shared.unit_ext) or nunits == max_units) continue;
+        if (!std.mem.endsWith(u8, fname, shared.unit_ext) or !roomForUnit(fname)) continue;
         var path: [96]u8 = undefined;
         const p = joinPath(@ptrCast(&path), shared.unit_dir[0 .. shared.unit_dir.len - 1], fname);
         const name = fname[0 .. fname.len - shared.unit_ext.len];
@@ -655,7 +674,7 @@ fn loadSessionUnits() void {
     var ai = shared.marcIter(archive());
     while (ai.next()) |e| {
         if (!std.mem.startsWith(u8, e.path, tmpl_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
-        if (nunits == max_units) break;
+        if (!roomForUnit(e.path)) break;
         const name = e.path[tmpl_dir.len .. e.path.len - shared.unit_ext.len];
         fba.reset();
         const v = interp.parseData(e.data) catch continue;
@@ -1083,12 +1102,7 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
                 const u = &units[index];
                 var record = u.app orelse continue;
                 if (count == capacity) break;
-                var up = u.up;
-                if (up and u.ctl != 0) {
-                    const state = usys.domainStat(u.ctl);
-                    up = state.err == .ok and state.data[0] == @intFromEnum(shared.DomainState.alive);
-                }
-                if (up) record.flags |= shared.apps.running;
+                if (liveUp(u)) record.flags |= shared.apps.running;
                 record.encode(bytes[count * shared.apps.Record.size ..][0..shared.apps.Record.size]);
                 count += 1;
             }
@@ -1134,16 +1148,9 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
             var n: usize = 0;
             for (units[0..nunits]) |*u| {
                 if (n == cap_recs) break;
-                // Listing must not consume a death before superviseDeaths
-                // handles restart policy or an essential unit shutdown.
-                var reported_up = u.up;
-                if (u.up and u.ctl != 0) {
-                    const st = usys.domainStat(u.ctl);
-                    if (st.err == .ok and st.data[0] == @intFromEnum(shared.DomainState.dead)) reported_up = false;
-                }
                 var rec: shared.UnitRec = .{
                     .name = @splat(0),
-                    .up = @intFromBool(reported_up),
+                    .up = @intFromBool(liveUp(u)),
                     .restarts = @intCast(u.restarts),
                     .max_restarts = @intCast(u.max_restarts),
                 };

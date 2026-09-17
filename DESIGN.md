@@ -3489,6 +3489,12 @@ watch each app's domain (a cap it does not hold), the pill's dot is now
 channel) asks init for its unit list — the same `list` request `svc`
 renders — and reads that unit's `up` bit; init already reports a unit whose
 domain has died as down, so this is the honest "is the app still running".
+(Until 2026-09-17 the `list` and `apps` queries read liveness differently
+— `list` counted a dying domain as up and `apps` as down, so the dock's
+dot and the launcher could disagree for a beat; one `liveUp` now answers
+both: up means the domain is alive, and a stat that fails is down. The
+same pass made the unit-table cap loud everywhere: a session unit past
+`max_units` was dropped silently where the system loader logged it.)
 The dock's `view` calls `unit-up` per pill and a `tick: 200` re-renders
 every second (the same clock-refresh path the top bar uses; 200 ms until
 2026-09-16, when the per-poll shared-buffer churn was found), so the dot
