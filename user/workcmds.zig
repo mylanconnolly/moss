@@ -497,6 +497,31 @@ var rows_order_hash: u64 = 0;
 var unit_catalog: @import("appsclient.zig").Catalog = .{};
 var rows_seen: [max_unit_rows]struct { name: [16]u8, up: bool } = undefined;
 var rows_nseen: usize = 0;
+/// Each unit's last sixty CPU readings (permille, newest last), kept
+/// between calls for the table's History column; a unit's slot follows
+/// its name, so a restart keeps its line.
+const unit_history_len = 60;
+var unit_hist: [max_unit_rows]struct { name: [16]u8, samples: [unit_history_len]u16, len: usize } = undefined;
+var unit_nhist: usize = 0;
+
+fn unitHistory(a: std.mem.Allocator, name: [16]u8, pm: u64) mshl.Error!Value {
+    var slot: ?usize = null;
+    for (unit_hist[0..unit_nhist], 0..) |*h, i| if (std.mem.eql(u8, &h.name, &name)) {
+        slot = i;
+    };
+    if (slot == null and unit_nhist < max_unit_rows) {
+        unit_hist[unit_nhist] = .{ .name = name, .samples = @splat(0), .len = 0 };
+        slot = unit_nhist;
+        unit_nhist += 1;
+    }
+    const h = &unit_hist[slot orelse return .{ .list = &.{} }];
+    std.mem.copyForwards(u16, h.samples[0 .. unit_history_len - 1], h.samples[1..unit_history_len]);
+    h.samples[unit_history_len - 1] = @intCast(@min(pm, 1000));
+    if (h.len < unit_history_len) h.len += 1;
+    const vals = try a.alloc(Value, h.len);
+    for (vals, h.samples[unit_history_len - h.len ..]) |*v, s| v.* = .{ .int = s };
+    return .{ .list = vals };
+}
 
 fn cpuPermille(r: *const shared.UnitRec) u64 {
     return r.cpu;
@@ -611,7 +636,7 @@ fn unitRows(it: *mshl.Interp, sort_name: []const u8, selected: []const u8) mshl.
         order_hash = (order_hash ^ 0x1f) *% 0x100000001b3;
         const state = if (r.up != 0) "Running" else if (r.stopped != 0) "Stopped" else if (r.exit_code != 0) try std.fmt.allocPrint(a, "Crashed ({d})", .{r.exit_code}) else "Not running";
         const pm = cpuPermille(r);
-        const cells = try a.alloc(Value, 6);
+        const cells = try a.alloc(Value, 7);
         cells[0] = .{ .str = try a.dupe(u8, names[i]) };
         cells[1] = .{ .str = try a.dupe(u8, state) };
         cells[2] = .{ .str = if (r.up != 0) try std.fmt.allocPrint(a, "{d}.{d}%", .{ pm / 10, pm % 10 }) else "" };
@@ -619,6 +644,7 @@ fn unitRows(it: *mshl.Interp, sort_name: []const u8, selected: []const u8) mshl.
         cells[3] = .{ .str = if (r.up != 0) try std.fmt.allocPrint(a, "{d}.{d} / {d} MB", .{ used / 1024, (used % 1024) * 10 / 1024, (r.user_kb & 0xffff_ffff) / 1024 }) else "" };
         cells[4] = .{ .str = if (r.up != 0) try std.fmt.allocPrint(a, "{d}", .{r.threads}) else "" };
         cells[5] = .{ .str = if (r.restarts == 0) "" else try std.fmt.allocPrint(a, "{d} / {d}", .{ r.restarts, r.max_restarts }) };
+        cells[6] = try unitHistory(a, r.name, if (r.up != 0) pm else 0);
         rows[ri] = try mshl.toValue(a, .{
             .id = try a.dupe(u8, r.nameSlice()),
             .cells = Value{ .list = cells },

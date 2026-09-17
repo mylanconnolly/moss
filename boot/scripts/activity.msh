@@ -23,6 +23,7 @@ def sort-of [col] {
     3 => "mem"
     4 => "threads"
     5 => "restarts"
+    6 => "cpu"
     _ => "name"
   }
 }
@@ -123,7 +124,7 @@ let final = (gui {
                   selected: $state.sel
                   sort:     (col-of $state.sort)
                   empty:    "Nothing is running."
-                  cols:     [{ title: "Name", w: 10 } { title: "State", w: 6 } { title: "CPU", w: 3, right: true } { title: "Memory", w: 7, right: true } { title: "Threads", w: 4, right: true } { title: "Restarts", w: 4, right: true }]
+                  cols:     [{ title: "Name", w: 9 } { title: "State", w: 5 } { title: "CPU", w: 3, right: true } { title: "Memory", w: 6, right: true } { title: "Threads", w: 4, right: true } { title: "Restarts", w: 4, right: true } { title: "History", w: 5 }]
                   rows:     $t.rows
                 }
               })

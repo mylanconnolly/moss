@@ -3283,6 +3283,15 @@ what will not go. The `activity` drill now quits Alpha, which closes
 itself, and force-quits Beta; both drill windows carry an `app:` record
 for their titles.
 
+**Per-unit history (same day).** The last of the follow-ons: a History
+column in the Session table, a sparkline of each unit's last sixty CPU
+readings. The history is the app's to keep — `unit-rows` holds a ring
+per unit name between calls, so a restarted unit keeps its line — and
+the list widget draws any cell that is a list of numbers as a sparkline
+(one bar per permille sample on the row's ground, newest at the right,
+the danger colour past 80%), which is the whole of the toolkit change.
+Sorting the column sorts by CPU.
+
 **Shut down and restart (as built, 2026-09-16).** The system menu had
 Log Out and no way to end the machine; the machine also had none — an
 interactive boot powered off only when its app exited, and a root task

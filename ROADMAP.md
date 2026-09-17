@@ -200,11 +200,12 @@ at once.
 client-defined menu schemas, nested submenus, and scrollable overflow when
 applications need menus beyond those profiles.
 
-**Activity follow-ons (2026-09-17).** The task manager shows a session's
-own units, the machine's totals, and (an administrator) every domain,
-can ask a window to close before forcing it, and its tables fill a
-maximized window. Next: per-unit CPU history in the table (the `chart`
-widget exists; the history would be init's or the app's to keep).
+**Activity follow-ons (2026-09-17).** All landed: the session's units
+with per-unit CPU history, the machine's totals, an administrator's
+System tab, Quit before Force Quit, tables that fill a maximized window.
+What a later pass might add: a per-domain kill for the System tab (a
+session's own init could offer `stop` by domain id for the domains it
+supervises), and memory history per unit beside the CPU one.
 
 **Follow-ons from the project assessment (2026-09-12)**
 
@@ -1538,6 +1539,9 @@ widget exists; the history would be init's or the app's to keep).
   drill quits Alpha (it closes itself) and force-quits Beta. Then the
   layout engine's height offer (`grow` on a column child, `avail_h` on
   the tree interface): a maximized Activity's table fills the window.
+  And a History column: a sparkline per unit of its last sixty CPU
+  readings, kept by `unit-rows`; a list cell that is a list of numbers
+  draws as a sparkline.
 - ✅ **Shut down and restart** (2026-09-16): the system menu's Restart and
   Shut Down (with rules between groups) climb the init tree as one
   `InitRequest.power` — bar → session init → session manager → system init

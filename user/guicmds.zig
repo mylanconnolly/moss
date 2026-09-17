@@ -1175,7 +1175,8 @@ fn cellAt(cellsv: Value, ci: usize) []const u8 {
 /// A scrollable, selectable list. Record fields: `id` (interaction key),
 /// `key` (content identity — a new value resets scroll/selection), `h`
 /// (viewport height in px), optional `cols` [{title, w, right?}] for a
-/// header + column layout, and `rows` [{id, cells:[str], icon?}]. `fit`
+/// header + column layout, and `rows` [{id, cells:[str | [int…]], icon?}]
+/// (a cell that is a list of permille samples draws as a sparkline). `fit`
 /// treats column widths as weights; `empty` supplies a placeholder and
 /// `active` controls selection highlighting. The runtime owns
 /// the scroll offset and selection (see `ListState`); the app just emits
@@ -1312,6 +1313,26 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
                 const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
                 const cw = if (fit) ui.flow.trackWidth(tracks_w, total_weight, before, weight) else weight;
                 before += weight;
+                // A cell that is a list of numbers (permille) is a sparkline:
+                // one bar per sample, newest at the right, on the row's ground.
+                if (cellsv == .list and ci < cellsv.list.len and cellsv.list[ci] == .list) {
+                    const samples = cellsv.list[ci];
+                    const n = sampleCount(samples);
+                    const sw = cw -| 12;
+                    const sh = line -| 2;
+                    if (n > 0 and sw >= 8) {
+                        const bw = @max(sw / @max(n, 30), 1);
+                        for (0..n) |si| {
+                            const v = sampleAt(samples, si);
+                            const bar = @max(sh * v / 1000, if (v > 0) @as(usize, 1) else 0);
+                            if (bar == 0) continue;
+                            const bx = cx + 4 + sw -| (n - si) * bw;
+                            fillRect(bx, ty + 1 + sh - bar, bw, bar, if (v > 800) pal.danger else if (selected and focused) pal.primary_ink else pal.primary);
+                        }
+                    }
+                    cx += cw;
+                    continue;
+                }
                 const text = cellAt(cellsv, ci);
                 const inset = if (ci == 0) icon_pad else 0;
                 const right = if (cv.record.get("right")) |v| v.asBool() else false;
