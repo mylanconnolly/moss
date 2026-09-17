@@ -72,7 +72,7 @@ const specs = [_]Spec{
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "listdemo", .kind = .listdemo, .pass = "listdemo-test: PASS", .extra = "gui: list items", .append = "profile=listdemo", .timeout_s = 120 },
     .{ .name = "explorer", .kind = .explorer, .pass = "explorer-test: PASS", .extra = "gui: list files", .append = "profile=explorer", .timeout_s = 120 },
-    .{ .name = "netconf", .kind = .netconf, .pass = "netconf-test: PASS", .extra = "netconf: net1 echoed", .always_extra = "netsvc: 2 nic(s) up", .extra2 = "netconf: done", .append = "profile=netconf" },
+    .{ .name = "netconf", .kind = .netconf, .pass = "netconf-test: PASS", .extra = "netconf: net1 echoed", .always_extra = "netsvc: net0 dhcp bound 10.0.2.15/24 via 10.0.2.2", .extra2 = "netconf: net1 leased again", .append = "profile=netconf" },
     .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-beta ok=true", .always_extra = "init: stopped by request: win-beta", .extra2 = "win-alpha: closed", .append = "profile=activity", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },

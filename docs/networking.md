@@ -74,8 +74,21 @@ interface's default configuration:
 | slirp (node 0) | `10.0.2.15/24`, `fec0::15/64` | `10.0.2.2` (ARP) and `fec0::2` (NDP), resolved before serving anyone | the net drill, the shell boot |
 | cluster (node N) | `10.77.0.N/24`, `fdcc::N/64` | none: everything is on-link, delivered to the broadcast MAC | the fabric (`net-cluster.msh`, node 1; a guest node joins as 2) |
 
-Further interfaces are **off** until configured. Configuration comes
-from the settings file — the archive's `conf/net.msh`, then, when the
+Every interface asks for a **DHCP** lease unless the settings say
+otherwise — the first NIC's slirp mode is a DHCP default too, since
+QEMU's user network serves one and hands out `10.0.2.15` first, so the
+drills see the address they always did; cluster mode stays static. The
+client is the RFC 2131 half a host needs: DISCOVER broadcast from
+`0.0.0.0` with the BROADCAST flag (an interface with no address can
+hear a broadcast answer), the first OFFER's address REQUESTed, the ACK's
+address, mask, router, resolvers and lease applied; at half the lease a
+unicast REQUEST to the server renews, at seven eighths a broadcast one
+rebinds, and an expired lease takes the address with it and starts
+over. Retransmits back off from a second to sixteen on the service's
+tick, and the service does not serve its first client until the first
+interface is bound (ten seconds at most, then it serves anyway). A
+lease's resolvers come after the settings' explicit ones. Configuration
+comes from the settings file — the archive's `conf/net.msh`, then, when the
 unit holds a `conf` view, the persisted `conf/app/net.msh` Settings
 writes, whose entries win — keyed by MAC:
 
@@ -95,10 +108,10 @@ the control view, minted at start and handed to the supervisor with
 A session's Settings gets it from the session manager only for an
 administrator. In the language: `net-ifaces` lists the interfaces as
 records and `net-configure INDEX { mode, address, gateway, address6,
-gateway6, resolvers }` applies one; `mode: dhcp` is the next stage and
-leaves the interface down until it lands. The `netconf` drill boots
-two NICs on two user networks, configures the second statically, echoes
-over both segments, and takes it down again.
+gateway6, resolvers }` applies one. The `netconf` drill boots two NICs
+on two user networks, sees both leased, configures the second
+statically, echoes over both segments, takes it down, and leases it
+again.
 
 ### Network views
 
@@ -625,9 +638,11 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   through `derive` directly but not from a unit file.
 - Several NICs are driven, but a link's state is not read (virtio-net
   negotiates no STATUS feature): an interface is "up" when it has an
-  address. No DHCP client yet (an interface set to `dhcp` stays down);
-  no router advertisements; a route is on-link-by-prefix or the first
-  gateway of the family — no metrics, no per-destination routes.
+  address. DHCPv4 only: no router advertisements (the v6 side of a
+  DHCP interface is static or absent), no DHCPv6, no DHCP option beyond
+  mask, router, resolvers, lease and server id; a route is
+  on-link-by-prefix or the first gateway of the family — no metrics, no
+  per-destination routes.
 - Cluster addressing is static (node N is `10.77.0.N` / `fdcc::N`);
   dynamic addressing is a separate concern.
 - Severing an IRQ binding must also mask the line, or a level-triggered

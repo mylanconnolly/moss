@@ -206,11 +206,11 @@ over a stack that can be configured at all. Stages, one commit each:
 (1) ✅ interfaces: the service drives every NIC as an interface with
 its own addresses and neighbour cache, routes by prefix, answers
 `iface_status` and takes `iface_configure` over a control endpoint;
-`net-ifaces` / `net-configure`; the `netconf` drill. (2) a DHCPv4 client
-per interface — discover, offer, request, ack, renewal, the lease's
-router and resolvers; DHCP the default for slirp boots (QEMU's user
-network serves it and hands out 10.0.2.15 first, so nothing existing
-moves). (3) persistence: `conf/app/net.msh` written by Settings through
+`net-ifaces` / `net-configure`; the `netconf` drill. (2) ✅ a DHCPv4
+client per interface — discover, offer, request, ack, renewal,
+rebinding, expiry, the lease's router and resolvers; DHCP the default
+for every interface (QEMU's user network serves it and hands out
+10.0.2.15 first, so nothing existing moved). (3) persistence: `conf/app/net.msh` written by Settings through
 the admin-gated `sysconf-write`, read by the service at boot over a
 `conf` view, pushed live through configure. (4) the Settings tab —
 tabs across the top (Personal, Displays, Network), the Displays button
@@ -1530,6 +1530,13 @@ supervises), and memory history per unit beside the CPU one.
   pointer mapping and resident bars. Output control uses a separate boot
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
+- ✅ **Network settings, stage 2: DHCP** (2026-09-17): a DHCPv4 client
+  per interface (discover/offer/request/ack, T1 renew, T2 rebind,
+  expiry, backoff on the tick), replies taken before the socket layer,
+  requests built raw; DHCP is every interface's default, slirp's first
+  NIC included, and the service waits for that lease before serving.
+  The `netconf` drill leases both NICs at boot, goes static, off, and
+  leases again.
 - ✅ **Network settings, stage 1: interfaces** (2026-09-17): the
   network service drives every NIC it is given as an interface (queues,
   MAC, prefixed addresses, gateways, resolvers, a neighbour cache each),

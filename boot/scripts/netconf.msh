@@ -1,73 +1,97 @@
-# Interface configuration: the service lists its NICs, the first is up
-# with the slirp defaults, the second is off until configured. A static
-# configuration over the control endpoint brings it up on the second
-# segment (10.0.3.0/24, its own slirp), where the echo at 10.0.3.100
-# answers — a data path over the second NIC, routed by prefix. The
-# status read back says what was set.
+# Interface configuration: the service lists its NICs; both came up on
+# DHCP (each QEMU user network serves a lease), the first with the slirp
+# defaults. The second is then configured statically over the control
+# endpoint, reaches its segment's echo at 10.0.3.100 — a data path over
+# the second NIC, routed by prefix — is taken down, and leased again.
+# The status read back says what was set at each step.
 
 def fail [why] {
   echo ("netconf: FAIL " + $why)
-  exit 1
+  err $why
+}
+
+# The second interface's row, once it is up (a lease takes a moment).
+def wait-up [] {
+  let waited = 0
+  let row = (net-ifaces).1
+  while ((not $row.up) and ($waited < 40)) {
+    sleep 250
+    let waited = ($waited + 1)
+    let row = (net-ifaces).1
+  }
+  $row
 }
 
 let ifs = (net-ifaces)
 echo ("netconf: ifaces=" + (str (len $ifs)))
-if ((len $ifs) != 2) { fail "expected two interfaces" }
+if ((len $ifs) != 2) { (fail "expected two interfaces")? }
 let net0 = $ifs.0
-let net1 = $ifs.1
-if ($net0.address != "10.0.2.15") { fail ("net0 address " + $net0.address) }
-if ($net0.gateway != "10.0.2.2") { fail ("net0 gateway " + $net0.gateway) }
-if $net1.up { fail "net1 was up before it was configured" }
-echo ("netconf: net0 " + $net0.address + "/" + (str $net0.prefix) + " via " + $net0.gateway + " mac " + $net0.mac)
+if ($net0.address != "10.0.2.15") { (fail ("net0 address " + $net0.address))? }
+if ($net0.gateway != "10.0.2.2") { (fail ("net0 gateway " + $net0.gateway))? }
+if ($net0.mode != "dhcp") { (fail ("net0 mode " + $net0.mode))? }
+if ($net0.lease <= 0) { (fail "net0 has no lease")? }
+echo ("netconf: net0 " + $net0.address + "/" + (str $net0.prefix) + " via " + $net0.gateway + " mac " + $net0.mac + " lease " + (str $net0.lease) + "s")
+let net1 = (wait-up)
+if (not $net1.up) { (fail "net1 got no lease at boot")? }
+if ($net1.address != "10.0.3.15") { (fail ("net1 leased address " + $net1.address))? }
+if ($net1.gateway != "10.0.3.2") { (fail ("net1 leased gateway " + $net1.gateway))? }
+echo ("netconf: net1 leased " + $net1.address + "/" + (str $net1.prefix) + " via " + $net1.gateway + " lease " + (str $net1.lease) + "s")
 
-# The wire echo on the first segment still works with two NICs driven.
+# The wire echo on each segment: routing by prefix picks the NIC.
 match (connect 10.0.2.100 9000) {
   ok $s => {
     send $s "hello net0"
-    match (from-bytes (recv $s)?) { ok $d => { if ($d != "hello net0") { fail "net0 echo mismatch" } }; err $e => { fail ("net0 echo recv " + $e) } }
+    match (from-bytes (recv $s)?) { ok $d => { if ($d != "hello net0") { (fail "net0 echo mismatch")? } }; err $e => { (fail ("net0 echo recv " + $e))? } }
     close $s
     echo "netconf: net0 echoed"
   }
-  err $e => { fail ("net0 connect " + $e) }
+  err $e => { (fail ("net0 connect " + $e))? }
+}
+match (connect 10.0.3.100 9000) {
+  ok $s => { close $s; echo "netconf: net1 reachable on its lease" }
+  err $e => { (fail ("net1 leased connect " + $e))? }
 }
 
-# (Before net1 is up, 10.0.3.100 is off every link and goes to net0's
-# default gateway, which cannot reach it: a slow refusal, not a fast one,
-# and correct — a default route takes everything. Not exercised here.)
-
+# Static, over the control endpoint: the same address, by hand.
 match (net-configure 1 { mode: static, address: "10.0.3.15/24", gateway: "10.0.3.2" }) {
   ok _ => { echo "netconf: net1 configured" }
-  err $e => { fail ("net-configure " + $e) }
+  err $e => { (fail ("net-configure " + $e))? }
 }
 let again = (net-ifaces)
 let after = $again.1
-if (not $after.up) { fail "net1 not up after configuration" }
-if ($after.address != "10.0.3.15") { fail ("net1 address " + $after.address) }
-if ($after.mode != "static") { fail ("net1 mode " + $after.mode) }
-
-# The second segment's echo, over the second NIC.
+if (not $after.up) { (fail "net1 not up after configuration")? }
+if ($after.address != "10.0.3.15") { (fail ("net1 address " + $after.address))? }
+if ($after.mode != "static") { (fail ("net1 mode " + $after.mode))? }
 match (connect 10.0.3.100 9000) {
   ok $s => {
     send $s "hello net1"
-    match (from-bytes (recv $s)?) { ok $d => { if ($d != "hello net1") { fail "net1 echo mismatch" } }; err $e => { fail ("net1 echo recv " + $e) } }
+    match (from-bytes (recv $s)?) { ok $d => { if ($d != "hello net1") { (fail "net1 echo mismatch")? } }; err $e => { (fail ("net1 echo recv " + $e))? } }
     close $s
     echo "netconf: net1 echoed"
   }
-  err $e => { fail ("net1 connect " + $e) }
+  err $e => { (fail ("net1 connect " + $e))? }
 }
-
-# And the first segment is still there: routing chose by prefix.
 match (connect 10.0.2.100 9000) {
   ok $s => { close $s; echo "netconf: net0 still reachable" }
-  err $e => { fail ("net0 after net1 " + $e) }
+  err $e => { (fail ("net0 after net1 " + $e))? }
 }
 
-# Off again: the segment goes away with the address.
+# Off: the segment goes away with the address.
 match (net-configure 1 { mode: off }) {
   ok _ => { echo "netconf: net1 off" }
-  err $e => { fail ("net-configure off " + $e) }
+  err $e => { (fail ("net-configure off " + $e))? }
 }
 let final = (net-ifaces)
 let off = $final.1
-if $off.up { fail "net1 still up after off" }
+if $off.up { (fail "net1 still up after off")? }
+
+# And back on DHCP: a fresh lease.
+match (net-configure 1 { mode: dhcp }) {
+  ok _ => { echo "netconf: net1 set to dhcp" }
+  err $e => { (fail ("net-configure dhcp " + $e))? }
+}
+let relit = (wait-up)
+if (not $relit.up) { (fail "net1 got no second lease")? }
+if ($relit.mode != "dhcp") { (fail ("net1 mode " + $relit.mode))? }
+echo ("netconf: net1 leased again " + $relit.address)
 echo "netconf: done"

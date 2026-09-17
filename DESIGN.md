@@ -3318,6 +3318,28 @@ is a subtraction, and the formatter helpfully spaces it out. And a
 destination on no link goes to the default gateway and fails slowly,
 which is right; the drill's first draft expected a fast refusal.
 
+**Network settings, stage 2: DHCP (as built, 2026-09-17).** Every
+interface asks for a lease unless told otherwise, the first NIC's slirp
+mode included — QEMU's user network serves DHCP and hands out 10.0.2.15
+first, so every existing drill sees the address it always did while the
+service now earns it. The client is the RFC 2131 half a host needs and
+lives beside the interface table: DISCOVER broadcast from 0.0.0.0 with
+the BROADCAST flag set (an interface with no address can hear a
+broadcast answer; `ip4Input` also accepts the address being offered),
+the first OFFER's address REQUESTed, the ACK's address, mask, router,
+resolvers and lease applied; T1 renews by unicast, T2 rebinds by
+broadcast, expiry takes the address away and starts over; backoff from
+one second to sixteen, on the tick. Replies are picked off in the IP
+input before the socket layer (UDP to port 68 is the interface's, not a
+socket's) and requests are built raw, because the socket layer has no
+interface to speak for and no address to speak from. The service waits
+for the first interface's lease before serving (ten seconds at most),
+which keeps the "resolve the gateways before anyone asks" promise the
+slirp boot always had. A lease's resolvers come after the settings'
+explicit ones, so the drills' `::1` (dnsd) still answers first. The
+`netconf` drill sees both NICs leased at boot, replaces the second's
+lease with a static address, takes it down, and leases it again.
+
 **Quit before Force Quit (same day).** A task manager that can only
 kill is a blunt one: an editor with unsaved work deserves to be asked.
 The compositor gained `close_titled`: the window with that title has its

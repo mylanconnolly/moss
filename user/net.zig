@@ -339,6 +339,7 @@ const Iface = struct {
     n_resolvers: usize = 0,
     neigh: [max_neigh]Neigh = @splat(.{}),
     next_neigh: usize = 0,
+    dhcp: Dhcp = .{},
 
     fn hasIp6(f: *const Iface) bool {
         return !addrIsZero(f.ip6);
@@ -354,6 +355,284 @@ const Iface = struct {
 var ifaces: [max_ifaces]Iface = @splat(.{});
 var n_ifaces: usize = 0;
 var cluster_node: u64 = 0;
+
+// ----------------------------------------------------------------- DHCP
+//
+// A DHCPv4 client per interface (RFC 2131, the client's half): DISCOVER
+// broadcast from 0.0.0.0, the OFFER's address REQUESTed, the ACK's
+// address, mask, router, resolvers and lease applied; at T1 (half the
+// lease) a unicast REQUEST to the server renews, at T2 (seven eighths)
+// a broadcast one rebinds, and a lease that expires takes the address
+// with it and starts over. Backoff doubles from a second to sixteen.
+// The state machine runs on the service's tick; replies arrive as UDP
+// to port 68 (broadcast, or to the address being offered) and are
+// handed here before the socket layer.
+
+const DhcpState = enum(u8) { off = 0, discover = 1, request = 2, bound = 3, renew = 4, rebind = 5 };
+
+const Dhcp = struct {
+    state: DhcpState = .off,
+    xid: u32 = 0,
+    server: u32 = 0,
+    offered: u32 = 0,
+    lease_s: u32 = 0,
+    bound_ms: i64 = 0,
+    t1_ms: i64 = 0,
+    t2_ms: i64 = 0,
+    expiry_ms: i64 = 0,
+    next_ms: i64 = 0,
+    backoff_ms: i64 = 1000,
+};
+
+const dhcp_client_port: u16 = 68;
+const dhcp_server_port: u16 = 67;
+
+fn dhcpStart(f: *Iface) void {
+    f.dhcp = .{ .state = .discover, .xid = @truncate(usys.cycles() ^ (@as(u64, f.mac[5]) << 24)), .next_ms = nowMs() };
+}
+
+/// One DHCP message: `kind` 1 DISCOVER, 3 REQUEST. Broadcast from
+/// 0.0.0.0 unless the lease is being renewed (then unicast, from our
+/// address, to the server). The BROADCAST flag asks the server to answer
+/// to ff:ff:ff:ff:ff:ff, which an interface with no address can hear.
+fn dhcpSend(f: *Iface, kind: u8, unicast: bool) void {
+    var m: [300]u8 = @splat(0);
+    m[0] = 1; // BOOTREQUEST
+    m[1] = 1; // ethernet
+    m[2] = 6;
+    pbe32(m[4..8], f.dhcp.xid);
+    if (!unicast) m[10] = 0x80; // BROADCAST
+    if (unicast) pbe32(m[12..16], f.ip4); // ciaddr
+    @memcpy(m[28..34], &f.mac);
+    @memcpy(m[236..240], &[_]u8{ 0x63, 0x82, 0x53, 0x63 });
+    var o: usize = 240;
+    m[o] = 53;
+    m[o + 1] = 1;
+    m[o + 2] = kind;
+    o += 3;
+    m[o] = 61; // client identifier: hardware type + MAC
+    m[o + 1] = 7;
+    m[o + 2] = 1;
+    @memcpy(m[o + 3 .. o + 9], &f.mac);
+    o += 9;
+    m[o] = 55; // parameter request: mask, router, dns, lease, server id
+    m[o + 1] = 5;
+    @memcpy(m[o + 2 .. o + 7], &[_]u8{ 1, 3, 6, 51, 54 });
+    o += 7;
+    if (kind == 3 and !unicast) {
+        m[o] = 50; // requested address
+        m[o + 1] = 4;
+        pbe32(m[o + 2 .. o + 6], f.dhcp.offered);
+        o += 6;
+        if (f.dhcp.state == .request) {
+            m[o] = 54; // the server whose offer this is
+            m[o + 1] = 4;
+            pbe32(m[o + 2 .. o + 6], f.dhcp.server);
+            o += 6;
+        }
+    }
+    m[o] = 255;
+    o += 1;
+    const len = @max(o, 300);
+    // UDP 68 -> 67 over IPv4, built here: the socket layer has no
+    // interface to speak for, and no address to speak from.
+    var u: [8 + 300]u8 = undefined;
+    pbe16(u[0..2], dhcp_client_port);
+    pbe16(u[2..4], dhcp_server_port);
+    pbe16(u[4..6], @intCast(8 + len));
+    u[6] = 0;
+    u[7] = 0;
+    @memcpy(u[8 .. 8 + len], m[0..len]);
+    const src_ip: u32 = if (unicast) f.ip4 else 0;
+    const dst_ip: u32 = if (unicast) f.dhcp.server else 0xffff_ffff;
+    const sum = udpChecksum(v4Addr(src_ip), v4Addr(dst_ip), u[0 .. 8 + len]);
+    u[6] = @truncate(sum >> 8);
+    u[7] = @truncate(sum);
+    var pkt: [20 + 8 + 300]u8 = undefined;
+    const total = 20 + 8 + len;
+    pkt[0] = 0x45;
+    pkt[1] = 0;
+    pbe16(pkt[2..4], @intCast(total));
+    pkt[4] = 0;
+    pkt[5] = 0;
+    pkt[6] = 0;
+    pkt[7] = 0;
+    pkt[8] = 64;
+    pkt[9] = 17;
+    pkt[10] = 0;
+    pkt[11] = 0;
+    pbe32(pkt[12..16], src_ip);
+    pbe32(pkt[16..20], dst_ip);
+    const ipsum = csum(pkt[0..20], 0);
+    pkt[10] = @truncate(ipsum >> 8);
+    pkt[11] = @truncate(ipsum);
+    @memcpy(pkt[20..total], u[0 .. 8 + len]);
+    const dmac: [6]u8 = if (unicast) (nextHopMac(f, v4Addr(f.dhcp.server)) orelse @splat(0xff)) else @splat(0xff);
+    ethSend(f, &dmac, 0x0800, pkt[0..total]);
+}
+
+/// A server's reply (the UDP payload), for this interface's transaction.
+fn dhcpInput(f: *Iface, m: []const u8) void {
+    if (f.dhcp.state == .off or f.dhcp.state == .bound) return;
+    if (m.len < 240 or m[0] != 2 or be32(m[4..8]) != f.dhcp.xid) return;
+    if (!std.mem.eql(u8, m[28..34], &f.mac)) return;
+    if (!std.mem.eql(u8, m[236..240], &[_]u8{ 0x63, 0x82, 0x53, 0x63 })) return;
+    const yiaddr = be32(m[16..20]);
+    var kind: u8 = 0;
+    var mask: u32 = 0;
+    var router: u32 = 0;
+    var server: u32 = 0;
+    var lease: u32 = 0;
+    var servers: [max_resolvers]u32 = @splat(0);
+    var ndns: usize = 0;
+    var o: usize = 240;
+    while (o + 2 <= m.len and m[o] != 255) {
+        if (m[o] == 0) {
+            o += 1;
+            continue;
+        }
+        const len: usize = m[o + 1];
+        if (o + 2 + len > m.len) break;
+        const v = m[o + 2 .. o + 2 + len];
+        switch (m[o]) {
+            53 => if (len >= 1) {
+                kind = v[0];
+            },
+            1 => if (len >= 4) {
+                mask = be32(v[0..4]);
+            },
+            3 => if (len >= 4) {
+                router = be32(v[0..4]);
+            },
+            54 => if (len >= 4) {
+                server = be32(v[0..4]);
+            },
+            51 => if (len >= 4) {
+                lease = be32(v[0..4]);
+            },
+            6 => {
+                var i: usize = 0;
+                while (i + 4 <= len and ndns < max_resolvers) : (i += 4) {
+                    servers[ndns] = be32(v[i..][0..4]);
+                    ndns += 1;
+                }
+            },
+            else => {},
+        }
+        o += 2 + len;
+    }
+    const now = nowMs();
+    switch (kind) {
+        2 => if (f.dhcp.state == .discover) { // OFFER: take the first
+            f.dhcp.offered = yiaddr;
+            f.dhcp.server = server;
+            f.dhcp.state = .request;
+            f.dhcp.backoff_ms = 1000;
+            f.dhcp.next_ms = now;
+            dhcpSend(f, 3, false);
+            f.dhcp.next_ms = now + f.dhcp.backoff_ms;
+        },
+        5 => { // ACK: the lease
+            if (lease == 0) lease = 3600;
+            f.ip4 = yiaddr;
+            f.prefix4 = prefixOfMask(mask);
+            f.gw4 = router;
+            f.n_resolvers = 0;
+            for (servers[0..ndns]) |d| {
+                f.resolvers[f.n_resolvers] = v4Addr(d);
+                f.n_resolvers += 1;
+            }
+            f.up = true;
+            f.dhcp.lease_s = lease;
+            f.dhcp.bound_ms = now;
+            f.dhcp.t1_ms = now + @as(i64, lease) * 500;
+            f.dhcp.t2_ms = now + @as(i64, lease) * 875;
+            f.dhcp.expiry_ms = now + @as(i64, lease) * 1000;
+            f.dhcp.state = .bound;
+            f.dhcp.backoff_ms = 1000;
+            if (server != 0) f.dhcp.server = server;
+            rebuildResolvers();
+            var nb: [8]u8 = undefined;
+            var ab: [48]u8 = undefined;
+            var gb: [48]u8 = undefined;
+            logf("netsvc: {s} dhcp bound {s}/{d} via {s} lease {d}s", .{ f.name(&nb), shared.formatAddr(&ab, addrWords(v4Addr(f.ip4))), f.prefix4, if (f.gw4 != 0) shared.formatAddr(&gb, addrWords(v4Addr(f.gw4))) else "-", lease });
+        },
+        6 => { // NAK: start over
+            dhcpLost(f);
+            dhcpStart(f);
+        },
+        else => {},
+    }
+}
+
+fn prefixOfMask(mask: u32) u8 {
+    var n: u8 = 0;
+    var m = mask;
+    while (m & 0x8000_0000 != 0) : (m <<= 1) n += 1;
+    return if (n == 0) 24 else n;
+}
+
+/// The lease is gone: so is the address it carried.
+fn dhcpLost(f: *Iface) void {
+    if (f.up) {
+        var nb: [8]u8 = undefined;
+        logf("netsvc: {s} dhcp lease lost", .{f.name(&nb)});
+    }
+    f.up = false;
+    f.ip4 = 0;
+    f.prefix4 = 0;
+    f.gw4 = 0;
+    f.n_resolvers = 0;
+    f.neigh = @splat(.{});
+    rebuildResolvers();
+}
+
+/// The clock's part: (re)transmissions with backoff, renewal, rebinding,
+/// expiry. Called every tick.
+fn dhcpScan() void {
+    const now = nowMs();
+    for (ifaces[0..n_ifaces]) |*f| {
+        if (f.mode != .dhcp) continue;
+        switch (f.dhcp.state) {
+            .off => {},
+            .discover, .request => if (now >= f.dhcp.next_ms) {
+                if (f.dhcp.state == .request and f.dhcp.backoff_ms >= 8000) {
+                    // The offer went unacknowledged: discover again.
+                    f.dhcp.state = .discover;
+                    f.dhcp.backoff_ms = 1000;
+                }
+                dhcpSend(f, if (f.dhcp.state == .discover) 1 else 3, false);
+                f.dhcp.next_ms = now + f.dhcp.backoff_ms;
+                f.dhcp.backoff_ms = @min(f.dhcp.backoff_ms * 2, 16000);
+            },
+            .bound => if (now >= f.dhcp.t1_ms) {
+                f.dhcp.state = .renew;
+                f.dhcp.backoff_ms = 1000;
+                f.dhcp.next_ms = now;
+            },
+            .renew, .rebind => {
+                if (now >= f.dhcp.expiry_ms) {
+                    dhcpLost(f);
+                    dhcpStart(f);
+                    continue;
+                }
+                if (f.dhcp.state == .renew and now >= f.dhcp.t2_ms) f.dhcp.state = .rebind;
+                if (now >= f.dhcp.next_ms) {
+                    dhcpSend(f, 3, f.dhcp.state == .renew);
+                    f.dhcp.next_ms = now + f.dhcp.backoff_ms;
+                    f.dhcp.backoff_ms = @min(f.dhcp.backoff_ms * 2, 16000);
+                }
+            },
+        }
+    }
+}
+
+/// Seconds left on the lease, for the status record.
+fn leaseLeft(f: *const Iface) u32 {
+    if (f.mode != .dhcp or !f.up) return 0;
+    const left = f.dhcp.expiry_ms - nowMs();
+    return if (left <= 0) 0 else @intCast(@divTrunc(left, 1000));
+}
 
 fn ifaceAt(i: u64) ?*Iface {
     if (i >= n_ifaces) return null;
@@ -602,6 +881,7 @@ fn netTick() void {
     }
     retransmitScan();
     lookupScan();
+    dhcpScan();
 }
 
 /// One doorbell for every NIC: whichever raised it, all are drained.
@@ -878,12 +1158,18 @@ fn ip4Input(f: *Iface, p: []const u8) void {
     const total = (@as(usize, p[2]) << 8) | p[3];
     if (total > p.len or ihl < 20) return;
     const dst_ip = be32(p[16..20]);
-    // Ours on this interface, or a broadcast (DHCP answers arrive so).
-    if (!(f.up and dst_ip == f.ip4) and dst_ip != 0xffff_ffff) return;
+    // Ours on this interface, a broadcast, or the address a DHCP server
+    // is offering us (some answer to it before we hold it).
+    if (!(f.up and dst_ip == f.ip4) and dst_ip != 0xffff_ffff and !(f.dhcp.state == .request and dst_ip == f.dhcp.offered)) return;
     const src = v4Addr(be32(p[12..16]));
     switch (p[9]) {
         6 => if (dst_ip != 0xffff_ffff) tcpInput(src, v4Addr(dst_ip), p[ihl..total]),
-        17 => udpInput(src, v4Addr(dst_ip), p[ihl..total]),
+        17 => {
+            const seg = p[ihl..total];
+            // A DHCP reply (to port 68) is the interface's, not a socket's.
+            if (seg.len >= 8 and be16(seg[2..4]) == dhcp_client_port) return dhcpInput(f, seg[8..@min(seg.len, be16(seg[4..6]))]);
+            udpInput(src, v4Addr(dst_ip), seg);
+        },
         1 => { // ICMP
             const b = p[ihl..total];
             if (b.len >= 8 and b[0] == 0) ping_replies += 1;
@@ -928,7 +1214,11 @@ fn configureAtBoot(f: *Iface) void {
             f.bcast_delivery = true;
         }
     } else if (f.index == 0) {
-        cfg = .{ .mode = .static, .ip4 = shared.net_own_ip4, .prefix4 = 24, .gw4 = shared.net_gw_ip4, .ip6 = addrFromWords(shared.net_own_ip6[0], shared.net_own_ip6[1]), .prefix6 = 64, .gw6 = addrFromWords(shared.net_gw_ip6[0], shared.net_gw_ip6[1]) };
+        // Slirp serves DHCP (and hands out 10.0.2.15 first); the v6 side
+        // stays static — no router advertisements are read yet.
+        cfg = .{ .mode = .dhcp, .ip6 = addrFromWords(shared.net_own_ip6[0], shared.net_own_ip6[1]), .prefix6 = 64, .gw6 = addrFromWords(shared.net_gw_ip6[0], shared.net_gw_ip6[1]) };
+    } else {
+        cfg = .{ .mode = .dhcp };
     }
     applyConfig(f, cfg);
 }
@@ -939,16 +1229,21 @@ fn applyConfig(f: *Iface, cfg: shared.IfaceConfig) void {
     f.mode = cfg.mode;
     f.neigh = @splat(.{});
     f.n_resolvers = 0;
+    f.dhcp = .{};
     switch (cfg.mode) {
         .off, .dhcp => {
-            // DHCP is the next stage: until it lands an interface set to
-            // it is down, and says so.
             f.up = false;
             f.ip4 = 0;
             f.prefix4 = 0;
             f.gw4 = 0;
-            f.ip6 = @splat(0);
-            f.gw6 = @splat(0);
+            // A static v6 address may ride beside a DHCP v4 one.
+            f.ip6 = if (cfg.mode == .dhcp) cfg.ip6 else @splat(0);
+            f.prefix6 = cfg.prefix6;
+            f.gw6 = if (cfg.mode == .dhcp) cfg.gw6 else @splat(0);
+            if (cfg.mode == .dhcp) {
+                f.up = f.hasIp6();
+                dhcpStart(f);
+            }
         },
         .static => {
             f.ip4 = cfg.ip4;
@@ -968,22 +1263,27 @@ fn applyConfig(f: *Iface, cfg: shared.IfaceConfig) void {
     var nb: [8]u8 = undefined;
     var ab: [48]u8 = undefined;
     var gb: [48]u8 = undefined;
-    logf("netsvc: {s} {s} {s}/{d} via {s}", .{ f.name(&nb), @tagName(f.mode), if (f.up) shared.formatAddr(&ab, addrWords(v4Addr(f.ip4))) else "down", f.prefix4, if (f.gw4 != 0) shared.formatAddr(&gb, addrWords(v4Addr(f.gw4))) else "-" });
+    if (f.mode == .dhcp and f.ip4 == 0) {
+        logf("netsvc: {s} dhcp, asking for a lease", .{f.name(&nb)});
+    } else {
+        logf("netsvc: {s} {s} {s}/{d} via {s}", .{ f.name(&nb), @tagName(f.mode), if (f.up) shared.formatAddr(&ab, addrWords(v4Addr(f.ip4))) else "down", f.prefix4, if (f.gw4 != 0) shared.formatAddr(&gb, addrWords(v4Addr(f.gw4))) else "-" });
+    }
 }
 
 fn addrWords(a: Addr) [2]u64 {
     return .{ std.mem.readInt(u64, a[0..8], .big), std.mem.readInt(u64, a[8..16], .big) };
 }
 
-/// The resolvers the stack asks, in order: each interface's (DHCP or
-/// static), then the settings' global list — deduplicated, at most four.
+/// The resolvers the stack asks, in order: the settings' global list
+/// (explicit policy first), then each interface's (a lease's, a static
+/// entry's) — deduplicated, at most four.
 fn rebuildResolvers() void {
     n_resolvers = 0;
+    for (conf_resolvers[0..conf_n_resolvers]) |r| addResolver(r);
     for (ifaces[0..n_ifaces]) |*f| {
         if (!f.up) continue;
         for (f.resolvers[0..f.n_resolvers]) |r| addResolver(r);
     }
-    for (conf_resolvers[0..conf_n_resolvers]) |r| addResolver(r);
 }
 
 fn addResolver(r: Addr) void {
@@ -1006,6 +1306,9 @@ fn statusOf(f: *Iface) shared.IfaceStatus {
     if (f.hasGw6()) st.flags |= shared.IfaceStatus.flag_gw6;
     st.n_resolvers = @intCast(f.n_resolvers);
     for (0..f.n_resolvers) |i| st.resolvers[i] = f.resolvers[i];
+    st.dhcp_state = @intFromEnum(f.dhcp.state);
+    st.lease_s = leaseLeft(f);
+    if (f.mode == .dhcp and f.up and f.ip4 != 0) st.flags |= shared.IfaceStatus.flag_leased;
     return st;
 }
 
@@ -1970,29 +2273,32 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     }
     logf("netsvc: {d} nic(s) up, resolving gateways", .{n_ifaces});
 
-    // Resolve every configured gateway before serving anyone: the first
-    // client's first packet should not be the one that asks. A cluster
-    // segment has none (broadcast delivery); a gateway that never answers
-    // (a NIC on a dead segment) is given up on, not waited for forever.
+    // The clock: retransmission must run even when nobody calls and no
+    // frame arrives — a client sleeping on its doorbell after a lost SYN
+    // waits for exactly that. Every tick (a tenth of a second), bit_tick
+    // — the first cut asked for ten of them, believing a tick was 10 ms.
+    // Armed before the wait below, whose DHCP retransmits need it.
+    if (usys.timerArm(irq_notif, 1, bit_tick) != .ok) usys.exit(180);
+    // Before serving anyone: every DHCP interface bound and every
+    // configured gateway resolved, so the first client's first packet is
+    // not the one that asks. Bounded (ten seconds): a NIC on a dead
+    // segment is given up on, not waited for forever; the first
+    // interface's lease is what the boot's clients rely on.
     var tries: u32 = 0;
-    while (tries < 50) : (tries += 1) {
+    while (tries < 100) : (tries += 1) {
         var pending = false;
         for (ifaces[0..n_ifaces]) |*f| {
+            if (f.mode == .dhcp and f.dhcp.state != .bound and f.index == 0) pending = true;
             if (!f.up or f.bcast_delivery) continue;
             if (f.gw4 != 0 and nextHopMac(f, v4Addr(f.gw4)) == null) pending = true;
             if (f.hasGw6() and nextHopMac(f, f.gw6) == null) pending = true;
         }
         if (!pending) break;
-        _ = usys.notifyWait(irq_notif);
-        irqDrain();
+        const w = usys.notifyWait(irq_notif);
+        if (w.err == .ok and w.data[0] & bit_irq != 0) irqDrain() else netTick();
     }
-    if (tries == 50) logf("netsvc: a gateway did not answer; serving anyway", .{});
+    if (tries == 100) logf("netsvc: a lease or a gateway did not come; serving anyway", .{});
     if (usys.notifyBind(irq_notif) != .ok) usys.exit(178);
-    // The clock: retransmission must run even when nobody calls and no
-    // frame arrives — a client sleeping on its doorbell after a lost SYN
-    // waits for exactly that. Every tick (a tenth of a second), bit_tick
-    // — the first cut asked for ten of them, believing a tick was 10 ms.
-    if (usys.timerArm(irq_notif, 1, bit_tick) != .ok) usys.exit(180);
     _ = usys.log(log_h, "netsvc: virtio-net up, serving");
 
     views[control_badge] = .{ .used = true, .control = true };
