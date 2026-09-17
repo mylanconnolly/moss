@@ -155,6 +155,8 @@ var disp_cap: u64 = 0;
 var output_cap: u64 = 0;
 var font_cap: u64 = 0;
 var locale_cap: u64 = 0;
+var net_cap: u64 = 0;
+var net_control_cap: u64 = 0;
 var home_buf: [*]u8 = undefined;
 var app_view: u64 = 0;
 var app_buf: [*]u8 = undefined;
@@ -260,6 +262,8 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     init_chan = setup.cap(.init);
     font_cap = setup.cap(.font);
     locale_cap = setup.cap(.locale);
+    net_cap = setup.cap(.net);
+    net_control_cap = setup.cap(.net_control);
     gui_sessions = disp_cap != 0;
     if (users_view == 0 or home_view == 0 or app_view == 0) usys.exit(180);
     users_buf = @ptrFromInt(fsc.attachBuf(users_view).va);
@@ -1020,6 +1024,10 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     if (ok and gui_sessions) ok = boot.giveCap(b, .display, disp_cap) and boot.giveCap(b, .font, font_cap);
     if (ok and gui_sessions and output_cap != 0) ok = boot.giveCap(b, .display_control, output_cap);
     if (ok and gui_sessions and locale_cap != 0) ok = boot.giveCap(b, .locale, locale_cap);
+    // The network: every GUI session may read the interfaces' status; only
+    // an administrator's session may configure them.
+    if (ok and gui_sessions and net_cap != 0) ok = boot.giveCap(b, .net, net_cap);
+    if (ok and gui_sessions and budget.admin and net_control_cap != 0) ok = boot.giveCap(b, .net_control, net_control_cap);
     if (ok) ok = boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
     if (!ok) {
         _ = usys.domainDestroy(s.ctl);

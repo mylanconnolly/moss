@@ -72,7 +72,7 @@ const specs = [_]Spec{
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "listdemo", .kind = .listdemo, .pass = "listdemo-test: PASS", .extra = "gui: list items", .append = "profile=listdemo", .timeout_s = 120 },
     .{ .name = "explorer", .kind = .explorer, .pass = "explorer-test: PASS", .extra = "gui: list files", .append = "profile=explorer", .timeout_s = 120 },
-    .{ .name = "netconf", .kind = .netconf, .pass = "netconf-test: PASS", .extra = "netconf: net1 echoed", .always_extra = "netsvc: net0 dhcp bound 10.0.2.15/24 via 10.0.2.2", .extra2 = "netconf: net1 leased again", .append = "profile=netconf" },
+    .{ .name = "netconf", .kind = .netconf, .pass = "netconf-test: PASS", .extra = "netconf: net1 echoed", .always_extra = "netsvc: net0 dhcp bound 10.0.2.15/24 via 10.0.2.2", .extra2 = "netconf: net1 leased again", .second_run_extra = "netsvc: settings read from conf/app/net.msh", .append = "profile=netconf" },
     .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-beta ok=true", .always_extra = "init: stopped by request: win-beta", .extra2 = "win-alpha: closed", .append = "profile=activity", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
@@ -442,7 +442,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .netconf or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -546,12 +546,18 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // Two NICs on two user networks, an echo on each segment: the
         // interface-configuration drill.
-        .netconf => try args.appendSlice(gpa, &.{
-            "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
-            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-            "-netdev", "user,id=n1,net=10.0.3.0/24,guestfwd=tcp:10.0.3.100:9000-cmd:cat",
-            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n1",
-        }),
+        .netconf => {
+            try args.appendSlice(gpa, &.{
+                "-netdev", "user,id=n0,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+                "-netdev", "user,id=n1,net=10.0.3.0/24,guestfwd=tcp:10.0.3.100:9000-cmd:cat",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n1",
+            });
+            try appendDisk(&args, disk); // the persisted settings live on it
+        },
+        // The GUI session drills get one NIC on a user network, so the
+        // system's network unit comes up and Settings has an interface to
+        // show; nothing dials out.
         // The real-msh seat: the graphical devices plus a disk for mossfs
         // (the shell's filesystem view).
         // The GUI front door: the graphical devices, a disk for the users
@@ -573,6 +579,10 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
                 "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
+            });
+            if (spec.kind == .guishell or spec.kind == .guishellro) try args.appendSlice(gpa, &.{
+                "-netdev", "user,id=n0",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             });
             try appendDisk(&args, disk);
         },
@@ -3109,6 +3119,42 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.chord2("shift", "meta_l", "w")) return false;
     if (!try waitLogN(log_path, "editor: exit", 3, "launcher dismissal lost Editor focus", spec, polls)) return false;
 
+    // The Network tab, as an administrator: select the one interface, switch
+    // it to Static (the fields seed with its live address), Apply — the
+    // service reconfigures live and the settings are saved for the boot.
+    // Settings is still up from the scale round trip; the launcher brings
+    // its window back rather than starting another.
+    const activates = countOccurrences(readLog(log_path), "launcher: activate settings");
+    const actives = countOccurrences(readLog(log_path), "topbar: active Settings");
+    if (!q.chord("meta_l", "spc")) return false;
+    if (!try waitLogN(log_path, launcher_ready_line, 5, "launcher did not open for the network step", spec, polls)) return false;
+    if (!q.typeText("settings") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "launcher: activate settings", activates + 1, "the launcher did not activate Settings", spec, polls)) return false;
+    if (!try waitLogN(log_path, "topbar: active Settings", actives + 1, "Settings did not come to the front for the network step", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: tab tabs 2 at", 1, "the Network tab was not logged", spec, polls)) return false;
+    sleepMs(500);
+    const net_tab = tabCenter(readLog(log_path), "tabs", 2) orelse return sfail(spec, log_path, "find the Network tab");
+    if (!clickScanout(&q, net_tab[0], net_tab[1])) return sfail(spec, log_path, "click the Network tab");
+    const ifaces = waitListGeom(spec, log_path, polls, "ifaces") orelse return sfail(spec, log_path, "the interface list was not laid out");
+    if (!clickScanout(&q, ifaces[0], ifaces[1] + ifaces[2] / 2)) return sfail(spec, log_path, "select the interface");
+    if (!try waitLogN(log_path, "gui: tab netmode 1 at", 1, "the mode switch never appeared", spec, polls)) return false;
+    sleepMs(300);
+    const static_tab = tabCenter(readLog(log_path), "netmode", 1) orelse return sfail(spec, log_path, "find the Static switch");
+    if (!clickScanout(&q, static_tab[0], static_tab[1])) return sfail(spec, log_path, "switch to Static");
+    if (!try waitLogN(log_path, "gui: widget netapply at", 1, "the Apply button never appeared", spec, polls)) return false;
+    sleepMs(300);
+    const apply_net = widgetCenter(readLog(log_path), "netapply") orelse return sfail(spec, log_path, "find Apply");
+    // The cluster unit boots net0 static at this address already; Apply
+    // reconfigures it with the seeded fields, so the service says it again.
+    const statics = countOccurrences(readLog(log_path), "netsvc: net0 static 10.77.0.1/24");
+    if (!clickScanout(&q, apply_net[0], apply_net[1])) return sfail(spec, log_path, "click Apply");
+    if (!try waitLogN(log_path, "netsvc: net0 static 10.77.0.1/24", statics + 1, "the service did not take the static configuration", spec, polls)) return false;
+    if (!try waitLogN(log_path, "sysconf: saved net", 1, "the network settings were not saved", spec, polls)) return false;
+    _ = q.screendump(check_dir ++ "/settings-network.ppm");
+    const closed_before = countOccurrences(readLog(log_path), "gui: closed");
+    if (!q.chord("meta_l", "w")) return false;
+    if (!try waitLogN(log_path, "gui: closed", closed_before + 1, "Settings did not close after the network step", spec, polls)) return false;
+
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.
     return desktopLogout(spec, log_path, polls, &q);
@@ -3192,6 +3238,26 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     _ = q.screendump(check_dir ++ "/activity-bob.ppm");
     if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
     if (!try waitLogN(log_path, "activity: closed", 1, "Activity did not close", spec, polls)) return false;
+    // The Network tab for a non-administrator: the interface is listed, its
+    // facts shown, and there is no Apply — the session holds no control cap.
+    const settings_before = countOccurrences(readLog(log_path), "settings: network read-only");
+    if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher for Settings");
+    if (!try waitLogN(log_path, launcher_ready_line, 2, "the launcher did not open for Settings", spec, polls)) return false;
+    if (!q.typeText("settings") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Settings");
+    if (!try waitLogN(log_path, "settings: network read-only", settings_before + 1, "Settings did not reopen for bob", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: tab tabs 2 at", 1, "the Network tab was not logged for bob", spec, polls)) return false;
+    sleepMs(400);
+    const net_tab = tabCenter(readLog(log_path), "tabs", 2) orelse return sfail(spec, log_path, "find the Network tab");
+    if (!clickScanout(&q, net_tab[0], net_tab[1])) return sfail(spec, log_path, "click the Network tab");
+    const ifaces = waitListGeom(spec, log_path, polls, "ifaces") orelse return sfail(spec, log_path, "the interface list was not laid out for bob");
+    if (!clickScanout(&q, ifaces[0], ifaces[1] + ifaces[2] / 2)) return sfail(spec, log_path, "select the interface");
+    if (!try waitLogN(log_path, "gui: tab netmode 1 at", 1, "the mode switch never appeared for bob", spec, polls)) return false;
+    sleepMs(300);
+    if (countOccurrences(readLog(log_path), "gui: widget netapply at") != 0) return sfail(spec, log_path, "a non-administrator was offered Apply");
+    _ = q.screendump(check_dir ++ "/settings-network-bob.ppm");
+    const closed_before_net = countOccurrences(readLog(log_path), "gui: closed");
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Settings");
+    if (!try waitLogN(log_path, "gui: closed", closed_before_net + 1, "Settings did not close for bob", spec, polls)) return false;
     return desktopLogout(spec, log_path, polls, &q);
 }
 
@@ -5042,10 +5108,14 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
     var width: u32 = 1280;
     var height: u32 = 1024;
     var ready = countOccurrences(readLog(log_path), "gui: ready");
-    const displays = widgetCenter(readLog(log_path), "display") orelse return sfail(spec, log_path, "Displays button missing");
+    // Displays is a tab of the Settings window; the tab strip logs each
+    // tab's centre as it paints.
+    const displays = tabCenter(readLog(log_path), "tabs", 1) orelse return sfail(spec, log_path, "Displays tab missing");
+    // Wait for the page to paint its list (a fresh geometry line), not a
+    // fixed delay: under a loaded host the old line would be read back.
+    var lists = countOccurrences(readLog(log_path), "gui: list resolution");
     if (!clickOutput(q, displays, width, height)) return false;
-    if (!try waitLogN(log_path, "gui: ready", ready + 1, "Displays panel did not open", spec, polls)) return false;
-    sleepMs(200);
+    if (!try waitLogN(log_path, "gui: list resolution", lists + 1, "Displays page did not open", spec, polls)) return false;
     for ([_]usize{ 5, 0, 3 }, 0..) |row, pass| {
         const geom = waitListGeom(spec, log_path, polls, "resolution") orelse return false;
         if (!clickOutput(q, .{ geom[0], geom[1] + geom[2] / 2 }, width, height)) return false;
@@ -5131,11 +5201,10 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
             if (!q.typeText(check) or !q.sendKey("ret")) return false;
             if (!try waitLogN(log_path, "gui: ready", ready + 1, "confirmed resolution was not persisted", spec, polls)) return false;
             sleepMs(250);
-            const button = widgetCenter(readLog(log_path), "display") orelse return false;
-            ready = countOccurrences(readLog(log_path), "gui: ready");
-            if (!clickOutput(q, button, width, height)) return false;
-            if (!try waitLogN(log_path, "gui: ready", ready + 1, "Displays did not reopen", spec, polls)) return false;
-            sleepMs(200);
+            const tab = tabCenter(readLog(log_path), "tabs", 1) orelse return sfail(spec, log_path, "Displays tab missing after the restart");
+            lists = countOccurrences(readLog(log_path), "gui: list resolution");
+            if (!clickOutput(q, tab, width, height)) return false;
+            if (!try waitLogN(log_path, "gui: list resolution", lists + 1, "Displays page did not reopen", spec, polls)) return false;
             continue;
         }
         const action = widgetCenter(readLog(log_path), if (pass == 1) "revert" else "keep") orelse return sfail(spec, log_path, "resolution decision button missing");
@@ -5144,10 +5213,9 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
         if (!try waitLogN(log_path, "gui: ready", ready + 1, "Displays panel did not return", spec, polls)) return false;
         sleepMs(300);
     }
-    const back = widgetCenter(readLog(log_path), "back") orelse return false;
-    ready = countOccurrences(readLog(log_path), "gui: ready");
-    if (!clickOutput(q, back, width, height)) return false;
-    if (!try waitLogN(log_path, "gui: ready", ready + 1, "Settings did not return", spec, polls)) return false;
+    // Back to the Personal tab, where the desktop's logout exercise looks.
+    const personal = tabCenter(readLog(log_path), "tabs", 0) orelse return sfail(spec, log_path, "Personal tab missing");
+    if (!clickOutput(q, personal, width, height)) return false;
     sleepMs(300);
     return true;
 }
@@ -5331,14 +5399,18 @@ fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp)
     var width: u32 = 1280;
     var height: u32 = 1024;
     for ([_]usize{ 0, 3 }, 0..) |row, pass| {
-        // The first focus target is Displays. Home scrolls the viewport
-        // back to its top after the previous wheel exercise.
+        // The tab strip is the first focus target. Home scrolls the
+        // viewport back to its top after the previous wheel exercise; a
+        // click on the Displays tab shows that page and focuses the strip,
+        // and Tab moves on to the resolution list.
         if (!q.sendKey("home")) return false;
         sleepMs(150);
-        const displays = widgetCenter(readLog(log_path), "display") orelse return false;
-        ready = countOccurrences(readLog(log_path), "gui: ready");
+        const displays = tabCenter(readLog(log_path), "tabs", 1) orelse return sfail(spec, log_path, "large-text Displays tab missing");
+        const lists = countOccurrences(readLog(log_path), "gui: widget resolution at");
         if (!clickOutput(q, displays, width, height)) return false;
-        if (!try waitLogN(log_path, "gui: ready", ready + 1, "large-text Displays did not open", spec, polls)) return false;
+        if (!try waitLogN(log_path, "gui: widget resolution at", lists + 1, "large-text Displays did not open", spec, polls)) return false;
+        sleepMs(150);
+        if (!q.sendKey("tab")) return false;
         // A selection event enables Preview, including for the first row.
         sleepMs(150);
         if (!q.sendKey("down")) return false;
@@ -5359,13 +5431,12 @@ fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp)
         sleepMs(200);
         ready = countOccurrences(readLog(log_path), "gui: ready");
         if (!q.sendKey("ret")) return false; // focused Keep resolution
-        if (!try waitLogN(log_path, "gui: ready", ready + 1, "large-text confirmation failed", spec, polls)) return false;
-        sleepMs(150);
-        if (!q.chord("shift", "tab")) return false; // Back, revealed below list
-        sleepMs(150);
-        ready = countOccurrences(readLog(log_path), "gui: ready");
-        if (!q.sendKey("ret")) return false;
+        // Keeping returns to Settings, on the Displays tab; Personal is
+        // the tall page the scroll exercise wants.
         if (!try waitLogN(log_path, "gui: ready", ready + 1, "large-text Settings did not return", spec, polls)) return false;
+        sleepMs(300);
+        const personal = tabCenter(readLog(log_path), "tabs", 0) orelse return sfail(spec, log_path, "large-text Personal tab missing");
+        if (!clickOutput(q, personal, width, height)) return false;
         sleepMs(200);
         if (pass == 0) {
             _ = q.screendump(check_dir ++ "/settings-300-1024-top.ppm");
@@ -5394,7 +5465,7 @@ fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp)
 
         }
     }
-    // Main Settings starts on Displays; Tab reveals Smaller. Restore the
+    // Focus sits on the tab strip; Tab reveals Smaller. Restore the
     // original scale before the desktop's existing logout exercise.
     if (!q.sendKey("tab")) return false;
     sleepMs(100);

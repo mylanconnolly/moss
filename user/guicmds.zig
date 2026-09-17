@@ -1441,7 +1441,14 @@ fn listClick(id: []const u8, x: usize, screen_y: usize) ListClick {
         }
         const row = st.scroll + (y - lh.rows_top) / lh.row_h;
         if (row >= st.nrows) return .{};
-        const activated = st.click.press(row, usys.nowMs());
+        const now_ms = usys.nowMs();
+        const prev_row = st.click.row;
+        const prev_at = st.click.at_ms;
+        const activated = st.click.press(row, now_ms);
+        // One line per click, so a drill can see why a double-click did or
+        // did not activate (the two clocks, the two rows).
+        var cl: [96]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&cl, "gui: click {s} row={d} now={d} prev_row={?} prev_at={d} activated={}", .{ id, row, now_ms, prev_row, prev_at, activated }) catch "gui: click");
         st.sel = row;
         keepSelVisible(st);
         return .{ .fire = true, .activated = activated, .row = row };

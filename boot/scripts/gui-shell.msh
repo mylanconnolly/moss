@@ -1,27 +1,30 @@
-# The graphical session's settings app (the post-login GUI): a two-pane
-# settings desktop that runs as the logged-in user in their own session
+# The graphical session's settings app (the post-login GUI): a tabbed
+# settings window that runs as the logged-in user in their own session
 # domain, rendered through the shared font service.
 #
-#   YOU (the user pane): this user's own appearance (the accessibility text
-#   scale, the theme, the high-contrast and colourblind-safe switches) and
-#   their preferred locale (a live sample shows a date and a number in it).
-#   "apply" persists both to the user's home (conf/font.msh, conf/locale.msh)
-#   and pushes them live — the font layer to the shared font service, the
-#   locale to this session's formatter. `theme` is locked by the system
-#   layer here (an org mandate): a user may set it, but the effective theme
-#   the font service applies stays the system's.
+#   PERSONAL: this user's own appearance (the accessibility text scale,
+#   the theme, the high-contrast and colourblind-safe switches) and their
+#   preferred locale (a live sample shows a date and a number in it).
+#   "apply" persists both to the user's home (conf/font.msh,
+#   conf/locale.msh) and pushes them live. `theme` is locked by the
+#   system layer here (an org mandate). Beneath it the system DEFAULT
+#   locale, from the system settings layer (conf/app/locale.msh) reached
+#   through the session's conf view: an administrator — whose conf view
+#   the session manager granted read-write — changes it; everyone else's
+#   view is read-only and the pane says so.
 #
-#   SYSTEM (the system pane): the system DEFAULT locale, from the system
-#   settings layer (conf/app/locale.msh) reached through the session's conf
-#   view. An administrator — whose conf view the session manager granted
-#   read-write — changes it with "save system"; everyone else's view is
-#   read-only and the pane says so.
+#   DISPLAYS: the output modes the driver offers; a preview with a
+#   compositor-owned deadline, kept per monitor.
 #
-# "log out" reverts the user's font layer and exits; the runtime closes the
-# window, mshrun exits, and the manager tears the session down.
+#   NETWORK: every interface the network service drives, with how it is
+#   addressed (a DHCP lease, or static). Selecting one shows its facts;
+#   an administrator — whose session holds the service's control cap —
+#   switches it between DHCP and static, edits the static fields, and
+#   applies: the change goes live through the control endpoint and is
+#   saved to conf/app/net.msh, which the service reads at the next boot.
+#
+# "Close" ends the window; the session lives on.
 
-# A live sample of a locale: a medium date and a formatted number, so the
-# user sees what their choice does. The formatters take the tag explicitly.
 def loc-sample [tag] {
   let num = (fmt-number 1234.5 $tag)
   match (fmt-date $tag "medium") {
@@ -30,83 +33,180 @@ def loc-sample [tag] {
   }
 }
 
-# Whether the system layer locks `theme` (the font service reports it). A
-# locked axis is shown as a non-editable label, not a button.
 def theme-locked [] {
   (appearance) | get "theme_locked"
 }
 
-# Output modes come from the driver. A compositor-owned deadline protects
-# the user even if this application crashes during a preview.
-def display-settings [] {
-  let message = ""
-  let again = true
-  while $again {
-    let info = (display-info)
-    let picked = (gui {
-        title: "Settings"
-        width: 560
-        init:  { choice: "", action: "" }
-        view: (fn [state] {
-            { kind: "column", gap: 16, children: [
-                { kind: "label", role: "title", text: "Display resolution" }
-                { kind: "label", wrap: true, muted: true, text: ("Current: " + $info.mode) }
-                { kind: "label", wrap: true, muted: true, text: ("Native: " + (str $info.preferred_width) + " × " + (str $info.preferred_height)) }
-                { kind: "label", wrap: true, muted: true, text: ("Monitor: " + $info.monitor) }
-                { kind: "list", id: "resolution", key: "modes", h: 220, rows: (display-modes), active: ($state.choice != "") }
-                { kind: "label", wrap: true, muted: true, text: $message }
-                { kind: "row", children: [
-                    { kind: "button", id: "preview", label: "Preview resolution", variant: "primary", disabled: (($state.choice == "") or (not $info.can_change)) }
-                    { kind: "button", id: "back", label: "Back" }
-                  ] }
-              ] }
-          })
-        update: (fn [state, ev] {
-            match $ev.id {
-              "resolution" => { { choice: $ev.row, action: "" } }
-              "preview" => { { choice: $state.choice, action: "preview", done: true } }
-              "back" => { { choice: $state.choice, action: "", done: true } }
-              _ => $state
-            }
-          })
+# An action ends the window (`done`); the loop below acts on it and may
+# reopen the window on the same tab.
+def act [state, name] {
+  $state | merge { note: "", action: $name, done: true }
+}
+
+def personal-page [state] {
+  { kind: "column", gap: 16, children: [
+      { kind: "label", wrap: true, muted: true, text: "Appearance and language for your session." }
+      { kind: "section", children: [
+          { kind: "label", text: "Appearance" }
+          { kind: "label", wrap: true, muted: true, text: ("Text size · " + (str $state.scale) + "×") }
+          { kind: "row", children: [
+              { kind: "button", id: "smaller", label: "Smaller" }
+              { kind: "button", id: "larger", label: "Larger" }
+            ] }
+          { kind: "row", children: [
+              (match (theme-locked) {
+                  true => { kind: "label", wrap: true, muted: true, text: ("Theme: " + $state.theme + " (managed)") }
+                  _ => { kind: "button", id: "theme", label: ("Theme: " + $state.theme) }
+                })
+              { kind: "button", id: "contrast", label: ("Contrast: " + $state.contrast) }
+              { kind: "button", id: "colors", label: ("Colors: " + $state.colors) }
+            ] }
+          { kind: "row", children: [
+              { kind: "button", id: "myloc", label: ("Language: " + $state.myloc) }
+              { kind: "label", wrap: true, muted: true, text: (loc-sample $state.myloc) }
+            ] }
+          { kind: "button", id: "apply", label: "Apply changes", variant: "primary" }
+        ] }
+      { kind: "section", children: [
+          { kind: "label", text: "System defaults" }
+          { kind: "label", wrap: true, muted: true, text: ("Default language: " + $state.sysloc) }
+          (match $state.admin {
+              true => { kind: "row", children: [
+                  { kind: "button", id: "cycleloc", label: "Change language" }
+                  { kind: "button", id: "savesys", label: "Save system", variant: "primary" }
+                ] }
+              _ => { kind: "label", wrap: true, muted: true, text: "An administrator manages these settings." }
+            })
+        ] }
+    ] }
+}
+
+def displays-page [state] {
+  let info = (display-info)
+  { kind: "column", gap: 12, children: [
+      { kind: "label", wrap: true, muted: true, text: ("Current: " + $info.mode + " · native " + (str $info.preferred_width) + " × " + (str $info.preferred_height)) }
+      { kind: "label", wrap: true, muted: true, text: ("Monitor: " + $info.monitor) }
+      { kind: "list", id: "resolution", key: "modes", h: 200, rows: (display-modes), active: ($state.choice != "") }
+      { kind: "row", children: [
+          { kind: "button", id: "preview", label: "Preview resolution", variant: "primary", disabled: (($state.choice == "") or (not $info.can_change)) }
+          { kind: "label", muted: true, flex: 1, text: $state.note }
+        ] }
+    ] }
+}
+
+# The lease line, the resolvers line: what a selected interface says.
+def iface-facts [f] {
+  let lease = (match $f.mode { "dhcp" => (match ($f.lease > 0) { true => (" · lease " + (str $f.lease) + " s left"); _ => " · no lease yet" }); _ => "" })
+  let dns = (match (len $f.resolvers) { 0 => ""; _ => (" · resolvers " + ($f.resolvers | join ", ")) })
+  ("MAC " + $f.mac + $lease + $dns)
+}
+
+def network-page [state] {
+  let ifs = (net-ifaces)
+  let f = ($ifs | find (fn [r] { $r.id == $state.sel }))
+  { kind: "column", gap: 12, children: [
+      { kind: "label", wrap: true, muted: true, text: (match (len $ifs) { 0 => "No network interfaces are available to this session."; _ => "The interfaces on this machine. Select one to see, or change, how it is addressed." }) }
+      { kind: "list", id: "ifaces", key: "ifaces", h: 96, fit: true, selected: $state.sel
+        cols: [{ title: "Name", w: 3 } { title: "Mode", w: 4 } { title: "Address", w: 5 } { title: "Gateway", w: 5 }]
+        rows: $ifs }
+      (match $f {
+          nothing => { kind: "label", muted: true, text: "" }
+          $r => { kind: "section", gap: 8, children: [
+              { kind: "label", wrap: true, muted: true, text: (iface-facts $r) }
+              { kind: "tabs", id: "netmode", items: ["DHCP", "Static"], selected: (match $state.mode { "static" => 1; _ => 0 }) }
+              (match $state.mode {
+                  "static" => { kind: "column", gap: 8, children: [
+                      { kind: "field", id: ("address-" + $state.sel), label: "Address, as a.b.c.d/prefix", value: $state.addr }
+                      { kind: "field", id: ("gateway-" + $state.sel), label: "Gateway", value: $state.gw }
+                      { kind: "field", id: ("resolvers-" + $state.sel), label: "Resolvers, comma-separated", value: $state.dns }
+                    ] }
+                  _ => { kind: "label", wrap: true, muted: true, text: "The address, gateway and resolvers come from the network's DHCP server." }
+                })
+              (match (net-admin) {
+                  true => { kind: "row", gap: 8, children: [
+                      { kind: "button", id: "netapply", label: "Apply", variant: "primary" }
+                      { kind: "label", muted: true, flex: 1, text: $state.note }
+                    ] }
+                  _ => { kind: "label", wrap: true, muted: true, text: "An administrator manages network settings." }
+                })
+            ] }
+        })
+    ] }
+}
+
+# What to write for one interface: the one being applied gets the new
+# settings; every other keeps what the file says, or its live mode.
+def net-entry [f, saved, sel, mode, addr, gw, dns] {
+  match ($f.id == $sel) {
+    true => (match $mode {
+        "static" => { mac: $f.mac, mode: "static", address: $addr, gateway: $gw, resolvers: (match $dns { "" => []; _ => ($dns | split ",") }) }
+        _ => { mac: $f.mac, mode: "dhcp" }
       })
-    let choice = $picked.choice
-    let again = ($picked.action == "preview")
-    if $again {
-      if (display-preview $choice) {
-        let decision = (gui {
-            title: "Settings"
-            width: 560
-            tick:  200
-            init:  { keep: false }
-            view: (fn [state] {
-                let current = (display-info)
-                { kind: "column", gap: 16, children: [
-                    { kind: "label", role: "title", text: (match ($current.seconds > 0) { true => "Keep this resolution?"; _ => "Previous resolution restored" }) }
-                    { kind: "label", text: $current.mode }
-                    { kind: "label", wrap: true, muted: true, text: (match ($current.seconds > 0) { true => ("Reverting in " + (str $current.seconds) + " seconds."); _ => "The preview expired without confirmation." }) }
-                    { kind: "row", children: [
-                        { kind: "button", id: "keep", label: "Keep resolution", variant: "primary", disabled: ($current.seconds == 0) }
-                        { kind: "button", id: "revert", label: "Revert / Back" }
-                      ] }
-                  ] }
-              })
-            update: (fn [state, ev] { match $ev.id { "keep" => { { keep: true, done: true } }; "revert" => { { keep: false, done: true } }; _ => $state } })
+    _ => (match ($saved | find (fn [e] { $e.mac == $f.mac })) {
+        nothing => { mac: $f.mac, mode: $f.mode }
+        $e => $e
+      })
+  }
+}
+
+# Apply a selected interface's settings live and save them for the boot.
+def net-apply [state, fields] {
+  let ifs = (net-ifaces)
+  let addr = (match $state.mode { "static" => ($fields | get ("address-" + $state.sel)); _ => "" })
+  let gw = (match $state.mode { "static" => ($fields | get ("gateway-" + $state.sel)); _ => "" })
+  let dns = (match $state.mode { "static" => ($fields | get ("resolvers-" + $state.sel)); _ => "" })
+  let cfg = (match $state.mode {
+      "static" => { mode: "static", address: $addr, gateway: $gw, resolvers: (match $dns { "" => []; _ => ($dns | split ",") }) }
+      _ => { mode: "dhcp" }
+    })
+  let index = (match (int $state.sel) { ok $n => $n; _ => 0 })
+  match (net-configure $index $cfg) {
+    ok _ => {
+      let saved = (match (sysconf-read "net") { ok $t => (match ($t | from-data | get "interfaces") { nothing => []; $l => $l }); _ => [] })
+      let entries = ($ifs | map { net-entry $it $saved $state.sel $state.mode $addr $gw $dns })
+      let note = (match (sysconf-write "net" (to-data { interfaces: $entries })) {
+          ok _ => "Applied and saved."
+          _ => "Applied, but the settings could not be saved."
+        })
+      $state | merge { addr: $addr, gw: $gw, dns: $dns, note: $note }
+    }
+    err $why => ($state | merge { addr: $addr, gw: $gw, dns: $dns, note: ("Not applied: " + $why) })
+  }
+}
+
+# The display preview: a compositor-owned deadline protects the user even
+# if this application crashes during a preview.
+def preview-flow [choice, monitor] {
+  match (display-preview $choice) {
+    true => {
+      let decision = (gui {
+          title: "Settings"
+          width: 560
+          tick:  200
+          init:  { keep: false }
+          view: (fn [state] {
+              let current = (display-info)
+              { kind: "column", gap: 16, children: [
+                  { kind: "label", role: "title", text: (match ($current.seconds > 0) { true => "Keep this resolution?"; _ => "Previous resolution restored" }) }
+                  { kind: "label", text: $current.mode }
+                  { kind: "label", wrap: true, muted: true, text: (match ($current.seconds > 0) { true => ("Reverting in " + (str $current.seconds) + " seconds."); _ => "The preview expired without confirmation." }) }
+                  { kind: "row", children: [
+                      { kind: "button", id: "keep", label: "Keep resolution", variant: "primary", disabled: ($current.seconds == 0) }
+                      { kind: "button", id: "revert", label: "Revert / Back" }
+                    ] }
+                ] }
+            })
+          update: (fn [state, ev] { match $ev.id { "keep" => { { keep: true, done: true } }; "revert" => { { keep: false, done: true } }; _ => $state } })
+        })
+      match ($decision.keep and (display-confirm)) {
+        true => (match (save ("conf/display-" + $monitor + ".msh") (to-data { mode: $choice })) {
+            ok _ => "Resolution saved for this monitor."
+            _ => "Resolution applied, but could not save your preference."
           })
-        if ($decision.keep and (display-confirm)) {
-          # Kept per monitor: another monitor keeps its own choice.
-          match (save ("conf/display-" + $info.monitor + ".msh") (to-data { mode: $choice })) {
-            ok _ => { let message = "Resolution saved for this monitor." }
-            _ => { let message = "Resolution applied, but could not save your preference." }
-          }
-        } else {
-          display-revert
-          let message = "Previous resolution restored."
-        }
-      } else {
-        let message = "The display could not apply this resolution."
+        _ => { display-revert; "Previous resolution restored." }
       }
     }
+    _ => "The display could not apply this resolution."
   }
 }
 
@@ -120,15 +220,15 @@ match (cat "conf/locale.msh") {
   _ => null
 }
 
-# Whether this session may write the system settings layer (an admin). The
-# system pane is editable only then; everyone else's conf view is read-only.
 let admin = (sysconf-admin)
 echo ("settings: admin=" + (match $admin { true => "true"; _ => "false" }))
 echo ("settings: system " + (match $admin { true => "editable"; _ => "read-only" }))
-
 echo ("settings: theme " + (match (theme-locked) { true => "locked"; _ => "editable" }))
+echo ("settings: network " + (match (net-admin) { true => "editable"; _ => "read-only" }))
 
 let running = true
+let starttab = 0
+let note = ""
 while $running {
   let cfg = match (cat "conf/font.msh") {
     ok $l => { from-data $l }
@@ -143,89 +243,66 @@ while $running {
     _ => "en-US"
   }
   let r = (gui {
-      init:  { scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), myloc: $myloc, sysloc: $sysloc, admin: $admin, action: "" }
+      init:  { tab: $starttab, scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), myloc: $myloc, sysloc: $sysloc, admin: $admin, choice: "", sel: "", mode: "dhcp", addr: "", gw: "", dns: "", note: $note, action: "", done: false }
       title: "Settings"
+      width: 640
       view: (fn [state] {
-          {
-            kind: "column"
-            gap:  20
-            children: [
-              { kind: "row", children: [{ kind: "label", flex: 1, wrap: true, role: "title", text: "Personal settings" } { kind: "button", id: "display", label: "Displays" }] }
-              { kind: "label", wrap: true, muted: true, text: "Appearance and language for your session." }
-              {
-                kind: "section"
-                children: [
-                  { kind: "label", text: "Appearance" }
-                  { kind: "label", wrap: true, muted: true, text: ("Text size · " + (str $state.scale) + "×") }
-                  {
-                    kind: "row"
-                    children: [
-                      { kind: "button", id: "smaller", label: "Smaller" }
-                      { kind: "button", id: "larger", label: "Larger" }
-                    ]
-                  }
-                  {
-                    kind: "row"
-                    children: [
-                      (match (theme-locked) {
-                          true => { kind: "label", wrap: true, muted: true, text: ("Theme: " + $state.theme + " (managed)") }
-                          _ => { kind: "button", id: "theme", label: ("Theme: " + $state.theme) }
-                        })
-                      { kind: "button", id: "contrast", label: ("Contrast: " + $state.contrast) }
-                      { kind: "button", id: "colors", label: ("Colors: " + $state.colors) }
-                    ]
-                  }
-                  {
-                    kind: "row"
-                    children: [
-                      { kind: "button", id: "myloc", label: ("Language: " + $state.myloc) }
-                      { kind: "label", wrap: true, muted: true, text: (loc-sample $state.myloc) }
-                    ]
-                  }
-                  { kind: "button", id: "apply", label: "Apply changes", variant: "primary" }
-                ]
-              }
-              {
-                kind: "section"
-                children: [
-                  { kind: "label", text: "System defaults" }
-                  { kind: "label", wrap: true, muted: true, text: ("Default language: " + $state.sysloc) }
-                  (match $state.admin {
-                      true => {
-                        kind: "row"
-                        children: [
-                          { kind: "button", id: "cycleloc", label: "Change language" }
-                          { kind: "button", id: "savesys", label: "Save system", variant: "primary" }
-                        ]
-                      }
-                      _ => { kind: "label", wrap: true, muted: true, text: "An administrator manages these settings." }
-                    })
-                ]
-              }
+          { kind: "column", gap: 12, children: [
+              { kind: "tabs", id: "tabs", items: ["Personal", "Displays", "Network"], selected: $state.tab }
+              (match $state.tab {
+                  1 => (displays-page $state)
+                  2 => (network-page $state)
+                  _ => (personal-page $state)
+                })
               { kind: "button", id: "logout", label: "Close" }
-            ]
-          }
+            ] }
         })
       update: (fn [state, ev] {
           match $ev.id {
-            "smaller" => { { scale: (match (($state.scale - 0.25) < 1.0) { true => 1.0; _ => ($state.scale - 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "larger" => { { scale: (match (($state.scale + 0.25) > 3.0) { true => 3.0; _ => ($state.scale + 0.25) }), theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "theme" => { { scale: $state.scale, theme: (match $state.theme { "dark" => "light"; _ => "dark" }), contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "contrast" => { { scale: $state.scale, theme: $state.theme, contrast: (match $state.contrast { "high" => "normal"; _ => "high" }), colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "colors" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: (match $state.colors { "cb-safe" => "default"; _ => "cb-safe" }), myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "myloc" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: (match $state.myloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }), sysloc: $state.sysloc, admin: $state.admin, action: "" } }
-            "cycleloc" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: (match $state.sysloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }), admin: $state.admin, action: "" } }
-            "display" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "display", done: true } }
-            "apply" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "apply", done: true } }
-            "savesys" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "savesys", done: true } }
-            "logout" => { { scale: $state.scale, theme: $state.theme, contrast: $state.contrast, colors: $state.colors, myloc: $state.myloc, sysloc: $state.sysloc, admin: $state.admin, action: "logout", done: true } }
+            "tabs" => (match ($ev.col >= 0) {
+                true => ($state | merge { tab: $ev.col, note: "" })
+                _ => $state
+              })
+            "smaller" => ($state | merge { scale: (match (($state.scale - 0.25) < 1.0) { true => 1.0; _ => ($state.scale - 0.25) }) })
+            "larger" => ($state | merge { scale: (match (($state.scale + 0.25) > 3.0) { true => 3.0; _ => ($state.scale + 0.25) }) })
+            "theme" => ($state | merge { theme: (match $state.theme { "dark" => "light"; _ => "dark" }) })
+            "contrast" => ($state | merge { contrast: (match $state.contrast { "high" => "normal"; _ => "high" }) })
+            "colors" => ($state | merge { colors: (match $state.colors { "cb-safe" => "default"; _ => "cb-safe" }) })
+            "myloc" => ($state | merge { myloc: (match $state.myloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }) })
+            "cycleloc" => ($state | merge { sysloc: (match $state.sysloc { "en-US" => "de-DE"; "de-DE" => "fr-FR"; "fr-FR" => "ja-JP"; _ => "en-US" }) })
+            "resolution" => ($state | merge { choice: $ev.row, note: "" })
+            "ifaces" => (match ($ev.col >= 0) {
+                true => $state
+                _ => {
+                  # Selecting an interface seeds the static fields with what it has now.
+                  let f = ((net-ifaces) | find (fn [r] { $r.id == $ev.row }))
+                  match $f {
+                    nothing => $state
+                    $r => ($state | merge { sel: $ev.row, mode: (match $r.mode { "static" => "static"; _ => "dhcp" }), addr: (match $r.address { "" => ""; _ => ($r.address + "/" + (str $r.prefix)) }), gw: $r.gateway, dns: ($r.resolvers | join ","), note: "" })
+                  }
+                }
+              })
+            "netmode" => (match ($ev.col >= 0) {
+                true => ($state | merge { mode: (match $ev.col { 1 => "static"; _ => "dhcp" }), note: "" })
+                _ => $state
+              })
+            "netapply" => (net-apply $state $ev.fields)
+            "preview" => (act $state "preview")
+            "apply" => (act $state "apply")
+            "savesys" => (act $state "savesys")
+            "logout" => (act $state "logout")
             _ => $state
           }
         })
     })
   let action = $r.action
+  let starttab = $r.tab
+  let note = ""
   match $action {
-    "display" => { display-settings }
+    "preview" => {
+      let info = (display-info)
+      let note = (preview-flow $r.choice $info.monitor)
+    }
     "apply" => {
       save "conf/font.msh" (to-data { scale: $r.scale, theme: $r.theme, contrast: $r.contrast, colors: $r.colors })
       sessionfont (cat "conf/font.msh")?
@@ -233,19 +310,13 @@ while $running {
       sessionlocale $r.myloc
     }
     "savesys" => {
-      # Write the system default locale (confcmds logs the outcome: an
-      # admin's view is read-write and it saves, a plain user's is read-only
-      # and it is refused). The result is discarded — inside this loop mshl
-      # would drop an echo's output anyway.
+      # Write the system default locale (confcmds logs the outcome).
       sysconf-write "locale" (to-data { default: $r.sysloc })
     }
-    # "close" just ends the settings window; the session (and its appearance)
-    # lives on — reverting is the top bar's job at log-out, not ours.
     _ => null
   }
-  # Reopen only to re-render after a change (apply/save re-lay the window at
-  # the new look); "close" and the red traffic-light (which return with no
-  # action) end the app.
-  let running = (match $action { "apply" => true; "savesys" => true; "display" => true; _ => false })
+  # Reopen only to re-render after a change; "close" and the red
+  # traffic-light (which return with no action) end the app.
+  let running = (match $action { "apply" => true; "savesys" => true; "preview" => true; _ => false })
 }
 "gui: shell exited"

@@ -7,7 +7,9 @@
   budget: { user: 8mb }
   give: [
     { tag: device, device: net }
+    { tag: device, device: net, index: 1, optional: true }
     { tag: buf, shm: 1 }
     { file: conf/net-cluster.msh }
+    { tag: conf, fs: conf/app, ro: true, optional: true }
   ]
 }

@@ -10,5 +10,6 @@
     { tag: device, device: net, index: 1, optional: true }
     { tag: buf, shm: 1 }
     { file: conf/net.msh }
+    { tag: conf, fs: conf/app, ro: true, optional: true }
   ]
 }

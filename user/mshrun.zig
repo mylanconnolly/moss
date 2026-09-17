@@ -65,6 +65,9 @@ var has_console = false;
 
 // The interpreter's memory: an arena for the whole run (a script is one
 // evaluation, statement by statement) and a pool for what it binds.
+// The arena a top-level statement evaluates in — a whole `gui { … }`
+// program with its AST lives here for as long as its window is open;
+// 1 MiB held a 10 KB settings script and not a 19 KB one (2026-09-17).
 var heap_line: [1 << 20]u8 = undefined;
 var line_fba: std.heap.FixedBufferAllocator = undefined;
 var box_pool: mosslib.pool.Pool(256, 2048) = .{};
@@ -284,7 +287,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     workcmds_on = true;
     workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, init_cap);
     workcmds.log_h = log_h;
-    if (setup.has(.net)) net = netcmds.Net.init(setup.cap(.net));
+    // Always wired: `net-ifaces` answers an empty list without a view and
+    // `net-admin` false without the control cap, so a settings page can
+    // ask before it shows anything; the socket commands fail to attach.
+    net = netcmds.Net.init(if (setup.has(.net)) setup.cap(.net) else 0);
     if (setup.has(.net_control)) if (net) |*n| {
         n.control = setup.cap(.net_control);
     };
@@ -292,6 +298,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (setup.has(.conf)) confcmds.setup(setup.cap(.conf), log_h);
     @import("clipboard.zig").authority = setup.cap(.clip);
     @import("documentlaunch.zig").setup(setup.cap(.picker), init_cap, setup.cap(.display));
+    @import("documentlaunch.zig").log_h = log_h;
     @import("appsclient.zig").authority = init_cap;
     guicmds.output_control = setup.cap(.display_control);
     if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h, setup.secret(), if (setup.has(.font)) setup.cap(.font) else 0, fab_chan);

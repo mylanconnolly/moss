@@ -69,7 +69,11 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64)
 
 // ------------------------------------------------------------ the service
 
-const max_views = 32;
+// 64 since 2026-09-17: a graphical session's apps, its document handoffs
+// (a view each) and the services with settings views reached 32 in the
+// guishell drill once the network unit held one too, and the next
+// derive — a document handoff — failed with no word said.
+const max_views = 64;
 const max_boot = 40; // etc/, conf/, and every img/ entry
 const max_fds = 8;
 const max_path = 256;
@@ -1182,7 +1186,12 @@ fn doDerive(v: *View, caller: u64, path_off: u64, path_len: u64, want_ro: bool) 
     // Find a free view slot (badge = index).
     var slot: usize = 0;
     while (slot < max_views and views[slot].used) slot += 1;
-    if (slot == max_views) return fail(.no_space);
+    if (slot == max_views) {
+        // Say so: a derive that fails here surfaces far away (a document
+        // handoff that never happens) with nothing in the log otherwise.
+        _ = usys.log(glog, "fssvc: view table full; derive refused");
+        return fail(.no_space);
+    }
     var nv = &views[slot];
 
     switch (res) {

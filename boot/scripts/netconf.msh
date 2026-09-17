@@ -33,9 +33,14 @@ if ($net0.lease <= 0) { (fail "net0 has no lease")? }
 echo ("netconf: net0 " + $net0.address + "/" + (str $net0.prefix) + " via " + $net0.gateway + " mac " + $net0.mac + " lease " + (str $net0.lease) + "s")
 let net1 = (wait-up)
 if (not $net1.up) { (fail "net1 got no lease at boot")? }
-if ($net1.address != "10.0.3.15") { (fail ("net1 leased address " + $net1.address))? }
-if ($net1.gateway != "10.0.3.2") { (fail ("net1 leased gateway " + $net1.gateway))? }
-echo ("netconf: net1 leased " + $net1.address + "/" + (str $net1.prefix) + " via " + $net1.gateway + " lease " + (str $net1.lease) + "s")
+if ($net1.address != "10.0.3.15") { (fail ("net1 address at boot " + $net1.address))? }
+if ($net1.gateway != "10.0.3.2") { (fail ("net1 gateway at boot " + $net1.gateway))? }
+# A second boot of this disk finds the settings this run writes at the
+# end: net1 static from the file, not leased.
+match $net1.mode {
+  "static" => { echo "netconf: net1 static from the persisted settings" }
+  _ => { echo ("netconf: net1 leased " + $net1.address + "/" + (str $net1.prefix) + " via " + $net1.gateway + " lease " + (str $net1.lease) + "s") }
+}
 
 # The wire echo on each segment: routing by prefix picks the NIC.
 match (connect 10.0.2.100 9000) {
@@ -94,4 +99,11 @@ let relit = (wait-up)
 if (not $relit.up) { (fail "net1 got no second lease")? }
 if ($relit.mode != "dhcp") { (fail ("net1 mode " + $relit.mode))? }
 echo ("netconf: net1 leased again " + $relit.address)
+
+# Persist a static net1 the way Settings does (the file the service reads
+# at boot), so the second run of this disk finds it.
+match (save "net.msh" (to-data { interfaces: [{ mac: $relit.mac, mode: "static", address: "10.0.3.15/24", gateway: "10.0.3.2" }] })) {
+  ok _ => { sync; echo "netconf: settings written" }
+  err $e => { (fail ("save settings " + $e))? }
+}
 echo "netconf: done"

@@ -500,13 +500,13 @@ pub const Host = struct {
 
 /// Commands and keywords defined by the language itself.
 pub const builtin_names = [_][]const u8{
-    "echo",      "len",     "first",     "last",     "reverse",    "where",   "sort-by",   "select",
-    "get",       "lines",   "keys",      "let",      "def",        "fn",      "if",        "for",
-    "while",     "match",   "try",       "use",      "not",        "and",     "or",        "true",
-    "false",     "null",    "else",      "in",       "ok",         "err",     "map",       "filter",
-    "reduce",    "any",     "all",       "find",     "range",      "join",    "split",     "str",
-    "int",       "float",   "round",     "floor",    "ceil",       "type",    "shape",     "check",
-    "signature", "to-data", "from-data", "to-bytes", "from-bytes", "to-json", "from-json",
+    "echo",   "len",       "first",   "last",      "reverse",  "where",      "sort-by", "select",
+    "get",    "merge",     "lines",   "keys",      "let",      "def",        "fn",      "if",
+    "for",    "while",     "match",   "try",       "use",      "not",        "and",     "or",
+    "true",   "false",     "null",    "else",      "in",       "ok",         "err",     "map",
+    "filter", "reduce",    "any",     "all",       "find",     "range",      "join",    "split",
+    "str",    "int",       "float",   "round",     "floor",    "ceil",       "type",    "shape",
+    "check",  "signature", "to-data", "from-data", "to-bytes", "from-bytes", "to-json", "from-json",
 };
 
 /// The builtins' signatures: what each takes and answers, checked at
@@ -543,6 +543,7 @@ const builtin_sigs = [_]BuiltinSig{
     .{ .name = "sort-by", .sig = .{ .params = &.{.{ .name = "column", .shape = .string }}, .rest = .{ .word = "--desc" }, .input = .{ .required = .table }, .ret = .table } },
     .{ .name = "select", .sig = .{ .params = &.{.{ .name = "column", .shape = .string }}, .rest = .string, .input = .{ .required = S.table_or_record }, .ret = S.table_or_record } },
     .{ .name = "get", .sig = .{ .params = &.{.{ .name = "field", .shape = .string }}, .input = .{ .required = .any }, .ret = .any } },
+    .{ .name = "merge", .sig = .{ .params = &.{.{ .name = "changes", .shape = .record }}, .input = .{ .required = .record }, .ret = .record } },
     .{ .name = "keys", .sig = .{ .input = .{ .required = S.table_or_record }, .ret = S.strings } },
     .{ .name = "lines", .sig = .{ .params = &.{S.text_param}, .input = .{ .optional = .string }, .ret = S.strings } },
     .{ .name = "to-data", .sig = .{ .params = &.{S.value_param}, .input = S.in_any, .ret = .string } },
@@ -1985,6 +1986,31 @@ pub const Interp = struct {
         }
         if (eql(u8, name, "get")) {
             return try self.fieldOf(input.?, args[0].str);
+        }
+        if (eql(u8, name, "merge")) {
+            // A record with the changes laid over the input: the input's
+            // keys keep their order, a changed key keeps its place with the
+            // new value, a new key goes on the end. What a state update in
+            // a view/update program writes instead of every field again.
+            const base = input.?.record;
+            const over = args[0].record;
+            var extra: usize = 0;
+            for (over.keys) |k| if (base.get(k) == null) {
+                extra += 1;
+            };
+            const keys = try self.arena.alloc([]const u8, base.keys.len + extra);
+            const vals = try self.arena.alloc(Value, base.keys.len + extra);
+            for (base.keys, 0..) |k, i| {
+                keys[i] = k;
+                vals[i] = over.get(k) orelse base.vals[i];
+            }
+            var n = base.keys.len;
+            for (over.keys, 0..) |k, i| if (base.get(k) == null) {
+                keys[n] = k;
+                vals[n] = over.vals[i];
+                n += 1;
+            };
+            return .{ .record = .{ .keys = keys, .vals = vals } };
         }
         if (eql(u8, name, "keys")) {
             const names = switch (input.?) {
@@ -4894,4 +4920,13 @@ test "nothing is the absent value in code, as null is in data" {
     try expectOut(it, "match 1 { nothing => \"absent\"; $x => \"present\" }", "present\n");
     try expectOut(it, "match nothing { null => \"absent\"; _ => \"present\" }", "absent\n");
     try expectOut(it, "(nothing == null)", "true\n");
+}
+
+test "merge lays changes over a record, keeping its key order" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    try expectOut(it, "{ a: 1, b: 2 } | merge { b: 3, c: 4 } | to-data", "{a: 1, b: 3, c: 4}\n");
+    try expectOut(it, "{ a: 1, b: 2 } | merge { a: 1 } | to-data", "{a: 1, b: 2}\n");
 }

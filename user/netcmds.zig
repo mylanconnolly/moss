@@ -477,6 +477,9 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // configuration live (the control cap is the authority; without it
     // the command answers `err not allowed`).
     if (is(u8, name, "net-ifaces")) return .{ .ret = .list };
+    // `net-admin`: whether this program may configure interfaces (it holds
+    // the control cap) — a settings page shows its fields only then.
+    if (is(u8, name, "net-admin")) return .{ .ret = .bool };
     if (is(u8, name, "net-configure")) return .{ .params = &.{ .{ .name = "index", .shape = .int }, .{ .name = "config", .shape = .record } }, .ret = .result };
     return null;
 }
@@ -565,6 +568,7 @@ fn prefixed(text: []const u8, out: *[16]u8, prefix: *u8) bool {
 
 fn ifaceRows(n: *Net, it: *mshl.Interp) mshl.Error!Value {
     const a = it.arena;
+    if (n.chan == 0) return .{ .list = &.{} };
     if (!n.attach()) return it.fail("net-ifaces: cannot attach a buffer to the network view", .{});
     const count = switch (usys.callTyped(shared.NetReq, shared.NetResp, n.chan, .iface_count, 0)) {
         .ok => |rep| switch (rep) {
@@ -585,7 +589,14 @@ fn ifaceRows(n: *Net, it: *mshl.Interp) mshl.Error!Value {
         var mb: [18]u8 = undefined;
         const mac = std.fmt.bufPrint(&mb, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ st.mac[0], st.mac[1], st.mac[2], st.mac[3], st.mac[4], st.mac[5] }) catch "";
         const up = st.flags & shared.IfaceStatus.flag_up != 0;
+        const cells = try a.alloc(Value, 4);
+        cells[0] = .{ .str = try a.dupe(u8, st.nameSlice()) };
+        cells[1] = .{ .str = if (up and st.mode == .dhcp) "DHCP" else if (st.mode == .dhcp) "DHCP (no lease)" else if (st.mode == .static) "Static" else "Off" };
+        cells[2] = .{ .str = if (up and st.ip4 != 0) try addrText(a, v4Bytes(st.ip4)) else "" };
+        cells[3] = .{ .str = if (st.gw4 != 0) try addrText(a, v4Bytes(st.gw4)) else "" };
         row.* = try mshl.toValue(a, .{
+            .id = try std.fmt.allocPrint(a, "{d}", .{i}),
+            .cells = Value{ .list = cells },
             .index = @as(i64, @intCast(i)),
             .name = try a.dupe(u8, st.nameSlice()),
             .mac = try a.dupe(u8, mac),
@@ -660,6 +671,7 @@ fn configureIface(n: *Net, it: *mshl.Interp, index: u64, rec: mshl.Record) mshl.
 pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     const is = std.mem.eql;
     if (is(u8, name, "net-ifaces")) return try ifaceRows(n, it);
+    if (is(u8, name, "net-admin")) return Value{ .bool = n.control != 0 };
     if (is(u8, name, "net-configure")) {
         if (args.len < 2 or args[0] != .int or args[0].int < 0 or args[1] != .record) return it.fail("net-configure: INDEX and a configuration record expected", .{});
         return try configureIface(n, it, @intCast(args[0].int), args[1].record);
@@ -815,4 +827,4 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
     return null;
 }
 
-pub const command_names = [_][]const u8{ "connect", "listen", "accept", "send", "recv", "close", "status", "udp-bind", "udp-send", "udp-recv", "resolve", "net-ifaces", "net-configure" };
+pub const command_names = [_][]const u8{ "connect", "listen", "accept", "send", "recv", "close", "status", "udp-bind", "udp-send", "udp-recv", "resolve", "net-ifaces", "net-configure", "net-admin" };

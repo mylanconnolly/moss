@@ -34,7 +34,15 @@ const trace = @import("trace.zig");
 
 const max_channels = 64;
 const max_notifications = 64;
-const max_shms = 64;
+/// Shared-memory objects, machine-wide. A desktop is a hungry one: the
+/// scanout, a surface per window, a font and locale buffer per GUI
+/// client, a filesystem-view buffer per attach, a document buffer per
+/// handoff, the network service's. 64 ran out on 2026-09-17 with
+/// Settings, Files, Editor and a dialog open beside the network unit,
+/// and the object refused was a document handoff's; 128 now, and the
+/// refusal is logged with the holders. (Each entry carries a page table
+/// sized for the largest buffer; a leaner shape is noted debt.)
+const max_shms = 128;
 /// The largest shared buffer, in pages: 2250 (about 8.8 MB) — a full
 /// scanout surface at 1920x1200x4 (the compositor's framebuffer, and a
 /// maximized window there); before that a program stage — msh, with every
@@ -134,6 +142,7 @@ pub const Shm = struct {
 var channels: [max_channels]Channel = @splat(.{});
 var notifications: [max_notifications]Notification = @splat(.{});
 var shms: [max_shms]Shm = @splat(.{});
+var shm_full_dumped = false;
 var badges: [max_badges]Badge = @splat(.{});
 var objs_lock: lock.SpinLock = .{};
 var shm_lock: lock.SpinLock = .{};
@@ -144,7 +153,13 @@ var timers_lock: lock.SpinLock = .{};
 /// Shared-memory pages are charged here for now; per-domain accounting for
 /// objects that outlive their creator arrives with real object lifetimes in
 /// Phase 5.
-pub var shm_account: kalloc.Account = .{ .limit = 64 << 20 };
+/// Every shared buffer in the system draws on this one account: the
+/// scanout, every window's surface, font, document and network buffers.
+/// 64 MB was the 2026-09-10 bump for a 1280x1024 scanout; a full desktop
+/// (Settings, Files, Editor, a dialog, the network service) sat at its
+/// edge on 2026-09-17 and a document handoff's buffer was the one refused
+/// — silently, until the refusal below said so. 128 MB now.
+pub var shm_account: kalloc.Account = .{ .limit = 128 << 20 };
 
 pub const Error = error{NoObjects};
 
@@ -783,12 +798,21 @@ pub fn createShmBy(npages: u32, creator: []const u8) ?*Shm {
                 const page = kalloc.allocPage(&shm_account) catch {
                     for (0..i) |j| kalloc.freePage(&shm_account, mem.physToPtr([*]u8, s.pages[j]));
                     s.* = .{};
+                    // Say so, with the ledger: a refused buffer surfaces far
+                    // away (a document that will not open) with no other trace.
+                    log.info("shm: refused {d} pages for {s}: account {d}/{d} KB", .{ npages, creator, shm_account.balance() / 1024, shm_account.limit / 1024 });
                     return null;
                 };
                 s.pages[i] = mem.virtToPhys(@intFromPtr(page));
             }
             return s;
         }
+    }
+    // No free object: say so, and once, who holds them all.
+    log.info("shm: refused {d} pages for {s}: all {d} objects in use", .{ npages, creator, max_shms });
+    if (!shm_full_dumped) {
+        shm_full_dumped = true;
+        dumpShms();
     }
     return null;
 }

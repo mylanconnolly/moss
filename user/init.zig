@@ -633,7 +633,10 @@ fn giveOne(u: *Unit, g: Give) bool {
             }
             const path = g.name;
             if (g.mkdir and !fsc.fsMkdir(chan, buf, path)) return false;
-            const view = fsc.fsDerive(chan, buf, path, g.ro) orelse return false;
+            const view = fsc.fsDerive(chan, buf, path, g.ro) orelse {
+                logLine("init: view derive failed: ", path);
+                return false;
+            };
             const ok = boot.giveCap(u.chan_b, g.tag, view);
             _ = usys.capDrop(view);
             return ok;

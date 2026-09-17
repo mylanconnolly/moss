@@ -149,27 +149,49 @@ fn offerDocument(chan: u64, sender: *Client, parent_view: u64, name_len: u64) p.
     if (next_badge == std.math.maxInt(u64)) return failure(error.TemporaryFileBusy);
     const badge = next_badge;
     next_badge += 1;
-    const offered_client = allocate(badge) orelse return failure(error.TemporaryFileBusy);
+    const offered_client = allocate(badge) orelse {
+        _ = usys.log(glog, "filepicker: offer refused: no client slot");
+        return failure(error.TemporaryFileBusy);
+    };
     var accepted = false;
     defer if (!accepted) {
         release(badge);
     };
     offered_client.selected_view = parent_view;
     transferred = true;
+    // Each refusal below says why: the client sees one generic message,
+    // and a quota (a buffer per held document) surfaces only here.
     const sh = usys.shmCreate(shared.fs_buf_pages);
-    if (sh.err != .ok) return failure(error.Unavailable);
+    if (sh.err != .ok) {
+        var l: [96]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&l, "filepicker: offer refused: no document buffer ({t})", .{sh.err}) catch "filepicker: offer refused: no document buffer");
+        return failure(error.Unavailable);
+    }
     defer _ = usys.capDrop(sh.data[0]);
     const mapped = usys.shmMap(sh.data[0]);
-    if (mapped.err != .ok) return failure(error.Unavailable);
+    if (mapped.err != .ok) {
+        _ = usys.log(glog, "filepicker: offer refused: cannot map the document buffer");
+        return failure(error.Unavailable);
+    }
     offered_client.view_va = mapped.data[0];
     const attached = switch (usys.callTyped(shared.FsReq, shared.FsResp, parent_view, .attach_buf, sh.data[0])) {
         .ok => |rep| rep == .ok,
         .err => false,
     };
-    if (!attached) return failure(error.Unavailable);
-    _ = file.load(parent_view, documentBuffer(offered_client), basename, &scratch) catch |err| return failure(err);
+    if (!attached) {
+        _ = usys.log(glog, "filepicker: offer refused: the view would not take the buffer");
+        return failure(error.Unavailable);
+    }
+    _ = file.load(parent_view, documentBuffer(offered_client), basename, &scratch) catch |err| {
+        var l: [96]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&l, "filepicker: offer refused: load failed ({s})", .{@errorName(err)}) catch "filepicker: offer refused: load failed");
+        return failure(err);
+    };
     const minted = usys.chanMint(chan, badge);
-    if (minted.err != .ok) return failure(error.Unavailable);
+    if (minted.err != .ok) {
+        _ = usys.log(glog, "filepicker: offer refused: cannot mint the document endpoint");
+        return failure(error.Unavailable);
+    }
     offered_client.held_cap = minted.data[1];
     offered_client.sender = sender.badge;
     @memcpy(offered_client.path[0..basename.len], basename);

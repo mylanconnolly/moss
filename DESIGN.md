@@ -3340,6 +3340,55 @@ explicit ones, so the drills' `::1` (dnsd) still answers first. The
 `netconf` drill sees both NICs leased at boot, replaces the second's
 lease with a static address, takes it down, and leases it again.
 
+**Network settings, stage 3: persisted, and in Settings (as built,
+2026-09-17).** The last three stages of the arc landed as one, since
+the persistence is only exercised by the page that writes it. The
+system boot's network unit reads `conf/app/net.msh` over an optional
+`conf` view (optional: a boot without a disk skips it), the drills' net
+unit too; the session manager hands every GUI session the network
+service's view, for the status, and an administrator's session the
+control endpoint — the same admin bit that makes the system settings
+writable — and Settings takes both as optional session caps, so the
+same unit file serves alice and bob. Settings itself is tabbed now,
+Personal, Displays and Network, over the `tabs` widget; the Displays
+button became a tab and its preview flow follows the window as an
+action. The Network tab lists the interfaces (`net-ifaces`, whose rows
+carry list cells now), shows the selected one's MAC, lease and
+resolvers, switches DHCP / Static with a second tab strip as a
+segmented control, seeds the static fields from the live address
+(field ids carry the interface index, so a new selection reseeds), and
+Apply runs `net-configure` live then writes every interface's entry
+with `sysconf-write`, synced. The `netconf` drill gained a disk and a
+second run: the script writes the file the way Settings does and the
+second boot brings net1 up static from it. The `guishell` drill applies
+a static address as alice (the service reconfigures, `sysconf: saved
+net`); `guishellro` checks bob has no Apply.
+
+Three ceilings were hit on the way, each silent until made to speak.
+The system init's user budget (64 MB) ran out once every GUI boot also
+ran the network unit, refusing the next app's spawn (96 MB now). The
+filesystem service's derived-view table (32) was not the one, but it
+logs when full now (64). The kernel's table of shared-memory objects
+(64, machine-wide: the scanout, a surface per window, a font and
+locale buffer per GUI client, a buffer per view attach and per document
+handoff, the network service's) was: a document handoff's buffer was
+refused with a bare `no_space` and the Files window's note was the only
+trace — the refusal is logged with the ledger and a one-time dump of
+the holders now, the table is 128, and the byte account went to 128 MB
+beside it. The refusal surfaced far from its cause through three
+processes; the document handoff logs its reason now, the broker logs
+each of its refusal points, and a list logs every click with the two
+clocks and rows a double-click compares (that log found the click was
+fine and the refusal was elsewhere). Also learned: a script's `echo`
+inside a GUI `update` is discarded, so a diagnostic there says nothing;
+log from the Zig command instead. And mshl gained `merge` — `$state |
+merge { tab: 2 }` — because a state record with sixteen fields rebuilt
+in every event arm overflowed the statement arena (1 MiB) before it
+overflowed the reader — and doubling that arena grew every mshrun's
+image past the smallest worker and unit budgets (4 MB), which refused
+spawns across four drills; the smaller script was the fix, not the
+bigger arena.
+
 **Quit before Force Quit (same day).** A task manager that can only
 kill is a blunt one: an editor with unsaved work deserves to be asked.
 The compositor gained `close_titled`: the window with that title has its

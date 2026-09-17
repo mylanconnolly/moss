@@ -30,6 +30,8 @@
     { tag: display_control, unit: compositor-ptr, control: true }
     { tag: font, unit: fontsvc }
     { tag: locale, unit: localesvc }
+    { tag: net, netview: net-cluster, optional: true }
+    { tag: net_control, unit: net-cluster, control: true, optional: true }
     { tag: init, self: true }
   ]
 }

@@ -210,15 +210,18 @@ its own addresses and neighbour cache, routes by prefix, answers
 client per interface — discover, offer, request, ack, renewal,
 rebinding, expiry, the lease's router and resolvers; DHCP the default
 for every interface (QEMU's user network serves it and hands out
-10.0.2.15 first, so nothing existing moved). (3) persistence: `conf/app/net.msh` written by Settings through
-the admin-gated `sysconf-write`, read by the service at boot over a
-`conf` view, pushed live through configure. (4) the Settings tab —
-tabs across the top (Personal, Displays, Network), the Displays button
-folded in — with an interface card per NIC, a DHCP/Static choice, the
-fields, Apply and Revert; read-only for a non-administrator. (5) a
-guishell step that drives the tab. Out of scope, said so: IPv6
-autoconfiguration (router advertisements), link state (virtio-net has
-none), routing metrics.
+10.0.2.15 first, so nothing existing moved). (3) ✅ persistence:
+`conf/app/net.msh` written by Settings through the admin-gated
+`sysconf-write`, read by the service at boot over an optional `conf`
+view, pushed live through configure; the netconf drill's second run
+reads it back. (4) ✅ the Settings tab — Personal, Displays, Network
+across the top, the Displays button folded in — the interface list, a
+DHCP/Static switch, the fields, Apply; read-only for a non-administrator
+(the control endpoint reaches only an administrator's session). (5) ✅
+guishell applies a static address as alice, guishellro checks bob has
+no Apply. Out of scope, said so: IPv6 autoconfiguration (router
+advertisements), link state (virtio-net has none), routing metrics, a
+Revert button (the fields reseed on reselecting the interface).
 
 **Activity follow-ons (2026-09-17).** All landed: the session's units
 with per-unit CPU history, the machine's totals, an administrator's
@@ -1530,6 +1533,17 @@ supervises), and memory history per unit beside the CPU one.
   pointer mapping and resident bars. Output control uses a separate boot
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
+- ✅ **Network settings, stage 3: persisted, and in Settings**
+  (2026-09-17): Settings is tabbed (Personal, Displays, Network); the
+  Network tab lists interfaces, switches DHCP/Static, edits the static
+  fields and applies live + saves `conf/app/net.msh`; the service reads
+  it at boot over an optional `conf` view; the session manager hands
+  sessions the service's view and administrators its control endpoint.
+  Drills: netconf's second run, guishell (alice applies), guishellro
+  (bob read-only). Found: three silent ceilings — the system init's user
+  budget (64→96 MB), the kernel's shared-memory object table (64→128,
+  now logged with holders), the filesystem's view table (logged) — and
+  that `echo` inside a GUI `update` is discarded. mshl gained `merge`.
 - ✅ **Network settings, stage 2: DHCP** (2026-09-17): a DHCPv4 client
   per interface (discover/offer/request/ack, T1 renew, T2 rebind,
   expiry, backoff on the tick), replies taken before the socket layer,

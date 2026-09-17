@@ -8,10 +8,23 @@ const Document = @import("document.zig").Client;
 var picker: u64 = 0;
 var supervisor: u64 = 0;
 var display: u64 = 0;
+/// The host's log: a refused handoff says why here, since the message
+/// the window shows is not in any log.
+pub var log_h: u64 = 0;
 pub fn setup(p: u64, init: u64, screen: u64) void {
     picker = p;
     supervisor = init;
     display = screen;
+}
+fn refused(why: []const u8) []const u8 {
+    var l: [128]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "handoff: refused: {s}", .{why}) catch "handoff: refused");
+    return why;
+}
+fn failed(e: anyerror) []const u8 {
+    var l: [128]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "handoff: refused ({s}): {s}", .{ @errorName(e), message(e) }) catch "handoff: refused");
+    return message(e);
 }
 fn message(err: anyerror) []const u8 {
     return switch (err) {
@@ -32,11 +45,11 @@ pub fn open(chan: u64, buf: [*]u8, path: []const u8) ?[]const u8 {
     if (name.len == 0) return "Choose a regular text file.";
     // Derivation preserves inherited read-only and revocation restrictions.
     // Its independent buffer also prevents interference with Files' listing.
-    const selected_view = fs.fsDerive(chan, buf, parent, false) orelse return "This folder is no longer available.";
+    const selected_view = fs.fsDerive(chan, buf, parent, false) orelse return refused("This folder is no longer available.");
     defer _ = usys.capDrop(selected_view);
-    var sender = Document.init(picker) catch |e| return message(e);
+    var sender = Document.init(picker) catch |e| return failed(e);
     defer sender.deinit();
-    const ticket = sender.offer(selected_view, name) catch |e| return message(e);
+    const ticket = sender.offer(selected_view, name) catch |e| return failed(e);
     var committed = false;
     defer if (!committed) sender.cancelOffer(ticket);
     const name_words = shared.strToWords("medit");
@@ -47,8 +60,8 @@ pub fn open(chan: u64, buf: [*]u8, path: []const u8) ?[]const u8 {
         },
         .err => false,
     };
-    if (!launched) return "Editor could not start. Close an application and try again.";
-    sender.enqueue(ticket) catch |e| return message(e);
+    if (!launched) return refused("Editor could not start. Close an application and try again.");
+    sender.enqueue(ticket) catch |e| return failed(e);
     committed = true;
     if (display != 0) {
         const title = shared.strToWords("Editor");

@@ -108,10 +108,25 @@ the control view, minted at start and handed to the supervisor with
 A session's Settings gets it from the session manager only for an
 administrator. In the language: `net-ifaces` lists the interfaces as
 records and `net-configure INDEX { mode, address, gateway, address6,
-gateway6, resolvers }` applies one. The `netconf` drill boots two NICs
-on two user networks, sees both leased, configures the second
-statically, echoes over both segments, takes it down, and leases it
-again.
+gateway6, resolvers }` applies one; `net-admin` says whether the program
+may. The `netconf` drill boots two NICs on two user networks, sees both
+leased, configures the second statically, echoes over both segments,
+takes it down, leases it again, and writes the settings file; a second
+boot of its disk reads the file and brings the second NIC up static.
+
+**Settings.** The desktop's Settings app has a Network tab: every
+interface with its mode, address and gateway; selecting one shows its
+MAC, lease and resolvers, a DHCP / Static switch, and for Static the
+address (`a.b.c.d/prefix`), gateway and resolver fields, seeded with
+what the interface has now. Apply configures the interface live over
+the control endpoint and saves every interface's entry to
+`conf/app/net.msh` through the admin-gated `sysconf-write`, synced.
+The session manager hands every GUI session the service's view (for
+the status) and only an administrator's session the control endpoint;
+anyone else sees the tab read-only, with "An administrator manages
+network settings." The `guishell` drill applies a static address as
+alice and reads the service's reconfiguration and the save; the
+`guishellro` drill checks bob sees no Apply.
 
 ### Network views
 

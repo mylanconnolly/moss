@@ -130,6 +130,15 @@ failing the unit; the program sees the tag absent. A service's control
 endpoint (the compositor's `display_control`, the network service's
 `net_control`) is minted by the service, handed to init with `ready`,
 and given on with `{ tag: …, unit: …, control: true }`.
+Inside a GUI program's `update`, `echo` output is discarded (the runtime
+drops the interpreter's output between events), so a diagnostic there
+says nothing: log from the Zig command the script calls, or `echo`
+after `gui` returns. Machine-wide ceilings a desktop can reach, each
+logged when hit: the kernel's shared-memory objects (`max_shms`, 128)
+and bytes (`shm_account`, 128 MB), the filesystem's derived views
+(`max_views`, 64), a domain's mapping windows (`max_mappings`), and
+the system init's user budget (`root.zig`, 96 MB) — a spawn refusal
+prints the account chain; a refused shared buffer prints the ledger.
 A unit's `grant: [introspect]` (the machine's ledger, `domain_list`) is
 honoured by the system init as written and by a session init only for
 an administrator's session; a non-admin session logs the refusal and the
