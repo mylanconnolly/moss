@@ -7,33 +7,86 @@ pub const uwidth = @import("medit/uwidth.zig");
 pub const max_bytes = 256 * 1024;
 pub const max_lines = 8192;
 const max_history = 64;
-const history_bytes = 2 * 1024 * 1024;
+pub const history_bytes = 2 * 1024 * 1024;
 pub const Movement = enum { left, right, up, down, word_left, word_right, line_start, line_end, document_start, document_end };
-const Snapshot = struct { text: []u8, cursor: Pos, anchor: ?Pos };
+const Snapshot = struct { text: []u8, cursor: Pos, anchor: ?Pos, seq: u64 = 0 };
+
+/// A history budget several editors share. An editor on its own bounds
+/// its histories at `history_bytes`; editors attached to one Budget are
+/// bounded together, and when the sum exceeds the limit the oldest
+/// snapshot in the whole set goes, whichever editor holds it — a tab
+/// left open long ago gives way to the one being edited now, and a
+/// dozen tabs cannot hold a dozen budgets against one heap.
+pub const Budget = struct {
+    limit: usize = history_bytes,
+    bytes: usize = 0,
+    seq: u64 = 0,
+    editors: ?*Editor = null,
+
+    /// Drop the oldest snapshot of any attached editor. False when there
+    /// is nothing left to drop, or the oldest is the one just recorded.
+    fn evictOldest(self: *Budget, keep: u64) bool {
+        var oldest: ?*History = null;
+        var oldest_ed: *Editor = undefined;
+        var e = self.editors;
+        while (e) |ed| : (e = ed.budget_next) {
+            for ([_]*History{ &ed.undo_history, &ed.redo_history }) |h| {
+                if (h.len == 0) continue;
+                if (oldest == null or h.items[0].seq < oldest.?.items[0].seq) {
+                    oldest = h;
+                    oldest_ed = ed;
+                }
+            }
+        }
+        const h = oldest orelse return false;
+        if (h.items[0].seq == keep) return false;
+        h.evictFront(oldest_ed);
+        return true;
+    }
+};
+
 const History = struct {
     items: [max_history]Snapshot = undefined,
     len: usize = 0,
     bytes: usize = 0,
-    fn clear(self: *History, gpa: std.mem.Allocator) void {
-        for (self.items[0..self.len]) |s| gpa.free(s.text);
+    fn clear(self: *History, ed: *Editor) void {
+        for (self.items[0..self.len]) |s| ed.gpa.free(s.text);
+        if (ed.budget) |b| b.bytes -= self.bytes;
         self.len = 0;
         self.bytes = 0;
     }
-    fn push(self: *History, gpa: std.mem.Allocator, s: Snapshot) void {
-        while (self.len > 0 and (self.len == max_history or self.bytes + s.text.len > history_bytes)) {
-            self.bytes -= self.items[0].text.len;
-            gpa.free(self.items[0].text);
-            std.mem.copyForwards(Snapshot, self.items[0 .. self.len - 1], self.items[1..self.len]);
-            self.len -= 1;
-        }
-        self.items[self.len] = s;
-        self.len += 1;
-        self.bytes += s.text.len;
+    fn evictFront(self: *History, ed: *Editor) void {
+        self.bytes -= self.items[0].text.len;
+        if (ed.budget) |b| b.bytes -= self.items[0].text.len;
+        ed.gpa.free(self.items[0].text);
+        std.mem.copyForwards(Snapshot, self.items[0 .. self.len - 1], self.items[1..self.len]);
+        self.len -= 1;
     }
-    fn pop(self: *History) Snapshot {
+    fn push(self: *History, ed: *Editor, snap: Snapshot) void {
+        var s = snap;
+        while (self.len == max_history) self.evictFront(ed);
+        if (ed.budget) |b| {
+            s.seq = b.seq;
+            b.seq += 1;
+            self.items[self.len] = s;
+            self.len += 1;
+            self.bytes += s.text.len;
+            b.bytes += s.text.len;
+            while (b.bytes > b.limit and b.evictOldest(s.seq)) {}
+        } else {
+            while (self.len > 0 and self.bytes + s.text.len > history_bytes) self.evictFront(ed);
+            s.seq = ed.seq;
+            ed.seq += 1;
+            self.items[self.len] = s;
+            self.len += 1;
+            self.bytes += s.text.len;
+        }
+    }
+    fn pop(self: *History, ed: *Editor) Snapshot {
         self.len -= 1;
         const s = self.items[self.len];
         self.bytes -= s.text.len;
+        if (ed.budget) |b| b.bytes -= s.text.len;
         return s;
     }
 };
@@ -47,17 +100,45 @@ pub const Editor = struct {
     redo_history: History = .{},
     typing: bool = false,
     preferred_col: ?usize = null,
+    /// Snapshot ordering when the editor bounds its own histories.
+    seq: u64 = 0,
+    budget: ?*Budget = null,
+    budget_next: ?*Editor = null,
 
     pub fn init(gpa: std.mem.Allocator) !Editor {
         var b = try Buffer.init(gpa);
         errdefer b.deinit();
         return .{ .gpa = gpa, .buffer = b, .saved = try gpa.dupe(u8, "") };
     }
+    /// Share a history budget. Call once the editor has its final address
+    /// (the budget keeps a pointer) and before its first edit; `deinit`
+    /// detaches. The editor's existing snapshots are charged as they are.
+    pub fn attach(self: *Editor, budget: *Budget) void {
+        std.debug.assert(self.budget == null);
+        self.budget = budget;
+        self.budget_next = budget.editors;
+        budget.editors = self;
+        budget.bytes += self.undo_history.bytes + self.redo_history.bytes;
+    }
+    fn detach(self: *Editor) void {
+        const b = self.budget orelse return;
+        b.bytes -= self.undo_history.bytes + self.redo_history.bytes;
+        var link = &b.editors;
+        while (link.*) |ed| : (link = &ed.budget_next) {
+            if (ed == self) {
+                link.* = self.budget_next;
+                break;
+            }
+        }
+        self.budget = null;
+        self.budget_next = null;
+    }
     pub fn deinit(self: *Editor) void {
+        self.detach();
         self.buffer.deinit();
         self.gpa.free(self.saved);
-        self.undo_history.clear(self.gpa);
-        self.redo_history.clear(self.gpa);
+        self.undo_history.clear(self);
+        self.redo_history.clear(self);
     }
     fn validate(text: []const u8) !void {
         if (text.len > max_bytes) return error.FileTooLarge;
@@ -72,8 +153,8 @@ pub const Editor = struct {
         try self.buffer.loadBytes(text);
         self.gpa.free(self.saved);
         self.saved = saved;
-        self.undo_history.clear(self.gpa);
-        self.redo_history.clear(self.gpa);
+        self.undo_history.clear(self);
+        self.redo_history.clear(self);
         self.cursor = .{ .line = 0, .col = 0 };
         self.anchor = null;
         self.breakGroup();
@@ -232,8 +313,8 @@ pub const Editor = struct {
         try self.buffer.loadBytes(after);
         if (coalesce and self.typing and self.undo_history.len > 0) {
             self.gpa.free(before.text);
-        } else self.undo_history.push(self.gpa, before);
-        self.redo_history.clear(self.gpa);
+        } else self.undo_history.push(self, before);
+        self.redo_history.clear(self);
         self.cursor = Buffer.advance(r.start, text);
         self.anchor = null;
         self.preferred_col = null;
@@ -269,8 +350,8 @@ pub const Editor = struct {
         errdefer self.gpa.free(current.text);
         const target = from.items[from.len - 1];
         try self.buffer.loadBytes(target.text);
-        _ = from.pop();
-        to.push(self.gpa, current);
+        _ = from.pop(self);
+        to.push(self, current);
         self.cursor = target.cursor;
         self.anchor = target.anchor;
         self.gpa.free(target.text);
@@ -508,4 +589,54 @@ test "CRLF editing keeps line endings atomic and autoindent preserves bytes" {
     try std.testing.expectEqual(@as(usize, 8), e.cursor.col);
     try e.backspace();
     try std.testing.expectEqualStrings("literal", e.buffer.lineSlice(0));
+}
+
+test "a shared budget evicts the oldest snapshot across editors" {
+    const a = std.testing.allocator;
+    var budget: Budget = .{ .limit = 400 };
+    var first = try Editor.init(a);
+    defer first.deinit();
+    first.attach(&budget);
+    var second = try Editor.init(a);
+    defer second.deinit();
+    second.attach(&budget);
+    // Ten 20-byte lines: each edit snapshots the text before it, so the
+    // last two snapshots (180 + 160 bytes) are all the budget holds.
+    for (0..10) |_| {
+        first.breakGroup();
+        try first.insert("0123456789abcdefghi\n");
+    }
+    try std.testing.expectEqual(@as(usize, 2), first.undo_history.len);
+    try std.testing.expectEqual(@as(usize, 340), budget.bytes);
+    // The second editor's edits (0 + 20 + 40 + 60 bytes) push the first's
+    // oldest snapshot out; the first still undoes the one it has left.
+    for (0..4) |_| {
+        second.breakGroup();
+        try second.insert("0123456789abcdefghi\n");
+    }
+    try std.testing.expectEqual(@as(usize, 1), first.undo_history.len);
+    try std.testing.expectEqual(@as(usize, 4), second.undo_history.len);
+    try std.testing.expectEqual(first.undo_history.bytes + second.undo_history.bytes, budget.bytes);
+    try std.testing.expect(try first.undo());
+    try std.testing.expectEqual(@as(usize, 10), first.buffer.lineCount());
+    try std.testing.expect(!try first.undo());
+    // Undoing moved the 200-byte current text to redo, within the budget.
+    try std.testing.expectEqual(@as(usize, 320), budget.bytes);
+    // A closed editor hands its share back and leaves the list.
+    second.deinit();
+    second = try Editor.init(a);
+    try std.testing.expectEqual(@as(usize, 200), budget.bytes);
+    try std.testing.expect(budget.editors == &first);
+    try std.testing.expect(first.budget_next == null);
+    // A snapshot larger than the whole budget still lands: the newest is
+    // never the one evicted; everything older goes to make room.
+    var big = try Editor.init(a);
+    defer big.deinit();
+    big.attach(&budget);
+    try big.insert("x" ** 450);
+    big.breakGroup();
+    try big.insert("y");
+    try std.testing.expectEqual(@as(usize, 1), big.undo_history.len);
+    try std.testing.expectEqual(@as(usize, 0), first.redo_history.len);
+    try std.testing.expectEqual(@as(usize, 450), budget.bytes);
 }

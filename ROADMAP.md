@@ -1542,7 +1542,8 @@ applications need menus beyond those profiles.
   read-only restrictions and explicit view revocation. Prepared requests reclaim on sender
   death; committed requests survive until claimed or session teardown. Tabs
   share layout/rendering/hit-testing helpers and keep independent buffers,
-  undo, cursor, scroll, search, and save authority. New/Open add tabs; Cmd+W
+  undo, cursor, scroll, search, and save authority (the undo stacks share
+  one window-wide byte budget since 2026-09-17). New/Open add tabs; Cmd+W
   closes one, Shift+Cmd+W closes the window, and cancelling a dirty-window
   close retains every tab. Ctrl+Tab/Shift+Ctrl+Tab switch tabs. The toolkit is
   reusable by the later terminal-multiplexing arc without implementing it here.

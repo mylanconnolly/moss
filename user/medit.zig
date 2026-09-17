@@ -27,6 +27,10 @@ var authority: u64 = 0;
 var receiver: u64 = 0;
 var test_mode = false;
 var pool: ml.pool.Pool(64, 131072) = .{};
+/// One undo/redo budget for every tab: a dozen documents share the
+/// history a single one used to have, and the oldest snapshot anywhere
+/// goes first, not the active tab's.
+var history_budget: core.Budget = .{};
 const Tab = struct {
     ed: core.Editor,
     doc: ?Document = null,
@@ -320,6 +324,7 @@ fn prepareTab() !*Tab {
     errdefer gpa.destroy(tab);
     tab.* = .{ .ed = try core.Editor.init(gpa) };
     errdefer tab.ed.deinit();
+    tab.ed.attach(&history_budget);
     const name = try std.fmt.bufPrint(&tab.untitled, "Untitled {d}", .{next_untitled});
     tab.untitled_len = name.len;
     try tabs.ensureUnusedCapacity(gpa, 1);

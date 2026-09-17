@@ -4721,8 +4721,14 @@ without SDL, host filesystem APIs, dynamic grammars, or a language server.
 Selection, visual-column movement, word navigation, grouped typing, find,
 undo/redo, and saved-state tracking are independent of the UI. Replacement
 buffers are built before publishing changes: allocation failure leaves the
-live document intact. A reclaiming pool supports sustained editing; history
-holds up to 64 revisions and 2 MiB per stack. Documents are valid UTF-8,
+live document intact. A reclaiming pool supports sustained editing; a
+history holds up to 64 revisions, and every tab's undo and redo stacks
+draw on one 2 MiB budget (`editor.Budget`, 2026-09-17: it was 2 MiB per
+stack per tab against the one 8 MiB pool, so a handful of busy tabs could
+starve the document itself). Over budget, the oldest snapshot in the whole
+window goes first, whichever tab holds it, so the tab being edited keeps
+its recent history and an idle tab pays; the newest snapshot is never the
+one evicted. Documents are valid UTF-8,
 without NULs, up to 256 KiB and 8192 lines. Existing line endings and trailing
 newlines survive load/save; CRLF is one editing boundary and Enter copies
 the local line ending and indentation. The current clipboard transport is limited to
