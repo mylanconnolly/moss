@@ -76,17 +76,18 @@ fn settledWorkArea() wf.Geom {
     const bar_h = lineOf(R_UI) + 2 * guibar.bar_vpad + pal.border_w;
     var wa = wf.workArea();
     var tries: usize = 0;
-    // Up to 1.5 s: the dock re-declares on its own render, which under a
-    // loaded parallel gate can come later than the 320 ms this once
-    // allowed — and a window that opens a beat late beats one centred in
-    // a work area 16 px off (the guishellro drill caught the difference).
-    while (tries < 30) : (tries += 1) {
+    // The chrome is woken to re-declare the moment the appearance changes
+    // (`appearance_changed`), so this is a short backstop, not the plan;
+    // if it runs out, the log says so and the window centres in what the
+    // compositor has (the guishellro drill once caught it 8 px off).
+    while (tries < 12) : (tries += 1) {
         const top_ok = wa.y == 0 or wa.y == bar_h;
         const bottom_ok = wa.y + wa.h == wf.scanout_h or wa.y + wa.h + dockHeight() == wf.scanout_h;
         if (top_ok and bottom_ok) break;
         usys.sleepMs(50);
         wa = wf.workArea();
     }
+    if (tries == 12) _ = usys.log(log_h, "gui: work area unsettled; placing anyway");
     return wa;
 }
 /// Tell the compositor the edge this chrome reserves, so every window's
@@ -1728,6 +1729,8 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         else
             "";
         wf.applyUserLayer(text);
+        // Chrome re-declares its struts on its next wake; give it one now.
+        if (output_control != 0) _ = usys.callTyped(shared.GpuReq, shared.GpuResp, output_control, .appearance_changed, 0);
         return Value.nothing;
     }
     if (std.mem.eql(u8, name, "appearance")) {

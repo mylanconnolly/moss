@@ -1654,6 +1654,24 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 wakeReader(chan_h, sf.owner, hit, 3);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
+            .appearance_changed => {
+                // Every parked reader gets a tick now: their loops re-read
+                // font metrics on any wake, so the bar and the dock declare
+                // their new heights within the round trip instead of on
+                // their own next tick (the dock's is a second away).
+                if (badge != control_badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 25 } }, 0, token);
+                    continue;
+                }
+                for (&readers) |*rd| {
+                    if (!rd.used or rd.token == 0) continue;
+                    const t = rd.token;
+                    rd.token = 0;
+                    rd.tick_due = false;
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = focused, .kind = 2, .arg = 0 } }, 0, t);
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
             .close_titled => |q| {
                 // A graceful quit: the window titled a/b gets the close_window
                 // key its owner already handles (the red dot, Cmd-W), queued

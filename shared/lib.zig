@@ -1022,6 +1022,12 @@ pub const GpuReq = union(enum(u64)) {
     /// ok, or `gpu_err` 14 (no such title), 22 (a key already queued),
     /// 25 (not the control badge, or a trusted surface).
     close_titled: struct { a: u64, b: u64 },
+    /// The session's appearance (font scale, theme) just changed: wake
+    /// every parked reader with a tick so chrome re-reads its metrics and
+    /// re-declares its struts now, not on its next own tick — a window
+    /// opening right after a scale change centres against fresh struts.
+    /// Control badge only. -> ok.
+    appearance_changed: void,
     /// Earn a uniquely-badged channel so several windows from different
     /// processes are told apart (their surfaces and input readers are keyed
     /// by badge). An ordinary GUI client registers once on start and drives
