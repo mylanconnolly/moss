@@ -3163,6 +3163,26 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (pass == 1 and current[1] != initial_small[1]) return sfail(spec, log_path, "font geometry drifted after round trip");
         _ = q.screendump(if (pass == 0) check_dir ++ "/settings-scale-100.ppm" else check_dir ++ "/settings-scale-150.ppm");
     }
+    // A non-administrator's Activity: the session init refuses the unit's
+    // introspect grant, and the System tab says so instead of listing the
+    // machine. Open it from the launcher, look, and close it.
+    const closed_before = countOccurrences(readLog(log_path), "gui: closed");
+    if (!q.chord2("shift", "meta_l", "w")) return sfail(spec, log_path, "close Settings");
+    if (!try waitLogN(log_path, "gui: closed", closed_before + 1, "Settings did not close before the Activity step", spec, polls)) return false;
+    if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher");
+    if (!try waitLogN(log_path, launcher_ready_line, 1, "the launcher did not open for Activity", spec, polls)) return false;
+    if (!q.typeText("activity") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Activity");
+    if (!try waitLogN(log_path, "init: introspect grant refused (not an administrator's session): activity", 1, "the session init did not refuse the introspect grant", spec, polls)) return false;
+    if (!try waitLogN(log_path, "activity: machine cores=", 1, "Activity never came up for bob", spec, polls)) return false;
+    sleepMs(500);
+    const tab = tabCenter(readLog(log_path), "tabs", 1) orelse return sfail(spec, log_path, "find the System tab");
+    if (!clickScanout(&q, tab[0], tab[1])) return sfail(spec, log_path, "click the System tab");
+    if (!try waitLogN(log_path, "activity: system unavailable", 1, "the System tab did not report the missing grant", spec, polls)) return false;
+    if (countOccurrences(readLog(log_path), "activity: system domains=") != 0) return sfail(spec, log_path, "a non-administrator listed the machine's domains");
+    sleepMs(300);
+    _ = q.screendump(check_dir ++ "/activity-bob.ppm");
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
+    if (!try waitLogN(log_path, "activity: closed", 1, "Activity did not close", spec, polls)) return false;
     return desktopLogout(spec, log_path, polls, &q);
 }
 
