@@ -225,7 +225,8 @@ match (cat $path) {
 **Match.** `match value { pattern [if guard] => body … }` tries the
 arms in order; a body is a block or one statement on the same line. Patterns are
 `_` (anything), `$name` (anything, bound), literals (`1`, `"text"`, a
-bare word as a string — `dir`, `file` — `true`, `false`, `null`),
+bare word as a string — `dir`, `file` — `true`, `false`, `null` or
+`nothing` for the absent value),
 `ok p` and `err p`, lists `[p, p]`, `[$head, ..$tail]`, `[1, ..]`, and
 records `{ name: $n, size: 0 }` or `{ name }` (which binds `$name`);
 a record pattern matches a record that has at least those fields.

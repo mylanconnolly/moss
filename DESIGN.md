@@ -3205,9 +3205,9 @@ confirm step, and reads init's `stopped by request` and the table's
 built over the evaluation arena ran the 512 KiB pool dry under the
 system init's hundred units (the 30 KB catalog buffer is static now,
 and the never-started filter made the table honest as well as small);
-an mshl `match` on a `nothing` value binds a `$var` arm before a
-`nothing` literal arm is reached, so the selected-row lookup moved into
-Zig; and the runner put the new drill in the disk-backed QEMU group by
+an mshl `match` arm written `nothing` never matched the absent value
+(the word was a string; fixed later that day), so the selected-row
+lookup moved into Zig; and the runner put the new drill in the disk-backed QEMU group by
 mistake, so QEMU never started and the failure left no log — a kind's
 group decides its devices *and* its disk.
 
@@ -3266,6 +3266,22 @@ runtime until the stack ran out; the pointer branch now coerces an array
 pointer to a slice, and a test feeds it literals. (The first suspect, the
 command's 30 KB of working arrays on the stack, moved to statics on the
 way; a 256 KB user stack does not leave a host command that much.)
+
+**The arc's debt, paid (same day).** Seven things the arc left behind,
+struck the same day. `DomainRec`'s cpu word is `cpu_budget` (limit and
+partition only; the budget-period spend it carried read zero without a
+budget, and `cpu_total` is the spend). A `cap_kind` syscall says what a
+capability is, so mshrun's probe of slot 2 no longer takes an introspect
+cap for a spawner and stages workers it cannot spawn; `workcmds` reads
+the ledger through whichever it has. The `guishellro` drill opens
+Activity as bob and reads the session init's refusal and the tab's
+"needs an administrator's session". `appearance_changed` (above) makes
+the work-area wait a backstop. HACKING says what a host command may put
+on the stack. And the `nothing` arm that never matched: `null` was the
+only spelling of the absent value the parser knew, so a `nothing` arm
+was the *string* "nothing"; `nothing` is the absent literal in code now
+(data files keep `null`), with a test. The dock's per-pill poll was a
+stale comment, not a cost.
 
 **Quit before Force Quit (same day).** A task manager that can only
 kill is a blunt one: an editor with unsaved work deserves to be asked.
@@ -3788,11 +3804,15 @@ Settings reopening itself right after a font Apply centred against the
 old strut, so its position drifted by a few pixels across a scale round
 trip. The bar and the dock are the same runtime as the window, so
 `sizeToContent` knows what they will declare and waits for the
-compositor's answer to match before placing (up to 1.5 s since
-2026-09-17: the first cut gave up after 320 ms, which a loaded parallel
-gate exceeded once and the window centred 8 px low; the runtime now logs
-`gui: placed` with the work area it used); the compositor logs every
-strut change. *Lesson:* when the same number is
+compositor's answer to match before placing; the compositor logs every
+strut change. The wait is a backstop since 2026-09-17: a font push
+(`sessionfont`) now asks the compositor for `appearance_changed`, which
+wakes every parked reader with a tick, so the bar and the dock re-read
+their metrics and re-declare within the round trip instead of on their
+own next tick (the dock's is a second away — a loaded parallel gate once
+exceeded the old 320 ms wait and Settings centred 8 px low). The
+backstop is 600 ms and logs `gui: work area unsettled` when it runs
+out; `gui: placed` logs the work area used. *Lesson:* when the same number is
 derived in four places, none of them is the source of truth; find who
 actually owns the fact and have everyone ask — and expect one ordering
 race the old lockstep hid.

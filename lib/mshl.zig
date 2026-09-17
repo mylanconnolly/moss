@@ -221,7 +221,7 @@ pub const Shape = union(enum) {
                     try out.append(a, '"');
                     try out.appendSlice(a, w);
                     try out.append(a, '"');
-                } else if (std.mem.eql(u8, w, "true") or std.mem.eql(u8, w, "false") or std.mem.eql(u8, w, "null")) {
+                } else if (std.mem.eql(u8, w, "true") or std.mem.eql(u8, w, "false") or std.mem.eql(u8, w, "null") or std.mem.eql(u8, w, "nothing")) {
                     try out.appendSlice(a, w); // words in a shape, and read back as such
                 } else try writeStr(w, a, out);
             },
@@ -2610,7 +2610,7 @@ fn writeStr(s: []const u8, a: std.mem.Allocator, out: *std.ArrayList(u8)) Error!
         if (!Lexer.isWordChar(c) or c == ':' or c == '#') bare = false;
     }
     if (bare and s[s.len - 1] == ':') bare = false;
-    for ([_][]const u8{ "true", "false", "null", "not", "and", "or", "in", "fn", "match", "try", "shape", "_" }) |kw| {
+    for ([_][]const u8{ "true", "false", "null", "nothing", "not", "and", "or", "in", "fn", "match", "try", "shape", "_" }) |kw| {
         if (std.mem.eql(u8, s, kw)) bare = false;
     }
     if (bare) return out.appendSlice(a, s);
@@ -3548,7 +3548,7 @@ const Parser = struct {
     }
 
     fn isKeywordStart(w: []const u8) bool {
-        for ([_][]const u8{ "true", "false", "null", "not", "fn", "match", "try", "shape" }) |kw| {
+        for ([_][]const u8{ "true", "false", "null", "nothing", "not", "fn", "match", "try", "shape" }) |kw| {
             if (std.mem.eql(u8, w, kw)) return true;
         }
         return false;
@@ -3563,7 +3563,7 @@ const Parser = struct {
                 _ = p.take();
                 if (std.mem.eql(u8, w, "true")) return p.mk(.{ .lit = .{ .bool = true } });
                 if (std.mem.eql(u8, w, "false")) return p.mk(.{ .lit = .{ .bool = false } });
-                if (std.mem.eql(u8, w, "null")) return p.mk(.{ .lit = .nothing });
+                if (std.mem.eql(u8, w, "null") or std.mem.eql(u8, w, "nothing")) return p.mk(.{ .lit = .nothing });
                 if (std.mem.eql(u8, w, "shape")) return p.mk(.{ .shape_lit = try p.shapeTerm() });
                 return p.mk(.{ .lit = .{ .str = w } });
             },
@@ -3853,7 +3853,7 @@ const Parser = struct {
             .word => |w| {
                 if (std.mem.eql(u8, w, "true")) return p.mk(.{ .lit = .{ .bool = true } });
                 if (std.mem.eql(u8, w, "false")) return p.mk(.{ .lit = .{ .bool = false } });
-                if (std.mem.eql(u8, w, "null")) return p.mk(.{ .lit = .nothing });
+                if (std.mem.eql(u8, w, "null") or std.mem.eql(u8, w, "nothing")) return p.mk(.{ .lit = .nothing });
                 if (std.mem.eql(u8, w, "fn")) {
                     const ps = try p.params("fn");
                     const body = try p.block();
@@ -3960,7 +3960,7 @@ const Parser = struct {
             // A bare word keeps its colon as one token (`dir:`, `5:`):
             // split it, and read what is left as the lexer would have.
             const w = subject.word[0 .. subject.word.len - 1];
-            subject.* = if (Lexer.parseNumber(w)) |n| .{ .lit = n } else if (std.mem.eql(u8, w, "true")) .{ .lit = .{ .bool = true } } else if (std.mem.eql(u8, w, "false")) .{ .lit = .{ .bool = false } } else if (std.mem.eql(u8, w, "null")) .{ .lit = .nothing } else .{ .word = w };
+            subject.* = if (Lexer.parseNumber(w)) |n| .{ .lit = n } else if (std.mem.eql(u8, w, "true")) .{ .lit = .{ .bool = true } } else if (std.mem.eql(u8, w, "false")) .{ .lit = .{ .bool = false } } else if (std.mem.eql(u8, w, "null") or std.mem.eql(u8, w, "nothing")) .{ .lit = .nothing } else .{ .word = w };
             shape = try p.shapeUnion();
         } else if (isWord(p.peekAt(), ":")) {
             _ = p.take();
@@ -4038,7 +4038,11 @@ const Parser = struct {
                 if (std.mem.eql(u8, w, "_")) return .wild;
                 if (std.mem.eql(u8, w, "true")) return .{ .lit = .{ .bool = true } };
                 if (std.mem.eql(u8, w, "false")) return .{ .lit = .{ .bool = false } };
-                if (std.mem.eql(u8, w, "null")) return .{ .lit = .nothing };
+                // The absent value is written `null` in data and may be
+                // written `nothing` in code — the name the language gives
+                // it; until 2026-09-17 a `nothing` arm was the *string*
+                // "nothing" and silently never matched.
+                if (std.mem.eql(u8, w, "null") or std.mem.eql(u8, w, "nothing")) return .{ .lit = .nothing };
                 if (std.mem.eql(u8, w, "ok") or std.mem.eql(u8, w, "err")) {
                     const inner = try p.a().create(Pattern);
                     inner.* = try p.pattern();
@@ -4879,4 +4883,15 @@ test "toValue takes string literals and arrays as strings and lists" {
     const nums = v.record.get("nums").?;
     try std.testing.expect(nums == .list);
     try std.testing.expectEqual(@as(i64, 2), nums.list[1].int);
+}
+
+test "nothing is the absent value in code, as null is in data" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    try expectOut(it, "match null { nothing => \"absent\"; $x => \"present\" }", "absent\n");
+    try expectOut(it, "match 1 { nothing => \"absent\"; $x => \"present\" }", "present\n");
+    try expectOut(it, "match nothing { null => \"absent\"; _ => \"present\" }", "absent\n");
+    try expectOut(it, "(nothing == null)", "true\n");
 }

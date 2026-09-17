@@ -1520,9 +1520,10 @@ supervises), and memory history per unit beside the CPU one.
   caps it holds, no introspect grant. Toolkit: clickable list headers
   (`col` in the event, `sort:` mark), `selected:` by row id, widgets
   re-announced when the set changes. `activity` drill. Found: the table
-  over the evaluation arena drained the pool under a hundred units; a
-  `match` `$var` arm shadows a later `nothing` arm; the drill's QEMU group
-  implied a disk nobody made. Same day, the machine panel: CPU and memory
+  over the evaluation arena drained the pool under a hundred units; the
+  word `nothing` in a pattern was a string (`null` was the only absent
+  literal; `nothing` is one now); the drill's QEMU group implied a disk
+  nobody made. Same day, the machine panel: CPU and memory
   history charts, a load bar per core, cores and uptime, through
   `InitRequest.stats` over `sysinfo`'s buffer form (per-core busy cycles
   from the scheduler); `chart` and `meter` widgets, top-aligned rows.
