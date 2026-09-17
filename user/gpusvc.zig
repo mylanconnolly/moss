@@ -850,7 +850,10 @@ fn keyReader(_: u64) callconv(.c) void {
 // reply token so the serve loop can answer it later. `tick_ticks` > 0 (a
 // `next_input_tick` reader) also wants a periodic wake — see the timer.
 const max_readers = max_surfaces;
-const Reader = struct { used: bool = false, badge: u64 = 0, token: u64 = 0, tick_ticks: u64 = 0, tick_due: bool = false, yield_to_input: bool = false };
+/// `tick_ticks` is the period this reader asked for; `tick_elapsed` counts
+/// the timer's fires toward it, so a client asking for a second is woken
+/// once a second however fast the timer runs for a faster client.
+const Reader = struct { used: bool = false, badge: u64 = 0, token: u64 = 0, tick_ticks: u64 = 0, tick_elapsed: u64 = 0, tick_due: bool = false, yield_to_input: bool = false };
 var readers: [max_readers]Reader = @splat(.{});
 
 // The tick timer rides the input doorbell (`key_bell`) with a distinct bit
@@ -862,6 +865,7 @@ var tick_armed: u64 = 0; // the period currently armed (ticks); 0 = off
 fn parkReader(badge: u64, token: u64, tick_ticks: u64) void {
     for (&readers) |*rd| if (rd.used and rd.badge == badge) {
         rd.token = token; // a client re-reads: replace its (already answered) token
+        if (tick_ticks != rd.tick_ticks) rd.tick_elapsed = 0;
         rd.tick_ticks = tick_ticks;
         if (tick_ticks == 0) rd.tick_due = false;
         refreshTicks();
@@ -887,12 +891,20 @@ fn refreshTicks() void {
     }
 }
 
-/// A timer fired: hand a tick event to every ticking reader with a parked
-/// token, retaining one coalesced tick for a client that is still busy.
+/// A timer fired (every `tick_armed` ticks, the shortest period asked):
+/// advance each ticking reader toward its own period and mark those that
+/// reached it due, retaining one coalesced tick for a client still busy.
+/// Until 2026-09-17 every fire marked every reader due, so a window
+/// asking for a second re-rendered at the bar's 100 ms clock rate — the
+/// Activity app read 18% of a core while idle, all of it its own paint.
 fn dispatchTicks(chan_h: u64) void {
     expirePreview();
     for (&readers) |*rd| if (rd.used and rd.tick_ticks != 0) {
-        rd.tick_due = true; // coalesce, but retain ticks while the client renders
+        rd.tick_elapsed += @max(tick_armed, 1);
+        if (rd.tick_elapsed >= rd.tick_ticks) {
+            rd.tick_elapsed = 0;
+            rd.tick_due = true; // coalesce, but retain ticks while the client renders
+        }
     };
     dispatchDueTicks(chan_h, false);
 }

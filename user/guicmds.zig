@@ -576,6 +576,9 @@ const MshlTree = struct {
     pub fn gap(_: *MshlTree, n: Node) usize {
         return nodeGap(n.record);
     }
+    pub fn alignTop(_: *MshlTree, n: Node) bool {
+        return n == .record and std.mem.eql(u8, strField(n.record, "align"), "top");
+    }
     pub fn flex(_: *MshlTree, n: Node) usize {
         return flexWeight(n);
     }
@@ -662,7 +665,93 @@ fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool)
         if (paint) return drawList(rec, x, y, avail_w);
         return .{ .w = avail_w, .h = @intCast(@max(intField(rec, "h", 240), 40)) };
     }
+    if (std.mem.eql(u8, kind, "chart")) return layoutChart(rec, x, y, avail_w, paint);
+    if (std.mem.eql(u8, kind, "meter")) return layoutMeter(rec, x, y, avail_w, paint);
     return .{};
+}
+
+/// The permille samples of a `values:` list, clamped to 0..1000.
+fn sampleAt(values: Value, i: usize) usize {
+    if (values != .list or i >= values.list.len or values.list[i] != .int) return 0;
+    return @intCast(std.math.clamp(values.list[i].int, 0, 1000));
+}
+fn sampleCount(values: Value) usize {
+    return if (values == .list) values.list.len else 0;
+}
+
+/// `{ kind: "chart", h, title, caption, values: [permille…] }`: a history
+/// graph — newest sample at the right edge, a filled area under a line,
+/// a light grid at quarters — with the title and the current reading
+/// above it. The area a chart takes is its own: `h` tall, the width
+/// offered. Loads over 80% paint in the danger colour, like a meter.
+fn layoutChart(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
+    const h: usize = @intCast(std.math.clamp(intField(rec, "h", 100), 40, 400));
+    const w = avail_w;
+    if (!paint or w < 24) return .{ .w = w, .h = h };
+    const line = lineOf(R_UI);
+    panel(x, y, w, h, r_field, pal.field_bg, pal.border, pal.border_w);
+    const title = strField(rec, "title");
+    const caption = strField(rec, "caption");
+    drawStrTrunc(x + 10, y + 6, R_UI, title, w / 2, pal.text_muted, pal.field_bg);
+    drawStrTrunc(x + w -| (10 + strW(R_UI, caption)), y + 6, R_UI, caption, w / 2, pal.text, pal.field_bg);
+    const px = x + 10;
+    const py = y + line + 12;
+    const pw = w -| 20;
+    const ph = (y + h -| 8) -| py;
+    if (ph < 8 or pw < 8) return .{ .w = w, .h = h };
+    // The grid: quarter lines.
+    for (1..4) |q| fillRect(px, py + ph * q / 4, pw, 1, pal.border);
+    const values = rec.get("values") orelse Value.nothing;
+    const n = sampleCount(values);
+    if (n == 0) return .{ .w = w, .h = h };
+    const slots = @max(n, 30); // a young history grows in from the right
+    const cw = @max(pw / slots, 1);
+    const fill = ui.palette.shade(pal.primary, 2, 5);
+    for (0..n) |i| {
+        const v = sampleAt(values, i);
+        const bar = ph * v / 1000;
+        const cx = px + pw -| (n - i) * cw;
+        if (bar > 0) {
+            const ink = if (v > 800) pal.danger else pal.primary;
+            fillRect(cx, py + ph - bar, cw, bar, if (v > 800) ui.palette.shade(pal.danger, 2, 5) else fill);
+            fillRect(cx, py + ph - bar, cw, @min(2, bar), ink);
+        }
+    }
+    return .{ .w = w, .h = h };
+}
+
+/// `{ kind: "meter", label, value }` or `{ kind: "meter", labels: "C",
+/// values: [permille…] }`: one bar per value, its label at the left and
+/// its percentage at the right, the fill in the primary colour and in
+/// the danger colour past 80%. Rows stack; each is a text line tall.
+fn layoutMeter(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
+    const line = lineOf(R_UI);
+    const row_h = line + 4;
+    const values = rec.get("values") orelse Value.nothing;
+    const n = if (values == .list) values.list.len else 1;
+    const h = n * row_h;
+    if (!paint or avail_w < 40) return .{ .w = avail_w, .h = h };
+    const prefix = strField(rec, "labels");
+    const label_w = @max(strW(R_UI, "C00"), strW(R_UI, strField(rec, "label"))) + 8;
+    const caption_w = strW(R_UI, "100%") + 6;
+    const bar_x = x + label_w;
+    const bar_w = avail_w -| (label_w + caption_w);
+    const bar_h = @max(line / 2, 6);
+    for (0..n) |i| {
+        const ry = y + i * row_h;
+        const v: usize = if (values == .list) sampleAt(values, i) else @intCast(std.math.clamp(intField(rec, "value", 0), 0, 1000));
+        var lb: [24]u8 = undefined;
+        const label = if (values == .list) (std.fmt.bufPrint(&lb, "{s}{d}", .{ prefix, i }) catch "") else strField(rec, "label");
+        drawStrTrunc(x, ry, R_UI, label, label_w -| 4, pal.text_muted, content_bg);
+        const by = ry + (line -| bar_h) / 2;
+        fillRoundRect(bar_x, by, bar_w, bar_h, bar_h / 2, pal.surface_hi);
+        const filled = bar_w * v / 1000;
+        if (filled > 0) fillRoundRect(bar_x, by, @max(filled, bar_h), bar_h, bar_h / 2, if (v > 800) pal.danger else pal.primary);
+        var cb: [8]u8 = undefined;
+        const caption = std.fmt.bufPrint(&cb, "{d}%", .{v / 10}) catch "";
+        drawStrTrunc(bar_x + bar_w + caption_w -| strW(R_UI, caption), ry, R_UI, caption, caption_w, pal.text, content_bg);
+    }
+    return .{ .w = avail_w, .h = h };
 }
 
 fn flexWeight(node: Value) usize {

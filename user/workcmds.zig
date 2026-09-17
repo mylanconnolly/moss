@@ -639,6 +639,95 @@ fn unitRows(it: *mshl.Interp, sort_name: []const u8, selected: []const u8) mshl.
     });
 }
 
+const max_cores = 64;
+const history_len = 60;
+/// The previous `sys-stats` reading, for the rates, and the histories
+/// (permille, newest last) the charts draw.
+var stat_prev_now: u64 = 0;
+var stat_prev_busy: [max_cores]u64 = @splat(0);
+var stat_cpu_hist: [history_len]u16 = @splat(0);
+var stat_mem_hist: [history_len]u16 = @splat(0);
+var stat_hist_len: usize = 0;
+var stat_announced = false;
+
+fn pushHistory(hist: *[history_len]u16, v: u16) void {
+    std.mem.copyForwards(u16, hist[0 .. history_len - 1], hist[1..history_len]);
+    hist[history_len - 1] = v;
+}
+
+fn historyValue(a: std.mem.Allocator, hist: *const [history_len]u16) mshl.Error!Value {
+    const n = stat_hist_len;
+    const vals = try a.alloc(Value, n);
+    for (vals, hist[history_len - n ..]) |*v, s| v.* = .{ .int = s };
+    return .{ .list = vals };
+}
+
+/// The machine: `{ total_mb, used_mb, free_mb, cores, uptime_s, cpu_pm,
+/// cores_pm, cpu_history, mem_history, cpu_text, mem_text, machine_text }`.
+/// Loads are permille of one core over the interval since the previous
+/// call (the first call has no interval and reports zero).
+fn sysStats(it: *mshl.Interp) mshl.Error!Value {
+    const a = it.arena;
+    const sh = usys.shmCreate(1);
+    if (sh.err != .ok) return it.fail("sys-stats: out of shared memory", .{});
+    defer _ = usys.capDrop(sh.data[0]);
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return it.fail("sys-stats: cannot map the buffer", .{});
+    defer _ = usys.shmUnmap(m.data[0]);
+    const words: [*]const u64 = @ptrFromInt(m.data[0]);
+    const n = switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .stats, sh.data[0])) {
+        .ok => |rep| switch (rep) {
+            .stats => |s| s.n,
+            else => return it.fail("sys-stats: bad reply from init", .{}),
+        },
+        .err => return it.fail("sys-stats: init unreachable", .{}),
+    };
+    const S = shared.SysStats;
+    if (n < S.head_words) return it.fail("sys-stats: the machine did not answer", .{});
+    const free = words[S.free_bytes];
+    const total = words[S.total_bytes];
+    const cores: usize = @intCast(@min(words[S.cores], @min(max_cores, n - S.head_words)));
+    const now = words[S.now_cycles];
+    // Per-core load over the interval; the machine's is their mean.
+    const cores_pm = try a.alloc(Value, cores);
+    var sum: u64 = 0;
+    for (0..cores) |i| {
+        const busy = words[S.head_words + i];
+        var pm: u64 = 0;
+        if (stat_prev_now != 0 and now > stat_prev_now and busy >= stat_prev_busy[i]) pm = @min((busy - stat_prev_busy[i]) * 1000 / (now - stat_prev_now), 1000);
+        stat_prev_busy[i] = busy;
+        cores_pm[i] = .{ .int = @intCast(pm) };
+        sum += pm;
+    }
+    stat_prev_now = now;
+    const cpu_pm: u64 = if (cores > 0) sum / cores else 0;
+    const used = total -| free;
+    const mem_pm: u64 = if (total > 0) used * 1000 / total else 0;
+    pushHistory(&stat_cpu_hist, @intCast(cpu_pm));
+    pushHistory(&stat_mem_hist, @intCast(mem_pm));
+    if (stat_hist_len < history_len) stat_hist_len += 1;
+    const uptime_s = words[S.uptime_ticks] / 10;
+    if (!stat_announced and log_h != 0) {
+        stat_announced = true;
+        var l: [80]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&l, "activity: machine cores={d} mem={d} MB", .{ cores, total >> 20 }) catch "activity: machine");
+    }
+    return try mshl.toValue(a, .{
+        .total_mb = @as(i64, @intCast(total >> 20)),
+        .used_mb = @as(i64, @intCast(used >> 20)),
+        .free_mb = @as(i64, @intCast(free >> 20)),
+        .cores = @as(i64, @intCast(cores)),
+        .uptime_s = @as(i64, @intCast(uptime_s)),
+        .cpu_pm = @as(i64, @intCast(cpu_pm)),
+        .cores_pm = Value{ .list = cores_pm },
+        .cpu_history = try historyValue(a, &stat_cpu_hist),
+        .mem_history = try historyValue(a, &stat_mem_hist),
+        .cpu_text = try std.fmt.allocPrint(a, "{d}.{d}%", .{ cpu_pm / 10, cpu_pm % 10 }),
+        .mem_text = try std.fmt.allocPrint(a, "{d} / {d} MB", .{ used >> 20, total >> 20 }),
+        .machine_text = try std.fmt.allocPrint(a, "{d} cores \u{00b7} up {d}h {d:0>2}m {d:0>2}s", .{ cores, uptime_s / 3600, (uptime_s / 60) % 60, uptime_s % 60 }),
+    });
+}
+
 /// Log what changed: the row order when it did (one line per row), and
 /// each unit whose running flag flipped since the table was last built.
 fn noteRows(recs: []const shared.UnitRec, order: []const usize, order_hash: u64) void {
@@ -921,6 +1010,11 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // and stops its session's apps, never another user's or the system's.
     if (std.mem.eql(u8, name, "unit-rows")) return .{ .params = &.{ .{ .name = "sort", .shape = .string }, .{ .name = "selected", .shape = .string } }, .ret = .record };
     if (std.mem.eql(u8, name, "unit-stop")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
+    // `sys-stats` is the machine itself: memory used of total, cores,
+    // uptime, each core's load and the whole machine's over the interval
+    // since the previous call, plus the last 60 samples of CPU and memory
+    // (this program's own history, kept between calls) for a chart.
+    if (std.mem.eql(u8, name, "sys-stats")) return .{ .ret = .record };
     if (std.mem.eql(u8, name, "power")) return .{ .params = &.{.{ .name = "action", .shape = .string }}, .ret = .bool };
     return null;
 }
@@ -1091,6 +1185,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (init_chan == 0) return it.fail("unit-rows: this program cannot reach init", .{});
         if (args.len < 2 or args[0] != .str or args[1] != .str) return it.fail("unit-rows: SORT SELECTED expected", .{});
         return try unitRows(it, args[0].str, args[1].str);
+    }
+    if (is(u8, name, "sys-stats")) {
+        if (init_chan == 0) return it.fail("sys-stats: this program cannot reach init", .{});
+        return try sysStats(it);
     }
     if (is(u8, name, "unit-stop")) {
         if (init_chan == 0) return it.fail("unit-stop: this program cannot reach init", .{});
@@ -1423,4 +1521,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "net-rows", "browse-rows" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "net-rows", "browse-rows" };

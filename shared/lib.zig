@@ -508,6 +508,11 @@ pub const InitRequest = union(enum(u64)) {
     /// to its own init; the system init is root, whose exit code the
     /// kernel answers with PSCI off or reset.
     power: struct { action: u64 },
+    /// + a buffer cap: fill it with the machine's SysStats words (init
+    /// reads them with its spawner) and reply `stats { n }`. What a task
+    /// manager shows about the machine itself — memory, cores, load —
+    /// reaches a session app this way: coarse facts, through its own init.
+    stats: void,
 };
 pub const PowerAction = enum(u64) { off = 1, restart = 2 };
 /// Root exit codes the kernel reads as power requests (drills' own codes
@@ -527,6 +532,22 @@ pub const InitReply = union(enum(u64)) {
     installed: struct { n: u64 },
     /// A power request accepted: this init is going down.
     powering: void,
+    /// `stats` answered: the buffer holds n SysStats words.
+    stats: struct { n: u64 },
+};
+
+/// The machine record `sysinfo` writes into a buffer, as u64 word
+/// indexes: the memory totals, the online core count, uptime, the cycle
+/// counter and its rate (so two readings give an interval), then one
+/// busy-cycle count per core. Coarse machine facts, no domain named.
+pub const SysStats = struct {
+    pub const free_bytes = 0;
+    pub const total_bytes = 1;
+    pub const cores = 2;
+    pub const uptime_ticks = 3;
+    pub const now_cycles = 4;
+    pub const cycle_hz = 5;
+    pub const head_words = 6;
 };
 
 /// One unit as `svc` and the Activity app see it, packed into a buffer

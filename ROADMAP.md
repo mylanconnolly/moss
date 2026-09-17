@@ -201,13 +201,13 @@ client-defined menu schemas, nested submenus, and scrollable overflow when
 applications need menus beyond those profiles.
 
 **Activity follow-ons (2026-09-17).** The task manager shows a session's
-own units. Next: an admin **System** tab over `domain_list` (the
-`introspect` grant, gated like Settings' admin view) for every domain on
-the machine with the account tree; a **graceful quit** before Force Quit
-— a close request routed through the compositor's app-menu path, which
-only chrome may invoke today — and a machine-wide header (free memory,
-cores, uptime from `sysinfo`) where the grant allows it; per-unit CPU
-history sparklines once the toolkit has a canvas widget.
+own units and the machine's totals. Next: an admin **System** tab over
+`domain_list` (the `introspect` grant, gated like Settings' admin view)
+for every domain on the machine with the account tree; a **graceful
+quit** before Force Quit — a close request routed through the
+compositor's app-menu path, which only chrome may invoke today; per-unit
+CPU history in the table (the `chart` widget exists; the history would
+be init's or the app's to keep).
 
 **Follow-ons from the project assessment (2026-09-12)**
 
@@ -1524,7 +1524,13 @@ history sparklines once the toolkit has a canvas widget.
   re-announced when the set changes. `activity` drill. Found: the table
   over the evaluation arena drained the pool under a hundred units; a
   `match` `$var` arm shadows a later `nothing` arm; the drill's QEMU group
-  implied a disk nobody made.
+  implied a disk nobody made. Same day, the machine panel: CPU and memory
+  history charts, a load bar per core, cores and uptime, through
+  `InitRequest.stats` over `sysinfo`'s buffer form (per-core busy cycles
+  from the scheduler); `chart` and `meter` widgets, top-aligned rows.
+  Found: the compositor woke every ticking client at the fastest client's
+  period, so a 1 s window re-rendered at the bar's 100 ms — the "idle"
+  18% of a core was its own paint; each reader now keeps its own period.
 - ✅ **Shut down and restart** (2026-09-16): the system menu's Restart and
   Shut Down (with rules between groups) climb the init tree as one
   `InitRequest.power` — bar → session init → session manager → system init

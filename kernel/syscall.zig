@@ -477,13 +477,46 @@ fn sysRngSeed(d: *domain.Domain, handle_bits: u64, ptr: u64, len: u64) u64 {
 }
 
 /// sysinfo(cap): pmem free/total bytes, online cores, uptime ticks.
+/// With a buffer (x1 = ptr, x2 = len), the fuller record shared.SysStats
+/// describes — those four, the cycle counter and its rate, then each
+/// core's busy cycles — written as u64 words; x1 = the word count.
 fn sysSysinfo(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     if (!introspectOk(d, frame.arg(0))) return errno(.bad_handle);
     const st = pmem.stats();
-    frame.set(1, st.free_bytes);
-    frame.set(2, st.total_bytes);
-    frame.set(3, sched.onlineCount());
-    frame.set(4, sched.uptimeTicks());
+    const cores = sched.onlineCount();
+    if (frame.arg(1) == 0) {
+        frame.set(1, st.free_bytes);
+        frame.set(2, st.total_bytes);
+        frame.set(3, cores);
+        frame.set(4, sched.uptimeTicks());
+        return errno(.ok);
+    }
+    const ptr = frame.arg(1);
+    const len = frame.arg(2);
+    const words = shared.SysStats.head_words + cores;
+    if (len < words * 8 or len > 4096) return errno(.bad_arg);
+    domain.uaccessEnter(d);
+    defer domain.uaccessLeave(d);
+    if (!userRangeWritable(d, ptr, len)) return errno(.fault);
+    const Ctx = struct { free: u64, total: u64, cores: u64 };
+    frame.set(1, arch.uaccess.withUserBuffer(ptr, len, Ctx{ .free = st.free_bytes, .total = st.total_bytes, .cores = cores }, struct {
+        fn f(c: Ctx, buf: []u8) u64 {
+            const put = struct {
+                fn w(b: []u8, i: usize, v: u64) void {
+                    std.mem.writeInt(u64, b[i * 8 ..][0..8], v, .little);
+                }
+            }.w;
+            put(buf, shared.SysStats.free_bytes, c.free);
+            put(buf, shared.SysStats.total_bytes, c.total);
+            put(buf, shared.SysStats.cores, c.cores);
+            put(buf, shared.SysStats.uptime_ticks, sched.uptimeTicks());
+            put(buf, shared.SysStats.now_cycles, arch.cpu.cycles());
+            put(buf, shared.SysStats.cycle_hz, arch.cpu.cycleHz());
+            var i: usize = 0;
+            while (i < c.cores) : (i += 1) put(buf, shared.SysStats.head_words + i, sched.busyCycles(i));
+            return shared.SysStats.head_words + c.cores;
+        }
+    }.f));
     return errno(.ok);
 }
 

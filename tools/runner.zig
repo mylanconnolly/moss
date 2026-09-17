@@ -1219,6 +1219,7 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "gui: ready", 1, "Activity never came up", spec, polls)) return false;
     if (!try waitLogN(log_path, "activity: row ", 1, "the table logged no rows", spec, polls)) return false;
+    if (!try waitLogN(log_path, "activity: machine cores=", 1, "the machine panel never read sysinfo", spec, polls)) return false;
     const g = waitListGeom(spec, log_path, polls, "procs") orelse {
         reportFailure(spec.name, "could not parse the table's geometry", log_path);
         return false;

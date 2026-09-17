@@ -1194,6 +1194,20 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
             _ = usys.shmUnmap(m.data[0]);
             _ = usys.replyTyped(shared.InitReply, chan, .{ .listed = .{ .n = n } }, 0);
         },
+        .stats => {
+            // The machine's facts for a task manager: read with this
+            // init's spawner into the caller's buffer. A session init
+            // answers for the whole machine — memory, cores and load are
+            // not a session's secret — but nothing here names a domain.
+            if (r.cap == 0) return failReply(chan, .bad_arg);
+            const m = usys.shmMap(r.cap);
+            _ = usys.capDrop(r.cap);
+            if (m.err != .ok) return failReply(chan, .bad_arg);
+            const words: [*]u64 = @ptrFromInt(m.data[0]);
+            const st = usys.sysStats(spawner, words[0 .. m.data[1] * 4096 / 8]);
+            _ = usys.shmUnmap(m.data[0]);
+            _ = usys.replyTyped(shared.InitReply, chan, .{ .stats = .{ .n = if (st.err == .ok) st.data[0] else 0 } }, 0);
+        },
         .install => {
             if (r.cap == 0) return failReply(chan, .bad_arg);
             const n = installImages(r.cap, @ptrFromInt(fsc.attachBuf(r.cap).va));

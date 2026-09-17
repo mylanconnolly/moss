@@ -16,6 +16,7 @@
 //!   fn children(t: *Tree, n: Node) []const Node;
 //!   fn gap(t: *Tree, n: Node) usize;          // between siblings
 //!   fn flex(t: *Tree, n: Node) usize;         // row track weight, 0 = natural width
+//!   fn alignTop(t: *Tree, n: Node) bool;      // a row's children sit on its top edge, not centred
 //!   fn scrollHeight(t: *Tree, n: Node) usize; // a scroll viewport's height
 //!   fn scrollChild(t: *Tree, n: Node) ?Node;
 //!   fn splitLeft(t: *Tree, n: Node) ?Node;    fn splitRight(t: *Tree, n: Node) ?Node;
@@ -58,10 +59,13 @@ pub fn Engine(comptime Tree: type) type {
 
         /// The row's two modes: with any flex child and room for the
         /// fixed ones, proportional tracks on one line; otherwise a
-        /// greedy wrapping flow. Children centre vertically on their line.
+        /// greedy wrapping flow. Children centre vertically on their line
+        /// unless the row is top-aligned (two panels of unequal height
+        /// side by side read better sharing a top edge).
         fn row(t: *Tree, n: Node, x: usize, y: usize, avail_w: usize, do_paint: bool) Size {
             const children = t.children(n);
             const g = t.gap(n);
+            const top = t.alignTop(n);
             var total: usize = 0;
             var fixed: usize = g * (children.len -| 1);
             for (children) |child| {
@@ -84,7 +88,7 @@ pub fn Engine(comptime Tree: type) type {
                     const weight = t.flex(child);
                     const width = if (weight == 0) layout(t, child, 0, 0, avail_w, false).w else flow.trackWidth(avail_w - fixed, total, before, weight);
                     const size = layout(t, child, 0, 0, width, false);
-                    if (do_paint) _ = t.childPaint(child, xx, y + (height - size.h) / 2, width);
+                    if (do_paint) _ = t.childPaint(child, xx, if (top) y else y + (height - size.h) / 2, width);
                     xx += width + g;
                     before += weight;
                 }
@@ -96,7 +100,7 @@ pub fn Engine(comptime Tree: type) type {
             for (children) |child| {
                 const sz = layout(t, child, 0, 0, avail_w, false);
                 const place = line.put(.{ .w = sz.w, .h = row_h });
-                if (do_paint) _ = t.childPaint(child, x + place.x, y + place.y + (row_h - sz.h) / 2, place.w);
+                if (do_paint) _ = t.childPaint(child, x + place.x, if (top) y + place.y else y + place.y + (row_h - sz.h) / 2, place.w);
             }
             return line.size();
         }
@@ -173,6 +177,7 @@ const TestNode = struct {
     h: usize = 0,
     gap: usize = 0,
     flex: usize = 0,
+    top: bool = false,
     children: []const *const TestNode = &.{},
     scroll_h: usize = 0,
     left: ?*const TestNode = null,
@@ -194,6 +199,9 @@ const TestTree = struct {
     }
     fn children(_: *TestTree, n: Node) []const Node {
         return n.children;
+    }
+    fn alignTop(_: *TestTree, n: Node) bool {
+        return n.top;
     }
     fn gap(_: *TestTree, n: Node) usize {
         return n.gap;
@@ -331,4 +339,15 @@ test "measure and paint agree on a nested tree" {
         const p = E.paint(&t, &outer, 7, 9, w);
         try std.testing.expectEqual(m, p);
     }
+}
+
+test "a top-aligned row keeps unequal children on one top edge" {
+    const a = TestNode{ .w = 40, .h = 30 };
+    const b = TestNode{ .w = 40, .h = 10, .flex = 1 };
+    const r = TestNode{ .kind = .row, .top = true, .children = &.{ &a, &b } };
+    var t = TestTree{};
+    const size = TestTree.Eng.paint(&t, &r, 0, 100, 200);
+    try std.testing.expectEqual(@as(usize, 30), size.h);
+    try std.testing.expectEqual(@as(usize, 100), t.paints[0].y);
+    try std.testing.expectEqual(@as(usize, 100), t.paints[1].y); // not centred at 110
 }

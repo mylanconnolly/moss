@@ -182,6 +182,10 @@ pub const PerCpu = struct {
     need_resched: bool = false,
     online: bool = false,
     ticks: u64 = 0, // debug
+    /// Cycles this core spent running anything but its idle thread, for
+    /// the machine's per-core load (sysinfo's buffer form). Written only
+    /// by this core; a reader elsewhere sees a slightly stale count.
+    busy: u64 = 0,
     lock: lock.SpinLock = .{},
     /// The vCPU this core is running right now (a *vm.Vcpu), and the
     /// one it ran last (whose virtual timer may still fire here).
@@ -825,10 +829,18 @@ fn cycles() u64 {
 }
 
 fn chargeRun(t: *Thread, now: u64) void {
+    const cpu = thisCpu();
+    if (t != cpu.idle) cpu.busy +%= now -% t.run_start;
     if (t.user_ctx) |d| {
         if (cpu_charge) |f| f(d, now -% t.run_start);
     }
     t.run_start = now;
+}
+
+/// A core's busy cycles so far (0 for one that is not online).
+pub fn busyCycles(i: usize) u64 {
+    if (i >= max_cpus or !cpus[i].online) return 0;
+    return cpus[i].busy;
 }
 
 fn overBudget(t: *Thread) bool {

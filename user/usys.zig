@@ -383,6 +383,12 @@ pub fn sysInfo(spawner_h: u64) IpcResult {
     return syscall6(.sysinfo, spawner_h, 0, 0, 0, 0, 0);
 }
 
+/// sysinfo's buffer form: shared.SysStats words into `buf`; data[0] =
+/// the word count written.
+pub fn sysStats(spawner_h: u64, buf: []u64) IpcResult {
+    return syscall6(.sysinfo, spawner_h, @intFromPtr(buf.ptr), buf.len * 8, 0, 0, 0);
+}
+
 pub const Clock = struct { boot_epoch_ms: u64, source: shared.ClockSource };
 
 /// clock_get: the Unix time of boot in milliseconds (0 = unknown) and

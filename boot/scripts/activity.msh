@@ -45,6 +45,7 @@ let final = (gui {
     tick:  1000
     view: (fn [state] {
         let t = (unit-rows $state.sort $state.sel)
+        let m = (sys-stats)
         let have = $t.have
         let up = $t.up
         let windowed = ($t.window != "")
@@ -55,10 +56,20 @@ let final = (gui {
           children: [
             { kind: "row", children: [
                 { kind: "label", role: "title", flex: 1, text: "Activity" }
-                { kind: "label", muted: true, text: $t.summary }
+                { kind: "label", muted: true, text: $m.machine_text }
+              ] }
+            { kind: "row", gap: 16, align: "top", children: [
+                { kind: "column", flex: 3, gap: 8, children: [
+                    { kind: "chart", h: 110, title: "CPU", caption: $m.cpu_text, values: $m.cpu_history }
+                    { kind: "meter", labels: "C", values: $m.cores_pm }
+                  ] }
+                { kind: "column", flex: 2, gap: 8, children: [
+                    { kind: "chart", h: 110, title: "Memory", caption: $m.mem_text, values: $m.mem_history }
+                    { kind: "label", muted: true, wrap: true, text: $t.summary }
+                  ] }
               ] }
             {
-              kind: "list", id: "procs", key: "procs", h: 380, fit: true
+              kind: "list", id: "procs", key: "procs", h: 300, fit: true
               selected: $state.sel
               sort:     (col-of $state.sort)
               empty:    "Nothing is running."

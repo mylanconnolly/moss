@@ -3211,6 +3211,32 @@ Zig; and the runner put the new drill in the disk-backed QEMU group by
 mistake, so QEMU never started and the failure left no log — a kind's
 group decides its devices *and* its disk.
 
+**Activity's machine panel, and the tick that was ten times too fast
+(same day).** The first version read 18% of a core while the desktop
+sat idle, and the user's eye was right that its numbers changed far
+more often than once a second. The app asked the compositor for a
+1000 ms tick; the compositor arms one timer at the shortest period any
+client asked for — the bar's 100 ms, for prompt menu state — and then
+handed *every* fire to *every* ticking client. So a window asking for a
+second re-rendered ten times a second, and the cost was all its own
+paint. Each reader now counts the timer's fires toward its own period
+and is woken only when it reaches it. Above the table there is now the
+machine itself, btop-style: a CPU history chart with one load bar per
+core beneath it, a memory history chart with used-of-total, and the core
+count and uptime in the header. The numbers come through the same door
+as the rest: `InitRequest.stats` asks the app's own init, which reads
+`sysinfo`'s new buffer form with its spawner — the memory totals, the
+core count, uptime, the cycle counter and its rate, and a busy-cycle
+count per core (`sched.busyCycles`, charged in `chargeRun` for anything
+but the idle thread) — coarse machine facts that name no domain. The
+`sys-stats` command turns two readings into per-core loads over the
+interval and keeps a sixty-sample history of the machine's CPU and
+memory for the charts. Two toolkit widgets carry it: `chart` (a filled
+history graph with a quarter grid, title and current reading, red past
+80%) and `meter` (label, bar, percentage; one row per value for the
+cores), and a row can be `align: "top"` so two panels of unequal height
+share a top edge instead of centring.
+
 **Shut down and restart (as built, 2026-09-16).** The system menu had
 Log Out and no way to end the machine; the machine also had none — an
 interactive boot powered off only when its app exited, and a root task
