@@ -388,13 +388,27 @@ fn sysDomainStat(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     const obj = d.captable.?.lookup(h, .domain_ctl) orelse return errno(.bad_handle);
     const child: *domain.Domain = @ptrFromInt(obj);
     trace.record(.domain_stat, child.id, @intFromEnum(child.state));
-    frame.set(1, switch (child.state) {
+    const state: u64 = switch (child.state) {
         .alive => @intFromEnum(shared.DomainState.alive),
         .dying => @intFromEnum(shared.DomainState.dying),
         else => @intFromEnum(shared.DomainState.dead),
-    });
-    frame.set(2, child.exit_code);
-    // Budgets, used KB << 32 | limit KB (introspection for supervisors).
+    };
+    // Two views, chosen by x1. The default: the state, the exit code,
+    // then the memory budgets as used KB << 32 | limit KB (introspection
+    // for supervisors). The resource view (x1 = 1): the state with the
+    // live thread count in bits 8..15, the domain's lifetime CPU spend
+    // in cycles (the caller turns two readings into a rate over its own
+    // interval, the way top does — no dependence on the budget period),
+    // then the same two memory words. A supervisor that shows what its
+    // children cost (a task manager over init's unit table) reads this
+    // without an introspect grant: the ctl cap it holds is the authority.
+    if (frame.arg(1) == 1) {
+        frame.set(1, state | (@as(u64, @min(child.threads_alive.load(.monotonic), 255)) << 8));
+        frame.set(2, child.cpu.total.load(.monotonic));
+    } else {
+        frame.set(1, state);
+        frame.set(2, child.exit_code);
+    }
     frame.set(3, ((child.kobj.balance() / 1024) << 32) | (child.kobj.limit / 1024));
     frame.set(4, ((child.user_mem.balance() / 1024) << 32) | (child.user_mem.limit / 1024));
     return errno(.ok);

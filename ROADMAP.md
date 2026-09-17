@@ -200,6 +200,15 @@ at once.
 client-defined menu schemas, nested submenus, and scrollable overflow when
 applications need menus beyond those profiles.
 
+**Activity follow-ons (2026-09-17).** The task manager shows a session's
+own units. Next: an admin **System** tab over `domain_list` (the
+`introspect` grant, gated like Settings' admin view) for every domain on
+the machine with the account tree; a **graceful quit** before Force Quit
+— a close request routed through the compositor's app-menu path, which
+only chrome may invoke today — and a machine-wide header (free memory,
+cores, uptime from `sysinfo`) where the grant allows it; per-unit CPU
+history sparklines once the toolkit has a canvas widget.
+
 **Follow-ons from the project assessment (2026-09-12)**
 
 - **Document workflow follow-through.** The native editor and capability-scoped
@@ -1503,6 +1512,19 @@ applications need menus beyond those profiles.
   pointer mapping and resident bars. Output control uses a separate boot
   export delegated to desktop components. Real-monitor EDID/timings, hotplug,
   refresh rates and multiple outputs remain follow-ons.
+- ✅ **Activity, the task manager** (2026-09-17): an mshl app over init's
+  unit table — every session app and every service that has run, with
+  state, CPU, memory of budget, threads and restarts; sortable headers, a
+  one-second refresh, Show Window / Launch / Force Quit with a confirm
+  row. Scoped by the capability model: the session's init cap shows the
+  session's units and stops only those. `domain_stat` grew a resource
+  view (threads, lifetime CPU cycles) so init reports rates from the ctl
+  caps it holds, no introspect grant. Toolkit: clickable list headers
+  (`col` in the event, `sort:` mark), `selected:` by row id, widgets
+  re-announced when the set changes. `activity` drill. Found: the table
+  over the evaluation arena drained the pool under a hundred units; a
+  `match` `$var` arm shadows a later `nothing` arm; the drill's QEMU group
+  implied a disk nobody made.
 - ✅ **Shut down and restart** (2026-09-16): the system menu's Restart and
   Shut Down (with rules between groups) climb the init tree as one
   `InitRequest.power` — bar → session init → session manager → system init

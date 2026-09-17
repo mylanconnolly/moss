@@ -123,6 +123,9 @@ control bytes and overlong values are refused, not truncated. `dock`
 defaults to false; `order` defaults to 1000 and accepts 0–65535. Metadata
 belongs to the unit because several apps may share one executable image.
 Units without it remain services and are omitted from application discovery.
+A new session app also changes one runner constant, `launcher_ready_line`
+in `tools/runner.zig` (the launcher logs how many apps it found), and is
+listed in `build.zig`'s archive files with its script.
 Init's `apps {start}` request fills a supplied shared buffer with
 `shared.apps.Record`s and returns `{n,total,next}`; `next:0` completes the
 catalog. Reading it never starts an app. Launch still uses `connect_named`

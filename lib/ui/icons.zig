@@ -5,7 +5,7 @@
 const std = @import("std");
 const path = @import("iconpath.zig");
 const Segment = path.Segment;
-pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close, moss };
+pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close, activity, moss };
 pub fn parse(name: []const u8) ?Icon {
     if (std.mem.eql(u8, name, "file-text")) return .file;
     if (std.mem.eql(u8, name, "house")) return .home;
@@ -18,6 +18,7 @@ pub fn parse(name: []const u8) ?Icon {
     if (std.mem.eql(u8, name, "arrow-left")) return .back;
     if (std.mem.eql(u8, name, "tree-structure")) return .network;
     if (std.mem.eql(u8, name, "x")) return .close;
+    if (std.mem.eql(u8, name, "pulse")) return .activity;
     return std.meta.stringToEnum(Icon, name);
 }
 fn segments(icon: Icon) []const Segment {
@@ -34,6 +35,7 @@ fn segments(icon: Icon) []const Segment {
         .back => path.fromSvg(@embedFile("phosphor/regular/arrow-left.svg")),
         .network => path.fromSvg(@embedFile("phosphor/regular/tree-structure.svg")),
         .close => path.fromSvg(@embedFile("phosphor/regular/x.svg")),
+        .activity => path.fromSvg(@embedFile("phosphor/regular/pulse.svg")),
         .moss => path.fromSvg(@embedFile("branding/moss.svg")),
     };
 }

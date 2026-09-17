@@ -529,23 +529,45 @@ pub const InitReply = union(enum(u64)) {
     powering: void,
 };
 
-/// One unit as `svc` sees it, packed into a buffer by init's `list`.
+/// One unit as `svc` and the Activity app see it, packed into a buffer
+/// by init's `list`: the supervision facts (up, restarts, stopped by
+/// request, the last exit code) and what the unit costs right now,
+/// which init reads from the ctl cap it holds (`domain_stat`'s resource
+/// view) — so a session app sees its own session's apps, and only those,
+/// with no introspect grant.
 pub const UnitRec = struct {
     name: [16]u8, // NUL-padded
     up: u8,
     restarts: u32,
     max_restarts: u32,
+    /// used KB << 32 | limit KB, as DomainRec packs them.
+    kobj_kb: u64 = 0,
+    user_kb: u64 = 0,
+    /// CPU spend since the previous `list`, in permille of one core.
+    cpu: u64 = 0,
+    /// The last death's exit code (0 until the unit has died once).
+    exit_code: u64 = 0,
+    threads: u8 = 0,
+    /// Stopped by request (`stop_named`): down and not to be restarted.
+    stopped: u8 = 0,
+    /// Has an `app:` record: an application, not a service.
+    app: u8 = 0,
 
-    pub const size = 28;
+    pub const size = 64;
 
     pub fn encode(r: *const UnitRec, out: *[size]u8) void {
+        @memset(out, 0);
         @memcpy(out[0..16], &r.name);
         out[16] = r.up;
-        out[17] = 0;
-        out[18] = 0;
-        out[19] = 0;
         std.mem.writeInt(u32, out[20..24], r.restarts, .little);
         std.mem.writeInt(u32, out[24..28], r.max_restarts, .little);
+        std.mem.writeInt(u64, out[28..36], r.kobj_kb, .little);
+        std.mem.writeInt(u64, out[36..44], r.user_kb, .little);
+        std.mem.writeInt(u64, out[44..52], r.cpu, .little);
+        std.mem.writeInt(u64, out[52..60], r.exit_code, .little);
+        out[60] = r.threads;
+        out[61] = r.stopped;
+        out[62] = r.app;
     }
 
     pub fn decode(b: *const [size]u8) UnitRec {
@@ -554,9 +576,31 @@ pub const UnitRec = struct {
             .up = b[16],
             .restarts = std.mem.readInt(u32, b[20..24], .little),
             .max_restarts = std.mem.readInt(u32, b[24..28], .little),
+            .kobj_kb = std.mem.readInt(u64, b[28..36], .little),
+            .user_kb = std.mem.readInt(u64, b[36..44], .little),
+            .cpu = std.mem.readInt(u64, b[44..52], .little),
+            .exit_code = std.mem.readInt(u64, b[52..60], .little),
+            .threads = b[60],
+            .stopped = b[61],
+            .app = b[62],
         };
     }
+
+    pub fn nameSlice(r: *const UnitRec) []const u8 {
+        return std.mem.sliceTo(&r.name, 0);
+    }
 };
+
+test "UnitRec round-trips every field" {
+    var name: [16]u8 = @splat(0);
+    @memcpy(name[0..6], "editor");
+    const r: UnitRec = .{ .name = name, .up = 1, .restarts = 2, .max_restarts = 3, .kobj_kb = (5 << 32) | 1024, .user_kb = (300 << 32) | 16384, .cpu = 125, .exit_code = 7, .threads = 4, .stopped = 1, .app = 1 };
+    var buf: [UnitRec.size]u8 = undefined;
+    r.encode(&buf);
+    const d = UnitRec.decode(&buf);
+    try std.testing.expectEqualStrings("editor", d.nameSlice());
+    try std.testing.expectEqual(r, d);
+}
 
 // ----------------------------------------------------------------- users
 //
@@ -2103,7 +2147,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48, activity = 49 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with

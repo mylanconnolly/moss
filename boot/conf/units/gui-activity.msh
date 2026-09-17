@@ -1,0 +1,18 @@
+# The Activity drill (profile activity): mshrun runs the Activity app on
+# the pointer-capable compositor beside win-alpha (a plain window). The
+# host selects win-alpha's row, force-quits it through the confirm step,
+# and closes Activity; init's log shows the stop, the table shows the flip.
+# Essential: closing Activity ends the boot.
+{
+  image:     mshrun
+  script:    scripts/activity.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [activity]
+  essential: true
+  give: [
+    { tag: init, self: true }
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+  ]
+}

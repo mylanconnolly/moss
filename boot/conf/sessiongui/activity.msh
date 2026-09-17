@@ -1,0 +1,17 @@
+# The Activity app (lazy — the launcher starts it; not on the dock, like
+# a utility). What this session is running and what it costs, with Force
+# Quit. Its init cap is the session's own front channel, so the table is
+# this session's units and nothing beyond them. Non-essential.
+{
+  app:       { name: "Activity", description: "See what is running, what it costs, and stop an app", icon: pulse, window: "Activity", dock: false, order: 60 }
+  image:     mshrun
+  script:    scripts/activity.msh
+  budget:    { user: 16mb }
+  grant:     [log, bootfs]
+  essential: false
+  give: [
+    { tag: init, self: true }
+    { tag: display, session: true }
+    { tag: font, session: true }
+  ]
+}

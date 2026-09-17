@@ -1,0 +1,118 @@
+# Activity: what this session is running and what it costs. One row per
+# unit the session's init supervises (an app under its display name and
+# icon, a service under its unit name), with its state, CPU, memory,
+# threads and restarts, refreshed every second from `unit-rows`. Click a
+# column header to sort by it. Select a row to show its window, launch it
+# if it is down, or force-quit it (init destroys the domain; a confirm
+# step stands between the button and the kill). The table is this
+# session's only: the init cap this app holds is its own session's, so
+# another user's apps and the system's services are not even visible.
+#
+# State: { sort, sel, confirm, note }. sel = the selected unit's id.
+
+def sort-of [col] {
+  match $col {
+    0 => "name"
+    1 => "state"
+    2 => "cpu"
+    3 => "mem"
+    4 => "threads"
+    5 => "restarts"
+    _ => "name"
+  }
+}
+
+def col-of [sort] {
+  match $sort {
+    "name" => 0
+    "state" => 1
+    "cpu" => 2
+    "mem" => 3
+    "threads" => 4
+    "restarts" => 5
+    _ => 0
+  }
+}
+
+def same [state] {
+  { sort: $state.sort, sel: $state.sel, confirm: "", note: "" }
+}
+
+let final = (gui {
+    init:  { sort: "name", sel: "", confirm: "", note: "" }
+    title: "Activity"
+    width: 760
+    tick:  1000
+    view: (fn [state] {
+        let t = (unit-rows $state.sort $state.sel)
+        let have = $t.have
+        let up = $t.up
+        let windowed = ($t.window != "")
+        let shown = $t.name
+        {
+          kind: "column"
+          gap:  12
+          children: [
+            { kind: "row", children: [
+                { kind: "label", role: "title", flex: 1, text: "Activity" }
+                { kind: "label", muted: true, text: $t.summary }
+              ] }
+            {
+              kind: "list", id: "procs", key: "procs", h: 380, fit: true
+              selected: $state.sel
+              sort:     (col-of $state.sort)
+              empty:    "Nothing is running."
+              cols:     [{ title: "Name", w: 10 } { title: "State", w: 6 } { title: "CPU", w: 3, right: true } { title: "Memory", w: 7, right: true } { title: "Threads", w: 4, right: true } { title: "Restarts", w: 4, right: true }]
+              rows:     $t.rows
+            }
+            (match $state.confirm {
+                "" => { kind: "row", gap: 8, children: [
+                    { kind: "button", id: "show", label: "Show Window", disabled: (not ($have and $up and $windowed)) }
+                    { kind: "button", id: "launch", label: "Launch", disabled: (not ($have and (not $up))) }
+                    { kind: "button", id: "quit", label: "Force Quit", variant: "danger", disabled: (not ($have and $up)) }
+                    { kind: "label", muted: true, flex: 1, text: $state.note }
+                  ] }
+                _ => { kind: "row", gap: 8, children: [
+                    { kind: "button", id: "cancel", label: "Cancel" }
+                    { kind: "button", id: "confirm-quit", label: "Force Quit", variant: "danger" }
+                    { kind: "label", flex: 1, text: ("Force quit “" + $shown + "”? Unsaved work in it is lost.") }
+                  ] }
+              })
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "procs" => (match ($ev.col >= 0) {
+              true => { { sort: (sort-of $ev.col), sel: $state.sel, confirm: "", note: "" } }
+              _ => (match $ev.activated {
+                  true => {
+                    let w = ((unit-rows $state.sort $ev.row) | get "window")
+                    match ($w != "") {
+                      true => { restore-window $w; { sort: $state.sort, sel: $ev.row, confirm: "", note: "" } }
+                      _ => { { sort: $state.sort, sel: $ev.row, confirm: "", note: "" } }
+                    }
+                  }
+                  _ => { { sort: $state.sort, sel: $ev.row, confirm: "", note: "" } }
+                })
+            })
+          "show" => {
+            let w = ((unit-rows $state.sort $state.sel) | get "window")
+            match (restore-window $w) {
+              ok _ => (same $state)
+              _ => { { sort: $state.sort, sel: $state.sel, confirm: "", note: "Its window is not open." } }
+            }
+          }
+          "launch" => { launch $state.sel; { sort: $state.sort, sel: $state.sel, confirm: "", note: ("Launched " + $state.sel) } }
+          "quit" => { { sort: $state.sort, sel: $state.sel, confirm: $state.sel, note: "" } }
+          "cancel" => (same $state)
+          "confirm-quit" => (match (unit-stop $state.confirm) {
+              true => { { sort: $state.sort, sel: $state.sel, confirm: "", note: ("Stopped " + $state.confirm) } }
+              _ => { { sort: $state.sort, sel: $state.sel, confirm: "", note: ("Could not stop " + $state.confirm) } }
+            })
+          "close" => { { sort: $state.sort, sel: $state.sel, confirm: "", note: "", done: true } }
+          _ => $state
+        }
+      })
+  })
+echo ("activity: closed sort=" + $final.sort)

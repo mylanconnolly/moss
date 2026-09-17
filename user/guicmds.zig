@@ -76,11 +76,15 @@ fn settledWorkArea() wf.Geom {
     const bar_h = lineOf(R_UI) + 2 * guibar.bar_vpad + pal.border_w;
     var wa = wf.workArea();
     var tries: usize = 0;
-    while (tries < 8) : (tries += 1) {
+    // Up to 1.5 s: the dock re-declares on its own render, which under a
+    // loaded parallel gate can come later than the 320 ms this once
+    // allowed — and a window that opens a beat late beats one centred in
+    // a work area 16 px off (the guishellro drill caught the difference).
+    while (tries < 30) : (tries += 1) {
         const top_ok = wa.y == 0 or wa.y == bar_h;
         const bottom_ok = wa.y + wa.h == wf.scanout_h or wa.y + wa.h + dockHeight() == wf.scanout_h;
         if (top_ok and bottom_ok) break;
-        usys.sleepMs(40);
+        usys.sleepMs(50);
         wa = wf.workArea();
     }
     return wa;
@@ -520,6 +524,10 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     const available = work_bottom -| work_top;
     wf.win_h = @min(@max(win_h_min, content_h), @min(wf.win_h_max, available));
     wf.win_y = work_top + (available - wf.win_h) / 2;
+    // How the window was sized and where it went, so a drill that finds a
+    // window somewhere unexpected can see which work area it centred in.
+    var l: [96]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "gui: placed y={d} h={d} content={d} work={d}+{d}", .{ wf.win_y, wf.win_h, content_h, wa.y, wa.h }) catch "gui: placed");
 }
 
 /// Children remain ordinary mshl data, shared by measurement and painting.
@@ -952,8 +960,14 @@ const ListHit = struct {
     rows_w: usize = 0,
     row_h: usize = 0,
     sb_x: usize = 0, // scrollbar centre (surface-local), 0 = no scrollbar
+    /// The column header above the rows: its height and each column's
+    /// right edge (surface-local), so a header click can name a column.
+    header_h: usize = 0,
+    col_edge: [max_list_cols]usize = @splat(0),
+    ncols: usize = 0,
     st: *ListState = undefined,
 };
+const max_list_cols = 8;
 var list_hits: [max_lists]ListHit = undefined;
 var nlisthit: usize = 0;
 
@@ -1020,20 +1034,38 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const tracks_w = w -| (2 * list_cell_pad + 8);
     panel(x, y, w, box_h, r_field, pal.field_bg, if (focused) pal.focus else pal.border, if (focused) pal.focus_w else pal.border_w);
 
-    // Header: muted column titles + a rule beneath them.
+    // Header: muted column titles + a rule beneath them. A `sort` field
+    // names the column the rows are ordered by; its title gets a mark.
+    var col_edge: [max_list_cols]usize = @splat(0);
+    var ncols: usize = 0;
     if (cols.len > 0) {
+        const sort_col: ?usize = if (rec.get("sort")) |sv| (if (sv == .int and sv.int >= 0) @intCast(sv.int) else null) else null;
         var hx = x + list_cell_pad;
         var before: usize = 0;
-        for (cols) |cv| {
+        for (cols, 0..) |cv, ci| {
             if (cv != .record) continue;
             const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
             const cw = if (fit) ui.flow.trackWidth(tracks_w, total_weight, before, weight) else weight;
             before += weight;
             const text = strField(cv.record, "title");
+            const sorted = sort_col == ci;
+            const mark_w: usize = if (sorted) 12 else 0; // a small triangle after the title
             const right = if (cv.record.get("right")) |v| v.asBool() else false;
-            const offset = if (right) (cw -| 8) -| strW(R_UI, text) else 0;
-            drawStrTrunc(hx + offset, y + list_row_vpad, R_UI, text, cw -| 8, pal.text_muted, pal.field_bg);
+            const offset = if (right) (cw -| 8) -| (strW(R_UI, text) + mark_w) else 0;
+            drawStrTrunc(hx + offset, y + list_row_vpad, R_UI, text, cw -| (8 + mark_w), if (sorted) pal.text else pal.text_muted, pal.field_bg);
+            if (sorted) {
+                const tx = hx + offset + @min(strW(R_UI, text), cw -| (8 + mark_w)) + 5;
+                const ty = y + list_row_vpad + line / 2 - 1;
+                fillRect(tx, ty, 7, 1, pal.text);
+                fillRect(tx + 1, ty + 1, 5, 1, pal.text);
+                fillRect(tx + 2, ty + 2, 3, 1, pal.text);
+                fillRect(tx + 3, ty + 3, 1, 1, pal.text);
+            }
             hx += cw;
+            if (ncols < max_list_cols) {
+                col_edge[ncols] = hx;
+                ncols += 1;
+            }
         }
         fillRect(x + pal.border_w, y + header_h, w -| (2 * pal.border_w), pal.border_w, pal.border);
     }
@@ -1046,6 +1078,19 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const st = listFor(id, key);
     st.nrows = nrows;
     st.vis = vis;
+    // `selected: ID` pins the selection to a row by its id, so a list
+    // whose rows reorder between renders (a live table sorted by CPU)
+    // keeps the highlight on the same item, not the same index.
+    if (rec.get("selected")) |sv| if (sv == .str and sv.str.len > 0) {
+        var i: usize = 0;
+        while (i < nrows) : (i += 1) {
+            const idv = rowField(rowsv, i, "id");
+            if (idv == .str and std.mem.eql(u8, idv.str, sv.str)) {
+                st.sel = i;
+                break;
+            }
+        }
+    };
     if (nrows == 0) st.sel = 0 else if (st.sel >= nrows) st.sel = nrows - 1;
     // Only clamp the scroll to the last page here; following the selection
     // into view is done when the selection *moves* (a click or arrow key),
@@ -1129,7 +1174,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
 
     if (nlisthit < list_hits.len) {
         const sb_x = if (has_sb) x + w - sb_w / 2 - pal.border_w else 0;
-        list_hits[nlisthit] = .{ .id = id, .x = x, .rows_top = rows_top, .offset_y = wf.draw_offset_y, .rows_w = rows_w, .row_h = row_h, .sb_x = sb_x, .st = st };
+        list_hits[nlisthit] = .{ .id = id, .x = x, .rows_top = rows_top, .offset_y = wf.draw_offset_y, .rows_w = rows_w, .row_h = row_h, .sb_x = sb_x, .header_h = header_h, .col_edge = col_edge, .ncols = ncols, .st = st };
         nlisthit += 1;
     }
     if (nfoc < focusables.len) {
@@ -1177,11 +1222,13 @@ fn keepSelVisible(st: *ListState) void {
     if (st.vis > 0 and st.sel >= st.scroll + st.vis) st.scroll = st.sel + 1 - st.vis;
 }
 
-const ListClick = struct { fire: bool = false, activated: bool = false, row: usize = 0 };
+const ListClick = struct { fire: bool = false, activated: bool = false, row: usize = 0, header: ?usize = null };
 
 /// Route a click at (x, y) inside the list `id`: a row click moves the
 /// selection (a reclick on the same row activates it); a scrollbar-track
-/// click pages. Returns whether to fire a list event and for which row.
+/// click pages; a column-header click fires with that column (`header`)
+/// and no row — the app decides what a column click means (a sort).
+/// Returns whether to fire a list event and for which row.
 fn listClick(id: []const u8, x: usize, screen_y: usize) ListClick {
     for (list_hits[0..nlisthit]) |lh| {
         if (!std.mem.eql(u8, lh.id, id)) continue;
@@ -1194,7 +1241,13 @@ fn listClick(id: []const u8, x: usize, screen_y: usize) ListClick {
             if (y < mid) st.scroll = st.scroll -| st.vis else st.scroll += st.vis;
             return .{};
         }
-        if (y < lh.rows_top) return .{};
+        if (y < lh.rows_top) {
+            if (lh.ncols == 0 or y < lh.rows_top -| lh.header_h) return .{};
+            var ci: usize = 0;
+            while (ci < lh.ncols) : (ci += 1) if (x < lh.col_edge[ci]) break;
+            if (ci == lh.ncols) return .{};
+            return .{ .fire = true, .header = ci };
+        }
         const row = st.scroll + (y - lh.rows_top) / lh.row_h;
         if (row >= st.nrows) return .{};
         const activated = st.click.press(row, usys.nowMs());
@@ -1238,15 +1291,21 @@ fn mkEvent(it: *mshl.Interp, id: []const u8) mshl.Error!Value {
 /// The event a list fires: `{ id: <listId>, row: <rowId>, activated: bool }`
 /// — `activated` true for Enter or a reclick (open), false for a plain
 /// selection (the app updates a preview). The app maps `row` to its data.
-fn mkListEvent(it: *mshl.Interp, id: []const u8, row: []const u8, activated: bool) mshl.Error!Value {
-    const keys = try it.arena.alloc([]const u8, 3);
+/// The event for a list: `{ id, row, activated, col }` — `row` the
+/// selected row's id and `activated` whether it was opened (Enter, a
+/// reclick); or, for a column-header click, `row` empty and `col` the
+/// column's index (-1 otherwise).
+fn mkListEvent(it: *mshl.Interp, id: []const u8, row: []const u8, activated: bool, col: ?usize) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 4);
     keys[0] = "id";
     keys[1] = "row";
     keys[2] = "activated";
-    const vals = try it.arena.alloc(Value, 3);
+    keys[3] = "col";
+    const vals = try it.arena.alloc(Value, 4);
     vals[0] = .{ .str = try it.arena.dupe(u8, id) };
     vals[1] = .{ .str = try it.arena.dupe(u8, row) };
     vals[2] = .{ .bool = activated };
+    vals[3] = .{ .int = if (col) |c| @intCast(c) else -1 };
     return .{ .record = .{ .keys = keys, .vals = vals } };
 }
 
@@ -1670,6 +1729,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     var action_len: usize = 0;
     var minimized = false; // the amber dot hid us; a restore event brings us back
     var announced = false;
+    var announced_layout: u64 = 0;
     var relog_geom = false; // a resize moved the traffic lights; re-log them
     // The current view tree: the initial view of the initial state, then
     // recomputed after each fired event — locally (update then view) or,
@@ -1759,8 +1819,18 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             var dl: [96]u8 = undefined;
             _ = usys.log(log_h, std.fmt.bufPrint(&dl, "gui: dots close={d},{d} min={d},{d} max={d},{d}", .{ wf.win_x + wf.dots_cx[0], wf.win_y + wf.dots_cy, wf.win_x + wf.dots_cx[1], wf.win_y + wf.dots_cy, wf.win_x + wf.dots_cx[2], wf.win_y + wf.dots_cy }) catch "gui: dots");
         }
-        if (!announced) {
-            _ = usys.log(log_h, "gui: ready");
+        // The widgets change with the state (a confirm step's buttons appear
+        // when it opens): announce the set again whenever it differs from
+        // the last announced one, so a host finds the new buttons' centres.
+        var layout_hash: u64 = 0xcbf29ce484222325;
+        for (0..nfocus) |i| {
+            const f = focusables[i];
+            for (f.id) |c| layout_hash = (layout_hash ^ c) *% 0x100000001b3;
+            layout_hash = (layout_hash ^ (f.bx + f.by * 7919 + f.bw * 104729)) *% 0x100000001b3;
+        }
+        if (!announced or layout_hash != announced_layout) {
+            announced_layout = layout_hash;
+            if (!announced) _ = usys.log(log_h, "gui: ready");
             // Log each focusable widget's clickable centre in scanout
             // coordinates, so a host driving the pointer can click it.
             for (0..nfocus) |i| {
@@ -1787,6 +1857,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var fired_list = false;
         var fired_row: []const u8 = "";
         var fired_activated = false;
+        var fired_col: ?usize = null; // a column-header click, by index
         var ticked = false;
         var closed = false;
         input: while (true) {
@@ -1907,8 +1978,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                 if (lc.fire) {
                                     fired = focusables[wi].id;
                                     fired_list = true;
-                                    fired_row = listRowId(tree, focusables[wi].id, lc.row);
+                                    fired_row = if (lc.header != null) "" else listRowId(tree, focusables[wi].id, lc.row);
                                     fired_activated = lc.activated;
+                                    fired_col = lc.header;
                                 }
                                 break :input; // re-render (selection or scroll moved)
                             }
@@ -2111,7 +2183,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             reveal_focus = true;
             action_len = @min(id.len, action_id.len);
             @memcpy(action_id[0..action_len], id[0..action_len]);
-            const ev = if (fired_list) try mkListEvent(it, id, fired_row, fired_activated) else try mkEvent(it, id);
+            const ev = if (fired_list) try mkListEvent(it, id, fired_row, fired_activated, fired_col) else try mkEvent(it, id);
             if (remote_node != 0) {
                 // The app runs on the fabric: ship the event, render the
                 // tree that comes back. A dropped round trip keeps the last

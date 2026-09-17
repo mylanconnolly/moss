@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity };
 
 const Spec = struct {
     name: []const u8,
@@ -72,6 +72,7 @@ const specs = [_]Spec{
     .{ .name = "guiclick", .kind = .guiclick, .pass = "guiclick-test: PASS", .extra = "gui: done count=1", .append = "profile=guiclick", .timeout_s = 120 },
     .{ .name = "listdemo", .kind = .listdemo, .pass = "listdemo-test: PASS", .extra = "gui: list items", .append = "profile=listdemo", .timeout_s = 120 },
     .{ .name = "explorer", .kind = .explorer, .pass = "explorer-test: PASS", .extra = "gui: list files", .append = "profile=explorer", .timeout_s = 120 },
+    .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-alpha ok=true", .always_extra = "init: stopped by request: win-alpha", .extra2 = "activity: win-alpha running=false", .append = "profile=activity", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
@@ -162,7 +163,7 @@ const check_dir = "zig-out/check";
 const gpu_device = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
 /// The launcher lists every `app:` unit of the session template
 /// (boot/conf/sessiongui): five today. A new app changes this once.
-const launcher_ready_line = "launcher: ready count=5";
+const launcher_ready_line = "launcher: ready count=6";
 
 // Host TCP ports. Drills run concurrently (`--jobs`, one worker thread
 // per QEMU), so every host port is per worker slot: slot 0 keeps the
@@ -528,7 +529,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
-        .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo, .cascade => try args.appendSlice(gpa, &.{
+        .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo, .cascade, .activity => try args.appendSlice(gpa, &.{
             "-device", gpu_device,
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -614,6 +615,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .explorer) {
         if (!try explorerDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .activity) {
+        if (!try activityDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .desktop) {
         if (!try desktopDrive(spec, log_path, polls)) return false;
@@ -1206,6 +1210,66 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     }
     return true;
+}
+
+/// The Activity drill: the task manager lists the profile's units with
+/// win-alpha among them. Select win-alpha's row (the table logs its row
+/// order), press Force Quit, confirm, and watch init stop it and the
+/// table flip its row; then close Activity (Cmd-W) to end the boot.
+fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "gui: ready", 1, "Activity never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "activity: row ", 1, "the table logged no rows", spec, polls)) return false;
+    const g = waitListGeom(spec, log_path, polls, "procs") orelse {
+        reportFailure(spec.name, "could not parse the table's geometry", log_path);
+        return false;
+    };
+    const row = activityRow(readLog(log_path), "win-alpha") orelse {
+        reportFailure(spec.name, "win-alpha has no row in the table", log_path);
+        return false;
+    };
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    _ = q.screendump(check_dir ++ "/activity.ppm");
+    if (!clickScanout(&q, g[0], g[1] + g[2] * row + g[2] / 2)) return sfail(spec, log_path, "click win-alpha's row");
+    sleepMs(400);
+    const quit = widgetCenter(readLog(log_path), "quit") orelse {
+        reportFailure(spec.name, "no Force Quit button was logged", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, quit[0], quit[1])) return sfail(spec, log_path, "click Force Quit");
+    if (!try waitLogN(log_path, "gui: widget confirm-quit at", 1, "the confirm step never appeared", spec, polls)) return false;
+    sleepMs(300);
+    const confirm = widgetCenter(readLog(log_path), "confirm-quit") orelse {
+        reportFailure(spec.name, "no confirm button was logged", log_path);
+        return false;
+    };
+    _ = q.screendump(check_dir ++ "/activity-confirm.ppm");
+    if (!clickScanout(&q, confirm[0], confirm[1])) return sfail(spec, log_path, "click the confirm button");
+    if (!try waitLogN(log_path, "activity: stop win-alpha ok=true", 1, "the stop was not accepted", spec, polls)) return false;
+    if (!try waitLogN(log_path, "activity: win-alpha running=false", 1, "the table never showed win-alpha down", spec, polls)) return false;
+    sleepMs(300);
+    _ = q.screendump(check_dir ++ "/activity-stopped.ppm");
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
+    if (!try waitLogN(log_path, "activity: closed", 1, "Activity never closed", spec, polls)) return false;
+    return true;
+}
+
+/// The row index the Activity table last logged for `unit` ("activity:
+/// row N <unit>"), scanning from the end so a re-sort's newer lines win.
+fn activityRow(content: []const u8, unit: []const u8) ?u32 {
+    var kb: [48]u8 = undefined;
+    const suffix = std.fmt.bufPrint(&kb, " {s}", .{unit}) catch return null;
+    var at = content.len;
+    while (std.mem.lastIndexOf(u8, content[0..at], "activity: row ")) |i| {
+        const eol = std.mem.indexOfScalarPos(u8, content, i, '\n') orelse content.len;
+        const line = std.mem.trimEnd(u8, content[i..eol], "\r");
+        if (std.mem.endsWith(u8, line, suffix)) return parseAfter(line, "activity: row ");
+        at = i;
+    }
+    return null;
 }
 
 /// Press the titlebar at (fx, fy) and drag to (tx, ty) in scanout pixels,

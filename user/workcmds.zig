@@ -36,6 +36,8 @@ var fab_chan: u64 = 0;
 /// init's front channel, when the host holds one: `dial` reaches a
 /// durable service unit through it (init starts and supervises it).
 var init_chan: u64 = 0;
+/// The host's log, for the unit table's change notes (a drill reads them).
+pub var log_h: u64 = 0;
 
 pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8, fabric: u64, init: u64) void {
     spawner = spawner_cap;
@@ -483,6 +485,187 @@ fn remoteConnect(it: *mshl.Interp, node: u64, name: []const u8) mshl.Error!Value
     };
 }
 
+const max_unit_rows = 128;
+const UnitSort = enum { name, state, cpu, mem, threads, restarts };
+
+/// What the table logged last time, so the log carries only changes: the
+/// row order (a drill finds a unit's row by it) and each unit's running
+/// flag (a stop shows as a flip). Bounded by the unit table.
+var rows_order_hash: u64 = 0;
+/// The catalog read per table build: 30 KB, far too big for the
+/// evaluation arena's blocks, so it lives here (one build at a time).
+var unit_catalog: @import("appsclient.zig").Catalog = .{};
+var rows_seen: [max_unit_rows]struct { name: [16]u8, up: bool } = undefined;
+var rows_nseen: usize = 0;
+
+fn cpuPermille(r: *const shared.UnitRec) u64 {
+    return r.cpu;
+}
+fn userUsedKb(r: *const shared.UnitRec) u64 {
+    return r.user_kb >> 32;
+}
+
+/// The Activity table: init's unit list joined with the app catalog (a
+/// unit with an `app:` record shows under its display name and icon), as
+/// list rows `{ id, cells, icon }` in the order asked for, with the
+/// totals and the selected unit's facts (`have`, `up`, `name`, `window`)
+/// beside them, so the script never searches the rows. Everything is
+/// arena-owned so the GUI can hold the rows across renders.
+fn unitRows(it: *mshl.Interp, sort_name: []const u8, selected: []const u8) mshl.Error!Value {
+    const a = it.arena;
+    const sort = std.meta.stringToEnum(UnitSort, sort_name) orelse .name;
+    // The units.
+    const sh = usys.shmCreate(2);
+    if (sh.err != .ok) return it.fail("unit-rows: out of shared memory", .{});
+    defer _ = usys.capDrop(sh.data[0]);
+    const m = usys.shmMap(sh.data[0]);
+    if (m.err != .ok) return it.fail("unit-rows: cannot map the buffer", .{});
+    defer _ = usys.shmUnmap(m.data[0]);
+    const buf: [*]u8 = @ptrFromInt(m.data[0]);
+    const listed = switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .list, sh.data[0])) {
+        .ok => |rep| switch (rep) {
+            .listed => |l| @min(l.n, max_unit_rows),
+            else => return it.fail("unit-rows: bad reply from init", .{}),
+        },
+        .err => return it.fail("unit-rows: init unreachable", .{}),
+    };
+    // The table is what runs, ran, or can be launched: every app (a
+    // "Launch" target), and a service only once it has been up (a unit
+    // file nobody started is not activity — init knows a hundred of them).
+    var recs: [max_unit_rows]shared.UnitRec = undefined;
+    var n: usize = 0;
+    for (0..listed) |i| {
+        const r = shared.UnitRec.decode(buf[i * shared.UnitRec.size ..][0..shared.UnitRec.size]);
+        if (r.up == 0 and r.app == 0 and r.restarts == 0 and r.stopped == 0 and r.exit_code == 0) continue;
+        recs[n] = r;
+        n += 1;
+    }
+    // The catalog: display names, icons and window titles for the apps.
+    const catalog = &unit_catalog;
+    catalog.* = .{};
+    _ = catalog.refresh();
+    var apps: [max_unit_rows]?*const shared.apps.Record = @splat(null);
+    var names: [max_unit_rows][]const u8 = undefined;
+    for (0..n) |i| {
+        names[i] = recs[i].nameSlice();
+        for (catalog.records[0..catalog.len]) |*app| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&app.unit, 0), names[i])) {
+                apps[i] = app;
+                names[i] = std.mem.sliceTo(&app.name, 0);
+            }
+        }
+    }
+    // The order: the sort column, descending for the costs, ties by name.
+    var order: [max_unit_rows]usize = undefined;
+    for (0..n) |i| order[i] = i;
+    const Ctx = struct {
+        recs: []const shared.UnitRec,
+        names: []const []const u8,
+        sort: UnitSort,
+        fn less(ctx: @This(), x: usize, y: usize) bool {
+            const rx = &ctx.recs[x];
+            const ry = &ctx.recs[y];
+            const kx: u64 = switch (ctx.sort) {
+                .name => 0,
+                .state => rx.up,
+                .cpu => cpuPermille(rx),
+                .mem => userUsedKb(rx),
+                .threads => rx.threads,
+                .restarts => rx.restarts,
+            };
+            const ky: u64 = switch (ctx.sort) {
+                .name => 0,
+                .state => ry.up,
+                .cpu => cpuPermille(ry),
+                .mem => userUsedKb(ry),
+                .threads => ry.threads,
+                .restarts => ry.restarts,
+            };
+            if (kx != ky) return kx > ky;
+            return std.ascii.lessThanIgnoreCase(ctx.names[x], ctx.names[y]);
+        }
+    };
+    std.mem.sort(usize, order[0..n], Ctx{ .recs = recs[0..n], .names = names[0..n], .sort = sort }, Ctx.less);
+    // The rows and the totals.
+    const rows = try a.alloc(Value, n);
+    var running: i64 = 0;
+    var mem_kb: u64 = 0;
+    var cpu_pm: u64 = 0;
+    var order_hash: u64 = 0xcbf29ce484222325;
+    var sel_have = false;
+    var sel_up = false;
+    var sel_name: []const u8 = selected;
+    var sel_window: []const u8 = "";
+    for (order[0..n], 0..) |i, ri| {
+        const r = &recs[i];
+        if (std.mem.eql(u8, r.nameSlice(), selected)) {
+            sel_have = true;
+            sel_up = r.up != 0;
+            sel_name = names[i];
+            sel_window = if (apps[i]) |app| std.mem.sliceTo(&app.window, 0) else "";
+        }
+        if (r.up != 0) running += 1;
+        mem_kb += userUsedKb(r);
+        cpu_pm += cpuPermille(r);
+        for (r.nameSlice()) |c| order_hash = (order_hash ^ c) *% 0x100000001b3;
+        order_hash = (order_hash ^ 0x1f) *% 0x100000001b3;
+        const state = if (r.up != 0) "Running" else if (r.stopped != 0) "Stopped" else if (r.exit_code != 0) try std.fmt.allocPrint(a, "Crashed ({d})", .{r.exit_code}) else "Not running";
+        const pm = cpuPermille(r);
+        const cells = try a.alloc(Value, 6);
+        cells[0] = .{ .str = try a.dupe(u8, names[i]) };
+        cells[1] = .{ .str = try a.dupe(u8, state) };
+        cells[2] = .{ .str = if (r.up != 0) try std.fmt.allocPrint(a, "{d}.{d}%", .{ pm / 10, pm % 10 }) else "" };
+        const used = userUsedKb(r);
+        cells[3] = .{ .str = if (r.up != 0) try std.fmt.allocPrint(a, "{d}.{d} / {d} MB", .{ used / 1024, (used % 1024) * 10 / 1024, (r.user_kb & 0xffff_ffff) / 1024 }) else "" };
+        cells[4] = .{ .str = if (r.up != 0) try std.fmt.allocPrint(a, "{d}", .{r.threads}) else "" };
+        cells[5] = .{ .str = if (r.restarts == 0) "" else try std.fmt.allocPrint(a, "{d} / {d}", .{ r.restarts, r.max_restarts }) };
+        rows[ri] = try mshl.toValue(a, .{
+            .id = try a.dupe(u8, r.nameSlice()),
+            .cells = Value{ .list = cells },
+            .icon = try a.dupe(u8, if (apps[i]) |app| std.mem.sliceTo(&app.icon, 0) else "std"),
+        });
+    }
+    noteRows(recs[0..n], order[0..n], order_hash);
+    return try mshl.toValue(a, .{
+        .rows = Value{ .list = rows },
+        .running = running,
+        .mem_kb = @as(i64, @intCast(mem_kb)),
+        .cpu_pm = @as(i64, @intCast(cpu_pm)),
+        .summary = try std.fmt.allocPrint(a, "{d} running \u{00b7} {d} MB \u{00b7} CPU {d}.{d}%", .{ running, mem_kb / 1024, cpu_pm / 10, cpu_pm % 10 }),
+        .have = sel_have,
+        .up = sel_up,
+        .name = try a.dupe(u8, sel_name),
+        .window = try a.dupe(u8, sel_window),
+    });
+}
+
+/// Log what changed: the row order when it did (one line per row), and
+/// each unit whose running flag flipped since the table was last built.
+fn noteRows(recs: []const shared.UnitRec, order: []const usize, order_hash: u64) void {
+    if (log_h == 0) return;
+    var l: [64]u8 = undefined;
+    if (order_hash != rows_order_hash) {
+        rows_order_hash = order_hash;
+        for (order, 0..) |i, ri| _ = usys.log(log_h, std.fmt.bufPrint(&l, "activity: row {d} {s}", .{ ri, recs[i].nameSlice() }) catch continue);
+    }
+    for (recs) |*r| {
+        const up = r.up != 0;
+        var found = false;
+        for (rows_seen[0..rows_nseen]) |*s| {
+            if (!std.mem.eql(u8, std.mem.sliceTo(&s.name, 0), r.nameSlice())) continue;
+            found = true;
+            if (s.up != up) {
+                s.up = up;
+                _ = usys.log(log_h, std.fmt.bufPrint(&l, "activity: {s} running={}", .{ r.nameSlice(), up }) catch continue);
+            }
+        }
+        if (!found and rows_nseen < max_unit_rows) {
+            rows_seen[rows_nseen] = .{ .name = r.name, .up = up };
+            rows_nseen += 1;
+        }
+    }
+}
+
 /// Whether init currently has `name` up (its domain alive). Asks init for
 /// its unit list (the same request `svc` renders) and reads that unit's
 /// `up` bit — init reports a unit whose domain has died as down, so this is
@@ -730,6 +913,14 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // mark when the app it launched exits. Reachable only from a program
     // that holds init's front channel.
     if (std.mem.eql(u8, name, "unit-up")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
+    // `unit-rows SORT` is the Activity app's table: every unit this
+    // program's init supervises, with what each costs, as list-widget rows
+    // ordered by SORT (name, state, cpu, mem, threads, restarts) plus the
+    // totals; `unit-stop NAME` asks init to stop one (destroy + no
+    // restart). Both reach only the caller's own init: a session app sees
+    // and stops its session's apps, never another user's or the system's.
+    if (std.mem.eql(u8, name, "unit-rows")) return .{ .params = &.{ .{ .name = "sort", .shape = .string }, .{ .name = "selected", .shape = .string } }, .ret = .record };
+    if (std.mem.eql(u8, name, "unit-stop")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
     if (std.mem.eql(u8, name, "power")) return .{ .params = &.{.{ .name = "action", .shape = .string }}, .ret = .bool };
     return null;
 }
@@ -895,6 +1086,24 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (args.len == 0 or args[0] != .str) return it.fail("unit-up: a unit name expected", .{});
         if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("unit-up: a unit name is 1..16 bytes", .{});
         return .{ .bool = unitUp(args[0].str) };
+    }
+    if (is(u8, name, "unit-rows")) {
+        if (init_chan == 0) return it.fail("unit-rows: this program cannot reach init", .{});
+        if (args.len < 2 or args[0] != .str or args[1] != .str) return it.fail("unit-rows: SORT SELECTED expected", .{});
+        return try unitRows(it, args[0].str, args[1].str);
+    }
+    if (is(u8, name, "unit-stop")) {
+        if (init_chan == 0) return it.fail("unit-stop: this program cannot reach init", .{});
+        if (args.len == 0 or args[0] != .str) return it.fail("unit-stop: a unit name expected", .{});
+        if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("unit-stop: a unit name is 1..16 bytes", .{});
+        const w = shared.strToWords(args[0].str);
+        const ok = switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{ .stop_named = .{ .a = w[0], .b = w[1] } }, 0)) {
+            .ok => |r| r == .stopped,
+            .err => false,
+        };
+        var l: [64]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&l, "activity: stop {s} ok={}", .{ args[0].str, ok }) catch "activity: stop");
+        return .{ .bool = ok };
     }
     // close / status on a service handle.
     const hv = input orelse (if (args.len > 0) args[0] else return null);
@@ -1214,4 +1423,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "net-rows", "browse-rows" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "net-rows", "browse-rows" };

@@ -7,7 +7,7 @@
   script:    scripts/win-alpha.msh
   grant:     [log, bootfs]
   budget:    { user: 24mb }
-  profiles:  [desktop]
+  profiles:  [desktop, activity]
   essential: false
   give: [
     { tag: display, unit: compositor-ptr }

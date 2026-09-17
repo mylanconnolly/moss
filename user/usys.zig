@@ -186,9 +186,17 @@ pub fn chanCreate() IpcResult {
     return syscall6(.chan_create, 0, 0, 0, 0, 0, 0);
 }
 
-/// domain_stat: data[0] = shared.DomainState, data[1] = exit code.
+/// domain_stat: data[0] = shared.DomainState, data[1] = exit code,
+/// data[2] = kobj used KB << 32 | limit KB, data[3] = the same for user
+/// memory.
 pub fn domainStat(ctl: u64) IpcResult {
     return syscall6(.domain_stat, ctl, 0, 0, 0, 0, 0);
+}
+
+/// domain_stat's resource view: data[0] = state | live threads << 8,
+/// data[1] = lifetime CPU cycles, data[2] / data[3] = the memory words.
+pub fn domainUsage(ctl: u64) IpcResult {
+    return syscall6(.domain_stat, ctl, 1, 0, 0, 0, 0);
 }
 
 pub fn domainDestroy(ctl: u64) shared.Errno {

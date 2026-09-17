@@ -3158,6 +3158,59 @@ split first (above) and why `-Djobs=1` is the flake-hunt mode — a hang
 seen only at width 3 is a real hang or a drill too close to the edge,
 and the dump says which.
 
+**Activity, the task manager (as built, 2026-09-17).** A desktop with
+no way to see what is running, or to stop something that will not stop
+itself, is not finished. Activity is an mshl app (`scripts/activity.msh`,
+launched from Applications, not docked, like a utility) over two new
+`workcmds` commands. `unit-rows SORT SELECTED` is the table: init's unit
+list joined with the app catalog, so an application shows under its
+display name and icon and a service under its unit name, with State
+(Running, Stopped, Crashed with the exit code, Not running), CPU, Memory
+(used of budget), Threads and Restarts, sorted by the column asked for
+(costs descending, ties by name) and refreshed by a one-second tick; it
+also answers the selected unit's facts (present, up, window title) so the
+script never searches rows. `unit-stop NAME` is init's `stop_named`:
+destroy the domain, do not restart. The buttons — Show Window (the dock's
+`restore_titled`), Launch, Force Quit — follow the selection, and Force
+Quit opens a one-line confirm row in place before the kill. What the
+table shows is what runs, ran, or can be launched: every app, and a
+service once it has been up; a unit file nobody started is not activity
+(the system init knows a hundred).
+
+The scope is the capability model's, not a policy: the app's init cap is
+its own session's front channel, so it sees that session's units and can
+stop only those. Another user's apps and the system's services are not
+hidden from it; they are not there. And the resource numbers come the
+same way — init already holds every unit's ctl cap, and `domain_stat`
+grew a *resource view* (x1 = 1) returning the live thread count and the
+domain's lifetime CPU cycles beside the memory words, so init turns two
+readings into a rate over its own interval, the way top does, with no
+introspect grant anywhere. (The first cut read the kernel's budget-period
+permille; it needs a CPU budget to tick and read zero for everything.)
+`UnitRec` carries the new fields, appended: memory used and limit, CPU
+permille, the last exit code, threads, stopped-by-request, has-an-app.
+
+Two toolkit pieces came with it. A `list` widget's column headers are
+clickable: the click fires the list's event with `col` set (and no row),
+and a `sort:` field on the list marks the sorted column with a small
+triangle; `selected: ID` pins the selection to a row by id, so a live
+table whose rows reorder keeps the highlight on the same item, not the
+same index. And the window runtime announces its widgets' centres again
+whenever the focusable set changes (a confirm row appearing), not only at
+`gui: ready`, so a host driving the pointer finds new buttons. The
+`activity` drill boots the app beside a plain window, selects that
+window's row by the order the table logs, force-quits it through the
+confirm step, and reads init's `stopped by request` and the table's
+`running=false` before closing with Cmd-W. Found on the way: the table
+built over the evaluation arena ran the 512 KiB pool dry under the
+system init's hundred units (the 30 KB catalog buffer is static now,
+and the never-started filter made the table honest as well as small);
+an mshl `match` on a `nothing` value binds a `$var` arm before a
+`nothing` literal arm is reached, so the selected-row lookup moved into
+Zig; and the runner put the new drill in the disk-backed QEMU group by
+mistake, so QEMU never started and the failure left no log — a kind's
+group decides its devices *and* its disk.
+
 **Shut down and restart (as built, 2026-09-16).** The system menu had
 Log Out and no way to end the machine; the machine also had none — an
 interactive boot powered off only when its app exited, and a root task
@@ -3653,9 +3706,12 @@ the bar re-declares its strut a tick after its metrics change, and
 Settings reopening itself right after a font Apply centred against the
 old strut, so its position drifted by a few pixels across a scale round
 trip. The bar and the dock are the same runtime as the window, so
-`sizeToContent` knows what they will declare and waits (a few 40 ms
-polls) for the compositor's answer to match before placing; the
-compositor logs every strut change. *Lesson:* when the same number is
+`sizeToContent` knows what they will declare and waits for the
+compositor's answer to match before placing (up to 1.5 s since
+2026-09-17: the first cut gave up after 320 ms, which a loaded parallel
+gate exceeded once and the window centred 8 px low; the runtime now logs
+`gui: placed` with the work area it used); the compositor logs every
+strut change. *Lesson:* when the same number is
 derived in four places, none of them is the source of truth; find who
 actually owns the fact and have everyone ask — and expect one ordering
 race the old lockstep hid.

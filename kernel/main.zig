@@ -280,6 +280,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.activity_test) {
+        _ = sched.spawn("boot-watch", activityTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.browse_test) {
         _ = sched.spawn("boot-watch", browseTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -949,6 +954,11 @@ fn listdemoTestWorker(_: u64) void {
 }
 fn explorerTestWorker(_: u64) void {
     systemDrill("explorer");
+}
+/// The Activity drill: the task-manager app force-quits a window through
+/// its confirm step; init logs the requested stop and the table flips.
+fn activityTestWorker(_: u64) void {
+    systemDrill("activity");
 }
 fn browseTestWorker(_: u64) void {
     systemDrill("browse");

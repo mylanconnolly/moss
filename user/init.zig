@@ -151,6 +151,13 @@ const Unit = struct {
     stopped: bool = false,
     activating: bool = false,
     restarts: u64 = 0,
+    /// The last death's exit code, for the unit list (a crash loop shows
+    /// its code beside its restart count).
+    last_exit: u64 = 0,
+    /// The previous `list`'s reading of the domain's lifetime CPU cycles
+    /// and when it was taken, so the next reports a rate over the gap.
+    cpu_total: u64 = 0,
+    cpu_at: u64 = 0,
     buf_h: u64 = 0, // its `buf` shm cap, if a give created one
     buf_va: u64 = 0, // ... mapped here (secrets are staged through it)
     identity_restored: bool = false,
@@ -937,6 +944,8 @@ fn superviseDeaths() void {
         if (st.err != .ok) continue;
         if (st.data[0] != @intFromEnum(shared.DomainState.dead)) continue;
         u.up = false;
+        u.last_exit = st.data[1];
+        u.cpu_at = 0;
         if (u.control_cap != 0) {
             _ = usys.capDrop(u.control_cap);
             u.control_cap = 0;
@@ -1133,6 +1142,7 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
                 u.control_cap = 0;
             }
             u.stopped = true;
+            logLine("init: stopped by request: ", u.name);
             _ = usys.replyTyped(shared.InitReply, chan, .stopped, 0);
         },
         .list => {
@@ -1153,7 +1163,29 @@ fn handleRequest(chan: u64, r: usys.IpcResult) void {
                     .up = @intFromBool(liveUp(u)),
                     .restarts = @intCast(u.restarts),
                     .max_restarts = @intCast(u.max_restarts),
+                    .exit_code = u.last_exit,
+                    .stopped = @intFromBool(u.stopped),
+                    .app = @intFromBool(u.app != null),
                 };
+                // What it costs right now, from the ctl cap init holds.
+                if (rec.up != 0 and u.ctl != 0) {
+                    const usage = usys.domainUsage(u.ctl);
+                    if (usage.err == .ok) {
+                        rec.threads = @intCast((usage.data[0] >> 8) & 0xff);
+                        rec.kobj_kb = usage.data[2];
+                        rec.user_kb = usage.data[3];
+                        // The rate since the previous list: cycles spent over
+                        // cycles elapsed, as permille of one core (a busy
+                        // multi-threaded unit can exceed 1000).
+                        const now = usys.cycles();
+                        const total = usage.data[1];
+                        if (u.cpu_at != 0 and now > u.cpu_at and total >= u.cpu_total) {
+                            rec.cpu = (total - u.cpu_total) * 1000 / (now - u.cpu_at);
+                        }
+                        u.cpu_total = total;
+                        u.cpu_at = now;
+                    }
+                }
                 const k = @min(u.name.len, 16);
                 @memcpy(rec.name[0..k], u.name[0..k]);
                 rec.encode(buf[n * shared.UnitRec.size ..][0..shared.UnitRec.size]);
