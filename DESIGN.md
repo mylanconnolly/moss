@@ -3158,6 +3158,40 @@ split first (above) and why `-Djobs=1` is the flake-hunt mode — a hang
 seen only at width 3 is a real hang or a drill too close to the edge,
 and the dump says which.
 
+**Nodes, stage 1: the fabric has a face (as built, 2026-09-17).** The
+fabric has been real since phase 11 — nodes join, publish services,
+dial each other, run stages on each other — and none of it was visible
+from a desktop. Nodes is the window onto it. `node-rows SELECTED` is
+the whole membership the fabric service knows: this machine and every
+peer it has heard from, each with whether it is reachable and how much
+memory it last reported, plus the facts about the selected one (its
+number, whether it is us, up, free memory). The existing `net-rows`
+could not serve: it hides this machine and hides peers that have gone
+away, which is exactly what a machine list must show.
+
+The app is a table over that, refreshed every two seconds, with a panel
+beneath it and a Check button. Check is the point: the membership is
+gossip, and a node the fabric remembers is not the same as a node that
+answers, so Check runs `remote NODE { now }` — the fabric spawns an
+mshrun stage on that machine, runs one command there, and brings the
+value back — and reports the peer's own uptime. `remote` now logs one
+line per call (`fab: remote node=1 ok=true`): a domain spawned on
+another machine is rare and expensive enough to say out loud, and it is
+what the drill watches. The GUI's own per-event remote path calls
+`runRemote` directly and stays quiet.
+
+Two things the app taught. A window is sized to its content once, when
+it opens, so a panel that appears on selection falls outside it — the
+detail panel is drawn always, its text changing, the way Activity keeps
+its buttons and disables them. And mshl's `int` answers a *result*, so
+`(str (int $x))` renders "ok 3": the conversion builtins are fallible
+and their results need unwrapping (`(int $x)?`), which every other
+script in the tree already did. The `nodes` drill is two machines on
+one fabric: node 1 seeds it, node 2 runs the app, the table must list
+both, and Check must make node 1 run a stage. A machine with no fabric
+cap says so and shows nothing — which is what the desktop's own session
+shows today, since a lone machine is not a fabric.
+
 **Console, the log viewer (as built, 2026-09-17).** Every debugging
 session on this machine ended in the serial file; a desktop that cannot
 show its own log is not finished either. The read side did not exist:

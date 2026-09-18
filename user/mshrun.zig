@@ -287,6 +287,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     workcmds_on = true;
     workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, init_cap);
     workcmds.log_h = log_h;
+    fabcmds.log_h = log_h;
     // Always wired: `net-ifaces` answers an empty list without a view and
     // `net-admin` false without the control cap, so a settings page can
     // ask before it shows anything; the socket commands fail to attach.

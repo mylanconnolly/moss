@@ -295,6 +295,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.nodes_test) {
+        _ = sched.spawn("boot-watch", nodesTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.browse_test) {
         _ = sched.spawn("boot-watch", browseTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -974,6 +979,11 @@ fn activityTestWorker(_: u64) void {
 /// `log_read`, filters it, pauses, and closes.
 fn consoleTestWorker(_: u64) void {
     systemDrill("console");
+}
+/// The Nodes drill, node 2: the app lists the fabric's membership (the
+/// seed on node 1 and itself) and checks the peer over the fabric.
+fn nodesTestWorker(_: u64) void {
+    systemDrill("nodes");
 }
 /// The interface-configuration drill: two NICs on two user networks; the
 /// script configures the second statically and echoes over both.

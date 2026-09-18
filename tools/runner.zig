@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes };
 
 const Spec = struct {
     name: []const u8,
@@ -75,6 +75,7 @@ const specs = [_]Spec{
     .{ .name = "netconf", .kind = .netconf, .pass = "netconf-test: PASS", .extra = "netconf: net1 echoed", .always_extra = "netsvc: net0 dhcp bound 10.0.2.15/24 via 10.0.2.2", .extra2 = "netconf: net1 leased again", .second_run_extra = "netsvc: settings read from conf/app/net.msh", .append = "profile=netconf" },
     .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-beta ok=true", .always_extra = "init: stopped by request: win-beta", .extra2 = "win-alpha: closed", .append = "profile=activity", .timeout_s = 120 },
     .{ .name = "console", .kind = .console, .pass = "console-test: PASS", .extra = "console: filter 'fontsvc'", .always_extra = "console: paused", .extra2 = "console: closed", .append = "profile=console", .timeout_s = 120 },
+    .{ .name = "nodes", .kind = .nodes, .pass = "nodes-test: PASS", .extra = "fab: remote node=1 ok=true", .always_extra = "nodes: members=2 up=2", .extra2 = "nodes: closed", .append = "profile=nodes", .timeout_s = 180 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
@@ -165,7 +166,7 @@ const check_dir = "zig-out/check";
 const gpu_device = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
 /// The launcher lists every `app:` unit of the session template
 /// (boot/conf/sessiongui): five today. A new app changes this once.
-const launcher_ready_line = "launcher: ready count=7";
+const launcher_ready_line = "launcher: ready count=8";
 
 // Host TCP ports. Drills run concurrently (`--jobs`, one worker thread
 // per QEMU), so every host port is per worker slot: slot 0 keeps the
@@ -439,6 +440,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
     if (spec.kind == .fabgui) return runFabGui(spec, bin, polls);
     if (spec.kind == .netbrowse) return runNetBrowse(spec, bin, polls);
+    if (spec.kind == .nodes) return runNodes(spec, bin, polls);
     if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
@@ -4407,6 +4409,102 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
 /// explorer re-lists that node over the fabric on the way out and reports
 /// the node it browsed and the row count, so a non-empty listing from
 /// node=1 proves the whole remote path.
+/// The row index the Nodes table gave node `node` ("nodes: row N
+/// node=M"), from the last membership change.
+fn nodeRow(content: []const u8, node: []const u8) ?u32 {
+    var kb: [32]u8 = undefined;
+    const suffix = std.fmt.bufPrint(&kb, " node={s}", .{node}) catch return null;
+    var at = content.len;
+    while (std.mem.lastIndexOf(u8, content[0..at], "nodes: row ")) |i| {
+        const eol = std.mem.indexOfScalarPos(u8, content, i, '\n') orelse content.len;
+        const line = std.mem.trimEnd(u8, content[i..eol], "\r");
+        if (std.mem.endsWith(u8, line, suffix)) return parseAfter(line, "nodes: row ");
+        at = i;
+    }
+    return null;
+}
+
+/// The Nodes drill: two machines on one fabric. Node 1 is the seed;
+/// node 2 runs the Nodes app, which must list both (itself and the
+/// peer), and Check must run a stage on node 1 over the fabric.
+fn runNodes(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
+    const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
+    for ([_][]const u8{ disk1, disk2, log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
+    try makeDisk(disk1);
+    try makeDisk(disk2);
+
+    // Node 1: the fabric seed, with a browse service so it has something
+    // to be (the Nodes app only needs it to answer).
+    var args1: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args1, log1, bin, "nodes-node1", "profile=browsehost node=1");
+    try appendDisk(&args1, disk1);
+    try args1.appendSlice(gpa, &.{
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+    });
+    var c1 = try spawnQemu(args1.items);
+    defer c1.kill(io);
+    sleepMs(1000);
+
+    // Node 2: the Nodes app, with the graphical devices and QMP.
+    var args2: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args2, log2, bin, "nodes-node2", "profile=nodes node=2");
+    try appendDisk(&args2, disk2);
+    try args2.appendSlice(gpa, &.{
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+        "-device", gpu_device,
+        "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+        "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
+        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
+    });
+    var c2 = try spawnQemu(args2.items);
+    defer c2.kill(io);
+
+    if (!try waitLogN(log2, "gui: ready", 1, "the Nodes app never came up on node 2", spec, polls)) return false;
+    // Both machines in the table: itself, and the seed once it has
+    // greeted and gossiped (which takes a moment after boot).
+    if (!try waitLogN(log2, "nodes: members=2 up=2", 1, "the table never listed both nodes", spec, polls)) return false;
+
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log2);
+        return false;
+    };
+    defer q.close();
+    const g = waitListGeom(spec, log2, polls, "nodes") orelse {
+        reportFailure(spec.name, "the table's geometry was never logged", log2);
+        return false;
+    };
+    if (listCount(readLog(log2), "nodes") != 2) return sfail(spec, log2, "the table did not show two nodes");
+    _ = q.screendump(check_dir ++ "/nodes.ppm");
+    // Select the peer — the row the app said is node 1 — and check it.
+    const row = nodeRow(readLog(log2), "1") orelse {
+        reportFailure(spec.name, "the table never said which row is node 1", log2);
+        return false;
+    };
+    if (!clickScanout(&q, g[0], g[1] + g[2] * row + g[2] / 2)) return sfail(spec, log2, "select node 1");
+    if (!try waitLogN(log2, "gui: widget check at", 1, "the Check button never appeared", spec, polls)) return false;
+    sleepMs(300);
+    const check = widgetCenter(readLog(log2), "check") orelse {
+        reportFailure(spec.name, "no Check button was logged", log2);
+        return false;
+    };
+    if (!clickScanout(&q, check[0], check[1])) return sfail(spec, log2, "click Check");
+    // The peer really ran a stage: the fabric spawned mshrun on node 1,
+    // ran `now` there, and the value came back.
+    if (!try waitLogN(log2, "fab: remote node=1 ok=true", 1, "node 1 did not answer the check", spec, polls)) return false;
+    sleepMs(600);
+    _ = q.screendump(check_dir ++ "/nodes-checked.ppm");
+    // Close: the app is essential, so the boot ends.
+    if (!q.chord("meta_l", "w")) return sfail(spec, log2, "close Nodes");
+    return try waitLogN(log2, "nodes: closed", 1, "Nodes did not close", spec, polls);
+}
+
 fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
     const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });

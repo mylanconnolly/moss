@@ -1,0 +1,19 @@
+# The Nodes drill, node 2 (profile nodes): the Nodes app with a fabric
+# cap, so its table is the live membership — itself and the seed on node
+# 1 — and Check runs a stage on the peer over the fabric. Holding a
+# `fabric` give pulls this node's fabric stack up (fabsvc → fabroot →
+# netsvc → net-cluster), `display` the pointer-capable compositor and
+# `font` the font service. Essential: the boot follows the app.
+{
+  image:     mshrun
+  script:    scripts/nodes.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [nodes]
+  essential: true
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: fabric, unit: fabsvc }
+  ]
+}

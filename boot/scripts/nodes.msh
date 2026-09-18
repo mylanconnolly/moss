@@ -1,0 +1,96 @@
+# Nodes: the machines this one shares a fabric with. The table is the
+# fabric's membership (`node-rows`) — this machine and every peer it has
+# heard from, whether each is reachable, and how much memory it has free
+# — refreshed every two seconds. Select a node to see what the fabric
+# knows about it; Check runs a tiny stage on that peer over the fabric
+# (`remote NODE { now }`) and reports what came back, which is the
+# difference between a node the membership remembers and one that
+# answers. A machine with no fabric cap says so and shows nothing.
+#
+# State: { sel, note }. sel = the selected node's id, as its row's id.
+
+def uptime-text [ms] {
+  # `int` answers a result (ok N), so unwrap it before it is rendered.
+  ((str (int ($ms / 1000))?) + "s since it booted")
+}
+
+def check-node [node] {
+  match (remote $node { now }) {
+    ok $ms => ("Node " + (str $node) + " answered over the fabric: " + (uptime-text $ms))
+    err $e => ("Node " + (str $node) + " did not answer: " + $e)
+  }
+}
+
+# The panel below the table is always drawn, selection or not: the
+# window is sized to its content once, when it opens, so a panel that
+# appeared later would fall outside it.
+def node-title [n] {
+  match $n.have {
+    true => ("Node " + (str $n.node) + " · " + (match $n.self { true => "this machine"; _ => "a peer" }) + " · " + (match $n.up { true => "up"; _ => "unreachable" }))
+    _ => "No node selected"
+  }
+}
+
+def node-detail [n] {
+  match $n.have {
+    true => (match $n.up {
+        true => ((str $n.free_mb) + " MB of memory free, as the fabric last heard")
+        _ => "The fabric has not heard from this node recently."
+      })
+    _ => "Select a node to see what the fabric knows about it."
+  }
+}
+
+def check-sel [state] {
+  let n = (node-rows $state.sel)
+  match $n.have {
+    true => ($state | merge { note: (check-node $n.node) })
+    _ => $state
+  }
+}
+
+let final = (gui {
+    init:  { sel: "", note: "" }
+    title: "Nodes"
+    width: 640
+    tick:  2000
+    view: (fn [state] {
+        let n = (node-rows $state.sel)
+        {
+          kind: "column"
+          gap:  12
+          children: [
+            { kind: "row", children: [
+                { kind: "label", role: "title", flex: 1, text: "Nodes" }
+                { kind: "label", muted: true, text: $n.summary }
+              ] }
+            {
+              kind: "list", id: "nodes", key: "nodes", h: 260, auto: true, fit: true
+              selected: $state.sel
+              empty:    (match $n.available { true => "No node has joined the fabric yet."; _ => "This machine is not part of a fabric." })
+              cols:     [{ title: "Name", w: 3 } { title: "Role", w: 4 } { title: "State", w: 3 } { title: "Memory", w: 4 }]
+              rows:     $n.rows
+            }
+            { kind: "section", gap: 8, children: [
+                { kind: "label", text: (node-title $n) }
+                { kind: "label", muted: true, wrap: true, text: (node-detail $n) }
+                { kind: "row", gap: 8, children: [
+                    { kind: "button", id: "check", label: "Check", variant: "primary", disabled: (not ($n.have and $n.up and (not $n.self))) }
+                    { kind: "label", muted: true, flex: 1, wrap: true, text: $state.note }
+                  ] }
+              ] }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "nodes" => (match ($ev.col >= 0) {
+              true => $state
+              _ => ($state | merge { sel: $ev.row, note: "" })
+            })
+          "check" => (check-sel $state)
+          _ => $state
+        }
+      })
+  })
+"nodes: closed"

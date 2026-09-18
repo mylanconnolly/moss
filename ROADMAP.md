@@ -1569,6 +1569,16 @@ supervises), and memory history per unit beside the CPU one.
   sentinel against a boot-time clock under 500 ms (no ARP ever sent);
   the 24-byte script-path cap, relearned; a hyphenated script variable
   is a subtraction.
+- ✅ **Nodes, stage 1: the fabric's membership** (2026-09-17): a Nodes
+  app over `node-rows` — this machine and every peer the fabric knows,
+  reachable or not, with free memory — and a Check that runs `remote
+  NODE { now }` on the selected peer, so a node that answers is told
+  apart from one the gossip remembers. `remote` logs one line per call.
+  The `nodes` drill is two machines on one fabric. Next stages: give a
+  desktop session a fabric cap (the machine must run the fabric stack
+  for that to mean anything), reach into a node (files, a command), and
+  start a node — init would parse `grant: [hypervisor]` and a `vmm`
+  unit, which today only drill code in the kernel spawns.
 - ✅ **Console, the log viewer** (2026-09-17): the kernel keeps the recent
   log (every line it or any domain printed) in a 128 KiB ring, and a
   `log_read` syscall behind the introspect cap copies it out by offset,

@@ -51,6 +51,12 @@ pub fn signature(name: []const u8) ?mshl.Signature {
 }
 
 /// null = not a fabric command.
+/// Where to note a `remote` call's outcome, when the program has a log.
+/// One line per call: a remote stage is a domain spawned on another
+/// machine, rare and expensive enough to be worth saying. The GUI's
+/// per-event path calls `runRemote` directly and stays quiet.
+pub var log_h: u64 = 0;
+
 pub fn call(f: *Fab, it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Value) mshl.Error!?Value {
     if (!std.mem.eql(u8, name, "remote")) return null;
     if (args.len != 2 or args[0] != .int or args[0].int < 0) return it.fail("remote: NODE FUNCTION expected", .{});
@@ -60,7 +66,13 @@ pub fn call(f: *Fab, it: *mshl.Interp, name: []const u8, args: []const Value, in
         .str => |t| t,
         else => return it.fail("remote: a function or script text expected, got a {s}", .{args[1].typeName()}),
     };
-    return try runRemote(f.chan, it, node, script, input orelse .nothing);
+    const out = try runRemote(f.chan, it, node, script, input orelse .nothing);
+    if (log_h != 0) {
+        var lb: [64]u8 = undefined;
+        const ok = out == .result and out.result.ok;
+        _ = usys.log(log_h, std.fmt.bufPrint(&lb, "fab: remote node={d} ok={}", .{ node, ok }) catch "fab: remote");
+    }
+    return out;
 }
 
 /// Run `script` on `node` with `in_val` as its `$in`, as a pipeline stage

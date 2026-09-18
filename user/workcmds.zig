@@ -1292,6 +1292,93 @@ fn membersBuf() ?[*]u8 {
 /// this node (id = the node number, cells = ["Node N", "F MB"]), built in
 /// the arena for the Network sidebar. An empty list when there is no
 /// fabric or the query fails — the sidebar simply shows no peers.
+/// `node-rows SELECTED`: every member of the fabric this node can see —
+/// itself included, and peers that have gone away — as list rows
+/// { id, cells: [name, role, state, free memory] }, plus what the
+/// selection is: `have`, `node`, `self`, `up`, `free_mb`, and a summary.
+/// `available` is false without a fabric cap (a machine on its own).
+fn nodeRows(it: *mshl.Interp, selected: []const u8) mshl.Error!Value {
+    const a = it.arena;
+    const none = .{
+        .rows = Value{ .list = &.{} },
+        .available = false,
+        .have = false,
+        .node = @as(i64, 0),
+        .self = false,
+        .up = false,
+        .free_mb = @as(i64, 0),
+        .summary = "This machine is not part of a fabric.",
+    };
+    if (fab_chan == 0) return try mshl.toValue(a, none);
+    const buf = membersBuf() orelse return try mshl.toValue(a, none);
+    const n = switch (usys.callTyped(shared.FabReq, shared.FabResp, fab_chan, .members, 0)) {
+        .ok => |rep| switch (rep) {
+            .num => |q| q.n,
+            else => return try mshl.toValue(a, none),
+        },
+        .err => return try mshl.toValue(a, none),
+    };
+    var rows: std.ArrayList(Value) = .empty;
+    var nup: u64 = 0;
+    var have = false;
+    var sel_node: u64 = 0;
+    var sel_self = false;
+    var sel_up = false;
+    var sel_free: u64 = 0;
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        const rec = buf[i * shared.fab_member_size ..];
+        const node: u64 = @as(u64, rec[0]) | (@as(u64, rec[1]) << 8);
+        const up = rec[2] != 0;
+        const self = rec[3] != 0;
+        const free_mb: u64 = @as(u64, rec[4]) | (@as(u64, rec[5]) << 8);
+        if (up) nup += 1;
+        const id = try std.fmt.allocPrint(a, "{d}", .{node});
+        const cells = try a.alloc(Value, 4);
+        cells[0] = .{ .str = try std.fmt.allocPrint(a, "Node {d}", .{node}) };
+        cells[1] = .{ .str = if (self) "This machine" else "Peer" };
+        cells[2] = .{ .str = if (up) "Up" else "Unreachable" };
+        cells[3] = .{ .str = if (up) try std.fmt.allocPrint(a, "{d} MB free", .{free_mb}) else "" };
+        try rows.append(a, try mshl.toValue(a, .{ .id = id, .cells = Value{ .list = cells } }));
+        if (std.mem.eql(u8, selected, id)) {
+            have = true;
+            sel_node = node;
+            sel_self = self;
+            sel_up = up;
+            sel_free = free_mb;
+        }
+    }
+    var sb: [160]u8 = undefined;
+    const summary = try a.dupe(u8, std.fmt.bufPrint(&sb, "{d} node{s} in the fabric, {d} reachable.", .{ rows.items.len, if (rows.items.len == 1) "" else "s", nup }) catch "");
+    // One line when the membership changes, not per tick: a node joining
+    // or leaving is news, a node still being there is not.
+    if (log_h != 0 and (rows.items.len != nodes_seen or nup != nodes_up_seen)) {
+        nodes_seen = rows.items.len;
+        nodes_up_seen = nup;
+        var lb: [96]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&lb, "nodes: members={d} up={d}", .{ rows.items.len, nup }) catch "nodes: members");
+        // And which row is which node, so a host driving the pointer can
+        // click a particular one (the order is the fabric's, not ours).
+        for (rows.items, 0..) |r, ri| {
+            const idv = if (r == .record) r.record.get("id") orelse Value.nothing else Value.nothing;
+            if (idv != .str) continue;
+            _ = usys.log(log_h, std.fmt.bufPrint(&lb, "nodes: row {d} node={s}", .{ ri, idv.str }) catch "nodes: row");
+        }
+    }
+    return try mshl.toValue(a, .{
+        .rows = Value{ .list = rows.items },
+        .available = true,
+        .have = have,
+        .node = @as(i64, @intCast(sel_node)),
+        .self = sel_self,
+        .up = sel_up,
+        .free_mb = @as(i64, @intCast(sel_free)),
+        .summary = summary,
+    });
+}
+var nodes_seen: usize = 0;
+var nodes_up_seen: u64 = 0;
+
 fn netRows(it: *mshl.Interp) mshl.Error!Value {
     const a = it.arena;
     if (fab_chan == 0) return .{ .list = &.{} };
@@ -1370,6 +1457,7 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // FILTER; `available` false without the introspect grant. Paused, it
     // pulls nothing new. For the Console app.
     if (std.mem.eql(u8, name, "log-rows")) return .{ .params = &.{ .{ .name = "filter", .shape = .string }, .{ .name = "paused", .shape = .bool } }, .ret = .record };
+    if (std.mem.eql(u8, name, "node-rows")) return .{ .params = &.{.{ .name = "selected", .shape = .string }}, .ret = .record };
     if (std.mem.eql(u8, name, "power")) return .{ .params = &.{.{ .name = "action", .shape = .string }}, .ret = .bool };
     return null;
 }
@@ -1544,6 +1632,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (is(u8, name, "domain-rows")) {
         if (args.len == 0 or args[0] != .str) return it.fail("domain-rows: a sort column expected", .{});
         return try domainRows(it, args[0].str);
+    }
+    if (is(u8, name, "node-rows")) {
+        if (args.len == 0 or args[0] != .str) return it.fail("node-rows: the selected node's id expected", .{});
+        return try nodeRows(it, args[0].str);
     }
     if (is(u8, name, "log-rows")) {
         if (args.len < 2 or args[0] != .str or args[1] != .bool) return it.fail("log-rows: a filter and a paused flag expected", .{});
@@ -1884,4 +1976,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "domain-rows", "log-rows", "net-rows", "browse-rows" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "domain-rows", "log-rows", "node-rows", "net-rows", "browse-rows" };
