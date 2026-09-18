@@ -6032,6 +6032,70 @@ five times: the host's 220 KB in `mshrun` tipped the shells' 32 MB by
 38 KB, found by logging every spawn's usage on both trees, not by
 arithmetic — the shells are 40 MB now.
 
+**Stage 6, the window (as built, 2026-09-18).** The browser is an
+ordinary mshl window and the page domain is an ordinary leaf, and the
+whole stage is making those two sentences true. The GUI runtime's loop
+blocks in one place, a `call` to the compositor for the next input,
+and the kernel cannot interrupt a blocked call — only a `recv`. So the
+pages are served from a second thread that does nothing but
+`webhost.step` and move what it hears into module state (title, URL,
+load state, hover text, a death) behind the host's lock; the GUI loop,
+which ticks every 40 ms while a page lives, blits any fresh commit on
+its render and hands each queued event to `update` through the same
+`fired` path a button uses, so the app never knows a thread exists.
+The leaf itself follows the scroll slot: a table keyed by leaf id,
+allocated on first sight, marked seen per render, reaped before the
+paint of any tree that no longer names it — `host.destroy` in the
+reap — and reaped wholesale when the `gui` call returns. Its rect is
+the page's viewport: `sync` compares the rect to what the page has and
+sends `resize` (the seam's one new command: the page unmaps its
+pixels, asks `attach_pixels` again for the buffer the host made at the
+new size, and lays out afresh from the arena mark after its parse); a
+`visible: false` leaf measures nothing and resizes its page to 0 × 0,
+so a hidden tab keeps its document and holds no pixels. Painting is a
+row copy from the page's buffer into the surface under a clip narrowed
+to the leaf — the invariant that a page paints inside its rect and
+nowhere else is a clip rectangle, and the drill screendumps a page
+that paints a fake address bar to prove it. Input is the reverse map:
+a press, release or tracked move inside the rect becomes a `pointer`
+command in page coordinates, the wheel a `scroll`, printable keys and
+arrows a `key` while the page has focus; Tab and the window's keys stay
+the window's.
+
+Around it, three things the desktop lacked. A session app could reach
+neither trust roots nor fonts: a session's `{ tag: view }` is its home,
+and the session manager forwarded no view of the assets tier — so the
+`assets` cap tag exists now, the manager gives it to every GUI session,
+`mshrun` takes it before it wires TLS and the page host, and both read
+from it (`tls/roots.pem`, `fonts/…`). The language would not add a list
+and a table, and `map` over the tab records yields a table, so a view
+could not put its literal chrome beside its mapped page leaves; `+`
+joins them as rows now. And the budgets: a page domain is 28 MB, a
+session record's grant was 96 MB and the manager hosting it 112, so a
+session is 160 MB and its host 192. The app is a hundred lines of pure
+functions: tabs, an active id, a `gen` per tab that renumbers the
+address field when the page reports its final URL (a field keeps its
+own text by id), a `nav` nonce for reload, a verdict line — `https`
+means the broker verified the certificate against the roots, since
+there is no unverified TLS here.
+
+The drill found four things after the first render: the page host was
+wired in `mshrun` before the assets view was taken, so the pages got
+the home view with an `assets/` prefix, found no fonts and laid out in
+fixed cells — every glyph a block, plain in the screendump; the glyph
+baseline sign (`lib/font` gives a bitmap's top *from* the baseline,
+negative above it, and the toolkit adds it; the page subtracted it, and
+every letter with an ascender sat a line high); a hidden leaf that
+measures nothing still costs its column a gap, so the second tab grew
+the window by six pixels into a scrollbar (the pages share a gap-less
+column now); and `children:` takes a list, not the table `map` makes —
+`([] + $pages)` — which the runtime should learn to accept.
+*Lessons:* (1) look at the picture: three of the four were visible in
+one screendump that the pixel assertions had already passed. (2) When a
+loop blocks in a call, the only way to serve a second channel is a
+second thread; put the thread behind one lock and one queue and let
+the loop keep its shape.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

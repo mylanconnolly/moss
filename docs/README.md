@@ -41,6 +41,7 @@ detail below it.
 | [Devices and drivers](drivers.md) | Drivers as sandboxed programs: PCI enumeration, virtio, MSI-X through the ITS, DMA through the SMMU, the console, entropy, the block driver's transports. |
 | [Filesystems and views](filesystem.md) | The tiers of the system volume, what a view is, what a program and a user session can see, home volumes, program stores and manifests, and where `run` finds a program. |
 | [Storage](storage.md) | The block driver, fssvc's data path, and mossfs: copy-on-write, checksums, transaction groups, compression, encryption, hashed directories, the host test suite, baselines. |
+| [The web](web.md) | The web engine as libraries, page domains and their host/broker, `web-render`, and the Web app whose tabs are sandboxed pages. |
 | [Networking](networking.md) | netsvc over virtio-net, the IPv6-native dual stack, network views and allowlists, sockets and doorbells, what the drills prove. |
 | [Users and sessions](users.md) | Identities as keys, user records, login as unsealing, the session manager, sessions as domains, console login, logout, layered settings. |
 | [The fabric](fabric.md) | Pooling machines: node identities and the root of trust, the join handshake and sealed transport, membership and placement, proxied channels and cap transfer. |

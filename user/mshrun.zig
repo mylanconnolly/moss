@@ -56,6 +56,8 @@ fn uPanic(msg: []const u8, _: ?usize) noreturn {
 var glog: u64 = 0;
 var view_chan: u64 = 0;
 var view_buf: [*]u8 = undefined;
+var assets_chan: u64 = 0;
+var assets_buf: [*]u8 = undefined;
 /// When this script was granted a spawner, the stage its `spawn`
 /// workers are loaded into, and the spawner slot (slot 2, insert order
 /// log->chan->spawner). 0 = not granted: `spawn` is refused.
@@ -301,11 +303,21 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     // Always wired: `net-ifaces` answers an empty list without a view and
     // `net-admin` false without the control cap, so a settings page can
     // ask before it shows anything; the socket commands fail to attach.
+    // A session app is handed the assets tier itself (roots, fonts),
+    // never the disk root: its own view is its home. Taken before the
+    // page host and TLS are wired, which read from it.
+    if (setup.has(.assets)) {
+        assets_chan = setup.cap(.assets);
+        assets_buf = @ptrFromInt(fsc.attachBuf(assets_chan).va);
+    }
     net = netcmds.Net.init(if (setup.has(.net)) setup.cap(.net) else 0);
     httpcmds.fs = &fs_ctx; // `fetch { to }` and file bodies go through the script's view
     // `web-render`: page domains spawned from the store, brokered over
     // this script's network view; self-guards without a spawner.
-    if (net) |*n| webrender.setup(worker_spawner, n, view_chan, view_buf, &stores, log_h);
+    if (net) |*n| {
+        webrender.setup(worker_spawner, n, view_chan, view_buf, &stores, log_h);
+        guicmds.setupPages(worker_spawner, n, if (assets_chan != 0) assets_chan else view_chan, if (assets_chan != 0) assets_buf else view_buf, assets_chan != 0, &stores, log_h);
+    }
     if (setup.has(.net_control)) if (net) |*n| {
         n.control = setup.cap(.net_control);
     };
@@ -319,6 +331,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h, setup.secret(), if (setup.has(.font)) setup.cap(.font) else 0, fab_chan);
     if (setup.has(.sess)) sesscmds.setup(setup.cap(.sess), if (setup.has(.console)) setup.cap(.console) else 0);
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
+    if (assets_chan != 0) tlscmds.setRootsAssetsView(assets_chan, assets_buf);
     tlscmds.setIdentity(setup.file(.cert) orelse "", setup.secret());
     if (fab_chan != 0) fab = .{ .chan = fab_chan };
     const path = setup.arg();

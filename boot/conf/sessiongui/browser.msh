@@ -1,0 +1,25 @@
+# The Web app (lazy — the dock launches it): the browser, an mshl window
+# whose tabs are page domains. It holds a spawner for them, the session's
+# network view (their broker fetches over it; a page itself holds no
+# network), the assets tier for the trust roots and the fonts its pages
+# rasterize, and the system store the `webpage` image is staged from.
+# The budget hosts the pages: 28 MB each, two open at once with room for
+# the window itself. Non-essential: closing its window ends only this.
+{
+  app:       { name: "Web", description: "Browse the web in sandboxed pages", icon: network, window: "Web", dock: true, order: 55 }
+  image:     mshrun
+  script:    scripts/browser.msh
+  budget:    { user: 72mb, kobj: 8mb }
+  grant:     [log, spawner, bootfs]
+  essential: false
+  give: [
+    { tag: init, self: true }
+    { tag: clip, unit: clipsvc }
+    { tag: display, session: true }
+    { tag: font, session: true }
+    { tag: net, session: true }
+    { tag: assets, session: true }
+    { tag: store, session: true }
+    { tag: view, fs: "", ro: false }
+  ]
+}

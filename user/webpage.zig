@@ -236,7 +236,9 @@ const PageFonts = struct {
             const advance = @as(f64, @floatFromInt(face.face.advance(gid))) * scale;
             if (cp != ' ' and cp != 0xa0) if (self.glyph(face.idx, face.face, gid, f.size)) |g| {
                 const gx: i64 = @as(i64, @intFromFloat(@round(pen))) + g.left;
-                const gy: i64 = @as(i64, @intFromFloat(@round(baseline))) - g.top;
+                // `top` is the bitmap's top from the baseline, downward
+                // (negative above it), as the toolkit reads it.
+                const gy: i64 = @as(i64, @intFromFloat(@round(baseline))) + g.top;
                 for (0..g.h) |row| {
                     const y = gy + @as(i64, @intCast(row));
                     if (y < 0) continue;
@@ -278,6 +280,9 @@ var page_fonts: PageFonts = .{};
 
 const Page = struct {
     doc: ?*dom.Document = null,
+    sheets: []const web.style.Sheet = &.{},
+    /// The arena's fill after the parse: a relayout resets to here.
+    parsed_mark: usize = 0,
     styles: ?*web.style.Styles = null,
     layout: ?*web.layout.Layout = null,
     base: ?web.url.Url = null,
@@ -425,16 +430,68 @@ fn present(markup: []const u8, failure: u64) void {
     eventText(.title, std.mem.trim(u8, title, " \t\r\n"));
     eventText(.url, page.url());
     const env: web.style.Env = .{ .width = @floatFromInt(vw), .height = @floatFromInt(vh) };
-    const sheets = web.style.collectDocumentSheetsWith(a, doc, env, uaSheet(env)) catch outOfMemory();
+    page.sheets = web.style.collectDocumentSheetsWith(a, doc, env, uaSheet(env)) catch outOfMemory();
+    page.parsed_mark = arena_fba.end_index;
+    relayout();
+    event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
+}
+
+/// Style, lay out and paint the parsed document for the viewport as it
+/// is now; everything after the parse is redone from the arena's mark.
+/// (`@media` rules were flattened at parse for the viewport of that
+/// time — a resize keeps them; the cascade's other viewport units are
+/// computed here.)
+fn relayout() void {
+    const a = arena();
+    const doc = page.doc orelse return;
+    arena_fba.end_index = page.parsed_mark;
+    page.layout = null;
+    const env: web.style.Env = .{ .width = @floatFromInt(vw), .height = @floatFromInt(vh) };
     const styles = a.create(web.style.Styles) catch outOfMemory();
-    styles.* = web.style.compute(a, doc, sheets, env) catch outOfMemory();
+    styles.* = web.style.compute(a, doc, page.sheets, env) catch outOfMemory();
     page.styles = styles;
     const l = web.layout.layoutDocument(a, doc, styles, page_fonts.fonts(), @floatFromInt(vw), @floatFromInt(vh)) catch outOfMemory();
     page.layout = l;
     page.extent = l.get(l.root).h;
+    const max_y = @max(0, page.extent - @as(f64, @floatFromInt(vh)));
+    page.scroll_y = @min(page.scroll_y, max_y);
     event(.extent, @intFromFloat(@max(0, page.extent)), 0);
     paintAll();
-    event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
+}
+
+/// The host's viewport changed: let the old pixels go, take the new
+/// buffer (none when hidden), and lay out for it.
+fn resize(w: u64, h: u64) void {
+    if (has_pixels) {
+        _ = usys.shmUnmap(@intFromPtr(px));
+        has_pixels = false;
+    }
+    vw = @intCast(w);
+    vh = @intCast(h);
+    if (w > 0 and h > 0) {
+        const p = callCap(.attach_pixels);
+        switch (p.rep) {
+            .pixels => |pp| if (p.cap != 0) {
+                const pm = usys.shmMap(p.cap);
+                _ = usys.capDrop(p.cap);
+                if (pm.err == .ok and pp.w * pp.h * 4 <= pm.data[1] * 4096) {
+                    px = @ptrFromInt(pm.data[0]);
+                    has_pixels = true;
+                    vw = @intCast(pp.w);
+                    vh = @intCast(pp.h);
+                }
+            },
+            else => if (p.cap != 0) {
+                _ = usys.capDrop(p.cap);
+            },
+        }
+    } else {
+        // Hidden: lay out for the last real size so the extent stays
+        // meaningful; nothing is painted.
+        vw = 1024;
+        vh = 768;
+    }
+    relayout();
 }
 
 fn paintAll() void {
@@ -519,6 +576,7 @@ fn serve() noreturn {
             .pointer => |p| pointer(std.enums.fromInt(wire.PointerKind, p.kind) orelse .move, p.x, p.y),
             .key => {},
             .dump => |d| dump(std.enums.fromInt(wire.Dump, d.what) orelse .html),
+            .resize => |r| resize(r.w, r.h),
             .stop => usys.exit(0),
             else => {},
         }

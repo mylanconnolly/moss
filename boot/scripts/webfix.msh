@@ -13,6 +13,7 @@ let pages = [
   { path: "/", file: "index.html" }
   { path: "/index.html", file: "index.html" }
   { path: "/about.html", file: "about.html" }
+  { path: "/spoof.html", file: "spoof.html" }
 ]
 def page [req] {
   match $req.path {

@@ -38,6 +38,7 @@ const mshl = mosslib.mshl;
 pub const Value = mshl.Value;
 const wf = @import("windowframe.zig");
 const widgets = @import("widgets.zig");
+const guipage = @import("guipage.zig");
 
 // The window frame — the chrome, the compositor surface, the drawing
 // primitives and the system font — lives in windowframe.zig, shared with
@@ -130,6 +131,14 @@ pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64, fabr
     wf.setup(display_cap, log, secret, font_cap);
 }
 
+/// What the `page` leaf needs to host page domains (a spawner, the
+/// network view its broker fetches over, a view for fonts, the stores
+/// the `webpage` image is staged from); without them a page leaf shows
+/// nothing and says why.
+pub fn setupPages(spawner: u64, n: *@import("netcmds.zig").Net, view_chan: u64, view_buf: [*]u8, assets_view: bool, stores: []const ?@import("fscmds.zig").Store, log: u64) void {
+    guipage.setup(spawner, n, view_chan, view_buf, assets_view, stores, log);
+}
+
 /// Whether the host holds a display — `gui` is offered only then.
 pub fn on() bool {
     return wf.display != 0;
@@ -184,6 +193,9 @@ const restore_result = mshl.resultShape(.string, .string);
 
 const pad = ui.space.inset; // window inset for content
 
+/// How often the loop looks in on live pages (their commits and news).
+const page_tick_ms: u64 = 40;
+
 // The laid-out content height, from the measuring pass — the frame's
 // window is sized to it before the surface is created (`sizeToContent`).
 var content_h: usize = 0;
@@ -191,7 +203,7 @@ var content_h: usize = 0;
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
 // the surface (so a pointer press can hit-test which widget it landed on).
-const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, is_list: bool = false, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
+const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, is_list: bool = false, is_page: bool = false, page_slot: usize = 0, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
 var focusables: [64]Focus = undefined;
 
 // Every window has an implicit viewport; explicit `scroll` nodes can nest.
@@ -518,10 +530,132 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
         st.* = .{};
     };
     for (&scrolls) |*st| st.seen = false;
+    // Page domains live as long as their leaves: one not in this tree is
+    // reaped before the paint that would have shown it.
+    reap_tree = tree;
+    guipage.reap(pagePresent);
+    guipage.beginRender();
     scroll_owner = 0;
     layout_overflow = false;
     _ = paintViewport(body, pad, top + pad, wf.win_w -| (2 * pad), wf.win_h -| (top + 2 * pad), 0);
     return nfoc;
+}
+
+var reap_tree: Value = .nothing;
+fn pagePresent(id: []const u8) bool {
+    return containsPage(reap_tree, id);
+}
+fn containsPage(node: Value, id: []const u8) bool {
+    if (node != .record) return false;
+    const rec = node.record;
+    if (std.mem.eql(u8, strField(rec, "kind"), "page") and std.mem.eql(u8, strField(rec, "id"), id)) return true;
+    for (nodeChildren(rec)) |child| if (containsPage(child, id)) return true;
+    for ([_][]const u8{ "child", "left", "right" }) |key| {
+        if (rec.get(key)) |child| if (containsPage(child, id)) return true;
+    }
+    return false;
+}
+
+/// The interpreter of the running `gui`, for staging the page image.
+var page_it: ?*mshl.Interp = null;
+
+/// `{ kind: "page", id, url, nav, visible, h }`: a page domain's
+/// viewport. The leaf takes the height offered (or `h`, 300 by
+/// default); a `visible: false` leaf takes no room and its page keeps
+/// its document without a pixel buffer. The page's pixels are blitted
+/// inside the rect and nowhere else — the chrome above it is this
+/// window's, whatever the page paints.
+fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize, paint: bool) Size {
+    const id = strField(rec, "id");
+    const visible = if (rec.get("visible")) |v| v.asBool() else true;
+    const url = strField(rec, "url");
+    const nav: i64 = if (rec.get("nav")) |n| (if (n == .int) n.int else 0) else 0;
+    if (!visible) {
+        if (paint) if (page_it) |it| if (guipage.slotFor(it, id)) |s| guipage.sync(s, url, nav, 0, 0);
+        return .{};
+    }
+    const h = @max(@as(usize, @intCast(std.math.clamp(intField(rec, "h", 300), 40, 4000))), avail_h);
+    if (!paint) return .{ .w = avail_w, .h = h };
+    const it = page_it orelse return .{ .w = avail_w, .h = h };
+    const s = guipage.slotFor(it, id) orelse {
+        fillRect(x, y, avail_w, h, pal.bg);
+        guipage.pushFor(id, .unavailable, 0, guipage.last_refusal);
+        return .{ .w = avail_w, .h = h };
+    };
+    s.x = x;
+    s.y = y;
+    s.sy = wf.screenY(y);
+    guipage.sync(s, url, nav, @intCast(avail_w), @intCast(h));
+    if (s.sy >= 0 and (s.logged_x != wf.win_x + x or s.logged_y != wf.win_y + @as(usize, @intCast(s.sy)) or s.logged_w != avail_w or s.logged_h != h)) {
+        s.logged_x = wf.win_x + x;
+        s.logged_y = wf.win_y + @as(usize, @intCast(s.sy));
+        s.logged_w = @intCast(avail_w);
+        s.logged_h = @intCast(h);
+        var line: [128]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&line, "gui: page {s} at {d},{d} size {d}x{d}", .{ id, s.logged_x, s.logged_y, avail_w, h }) catch "gui: page");
+    }
+    // Clip to the rect, blit, restore.
+    const sx0 = wf.clip_x0;
+    const sy0 = wf.clip_y0;
+    const sx1 = wf.clip_x1;
+    const sy1 = wf.clip_y1;
+    wf.clip_x0 = @max(wf.clip_x0, x);
+    wf.clip_y0 = @max(wf.clip_y0, wf.clipY(y));
+    wf.clip_x1 = @min(wf.clip_x1, x + avail_w);
+    wf.clip_y1 = @min(wf.clip_y1, wf.clipY(y + h));
+    var ctx: BlitCtx = .{ .x = x, .y = y };
+    if (!guipage.blit(s, @ptrCast(&ctx), blitRow)) fillRect(x, y, avail_w, h, pal.bg);
+    wf.clip_x0 = sx0;
+    wf.clip_y0 = sy0;
+    wf.clip_x1 = sx1;
+    wf.clip_y1 = sy1;
+    recordFocus(.{ .id = id, .is_field = false, .is_page = true, .page_slot = @intFromPtr(s), .bx = x, .by = y, .bw = avail_w, .bh = h });
+    return .{ .w = avail_w, .h = h };
+}
+
+const BlitCtx = struct { x: usize, y: usize };
+
+/// One row of a page into the surface: clipped to the window's clip
+/// rect (already narrowed to the leaf), copied whole where it shows.
+fn blitRow(ctx: *anyopaque, index: usize, src: []const u32) void {
+    const c: *BlitCtx = @ptrCast(@alignCast(ctx));
+    const sy = wf.screenY(c.y + index);
+    if (sy < 0) return;
+    const yy: usize = @intCast(sy);
+    if (yy < wf.clip_y0 or yy >= wf.clip_y1 or yy >= wf.win_h) return;
+    const x0 = @max(c.x, wf.clip_x0);
+    const x1 = @min(@min(c.x + src.len, wf.clip_x1), wf.win_w);
+    if (x1 <= x0) return;
+    const row = wf.px[yy * wf.win_w .. yy * wf.win_w + wf.win_w];
+    for (x0..x1) |xx| row[xx] = src[xx - c.x];
+}
+
+fn pageOf(f: Focus) *guipage.Slot {
+    return @ptrFromInt(f.page_slot);
+}
+
+/// The event for a page: `{ id, kind, text, code }` — `kind` one of
+/// title, url, load (text: loading / done / failed; code: why), hover
+/// (text: the link under the pointer, or empty), crashed, unavailable.
+fn mkPageEvent(it: *mshl.Interp, pe: guipage.Event) mshl.Error!Value {
+    const keys = try it.arena.alloc([]const u8, 4);
+    keys[0] = "id";
+    keys[1] = "kind";
+    keys[2] = "text";
+    keys[3] = "code";
+    const vals = try it.arena.alloc(Value, 4);
+    vals[0] = .{ .str = try it.arena.dupe(u8, pe.idText()) };
+    vals[1] = .{ .str = @tagName(pe.kind) };
+    var code: u64 = pe.code;
+    var text: []const u8 = pe.textOf();
+    if (pe.kind == .load) {
+        const st = std.enums.fromInt(shared.web.LoadState, pe.code >> 32) orelse .failed;
+        text = @tagName(st);
+        code = pe.code & 0xffff_ffff;
+    }
+    vals[2] = .{ .str = try it.arena.dupe(u8, text) };
+    vals[3] = .{ .int = @intCast(code) };
+    return .{ .record = .{ .keys = keys, .vals = vals } };
 }
 
 /// The height of the window's tab bar this render (0 without one): the
@@ -739,6 +873,7 @@ fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     if (std.mem.eql(u8, kind, "chart")) return layoutChart(rec, x, y, avail_w, avail_h, paint);
     if (std.mem.eql(u8, kind, "tabs")) return layoutTabs(rec, x, y, avail_w, paint);
     if (std.mem.eql(u8, kind, "meter")) return layoutMeter(rec, x, y, avail_w, paint);
+    if (std.mem.eql(u8, kind, "page")) return layoutPage(rec, x, y, avail_w, avail_h, paint);
     return .{};
 }
 
@@ -1899,6 +2034,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         .bool => if (t.bool) 1000 else 0,
         else => 0,
     } else 0;
+    const app_tick_ms = wf.tick_ms;
+    page_it = it;
+    defer page_it = null;
+    defer guipage.reapAll();
     // `bar: true` is the resident top menu bar — a distinct render/loop
     // (pinned, chrome-less, with dropdown menus), not a window.
     if (spec.get("bar") != null and (spec.get("bar").?).asBool()) {
@@ -2047,6 +2186,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             evaluated = false;
         }
         var nfocus = renderTree(tree, title, focus);
+        // With a page alive the loop ticks fast: its commits are blitted
+        // and its events delivered from the tick.
+        wf.tick_ms = if (guipage.live()) (if (app_tick_ms == 0) page_tick_ms else @min(app_tick_ms, page_tick_ms)) else app_tick_ms;
         if (!want_trusted) {
             var enabled = shared.menus.offered(menu_profile);
             if (menu_profile == .files) {
@@ -2162,6 +2304,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var fired_row: []const u8 = "";
         var fired_activated = false;
         var fired_col: ?usize = null; // a column-header click, by index
+        var fired_page: ?guipage.Event = null;
         var ticked = false;
         var closed = false;
         input: while (true) {
@@ -2200,6 +2343,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // — but never mid-drag (a ticking clock must not drop a drag),
             // and never while minimized (nothing is on screen to update).
             if (ev.kind == 2) {
+                // A page's news first: an event for `update`, or a fresh
+                // commit to blit.
+                if (guipage.take()) |pe| {
+                    fired_page = pe;
+                    fired = pe.idText();
+                    break :input;
+                }
+                if (guipage.dirty() and !minimized and !wf.dragging) break :input;
+                if (app_tick_ms == 0) continue :input;
                 if (wf.dragging or minimized or pressed != null) continue :input;
                 ticked = true;
                 break :input;
@@ -2213,6 +2365,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             if (ev.kind == 1) {
                 const wheel = shared.ptrWheel(ev.btn);
                 if (wheel != 0) {
+                    if (hitWidget(nfocus, ev.x, ev.y)) |wi| if (focusables[wi].is_page) {
+                        guipage.scroll(pageOf(focusables[wi]), -@as(i64, wheel) * 3 * @as(i64, @intCast(lineOf(R_UI))));
+                        continue :input;
+                    };
                     if (hitWidget(nfocus, ev.x, ev.y)) |wi| if (focusables[wi].is_list) {
                         if (listStateById(focusables[wi].id)) |list| {
                             const old = list.scroll;
@@ -2237,13 +2393,20 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 }
                 const old_hover = hovered;
                 hovered = hitWidget(nfocus, ev.x, ev.y);
+                if (hovered) |wi| if (focusables[wi].is_page and ev.btn & 1 == 0 and pressed == null) {
+                    const f = focusables[wi];
+                    guipage.pointer(pageOf(f), .move, @intCast(ev.x - f.bx), @intCast(@as(isize, @intCast(ev.y)) - f.sy));
+                    continue :input; // the page's own hover is its news
+                };
                 const pointer = wf.onPointer(ev, title);
                 if (pressed) |wi| {
                     if (ev.btn & 1 == 0) {
                         pressed = null;
                         if (hovered == wi and wi < nfocus) {
                             const f = focusables[wi];
-                            if (f.crumb) |c| {
+                            if (f.is_page) {
+                                guipage.pointer(pageOf(f), .up, @intCast(ev.x - f.bx), @intCast(@as(isize, @intCast(ev.y)) - f.sy));
+                            } else if (f.crumb) |c| {
                                 const hit = crumbHit(f, ev.x, ev.y);
                                 if (hit != null and hit == crumb_pressed) {
                                     fired = f.id;
@@ -2294,6 +2457,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                     fired_col = lc.header;
                                 }
                                 break :input; // re-render (selection or scroll moved)
+                            }
+                            if (focusables[wi].is_page) {
+                                const f = focusables[wi];
+                                guipage.pointer(pageOf(f), .down, @intCast(cev.x - f.bx), @intCast(@as(isize, @intCast(cev.y)) - f.sy));
+                                pressed = wi;
+                                break :input;
                             }
                             if (!focusables[wi].is_field) {
                                 pressed = wi;
@@ -2423,6 +2592,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     break :input;
                 }
             };
+            // A focused page takes printable keys and the arrows; Tab and
+            // the chrome's keys stay the window's.
+            if (cur) |c| if (c.is_page and ((ch >= 0x20 and ch < 0x7f) or ch == key_up or ch == key_down or ch == 0x1e or ch == 0x1f or ch == '\n')) {
+                guipage.key(pageOf(c), ch);
+                continue :input;
+            };
             if (ch == 0x1e or ch == 0x1f or ch == shared.keyboard.home or ch == shared.keyboard.end) {
                 const owner = if (cur) |c| c.owner else 0;
                 const delta: isize = @intCast(if (ch == shared.keyboard.home or ch == shared.keyboard.end) scrolls[owner].state.extent else @max(1, scrolls[owner].h -| lineOf(R_UI)));
@@ -2494,7 +2669,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             reveal_focus = true;
             action_len = @min(id.len, action_id.len);
             @memcpy(action_id[0..action_len], id[0..action_len]);
-            const ev = if (fired_list) try mkListEvent(it, id, fired_row, fired_activated, fired_col) else try mkEvent(it, id);
+            const ev = if (fired_page) |pe| try mkPageEvent(it, pe) else if (fired_list) try mkListEvent(it, id, fired_row, fired_activated, fired_col) else try mkEvent(it, id);
             if (remote_node != 0) {
                 // The app runs on the fabric: ship the event, render the
                 // tree that comes back. A dropped round trip keeps the last

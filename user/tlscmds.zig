@@ -83,6 +83,14 @@ pub fn setRootsView(chan: u64, buf: [*]u8) void {
     roots_view_buf = buf;
 }
 
+/// The roots from a view of the assets tier itself (`tls/roots.pem`
+/// under it), which is what a session forwards to its apps.
+pub fn setRootsAssetsView(chan: u64, buf: [*]u8) void {
+    roots_view = chan;
+    roots_view_buf = buf;
+    roots_path = "tls/roots.pem";
+}
+
 // --------------------------------------------------------------- identity
 
 var cert_pem: []const u8 = "";

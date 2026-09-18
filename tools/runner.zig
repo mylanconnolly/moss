@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes, nodevm, web };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes, nodevm, web, browser };
 
 const Spec = struct {
     name: []const u8,
@@ -126,6 +126,7 @@ const specs = [_]Spec{
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .always_extra = "echocli: handed-off socket echoed on a new view", .append = "profile=net" },
     .{ .name = "dot", .kind = .dot, .pass = "dot-test: PASS", .extra = "mshrun: script: dot resolve ok", .append = "profile=dot" },
     .{ .name = "web", .kind = .web, .pass = "web-test: PASS", .extra = "mshrun: script: web fixtures ok", .append = "profile=web" },
+    .{ .name = "browser", .kind = .browser, .pass = "browser-test: PASS", .extra = "browser: closed tabs=1", .always_extra = "page t1: load done", .extra2 = "topbar: exit note=logging out", .append = "profile=browser", .timeout_s = 180 },
     .{ .name = "webpage", .kind = .web, .pass = "webpage-test: PASS", .extra = "webpagecli: page domains ok", .extra2 = "webpagecli: the page that read past its arena died, as it should", .append = "profile=webpage", .timeout_s = 150 },
     .{
         .name = "users",
@@ -169,7 +170,7 @@ const check_dir = "zig-out/check";
 const gpu_device = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
 /// The launcher lists every `app:` unit of the session template
 /// (boot/conf/sessiongui): five today. A new app changes this once.
-const launcher_ready_line = "launcher: ready count=8";
+const launcher_ready_line = "launcher: ready count=9";
 
 // Host TCP ports. Drills run concurrently (`--jobs`, one worker thread
 // per QEMU), so every host port is per worker slot: slot 0 keeps the
@@ -448,7 +449,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .netconf or spec.kind == .dot or spec.kind == .web or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor or spec.kind == .nodevm) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .netconf or spec.kind == .dot or spec.kind == .web or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor or spec.kind == .nodevm or spec.kind == .browser) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -603,7 +604,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         // The post-login GUI shell: like the front door, but the shell runs
         // on the pointer-capable compositor, so a tablet (input index 1,
         // after the keyboard) rides along for a working cursor.
-        .guishell, .guishellro, .display, .largetext, .power, .restart, .explorer, .terminal, .editor => {
+        .guishell, .guishellro, .display, .largetext, .power, .restart, .explorer, .terminal, .editor, .browser => {
             try args.appendSlice(gpa, &.{
                 "-device", gpu_device,
                 "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
@@ -616,6 +617,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             // tab must list the two the cluster unit takes (a 96px list once
             // showed one and hid the other behind a scrollbar). And a second
             // entropy device, the guest's.
+            // The browser drill: the fixture servers and the session's
+            // broker share one network stack on loopback; a slirp NIC for
+            // the device and entropy for the TLS handshakes.
+            if (spec.kind == .browser) try args.appendSlice(gpa, &.{
+                "-netdev", "user,id=n0",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+                "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
+            });
             if (spec.kind == .guishell or spec.kind == .guishellro) try args.appendSlice(gpa, &.{
                 "-netdev", "hubport,id=h1,hubid=0",
                 "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
@@ -735,6 +744,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .editor) {
         if (!try editorDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .browser) {
+        if (!try browserDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .terminal) {
         if (!try terminalDrive(spec, log_path, polls)) return false;
@@ -1225,6 +1237,134 @@ fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 /// select it, Enter to open it, then close the window — the app reports the
 /// path it was at. A non-empty closing path proves the click hit-test,
 /// activation, and navigation into a directory worked.
+/// The rect a page leaf was painted at, from `gui: page <id> at X,Y
+/// size WxH` (scanout coordinates), the last one logged.
+fn pageRect(content: []const u8, id: []const u8) ?[4]u32 {
+    const key = std.fmt.allocPrint(gpa, "gui: page {s} at ", .{id}) catch return null;
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    const rest = content[at + key.len ..];
+    const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    var it = std.mem.tokenizeAny(u8, rest[0..nl], ", sizex\r");
+    var out: [4]u32 = undefined;
+    for (&out) |*v| v.* = std.fmt.parseInt(u32, it.next() orelse return null, 10) catch return null;
+    return out;
+}
+
+/// How many pixels of a colour lie inside a rect of a screendump.
+fn countRgbIn(img: Ppm, rect: [4]u32, r: u8, g: u8, b: u8) usize {
+    var n: usize = 0;
+    var y: usize = rect[1];
+    while (y < rect[1] + rect[3] and y < img.h) : (y += 1) {
+        var x: usize = rect[0];
+        while (x < rect[0] + rect[2] and x < img.w) : (x += 1) if (eqRgb(pixelAt(img, x, y), r, g, b)) {
+            n += 1;
+        };
+    }
+    return n;
+}
+
+/// The browser drill: sign in, open Web from the dock, and see the
+/// fixture's front page — loaded over loopback TLS by a page domain —
+/// painted with its heading's colour inside the page's rect; open a
+/// second tab, type a URL for a page that paints a fake address bar,
+/// and see the fake stay inside the page's rect while the real bar
+/// above it is untouched; close that tab (its domain is reaped), quit
+/// the window, log out. The leak bar closes the boot.
+fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    if (!try desktopSignIn(spec, log_path, polls, &q, "alice", "alice-pass")) return false;
+    if (!try waitLogN(log_path, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "webfix: serving https", 1, "the TLS fixture never came up", spec, polls)) return false;
+    sleepMs(500);
+    // Web is pill 5 (order 55, after Settings, Demo, Files, Terminal, Editor).
+    const pill = parseDockItem(readLog(log_path), 5) orelse {
+        reportFailure(spec.name, "could not parse the dock's Web pill", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, pill[0], pill[1])) return sfail(spec, log_path, "click the Web pill");
+    if (!try waitLogN(log_path, "dock: activate browser", 1, "the Web pill did not launch the browser", spec, polls)) return false;
+    if (!try waitLogN(log_path, "page t1: load done", 1, "the first tab never loaded the fixture over TLS", spec, polls)) return false;
+    // The page's commit reaches the window on the next tick; give it a moment.
+    sleepMs(700);
+    _ = q.screendump(check_dir ++ "/browser-front.ppm");
+    const front = readPpm(check_dir ++ "/browser-front.ppm") orelse return sfail(spec, log_path, "read the browser screendump");
+    const r1 = pageRect(readLog(log_path), "t1") orelse {
+        reportFailure(spec.name, "could not parse the first page's rect", log_path);
+        return false;
+    };
+    const heading = countRgbIn(front, r1, 51, 102, 153);
+    if (heading < 20) {
+        var b: [96]u8 = undefined;
+        reportFailure(spec.name, std.fmt.bufPrint(&b, "the heading's colour is not in the page rect ({d} pixels)", .{heading}) catch "no heading", log_path);
+        return false;
+    }
+    // A second tab: type a URL into its address field and go.
+    const newtab = widgetCenter(readLog(log_path), "newtab") orelse {
+        reportFailure(spec.name, "could not find the New Tab button", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, newtab[0], newtab[1])) return sfail(spec, log_path, "click New Tab");
+    if (!try waitLogN(log_path, "gui: widget url-t2-0 at", 1, "the second tab's address field never appeared", spec, polls)) return false;
+    const field = widgetCenter(readLog(log_path), "url-t2-0") orelse return false;
+    if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field");
+    sleepMs(200);
+    if (!q.typeText("http://www.moss.test:8080/spoof.html")) return sfail(spec, log_path, "type the URL");
+    const go = widgetCenter(readLog(log_path), "go") orelse return false;
+    if (!clickScanout(&q, go[0], go[1])) return sfail(spec, log_path, "click Go");
+    if (!try waitLogN(log_path, "page t2: load done", 1, "the second tab never loaded the spoof page", spec, polls)) return false;
+    sleepMs(700);
+    _ = q.screendump(check_dir ++ "/browser-spoof.ppm");
+    const spoof = readPpm(check_dir ++ "/browser-spoof.ppm") orelse return sfail(spec, log_path, "read the spoof screendump");
+    const r2 = pageRect(readLog(log_path), "t2") orelse {
+        reportFailure(spec.name, "could not parse the second page's rect", log_path);
+        return false;
+    };
+    // The fake bar is red inside the page's rect...
+    if (!eqRgb(pixelAt(spoof, r2[0] + 10, r2[1] + 10), 0xdd, 0x22, 0x22)) {
+        reportFailure(spec.name, "the spoof page's fake address bar was not painted inside its rect", log_path);
+        return false;
+    }
+    // ...and nowhere above it: the real address field (renumbered by the
+    // page's final URL) and the strip just above the page keep their colours.
+    const real = widgetCenter(readLog(log_path), "url-t2-1") orelse {
+        reportFailure(spec.name, "could not find the second tab's address field after its load", log_path);
+        return false;
+    };
+    if (eqRgb(pixelAt(spoof, real[0], real[1]), 0xdd, 0x22, 0x22)) {
+        reportFailure(spec.name, "the fake address bar reached the real one", log_path);
+        return false;
+    }
+    var above: usize = 0;
+    var x: usize = r2[0];
+    while (x < r2[0] + r2[2]) : (x += 1) if (eqRgb(pixelAt(spoof, x, r2[1] - 3), 0xdd, 0x22, 0x22)) {
+        above += 1;
+    };
+    if (above != 0) {
+        reportFailure(spec.name, "the page painted above its rect", log_path);
+        return false;
+    }
+    // Close the second tab: its page domain is reaped with its leaf.
+    const closetab = widgetCenter(readLog(log_path), "closetab") orelse return false;
+    if (!clickScanout(&q, closetab[0], closetab[1])) return sfail(spec, log_path, "click Close Tab");
+    if (!try waitLogN(log_path, "page t2: reaped", 1, "closing the tab did not reap its page", spec, polls)) return false;
+    sleepMs(300);
+    // Quit through the window's close dot, then log out.
+    const c = parseDot(readLog(log_path), "close=") orelse {
+        reportFailure(spec.name, "could not find the close dot", log_path);
+        return false;
+    };
+    if (!clickScanout(&q, c[0], c[1])) return sfail(spec, log_path, "click close");
+    if (!try waitLogN(log_path, "browser: closed tabs=1", 1, "the browser never closed", spec, polls)) return false;
+    if (!try waitLogN(log_path, "page t1: reaped", 1, "the window's exit did not reap its page", spec, polls)) return false;
+    sleepMs(300);
+    return try desktopLogout(spec, log_path, polls, &q);
+}
+
 fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "gui: ready", 1, "the explorer never came up", spec, polls)) return false;
     // The right pane (id "files") lists the current directory.
@@ -5053,6 +5193,9 @@ const Qmp = struct {
                 '"' => "apostrophe",
                 '?' => "slash",
                 '|' => "backslash",
+                ':' => "semicolon",
+                '_' => "minus",
+                '&' => "7",
                 else => null,
             };
             if (shifted) |key| {
@@ -5067,6 +5210,7 @@ const Qmp = struct {
                     '.' => "dot",
                     '=' => "equal",
                     ';' => "semicolon",
+                    ',' => "comma",
                     else => return false,
                 };
                 if (!q.sendKey(qcode)) return false;

@@ -1,0 +1,137 @@
+# Web: the browser. Tabs are page domains — each tab's `page` leaf in
+# the view is a sandboxed process that loads through this window's own
+# broker and paints into a buffer the runtime blits inside the leaf's
+# rect; the address bar above it is this window's pixels, whatever the
+# page paints. The app is pure: its state is the tab list, and every
+# event — a button, the tab strip, a page's title, URL, load state,
+# hover or death — is a coarse record to `update`.
+#
+# State: { tabs: [{ id, url, title, state, code, hover, gen, nav }],
+# active: the shown tab's id, next: the next tab number }. A tab's `gen`
+# renumbers its address field when the page reports its final URL (a
+# field keeps its own text by id); `nav` is a nonce that makes the page
+# reload the same URL.
+
+let home = "https://www.moss.test:8443/"
+
+def new-tab [id, url] {
+  { id: $id, url: $url, title: "", state: "loading", code: 0, hover: "", gen: 0, nav: 0 }
+}
+
+def active-tab [state] {
+  $state.tabs | find (fn [t] { $t.id == $state.active })
+}
+
+def tab-index [tabs, active] {
+  let r = ($tabs | reduce { i: 0, sel: 0 } {
+      match ($it.id == $active) {
+        true => ({ i: ($acc.i + 1), sel: $acc.i })
+        _ => ({ i: ($acc.i + 1), sel: $acc.sel })
+      }
+    })
+  $r.sel
+}
+
+def tab-at [tabs, index] {
+  $tabs | first ($index + 1) | last 1 | map { $it.id } | join ""
+}
+
+def set-tab [state, id, changes] {
+  $state | merge { tabs: ($state.tabs | map (fn [t] {
+          match ($t.id == $id) {
+            true => ($t | merge $changes)
+            _ => $t
+          }
+        })) }
+}
+
+def normalize [url] {
+  match ($url | split "://" | len) {
+    1 => ("http://" + $url)
+    _ => $url
+  }
+}
+
+def status-line [tab] {
+  let verdict = (match $tab.state {
+      "loading" => "Loading"
+      "done" => (match ($tab.url | split "https://" | len) {
+          2 => "Secure: the connection was verified against the trust roots"
+          _ => "Not secure: plain http"
+        })
+      "failed" => ("Could not load the page (" + (str $tab.code) + ")")
+      "crashed" => "The page crashed; reload to try again"
+      _ => $tab.state
+    })
+  match $tab.hover {
+    "" => $verdict
+    _ => ($verdict + "  ->  " + $tab.hover)
+  }
+}
+
+let final = (gui {
+    init:  { tabs: [(new-tab "t1" $home)], active: "t1", next: 2 }
+    title: "Web"
+    width: 1000
+    view: (fn [state] {
+        let cur = (active-tab $state)
+        let idx = (tab-index $state.tabs $state.active)
+        let chrome = [
+          { kind: "tabs", id: "tabs", bar: true, items: ($state.tabs | map { match $it.title { "" => "New Tab"; _ => $it.title } }), selected: $idx }
+          { kind: "row", gap: 6, children: [
+              { kind: "button", id: "reload", label: "Reload" }
+              { kind: "field", id: ("url-" + $cur.id + "-" + (str $cur.gen)), flex: 1, value: $cur.url }
+              { kind: "button", id: "go", label: "Go", variant: "primary" }
+              { kind: "button", id: "newtab", label: "New Tab" }
+              { kind: "button", id: "closetab", label: "Close Tab", disabled: ((len $state.tabs) < 2) }
+            ] }
+        ]
+        let pages = ($state.tabs | map (fn [t] { { kind: "page", id: $t.id, url: $t.url, nav: $t.nav, visible: ($t.id == $state.active), h: 560, grow: true } }))
+        let status = [{ kind: "label", muted: true, text: (status-line $cur) }]
+        # The pages share one gap-less column: a hidden tab's leaf takes no
+        # room at all, so the window's height is the shown page's. (`map`
+        # yields a table; adding a list makes the list `children` wants.)
+        { kind: "column", gap: 6, children: ($chrome + [{ kind: "column", gap: 0, grow: true, children: ([] + $pages) }] + $status) }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "go" => {
+            let cur = (active-tab $state)
+            let typed = ($ev.fields | get ("url-" + $cur.id + "-" + (str $cur.gen)))
+            set-tab $state $cur.id { url: (normalize $typed), nav: ($cur.nav + 1), state: "loading", hover: "" }
+          }
+          "reload" => {
+            let cur = (active-tab $state)
+            set-tab $state $cur.id { nav: ($cur.nav + 1), state: "loading" }
+          }
+          "newtab" => {
+            let id = ("t" + (str $state.next))
+            $state | merge { tabs: ($state.tabs + [(new-tab $id "")]), active: $id, next: ($state.next + 1) }
+          }
+          "closetab" => (match ((len $state.tabs) < 2) {
+              true => $state
+              _ => {
+                let rest = ($state.tabs | filter (fn [t] { $t.id != $state.active }))
+                $state | merge { tabs: $rest, active: (tab-at $rest 0) }
+              }
+            })
+          "tabs" => (match ($ev.col >= 0) {
+              true => ($state | merge { active: (tab-at $state.tabs $ev.col) })
+              _ => $state
+            })
+          _ => (match $ev.kind {
+              "title" => (set-tab $state $ev.id { title: $ev.text })
+              "url" => {
+                let t = ($state.tabs | find (fn [t] { $t.id == $ev.id }))
+                set-tab $state $ev.id { url: $ev.text, gen: ($t.gen + 1) }
+              }
+              "load" => (set-tab $state $ev.id { state: $ev.text, code: $ev.code })
+              "hover" => (set-tab $state $ev.id { hover: $ev.text })
+              "crashed" => (set-tab $state $ev.id { state: "crashed" })
+              "unavailable" => (set-tab $state $ev.id { state: ("No page host: " + $ev.text) })
+              _ => $state
+            })
+        }
+      })
+  })
+echo ("browser: closed tabs=" + (str (len $final.tabs)))

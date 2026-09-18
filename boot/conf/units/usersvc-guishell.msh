@@ -12,11 +12,12 @@
 # real room — 40mb/1mb (the old user-only budget, kobj defaulting to 1mb)
 # fit only one app, so launching a second was refused with QuotaExceeded.
 # Sized to comfortably exceed a session record's own grant (kobj 4mb, user
-# 96mb) plus usersvc's overhead.
+# 160mb since the browser's page domains, 28 MB each) plus usersvc's
+# overhead.
 {
   image:    users
   arg:      1
-  budget:   { kobj: 8mb, user: 112mb }
+  budget:   { kobj: 8mb, user: 192mb }
   grant:    [log, spawner, bootfs]
   profiles: [guishell]
   after:    apply
@@ -31,6 +32,9 @@
     { tag: font, unit: fontsvc }
     { tag: locale, unit: localesvc }
     { tag: net, netview: net-cluster, optional: true }
+    # The assets tier, read-only, forwarded to every GUI session: trust
+    # roots for an app that fetches over TLS, fonts for one hosting pages.
+    { tag: assets, fs: assets, ro: true }
     { tag: net_control, unit: net-cluster, control: true, optional: true }
     # The fabric, so a session's Nodes (and Files' Network sidebar) see
     # the machines this one is clustered with; pulls the fabric stack up.

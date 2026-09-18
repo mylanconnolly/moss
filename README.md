@@ -158,6 +158,7 @@ PASS marker and power off. Individual tests can still be run by hand:
 | login | Console login: two users at two consoles at once, each session an init instance with msh holding the home as its whole filesystem; a refused passphrase, the other's files unnameable, out and back in, `run` from the system store and `install` into the home's own, a share offered, accepted, read through, refused a write, and withdrawn, seats freed | `zig build run-login` (interactive) |
 | net | Dual-stack TCP through userspace netsvc; allowlist views | `zig build run-net -Dnet-test` |
 | web | The web fixture servers: moss serves pages to moss over loopback, plain and over TLS by name, and a script fetches them — the first row of the browser arc; then `web-render` loads a page in a page domain and hands back its document | `zig build check -Donly=web` |
+| browser | The desktop's Web app: a fixture over loopback TLS in a sandboxed page domain, screendumped; a second tab whose page paints a fake address bar stays inside its rect; close, quit, log out; the leak bar | `zig build check -Donly=browser` |
 | webpage | Page domains: a native host spawns sandboxed pages holding one channel, brokers their fetches, and drives them — load, paint (the heading's colour is in the pixels), hover, click, dump; a page sent after a resource larger than its arena dies alone; teardown meets the leak bar | `zig build check -Donly=webpage` |
 | flogin | Fabric login: a user whose record lives on node 1 logs in on node 2 — the session manager publishes itself to the pool, the record is fetched over the sealed link, the home is born on node 2 | runner only (two QEMUs on one segment) |
 | rng | Userspace virtio-rng seeds the kernel CSPRNG via the entropy cap; getrandom fail-closed and policed | `zig build run -Drng-test` |
@@ -186,6 +187,16 @@ mshl formatter's, lint's and language server's tests and checks every
 ## License
 
 MIT — see `LICENSE`.
+
+### Web
+
+Launch **Web** from the graphical desktop, or boot the drill's desktop
+with `zig build run-gui -Dgui-profile=browser` (sign in as alice /
+alice-pass; the fixture site is `https://www.moss.test:8443/`). Each tab
+is a page domain: a sandboxed process holding one channel to the
+window, which brokers its fetches and blits its pixels inside the tab's
+rect — a page cannot paint over the address bar. HTML and CSS 2.1 today,
+JavaScript when our engine lands. See [docs/web.md](docs/web.md).
 
 ### Native text editor
 

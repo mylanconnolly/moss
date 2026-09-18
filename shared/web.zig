@@ -73,6 +73,10 @@ pub const HostResp = union(enum(u64)) {
     /// Write the document out into the data buffer (`what` is a `Dump`);
     /// the page answers with a `dumped` event.
     dump: struct { what: u64 },
+    /// The viewport is now `w` × `h`: the page asks `attach_pixels`
+    /// again for the new buffer (0 × 0 = hidden: no buffer, no paint;
+    /// the document stays) and lays out afresh.
+    resize: struct { w: u64, h: u64 },
     stop: void,
 };
 

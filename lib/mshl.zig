@@ -1697,7 +1697,12 @@ pub const Interp = struct {
                 if (isNumber(l) and isNumber(r)) return .{ .float = asFloat(l) + asFloat(r) };
                 if (l == .str and r == .str) return .{ .str = try std.mem.concat(self.arena, u8, &.{ l.str, r.str }) };
                 if (l == .bytes and r == .bytes) return .{ .bytes = try std.mem.concat(self.arena, u8, &.{ l.bytes, r.bytes }) };
-                if (l == .list and r == .list) return .{ .list = try std.mem.concat(self.arena, Value, &.{ l.list, r.list }) };
+                // Lists concatenate; a table (what `map` over records or a
+                // `where` yields) joins as its rows, so a view can put
+                // literal children beside mapped ones.
+                if ((l == .list or l == .table) and (r == .list or r == .table)) {
+                    return .{ .list = try std.mem.concat(self.arena, Value, &.{ try self.itemsOf(l, "+"), try self.itemsOf(r, "+") }) };
+                }
                 return self.fail("cannot add a {s} and a {s}", .{ l.typeName(), r.typeName() });
             },
             .sub, .mul, .div, .mod => {
@@ -4929,4 +4934,15 @@ test "merge lays changes over a record, keeping its key order" {
     const it = &t.it;
     try expectOut(it, "{ a: 1, b: 2 } | merge { b: 3, c: 4 } | to-data", "{a: 1, b: 3, c: 4}\n");
     try expectOut(it, "{ a: 1, b: 2 } | merge { a: 1 } | to-data", "{a: 1, b: 2}\n");
+}
+
+test "lists and tables add: a view puts literal children beside mapped ones" {
+    var t: TestState = undefined;
+    t.start();
+    defer t.stop();
+    const it = &t.it;
+    try expectOut(it, "let rows = ([{ a: 1 }, { a: 2 }] | map { $it }); (type $rows)", "table\n");
+    try expectOut(it, "([{ a: 0 }] + $rows + [{ a: 3 }]) | map { $it.a }", "0\n1\n2\n3\n");
+    try expectOut(it, "(type ($rows + $rows))", "list\n");
+    try expectRuntime(it, "$rows + 1", "cannot add a table and a int");
 }

@@ -133,7 +133,9 @@ typed answers: `str v` renders a value, `int text` gives a *result*
 by construction — a literal that is not valid UTF-8 is a syntax error
 — with `len` in code points; `to-bytes` makes bytes of one,
 `from-bytes` gives an `ok` string or an `err` when the bytes are not
-UTF-8, and `+` joins bytes with bytes.
+UTF-8, and `+` joins bytes with bytes. `+` also concatenates lists,
+and a table (what `map` over records or `where` yields) joins as its
+rows, so a view can put literal children beside mapped ones.
 
 **Two kinds of number, and a small tower.** An int is 64 bits and
 wraps; a float is written with a fraction or an exponent (`1.5`, `2e3`,

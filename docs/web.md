@@ -1,0 +1,137 @@
+# The web
+
+## In one breath
+
+A browser is a page's sandbox with a window around it. The engine —
+URLs, encodings, HTML, CSS, layout, paint — is a set of pure Zig
+libraries under `lib/web/`, host-tested against the public conformance
+corpora so that compliance is a number the tests print. Untrusted
+content *runs* in exactly one place: a **page domain**, a spawned
+`webpage` program whose whole world is one badged channel to the
+program that spawned it. That program is its **host and broker**: it
+answers the page's requests for its buffers, feeds it the next command,
+fetches what the page opens over its own network view and trust roots,
+and takes the events the page reports. A page paints into a pixel
+buffer its host granted, and the host blits those pixels inside the
+page's rectangle and nowhere else, so the address bar above a page is
+the window's pixels whatever the page paints.
+
+Three programs are hosts today: the shell's `web-render URL`, which
+loads a page headlessly and hands back its document; `webpagecli`, the
+drill's native client; and the desktop's **Web** app, an mshl window
+whose tabs are page domains.
+
+## How it works
+
+### The libraries
+
+`lib/web.zig` is the module root. `url` is the WHATWG parser and
+serializer; `encoding` decodes the byte streams the web sends;
+`tokenizer` and `html` are the HTML Standard's parser into `dom`;
+`selectors` matches CSS selectors; `text` is the readable text of a
+page; `css`, `color` and `media` are CSS syntax, colours and media
+queries, `style` the cascade; `layout` places boxes and lines
+(CSS 2.1's visual formatting model, with a `Fonts` vtable for text), and
+`paint` draws them into the toolkit's canvas. The corpora under
+`tools/testdata/web/` are vendored at pinned commits; every `zig build
+test` prints the counts (see [Testing](testing.md)) and asserts a floor,
+and the layout engine's reftests — pairs of pages that must paint the
+same pixels, Acid1 among them — must all agree.
+
+In the shell (see [Networking](networking.md)), `fetch` is the HTTP
+client, and `html-parse`, `html-select`, `html-text`, `html-style` and
+`css-parse` are the libraries as commands; they parse in the caller's
+process and execute nothing.
+
+### The page domain and its host
+
+`shared/web.zig` is the seam, and the kernel's IPC decided its shape.
+A channel has a serving end and a calling end, a call blocks until the
+reply, and a page may hold one capability — so the page holds the
+calling end and only calls. It asks for a data buffer (URLs, resource
+chunks and document dumps pass through it), a viewport-sized pixel
+buffer, and a pack of font files; then it asks for the `next` command,
+which the host parks until it has one: load a URL, scroll, the pointer,
+a key, a dump, a new viewport, stop. To load, the page `open`s the URL
+through the host and `read`s it in chunks; the host — the broker — is
+the only thing with a network view. With each thing that happens the
+page calls back with an event: `title`, `url`, `load` (loading, done,
+failed and why), `commit` (it painted), `hover` (the link under the
+pointer), `extent` (how tall the document is), `dumped`.
+
+`user/webpage.zig` is the domain: a static 20 MB arena that every
+navigation resets and that is the page's whole memory budget (a
+program's memory here is its image's static size, charged at spawn),
+`lib/font` over the packed faces with a bounded glyph cache, the parser,
+cascade, layout and painter over the granted pixels, a hit test that
+walks the DOM up to a link, hover when the link under the pointer
+changes, a click on the element the press landed on navigating,
+scrolling as a repaint at the new offset. A page that runs out of arena
+logs it and exits; its host hears the death as its badge's
+`client_dead`. It holds no filesystem, no network, no font service.
+
+`user/webhost.zig` is the host and broker in one module. `spawn` mints
+a badge, spawns the page under it and creates its buffers; `step`
+receives one message and does what it can itself (an attach, an open, a
+read, parking a `next`) and reports an event or a death to the program;
+`send` queues a command and answers a parked page at once; `resize`
+gives a page a new viewport (none for a hidden one). The broker is
+deliberately plain: one connection per open, redirects followed on the
+host's side, `http` and `https` only (TLS verified against the host's
+trust roots), no content coding requested, a 24 MB cap, a 10 s stall
+limit. A host that serves pages from one thread while another commands
+them (a window) takes the host's lock around its state.
+
+### The window: Web
+
+The desktop's **Web** app (`boot/scripts/browser.msh`, unit
+`boot/conf/sessiongui/browser.msh`) is an ordinary mshl GUI: its state
+is its tab list, and every event — a button, the tab strip, a page's
+title, URL, load state, hover or death — is a coarse record to
+`update`. The one new widget is the runtime's `page` leaf:
+
+```
+{ kind: "page", id: "t1", url: "https://…", nav: 0, visible: true, h: 560, grow: true }
+```
+
+A `page` leaf is a page domain. The runtime spawns one the first time it
+sees the id, navigates it when `url` (or the `nav` nonce) changes,
+gives it a pixel buffer the size of the leaf's rect while it is visible
+and takes it back when it is not (a hidden tab keeps its document and
+holds no pixels), blits its pixels inside the rect on every render,
+routes the pointer, wheel and keys inside the rect to the page, and
+reaps the domain when the leaf is gone from the tree — lifetime is the
+tree's, like a scroll slot, so a closed tab is a dead domain and the
+window's exit takes every page with it. What the page reports reaches
+`update` as `{ id, kind, text, code }` with `kind` one of `title`,
+`url`, `load`, `hover`, `crashed`, `unavailable`. The pages are served
+on a thread of their own (the GUI loop blocks on the compositor); while
+a page is alive the loop ticks every 40 ms to blit fresh commits and
+deliver queued events.
+
+A session app that hosts pages needs a `spawner`, the session's
+network view, the assets tier (`{ tag: assets, session: true }`: the
+trust roots and the fonts the pages rasterize — a session's own view is
+its home, never the disk root) and the system store the `webpage` image
+is staged from, and a budget for its pages: 28 MB each. `Web` is 72 MB
+for two.
+
+### What is not built
+
+No cache, no cookie jar and no connection pool yet (the session's
+`webfetch` unit of the plan); no content coding in the page; no back,
+forward or stop (stage 7's history); no images or web fonts (stage 8);
+no flexbox, grid or tables beyond block rows (stage 9); no JavaScript
+(stages 10–11: our own engine, off until it lands). Menus are the
+generic window menu until client-defined menus exist. The `page` leaf
+does not yet follow a window resize with a fresh buffer of the new size
+in one step: the leaf's rect changes on the next render and the page is
+told, so a maximized window shows the page relaid out after a tick.
+
+## Dig deeper
+
+- `ROADMAP.md`, "A web browser": the arc, its locked decisions and
+  stages, each with its exit criterion and what it found.
+- `DESIGN.md`, "The web": the as-built story of every stage.
+- `docs/networking.md`: `fetch`, the HTML and CSS commands, `web-render`.
+- `docs/testing.md`: the `web`, `webpage` and `browser` drills.

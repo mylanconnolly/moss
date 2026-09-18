@@ -568,6 +568,11 @@ barriers in the virtio drivers, and `user/vmm.zig`.
 - A cap named at `spawn` keeps its badge (a child spawned with a
   minted end is heard under that badge, and its death is that badge's
   `client_dead`); the syscall dropped it until 2026-09-18.
+- A GUI leaf that stands for a process (the `page` leaf) is served on a
+  thread of its own; that thread never touches the interpreter — it
+  only moves bytes into module state the GUI loop reads on its tick.
+  A view's `children:` must be a list: `map` yields a table, so a mapped
+  run of children is `([] + $mapped)`.
 - `shared/` may not import kernel or user code and may not allocate; it is
   the ABI and compiles for every target.
 - Kernel W^X, no ambient authority, no kernel channel bypasses — see the

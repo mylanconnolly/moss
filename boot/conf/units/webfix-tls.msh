@@ -1,6 +1,6 @@
 # The fixture web server over TLS: the same pages on 8443, presenting
 # the www.moss.test certificate the test root signed — moss's TLS server
 # proving moss's TLS client, as the net drill does against openssl.
-{ image: mshrun, script: scripts/webfix-tls.msh, grant: [log, bootfs], budget: { user: 16mb }, profiles: [web],
+{ image: mshrun, script: scripts/webfix-tls.msh, grant: [log, bootfs], budget: { user: 16mb }, profiles: [web, browser],
   give: [{ tag: net, netview: net }, { tag: view, fs: boot/web, ro: true }, { tag: buf, shm: 1 },
     { tag: cert, file: tls/moss-web-server.pem }, { secret: tls/moss-web-server.key }] }

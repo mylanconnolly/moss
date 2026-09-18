@@ -28,6 +28,20 @@ const Net = netcmds.Net;
 pub const max_pages = 4;
 pub const PageId = u8;
 
+/// A host may serve its pages from one thread while another thread
+/// commands them (a window's GUI loop blocks on the compositor). The
+/// lock covers the host's state; the blocking receive is outside it.
+pub const Lock = struct {
+    held: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    pub fn acquire(l: *Lock) void {
+        while (l.held.cmpxchgWeak(false, true, .acquire, .monotonic) != null) usys.yield();
+    }
+    pub fn release(l: *Lock) void {
+        l.held.store(false, .release);
+    }
+};
+
 /// A page's memory: its arena and glyph cache (22.5 MB of image BSS)
 /// plus the image and its 512K stack.
 pub const page_user_kb: u64 = 28 << 10;
@@ -152,6 +166,7 @@ pub const Command = union(enum) {
     pointer: struct { kind: wire.PointerKind, x: u32, y: u32 },
     key: struct { code: u32, ch: u32 },
     dump: wire.Dump,
+    resize: struct { w: u32, h: u32 },
     stop,
 };
 
@@ -247,6 +262,7 @@ pub const Host = struct {
     fonts_len: usize = 0,
     /// The reply token of the call being served.
     cur_token: u64 = 0,
+    lock: Lock = .{},
     scratch: [head_max + request_max]u8 = undefined,
 
     /// Set up in place: a Host is a few hundred KB (each page keeps a
@@ -268,7 +284,17 @@ pub const Host = struct {
     /// into a buffer every page is granted. Best effort: a page without
     /// fonts lays out with fixed cells.
     pub fn loadFonts(h: *Host, view: u64, view_buf: [*]u8) bool {
-        const files = [_][]const u8{ "assets/fonts/IBMPlexSans.ttf", "assets/fonts/IBMPlexMono-Regular.ttf" };
+        return h.loadFontsFrom(view, view_buf, "assets/");
+    }
+
+    /// The same from a view rooted at `prefix` (an assets view: "").
+    pub fn loadFontsFrom(h: *Host, view: u64, view_buf: [*]u8, prefix: []const u8) bool {
+        var p0: [64]u8 = undefined;
+        var p1: [64]u8 = undefined;
+        const files = [_][]const u8{
+            std.fmt.bufPrint(&p0, "{s}fonts/IBMPlexSans.ttf", .{prefix}) catch return false,
+            std.fmt.bufPrint(&p1, "{s}fonts/IBMPlexMono-Regular.ttf", .{prefix}) catch return false,
+        };
         const pages: u64 = 200; // 800 KB: the two faces are 673 KB
         const s = usys.shmCreate(pages);
         if (s.err != .ok) return false;
@@ -302,6 +328,8 @@ pub const Host = struct {
     /// viewport (0 × 0 for a headless page). The page's first messages
     /// (its attaches) are served by `step`.
     pub fn spawn(h: *Host, stage_handle: u64, w: u32, height: u32) ?PageId {
+        h.lock.acquire();
+        defer h.lock.release();
         var idx: usize = 0;
         while (idx < max_pages and h.pages[idx].used) idx += 1;
         if (idx == max_pages) return null;
@@ -358,8 +386,45 @@ pub const Host = struct {
         return @intCast(idx);
     }
 
+    /// Give a page a new viewport: a fresh pixel buffer of `w` × `h`
+    /// (none for 0 × 0, a hidden page), the old one let go here — the
+    /// page unmaps its side when it takes the `resize` command and asks
+    /// for the new buffer.
+    pub fn resize(h: *Host, id: PageId, w: u32, height: u32) bool {
+        h.lock.acquire();
+        defer h.lock.release();
+        const p = &h.pages[id];
+        if (!p.used or p.dead) return false;
+        if (p.w == w and p.h == height) return true;
+        if (p.px_va != 0) _ = usys.shmUnmap(p.px_va);
+        if (p.px_shm != 0) _ = usys.capDrop(p.px_shm);
+        p.px_va = 0;
+        p.px_shm = 0;
+        p.w = w;
+        p.h = height;
+        if (w > 0 and height > 0) {
+            const pages = (@as(u64, w) * height * 4 + 4095) / 4096;
+            const s = usys.shmCreate(pages);
+            if (s.err != .ok) return false;
+            const m = usys.shmMap(s.data[0]);
+            if (m.err != .ok) {
+                _ = usys.capDrop(s.data[0]);
+                return false;
+            }
+            p.px_shm = s.data[0];
+            p.px_va = m.data[0];
+        }
+        return h.sendLocked(id, .{ .resize = .{ .w = w, .h = height } });
+    }
+
     /// Destroy a page's domain and drop everything held for it.
     pub fn destroy(h: *Host, id: PageId) void {
+        h.lock.acquire();
+        defer h.lock.release();
+        h.destroyLocked(id);
+    }
+
+    fn destroyLocked(h: *Host, id: PageId) void {
         const p = &h.pages[id];
         if (!p.used) return;
         if (p.open) |*r| r.conn.close(h.net);
@@ -385,7 +450,9 @@ pub const Host = struct {
     }
 
     pub fn deinit(h: *Host) void {
-        for (0..max_pages) |i| h.destroy(@intCast(i));
+        h.lock.acquire();
+        for (0..max_pages) |i| h.destroyLocked(@intCast(i));
+        h.lock.release();
         if (h.fonts_va != 0) _ = usys.shmUnmap(h.fonts_va);
         if (h.fonts_shm != 0) _ = usys.capDrop(h.fonts_shm);
         if (h.chan_b != 0) _ = usys.capDrop(h.chan_b);
@@ -404,6 +471,12 @@ pub const Host = struct {
 
     /// Queue a command for a page; a page waiting on `next` gets it now.
     pub fn send(h: *Host, id: PageId, cmd: Command) bool {
+        h.lock.acquire();
+        defer h.lock.release();
+        return h.sendLocked(id, cmd);
+    }
+
+    fn sendLocked(h: *Host, id: PageId, cmd: Command) bool {
         const p = &h.pages[id];
         if (!p.used or p.dead) return false;
         if (p.qlen == p.queue.len) return false;
@@ -436,6 +509,7 @@ pub const Host = struct {
             .pointer => |pt| .{ .pointer = .{ .kind = @intFromEnum(pt.kind), .x = pt.x, .y = pt.y } },
             .key => |k| .{ .key = .{ .code = k.code, .ch = k.ch } },
             .dump => |d| .{ .dump = .{ .what = @intFromEnum(d) } },
+            .resize => |r| .{ .resize = .{ .w = r.w, .h = r.h } },
             .stop => .stop,
         };
         // Shift the queue.
@@ -459,6 +533,8 @@ pub const Host = struct {
         };
         if (!live) return .idle;
         const r = usys.recvMsg(h.chan);
+        h.lock.acquire();
+        defer h.lock.release();
         if (r.err == .client_dead) {
             const id = h.byBadge(r.badge) orelse return .stale;
             logf(h.log, "webhost: page {d} died (badge {d})", .{ id, r.badge });

@@ -593,23 +593,48 @@ supervises), and memory history per unit beside the CPU one.
       shell drill's `run` was refused by 38 KB; those four budgets are
       40 MB now (the kernel admits a spawn when the child's image and
       stack fit the parent's remaining budget, not its declared limit).
-    - **(6) The window: Web.** `boot/scripts/browser.msh`, unit
-      `browser` with `app: { name: "Web", … dock: true }`. The runtime's
-      `page` leaf (`{ kind: "page", id, url, nav, grow: true }`) spawns,
-      navigates, blits and reaps page domains and routes pointer, keys
-      and wheel inside its rect; page events reach `update` as coarse
-      events (`{ id, kind: "title" | "url" | "load" | "crashed", … }`).
-      The app: the toolkit's tab strip (the editor's), a URL field,
-      back/forward/reload/stop, a status line with the broker's TLS
-      verdict, a hidden tab keeps its document and drops its pixels (the
-      buffer is viewport-sized and only the visible page holds one — at
-      1920×1200 a full-window buffer is 9 MB, and the session budget is
-      96 MB). `progload` grows a `spawn-program`: stage a named image
-      with an explicit cap manifest, not only an `mshrun` handler. Menus
-      through client-defined schemas. *Exit:* the `browser` drill —
-      navigate to a fixture over loopback https, screendump the heading,
-      open a second tab, close it, quit; leak bar; a page that paints a
-      fake URL bar is screendumped inside its rect and nowhere else.
+    - ✅ **(6) The window: Web** (2026-09-18). The runtime's `page`
+      leaf (`user/guipage.zig` + arms in `guicmds.zig`): `{ kind:
+      "page", id, url, nav, visible, h, grow }` spawns a page domain
+      the first time its id is seen, navigates it when `url` or the
+      `nav` nonce changes, gives it a pixel buffer the size of its rect
+      while visible and takes it back when hidden (the document stays,
+      the pixels go), blits inside the rect and nowhere else, routes
+      the pointer, wheel and keys inside the rect to the page, and
+      reaps the domain when the leaf leaves the tree — the scroll-slot
+      lifetime, so a closed tab is a dead domain and the window's exit
+      takes every page. The pages are served on a thread (the GUI loop
+      blocks on the compositor, and a blocked `call` cannot be
+      interrupted); the loop ticks every 40 ms while a page lives, to
+      blit commits and hand queued page events to `update` as `{ id,
+      kind: title | url | load | hover | crashed | unavailable, text,
+      code }`. `boot/scripts/browser.msh`, unit `browser` (`app: { name:
+      "Web", dock: true }`): the tab strip, an address field, Reload,
+      Go, New Tab, Close Tab (the script strip has no close glyph), a
+      status line with the verdict (`https` means the broker verified
+      the certificate against the trust roots; there is no unverified
+      TLS). The seam grew `resize`; sessions grew an `assets` cap (the
+      tier itself, read-only, forwarded by the session manager: a
+      session's view is its home, so neither roots nor fonts were
+      reachable from an app before); the language lets `+` join lists
+      and tables (a view's mapped children beside literal ones); the
+      shells' budgets are 160 MB per session and 192 MB to host one.
+      The `browser` drill: the desktop, signed in as alice; Web from the
+      dock; the fixture over loopback TLS in the first tab, the
+      heading's colour found in the page's rect of a screendump; a
+      second tab typed a URL for a page that paints a fake address bar,
+      which stays inside the page's rect while the real bar above is
+      untouched; Close Tab reaps its domain; the close dot ends the
+      window and its page; log out; the leak bar. Found on the way: the
+      page host was wired before the assets view was taken (fonts came
+      from the wrong view — every glyph a block); the glyph baseline
+      sign (the toolkit adds a glyph's `top`, negative above the line);
+      a hidden leaf still costs its column a gap (the pages share a
+      gap-less column); `children:` takes only a list. Not built, said
+      so: back/forward/stop (stage 7), `spawn-program` in `progload`
+      (the host stages the one image it needs), client-defined menus
+      (the generic window menu for now), a fresh buffer in the same step
+      as a window resize (the page follows on the next render).
     - **(7) Using it.** History and bookmarks (`state/browser/`, mshl
       data), find in page, zoom seeded from the user's font scale and
       following a `sessionfont` push (reflow), downloads through the

@@ -156,6 +156,7 @@ var output_cap: u64 = 0;
 var font_cap: u64 = 0;
 var locale_cap: u64 = 0;
 var net_cap: u64 = 0;
+var assets_cap: u64 = 0;
 var net_control_cap: u64 = 0;
 var fabric_cap: u64 = 0;
 var home_buf: [*]u8 = undefined;
@@ -264,6 +265,7 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     font_cap = setup.cap(.font);
     locale_cap = setup.cap(.locale);
     net_cap = setup.cap(.net);
+    assets_cap = setup.cap(.assets);
     net_control_cap = setup.cap(.net_control);
     fabric_cap = setup.cap(.fabric);
     gui_sessions = disp_cap != 0;
@@ -1029,6 +1031,9 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     // The network: every GUI session may read the interfaces' status; only
     // an administrator's session may configure them.
     if (ok and gui_sessions and net_cap != 0) ok = boot.giveCap(b, .net, net_cap);
+    // The assets tier, read-only: trust roots and fonts for an app that
+    // fetches over TLS or hosts pages.
+    if (ok and gui_sessions and assets_cap != 0) ok = boot.giveCap(b, .assets, assets_cap);
     if (ok and gui_sessions and budget.admin and net_control_cap != 0) ok = boot.giveCap(b, .net_control, net_control_cap);
     // The fabric: every GUI session sees the cluster; an administrator's
     // session also gets the machine's init, to start and stop its units

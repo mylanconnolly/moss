@@ -1,0 +1,28 @@
+# The session manager for the browser drill (profile browser): the GUI
+# session manager as in usersvc-guishell, but its network view comes from
+# the plain `net` unit — the one the web fixture servers use — so the
+# session's browser and the fixtures share one network stack and its
+# loopback. Sized to host a session that opens the browser with two
+# page domains (28 MB each) beside the top bar and dock.
+{
+  image:    users
+  arg:      1
+  budget:   { kobj: 8mb, user: 192mb }
+  grant:    [log, spawner, bootfs]
+  profiles: [browser]
+  after:    apply
+  give: [
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
+    { tag: home, fs: home, ro: false }
+    { tag: shares, fs: conf/shares, ro: false, mkdir: true }
+    { tag: conf, fs: conf/app, ro: false, mkdir: true }
+    { tag: store, fs: img, ro: true }
+    { tag: display, unit: compositor-ptr }
+    { tag: display_control, unit: compositor-ptr, control: true }
+    { tag: font, unit: fontsvc }
+    { tag: locale, unit: localesvc }
+    { tag: net, netview: net }
+    { tag: assets, fs: assets, ro: true }
+    { tag: init, self: true }
+  ]
+}
