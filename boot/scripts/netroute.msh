@@ -1,0 +1,16 @@
+# The leased NIC is the way out: 10.0.2.100:9000 is the drill's echo
+# server on QEMU's user network (a hand-run desktop has none there, and
+# says so). The lease takes a moment, hence the retry on a refusal.
+def probe [tries] {
+  match (connect 10.0.2.100 9000) {
+    ok $s => {
+      send $s "leased path"
+      match (from-bytes (recv $s)?) {
+        ok $d => { close $s; if ($d == "leased path") { echo "netroute: leased path echoed" } else { echo ("netroute: FAIL echo mismatch " + $d) } }
+        err $e => { close $s; echo ("netroute: FAIL echo recv " + $e) }
+      }
+    }
+    err $e => if $tries > 0 { sleep 250; probe ($tries - 1) } else { echo ("netroute: no echo server on the leased network (" + $e + ")") }
+  }
+}
+probe 40

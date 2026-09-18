@@ -484,3 +484,21 @@ test "paint: the reftests, counted" {
     try std.testing.expectEqual(names.items.len, passed);
     try std.testing.expect(names.items.len >= 16);
 }
+
+// A line with hundreds of inline boxes: the spans appended for them grow
+// the fragment list while the line's own fragments are being read
+// (Wikipedia's front page found the slice taken once pointing into the
+// list's freed buffer).
+test "paint: a line of many inline boxes survives the fragment list growing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "<body style='margin:0;width:4000px'><p>");
+    for (0..400) |i| {
+        var b: [32]u8 = undefined;
+        try src.appendSlice(a, try std.fmt.bufPrint(&b, "<b><i>x{d}</i></b> ", .{i}));
+    }
+    try src.appendSlice(a, "</p></body>");
+    _ = try renderForTest(a, src.items, 4096, 64);
+}

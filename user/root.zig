@@ -100,7 +100,7 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
         // guest RAM) beside the desktop. The hypervisor flag is honoured
         // only when root holds the cap (the kernel checks), so a boot
         // without one simply has no VMM to start.
-        usys.kbLimits(12 << 10, 256 << 10),
+        usys.kbLimits(12 << 10, 288 << 10),
     );
     _ = usys.capDrop(ch.data[0]);
     if (r.err != .ok) {

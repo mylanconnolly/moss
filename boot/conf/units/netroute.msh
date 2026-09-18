@@ -1,0 +1,9 @@
+# Routing beside the cluster segment (profile guishell, the desktop's
+# shape): the fabric NIC is a broadcast-delivery hub, the third NIC is
+# leased from QEMU's user network, and a connect to that network's echo
+# server must leave through the leased NIC — once the hub claimed every
+# destination and the desktop's web pages could reach nothing. A
+# non-essential oneshot: its FAIL line is what the drill watches for.
+{ image: mshrun, script: scripts/netroute.msh, grant: [log, bootfs],
+  budget: { user: 20mb }, profiles: [guishell], oneshot: true,
+  give: [{ tag: net, netview: net-cluster }] }

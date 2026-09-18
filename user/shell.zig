@@ -888,11 +888,23 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     const ch = usys.chanCreate();
     if (ch.err != .ok) return it.fail("run: out of channels", .{});
     // A child we grant a spawner may offload work to its own workers, so
-    // it needs room for them (each ~4M) plus the transient overlap while
-    // a finished worker's memory is still being reclaimed — 20M, against
-    // 8M for a plain program. The shell's own 24M budget hosts it.
-    const child_mb: u64 = if (flags & shared.SpawnFlags.grant_spawner != 0) 20 << 10 else 8 << 10;
-    const sp = usys.spawn(spawner_h, run_stage.handle, run_arg, ch.data[0], flags, usys.kbLimits(1 << 10, child_mb));
+    // it needs room for them (each 8M) plus the transient overlap while
+    // a finished worker's memory is still being reclaimed — 24M, against
+    // 8M for a plain program. The shell's own 40M budget hosts it.
+    const child_mb: u64 = if (flags & shared.SpawnFlags.grant_spawner != 0) 24 << 10 else 8 << 10;
+    // The last `run`'s child is reaped asynchronously and its memory is
+    // charged until then: a refusal for room right after one is retried
+    // for a moment before it is real (the webhost's lesson).
+    var sp = usys.spawn(spawner_h, run_stage.handle, run_arg, ch.data[0], flags, usys.kbLimits(1 << 10, child_mb));
+    var tries: usize = 0;
+    while (sp.err == .no_space and tries < 50) : (tries += 1) {
+        usys.sleepMs(20);
+        sp = usys.spawn(spawner_h, run_stage.handle, run_arg, ch.data[0], flags, usys.kbLimits(1 << 10, child_mb));
+    }
+    if (tries > 0) {
+        var note: [96]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&note, "run: room for {s} after {d} retries: {s}", .{ name, tries, @tagName(sp.err) }) catch "run: retried");
+    }
     _ = usys.capDrop(ch.data[0]);
     if (sp.err != .ok) {
         _ = usys.capDrop(ch.data[1]);

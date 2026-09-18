@@ -19,6 +19,9 @@ pub fn Pool(comptime chunk: usize, comptime nchunks: usize) type {
         /// there was: a host's out-of-memory report reads these.
         last_refused: usize = 0,
         last_free_run: usize = 0,
+        /// How many chunks were in use at that refusal (a report after
+        /// a teardown would otherwise count what the teardown freed).
+        last_busy: usize = 0,
 
         pub fn allocator(self: *Self) std.mem.Allocator {
             return .{ .ptr = self, .vtable = &vtable };
@@ -53,6 +56,11 @@ pub fn Pool(comptime chunk: usize, comptime nchunks: usize) type {
             }
             self.last_refused = n;
             self.last_free_run = longest;
+            var busy: usize = 0;
+            for (self.used) |u| if (u) {
+                busy += 1;
+            };
+            self.last_busy = busy;
             return null;
         }
 

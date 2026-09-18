@@ -62,11 +62,13 @@ page calls back with an event: `title`, `url`, `load` (loading, done,
 failed and why), `commit` (it painted), `hover` (the link under the
 pointer), `extent` (how tall the document is), `dumped`.
 
-`user/webpage.zig` is the domain: two static arenas that are the
-page's whole memory budget (a program's memory here is its image's
-static size, charged at spawn) — the document's, 12 MB, holding the
-bytes, the tree, its sheets and every later edit until the next
-navigation, and the layout's, 8 MB, reset whole on every relayout —
+`user/webpage.zig` is the domain: static arenas that are the page's
+whole memory budget (a program's memory here is its image's static
+size, charged at spawn) — the document's, 12 MB, holding the bytes,
+the tree, its sheets and every later edit until the next navigation,
+the layout's, 12 MB, reset whole on every relayout, the picture store
+(6 MB of decoded pixels) and a per-picture scratch the file bytes and
+the decoder pass through —
 `lib/font` over the packed faces with a bounded glyph cache, the parser,
 cascade, layout and painter over the granted pixels, a hit test that
 walks the DOM up to a link, hover when the link under the pointer
@@ -118,10 +120,18 @@ A session app that hosts pages needs a `spawner`, the session's
 network view, the assets tier (`{ tag: assets, session: true }`: the
 trust roots and the fonts the pages rasterize — a session's own view is
 its home, never the disk root) and the system store the `webpage` image
-is staged from, and a budget for its pages: 28 MB each. `Web` is 72 MB
+is staged from, and a budget for its pages: 44 MB each. `Web` is 104 MB
 for two.
 
 ### Using it
+
+The first tab opens blank; a home page is a URL as data in
+`state/browser/home.msh` in the home. A real site opens over http or
+https — the system's trust roots are the drills' test CA followed by
+the Mozilla bundle — through the session's network view, which in the
+desktop is the cluster stack with its leased NIC as the way out. A site
+paints with its inline styles only (`<link rel=stylesheet>` is not
+fetched yet), so most look like plain documents until stage 9.
 
 Forms work inside the page: the painter draws text and password
 fields, check boxes and radios, buttons, selects and text areas
@@ -159,7 +169,9 @@ log from inside `update`, where `echo` waits for the window to close).
 
 ### What is not built
 
-No cache, no cookie jar and no connection pool yet (the session's
+No external stylesheets yet (`<link rel=stylesheet>`; the page's own
+`<style>` blocks and attributes are the cascade); no cache, no cookie
+jar and no connection pool yet (the session's
 `webfetch` unit of the plan); no content coding in the page; no stop
 button; a select cycles its options rather than opening a list; binary
 downloads wait for a bytes save in the picker; no SVG, WebP, animated

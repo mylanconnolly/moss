@@ -670,7 +670,11 @@ fn defaultSrc(v4: bool) ?Addr {
 }
 
 fn onLink(f: *const Iface, dst: Addr) bool {
-    if (f.bcast_delivery) return true;
+    // A broadcast-delivery segment (the cluster hub) reaches its
+    // neighbours without ARP, but it is on-link only for its own
+    // prefixes like any other: claiming every destination sent the
+    // desktop's DNS queries and web connects out the hub as broadcasts
+    // instead of through the leased NIC beside it (2026-09-18).
     if (isV4Mapped(dst)) {
         if (f.ip4 == 0) return false;
         const m = prefixMask4(f.prefix4);
@@ -1547,6 +1551,13 @@ const Lookup = struct {
     sent_at: i64 = 0,
     addrs: [shared.resolve_max][2]u64 = undefined,
     n: usize = 0,
+    /// The answers by family as they came (AAAA, then A), merged into
+    /// `addrs` when the lookup finishes: the family with a way out first,
+    /// the two alternating, so eight AAAA records ahead of eight A
+    /// records cannot leave a client with nothing it can reach (google,
+    /// 2026-09-18: every address it tried was v6 on a v4-only lease).
+    by_family: [2][shared.resolve_max][2]u64 = undefined,
+    n_by_family: [2]usize = .{ 0, 0 },
     ttl: u32 = max_ttl_s,
     done: bool = false,
     err: ?shared.NetErr = null,
@@ -1644,7 +1655,27 @@ fn lookupSend(l: *Lookup) void {
     l.sent_at = nowMs();
 }
 
+/// The answers into `addrs`: the family the stack can route first
+/// (v6 when it has a v6 way out, else v4), then alternating.
+fn lookupOrder(l: *Lookup) void {
+    const v6_first = route(addrFromWords(0x2001_0db8_0000_0000, 1)) != null;
+    const first: usize = if (v6_first) 0 else 1;
+    var take: [2]usize = .{ 0, 0 };
+    l.n = 0;
+    var fam = first;
+    while (l.n < shared.resolve_max) {
+        const other = 1 - fam;
+        if (take[fam] < l.n_by_family[fam]) {
+            l.addrs[l.n] = l.by_family[fam][take[fam]];
+            take[fam] += 1;
+            l.n += 1;
+        } else if (take[other] >= l.n_by_family[other]) break;
+        fam = other;
+    }
+}
+
 fn lookupFinish(l: *Lookup) void {
+    lookupOrder(l);
     if (l.n == 0 and l.err == null) l.err = if (l.nx) .nxdomain else if (l.declined) .refused else if (l.got[0] or l.got[1]) .nxdomain else .timeout;
     l.done = true;
     cachePut(l);
@@ -1669,9 +1700,10 @@ fn dnsInput(src: Addr, sport: u16, msg: []const u8) void {
             .ok => {
                 const found = dns.addressesFor(a, msg, r, l.nameSlice()) catch return;
                 for (found.words) |w| {
-                    if (l.n == shared.resolve_max) break;
-                    l.addrs[l.n] = w;
-                    l.n += 1;
+                    if (l.n_by_family[k] == shared.resolve_max) break;
+                    l.by_family[k][l.n_by_family[k]] = w;
+                    l.n_by_family[k] += 1;
+                    l.n += 1; // "something came" for the resolver walk
                 }
                 if (found.words.len > 0) l.ttl = @min(l.ttl, found.ttl);
             },

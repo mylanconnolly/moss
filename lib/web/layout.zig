@@ -275,6 +275,13 @@ pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *c
     const l = try a.create(Layout);
     l.* = .{ .a = a, .doc = doc, .styles = styles, .fonts = fonts, .images = images, .viewport_w = viewport_w, .viewport_h = viewport_h };
     l.root_style.display = .block;
+    // The box and fragment lists sized from the node count up front: a
+    // page's allocator is a fixed buffer that cannot take back what a
+    // doubling list leaves behind, and a 3900-node page grew these lists
+    // through 10 MB of an 8 MB arena (Wikipedia, 2026-09-18).
+    const n = doc.nodes.items.len;
+    try l.boxes.ensureTotalCapacity(a, n + n / 4 + 8);
+    try l.fragments.ensureTotalCapacity(a, 2 * n + 8);
     try l.boxes.append(a, .{ .kind = .root, .node = null, .style = &l.root_style });
     // The root element's box is the html element's, a block under the
     // initial containing block.
@@ -401,15 +408,21 @@ fn markerText(l: *Layout, id: NodeId, st: *const Computed) Error![]const u8 {
         .decimal => try std.fmt.allocPrint(l.a, "{d}. ", .{n}),
         .lower_alpha => try std.fmt.allocPrint(l.a, "{c}. ", .{@as(u8, @intCast('a' + (n - 1) % 26))}),
         .upper_alpha => try std.fmt.allocPrint(l.a, "{c}. ", .{@as(u8, @intCast('A' + (n - 1) % 26))}),
-        .lower_roman => try std.fmt.allocPrint(l.a, "{s}. ", .{roman(n, false)}),
-        .upper_roman => try std.fmt.allocPrint(l.a, "{s}. ", .{roman(n, true)}),
+        .lower_roman => blk: {
+            var buf: [16]u8 = undefined;
+            break :blk try std.fmt.allocPrint(l.a, "{s}. ", .{roman(&buf, n, false)});
+        },
+        .upper_roman => blk: {
+            var buf: [16]u8 = undefined;
+            break :blk try std.fmt.allocPrint(l.a, "{s}. ", .{roman(&buf, n, true)});
+        },
         else => "",
     };
 }
 
-threadlocal var roman_buf: [16]u8 = undefined;
-
-fn roman(n_in: usize, upper: bool) []const u8 {
+// Into the caller's buffer: nothing a user program links may be
+// `threadlocal` (no thread-local storage there; see encoding.zig).
+fn roman(roman_buf: *[16]u8, n_in: usize, upper: bool) []const u8 {
     const vals = [_]usize{ 1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1 };
     const syms = [_][]const u8{ "m", "cm", "d", "cd", "c", "xc", "l", "xl", "x", "ix", "v", "iv", "i" };
     var n: usize = @min(n_in, 3999);
@@ -1655,7 +1668,12 @@ fn baselineShift(st: *const Computed, h: f64, baseline: f64) f64 {
 /// close fragment (or the line end).
 fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64, line_end: f64, y: f64, h: f64, baseline: f64) Error!void {
     _ = container;
-    const frags = l.fragments.items[first_frag..];
+    // The line's fragments are a range, re-sliced at each use: the spans
+    // appended below grow the same list, and a slice taken once pointed
+    // into its freed buffer (Wikipedia's front page, 2026-09-18: a box id
+    // read from that memory indexed past the box list).
+    const last_frag = l.fragments.items.len;
+    const frags = l.fragments.items[first_frag..last_frag];
     // Boxes seen on this line, in order of first appearance.
     var seen: std.ArrayList(BoxId) = .empty;
     for (frags) |f| {
@@ -1686,7 +1704,7 @@ fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64,
         var x1 = line_end;
         var opened = false;
         var closed = false;
-        for (frags) |f| {
+        for (l.fragments.items[first_frag..last_frag]) |f| {
             if (f.box == bid and f.kind == .inline_open) {
                 x0 = f.x;
                 opened = true;
@@ -1700,7 +1718,7 @@ fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64,
             // Extend to the box's content extent on this line.
             var lo: ?f64 = null;
             var hi: ?f64 = null;
-            for (frags) |f| {
+            for (l.fragments.items[first_frag..last_frag]) |f| {
                 if (!isInsideInline(l, f.box, bid)) continue;
                 lo = if (lo) |v| @min(v, f.x) else f.x;
                 hi = if (hi) |v| @max(v, f.x + f.w) else f.x + f.w;

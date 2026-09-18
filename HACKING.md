@@ -489,6 +489,29 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   in a frame ended Activity's first System tab with a data abort at the
   stack's guard — and never pass `mshl.toValue` a type it cannot take
   (it is recursive per type).
+- Nothing a user program links may be `threadlocal`: there is no
+  thread-local storage set up, so the first access dereferences a null
+  TLS base (a data abort at a small `far`, `0x10`) — the encoding
+  prescan's scratch killed the first real web page. Pass a caller's
+  buffer instead. `grep -rn threadlocal lib/ shared/ user/` should
+  stay empty.
+- `tools/guidrive.py` drives a headless `run-gui` over QMP (sign in,
+  the Web pill, URLs typed into the address field, a screendump per
+  URL): the exact desktop the user runs, without a window. Add
+  `-object filter-dump,id=fd,netdev=n2,file=x.pcap` to the QEMU
+  command line and `tcpdump -nr x.pcap` says what left the guest.
+- Budgets: the kernel charges a child's *image* (text, data, BSS,
+  stack) to the parent chain at spawn and refuses when the parent's room
+  is short of it; a child's own limit is its cap, not what it costs
+  until it allocates. So a static array added to `mshrun` is paid by
+  every shell that hosts one, and the shell drill sits within 2 MB of
+  its budget with two idle workers alive. When a spawn is refused, the
+  kernel logs the chain; to see what is alive at that point, add a
+  temporary `ps` step to the drill's console script and read the
+  transcript (kept only when a step fails). A refusal right after a
+  child's exit is transient — its charge returns when the reaper is
+  done — so a host retries for a moment (`webhost.spawn`, the shell's
+  `run`, `workcmds.spawnWorker`).
 - A thread's stack is a static array with no guard below it, so an
   overflow corrupts whatever the linker placed next — and the symptom
   moves when unrelated code changes the layout (the browser's serving

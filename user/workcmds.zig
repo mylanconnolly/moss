@@ -113,7 +113,14 @@ fn spawnWorker(stage_handle: u64, handler_src: []const u8) SpawnOut {
 
     const ch = usys.chanCreate();
     if (ch.err != .ok) return .{ .failed = "out of channels" };
-    const sp = usys.spawn(spawner, stage_handle, 2, ch.data[0], shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a, usys.kbLimits(1 << 10, 8 << 10)); // mshrun spans 3.6 MB before its 512K stack
+    // A finished worker is reaped asynchronously and its memory charged
+    // until then: a refusal for room is retried for a moment first.
+    var sp = usys.spawn(spawner, stage_handle, 2, ch.data[0], shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a, usys.kbLimits(1 << 10, 8 << 10));
+    var tries: usize = 0;
+    while (sp.err == .no_space and tries < 50) : (tries += 1) {
+        usys.sleepMs(20);
+        sp = usys.spawn(spawner, stage_handle, 2, ch.data[0], shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a, usys.kbLimits(1 << 10, 8 << 10));
+    }
     _ = usys.capDrop(ch.data[0]);
     if (sp.err != .ok) {
         _ = usys.capDrop(ch.data[1]);

@@ -36,10 +36,30 @@ pub const Epoch = struct {
     /// and contiguous here, never contending with the snapshots in the
     /// box pool (whose fragmentation once refused a 22 KB run with most
     /// of its chunks free, ending the browser on a download turn).
-    var scratch_storage: [512 << 10]u8 = undefined;
+    var scratch_storage: [512 << 10]u8 = undefined; // the Console app renders past 256 KB
     var scratch_fba: std.heap.FixedBufferAllocator = undefined;
     /// One epoch at a time per process: the backing is shared.
     var scratch_busy = false;
+    /// The last request the scratch refused, and its high-water mark:
+    /// a host's out-of-memory report reads these.
+    pub var scratch_refused: usize = 0;
+    pub var scratch_peak: usize = 0;
+    pub fn scratchSize() usize {
+        return scratch_storage.len;
+    }
+    const Counted = struct {
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const r = std.heap.FixedBufferAllocator.alloc(ctx, len, alignment, ra);
+            if (r == null) scratch_refused = len else scratch_peak = @max(scratch_peak, scratch_fba.end_index);
+            return r;
+        }
+        fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+            const r = std.heap.FixedBufferAllocator.resize(ctx, buf, alignment, new_len, ra);
+            if (!r and new_len > buf.len) scratch_refused = new_len else scratch_peak = @max(scratch_peak, scratch_fba.end_index);
+            return r;
+        }
+        const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = std.heap.FixedBufferAllocator.remap, .free = std.heap.FixedBufferAllocator.free };
+    };
 
     pub fn begin(self: *Epoch, it: *mshl.Interp, roots: Value) mshl.Error!void {
         std.debug.assert(!self.active and !scratch_busy);
@@ -47,7 +67,7 @@ pub const Epoch = struct {
         const pending = it.detachDead(roots);
         scratch_busy = true;
         scratch_fba = std.heap.FixedBufferAllocator.init(&scratch_storage);
-        self.* = .{ .it = it, .scratch = std.heap.ArenaAllocator.init(scratch_fba.allocator()), .outer = it.arena, .frames = it.free_frames, .out = it.out, .ret = it.ret, .err_msg = it.err_msg, .roots = held, .pending = pending, .active = true };
+        self.* = .{ .it = it, .scratch = std.heap.ArenaAllocator.init(.{ .ptr = &scratch_fba, .vtable = &Counted.vtable }), .outer = it.arena, .frames = it.free_frames, .out = it.out, .ret = it.ret, .err_msg = it.err_msg, .roots = held, .pending = pending, .active = true };
         it.arena = self.scratch.allocator();
         it.free_frames = .empty;
         it.out = .empty;

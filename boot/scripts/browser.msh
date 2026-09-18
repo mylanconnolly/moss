@@ -17,8 +17,21 @@
 # the page reports for it is not pushed again. Bookmarks persist under
 # the home's state/browser/ as data; history lines go to history.msh.
 
-let home = "https://www.moss.test:8443/"
 let store = "state/browser"
+
+# The home page: `state/browser/home.msh` in the home holds a URL as
+# data; without one the first tab is a New Tab (the fixture home of the
+# drills is a page a hand-run desktop can never reach).
+def load-home [] {
+  match (cat ($store + "/home.msh")) {
+    ok $text => (match ($text | from-data) {
+        ok $v => (match $v { $u => $u })
+        _ => ""
+      })
+    _ => ""
+  }
+}
+let home = (load-home)
 
 def new-tab [id, url] {
   { id: $id, url: $url, title: "", state: "loading", code: 0, hover: "", gen: 0, nav: 0, back: [], fwd: [], skip: false }
@@ -165,8 +178,14 @@ let final = (gui {
     update: (fn [state, ev] {
         match $ev.id {
           "go" => {
+            # The field the event carries was rendered before any page
+            # event that renumbered it (a failing load bumps `gen` on
+            # every report), so the value is looked up by the newest
+            # numbering the event knows; none known, the address stands.
             let cur = (active-tab $state)
-            let typed = ($ev.fields | get ("url-" + $cur.id + "-" + (str $cur.gen)))
+            let known = ($ev.fields | keys)
+            let hit = (range 0 12 | map { "url-" + $cur.id + "-" + (str ($cur.gen - $it)) } | find (fn [c] { $known | any (fn [k] { $k == $c }) }))
+            let typed = (match $hit { nothing => $cur.url; $k => ($ev.fields | get $k) })
             go ($state | merge { note: "" }) $typed
           }
           "back" => {
@@ -232,8 +251,11 @@ let final = (gui {
               "title" => (set-tab $state $ev.id { title: $ev.text })
               "url" => {
                 let t = ($state.tabs | find (fn [t] { $t.id == $ev.id }))
+                # The same URL reported again (a failed load reports it
+                # on every retry) keeps the address field as it is: a
+                # renumbering resets what the user is typing into it.
                 match ($t.url == $ev.text) {
-                  true => (set-tab $state $ev.id { gen: ($t.gen + 1), skip: false })
+                  true => (set-tab $state $ev.id { skip: false })
                   _ => {
                     note-history $ev.text
                     match $t.skip {

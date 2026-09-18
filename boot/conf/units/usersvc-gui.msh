@@ -10,7 +10,7 @@
 {
   image:    users
   arg:      1
-  budget:   { kobj: 8mb, user: 192mb }
+  budget:   { kobj: 8mb, user: 224mb }
   grant:    [log, spawner, bootfs]
   profiles: [gsession, lconsole, gisession]
   after:    apply

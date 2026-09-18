@@ -42,9 +42,13 @@ pub const Lock = struct {
     }
 };
 
-/// A page's memory: its arena and glyph cache (22.5 MB of image BSS)
-/// plus the image and its 512K stack.
-pub const page_user_kb: u64 = 28 << 10;
+/// A page's memory: its arenas — the document's (12 MB), the layout's
+/// (12), the glyph cache (2), the picture store (6) and the picture
+/// scratch (6) — plus the image and its 512K stack. Wikipedia's front
+/// page, the first real site opened, died twice of a 28 MB page: of
+/// the pictures it decoded into the document arena, then of an 8 MB
+/// layout arena a 3900-node page asks 10 MB of (2026-09-18).
+pub const page_user_kb: u64 = 44 << 10;
 pub const page_kobj_kb: u64 = 2 << 10;
 
 const stall_ms: u64 = 10_000;
@@ -572,6 +576,10 @@ pub const Host = struct {
         if (e != .ok) logf(h.log, "webhost: page {d}: answering {s} with token {x} failed: {s}", .{ id, @tagName(rep), token, @tagName(e) });
     }
 
+    fn isResolveFailure(why: []const u8) bool {
+        return std.mem.indexOf(u8, why, "resolve") != null or std.mem.indexOf(u8, why, "nxdomain") != null;
+    }
+
     /// Every reply names its caller: with a page parked on `next`, a
     /// reply without a token would answer the wrong call.
     fn reply(h: *Host, rep: wire.HostResp, cap: u64) void {
@@ -718,12 +726,21 @@ pub const Host = struct {
             const a = fba.allocator();
             const target = http.parseUrl(url) orelse return h.refuse(if (std.mem.indexOf(u8, url, "://") == null) .bad_url else .scheme);
             if (!h.net.attach()) return h.refuse(.connect);
+            // A failure to reach the site says why in the log: the word
+            // is the network service's or the TLS client's, and a page
+            // only hears a code.
             const conn: Conn = if (target.tls) switch (tlscmds.open(h.net, target.host, target.port, target.host)) {
                 .conn => |c| .{ .tls = c },
-                .failed => return h.refuse(.connect),
+                .failed => |why| {
+                    logf(h.log, "webhost: page {d}: {s}: {s}", .{ id, url, why });
+                    return h.refuse(if (isResolveFailure(why)) .resolve else .connect);
+                },
             } else switch (h.net.connectHost(target.host, target.port)) {
                 .sock => |s| .{ .plain = s },
-                .failed => |why| return h.refuse(if (std.mem.indexOf(u8, why, "resolve") != null or std.mem.indexOf(u8, why, "nxdomain") != null) .resolve else .connect),
+                .failed => |why| {
+                    logf(h.log, "webhost: page {d}: {s}: {s}", .{ id, url, why });
+                    return h.refuse(if (isResolveFailure(why)) .resolve else .connect);
+                },
             };
             var req: std.ArrayList(u8) = .empty;
             var host_hdr: [300]u8 = undefined;
@@ -752,6 +769,7 @@ pub const Host = struct {
                     .data => |bytes| {
                         if (got + bytes.len > head_buf.len) {
                             conn.close(h.net);
+                            logf(h.log, "webhost: page {d}: {s}: the head is longer than {d} KB", .{ id, url, head_buf.len / 1024 });
                             return h.refuse(.protocol);
                         }
                         @memcpy(head_buf[got .. got + bytes.len], bytes);
@@ -760,11 +778,13 @@ pub const Host = struct {
                     .closed => closed = true,
                     .failed, .timeout => {
                         conn.close(h.net);
+                        logf(h.log, "webhost: page {d}: {s}: no head after {d} bytes (the connection failed or stalled)", .{ id, url, got });
                         return h.refuse(.connect);
                     },
                 }
-                const parsed = http.parseHead(a, head_buf[0..got]) catch {
+                const parsed = http.parseHead(a, head_buf[0..got]) catch |e| {
                     conn.close(h.net);
+                    logf(h.log, "webhost: page {d}: {s}: the head does not parse: {s}", .{ id, url, @errorName(e) });
                     return h.refuse(.protocol);
                 };
                 if (parsed) |hd| {
@@ -773,6 +793,7 @@ pub const Host = struct {
                 }
                 if (closed) {
                     conn.close(h.net);
+                    logf(h.log, "webhost: page {d}: {s}: closed before the head ({d} bytes)", .{ id, url, got });
                     return h.refuse(.protocol);
                 }
             }
@@ -846,10 +867,17 @@ pub const Host = struct {
                             res.done = true;
                             break;
                         }
+                        logf(h.log, "webhost: page {d}: the body was cut short (closed, {s} framing)", .{ id, @tagName(res.framing) });
                         h.finish(p);
                         return h.chunkReply(0, .failed);
                     },
-                    .failed, .timeout => {
+                    .failed => {
+                        logf(h.log, "webhost: page {d}: the body's connection failed", .{id});
+                        h.finish(p);
+                        return h.chunkReply(0, .failed);
+                    },
+                    .timeout => {
+                        logf(h.log, "webhost: page {d}: the body stalled for {d} ms", .{ id, stall_ms });
                         h.finish(p);
                         return h.chunkReply(0, .failed);
                     },

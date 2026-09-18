@@ -100,6 +100,18 @@ pub fn declareStrut(edge: u64, size: usize) void {
 
 pub var output_control: u64 = 0;
 pub var log_h: u64 = 0; // for the run loops' `gui:`/`topbar:`/`dock:` logging
+/// The host's retained-value pool occupancy (chunks busy), logged when it
+/// climbs a step past the last mark: which turn fills it.
+pub var pool_busy: ?*const fn () usize = null;
+var pool_mark: usize = 0;
+fn notePool(what: []const u8) void {
+    const f = pool_busy orelse return;
+    const busy = f();
+    if (busy < pool_mark + 256) return;
+    pool_mark = busy;
+    var line: [120]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&line, "gui: pool {d} chunks busy after {s}", .{ busy, what }) catch "gui: pool");
+}
 
 // Crash-isolation of `update` (opt-in `gui { isolate: true }`): the app's
 // `update` runs in a worker domain, so a fault or panic in it kills only
@@ -2220,6 +2232,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (evaluated) {
             // Snapshot live state before discarding callback scratch allocations.
             try epoch.checkpoint(&state, &tree);
+            notePool(action_id[0..action_len]);
             evaluated = false;
         }
         var nfocus = renderTree(tree, title, focus);

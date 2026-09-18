@@ -803,6 +803,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/fabsig.msh",            "conf/units/fabsigtx.msh",
         "scripts/fabsig-wait.msh",          "scripts/fabsig-send.msh",
         "conf/units/fabname.msh",           "scripts/fabname.msh",
+        "conf/units/netroute.msh",          "scripts/netroute.msh",
         "conf/units/locale-drill.msh",      "scripts/locale-drill.msh",
         "conf/units/localeupd.msh",         "conf/locale.msh",
         "conf/units/localesvc.msh",         "conf/units/clipsvc.msh",
@@ -841,14 +842,21 @@ pub fn build(b: *std.Build) void {
     }
     // The trust roots, as assets seeded into the filesystem at first boot
     // and updatable in place: `assets/tls/roots.pem` is what the system
-    // trusts (the drill's own test root here; a real build would seed the
-    // public bundle). `ca-bundle.pem` is the Mozilla bundle as curl
+    // trusts — the drills' own test root followed by the public bundle,
+    // so the desktop's Web app reaches real sites over https (until
+    // 2026-09-18 it held the test root alone, and every public site was
+    // "Cannot open"). `ca-bundle.pem` is the Mozilla bundle as curl
     // publishes it — a realistic 190 KB asset, and the "other" root set
     // the drill swaps in to prove a hot update changes trust with no
     // restart; `other-ca.pem` is a second small root for the same.
+    const roots_seed = b.addSystemCommand(&.{ "cat", "lib/tls/moss-test-ca.pem", "boot/tls/roots.pem" });
+    roots_seed.addFileInput(b.path("lib/tls/moss-test-ca.pem"));
+    roots_seed.addFileInput(b.path("boot/tls/roots.pem"));
+    const roots_seed_path = roots_seed.captureStdOut(.{ .basename = "roots.pem" });
+    pack.addPrefixedFileArg("assets/tls/roots.pem=", roots_seed_path);
+    pack_guest.addPrefixedFileArg("assets/tls/roots.pem=", roots_seed_path);
     const asset_files = [_]struct { at: []const u8, from: []const u8 }{
         .{ .at = "assets/licenses/phosphor.txt", .from = "lib/ui/phosphor/LICENSE" },
-        .{ .at = "assets/tls/roots.pem", .from = "lib/tls/moss-test-ca.pem" },
         .{ .at = "assets/tls/ca-bundle.pem", .from = "boot/tls/roots.pem" },
         .{ .at = "assets/tls/other-ca.pem", .from = "lib/tls/other-ca.pem" },
         // The bundled system font families (OFL), seeded into the assets

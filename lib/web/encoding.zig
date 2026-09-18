@@ -110,7 +110,8 @@ pub fn prescan(input: []const u8) ?Encoding {
             var charset: ?Encoding = null;
             var seen: [8][]const u8 = undefined;
             var seen_n: usize = 0;
-            while (getAttribute(bytes, &pos)) |attr| {
+            var scratch: [32]u8 = undefined;
+            while (getAttribute(bytes, &pos, &scratch)) |attr| {
                 var dup = false;
                 for (seen[0..seen_n]) |sn| if (std.mem.eql(u8, sn, attr.name)) {
                     dup = true;
@@ -144,7 +145,8 @@ pub fn prescan(input: []const u8) ?Encoding {
             // A tag: skip its name, then its attributes.
             pos += 1;
             while (pos < bytes.len and !isSpace(bytes[pos]) and bytes[pos] != '>') pos += 1;
-            while (getAttribute(bytes, &pos)) |_| {}
+            var scratch: [32]u8 = undefined;
+            while (getAttribute(bytes, &pos, &scratch)) |_| {}
             continue;
         }
         if (pos + 1 < bytes.len and bytes[pos] == '<' and (bytes[pos + 1] == '!' or bytes[pos + 1] == '/' or bytes[pos + 1] == '?')) {
@@ -162,7 +164,7 @@ const Attr = struct { name: []const u8, value: []const u8 };
 /// place is not possible over a const slice, so names are compared
 /// lowercased through a small buffer; values come back as written
 /// (labels are matched case-insensitively anyway).
-fn getAttribute(bytes: []const u8, pos: *usize) ?Attr {
+fn getAttribute(bytes: []const u8, pos: *usize, scratch: *[32]u8) ?Attr {
     while (pos.* < bytes.len and (isSpace(bytes[pos.*]) or bytes[pos.*] == '/')) pos.* += 1;
     if (pos.* >= bytes.len or bytes[pos.*] == '>') return null;
     const name_start = pos.*;
@@ -172,7 +174,7 @@ fn getAttribute(bytes: []const u8, pos: *usize) ?Attr {
         if (isSpace(c) or c == '/' or c == '>') break;
         pos.* += 1;
     }
-    const attr_name = lowerAscii(bytes[name_start..pos.*]);
+    const attr_name = lowerAscii(scratch, bytes[name_start..pos.*]);
     while (pos.* < bytes.len and isSpace(bytes[pos.*])) pos.* += 1;
     if (pos.* >= bytes.len or bytes[pos.*] != '=') return .{ .name = attr_name, .value = "" };
     pos.* += 1;
@@ -193,14 +195,15 @@ fn getAttribute(bytes: []const u8, pos: *usize) ?Attr {
     return .{ .name = attr_name, .value = bytes[start..pos.*] };
 }
 
-// Attribute names the prescan cares about are ASCII; a name with other
-// bytes cannot match and is returned as-is through the scratch.
-threadlocal var name_scratch: [32]u8 = undefined;
-
-fn lowerAscii(s: []const u8) []const u8 {
-    if (s.len > name_scratch.len) return s;
-    for (s, 0..) |c, i| name_scratch[i] = std.ascii.toLower(c);
-    return name_scratch[0..s.len];
+// Attribute names the prescan cares about are ASCII; a name longer than
+// the caller's scratch cannot match and is returned as-is. (The scratch
+// was a `threadlocal` once: a user program has no thread-local storage,
+// so the first real page's prescan died of a data abort at a null TLS
+// base — nothing a user program links may be `threadlocal`.)
+fn lowerAscii(scratch: *[32]u8, s: []const u8) []const u8 {
+    if (s.len > scratch.len) return s;
+    for (s, 0..) |c, i| scratch[i] = std.ascii.toLower(c);
+    return scratch[0..s.len];
 }
 
 /// What a document is in: the BOM first, then the transport's charset,

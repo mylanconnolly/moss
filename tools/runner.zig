@@ -28,6 +28,8 @@ const Spec = struct {
     always_extra: ?[]const u8 = null,
     /// A further marker that must also appear (a third required substring).
     extra2: ?[]const u8 = null,
+    /// A fourth line the log must carry.
+    extra3: ?[]const u8 = null,
     /// For panic-path tests, "KERNEL PANIC" is the point, not a failure.
     panic_is_failure: bool = true,
     /// Second run on the same disk (persistence); this marker must appear.
@@ -94,7 +96,7 @@ const specs = [_]Spec{
     .{ .name = "lconsole", .kind = .lconsole, .pass = "lconsole-test: PASS", .extra = "login: session ok who=alice", .append = "profile=lconsole", .timeout_s = 120 },
     .{ .name = "gisession", .kind = .gisession, .pass = "gisession-test: PASS", .extra = "gui: session ok who=alice", .append = "profile=gisession", .timeout_s = 120 },
     .{ .name = "gboom", .kind = .gboom, .pass = "gboom-test: PASS", .extra = "gui: session survived count=1", .append = "profile=gboom", .timeout_s = 120 },
-    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "dock: activate settings", .always_extra = "settings: admin=true", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
+    .{ .name = "guishell", .kind = .guishell, .pass = "guishell-test: PASS", .extra = "dock: activate settings", .always_extra = "settings: admin=true", .extra2 = "topbar: exit note=logging out", .extra3 = "netroute: leased path echoed", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "guishellro", .kind = .guishellro, .pass = "guishellro-test: PASS", .extra = "settings: admin=false", .always_extra = "settings: system read-only", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "display", .kind = .display, .pass = "display-test: PASS", .extra = "gpu: output 1920x1080", .always_extra = "display: mode confirmed", .extra2 = "topbar: exit note=logging out", .append = "profile=guishell", .timeout_s = 120 },
     .{ .name = "power", .kind = .power, .pass = "power-test: PASS", .extra = "users: session asked to shut down", .always_extra = "power-test: powered off by request", .extra2 = "init: power request: off", .append = "profile=guishell", .timeout_s = 120 },
@@ -628,12 +630,15 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
                 "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
                 "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
             });
+            // The user network carries an echo server: the `netroute`
+            // unit proves a connect leaves through the leased NIC and not
+            // the hub (which once claimed every destination).
             if (spec.kind == .guishell or spec.kind == .guishellro) try args.appendSlice(gpa, &.{
                 "-netdev", "hubport,id=h1,hubid=0",
                 "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
                 "-netdev", "hubport,id=h2,hubid=0",
                 "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h2",
-                "-netdev", "user,id=n2",
+                "-netdev", "user,id=n2,guestfwd=tcp:10.0.2.100:9000-cmd:cat",
                 "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n2",
                 "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
             });
@@ -1291,6 +1296,16 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     };
     if (!clickScanout(&q, pill[0], pill[1])) return sfail(spec, log_path, "click the Web pill");
     if (!try waitLogN(log_path, "dock: activate browser", 1, "the Web pill did not launch the browser", spec, polls)) return false;
+    // The first tab opens blank (a home page is a setting in the home);
+    // the fixture's TLS front page is typed into it.
+    if (!try waitLogN(log_path, "gui: widget url-t1-0 at", 1, "the first tab's address field never appeared", spec, polls)) return false;
+    sleepMs(500);
+    const field1 = widgetCenter(readLog(log_path), "url-t1-0") orelse return false;
+    if (!clickScanout(&q, field1[0], field1[1])) return sfail(spec, log_path, "click the first address field");
+    sleepMs(200);
+    if (!q.typeText("https://www.moss.test:8443/")) return sfail(spec, log_path, "type the home URL");
+    const go1 = widgetCenter(readLog(log_path), "go") orelse return false;
+    if (!clickScanout(&q, go1[0], go1[1])) return sfail(spec, log_path, "click Go for the home page");
     if (!try waitLogN(log_path, "page t1: load done", 1, "the first tab never loaded the fixture over TLS", spec, polls)) return false;
     // The page's commit reaches the window on the next tick; give it a moment.
     sleepMs(700);
@@ -1332,9 +1347,10 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "the spoof page's fake address bar was not painted inside its rect", log_path);
         return false;
     }
-    // ...and nowhere above it: the real address field (renumbered by the
-    // page's final URL) and the strip just above the page keep their colours.
-    const real = widgetCenter(readLog(log_path), "url-t2-1") orelse {
+    // ...and nowhere above it: the real address field (its number stays:
+    // the page reported the URL that was typed) and the strip just above
+    // the page keep their colours.
+    const real = widgetCenter(readLog(log_path), "url-t2-0") orelse {
         reportFailure(spec.name, "could not find the second tab's address field after its load", log_path);
         return false;
     };
@@ -1381,7 +1397,8 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "page t2: url \"http://www.moss.test:8080/submit?name=Moss+Reader&agree=yes&colour=green&go=Send\"", 1, "the submitted query is not what was filled in", spec, polls)) return false;
     // The app takes the page's URL into its state on a tick (page events
     // arrive one per tick): its address field is renumbered when it has.
-    if (!try waitLogN(log_path, "gui: widget url-t2-3 at", 1, "the app did not take the submitted URL", spec, polls)) return false;
+    // The submit's query is a URL the tab did not have: the field renumbers.
+    if (!try waitLogN(log_path, "gui: widget url-t2-1 at", 1, "the app did not take the submitted URL", spec, polls)) return false;
     // Bookmark the result, then find a word on it.
     const bm = widgetCenter(readLog(log_path), "bookmark") orelse return false;
     if (!clickScanout(&q, bm[0], bm[1])) return sfail(spec, log_path, "click Bookmark");
@@ -5471,7 +5488,9 @@ fn watch(log_path: []const u8, spec: Spec, extra: ?[]const u8, polls: *u64) Verd
             std.mem.indexOf(u8, content, spec.always_extra.?) != null;
         const have_extra2 = spec.extra2 == null or
             std.mem.indexOf(u8, content, spec.extra2.?) != null;
-        if (have_pass and have_extra and have_always and have_extra2) return .{ .ok = true };
+        const have_extra3 = spec.extra3 == null or
+            std.mem.indexOf(u8, content, spec.extra3.?) != null;
+        if (have_pass and have_extra and have_always and have_extra2 and have_extra3) return .{ .ok = true };
 
         if (n * poll_ms / 1000 > spec.timeout_s) {
             return .{ .ok = false, .why = "timeout" };

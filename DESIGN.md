@@ -6212,6 +6212,57 @@ plain sight in the screendump. (4) A static array in `mshrun` is paid
 for by every mshrun and every budget that hosts one; read the BSS
 after adding one, and look for what can shrink first.
 
+**First real sites (as built, 2026-09-18).** Eight stages of drills
+had never opened a page outside the fixtures, and the first attempt
+from the desktop was "Cannot open" for every site. The kernel log of
+that run said `connect` and nothing more, so the first change was the
+broker saying why (`webhost: page N: URL: timeout`), and the second
+was reproducing the desktop without a window: `tools/guidrive.py`
+boots the run-gui command line headless and drives it over QMP the
+way the runner does. A packet capture on the leased NIC then showed
+DHCP and nothing else — no DNS query ever left through it. In cluster
+addressing the fabric NIC is broadcast-delivery (no ARP on the hub),
+and the on-link check had claimed every destination for such an
+interface, so the route for 10.0.2.3 was the hub. On-link is the
+prefix check for every interface now, and the guishell drill's
+`netroute` unit connects through the leased NIC to an echo server QEMU
+serves there. The next site died of a `threadlocal` scratch buffer in
+the encoding prescan: a user program has no thread-local storage, and
+the first page whose head the prescan read dereferenced a null TLS
+base. Then google resolved to eight AAAA records the resolver kept and
+eight A records it dropped at its cap, on a lease with no v6 route;
+the resolver orders the family it can route first and alternates.
+Then Wikipedia read a box id out of freed memory: a line's fragments
+were sliced once while the spans appended for its inline boxes grew
+the same list. And then Wikipedia ran out of a 28 MB page twice —
+pictures decoded into the document arena, and 3900 nodes asking 10 MB
+of an 8 MB layout arena that cannot take back what a doubling list
+leaves — so pictures have a store and a per-picture scratch, the
+layout lists are pre-sized from the node count, a page is 44 MB, and
+the budgets above it moved with it. The trust roots were the last
+wall: the system trusted the drills' test CA alone, and the seed is
+that CA followed by the Mozilla bundle now. And the window's own
+memory moved: `mshrun`'s pool of retained values held the browser's
+spec, state and two turn snapshots at 1668 of 2048 chunks before its
+first action and filled on the second tab (a pool occupancy line,
+`gui: pool N chunks busy after ACTION`, found that in one run) — the
+pool is 4096 chunks. That half megabyte tipped the shell drill,
+whose `ps` at the failing step (a temporary drill line, the fastest
+instrument there is) showed the shell 1.5 MB from its budget with two
+idle workers alive: the kernel charges a child's image at spawn, not
+its limit, so what binds is the parent's room against the image. The
+shells host 48 MB now and a `run` child 24, and a spawn refused right
+after a child's exit is retried for a second, as the web host already
+did, because a reaped child's charge comes back late. example.com, google and
+Wikipedia open; Wikipedia paints as its inline styles alone, because
+`<link rel=stylesheet>` is not fetched yet. *Lessons:* (1) a fixture
+drill proves the seam, not the world; the first real site is a test
+the arc must run before it calls a stage done. (2) A failure that only
+says its code costs a capture and a reproduction; log the reason at
+the site that knows it. (3) Nothing a user program links may be
+`threadlocal`. (4) A fixed buffer needs pre-sized lists, or a bigger
+arena than the bytes it will keep.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

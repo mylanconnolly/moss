@@ -25,10 +25,20 @@ comptime {
 
 pub const panic = std.debug.FullPanic(uPanic);
 
-fn uPanic(msg: []const u8, _: ?usize) noreturn {
-    var line: [200]u8 = undefined;
-    const text = std.fmt.bufPrint(&line, "webpage: panic: {s}", .{msg}) catch "webpage: panic";
-    _ = usys.log(glog, text);
+/// The panic line carries the faulting address and a walk up the frame
+/// chain (each aarch64 frame is [fp, lr]); symbolize against the build's
+/// `webpage.elf` with `nm -n` / `objdump -d -l` (HACKING.md).
+fn uPanic(msg: []const u8, ret_addr: ?usize) noreturn {
+    var line: [240]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: panic: {s} (at 0x{x})", .{ msg, ret_addr orelse 0 }) catch "webpage: panic");
+    var fp: usize = @frameAddress();
+    var depth: usize = 0;
+    while (fp != 0 and depth < 12) : (depth += 1) {
+        const frame: *const [2]usize = @ptrFromInt(fp);
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "  frame {d}: 0x{x}", .{ depth, frame[1] }) catch "?");
+        if (frame[0] <= fp) break;
+        fp = frame[0];
+    }
     usys.exit(255);
 }
 
@@ -45,7 +55,7 @@ var heap: [12 << 20]u8 = undefined;
 var arena_fba: std.heap.FixedBufferAllocator = undefined;
 /// The layout arena: the computed styles and the box tree, reset whole
 /// on every relayout (a resize, a keystroke into a field, a zoom).
-var layout_heap: [8 << 20]u8 = undefined;
+var layout_heap: [12 << 20]u8 = undefined;
 var layout_fba: std.heap.FixedBufferAllocator = undefined;
 /// Rasterized glyphs, kept across navigations.
 var glyph_heap: [2 << 20]u8 = undefined;
@@ -53,9 +63,22 @@ var glyph_fba: std.heap.FixedBufferAllocator = undefined;
 /// The user-agent stylesheet, parsed once.
 var ua_heap: [512 << 10]u8 = undefined;
 var ua_sheet: ?web.style.Sheet = null;
+/// The pictures: their decoded pixels live in the store until the next
+/// navigation (the cap is `max_picture_bytes`); a picture's file bytes
+/// and its decoder's working memory pass through the scratch, reset per
+/// picture, so a site's images cannot outgrow the document's arena
+/// (Wikipedia's front page did, 2026-09-18).
+var picture_heap: [6 << 20]u8 = undefined;
+var picture_fba: std.heap.FixedBufferAllocator = undefined;
+var picture_scratch: [6 << 20]u8 = undefined;
+var picture_scratch_fba: std.heap.FixedBufferAllocator = undefined;
+
+/// What the page is doing, for the out-of-memory line.
+var phase: []const u8 = "loading";
 
 fn outOfMemory() noreturn {
-    _ = usys.log(glog, "webpage: out of memory: the document outgrew the page's arena");
+    var line: [160]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document arena {d} of {d} KB, layout arena {d} of {d} KB)", .{ phase, arena_fba.end_index / 1024, heap.len / 1024, layout_fba.end_index / 1024, layout_heap.len / 1024 }) catch "webpage: out of memory");
     usys.exit(137);
 }
 
@@ -439,6 +462,11 @@ fn openUrl(url_text: []const u8, post: bool, body: []const u8) Opened {
 /// A resource of the page (a picture, a font) fetched whole into the
 /// document's arena: its bytes, or null when refused, failed or too big.
 fn fetchResource(url_text: []const u8, max: usize) ?[]u8 {
+    return fetchResourceInto(arena(), url_text, max);
+}
+
+/// A resource through the host, whole, into `a` (up to `max` bytes).
+fn fetchResourceInto(a: std.mem.Allocator, url_text: []const u8, max: usize) ?[]u8 {
     switch (openUrl(url_text, false, "")) {
         .ok => |st| if (st >= 400) {
             _ = call(.cancel);
@@ -457,7 +485,11 @@ fn fetchResource(url_text: []const u8, max: usize) ?[]u8 {
             _ = call(.cancel);
             return null;
         }
-        body.appendSlice(arena(), data[0..n]) catch outOfMemory();
+        body.appendSlice(a, data[0..n]) catch {
+            // Too big for where it was to go: skipped, never fatal.
+            _ = call(.cancel);
+            return null;
+        };
         switch (std.enums.fromInt(wire.ChunkEnd, chunk.done) orelse .failed) {
             .more => {},
             .done => return body.items,
@@ -576,6 +608,7 @@ fn fresh() void {
     page = .{};
     arena_fba.reset();
     layout_fba.reset();
+    picture_fba.reset();
     page_fonts.forgetWebFaces();
 }
 
@@ -595,6 +628,7 @@ fn showStatus(status: u64) void {
 /// that loaded, else the code or status the load event reports.
 fn present(markup: []const u8, failure: u64) void {
     const a = arena();
+    phase = "parsing the document";
     const doc = web.html.parse(a, markup, .{}) catch outOfMemory();
     page.doc = doc;
     page.base = web.url.parse(a, page.url(), null) catch null;
@@ -606,10 +640,15 @@ fn present(markup: []const u8, failure: u64) void {
     };
     eventText(.title, std.mem.trim(u8, title, " \t\r\n"));
     eventText(.url, page.url());
+    phase = "collecting its style sheets";
     page.sheets = web.style.collectDocumentSheetsWith(a, doc, env(), uaSheet(env())) catch outOfMemory();
+    phase = "loading its web fonts";
     loadFontFaces();
+    phase = "laying it out";
     relayout(false);
+    phase = "loading its pictures";
     loadPicturesNear();
+    phase = "editing it";
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
 }
 
@@ -680,17 +719,22 @@ fn loadPicturesNear() void {
             slot.* = .{ .node = node, .state = .failed, .bm = .{ .w = 0, .h = 0, .rgba = &.{} } };
             page.n_pictures += 1;
             const src = doc.getAttr(node, "src") orelse continue;
-            const u = web.url.resolve(arena(), src, base) catch continue;
-            const href = u.href(arena()) catch outOfMemory();
-            const bytes = fetchResource(href, 2 << 20) orelse continue;
-            const img = mosslib.image.decode(arena(), bytes) catch |e| {
+            // The file and the decoder's working memory in the scratch,
+            // reset per picture; only the pixels are kept, in the store.
+            picture_scratch_fba.reset();
+            const scratch = picture_scratch_fba.allocator();
+            const u = web.url.resolve(scratch, src, base) catch continue;
+            const href = u.href(scratch) catch continue;
+            const bytes = fetchResourceInto(scratch, href, 2 << 20) orelse continue;
+            const img = mosslib.image.decode(scratch, bytes) catch |e| {
                 logLine("webpage: image not decoded: ", @errorName(e));
                 continue;
             };
             if (page.picture_bytes + img.rgba.len > max_picture_bytes) continue;
-            page.picture_bytes += img.rgba.len;
+            const kept = picture_fba.allocator().dupe(u8, img.rgba) catch continue;
+            page.picture_bytes += kept.len;
             slot.state = .loaded;
-            slot.bm = .{ .w = img.w, .h = img.h, .rgba = img.rgba };
+            slot.bm = .{ .w = img.w, .h = img.h, .rgba = kept };
             var line: [200]u8 = undefined;
             _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: image {s} {d}x{d}", .{ src[0..@min(src.len, 120)], img.w, img.h }) catch "webpage: image");
             got += 1;
@@ -1338,6 +1382,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, _: u64, _: u64) callconv(.c) 
     }
     arena_fba = std.heap.FixedBufferAllocator.init(&heap);
     layout_fba = std.heap.FixedBufferAllocator.init(&layout_heap);
+    picture_fba = std.heap.FixedBufferAllocator.init(&picture_heap);
+    picture_scratch_fba = std.heap.FixedBufferAllocator.init(&picture_scratch);
     glyph_fba = std.heap.FixedBufferAllocator.init(&glyph_heap);
     attach();
     _ = usys.log(glog, "webpage: up");

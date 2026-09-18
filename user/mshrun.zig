@@ -82,7 +82,18 @@ var has_console = false;
 // 1 MiB held a 10 KB settings script and not a 19 KB one (2026-09-17).
 var heap_line: [1 << 20]u8 = undefined;
 var line_fba: std.heap.FixedBufferAllocator = undefined;
-var box_pool: mosslib.pool.Pool(256, 2048) = .{};
+// 4096 chunks (1 MB): the browser's retained set — its spec, its state,
+// two turn snapshots (the tree is copied at every checkpoint, the old
+// one released after) — sat at 1668 chunks before its first action and
+// filled 2048 on the second tab (2026-09-18).
+var box_pool: mosslib.pool.Pool(256, 4096) = .{};
+fn poolBusy() usize {
+    var busy: usize = 0;
+    for (box_pool.used) |u| if (u) {
+        busy += 1;
+    };
+    return busy;
+}
 var host_ctx: u8 = 0;
 var fs_ctx = fscmds.Fs{ .edit = @import("documentlaunch.zig").open, .resolve = resolve, .root = 0, .derive = viewDerive, .leave = viewLeave, .depth = viewDepth };
 /// The stores `use NAME` reads a module from: `img/` in the view when
@@ -341,6 +352,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     @import("documentlaunch.zig").log_h = log_h;
     @import("appsclient.zig").authority = init_cap;
     guicmds.output_control = setup.cap(.display_control);
+    guicmds.pool_busy = poolBusy;
     if (setup.has(.display)) guicmds.setup(setup.cap(.display), log_h, setup.secret(), if (setup.has(.font)) setup.cap(.font) else 0, fab_chan);
     if (setup.has(.sess)) sesscmds.setup(setup.cap(.sess), if (setup.has(.console)) setup.cap(.console) else 0);
     if (view_chan != 0) tlscmds.setRootsView(view_chan, view_buf);
@@ -378,8 +390,9 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
             for (box_pool.used) |u| if (u) {
                 busy += 1;
             };
-            var msg: [160]u8 = undefined;
-            fail(path, std.fmt.bufPrint(&msg, "out of memory (line heap {d}/{d} KB, box pool {d}/{d} chunks, last refused {d} chunks with a free run of {d})", .{ line_fba.end_index / 1024, heap_line.len / 1024, busy, box_pool.used.len, box_pool.last_refused, box_pool.last_free_run }) catch "out of memory");
+            var msg: [240]u8 = undefined;
+            const Epoch = @import("guieval.zig").Epoch;
+            fail(path, std.fmt.bufPrint(&msg, "out of memory (line heap {d}/{d} KB, box pool {d}/{d} chunks, last refused {d} chunks with a free run of {d} and {d} busy then, peak {d}; render scratch peak {d}/{d} KB, last refused {d} bytes)", .{ line_fba.end_index / 1024, heap_line.len / 1024, busy, box_pool.used.len, box_pool.last_refused, box_pool.last_free_run, box_pool.last_busy, box_pool.peak, Epoch.scratch_peak / 1024, Epoch.scratchSize() / 1024, Epoch.scratch_refused }) catch "out of memory");
         }
         fail(path, switch (e) {
             error.Exit => "exit",

@@ -727,6 +727,52 @@ supervises), and memory history per unit beside the CPU one.
       which took 1 MB off the image. Not built, said so: SVG, WebP, animated GIF
       (the first frame), `srcset`/`picture`, a bytes save in the picker
       (a binary download still waits), and images in `background-image`.
+    - ✅ **First real sites** (2026-09-18, between stages 8 and 9). The
+      desktop's Web app could not open a page outside the drills: six
+      bugs, none in a stage's own exit test. (1) The network stack, in
+      cluster addressing, marked the fabric NIC broadcast-delivery and
+      the on-link check claimed *every* destination for it, so the
+      desktop's DNS queries and connects went out the hub as broadcasts
+      and never through the leased NIC beside it (a capture on the user
+      network showed DHCP and nothing else) — on-link is the prefix
+      check for every interface now, and a `netroute` oneshot in the
+      guishell drill connects to an echo server on the leased network.
+      (2) The system's trust roots were the drills' test CA alone
+      (`assets/tls/roots.pem`), so every https site was "Cannot open" —
+      the seed is the test CA followed by the Mozilla bundle. (3) The
+      encoding prescan and the layout's roman numerals kept a
+      `threadlocal` scratch: a user program has no thread-local storage,
+      and the first real page died of a data abort at a null TLS base —
+      caller-owned buffers, and a sharp edge in HACKING. (4) The
+      resolver kept the first eight answers, google's eight AAAA
+      records, on a lease with no v6 route: it orders the family it can
+      route first and alternates. (5) A line's fragments were sliced
+      once while the spans appended for its inline boxes grew the same
+      list; Wikipedia's front page read a box id out of the freed buffer
+      (a host test with four hundred inline boxes on a line reproduces
+      it). (6) A 28 MB page could not hold a real site: its pictures
+      decoded into the document arena, and its 3900 nodes asked 10 MB
+      of an 8 MB layout arena — pictures have a store and a per-picture
+      scratch, the layout arena is 12 MB with its lists pre-sized from
+      the node count, a page is 44 MB, and the budget chain above it
+      (Web 104, session 192, manager 224, init 288, root 352 MB) moved
+      with it — and so did the shells' (48 MB, a `run` child 24): the
+      kernel charges a child's *image* at spawn, so what binds is the
+      parent's room against the image, and `mshrun`'s grew 512 KB past
+      the 1.5 MB the shell drill had left; a spawn refused right after a
+      child's exit is retried for a second in the shell's `run` and the
+      worker spawner, since a reaped child's charge returns late. Also: the broker logs why a connect, a head or a body
+      failed; the page's out-of-memory line names the phase and both
+      arenas; the page domain's panic line carries the address and the
+      frame chain; `mshrun`'s retained-value pool is 1 MB (the browser's
+      spec, state and two turn snapshots filled 512 KB on its second
+      tab) and its render scratch 256 KB; the home page is a setting (`state/browser/home.msh`,
+      blank by default — the fixture home can never load off the
+      drill); the address field no longer renumbers on a URL reported
+      unchanged; `tools/guidrive.py` drives a headless run-gui over QMP.
+      Not built, said so: external stylesheets (`<link rel=stylesheet>`
+      is not fetched yet, so a real site paints as its inline styles
+      alone — the first item of stage 9), SVG and WebP pictures.
     - **(9) Modern layout.** Flexbox, grid, positioned boxes (absolute,
       fixed, sticky), `calc()`, custom properties, transforms and
       opacity at paint time, tables, `overflow` scroll containers, then

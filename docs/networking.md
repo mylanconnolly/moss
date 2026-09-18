@@ -72,7 +72,7 @@ interface's default configuration:
 | Mode | `net0` | Gateways | Used by |
 |---|---|---|---|
 | slirp (node 0) | `10.0.2.15/24`, `fec0::15/64` | `10.0.2.2` (ARP) and `fec0::2` (NDP), resolved before serving anyone | the net drill, the shell boot |
-| cluster (node N) | `10.77.0.N/24`, `fdcc::N/64` | none: everything is on-link, delivered to the broadcast MAC | the fabric (`net-cluster.msh`, node 1; a guest node joins as 2) |
+| cluster (node N) | `10.77.0.N/24`, `fdcc::N/64` | none on the segment: its prefixes are on-link, delivered to the broadcast MAC; a leased NIC beside it (the desktop's third) is the way out for everything else | the fabric (`net-cluster.msh`, node 1; a guest node joins as 2) |
 
 Every interface asks for a **DHCP** lease unless the settings say
 otherwise — the first NIC's slirp mode is a DHCP default too, since
@@ -663,8 +663,12 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   at aligned offsets (a lesson).
 - **Gateways.** In slirp mode the service resolves both gateways (ARP
   for v4, neighbor solicitation for v6) before it serves its first
-  client. In cluster mode there are no gateways; every destination is
-  on-link and frames go to the broadcast MAC.
+  client. In cluster mode the segment has no gateway: its own prefixes
+  are on-link and frames go to the broadcast MAC — only its prefixes,
+  like any interface (until 2026-09-18 it claimed every destination,
+  and the desktop's DNS queries and connects went out the hub as
+  broadcasts instead of through the leased NIC beside it); anything
+  else routes through an interface with a gateway, the leased one.
 - **Filtered views** answer `denied` to `tcp_listen`, `ping`, and
   `derive`, and to `tcp_connect` for any destination but their own.
   `derive(::, 0)` from an unrestricted view clones it unrestricted;
