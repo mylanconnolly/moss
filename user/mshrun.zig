@@ -296,6 +296,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     // `net-admin` false without the control cap, so a settings page can
     // ask before it shows anything; the socket commands fail to attach.
     net = netcmds.Net.init(if (setup.has(.net)) setup.cap(.net) else 0);
+    httpcmds.fs = &fs_ctx; // `fetch { to }` and file bodies go through the script's view
     if (setup.has(.net_control)) if (net) |*n| {
         n.control = setup.cap(.net_control);
     };

@@ -254,7 +254,8 @@ tree, `lib/` in the archive; host-tested with the interpreter) is
 installed at boot as content-addressed sources with a manifest each
 (see [the store](filesystem.md#programs-are-files-in-a-store)), so
 `let math = (use math); [1, 2, 3] | $math.sum` works in any session and
-in a script `mshrun` runs, and `install math` copies the module into a
+in a script `mshrun` runs (`use web` is the other module: `$web.save
+URL PATH`, the wget), and `install math` copies the module into a
 home's own store like a program. The module's functions find each
 other in the module's scope, never in the session's, and the scope
 lives as long as any of them does. There is no global namespace: a

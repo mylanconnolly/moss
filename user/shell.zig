@@ -141,6 +141,7 @@ export fn umain(log_h: u64, boot_chan: u64, _: u64) callconv(.c) noreturn {
     cons_chan = setup.cap(.console);
     fs_chan = setup.cap(.view);
     fs_ctx.root = fs_chan;
+    httpcmds.fs = &fs_ctx;
     init_chan = setup.cap(.init);
     fab_chan = setup.cap(.fabric);
     fab_ctx.chan = fab_chan;

@@ -1,9 +1,12 @@
-# The web drill: the fixture servers answer, both ways. A page fetched
-# plain over loopback by name (dnsd serves www.moss.test as ::1), a page
-# fetched over TLS with the certificate verified against the trust roots
-# in the assets tier, and a request for a page that is not there refused
-# with a 404. The servers are units of the same profile, so the first
-# fetch retries while they come up.
+# The web drill: the fixture servers answer, both ways, and fetch does
+# what a page needs. A page fetched plain over loopback by name (dnsd
+# serves www.moss.test as ::1), a page over TLS with the certificate
+# verified against the trust roots in the assets tier, a request for a
+# page that is not there refused with a 404; then a redirect chain
+# followed (and, asked not to, shown), a gzip body inflated, a HEAD, a
+# 4 MB body streamed into a file inside a 16 MB budget — and refused
+# in memory — and the `web` module's wget. The servers are units of the
+# same profile, so the first fetch retries while they come up.
 def try-fetch [url, n] {
   match (fetch $url) {
     ok $r => (ok $r)
@@ -16,6 +19,7 @@ def try-fetch [url, n] {
 let r = (try-fetch http://www.moss.test:8080/ 60)?
 if $r.status != 200 or ($r.body | split "A moss fixture" | len) < 2 { (err "http fixture: $r.status")? }
 if ($r.headers | get "content-type") != "text/html; charset=utf-8" { (err "http fixture: not html")? }
+if $r.url != "http://www.moss.test:8080/" or $r.redirects != 0 { (err "http fixture: url $r.url")? }
 echo "script: http fixture ok"
 let s = (try-fetch https://www.moss.test:8443/about.html 60)?
 if $s.status != 200 or ($s.body | split "About the fixtures" | len) < 2 { (err "https fixture: $s.status")? }
@@ -24,4 +28,51 @@ match (fetch http://www.moss.test:8080/missing.html) {
   ok $m => { if $m.status != 404 { (err "missing page: $m.status")? } }
   err $e => (err "missing page: $e")?
 }
+# Redirects: three hops of three kinds land on the page, and the final
+# URL and the count say so; a relative Location resolves against the
+# hop it came from. Asked not to follow, the first answer is shown.
+let d = (fetch http://www.moss.test:8080/r1)?
+if $d.status != 200 or $d.redirects != 3 or $d.url != "http://www.moss.test:8080/about.html" { (err "redirects: $d.status $d.redirects $d.url")? }
+if ($d.body | split "About the fixtures" | len) < 2 { (err "redirects: wrong page")? }
+let f = (fetch http://www.moss.test:8080/r1 { follow: false })?
+if $f.status != 301 or ($f.headers | get "location") != "/r2" { (err "unfollowed redirect: $f.status")? }
+echo "script: redirects ok"
+# A gzip body arrives compressed (the file is served as it is, with its
+# coding declared) and fetch inflates it; the coding header is gone
+# from what the script sees.
+let g = (fetch http://www.moss.test:8080/gz)?
+if $g.status != 200 or ($g.body | split "inflated by fetch" | len) < 2 { (err "gzip: $g.status")? }
+if ($g.headers | keys | any { $it == "content-encoding" }) { (err "gzip: coding header kept")? }
+let raw = (fetch http://www.moss.test:8080/gz { decode: false })?
+if ($raw.headers | get "content-encoding") != "gzip" or (type $raw.body) != "bytes" { (err "gzip raw: not the wire bytes")? }
+echo "script: gzip ok"
+# HEAD: the head, its Content-Length describing the body that never comes.
+let h = (fetch http://www.moss.test:8080/about.html { method: "HEAD" })?
+if $h.status != 200 or $h.body != "" { (err "head: $h.status")? }
+let about = (stat boot/web/about.html)?
+if ($h.headers | get "content-length") != (str $about.size) { (err "head: content-length")? }
+echo "script: head ok"
+# Streaming: index.html sent 8192 times is a body far past the in-memory
+# cap and a fair share of this unit's 16 MB — streamed into a file it
+# never touches the budget; whole, it is refused.
+let index = (stat boot/web/index.html)?
+let want = ($index.size * 8192)
+(mkdir state/webdrill)?
+let big = (fetch http://www.moss.test:8080/big { to: state/webdrill/big.bin })?
+let got = (stat state/webdrill/big.bin)?
+if $big.status != 200 or $big.bytes != $want or $got.size != $want { (err "stream: $big.bytes of $want, file $got.size")? }
+match (fetch http://www.moss.test:8080/big) {
+  ok $x => (err "a 4 MB body was accepted in memory: $x.status")?
+  err $e => { if ($e | split "too large" | len) < 2 { (err "big in memory: $e")? } }
+}
+let tbig = (fetch https://www.moss.test:8443/big { to: state/webdrill/big-tls.bin })?
+if $tbig.bytes != $want { (err "stream over tls: $tbig.bytes")? }
+echo "script: stream ok $want"
+# The module: the wget in three lines.
+let web = (use web)
+let w = ($web.save http://www.moss.test:8080/r1 state/webdrill/page.html)?
+if $w.status != 200 or $w.redirects != 3 or $w.bytes != $about.size { (err "web.save: $w")? }
+let wh = ($web.head http://www.moss.test:8080/)?
+if $wh.status != 200 { (err "web.head: $wh")? }
+echo "script: web module ok"
 echo "script: web fixtures ok"

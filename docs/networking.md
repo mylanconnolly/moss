@@ -437,9 +437,31 @@ connections by address and port and reuses one for the next request
 to the same place; a kept connection the peer closed meanwhile is
 noticed by the empty answer and the request goes once more on a fresh
 one, and `{ keep: false }` in the options asks for a close instead.
-`fetch` takes `http://` and `https://` URLs whose host is an address
-or a name — and reads the response to its `Content-Length` or to the
-close.
+`fetch` takes an `http://` or `https://` URL — parsed by
+`lib/web/url.zig`, the WHATWG parser, so a name, an address, an IPv6
+literal, userinfo and a fragment are all understood — and its options
+record says how far to go. `follow`: redirects, ten by default, `false`
+to see the 3xx itself; a 303 or a redirected POST is retried as a GET
+without its body, a redirect to another origin drops `Authorization`
+and `Cookie`, and the answer's `url` and `redirects` say where it
+ended. `decode`: gzip and deflate bodies are asked for and inflated,
+the `content-encoding` and `content-length` headers dropped from the
+answer; `false` keeps the wire bytes. `to: PATH`: the body streamed
+into a file through the host's view as it arrives — only the head is
+held in memory, so a download is bounded by the disk and not the
+budget; the answer has `bytes` and no `body`, and identity encoding is
+asked for. `max`: the body cap, 256 KB in memory unless raised.
+`timeout`: milliseconds to wait on the peer, ten seconds by default.
+`method: HEAD`: the head alone, its `content-length` describing the
+body that never comes. `host`: the certificate's name when it is not
+the URL's. The standard library's `web` module is the wget over it:
+`let web = (use web)`, then `$web.save URL PATH` (a download with
+redirects, answering `{ url, status, bytes, redirects }`), `$web.head
+URL`, `$web.text URL`. On the serving side a handler may answer
+`body: { file: PATH }` — the file is sent from the view in 32 KB
+pieces with a `Content-Type` from its name, never whole in memory;
+`repeat: N` sends it N times, a fixture server's large body — and a
+HEAD request gets the head of whatever the handler answered.
 
 ### TLS: the client, and whom it trusts
 
@@ -621,6 +643,10 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
 
 ## Known limits and bugs
 
+- `fetch` decodes gzip and deflate, not br (the brotli decoder wants
+  its output size up front); a download cannot be resumed by range; the
+  URL parser has no UTS46 mapping table (non-Latin domains are
+  punycoded as written, not case-folded) and no setters.
 - The stack is small by design: a send window bounded by the peer's
   advertised window and our 32 KB ring, no congestion control, no
   window scaling, no selective acknowledgement, in-order receive (a

@@ -407,20 +407,35 @@ supervises), and memory history per unit beside the CPU one.
       is copied through the unit's shared buffer, so a unit that takes a
       certificate needs `{ tag: buf, shm: 1 }` — the TLS fixture would
       not wire until it had one.
-    - **(1) URL, encoding, and a `fetch` that grows up.** `lib/web/url.zig`
-      (the WHATWG parser: parse, resolve against a base, serialize,
-      origin; punycode for hosts, IDNA display later), `lib/web/
-      encoding.zig` (UTF-8, windows-1252, UTF-16 labels, the BOM and
-      `<meta charset>` sniff — strings are UTF-8 by guarantee, so the
-      boundary decodes). `fetch` follows redirects (bounded, the method
-      rewrite rules), sends `Accept-Encoding` and decodes gzip/deflate
-      (std's flate, already in `lib/font` for WOFF) and br (`lib/
-      brotli`), streams a body to a file view or a handler under a size
-      cap (`fetch URL { to: $view }`), takes a timeout, does HEAD; a
-      `web-get` script is the `wget`: progress on the console, `-o`,
-      resume by range later. *Exit:* `urltestdata.json` passes with the
-      count printed; the net drill fetches a redirect chain, a gzip
-      body, and streams 4 MB to a file inside a 16 MB budget.
+    - **(1) URL, encoding, and a `fetch` that grows up.** ✅ (landed
+      2026-09-18) `lib/web/url.zig`: the WHATWG basic URL parser as the
+      spec's state machine (special and opaque schemes, the file quirks,
+      IPv4's numeric forms, IPv6 with compression, the percent-encode
+      sets, punycode for non-ASCII labels), the serializer, the origin
+      and the getters; **875 of the WPT corpus's 893 entries agree**, the
+      rest needing the UTS46 mapping (non-Latin case folding), not
+      built; the floor is asserted so a change cannot lose one.
+      `lib/web/encoding.zig`: labels, the BOM, a Content-Type's charset,
+      the HTML prescan for `<meta charset>`, and decoding of UTF-8,
+      windows-1252 and UTF-16 to UTF-8 (the other legacy encodings
+      answer null rather than guess). `fetch` follows redirects
+      (`follow`, ten by default or `false`; a 303 or a redirected POST
+      becomes a GET, a change of origin drops the credentials, `url` and
+      `redirects` in the answer), asks for gzip and deflate and inflates
+      them (`decode`; br waits for a brotli decoder with a growable
+      output), streams a body into a file (`to: PATH` — the head in
+      memory and nothing more, an incremental dechunker for chunked
+      bodies), takes `max` and `timeout`, and does HEAD. `http-serve`
+      answers HEAD with the head alone and streams a file body
+      (`body: { file, repeat }`) from the view in 32 KB reads.
+      `lib/msh/web.msh` is the wget, three lines each over `fetch`:
+      `save URL PATH`, `head URL`, `text URL` (a module, since a run
+      argument is 24 bytes and a URL is not). The `web` drill: a
+      three-hop chain of three kinds and an unfollowed 301, a gzip body
+      inflated and shown raw, HEAD's Content-Length against `stat`,
+      index.html × 8192 (3.3 MB) streamed plain and over TLS into a
+      16 MB unit and refused whole, and the module. Not built, said so:
+      the URL setters, IDNA display, `br`, resuming a download by range.
     - **(2) HTML for the shell.** `lib/web/html.zig`, the WHATWG
       tokenizer and tree builder in full (every insertion mode, foster
       parenting, the adoption agency, `<template>`, foreign content) into

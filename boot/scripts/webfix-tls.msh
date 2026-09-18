@@ -4,18 +4,19 @@
 # and key (www.moss.test, signed by the test root the system trusts).
 # The page table is explicit — a request names a page or gets a 404 —
 # so nothing about the view leaks past the pages that are meant to be
-# served. Serves until the boot ends.
+# served; /big is the large body, streamed over TLS. Serves until the
+# boot ends.
 let pages = [
   { path: "/", file: "index.html" }
   { path: "/index.html", file: "index.html" }
   { path: "/about.html", file: "about.html" }
 ]
 def page [req] {
-  match ($pages | find (fn [p] { $p.path == $req.path })) {
-    nothing => { status: 404, body: "no such page" }
-    $hit => (match (cat $hit.file) {
-        ok $text => { status: 200, headers: { content-type: "text/html; charset=utf-8" }, body: $text }
-        err $e => { status: 500, body: "cannot read $hit.file: $e" }
+  match $req.path {
+    "/big" => { status: 200, body: { file: "index.html", repeat: 8192 } }
+    _ => (match ($pages | find (fn [p] { $p.path == $req.path })) {
+        nothing => { status: 404, body: "no such page" }
+        $hit => { status: 200, body: { file: $hit.file } }
       })
   }
 }

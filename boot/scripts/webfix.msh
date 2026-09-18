@@ -2,18 +2,26 @@
 # through a read-only view of that directory, served on port 8080 over
 # the unit's own network view. The page table is explicit — a request
 # names a page or gets a 404 — so nothing about the view leaks past the
-# pages that are meant to be served. Serves until the boot ends.
+# pages that are meant to be served. Beside the pages: a redirect chain
+# (/r1 → /r2 → /r3 → /about.html, one of each kind), a gzip body served
+# as-is with its coding declared (/gz), and a large body streamed from
+# a small file sent many times over (/big: index.html × 8192). Serves
+# until the boot ends.
 let pages = [
   { path: "/", file: "index.html" }
   { path: "/index.html", file: "index.html" }
   { path: "/about.html", file: "about.html" }
 ]
 def page [req] {
-  match ($pages | find (fn [p] { $p.path == $req.path })) {
-    nothing => { status: 404, body: "no such page" }
-    $hit => (match (cat $hit.file) {
-        ok $text => { status: 200, headers: { content-type: "text/html; charset=utf-8" }, body: $text }
-        err $e => { status: 500, body: "cannot read $hit.file: $e" }
+  match $req.path {
+    "/r1" => { status: 301, headers: { location: "/r2" }, body: "moved" }
+    "/r2" => { status: 302, headers: { location: "r3" }, body: "found" }
+    "/r3" => { status: 303, headers: { location: "/about.html" }, body: "see other" }
+    "/gz" => { status: 200, headers: { content-encoding: gzip, content-type: "text/plain; charset=utf-8" }, body: { file: "hello.txt.gz" } }
+    "/big" => { status: 200, body: { file: "index.html", repeat: 8192 } }
+    _ => (match ($pages | find (fn [p] { $p.path == $req.path })) {
+        nothing => { status: 404, body: "no such page" }
+        $hit => { status: 200, body: { file: $hit.file } }
       })
   }
 }

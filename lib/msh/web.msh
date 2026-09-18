@@ -1,0 +1,24 @@
+# web — the standard library's face on the web: `let web = (use web)`.
+# `save URL PATH` downloads a page into a file, streamed as it arrives
+# (never whole in memory), following redirects, and answers the final
+# URL with the byte count; `head URL` asks for the head alone; `text
+# URL` fetches a page and answers its body as text. Each is a thin
+# shape over `fetch`, which does the work — this module is the wget.
+def save [url, path] {
+  let r = (fetch $url { to: $path })?
+  match ($r.status >= 400) {
+    true => (err ("GET " + $url + ": " + (str $r.status)))
+    _ => (ok { url: $r.url, status: $r.status, bytes: $r.bytes, redirects: $r.redirects })
+  }
+}
+def head [url] {
+  let r = (fetch $url { method: "HEAD" })?
+  ok { url: $r.url, status: $r.status, headers: $r.headers }
+}
+def text [url] {
+  let r = (fetch $url)?
+  match ($r.status >= 400) {
+    true => (err ("GET " + $url + ": " + (str $r.status)))
+    _ => (ok $r.body)
+  }
+}

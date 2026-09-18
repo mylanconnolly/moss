@@ -740,6 +740,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/webfix-tls.msh",      "scripts/webfix-tls.msh",
         "conf/units/web-script.msh",      "scripts/web-drill.msh",
         "web/index.html",                 "web/about.html",
+        "web/hello.txt.gz",
         "scripts/worker-demo.msh",        "conf/units/svc-pub.msh",
         "scripts/svc-pub.msh",            "conf/units/doubler.msh",
         "scripts/doubler.msh",            "conf/units/gpusvc.msh",
@@ -805,7 +806,7 @@ pub fn build(b: *std.Build) void {
     // The language's standard library: mshl modules under lib/msh/,
     // host-tested with the interpreter, served by the archive as lib/
     // and installed into the store at boot (`use math`).
-    for ([_][]const u8{"math.msh"}) |f| {
+    for ([_][]const u8{ "math.msh", "web.msh" }) |f| {
         pack.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("lib/{s}=", .{f}), b.path(b.fmt("lib/msh/{s}", .{f})));
     }

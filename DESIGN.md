@@ -5696,6 +5696,78 @@ until it did. *Lesson:* the first row of a new arc is worth running
 before any of the arc's code exists — it is the cheapest way to find
 the limits the arc will lean on.
 
+**Stage 1, URL, encoding, and fetch (as built, 2026-09-18).** Two
+libraries and a grown-up client. `lib/web/url.zig` is the URL
+Standard's basic parser written as the spec reads: one loop over the
+input bytes with the spec's pointer (a state steps it back to reprocess
+in a new state, EOF included, forward one, or to -1 to start over; after
+a run, EOF ends the loop and anything else advances) and a `switch` on
+the twenty states, the percent-encode sets as one predicate, hosts by
+the host parser (opaque hosts for non-special schemes; domains
+percent-decoded, lowercased where ASCII, punycoded per label under
+`xn--`, then the ends-in-a-number check and the IPv4 parser with its
+hex and octal parts; IPv6 with the compress index and the embedded
+IPv4 tail, serialized with the longest zero run collapsed), and a `Url`
+that owns nothing but slices of the caller's allocator. The corpus test
+reads `urltestdata.json` with `std.json`, compares `href` and every
+getter, and prints the count: **875 of 893**. The eighteen that
+disagree all want UTS46 — case folding and normalization of non-Latin
+letters, which needs the mapping table — and the test asserts the
+floor so a change cannot lose one silently; `verbose` lists them.
+`lib/web/encoding.zig` is the Encoding Standard's front door: labels
+to the three encodings this file decodes (UTF-8, windows-1252 as the
+web's latin1 and the fallback, UTF-16 both ways; the others answer
+null), the BOM, the charset of a Content-Type, the HTML prescan over
+the first 1024 bytes (`<meta charset>`, `http-equiv=content-type`
+with its `content`, comments and tags skipped, a UTF-16 label there
+meaning UTF-8 as the standard says), and `detect` in the standard's
+order.
+
+`fetch` was a one-shot: one request, the whole body in memory under
+256 KB, no redirects, no compression. Now a `FetchOpts` record is
+parsed once and a loop drives it: the URL parsed by the new library
+(an IPv6 literal handed to the network without its brackets), the
+request formatted with `Accept-Encoding: gzip, deflate` when the body
+will be decoded in memory, one exchange on a kept connection with the
+one retry on a fresh one, then the redirect rule — 301/302/303/307/308
+with a Location resolved against the current URL, a 303 or a
+redirected POST retried as a GET without its body, a change of origin
+dropping `Authorization` and `Cookie`, ten hops by default — and the
+answer with `url` and `redirects`. Two exchanges exist. The in-memory
+one is the old path with the caller's `max` and a `head_only` flag
+(`parseResponseLimit`), then `decodeBody`: gzip through `std.compress.
+flate` with a static window (a host command's frame stays small), deflate
+tried as zlib then raw, the output drained under `max + 1` so a bomb is
+refused, and the coding headers dropped from what the script sees. The
+streaming one (`to: PATH`) parses only the head (`http.parseHead`),
+opens a `FileSink` through the host's filesystem context (`httpcmds.fs`,
+set by mshrun and msh), and writes every received piece straight from
+the network buffer into the view's buffer — a Content-Length counted
+down, a to-the-close body until the close, or a chunked body through a
+`Dechunker` that decodes sizes, data, the CRLF after each chunk and the
+trailers as they arrive; a redirect's body is drained with no file
+made; the connection is kept only when the framing said where the
+message ended. The server side learned the same two things: a handler's
+`body: { file: PATH, repeat: N }` is sent as a head with the file's
+length (times N) and a Content-Type from the name, then the file read
+from the view in `fs_max_io` pieces and sent as they come, never whole
+— `repeat` being the fixture server's way to a 3 MB body from a 400
+byte file — and a HEAD request gets the head of whatever the handler
+answered, its Content-Length intact.
+
+What the drill found. A command's declared answer is a structural
+shape with no optional fields, so the streamed answer carries `body:
+nothing` (the shape grew a `string | bytes | nothing` alternative) and
+`url` and `redirects` joined the shape rather than riding as extras.
+`get` on a record errors on a missing field — the drill asks `keys |
+any` to check a header is gone. A run argument is 24 bytes, so the
+wget is a module, not a program: `let web = (use web)`, then `$web.save
+URL PATH`. And `lib/brotli` wants its output size up front (WOFF2 knows
+it, HTTP does not), so `br` is not asked for until the decoder grows a
+growable output. The 3.3 MB stream runs in about a second and a half
+each way, plain and over TLS, in a unit whose 16 MB is mostly mshrun's
+own image.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

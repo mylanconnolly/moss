@@ -57,7 +57,7 @@ fn headEnd(bytes: []const u8) ?usize {
     return if (std.mem.indexOf(u8, bytes, "\r\n\r\n")) |i| i + 4 else null;
 }
 
-fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {
+pub fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {
     for (headers) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     }
@@ -79,16 +79,20 @@ fn parseHeaders(a: std.mem.Allocator, head: []const u8) ParseError![]const Heade
 }
 
 /// How the body is delimited.
-const Framing = union(enum) { length: usize, chunked, none };
+/// How a body is delimited: a Content-Length, chunked transfer, or
+/// nothing (the body runs to the close).
+pub const Framing = union(enum) { length: usize, chunked, none };
 
-fn framing(headers: []const Header) ParseError!Framing {
+/// The framing the headers declare; a Content-Length past `limit` (if
+/// one is given) is TooLarge, so a caller that streams passes null.
+pub fn framing(headers: []const Header, limit: ?usize) ParseError!Framing {
     if (headerValue(headers, "transfer-encoding")) |te| {
         // The last coding decides; anything but identity is chunked.
         if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, te, " "), "identity")) return .chunked;
     }
     const cl = headerValue(headers, "content-length") orelse return .none;
     const n = std.fmt.parseInt(usize, cl, 10) catch return error.Bad;
-    if (n > max_body) return error.TooLarge;
+    if (limit) |l| if (n > l) return error.TooLarge;
     return .{ .length = n };
 }
 
@@ -113,19 +117,19 @@ const Body = struct { data: []const u8, len: usize };
 /// The body after the head, by its framing: null while more bytes are
 /// needed. A chunked body is decoded into fresh memory; a lengthed one
 /// is a slice of the input.
-fn body(a: std.mem.Allocator, bytes: []const u8, fr: Framing) ParseError!?Body {
+fn body(a: std.mem.Allocator, bytes: []const u8, fr: Framing, limit: usize) ParseError!?Body {
     switch (fr) {
         .length => |want| {
             if (bytes.len < want) return null;
             return .{ .data = bytes[0..want], .len = want };
         },
         .none => return .{ .data = "", .len = 0 },
-        .chunked => return dechunk(a, bytes),
+        .chunked => return dechunk(a, bytes, limit),
     }
 }
 
 /// `size-hex[;ext]\r\n data \r\n` … `0\r\n [trailers] \r\n`.
-fn dechunk(a: std.mem.Allocator, bytes: []const u8) ParseError!?Body {
+fn dechunk(a: std.mem.Allocator, bytes: []const u8, limit: usize) ParseError!?Body {
     var out: std.ArrayList(u8) = .empty;
     var pos: usize = 0;
     while (true) {
@@ -146,7 +150,7 @@ fn dechunk(a: std.mem.Allocator, bytes: []const u8) ParseError!?Body {
             };
             return .{ .data = out.items, .len = end + 4 };
         }
-        if (out.items.len + size > max_body) return error.TooLarge;
+        if (out.items.len + size > limit) return error.TooLarge;
         if (bytes.len < pos + size + 2) return null;
         if (!std.mem.eql(u8, bytes[pos + size .. pos + size + 2], "\r\n")) return error.Bad;
         try out.appendSlice(a, bytes[pos .. pos + size]);
@@ -168,7 +172,7 @@ pub fn parseRequest(a: std.mem.Allocator, bytes: []const u8) ParseError!Parsed(R
     const version = words.next() orelse return error.Bad;
     if (words.next() != null or method.len == 0 or target.len == 0 or !std.mem.startsWith(u8, version, "HTTP/1.")) return error.Bad;
     const headers = try parseHeaders(a, head[@min(first_end + 2, head.len)..]);
-    const b = (try body(a, bytes[he..], try framing(headers))) orelse return .incomplete;
+    const b = (try body(a, bytes[he..], try framing(headers, max_body), max_body)) orelse return .incomplete;
     const q = std.mem.indexOfScalar(u8, target, '?');
     return .{ .done = .{
         .method = method,
@@ -185,9 +189,27 @@ pub fn parseRequest(a: std.mem.Allocator, bytes: []const u8) ParseError!Parsed(R
 /// `closed` says the peer has closed: a body with no length is then
 /// complete.
 pub fn parseResponse(a: std.mem.Allocator, bytes: []const u8, closed: bool) ParseError!Parsed(Response) {
+    return parseResponseLimit(a, bytes, closed, max_body, false);
+}
+
+/// The head of a response: everything a reader needs before the body,
+/// for a caller that streams the body itself. Null while incomplete.
+pub const Head = struct {
+    status: u16,
+    reason: []const u8,
+    headers: []const Header,
+    /// Bytes the head took (the blank line included): the body starts here.
+    len: usize,
+    framing: Framing,
+    keep: bool,
+    /// No body by definition (1xx, 204, 304), whatever the framing says.
+    bodiless: bool,
+};
+
+pub fn parseHead(a: std.mem.Allocator, bytes: []const u8) ParseError!?Head {
     const he = headEnd(bytes) orelse {
         if (bytes.len > max_head) return error.TooLarge;
-        return .incomplete;
+        return null;
     };
     if (he > max_head) return error.TooLarge;
     const head = bytes[0 .. he - 4];
@@ -198,18 +220,27 @@ pub fn parseResponse(a: std.mem.Allocator, bytes: []const u8, closed: bool) Pars
     const reason = if (line.len > 13) line[13..] else "";
     const headers = try parseHeaders(a, head[@min(first_end + 2, head.len)..]);
     const version = line[0..8];
-    const fr = try framing(headers);
-    // A status with no body by definition, and 304, end with the head.
     const bodiless = status == 204 or status == 304 or (status >= 100 and status < 200);
-    if (fr != .none or bodiless) {
-        const b = (try body(a, bytes[he..], if (bodiless) .none else fr)) orelse return .incomplete;
-        return .{ .done = .{ .status = status, .reason = reason, .headers = headers, .body = b.data, .len = he + b.len, .to_close = false, .keep = keepAlive(version, headers) } };
+    return .{ .status = status, .reason = reason, .headers = headers, .len = he, .framing = try framing(headers, null), .keep = keepAlive(version, headers), .bodiless = bodiless };
+}
+
+/// `parseResponse` with the body limit chosen by the caller, and
+/// `head_only` for the answer to a HEAD request (its Content-Length
+/// describes a body that never comes).
+pub fn parseResponseLimit(a: std.mem.Allocator, bytes: []const u8, closed: bool, limit: usize, head_only: bool) ParseError!Parsed(Response) {
+    const h = (try parseHead(a, bytes)) orelse return .incomplete;
+    const he = h.len;
+    const bodiless = h.bodiless or head_only;
+    if (!bodiless and h.framing == .length and h.framing.length > limit) return error.TooLarge;
+    if (h.framing != .none or bodiless) {
+        const b = (try body(a, bytes[he..], if (bodiless) .none else h.framing, limit)) orelse return .incomplete;
+        return .{ .done = .{ .status = h.status, .reason = h.reason, .headers = h.headers, .body = b.data, .len = he + b.len, .to_close = false, .keep = h.keep } };
     }
     if (!closed) {
-        if (bytes.len - he > max_body) return error.TooLarge;
+        if (bytes.len - he > limit) return error.TooLarge;
         return .incomplete;
     }
-    return .{ .done = .{ .status = status, .reason = reason, .headers = headers, .body = bytes[he..], .len = bytes.len, .to_close = true, .keep = false } };
+    return .{ .done = .{ .status = h.status, .reason = h.reason, .headers = h.headers, .body = bytes[he..], .len = bytes.len, .to_close = true, .keep = false } };
 }
 
 pub fn reasonFor(status: u16) []const u8 {
@@ -239,14 +270,66 @@ pub fn reasonFor(status: u16) []const u8 {
 /// (`date`: IMF-fixdate text, `shared.civil.imfText`; an origin with a
 /// clock must say so), plus the caller's headers (a content-type, say).
 pub fn formatResponse(a: std.mem.Allocator, out: *std.ArrayList(u8), status: u16, headers: []const Header, payload: []const u8, keep: bool, date: ?[]const u8) error{OutOfMemory}!void {
+    try formatHead(a, out, status, headers, payload.len, keep, date);
+    try out.appendSlice(a, payload);
+}
+
+/// The head alone, announcing a body of `content_length` bytes the
+/// caller sends itself (a streamed file), or never sends (HEAD).
+pub fn formatHead(a: std.mem.Allocator, out: *std.ArrayList(u8), status: u16, headers: []const Header, content_length: usize, keep: bool, date: ?[]const u8) error{OutOfMemory}!void {
     var buf: [64]u8 = undefined;
     try out.appendSlice(a, std.fmt.bufPrint(&buf, "HTTP/1.1 {d} ", .{status}) catch "");
     try out.appendSlice(a, reasonFor(status));
     try out.appendSlice(a, "\r\n");
     if (date) |d| try writeHeader(a, out, "Date", d);
     for (headers) |h| try writeHeader(a, out, h.name, h.value);
-    try out.appendSlice(a, std.fmt.bufPrint(&buf, "Content-Length: {d}\r\nConnection: {s}\r\n\r\n", .{ payload.len, if (keep) "keep-alive" else "close" }) catch "");
-    try out.appendSlice(a, payload);
+    try out.appendSlice(a, std.fmt.bufPrint(&buf, "Content-Length: {d}\r\nConnection: {s}\r\n\r\n", .{ content_length, if (keep) "keep-alive" else "close" }) catch "");
+}
+
+/// A Content-Type for a file by its extension — the handful the web
+/// serves most; anything else is bytes.
+pub fn contentTypeFor(path: []const u8) []const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return "application/octet-stream";
+    const ext = path[dot + 1 ..];
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(ext, "html") or eq(ext, "htm")) return "text/html; charset=utf-8";
+    if (eq(ext, "css")) return "text/css; charset=utf-8";
+    if (eq(ext, "js") or eq(ext, "mjs")) return "text/javascript; charset=utf-8";
+    if (eq(ext, "json")) return "application/json";
+    if (eq(ext, "txt") or eq(ext, "md")) return "text/plain; charset=utf-8";
+    if (eq(ext, "svg")) return "image/svg+xml";
+    if (eq(ext, "png")) return "image/png";
+    if (eq(ext, "jpg") or eq(ext, "jpeg")) return "image/jpeg";
+    if (eq(ext, "gif")) return "image/gif";
+    if (eq(ext, "webp")) return "image/webp";
+    if (eq(ext, "ico")) return "image/x-icon";
+    if (eq(ext, "woff2")) return "font/woff2";
+    if (eq(ext, "woff")) return "font/woff";
+    if (eq(ext, "ttf")) return "font/ttf";
+    if (eq(ext, "otf")) return "font/otf";
+    if (eq(ext, "gz")) return "application/gzip";
+    if (eq(ext, "pdf")) return "application/pdf";
+    if (eq(ext, "xml")) return "application/xml";
+    if (eq(ext, "wasm")) return "application/wasm";
+    return "application/octet-stream";
+}
+
+test "http: a head parses alone, and a HEAD answer has no body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX: y\r\n\r\nhel";
+    const h = (try parseHead(a, bytes)).?;
+    try std.testing.expectEqual(@as(u16, 200), h.status);
+    try std.testing.expect(h.framing == .length and h.framing.length == 5);
+    try std.testing.expect(h.keep and !h.bodiless);
+    try std.testing.expect((try parseHead(a, bytes[0..10])) == null);
+    try std.testing.expect((try parseResponseLimit(a, bytes, false, max_body, false)) == .incomplete);
+    const head_only = try parseResponseLimit(a, bytes, false, max_body, true);
+    try std.testing.expect(head_only == .done and head_only.done.body.len == 0 and head_only.done.len == h.len);
+    try std.testing.expectError(error.TooLarge, parseResponseLimit(a, bytes, false, 4, false));
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", contentTypeFor("a/b/index.HTML"));
+    try std.testing.expectEqualStrings("application/gzip", contentTypeFor("hello.txt.gz"));
 }
 
 pub fn formatRequest(a: std.mem.Allocator, out: *std.ArrayList(u8), method: []const u8, path: []const u8, host: []const u8, headers: []const Header, payload: []const u8, keep: bool) error{OutOfMemory}!void {
