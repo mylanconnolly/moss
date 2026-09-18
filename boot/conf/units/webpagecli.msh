@@ -1,0 +1,10 @@
+# The page-domain drill's client: a native host that spawns page domains
+# (the `webpage` image, staged from the boot archive), brokers their
+# fetches over its own network view, and drives them like a window
+# would — load, hover, click, dump, and a page sent after a resource
+# larger than its arena, which must die alone. Its budget hosts two
+# pages at 28 MB each. The root view (read-only) is for the system
+# fonts it packs for the pages and the trust roots. Essential and
+# native: its exit ends the boot.
+{ image: webpagecli, grant: [log, spawner, bootfs], budget: { user: 80mb, kobj: 8mb }, profiles: [webpage], essential: true,
+  give: [{ tag: net, netview: net }, { tag: view, fs: "", ro: true }] }

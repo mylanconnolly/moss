@@ -556,6 +556,18 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   (`client_dead`) or a new buffer is attached — and drops the cap handle
   once mapped, since the mapping keeps its own ref. Keep one buffer per
   purpose rather than mapping per operation.
+- A channel side whose last cap goes is closed for good, even if the
+  side is minted or ref'd again later. A host that creates a channel
+  to serve keeps one calling end of its own until teardown; dropping
+  it right after `chan_create` reported the first child's call as a
+  dead client (the page host, 2026-09-18).
+- Once a server holds any call open (a deferred reply, `recv`'s
+  token kept), every reply must name its token: a reply without one
+  answers the oldest pending caller, which was the parked one. A hang
+  whose dump shows the server in `recv` with `pending=1` is this.
+- A cap named at `spawn` keeps its badge (a child spawned with a
+  minted end is heard under that badge, and its death is that badge's
+  `client_dead`); the syscall dropped it until 2026-09-18.
 - `shared/` may not import kernel or user code and may not allocate; it is
   the ABI and compiles for every target.
 - Kernel W^X, no ambient authority, no kernel channel bypasses — see the

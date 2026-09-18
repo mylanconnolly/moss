@@ -106,7 +106,10 @@ the right to create virtual machines; and one virtual machine.
 Capabilities travel in exactly two ways: named in a manifest at spawn,
 or attached to a message. A call or a reply can carry one capability;
 the receiver gets a fresh handle in its own table, the sender keeps
-its own unless it drops it. That is how a filesystem view, a buffer, a
+its own unless it drops it. A badged calling end keeps its badge either
+way, so a host that mints a scoped end and names it at spawn hears the
+child under that badge and hears its death as that badge's
+`client_dead` (the spawn path dropped the badge until 2026-09-18). That is how a filesystem view, a buffer, a
 device, or a channel to a service reaches a program — and how a proxy
 in between can substitute its own.
 

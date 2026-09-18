@@ -322,16 +322,20 @@ fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
             ipc.refSide(ch, .a, 0);
             manifest.grant_channel_a = ch;
         } else {
-            const obj = d.captable.?.lookup(chan_h, .channel_b) orelse return errno(.bad_handle);
-            const ch: *ipc.Channel = @ptrFromInt(obj);
-            ipc.refSide(ch, .b, 0);
+            // The badge on the caller's cap travels with it: a host that
+            // minted a scoped end for the child hears the child under it,
+            // and the child's death as that badge's `client_dead`.
+            const found = d.captable.?.lookupBadge(chan_h, .channel_b) orelse return errno(.bad_handle);
+            const ch: *ipc.Channel = @ptrFromInt(found.obj);
+            ipc.refSide(ch, .b, found.badge);
             manifest.grant_channel_b = ch;
+            manifest.grant_channel_b_badge = found.badge;
         }
     }
 
     const child = domain.spawn(null, image, manifest) catch |e| {
         if (manifest.grant_channel_a) |ch| ipc.unrefSide(ch, .a, 0);
-        if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b, 0);
+        if (manifest.grant_channel_b) |ch| ipc.unrefSide(ch, .b, manifest.grant_channel_b_badge);
         // The caller sees one of three errnos; the log keeps the cause.
         log.info("spawn by {s} refused: {t}", .{ d.name, e });
         if (e == domain.Error.QuotaExceeded) {

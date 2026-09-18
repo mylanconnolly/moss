@@ -104,4 +104,17 @@ if ($sheet | len) != 3 { (err "css-parse: $sheet")? }
 let firstsel = ($sheet | first 1 | map { $it.selector })
 if $firstsel != ["h1"] { (err "css-parse selector: $firstsel")? }
 echo "script: css ok"
+# A headless render: a page domain, spawned from the store for the call
+# and brokered by this script, loads the front page and hands back its
+# document as the tree html-parse makes.
+let rendered = (web-render http://www.moss.test:8080/)?
+if $rendered.title != "moss fixture: home" { (err "web-render: title $rendered.title")? }
+if $rendered.url != "http://www.moss.test:8080/" { (err "web-render: url $rendered.url")? }
+let rh1 = (($rendered.dom | html-select "h1")? | map { $it | html-text })
+if $rh1 != ["A moss fixture"] { (err "web-render: h1 $rh1")? }
+match (web-render http://www.moss.test:8080/missing.html) {
+  ok $m => (err "web-render: a 404 rendered as ok")?
+  err $e => { if ($e | split "refused" | len) < 2 { (err "web-render 404: $e")? } }
+}
+echo "script: web-render ok"
 echo "script: web fixtures ok"

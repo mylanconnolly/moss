@@ -5684,7 +5684,8 @@ ask for 128 through `usys.imageHeaderStack`, and nothing else moved
 except the budgets that host mshrun — its image alone spans 3.6 MB, so
 a worker, a remote stage and the default unit budget are 8 MB, not 4,
 and the shells that hold five workers at once (the system shell, a
-session's, the windowed terminal's, the net drill's script) are 32 MB,
+session's, the windowed terminal's, the net drill's script) are 32 MB
+(40 MB since the page host joined `mshrun`, stage 5 of the web),
 not 24 — the second gate found each of them 2 MB short. The fault dump
 says "N bytes below the stack base: a stack overflow"
 when that is what it sees, and the spawn-refusal dump prints the
@@ -5966,6 +5967,70 @@ sixteen pairs written beside the engine all passed once the harness
 did. (2) Any box that borrows another box's style — text, anonymous —
 must be exempted from every property that is not inherited, and the
 exemption belongs in one predicate, not at each use.
+
+**Stage 5, the page domain and the broker (as built, 2026-09-18).**
+The seam first, because the kernel's IPC decided its shape. A channel
+has a serving end and a calling end; a call blocks until the server
+replies, and a server can hold several calls open and answer each by
+its token. A page must both take commands and ask for bytes, and it
+may hold one capability. If it *served* commands, its fetches would
+need a second channel to a broker that is not the program blocked in
+the command — so the page holds the calling end, and only calls: for
+its buffers (a data buffer for URLs, chunks and dumps, the viewport
+pixels, a pack of font files), for the `next` command, which the host
+parks by token until it has one, for `open` and `read` on a URL, and
+with each event. The host only serves. A page that dies is heard as
+its badge's `client_dead` on the very next receive; a host that wants
+several pages mints a badge each. `webpage.zig` is the domain: a
+static 20 MB arena that every navigation resets and that is the
+page's whole memory budget (a program's memory here is its image's
+static size, charged at spawn — there is no growing heap for the
+kernel to refuse later), `lib/font` parsing the packed faces and
+rasterizing into a bounded glyph cache, the parser, cascade, layout
+and painter of the last three stages over the granted pixels, a hit
+test that walks the DOM up to a link, hover reported when the link
+under the pointer changes, a click on the same element the press
+landed on navigating, scrolling as a repaint at the new offset. Out of
+memory is logged and exits; the host sees the death. `webhost.zig` is
+the host and the broker in one module: `spawn` mints a badge, spawns
+with it and creates the buffers; `step` receives one message, does
+what it can itself — attaches, opens, reads, parks a `next` — and
+reports an event or a death to the program; `send` queues a command
+and answers a parked page at once. The broker is plain by design:
+one connection per open, redirects followed on the host's side so a
+page never sees a hop, `http` and `https` only, no content coding
+requested (inflating belongs in the page's domain, a later stage), a
+24 MB cap, a 10 s stall limit, chunked and length framing decoded as
+the bytes arrive into the page's buffer — and a read fills its 256 KB
+chunk before answering, which turned ten thousand round trips for a
+large document into a hundred. `webpagecli` and `mshrun`'s
+`web-render` are its two callers.
+
+The drill found three things in a day, none of them in the web. The
+kernel's `spawn` granted a calling end with badge 0: the manifest has
+carried a badge field since init learned to spawn services, init's
+path set it, the syscall path never did — every child spawned by a
+user program answered under no identity. A host that created its
+channel and dropped the unbadged calling end at once found the side
+closed for good, the first page's call reported as a dead client
+before it was served: a side whose last capability goes is closed, so
+a host keeps one calling end of its own until teardown. And a host
+with a page parked on `next` that replied to an attach without a
+token answered the parked call instead: with deferred replies in use,
+every reply names its caller. A fourth was the fixture's: `web-render`
+took three seconds in the `web` drill because the script's earlier
+`fetch` had left a kept-alive connection the single-threaded fixture
+server was waiting on for its idle window, so the broker's new
+connection queued behind it. *Lessons:* (1) when a protocol has one
+side that serves, read the kernel's IPC rules before drawing the
+arrows — the page-as-caller shape fell out of them, and it is also
+the one where a page holds the least. (2) A hang with `pending=1` and
+the server in `recv` in the dump says the reply went to the wrong
+caller or to nobody; the dump had the answer before any theory did.
+(3) A static buffer in a program every shell spawns five of is paid
+five times: the host's 220 KB in `mshrun` tipped the shells' 32 MB by
+38 KB, found by logging every spawn's usage on both trees, not by
+arithmetic — the shells are 40 MB now.
 
 ## Distribution: the fabric
 

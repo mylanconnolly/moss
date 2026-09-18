@@ -490,6 +490,20 @@ and runs in the caller's process — a parser over untrusted bytes,
 bounded by the interpreter's arena and the domain's budget; nothing in
 these commands executes a page.
 
+`web-render URL` does execute one, the way a browser window will: it
+spawns a **page domain** — the `webpage` program from the store, a
+child holding exactly one capability, a badged channel back to this
+script's `mshrun` — and answers that channel as the page's broker,
+fetching what the page opens over the script's own network view and
+trust roots. The page reads the bytes, parses, styles and lays them
+out in its own arena (20 MB; past it the page dies and the command
+says so), and hands back its document, which `web-render` returns as
+`{ url, title, dom }` — the `dom` being the tree `html-parse` makes,
+so `html-select` and `html-text` read it. A script needs a `spawner`
+grant and a budget with room for a 28 MB child. The mechanics — the
+protocol in `shared/web.zig`, the host and broker in
+`user/webhost.zig` — are the ones the browser's tabs will use.
+
 ### TLS: the client, and whom it trusts
 
 `tls-connect HOST PORT [{ host: NAME }]` opens a TCP connection and

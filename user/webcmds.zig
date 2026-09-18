@@ -255,7 +255,7 @@ fn documentOf(it: *mshl.Interp, v: Value) mshl.Error!*dom.Document {
 
 // ---------------------------------------------------------- tree <-> data
 
-fn toData(it: *mshl.Interp, doc: *const dom.Document, id: dom.NodeId) mshl.Error!Value {
+pub fn toData(it: *mshl.Interp, doc: *const dom.Document, id: dom.NodeId) mshl.Error!Value {
     const n = doc.get(id);
     switch (n.kind) {
         .text => return record(it, &.{"text"}, &.{.{ .str = n.text.items }}),

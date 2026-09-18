@@ -1,4 +1,4 @@
 # The fixture web server, plain: mshrun serving boot/web/ on 8080 over
 # loopback (profile web). What every web drill fetches from.
-{ image: mshrun, script: scripts/webfix.msh, grant: [log, bootfs], budget: { user: 16mb }, profiles: [web],
+{ image: mshrun, script: scripts/webfix.msh, grant: [log, bootfs], budget: { user: 16mb }, profiles: [web, webpage],
   give: [{ tag: net, netview: net }, { tag: view, fs: boot/web, ro: true }] }

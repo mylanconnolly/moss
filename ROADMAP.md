@@ -545,22 +545,54 @@ supervises), and memory history per unit beside the CPU one.
       beyond block rows, flex and grid, bidi and shaping, hyphenation,
       the UAX #14 classes beyond spaces, `overflow: scroll` inside a
       box, images (stage 8).
-    - **(5) The page domain and the broker.** `user/webpage.zig` serves
-      `PageReq`: loads through its broker, parses, styles, lays out,
-      paints the viewport into the granted buffer, commits damage rects,
-      hit-tests links and form controls, scrolls by shifting its own
-      buffer and painting the strip. `user/webfetch.zig`, the session's
-      broker (badged clients, the requesting origin on every open; six
-      connections per host on the HTTP pool; a memory cache with
-      validation, `ETag`/`If-Modified-Since`; the cookie jar and the
-      cache index in the home's `state/webfetch/`; policy from
-      `conf/app/web.msh` through the admin-gated `sysconf`); the
-      broker's logic in one module `mshrun` also serves for `web-render`.
-      A native drill client (`compcli`'s shape) spawns a page: load a
-      fixture, click a link, the second page's commit lands; a page that
-      allocates without bound is refused by quota and the client sees
-      `peer_dead`; teardown meets the leak bar. *Exit:* the `webpage`
-      drill; `web-render URL` from the shell returns the DOM after load.
+    - ✅ **(5) The page domain and the broker** (2026-09-18).
+      `shared/web.zig` is the seam, shaped by the kernel's IPC: a page
+      holds one badged *calling* end of its host's channel and nothing
+      else, so every message is the page's call and the host's reply —
+      the page asks for its data buffer, its viewport pixels and a pack
+      of font files, then for the `next` command (which the host parks
+      until it has one), opens and reads resources by URL through the
+      host, and reports events (`title`, `url`, `load`, `commit`,
+      `hover`, `extent`, `dumped`). `user/webpage.zig` is the domain:
+      a 20 MB arena reset per navigation, `lib/font` over the packed
+      faces with a bounded glyph cache (no font service, as locked),
+      the parser, cascade, layout and painter of stages 2–4, a hit test
+      for links, scrolling by repaint. `user/webhost.zig` is the host
+      and broker in one module: spawn (a minted badge per page, the
+      buffers granted on the page's first calls), a `step` that serves
+      one message and tells the program what it was, commands queued
+      and answered by reply token, and the broker — one connection per
+      open, redirects followed here, `http`/`https` only, no content
+      coding asked for, a 24 MB cap, a 10 s stall limit; no cache, no
+      cookie jar, no pool yet (they come with the window that needs
+      them, stages 6–7, with the session's `webfetch` unit). Two hosts
+      use it: `webpagecli`, the drill's native client, and `mshrun`'s
+      `web-render URL`, which returns `{ url, title, dom }`. The
+      `webpage` drill: load, the heading's colour found in the pixels,
+      scroll, the link found by hovering down the strip, the click's
+      second page with its title and URL, the document read back; a
+      second page sent after a 23.8 MB resource dies of its arena
+      (logged, `client_dead` to the host) while the first still
+      scrolls; the leak bar. Three things it found: (a) the kernel's
+      spawn path granted a channel end with badge 0, dropping the badge
+      minted on it — the manifest had the field, init's path used it,
+      the syscall never filled it (fixed; a host now hears a spawned
+      child under its badge); (b) a channel side whose last cap goes is
+      closed for good, so a host must keep its own unbadged calling end
+      until teardown, not drop it after creating the channel; (c) with
+      one caller parked on a deferred reply, a reply without a token
+      answers the wrong caller — every reply names its token. Honest
+      differences from the plan: memory exhaustion is the page's own
+      arena refusing (a program's memory here is its image's static
+      size, charged at spawn), not a kernel kill, and the drill checks
+      that; scrolling repaints the viewport rather than shifting it;
+      `webfetch` as a session unit, its cache, cookies and policy, wait
+      for the window. One more thing the gate found: the host's static
+      buffers grew every `mshrun` by 220 KB, and the shells that hold
+      five workers at once had 1 MB of headroom in their 32 MB — the
+      shell drill's `run` was refused by 38 KB; those four budgets are
+      40 MB now (the kernel admits a spawn when the child's image and
+      stack fit the parent's remaining budget, not its declared limit).
     - **(6) The window: Web.** `boot/scripts/browser.msh`, unit
       `browser` with `app: { name: "Web", … dock: true }`. The runtime's
       `page` leaf (`{ kind: "page", id, url, nav, grow: true }`) spawns,

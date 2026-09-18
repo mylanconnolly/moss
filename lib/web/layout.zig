@@ -1744,3 +1744,71 @@ test "layout: lines wrap, floats intrude, inline-block sits on the baseline" {
     // The line starts right of the float.
     try std.testing.expectEqual(@as(f64, 50), q.lines.items[0].x);
 }
+
+// ------------------------------------------------------------ hit testing
+
+/// The element under document point (x, y): the deepest box whose
+/// border box holds the point, text counting for its parent element;
+/// null over the canvas alone. A host's click or hover starts here and
+/// walks the DOM up to what it wants (a link, a control).
+pub fn hitTest(l: *const Layout, x: f64, y: f64) ?NodeId {
+    var best: ?BoxId = null;
+    var best_depth: usize = 0;
+    for (l.boxes.items, 0..) |b, i| {
+        if (b.kind == .root) continue;
+        const inside = switch (b.kind) {
+            .text, .inline_box => fragmentHolds(l, @intCast(i), x, y),
+            else => b.laid_out and x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h,
+        };
+        if (!inside) continue;
+        const depth = boxDepth(l, @intCast(i));
+        if (best == null or depth >= best_depth) {
+            best = @intCast(i);
+            best_depth = depth;
+        }
+    }
+    const id = best orelse return null;
+    var b = l.get(id);
+    while (b.node == null or l.doc.get(b.node.?).kind != .element) {
+        const p = b.parent orelse return null;
+        b = l.get(p);
+    }
+    return b.node;
+}
+
+fn boxDepth(l: *const Layout, id: BoxId) usize {
+    var d: usize = 0;
+    var b = l.get(id);
+    while (b.parent) |p| : (b = l.get(p)) d += 1;
+    return d;
+}
+
+/// Inline content has no box of its own on the page: it is where its
+/// fragments landed on the lines of the block that holds it.
+fn fragmentHolds(l: *const Layout, id: BoxId, x: f64, y: f64) bool {
+    for (l.fragments.items) |f| {
+        if (f.box != id) continue;
+        if (x >= f.x and x < f.x + f.w and y >= f.y and y < f.y + f.h) return true;
+    }
+    return false;
+}
+
+test "layout: hit test finds the link under a point" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try html.parse(a, "<body style='margin:0;font-size:16px;line-height:20px'><div style='height:40px'></div><p style='margin:0'>go <a href='x.html'>there</a> now</p>", .{});
+    const env: style.Env = .{ .width = 320, .height = 240 };
+    const sheets = try style.collectDocumentSheets(a, doc, env);
+    const styles = try a.create(style.Styles);
+    styles.* = try style.compute(a, doc, sheets, env);
+    var fixed: FixedFonts = .{};
+    const l = try layoutDocument(a, doc, styles, fixed.fonts(), 320, 240);
+    // "go " is 3 cells of 8px; the link starts at x=24 on the line at y=40.
+    const hit = hitTest(l, 30, 50) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(doc.isHtml(hit, "a"));
+    const before = hitTest(l, 5, 50) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(doc.isHtml(before, "p"));
+    const above = hitTest(l, 5, 10) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(doc.isHtml(above, "div"));
+}

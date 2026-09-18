@@ -373,6 +373,11 @@ pub fn build(b: *std.Build) void {
         "web-test",
         "Run the web drill: the fixture servers (plain and TLS) answer a script's fetches over loopback by name",
     ) orelse false;
+    const webpage_test = b.option(
+        bool,
+        "webpage-test",
+        "Run the page-domain drill: a native host spawns page domains that load, paint, hover, click and dump the fixtures, and one that dies of its arena",
+    ) orelse false;
     const rng_test = b.option(
         bool,
         "rng-test",
@@ -522,6 +527,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "flogin_test", flogin_test);
     build_opts.addOption(bool, "dot_test", dot_test);
     build_opts.addOption(bool, "web_test", web_test);
+    build_opts.addOption(bool, "webpage_test", webpage_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -579,6 +585,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "medit", .src = "user/medit.zig" },
         .{ .name = "filepicker", .src = "user/filepicker.zig" },
         .{ .name = "chooser", .src = "user/chooser.zig" },
+        .{ .name = "webpage", .src = "user/webpage.zig" },
+        .{ .name = "webpagecli", .src = "user/webpagecli.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
     // program images plus the literal boot files below, laid out per the
@@ -739,8 +747,8 @@ pub fn build(b: *std.Build) void {
         "conf/units/webfix.msh",          "scripts/webfix.msh",
         "conf/units/webfix-tls.msh",      "scripts/webfix-tls.msh",
         "conf/units/web-script.msh",      "scripts/web-drill.msh",
-        "web/index.html",                 "web/about.html",
-        "web/hello.txt.gz",
+        "conf/units/webpagecli.msh",      "web/index.html",
+        "web/about.html",                 "web/hello.txt.gz",
         "scripts/worker-demo.msh",        "conf/units/svc-pub.msh",
         "scripts/svc-pub.msh",            "conf/units/doubler.msh",
         "scripts/doubler.msh",            "conf/units/gpusvc.msh",
@@ -923,7 +931,7 @@ pub fn build(b: *std.Build) void {
             "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
             "editor_test",     "activity_test",  "netconf_test",    "console_test",
-            "nodes_test",      "nodevm_test",    "web_test",
+            "nodes_test",      "nodevm_test",    "web_test",        "webpage_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1392,7 +1400,7 @@ pub fn build(b: *std.Build) void {
         "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
         "editor_test",     "activity_test",  "netconf_test",    "console_test",
-        "nodes_test",      "nodevm_test",    "web_test",
+        "nodes_test",      "nodevm_test",    "web_test",        "webpage_test",
     };
     const variants = [_][]const u8{
         "panic",     "fault",     "sched",     "domain",   "ipc",        "init",
@@ -1406,7 +1414,7 @@ pub fn build(b: *std.Build) void {
         "largetext", "power",     "restart",   "fabgui",   "fabsignal",  "locale",
         "localeupd", "desktop",   "topbar",    "dock",     "listdemo",   "explorer",
         "browse",    "netbrowse", "cascade",   "terminal", "editor",     "activity",
-        "netconf",   "console",   "nodes",     "nodevm",   "web",
+        "netconf",   "console",   "nodes",     "nodevm",   "web",        "webpage",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

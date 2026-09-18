@@ -126,6 +126,7 @@ const specs = [_]Spec{
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .always_extra = "echocli: handed-off socket echoed on a new view", .append = "profile=net" },
     .{ .name = "dot", .kind = .dot, .pass = "dot-test: PASS", .extra = "mshrun: script: dot resolve ok", .append = "profile=dot" },
     .{ .name = "web", .kind = .web, .pass = "web-test: PASS", .extra = "mshrun: script: web fixtures ok", .append = "profile=web" },
+    .{ .name = "webpage", .kind = .web, .pass = "webpage-test: PASS", .extra = "webpagecli: page domains ok", .extra2 = "webpagecli: the page that read past its arena died, as it should", .append = "profile=webpage", .timeout_s = 150 },
     .{
         .name = "users",
         .kind = .blk,

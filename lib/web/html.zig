@@ -2187,3 +2187,103 @@ fn parseDat(block: []const u8) ?DatCase {
     const expected = std.mem.trimEnd(u8, rest, "\n");
     return .{ .input = input, .fragment = fragment, .scripting = scripting, .expected = expected };
 }
+
+// ------------------------------------------------ serialization, as HTML
+
+const void_elements = [_][]const u8{ "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr" };
+const raw_text_elements = [_][]const u8{ "style", "script", "xmp", "iframe", "noembed", "noframes", "plaintext" };
+
+fn nameIn(name: []const u8, list: []const []const u8) bool {
+    for (list) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
+/// The children of `root` as HTML markup — the standard's "HTML
+/// fragment serialization algorithm": void elements without an end
+/// tag, raw text elements' text as it is, everything else's text with
+/// `&`, `<`, `>` and no-break spaces escaped, attribute values with
+/// `&`, `"` and no-break spaces. What a page domain hands its host
+/// when asked for the document, and what the host parses back.
+pub fn serialize(a: std.mem.Allocator, doc: *const Document, root: NodeId, out: *std.ArrayList(u8)) Error!void {
+    var c = doc.get(root).first_child;
+    while (c) |cid| : (c = doc.get(cid).next) try serializeNode(a, doc, cid, out);
+}
+
+fn serializeNode(a: std.mem.Allocator, doc: *const Document, id: NodeId, out: *std.ArrayList(u8)) Error!void {
+    const n = doc.get(id);
+    switch (n.kind) {
+        .doctype => {
+            try out.appendSlice(a, "<!DOCTYPE ");
+            try out.appendSlice(a, n.name);
+            try out.append(a, '>');
+        },
+        .comment => {
+            try out.appendSlice(a, "<!--");
+            try out.appendSlice(a, n.text.items);
+            try out.appendSlice(a, "-->");
+        },
+        .text => {
+            const parent = if (n.parent) |p| doc.get(p) else null;
+            if (parent != null and parent.?.kind == .element and parent.?.namespace == .html and nameIn(parent.?.name, &raw_text_elements)) {
+                try out.appendSlice(a, n.text.items);
+            } else try escapeText(a, n.text.items, false, out);
+        },
+        .element => {
+            try out.append(a, '<');
+            try out.appendSlice(a, n.name);
+            for (n.attrs.items) |at| {
+                try out.append(a, ' ');
+                if (at.prefix) |pre| {
+                    try out.appendSlice(a, pre);
+                    try out.append(a, ':');
+                }
+                try out.appendSlice(a, at.name);
+                try out.appendSlice(a, "=\"");
+                try escapeText(a, at.value, true, out);
+                try out.append(a, '"');
+            }
+            try out.append(a, '>');
+            if (n.namespace == .html and nameIn(n.name, &void_elements)) return;
+            const contents = if (n.template_contents) |tc| tc else id;
+            var c = doc.get(contents).first_child;
+            while (c) |cid| : (c = doc.get(cid).next) try serializeNode(a, doc, cid, out);
+            try out.appendSlice(a, "</");
+            try out.appendSlice(a, n.name);
+            try out.append(a, '>');
+        },
+        else => {},
+    }
+}
+
+fn escapeText(a: std.mem.Allocator, s: []const u8, attribute: bool, out: *std.ArrayList(u8)) Error!void {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const ch = s[i];
+        if (ch == '&') {
+            try out.appendSlice(a, "&amp;");
+        } else if (ch == 0xc2 and i + 1 < s.len and s[i + 1] == 0xa0) {
+            try out.appendSlice(a, "&nbsp;");
+            i += 1;
+        } else if (attribute and ch == '"') {
+            try out.appendSlice(a, "&quot;");
+        } else if (!attribute and ch == '<') {
+            try out.appendSlice(a, "&lt;");
+        } else if (!attribute and ch == '>') {
+            try out.appendSlice(a, "&gt;");
+        } else try out.append(a, ch);
+    }
+}
+
+test "html: serialize round trips a small document" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try parse(a, "<!DOCTYPE html><title>T &amp; U</title><p class=\"x\">a<br>b &lt; c</p><style>a>b{}</style>", .{});
+    var out: std.ArrayList(u8) = .empty;
+    try serialize(a, doc, dom.document_id, &out);
+    try std.testing.expectEqualStrings("<!DOCTYPE html><html><head><title>T &amp; U</title></head><body><p class=\"x\">a<br>b &lt; c</p><style>a>b{}</style></body></html>", out.items);
+    const again = try parse(a, out.items, .{});
+    var out2: std.ArrayList(u8) = .empty;
+    try serialize(a, again, dom.document_id, &out2);
+    try std.testing.expectEqualStrings(out.items, out2.items);
+}
