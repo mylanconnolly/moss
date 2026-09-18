@@ -229,9 +229,12 @@ var io: Io = undefined;
 var gpa: std.mem.Allocator = undefined;
 const cwd = Io.Dir.cwd();
 
+var keep_disk = false;
+
 pub fn main(init: std.process.Init) !u8 {
     io = init.io;
     gpa = std.heap.smp_allocator;
+    keep_disk = init.environ_map.get("MOSS_KEEP_DISK") != null;
 
     var argv_list: std.ArrayList([]const u8) = .empty;
     var arg_it = std.process.Args.Iterator.init(init.minimal.args);
@@ -5494,7 +5497,13 @@ fn appendDisk(args: *std.ArrayList([]const u8), disk: []const u8) !void {
     });
 }
 
+/// A fresh scratch disk — unless MOSS_KEEP_DISK is set and one exists,
+/// for running a drill against a disk with history (a persisted
+/// `run-gui` disk copied in, to reproduce what only an old volume shows).
 fn makeDisk(path: []const u8) !void {
+    if (keep_disk) {
+        if (cwd.access(io, path, .{})) |_| return else |_| {}
+    }
     const f = try cwd.createFile(io, path, .{ .truncate = true });
     defer f.close(io);
     try f.setLength(io, 16 * 1024 * 1024);

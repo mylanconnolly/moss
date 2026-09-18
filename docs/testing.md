@@ -150,6 +150,11 @@ flowchart TD
   P2 -- no --> FAIL
 ```
 
+`MOSS_KEEP_DISK=1` in the environment makes the runner keep a drill's
+scratch disk when one exists instead of creating it fresh — for running
+a drill against a disk with history (a `run-gui` disk copied to
+`zig-out/check/<drill>.img`), which is how a sign-in that failed only on
+an old volume was reproduced.
 `-Dsoak=N` becomes `--repeat N`: the runner runs each drill N times and
 stops that drill at its first failure (the repeats of one label run back
 to back in one worker). `-Djobs=N` becomes `--jobs N`, the number of

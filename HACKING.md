@@ -568,6 +568,10 @@ barriers in the virtio drivers, and `user/vmm.zig`.
 - A cap named at `spawn` keeps its badge (a child spawned with a
   minted end is heard under that badge, and its death is that badge's
   `client_dead`); the syscall dropped it until 2026-09-18.
+- Rewriting a small file that must never be empty (a user's record) goes
+  through a sibling and `rename`, never truncate-then-write: a write
+  that fails after the truncate leaves nothing, and "no record" then
+  reads as a missing user (users.zig `replaceFile`, 2026-09-18).
 - A GUI leaf that stands for a process (the `page` leaf) is served on a
   thread of its own; that thread never touches the interpreter — it
   only moves bytes into module state the GUI loop reads on its tick.

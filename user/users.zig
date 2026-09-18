@@ -758,9 +758,12 @@ fn authenticate(name_src: []const u8, phrase: []const u8, console: u64) shared.S
         budget = .{};
         local = readRecord(name, &budget);
     }
-    const rec = local orelse (if (fab_chan != 0 and fetchRecord(name)) readRecord(name, &budget) else null) orelse return refuse("usersvc: login refused");
+    // Two refusals that read alike to the user are told apart in the
+    // log: no record for the name, or a record the passphrase does not
+    // unlock (a wrong passphrase, or a record damaged on disk).
+    const rec = local orelse (if (fab_chan != 0 and fetchRecord(name)) readRecord(name, &budget) else null) orelse return refuse("usersvc: login refused (no record)");
     var fba = std.heap.FixedBufferAllocator.init(&kdf_heap);
-    const kp = usercred.unlock(fba.allocator(), &rec, phrase) catch return refuse("usersvc: login refused");
+    const kp = usercred.unlock(fba.allocator(), &rec, phrase) catch return refuse("usersvc: login refused (the passphrase does not unlock the record)");
     // One server per home: a home leased to a session elsewhere, or
     // already open here, is not opened again.
     if (leaseHeld(name) or sessionOpen(name)) {
@@ -928,7 +931,14 @@ fn readRecord(name: []const u8, budget: *Budget) ?usercred.Record {
     const n = readFile(users_view, users_buf, path[0 .. name.len + 4], &text) orelse return null;
     var fba = std.heap.FixedBufferAllocator.init(&text_heap);
     var interp = mshl.Interp.init(fba.allocator(), fba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
-    const v = interp.parseData(text[0..n]) catch return null;
+    // A record that is there but empty or unreadable is a damaged one,
+    // not a missing user: say so, since "no record" sends an operator
+    // looking in the wrong place (an interrupted rewrite once left one
+    // empty, and every login was refused with nothing said).
+    const v = interp.parseData(text[0..n]) catch {
+        logName("usersvc: record damaged (empty/unreadable); restore it, or remove it + home: ", name);
+        return null;
+    };
     if (v != .record) return null;
     const r = v.record;
     var rec: usercred.Record = .{ .pk = undefined, .salt = undefined, .sealed = undefined, .kdf = .{} };
@@ -1648,10 +1658,19 @@ fn randomOrDie(out: []u8) void {
 /// actually changed. Any parse/write trouble leaves the record untouched.
 fn refreshRecord(view: u64, vbuf: [*]u8, path: []const u8, name: []const u8, budget: Budget) bool {
     var cur: [1024]u8 = undefined;
-    const existing = readInto(view, vbuf, path, &cur) orelse return false;
+    const existing = readInto(view, vbuf, path, &cur) orelse {
+        logName("apply: record unreadable; left alone: ", name);
+        return false;
+    };
     var pfba = std.heap.FixedBufferAllocator.init(&text_heap);
     var pin = mshl.Interp.init(pfba.allocator(), pfba.allocator(), .{ .ctx = @ptrCast(&host_ctx), .call = noHost });
-    const pv = pin.parseData(existing) catch return false;
+    const pv = pin.parseData(existing) catch {
+        // Not recreated: a fresh identity could not open the home the
+        // old one encrypted. An operator restores the record, or removes
+        // it and the home to start the user over.
+        logName("apply: record damaged; left alone (restore, or remove it + home): ", name);
+        return false;
+    };
     if (pv != .record) return false;
     const rr = pv.record;
     var rec: usercred.Record = .{ .pk = undefined, .salt = undefined, .sealed = undefined, .kdf = .{} };
@@ -1666,7 +1685,10 @@ fn refreshRecord(view: u64, vbuf: [*]u8, path: []const u8, name: []const u8, bud
     var rtext: [1024]u8 = undefined;
     const rendered = renderRecord(&rtext, rec, budget);
     if (std.mem.eql(u8, rendered, existing)) return false; // already current
-    if (!writeFile(view, vbuf, path, rendered)) return false;
+    if (!replaceFile(view, vbuf, path, rendered)) {
+        logName("apply: record rewrite failed; left as it was: ", name);
+        return false;
+    }
     logName("apply: refreshed policy for ", name);
     return true;
 }
@@ -1894,6 +1916,21 @@ fn readFile(view: u64, buf: [*]u8, path: []const u8, out: []u8) ?usize {
     if (n > out.len) return null;
     @memcpy(out[0..n], buf[0..n]);
     return n;
+}
+
+/// Replace a file's contents without a moment in which it is empty: the
+/// new text goes to a sibling, which then takes the name (mossfs's
+/// rename is atomic within a view). A rewrite that truncated first left
+/// a user's record empty when its write failed, and every login after
+/// was refused.
+fn replaceFile(view: u64, buf: [*]u8, path: []const u8, data: []const u8) bool {
+    var tmp: [max_name + 12]u8 = undefined;
+    if (path.len + 4 > tmp.len) return false;
+    @memcpy(tmp[0..path.len], path);
+    @memcpy(tmp[path.len .. path.len + 4], ".new");
+    const tmp_path = tmp[0 .. path.len + 4];
+    if (!writeFile(view, buf, tmp_path, data)) return false;
+    return fsc.fsRename(view, buf, tmp_path, path);
 }
 
 fn writeFile(view: u64, buf: [*]u8, path: []const u8, data: []const u8) bool {
