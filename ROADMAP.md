@@ -1546,7 +1546,9 @@ supervises), and memory history per unit beside the CPU one.
   that `echo` inside a GUI `update` is discarded. mshl gained `merge`.
   Same day: run-gui boots two NICs (cluster + user network), a cluster
   node's further NICs lease, and lists take `auto: true` to size to
-  their rows (the two-row interface table hid its second row).
+  their rows (the two-row interface table hid its second row); a
+  `tabs` strip with `bar: true` at the root is window chrome, flush
+  under the titlebar with the page padded below it.
 - ✅ **Network settings, stage 2: DHCP** (2026-09-17): a DHCPv4 client
   per interface (discover/offer/request/ack, T1 renew, T2 rebind,
   expiry, backoff on the tick), replies taken before the socket layer,

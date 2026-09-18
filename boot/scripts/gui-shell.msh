@@ -248,7 +248,7 @@ while $running {
       width: 640
       view: (fn [state] {
           { kind: "column", gap: 12, children: [
-              { kind: "tabs", id: "tabs", items: ["Personal", "Displays", "Network"], selected: $state.tab }
+              { kind: "tabs", id: "tabs", bar: true, items: ["Personal", "Displays", "Network"], selected: $state.tab }
               (match $state.tab {
                   1 => (displays-page $state)
                   2 => (network-page $state)

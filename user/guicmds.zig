@@ -507,7 +507,12 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     // The frame paints the titlebar (bar, traffic-light dots, title) and
     // sets `wf.title_h` — the content area starts below it.
     wf.drawChrome(title);
-    // Content area below the titlebar. Record the full height it wants so
+    // A tab bar is chrome too: flush under the titlebar, edge to edge,
+    // and the padded body — the selected tab's page — begins below it.
+    tabbar_h = 0;
+    const body = if (topBar(tree)) |bar| paintTopBar(tree.record, bar) else tree;
+    const top = wf.title_h + tabbar_h;
+    // Content area below the chrome. Record the full height it wants so
     // the window can be sized to fit before its surface is created.
     for (scrolls[1..]) |*st| if (st.used and !containsScroll(tree, st.id[0..st.len])) {
         st.* = .{};
@@ -515,8 +520,47 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     for (&scrolls) |*st| st.seen = false;
     scroll_owner = 0;
     layout_overflow = false;
-    _ = paintViewport(tree, pad, wf.title_h + pad, wf.win_w -| (2 * pad), wf.win_h -| (wf.title_h + 2 * pad), 0);
+    _ = paintViewport(body, pad, top + pad, wf.win_w -| (2 * pad), wf.win_h -| (top + 2 * pad), 0);
     return nfoc;
+}
+
+/// The height of the window's tab bar this render (0 without one): the
+/// body's viewport starts below the titlebar and it.
+var tabbar_h: usize = 0;
+
+/// The tab strip a window shows as chrome, if its tree is a column whose
+/// first child is `{ kind: "tabs", bar: true, … }` — no inset around it,
+/// the page it selects gets the inset instead.
+fn topBar(tree: Value) ?mshl.Record {
+    if (tree != .record) return null;
+    const children = nodeChildren(tree.record);
+    if (children.len == 0 or children[0] != .record) return null;
+    const first = children[0].record;
+    if (!std.mem.eql(u8, strField(first, "kind"), "tabs")) return null;
+    const bar = if (first.get("bar")) |v| v.asBool() else false;
+    if (!bar or tree.record.keys.len > body_keys.len) return null;
+    return first;
+}
+
+// The body record a tab bar leaves: the root column without its first
+// child. Built in place for one render, since a record is two slices.
+var body_keys: [16][]const u8 = undefined;
+var body_vals: [16]Value = undefined;
+
+/// Paint `bar` flush under the titlebar, full width, with a rule beneath
+/// it, set `tabbar_h`, and return the tree's body: `root` without its first
+/// child (its other fields, gap and the like, kept).
+fn paintTopBar(root: mshl.Record, bar: mshl.Record) Value {
+    const y = wf.title_h + pal.border_w;
+    const size = layoutTabs(bar, 0, y, wf.win_w, !wf.measuring);
+    if (!wf.measuring) fillRect(0, y + size.h, wf.win_w, pal.border_w, pal.border);
+    tabbar_h = pal.border_w + size.h + pal.border_w;
+    const n = root.keys.len;
+    for (root.keys, root.vals, 0..) |k, v, i| {
+        body_keys[i] = k;
+        body_vals[i] = if (std.mem.eql(u8, k, "children")) Value{ .list = nodeChildren(root)[1..] } else v;
+    }
+    return .{ .record = .{ .keys = body_keys[0..n], .vals = body_vals[0..n] } };
 }
 
 /// Lay the tree out without drawing, to find the window height its content
@@ -525,7 +569,9 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     const tree = it.callValue(view, &.{state}, null, null) catch return;
     wf.measuring = true;
     wf.drawChrome(title);
-    content_h = wf.title_h + 2 * pad + layoutNode(tree, 0, 0, wf.win_w - 2 * pad, 0, false).h;
+    tabbar_h = 0;
+    const body = if (topBar(tree)) |bar| paintTopBar(tree.record, bar) else tree;
+    content_h = wf.title_h + tabbar_h + 2 * pad + layoutNode(body, 0, 0, wf.win_w - 2 * pad, 0, false).h;
     wf.measuring = false;
     // Centre inside the desktop work area the compositor publishes (between
     // the bar and the dock). Using the whole scanout placed tall windows
@@ -717,7 +763,9 @@ var ntabhit: usize = 0;
 /// `{ kind: "tabs", id, items: ["A", "B"], selected }`: the toolkit's
 /// tab strip (no close glyphs), one focusable. A click fires the list
 /// event shape with `col` = the tab's index and `row` = its label; the
-/// app keeps which tab is selected in its state.
+/// app keeps which tab is selected in its state. As the first child of
+/// the window's root column with `bar: true`, the strip is chrome: flush
+/// under the titlebar edge to edge, the padded body below it.
 fn layoutTabs(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
     const h = ui.paint.controlHeight(wf.brush());
     if (!paint) return .{ .w = avail_w, .h = h };
@@ -2166,7 +2214,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                             if (list.scroll != old) break :input;
                         }
                     };
-                    if (ev.y >= wf.title_h + pad and ev.y < wf.win_h -| pad and ev.x >= pad and ev.x < wf.win_w -| pad and scrollStep(scrollAt(ev.x, ev.y), -@as(isize, wheel) * @as(isize, @intCast(lineOf(R_UI) * 3)))) {
+                    if (ev.y >= wf.title_h + tabbar_h + pad and ev.y < wf.win_h -| pad and ev.x >= pad and ev.x < wf.win_w -| pad and scrollStep(scrollAt(ev.x, ev.y), -@as(isize, wheel) * @as(isize, @intCast(lineOf(R_UI) * 3)))) {
                         hovered = null;
                         pressed = null;
                         field_drag = null;

@@ -3402,6 +3402,19 @@ its rows, `h` the most it may take — with measure and paint sharing
 the rule so the layout reserves what is drawn; the guishell drills boot
 two NICs and assert the list counts both.
 
+**The tab bar is chrome (same day).** A tab strip inset like any
+widget — a gap above it, a gap either side — read as a control inside
+the page rather than the thing that picks the page. A `tabs` strip
+that is the first child of the window's root column with `bar: true`
+is painted by the frame now: flush under the titlebar, edge to edge,
+a rule beneath, and the padded body (the selected page) begins below
+it. Settings uses it. The strip stays outside the body's scroll
+viewport, so it never scrolls away, and it is still the first
+focusable, so a drill's Tab order did not move; measure and paint
+both account for its height. The body is the root record with its
+first child dropped, built in place for the render (a record is two
+slices, so no allocation).
+
 **Quit before Force Quit (same day).** A task manager that can only
 kill is a blunt one: an editor with unsaved work deserves to be asked.
 The compositor gained `close_titled`: the window with that title has its
