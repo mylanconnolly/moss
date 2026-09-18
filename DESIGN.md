@@ -5844,6 +5844,56 @@ next send fails, and the handler loop moves on. *Lesson:* a stack that
 drops what it does not understand makes every peer's stall look like
 the network's; the reset is how a peer learns it is talking to nobody.
 
+**Stage 3, CSS (as built, 2026-09-18).** Four libraries. `css.zig` is
+Syntax Level 3 as written: the tokenizer over bytes with the spec's
+"would start an identifier/number" lookaheads, names and strings
+returned as slices of the source unless an escape forces a copy, and
+the parser's entry points over a token list — a stylesheet, a list of
+rules, one rule, one declaration, the 2021 declaration list, the
+nesting-era block contents that tries a declaration and falls back to a
+qualified rule (a top-level `{}` beside other values makes it a rule),
+one component value and a list. The corpus runner serializes both
+sides into the corpus's JSON notation and compares text: 135 of 149;
+the fourteen left want the `~=`-family match tokens (delims for a
+decade) and the whitespace and semicolons an older "parse a
+declaration" kept. `color.zig` holds sRGB channels as computed rather
+than rounded, because Level 4 serializes what was computed (`hsl()`
+gives `rgb(31.875, …)`), and matches 1782 of 1822 colour cases; the
+forty left are grey `hwb()` values whose sixth decimal the corpus
+rounds up where IEEE rounds down, which no formula I tried reproduces.
+`media.zig` evaluates a query list against an `Env` the session fills
+(the viewport and the appearance axes: `prefers-color-scheme: dark` is
+the theme, `prefers-contrast: more` the contrast). `style.zig` is the
+cascade: `parseSheet` turns a sheet into rules — one per complex
+selector, carrying its specificity, sharing the block's longhand
+declarations with shorthands expanded as they are read — with `@media`
+blocks flattened or dropped for the env and `@supports` decided by
+whether the property parses here; `compute` walks the document,
+gathers every matching rule's declarations with (origin, importance,
+specificity, order), takes the winner per property, and derives the
+computed value against the parent's: font-size first, since every
+`em` below hangs on it. An invalid value is dropped when the sheet is
+parsed, not when the winner is applied — the first version applied
+the winner and fell back to the initial value when it failed to
+parse, so `display: bogus` beat the user-agent's `display: block`, and
+the test caught it.
+
+The shell got two commands: `html-style SELECTOR` (computed values as
+records, for a desktop viewport in the light theme — the page domain
+will use the session's) and `css-parse`. The first run of the drill's
+`html-style` ended in "out of memory": the cascade of a four-element
+page cost 986 KB of a 1 MB line heap. Measured by phase, the
+user-agent sheet's 1002 tokens (56 KB of data) cost 237 KB — every
+identifier grew an `ArrayList` from nothing one byte at a time, the
+token list doubled its way up, and an arena frees nothing — and every
+rule's block was re-tokenized from its text. Source slices for names
+and strings, one pre-sized token list, blocks parsed from their
+values by flattening them back into tokens, and the user-agent sheet
+parsed once per process into its own heap brought the sheet to 69 KB
+of tokens and the whole cascade well inside the line. *Lesson:* an
+arena makes growth free to write and dear to run; measure with a
+fixed buffer, where every doubling shows.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

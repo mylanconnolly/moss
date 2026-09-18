@@ -16,19 +16,22 @@ const Value = mshl.Value;
 const Shape = mshl.Shape;
 const dom = web.dom;
 
-pub const command_names = [_][]const u8{ "html-parse", "html-select", "html-text" };
+pub const command_names = [_][]const u8{ "html-parse", "html-select", "html-text", "html-style", "css-parse" };
 
 const string_or_tree = blk: {
     const alts = [_]Shape{ .string, .record, .list };
     break :blk Shape{ .one_of = &alts };
 };
 const select_result = mshl.resultShape(.list, .string);
+const style_result = mshl.resultShape(.list, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
     const is = std.mem.eql;
     if (is(u8, name, "html-parse")) return .{ .params = &.{.{ .name = "html", .shape = .string, .optional = true }}, .input = .{ .optional = .string }, .ret = .record };
     if (is(u8, name, "html-select")) return .{ .params = &.{ .{ .name = "selector", .shape = .string }, .{ .name = "html", .shape = string_or_tree, .optional = true } }, .input = .{ .optional = string_or_tree }, .ret = select_result };
     if (is(u8, name, "html-text")) return .{ .params = &.{.{ .name = "html", .shape = string_or_tree, .optional = true }}, .input = .{ .optional = string_or_tree }, .ret = .string };
+    if (is(u8, name, "html-style")) return .{ .params = &.{ .{ .name = "selector", .shape = .string }, .{ .name = "html", .shape = string_or_tree, .optional = true } }, .input = .{ .optional = string_or_tree }, .ret = style_result };
+    if (is(u8, name, "css-parse")) return .{ .params = &.{.{ .name = "css", .shape = string_or_tree, .optional = true }}, .input = .{ .optional = string_or_tree }, .ret = .list };
     return null;
 }
 
@@ -57,7 +60,175 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         const doc = try documentOf(it, src);
         return .{ .str = try web.text.extract(it.arena, doc, dom.document_id) };
     }
+    if (is(u8, name, "html-style")) {
+        const src = try source(it, "html-style", args, 1, input);
+        const doc = try documentOf(it, src);
+        const sel = web.selectors.Selector.parse(it.arena, args[0].str) catch |e| switch (e) {
+            error.OutOfMemory => return mshl.Error.OutOfMemory,
+            error.Invalid => return try it.mkResult(false, .{ .str = try std.fmt.allocPrint(it.arena, "not a selector: {s}", .{args[0].str}) }),
+        };
+        // The cascade for a desktop-sized page in the light theme: what
+        // a script asks is "what would this element be", not the session's
+        // window — that comes with the page domain.
+        const env: web.style.Env = .{ .width = 1280, .height = 1024 };
+        const ua = uaSheet(env) orelse return it.fail("html-style: the user-agent stylesheet did not fit its heap", .{});
+        const sheets = try web.style.collectDocumentSheetsWith(it.arena, doc, env, ua);
+        const styles = try web.style.compute(it.arena, doc, sheets, env);
+        var ids: std.ArrayList(dom.NodeId) = .empty;
+        sel.queryAll(doc, dom.document_id, it.arena, &ids) catch return mshl.Error.OutOfMemory;
+        const out = try it.arena.alloc(Value, ids.items.len);
+        for (ids.items, 0..) |id, i| out[i] = try styleRecord(it, styles.get(id));
+        return try it.mkResult(true, .{ .list = out });
+    }
+    if (is(u8, name, "css-parse")) {
+        const src = try source(it, "css-parse", args, 0, input);
+        // A stylesheet's text, or a page: every `<style>` in it, in order.
+        const text: []const u8 = if (src == .str) src.str else blk: {
+            const doc = try documentOf(it, src);
+            var out: std.ArrayList(u8) = .empty;
+            var w = doc.walk(dom.document_id);
+            while (w.next()) |id| if (doc.isHtml(id, "style")) {
+                try out.appendSlice(it.arena, doc.textContent(id, it.arena) catch return mshl.Error.OutOfMemory);
+                try out.append(it.arena, '\n');
+            };
+            break :blk out.items;
+        };
+        var p = web.css.Parser.init(it.arena, text, false) catch return mshl.Error.OutOfMemory;
+        const rules = p.parseStylesheet() catch return mshl.Error.OutOfMemory;
+        return .{ .list = try rulesData(it, rules) };
+    }
     return null;
+}
+
+// The user-agent sheet, parsed once on first use into a heap of its
+// own: its forty-odd rules cost a third of the line heap to parse, and
+// they never change. Media queries in it are evaluated for a desktop
+// viewport; it has none today.
+var ua_heap: [512 << 10]u8 = undefined;
+var ua_cache: ?web.style.Sheet = null;
+
+fn uaSheet(env: web.style.Env) ?web.style.Sheet {
+    if (ua_cache) |c| return c;
+    var fba = std.heap.FixedBufferAllocator.init(&ua_heap);
+    ua_cache = web.style.parseSheet(fba.allocator(), web.style.ua_sheet, .user_agent, env) catch return null;
+    return ua_cache;
+}
+
+/// A stylesheet's rules as data: `{ selector, declarations: { name:
+/// "value" } }` for a style rule, `{ at, prelude, rules | block }` for
+/// an at-rule (a `@media` block's rules nested as data too).
+fn rulesData(it: *mshl.Interp, rules: []const web.css.Rule) mshl.Error![]Value {
+    var out: std.ArrayList(Value) = .empty;
+    for (rules) |r| switch (r) {
+        .err => {},
+        .qualified => |q| {
+            const sel = web.css.valuesText(it.arena, q.prelude) catch return mshl.Error.OutOfMemory;
+            const block = web.css.valuesText(it.arena, q.block) catch return mshl.Error.OutOfMemory;
+            var bp = web.css.Parser.init(it.arena, block, false) catch return mshl.Error.OutOfMemory;
+            const items = bp.parseBlockContents() catch return mshl.Error.OutOfMemory;
+            var keys: std.ArrayList([]const u8) = .empty;
+            var vals: std.ArrayList(Value) = .empty;
+            for (items) |item| if (item == .declaration) {
+                var text = web.css.valuesText(it.arena, item.declaration.value) catch return mshl.Error.OutOfMemory;
+                if (item.declaration.important) text = try std.mem.concat(it.arena, u8, &.{ text, " !important" });
+                try keys.append(it.arena, item.declaration.name);
+                try vals.append(it.arena, .{ .str = text });
+            };
+            try out.append(it.arena, try record(it, &.{ "selector", "declarations" }, &.{ .{ .str = sel }, .{ .record = .{ .keys = keys.items, .vals = vals.items } } }));
+        },
+        .at => |at| {
+            const prelude = web.css.valuesText(it.arena, at.prelude) catch return mshl.Error.OutOfMemory;
+            if (at.block) |b| {
+                const block = web.css.valuesText(it.arena, b) catch return mshl.Error.OutOfMemory;
+                if (std.ascii.eqlIgnoreCase(at.name, "media") or std.ascii.eqlIgnoreCase(at.name, "supports")) {
+                    var bp = web.css.Parser.init(it.arena, block, false) catch return mshl.Error.OutOfMemory;
+                    const inner = bp.parseListOfRules() catch return mshl.Error.OutOfMemory;
+                    try out.append(it.arena, try record(it, &.{ "at", "prelude", "rules" }, &.{ .{ .str = at.name }, .{ .str = prelude }, .{ .list = try rulesData(it, inner) } }));
+                } else {
+                    try out.append(it.arena, try record(it, &.{ "at", "prelude", "block" }, &.{ .{ .str = at.name }, .{ .str = prelude }, .{ .str = block } }));
+                }
+            } else try out.append(it.arena, try record(it, &.{ "at", "prelude" }, &.{ .{ .str = at.name }, .{ .str = prelude } }));
+        },
+    };
+    return out.items;
+}
+
+fn percentText(it: *mshl.Interp, x: f64) mshl.Error!Value {
+    return .{ .str = try std.fmt.allocPrint(it.arena, "{d}%", .{x}) };
+}
+
+fn lengthAutoValue(it: *mshl.Interp, l: web.style.LengthAuto) mshl.Error!Value {
+    return switch (l) {
+        .px => |x| .{ .float = x },
+        .percent => |x| try percentText(it, x),
+        .auto => .{ .str = "auto" },
+    };
+}
+
+fn lengthPercentValue(it: *mshl.Interp, l: web.style.LengthPercent) mshl.Error!Value {
+    return switch (l) {
+        .px => |x| .{ .float = x },
+        .percent => |x| try percentText(it, x),
+    };
+}
+
+fn sidesAuto(it: *mshl.Interp, arr: [4]web.style.LengthAuto) mshl.Error!Value {
+    const out = try it.arena.alloc(Value, 4);
+    for (arr, 0..) |l, i| out[i] = try lengthAutoValue(it, l);
+    return .{ .list = out };
+}
+
+fn sidesPercent(it: *mshl.Interp, arr: [4]web.style.LengthPercent) mshl.Error!Value {
+    const out = try it.arena.alloc(Value, 4);
+    for (arr, 0..) |l, i| out[i] = try lengthPercentValue(it, l);
+    return .{ .list = out };
+}
+
+/// The computed values a script can read, with CSS's spellings.
+fn styleRecord(it: *mshl.Interp, c: *const web.style.Computed) mshl.Error!Value {
+    const fams = try it.arena.alloc(Value, c.font_family.len);
+    for (c.font_family, 0..) |f, i| fams[i] = .{ .str = f };
+    const widths = try it.arena.alloc(Value, 4);
+    for (0..4) |i| widths[i] = .{ .float = c.borderWidth(i) };
+    const lh: Value = switch (c.line_height) {
+        .normal => .{ .str = "normal" },
+        .number => |n| .{ .float = n },
+        .px => |x| .{ .float = x },
+    };
+    return record(it, &.{ "display", "position", "float", "color", "background-color", "font-size", "font-weight", "font-style", "font-family", "line-height", "text-align", "text-decoration", "white-space", "list-style-type", "width", "height", "margin", "padding", "border-width", "visibility", "opacity" }, &.{
+        .{ .str = cssName(@tagName(c.display)) },
+        .{ .str = @tagName(c.position) },
+        .{ .str = @tagName(c.float) },
+        .{ .str = c.color.serialize(it.arena) catch return mshl.Error.OutOfMemory },
+        .{ .str = c.background_color.serialize(it.arena) catch return mshl.Error.OutOfMemory },
+        .{ .float = c.font_size },
+        .{ .int = c.font_weight },
+        .{ .str = @tagName(c.font_style) },
+        .{ .list = fams },
+        lh,
+        .{ .str = @tagName(c.text_align) },
+        .{ .str = if (c.text_decoration.underline) "underline" else if (c.text_decoration.line_through) "line-through" else if (c.text_decoration.overline) "overline" else "none" },
+        .{ .str = cssName(@tagName(c.white_space)) },
+        .{ .str = cssName(@tagName(c.list_style_type)) },
+        try lengthAutoValue(it, c.width),
+        try lengthAutoValue(it, c.height),
+        try sidesAuto(it, c.margin),
+        try sidesPercent(it, c.padding),
+        .{ .list = widths },
+        .{ .str = @tagName(c.visibility) },
+        .{ .float = c.opacity },
+    });
+}
+
+/// An enum tag as CSS spells it (`inline_block` is `inline-block`).
+fn cssName(tag: []const u8) []const u8 {
+    for (tag) |c| if (c == '_') {
+        // Map through a small static table of the names that have one.
+        const known = [_][2][]const u8{ .{ "inline_block", "inline-block" }, .{ "list_item", "list-item" }, .{ "inline_flex", "inline-flex" }, .{ "inline_grid", "inline-grid" }, .{ "inline_table", "inline-table" }, .{ "table_row", "table-row" }, .{ "table_cell", "table-cell" }, .{ "table_row_group", "table-row-group" }, .{ "table_header_group", "table-header-group" }, .{ "table_footer_group", "table-footer-group" }, .{ "table_caption", "table-caption" }, .{ "table_column", "table-column" }, .{ "table_column_group", "table-column-group" }, .{ "flow_root", "flow-root" }, .{ "pre_wrap", "pre-wrap" }, .{ "pre_line", "pre-line" }, .{ "break_spaces", "break-spaces" }, .{ "lower_alpha", "lower-alpha" }, .{ "upper_alpha", "upper-alpha" }, .{ "lower_roman", "lower-roman" }, .{ "upper_roman", "upper-roman" } };
+        for (known) |k| if (std.mem.eql(u8, k[0], tag)) return k[1];
+        return tag;
+    };
+    return tag;
 }
 
 /// The markup or tree a command works on: the argument at `index` if

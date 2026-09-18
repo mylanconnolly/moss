@@ -255,8 +255,9 @@ installed at boot as content-addressed sources with a manifest each
 (see [the store](filesystem.md#programs-are-files-in-a-store)), so
 `let math = (use math); [1, 2, 3] | $math.sum` works in any session and
 in a script `mshrun` runs (`use web` is the other module: `$web.save
-URL PATH`, the wget; `html-parse`, `html-select` and `html-text` are
-the web engine's commands, on the networking page), and `install math` copies the module into a
+URL PATH`, the wget; `html-parse`, `html-select`, `html-text`,
+`html-style` and `css-parse` are the web engine's commands, on the
+networking page), and `install math` copies the module into a
 home's own store like a program. The module's functions find each
 other in the module's scope, never in the session's, and the scope
 lives as long as any of them does. There is no global namespace: a

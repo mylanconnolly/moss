@@ -3,10 +3,15 @@
 <head>
 <meta charset="utf-8">
 <title>moss fixture: home</title>
+<style>
+  h1 { color: #336699; border-bottom: 2px solid currentcolor }
+  .note { font-style: italic; margin: 1em 0 }
+  @media (max-width: 400px) { h1 { display: none } }
+</style>
 </head>
 <body>
 <h1>A moss fixture</h1>
-<p>This page is served by moss to moss: the <code>webfix</code> unit reads it
+<p class="note">This page is served by moss to moss: the <code>webfix</code> unit reads it
 from <code>boot/web/</code> and answers over loopback, plain and over TLS.
 Every web drill starts here.</p>
 <ul>

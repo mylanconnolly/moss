@@ -478,6 +478,12 @@ let title = (($page.body | html-select "head > title")? | map { $it | html-text 
 let links = (($page.body | html-select "a[href]")? | map { $it.attrs.href })
 ```
 
+`html-style SELECTOR` answers the computed style of the matching
+elements as records — `display`, `color`, `font-size`, the margins and
+borders, and the rest a layout needs — after the cascade of the page's
+own `<style>` sheets over the user agent's; `css-parse` turns a
+stylesheet into data (`{ selector, declarations }` rules and at-rules).
+
 The parser is the standard's (`lib/web/html.zig`, host-tested against
 the html5lib corpus: every tokenizer and tree-construction case agrees)
 and runs in the caller's process — a parser over untrusted bytes,

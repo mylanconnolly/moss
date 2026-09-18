@@ -86,4 +86,22 @@ let words = ($r.body | html-text)
 if ($words | split "served by moss to moss" | len) < 2 { (err "html-text: $words")? }
 match ($doc | html-select "p[") { ok _ => (err "a bad selector was accepted")?; err $e => echo "script: bad selector refused: $e" }
 echo "script: html ok $links"
+# The cascade: the page's own sheet over the user agent's, computed.
+let h1 = (($doc | html-style "h1")? | first 1)
+if ($h1 | len) != 1 { (err "html-style h1: $h1")? }
+let h = ($h1 | first 1 | map { $it.display })
+if $h != ["block"] { (err "h1 display: $h")? }
+let hc = ($h1 | map { $it.color })
+if $hc != ["rgb(51, 102, 153)"] { (err "h1 color: $hc")? }
+let hs = ($h1 | map { $it.font-size })
+if $hs != [32.0] { (err "h1 font-size: $hs")? }
+let hb = ($h1 | map { $it.border-width })
+if $hb != [[0.0, 0.0, 2.0, 0.0]] { (err "h1 border: $hb")? }
+let note = (($doc | html-style "p.note")? | map { $it.font-style })
+if $note != ["italic"] { (err "note style: $note")? }
+let sheet = ($doc | css-parse)
+if ($sheet | len) != 3 { (err "css-parse: $sheet")? }
+let firstsel = ($sheet | first 1 | map { $it.selector })
+if $firstsel != ["h1"] { (err "css-parse selector: $firstsel")? }
+echo "script: css ok"
 echo "script: web fixtures ok"

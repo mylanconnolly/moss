@@ -471,15 +471,41 @@ supervises), and memory history per unit beside the CPU one.
       said so: `:lang()`, namespaces and the user-action pseudo-classes
       in selectors; the UTS46 table for domains stays the URL parser's
       gap.
-    - **(3) CSS.** `lib/web/css.zig`: Syntax Level 3 (tokens, rules,
-      declarations, the error recovery), selectors matching against the
-      DOM with specificity, the cascade (origins — UA, author; order;
-      `!important`; `inherit`/`initial`/`unset`), computed values for
-      the properties stage 4 lays out, the UA stylesheet as a comptime
-      string, media queries (width, `prefers-color-scheme` and
-      `prefers-contrast` from the session's appearance axes). *Exit:*
-      css-parsing-tests count printed; cascade unit tests; `html-select`
-      shares the selector engine.
+    - **(3) CSS.** ✅ (landed 2026-09-18) `lib/web/css.zig`: Syntax Level 3
+      — the tokenizer and every entry point (a stylesheet, a rule list,
+      one rule, one declaration, a declaration list, the nesting-era
+      block contents, component values) with the standard's recovery;
+      **135 of css-parsing-tests' 149 cases agree** (the rest want the
+      pre-standard match tokens and lone-declaration whitespace).
+      `lib/web/color.zig`: the named colours, hex, `rgb()`, `hsl()`,
+      `hwb()` in both syntaxes, serialized as Level 4 says — **1782 of
+      1822** colour cases (forty grey `hwb()` values round the other
+      way). `lib/web/media.zig`: media query lists — types, `not`/`only`/
+      `and`/`or`, width and height with `min-`/`max-` and the range
+      syntax, orientation, `prefers-color-scheme` and `prefers-contrast`
+      from the session's appearance axes, hover and pointer — against an
+      `Env`. `lib/web/style.zig`: the cascade — sheets parsed into rules
+      with each complex selector's specificity and longhand declarations
+      (shorthands `margin`, `padding`, `border` and its sides, `background`
+      (its colour), `font`, `list-style`, `overflow`, `text-decoration`,
+      `inset` expanded, invalid values dropped at parse time so they never
+      shadow a lesser rule), `@media` flattened and `@supports` checked,
+      the winner per property by importance and origin, specificity, then
+      order with the `style` attribute last, `inherit`/`initial`/`unset`,
+      computed values (`em`, `rem`, `%` of font size, viewport units,
+      absolute units; relative weights and sizes) for the fifty-odd
+      properties a block-and-inline layout and its painter need; the
+      user-agent sheet from the HTML Standard's rendering section. In the
+      shell: `html-style SELECTOR` (the computed style of matching
+      elements as records) and `css-parse` (a stylesheet as data); the
+      selector engine gained `:where()` and specificity. Lessons: a
+      parser's allocation churn (a list grown per character, a token list
+      doubled in an arena, a block re-tokenized from its text) cost three
+      times its data and ran the interpreter's line heap dry — names and
+      strings are source slices now, lists are pre-sized, blocks parse from
+      their values, and the shell parses the user-agent sheet once. Not
+      built, said so: `calc()`, `@import` fetching, `lab()` and the
+      wide-gamut colours, the user origin.
     - **(4) Layout and paint, on the host.** `lib/web/layout.zig`: the
       box tree and CSS 2.1's visual formatting model — block and inline
       formatting, margin collapse, floats and clears, line boxes,

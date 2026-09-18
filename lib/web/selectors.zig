@@ -39,6 +39,8 @@ pub const Pseudo = union(enum) {
     nth_last_of_type: Nth,
     not: []const Complex,
     is: []const Complex,
+    /// `:where()`: `:is()` with no specificity.
+    where: []const Complex,
     has: []const Complex,
     checked,
     disabled,
@@ -96,6 +98,12 @@ pub const Selector = struct {
     pub fn queryAll(sel: *const Selector, doc: *const Document, root: NodeId, a: std.mem.Allocator, out: *std.ArrayList(NodeId)) Error!void {
         var w = doc.walk(root);
         while (w.next()) |id| if (sel.matches(doc, id)) try out.append(a, id);
+    }
+
+    /// Does `id` match this one complex selector of the list?
+    pub fn matchesOne(doc: *const Document, id: NodeId, c: Complex) bool {
+        if (doc.get(id).kind != .element) return false;
+        return matchComplex(doc, id, c, null);
     }
 
     pub fn queryFirst(sel: *const Selector, doc: *const Document, root: NodeId) ?NodeId {
@@ -263,7 +271,7 @@ fn matchPseudo(doc: *const Document, id: NodeId, ps: Pseudo) bool {
             for (list) |c| if (matchComplex(doc, id, c, null)) return false;
             return true;
         },
-        .is => |list| {
+        .is, .where => |list| {
             for (list) |c| if (matchComplex(doc, id, c, null)) return true;
             return false;
         },
@@ -340,6 +348,36 @@ fn nthMatches(nth: Nth, index: i32) bool {
     return @divTrunc(diff, nth.a) >= 0;
 }
 
+// ----------------------------------------------------------- specificity
+
+/// A selector's specificity as one number: ids, then classes and
+/// attributes and pseudo-classes, then types, ten bits each — so the
+/// cascade compares by integer. `:is()`, `:not()` and `:has()` count as
+/// their most specific argument; `:where()` counts nothing.
+pub fn specificity(c: Complex) u32 {
+    var ids: u32 = 0;
+    var classes: u32 = 0;
+    var types: u32 = 0;
+    for (c.compounds) |comp| for (comp.simples) |s| switch (s) {
+        .universal => {},
+        .type => types += 1,
+        .id => ids += 1,
+        .class, .attr => classes += 1,
+        .pseudo => |ps| switch (ps) {
+            .not, .is, .has => |list| {
+                var best: u32 = 0;
+                for (list) |inner| best = @max(best, specificity(inner));
+                ids += best >> 20;
+                classes += (best >> 10) & 0x3ff;
+                types += best & 0x3ff;
+            },
+            .where => {},
+            else => classes += 1,
+        },
+    };
+    return (@as(u32, @min(ids, 1023)) << 20) | (@as(u32, @min(classes, 1023)) << 10) | @as(u32, @min(types, 1023));
+}
+
 // --------------------------------------------------------------- parsing
 
 const Parser = struct {
@@ -367,10 +405,17 @@ const Parser = struct {
         return isNameStart(c) or std.ascii.isDigit(c);
     }
 
-    /// An identifier with CSS escapes undone.
+    /// An identifier with CSS escapes undone; one without escapes is a
+    /// slice of the source.
     fn ident(p: *Parser) Error![]const u8 {
-        var out: std.ArrayList(u8) = .empty;
         const start = p.pos;
+        while (p.peek()) |c| : (p.pos += 1) if (!isNameChar(c) or c == '\\') break;
+        if (p.peek() != '\\') {
+            if (p.pos == start) return error.Invalid;
+            return p.s[start..p.pos];
+        }
+        var out: std.ArrayList(u8) = .empty;
+        try out.appendSlice(p.a, p.s[start..p.pos]);
         while (p.peek()) |c| {
             if (c == '\\') {
                 p.pos += 1;
@@ -561,8 +606,10 @@ const Parser = struct {
             var out: Pseudo = undefined;
             if (eq(name, "not")) {
                 out = .{ .not = try p.parseList(false) };
-            } else if (eq(name, "is") or eq(name, "where") or eq(name, "matches")) {
+            } else if (eq(name, "is") or eq(name, "matches")) {
                 out = .{ .is = try p.parseList(false) };
+            } else if (eq(name, "where")) {
+                out = .{ .where = try p.parseList(false) };
             } else if (eq(name, "has")) {
                 out = .{ .has = try p.parseList(true) };
             } else if (eq(name, "nth-child")) {
@@ -669,4 +716,8 @@ test "selectors: simple, attribute, structural, combinators" {
     try std.testing.expectError(error.Invalid, Selector.parse(a, "p >"));
     try std.testing.expectError(error.Invalid, Selector.parse(a, ":hover"));
     try std.testing.expectError(error.Invalid, Selector.parse(a, "p::before"));
+    const sp = try Selector.parse(a, "#a .b.c p:first-child, :where(#x) span, :is(#y, .z)");
+    try std.testing.expectEqual(@as(u32, (1 << 20) | (3 << 10) | 1), specificity(sp.list[0]));
+    try std.testing.expectEqual(@as(u32, 1), specificity(sp.list[1]));
+    try std.testing.expectEqual(@as(u32, 1 << 20), specificity(sp.list[2]));
 }
