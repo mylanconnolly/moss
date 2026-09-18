@@ -495,7 +495,8 @@ fn activate(u: *Unit) bool {
     u.activating = true;
     defer u.activating = false;
     if (!stage.load(boot_va, boot_len, u.image)) {
-        logLine("init: image missing from the boot archive for unit ", u.name);
+        logLine("init: cannot stage the image for unit ", u.name);
+        logLine("init:   the image is ", loader.Stage.last_refusal);
         return false;
     }
     const ch = usys.chanCreate();

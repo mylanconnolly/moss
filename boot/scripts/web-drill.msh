@@ -75,4 +75,15 @@ if $w.status != 200 or $w.redirects != 3 or $w.bytes != $about.size { (err "web.
 let wh = ($web.head http://www.moss.test:8080/)?
 if $wh.status != 200 { (err "web.head: $wh")? }
 echo "script: web module ok"
+# The engine in the shell: the page as a tree, a selector over it, its
+# text — scraping, in three commands.
+let doc = ($r.body | html-parse)
+let titles = (($doc | html-select "head > title")? | map { $it | html-text })
+if $titles != ["moss fixture: home"] { (err "html-select title: $titles")? }
+let links = (($doc | html-select "a[href]")? | map { $it.attrs.href })
+if $links != ["about.html"] { (err "html-select links: $links")? }
+let words = ($r.body | html-text)
+if ($words | split "served by moss to moss" | len) < 2 { (err "html-text: $words")? }
+match ($doc | html-select "p[") { ok _ => (err "a bad selector was accepted")?; err $e => echo "script: bad selector refused: $e" }
+echo "script: html ok $links"
 echo "script: web fixtures ok"

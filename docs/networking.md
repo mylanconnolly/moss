@@ -463,6 +463,27 @@ pieces with a `Content-Type` from its name, never whole in memory;
 `repeat: N` sends it N times, a fixture server's large body — and a
 HEAD request gets the head of whatever the handler answered.
 
+What comes back can be read as a page, not just text: `html-parse` turns
+markup into a tree of records (`{ tag, attrs, children }`, `{ text }`,
+`{ comment }`, `{ doctype }` — the DOM as data), `html-select SELECTOR`
+answers `ok` with the subtrees a CSS selector matches (Level 3 and the
+useful Level 4: `:is`, `:not`, `:has`, `:nth-child`, every attribute
+operator) or `err` for a selector it cannot read, and `html-text` is
+what the page says without its markup. Each takes the markup or a
+parsed tree, as an argument or through the pipe:
+
+```
+let page = (fetch https://example.com/)?
+let title = (($page.body | html-select "head > title")? | map { $it | html-text })
+let links = (($page.body | html-select "a[href]")? | map { $it.attrs.href })
+```
+
+The parser is the standard's (`lib/web/html.zig`, host-tested against
+the html5lib corpus: every tokenizer and tree-construction case agrees)
+and runs in the caller's process — a parser over untrusted bytes,
+bounded by the interpreter's arena and the domain's budget; nothing in
+these commands executes a page.
+
 ### TLS: the client, and whom it trusts
 
 `tls-connect HOST PORT [{ host: NAME }]` opens a TCP connection and
@@ -651,7 +672,10 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   advertised window and our 32 KB ring, no congestion control, no
   window scaling, no selective acknowledgement, in-order receive (a
   lost segment stalls delivery until it is retransmitted), no
-  TIME_WAIT; UDP keeps eight datagrams per socket and drops the rest.
+  TIME_WAIT (a closed socket lingers two seconds, and a segment for a
+  connection the stack no longer has is answered with a reset, so a
+  peer still sending fails at once instead of retransmitting into
+  silence); UDP keeps eight datagrams per socket and drops the rest.
   It is the fabric's transport and a script's, not a general-purpose
   host stack.
 - Blocking is `would_block` plus a doorbell; the async ring transport

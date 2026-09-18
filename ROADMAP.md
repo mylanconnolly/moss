@@ -436,18 +436,41 @@ supervises), and memory history per unit beside the CPU one.
       index.html × 8192 (3.3 MB) streamed plain and over TLS into a
       16 MB unit and refused whole, and the module. Not built, said so:
       the URL setters, IDNA display, `br`, resuming a download by range.
-    - **(2) HTML for the shell.** `lib/web/html.zig`, the WHATWG
-      tokenizer and tree builder in full (every insertion mode, foster
-      parenting, the adoption agency, `<template>`, foreign content) into
-      `lib/web/dom.zig`, an arena DOM addressed by index (no pointers,
-      no cycles — it serializes, and it crosses the fabric). Commands:
-      `html-parse` (the DOM as mshl data: tag, attrs, children, text),
-      `html-select SEL` (Selectors Level 3 and the useful Level 4 —
-      `:not`, `:is`, `:has` later — over the DOM), `html-text` (the
-      readable text, block boundaries as newlines). *Exit:* html5lib
-      tokenizer and tree-construction counts printed; the `web` drill's
-      script fetches a fixture and prints its title and links — the
-      shell scrapes the web.
+    - **(2) HTML for the shell.** ✅ (landed 2026-09-18) `lib/web/
+      tokenizer.zig`, the standard's tokenizer state by state (the
+      generated `entities.zig` holds the 2231 named character references;
+      characters go out as runs the tree builder cuts), and `lib/web/
+      html.zig`, the tree construction in full — every insertion mode,
+      the adoption agency, foster parenting, templates, foreign content
+      with its case and attribute adjustments, the fragment case, and
+      the 2025 select rules (there is no "in select" mode any more; a
+      `selectedcontent` mirrors its select's chosen option) — into
+      `lib/web/dom.zig`, an arena DOM addressed by index. **7028 of 7028
+      tokenizer runs and 1791 of 1791 tree-construction cases agree**
+      with the html5lib corpus (four tokenizer cases with lone surrogates
+      cannot be UTF-8 and are skipped); both floors are asserted.
+      `lib/web/selectors.zig` matches Selectors Level 3 and the useful
+      Level 4 (`:is`, `:not`, `:has`, `:nth-child`, every attribute
+      operator with `i`) right to left over the DOM, and `lib/web/text.zig`
+      is the readable text of a page. Commands, in `user/webcmds.zig`,
+      for both shells: `html-parse` (the DOM as data — `{ tag, attrs,
+      children }`, `{ text }`, `{ comment }`, `{ doctype }`), `html-select
+      SELECTOR` (an `ok` list of matching subtrees, or `err` for a bad
+      selector), `html-text`; each takes markup or a parsed tree, by
+      argument or through the pipe. The `web` drill fetches the fixture,
+      selects its title and its links, extracts its text, and has a bad
+      selector refused. Found on the way: mshrun crossed the 1.5 MB
+      program stage (512 pages now, and a refused image says why —
+      "larger than the program stage" read as "image missing" for an
+      hour); and, under the parallel gate, the fixture server stalled
+      after the client refused the 3 MB body and closed — the stack
+      answered nothing for segments to a socket that had finished
+      lingering, so the server retransmitted into silence and every
+      request after it timed out; netsvc now answers such a segment
+      with a reset (RFC 793), and the sender fails at once. Not built,
+      said so: `:lang()`, namespaces and the user-action pseudo-classes
+      in selectors; the UTS46 table for domains stays the URL parser's
+      gap.
     - **(3) CSS.** `lib/web/css.zig`: Syntax Level 3 (tokens, rules,
       declarations, the error recovery), selectors matching against the
       DOM with specificity, the cascade (origins — UA, author; order;

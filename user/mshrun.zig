@@ -18,6 +18,7 @@ const netcmds = @import("netcmds.zig");
 const localecmds = @import("localecmds.zig");
 const confcmds = @import("confcmds.zig");
 const httpcmds = @import("httpcmds.zig");
+const webcmds = @import("webcmds.zig");
 const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
 const workcmds = @import("workcmds.zig");
@@ -156,6 +157,7 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     if (localecmds.on()) {
         if (localecmds.signature(name)) |sig| return sig;
     }
+    if (webcmds.signature(name)) |sig| return sig;
     return syscmds.signature(name);
 }
 
@@ -185,6 +187,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     if (localecmds.on()) {
         if (try localecmds.call(it, name, args, input)) |v| return v;
     }
+    if (try webcmds.call(it, name, args, input)) |v| return v;
     if (try syscmds.call(it, name, args)) |v| return v;
     return null;
 }

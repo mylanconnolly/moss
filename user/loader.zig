@@ -35,10 +35,16 @@ pub const Stage = struct {
     /// is ~900 KB of ReleaseSafe code (TLS 1.3 with its cipher suites and
     /// certificate parsing is 450 KB of it); a stage too small reports
     /// "image missing from the boot archive".
-    // 384 (1.5M): the biggest program image (msh, ~1.05M — every command
-    // module plus the mshl interpreter) must fit in the stage it is copied
-    // through. Bounded by ipc.shm_max_pages, which matches.
-    pub const default_pages: u64 = 384;
+    // 512 (2 MB): the biggest program image must fit in the stage it is
+    // copied through — msh was ~1.05 MB with every command module and the
+    // interpreter (384 pages), and mshrun crossed 1.5 MB on 2026-09-18
+    // when the HTML parser and its 2231 named character references
+    // joined it. Bounded by ipc.shm_max_pages (2250), far above.
+    pub const default_pages: u64 = 512;
+
+    /// Why the last `load` refused, for the caller's log: a stage too
+    /// small once read as "image missing" for a day.
+    pub var last_refusal: []const u8 = "";
 
     pub fn init(pages: u64) ?Stage {
         const s = usys.shmCreate(pages);
@@ -54,16 +60,35 @@ pub const Stage = struct {
     /// archive is caught here, not by running the wrong program.
     pub fn load(self: *Stage, blob_va: u64, blob_len: u64, id: shared.ImageId) bool {
         const blob = @as([*]const u8, @ptrFromInt(blob_va))[0..blob_len];
-        const image = shared.marcFind(blob, shared.imagePath(id)) orelse return false;
-        if (image.len < @sizeOf(shared.UserImageHeader) or image.len > self.bytes) return false;
+        const image = shared.marcFind(blob, shared.imagePath(id)) orelse {
+            last_refusal = "not in the archive";
+            return false;
+        };
+        if (image.len > self.bytes) {
+            last_refusal = "larger than the program stage (raise loader.Stage.default_pages)";
+            return false;
+        }
+        if (image.len < @sizeOf(shared.UserImageHeader)) {
+            last_refusal = "too small to be an image";
+            return false;
+        }
         var hdr: shared.UserImageHeader = undefined;
         @memcpy(@as([*]u8, @ptrCast(&hdr))[0..@sizeOf(shared.UserImageHeader)], image[0..@sizeOf(shared.UserImageHeader)]);
-        if (hdr.magic != shared.UserImageHeader.expected_magic) return false;
+        if (hdr.magic != shared.UserImageHeader.expected_magic) {
+            last_refusal = "not a MOSS image";
+            return false;
+        }
         const want = @tagName(id);
         const have = hdr.nameSlice();
-        if (have.len != want.len) return false;
+        if (have.len != want.len) {
+            last_refusal = "named for another program";
+            return false;
+        }
         for (have, want) |a, b| {
-            if (a != b) return false;
+            if (a != b) {
+                last_refusal = "named for another program";
+                return false;
+            }
         }
         const dst = @as([*]u8, @ptrFromInt(self.va))[0..image.len];
         @memcpy(dst, image);

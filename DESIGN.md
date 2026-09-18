@@ -5768,6 +5768,82 @@ growable output. The 3.3 MB stream runs in about a second and a half
 each way, plain and over TLS, in a unit whose 16 MB is mostly mshrun's
 own image.
 
+**Stage 2, HTML for the shell (as built, 2026-09-18).** The parser is
+three files with the standard's own seams. `tokenizer.zig` is §13.2.5
+as a `switch` over eighty states with the spec's phrasing kept —
+consume, reconsume, emit — and two departures: characters are emitted
+as runs (the tree builder cuts a run into whitespace, NUL and text
+where a mode cares, so the per-character dispatch the spec describes
+costs one comparison per byte), and the character reference states run
+to completion in one step, the named table (`entities.zig`, generated
+from the standard's `entities.json` by `tools/mkentities.py`, sorted for
+binary search) probed longest-first with the legacy no-semicolon forms
+and the attribute-value exception. Two tokens can be pending at once
+(a run of characters flushed ahead of a tag, and the EOF behind a
+comment the end of input finished), which a one-slot queue lost — the
+corpus's `FOO<!-- BAR --!>` family found it. `html.zig` is §13.2.6: a
+`Parser` with the stack of open elements and the list of active
+formatting elements as index lists, the insertion modes as functions
+that call one another the way the spec's "reprocess" does, the
+insertion place as a `{ parent, before }` the foster-parenting rule
+computes, the adoption agency written from the spec's numbered steps,
+and foreign content with the SVG case table and the foreign attribute
+split (`xlink:href` becomes a prefix and a local name on a foreign
+element, and stays one attribute on an HTML one). `dom.zig` is the
+tree: one node list, links as indices, attributes and text as
+growable lists beside a node — no pointers, so an insertion cannot
+dangle anything, except a Zig pointer into the node list held across a
+node creation, which the template element's contents fragment found on
+the first run.
+
+The corpus test parses every `.dat` block (document or fragment in its
+context, scripting as the block says) and serializes the tree in the
+corpus's notation; **1791 of 1791** agree, and **7028 of 7028**
+tokenizer runs. The first run agreed on 1728, and the sixty-three that
+did not all came from one fact: the standard removed the "in select"
+insertion mode in 2025 (customizable select), so `<select>` parses as
+an ordinary element with `option` and `optgroup` rules of its own,
+`select` joined the default scope list, and a `selectedcontent`
+element shows a clone of its select's chosen option — the html5lib
+corpus of June 2026 says so, and the parser now does too. The rest
+were the comment queue above, the first newline after `<pre>` and
+`<textarea>` (noted, never dropped), `</p>` and `</br>` breaking out of
+foreign content, and the fragment case wrongly seeding the tokenizer's
+last start tag (so `</script>` inside a script fragment ended it, which
+the standard says it must not).
+
+`selectors.zig` parses a selector list into compounds and combinators
+and matches right to left, the way engines do; `:has()` takes a
+relative selector anchored at the candidate. `text.zig` walks text
+nodes with the block elements breaking lines, `pre` verbatim, the
+silent elements skipped. `user/webcmds.zig` puts the three in both
+shells; a parsed tree crosses the language as records and lists and
+comes back the same way (`fromData` rebuilds a DOM from a tree), so a
+selector runs as well over what `html-parse` returned as over the
+markup. The commands run in the caller's process by the arc's rule —
+parsers may, executors may not.
+
+The stage's own lesson was the program stage: mshrun grew past 1.5 MB
+with the parser and the entity table, `stage.load` refused it, and
+init said "image missing from the boot archive" — the loader's one
+answer for five refusals. It records why now, and init logs it.
+
+The parallel gate found one more, in the network stack. The drill
+refuses the 3 MB body when fetched whole (the head's Content-Length is
+past the cap) and closes the connection; the client's socket lingers
+two seconds acknowledging and dropping what still arrives, then is
+freed — and from then on the server's segments matched no socket and
+were dropped in silence. The fixture server is one thread in a loop:
+it kept retransmitting with backoff, and the next request waited
+behind it until the client's ten seconds ran out. Alone, the server
+finished inside the two seconds; three drills at a time, it did not.
+The stack now does what TCP says: a segment for a connection it does
+not have is answered with a reset (RFC 793 §3.4, a reset never
+answered with one), the server's socket dies on receiving it, its
+next send fails, and the handler loop moves on. *Lesson:* a stack that
+drops what it does not understand makes every peer's stall look like
+the network's; the reset is how a peer learns it is talking to nobody.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

@@ -2121,6 +2121,11 @@ fn tcpInput(src: Addr, dst: Addr, seg: []const u8) void {
         return;
     }
     if (flags & F_SYN != 0 and flags & F_ACK == 0) {
+        var listening = false;
+        for (&socks) |*l| if (l.used and l.state == .listen and l.lport == dport) {
+            listening = true;
+        };
+        if (!listening) return tcpReset(src, dst, sport, dport, seq, ack, flags, payload.len);
         for (&socks) |*l| {
             if (!l.used or l.state != .listen or l.lport != dport) continue;
             // Backlog full: drop the SYN; the client's SYN retransmit retries.
@@ -2143,6 +2148,29 @@ fn tcpInput(src: Addr, dst: Addr, seg: []const u8) void {
             ring(l);
             return;
         }
+        return;
+    }
+    tcpReset(src, dst, sport, dport, seq, ack, flags, payload.len);
+}
+
+/// A segment for a connection this stack does not have — a peer still
+/// sending to a socket that closed and finished lingering, typically —
+/// is answered with a reset (RFC 793 §3.4), so the sender's next send
+/// fails instead of retransmitting into silence for the rest of the
+/// boot: a single-threaded server sending 3 MB to a client that had
+/// refused it and gone stalled every request after it. A reset is
+/// never answered with a reset.
+fn tcpReset(src: Addr, dst: Addr, sport: u16, dport: u16, seq: u32, ack: u32, flags: u8, payload_len: usize) void {
+    if (flags & F_RST != 0) return;
+    var tmp: Sock = .{ .used = true, .state = .closed, .lport = dport, .rport = sport, .laddr = dst, .raddr = src };
+    if (flags & F_ACK != 0) {
+        tcpEmit(&tmp, ack, F_RST, "", "");
+    } else {
+        var next: u32 = seq +% @as(u32, @intCast(payload_len));
+        if (flags & F_SYN != 0) next +%= 1;
+        if (flags & F_FIN != 0) next +%= 1;
+        tmp.rcv_nxt = next;
+        tcpEmit(&tmp, 0, F_RST | F_ACK, "", "");
     }
 }
 
