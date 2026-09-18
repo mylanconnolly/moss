@@ -139,10 +139,13 @@ and bytes (`shm_account`, 128 MB), the filesystem's derived views
 (`max_views`, 64), a domain's mapping windows (`max_mappings`), and
 the system init's user budget (`root.zig`, 96 MB) — a spawn refusal
 prints the account chain; a refused shared buffer prints the ledger.
-A unit's `grant: [introspect]` (the machine's ledger, `domain_list`) is
-honoured by the system init as written and by a session init only for
-an administrator's session; a non-admin session logs the refusal and the
-unit runs without it (Activity's System tab says so).
+A unit's `grant: [introspect]` (the machine's ledger, `domain_list`;
+the machine's log, `log_read`) is honoured by the system init as
+written and by a session init only for an administrator's session; a
+non-admin session logs the refusal and the unit runs without it
+(Activity's System tab and Console say so). Note that Console's own
+notes are log lines too: a command that logs on every call would feed
+itself a new line per tick, so `log-rows` logs on changes only.
 A new session app also changes one runner constant, `launcher_ready_line`
 in `tools/runner.zig` (the launcher logs how many apps it found), and is
 listed in `build.zig`'s archive files with its script.

@@ -5,7 +5,7 @@
 const std = @import("std");
 const path = @import("iconpath.zig");
 const Segment = path.Segment;
-pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close, activity, moss };
+pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close, activity, console, moss };
 pub fn parse(name: []const u8) ?Icon {
     if (std.mem.eql(u8, name, "file-text")) return .file;
     if (std.mem.eql(u8, name, "house")) return .home;
@@ -36,6 +36,7 @@ fn segments(icon: Icon) []const Segment {
         .network => path.fromSvg(@embedFile("phosphor/regular/tree-structure.svg")),
         .close => path.fromSvg(@embedFile("phosphor/regular/x.svg")),
         .activity => path.fromSvg(@embedFile("phosphor/regular/pulse.svg")),
+        .console => path.fromSvg(@embedFile("phosphor/regular/article.svg")),
         .moss => path.fromSvg(@embedFile("branding/moss.svg")),
     };
 }

@@ -380,6 +380,16 @@ pub fn shmUnmap(va: u64) shared.Errno {
 }
 
 /// domain_list: data[0] = DomainRec count written into buf.
+pub const LogRead = struct { n: usize, start: u64, head: u64 };
+
+/// log_read: the recent machine log from offset `from` into `buf` (at
+/// most 2048 bytes a call, whole lines); null without the authority.
+pub fn logRead(introspect_h: u64, from: u64, buf: []u8) ?LogRead {
+    const r = syscall6(.log_read, introspect_h, from, @intFromPtr(buf.ptr), buf.len, 0, 0);
+    if (r.err != .ok) return null;
+    return .{ .n = @intCast(r.data[0]), .start = r.data[1], .head = r.data[2] };
+}
+
 pub fn domainList(spawner_h: u64, buf: []u8) IpcResult {
     return syscall6(.domain_list, spawner_h, @intFromPtr(buf.ptr), buf.len, 0, 0, 0);
 }

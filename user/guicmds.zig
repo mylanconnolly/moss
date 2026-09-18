@@ -1226,7 +1226,8 @@ fn cellAt(cellsv: Value, ci: usize) []const u8 {
 /// (viewport height in px; with `auto` the most it may take, the box
 /// sizing itself to its rows), optional `cols` [{title, w, right?}] for a
 /// header + column layout, and `rows` [{id, cells:[str | [int…]], icon?}]
-/// (a cell that is a list of permille samples draws as a sparkline). `fit`
+/// (a cell that is a list of permille samples draws as a sparkline); `tail`
+/// keeps the newest row in view as rows arrive. `fit`
 /// treats column widths as weights; `empty` supplies a placeholder and
 /// `active` controls selection highlighting. The runtime owns
 /// the scroll offset and selection (see `ListState`); the app just emits
@@ -1314,6 +1315,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     if (vis == 0) vis = 1;
 
     const st = listFor(id, key);
+    const rows_before = st.nrows;
     st.nrows = nrows;
     st.vis = vis;
     // `selected: ID` pins the selection to a row by its id, so a list
@@ -1334,6 +1336,10 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     // into view is done when the selection *moves* (a click or arrow key),
     // so a free scroll (the scrollbar) is not undone by a stale selection.
     const max_scroll = if (nrows > vis) nrows - vis else 0;
+    // `tail: true`: a list that follows its end — a log — scrolls to the
+    // newest row whenever rows arrive; between arrivals it scrolls freely.
+    const tail = if (rec.get("tail")) |v| v.asBool() else false;
+    if (tail and nrows != rows_before) st.scroll = max_scroll;
     if (st.scroll > max_scroll) st.scroll = max_scroll;
 
     const has_sb = nrows > vis;

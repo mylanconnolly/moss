@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console };
 
 const Spec = struct {
     name: []const u8,
@@ -74,6 +74,7 @@ const specs = [_]Spec{
     .{ .name = "explorer", .kind = .explorer, .pass = "explorer-test: PASS", .extra = "gui: list files", .append = "profile=explorer", .timeout_s = 120 },
     .{ .name = "netconf", .kind = .netconf, .pass = "netconf-test: PASS", .extra = "netconf: net1 echoed", .always_extra = "netsvc: net0 dhcp bound 10.0.2.15/24 via 10.0.2.2", .extra2 = "netconf: net1 leased again", .second_run_extra = "netsvc: settings read from conf/app/net.msh", .append = "profile=netconf" },
     .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-beta ok=true", .always_extra = "init: stopped by request: win-beta", .extra2 = "win-alpha: closed", .append = "profile=activity", .timeout_s = 120 },
+    .{ .name = "console", .kind = .console, .pass = "console-test: PASS", .extra = "console: filter 'fontsvc'", .always_extra = "console: paused", .extra2 = "console: closed", .append = "profile=console", .timeout_s = 120 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
@@ -164,7 +165,7 @@ const check_dir = "zig-out/check";
 const gpu_device = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
 /// The launcher lists every `app:` unit of the session template
 /// (boot/conf/sessiongui): five today. A new app changes this once.
-const launcher_ready_line = "launcher: ready count=6";
+const launcher_ready_line = "launcher: ready count=7";
 
 // Host TCP ports. Drills run concurrently (`--jobs`, one worker thread
 // per QEMU), so every host port is per worker slot: slot 0 keeps the
@@ -530,7 +531,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         }),
         // The compositor pointer drill and the mshl GUI click drill: a
         // display, keyboard + tablet, QMP.
-        .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo, .cascade, .activity => try args.appendSlice(gpa, &.{
+        .pointer, .guiclick, .desktop, .topbar, .dock, .listdemo, .cascade, .activity, .console => try args.appendSlice(gpa, &.{
             "-device", gpu_device,
             "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
             "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
@@ -643,6 +644,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .activity) {
         if (!try activityDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .console) {
+        if (!try consoleDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .desktop) {
         if (!try desktopDrive(spec, log_path, polls)) return false;
@@ -1250,6 +1254,48 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
 /// win-alpha among them. Select win-alpha's row (the table logs its row
 /// order), press Force Quit, confirm, and watch init stop it and the
 /// table flip its row; then close Activity (Cmd-W) to end the boot.
+/// The Console drill: the log viewer comes up with the boot log, is
+/// filtered to one source (typed, then Filter), paused, a row selected,
+/// and closed with Cmd-W; the app's own notes carry each step.
+fn consoleDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "gui: ready", 1, "Console never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "console: up total=", 1, "the log was never read", spec, polls)) return false;
+    const total = parseAfter(readLog(log_path), "console: up total=") orelse 0;
+    if (total < 20) return sfail(spec, log_path, "the boot log read back too few lines");
+    const g = waitListGeom(spec, log_path, polls, "lines") orelse return sfail(spec, log_path, "the table's geometry was not logged");
+    if (listCount(readLog(log_path), "lines") < 20) return sfail(spec, log_path, "the table shows too few rows");
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    sleepMs(1200); // a tick: the table follows the newest line
+    _ = q.screendump(check_dir ++ "/console.ppm");
+    // Filter to the font service's lines: click the field, type, Filter.
+    const field = widgetCenter(readLog(log_path), "filter-0") orelse return sfail(spec, log_path, "no filter field was logged");
+    if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the filter field");
+    sleepMs(200);
+    if (!q.typeText("fontsvc")) return sfail(spec, log_path, "type the filter");
+    const apply = widgetCenter(readLog(log_path), "apply") orelse return sfail(spec, log_path, "no Filter button was logged");
+    if (!clickScanout(&q, apply[0], apply[1])) return sfail(spec, log_path, "click Filter");
+    if (!try waitLogN(log_path, "console: filter 'fontsvc' matched=", 1, "the filter was not applied", spec, polls)) return false;
+    const matched = parseAfter(readLog(log_path), "console: filter 'fontsvc' matched=") orelse 0;
+    if (matched == 0 or matched >= total) return sfail(spec, log_path, "the filter did not narrow the table");
+    sleepMs(600);
+    _ = q.screendump(check_dir ++ "/console-filtered.ppm");
+    // Pause, select the first row, and read its whole line below.
+    const pause = widgetCenter(readLog(log_path), "pause") orelse return sfail(spec, log_path, "no Pause button was logged");
+    if (!clickScanout(&q, pause[0], pause[1])) return sfail(spec, log_path, "click Pause");
+    if (!try waitLogN(log_path, "console: paused", 1, "the log did not pause", spec, polls)) return false;
+    sleepMs(300);
+    if (!clickScanout(&q, g[0], g[1] + g[2] / 2)) return sfail(spec, log_path, "select a row");
+    sleepMs(600);
+    _ = q.screendump(check_dir ++ "/console-paused.ppm");
+    // Close: the app is essential, so the boot ends.
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Console");
+    return try waitLogN(log_path, "console: closed", 1, "Console did not close", spec, polls);
+}
+
 fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "gui: ready", 1, "Activity never came up", spec, polls)) return false;
     if (!try waitLogN(log_path, "activity: row ", 1, "the table logged no rows", spec, polls)) return false;
@@ -3172,6 +3218,17 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.chord("meta_l", "w")) return false;
     if (!try waitLogN(log_path, "gui: closed", closed_before + 1, "Settings did not close after the network step", spec, polls)) return false;
 
+    // Console: an administrator's session reads the machine's log.
+    if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher for Console");
+    if (!try waitLogN(log_path, launcher_ready_line, 6, "the launcher did not open for Console", spec, polls)) return false;
+    if (!q.typeText("console") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Console");
+    if (!try waitLogN(log_path, "console: up total=", 1, "Console never read the log for alice", spec, polls)) return false;
+    sleepMs(800);
+    _ = q.screendump(check_dir ++ "/console-alice.ppm");
+    const closed_before_console = countOccurrences(readLog(log_path), "gui: closed");
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Console");
+    if (!try waitLogN(log_path, "gui: closed", closed_before_console + 1, "Console did not close", spec, polls)) return false;
+
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.
     return desktopLogout(spec, log_path, polls, &q);
@@ -3252,6 +3309,19 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "activity: system unavailable", 1, "the System tab did not report the missing grant", spec, polls)) return false;
     if (countOccurrences(readLog(log_path), "activity: system domains=") != 0) return sfail(spec, log_path, "a non-administrator listed the machine's domains");
     sleepMs(300);
+    // Console for bob: the grant is refused, the table says so, no line
+    // of the machine's log is read.
+    if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher for Console");
+    if (!try waitLogN(log_path, launcher_ready_line, 2, "the launcher did not open for Console", spec, polls)) return false;
+    if (!q.typeText("console") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Console");
+    if (!try waitLogN(log_path, "init: introspect grant refused (not an administrator's session): console", 1, "the session init did not refuse Console's introspect grant", spec, polls)) return false;
+    if (!try waitLogN(log_path, "console: unavailable", 1, "Console did not report the missing grant", spec, polls)) return false;
+    if (countOccurrences(readLog(log_path), "console: up total=") != 0) return sfail(spec, log_path, "a non-administrator read the machine's log");
+    sleepMs(500);
+    _ = q.screendump(check_dir ++ "/console-bob.ppm");
+    const closed_before_console = countOccurrences(readLog(log_path), "gui: closed");
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Console");
+    if (!try waitLogN(log_path, "gui: closed", closed_before_console + 1, "Console did not close for bob", spec, polls)) return false;
     _ = q.screendump(check_dir ++ "/activity-bob.ppm");
     if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
     if (!try waitLogN(log_path, "activity: closed", 1, "Activity did not close", spec, polls)) return false;
@@ -3259,7 +3329,7 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // facts shown, and there is no Apply — the session holds no control cap.
     const settings_before = countOccurrences(readLog(log_path), "settings: network read-only");
     if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher for Settings");
-    if (!try waitLogN(log_path, launcher_ready_line, 2, "the launcher did not open for Settings", spec, polls)) return false;
+    if (!try waitLogN(log_path, launcher_ready_line, 3, "the launcher did not open for Settings", spec, polls)) return false;
     if (!q.typeText("settings") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Settings");
     if (!try waitLogN(log_path, "settings: network read-only", settings_before + 1, "Settings did not reopen for bob", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: tab tabs 2 at", 1, "the Network tab was not logged for bob", spec, polls)) return false;

@@ -757,6 +757,151 @@ fn sysStats(it: *mshl.Interp) mshl.Error!Value {
     });
 }
 
+// ------------------------------------------------------------- the log
+// The machine log for the Console app: the kernel's ring, pulled with
+// `log_read` on every call (unless paused) into a ring of our own keyed
+// by the same offsets, scanned into rows — time, source, message —
+// oldest first, filtered by substring, the newest `max_log_rows` kept. A
+// row's id is the line's offset, so a selection survives arrivals.
+const log_text_size = 64 << 10;
+const max_log_rows = 400;
+const log_cell_max = 200;
+var log_text: [log_text_size]u8 = undefined;
+var log_head: u64 = 0; // the offset after the last byte held
+var log_first: u64 = 0; // the offset of the first whole line held
+var log_gap = false; // the kernel dropped lines we never saw
+var log_started = false;
+var log_last_filter: [64]u8 = undefined;
+var log_last_filter_len: usize = 0;
+var log_last_paused = false;
+var log_pull: [2048]u8 = undefined;
+
+fn logPull() void {
+    var guard: usize = 0;
+    while (guard < 64) : (guard += 1) {
+        const r = usys.logRead(introspect, log_head, &log_pull) orelse return;
+        if (r.n == 0) return;
+        if (r.start > log_head) {
+            // The ring moved past us: what we hold is stale, start over.
+            log_gap = log_started;
+            log_first = r.start;
+            log_head = r.start;
+        }
+        for (log_pull[0..r.n]) |c| {
+            log_text[log_head % log_text_size] = c;
+            log_head += 1;
+        }
+        if (log_head - log_first > log_text_size) {
+            // Our ring is smaller than the kernel's: drop whole lines.
+            var f = log_head - log_text_size;
+            while (f < log_head and log_text[f % log_text_size] != '\n') f += 1;
+            log_first = @min(f + 1, log_head);
+        }
+        if (r.start + r.n >= r.head) return;
+    }
+}
+
+const LogLine = struct { off: u64, len: usize };
+
+fn logLineAt(off: u64, buf: []u8) []const u8 {
+    var n: usize = 0;
+    while (off + n < log_head and n < buf.len) : (n += 1) {
+        const c = log_text[(off + n) % log_text_size];
+        if (c == '\n') break;
+        buf[n] = c;
+    }
+    return buf[0..n];
+}
+
+/// A line's parts: `stamp [source] message` — the kernel's own lines tag
+/// a level (`[info ]`) and show as source `kernel`.
+const LogParts = struct { time: []const u8, source: []const u8, message: []const u8 };
+fn logParse(line: []const u8) LogParts {
+    const sp = std.mem.indexOfScalar(u8, line, ' ') orelse return .{ .time = "", .source = "", .message = line };
+    const rest = line[sp + 1 ..];
+    if (rest.len < 2 or rest[0] != '[') return .{ .time = line[0..sp], .source = "", .message = rest };
+    const rb = std.mem.indexOfScalar(u8, rest, ']') orelse return .{ .time = line[0..sp], .source = "", .message = rest };
+    var source = std.mem.trim(u8, rest[1..rb], " ");
+    if (std.mem.eql(u8, source, "info") or std.mem.eql(u8, source, "warn") or std.mem.eql(u8, source, "error") or std.mem.eql(u8, source, "debug")) source = "kernel";
+    var message = rest[rb + 1 ..];
+    if (message.len > 0 and message[0] == ' ') message = message[1..];
+    return .{ .time = line[0..sp], .source = source, .message = message };
+}
+
+/// `log-rows FILTER PAUSED`: the log as list rows, newest last.
+fn logRows(it: *mshl.Interp, filter: []const u8, paused: bool) mshl.Error!Value {
+    const a = it.arena;
+    if (introspect == 0) {
+        if (!log_started and log_h != 0) _ = usys.log(log_h, "console: unavailable (no introspect grant)");
+        log_started = true;
+        return try mshl.toValue(a, .{ .rows = Value{ .list = &.{} }, .available = false, .total = @as(i64, 0), .shown = @as(i64, 0), .summary = "" }); // the table's placeholder says why
+    }
+    if (!paused) logPull();
+    // Scan every whole line held, keeping the newest matches.
+    var kept: [max_log_rows]LogLine = undefined;
+    var nkept: usize = 0;
+    var next: usize = 0; // ring index into kept
+    var total: usize = 0;
+    var matched: usize = 0;
+    var off = log_first;
+    var lb: [1024]u8 = undefined;
+    while (off < log_head) {
+        const line = logLineAt(off, &lb);
+        const len = line.len;
+        const eol = off + len + 1;
+        if (eol > log_head) break; // a partial last line: not yet
+        total += 1;
+        if (filter.len == 0 or std.mem.indexOf(u8, line, filter) != null) {
+            matched += 1;
+            kept[next] = .{ .off = off, .len = len };
+            next = (next + 1) % max_log_rows;
+            if (nkept < max_log_rows) nkept += 1;
+        }
+        off = eol;
+    }
+    const rows = try a.alloc(Value, nkept);
+    const start = if (nkept < max_log_rows) 0 else next;
+    for (0..nkept) |i| {
+        const l = kept[(start + i) % max_log_rows];
+        const line = try a.dupe(u8, logLineAt(l.off, &lb));
+        const p = logParse(line);
+        const cells = try a.alloc(Value, 3);
+        cells[0] = .{ .str = p.time };
+        cells[1] = .{ .str = p.source };
+        cells[2] = .{ .str = p.message[0..@min(p.message.len, log_cell_max)] };
+        rows[i] = try mshl.toValue(a, .{
+            .id = try std.fmt.allocPrint(a, "{d}", .{l.off}),
+            .cells = Value{ .list = cells },
+            .text = line,
+        });
+    }
+    // Announce what changed — once per change, never per tick: a line
+    // logged here is itself a line, and a per-tick note would never end.
+    if (log_h != 0) {
+        var lbuf: [160]u8 = undefined;
+        const filter_changed = !std.mem.eql(u8, log_last_filter[0..log_last_filter_len], filter);
+        if (!log_started) {
+            _ = usys.log(log_h, std.fmt.bufPrint(&lbuf, "console: up total={d} shown={d}", .{ total, nkept }) catch "console: up");
+        } else if (filter_changed) {
+            _ = usys.log(log_h, std.fmt.bufPrint(&lbuf, "console: filter '{s}' matched={d} shown={d} total={d}", .{ filter, matched, nkept, total }) catch "console: filter");
+        }
+        if (log_started and paused != log_last_paused) _ = usys.log(log_h, if (paused) "console: paused" else "console: resumed");
+    }
+    log_started = true;
+    log_last_paused = paused;
+    log_last_filter_len = @min(filter.len, log_last_filter.len);
+    @memcpy(log_last_filter[0..log_last_filter_len], filter[0..log_last_filter_len]);
+    var sb: [128]u8 = undefined;
+    const summary = try a.dupe(u8, std.fmt.bufPrint(&sb, "{d} of {d} lines{s}{s}", .{ nkept, total, if (matched > nkept) " (the oldest matches are past the window)" else "", if (log_gap) "; older lines were lost to the ring" else "" }) catch "");
+    return try mshl.toValue(a, .{
+        .rows = Value{ .list = rows },
+        .available = true,
+        .total = @as(i64, @intCast(total)),
+        .shown = @as(i64, @intCast(nkept)),
+        .summary = summary,
+    });
+}
+
 const max_domain_rows = 256;
 const DomainSort = enum { name, id, state, cpu, mem, kobj, threads };
 var dom_buf: [max_domain_rows * shared.DomainRec.size]u8 = undefined;
@@ -1220,6 +1365,11 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // memory and kernel-object use of budget, and threads. Needs the
     // introspect (or spawner) cap; without one, `available` is false.
     if (std.mem.eql(u8, name, "domain-rows")) return .{ .params = &.{.{ .name = "sort", .shape = .string }}, .ret = .record };
+    // `log-rows FILTER PAUSED`: the machine log as rows { id, cells:
+    // [time, source, message], text }, newest last, lines containing
+    // FILTER; `available` false without the introspect grant. Paused, it
+    // pulls nothing new. For the Console app.
+    if (std.mem.eql(u8, name, "log-rows")) return .{ .params = &.{ .{ .name = "filter", .shape = .string }, .{ .name = "paused", .shape = .bool } }, .ret = .record };
     if (std.mem.eql(u8, name, "power")) return .{ .params = &.{.{ .name = "action", .shape = .string }}, .ret = .bool };
     return null;
 }
@@ -1394,6 +1544,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (is(u8, name, "domain-rows")) {
         if (args.len == 0 or args[0] != .str) return it.fail("domain-rows: a sort column expected", .{});
         return try domainRows(it, args[0].str);
+    }
+    if (is(u8, name, "log-rows")) {
+        if (args.len < 2 or args[0] != .str or args[1] != .bool) return it.fail("log-rows: a filter and a paused flag expected", .{});
+        return try logRows(it, args[0].str, args[1].bool);
     }
     if (is(u8, name, "sys-stats")) {
         if (init_chan == 0) return it.fail("sys-stats: this program cannot reach init", .{});
@@ -1730,4 +1884,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "domain-rows", "net-rows", "browse-rows" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "domain-rows", "log-rows", "net-rows", "browse-rows" };

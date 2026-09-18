@@ -1,0 +1,57 @@
+# Console: the machine's log, live. Every line the kernel and every
+# domain printed, from the kernel's ring (`log-rows`), one row per line —
+# time, source, message — the newest at the bottom and the list following
+# it as lines arrive. Filter keeps the lines containing a phrase (type it,
+# press Filter; Clear drops it); Pause stops pulling so a stretch can be
+# read, Resume catches up. Select a row to read its whole line below the
+# table. The log is the whole machine's, so the session's init grants
+# the introspect it needs only to an administrator; anyone else sees the
+# table say so.
+#
+# State: { filter, gen, paused, sel }. gen renumbers the filter field so
+# Clear reseeds it empty (a field keeps its own text by id).
+
+let final = (gui {
+    init:  { filter: "", gen: 0, paused: false, sel: "" }
+    title: "Console"
+    width: 900
+    tick:  1000
+    view: (fn [state] {
+        let l = (log-rows $state.filter $state.paused)
+        let picked = ($l.rows | find (fn [r] { $r.id == $state.sel }))
+        {
+          kind: "column"
+          gap:  10
+          children: [
+            { kind: "row", gap: 8, children: [
+                { kind: "field", id: ("filter-" + (str $state.gen)), flex: 1, value: $state.filter }
+                { kind: "button", id: "apply", label: "Filter", variant: "primary" }
+                { kind: "button", id: "clear", label: "Clear", disabled: ($state.filter == "") }
+                { kind: "button", id: "pause", label: (match $state.paused { true => "Resume"; _ => "Pause" }) }
+              ] }
+            {
+              kind: "list", id: "lines", key: "lines", h: 380, fit: true, grow: true
+              tail:     (not $state.paused)
+              selected: $state.sel
+              empty:    (match $l.available { true => "Nothing has been logged yet."; _ => "The machine log needs an administrator's session." })
+              cols:     [{ title: "Time", w: 3 } { title: "Source", w: 2 } { title: "Message", w: 11 }]
+              rows:     $l.rows
+            }
+            { kind: "label", muted: true, wrap: true, text: (match $picked { nothing => $l.summary; $r => $r.text }) }
+          ]
+        }
+      })
+    update: (fn [state, ev] {
+        match $ev.id {
+          "apply" => ($state | merge { filter: ($ev.fields | get ("filter-" + (str $state.gen))), sel: "" })
+          "clear" => ($state | merge { filter: "", gen: ($state.gen + 1), sel: "" })
+          "pause" => ($state | merge { paused: (not $state.paused) })
+          "lines" => (match ($ev.col >= 0) {
+              true => $state
+              _ => ($state | merge { sel: $ev.row })
+            })
+          _ => $state
+        }
+      })
+  })
+"console: closed"

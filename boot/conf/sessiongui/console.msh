@@ -1,0 +1,19 @@
+# The Console app (lazy — the launcher starts it; not on the dock, like a
+# utility). The machine's log, live, filtered, paused, followed. The
+# `introspect` grant is the whole point: the log is every domain's, so
+# a session init honours the grant only for an administrator's session;
+# for anyone else the table says so and shows nothing. Non-essential.
+{
+  app:       { name: "Console", description: "Read the machine's log as it is written", icon: console, window: "Console", dock: false, order: 70 }
+  image:     mshrun
+  script:    scripts/console.msh
+  budget:    { user: 16mb }
+  grant:     [log, bootfs, introspect]
+  essential: false
+  give: [
+    { tag: init, self: true }
+    { tag: display, session: true }
+    { tag: display_control, session: true }
+    { tag: font, session: true }
+  ]
+}

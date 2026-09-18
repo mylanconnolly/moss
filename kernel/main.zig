@@ -290,6 +290,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.console_test) {
+        _ = sched.spawn("boot-watch", consoleTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.browse_test) {
         _ = sched.spawn("boot-watch", browseTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -964,6 +969,11 @@ fn explorerTestWorker(_: u64) void {
 /// its confirm step; init logs the requested stop and the table flips.
 fn activityTestWorker(_: u64) void {
     systemDrill("activity");
+}
+/// The Console drill: the log viewer reads the kernel's ring through
+/// `log_read`, filters it, pauses, and closes.
+fn consoleTestWorker(_: u64) void {
+    systemDrill("console");
 }
 /// The interface-configuration drill: two NICs on two user networks; the
 /// script configures the second statically and echoes over both.

@@ -331,7 +331,9 @@ it — and no claim that any of this defeats Spectre-class attacks.
     `timer_arm`
   - memory: `shm_create`, `shm_map`, `shm_unmap`
   - domains: `spawn`, `domain_stat`, `domain_destroy`, `watch_deaths`,
-    `cap_drop`, `domain_list`, `sysinfo`
+    `cap_drop`, `domain_list`, `sysinfo`, `cap_kind`, `log_read` (the
+    recent log — every line printed, in a 128 KiB ring — by offset,
+    whole lines, behind the introspect cap like the ledger)
   - drivers: `mmio_map`, `irq_bind`, `irq_ack`, `dma_alloc`,
     `device_info`, `device_register`, `window_map`, `rng_seed`
   - virtual machines: `vm_create`, `vm_run`, `vm_set`,

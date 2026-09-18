@@ -72,6 +72,7 @@ pub fn dispatch(frame: *arch.trap.TrapFrame) void {
         .chan_same => sysChanSame(d, frame),
         .cap_kind => sysCapKind(d, frame),
         .domain_list => sysDomainList(d, frame),
+        .log_read => sysLogRead(d, frame),
         .sysinfo => sysSysinfo(d, frame),
         .getrandom => sysGetrandom(d, frame.arg(0), frame.arg(1)),
         .rng_seed => sysRngSeed(d, frame.arg(0), frame.arg(1), frame.arg(2)),
@@ -441,6 +442,30 @@ fn sysDomainList(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     }.f));
     return errno(.ok);
 }
+
+/// log_read(cap, from, buf, len): the recent log from offset `from` —
+/// see shared.Syscall.log_read. Gated like the ledger: reading what every
+/// domain printed is introspection of the whole machine.
+fn sysLogRead(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
+    if (!introspectOk(d, frame.arg(0))) return errno(.bad_handle);
+    const from = frame.arg(1);
+    const ptr = frame.arg(2);
+    const len = frame.arg(3);
+    if (len == 0 or len > log_read_max) return errno(.bad_arg);
+    domain.uaccessEnter(d);
+    defer domain.uaccessLeave(d);
+    if (!userRangeWritable(d, ptr, len)) return errno(.fault);
+    // Read into a kernel buffer under the log's lock, then out to the
+    // caller: the ring is never copied through a user pointer.
+    var tmp: [log_read_max]u8 = undefined;
+    const r = log.read(from, tmp[0..len]);
+    arch.uaccess.copyToUser(ptr, tmp[0..r.n]);
+    frame.set(1, r.n);
+    frame.set(2, r.start);
+    frame.set(3, r.head);
+    return errno(.ok);
+}
+const log_read_max = 2048;
 
 // ---------------------------------------------------------------- entropy
 

@@ -65,4 +65,40 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     const irqs = lk.lockIrqSave();
     defer lk.unlockRestore(irqs);
     arch.console.write(line);
+    for (line) |c| {
+        ring[ring_head % ring_size] = c;
+        ring_head += 1;
+    }
+}
+
+// The recent log as bytes: every line printed, kernel's and domains',
+// in a ring the `log_read` syscall copies out by offset — a log viewer's
+// window onto the machine, without a second logging path. The offset is
+// the count of bytes ever written, so a reader resumes where it left off
+// and can tell when the ring has dropped what it had not read.
+const ring_size = 128 << 10;
+var ring: [ring_size]u8 = undefined;
+var ring_head: u64 = 0;
+
+pub const Read = struct { n: usize, start: u64, head: u64 };
+
+/// Copy the log from offset `from` into `buf`: whole lines when more
+/// remains after the buffer (the last partial line is left for the next
+/// call), so a reader never splits one. `from` older than the ring holds
+/// resumes at the first whole line kept.
+pub fn read(from: u64, buf: []u8) Read {
+    const irqs = lk.lockIrqSave();
+    defer lk.unlockRestore(irqs);
+    const oldest = if (ring_head > ring_size) ring_head - ring_size else 0;
+    var start = @min(@max(from, oldest), ring_head);
+    if (from < oldest) {
+        while (start < ring_head and ring[start % ring_size] != '\n') start += 1;
+        if (start < ring_head) start += 1;
+    }
+    var n: usize = 0;
+    while (start + n < ring_head and n < buf.len) : (n += 1) buf[n] = ring[(start + n) % ring_size];
+    if (n == buf.len and start + n < ring_head) {
+        if (std.mem.lastIndexOfScalar(u8, buf[0..n], '\n')) |nl| n = nl + 1;
+    }
+    return .{ .n = n, .start = start, .head = ring_head };
 }

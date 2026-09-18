@@ -3158,6 +3158,41 @@ split first (above) and why `-Djobs=1` is the flake-hunt mode — a hang
 seen only at width 3 is a real hang or a drill too close to the edge,
 and the dump says which.
 
+**Console, the log viewer (as built, 2026-09-17).** Every debugging
+session on this machine ended in the serial file; a desktop that cannot
+show its own log is not finished either. The read side did not exist:
+`log` is a syscall that writes a line to the console, and nothing kept
+it. The kernel keeps it now — `log.print` appends every line it writes,
+kernel's and domains', to a 128 KiB ring under the same lock, indexed
+by the count of bytes ever written — and `log_read(introspect, from,
+buf, len)` copies from an offset, at most 2 KiB a call and whole lines
+(the last partial line waits for the next call), returning where the
+copy started and where the head is, so a reader resumes where it left
+off and can tell when the ring dropped what it never read (it resumes
+at the first whole line kept). The gate is the introspect cap: reading
+what every domain printed is introspection of the whole machine, the
+same authority as the ledger, and a session's init grants it only to an
+administrator. The copy goes through a kernel buffer, never through a
+user pointer under the log lock.
+
+Userspace mirrors the ring in `workcmds` (64 KiB, keyed by the same
+offsets, pulled on every call unless paused) and scans it into rows:
+`log-rows FILTER PAUSED` gives `{ id: offset, cells: [time, source,
+message], text }` for the lines containing FILTER, the newest 400,
+oldest first, with a summary of what the window holds; the kernel's own
+lines (`[info ]`) show as source `kernel`. The Console app is the
+smallest of the desktop's: a field, Filter, Clear (which renumbers the
+field's id so the runtime reseeds it empty), Pause / Resume, the table,
+and the selected row's whole line beneath it. Two runtime additions
+carried it: a list's `tail: true` scrolls to the newest row whenever
+rows arrive and otherwise leaves the scroll alone, so a paused log can
+be read; and the app's own notes (`console: up`, `console: filter`,
+`console: paused`) are logged on change, never per tick — a line logged
+per call is a new line per call, and the table would never settle. The
+`console` drill filters the boot log to the font service (four lines of
+forty-six), pauses, selects, closes; guishell opens Console as alice,
+guishellro sees the grant refused for bob and the table say so.
+
 **Activity, the task manager (as built, 2026-09-17).** A desktop with
 no way to see what is running, or to stop something that will not stop
 itself, is not finished. Activity is an mshl app (`scripts/activity.msh`,

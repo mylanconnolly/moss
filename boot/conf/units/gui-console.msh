@@ -1,0 +1,18 @@
+# The Console drill (profile console): mshrun runs the Console app on the
+# pointer-capable compositor. The host reads the table, filters it to one
+# source, pauses, selects a row, and closes the window. Essential: closing
+# Console ends the boot.
+{
+  image:     mshrun
+  script:    scripts/console.msh
+  grant:     [log, bootfs, introspect]
+  budget:    { user: 24mb }
+  profiles:  [console]
+  essential: true
+  give: [
+    { tag: init, self: true }
+    { tag: display, unit: compositor-ptr }
+    { tag: display_control, unit: compositor-ptr, control: true }
+    { tag: font, unit: fontsvc }
+  ]
+}

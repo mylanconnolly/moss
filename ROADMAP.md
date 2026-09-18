@@ -1569,6 +1569,16 @@ supervises), and memory history per unit beside the CPU one.
   sentinel against a boot-time clock under 500 ms (no ARP ever sent);
   the 24-byte script-path cap, relearned; a hyphenated script variable
   is a subtraction.
+- ✅ **Console, the log viewer** (2026-09-17): the kernel keeps the recent
+  log (every line it or any domain printed) in a 128 KiB ring, and a
+  `log_read` syscall behind the introspect cap copies it out by offset,
+  whole lines. `log-rows FILTER PAUSED` pulls it into the app's own ring
+  and answers rows — time, source, message — newest last, filtered by
+  substring. The Console app: a filter field with Filter and Clear,
+  Pause / Resume, a table that follows its end (`tail: true`), the
+  selected row's whole line beneath. Admin-gated like Activity's System
+  tab; the `console` drill filters, pauses and selects; guishell opens it
+  as alice, guishellro sees bob refused.
 - ✅ **Activity, the task manager** (2026-09-17): an mshl app over init's
   unit table — every session app and every service that has run, with
   state, CPU, memory of budget, threads and restarts; sortable headers, a
