@@ -1,0 +1,34 @@
+<!DOCTYPE html><html><head><title>acid1 ref</title><meta name="reftest-size" content="540x420">
+<style>
+/* Every box of Acid1 at the coordinates CSS 1 gives it, worked out by
+   hand from the page's em values (1em = 10px): the body's content box
+   is the origin. Nothing here floats or clears. */
+html { font-size: 10px; line-height: 10px; background-color: blue; color: white }
+body { margin: 15px; border: 5px solid black; padding: 0; width: 480px; background-color: white }
+#stage { position: relative; height: 315px }
+#stage div { position: absolute }
+#dt { left: 5px; top: 5px; width: 50px; height: 280px; padding: 10px; border: 5px solid black; background-color: rgb(204,0,0) }
+#dd { left: 95px; top: 5px; width: 340px; height: 270px; padding: 10px; border: 10px solid black }
+.li { width: 50px; height: 90px; padding: 10px; border: 5px solid black; background-color: #FC0; color: black }
+#li1 { left: 115px; top: 25px }
+#li3 { left: 375px; top: 25px }
+#bar { left: 205px; top: 25px; width: 140px; height: 90px; padding: 10px; background-color: black; color: white }
+#baz { left: 115px; top: 155px; width: 100px; height: 100px; padding: 10px; background-color: black; color: white }
+#bq { left: 255px; top: 155px; width: 50px; height: 90px; padding: 10px 0; border-style: solid; border-color: black; border-width: 10px 15px 20px 5px; background-color: #FC0; color: black }
+#h1 { left: 335px; top: 155px; width: 100px; height: 100px; padding: 10px; background-color: black; color: white }
+form { margin: 0; display: inline }
+p { margin: 0 }
+form p { line-height: 1.9 }
+</style></head><body>
+<div id="stage">
+<div id="dt">toggle</div>
+<div id="dd"></div>
+<div id="li1" class="li">the way</div>
+<div id="bar"><p>the world ends</p><form action="./" method="get"><p>bang <input type="radio" name="foo" value="off"></p><p>whimper <input type="radio" name="foo2" value="on"></p></form></div>
+<div id="li3" class="li">i grow old</div>
+<div id="baz">pluot?</div>
+<div id="bq">bar maids,</div>
+<div id="h1">sing to me, erbarme dich</div>
+</div>
+<p style="color: black; font-size: 1em; line-height: 1.3em">		 This is a nonsensical document, but syntactically valid HTML 4.0. All 100%-conformant CSS1 agents should be able to render the document elements above this paragraph indistinguishably (to the pixel) from this 			<a href="sec5526c.gif">reference rendering,</a>		 (except font rasterization and form widgets). All discrepancies should be traceable to CSS1 implementation shortcomings. Once you have finished evaluating this test, you can return to the <A HREF="sec5526c.htm">parent page</A>. 		</p>
+</body></html>

@@ -506,18 +506,45 @@ supervises), and memory history per unit beside the CPU one.
       their values, and the shell parses the user-agent sheet once. Not
       built, said so: `calc()`, `@import` fetching, `lab()` and the
       wide-gamut colours, the user origin.
-    - **(4) Layout and paint, on the host.** `lib/web/layout.zig`: the
-      box tree and CSS 2.1's visual formatting model — block and inline
-      formatting, margin collapse, floats and clears, line boxes,
-      `vertical-align`, `white-space`, `overflow`, lists, replaced boxes
-      as sized rectangles; text through the toolkit's `Typeface` vtable
-      (metrics from `lib/font` in the page, `Fixed` on the host) with a
-      UAX #14 line-breaking subset; `lib/web/paint.zig` draws a display
-      list into `ui.Canvas` (backgrounds, borders, text, images once
-      decoded), translated by the scroll offset. Host **reftests**: pairs
-      of fixtures that must paint identically, compared pixel-exact on
-      `Fixed` — the WPT model, run on the host with no QEMU. *Exit:*
-      reftest count printed; Acid1 paints as its reference.
+    - ✅ **(4) Layout and paint, on the host** (2026-09-18).
+      `lib/web/layout.zig`: the box tree (blocks, inline boxes, text
+      runs, anonymous blocks around inline runs, a block inside an
+      inline splitting it as §9.2.1.1 says, list markers) and CSS 2.1's
+      visual formatting model — widths from the containing block with
+      `auto` margins, margin collapsing between siblings and through
+      empty parents, floats with `clear` and the rules that keep a later
+      float below or right of an earlier one, block formatting context
+      roots, shrink-to-fit from min/max-content widths, line boxes
+      filled greedily at spaces with `white-space` processing, inline
+      padding and borders across lines, atomic inlines and replaced
+      boxes as sized rectangles, `vertical-align`, `text-align`
+      including `justify`, `text-indent`, `overflow` clipping, relative
+      and absolute positioning laid out last. Text is measured through
+      a `Fonts` vtable: the page domain will hand it its typefaces, the
+      host tests use `FixedFonts` (a cell half the size wide, a solid
+      block inset a pixel), so every reftest is a test of layout alone.
+      `lib/web/paint.zig` paints into `ui.Canvas` in the spec's order,
+      positioned boxes around the flow by `z-index`, translated by a
+      scroll offset. Host **reftests** under `tools/testdata/web/reftests`
+      (17 pairs; the count is printed and all must agree): the WPT
+      model, and Acid1 — the W3C page byte for byte against a reference
+      whose every box is placed by hand at the coordinates CSS 1 gives
+      it, worked out on paper; it agrees to the pixel. Acid1 found three
+      real bugs: `em` border widths resolved against the initial 16px
+      font (the body's `.5em` border came out 8px and pushed the
+      right-floated `dd` a row down); anonymous blocks copied their
+      parent's whole style, padding and `position` included, so an
+      inline run inside an absolutely positioned box was itself
+      "absolute" and never laid out; and a block inside an inline had
+      been an inline-block "for simplicity", which put two paragraphs on
+      one line. Two more from the pairs: text boxes carry their parent's
+      style, so a `position: absolute` span's text counted as out of
+      flow and vanished (the box's kind now decides), and a float
+      between two blocks was wrapped in an anonymous block that then
+      "collapsed through" and dropped it. Not built, said so: tables
+      beyond block rows, flex and grid, bidi and shaping, hyphenation,
+      the UAX #14 classes beyond spaces, `overflow: scroll` inside a
+      box, images (stage 8).
     - **(5) The page domain and the broker.** `user/webpage.zig` serves
       `PageReq`: loads through its broker, parses, styles, lays out,
       paints the viewport into the granted buffer, commits damage rects,

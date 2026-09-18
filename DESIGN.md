@@ -5894,6 +5894,79 @@ of tokens and the whole cascade well inside the line. *Lesson:* an
 arena makes growth free to write and dear to run; measure with a
 fixed buffer, where every doubling shows.
 
+**Stage 4, layout and paint (as built, 2026-09-18).** `layout.zig` is
+CSS 2.1's visual formatting model in 1700 lines, host-tested to the
+pixel. The box tree first: one box per element that generates one
+(`display: none` and `contents` generate none, replaced elements are
+atomic inlines, a text node is a text box carrying its parent's style),
+anonymous blocks wrapped around each run of inline-level children where
+a block container mixes both, and — the case a simplification is
+tempting — a block inside an inline splitting the inline into pieces
+around it, the pieces sharing node and style and the block hoisted to
+the enclosing block container (§9.2.1.1). Blocks then lay out top down:
+widths solved from the containing block with `auto` margins centring,
+top and bottom margins collapsed between siblings and through parents
+that hold nothing (a `Margin` keeps its largest positive and most
+negative part, as the spec adds them), floats placed by the nine rules
+(a later left float sits right of every earlier one it overlaps
+vertically or below it — the rule that puts Acid1's "pluot?" under
+"the way" and not in the gap beside it) and recorded per block
+formatting context so lines shorten around them and `clear` finds
+their bottoms, shrink-to-fit widths from min-content and max-content
+measures, and absolutely positioned boxes laid out last against their
+containing blocks. Inline content is collected into items (text runs
+with white-space already processed, spaces, inline-box open and close
+edges with their padding and borders, atomic inlines, markers) and
+filled greedily into line boxes at spaces, each line's height from the
+tallest aligned box with `vertical-align` shifting baselines,
+`text-align` spending the slack (`justify` across the line's spaces),
+and an outside list marker placed left of the first line. Text is
+measured through a `Fonts` vtable with three calls — advance, metrics,
+draw — that the page domain will fill with its typefaces and that
+`FixedFonts` fills on the host with a cell half the font size wide and
+a solid block a pixel inside it, so a reftest that differs differs in
+layout, never in a glyph. `paint.zig` walks the tree in the spec's
+order (a block's background and border, its in-flow children, its
+floats, its lines' inline backgrounds, then text and atomics) with
+`overflow` clipping a box's children to its padding box, the root's or
+body's background propagated to the canvas, and positioned boxes
+painted around the flow by `z-index`; the scroll offset is subtracted
+at paint, so scrolling is a repaint.
+
+The tests are reftests, the WPT model: `tools/testdata/web/reftests`
+holds pairs, `NAME.html` and `NAME-ref.html`, that must paint the same
+pixels, the reference reaching the picture by simpler means (fixed
+sizes, absolute positions, no floats). Seventeen agree and all must.
+The last is Acid1: W3C's CSS1 box-model page byte for byte, against a
+reference in which every box is placed by hand at the coordinates CSS
+1 gives it, worked out from the page's em values on paper, not from
+the engine. It agreed to the pixel on the fourth try; the three tries
+before it were bugs, each of a kind that no smaller fixture had asked
+about. `em` border widths were resolved against the initial 16px font
+instead of the element's — the body's `.5em` border came out 8px, and
+with 16px more of border the right-floated `dd` no longer fitted beside
+the `dt` and dropped a row. Anonymous blocks took their parent's whole
+computed style, `padding` and `position` included, so the inline run
+inside the absolutely positioned `#bar` of the reference was itself
+"absolute" and never laid out, and in the test page it was indented by
+its parent's padding; an anonymous box now has initial values with only
+the inherited properties copied. And the block-inside-inline case (a
+`form { display: inline }` around two paragraphs) had been an
+inline-block "because a reader notices it least", which put "bang" and
+"whimper" on one line; splitting the inline is a hundred lines and the
+reader notices nothing. Two more came from the smaller pairs: a text box
+carries its parent's style, so the text of a `position: absolute` span
+tested as out-of-flow and vanished (whether a box is a float or
+positioned is now decided by its kind as well), and a float between two
+blocks was gathered into an anonymous block that held nothing in flow,
+"collapsed through", and was positioned as empty without ever placing
+it. *Lessons:* (1) a reference derived by hand from the spec is the
+only reftest that can find a bug the engine and its author share; the
+sixteen pairs written beside the engine all passed once the harness
+did. (2) Any box that borrows another box's style — text, anonymous —
+must be exempted from every property that is not inherited, and the
+exemption belongs in one predicate, not at each use.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

@@ -242,7 +242,11 @@ it, add a `trace.record` at the suspect step.
 - **Host unit tests.** `zig build test` runs four test binaries: the
   shared ABI (handles, message codecs, rings, the boot archive), the
   devicetree parser, the `lib/` modules (lz4, xts, fabric certificates,
-  user credentials, layered settings, the msh language), and the full
+  user credentials, layered settings, the msh language, the web
+  libraries against their vendored corpora with pass counts printed
+  and floors asserted, and the layout engine's reftests — pairs of
+  pages under `tools/testdata/web/reftests` that must paint the same
+  pixels on the fixed test fonts, Acid1 among them), and the full
   mossfs suite including both crash-injection sweeps.
   `zig test lib/mshl.zig` alone runs in about a second and is the loop
   for shell-language work.

@@ -492,7 +492,7 @@ fn expandBorder(a: std.mem.Allocator, vals: []const css.Value, which: []const us
             style = v;
         } else if (color.parseValue(v) != null) {
             col = v;
-        } else if (borderWidthOf(v) != null) {
+        } else if (borderWidthOf(v, 16, .{ .width = 0, .height = 0 }) != null) {
             width = v;
         } else return;
     }
@@ -657,6 +657,15 @@ fn applyDeclared(a: std.mem.Allocator, out: *Computed, p: Prop, d: Declared, par
     }
 }
 
+/// The style of an anonymous box: initial values with the parent's
+/// inherited properties, as CSS 2.1 §9.2.1.1 gives it — nothing of the
+/// parent's position, float, box edges or sizes.
+pub fn anonymous(parent: *const Computed) Computed {
+    var out: Computed = .{};
+    inline for (comptime std.enums.values(Prop)) |p| if (p.inherited()) copyProp(&out, parent, p);
+    return out;
+}
+
 fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
     switch (p) {
         .display => out.display = from.display,
@@ -778,7 +787,7 @@ fn lengthAuto(v: css.Value, font_size: f64, env: Env) ?LengthAuto {
     };
 }
 
-fn borderWidthOf(v: css.Value) ?f64 {
+fn borderWidthOf(v: css.Value, font_size: f64, env: Env) ?f64 {
     if (ident(v)) |w| {
         const eq = std.ascii.eqlIgnoreCase;
         if (eq(w, "thin")) return 1;
@@ -786,7 +795,7 @@ fn borderWidthOf(v: css.Value) ?f64 {
         if (eq(w, "thick")) return 5;
         return null;
     }
-    return lengthPx(v, 16, .{ .width = 0, .height = 0 });
+    return lengthPx(v, font_size, env);
 }
 
 fn borderStyleOf(v: css.Value) ?BorderStyle {
@@ -839,7 +848,7 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
         },
         .margin_top, .margin_right, .margin_bottom, .margin_left => out.margin[sideOf(p)] = lengthAuto(v, font_size, env) orelse return error.Invalid,
         .padding_top, .padding_right, .padding_bottom, .padding_left => out.padding[sideOf(p)] = lengthPercent(v, font_size, env) orelse return error.Invalid,
-        .border_top_width, .border_right_width, .border_bottom_width, .border_left_width => out.border_width[sideOf(p)] = borderWidthOf(v) orelse (lengthPx(v, font_size, env) orelse return error.Invalid),
+        .border_top_width, .border_right_width, .border_bottom_width, .border_left_width => out.border_width[sideOf(p)] = borderWidthOf(v, font_size, env) orelse return error.Invalid,
         .border_top_style, .border_right_style, .border_bottom_style, .border_left_style => out.border_style[sideOf(p)] = borderStyleOf(v) orelse return error.Invalid,
         .border_top_color, .border_right_color, .border_bottom_color, .border_left_color => out.border_color[sideOf(p)] = switch (color.parseValue(v) orelse return error.Invalid) {
             .color => |c| c,
