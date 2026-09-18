@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes, nodevm };
 
 const Spec = struct {
     name: []const u8,
@@ -76,6 +76,7 @@ const specs = [_]Spec{
     .{ .name = "activity", .kind = .activity, .pass = "activity-test: PASS", .extra = "activity: stop win-beta ok=true", .always_extra = "init: stopped by request: win-beta", .extra2 = "win-alpha: closed", .append = "profile=activity", .timeout_s = 120 },
     .{ .name = "console", .kind = .console, .pass = "console-test: PASS", .extra = "console: filter 'fontsvc'", .always_extra = "console: paused", .extra2 = "console: closed", .append = "profile=console", .timeout_s = 120 },
     .{ .name = "nodes", .kind = .nodes, .pass = "nodes-test: PASS", .extra = "fab: remote node=1 ok=true", .always_extra = "nodes: members=2 up=2", .extra2 = "nodes: closed", .append = "profile=nodes", .timeout_s = 180 },
+    .{ .name = "nodevm", .kind = .nodevm, .pass = "nodevm-test: PASS", .extra = "fab: remote node=2 ok=true", .always_extra = "init: stopped by request: vmnode", .extra2 = "nodes: closed", .append = "profile=nodevm", .timeout_s = 240 },
     .{ .name = "desktop", .kind = .desktop, .pass = "desktop-test: PASS", .extra = "gui: Alpha moved to", .always_extra = "comp: surface raised", .extra2 = "win-beta: closed", .append = "profile=desktop", .timeout_s = 120 },
     .{ .name = "topbar", .kind = .topbar, .pass = "topbar-test: PASS", .extra = "topbar: exit note=logging out", .always_extra = "topbar: popup at", .append = "profile=topbar", .timeout_s = 120 },
     .{ .name = "dock", .kind = .dock, .pass = "dock-test: PASS", .extra = "dock: activate win-alpha", .always_extra = "win-alpha: closed", .append = "profile=dock", .timeout_s = 120 },
@@ -445,7 +446,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .netconf or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .netconf or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor or spec.kind == .nodevm) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -497,6 +498,22 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),
+        // The guest-node drill from the desktop's Nodes app: the vmnode
+        // devices plus a display, keyboard, tablet and QMP.
+        .nodevm => {
+            try appendDisk(&args, disk); // the fabric keeps its identity in state/
+            try args.appendSlice(gpa, &.{
+                "-netdev", "hubport,id=h1,hubid=0",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+                "-netdev", "hubport,id=h2,hubid=0",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h2",
+                "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
+                "-device", gpu_device,
+                "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+                "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
+                "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
+            });
+        },
         // Two NICs on one hub (host node 1, guest node 2) and a second
         // entropy device for the guest.
         .vmnode => try args.appendSlice(gpa, &.{
@@ -583,15 +600,20 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
                 "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
                 "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
             });
-            // Two NICs, as run-gui boots: the Network tab must list both
-            // (a 96px list once showed one and hid the other behind a
-            // scrollbar). The cluster unit takes net0 static and leases
-            // net1 from its own user network.
+            // The NICs as run-gui boots them: two on a hub (the cluster
+            // segment; the second is a guest node's, passed through by
+            // vmnode) and one on QEMU's user network, leased — the Network
+            // tab must list the two the cluster unit takes (a 96px list once
+            // showed one and hid the other behind a scrollbar). And a second
+            // entropy device, the guest's.
             if (spec.kind == .guishell or spec.kind == .guishellro) try args.appendSlice(gpa, &.{
-                "-netdev", "user,id=n0",
-                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
-                "-netdev", "user,id=n1",
-                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n1",
+                "-netdev", "hubport,id=h1,hubid=0",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+                "-netdev", "hubport,id=h2,hubid=0",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h2",
+                "-netdev", "user,id=n2",
+                "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n2",
+                "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
             });
             try appendDisk(&args, disk);
         },
@@ -649,6 +671,9 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     if (spec.kind == .console) {
         if (!try consoleDrive(spec, log_path, polls)) return false;
+    }
+    if (spec.kind == .nodevm) {
+        if (!try nodevmDrive(spec, log_path, polls)) return false;
     }
     if (spec.kind == .desktop) {
         if (!try desktopDrive(spec, log_path, polls)) return false;
@@ -4409,6 +4434,47 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
 /// explorer re-lists that node over the fabric on the way out and reports
 /// the node it browsed and the row count, so a non-empty listing from
 /// node=1 proves the whole remote path.
+/// The guest-node drill (`nodevm`): the Nodes app on one machine starts
+/// a guest node — init starts the VMM, the guest boots a moss kernel and
+/// joins the fabric as node 2 — then checks it over the fabric and stops
+/// it. The table goes from one row to two and the guest section flips.
+fn nodevmDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
+    if (!try waitLogN(log_path, "gui: ready", 1, "the Nodes app never came up", spec, polls)) return false;
+    if (!try waitLogN(log_path, "nodes: members=1 up=1", 1, "the table never listed this machine", spec, polls)) return false;
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log_path);
+        return false;
+    };
+    defer q.close();
+    sleepMs(500);
+    _ = q.screendump(check_dir ++ "/nodevm-alone.ppm");
+    const start = widgetCenter(readLog(log_path), "start") orelse return sfail(spec, log_path, "no Start button was logged");
+    if (!clickScanout(&q, start[0], start[1])) return sfail(spec, log_path, "click Start");
+    if (!try waitLogN(log_path, "machine: launch vmnode ok=true", 1, "init did not start the guest node's VMM", spec, polls)) return false;
+    if (!try waitLogN(log_path, "init: started unit vmnode", 1, "the VMM never came up", spec, polls)) return false;
+    // The guest boots a whole moss (its lines come through the VMM as
+    // `guest| …`) and joins: the membership goes to two.
+    if (!try waitLogN(log_path, "nodes: members=2 up=2", 1, "the guest never joined the fabric", spec, polls)) return false;
+    const g = waitListGeom(spec, log_path, polls, "nodes") orelse return sfail(spec, log_path, "the table's geometry was never logged");
+    sleepMs(500);
+    _ = q.screendump(check_dir ++ "/nodevm-joined.ppm");
+    const row = nodeRow(readLog(log_path), "2") orelse return sfail(spec, log_path, "the table never said which row is node 2");
+    if (!clickScanout(&q, g[0], g[1] + g[2] * row + g[2] / 2)) return sfail(spec, log_path, "select node 2");
+    sleepMs(400);
+    const check = widgetCenter(readLog(log_path), "check") orelse return sfail(spec, log_path, "no Check button was logged");
+    if (!clickScanout(&q, check[0], check[1])) return sfail(spec, log_path, "click Check");
+    if (!try waitLogN(log_path, "fab: remote node=2 ok=true", 1, "the guest did not answer the check", spec, polls)) return false;
+    sleepMs(600);
+    _ = q.screendump(check_dir ++ "/nodevm-checked.ppm");
+    const stop = widgetCenter(readLog(log_path), "stop") orelse return sfail(spec, log_path, "no Stop button was logged");
+    if (!clickScanout(&q, stop[0], stop[1])) return sfail(spec, log_path, "click Stop");
+    if (!try waitLogN(log_path, "machine: stop vmnode ok=true", 1, "the guest node was not stopped", spec, polls)) return false;
+    if (!try waitLogN(log_path, "init: stopped by request: vmnode", 1, "init did not stop the VMM", spec, polls)) return false;
+    sleepMs(800);
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Nodes");
+    return try waitLogN(log_path, "nodes: closed", 1, "Nodes did not close", spec, polls);
+}
+
 /// The row index the Nodes table gave node `node` ("nodes: row N
 /// node=M"), from the last membership change.
 fn nodeRow(content: []const u8, node: []const u8) ?u32 {

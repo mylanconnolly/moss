@@ -139,6 +139,15 @@ and bytes (`shm_account`, 128 MB), the filesystem's derived views
 (`max_views`, 64), a domain's mapping windows (`max_mappings`), and
 the system init's user budget (`root.zig`, 96 MB) — a spawn refusal
 prints the account chain; a refused shared buffer prints the ledger.
+A unit's `grant: [hypervisor]` (a VMM) is parsed by the system init
+only and honoured by the kernel only when the spawner holds the cap;
+root has it from the kernel. A session app that must start or stop one
+of the MACHINE's units (a guest node's VMM) takes `{ tag: sysinit,
+session: true, optional: true }` — the session manager passes the
+machine's init to an administrator's session — and calls
+`machine-launch` / `machine-unit-up` / `machine-unit-stop`; its own
+`init` is the session's. Reading init's unit list needs two pages (105
+units, 64 per page).
 A unit's `grant: [introspect]` (the machine's ledger, `domain_list`;
 the machine's log, `log_read`) is honoured by the system init as
 written and by a session init only for an administrator's session; a

@@ -1,8 +1,10 @@
 # The Nodes app (lazy — the launcher starts it; not on the dock, like a
-# utility). The machines this one shares a fabric with, and what they
-# answer. The `fabric` give is optional: a session whose machine runs no
-# fabric service gets the app anyway, and it says the machine is not part
-# of a fabric. Non-essential.
+# utility). The machines this one shares a fabric with, what they answer,
+# and a guest node this machine can start. The `fabric` give is optional:
+# a session whose machine runs no fabric service gets the app anyway, and
+# it says the machine is not part of a fabric. `sysinit` — the machine's
+# init, to start and stop the guest node's VMM — reaches only an
+# administrator's session; anyone else sees Start refused. Non-essential.
 {
   app:       { name: "Nodes", description: "See the machines on this fabric and what they answer", icon: network, window: "Nodes", dock: false, order: 80 }
   image:     mshrun
@@ -16,5 +18,6 @@
     { tag: display_control, session: true }
     { tag: font, session: true }
     { tag: fabric, session: true, optional: true }
+    { tag: sysinit, session: true, optional: true }
   ]
 }

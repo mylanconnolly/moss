@@ -307,6 +307,9 @@ fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
     if (flags & shared.SpawnFlags.grant_bootfs != 0) manifest.grant_bootfs = true;
     if (flags & shared.SpawnFlags.grant_introspect != 0) manifest.grant_introspect = true;
     if (flags & shared.SpawnFlags.grant_clock != 0) manifest.grant_clock = true;
+    // The hypervisor is the spawner's to pass on only if it holds it: a
+    // domain without the cap cannot mint one for a child.
+    if (flags & shared.SpawnFlags.grant_hypervisor != 0) manifest.grant_hypervisor = d.captable.?.holds(.hypervisor);
     if (limits & 0xffff_ffff != 0) manifest.kobj_limit = (limits & 0xffff_ffff) << 10;
     if (limits >> 32 != 0) manifest.user_limit = (limits >> 32) << 10;
     manifest.cpu_permille = frame.arg(6) & 0xffff;

@@ -7,7 +7,10 @@
   budget: { user: 8mb }
   give: [
     { tag: device, device: net }
-    { tag: device, device: net, index: 1, optional: true }
+    # The third NIC, when there is one: the desktop's way out (QEMU's user
+    # network, leased). The second is a guest node's (vmnode passes it
+    # through), so it is not taken here.
+    { tag: device, device: net, index: 2, optional: true }
     { tag: buf, shm: 1 }
     { file: conf/net-cluster.msh }
     { tag: conf, fs: conf/app, ro: true, optional: true }

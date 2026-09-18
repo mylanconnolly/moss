@@ -1,0 +1,21 @@
+# A guest node: the VMM (arg 3: a pool node on one vCPU — a four-vCPU
+# guest under a busy host can start a thread on a null stack, see the
+# VMM) boots a moss kernel in a virtual machine
+# with the machine's second NIC and second entropy device passed through,
+# and the guest joins this machine's fabric as node 2 — one box, two pool
+# nodes. Lazy (no profiles): the Nodes app starts it through the machine's
+# init (`machine-launch vmnode`) and stops it (`machine-unit-stop`), which
+# destroys the VMM and with it the VM. Its budget is the guest's RAM
+# (128 MB) plus the VMM's own; it nests in init's, so init's slice is
+# sized for one guest beside a desktop. The hypervisor grant is honoured
+# only by the system init and only when root holds the cap.
+{
+  image:  vmm
+  arg:    3
+  budget: { kobj: 8mb, user: 160mb }
+  grant:  [log, bootfs, hypervisor]
+  give: [
+    { tag: device, device: rng, index: 1 }
+    { tag: device, device: net, index: 1 }
+  ]
+}

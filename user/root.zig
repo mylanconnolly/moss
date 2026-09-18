@@ -93,12 +93,14 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
         stage.handle,
         arg,
         ch.data[0],
-        shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs | shared.SpawnFlags.chan_side_a,
-        // init's slice: 12MB kobj, 96MB user (its units nest inside). 64MB
+        shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs | shared.SpawnFlags.chan_side_a | shared.SpawnFlags.grant_hypervisor,
+        // init's slice: 12MB kobj, 256MB user (its units nest inside). 64MB
         // ran out on 2026-09-17 once every GUI boot also ran the network
-        // service — the launch of one more app was refused with the
-        // system tree at 59MB.
-        usys.kbLimits(12 << 10, 96 << 10),
+        // service; 96MB cannot hold a guest node (a VMM with 128MB of
+        // guest RAM) beside the desktop. The hypervisor flag is honoured
+        // only when root holds the cap (the kernel checks), so a boot
+        // without one simply has no VMM to start.
+        usys.kbLimits(12 << 10, 256 << 10),
     );
     _ = usys.capDrop(ch.data[0]);
     if (r.err != .ok) {

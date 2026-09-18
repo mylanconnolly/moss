@@ -286,6 +286,10 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     const init_cap: u64 = if (setup.has(.init)) setup.cap(.init) else 0;
     workcmds_on = true;
     workcmds.setup(worker_spawner, loadWorkerStage, view_chan, view_buf, fab_chan, init_cap);
+    // The machine's init for the `machine-*` commands: the session
+    // manager's `sysinit` when it gave one (an administrator's session),
+    // else our own init — which IS the machine's for a system unit.
+    workcmds.machine_init = if (setup.has(.sysinit)) setup.cap(.sysinit) else init_cap;
     workcmds.log_h = log_h;
     fabcmds.log_h = log_h;
     // Always wired: `net-ifaces` answers an empty list without a view and

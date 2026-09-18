@@ -340,6 +340,10 @@ fn parseUnit(name: []const u8, v: Value) ?Unit {
                 if (!session_mode or session_admin) u.flags |= shared.SpawnFlags.grant_introspect else logLine("init: introspect grant refused (not an administrator's session): ", name);
             }
             if (std.mem.eql(u8, gn, "clock")) u.flags |= shared.SpawnFlags.grant_clock;
+            // The hypervisor (a VMM unit): the machine's, never a session's.
+            if (std.mem.eql(u8, gn, "hypervisor")) {
+                if (!session_mode) u.flags |= shared.SpawnFlags.grant_hypervisor else logLine("init: hypervisor grant refused (a session): ", name);
+            }
         };
     }
     if (r.get("give")) |g| {

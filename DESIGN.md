@@ -3158,6 +3158,61 @@ split first (above) and why `-Djobs=1` is the flake-hunt mode — a hang
 seen only at width 3 is a real hang or a drill too close to the edge,
 and the dump says which.
 
+**Nodes, stages 2 and 3: the desktop is a node, and can start one (as
+built, 2026-09-18).** Stage 1 listed the fabric from a drill machine;
+the desktop's own session had no fabric cap and no fabric. Now the
+guishell session manager holds `{ tag: fabric, unit: fabsvc }`, which
+pulls the fabric stack up on every desktop boot (fabsvc → fabroot →
+net-cluster; the guishell machine is node 1 and the seed, so nothing
+waits on a peer), and hands the service's channel to every GUI
+session — Nodes and Files' Network sidebar see the cluster — and to an
+administrator's session also `sysinit`: the machine's init, its front
+channel, so an app there can start and stop the machine's units. A
+session's own `init` is only the session's. `machine-launch NAME`,
+`machine-unit-up NAME` and `machine-unit-stop NAME` in workcmds go to
+that channel when a session has it, and to the app's own init when it
+does not, which for a system unit is the machine's; each logs its
+outcome. The unit-list buffer they read grew to two pages: the machine's
+init has 105 units and one page holds 64, so a unit past the page was
+"down" for ever.
+
+The unit is `vmnode`: the VMM with `grant: [hypervisor]` — a grant init
+parses now (the system init only; a session's is refused and logged),
+carried by a spawn flag the kernel honours only when the spawner holds
+the cap itself (root gets it from the kernel and passes it to init, so a
+boot without a hypervisor has no VMM to start) — with the machine's
+second NIC and second entropy device passed through. Its budget is the
+guest's 128 MB plus the VMM's own; init's slice went to 256 MB and
+root's to 320 to hold that beside the desktop. The Nodes app's Start is
+`machine-launch vmnode`; the guest boots a whole moss in about a second
+and a half, joins the fabric as node 2 (the table goes to two rows, the
+Check answers with the guest's uptime), and Stop destroys the VMM and
+the VM with it. Run sends a line of msh to the selected peer the same
+way Check does and shows the value. `run-gui` and the desktop drills
+boot the three NICs and two entropy devices this needs: two NICs on a
+hub (the cluster segment; the second is the guest's) and one on QEMU's
+user network, so the cluster unit takes `index: 0` and the optional
+`index: 2`.
+
+The guest node runs on ONE vCPU, and that is a decision with a bug
+behind it. A four-vCPU guest under a busy host can start a fresh thread
+on a null stack — the guest's fabsvc faults at its worker trampoline's
+first instruction with SP_EL0 = 0 (`far=0xfffffffffffffff0`), the guest
+kernel panics, and the node never joins. Seen 3/3 from the desktop,
+1/3 in the `vmnode` drill under three parallel drills, never with one
+vCPU, and — the mark of a timing bug — never once anything touched the
+guest's switch path: a log line in the thread-start path, a flag
+compare in the scheduler, or a trace-ring record per switch each made
+it vanish (8/8, 6/6). A diagnostic showed every new thread handed a
+valid stack pointer, so the pointer is lost between the kernel's read
+of the start block and the thread's first user instruction; the one
+interleaving that yields entry valid and stack zero is two cores
+running the same fresh thread (the second reads the entry before the
+first zeroes the block and the stack after). Not found in the
+scheduler's enqueue/pick or the hypervisor's entry stub by reading. The
+`vmnode` drill keeps four vCPUs (it asserts them); the `nodevm` drill
+and the desktop use one. ROADMAP carries the recipe.
+
 **Nodes, stage 1: the fabric has a face (as built, 2026-09-17).** The
 fabric has been real since phase 11 — nodes join, publish services,
 dial each other, run stages on each other — and none of it was visible

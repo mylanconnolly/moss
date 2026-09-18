@@ -41,6 +41,11 @@ pub var log_h: u64 = 0;
 /// A cap that reads the machine's ledger (`domain_list`): the spawner
 /// when we have one, else an introspect grant; 0 = neither.
 pub var introspect: u64 = 0;
+/// The machine's init, for `machine-launch` / `machine-unit-up` /
+/// `machine-unit-stop`: a session app holds the session's init as `init`
+/// and, if an administrator's, the machine's as `sysinit`; a system unit
+/// has one init and it is the machine's. 0 = neither.
+pub var machine_init: u64 = 0;
 
 pub fn setup(spawner_cap: u64, load: LoadFn, view_chan: u64, view_buf: [*]u8, fabric: u64, init: u64) void {
     spawner = spawner_cap;
@@ -1106,15 +1111,22 @@ fn noteRows(recs: []const shared.UnitRec, order: []const usize, order_hash: u64)
 /// the honest "is the app still running" the dock needs. Any error (no
 /// buffer, init unreachable, the unit unknown) reads as down.
 fn unitUp(name: []const u8) bool {
-    if (init_chan == 0) return false;
-    const sh = usys.shmCreate(1);
+    return unitUpOn(init_chan, name);
+}
+
+fn unitUpOn(chan: u64, name: []const u8) bool {
+    if (chan == 0) return false;
+    // Two pages: the machine's init has more units than one page of
+    // records holds (105 on 2026-09-18), and a unit past the page looked
+    // down for ever.
+    const sh = usys.shmCreate(2);
     if (sh.err != .ok) return false;
     defer _ = usys.capDrop(sh.data[0]);
     const m = usys.shmMap(sh.data[0]);
     if (m.err != .ok) return false;
     defer _ = usys.shmUnmap(m.data[0]);
     const buf: [*]u8 = @ptrFromInt(m.data[0]);
-    const n = switch (usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .list, sh.data[0])) {
+    const n = switch (usys.callTyped(shared.InitRequest, shared.InitReply, chan, .list, sh.data[0])) {
         .ok => |rep| switch (rep) {
             .listed => |l| l.n,
             else => return false,
@@ -1129,6 +1141,35 @@ fn unitUp(name: []const u8) bool {
         if (std.mem.eql(u8, rec.name[0..nlen], name)) return rec.up != 0;
     }
     return false;
+}
+
+/// Start a unit of the machine's through its init, or stop one: what the
+/// Nodes app does to a guest node's VMM. Each logs its outcome.
+fn machineLaunch(it: *mshl.Interp, name: []const u8) mshl.Error!Value {
+    if (machine_init == 0) return try errResult(it, "no machine init");
+    const w = shared.strToWords(name);
+    const ok = switch (usys.callTypedCap(shared.InitRequest, shared.InitReply, machine_init, .{ .connect_named = .{ .a = w[0], .b = w[1] } }, 0)) {
+        .ok => |ok| blk: {
+            if (ok.cap != 0) _ = usys.capDrop(ok.cap);
+            break :blk ok.rep == .connected;
+        },
+        .err => false,
+    };
+    var l: [64]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "machine: launch {s} ok={}", .{ name, ok }) catch "machine: launch");
+    return if (ok) try okResult(it, .{ .str = try it.arena.dupe(u8, name) }) else try errResult(it, "refused");
+}
+
+fn machineStop(name: []const u8) bool {
+    if (machine_init == 0) return false;
+    const w = shared.strToWords(name);
+    const ok = switch (usys.callTyped(shared.InitRequest, shared.InitReply, machine_init, .{ .stop_named = .{ .a = w[0], .b = w[1] } }, 0)) {
+        .ok => |r| r == .stopped,
+        .err => false,
+    };
+    var l: [64]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&l, "machine: stop {s} ok={}", .{ name, ok }) catch "machine: stop");
+    return ok;
 }
 
 /// Dial a durable service unit through init: init starts it (or restarts
@@ -1434,6 +1475,11 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     // mark when the app it launched exits. Reachable only from a program
     // that holds init's front channel.
     if (std.mem.eql(u8, name, "unit-up")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
+    // The machine's units, through the machine's init (see machine_init):
+    // start one, ask whether it is up, stop one.
+    if (std.mem.eql(u8, name, "machine-launch")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = call_result };
+    if (std.mem.eql(u8, name, "machine-unit-up")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
+    if (std.mem.eql(u8, name, "machine-unit-stop")) return .{ .params = &.{.{ .name = "unit", .shape = .string }}, .ret = .bool };
     // `unit-rows SORT` is the Activity app's table: every unit this
     // program's init supervises, with what each costs, as list-widget rows
     // ordered by SORT (name, state, cpu, mem, threads, restarts) plus the
@@ -1644,6 +1690,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (is(u8, name, "sys-stats")) {
         if (init_chan == 0) return it.fail("sys-stats: this program cannot reach init", .{});
         return try sysStats(it);
+    }
+    if (is(u8, name, "machine-launch") or is(u8, name, "machine-unit-up") or is(u8, name, "machine-unit-stop")) {
+        if (args.len == 0 or args[0] != .str) return it.fail("{s}: a unit name expected", .{name});
+        if (args[0].str.len == 0 or args[0].str.len > 16) return it.fail("{s}: a unit name is 1..16 bytes", .{name});
+        if (is(u8, name, "machine-launch")) return try machineLaunch(it, args[0].str);
+        if (is(u8, name, "machine-unit-up")) return .{ .bool = unitUpOn(machine_init, args[0].str) };
+        return .{ .bool = machineStop(args[0].str) };
     }
     if (is(u8, name, "unit-stop")) {
         if (init_chan == 0) return it.fail("unit-stop: this program cannot reach init", .{});
@@ -1976,4 +2029,4 @@ fn raceWorkers(it: *mshl.Interp, items: []const Value) mshl.Error!Value {
     return try errResult(it, "race: no worker became ready");
 }
 
-pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "domain-rows", "log-rows", "node-rows", "net-rows", "browse-rows" };
+pub const command_names = [_][]const u8{ "spawn", "serve", "call", "dispatch", "await", "race", "publish", "lookup", "dial", "launch", "signal", "wait", "notify", "unit-up", "unit-rows", "unit-stop", "sys-stats", "domain-rows", "log-rows", "node-rows", "net-rows", "browse-rows", "machine-launch", "machine-unit-up", "machine-unit-stop" };

@@ -196,6 +196,30 @@ text scales, and resolutions. The following follow-ons are recorded for later;
 they are not prerequisites for this GUI work or a commitment to build them all
 at once.
 
+**An SMP guest can start a thread on a null stack (2026-09-18, open).**
+A four-vCPU moss guest under a busy host: fabsvc's first worker faults
+at its trampoline's first instruction with SP_EL0 = 0
+(`far=0xfffffffffffffff0 elr=<usys.threadTrampoline>`), the guest
+kernel panics "reached unreachable code", the node never joins. Recipe:
+`vmnode.msh` with `arg: 2` (four vCPUs) and `zig build check
+-Donly=nodevm -Dsoak=3 -Djobs=1` — 3/3 on 2026-09-18; `-Donly=vmnode
+-Dsoak=3 -Djobs=3` gave 1/3. One vCPU (`arg: 3`, what the desktop
+uses) never fails. Every perturbation of the guest's switch path hides
+it (a log in `extraThreadEntry`, a compare in `scheduleLocked`, a
+trace record per switch), so the probe must be non-perturbing: record
+from the HOST side (`v.sp_el0`/`v.pc` at each guest exit into the host
+trace ring, dumped when the VMM exits), or a guest-side counter
+checked only at the fault. The interleaving that fits — two cores
+running one fresh thread, the second reading the start block after the
+first zeroed it — points at the scheduler's pick/steal or the
+hypervisor's SGI wake of a WFI'd vCPU; neither shows it by reading.
+
+**Nodes, what is left.** A session on the fabric acts with the
+machine's fabric identity — a remote stage runs as whatever the peer's
+fabric spawns, not as the user — so per-user identity on the fabric is
+open; remote files in Nodes (Files' Network sidebar has them);
+starting more than one guest (the second NIC is the one guest's).
+
 **Menu extensions.** The global bar uses typed built-in profiles today. Add
 client-defined menu schemas, nested submenus, and scrollable overflow when
 applications need menus beyond those profiles.
@@ -1569,6 +1593,20 @@ supervises), and memory history per unit beside the CPU one.
   sentinel against a boot-time clock under 500 ms (no ARP ever sent);
   the 24-byte script-path cap, relearned; a hyphenated script variable
   is a subtraction.
+- ✅ **Nodes, stages 2 and 3: the desktop is a node, and starts one**
+  (2026-09-18): the guishell session manager holds the fabric and hands
+  it to every GUI session, and the machine's init (`sysinit`) to an
+  administrator's; `machine-launch` / `machine-unit-up` /
+  `machine-unit-stop`; init parses `grant: [hypervisor]` (system init
+  only, honoured by the kernel only when the spawner holds the cap);
+  the `vmnode` unit boots a moss guest with the second NIC and entropy
+  device passed through, which joins the fabric as node 2; Nodes gains
+  Start / Stop for it and Run (a line of msh on the selected peer);
+  run-gui and the desktop drills boot three NICs and two entropy
+  devices; init 256 MB, root 320 MB. The `nodevm` drill starts the
+  guest from the app, sees it join, checks it, stops it. Found: the
+  machine's unit list overran one page (105 units, 64 per page), and
+  the SMP-guest fresh-thread bug below.
 - ✅ **Nodes, stage 1: the fabric's membership** (2026-09-17): a Nodes
   app over `node-rows` — this machine and every peer the fabric knows,
   reachable or not, with free memory — and a Check that runs `remote

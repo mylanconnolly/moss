@@ -1,0 +1,20 @@
+# The guest-node drill (profile nodevm): the Nodes app on a machine with
+# two NICs on one hub and two entropy devices, holding the machine's
+# init (its own — it is a system unit) and the fabric. The host starts
+# the guest node from the app: init starts `vmnode`, the guest boots and
+# joins this fabric as node 2, the table lists it, Check makes it run a
+# stage, and Stop ends it. Essential: closing the app ends the boot.
+{
+  image:     mshrun
+  script:    scripts/nodes.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [nodevm]
+  essential: true
+  give: [
+    { tag: init, self: true }
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: fabric, unit: fabsvc }
+  ]
+}

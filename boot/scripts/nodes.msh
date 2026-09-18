@@ -5,9 +5,15 @@
 # knows about it; Check runs a tiny stage on that peer over the fabric
 # (`remote NODE { now }`) and reports what came back, which is the
 # difference between a node the membership remembers and one that
-# answers. A machine with no fabric cap says so and shows nothing.
+# answers; Run sends a line of msh the same way and shows the value.
+# Below, the guest node: this machine can boot a moss kernel in a
+# virtual machine (the `vmnode` unit, through the machine's init) which
+# joins the fabric as node 2 — Start and Stop, for an administrator. A
+# machine with no fabric cap says so and shows nothing.
 #
-# State: { sel, note }. sel = the selected node's id, as its row's id.
+# State: { sel, note, gen, out }. sel = the selected node's id, as its
+# row's id; gen renumbers the Run field so it reseeds; out = Run's last
+# value, as data text.
 
 def uptime-text [ms] {
   # `int` answers a result (ok N), so unwrap it before it is rendered.
@@ -49,13 +55,42 @@ def check-sel [state] {
   }
 }
 
+# Run a line of msh on the selected node and keep its value as text.
+def run-sel [state, line] {
+  let n = (node-rows $state.sel)
+  match ($n.have and ($line != "")) {
+    true => (match (remote $n.node $line) {
+        ok $v => ($state | merge { out: ($v | to-data) })
+        err $e => ($state | merge { out: ("The node did not answer: " + $e) })
+      })
+    _ => $state
+  }
+}
+
+# The guest node: start its VMM through the machine's init, or stop it.
+def guest-start [state] {
+  match (machine-launch "vmnode") {
+    ok _ => ($state | merge { note: "Starting a guest node; it joins the fabric as node 2 once it has booted." })
+    err $e => ($state | merge { note: ("This session cannot start a node (" + $e + "); an administrator's can.") })
+  }
+}
+
+def guest-stop [state] {
+  match (machine-unit-stop "vmnode") {
+    true => ($state | merge { note: "The guest node was stopped." })
+    _ => ($state | merge { note: "The guest node could not be stopped." })
+  }
+}
+
 let final = (gui {
-    init:  { sel: "", note: "" }
+    init:  { sel: "", note: "", gen: 0, out: "" }
     title: "Nodes"
     width: 640
     tick:  2000
     view: (fn [state] {
         let n = (node-rows $state.sel)
+        let guest = (machine-unit-up "vmnode")
+        let peer = ($n.have and $n.up and (not $n.self))
         {
           kind: "column"
           gap:  12
@@ -65,7 +100,7 @@ let final = (gui {
                 { kind: "label", muted: true, text: $n.summary }
               ] }
             {
-              kind: "list", id: "nodes", key: "nodes", h: 260, auto: true, fit: true
+              kind: "list", id: "nodes", key: "nodes", h: 172, fit: true
               selected: $state.sel
               empty:    (match $n.available { true => "No node has joined the fabric yet."; _ => "This machine is not part of a fabric." })
               cols:     [{ title: "Name", w: 3 } { title: "Role", w: 4 } { title: "State", w: 3 } { title: "Memory", w: 4 }]
@@ -75,8 +110,21 @@ let final = (gui {
                 { kind: "label", text: (node-title $n) }
                 { kind: "label", muted: true, wrap: true, text: (node-detail $n) }
                 { kind: "row", gap: 8, children: [
-                    { kind: "button", id: "check", label: "Check", variant: "primary", disabled: (not ($n.have and $n.up and (not $n.self))) }
+                    { kind: "button", id: "check", label: "Check", variant: "primary", disabled: (not $peer) }
                     { kind: "label", muted: true, flex: 1, wrap: true, text: $state.note }
+                  ] }
+                { kind: "row", gap: 8, children: [
+                    { kind: "field", id: ("cmd-" + (str $state.gen)), flex: 1, label: "Run on this node (a line of msh)", value: "" }
+                    { kind: "button", id: "run", label: "Run", disabled: (not $peer) }
+                  ] }
+                { kind: "label", muted: true, wrap: true, text: $state.out }
+              ] }
+            { kind: "section", gap: 8, children: [
+                { kind: "label", text: (match $guest { true => "A guest node is running on this machine."; _ => "No guest node is running." }) }
+                { kind: "label", muted: true, wrap: true, text: "A guest node is a moss kernel booted in a virtual machine here, with the second NIC and entropy device passed through; it joins this fabric as node 2." }
+                { kind: "row", gap: 8, children: [
+                    { kind: "button", id: "start", label: "Start a guest node", variant: "primary", disabled: $guest }
+                    { kind: "button", id: "stop", label: "Stop the guest node", variant: "danger", disabled: (not $guest) }
                   ] }
               ] }
           ]
@@ -89,6 +137,9 @@ let final = (gui {
               _ => ($state | merge { sel: $ev.row, note: "" })
             })
           "check" => (check-sel $state)
+          "run" => (run-sel $state ($ev.fields | get ("cmd-" + (str $state.gen))))
+          "start" => (guest-start $state)
+          "stop" => (guest-stop $state)
           _ => $state
         }
       })

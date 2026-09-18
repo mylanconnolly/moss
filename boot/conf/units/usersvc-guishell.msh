@@ -32,6 +32,9 @@
     { tag: locale, unit: localesvc }
     { tag: net, netview: net-cluster, optional: true }
     { tag: net_control, unit: net-cluster, control: true, optional: true }
+    # The fabric, so a session's Nodes (and Files' Network sidebar) see
+    # the machines this one is clustered with; pulls the fabric stack up.
+    { tag: fabric, unit: fabsvc, optional: true }
     { tag: init, self: true }
   ]
 }

@@ -283,6 +283,9 @@ pub const SpawnFlags = struct {
     pub const grant_introspect: u64 = 1 << 4;
     /// Grant the right to set the wall clock (the time service).
     pub const grant_clock: u64 = 1 << 5;
+    /// Grant the hypervisor: the right to create and run virtual machines
+    /// (a VMM unit). The system init honours it; a session init never.
+    pub const grant_hypervisor: u64 = 1 << 6;
 };
 
 /// Where the kernel's idea of wall time came from.
@@ -859,9 +862,14 @@ pub const CapTag = enum(u64) {
     /// (`iface_configure`). Held by the desktop's Settings, and by a
     /// session only when the session manager passes it (an administrator).
     net_control = 32,
+    /// The machine's init — its front channel — handed to a session so an
+    /// administrator's app can start and stop the machine's units (a
+    /// guest node's VMM). The session manager passes it only to an
+    /// administrator's session; a session's own `init` is the session's.
+    sysinit = 33,
 };
 
-pub const cap_tag_count = 33;
+pub const cap_tag_count = 34;
 
 /// What a device is, by virtio device id (the modern PCI device id minus
 /// 0x1040). A device cap is handed over with its kind so the receiver
@@ -2382,7 +2390,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48, activity = 49, netconf = 50, console = 51, nodes = 52 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48, activity = 49, netconf = 50, console = 51, nodes = 52, nodevm = 53 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with

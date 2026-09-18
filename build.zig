@@ -262,6 +262,11 @@ pub fn build(b: *std.Build) void {
         "nodes-test",
         "Run the Nodes drill: two nodes, the app lists the fabric's membership and checks the peer",
     ) orelse false;
+    const nodevm_test = b.option(
+        bool,
+        "nodevm-test",
+        "Run the guest-node drill: the Nodes app starts a moss guest in a VM, which joins the fabric, answers, and is stopped",
+    ) orelse false;
     const browse_test = b.option(
         bool,
         "browse-test",
@@ -480,6 +485,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "activity_test", activity_test);
     build_opts.addOption(bool, "console_test", console_test);
     build_opts.addOption(bool, "nodes_test", nodes_test);
+    build_opts.addOption(bool, "nodevm_test", nodevm_test);
     build_opts.addOption(bool, "netconf_test", netconf_test);
     build_opts.addOption(bool, "browse_test", browse_test);
     build_opts.addOption(bool, "netbrowse_test", netbrowse_test);
@@ -744,6 +750,7 @@ pub fn build(b: *std.Build) void {
         "scripts/console.msh",            "conf/units/gui-console.msh",
         "conf/sessiongui/console.msh",    "scripts/nodes.msh",
         "conf/units/gui-nodes.msh",       "conf/sessiongui/nodes.msh",
+        "conf/units/vmnode.msh",          "conf/units/gui-nodevm.msh",
         "conf/units/browse-client.msh",   "scripts/browse-cli.msh",
         "conf/units/gui-netbrowse.msh",   "conf/units/cascade-a.msh",
         "scripts/win-mid.msh",            "conf/units/cascade-b.msh",
@@ -904,7 +911,7 @@ pub fn build(b: *std.Build) void {
             "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
             "editor_test",     "activity_test",  "netconf_test",    "console_test",
-            "nodes_test",
+            "nodes_test",      "nodevm_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1071,12 +1078,14 @@ pub fn build(b: *std.Build) void {
         // the app (or Ctrl-C here) ends it. Kernel log:
         // zig-out/gui-run-kernel.log. (VNC was the workaround when the
         // scanout was a tiny 640x480 that cocoa clipped into a corner.)
-        // Two NICs, so the Network tab has both kinds to show: net0 on the
-        // cluster segment (the socket netdev run-cluster's node 1 listens
-        // on, so the guishell profile's fabric address 10.77.0.1 is real
-        // and a second node could join), net1 on QEMU's user network,
-        // which the service leases by DHCP (10.0.2.15, outbound through
-        // the host). Both persist what Settings applies, on the disk.
+        // Three NICs and two entropy devices. The first NIC is the cluster
+        // segment (a hub, so the guishell profile's fabric address
+        // 10.77.0.1 is real); the second is on the same hub and is a guest
+        // node's — the Nodes app starts a moss kernel in a VM with it and
+        // the second rng passed through, and the guest joins the fabric
+        // as node 2; the third is QEMU's user network, leased by DHCP
+        // (10.0.2.15, outbound through the host). Settings persists what
+        // it applies, on the disk.
         const script = b.fmt(
             \\set -e
             \\test -f zig-out/gui-disk.img || dd if=/dev/zero of=zig-out/gui-disk.img bs=1048576 count=64 2>/dev/null
@@ -1085,10 +1094,13 @@ pub fn build(b: *std.Build) void {
             \\exec qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 \
             \\  -smp 4 -m 512M -nic none \
             \\  -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
-            \\  -netdev socket,id=n0,listen=127.0.0.1:31337 \
-            \\  -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0 \
-            \\  -netdev user,id=n1 \
-            \\  -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n1 \
+            \\  -netdev hubport,id=h1,hubid=0 \
+            \\  -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1 \
+            \\  -netdev hubport,id=h2,hubid=0 \
+            \\  -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h2 \
+            \\  -netdev user,id=n2 \
+            \\  -device virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n2 \
+            \\  -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
             \\  -device {s} \
             \\  -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
             \\  -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on \
@@ -1368,7 +1380,7 @@ pub fn build(b: *std.Build) void {
         "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
         "editor_test",     "activity_test",  "netconf_test",    "console_test",
-        "nodes_test",
+        "nodes_test",      "nodevm_test",
     };
     const variants = [_][]const u8{
         "panic",     "fault",     "sched",     "domain",   "ipc",        "init",
@@ -1382,7 +1394,7 @@ pub fn build(b: *std.Build) void {
         "largetext", "power",     "restart",   "fabgui",   "fabsignal",  "locale",
         "localeupd", "desktop",   "topbar",    "dock",     "listdemo",   "explorer",
         "browse",    "netbrowse", "cascade",   "terminal", "editor",     "activity",
-        "netconf",   "console",   "nodes",
+        "netconf",   "console",   "nodes",     "nodevm",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

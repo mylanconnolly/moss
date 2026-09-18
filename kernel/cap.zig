@@ -106,6 +106,13 @@ pub const Table = struct {
         return e.cap_type;
     }
 
+    /// Whether any slot holds a cap of `kind` — a spawner passing an
+    /// authority on (the hypervisor) must hold it itself.
+    pub fn holds(self: *Table, kind: CapType) bool {
+        for (&self.entries) |*e| if (e.cap_type == kind) return true;
+        return false;
+    }
+
     pub fn lookup(self: *Table, handle: shared.Handle, expect: CapType) ?u64 {
         if (handle.slot >= slots) return null;
         const e = &self.entries[handle.slot];

@@ -329,3 +329,15 @@ flowchart TB
   devicetree, PSCI, the emulated bus), `guest/hello.zig` (the bare-metal
   guest), `kernel/main.zig` (the `vm`, `guest`, `vmnode` drivers),
   `build.zig` (the guest kernel and its archive).
+
+## A guest node from the desktop
+
+The Nodes app starts one: init starts the `vmnode` unit — the VMM with
+`grant: [hypervisor]` (parsed by the system init only; the kernel honours
+the spawn flag only when the spawner holds the cap, and root has it from
+the kernel), the machine's second NIC and second entropy device given to
+it — and the VMM boots a moss guest (arg 3: a pool node on one vCPU, 128
+MB) that joins the machine's fabric as node 2. Stop destroys the VMM,
+and the VM with it. The unit's budget nests in init's (256 MB) and
+root's (320 MB). The guest runs on one vCPU because a four-vCPU guest
+under a busy host can start a thread on a null stack (ROADMAP, open).

@@ -157,6 +157,7 @@ var font_cap: u64 = 0;
 var locale_cap: u64 = 0;
 var net_cap: u64 = 0;
 var net_control_cap: u64 = 0;
+var fabric_cap: u64 = 0;
 var home_buf: [*]u8 = undefined;
 var app_view: u64 = 0;
 var app_buf: [*]u8 = undefined;
@@ -264,6 +265,7 @@ fn usersvc(chan_h: u64, va: u64, len: u64, flags: u64) noreturn {
     locale_cap = setup.cap(.locale);
     net_cap = setup.cap(.net);
     net_control_cap = setup.cap(.net_control);
+    fabric_cap = setup.cap(.fabric);
     gui_sessions = disp_cap != 0;
     if (users_view == 0 or home_view == 0 or app_view == 0) usys.exit(180);
     users_buf = @ptrFromInt(fsc.attachBuf(users_view).va);
@@ -1028,6 +1030,11 @@ fn spawnSession(s: *Session, budget: Budget, console: u64) bool {
     // an administrator's session may configure them.
     if (ok and gui_sessions and net_cap != 0) ok = boot.giveCap(b, .net, net_cap);
     if (ok and gui_sessions and budget.admin and net_control_cap != 0) ok = boot.giveCap(b, .net_control, net_control_cap);
+    // The fabric: every GUI session sees the cluster; an administrator's
+    // session also gets the machine's init, to start and stop its units
+    // (a guest node) — the session's own `init` is only the session's.
+    if (ok and gui_sessions and fabric_cap != 0) ok = boot.giveCap(b, .fabric, fabric_cap);
+    if (ok and gui_sessions and budget.admin and init_chan != 0) ok = boot.giveCap(b, .sysinit, init_chan);
     if (ok) ok = boot.give(b, .{ .arg = .{ .a = w[0], .b = w[1], .c = w[2] } }, 0) and boot.give(b, .go, 0);
     if (!ok) {
         _ = usys.domainDestroy(s.ctl);

@@ -300,6 +300,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.nodevm_test) {
+        _ = sched.spawn("boot-watch", nodevmTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
     if (build_options.browse_test) {
         _ = sched.spawn("boot-watch", browseTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -985,6 +990,12 @@ fn consoleTestWorker(_: u64) void {
 fn nodesTestWorker(_: u64) void {
     systemDrill("nodes");
 }
+/// The guest-node drill: from the Nodes app, init starts the `vmnode`
+/// unit — a VMM with the hypervisor grant — whose guest joins the
+/// fabric as node 2, answers a stage, and is stopped again.
+fn nodevmTestWorker(_: u64) void {
+    systemDrill("nodevm");
+}
 /// The interface-configuration drill: two NICs on two user networks; the
 /// script configures the second statically and echoes over both.
 fn netconfTestWorker(_: u64) void {
@@ -1140,7 +1151,13 @@ fn guiRunWorker(_: u64) void {
         .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 48 << 20,
-        .user_limit = 192 << 20,
+        // 320 MB: room for init (256) and under it a guest node's VMM
+        // with 128 MB of guest RAM beside the desktop.
+        .user_limit = 320 << 20,
+        // The hypervisor: root passes it to init, init to a `vmm` unit
+        // whose file says `grant: [hypervisor]` — a guest node started
+        // from the desktop.
+        .grant_hypervisor = true,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
     while (!(root.state == .dying and domain.drained(root))) sched.sleep(5);
     domain.finishTeardown(root);
@@ -1166,7 +1183,13 @@ fn systemDrill(comptime name: []const u8) void {
         .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 48 << 20,
-        .user_limit = 192 << 20,
+        // 320 MB: room for init (256) and under it a guest node's VMM
+        // with 128 MB of guest RAM beside the desktop.
+        .user_limit = 320 << 20,
+        // The hypervisor: root passes it to init, init to a `vmm` unit
+        // whose file says `grant: [hypervisor]` — a guest node started
+        // from the desktop.
+        .grant_hypervisor = true,
     }) catch |e| std.debug.panic("spawn root: {t}", .{e});
 
     // A hang is a failure with a dump, not a runner timeout on a silent

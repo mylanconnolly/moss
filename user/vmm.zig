@@ -73,15 +73,28 @@ var moss_guest = false;
 // interrupts through the (real, virtual) CPU interface.
 var gicd: [0x1_0000]u8 align(8) = @splat(0);
 const max_vcpus = 4;
+/// How many vCPUs this guest gets (see umain): the PSCI bound too, so a
+/// guest asking for more cores than it has is told there are none.
+var g_vcpus: u64 = max_vcpus;
 var gicr: [max_vcpus][0x2_0000]u8 align(8) = @splat(@splat(0));
 var vcpu_stacks: [max_vcpus][32 * 1024]u8 align(16) = undefined;
 
 export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) callconv(.c) noreturn {
     log_h = log_handle;
     moss_guest = arg >= 1;
+    // A pool node (2): the guest joins the fabric as node 2, with the
+    // devices its spawner passes through. 3 is the same node on ONE vCPU:
+    // what the desktop's Nodes app starts (the `vmnode` unit), because a
+    // four-vCPU guest under a busy host can start a fresh thread with a
+    // null stack (SP_EL0 = 0 at its first instruction — seen 3/3 from
+    // the desktop on 2026-09-18, 1/3 in the vmnode drill under parallel
+    // load, never with one vCPU, and never once anything perturbs the
+    // guest's switch path; ROADMAP has the recipe). The drill keeps 4.
+    const pool_node = arg == 2 or arg == 3;
+    g_vcpus = if (arg == 3) 1 else max_vcpus;
     const setup = boot.take(chan_h);
     _ = usys.capDrop(chan_h);
-    if (arg == 2) {
+    if (pool_node) {
         // A pool node: the devices its spawner handed over, in slots 1, 2.
         for ([_]shared.DeviceKind{ .rng, .net }) |k| {
             const h = setup.device(k);
@@ -102,7 +115,7 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
     };
 
     const ram_pages: u64 = if (moss_guest) 32768 else 2048; // 128M / 8M
-    const c = usys.vmCreate(hyp_h, ram_pages, if (moss_guest) max_vcpus else 1);
+    const c = usys.vmCreate(hyp_h, ram_pages, if (moss_guest) g_vcpus else 1);
     if (c.err != .ok) {
         _ = usys.log(log_h, "vmm: vm_create refused");
         usys.exit(131);
@@ -116,7 +129,7 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
         // The moss kernel as a guest on x86_64: an ELF the VMM loads the
         // way Limine would — page tables, the responses to the requests in
         // its image, ACPI tables, parked vCPUs.
-        const g = loadMossGuestX86(ram, ram_pages, image, arg == 2) orelse usys.exit(136);
+        const g = loadMossGuestX86(ram, ram_pages, image, pool_node) orelse usys.exit(136);
         _ = usys.log(log_h, "vmm: moss guest loaded (Limine protocol from the VMM); entering ring 0");
         if (usys.vmSetX(vm_h, g.entry, 0, g.cr3, g.rsp) != .ok) usys.exit(132);
         for (1..max_vcpus) |i| {
@@ -130,7 +143,7 @@ export fn umain(log_handle: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: 
         // Linux Image protocol: text at RAM + 0x80000, DTB pointer in x0.
         @memcpy(ram[0x80000 .. 0x80000 + image.len], image);
         const dtb_off = ram_pages * 4096 - 0x1_0000;
-        const n = writeDtb(ram[dtb_off .. dtb_off + 0x1000], ram_pages * 4096, arg == 2);
+        const n = writeDtb(ram[dtb_off .. dtb_off + 0x1000], ram_pages * 4096, pool_node);
         if (n == 0) usys.exit(136);
         entry = shared.vm_ram_ipa + 0x80000;
         x0 = shared.vm_ram_ipa + dtb_off;
@@ -241,7 +254,7 @@ fn psci(fid: u64, x1: u64, x2: u64, x3: u64) ?u64 {
         psci_system_off, psci_system_reset => return null,
         psci_cpu_on32, psci_cpu_on64 => {
             const idx = x1 & 0xff;
-            if ((x1 >> 8) != 0 or idx >= max_vcpus) return psci_invalid;
+            if ((x1 >> 8) != 0 or idx >= g_vcpus) return psci_invalid;
             switch (usys.vmCpuOn(vm_handle, idx, x2, x3)) {
                 .ok => {},
                 .busy => return psci_already_on,
