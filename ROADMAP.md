@@ -680,14 +680,53 @@ supervises), and memory history per unit beside the CPU one.
       the images of stage 8), a `sessionfont` push mid-session (the
       zoom follows the scale at each render), Escape's return to the
       chrome lands on the first widget.
-    - **(8) Images and web fonts.** `lib/png.zig` (std flate),
-      `lib/jpeg.zig` (baseline and progressive), `lib/gif.zig` (first
-      frame, animation on the tick later), an SVG subset grown from the
-      toolkit's `iconpath`, decoded in the page domain by viewport
-      (lazy), `@font-face` through `lib/font` in the page (TTF, OTF,
-      WOFF, WOFF2 already parse), the glyph cache per page. WebP when a
-      site asks. *Exit:* decoder corpora on the host; a fixture page
-      with every format screendumped.
+    - ✅ **(8) Images and web fonts** (2026-09-18). `lib/image.zig`:
+      PNG (every colour type and depth, palettes, tRNS, Adam7, over std
+      flate), GIF (LZW, interlace, the transparent index; the first
+      frame), JPEG (baseline and progressive, restart markers, chroma
+      upsampled linearly) into one `Image{w,h,rgba}`; `sniff` by magic
+      bytes, `decode` refuses a truncated or foreign file. The corpus is
+      ours: `tools/mkimages.sh` writes 29 files with ImageMagick and
+      their `.rgba` references (JPEG within a tolerance of 12), and the
+      host test decodes every one. The layout gets an `Images` provider
+      (a `Bitmap` per `img` node, or its declared size while the bytes
+      are not there) and each `Font` its computed family list; the
+      painter blits a picture, nearest and alpha-blended. In the page:
+      `@font-face` rules collected by the cascade (`Sheet.font_faces`),
+      each face fetched through the broker on load, WOFF and WOFF2
+      inflated to SFNT (`font.toSfnt`, the size from the header), parsed
+      by `lib/font` and picked by family name before the packed
+      generics — a page's text really is set in its web font, and it
+      says so the first time a glyph of it is drawn; pictures fetched
+      lazily for the `img`s laid out near the viewport (a screen either
+      side, on load and on scroll), capped at 64 pictures, 6 MB decoded
+      and 2 MB a file, with a relayout when a decoded size differs from
+      the declared one. The `browser` drill loads a fixture page with a
+      web font and four pictures (PNG, baseline and progressive JPEG,
+      GIF) and counts their colours in a screendump. Found on the way:
+      a font-family list starting with a quoted name (`"Plex Serif",
+      serif`) was rejected whole by the cascade, so the paragraph was
+      sans; the GUI runtime's render scratch was an arena over the box
+      pool it shares with the state snapshots, and a fragmented pool
+      refused a 22 KB run with most of its chunks free — the scratch is
+      a static buffer of its own now, and a pool refusal is logged with
+      the run it wanted and the run it had; and the page serving
+      thread's 64 KB stack was a third of what its TLS fetches need, so
+      the first https page overflowed it into whatever the linker
+      placed below (once that allocator: an "unreachable" in a resize
+      whose bounds were garbage) — 512 KB, painted so the high-water
+      mark is logged at the window's close, a canary that ends the
+      program instead of running on corrupt statics, and `mshrun`'s
+      panic line now carries the fault address and a walk of the frame
+      chain for `objdump`. The two thread stacks' worth of static memory
+      that added to `mshrun` (charged to every mshrun, and the shells'
+      worker hosts are budgeted to the edge: two gate drills refused a
+      worker) was paid for by shrinking the web host: a queued command
+      no longer carries a 2 KB URL buffer each (one slot per page for
+      the queued load and one for the find, a newer one superseding),
+      which took 1 MB off the image. Not built, said so: SVG, WebP, animated GIF
+      (the first frame), `srcset`/`picture`, a bytes save in the picker
+      (a binary download still waits), and images in `background-image`.
     - **(9) Modern layout.** Flexbox, grid, positioned boxes (absolute,
       fixed, sticky), `calc()`, custom properties, transforms and
       opacity at paint time, tables, `overflow` scroll containers, then

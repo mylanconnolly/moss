@@ -112,7 +112,24 @@ var host_ready = false;
 var stage: ?loader.Stage = null;
 var staged = false;
 var thread_up = false;
-var thread_stack: [64 << 10]u8 align(16) = undefined;
+/// The serving thread's stack. The broker fetches on this thread, and a
+/// TLS handshake alone needs >120 KB of it (kernel/domain.zig sizes the
+/// main stacks by the same lesson): at 64 KB the first https page
+/// overflowed the array into whatever the linker placed below it — once
+/// the GUI epoch's allocator, so the browser died of "unreachable" in a
+/// resize with the wrong buffer bounds (2026-09-18). The stack is
+/// painted at start so `stackHighWater` can report how much was used.
+const thread_stack_size = 512 << 10;
+const stack_paint: u8 = 0xa5;
+var thread_stack: [thread_stack_size]u8 align(16) = undefined;
+
+/// How deep the serving thread's stack has ever been, in bytes.
+pub fn stackHighWater() usize {
+    if (!thread_up) return 0;
+    var i: usize = 0;
+    while (i < thread_stack.len and thread_stack[i] == stack_paint) : (i += 1) {}
+    return thread_stack.len - i;
+}
 
 pub fn setup(spawner_cap: u64, n: *netcmds.Net, view_chan: u64, buf: [*]u8, assets_view: bool, s: []const ?fscmds.Store, log: u64) void {
     spawner = spawner_cap;
@@ -152,6 +169,7 @@ fn ensureHost(it: *mshl.Interp) bool {
         staged = true;
     }
     if (!thread_up) {
+        @memset(&thread_stack, stack_paint);
         if (usys.threadCreate(serve, 0, &thread_stack) != .ok) return false;
         thread_up = true;
     }
@@ -162,7 +180,13 @@ fn ensureHost(it: *mshl.Interp) bool {
 /// app must hear is queued.
 fn serve(_: u64) callconv(.c) void {
     while (true) {
-        switch (host.step()) {
+        const step = host.step();
+        if (thread_stack[0] != stack_paint or thread_stack[64] != stack_paint) {
+            // Past the end: whatever lies below the array is corrupt now.
+            webhost.logf(log_h, "page thread: stack overflow ({d} KB); exiting", .{thread_stack.len / 1024});
+            usys.exit(254);
+        }
+        switch (step) {
             .idle, .failed => usys.sleepMs(20),
             .event => |e| {
                 const p = host.page(e.page);
@@ -315,6 +339,7 @@ pub fn reapAll() void {
         host.destroy(s.page);
         s.* = .{};
     };
+    if (thread_up) webhost.logf(log_h, "page thread: stack high-water {d} of {d} KB", .{ stackHighWater() / 1024, thread_stack.len / 1024 });
 }
 
 /// What a leaf says beyond its URL: the text zoom (percent), the

@@ -44,13 +44,20 @@ pub const panic = std.debug.FullPanic(uPanic);
 
 /// A panic says what it was on the log before the exit: a silent 255
 /// from an essential unit reads as a hang from the console.
-fn uPanic(msg: []const u8, _: ?usize) noreturn {
-    var buf: [200]u8 = undefined;
-    const pre = "panic: ";
-    @memcpy(buf[0..pre.len], pre);
-    const n = @min(msg.len, buf.len - pre.len);
-    @memcpy(buf[pre.len .. pre.len + n], msg[0..n]);
-    _ = usys.log(glog, buf[0 .. pre.len + n]);
+/// The panic line carries the faulting address and a walk up the frame
+/// chain (each aarch64 frame is [fp, lr]); symbolize them against the
+/// build's `mshrun.elf` with `nm -n` / `objdump -d -l` (HACKING.md).
+fn uPanic(msg: []const u8, ret_addr: ?usize) noreturn {
+    var buf: [240]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&buf, "panic: {s} (at 0x{x})", .{ msg, ret_addr orelse 0 }) catch "panic");
+    var fp: usize = @frameAddress();
+    var depth: usize = 0;
+    while (fp != 0 and depth < 12) : (depth += 1) {
+        const frame: *const [2]usize = @ptrFromInt(fp);
+        _ = usys.log(glog, std.fmt.bufPrint(&buf, "  frame {d}: 0x{x}", .{ depth, frame[1] }) catch "?");
+        if (frame[0] <= fp) break;
+        fp = frame[0];
+    }
     usys.exit(255);
 }
 
@@ -365,8 +372,16 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     // program run by msh returns a value, like ls and ps.
     var out: std.ArrayList(u8) = .empty;
     const last = interp.evalScriptEach(text, &out, if (setup.has(.out)) null else emit) catch |e| {
+        if (e == error.OutOfMemory) {
+            // Which heap, and how full: the line arena or the box pool.
+            var busy: usize = 0;
+            for (box_pool.used) |u| if (u) {
+                busy += 1;
+            };
+            var msg: [160]u8 = undefined;
+            fail(path, std.fmt.bufPrint(&msg, "out of memory (line heap {d}/{d} KB, box pool {d}/{d} chunks, last refused {d} chunks with a free run of {d})", .{ line_fba.end_index / 1024, heap_line.len / 1024, busy, box_pool.used.len, box_pool.last_refused, box_pool.last_free_run }) catch "out of memory");
+        }
         fail(path, switch (e) {
-            error.OutOfMemory => "out of memory",
             error.Exit => "exit",
             else => interp.err_msg,
         });

@@ -96,7 +96,7 @@ root and init from unit files — also require root's exit code to be 0.
 | `fs` | Namespace views on real storage; persistence across a second boot; a hundred views reclaimed on client death | blk, two boots |
 | `net` | Dual-stack TCP through the userspace network service; allowlist views; a script speaking TCP and HTTP with sockets as values, serving pages the runner fetches through a port forward; packets kept in `zig-out/check/net.pcap` | net |
 | `web` | The web fixture servers (`mshrun` serving `boot/web/` plain on 8080 and over TLS on 8443 as `www.moss.test`) answer a script's `fetch`, verified against the assets roots; a missing page is a 404; `web-render` loads the front page in a page domain and hands back its document | web |
-| `browser` | The desktop's Web app: signed in as alice, launched from the dock, its first tab loads the fixture over loopback TLS in a page domain and the heading's colour is in the page's rect of a screendump; a second tab is typed a URL for a page painting a fake address bar, which stays inside the page's rect while the real bar above is untouched; a form filled from the keyboard (Tab, typing, Space) and submitted with exactly the expected query; the page bookmarked, a word found, zoom and the Site panel, a download saved through the picker under the typed name; the tab closed (its domain reaped), the window quit, the session logged out; the leak bar | web |
+| `browser` | The desktop's Web app: signed in as alice, launched from the dock, its first tab loads the fixture over loopback TLS in a page domain and the heading's colour is in the page's rect of a screendump; a second tab is typed a URL for a page painting a fake address bar, which stays inside the page's rect while the real bar above is untouched; a form filled from the keyboard (Tab, typing, Space) and submitted with exactly the expected query; the page bookmarked, a word found, zoom and the Site panel; a page with a web font and four pictures (PNG, baseline and progressive JPEG, GIF) whose colours are counted in a screendump and whose paragraph the page says is set in the web face; a download saved through the picker under the typed name; the tab closed (its domain reaped), the window quit, the session logged out; the leak bar | web |
 | `webpage` | Page domains: a native host (`webpagecli`) spawns `webpage` domains holding one badged channel and the buffers it grants, brokers their fetches over its own network view, and drives them — load and paint (the heading's colour is found in the pixels), scroll, hover to find the link, click through, dump the document; a second page sent after a 23.8 MB resource dies of its 20 MB arena while the first still scrolls; every buffer and domain is released (the leak bar) | web |
 | `rng` | The userspace virtio-rng driver seeds the kernel pool; `getrandom` fail-closed and policed | plain |
 | `fabric` | Three nodes: per-node identities, join, gossip, placement, a node's death and rejoin, an imposter refused, spawn authorization, revocation | cluster |
@@ -253,7 +253,9 @@ it, add a `trace.record` at the suspect step.
   libraries against their vendored corpora with pass counts printed
   and floors asserted, and the layout engine's reftests — pairs of
   pages under `tools/testdata/web/reftests` that must paint the same
-  pixels on the fixed test fonts, Acid1 among them), and the full
+  pixels on the fixed test fonts, Acid1 among them; the image decoders
+  against `tools/testdata/images`, a corpus `tools/mkimages.sh` writes
+  with ImageMagick beside its raw RGBA references), and the full
   mossfs suite including both crash-injection sweeps.
   `zig test lib/mshl.zig` alone runs in about a second and is the loop
   for shell-language work.

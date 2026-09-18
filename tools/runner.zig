@@ -1412,6 +1412,30 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!clickScanout(&q, site[0], site[1])) return sfail(spec, log_path, "click Site again");
     if (!try waitLogN(log_path, "gui: action site", 2, "the Site panel did not close", spec, polls)) return false;
     sleepMs(300);
+    // Pictures and a web font: the page fetches four images and a WOFF
+    // through its broker and decodes them itself; the solid ones are
+    // counted in the screendump, the font by the page's word.
+    if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field for the images");
+    sleepMs(200);
+    if (!q.chord("meta_l", "a")) return false;
+    if (!q.typeText("http://www.moss.test:8080/images.html")) return false;
+    const go4 = widgetCenter(readLog(log_path), "go") orelse return false;
+    if (!clickScanout(&q, go4[0], go4[1])) return sfail(spec, log_path, "click Go for the images");
+    if (!try waitLogN(log_path, "webpage: font-face loaded: Plex Serif", 1, "the web font did not load", spec, polls)) return false;
+    if (!try waitLogN(log_path, "webpage: web face in use: Plex Serif", 1, "the paragraph was not set in the web font", spec, polls)) return false;
+    if (!try waitLogN(log_path, "webpage: image /img/prog.jpg 64x48", 1, "the progressive JPEG did not decode", spec, polls)) return false;
+    if (!try waitLogN(log_path, "page t2: title \"moss fixture: images\"", 1, "the images page never loaded", spec, polls)) return false;
+    sleepMs(900);
+    _ = q.screendump(check_dir ++ "/browser-images.ppm");
+    const pics = readPpm(check_dir ++ "/browser-images.ppm") orelse return sfail(spec, log_path, "read the images screendump");
+    const r4 = pageRect(readLog(log_path), "t2") orelse return false;
+    const orange = countRgbIn(pics, r4, 0xff, 0x88, 0x00);
+    const blue = countRgbIn(pics, r4, 0x22, 0x66, 0xff);
+    if (orange < 2800 or blue < 2800) {
+        var b: [96]u8 = undefined;
+        reportFailure(spec.name, std.fmt.bufPrint(&b, "the pictures are not in the page rect (orange {d}, blue {d} of 3072)", .{ orange, blue }) catch "no pictures", log_path);
+        return false;
+    }
     // A download: the page reports a resource it will not show, the app
     // fetches it and the Save dialog asks where; type a name.
     if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field for the download");

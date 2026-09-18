@@ -152,13 +152,40 @@ fn attach() void {
 /// Text for layout and paint: the faces the host packed (sans first,
 /// mono second), rasterized by `lib/font` into a bounded glyph cache;
 /// without any, fixed cells, so a headless page still lays out.
+const max_web_faces = 8;
+
 const PageFonts = struct {
     faces: [2]?font.Font = .{ null, null },
+    /// `@font-face` faces the page fetched, by the family they declare.
+    extra: [max_web_faces]WebFace = undefined,
+    n_extra: usize = 0,
     cache: [512]Entry = undefined,
     cache_len: usize = 0,
     fixed: web.layout.FixedFonts = .{},
 
+    const WebFace = struct { name: [64]u8, name_len: usize, face: font.Font, used: bool = false };
     const Entry = struct { face: u8, gid: u16, size: u16, glyph: font.Glyph };
+
+    /// Add a fetched face under its family name; the glyph cache starts
+    /// over (its indices may be reused across pages).
+    fn addWebFace(self: *PageFonts, family: []const u8, face: font.Font) bool {
+        if (self.n_extra == max_web_faces) return false;
+        const w = &self.extra[self.n_extra];
+        w.name_len = @min(family.len, w.name.len);
+        @memcpy(w.name[0..w.name_len], family[0..w.name_len]);
+        w.face = face;
+        w.used = false;
+        self.n_extra += 1;
+        return true;
+    }
+
+    /// A new page: its web faces go (their bytes went with the arena).
+    fn forgetWebFaces(self: *PageFonts) void {
+        if (self.n_extra == 0) return;
+        self.n_extra = 0;
+        self.cache_len = 0;
+        glyph_fba.reset();
+    }
 
     fn load(self: *PageFonts, pack: []const u8) void {
         for (0..2) |i| {
@@ -176,6 +203,15 @@ const PageFonts = struct {
     const vtable: web.layout.Fonts.VTable = .{ .advance = adv, .metrics = met, .draw = draw };
 
     fn faceFor(self: *PageFonts, f: web.layout.Font) struct { face: *const font.Font, idx: u8 } {
+        // The computed family list, first choice first: a web face by its
+        // declared name wins; the generic families fall to the packed ones.
+        for (f.families) |fam| {
+            for (self.extra[0..self.n_extra], 0..) |*w, i| {
+                if (std.ascii.eqlIgnoreCase(w.name[0..w.name_len], fam)) return .{ .face = &w.face, .idx = @intCast(2 + i) };
+            }
+            if (std.ascii.eqlIgnoreCase(fam, "monospace")) if (self.faces[1]) |*m| return .{ .face = m, .idx = 1 };
+            if (std.ascii.eqlIgnoreCase(fam, "sans-serif") or std.ascii.eqlIgnoreCase(fam, "serif")) break;
+        }
         if (f.monospace) if (self.faces[1]) |*m| return .{ .face = m, .idx = 1 };
         return .{ .face = &self.faces[0].?, .idx = 0 };
     }
@@ -227,6 +263,15 @@ const PageFonts = struct {
         };
         self.cache[self.cache_len] = .{ .face = idx, .gid = gid, .size = size_q, .glyph = g };
         self.cache_len += 1;
+        // The first glyph a web face draws says so (the drill checks a
+        // page's text really is set in the face it fetched).
+        if (idx >= 2) {
+            const w = &self.extra[idx - 2];
+            if (!w.used) {
+                w.used = true;
+                logLine("webpage: web face in use: ", w.name[0..w.name_len]);
+            }
+        }
         return &self.cache[self.cache_len - 1].glyph;
     }
 
@@ -284,6 +329,12 @@ var page_fonts: PageFonts = .{};
 // ------------------------------------------------------------- the page
 
 const max_highlights = 256;
+const max_pictures = 64;
+/// Decoded pixels a page keeps at most (RGBA bytes); past it, pictures
+/// stay placeholders.
+const max_picture_bytes: usize = 6 << 20;
+
+const Picture = struct { node: dom.NodeId, state: enum { loaded, failed }, bm: web.layout.Bitmap };
 
 const Page = struct {
     doc: ?*dom.Document = null,
@@ -314,6 +365,11 @@ const Page = struct {
     matches: [max_highlights]web.paint.Highlight = undefined,
     n_matches: usize = 0,
     match_index: usize = 0,
+    /// The pictures fetched and decoded so far (or refused), by node.
+    pictures: [max_pictures]Picture = undefined,
+    n_pictures: usize = 0,
+    picture_bytes: usize = 0,
+    fonts_loaded: bool = false,
 
     fn url(p: *const Page) []const u8 {
         return p.url_buf[0..p.url_len];
@@ -355,6 +411,14 @@ fn env() web.style.Env {
 /// buffers, its final URL and content type.
 const Opened = union(enum) { ok: u64, refused: wire.RefuseCode };
 
+/// What the last `open` answered with: the resource's final URL and
+/// its content type (a document's become the page's; a picture's or
+/// font's are just read).
+var res_url: [2048]u8 = undefined;
+var res_url_len: usize = 0;
+var res_type: [256]u8 = undefined;
+var res_type_len: usize = 0;
+
 fn openUrl(url_text: []const u8, post: bool, body: []const u8) Opened {
     if (url_text.len + body.len > data_len) return .{ .refused = .bad_url };
     @memcpy(data[0..url_text.len], url_text);
@@ -365,11 +429,41 @@ fn openUrl(url_text: []const u8, post: bool, body: []const u8) Opened {
         .refused => |r| return .{ .refused = std.enums.fromInt(wire.RefuseCode, r.code) orelse .protocol },
         else => return .{ .refused = .protocol },
     };
-    page.url_len = @min(opened.url_len, page.url_buf.len);
-    @memcpy(page.url_buf[0..page.url_len], data[0..page.url_len]);
-    page.type_len = @min(opened.type_len, page.type_buf.len);
-    @memcpy(page.type_buf[0..page.type_len], data[opened.url_len .. opened.url_len + page.type_len]);
+    res_url_len = @min(opened.url_len, res_url.len);
+    @memcpy(res_url[0..res_url_len], data[0..res_url_len]);
+    res_type_len = @min(opened.type_len, res_type.len);
+    @memcpy(res_type[0..res_type_len], data[opened.url_len .. opened.url_len + res_type_len]);
     return .{ .ok = opened.status };
+}
+
+/// A resource of the page (a picture, a font) fetched whole into the
+/// document's arena: its bytes, or null when refused, failed or too big.
+fn fetchResource(url_text: []const u8, max: usize) ?[]u8 {
+    switch (openUrl(url_text, false, "")) {
+        .ok => |st| if (st >= 400) {
+            _ = call(.cancel);
+            return null;
+        },
+        .refused => return null,
+    }
+    var body: std.ArrayList(u8) = .empty;
+    while (true) {
+        const chunk = switch (call(.{ .read = .{ .max = data_len } })) {
+            .chunk => |c| c,
+            else => return null,
+        };
+        const n = @min(chunk.len, data_len);
+        if (body.items.len + n > max) {
+            _ = call(.cancel);
+            return null;
+        }
+        body.appendSlice(arena(), data[0..n]) catch outOfMemory();
+        switch (std.enums.fromInt(wire.ChunkEnd, chunk.done) orelse .failed) {
+            .more => {},
+            .done => return body.items,
+            .failed => return null,
+        }
+    }
 }
 
 /// The whole body of the open resource into the arena, or why not.
@@ -439,9 +533,6 @@ fn load(url_text: []const u8, post: bool, body_text: []const u8) void {
     @memcpy(body_keep[0..bn], body_text[0..bn]);
     const body = body_keep[0..bn];
     event(.load, @intFromEnum(wire.LoadState.loading), 0);
-    var url_before: [2048]u8 = undefined;
-    const before_len = page.url_len;
-    @memcpy(url_before[0..before_len], page.url());
     const status: u64 = switch (openUrl(target, post, body)) {
         .ok => |st| st,
         .refused => |code| {
@@ -452,30 +543,20 @@ fn load(url_text: []const u8, post: bool, body_text: []const u8) void {
             return;
         },
     };
-    if (status < 400 and !renderable(mimeOf(page.type_buf[0..page.type_len]))) {
+    if (status < 400 and !renderable(mimeOf(res_type[0..res_type_len]))) {
         _ = call(.cancel);
         // The download's URL and type, for the host; this page stays.
-        const ul = page.url_len;
-        const tl = page.type_len;
-        @memcpy(data[0..ul], page.url());
-        @memcpy(data[ul .. ul + tl], page.type_buf[0..tl]);
-        @memcpy(page.url_buf[0..before_len], url_before[0..before_len]);
-        page.url_len = before_len;
-        event(.download, ul, tl);
+        @memcpy(data[0..res_url_len], res_url[0..res_url_len]);
+        @memcpy(data[res_url_len .. res_url_len + res_type_len], res_type[0..res_type_len]);
+        event(.download, res_url_len, res_type_len);
         event(.load, @intFromEnum(wire.LoadState.done), 0);
         return;
     }
-    var final_url: [2048]u8 = undefined;
-    const fl = page.url_len;
-    @memcpy(final_url[0..fl], page.url());
-    var final_type: [256]u8 = undefined;
-    const tl = page.type_len;
-    @memcpy(final_type[0..tl], page.type_buf[0..tl]);
     fresh();
-    @memcpy(page.url_buf[0..fl], final_url[0..fl]);
-    page.url_len = fl;
-    @memcpy(page.type_buf[0..tl], final_type[0..tl]);
-    page.type_len = tl;
+    page.url_len = res_url_len;
+    @memcpy(page.url_buf[0..res_url_len], res_url[0..res_url_len]);
+    page.type_len = res_type_len;
+    @memcpy(page.type_buf[0..res_type_len], res_type[0..res_type_len]);
     const got = switch (readAll()) {
         .body => |b| b,
         .refused => |code| {
@@ -495,6 +576,7 @@ fn fresh() void {
     page = .{};
     arena_fba.reset();
     layout_fba.reset();
+    page_fonts.forgetWebFaces();
 }
 
 fn showError(code: wire.RefuseCode) void {
@@ -525,8 +607,108 @@ fn present(markup: []const u8, failure: u64) void {
     eventText(.title, std.mem.trim(u8, title, " \t\r\n"));
     eventText(.url, page.url());
     page.sheets = web.style.collectDocumentSheetsWith(a, doc, env(), uaSheet(env())) catch outOfMemory();
+    loadFontFaces();
     relayout(false);
+    loadPicturesNear();
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
+}
+
+/// The sheets' `@font-face` rules: each face fetched through the host,
+/// normalised to SFNT (WOFF and WOFF2 decompress into the arena) and
+/// parsed by `lib/font` into a face the layout picks by family.
+fn loadFontFaces() void {
+    if (page.fonts_loaded) return;
+    page.fonts_loaded = true;
+    const base = &(page.base orelse return);
+    var loaded: usize = 0;
+    for (page.sheets) |sheet| for (sheet.font_faces) |ff| {
+        if (loaded == max_web_faces) return;
+        const u = web.url.resolve(arena(), ff.src, base) catch continue;
+        const href = u.href(arena()) catch outOfMemory();
+        const bytes = fetchResource(href, 4 << 20) orelse {
+            logLine("webpage: font-face not loaded: ", ff.family);
+            continue;
+        };
+        // WOFF and WOFF2 state the SFNT's size at the same place.
+        var out_len: usize = bytes.len;
+        if (bytes.len >= 20 and (std.mem.eql(u8, bytes[0..4], "wOFF") or std.mem.eql(u8, bytes[0..4], "wOF2"))) out_len = @min(4 << 20, std.mem.readInt(u32, bytes[16..20], .big));
+        const out = arena().alloc(u8, @max(out_len, bytes.len)) catch outOfMemory();
+        const sfnt = font.toSfnt(arena(), bytes, out) catch {
+            logLine("webpage: font-face unreadable: ", ff.family);
+            continue;
+        };
+        const face = font.Font.parse(sfnt) catch {
+            logLine("webpage: font-face unreadable: ", ff.family);
+            continue;
+        };
+        if (page_fonts.addWebFace(ff.family, face)) {
+            loaded += 1;
+            logLine("webpage: font-face loaded: ", ff.family);
+        }
+    };
+}
+
+fn logLine(prefix: []const u8, text: []const u8) void {
+    var line: [160]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "{s}{s}", .{ prefix, text[0..@min(text.len, 100)] }) catch prefix);
+}
+
+fn pictureOf(node: dom.NodeId) ?*Picture {
+    for (page.pictures[0..page.n_pictures]) |*p| if (p.node == node) return p;
+    return null;
+}
+
+/// The pictures for the `img` boxes near the viewport (a screen above
+/// and two below), fetched and decoded lazily; a relayout follows when
+/// any arrived, since their sizes are now known. Returns how many.
+fn loadPicturesNear() void {
+    var rounds: usize = 0;
+    while (rounds < 3) : (rounds += 1) {
+        const l = page.layout orelse return;
+        const doc = page.doc orelse return;
+        const base = &(page.base orelse return);
+        const top = page.scroll_y - @as(f64, @floatFromInt(vh));
+        const bottom = page.scroll_y + 3 * @as(f64, @floatFromInt(vh));
+        var got: usize = 0;
+        for (l.boxes.items) |b| {
+            const node = b.node orelse continue;
+            if (!doc.isHtml(node, "img")) continue;
+            if (b.y + b.h < top or b.y > bottom) continue;
+            if (pictureOf(node) != null) continue;
+            if (page.n_pictures == max_pictures) break;
+            const slot = &page.pictures[page.n_pictures];
+            slot.* = .{ .node = node, .state = .failed, .bm = .{ .w = 0, .h = 0, .rgba = &.{} } };
+            page.n_pictures += 1;
+            const src = doc.getAttr(node, "src") orelse continue;
+            const u = web.url.resolve(arena(), src, base) catch continue;
+            const href = u.href(arena()) catch outOfMemory();
+            const bytes = fetchResource(href, 2 << 20) orelse continue;
+            const img = mosslib.image.decode(arena(), bytes) catch |e| {
+                logLine("webpage: image not decoded: ", @errorName(e));
+                continue;
+            };
+            if (page.picture_bytes + img.rgba.len > max_picture_bytes) continue;
+            page.picture_bytes += img.rgba.len;
+            slot.state = .loaded;
+            slot.bm = .{ .w = img.w, .h = img.h, .rgba = img.rgba };
+            var line: [200]u8 = undefined;
+            _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: image {s} {d}x{d}", .{ src[0..@min(src.len, 120)], img.w, img.h }) catch "webpage: image");
+            got += 1;
+        }
+        if (got == 0) return;
+        relayout(false);
+    }
+}
+
+fn imagesGet(_: *anyopaque, node: dom.NodeId) ?web.layout.Bitmap {
+    const p = pictureOf(node) orelse return null;
+    return if (p.state == .loaded) p.bm else null;
+}
+
+const images_vtable: web.layout.Images.VTable = .{ .get = imagesGet };
+
+fn imagesProvider() web.layout.Images {
+    return .{ .ctx = @ptrCast(&page), .vtable = &images_vtable };
 }
 
 /// Style, lay out and paint the parsed document for the viewport as it
@@ -544,7 +726,7 @@ fn relayout(recollect: bool) void {
     const styles = a.create(web.style.Styles) catch outOfMemory();
     styles.* = web.style.compute(a, doc, page.sheets, env()) catch outOfMemory();
     page.styles = styles;
-    const l = web.layout.layoutDocument(a, doc, styles, page_fonts.fonts(), @floatFromInt(vw), @floatFromInt(vh)) catch outOfMemory();
+    const l = web.layout.layoutDocumentWith(a, doc, styles, page_fonts.fonts(), imagesProvider(), @floatFromInt(vw), @floatFromInt(vh)) catch outOfMemory();
     page.layout = l;
     page.extent = l.get(l.root).h;
     const max_y = @max(0, page.extent - @as(f64, @floatFromInt(vh)));
@@ -613,6 +795,7 @@ fn paintAll() void {
 fn scrollBy(dy: f64) void {
     if (!scrollTo(page.scroll_y + dy)) return;
     paintAll();
+    loadPicturesNear();
 }
 
 fn scrollTo(y_in: f64) bool {

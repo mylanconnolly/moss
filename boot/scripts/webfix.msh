@@ -17,6 +17,12 @@ let pages = [
   { path: "/spoof.html", file: "spoof.html" }
   { path: "/form.html", file: "form.html" }
   { path: "/hello.txt.gz", file: "hello.txt.gz" }
+  { path: "/images.html", file: "images.html" }
+  { path: "/img/solid.png", file: "img/solid.png" }
+  { path: "/img/grad.jpg", file: "img/grad.jpg" }
+  { path: "/img/blue.gif", file: "img/blue.gif" }
+  { path: "/img/prog.jpg", file: "img/prog.jpg" }
+  { path: "/img/plexserif.woff", file: "img/plexserif.woff" }
 ]
 def page [req] {
   match $req.path {

@@ -36,6 +36,28 @@ pub const Font = struct {
     italic: bool = false,
     monospace: bool = false,
     serif: bool = false,
+    /// The computed `font-family` list, first choice first: a provider
+    /// with faces of its own (`@font-face`) picks by name.
+    families: []const []const u8 = &.{},
+};
+
+/// A picture the page has for an element: its pixels, RGBA rows of `w`.
+pub const Bitmap = struct { w: u32, h: u32, rgba: []const u8 };
+
+/// What layout (and paint) ask of images: the picture for a node, if
+/// the host has decoded one. An `img` without one is sized by its
+/// attributes or a placeholder.
+pub const Images = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        get: *const fn (ctx: *anyopaque, node: NodeId) ?Bitmap,
+    };
+
+    pub fn get(i: Images, node: NodeId) ?Bitmap {
+        return i.vtable.get(i.ctx, node);
+    }
 };
 
 pub const FontMetrics = struct {
@@ -120,7 +142,7 @@ pub fn fontOf(c: *const Computed) Font {
         if (std.ascii.eqlIgnoreCase(f, "serif")) serif = true;
         break;
     }
-    return .{ .size = c.font_size, .weight = c.font_weight, .italic = c.font_style != .normal, .monospace = mono, .serif = serif };
+    return .{ .size = c.font_size, .weight = c.font_weight, .italic = c.font_style != .normal, .monospace = mono, .serif = serif, .families = c.font_family };
 }
 
 // ------------------------------------------------------------- the tree
@@ -215,6 +237,8 @@ pub const Layout = struct {
     doc: *const Document,
     styles: *const style.Styles,
     fonts: Fonts,
+    /// The host's pictures, if it has any.
+    images: ?Images = null,
     boxes: std.ArrayList(Box) = .empty,
     fragments: std.ArrayList(Fragment) = .empty,
     root: BoxId = 0,
@@ -243,8 +267,13 @@ const FloatRec = struct { box: BoxId, x: f64, y: f64, w: f64, h: f64, left: bool
 /// computed for it; the result's boxes hold every position a painter
 /// needs.
 pub fn layoutDocument(a: std.mem.Allocator, doc: *const Document, styles: *const style.Styles, fonts: Fonts, viewport_w: f64, viewport_h: f64) Error!*Layout {
+    return layoutDocumentWith(a, doc, styles, fonts, null, viewport_w, viewport_h);
+}
+
+/// The same, with the host's pictures for `img` sizes.
+pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *const style.Styles, fonts: Fonts, images: ?Images, viewport_w: f64, viewport_h: f64) Error!*Layout {
     const l = try a.create(Layout);
-    l.* = .{ .a = a, .doc = doc, .styles = styles, .fonts = fonts, .viewport_w = viewport_w, .viewport_h = viewport_h };
+    l.* = .{ .a = a, .doc = doc, .styles = styles, .fonts = fonts, .images = images, .viewport_w = viewport_w, .viewport_h = viewport_h };
     l.root_style.display = .block;
     try l.boxes.append(a, .{ .kind = .root, .node = null, .style = &l.root_style });
     // The root element's box is the html element's, a block under the
@@ -1324,7 +1353,16 @@ fn replacedSize(l: *const Layout, id: BoxId, cb_w: f64) [2]f64 {
     const em = st.font_size;
     const name = doc.get(node).name;
     if (std.mem.eql(u8, name, "img") or std.mem.eql(u8, name, "video") or std.mem.eql(u8, name, "canvas") or std.mem.eql(u8, name, "iframe") or std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "embed") or std.mem.eql(u8, name, "object")) {
-        // No image yet: a placeholder. One given dimension keeps 2:1.
+        // A decoded picture has its own size; one given dimension keeps
+        // its ratio. Without one: a placeholder, 2:1.
+        if (l.images) |imgs| if (imgs.get(node)) |bm| {
+            const iw: f64 = @floatFromInt(bm.w);
+            const ih: f64 = @floatFromInt(bm.h);
+            if (w == null and h == null) return .{ iw, ih };
+            if (w == null) return .{ h.? * iw / ih, h.? };
+            if (h == null) return .{ w.?, w.? * ih / iw };
+            return .{ w.?, h.? };
+        };
         if (w == null and h == null) return .{ 300, 150 };
         if (w == null) return .{ h.? * 2, h.? };
         if (h == null) return .{ w.?, w.? / 2 };

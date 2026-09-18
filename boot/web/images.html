@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>moss fixture: images</title>
+<style>
+  @font-face { font-family: "Plex Serif"; src: url(/img/plexserif.woff); }
+  body { font-family: sans-serif; margin: 16px; }
+  h1 { color: #336699; }
+  .serif { font-family: "Plex Serif", serif; font-size: 20px; }
+  img { display: block; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h1>Pictures and a web font</h1>
+<p class="serif">This paragraph is set in Plex Serif, a web font the page fetched through its broker and rasterized itself.</p>
+<img src="/img/solid.png" alt="solid orange">
+<img src="/img/grad.jpg" alt="a gradient">
+<img src="/img/blue.gif" alt="solid blue">
+<img src="/img/prog.jpg" alt="a progressive JPEG">
+<p>Four pictures: a PNG, a baseline JPEG, a GIF and a progressive JPEG, each decoded in this page's own domain.</p>
+</body>
+</html>

@@ -15,6 +15,10 @@ pub fn Pool(comptime chunk: usize, comptime nchunks: usize) type {
         used: [nchunks]bool = [_]bool{false} ** nchunks,
         /// High-water mark, for the host's curiosity.
         peak: usize = 0,
+        /// What the last refused request wanted and the longest free run
+        /// there was: a host's out-of-memory report reads these.
+        last_refused: usize = 0,
+        last_free_run: usize = 0,
 
         pub fn allocator(self: *Self) std.mem.Allocator {
             return .{ .ptr = self, .vtable = &vtable };
@@ -35,6 +39,7 @@ pub fn Pool(comptime chunk: usize, comptime nchunks: usize) type {
             if (alignment.toByteUnits() > chunk) return null;
             const n = chunksFor(len);
             var i: usize = 0;
+            var longest: usize = 0;
             while (i + n <= nchunks) {
                 var run: usize = 0;
                 while (run < n and !self.used[i + run]) run += 1;
@@ -43,8 +48,11 @@ pub fn Pool(comptime chunk: usize, comptime nchunks: usize) type {
                     self.peak = @max(self.peak, i + n);
                     return @ptrCast(&self.buf[i * chunk]);
                 }
+                longest = @max(longest, run);
                 i += run + 1;
             }
+            self.last_refused = n;
+            self.last_free_run = longest;
             return null;
         }
 

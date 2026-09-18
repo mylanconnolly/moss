@@ -22,6 +22,7 @@ pub const tls = @import("tls.zig");
 pub const tthint = @import("tthint.zig");
 pub const usercred = @import("usercred.zig");
 pub const web = @import("web.zig");
+pub const image = @import("image.zig");
 pub const woff2 = @import("woff2.zig");
 pub const xts = @import("xts.zig");
 
@@ -45,6 +46,7 @@ test {
     _ = tthint;
     _ = usercred;
     _ = web;
+    _ = image;
     _ = woff2;
     _ = xts;
 }

@@ -114,6 +114,12 @@ const Painter = struct {
             p.control(b, n, kind);
             return;
         };
+        if (b.node) |n| if (p.l.doc.isHtml(n, "img")) {
+            if (p.l.images) |imgs| if (imgs.get(n)) |bm| {
+                p.picture(b, bm);
+                return;
+            };
+        };
         // Backgrounds and borders on the border box (the root's are the
         // canvas's).
         if (b.kind != .root and b.kind != .inline_box and b.kind != .anon_block) {
@@ -219,6 +225,39 @@ const Painter = struct {
         if (b.border[2] > 0) p.fill(f.x, f.y + f.h - b.border[2], f.w, b.border[2], st.borderColor(2).word());
         if (opens and b.border[3] > 0) p.fill(f.x, f.y, b.border[3], f.h, st.borderColor(3).word());
         if (closes and b.border[1] > 0) p.fill(f.x + f.w - b.border[1], f.y, b.border[1], f.h, st.borderColor(1).word());
+    }
+
+    /// A picture into its box's content area, scaled to it by nearest
+    /// sample (a box its own size copies pixel for pixel); alpha blends
+    /// over what is under it.
+    fn picture(p: *const Painter, b: *const layout.Box, bm: layout.Bitmap) void {
+        const x0f = b.x + b.border[3] + b.padding[3];
+        const y0f = b.y + b.border[0] + b.padding[0] - p.scroll;
+        const cw = b.w - b.border[1] - b.border[3] - b.padding[1] - b.padding[3];
+        const chh = b.h - b.border[0] - b.border[2] - b.padding[0] - b.padding[2];
+        if (cw <= 0 or chh <= 0 or bm.w == 0 or bm.h == 0) return;
+        const dw: usize = px(cw);
+        const dh: usize = px(chh);
+        if (dw == 0 or dh == 0) return;
+        const ox: i64 = @intFromFloat(@round(x0f));
+        const oy: i64 = @intFromFloat(@round(y0f));
+        var y: usize = 0;
+        while (y < dh) : (y += 1) {
+            const sy = @min(bm.h - 1, @as(u32, @intCast(y * bm.h / dh)));
+            const ty = oy + @as(i64, @intCast(y));
+            if (ty < 0) continue;
+            if (ty >= @as(i64, @intCast(p.canvas.h))) break;
+            var x: usize = 0;
+            while (x < dw) : (x += 1) {
+                const tx = ox + @as(i64, @intCast(x));
+                if (tx < 0) continue;
+                if (tx >= @as(i64, @intCast(p.canvas.w))) break;
+                const sx = @min(bm.w - 1, @as(u32, @intCast(x * bm.w / dw)));
+                const o = (@as(usize, sy) * bm.w + sx) * 4;
+                const word = (@as(u32, bm.rgba[o]) << 16) | (@as(u32, bm.rgba[o + 1]) << 8) | bm.rgba[o + 2];
+                p.canvas.blend(@intCast(tx), @intCast(ty), word, bm.rgba[o + 3]);
+            }
+        }
     }
 
     /// A 1px frame inside a rect.

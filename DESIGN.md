@@ -6146,6 +6146,72 @@ separate from anything that is rebuilt from it. (2) A queue that
 drops must say so; the silence cost an hour. (3) In a drill, wait for
 the effect in the app, not the cause in the page.
 
+**Stage 8, images and web fonts (as built, 2026-09-18).** The
+decoders are one library, `lib/image.zig`, and its corpus is generated
+rather than vendored: `tools/mkimages.sh` asks ImageMagick for
+twenty-nine files — PNG in every colour type and depth, palettes,
+transparency, Adam7; GIF plain, interlaced and transparent; JPEG
+baseline and progressive with restart markers and every subsampling —
+and their raw RGBA references, and the host test decodes each against
+its reference (JPEG within a tolerance, since no two decoders round
+alike). PNG rides std's flate; GIF is an LZW reader; JPEG is the whole
+of Annex F and G that a page meets — Huffman and progressive scans
+with successive approximation, restart intervals, chroma upsampled
+linearly so a gradient does not step. The layout learned two things
+it had no word for: an `Images` provider, asked per `img` node for a
+`Bitmap` or its declared size, and each `Font`'s computed family
+list, so the page's font provider can pick by name. The page domain
+does the rest without a new capability: `@font-face` rules come out
+of the cascade as `Sheet.font_faces`, each is fetched through the
+broker at load, inflated from WOFF or WOFF2 to SFNT (the header says
+the size) and parsed by `lib/font` into a face chosen before the
+packed generics; pictures are fetched for the `img`s laid out within
+a screen of the viewport, on load and on scroll, decoded into a
+bounded store (64 pictures, 6 MB decoded, 2 MB a file) and relaid out
+only when a decoded size differs from the declared one.
+
+The stage's bugs were mostly not in the stage. The cascade rejected a
+font-family list that opened with a quoted name — `"Plex Serif",
+serif` — as a whole, so the paragraph the drill was meant to see in a
+web font was sans, which only the screendump showed: the drill now
+waits for the page's own word that a glyph of the web face was drawn.
+The download turn then died of memory in the GUI runtime: the render
+scratch was an arena over the box pool it shares with the state
+snapshots, and after a page's worth of events the pool refused a
+22 KB run with three quarters of its chunks free — fragmentation,
+which the pool now reports as the run it wanted against the run it
+had. The scratch is a static buffer of its own now, contiguous, freed
+whole each turn. That change moved a symbol, and the browser began
+dying of "unreachable" in the fixed-buffer allocator's resize, whose
+bounds check saw garbage: the page-serving thread's stack was 64 KB
+in a program whose TLS fetches run on that thread, and the kernel's
+own note (`user_stack_pages`) says a handshake alone wants more than
+120 KB. It had been overflowing into whatever the linker placed
+below it — a flate window before, the scratch's allocator after — and
+the measured high-water mark was 233 KB. The stack is 512 KB, painted
+so `reapAll` logs how deep it went, and the serving loop checks a
+canary after every step and exits rather than run on corrupt statics.
+`mshrun`'s panic line carries the fault address and a walk of the
+frame chain now; `nm -n` and `objdump -d -l` on the build's
+`mshrun.elf` turned the first "unreachable" into a file and line.
+The last bill came from the gate: a 512 KB stack and a 512 KB scratch
+are static, charged to every `mshrun` on the system, and the shells
+that host workers are budgeted to the edge, so two drills refused a
+worker. The web host paid: its sixty-four-deep command queue carried
+a 2 KB URL buffer per entry per page, 720 KB a host and two hosts an
+image; a queued `load` or `find` keeps its text in one slot per page
+now (a newer one supersedes the queued one, which was the semantics
+anyway), and the image is a megabyte smaller than before the stage.
+*Lessons:* (1) a thread that fetches over TLS needs the same stack as
+a main thread that does — size every thread stack by its deepest
+caller, paint it, and log the high-water mark. (2) A symptom that
+moves when unrelated code changes is memory corruption from a
+neighbour; look at the symbol table's neighbours before the code. (3)
+A pixel assertion that passes is not the picture: the font bug was in
+plain sight in the screendump. (4) A static array in `mshrun` is paid
+for by every mshrun and every budget that hosts one; read the BSS
+after adding one, and look for what can shrink first.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

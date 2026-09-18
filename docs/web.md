@@ -31,8 +31,11 @@ serializer; `encoding` decodes the byte streams the web sends;
 `selectors` matches CSS selectors; `text` is the readable text of a
 page; `css`, `color` and `media` are CSS syntax, colours and media
 queries, `style` the cascade; `layout` places boxes and lines
-(CSS 2.1's visual formatting model, with a `Fonts` vtable for text), and
-`paint` draws them into the toolkit's canvas. The corpora under
+(CSS 2.1's visual formatting model, with a `Fonts` vtable for text and an
+`Images` provider for pictures), and `paint` draws them into the
+toolkit's canvas; `lib/image.zig` decodes PNG, GIF and JPEG (baseline
+and progressive) into RGBA, tested against a corpus `tools/mkimages.sh`
+generates with ImageMagick. The corpora under
 `tools/testdata/web/` are vendored at pinned commits; every `zig build
 test` prints the counts (see [Testing](testing.md)) and asserts a floor,
 and the layout engine's reftests — pairs of pages that must paint the
@@ -139,6 +142,16 @@ picker the editor saves through, so a download is a grant the user
 makes and, for now, UTF-8 text. The Site panel shows the origin, the
 page domain's memory against its budget, and what it holds.
 
+Pictures and web fonts are the page's own work. The cascade collects a
+sheet's `@font-face` rules; on load the page fetches each face through
+its broker, inflates WOFF or WOFF2 to SFNT and parses it with
+`lib/font`, and text whose family list names the face is set in it
+(the page logs `web face in use: NAME` the first time one draws). The
+`img`s laid out within a screen of the viewport are fetched and
+decoded as the page loads and scrolls — at most 64 pictures, 6 MB
+decoded, 2 MB a file — and painted at their laid-out size; an image
+whose decoded size differs from what the page declared relays out.
+
 Three host commands serve the app: `save-as NAME DATA` (the Save
 dialog; answers with the chosen name), `page-info ID` (a page
 domain's memory and whether it is alive) and `log TEXT` (a line to the
@@ -149,9 +162,8 @@ log from inside `update`, where `echo` waits for the window to close).
 No cache, no cookie jar and no connection pool yet (the session's
 `webfetch` unit of the plan); no content coding in the page; no stop
 button; a select cycles its options rather than opening a list; binary
-downloads wait for a bytes save in the picker; no images or web fonts
-(stage 8);
-no flexbox, grid or tables beyond block rows (stage 9); no JavaScript
+downloads wait for a bytes save in the picker; no SVG, WebP, animated
+GIF (the first frame shows), `srcset` or `background-image`; no flexbox, grid or tables beyond block rows (stage 9); no JavaScript
 (stages 10–11: our own engine, off until it lands). Menus are the
 generic window menu until client-defined menus exist. The `page` leaf
 does not yet follow a window resize with a fresh buffer of the new size

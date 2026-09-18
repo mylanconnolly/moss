@@ -489,6 +489,22 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   in a frame ended Activity's first System tab with a data abort at the
   stack's guard — and never pass `mshl.toValue` a type it cannot take
   (it is recursive per type).
+- A thread's stack is a static array with no guard below it, so an
+  overflow corrupts whatever the linker placed next — and the symptom
+  moves when unrelated code changes the layout (the browser's serving
+  thread overflowed 64 KB into a flate window, then into the GUI
+  epoch's allocator, and the panic said "unreachable" in a resize).
+  Size a thread stack by its deepest caller (a TLS handshake on it
+  wants what a main stack gets, 512 KB), paint it at start and log the
+  high-water mark (`guipage.stackHighWater`), and keep a canary check.
+  When a user program panics, `mshrun`'s line carries the address and
+  the frame chain: `nm -n` on the build's `.zig-cache/o/*/mshrun.elf`
+  names the function, `objdump -d -l --start-address=… --stop-address=…`
+  the source line. And every static array in `mshrun` is charged to
+  every mshrun on the system — the shells' worker hosts are budgeted to
+  the edge — so read the BSS (`objdump -h`, `nm -S | sort`) after adding
+  one: a 720 KB host struct twice over was what the browser's serving
+  stack and render scratch had to be paid for by.
 - A variant added to a wire enum or tagged union in `shared/` (`enum(u64)`,
   `union(enum(u64))`: syscalls, `GpuReq`, `InitRequest`, `CapTag`, the
   lot) goes at the END, never inserted or prepended. The tag is the

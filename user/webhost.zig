@@ -174,11 +174,14 @@ pub const Command = union(enum) {
     stop,
 };
 
+/// A queued command. The text a `load` or `find` carries lives in the
+/// page's own slot for that kind (a newer one supersedes what was queued,
+/// so one slot each is enough — sixty-four URL buffers a page once made
+/// a host 720 KB, and every mshrun carries two hosts).
 const Queued = struct {
     cmd: Command,
-    url: [2048]u8 = undefined,
-    url_len: usize = 0,
 };
+const text_slots = 2; // 0: the queued load's URL, 1: the queued find's text
 
 pub const Page = struct {
     used: bool = false,
@@ -197,6 +200,8 @@ pub const Page = struct {
     /// that relays out per key, so the queue is deep, and a drop is said.
     queue: [64]Queued = undefined,
     qlen: usize = 0,
+    texts: [text_slots][2048]u8 = undefined,
+    text_len: [text_slots]usize = @splat(0),
     open: ?Resource = null,
     // What the page reported, kept for the host program.
     title: [256]u8 = undefined,
@@ -508,18 +513,25 @@ pub const Host = struct {
             logf(h.log, "webhost: page {d}: command queue full; {s} dropped", .{ id, @tagName(cmd) });
             return false;
         }
-        const q = &p.queue[p.qlen];
-        q.* = .{ .cmd = cmd };
-        // A command's text lives in the slot, not in the caller's memory.
-        if (cmd == .load) {
-            q.url_len = @min(cmd.load.len, q.url.len);
-            @memcpy(q.url[0..q.url_len], cmd.load[0..q.url_len]);
-            q.cmd = .{ .load = "" };
-        } else if (cmd == .find) {
-            q.url_len = @min(cmd.find.text.len, q.url.len);
-            @memcpy(q.url[0..q.url_len], cmd.find.text[0..q.url_len]);
-            q.cmd = .{ .find = .{ .text = "", .index = cmd.find.index } };
+        // A command's text lives in the page's slot for its kind, not in
+        // the caller's memory; a newer load or find supersedes a queued
+        // one, which leaves the queue.
+        var stored = cmd;
+        if (cmd == .load or cmd == .find) {
+            const slot: usize = if (cmd == .load) 0 else 1;
+            const text = if (cmd == .load) cmd.load else cmd.find.text;
+            var i: usize = 0;
+            while (i < p.qlen) {
+                if (std.meta.activeTag(p.queue[i].cmd) == std.meta.activeTag(cmd)) {
+                    for (i + 1..p.qlen) |j| p.queue[j - 1] = p.queue[j];
+                    p.qlen -= 1;
+                } else i += 1;
+            }
+            p.text_len[slot] = @min(text.len, p.texts[slot].len);
+            @memcpy(p.texts[slot][0..p.text_len[slot]], text[0..p.text_len[slot]]);
+            stored = if (cmd == .load) .{ .load = "" } else .{ .find = .{ .text = "", .index = cmd.find.index } };
         }
+        p.queue[p.qlen] = .{ .cmd = stored };
         p.qlen += 1;
         if (p.parked) |token| {
             p.parked = null;
@@ -531,9 +543,9 @@ pub const Host = struct {
     fn answerNext(h: *Host, id: PageId, token: u64) void {
         const p = &h.pages[id];
         const q = &p.queue[0];
-        const url_slice: []const u8 = q.url[0..q.url_len];
         const rep: wire.HostResp = switch (q.cmd) {
             .load => blk: {
+                const url_slice = p.texts[0][0..p.text_len[0]];
                 const n = @min(url_slice.len, p.data_len);
                 @memcpy(p.data()[0..n], url_slice[0..n]);
                 break :blk .{ .load = .{ .off = 0, .len = n } };
@@ -544,8 +556,9 @@ pub const Host = struct {
             .dump => |d| .{ .dump = .{ .what = @intFromEnum(d) } },
             .resize => |r| .{ .resize = .{ .w = r.w, .h = r.h } },
             .find => |f| blk: {
-                const n = @min(url_slice.len, p.data_len);
-                @memcpy(p.data()[0..n], url_slice[0..n]);
+                const text = p.texts[1][0..p.text_len[1]];
+                const n = @min(text.len, p.data_len);
+                @memcpy(p.data()[0..n], text[0..n]);
                 break :blk .{ .find = .{ .len = n, .index = f.index } };
             },
             .zoom => |z| .{ .zoom = .{ .percent = z } },

@@ -241,11 +241,19 @@ pub const Rule = struct {
     declarations: []const Declaration,
 };
 
+/// An `@font-face` rule: the family it declares and the first `src`
+/// URL (a `local()` source is skipped), for a page to fetch and add
+/// to its faces. Weight and style are not matched yet: the first face
+/// declared for a family serves every variant.
+pub const FontFace = struct { family: []const u8, src: []const u8 };
+
 pub const Sheet = struct {
     origin: Origin,
     rules: []const Rule,
     /// `@import` URLs seen, for a loader to fetch and prepend.
     imports: []const []const u8,
+    /// `@font-face` rules seen, in order.
+    font_faces: []const FontFace = &.{},
 };
 
 pub const Env = media.Env;
@@ -258,11 +266,46 @@ pub fn parseSheet(a: std.mem.Allocator, text: []const u8, origin: Origin, env: E
     const rules = try p.parseStylesheet();
     var out: std.ArrayList(Rule) = .empty;
     var imports: std.ArrayList([]const u8) = .empty;
-    try collectRules(a, rules, env, &out, &imports);
-    return .{ .origin = origin, .rules = out.items, .imports = imports.items };
+    var faces: std.ArrayList(FontFace) = .empty;
+    try collectRulesFaces(a, rules, env, &out, &imports, &faces);
+    return .{ .origin = origin, .rules = out.items, .imports = imports.items, .font_faces = faces.items };
 }
 
 fn collectRules(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8)) Error!void {
+    var faces: std.ArrayList(FontFace) = .empty;
+    try collectRulesFaces(a, rules, env, out, imports, &faces);
+}
+
+/// An `@font-face` block's descriptors: the family and the first
+/// `url()` in `src`.
+fn fontFaceOf(a: std.mem.Allocator, block: []const css.Value) Error!?FontFace {
+    var p = try css.Parser.fromValues(a, block);
+    const items = try p.parseListOfDeclarations();
+    var family: ?[]const u8 = null;
+    var src: ?[]const u8 = null;
+    for (items) |item| {
+        if (item != .declaration) continue;
+        const d = item.declaration;
+        if (std.ascii.eqlIgnoreCase(d.name, "font-family")) {
+            for (d.value) |v| {
+                if (v == .token and v.token == .string) family = v.token.string;
+                if (v == .token and v.token == .ident and family == null) family = v.token.ident;
+            }
+        } else if (std.ascii.eqlIgnoreCase(d.name, "src")) {
+            for (d.value) |v| {
+                if (src != null) break;
+                if (v == .token and v.token == .url) src = v.token.url;
+                if (v == .function and std.ascii.eqlIgnoreCase(v.function.name, "url")) for (v.function.values) |x| if (x == .token and x.token == .string) {
+                    src = x.token.string;
+                };
+            }
+        }
+    }
+    if (family == null or src == null) return null;
+    return .{ .family = family.?, .src = src.? };
+}
+
+fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8), faces: *std.ArrayList(FontFace)) Error!void {
     for (rules) |r| switch (r) {
         .err => {},
         .qualified => |q| try addQualified(a, q, out),
@@ -272,7 +315,10 @@ fn collectRules(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *s
                 const q = try media.Query.parseValues(a, at.prelude);
                 if (!q.matches(env)) continue;
                 const block = at.block orelse continue;
-                try collectRules(a, try rulesOfBlock(a, block), env, out, imports);
+                try collectRulesFaces(a, try rulesOfBlock(a, block), env, out, imports, faces);
+            } else if (eq(at.name, "font-face")) {
+                const block = at.block orelse continue;
+                if (try fontFaceOf(a, block)) |f| try faces.append(a, f);
             } else if (eq(at.name, "import")) {
                 for (at.prelude) |v| {
                     if (v == .token and v.token == .string) try imports.append(a, v.token.string);
@@ -282,7 +328,7 @@ fn collectRules(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *s
             } else if (eq(at.name, "supports")) {
                 if (!supportsMatches(a, at.prelude)) continue;
                 const block = at.block orelse continue;
-                try collectRules(a, try rulesOfBlock(a, block), env, out, imports);
+                try collectRulesFaces(a, try rulesOfBlock(a, block), env, out, imports, faces);
             }
         },
     };
@@ -911,20 +957,23 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
             // between families.
             var fams: std.ArrayList([]const u8) = .empty;
             var name: std.ArrayList(u8) = .empty;
+            var quoted = false; // the family before this comma was a string
             for (vals) |x| {
                 if (x == .token and x.token == .comma) {
-                    if (name.items.len == 0) return error.Invalid;
-                    try fams.append(a, name.items);
+                    if (name.items.len == 0 and !quoted) return error.Invalid;
+                    if (name.items.len > 0) try fams.append(a, name.items);
                     name = .empty;
+                    quoted = false;
                     continue;
                 }
                 if (x == .token and x.token == .string) {
-                    if (name.items.len != 0) return error.Invalid;
+                    if (name.items.len != 0 or quoted) return error.Invalid;
                     try fams.append(a, x.token.string);
                     // A string is a whole family; a comma or the end follows.
-                    name = .empty;
+                    quoted = true;
                     continue;
                 }
+                if (quoted) return error.Invalid;
                 const w = ident(x) orelse return error.Invalid;
                 if (name.items.len > 0) try name.append(a, ' ');
                 try name.appendSlice(a, w);
@@ -1139,4 +1188,56 @@ pub fn collectDocumentSheetsWith(a: std.mem.Allocator, doc: *const Document, env
         try sheets.append(a, try parseSheet(a, text, .author, env));
     }
     return sheets.items;
+}
+
+test "style: a quoted family followed by more families is a list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    const doc = try html.parse(a,
+        \\<!DOCTYPE html><style>
+        \\  .q { font-family: "Plex Serif", serif }
+        \\  .u { font-family: Plex Sans, "Fira Code", monospace }
+        \\  .bad { font-family: "A" B }
+        \\</style>
+        \\<p class=q>a</p><p class=u>b</p><p class=bad>c</p>
+    , .{});
+    const sheets = try collectDocumentSheets(a, doc, env);
+    const styles = try compute(a, doc, sheets, env);
+    var w = doc.walk(dom.document_id);
+    var seen: usize = 0;
+    while (w.next()) |id| if (doc.isHtml(id, "p")) {
+        const fams = styles.get(id).font_family;
+        switch (seen) {
+            0 => {
+                try std.testing.expectEqual(@as(usize, 2), fams.len);
+                try std.testing.expectEqualStrings("Plex Serif", fams[0]);
+                try std.testing.expectEqualStrings("serif", fams[1]);
+            },
+            1 => {
+                try std.testing.expectEqual(@as(usize, 3), fams.len);
+                try std.testing.expectEqualStrings("Plex Sans", fams[0]);
+                try std.testing.expectEqualStrings("Fira Code", fams[1]);
+                try std.testing.expectEqualStrings("monospace", fams[2]);
+            },
+            // Invalid: the declaration is dropped and the default stands.
+            else => try std.testing.expectEqualStrings("sans-serif", fams[0]),
+        }
+        seen += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "style: @font-face rules are collected with their family and first url" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sheet = try parseSheet(a, "@font-face { font-family: \"Plex Serif\"; src: local(Plex), url(/f/serif.woff) format(\"woff\"); } p { color: red } @font-face { font-family: Mono; src: url(\"mono.ttf\") }", .author, .{ .width = 800, .height = 600 });
+    try std.testing.expectEqual(@as(usize, 2), sheet.font_faces.len);
+    try std.testing.expectEqualStrings("Plex Serif", sheet.font_faces[0].family);
+    try std.testing.expectEqualStrings("/f/serif.woff", sheet.font_faces[0].src);
+    try std.testing.expectEqualStrings("Mono", sheet.font_faces[1].family);
+    try std.testing.expectEqualStrings("mono.ttf", sheet.font_faces[1].src);
+    try std.testing.expectEqual(@as(usize, 1), sheet.rules.len);
 }

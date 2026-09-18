@@ -32,11 +32,22 @@ pub const Epoch = struct {
 
     /// `roots` names the spec/callback values this host loop keeps calling;
     /// they are held so a release during the epoch cannot retire them.
+    /// The scratch's own backing: a render's allocations are transient
+    /// and contiguous here, never contending with the snapshots in the
+    /// box pool (whose fragmentation once refused a 22 KB run with most
+    /// of its chunks free, ending the browser on a download turn).
+    var scratch_storage: [512 << 10]u8 = undefined;
+    var scratch_fba: std.heap.FixedBufferAllocator = undefined;
+    /// One epoch at a time per process: the backing is shared.
+    var scratch_busy = false;
+
     pub fn begin(self: *Epoch, it: *mshl.Interp, roots: Value) mshl.Error!void {
-        std.debug.assert(!self.active);
+        std.debug.assert(!self.active and !scratch_busy);
         const held = try it.holdHostValue(roots); // alive before they leave the pending list
         const pending = it.detachDead(roots);
-        self.* = .{ .it = it, .scratch = std.heap.ArenaAllocator.init(it.heap), .outer = it.arena, .frames = it.free_frames, .out = it.out, .ret = it.ret, .err_msg = it.err_msg, .roots = held, .pending = pending, .active = true };
+        scratch_busy = true;
+        scratch_fba = std.heap.FixedBufferAllocator.init(&scratch_storage);
+        self.* = .{ .it = it, .scratch = std.heap.ArenaAllocator.init(scratch_fba.allocator()), .outer = it.arena, .frames = it.free_frames, .out = it.out, .ret = it.ret, .err_msg = it.err_msg, .roots = held, .pending = pending, .active = true };
         it.arena = self.scratch.allocator();
         it.free_frames = .empty;
         it.out = .empty;
@@ -56,6 +67,11 @@ pub const Epoch = struct {
         self.it.out = .empty;
         self.it.ret = .nothing;
         self.it.err_msg = "";
+        // The scratch keeps the buffer it grew to: freed each turn, it
+        // asked the box pool for the same large contiguous run again,
+        // which the pool, fragmented by the snapshots it also holds,
+        // could refuse with most of its chunks free (the browser's
+        // download turn, after a page's events, 2026-09-18).
         _ = self.scratch.reset(.free_all);
         self.it.reclaim();
     }
@@ -85,6 +101,7 @@ pub const Epoch = struct {
         self.it.reclaimKeeping(self.returned);
         self.it.restoreDead(self.pending);
         self.scratch.deinit();
+        scratch_busy = false;
         self.active = false;
     }
 };
