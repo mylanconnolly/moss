@@ -167,6 +167,10 @@ pub const Command = union(enum) {
     key: struct { code: u32, ch: u32 },
     dump: wire.Dump,
     resize: struct { w: u32, h: u32 },
+    /// Find `text` (empty clears), showing match `index`.
+    find: struct { text: []const u8, index: u32 },
+    zoom: u32,
+    theme: u64,
     stop,
 };
 
@@ -189,7 +193,9 @@ pub const Page = struct {
     w: u32 = 0,
     h: u32 = 0,
     parked: ?u64 = null,
-    queue: [4]Queued = undefined,
+    /// Commands waiting for the page's `next`: typing outruns a page
+    /// that relays out per key, so the queue is deep, and a drop is said.
+    queue: [64]Queued = undefined,
     qlen: usize = 0,
     open: ?Resource = null,
     // What the page reported, kept for the host program.
@@ -205,6 +211,14 @@ pub const Page = struct {
     commits: usize = 0,
     dumped_len: usize = 0,
     dumped_cut: bool = false,
+    /// The last download's URL and type, a selection's text, the focused
+    /// element's kind: whichever event came last with text.
+    note: [2048]u8 = undefined,
+    note_len: usize = 0,
+    note2_len: usize = 0,
+    found_count: u64 = 0,
+    found_index: u64 = 0,
+    focus_rect: u64 = 0,
 
     pub fn titleText(p: *const Page) []const u8 {
         return p.title[0..p.title_len];
@@ -214,6 +228,15 @@ pub const Page = struct {
     }
     pub fn hoverText(p: *const Page) []const u8 {
         return p.hover[0..p.hover_len];
+    }
+    /// The last text-bearing event's text (a download's URL, a
+    /// selection, a focused element's kind).
+    pub fn noteText(p: *const Page) []const u8 {
+        return p.note[0..p.note_len];
+    }
+    /// A download's type, after its URL.
+    pub fn noteType(p: *const Page) []const u8 {
+        return p.note[p.note_len .. p.note_len + p.note2_len];
     }
     /// The page's pixels, XRGB rows of `w`.
     pub fn pixels(p: *const Page) []const u32 {
@@ -262,6 +285,8 @@ pub const Host = struct {
     fonts_len: usize = 0,
     /// The reply token of the call being served.
     cur_token: u64 = 0,
+    /// A POST's body, copied out of the page's buffer.
+    body: [8192]u8 = undefined,
     lock: Lock = .{},
     scratch: [head_max + request_max]u8 = undefined,
 
@@ -479,13 +504,21 @@ pub const Host = struct {
     fn sendLocked(h: *Host, id: PageId, cmd: Command) bool {
         const p = &h.pages[id];
         if (!p.used or p.dead) return false;
-        if (p.qlen == p.queue.len) return false;
+        if (p.qlen == p.queue.len) {
+            logf(h.log, "webhost: page {d}: command queue full; {s} dropped", .{ id, @tagName(cmd) });
+            return false;
+        }
         const q = &p.queue[p.qlen];
         q.* = .{ .cmd = cmd };
+        // A command's text lives in the slot, not in the caller's memory.
         if (cmd == .load) {
             q.url_len = @min(cmd.load.len, q.url.len);
             @memcpy(q.url[0..q.url_len], cmd.load[0..q.url_len]);
-            q.cmd = .{ .load = "" }; // the text lives in the slot
+            q.cmd = .{ .load = "" };
+        } else if (cmd == .find) {
+            q.url_len = @min(cmd.find.text.len, q.url.len);
+            @memcpy(q.url[0..q.url_len], cmd.find.text[0..q.url_len]);
+            q.cmd = .{ .find = .{ .text = "", .index = cmd.find.index } };
         }
         p.qlen += 1;
         if (p.parked) |token| {
@@ -510,6 +543,13 @@ pub const Host = struct {
             .key => |k| .{ .key = .{ .code = k.code, .ch = k.ch } },
             .dump => |d| .{ .dump = .{ .what = @intFromEnum(d) } },
             .resize => |r| .{ .resize = .{ .w = r.w, .h = r.h } },
+            .find => |f| blk: {
+                const n = @min(url_slice.len, p.data_len);
+                @memcpy(p.data()[0..n], url_slice[0..n]);
+                break :blk .{ .find = .{ .len = n, .index = f.index } };
+            },
+            .zoom => |z| .{ .zoom = .{ .percent = z } },
+            .theme => |t| .{ .theme = .{ .flags = t } },
             .stop => .stop,
         };
         // Shift the queue.
@@ -568,7 +608,7 @@ pub const Host = struct {
             .next => {
                 if (p.qlen > 0) h.answerNext(id, r.token) else p.parked = r.token;
             },
-            .open => |o| h.open(id, o.off, o.len),
+            .open => |o| h.open(id, o.off, o.len, o.flags),
             .read => |rd| h.read(id, rd.max),
             .cancel => {
                 if (p.open) |*res| res.conn.close(h.net);
@@ -614,6 +654,21 @@ pub const Host = struct {
                 p.dumped_len = @min(a, d.len);
                 p.dumped_cut = b != 0;
             },
+            .download => {
+                p.note_len = @min(@min(a, d.len), p.note.len);
+                p.note2_len = @min(@min(b, d.len -| a), p.note.len - p.note_len);
+                @memcpy(p.note[0 .. p.note_len + p.note2_len], d[0 .. p.note_len + p.note2_len]);
+            },
+            .selection, .focus => {
+                p.note_len = @min(@min(a, d.len), p.note.len);
+                p.note2_len = 0;
+                @memcpy(p.note[0..p.note_len], d[0..p.note_len]);
+                if (kind == .focus) p.focus_rect = b;
+            },
+            .found => {
+                p.found_count = a;
+                p.found_index = b;
+            },
         }
     }
 
@@ -623,7 +678,7 @@ pub const Host = struct {
         h.reply(.{ .refused = .{ .code = @intFromEnum(code) } }, 0);
     }
 
-    fn open(h: *Host, id: PageId, off: u64, len: u64) void {
+    fn open(h: *Host, id: PageId, off: u64, len: u64, flags: u64) void {
         const p = &h.pages[id];
         if (p.open) |*res| {
             res.conn.close(h.net);
@@ -631,11 +686,17 @@ pub const Host = struct {
         }
         const d = p.data();
         if (off > d.len or len > d.len - off or len == 0) return h.refuse(.bad_url);
-        // The URL is copied out: the data buffer is about to carry the answer.
+        // The URL (and a POST's body after it) is copied out: the data
+        // buffer is about to carry the answer.
         var url_buf: [2048]u8 = undefined;
         if (len > url_buf.len) return h.refuse(.bad_url);
         @memcpy(url_buf[0..len], d[off .. off + len]);
         var url: []const u8 = url_buf[0..len];
+        var post = flags & 1 != 0;
+        const body_len: usize = @intCast(@min(flags >> 8, h.body.len));
+        if (off + len + body_len > d.len) return h.refuse(.bad_url);
+        @memcpy(h.body[0..body_len], d[off + len .. off + len + body_len]);
+        var body: []const u8 = h.body[0..body_len];
         var fba = std.heap.FixedBufferAllocator.init(&h.scratch);
         var hops: usize = 0;
         while (true) : (hops += 1) {
@@ -657,11 +718,13 @@ pub const Host = struct {
                 target.host
             else
                 std.fmt.bufPrint(&host_hdr, "{s}:{d}", .{ target.host, target.port }) catch target.host;
-            http.formatRequest(a, &req, "GET", target.path, host_text, &.{
+            const headers_get = [_]http.Header{
                 .{ .name = "Accept", .value = "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5" },
                 .{ .name = "Accept-Encoding", .value = "identity" },
                 .{ .name = "User-Agent", .value = "moss/0.0 (webpage)" },
-            }, "", false) catch return h.refuse(.memory);
+            };
+            const headers_post = headers_get ++ [_]http.Header{.{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" }};
+            http.formatRequest(a, &req, if (post) "POST" else "GET", target.path, host_text, if (post) &headers_post else &headers_get, body, false) catch return h.refuse(.memory);
             if (conn.send(h.net, req.items)) |_| {
                 conn.close(h.net);
                 return h.refuse(.connect);
@@ -708,6 +771,9 @@ pub const Host = struct {
                 if (text.len > url_buf.len) return h.refuse(.bad_url);
                 @memcpy(url_buf[0..text.len], text);
                 url = url_buf[0..text.len];
+                // A redirected POST is followed as a GET, as browsers do.
+                post = false;
+                body = "";
                 continue;
             };
             if (head.framing == .length and head.framing.length > wire.max_resource) {

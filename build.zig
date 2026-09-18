@@ -756,6 +756,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/webpagecli.msh",        "conf/units/usersvc-browser.msh",
         "conf/units/gui-browser.msh",       "conf/sessiongui/browser.msh",
         "scripts/browser.msh",              "web/spoof.html",
+        "web/form.html",                    "web/notes.txt",
         "web/index.html",                   "web/about.html",
         "web/hello.txt.gz",                 "scripts/worker-demo.msh",
         "conf/units/svc-pub.msh",           "scripts/svc-pub.msh",

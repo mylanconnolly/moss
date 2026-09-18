@@ -502,7 +502,12 @@ says so), and hands back its document, which `web-render` returns as
 so `html-select` and `html-text` read it. A script needs a `spawner`
 grant and a budget with room for a 28 MB child. The mechanics — the
 protocol in `shared/web.zig`, the host and broker in
-`user/webhost.zig` — are the ones the browser's tabs will use.
+`user/webhost.zig` — are the ones the browser's tabs use (see
+[The web](web.md)). Beside it, for an app that hosts pages: `save-as
+NAME DATA` opens the session's Save dialog and writes through the
+grant the user makes there, `page-info ID` reports a page domain's
+memory against its budget, and `log TEXT` writes a line to the log at
+once (from inside a GUI's `update`, where `echo` waits).
 
 ### TLS: the client, and whom it trusts
 

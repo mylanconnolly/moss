@@ -7,13 +7,16 @@
 # as-is with its coding declared (/gz), and a large body streamed from
 # a small file sent many times over (/big: index.html × 8192), and one
 # larger than a page domain's arena (/boom: × 40000, 23.8 MB — under
-# the broker's cap, over what a page can hold). Serves until the boot
-# ends.
+# the broker's cap, over what a page can hold), and /submit, which
+# answers a form with the method, query and body it received. Serves
+# until the boot ends.
 let pages = [
   { path: "/", file: "index.html" }
   { path: "/index.html", file: "index.html" }
   { path: "/about.html", file: "about.html" }
   { path: "/spoof.html", file: "spoof.html" }
+  { path: "/form.html", file: "form.html" }
+  { path: "/hello.txt.gz", file: "hello.txt.gz" }
 ]
 def page [req] {
   match $req.path {
@@ -22,6 +25,8 @@ def page [req] {
     "/r3" => { status: 303, headers: { location: "/about.html" }, body: "see other" }
     "/gz" => { status: 200, headers: { content-encoding: gzip, content-type: "text/plain; charset=utf-8" }, body: { file: "hello.txt.gz" } }
     "/big" => { status: 200, body: { file: "index.html", repeat: 8192 } }
+    "/notes.download" => { status: 200, headers: { content-type: "application/octet-stream" }, body: { file: "notes.txt" } }
+    "/submit" => { status: 200, headers: { content-type: "text/html; charset=utf-8" }, body: ("<!DOCTYPE html><title>moss fixture: submitted</title><h1>Submitted</h1><p>method " + $req.method + "</p><p>query " + $req.query + "</p><p>body " + $req.body + "</p>") }
     "/boom" => { status: 200, body: { file: "index.html", repeat: 40000 } }
     _ => (match ($pages | find (fn [p] { $p.path == $req.path })) {
         nothing => { status: 404, body: "no such page" }

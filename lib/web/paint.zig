@@ -16,14 +16,36 @@ const color = @import("color.zig");
 const Layout = layout.Layout;
 const Box = layout.Box;
 const BoxId = layout.BoxId;
+const NodeId = layout.NodeId;
+const Document = layout.Document;
 const Canvas = ui.Canvas;
 
 pub const Error = error{OutOfMemory};
 
+/// A rect in document pixels, tinted over what is under it (a find
+/// match, a selection).
+pub const Highlight = struct { x: f64, y: f64, w: f64, h: f64, color: u32 };
+
+/// What a host of the page adds to the picture: highlights, and the
+/// focused element (its box, or its fragments for an inline one, get
+/// a ring).
+pub const Options = struct {
+    highlights: []const Highlight = &.{},
+    focus: ?NodeId = null,
+    /// The ring's colour, and a control's frame and face.
+    accent: u32 = 0x2f6fde,
+    frame: u32 = 0x8a8a8a,
+    face: u32 = 0xe4e4e4,
+};
+
 /// Paint the whole layout, scrolled by `scroll_y` document pixels
 /// (the canvas's own translation is not used; the painter subtracts).
 pub fn paint(l: *const Layout, canvas: *const Canvas, scroll_y: f64) Error!void {
-    var p: Painter = .{ .l = l, .canvas = canvas.*, .scroll = scroll_y };
+    return paintWith(l, canvas, scroll_y, .{});
+}
+
+pub fn paintWith(l: *const Layout, canvas: *const Canvas, scroll_y: f64, opts: Options) Error!void {
+    var p: Painter = .{ .l = l, .canvas = canvas.*, .scroll = scroll_y, .opts = opts };
     // The canvas background: the root element's, else the body's, as
     // CSS propagates it; else left as the caller filled it.
     if (rootBackground(l)) |bg| p.canvas.fillAll(bg);
@@ -36,6 +58,8 @@ pub fn paint(l: *const Layout, canvas: *const Canvas, scroll_y: f64) Error!void 
     while (i < order.len and zOf(l, order[i].box) < 0) : (i += 1) try p.paintBox(order[i].box);
     try p.paintBox(l.root);
     while (i < order.len) : (i += 1) try p.paintBox(order[i].box);
+    for (opts.highlights) |h| p.tint(h);
+    if (opts.focus) |f| p.focusRing(f);
 }
 
 fn zOf(l: *const Layout, id: BoxId) i32 {
@@ -63,6 +87,7 @@ const Painter = struct {
     l: *const Layout,
     canvas: Canvas,
     scroll: f64,
+    opts: Options = .{},
 
     fn px(v: f64) usize {
         return @intFromFloat(@max(0, @round(v)));
@@ -85,6 +110,10 @@ const Painter = struct {
         if (b.style.visibility != .visible or b.style.opacity == 0) return;
         if (b.style.display == .none) return;
         if (b.kind == .text or b.kind == .br) return;
+        if (b.node) |n| if (controlOf(p.l.doc, n)) |kind| {
+            p.control(b, n, kind);
+            return;
+        };
         // Backgrounds and borders on the border box (the root's are the
         // canvas's).
         if (b.kind != .root and b.kind != .inline_box and b.kind != .anon_block) {
@@ -192,6 +221,99 @@ const Painter = struct {
         if (closes and b.border[1] > 0) p.fill(f.x + f.w - b.border[1], f.y, b.border[1], f.h, st.borderColor(1).word());
     }
 
+    /// A 1px frame inside a rect.
+    fn stroke(p: *const Painter, x: f64, y: f64, w: f64, h: f64, thick: f64, word: u32) void {
+        p.fill(x, y, w, thick, word);
+        p.fill(x, y + h - thick, w, thick, word);
+        p.fill(x, y, thick, h, word);
+        p.fill(x + w - thick, y, thick, h, word);
+    }
+
+    /// A translucent tint over a rect (a highlight), blending per pixel.
+    fn tint(p: *const Painter, h: Highlight) void {
+        const x0: usize = px(@max(0, h.x));
+        const y0f = h.y - p.scroll;
+        if (y0f + h.h <= 0 or h.w <= 0 or h.h <= 0) return;
+        const y0: usize = px(@max(0, y0f));
+        const x1: usize = px(@max(0, h.x + h.w));
+        const y1: usize = px(@max(0, y0f + h.h));
+        var y = y0;
+        while (y < y1 and y < p.canvas.h) : (y += 1) {
+            var x = x0;
+            while (x < x1 and x < p.canvas.w) : (x += 1) p.canvas.blend(x, y, h.color, 110);
+        }
+    }
+
+    /// The focus ring: around the focused element's box, or around each
+    /// of its fragments when it is inline (a link).
+    fn focusRing(p: *const Painter, node: NodeId) void {
+        for (p.l.boxes.items, 0..) |b, i| {
+            if (b.node != node) continue;
+            switch (b.kind) {
+                .inline_box, .text => for (p.l.fragments.items) |f| {
+                    if (f.box == @as(BoxId, @intCast(i)) and f.kind == .inline_span) p.stroke(f.x - 2, f.y - 2, f.w + 4, f.h + 4, 2, p.opts.accent);
+                },
+                else => p.stroke(b.x - 2, b.y - 2, b.w + 4, b.h + 4, 2, p.opts.accent),
+            }
+        }
+    }
+
+    /// A form control, drawn by the page since no toolkit reaches in:
+    /// its frame, its face, and the value or label it shows.
+    fn control(p: *const Painter, b: *const layout.Box, node: NodeId, kind: Control) void {
+        const doc = p.l.doc;
+        const st = b.style;
+        const font = layout.fontOf(st);
+        const m = p.l.fonts.metrics(font);
+        const white: u32 = 0xffffff;
+        switch (kind) {
+            .text, .password, .textarea, .select => {
+                p.fill(b.x, b.y, b.w, b.h, if (st.background_color.a > 0) st.background_color.word() else white);
+                p.stroke(b.x, b.y, b.w, b.h, 1, p.opts.frame);
+                var value: []const u8 = if (kind == .textarea) (doc.textContent(node, p.l.a) catch "") else (doc.getAttr(node, "value") orelse "");
+                if (kind == .textarea) if (doc.getAttr(node, "value")) |v| {
+                    value = v;
+                };
+                if (kind == .select) value = selectedOption(doc, node);
+                var dots: [64]u8 = undefined;
+                if (kind == .password) {
+                    const n = @min(value.len, dots.len);
+                    @memset(dots[0..n], '*');
+                    value = dots[0..n];
+                }
+                // The text sits on the control's centre line; what does not
+                // fit is cut at the frame.
+                const saved = p.canvas;
+                var clipped = p.canvas;
+                clipped.clip_x0 = @max(clipped.clip_x0, px(@max(0, b.x + 2)));
+                clipped.clip_x1 = @min(clipped.clip_x1, px(@max(0, b.x + b.w - 2)));
+                const inner_h = m.ascent + m.descent;
+                const baseline = b.y + (b.h - inner_h) / 2 + m.ascent;
+                var q = p.*;
+                q.canvas = clipped;
+                p.l.fonts.draw(&q.canvas, font, b.x + 4, baseline - p.scroll, value, st.color.word());
+                if (kind == .select) p.l.fonts.draw(&q.canvas, font, b.x + b.w - 4 - p.l.fonts.advance(font, "v"), baseline - p.scroll, "v", p.opts.frame);
+                _ = saved;
+            },
+            .checkbox, .radio => {
+                p.fill(b.x, b.y, b.w, b.h, white);
+                p.stroke(b.x, b.y, b.w, b.h, 1, p.opts.frame);
+                if (doc.hasAttr(node, "checked")) p.fill(b.x + 3, b.y + 3, @max(1, b.w - 6), @max(1, b.h - 6), p.opts.accent);
+            },
+            .button => {
+                p.fill(b.x, b.y, b.w, b.h, if (st.background_color.a > 0) st.background_color.word() else p.opts.face);
+                p.stroke(b.x, b.y, b.w, b.h, 1, p.opts.frame);
+                var label: []const u8 = doc.getAttr(node, "value") orelse "";
+                if (doc.isHtml(node, "button")) label = doc.textContent(node, p.l.a) catch "";
+                if (label.len == 0) label = "Submit";
+                const tw = p.l.fonts.advance(font, label);
+                const inner_h = m.ascent + m.descent;
+                const baseline = b.y + (b.h - inner_h) / 2 + m.ascent;
+                p.l.fonts.draw(&p.canvas, font, b.x + @max(0, (b.w - tw) / 2), baseline - p.scroll, label, st.color.word());
+            },
+        }
+    }
+
     fn text(p: *const Painter, f: layout.Fragment) void {
         const b = p.l.get(f.box);
         const st = b.style;
@@ -207,6 +329,43 @@ const Painter = struct {
         if (st.text_decoration.overline) p.fill(f.x, f.y, f.w, thick, word);
     }
 };
+
+/// The kinds of control the painter draws itself.
+pub const Control = enum { text, password, checkbox, radio, button, select, textarea };
+
+/// The control an element is, if it is one (a hidden input is none).
+pub fn controlOf(doc: *const Document, node: NodeId) ?Control {
+    if (doc.isHtml(node, "textarea")) return .textarea;
+    if (doc.isHtml(node, "select")) return .select;
+    if (doc.isHtml(node, "button")) return .button;
+    if (!doc.isHtml(node, "input")) return null;
+    const t = doc.getAttr(node, "type") orelse "text";
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(t, "checkbox")) return .checkbox;
+    if (eq(t, "radio")) return .radio;
+    if (eq(t, "submit") or eq(t, "button") or eq(t, "reset")) return .button;
+    if (eq(t, "password")) return .password;
+    if (eq(t, "hidden")) return null;
+    return .text;
+}
+
+/// The text of a select's chosen option: the one marked `selected`,
+/// else the first.
+pub fn selectedOption(doc: *const Document, node: NodeId) []const u8 {
+    var first: ?NodeId = null;
+    var w = doc.walk(node);
+    while (w.next()) |id| if (doc.isHtml(id, "option")) {
+        if (first == null) first = id;
+        if (doc.hasAttr(id, "selected")) return optionText(doc, id);
+    };
+    return if (first) |f| optionText(doc, f) else "";
+}
+
+fn optionText(doc: *const Document, id: NodeId) []const u8 {
+    const c = doc.get(id).first_child orelse return doc.getAttr(id, "value") orelse "";
+    const n = doc.get(c);
+    return if (n.kind == .text) std.mem.trim(u8, n.text.items, " \t\r\n") else "";
+}
 
 // ------------------------------------------------------------------ tests
 

@@ -318,7 +318,15 @@ fn sendFile(n: *Net, it: *mshl.Interp, c: Conn, v: Value, fb: FileBody, keep: bo
     const t = try f.resolve(it, fb.path);
     const st = switch (fsc.fsStatR(t.chan, t.buf, t.path)) {
         .ok => |x| x,
-        .err => |e| return it.fail("http: cannot serve {s}: {t}", .{ fb.path, e }),
+        .err => |e| {
+            // A file the handler named but the view has not: the client
+            // gets a 404 and the server stays up — one bad route must not
+            // end every page it serves.
+            var line: [160]u8 = undefined;
+            _ = usys.log(log_h, std.fmt.bufPrint(&line, "http: cannot serve {s}: {t}", .{ fb.path, e }) catch "http: cannot serve a file");
+            const missing = try record(it, &.{ "status", "body" }, &.{ .{ .int = 404 }, .{ .str = "no such file" } });
+            return sendReply(n, it, c, missing, keep, head_only);
+        },
     };
     var status: u16 = 200;
     var headers: std.ArrayList(http.Header) = .empty;
@@ -720,6 +728,9 @@ fn exchange(n: *Net, it: *mshl.Interp, c: Conn, req: []const u8, opts: *const Fe
 /// an `http-serve` file body reads through. The host (mshrun, msh) sets
 /// it once it holds a view; null refuses those forms.
 pub var fs: ?*const fscmds.Fs = null;
+/// The host's log, for what a server must say without ending (a file it
+/// cannot serve).
+pub var log_h: u64 = 0;
 
 /// A file being written in order, `fs_max_io` bytes per exchange
 /// through the view's buffer; truncated to what was written on close.

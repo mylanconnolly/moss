@@ -1,0 +1,4 @@
+moss fixture: notes
+These bytes are served as application/octet-stream, so a page treats
+them as a download rather than a document: the browser fetches them and
+the Save dialog asks where they go.

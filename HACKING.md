@@ -572,6 +572,11 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   through a sibling and `rename`, never truncate-then-write: a write
   that fails after the truncate leaves nothing, and "no record" then
   reads as a missing user (users.zig `replaceFile`, 2026-09-18).
+- A tree that can be edited after it is built (the page's DOM) keeps
+  the slices it is given and grows with its own allocator: give it an
+  arena of its own, separate from anything rebuilt from it (layout),
+  and never a stack buffer. And a queue that drops must log the drop
+  (the page host's, 2026-09-18).
 - A GUI leaf that stands for a process (the `page` leaf) is served on a
   thread of its own; that thread never touches the interpreter — it
   only moves bytes into module state the GUI loop reads on its tick.

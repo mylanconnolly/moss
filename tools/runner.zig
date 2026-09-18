@@ -1351,6 +1351,80 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "the page painted above its rect", log_path);
         return false;
     }
+    // A form, from the keyboard: Tab into the page's first field, type a
+    // name, Tab to the checkbox and tick it, Tab past the select to the
+    // submit button and press it; the server echoes what it received.
+    if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field again");
+    sleepMs(200);
+    if (!q.chord("meta_l", "a")) return false;
+    if (!q.typeText("http://www.moss.test:8080/form.html")) return sfail(spec, log_path, "type the form URL");
+    const go2 = widgetCenter(readLog(log_path), "go") orelse return false;
+    if (!clickScanout(&q, go2[0], go2[1])) return sfail(spec, log_path, "click Go for the form");
+    if (!try waitLogN(log_path, "page t2: title \"moss fixture: form\"", 1, "the form page never loaded", spec, polls)) return false;
+    sleepMs(500);
+    _ = q.screendump(check_dir ++ "/browser-form.ppm");
+    // Focus the page by clicking its empty lower half, then Tab through it.
+    const r3 = pageRect(readLog(log_path), "t2") orelse return false;
+    if (!clickScanout(&q, r3[0] + r3[2] / 2, r3[1] + r3[3] - 20)) return sfail(spec, log_path, "click into the page");
+    sleepMs(200);
+    if (!q.sendKey("tab")) return false;
+    if (!try waitLogN(log_path, "webpage: focus name at", 1, "Tab did not focus the form's name field", spec, polls)) return false;
+    if (!q.typeText("Moss Reader")) return sfail(spec, log_path, "type into the field");
+    if (!q.sendKey("tab")) return false;
+    if (!try waitLogN(log_path, "webpage: focus agree at", 1, "Tab did not reach the checkbox", spec, polls)) return false;
+    if (!q.sendKey("spc")) return false;
+    sleepMs(200);
+    if (!q.sendKey("tab") or !q.sendKey("tab")) return false;
+    if (!try waitLogN(log_path, "webpage: focus go at", 1, "Tab did not reach the submit button", spec, polls)) return false;
+    if (!q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "page t2: title \"moss fixture: submitted\"", 1, "the form did not submit", spec, polls)) return false;
+    if (!try waitLogN(log_path, "page t2: url \"http://www.moss.test:8080/submit?name=Moss+Reader&agree=yes&colour=green&go=Send\"", 1, "the submitted query is not what was filled in", spec, polls)) return false;
+    // The app takes the page's URL into its state on a tick (page events
+    // arrive one per tick): its address field is renumbered when it has.
+    if (!try waitLogN(log_path, "gui: widget url-t2-3 at", 1, "the app did not take the submitted URL", spec, polls)) return false;
+    // Bookmark the result, then find a word on it.
+    const bm = widgetCenter(readLog(log_path), "bookmark") orelse return false;
+    if (!clickScanout(&q, bm[0], bm[1])) return sfail(spec, log_path, "click Bookmark");
+    if (!try waitLogN(log_path, "browser: bookmarked http://www.moss.test:8080/submit?", 1, "the page was not bookmarked", spec, polls)) return false;
+    // The bookmark's event re-renders the window; the find field is
+    // clicked once that has settled, or the click's focus is lost to it.
+    if (!try waitLogN(log_path, "gui: action bookmark", 1, "the bookmark event did not reach the app", spec, polls)) return false;
+    sleepMs(400);
+    const fld = widgetCenter(readLog(log_path), "find-0") orelse return false;
+    if (!clickScanout(&q, fld[0], fld[1])) return sfail(spec, log_path, "click the find field");
+    sleepMs(300);
+    if (!q.typeText("submitted")) return false;
+    sleepMs(200);
+    const fb = widgetCenter(readLog(log_path), "find") orelse return false;
+    if (!clickScanout(&q, fb[0], fb[1])) return sfail(spec, log_path, "click Find");
+    if (!try waitLogN(log_path, "page t2: found 1", 1, "Find did not report its match", spec, polls)) return false;
+    // Zoom the page and open the Site panel: the window re-renders with
+    // both and neither the page nor the app minds.
+    const zi = widgetCenter(readLog(log_path), "zoomin") orelse return false;
+    if (!clickScanout(&q, zi[0], zi[1])) return sfail(spec, log_path, "click zoom in");
+    if (!try waitLogN(log_path, "gui: action zoomin", 1, "zoom did not reach the app", spec, polls)) return false;
+    sleepMs(400);
+    const site = widgetCenter(readLog(log_path), "site") orelse return false;
+    if (!clickScanout(&q, site[0], site[1])) return sfail(spec, log_path, "click Site");
+    if (!try waitLogN(log_path, "gui: action site", 1, "the Site panel did not open", spec, polls)) return false;
+    sleepMs(600);
+    _ = q.screendump(check_dir ++ "/browser-site.ppm");
+    if (!clickScanout(&q, site[0], site[1])) return sfail(spec, log_path, "click Site again");
+    if (!try waitLogN(log_path, "gui: action site", 2, "the Site panel did not close", spec, polls)) return false;
+    sleepMs(300);
+    // A download: the page reports a resource it will not show, the app
+    // fetches it and the Save dialog asks where; type a name.
+    if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field for the download");
+    sleepMs(200);
+    if (!q.chord("meta_l", "a")) return false;
+    if (!q.typeText("http://www.moss.test:8080/notes.download")) return false;
+    const go3 = widgetCenter(readLog(log_path), "go") orelse return false;
+    if (!clickScanout(&q, go3[0], go3[1])) return sfail(spec, log_path, "click Go for the download");
+    if (!try waitLogN(log_path, "page t2: download http://www.moss.test:8080/notes.download", 1, "the page did not report the download", spec, polls)) return false;
+    if (!try waitLogN(log_path, "chooser: save dialog", 1, "the Save dialog did not open for the download", spec, polls)) return false;
+    sleepMs(300);
+    if (!q.chord("meta_l", "a") or !q.typeText("moss-notes.txt") or !q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "browser: saved moss-notes.txt", 1, "the download was not saved through the picker", spec, polls)) return false;
     // Close the second tab: its page domain is reaped with its leaf.
     const closetab = widgetCenter(readLog(log_path), "closetab") orelse return false;
     if (!clickScanout(&q, closetab[0], closetab[1])) return sfail(spec, log_path, "click Close Tab");

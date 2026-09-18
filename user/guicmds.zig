@@ -146,6 +146,9 @@ pub fn on() bool {
 
 pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "apps")) return .{ .ret = .list };
+    // `page-info ID`: what the page domain behind a `page` leaf holds —
+    // its memory against its budget, and whether it is alive.
+    if (std.mem.eql(u8, name, "page-info")) return .{ .params = &.{.{ .name = "id", .shape = .string }}, .ret = .record };
     if (std.mem.eql(u8, name, "display-info")) return .{ .ret = .record };
     if (std.mem.eql(u8, name, "display-modes")) return .{ .ret = .list };
     if (std.mem.eql(u8, name, "display-preview")) return .{ .params = &.{.{ .name = "mode", .shape = .string }}, .ret = .bool };
@@ -586,6 +589,7 @@ fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     s.y = y;
     s.sy = wf.screenY(y);
     guipage.sync(s, url, nav, @intCast(avail_w), @intCast(h));
+    guipage.syncExtras(s, pageExtras(rec));
     if (s.sy >= 0 and (s.logged_x != wf.win_x + x or s.logged_y != wf.win_y + @as(usize, @intCast(s.sy)) or s.logged_w != avail_w or s.logged_h != h)) {
         s.logged_x = wf.win_x + x;
         s.logged_y = wf.win_y + @as(usize, @intCast(s.sy));
@@ -611,6 +615,18 @@ fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     wf.clip_y1 = sy1;
     recordFocus(.{ .id = id, .is_field = false, .is_page = true, .page_slot = @intFromPtr(s), .bx = x, .by = y, .bw = avail_w, .bh = h });
     return .{ .w = avail_w, .h = h };
+}
+
+/// A leaf's zoom (percent, over the user's font scale), the session's
+/// appearance for the page's media queries, and its find.
+fn pageExtras(rec: mshl.Record) guipage.Extras {
+    const leaf_zoom: u64 = @intCast(std.math.clamp(intField(rec, "zoom", 100), 25, 400));
+    const seed: u64 = wf.scaledIconSize(100); // the user's scale, in percent
+    const flags = wf.appearanceFlags();
+    var theme: u64 = 0;
+    if (shared.apTheme(flags) == .dark) theme |= shared.web.ThemeFlags.dark;
+    if (shared.apContrast(flags) == .high) theme |= shared.web.ThemeFlags.high_contrast;
+    return .{ .zoom = @intCast(@max(25, leaf_zoom * seed / 100)), .theme = theme, .find = strField(rec, "find"), .find_nav = if (rec.get("find_nav")) |n| (if (n == .int) n.int else 0) else 0 };
 }
 
 const BlitCtx = struct { x: usize, y: usize };
@@ -651,6 +667,12 @@ fn mkPageEvent(it: *mshl.Interp, pe: guipage.Event) mshl.Error!Value {
     if (pe.kind == .load) {
         const st = std.enums.fromInt(shared.web.LoadState, pe.code >> 32) orelse .failed;
         text = @tagName(st);
+        code = pe.code & 0xffff_ffff;
+    }
+    // `found`: code is the count, text the index shown ("2" of 5).
+    var found_buf: [16]u8 = undefined;
+    if (pe.kind == .found) {
+        text = std.fmt.bufPrint(&found_buf, "{d}", .{pe.code >> 32}) catch "0";
         code = pe.code & 0xffff_ffff;
     }
     vals[2] = .{ .str = try it.arena.dupe(u8, text) };
@@ -1871,6 +1893,21 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
         return Value{ .list = rows };
     }
+    if (std.mem.eql(u8, name, "page-info")) {
+        if (args.len < 1 or args[0] != .str) return it.fail("page-info: a page id is needed", .{});
+        var used: i64 = 0;
+        var limit: i64 = 0;
+        var alive = false;
+        if (guipage.slotById(args[0].str)) |s| {
+            const inf = guipage.info(s);
+            used = @intCast(inf.used_kb);
+            limit = @intCast(inf.limit_kb);
+            alive = inf.alive;
+        }
+        const keys = try it.arena.dupe([]const u8, &.{ "alive", "used_kb", "limit_kb" });
+        const vals = try it.arena.dupe(Value, &.{ .{ .bool = alive }, .{ .int = used }, .{ .int = limit } });
+        return .{ .record = .{ .keys = keys, .vals = vals } };
+    }
     if (std.mem.eql(u8, name, "display-info")) {
         const out = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .output_info, 0)) {
             .ok => |r| switch (r) {
@@ -2398,6 +2435,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     guipage.pointer(pageOf(f), .move, @intCast(ev.x - f.bx), @intCast(@as(isize, @intCast(ev.y)) - f.sy));
                     continue :input; // the page's own hover is its news
                 };
+                // A drag that began on a page: its moves are the page's (a
+                // selection), wherever the pointer is now.
+                if (pressed) |pw| if (pw < nfocus and focusables[pw].is_page and ev.btn & 1 != 0) {
+                    const f = focusables[pw];
+                    const rx: i64 = @as(i64, @intCast(ev.x)) - @as(i64, @intCast(f.bx));
+                    const ry: i64 = @as(i64, @intCast(ev.y)) - @as(i64, @intCast(f.sy));
+                    guipage.pointer(pageOf(f), .move, @intCast(@max(0, rx)), @intCast(@max(0, ry)));
+                    continue :input;
+                };
                 const pointer = wf.onPointer(ev, title);
                 if (pressed) |wi| {
                     if (ev.btn & 1 == 0) {
@@ -2592,11 +2638,24 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     break :input;
                 }
             };
-            // A focused page takes printable keys and the arrows; Tab and
-            // the chrome's keys stay the window's.
-            if (cur) |c| if (c.is_page and ((ch >= 0x20 and ch < 0x7f) or ch == key_up or ch == key_down or ch == 0x1e or ch == 0x1f or ch == '\n')) {
-                guipage.key(pageOf(c), ch);
-                continue :input;
+            // A focused page takes printable keys, editing keys, the arrows
+            // and Tab (its own links and fields); Escape hands focus back to
+            // the chrome, and Copy takes the page's selection.
+            if (cur) |c| if (c.is_page) {
+                if (ch == 27) {
+                    focus = 0;
+                    reveal_focus = true;
+                    break :input;
+                }
+                if (ch == shared.keyboard.copy) {
+                    const sel = guipage.selectionOf(pageOf(c));
+                    if (sel.len > 0) _ = @import("clipboard.zig").set(sel);
+                    continue :input;
+                }
+                if ((ch >= 0x20 and ch != 0x7f) or ch == key_up or ch == key_down or ch == 0x1e or ch == 0x1f or ch == '\n' or ch == '\t' or ch == shared.keyboard.back_tab or ch == 8 or ch == 0x7f or ch == shared.keyboard.home or ch == shared.keyboard.end) {
+                    guipage.key(pageOf(c), ch);
+                    continue :input;
+                }
             };
             if (ch == 0x1e or ch == 0x1f or ch == shared.keyboard.home or ch == shared.keyboard.end) {
                 const owner = if (cur) |c| c.owner else 0;

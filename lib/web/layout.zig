@@ -24,8 +24,8 @@ const style = @import("style.zig");
 const ui = @import("../ui.zig");
 
 pub const Error = error{OutOfMemory};
-const Document = dom.Document;
-const NodeId = dom.NodeId;
+pub const Document = dom.Document;
+pub const NodeId = dom.NodeId;
 const Computed = style.Computed;
 
 // ---------------------------------------------------------------- fonts

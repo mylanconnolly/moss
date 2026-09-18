@@ -635,19 +635,51 @@ supervises), and memory history per unit beside the CPU one.
       (the host stages the one image it needs), client-defined menus
       (the generic window menu for now), a fresh buffer in the same step
       as a window resize (the page follows on the next render).
-    - **(7) Using it.** History and bookmarks (`state/browser/`, mshl
-      data), find in page, zoom seeded from the user's font scale and
-      following a `sessionfont` push (reflow), downloads through the
-      Save picker (a download is a grant, never an ambient write to the
-      home), selection and copy through `clipsvc`, forms (fields,
-      buttons, selects, submit — the toolkit's editor model in the page),
-      keyboard navigation (Tab across links and fields inside the page,
-      Escape back to the chrome), dark theme as `prefers-color-scheme`,
-      high contrast as forced colours, a "Site" popup showing what the
-      page domain holds — its origin, its budget and use, its cookies —
-      the capability facts a browser can show, as the explorer's footer
-      does for a view. *Exit:* the drill fills and submits a form,
-      bookmarks a page, downloads a file to the home via the picker.
+    - ✅ **(7) Using it** (2026-09-18). Forms in the page domain: the
+      painter draws the controls itself (text and password fields, check
+      boxes and radios, buttons, selects, text areas — no toolkit reaches
+      into a page), the page keeps a focused element (Tab and Shift-Tab
+      walk links and controls in document order, a click focuses what
+      takes focus, Escape hands focus back to the chrome), typing edits
+      a field's `value` in the DOM, Space and a click toggle a box or
+      pick a radio, a click on a select cycles its options, Enter in a
+      field or a submit button submits: the form's successful controls
+      form-urlencoded, sent as a GET query or a POST body through the
+      broker (a redirected POST is followed as a GET). The page reports
+      what it focused (kind and rect), so a drill can find a field.
+      Find: matches across the laid-out text, highlighted, the shown one
+      scrolled to, the count reported. Selection: a drag selects text
+      by fragments and reports it; Copy in the window puts the page's
+      selection on the session clipboard. Text zoom (`+`/`-`, seeded
+      from the user's font scale and following it) as the root font
+      size; the session's appearance (dark, high contrast) reaches the
+      page's media queries. Downloads: a resource that is not a document
+      is left unread and reported, the app fetches it over its own view
+      of the network and `save-as` opens the Save dialog — a download is
+      the user's grant in the picker, never a write to the home by the
+      app — and answers with the name the user chose. History: Back
+      and Forward per tab, every URL appended to `state/browser/
+      history.msh`; bookmarks as data in `bookmarks.msh`, a Bookmarks
+      list that navigates. A Site panel: the origin, the page domain
+      alive or not, its memory against its budget, and what it holds.
+      Three host commands: `save-as NAME DATA`, `page-info ID`, and
+      `log TEXT` (a line from inside `update`, where `echo` waits for
+      the window). The `browser` drill grew: the form filled from the
+      keyboard and submitted with exactly the expected query, the page
+      bookmarked, a word found, zoom and the Site panel, a download
+      saved through the picker under the typed name. Found on the way:
+      the DOM keeps the slices it is given and a relayout reset the
+      arena under later edits (the page has two arenas now, the
+      document's and the layout's); the host's four-deep command queue
+      dropped keys silently (sixty-four, and a drop is logged); the app
+      reloading a page whose final URL it had merely adopted; page
+      events arriving one per tick, which a drill must wait out. Not
+      built, said so: a select's popup (it cycles), cookies (the Site
+      panel says so), forced colours beyond the media query, binary
+      downloads (the picker saves UTF-8 text; a bytes save comes with
+      the images of stage 8), a `sessionfont` push mid-session (the
+      zoom follows the scale at each render), Escape's return to the
+      chrome lands on the first widget.
     - **(8) Images and web fonts.** `lib/png.zig` (std flate),
       `lib/jpeg.zig` (baseline and progressive), `lib/gif.zig` (first
       frame, animation on the tick later), an SVG subset grown from the

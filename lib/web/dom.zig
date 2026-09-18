@@ -111,6 +111,14 @@ pub const Document = struct {
         return null;
     }
 
+    pub fn removeAttr(d: *Document, id: NodeId, name: []const u8) void {
+        const n = d.node(id);
+        for (n.attrs.items, 0..) |at, i| if (std.mem.eql(u8, at.name, name)) {
+            _ = n.attrs.orderedRemove(i);
+            return;
+        };
+    }
+
     pub fn hasAttr(d: *const Document, id: NodeId, name: []const u8) bool {
         return d.getAttr(id, name) != null;
     }

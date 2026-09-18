@@ -6096,6 +6096,56 @@ loop blocks in a call, the only way to serve a second channel is a
 second thread; put the thread behind one lock and one queue and let
 the loop keep its shape.
 
+**Stage 7, using it (as built, 2026-09-18).** Forms are where the
+page domain first had to hold state of its own: the value a user
+types, a box ticked, a radio chosen, and a focused element for the
+keyboard. All of it lives in the DOM — a typed value is the input's
+`value` attribute, a tick is `checked`, a pick is `selected` — so the
+painter, which draws every control itself (a page has no toolkit),
+reads what it paints from the tree, and submitting a form is a walk of
+the tree: every successful control form-urlencoded, sent as a query
+for GET or a body for POST through the broker, which learned to send
+a body and to follow a redirected POST as a GET. That decision found
+the stage's first bug: the DOM keeps the slices it is given, and the
+page's single arena reset to a mark after the parse on every relayout,
+so a typed value pointed at a stack buffer and the attribute list
+grown after the parse was freed under it. The page has two arenas now
+— the document's, which holds the bytes, the tree, the sheets and
+every later edit until the next navigation, and the layout's, reset
+whole on every relayout — and nothing borrowed crosses between them.
+The keyboard is a focus ring the page keeps (Tab and Shift-Tab over
+links and controls in document order, Enter and Space to activate,
+Escape handed to the chrome by the runtime), and the page reports the
+focused element's kind and rect, which is what the drill uses to fill
+a form it cannot see. Find is a scan of the laid-out fragments, a
+highlight per match, the shown one scrolled into view; a selection is
+a drag over fragments, its text reported and taken by the window's
+Copy to the session clipboard. Zoom is the root font size, seeded
+from the user's scale; the appearance reaches the page's media
+queries. A download is the page declining: a resource whose type it
+will not show is left unread and reported, the app fetches it over
+its own network view, and `save-as` opens the picker's Save dialog —
+the same text-document broker the editor saves through, so a download
+is the user's grant and, for now, UTF-8 text. History is two lists per
+tab and a file; bookmarks are data in the home.
+
+The drill drove the form from the keyboard, and the second bug was in
+the host between the two: typing outran a page that relays out per
+keystroke, the host's four-deep command queue filled, and the Tab at
+the end of the word was dropped without a word — sixty-four deep now,
+and a drop is logged. The third was the app's: it took the page's
+final URL into its state, the leaf's `url` changed, and the runtime
+loaded it again; the runtime now asks nothing of a page whose reported
+URL is what the leaf says. The fourth was the drill's, twice: page
+events reach `update` one per tick, so a click right after a page's
+news raced the app's state (the drill waits for the app's own sign,
+the renumbered address field), and a click during the re-render an
+event caused lost its focus (the drill waits for the render).
+*Lessons:* (1) a document that can be edited needs its own arena,
+separate from anything that is rebuilt from it. (2) A queue that
+drops must say so; the silence cost an hour. (3) In a drill, wait for
+the effect in the app, not the cause in the page.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

@@ -4,18 +4,24 @@
 # rect; the address bar above it is this window's pixels, whatever the
 # page paints. The app is pure: its state is the tab list, and every
 # event — a button, the tab strip, a page's title, URL, load state,
-# hover or death — is a coarse record to `update`.
+# hover, selection, focus, a download or death — is a coarse record
+# to `update`.
 #
-# State: { tabs: [{ id, url, title, state, code, hover, gen, nav }],
-# active: the shown tab's id, next: the next tab number }. A tab's `gen`
-# renumbers its address field when the page reports its final URL (a
-# field keeps its own text by id); `nav` is a nonce that makes the page
-# reload the same URL.
+# State: { tabs: [{ id, url, title, state, code, hover, gen, nav, back,
+# fwd, skip }], active: the shown tab's id, next: the next tab number,
+# bookmarks: [{ url, title }], show: "" | "bookmarks" | "site", find,
+# find_nav, fgen, zoom, note }. A tab's `gen` renumbers its address
+# field when the page reports its final URL (a field keeps its own text
+# by id); `nav` is a nonce that makes the page reload the same URL;
+# `back`/`fwd` are its history, `skip` marks a history move so the URL
+# the page reports for it is not pushed again. Bookmarks persist under
+# the home's state/browser/ as data; history lines go to history.msh.
 
 let home = "https://www.moss.test:8443/"
+let store = "state/browser"
 
 def new-tab [id, url] {
-  { id: $id, url: $url, title: "", state: "loading", code: 0, hover: "", gen: 0, nav: 0 }
+  { id: $id, url: $url, title: "", state: "loading", code: 0, hover: "", gen: 0, nav: 0, back: [], fwd: [], skip: false }
 }
 
 def active-tab [state] {
@@ -52,7 +58,39 @@ def normalize [url] {
   }
 }
 
-def status-line [tab] {
+# Navigate the active tab to a URL the user chose: the page it shows
+# joins the back list, and forward is forgotten.
+def go [state, url] {
+  let cur = (active-tab $state)
+  set-tab $state $cur.id { url: (normalize $url), nav: ($cur.nav + 1), state: "loading", hover: "", back: ($cur.back + [$cur.url]), fwd: [], skip: false }
+}
+
+def load-bookmarks [] {
+  match (cat ($store + "/bookmarks.msh")) {
+    ok $text => (match ($text | from-data) {
+        ok $v => $v
+        _ => []
+      })
+    _ => []
+  }
+}
+
+def save-bookmarks [marks] {
+  match (mkdir $store) {
+    _ => ""
+  }
+  save ($store + "/bookmarks.msh") (to-data $marks)
+}
+
+def note-history [url] {
+  match (mkdir $store) {
+    _ => ""
+  }
+  let old = (match (cat ($store + "/history.msh")) { ok $t => $t; _ => "" })
+  save ($store + "/history.msh") ($old + $url + "\n")
+}
+
+def status-line [state, tab] {
   let verdict = (match $tab.state {
       "loading" => "Loading"
       "done" => (match ($tab.url | split "https://" | len) {
@@ -63,14 +101,28 @@ def status-line [tab] {
       "crashed" => "The page crashed; reload to try again"
       _ => $tab.state
     })
+  let with_note = (match $state.note {
+      "" => $verdict
+      _ => ($verdict + "  |  " + $state.note)
+    })
   match $tab.hover {
-    "" => $verdict
-    _ => ($verdict + "  ->  " + $tab.hover)
+    "" => $with_note
+    _ => ($with_note + "  ->  " + $tab.hover)
   }
 }
 
+def site-panel [state, tab] {
+  let info = (page-info $tab.id)
+  let origin = ($tab.url | split "/" | first 3 | join "/")
+  { kind: "section", title: "Site", children: [
+      { kind: "label", text: ("Origin: " + $origin) }
+      { kind: "label", text: ("Page domain: " + (match $info.alive { true => "alive"; _ => "gone" }) + ", " + (str $info.used_kb) + " KB of " + (str $info.limit_kb) + " KB") }
+      { kind: "label", muted: true, wrap: true, text: "The page holds one channel to this window and nothing else: no filesystem, no network of its own, no cookies yet. What it fetches goes through this window's broker." }
+    ] }
+}
+
 let final = (gui {
-    init:  { tabs: [(new-tab "t1" $home)], active: "t1", next: 2 }
+    init:  { tabs: [(new-tab "t1" $home)], active: "t1", next: 2, bookmarks: (load-bookmarks), show: "", find: "", find_nav: 0, fgen: 0, zoom: 100, note: "" }
     title: "Web"
     width: 1000
     view: (fn [state] {
@@ -79,26 +131,57 @@ let final = (gui {
         let chrome = [
           { kind: "tabs", id: "tabs", bar: true, items: ($state.tabs | map { match $it.title { "" => "New Tab"; _ => $it.title } }), selected: $idx }
           { kind: "row", gap: 6, children: [
+              { kind: "button", id: "back", label: "<", disabled: ((len $cur.back) == 0) }
+              { kind: "button", id: "forward", label: ">", disabled: ((len $cur.fwd) == 0) }
               { kind: "button", id: "reload", label: "Reload" }
               { kind: "field", id: ("url-" + $cur.id + "-" + (str $cur.gen)), flex: 1, value: $cur.url }
               { kind: "button", id: "go", label: "Go", variant: "primary" }
               { kind: "button", id: "newtab", label: "New Tab" }
               { kind: "button", id: "closetab", label: "Close Tab", disabled: ((len $state.tabs) < 2) }
             ] }
+          { kind: "row", gap: 6, children: [
+              { kind: "button", id: "bookmark", label: "Bookmark" }
+              { kind: "button", id: "bookmarks", label: ("Bookmarks (" + (str (len $state.bookmarks)) + ")") }
+              { kind: "field", id: ("find-" + (str $state.fgen)), flex: 1, value: $state.find }
+              { kind: "button", id: "find", label: "Find" }
+              { kind: "button", id: "zoomout", label: "-" }
+              { kind: "label", text: ((str $state.zoom) + "%") }
+              { kind: "button", id: "zoomin", label: "+" }
+              { kind: "button", id: "site", label: "Site" }
+            ] }
         ]
-        let pages = ($state.tabs | map (fn [t] { { kind: "page", id: $t.id, url: $t.url, nav: $t.nav, visible: ($t.id == $state.active), h: 560, grow: true } }))
-        let status = [{ kind: "label", muted: true, text: (status-line $cur) }]
+        let panel = (match $state.show {
+            "bookmarks" => [{ kind: "list", id: "bmlist", key: "bookmarks", h: 120, cols: [{ title: "Title", w: 2 } { title: "URL", w: 3 }], rows: ($state.bookmarks | map { { id: $it.url, cells: [$it.title, $it.url] } }), empty: "No bookmarks yet." }]
+            "site" => [(site-panel $state $cur)]
+            _ => []
+          })
+        let pages = ($state.tabs | map (fn [t] { { kind: "page", id: $t.id, url: $t.url, nav: $t.nav, visible: ($t.id == $state.active), h: 520, grow: true, zoom: $state.zoom, find: $state.find, find_nav: $state.find_nav } }))
+        let status = [{ kind: "label", muted: true, text: (status-line $state $cur) }]
         # The pages share one gap-less column: a hidden tab's leaf takes no
         # room at all, so the window's height is the shown page's. (`map`
         # yields a table; adding a list makes the list `children` wants.)
-        { kind: "column", gap: 6, children: ($chrome + [{ kind: "column", gap: 0, grow: true, children: ([] + $pages) }] + $status) }
+        { kind: "column", gap: 6, children: ($chrome + $panel + [{ kind: "column", gap: 0, grow: true, children: ([] + $pages) }] + $status) }
       })
     update: (fn [state, ev] {
         match $ev.id {
           "go" => {
             let cur = (active-tab $state)
             let typed = ($ev.fields | get ("url-" + $cur.id + "-" + (str $cur.gen)))
-            set-tab $state $cur.id { url: (normalize $typed), nav: ($cur.nav + 1), state: "loading", hover: "" }
+            go ($state | merge { note: "" }) $typed
+          }
+          "back" => {
+            let cur = (active-tab $state)
+            match ((len $cur.back) == 0) {
+              true => $state
+              _ => (set-tab $state $cur.id { url: ($cur.back | last 1 | join ""), back: ($cur.back | first ((len $cur.back) - 1)), fwd: ([$cur.url] + $cur.fwd), nav: ($cur.nav + 1), state: "loading", skip: true })
+            }
+          }
+          "forward" => {
+            let cur = (active-tab $state)
+            match ((len $cur.fwd) == 0) {
+              true => $state
+              _ => (set-tab $state $cur.id { url: ($cur.fwd | first 1 | join ""), fwd: ($cur.fwd | last ((len $cur.fwd) - 1)), back: ($cur.back + [$cur.url]), nav: ($cur.nav + 1), state: "loading", skip: true })
+            }
           }
           "reload" => {
             let cur = (active-tab $state)
@@ -106,7 +189,7 @@ let final = (gui {
           }
           "newtab" => {
             let id = ("t" + (str $state.next))
-            $state | merge { tabs: ($state.tabs + [(new-tab $id "")]), active: $id, next: ($state.next + 1) }
+            $state | merge { tabs: ($state.tabs + [(new-tab $id "")]), active: $id, next: ($state.next + 1), note: "" }
           }
           "closetab" => (match ((len $state.tabs) < 2) {
               true => $state
@@ -116,19 +199,73 @@ let final = (gui {
               }
             })
           "tabs" => (match ($ev.col >= 0) {
-              true => ($state | merge { active: (tab-at $state.tabs $ev.col) })
+              true => ($state | merge { active: (tab-at $state.tabs $ev.col), note: "" })
               _ => $state
             })
+          "bookmark" => {
+            let cur = (active-tab $state)
+            match ($state.bookmarks | any { $it.url == $cur.url }) {
+              true => ($state | merge { note: "Already bookmarked" })
+              _ => {
+                let marks = ($state.bookmarks + [{ url: $cur.url, title: (match $cur.title { "" => $cur.url; _ => $cur.title }) }])
+                match (save-bookmarks $marks) {
+                  ok _ => { log ("browser: bookmarked " + $cur.url) }
+                  err $e => { log ("browser: bookmark not saved: " + $e) }
+                }
+                $state | merge { bookmarks: $marks, note: "Bookmarked" }
+              }
+            }
+          }
+          "bookmarks" => ($state | merge { show: (match $state.show { "bookmarks" => ""; _ => "bookmarks" }) })
+          "bmlist" => (match ($ev.col >= 0) {
+              true => $state
+              _ => (match $ev.activated {
+                  true => (go ($state | merge { show: "", note: "" }) $ev.row)
+                  _ => $state
+                })
+            })
+          "site" => ($state | merge { show: (match $state.show { "site" => ""; _ => "site" }) })
+          "find" => ($state | merge { find: ($ev.fields | get ("find-" + (str $state.fgen))), find_nav: ($state.find_nav + 1), note: "" })
+          "zoomin" => ($state | merge { zoom: (match (($state.zoom + 25) > 300) { true => 300; _ => ($state.zoom + 25) }) })
+          "zoomout" => ($state | merge { zoom: (match (($state.zoom - 25) < 50) { true => 50; _ => ($state.zoom - 25) }) })
           _ => (match $ev.kind {
               "title" => (set-tab $state $ev.id { title: $ev.text })
               "url" => {
                 let t = ($state.tabs | find (fn [t] { $t.id == $ev.id }))
-                set-tab $state $ev.id { url: $ev.text, gen: ($t.gen + 1) }
+                match ($t.url == $ev.text) {
+                  true => (set-tab $state $ev.id { gen: ($t.gen + 1), skip: false })
+                  _ => {
+                    note-history $ev.text
+                    match $t.skip {
+                      true => (set-tab $state $ev.id { url: $ev.text, gen: ($t.gen + 1), skip: false })
+                      _ => (set-tab $state $ev.id { url: $ev.text, gen: ($t.gen + 1), back: ($t.back + [$t.url]), fwd: [] })
+                    }
+                  }
+                }
               }
               "load" => (set-tab $state $ev.id { state: $ev.text, code: $ev.code })
               "hover" => (set-tab $state $ev.id { hover: $ev.text })
               "crashed" => (set-tab $state $ev.id { state: "crashed" })
               "unavailable" => (set-tab $state $ev.id { state: ("No page host: " + $ev.text) })
+              "found" => ($state | merge { note: (match $ev.code { 0 => "Not found"; _ => ("Match " + (str ((int $ev.text)? + 1)) + " of " + (str $ev.code)) }) })
+              "selection" => ($state | merge { note: ("Selected " + (str (len $ev.text)) + " characters; Copy takes them") })
+              "focus" => $state
+              "download" => {
+                let name = ($ev.text | split "/" | last 1 | join "")
+                match (fetch $ev.text) {
+                  ok $r => (match (save-as $name $r.body) {
+                      ok $s => {
+                        log ("browser: saved " + $s.name + " " + (str $s.bytes))
+                        $state | merge { note: ("Saved " + $s.name) }
+                      }
+                      err $e => {
+                        log ("browser: download not saved: " + $e)
+                        $state | merge { note: ("Download not saved: " + $e) }
+                      }
+                    })
+                  err $e => ($state | merge { note: ("Download failed: " + $e) })
+                }
+              }
               _ => $state
             })
         }

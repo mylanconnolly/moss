@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>moss fixture: form</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  h1 { color: #336699; }
+  label { display: block; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h1>A form</h1>
+<p>Fill it in and submit: the server answers with what it received.</p>
+<form action="/submit" method="get">
+  <label>Name <input type="text" name="name" value=""></label>
+  <label><input type="checkbox" name="agree" value="yes"> I agree</label>
+  <label>Colour
+    <select name="colour">
+      <option value="red">Red</option>
+      <option value="green" selected>Green</option>
+      <option value="blue">Blue</option>
+    </select>
+  </label>
+  <input type="submit" name="go" value="Send">
+</form>
+<p><a href="/notes.download">Download the notes</a> · <a href="/">Home</a></p>
+</body>
+</html>

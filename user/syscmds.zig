@@ -34,6 +34,12 @@ pub fn nowMs() i64 {
 
 /// null = not one of these.
 pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value) mshl.Error!?Value {
+    if (std.mem.eql(u8, name, "log")) {
+        if (args.len < 1 or args[0] != .str) return it.fail("log: a string is needed", .{});
+        var line: [200]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&line, "{s}", .{args[0].str[0..@min(args[0].str.len, line.len)]}) catch "");
+        return .nothing;
+    }
     if (std.mem.eql(u8, name, "sleep")) {
         if (args[0].int < 0) return it.fail("sleep: milliseconds expected", .{});
         usys.sleepMs(@intCast(args[0].int));
@@ -66,11 +72,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value) mshl.Error!
     return null;
 }
 
-pub const command_names = [_][]const u8{ "sleep", "now", "date" };
+pub const command_names = [_][]const u8{ "sleep", "now", "date", "log" };
+
+/// The host's log for `log TEXT`: a line a script writes as it runs —
+/// what an app says from inside a GUI's `update`, where `echo` would
+/// wait for the window to close.
+pub var log_h: u64 = 0;
 
 const date_result = mshl.resultShape(mshl.shapeOf(Date), .{ .word = "no_clock" });
 
 pub fn signature(name: []const u8) ?mshl.Signature {
+    if (std.mem.eql(u8, name, "log")) return .{ .params = &.{.{ .name = "text", .shape = .string }}, .ret = .nothing };
     if (std.mem.eql(u8, name, "sleep")) return .{ .params = &.{.{ .name = "ms", .shape = .int }}, .ret = .nothing };
     if (std.mem.eql(u8, name, "now")) return .{ .ret = .int };
     if (std.mem.eql(u8, name, "date")) return .{ .ret = date_result };

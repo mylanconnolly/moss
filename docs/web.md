@@ -59,9 +59,11 @@ page calls back with an event: `title`, `url`, `load` (loading, done,
 failed and why), `commit` (it painted), `hover` (the link under the
 pointer), `extent` (how tall the document is), `dumped`.
 
-`user/webpage.zig` is the domain: a static 20 MB arena that every
-navigation resets and that is the page's whole memory budget (a
-program's memory here is its image's static size, charged at spawn),
+`user/webpage.zig` is the domain: two static arenas that are the
+page's whole memory budget (a program's memory here is its image's
+static size, charged at spawn) — the document's, 12 MB, holding the
+bytes, the tree, its sheets and every later edit until the next
+navigation, and the layout's, 8 MB, reset whole on every relayout —
 `lib/font` over the packed faces with a bounded glyph cache, the parser,
 cascade, layout and painter over the granted pixels, a hit test that
 walks the DOM up to a link, hover when the link under the pointer
@@ -116,11 +118,39 @@ its home, never the disk root) and the system store the `webpage` image
 is staged from, and a budget for its pages: 28 MB each. `Web` is 72 MB
 for two.
 
+### Using it
+
+Forms work inside the page: the painter draws text and password
+fields, check boxes and radios, buttons, selects and text areas
+itself; the page keeps a focused element (Tab and Shift-Tab walk links
+and controls, Enter and Space activate, Escape hands focus back to the
+window's chrome), typing edits a field, and a submit sends the form's
+controls form-urlencoded as a GET query or a POST body through the
+broker. Find highlights every match of a word and scrolls to one; a
+drag selects text and the window's Copy puts it on the session
+clipboard; `+` and `-` zoom the text (seeded from the user's font
+scale), and the session's dark or high-contrast appearance reaches the
+page's media queries. Back and Forward keep a history per tab (every
+URL also goes to `state/browser/history.msh`); Bookmark and the
+Bookmarks list keep `state/browser/bookmarks.msh`. A download is a
+resource the page will not show: it reports it, the app fetches it
+over its own network view, and the Save dialog asks where — the same
+picker the editor saves through, so a download is a grant the user
+makes and, for now, UTF-8 text. The Site panel shows the origin, the
+page domain's memory against its budget, and what it holds.
+
+Three host commands serve the app: `save-as NAME DATA` (the Save
+dialog; answers with the chosen name), `page-info ID` (a page
+domain's memory and whether it is alive) and `log TEXT` (a line to the
+log from inside `update`, where `echo` waits for the window to close).
+
 ### What is not built
 
 No cache, no cookie jar and no connection pool yet (the session's
-`webfetch` unit of the plan); no content coding in the page; no back,
-forward or stop (stage 7's history); no images or web fonts (stage 8);
+`webfetch` unit of the plan); no content coding in the page; no stop
+button; a select cycles its options rather than opening a list; binary
+downloads wait for a bytes save in the picker; no images or web fonts
+(stage 8);
 no flexbox, grid or tables beyond block rows (stage 9); no JavaScript
 (stages 10–11: our own engine, off until it lands). Menus are the
 generic window menu until client-defined menus exist. The `page` leaf

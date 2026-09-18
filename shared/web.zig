@@ -39,6 +39,8 @@ pub const PageReq = union(enum(u64)) {
     /// The next command; the host parks the call until it has one.
     next: void,
     /// Open the resource at data[off..off+len] (an absolute URL).
+    /// `flags`: bit 0 = POST, with a body of `flags >> 8` bytes following
+    /// the URL in the data buffer (form-urlencoded).
     open: struct { off: u64, len: u64, flags: u64 },
     /// The next chunk of the open resource, at most `max` bytes, into
     /// data[0..].
@@ -77,6 +79,14 @@ pub const HostResp = union(enum(u64)) {
     /// again for the new buffer (0 × 0 = hidden: no buffer, no paint;
     /// the document stays) and lays out afresh.
     resize: struct { w: u64, h: u64 },
+    /// Find the text at data[0..len] (empty clears): highlights every
+    /// match, scrolls to the `index`th, and answers with `found`.
+    find: struct { len: u64, index: u64 },
+    /// Text zoom, in percent of the page's own sizes.
+    zoom: struct { percent: u64 },
+    /// The session's appearance: `flags` bit 0 = dark, bit 1 = high
+    /// contrast (the page's `prefers-color-scheme` and forced colours).
+    theme: struct { flags: u64 },
     stop: void,
 };
 
@@ -97,7 +107,32 @@ pub const Event = enum(u64) {
     /// The document's laid-out height in pixels (`a`) — what a host may
     /// scroll through.
     extent = 7,
+    /// The resource opened is not a document: its URL is data[0..a] and
+    /// its type data[a..a+b]; the page left it unread for the host to
+    /// save (a download is the host's grant, never the page's write).
+    download = 8,
+    /// A find: `a` matches, the `b`th shown (0-based; a = 0 for none).
+    found = 9,
+    /// The text selected by a drag, data[0..a].
+    selection = 10,
+    /// The focused element changed: its kind name is data[0..a] (empty
+    /// for none); `b` packs its viewport rect as (x, y) in the high and
+    /// (w, h) in the low word, each pair 16 bits.
+    focus = 11,
 };
+
+pub const ThemeFlags = struct {
+    pub const dark: u64 = 1;
+    pub const high_contrast: u64 = 2;
+};
+
+/// A rect packed into a word: x, y, w, h as 16 bits each.
+pub fn packRect(x: u64, y: u64, w: u64, h: u64) u64 {
+    return ((x & 0xffff) << 48) | ((y & 0xffff) << 32) | ((w & 0xffff) << 16) | (h & 0xffff);
+}
+pub fn unpackRect(v: u64) [4]u64 {
+    return .{ (v >> 48) & 0xffff, (v >> 32) & 0xffff, (v >> 16) & 0xffff, v & 0xffff };
+}
 
 pub const LoadState = enum(u64) { loading = 0, done = 1, failed = 2 };
 

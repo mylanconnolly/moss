@@ -20,6 +20,7 @@ const confcmds = @import("confcmds.zig");
 const httpcmds = @import("httpcmds.zig");
 const webcmds = @import("webcmds.zig");
 const webrender = @import("webrender.zig");
+const pickcmds = @import("pickcmds.zig");
 const tlscmds = @import("tlscmds.zig");
 const fabcmds = @import("fabcmds.zig");
 const workcmds = @import("workcmds.zig");
@@ -162,6 +163,7 @@ fn hostSignature(_: *anyopaque, name: []const u8) ?mshl.Signature {
     }
     if (webcmds.signature(name)) |sig| return sig;
     if (webrender.signature(name)) |sig| return sig;
+    if (pickcmds.signature(name)) |sig| return sig;
     return syscmds.signature(name);
 }
 
@@ -193,6 +195,7 @@ fn hostCall(_: *anyopaque, it: *mshl.Interp, name: []const u8, args: []const Val
     }
     if (try webcmds.call(it, name, args, input)) |v| return v;
     if (try webrender.call(it, name, args, input)) |v| return v;
+    if (try pickcmds.call(it, name, args, input)) |v| return v;
     if (try syscmds.call(it, name, args)) |v| return v;
     return null;
 }
@@ -312,6 +315,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     }
     net = netcmds.Net.init(if (setup.has(.net)) setup.cap(.net) else 0);
     httpcmds.fs = &fs_ctx; // `fetch { to }` and file bodies go through the script's view
+    httpcmds.log_h = log_h;
+    syscmds.log_h = log_h;
     // `web-render`: page domains spawned from the store, brokered over
     // this script's network view; self-guards without a spawner.
     if (net) |*n| {
@@ -325,6 +330,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     if (setup.has(.conf)) confcmds.setup(setup.cap(.conf), log_h);
     @import("clipboard.zig").authority = setup.cap(.clip);
     @import("documentlaunch.zig").setup(setup.cap(.picker), init_cap, setup.cap(.display));
+    pickcmds.setup(setup.cap(.picker), log_h);
     @import("documentlaunch.zig").log_h = log_h;
     @import("appsclient.zig").authority = init_cap;
     guicmds.output_control = setup.cap(.display_control);

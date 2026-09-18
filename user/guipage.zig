@@ -49,6 +49,16 @@ pub const Slot = struct {
     sy: isize = 0,
     /// The page's commit count at the last blit: a newer one is dirty.
     blitted: usize = 0,
+    /// What the page was last told: its zoom, the appearance, the find.
+    zoom: u32 = 0,
+    theme: u64 = std.math.maxInt(u64),
+    find: [256]u8 = undefined,
+    find_len: usize = 0,
+    find_nav: i64 = 0,
+    find_sent: bool = false,
+    /// The last selection the page reported (what Copy takes).
+    sel: [2048]u8 = undefined,
+    sel_len: usize = 0,
     logged_x: usize = 0,
     logged_y: usize = 0,
     logged_w: u32 = 0,
@@ -73,7 +83,7 @@ pub const Event = struct {
     text: [512]u8 = undefined,
     text_len: usize = 0,
 
-    pub const Kind = enum { title, url, load, hover, crashed, unavailable };
+    pub const Kind = enum { title, url, load, hover, crashed, unavailable, download, found, selection, focus };
 
     pub fn idText(e: *const Event) []const u8 {
         return e.id[0..e.id_len];
@@ -157,13 +167,36 @@ fn serve(_: u64) callconv(.c) void {
             .event => |e| {
                 const p = host.page(e.page);
                 switch (std.enums.fromInt(wire.Event, @intFromEnum(e.kind)) orelse .commit) {
-                    .title => push(e.page, .title, 0, p.titleText()),
-                    .url => push(e.page, .url, 0, p.urlText()),
+                    .title => {
+                        push(e.page, .title, 0, p.titleText());
+                        if (slotOfPage(e.page)) |i| webhost.logf(log_h, "page {s}: title \"{s}\"", .{ slots[i].idText(), p.titleText() });
+                    },
+                    .url => {
+                        push(e.page, .url, 0, p.urlText());
+                        if (slotOfPage(e.page)) |i| webhost.logf(log_h, "page {s}: url \"{s}\"", .{ slots[i].idText(), p.urlText() });
+                    },
                     .load => {
                         push(e.page, .load, e.b | (e.a << 32), "");
                         if (slotOfPage(e.page)) |i| webhost.logf(log_h, "page {s}: load {s} {d}", .{ slots[i].idText(), @tagName(std.enums.fromInt(wire.LoadState, e.a) orelse .failed), e.b });
                     },
                     .hover => push(e.page, .hover, 0, p.hoverText()),
+                    .download => {
+                        push(e.page, .download, 0, p.noteText());
+                        if (slotOfPage(e.page)) |i| webhost.logf(log_h, "page {s}: download {s}", .{ slots[i].idText(), p.noteText() });
+                    },
+                    .found => {
+                        push(e.page, .found, e.a | (e.b << 32), "");
+                        if (slotOfPage(e.page)) |i| webhost.logf(log_h, "page {s}: found {d} showing {d}", .{ slots[i].idText(), e.a, e.b });
+                    },
+                    .selection => {
+                        if (slotOfPage(e.page)) |i| {
+                            const s = &slots[i];
+                            s.sel_len = @min(p.noteText().len, s.sel.len);
+                            @memcpy(s.sel[0..s.sel_len], p.noteText()[0..s.sel_len]);
+                        }
+                        push(e.page, .selection, e.a, p.noteText());
+                    },
+                    .focus => push(e.page, .focus, e.b, p.noteText()),
                     else => {},
                 }
             },
@@ -284,6 +317,55 @@ pub fn reapAll() void {
     };
 }
 
+/// What a leaf says beyond its URL: the text zoom (percent), the
+/// session's appearance, and a find (its text and a nonce that asks
+/// for the next match).
+pub const Extras = struct {
+    zoom: u32 = 100,
+    theme: u64 = 0,
+    find: []const u8 = "",
+    find_nav: i64 = 0,
+};
+
+/// The rest of a leaf's word, after `sync`.
+pub fn syncExtras(s: *Slot, x: Extras) void {
+    if (x.zoom != s.zoom) {
+        s.zoom = x.zoom;
+        _ = host.send(s.page, .{ .zoom = x.zoom });
+    }
+    if (x.theme != s.theme) {
+        s.theme = x.theme;
+        _ = host.send(s.page, .{ .theme = x.theme });
+    }
+    const changed = !std.mem.eql(u8, s.find[0..s.find_len], x.find) or x.find_nav != s.find_nav;
+    if (changed or (!s.find_sent and x.find.len > 0)) {
+        s.find_len = @min(x.find.len, s.find.len);
+        @memcpy(s.find[0..s.find_len], x.find[0..s.find_len]);
+        s.find_nav = x.find_nav;
+        s.find_sent = true;
+        _ = host.send(s.page, .{ .find = .{ .text = s.find[0..s.find_len], .index = @intCast(@max(0, x.find_nav)) } });
+    }
+}
+
+/// The last selection a page reported, for the clipboard.
+pub fn selectionOf(s: *Slot) []const u8 {
+    return s.sel[0..s.sel_len];
+}
+
+/// What the page domain holds, for a "Site" view: its memory against
+/// its budget, in KB, and whether it is alive.
+pub const Info = struct { used_kb: u64 = 0, limit_kb: u64 = 0, alive: bool = false };
+
+pub fn info(s: *Slot) Info {
+    host.lock.acquire();
+    defer host.lock.release();
+    const p = host.page(s.page);
+    if (!p.used or p.dead or p.ctl == 0) return .{};
+    const st = usys.domainStat(p.ctl);
+    if (st.err != .ok) return .{};
+    return .{ .used_kb = st.data[3] >> 32, .limit_kb = st.data[3] & 0xffff_ffff, .alive = st.data[0] != @intFromEnum(shared.DomainState.dead) };
+}
+
 /// Bring a page to what its leaf says: the viewport (a hidden leaf has
 /// none), then the URL and `nav` nonce.
 pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32) void {
@@ -294,7 +376,12 @@ pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32) void {
             s.blitted = 0;
         }
     }
-    const changed = !std.mem.eql(u8, s.urlText(), url) or nav != s.nav;
+    // A leaf whose URL is what the page already reports (the app took
+    // the page's final URL into its state) asks for nothing new.
+    host.lock.acquire();
+    const shown = std.mem.eql(u8, host.page(s.page).urlText(), url);
+    host.lock.release();
+    const changed = (!std.mem.eql(u8, s.urlText(), url) and !shown) or nav != s.nav;
     if (url.len > 0 and (changed or !s.loaded_once)) {
         s.url_len = @min(url.len, s.url.len);
         @memcpy(s.url[0..s.url_len], url[0..s.url_len]);
