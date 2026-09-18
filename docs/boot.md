@@ -157,7 +157,7 @@ script there in the view the unit gives it — a script as a unit, see
 A unit that spawns children (the fabric service, for remote stages)
 needs a budget that covers them: memory accounts nest, and a child's
 pages are charged up to its parent (`fabsvc.msh` says `budget: { kobj:
-4mb, user: 16mb }`; the default is 1 MB and 4 MB).
+4mb, user: 16mb }`; the default is 1 MB and 8 MB).
 
 ### Profiles and drills
 
@@ -277,7 +277,7 @@ failed.
 - **Unit limits** (`user/init.zig`): 48 units, 8 `give` lines each; the
   parser's arena is 256 KB, reset per file; a session's unit text is
   kept in a 32 KB area. Defaults: kernel-object budget 1 MB, user memory
-  4 MB, no CPU budget, grants `log` only. The repository ships 27 unit
+  8 MB, no CPU budget, grants `log` only. The repository ships 27 unit
   files plus the session template.
 - **Activation** (`ensureUp` → `activate`): stage the image from the
   archive, create the boot channel, spawn with the unit's grants and

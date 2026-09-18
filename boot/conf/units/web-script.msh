@@ -1,0 +1,5 @@
+# The web drill's client: a script fetches the fixtures plain and over
+# TLS (the trust roots read from the assets tier through a read-only
+# root view). Essential and oneshot: its exit ends the boot.
+{ image: mshrun, script: scripts/web-drill.msh, grant: [log, bootfs], profiles: [web], oneshot: true, essential: true,
+  give: [{ tag: net, netview: net }, { tag: view, fs: "", ro: true }] }

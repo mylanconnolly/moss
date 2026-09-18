@@ -1,0 +1,24 @@
+# The fixture web server over TLS: the pages under boot/web/, read
+# through a read-only view of that directory, served on port 8443 over
+# the unit's own network view; the identity is the unit's certificate
+# and key (www.moss.test, signed by the test root the system trusts).
+# The page table is explicit — a request names a page or gets a 404 —
+# so nothing about the view leaks past the pages that are meant to be
+# served. Serves until the boot ends.
+let pages = [
+  { path: "/", file: "index.html" }
+  { path: "/index.html", file: "index.html" }
+  { path: "/about.html", file: "about.html" }
+]
+def page [req] {
+  match ($pages | find (fn [p] { $p.path == $req.path })) {
+    nothing => { status: 404, body: "no such page" }
+    $hit => (match (cat $hit.file) {
+        ok $text => { status: 200, headers: { content-type: "text/html; charset=utf-8" }, body: $text }
+        err $e => { status: 500, body: "cannot read $hit.file: $e" }
+      })
+  }
+}
+let srv = (tls-listen 8443)?
+echo "webfix: serving https"
+(http-serve $srv $page)?

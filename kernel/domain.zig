@@ -27,7 +27,15 @@ const trace = @import("trace.zig");
 // spawning that 16 could not host. Each slot is a Domain (~3K, mostly its
 // mappings table), so the headroom costs ~48K of static kernel memory.
 const max_domains = 32;
-const user_stack_pages = 64; // 256K: a TLS 1.3 handshake (hybrid key share, certificate chain) needs >120K; before it, mossfs's CoW rebuild set the bar at 96K
+/// The default user stack, 256K: a TLS 1.3 handshake (hybrid key share,
+/// certificate chain) needs >120K; before it, mossfs's CoW rebuild set
+/// the bar at 96K. An image that needs more says so in its header
+/// (`stack_pages`, up to `max_user_stack_pages`): the interpreter hosts
+/// ask for 512K, since a `fetch https://` from inside a script function
+/// faulted in ECDSA's DER parse 4K below a 256K stack (2026-09-18), and
+/// raising every domain's stack instead broke every budget sized to it.
+const user_stack_pages = 64;
+const max_user_stack_pages = 256;
 const user_stack_top: u64 = 0x800_0000; // 128MB, far above the image
 
 /// Shared-memory mappings land here, bump-allocated per domain.
@@ -527,8 +535,9 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     d.image_end_va = base + header.mem_size;
 
     // User stack.
+    const stack_pages: u64 = if (header.stack_pages != 0) @min(header.stack_pages, max_user_stack_pages) else user_stack_pages;
     d.stack_top = user_stack_top;
-    d.stack_base = user_stack_top - user_stack_pages * mem.page_size;
+    d.stack_base = user_stack_top - stack_pages * mem.page_size;
     var sp = d.stack_base;
     while (sp < d.stack_top) : (sp += mem.page_size) {
         const page = try kalloc.allocPage(&d.user_mem);

@@ -240,6 +240,11 @@ fn handleUserSync(frame: *TrapFrame) void {
     log.warn("domain {s}: fault at EL0 — {s} (esr=0x{x} far=0x{x} elr=0x{x}); killing it", .{
         d.name, ecName(ec), esr, far, frame.elr,
     });
+    // A data abort just under the stack is a stack overflow, and the
+    // dump should say so rather than leave it to be worked out from the
+    // address (the web drill's TLS handshake inside a script function,
+    // 2026-09-18; Activity's System tab before it).
+    if (far < d.stack_base and d.stack_base - far < (1 << 20)) log.warn("  {d} bytes below the stack base: a stack overflow (user_stack_pages in kernel/domain.zig)", .{d.stack_base - far});
     domain.destroy(d);
     sched.exit();
 }

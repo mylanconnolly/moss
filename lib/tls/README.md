@@ -24,6 +24,12 @@ openssl x509 -req -in server.csr -CA moss-test-ca.pem -CAkey moss-test-ca.key \
 rm server.csr server.ext moss-test-ca.srl
 ```
 
+`moss-web-server.pem` / `.key` are the web fixture server's identity
+(`www.moss.test`, which dnsd's zone resolves to `::1`), signed by the
+same root and minted the same way with the name swapped; `webfix-tls`
+presents it and the web drill's `fetch https://` verifies it against the
+assets roots.
+
 The system's real trust roots are elsewhere: `boot/tls/roots.pem`, the
 Mozilla root store as curl publishes it (https://curl.se/ca/cacert.pem;
 the date is in its header), packed as `tls/roots.pem`.

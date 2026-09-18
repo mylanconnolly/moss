@@ -45,7 +45,7 @@ const progload = @import("progload.zig");
 const Program = progload.Program;
 
 comptime {
-    asm (usys.imageHeader("shell"));
+    asm (usys.imageHeaderStack("shell", 128));
 }
 
 pub const panic = std.debug.FullPanic(uPanic);

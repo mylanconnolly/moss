@@ -1,0 +1,27 @@
+# The web drill: the fixture servers answer, both ways. A page fetched
+# plain over loopback by name (dnsd serves www.moss.test as ::1), a page
+# fetched over TLS with the certificate verified against the trust roots
+# in the assets tier, and a request for a page that is not there refused
+# with a 404. The servers are units of the same profile, so the first
+# fetch retries while they come up.
+def try-fetch [url, n] {
+  match (fetch $url) {
+    ok $r => (ok $r)
+    err $e => (match ($n > 0) {
+        true => { sleep 500; try-fetch $url ($n - 1) }
+        _ => (err "fetch $url: $e")
+      })
+  }
+}
+let r = (try-fetch http://www.moss.test:8080/ 60)?
+if $r.status != 200 or ($r.body | split "A moss fixture" | len) < 2 { (err "http fixture: $r.status")? }
+if ($r.headers | get "content-type") != "text/html; charset=utf-8" { (err "http fixture: not html")? }
+echo "script: http fixture ok"
+let s = (try-fetch https://www.moss.test:8443/about.html 60)?
+if $s.status != 200 or ($s.body | split "About the fixtures" | len) < 2 { (err "https fixture: $s.status")? }
+echo "script: https fixture ok"
+match (fetch http://www.moss.test:8080/missing.html) {
+  ok $m => { if $m.status != 404 { (err "missing page: $m.status")? } }
+  err $e => (err "missing page: $e")?
+}
+echo "script: web fixtures ok"

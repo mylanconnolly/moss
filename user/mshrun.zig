@@ -34,7 +34,7 @@ const mshl = mosslib.mshl;
 const Value = mshl.Value;
 
 comptime {
-    asm (usys.imageHeader("mshrun"));
+    asm (usys.imageHeaderStack("mshrun", 128));
 }
 
 pub const panic = std.debug.FullPanic(uPanic);

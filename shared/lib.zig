@@ -2316,7 +2316,12 @@ pub fn wordsToStr(buf: *[24]u8, w: [3]u64) []const u8 {
 /// must match the catalog entry it was staged from.
 pub const UserImageHeader = extern struct {
     magic: u32,
-    version: u32,
+    /// The user stack the image asks for, in pages; 0 takes the kernel's
+    /// default (64 pages, 256 KB). The interpreter hosts (msh, mshrun)
+    /// ask for 128: a TLS handshake called from inside a script function
+    /// overflowed 256 KB (2026-09-18), and the stack is the image's to
+    /// know, not every spawner's to guess. Was an unused `version` word.
+    stack_pages: u32,
     text_size: u64,
     load_size: u64,
     mem_size: u64,
@@ -2390,7 +2395,7 @@ pub fn marcIter(blob: []const u8) MarcIter {
 /// `login` boots the multi-user system: a login prompt on every
 /// console; `session` is what a session's init starts (its units live in
 /// the user's home, else the archive's conf/session/ template).
-pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48, activity = 49, netconf = 50, console = 51, nodes = 52, nodevm = 53 };
+pub const BootProfile = enum(u64) { system = 0, blk = 1, fs = 2, net = 3, guest = 4, users = 5, login = 6, session = 7, flogin = 8, fjoin = 9, dot = 10, gpu = 11, term = 12, input = 13, seat = 14, gseat = 15, comp = 16, focus = 17, trust = 18, readers = 19, gui = 20, guilogin = 21, gtrust = 22, gsession = 23, lconsole = 24, gisession = 25, gboom = 26, fontrescan = 27, ptr = 28, pointer = 29, guiclick = 30, fontscale = 31, guishell = 32, fabgui = 33, fabsig = 34, fabsigtx = 35, locale = 36, localeupd = 37, desktop = 38, topbar = 39, dock = 40, listdemo = 41, explorer = 42, browse = 43, browsehost = 44, netbrowse = 45, cascade = 46, terminal = 47, editor = 48, activity = 49, netconf = 50, console = 51, nodes = 52, nodevm = 53, web = 54 };
 /// A session's unit template in the boot archive.
 pub const session_unit_dir = "conf/session/";
 /// The graphical session template: what a GUI session (a mode-3 init with

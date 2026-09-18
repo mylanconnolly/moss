@@ -3389,7 +3389,7 @@ branch, which sliced it back to a pointer to an array, and so on at
 runtime until the stack ran out; the pointer branch now coerces an array
 pointer to a slice, and a test feeds it literals. (The first suspect, the
 command's 30 KB of working arrays on the stack, moved to statics on the
-way; a 256 KB user stack does not leave a host command that much.)
+way; a 256 KB user stack — 512 KB for the interpreter hosts since 2026-09-18 — does not leave a host command that much.)
 
 **The arc's debt, paid (same day).** Seven things the arc left behind,
 struck the same day. `DomainRec`'s cpu word is `cpu_budget` (limit and
@@ -5642,6 +5642,59 @@ self-guards on the capability it needs, so `spawn` without a spawner or
 command"), which lets the *same* explorer script run local-only — where
 `net-rows` simply returns no peers — or networked, rather than forking into
 two scripts.
+
+## The web
+
+The browser arc (ROADMAP, "A web browser") begins here; each stage adds
+its "as built" below.
+
+**Stage 0, fixtures and the wire (as built, 2026-09-18).** Every web
+drill fetches from moss itself: two `mshrun` units under profile `web`,
+`webfix` (`http-serve` on loopback 8080) and `webfix-tls` (`tls-listen`
+on 8443, presenting `lib/tls/moss-web-server.pem`, a certificate for
+`www.moss.test` signed by the same test root the system trusts through
+`assets/tls/roots.pem`; dnsd's zone already resolves `www` to `::1`).
+Each holds a read-only view of `boot/web/` and nothing else of the
+filesystem, and answers from an explicit page table — a request names a
+page or gets a 404, so the view cannot be walked. The drill script
+(`web-script`, essential and oneshot) fetches a page plain, a page over
+TLS, and a missing page, retrying the first fetch while the servers
+come up; its exit ends the boot. The conformance corpora live under
+`tools/testdata/web/` with a README of pins and licences; nothing reads
+them yet. `shared/web.zig` waits for its first consumer.
+
+Three things the first row found, none of them about the web. The
+filesystem service's archive index was **forty entries** (`max_boot`)
+against an archive of 238: init reads the archive with `marcFind` and
+the kernel embeds it whole, so units, scripts and images were never
+affected — only a *view* under `boot/` saw the truncation, and the
+first unit to ask for one (`fs: boot/web`) was refused with a derive
+failure; `ls boot/conf/units` had been listing a sixth of them all
+along. It is 256 now, and `parseBoot` logs when the archive outgrows
+it. Second, `fetch https://` called from inside a script function
+faulted 4 KB below the stack base in ECDSA's DER parse: the TLS
+handshake needs more than 120 KB of stack on its own, and the
+interpreter's frames for a `def` and a `match` beneath it were the
+rest of 256 KB. The first fix, 512 KB for every domain, failed eight
+drills at once: every budget sized to the old stack — the shell's
+workers, the fabric's remote stage, the guest kernel's fabsvc — refused
+its spawn. So the stack is the image's to declare: the header's unused
+`version` word is `stack_pages` now (0 = the default 64), msh and mshrun
+ask for 128 through `usys.imageHeaderStack`, and nothing else moved
+except the budgets that host mshrun — its image alone spans 3.6 MB, so
+a worker, a remote stage and the default unit budget are 8 MB, not 4,
+and the shells that hold five workers at once (the system shell, a
+session's, the windowed terminal's, the net drill's script) are 32 MB,
+not 24 — the second gate found each of them 2 MB short. The fault dump
+says "N bytes below the stack base: a stack overflow"
+when that is what it sees, and the spawn-refusal dump prints the
+child's own request first, since every parent in that chain was far
+from its limit. Third, a `file:` or `secret:` give travels
+through the unit's shared buffer, so a unit that takes a certificate
+must also take `{ tag: buf, shm: 1 }`; the TLS fixture failed to wire
+until it did. *Lesson:* the first row of a new arc is worth running
+before any of the arc's code exists — it is the cheapest way to find
+the limits the arc will lean on.
 
 ## Distribution: the fabric
 

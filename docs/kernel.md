@@ -308,7 +308,7 @@ it — and no claim that any of this defeats Spectre-class attacks.
   (one page); 64 threads; up to 8 cores; 64 channels, 64 notifications,
   64 shared buffers (each up to 256 pages, 1 MB), 256 badge identities;
   8 pending callers per channel (deferred replies). A thread's kernel
-  stack is 8 pages; a domain's user stack is 64 pages (256 KB; a TLS handshake needs more than the 96 KB it was) below
+  stack is 8 pages; a domain's user stack is 64 pages (256 KB; a TLS handshake needs more than the 96 KB it was) unless the image's header asks for more (up to 256 pages; the interpreter hosts ask for 128, since a handshake inside a script function outgrew 256 KB) below
   `0x800_0000`, its image at `0x40_0000`, its window from
   `0x1000_0000`, 64 mappings. Default budgets at spawn are 1 MB of
   kernel objects and 1 MB of user memory unless the manifest says

@@ -335,6 +335,10 @@ fn sysSpawn(d: *domain.Domain, frame: *arch.trap.TrapFrame) u64 {
         // The caller sees one of three errnos; the log keeps the cause.
         log.info("spawn by {s} refused: {t}", .{ d.name, e });
         if (e == domain.Error.QuotaExceeded) {
+            // The child's own limits first: a refusal with every parent
+            // far from its limit is the child's budget too small for its
+            // image and stack (the web drill's script unit, 2026-09-18).
+            log.info("  child asked for: user {d} KB, kobj {d} KB", .{ manifest.user_limit / 1024, manifest.kobj_limit / 1024 });
             // Dump the account chain so it is clear WHICH limit (memory vs
             // kobj) at WHICH domain in the parent chain is the binding one.
             var a: ?*domain.Domain = d;

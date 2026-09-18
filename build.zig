@@ -368,6 +368,11 @@ pub fn build(b: *std.Build) void {
         "dot-test",
         "Run the DNS-over-TLS drill: netsvc's resolver forwards through dotd over TLS to a canned DoT responder",
     ) orelse false;
+    const web_test = b.option(
+        bool,
+        "web-test",
+        "Run the web drill: the fixture servers (plain and TLS) answer a script's fetches over loopback by name",
+    ) orelse false;
     const rng_test = b.option(
         bool,
         "rng-test",
@@ -516,6 +521,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "login_test", login_test);
     build_opts.addOption(bool, "flogin_test", flogin_test);
     build_opts.addOption(bool, "dot_test", dot_test);
+    build_opts.addOption(bool, "web_test", web_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -730,6 +736,10 @@ pub fn build(b: *std.Build) void {
         "conf/units/clock-cluster.msh",   "conf/clock-cluster.msh",
         "conf/units/dotd.msh",            "conf/dot.msh",
         "conf/units/dot-script.msh",      "scripts/dot-drill.msh",
+        "conf/units/webfix.msh",          "scripts/webfix.msh",
+        "conf/units/webfix-tls.msh",      "scripts/webfix-tls.msh",
+        "conf/units/web-script.msh",      "scripts/web-drill.msh",
+        "web/index.html",                 "web/about.html",
         "scripts/worker-demo.msh",        "conf/units/svc-pub.msh",
         "scripts/svc-pub.msh",            "conf/units/doubler.msh",
         "scripts/doubler.msh",            "conf/units/gpusvc.msh",
@@ -802,7 +812,8 @@ pub fn build(b: *std.Build) void {
     // The server identity the drill's `serve` over TLS presents (a
     // certificate for tls.moss.test and its key), given to the unit as
     // capabilities — not assets.
-    for ([_][]const u8{ "moss-test-server.pem", "moss-test-server.key" }) |f| {
+    // `moss-web-server` is the web fixture server's identity (www.moss.test).
+    for ([_][]const u8{ "moss-test-server.pem", "moss-test-server.key", "moss-web-server.pem", "moss-web-server.key" }) |f| {
         pack.addPrefixedFileArg(b.fmt("tls/{s}=", .{f}), b.path(b.fmt("lib/tls/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("tls/{s}=", .{f}), b.path(b.fmt("lib/tls/{s}", .{f})));
     }
@@ -911,7 +922,7 @@ pub fn build(b: *std.Build) void {
             "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
             "editor_test",     "activity_test",  "netconf_test",    "console_test",
-            "nodes_test",      "nodevm_test",
+            "nodes_test",      "nodevm_test",    "web_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1380,7 +1391,7 @@ pub fn build(b: *std.Build) void {
         "topbar_test",     "dock_test",      "listdemo_test",   "explorer_test",
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
         "editor_test",     "activity_test",  "netconf_test",    "console_test",
-        "nodes_test",      "nodevm_test",
+        "nodes_test",      "nodevm_test",    "web_test",
     };
     const variants = [_][]const u8{
         "panic",     "fault",     "sched",     "domain",   "ipc",        "init",
@@ -1394,7 +1405,7 @@ pub fn build(b: *std.Build) void {
         "largetext", "power",     "restart",   "fabgui",   "fabsignal",  "locale",
         "localeupd", "desktop",   "topbar",    "dock",     "listdemo",   "explorer",
         "browse",    "netbrowse", "cascade",   "terminal", "editor",     "activity",
-        "netconf",   "console",   "nodes",     "nodevm",
+        "netconf",   "console",   "nodes",     "nodevm",   "web",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

@@ -370,7 +370,7 @@ refused.
 - **Budget.** Memory accounts nest, so the children a fabric service
   spawns for its peers are paid from its own budget: the unit gives it
   4 MB of kernel objects and 16 MB of user memory, and the drill's
-  kernel driver the same; a remotely spawned child gets 1 MB and 4 MB
+  kernel driver the same; a remotely spawned child gets 1 MB and 8 MB
   of that. Sessions are keyed
   by node id, never by peer slot, so a slot recycled by a rejoin cannot
   misroute a stale remote channel — calls to a rebooted node fail
@@ -395,7 +395,7 @@ refused.
   `no_identity`, `no_entropy`, `denied`.
 - **Remote spawn.** Request `[image u16][arg u64][req u32]`; the child
   gets a log cap and the serving side of a fresh channel, 1 MB of
-  kernel-object budget and 4 MB of user memory; the ack carries the
+  kernel-object budget and 8 MB of user memory; the ack carries the
   export id and a code: spawned, unauthorized, or failed (a failed
   spawn's cause is on the spawning node's kernel log: `spawn by fabsvc
   refused: QuotaExceeded`). Image ids are the shared catalog's

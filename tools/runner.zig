@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes, nodevm };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes, nodevm, web };
 
 const Spec = struct {
     name: []const u8,
@@ -125,6 +125,7 @@ const specs = [_]Spec{
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .always_extra = "echocli: handed-off socket echoed on a new view", .append = "profile=net" },
     .{ .name = "dot", .kind = .dot, .pass = "dot-test: PASS", .extra = "mshrun: script: dot resolve ok", .append = "profile=dot" },
+    .{ .name = "web", .kind = .web, .pass = "web-test: PASS", .extra = "mshrun: script: web fixtures ok", .append = "profile=web" },
     .{
         .name = "users",
         .kind = .blk,
@@ -446,7 +447,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
 
     const disk = try std.fmt.allocPrint(gpa, "{s}/{s}.img", .{ check_dir, spec.name });
-    if (spec.kind == .blk or spec.kind == .net or spec.kind == .netconf or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor or spec.kind == .nodevm) try makeDisk(disk);
+    if (spec.kind == .blk or spec.kind == .net or spec.kind == .netconf or spec.kind == .dot or spec.kind == .web or spec.kind == .localeupd or spec.kind == .gseat or spec.kind == .gsession or spec.kind == .lconsole or spec.kind == .gisession or spec.kind == .gboom or spec.kind == .guishell or spec.kind == .guishellro or spec.kind == .display or spec.kind == .largetext or spec.kind == .power or spec.kind == .restart or spec.kind == .topbar or spec.kind == .explorer or spec.kind == .terminal or spec.kind == .editor or spec.kind == .nodevm) try makeDisk(disk);
 
     if (!try runOnce(spec, bin, disk, 1, spec.extra, polls)) return false;
     if (spec.second_run_extra) |extra2| {
@@ -489,6 +490,14 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
             "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
             "-device",
             "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
+        }),
+        // The web drill: the fixture servers and the script are all guests
+        // on loopback, so a plain slirp NIC (for the device) and entropy for
+        // the TLS handshakes.
+        .web => try args.appendSlice(gpa, &.{
+            "-netdev", "user,id=n0",
+            "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+            "-device", "virtio-rng-pci,disable-legacy=on,iommu_platform=on",
         }),
         // The locale updater: a plain slirp NIC (the guest reaches the host
         // fixture server as 10.0.2.2) and an entropy device for the TLS
@@ -621,7 +630,7 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
     }
     // net and dot keep their assets (trust roots) in mossfs, so they
     // boot a scratch disk alongside the NIC.
-    if (spec.kind == .net or spec.kind == .dot or spec.kind == .localeupd or spec.kind == .topbar) try appendDisk(&args, disk);
+    if (spec.kind == .net or spec.kind == .dot or spec.kind == .web or spec.kind == .localeupd or spec.kind == .topbar) try appendDisk(&args, disk);
 
     var tls_server: ?std.process.Child = null;
     if (spec.kind == .net) tls_server = try spawnQemu(&.{

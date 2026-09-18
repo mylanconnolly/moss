@@ -17,13 +17,20 @@ const is_x86 = builtin.cpu.arch == .x86_64;
 /// catalog. Entry: umain(log, chan, arg, blob va, blob len) as a C
 /// function — the kernel places the arguments per the port's ABI.
 pub fn imageHeader(comptime name: []const u8) []const u8 {
+    return imageHeaderStack(name, 0);
+}
+
+/// The same, asking the kernel for `stack_pages` of user stack (0 = the
+/// kernel's default): what the interpreter hosts open with, since a
+/// script's frames plus a TLS handshake outgrow the default.
+pub fn imageHeaderStack(comptime name: []const u8, comptime stack_pages: u32) []const u8 {
     if (name.len > 15) @compileError("image name too long: " ++ name);
     return std.fmt.comptimePrint(
         \\.section .text.uhdr, "ax"
         \\.global __uhdr
         \\__uhdr:
         \\        .ascii  "MOSS"
-        \\        .4byte  0
+        \\        .4byte  {d}
         \\        .quad   __utext_size
         \\        .quad   __uload_size
         \\        .quad   __umem_size
@@ -32,7 +39,7 @@ pub fn imageHeader(comptime name: []const u8) []const u8 {
         \\.global _ustart
         \\_ustart:
         \\        {s} umain
-    , .{ name, 16 - name.len, if (is_x86) "jmp" else "b" });
+    , .{ stack_pages, name, 16 - name.len, if (is_x86) "jmp" else "b" });
 }
 
 /// Order memory against a device: the virtio rings' descriptor and

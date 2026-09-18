@@ -46,6 +46,7 @@ list, followed by the story of what has **Landed** since.
 | Code sharing | **Static linking only — no dynamic loader, ever.** Shared functionality lives in `lib/`: pure, freestanding-safe, host-testable Zig modules (lz4, xts, ...) compiled into each program that imports them. Where key custody matters, a capability *service* holds the secret instead of a library. Code-page dedup, if ever needed, comes from content-addressed images (`img/`), not load-time linking. | Relocation machinery, symbol versioning, and loader attack surface bought nothing at moss's scale; static modules keep every binary analyzable and every ABI a comptime-checked Zig type. |
 | Homes across the fabric (decided 2026-09-04) | **One home per user, on the node where it was born; a session elsewhere mounts it — the home's node ships ciphertext, the session's node holds the key — under a lease that makes that session's home service the volume's only server.** Reaching the home is by proof of identity (a signature under the record's public key), never by trust between managers. No fallback home: a login whose home node is unreachable fails and names the node. Performance comes from a local block cache in the home service — exclusive under the lease, so it needs no coherence — and from wider transport frames, not from copying the home. Moving a home to another node is an administrative action, to be built. | A second home that quietly diverges is worse than a refused login; the key belongs where the passphrase was typed; the lease is what makes a cache sound. |
 | The language (mshl v3, decided 2026-09-03; stage 1 built the same day) | **One small, regular syntax for programs and data; functional; pattern matching; capabilities as values.** Values are immutable; functions are values with closures over an immutable environment snapshot, recursion by *name* (never a self-pointer), so values form no cycles and memory is **reference counted, exact, deterministic** — no tracing, no pauses, and a capability held by a value drops at the last use, when the service can reclaim it. (As built: the one cycle is a *scope* — its slots hold its functions, its functions point at it to resolve names — and it is collected by a check the interpreter runs on unheld scopes at the end of every statement; values themselves stay acyclic.) Temporaries live in a per-evaluation arena; only what is bound escapes to counted storage; lists, records and tables share structure on update. Errors are values: `Result` (`ok` / `err`) with `?` propagation and `match` that must be exhaustive; `nothing` is absence, never failure; no tuples (a record is the grouping). Modules are files reached through views (`use` evaluates a file to a record of its exports); no global namespace; the standard library ships in the archive. Extensions are two tiers: services over typed channels (drivers, GUIs — a Zig program, a thin mshl binding) and in-process Zig host commands compiled into the runtime (parsing, hashing). No concurrency in the language: parallelism is spawning programs, here or on another node, and passing values and caps through channels. Config files stay the literal subset of the same syntax. **Strongly typed, not statically typed** (decided 2026-09-03): every value carries its type and nothing coerces — conditions take booleans, comparisons take matching types, `Result` and `match` never bend — checked when evaluated and at every boundary (a value read from a file or a message is checked against the shape a program states for it); host commands declare their signatures from the same protocol types the services use, so a pipeline's mistakes are reported as typed errors, never silently wrong; annotations are optional shapes, structural (`{ name: string, size: int }` matches any record with those fields), with enumerations as unions of bare words so `match` can be checked for exhaustiveness where it is evaluated; no mandatory annotations, no static checker. (As built, 2026-09-04: shapes, signatures and results landed together — see "mshl v3, stage 6".) **Strings are UTF-8 by guarantee** (decided 2026-09-03): validated at every boundary, `len` and indexing by code point; binary data is a distinct `bytes` type (socket payloads, images), never a string. **Two numbers** (built 2026-09-04): int and float, never mixed on their own, converted by name; a tower above them (big integers, decimals) only when a use case asks. | The shell already thinks in the OS's values; the language must keep the properties the OS gives — no ambient authority, failure in the vocabulary, deterministic release — rather than import a runtime that fights them. Go's discipline about smallness, with the two things it lacks. |
+| The web (decided 2026-09-18) | **A browser is a page's sandbox with a window around it.** The engine is pure Zig libraries with the standing of `lib/font` — `lib/web/` (URL, encoding, HTML, DOM, CSS, layout, paint), `lib/js/` (our own JavaScript engine), the image decoders — freestanding-safe, host-tested against the public conformance corpora (html5lib-tests, the URL and CSS parsing tests, test262, WPT reftests), so compliance is a number the tests print, never a claim. Untrusted content **runs** only in a **page domain** (`webpage`): a child of whoever opened it, holding exactly one capability — a channel to a **fetch broker** (`webfetch` for the session, the calling script for a headless render) that owns the network view, the trust roots, the cookies, the cache and the policy. A page has no filesystem, no network, no font service; it paints into a badged, viewport-sized pixel buffer its host clips under its own chrome, so the URL bar cannot be spoofed by construction; a page that exhausts its budget is killed by the kernel and its tab says so. Parsers run in the caller's process (bounded, fuzzed); execution — layout of a page, scripts — never does. The browser (`Web`) is an mshl application over the toolkit — tabs, history and bookmarks are data in its state, a tab is a `page` leaf whose lifetime is the tree's — and the shell's `fetch` / `html-parse` / `web-render` are the same libraries and the same domain shape. No C runtime, no vendored engine; JavaScript is off until ours lands, and a site's script never gains authority the page domain lacks. | A page holding only a channel to a broker is the sandbox the OS already gives every driver, and the interposition invariant makes filtering, auditing and a kiosk one unit-file line; the libraries-plus-domains split is what let TLS, fonts and the language be built here without importing a runtime that fights the OS. |
 
 ### Non-goals (permanently, unless revisited here)
 
@@ -196,6 +197,12 @@ text scales, and resolutions. The following follow-ons are recorded for later;
 they are not prerequisites for this GUI work or a commitment to build them all
 at once.
 
+**The next application (2026-09-18): a web browser.** Written up under
+Arcs below ("A web browser"). It is the largest arc in this file — about
+the size of everything built so far — and it is staged so that each
+stage is useful on its own (a `fetch` that follows redirects, an HTML
+parser for the shell, a page domain, a window) long before scripts run.
+
 **An SMP guest can start a thread on a null stack (2026-09-18, open).**
 A four-vCPU moss guest under a busy host: fabsvc's first worker faults
 at its trampoline's first instruction with SP_EL0 = 0
@@ -285,6 +292,322 @@ supervises), and memory history per unit beside the CPU one.
 
 **Arcs**
 
+- **A web browser** (arc planned 2026-09-18; the decision row "The web"
+  in the table above). The next application, and the largest arc here:
+  an engine that powers the shell (`fetch` a site, parse it, pull the
+  links out), a `wget`-shaped tool, a headless render, and a windowed
+  browser with tabs — CSS, then JavaScript — safe, reasonably fast,
+  standards-compliant, and shaped like the rest of the OS. Sizing,
+  honestly: the tree is ~84k lines after eighteen days; a browser that
+  renders the real web is of that order again, most of it in two
+  libraries (layout, the JavaScript engine). So the arc is cut into
+  stages that each leave something usable and drilled, in the order a
+  user would miss them, and nothing below is a promise of a date.
+  - **Why it fits, and the three decisions taken up front.** (a) *The
+    engine is libraries; execution is a domain.* Everything that
+    understands the web is a pure Zig library under `lib/web/` and
+    `lib/js/` — allocation-explicit, freestanding-safe, host-tested like
+    `lib/font` and `lib/tls` — and the only place untrusted content
+    *runs* is a **page domain**, a spawned `webpage` program whose whole
+    manifest is one channel and one pixel buffer. This is the same split
+    that made TLS, fonts and the language buildable here, and it is the
+    safety story in one sentence: a page's script can do exactly what
+    the page domain can, which is ask its broker for bytes. (b) *A
+    broker owns the network.* A page never holds a network view. It
+    asks a **fetch broker** over its channel — for the Web app, the
+    session's `webfetch` unit (the clipsvc shape: one per session,
+    per-client badges), which holds the net view, the trust roots, the
+    HTTP pool, the cache, the cookie jar and the policy (schemes, mixed
+    content, redirect bounds, size caps, an admin allowlist); for a
+    headless render from a script, the calling `mshrun` itself serves
+    the same protocol with its own `fetch`. Because the broker is a
+    channel, it is interposable: an auditing proxy, a filtering proxy, a
+    kiosk that reaches one site — each is a unit-file line, the
+    interposition invariant at work. (c) *Pixels are the boundary.* A
+    page domain paints its viewport into a badged shared buffer its host
+    granted, and commits damage rects over the channel; the host blits
+    the buffer inside the page rect and nowhere else. The chrome — URL
+    bar, lock, tab strip — is the host's pixels, so a page cannot spoof
+    it; the compositor is unchanged (no nested surfaces); a remote page
+    domain is the same buffer over the bulk transport. A display list
+    is the fabric optimization for later, if measured.
+  - **Invariants (locked):** (1) *no parser in a shared service.* Bytes
+    from the net are decoded — HTML, CSS, images, fonts — inside the
+    page domain that asked for them; a hostile font or PNG can only kill
+    its own page. `fontsvc` stays system-wide and never sees a web font;
+    `lib/font` links into `webpage` for `@font-face`. (2) *Parsers in
+    process, execution in a domain.* `html-parse`, `html-select`,
+    `url-parse` run in the caller's process as `from-json` does —
+    bounded by its arena and budget, fuzzed on the host; anything that
+    lays out a page or runs a script (`web-render`, `web-eval`, a tab)
+    is a page domain. (3) *A tab is a `page` leaf.* The mshl app never
+    holds a domain handle: the runtime spawns a page domain when a
+    `page` leaf with a new id appears in the tree and tears it down
+    when the leaf is gone — lifetime is declarative, like scroll slots,
+    so a closed tab is a dead domain and the browser's exit takes every
+    page with it (teardown is transitive; the leak bar holds per page).
+    (4) *Let it crash.* A page that overruns its budget, faults, or
+    hangs is killed by the kernel; the tab shows "the page crashed" and
+    a reload button; the browser, the broker and the other tabs are
+    untouched — drilled, not assumed. (5) *Compliance is measured.* Each
+    library's host test runs the public corpus and prints its pass
+    count, asserted non-decreasing; the numbers are recorded in DESIGN
+    when a stage lands, as the font formats were. (6) *JavaScript is
+    ours, and off until it lands.* No C runtime, no vendored engine: a
+    parser, a bytecode compiler, a VM and a precise tracing collector
+    confined to the engine's own heap (the one tracing GC in the tree —
+    JavaScript needs cycles; the language does not). Until then a site
+    is what its HTML and CSS say, which is already most of the web
+    worth reading.
+  - **The seam.** `shared/web.zig`: `PageReq` (load, navigate, resize,
+    scroll, pointer, key, wheel, tick, find, select, stop) and the
+    page's events back (`title`, `url`, `load` state, `favicon` later,
+    a hit on a link, `crashed` by peer death); `BrokerReq` (open a
+    resource by URL with the requesting origin, read the next chunk,
+    cancel; cookie get/set for an origin; storage get/set per origin,
+    quota'd). Both typed, both fabric-shippable (data and a buffer, the
+    session-buffer idiom). The runtime's `page` leaf is the only new
+    widget the toolkit needs; the browser is the first customer of
+    client-defined menus (the "Menu extensions" item).
+  - **Stages, each with its exit criterion.** Stages 1–4 are libraries
+    with shell commands — the "engine for CLI use" the arc asks for
+    first; 5–7 are the window; 8–9 breadth; 10–11 scripts; 12 the
+    fabric. Track F runs beside them.
+    - **(0) Fixtures and the wire.** ✅ (landed 2026-09-18) The corpora
+      vendored under `tools/testdata/web/` at pinned commits with their
+      licences — html5lib-tests at the last commit still carrying
+      `tree-construction/` (the suite moved to WPT four days later), the
+      WPT URL data, css-parsing-tests; the test262 slice and the reftest
+      subsets wait for the stages that read them. The `webfix` and
+      `webfix-tls` units: `mshrun` + `http-serve` over loopback on 8080,
+      and over `tls-listen` on 8443 presenting a `www.moss.test`
+      certificate the test root signed (the zone already says `www` is
+      `::1`), serving `boot/web/` through a read-only view of just that
+      directory and an explicit page table. The `web` drill fetches a
+      page plain, a page over TLS verified against the assets roots, and
+      a 404, then ends the boot. `shared/web.zig` was left for its first
+      consumer (stage 5): a wire type with no caller is an API nobody has
+      checked. Three things it found, none of them in the web: (a) the
+      filesystem service indexed the first **40** archive entries
+      (`max_boot`) of the 238 the archive carries — init reads the archive
+      itself, so only a view under `boot/` ever saw the truncation (`fs:
+      boot/web` was refused; `ls boot/conf/units` listed a sixth of them);
+      256 now, and an overflow is logged. (b) `fetch https://` called from
+      inside a script *function* overflowed the 256K user stack in the
+      certificate's ECDSA parse (the handshake alone needs >120K). A 512K
+      stack for every domain failed eight drills — every budget sized to
+      the old stack — so the stack is the image's to declare (the
+      header's unused `version` word is `stack_pages`; msh and mshrun ask
+      for 512K, nothing else moved), the budgets that host mshrun (3.6 MB
+      of image) are 8 MB (workers, the fabric's remote stage, the default
+      unit budget) and the shells that host five workers at once are
+      32 MB (were 24), the fault log names an abort just under the stack
+      base as an overflow, and the spawn-refusal dump prints the child's
+      own request beside the parent chain. (c) a `file:`/`secret:` give
+      is copied through the unit's shared buffer, so a unit that takes a
+      certificate needs `{ tag: buf, shm: 1 }` — the TLS fixture would
+      not wire until it had one.
+    - **(1) URL, encoding, and a `fetch` that grows up.** `lib/web/url.zig`
+      (the WHATWG parser: parse, resolve against a base, serialize,
+      origin; punycode for hosts, IDNA display later), `lib/web/
+      encoding.zig` (UTF-8, windows-1252, UTF-16 labels, the BOM and
+      `<meta charset>` sniff — strings are UTF-8 by guarantee, so the
+      boundary decodes). `fetch` follows redirects (bounded, the method
+      rewrite rules), sends `Accept-Encoding` and decodes gzip/deflate
+      (std's flate, already in `lib/font` for WOFF) and br (`lib/
+      brotli`), streams a body to a file view or a handler under a size
+      cap (`fetch URL { to: $view }`), takes a timeout, does HEAD; a
+      `web-get` script is the `wget`: progress on the console, `-o`,
+      resume by range later. *Exit:* `urltestdata.json` passes with the
+      count printed; the net drill fetches a redirect chain, a gzip
+      body, and streams 4 MB to a file inside a 16 MB budget.
+    - **(2) HTML for the shell.** `lib/web/html.zig`, the WHATWG
+      tokenizer and tree builder in full (every insertion mode, foster
+      parenting, the adoption agency, `<template>`, foreign content) into
+      `lib/web/dom.zig`, an arena DOM addressed by index (no pointers,
+      no cycles — it serializes, and it crosses the fabric). Commands:
+      `html-parse` (the DOM as mshl data: tag, attrs, children, text),
+      `html-select SEL` (Selectors Level 3 and the useful Level 4 —
+      `:not`, `:is`, `:has` later — over the DOM), `html-text` (the
+      readable text, block boundaries as newlines). *Exit:* html5lib
+      tokenizer and tree-construction counts printed; the `web` drill's
+      script fetches a fixture and prints its title and links — the
+      shell scrapes the web.
+    - **(3) CSS.** `lib/web/css.zig`: Syntax Level 3 (tokens, rules,
+      declarations, the error recovery), selectors matching against the
+      DOM with specificity, the cascade (origins — UA, author; order;
+      `!important`; `inherit`/`initial`/`unset`), computed values for
+      the properties stage 4 lays out, the UA stylesheet as a comptime
+      string, media queries (width, `prefers-color-scheme` and
+      `prefers-contrast` from the session's appearance axes). *Exit:*
+      css-parsing-tests count printed; cascade unit tests; `html-select`
+      shares the selector engine.
+    - **(4) Layout and paint, on the host.** `lib/web/layout.zig`: the
+      box tree and CSS 2.1's visual formatting model — block and inline
+      formatting, margin collapse, floats and clears, line boxes,
+      `vertical-align`, `white-space`, `overflow`, lists, replaced boxes
+      as sized rectangles; text through the toolkit's `Typeface` vtable
+      (metrics from `lib/font` in the page, `Fixed` on the host) with a
+      UAX #14 line-breaking subset; `lib/web/paint.zig` draws a display
+      list into `ui.Canvas` (backgrounds, borders, text, images once
+      decoded), translated by the scroll offset. Host **reftests**: pairs
+      of fixtures that must paint identically, compared pixel-exact on
+      `Fixed` — the WPT model, run on the host with no QEMU. *Exit:*
+      reftest count printed; Acid1 paints as its reference.
+    - **(5) The page domain and the broker.** `user/webpage.zig` serves
+      `PageReq`: loads through its broker, parses, styles, lays out,
+      paints the viewport into the granted buffer, commits damage rects,
+      hit-tests links and form controls, scrolls by shifting its own
+      buffer and painting the strip. `user/webfetch.zig`, the session's
+      broker (badged clients, the requesting origin on every open; six
+      connections per host on the HTTP pool; a memory cache with
+      validation, `ETag`/`If-Modified-Since`; the cookie jar and the
+      cache index in the home's `state/webfetch/`; policy from
+      `conf/app/web.msh` through the admin-gated `sysconf`); the
+      broker's logic in one module `mshrun` also serves for `web-render`.
+      A native drill client (`compcli`'s shape) spawns a page: load a
+      fixture, click a link, the second page's commit lands; a page that
+      allocates without bound is refused by quota and the client sees
+      `peer_dead`; teardown meets the leak bar. *Exit:* the `webpage`
+      drill; `web-render URL` from the shell returns the DOM after load.
+    - **(6) The window: Web.** `boot/scripts/browser.msh`, unit
+      `browser` with `app: { name: "Web", … dock: true }`. The runtime's
+      `page` leaf (`{ kind: "page", id, url, nav, grow: true }`) spawns,
+      navigates, blits and reaps page domains and routes pointer, keys
+      and wheel inside its rect; page events reach `update` as coarse
+      events (`{ id, kind: "title" | "url" | "load" | "crashed", … }`).
+      The app: the toolkit's tab strip (the editor's), a URL field,
+      back/forward/reload/stop, a status line with the broker's TLS
+      verdict, a hidden tab keeps its document and drops its pixels (the
+      buffer is viewport-sized and only the visible page holds one — at
+      1920×1200 a full-window buffer is 9 MB, and the session budget is
+      96 MB). `progload` grows a `spawn-program`: stage a named image
+      with an explicit cap manifest, not only an `mshrun` handler. Menus
+      through client-defined schemas. *Exit:* the `browser` drill —
+      navigate to a fixture over loopback https, screendump the heading,
+      open a second tab, close it, quit; leak bar; a page that paints a
+      fake URL bar is screendumped inside its rect and nowhere else.
+    - **(7) Using it.** History and bookmarks (`state/browser/`, mshl
+      data), find in page, zoom seeded from the user's font scale and
+      following a `sessionfont` push (reflow), downloads through the
+      Save picker (a download is a grant, never an ambient write to the
+      home), selection and copy through `clipsvc`, forms (fields,
+      buttons, selects, submit — the toolkit's editor model in the page),
+      keyboard navigation (Tab across links and fields inside the page,
+      Escape back to the chrome), dark theme as `prefers-color-scheme`,
+      high contrast as forced colours, a "Site" popup showing what the
+      page domain holds — its origin, its budget and use, its cookies —
+      the capability facts a browser can show, as the explorer's footer
+      does for a view. *Exit:* the drill fills and submits a form,
+      bookmarks a page, downloads a file to the home via the picker.
+    - **(8) Images and web fonts.** `lib/png.zig` (std flate),
+      `lib/jpeg.zig` (baseline and progressive), `lib/gif.zig` (first
+      frame, animation on the tick later), an SVG subset grown from the
+      toolkit's `iconpath`, decoded in the page domain by viewport
+      (lazy), `@font-face` through `lib/font` in the page (TTF, OTF,
+      WOFF, WOFF2 already parse), the glyph cache per page. WebP when a
+      site asks. *Exit:* decoder corpora on the host; a fixture page
+      with every format screendumped.
+    - **(9) Modern layout.** Flexbox, grid, positioned boxes (absolute,
+      fixed, sticky), `calc()`, custom properties, transforms and
+      opacity at paint time, tables, `overflow` scroll containers, then
+      transitions and animations on the page's tick. *Exit:* WPT reftest
+      subsets per module with counts; Acid2 paints as its reference.
+    - **(10) JavaScript, the engine.** `lib/js/`: lexer and parser for
+      the ES2020 grammar (ASI, regex literals, templates, classes,
+      destructuring, modules), a bytecode compiler, a register VM, a
+      precise mark-sweep collector over the engine's own arena, and the
+      builtins in order of use — Object, Function, Array, String,
+      Number, Boolean, Symbol, Math, JSON, Error; RegExp on our own
+      backtracking engine with unicode mode; Map, Set, WeakMap; Promise
+      and the microtask queue; iterators, generators, async; Date over
+      `lib/civil`; Proxy and Reflect last. `web-eval` runs a snippet in
+      a page domain, never in the shell. *Exit:* test262 slice counts
+      per feature directory; a `bench` row for the VM.
+    - **(11) Scripts meet the page.** Bindings generated from one
+      comptime interface table; the event loop in `webpage` (tasks,
+      microtasks, timers on a kernel timer, animation frames on the
+      tick, script errors to the page's log); DOM Core and Events,
+      `querySelector`, `classList`, the CSSOM for `style`, `fetch` and
+      XHR through the broker (same-origin, then CORS), `localStorage`
+      per origin through the broker under a quota, the history API,
+      forms. Scripts on by default once this lands, with a per-site
+      switch in the Site popup and an admin allowlist in
+      `conf/app/web.msh` — the network allowlist's shape. `web-render`
+      returns the DOM after scripts ran, so the shell scrapes a
+      single-page app. *Exit:* an Acid3 score printed; a fixture
+      single-page app (fetch, update the DOM) drilled.
+    - **(12) The fabric.** A page domain placed on another node (the
+      viewport buffer over the bulk transport, the broker's channel
+      proxied — a heavy site rendered where the memory is); a broker on
+      another node (browse through a peer's network: an exit node is a
+      unit file there); the window itself remote is `gui { node }`
+      already. *Exit:* a two-node drill renders a page on node 2 into a
+      tab on node 1.
+    - **Track F — what the browser asks of the network** (as a stage
+      asks): TLS session resumption and HSTS; certificate errors as an
+      interstitial that names the failure and is never bypassed
+      silently; OCSP stapling and CRLs (the open TLS items); the HTTP
+      cache; HTTP/2 only when measured to matter (HTTP/1.1 with six
+      connections per host is what the pool gives); WebSocket when a
+      site or the fabric's own tools ask; netsvc's 16 sockets and 8
+      views per service replaced by quota-accounted growing storage
+      (the "GUI resource capacity" rule), the DNS cache of 16 names
+      grown with it; TLS 1.2 stays out unless a site the user needs
+      demands it.
+  - **Fast, and measured.** Arena allocation per document; the DOM and
+    box tree by index; dirty bits for restyle and relayout; the viewport
+    painted, not the page; scroll by blit; images decoded lazily and
+    once; glyphs cached per page from `lib/font`; page domains built
+    ReleaseSafe like every user program, a ReleaseFast row if a bench
+    says so. `zig build bench` gains rows — parse, style, layout and
+    paint of a fixed corpus (a snapshot of a long article page and a
+    dense reference page) — with baselines in DESIGN's table once the
+    first numbers exist; the drills time a first paint.
+  - **Safe, and drilled.** The page's manifest is the proof: no view,
+    no net, no font service — one channel, one buffer — and the drill
+    reads it back. Then the behaviours: the quota kill and the tab that
+    survives it; a fake URL bar that stays inside its rect; a page that
+    cannot reach the home (`web-render` of a hostile fixture, the home
+    unchanged); cookies of one origin invisible to another (the broker
+    scopes by origin, the page only ever sees its own); a filtered
+    broker (an admin allowlist) refusing a fixture's off-list
+    subresource with the refusal logged. Host fuzzing: a `zig build
+    fuzz` step runs `std.testing.fuzz` over every parser and decoder
+    (URL, encoding, HTML, CSS, PNG, JPEG, GIF, the JavaScript lexer and
+    parser) with the crash corpus checked in. Side channels: the stance
+    in DESIGN's security posture holds — a page domain is an address
+    space, not a Spectre fix, and cross-site isolation is one page
+    domain per site, first as one per tab, later per cross-site iframe.
+  - **Capacity to grow deliberately** (the lesson of the second GUI
+    app: log the chain, raise the budget on purpose): the session's
+    user budget (96 MB) against a page domain's (start at 32 MB; the
+    Web app's units hosted inside it), the guest's 512 MB, the shm
+    table (128) with a buffer per visible page, `max_domains` per
+    session for tabs, netsvc's sockets, the mshl tree pool (512 KiB)
+    for a tab list — each raised when a drill hits it, with the refusal
+    logged by the kernel.
+  - **Not in this arc** (out of scope, said so): WebGL and WebGPU,
+    WebRTC, audio and video (the OS has no sound yet), service workers,
+    HTTP/3, extensions with page access (a policy layer in mshl might
+    come later), WebAssembly (a smaller project than JavaScript and a
+    candidate for after it), complex text shaping — Arabic and Indic
+    scripts and bidi are deferred behind Latin, Greek, Cyrillic and
+    CJK, since there is no shaper in `lib/font` — and sites that need
+    one vendor's engine's bugs: the target is the web a
+    standards-compliant engine renders, and a page that is not that is
+    a page moss shows wrong, honestly.
+  - **What lands where.** Libraries under `lib/web/` and `lib/js/` with
+    `lib/png.zig`, `lib/jpeg.zig`, `lib/gif.zig` beside them, each in
+    `zig build test`; programs `user/webpage.zig`, `user/webfetch.zig`,
+    the broker module they share, `user/webcmds.zig` for the shell's
+    commands; the wire in `shared/web.zig`; the app in
+    `boot/scripts/browser.msh` and `boot/conf/sessiongui/browser.msh`;
+    fixtures in `boot/web/`; corpora in `tools/testdata/web/`; drills
+    `web`, `webpage`, `browser`, and the two-node one. Every stage ends
+    as every phase does: the gate green, DESIGN's "as built" and the
+    docs page (`docs/web.md`, from stage 5) updated, one commit that
+    tells the story and the bugs it found.
 - **Real aarch64 hardware via UEFI.** The strongest reason is the
   hypervisor: every VM drill runs only under TCG (Apple's Hypervisor
   framework exposes no nested EL2 with VHE), so EL2, stage-2 SMMU and
@@ -1499,7 +1822,11 @@ supervises), and memory history per unit beside the CPU one.
   deliberately parked, not forgotten: when it is back, run
   `zig build -Darch=x86_64 check` (or `-Dtcg`) on HEAD first, before any
   new x86_64 work, and expect the QEMU property work above to be the first
-  thing in the way.
+  thing in the way. (2026-09-18: the web arc's stage 0 changed the image
+  header, `kernel/domain.zig`, `kernel/syscall.zig` and the aarch64 trap
+  path too; `-Dtcg` on the M3 now gives empty logs and timeouts for every
+  row, on the previous commit as well, so it is the Framework's run that
+  will tell.)
 
 **Unified GUI framework and polish**
 

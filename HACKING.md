@@ -80,7 +80,7 @@ shm handle to `usys.spawn`; kernel boot drivers use `img(.name)`.
 an mshl record with `image`, optional `arg`/`budget` (`kobj`, `user`,
 `cpu` in permille of a core or `"25%"`)/`cores` (a partition)/`grant`/`restart`,
 `give` lines (`{ tag: device, device: blk }`, `{ tag: disk, unit: blk }`,
-`{ tag: buf, shm: 1 }`, `{ secret: conf/x.key }`, `{ tag: view, fs: p,
+`{ tag: buf, shm: 1 }`, `{ secret: conf/x.key }` (a `secret:` or `file:` give is copied through the unit's `buf`, which must be listed too), `{ tag: view, fs: p,
 ro: true }`, `{ tag: net, netview: net }`, `{ tag: init, self: true }`,
 `{ tag: console, session: true }` for one of a session's own caps; add
 `index: 1` to pick the second device of a kind or to file a cap as the
@@ -341,8 +341,10 @@ boot, ro: true } ] }` runs it from the archive and its error is the
 step's failure. Write a kernel-side driver only when the
 test must assert kernel state (log a unique `"<name>-test: PASS ..."`
 line, then `psci.systemOff()`; panics are failures). Either way, add
-the option to `build.zig` (the `-D` flag and the `variants`/
-`all_test_opts` lists).
+the option to `build.zig` (the `-D` flag, `build_opts`, the `variants`/
+`all_test_opts` lists and the guest kernel's option list beside them) and,
+for a drill that needs devices, a `Kind` in the runner with its QEMU
+arguments (a NIC, entropy, a disk when the drill reads `assets/`).
 
 **An architecture**: a directory `kernel/arch/<name>/` whose `arch.zig`
 provides every name `kernel/arch.zig` lists (read that file first: it
@@ -480,7 +482,8 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   requesting client's reply by token meanwhile and keeps serving everyone
   else. The document broker and its `chooser` are the model.
 - A host command runs on the interpreter's stack, and a user domain's
-  stack is 256 KB (`user_stack_pages`) with the interpreter's own frames
+  stack is 256 KB by default (`user_stack_pages`; an image asks for more in
+  its header — `usys.imageHeaderStack`, 512 KB for msh and mshrun) with the interpreter's own frames
   already on it. Keep a command's working set static (a `var` at module
   scope, one build at a time) rather than on the stack — 30 KB of arrays
   in a frame ended Activity's first System tab with a data abort at the

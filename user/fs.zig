@@ -74,7 +74,13 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, blob_va: u64, blob_len: u64)
 // guishell drill once the network unit held one too, and the next
 // derive — a document handoff — failed with no word said.
 const max_views = 64;
-const max_boot = 40; // etc/, conf/, and every img/ entry
+/// The archive index: every entry the boot archive carries (etc/, conf/,
+/// scripts/, img/, lib/, tls/, assets/ — 238 on 2026-09-18). It was 40
+/// for a long time and nothing said so: init reads the archive itself, so
+/// only a *view* under boot/ saw the truncation (a unit given
+/// `fs: boot/web` was refused, `ls boot/conf/units` listed a sixth of
+/// them). An overflow is logged now.
+const max_boot = 256;
 const max_fds = 8;
 const max_path = 256;
 const max_target = 200; // symlink target length cap
@@ -261,6 +267,7 @@ fn parseBoot(blob_va: u64, blob_len: u64) void {
         boot_count += 1;
         off += plen + dlen;
     }
+    if (off + 8 <= blob.len) _ = usys.log(glog, "fssvc: BOOT TABLE FULL — the rest of the archive is invisible through views; raise max_boot");
 }
 
 var cycle_hz: u64 = 0;
