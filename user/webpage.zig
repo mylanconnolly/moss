@@ -947,6 +947,7 @@ fn nodeRect(id: dom.NodeId) ?[4]f64 {
         if (b.node != id) continue;
         switch (b.kind) {
             .inline_box, .text => for (l.fragments.items) |f| {
+                if (f.dead) continue;
                 if (f.box != @as(web.layout.BoxId, @intCast(i))) continue;
                 r = if (have) union4(r, .{ f.x, f.y, f.w, f.h }) else .{ f.x, f.y, f.w, f.h };
                 have = true;
@@ -981,6 +982,7 @@ fn hitFragment(x: u64, y: u64) ?usize {
     var best: ?usize = null;
     var best_d: f64 = 1e18;
     for (l.fragments.items, 0..) |f, i| {
+        if (f.dead) continue;
         if (f.kind != .text) continue;
         const dx = if (fx < f.x) f.x - fx else if (fx > f.x + f.w) fx - (f.x + f.w) else 0;
         const dy = if (fy < f.y) f.y - fy else if (fy > f.y + f.h) fy - (f.y + f.h) else 0;
@@ -1276,7 +1278,7 @@ fn selectionHighlights(out: []web.paint.Highlight) usize {
     var i = lo;
     while (i <= hi and i < l.fragments.items.len and n < out.len) : (i += 1) {
         const f = l.fragments.items[i];
-        if (f.kind != .text) continue;
+        if (f.kind != .text or f.dead) continue;
         out[n] = .{ .x = f.x, .y = f.y, .w = f.w, .h = f.h, .color = 0x3b82f6 };
         n += 1;
     }
@@ -1296,7 +1298,7 @@ fn selectionText(out: []u8) usize {
     var i = lo;
     while (i <= hi and i < l.fragments.items.len) : (i += 1) {
         const f = l.fragments.items[i];
-        if (f.kind != .text) continue;
+        if (f.kind != .text or f.dead) continue;
         if (last_y) |ly| {
             const sep: u8 = if (f.y != ly) '\n' else ' ';
             if (n < out.len) {
@@ -1377,6 +1379,7 @@ fn collectMatches() void {
     const needle = page.findText();
     if (needle.len == 0) return;
     for (l.fragments.items) |f| {
+        if (f.dead) continue;
         if (f.kind != .text) continue;
         var start: usize = 0;
         while (std.ascii.indexOfIgnoreCasePos(f.text, start, needle)) |at| {

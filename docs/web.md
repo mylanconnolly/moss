@@ -131,9 +131,11 @@ The first tab opens blank; a home page is a URL as data in
 `state/browser/home.msh` in the home. A real site opens over http or
 https — the system's trust roots are the drills' test CA followed by
 the Mozilla bundle — through the session's network view, which in the
-desktop is the cluster stack with its leased NIC as the way out. A site
-paints with its inline styles only (`<link rel=stylesheet>` is not
-fetched yet), so most look like plain documents until stage 9.
+desktop is the cluster stack with its leased NIC as the way out. A
+site's linked stylesheets and their imports are fetched through the
+broker and join the cascade, and flexbox lays its rows and columns
+out; what a real site still lacks is grid, sticky boxes and tables
+beyond block rows, the rest of stage 9.
 
 The chrome's buttons are Phosphor glyphs (hover shows nothing yet; the
 labels are the buttons' names for the keyboard and the drills): carets
@@ -192,7 +194,8 @@ jar and no connection pool yet (the session's
 `webfetch` unit of the plan); no content coding in the page; no stop
 button; a select cycles its options rather than opening a list; binary
 downloads wait for a bytes save in the picker; no SVG, WebP, animated
-GIF (the first frame shows), `srcset` or `background-image`; no flexbox, grid or tables beyond block rows (stage 9); no JavaScript
+GIF (the first frame shows), `srcset` or `background-image`; no grid or tables beyond block rows, no `calc()` or custom properties
+(flexbox is built; stage 9's remainder); no JavaScript
 (stages 10–11: our own engine, off until it lands). Menus are the
 generic window menu until client-defined menus exist. The `page` leaf
 does not yet follow a window resize with a fresh buffer of the new size

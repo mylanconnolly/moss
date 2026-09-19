@@ -290,6 +290,7 @@ const Painter = struct {
             if (b.node != node) continue;
             switch (b.kind) {
                 .inline_box, .text => for (p.l.fragments.items) |f| {
+                    if (f.dead) continue;
                     if (f.box == @as(BoxId, @intCast(i)) and f.kind == .inline_span) p.stroke(f.x - 2, f.y - 2, f.w + 4, f.h + 4, 2, p.opts.accent);
                 },
                 else => p.stroke(b.x - 2, b.y - 2, b.w + 4, b.h + 4, 2, p.opts.accent),

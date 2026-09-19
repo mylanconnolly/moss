@@ -6323,6 +6323,41 @@ will not catch; keep values through the arena. (3) The first real
 input for a library is worth more than its conformance corpus for
 finding what the corpus never exercised.
 
+**Stage 9, flexbox (as built, 2026-09-18).** A flex container takes
+the block path with one branch: `layoutFlexContents`. Its children
+are made items at build time — an inline element is blockified (its
+own inline content wrapped), each run of text becomes an anonymous
+block, whitespace between items is nothing, a float is an ordinary
+item, an absolute stays out of flow — and the algorithm is Level 1's
+in order: a base size per item from `flex-basis`, else the main size
+property, else the content (a row item's max-content, a column item's
+height laid out at the width it will get); a hypothetical size
+clamped by min and max, where a flex item's `min-width: auto` is the
+content's min-content and no larger than its specified size (which
+`preferredWidths` cannot say, since it answers the specified width,
+so `contentWidths` asks the contents alone); lines broken greedily
+under `flex-wrap`; the flexible lengths loop freezing what clamping
+violated and redistributing; every item laid out at its main size for
+its cross size; `align-content` over the lines when the container's
+cross size is definite; `justify-content` with auto margins taking
+the free space first; `align-self` over `align-items`, stretch giving
+a row item the line's height and laying a column item out again at
+the line's width; `order` as a stable sort; the reverse directions
+mirrored at placement. Laying an item out twice is what the engine had
+never done, and it found two things: forgetting the first layout's
+fragments by removing them from the global list shifted the indexes
+every other line holds into it, so a block ended up with its ancestor's
+atomic fragment and painting recursed until the stack ran out — a
+fragment is marked dead now, and every scan skips it; and a box pointer
+held across an append into the box list (the wrapping of an item's own
+inlines) wrote the blockified kind into freed memory. Ten reftests
+pair each feature with floats and absolutes; Wikipedia's front page
+put its columns side by side. *Lessons:* (1) an index into a growing
+list is a promise never to remove from it. (2) A pointer into an
+`ArrayList` dies at the next append; fetch again after anything that
+can grow the list. (3) The first layout algorithm that lays out twice
+audits everything the first layout recorded.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

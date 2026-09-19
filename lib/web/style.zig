@@ -46,6 +46,15 @@ pub const LengthNone = union(enum) { px: f64, percent: f64, none };
 
 pub const Display = enum { @"inline", block, inline_block, list_item, none, contents, flex, inline_flex, grid, inline_grid, table, inline_table, table_row, table_cell, table_row_group, table_header_group, table_footer_group, table_caption, table_column, table_column_group, flow_root };
 pub const Position = enum { static, relative, absolute, fixed, sticky };
+// Flexbox (Level 1). `start`/`end` are taken as the flex ones; `left`/
+// `right`/`normal` are not (a declaration using them is dropped, so the
+// initial value stands, which is what those resolve to in a row anyway).
+pub const FlexDirection = enum { row, row_reverse, column, column_reverse };
+pub const FlexWrap = enum { nowrap, wrap, wrap_reverse };
+pub const JustifyContent = enum { flex_start, flex_end, center, space_between, space_around, space_evenly, start, end };
+pub const AlignItems = enum { stretch, flex_start, flex_end, center, baseline, start, end, self_start, self_end };
+pub const AlignSelf = enum { auto, stretch, flex_start, flex_end, center, baseline, start, end, self_start, self_end };
+pub const AlignContent = enum { stretch, flex_start, flex_end, center, space_between, space_around, space_evenly, start, end };
 pub const Float = enum { none, left, right };
 pub const Clear = enum { none, left, right, both };
 pub const BorderStyle = enum { none, hidden, solid, dashed, dotted, double, groove, ridge, inset, outset };
@@ -106,6 +115,19 @@ pub const Computed = struct {
     opacity: f64 = 1,
     box_sizing: BoxSizing = .content_box,
     z_index: ?i32 = null,
+    flex_direction: FlexDirection = .row,
+    flex_wrap: FlexWrap = .nowrap,
+    justify_content: JustifyContent = .flex_start,
+    align_items: AlignItems = .stretch,
+    align_self: AlignSelf = .auto,
+    align_content: AlignContent = .stretch,
+    flex_grow: f64 = 0,
+    flex_shrink: f64 = 1,
+    /// `auto` defers to the main size property; `content` is auto here.
+    flex_basis: LengthAuto = .auto,
+    order: i32 = 0,
+    row_gap: LengthPercent = .{ .px = 0 },
+    column_gap: LengthPercent = .{ .px = 0 },
 
     /// The four sides' order everywhere: top, right, bottom, left.
     pub const top = 0;
@@ -192,6 +214,18 @@ pub const Prop = enum {
     opacity,
     box_sizing,
     z_index,
+    flex_direction,
+    flex_wrap,
+    justify_content,
+    align_items,
+    align_self,
+    align_content,
+    flex_grow,
+    flex_shrink,
+    flex_basis,
+    order,
+    row_gap,
+    column_gap,
 
     pub fn inherited(p: Prop) bool {
         return switch (p) {
@@ -657,6 +691,69 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         return;
     }
     if (eq(name, "font")) return expandFont(a, vals, d.important, decls);
+    if (eq(name, "flex")) {
+        // none | [ <grow> <shrink>? || <basis> ]; `flex: 1` is 1 1 0.
+        if (wide) {
+            try push(a, decls, .flex_grow, vals, d.important);
+            try push(a, decls, .flex_shrink, vals, d.important);
+            try push(a, decls, .flex_basis, vals, d.important);
+            return;
+        }
+        var grow: ?f64 = null;
+        var shrink: ?f64 = null;
+        var basis: ?css.Value = null;
+        for (vals) |v| {
+            if (ident(v)) |w| {
+                if (eq(w, "none")) {
+                    grow = 0;
+                    shrink = 0;
+                    basis = v; // `auto`, below
+                    basis = .{ .token = .{ .ident = "auto" } };
+                    continue;
+                }
+                if (eq(w, "auto") or eq(w, "content")) {
+                    if (grow == null) grow = 1;
+                    if (shrink == null) shrink = 1;
+                    basis = v;
+                    continue;
+                }
+                return;
+            }
+            if (v == .token and v.token == .number) {
+                if (grow == null) grow = v.token.number.value else if (shrink == null) shrink = v.token.number.value else return;
+                continue;
+            }
+            if (v == .token and (v.token == .dimension or v.token == .percentage)) {
+                basis = v;
+                continue;
+            }
+            return;
+        }
+        var nb: [24]u8 = undefined;
+        const g = grow orelse 1;
+        const sh = shrink orelse 1;
+        const gt = std.fmt.bufPrint(&nb, "{d}", .{g}) catch return;
+        try push(a, decls, .flex_grow, try single(a, .{ .token = .{ .number = .{ .repr = try a.dupe(u8, gt), .value = g, .integer = g == @trunc(g) } } }), d.important);
+        var sb: [24]u8 = undefined;
+        const st = std.fmt.bufPrint(&sb, "{d}", .{sh}) catch return;
+        try push(a, decls, .flex_shrink, try single(a, .{ .token = .{ .number = .{ .repr = try a.dupe(u8, st), .value = sh, .integer = sh == @trunc(sh) } } }), d.important);
+        // A flex with a number and no basis flexes from zero.
+        const b: css.Value = basis orelse .{ .token = .{ .dimension = .{ .num = .{ .repr = "0", .value = 0, .integer = true }, .unit = "px" } } };
+        try push(a, decls, .flex_basis, try single(a, b), d.important);
+        return;
+    }
+    if (eq(name, "flex-flow")) {
+        for (vals) |v| {
+            if (keyword(FlexDirection, v) != null) try push(a, decls, .flex_direction, try single(a, v), d.important) else if (keyword(FlexWrap, v) != null) try push(a, decls, .flex_wrap, try single(a, v), d.important) else return;
+        }
+        return;
+    }
+    if (eq(name, "gap")) {
+        if (vals.len == 0 or vals.len > 2) return;
+        try push(a, decls, .row_gap, vals[0..1], d.important);
+        try push(a, decls, .column_gap, if (vals.len == 2) vals[1..2] else vals[0..1], d.important);
+        return;
+    }
 }
 
 fn single(a: std.mem.Allocator, v: css.Value) Error![]const css.Value {
@@ -898,6 +995,18 @@ fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
         .overflow_y => out.overflow_y = from.overflow_y,
         .visibility => out.visibility = from.visibility,
         .opacity => out.opacity = from.opacity,
+        .flex_direction => out.flex_direction = from.flex_direction,
+        .flex_wrap => out.flex_wrap = from.flex_wrap,
+        .justify_content => out.justify_content = from.justify_content,
+        .align_items => out.align_items = from.align_items,
+        .align_self => out.align_self = from.align_self,
+        .align_content => out.align_content = from.align_content,
+        .flex_grow => out.flex_grow = from.flex_grow,
+        .flex_shrink => out.flex_shrink = from.flex_shrink,
+        .flex_basis => out.flex_basis = from.flex_basis,
+        .order => out.order = from.order,
+        .row_gap => out.row_gap = from.row_gap,
+        .column_gap => out.column_gap = from.column_gap,
         .box_sizing => out.box_sizing = from.box_sizing,
         .z_index => out.z_index = from.z_index,
     }
@@ -1188,6 +1297,31 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
             out.opacity = @min(1, @max(0, x));
         },
         .box_sizing => out.box_sizing = keyword(BoxSizing, v) orelse return error.Invalid,
+        .flex_direction => out.flex_direction = keyword(FlexDirection, v) orelse return error.Invalid,
+        .flex_wrap => out.flex_wrap = keyword(FlexWrap, v) orelse return error.Invalid,
+        .justify_content => out.justify_content = keyword(JustifyContent, v) orelse return error.Invalid,
+        .align_items => out.align_items = keyword(AlignItems, v) orelse return error.Invalid,
+        .align_self => out.align_self = keyword(AlignSelf, v) orelse return error.Invalid,
+        .align_content => out.align_content = keyword(AlignContent, v) orelse return error.Invalid,
+        .flex_grow, .flex_shrink => {
+            if (v != .token or v.token != .number or v.token.number.value < 0) return error.Invalid;
+            if (p == .flex_grow) out.flex_grow = v.token.number.value else out.flex_shrink = v.token.number.value;
+        },
+        .flex_basis => {
+            if (ident(v)) |w| if (std.ascii.eqlIgnoreCase(w, "content")) {
+                out.flex_basis = .auto;
+                return true;
+            };
+            out.flex_basis = lengthAuto(v, font_size, env) orelse return error.Invalid;
+        },
+        .order => {
+            if (v != .token or v.token != .number or !v.token.number.integer) return error.Invalid;
+            out.order = @intFromFloat(v.token.number.value);
+        },
+        .row_gap, .column_gap => {
+            const lp: LengthPercent = if (ident(v) != null and std.ascii.eqlIgnoreCase(ident(v).?, "normal")) .{ .px = 0 } else lengthPercent(v, font_size, env) orelse return error.Invalid;
+            if (p == .row_gap) out.row_gap = lp else out.column_gap = lp;
+        },
         .z_index => {
             if (ident(v)) |w| {
                 if (!std.ascii.eqlIgnoreCase(w, "auto")) return error.Invalid;

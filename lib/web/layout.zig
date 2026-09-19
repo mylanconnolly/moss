@@ -165,6 +165,11 @@ pub const Line = struct {
 pub const Fragment = struct {
     box: BoxId,
     kind: enum { text, inline_open, inline_close, inline_span, atomic, marker },
+    /// Left behind by a subtree laid out again (a flex item measured,
+    /// then sized): no line reaches it, and every scan of the list skips
+    /// it. Removing it instead would shift the indexes every other
+    /// line holds into this list (2026-09-18).
+    dead: bool = false,
     x: f64,
     y: f64,
     w: f64,
@@ -381,7 +386,60 @@ fn buildBoxes(l: *Layout, parent: BoxId, id: NodeId) Error!void {
     if (st.display == .list_item) l.box(bid).marker_text = try markerText(l, id, st);
     var c = n.first_child;
     while (c) |cid| : (c = doc.get(cid).next) try buildBoxes(l, bid, cid);
-    if (kind == .block or kind == .inline_block) try wrapInlines(l, bid);
+    if (isFlexDisplay(st.display)) {
+        try wrapFlexItems(l, bid);
+    } else if (kind == .block or kind == .inline_block) try wrapInlines(l, bid);
+}
+
+fn isFlexDisplay(d: style.Display) bool {
+    return d == .flex or d == .inline_flex;
+}
+
+fn isFlexContainer(b: *const Box) bool {
+    return (b.kind == .block or b.kind == .inline_block) and isFlexDisplay(b.style.display);
+}
+
+/// A flex container's children become flex items: every in-flow element
+/// child is blockified (its own box, laid out as a block whatever its
+/// display), each run of text becomes an anonymous block item, and
+/// whitespace-only text between items is nothing. Floats do not float
+/// in a flex container; absolutes stay out of flow.
+fn wrapFlexItems(l: *Layout, id: BoxId) Error!void {
+    try splitInlines(l, id);
+    const old = try l.a.dupe(BoxId, l.get(id).children.items);
+    l.box(id).children = .empty;
+    var anon: ?BoxId = null;
+    for (old) |c| {
+        const cb = l.box(c);
+        if (cb.isPositioned()) {
+            try l.box(id).children.append(l.a, c);
+            anon = null;
+            continue;
+        }
+        if (cb.kind == .text) {
+            if (isBlank(cb.text) and cb.style.white_space != .pre and cb.style.white_space != .pre_wrap) continue;
+            if (anon == null) {
+                try l.boxes.append(l.a, .{ .kind = .anon_block, .node = null, .style = try anonStyle(l, l.get(id).style), .parent = id });
+                anon = @intCast(l.boxes.items.len - 1);
+                try l.box(id).children.append(l.a, anon.?);
+            }
+            try l.box(anon.?).children.append(l.a, c);
+            l.box(c).parent = anon;
+            continue;
+        }
+        anon = null;
+        // Blockified: an inline element, an inline-block, a br, a marker
+        // all lay out as a block-level item of their own. (`wrapInlines`
+        // appends boxes, so the box is fetched again after it: a pointer
+        // held across the append wrote into a freed list and made the
+        // tree a cycle, 2026-09-18.)
+        const kind = cb.kind;
+        if (kind == .inline_box or kind == .inline_block or kind == .br) {
+            if (kind == .inline_box) try wrapInlines(l, c);
+            l.box(c).kind = .block;
+        }
+        try l.box(id).children.append(l.a, c);
+    }
 }
 
 fn markerText(l: *Layout, id: NodeId, st: *const Computed) Error![]const u8 {
@@ -995,7 +1053,9 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
     const b = l.box(id);
     const st = b.style;
     var content_h: f64 = 0;
-    if (hasInlineContent(l, id)) {
+    if (isFlexContainer(b)) {
+        content_h = try layoutFlexContents(l, id, cb_w);
+    } else if (hasInlineContent(l, id)) {
         content_h = try layoutInlineContent(l, id, bfc);
     } else {
         const end = try layoutBlockChildren(l, id, bfc);
@@ -1071,6 +1131,16 @@ const Widths = struct { min: f64, max: f64 };
 
 /// The min-content and max-content widths of a box's border box.
 fn preferredWidths(l: *Layout, id: BoxId) Error!Widths {
+    return preferredWidthsOf(l, id, false);
+}
+
+/// The widths of the contents alone, a specified `width` ignored: a
+/// flex item's automatic minimum is the smaller of this and its size.
+fn contentWidths(l: *Layout, id: BoxId) Error!Widths {
+    return preferredWidthsOf(l, id, true);
+}
+
+fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
     const b = l.box(id);
     const st = b.style;
     for (0..4) |i| {
@@ -1082,13 +1152,38 @@ fn preferredWidths(l: *Layout, id: BoxId) Error!Widths {
         const size = replacedSize(l, id, 0);
         return .{ .min = size[0] + extras, .max = size[0] + extras };
     }
-    if (st.width == .px) {
+    if (st.width == .px and !contents_only) {
         const w = if (st.box_sizing == .border_box) st.width.px else st.width.px + extras;
         return .{ .min = w, .max = w };
     }
     var min: f64 = 0;
     var max: f64 = 0;
-    if (hasInlineContent(l, id)) {
+    if (isFlexContainer(b)) {
+        // A row's max-content is its items' side by side (plus gaps),
+        // its min-content the widest item's unless it cannot wrap; a
+        // column's are the widest item's.
+        const row = st.flex_direction == .row or st.flex_direction == .row_reverse;
+        var n: usize = 0;
+        for (b.children.items) |c| {
+            const cb = l.get(c);
+            if (cb.isPositioned()) continue;
+            const cw = try preferredWidths(l, c);
+            const cm = (resolveLA(cb.style.margin[1], 0) orelse 0) + (resolveLA(cb.style.margin[3], 0) orelse 0);
+            if (row) {
+                max += cw.max + cm;
+                if (st.flex_wrap == .nowrap) min += cw.min + cm else min = @max(min, cw.min + cm);
+            } else {
+                max = @max(max, cw.max + cm);
+                min = @max(min, cw.min + cm);
+            }
+            n += 1;
+        }
+        if (row and n > 1) {
+            const gap = resolveLP(st.column_gap, 0) * @as(f64, @floatFromInt(n - 1));
+            max += gap;
+            if (st.flex_wrap == .nowrap) min += gap;
+        }
+    } else if (hasInlineContent(l, id)) {
         const items = try collectItems(l, id, l.fonts);
         var line: f64 = 0;
         var word: f64 = 0;
@@ -1743,6 +1838,437 @@ fn isInsideInline(l: *const Layout, frag_box: BoxId, inline_box: BoxId) bool {
     return false;
 }
 
+// ------------------------------------------------------------- flexbox
+
+/// One flex item while its line is being built.
+const FlexItem = struct {
+    box: BoxId,
+    /// The flex base size (inner main size before flexing) and the
+    /// hypothetical one (clamped by min/max).
+    base: f64,
+    hyp: f64,
+    /// Min and max inner main sizes.
+    min: f64,
+    max: f64,
+    /// Outer edges on the main axis (margins + padding + border), with
+    /// auto margins counted as zero, and how many main margins are auto.
+    outer: f64,
+    auto_main: u8,
+    /// The result of flexing: the inner main size.
+    main: f64 = 0,
+    frozen: bool = false,
+    /// The item's cross size (outer, margins included) once laid out.
+    cross: f64 = 0,
+};
+
+const FlexLine = struct { first: usize, count: usize, cross: f64 = 0, main_used: f64 = 0 };
+
+/// Lay out a flex container's items (CSS Flexbox Level 1, single and
+/// multi-line): base sizes, line breaking, flexible lengths with min/max
+/// clamping, cross sizes, `align-content`, `justify-content` with auto
+/// margins absorbing free space, `align-items`/`align-self` including
+/// stretch, `order`, gaps, and the reverse directions. Baseline
+/// alignment is taken as flex-start. Returns the content height.
+fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
+    const container = l.box(id);
+    const st = container.style;
+    const row = st.flex_direction == .row or st.flex_direction == .row_reverse;
+    const reverse_main = st.flex_direction == .row_reverse or st.flex_direction == .column_reverse;
+    const content_w = container.contentW();
+    // The container's definite height, when it has one: the column's
+    // main size and the row's cross size to align against.
+    const parent_h: ?f64 = if (container.parent) |p| (if (l.get(p).style.height == .auto and l.get(p).kind != .root) null else l.get(p).contentH()) else null;
+    var definite_h: ?f64 = null;
+    if (st.height == .px) definite_h = st.height.px - (if (st.box_sizing == .border_box) verticalExtras(container) else 0);
+    if (st.height == .percent and parent_h != null) definite_h = resolveLA(st.height, parent_h.?).? - (if (st.box_sizing == .border_box) verticalExtras(container) else 0);
+    const main_avail: ?f64 = if (row) content_w else definite_h;
+    const cross_avail: ?f64 = if (row) definite_h else content_w;
+    const main_gap = resolveLP(if (row) st.column_gap else st.row_gap, content_w);
+    const cross_gap = resolveLP(if (row) st.row_gap else st.column_gap, content_w);
+
+    // The items, in `order`, absolutes set aside.
+    var items: std.ArrayList(FlexItem) = .empty;
+    for (container.children.items) |c| {
+        const cb = l.box(c);
+        if (cb.isPositioned()) {
+            try l.absolutes.append(l.a, .{ .box = c, .cb = containingBlockFor(l, c) });
+            continue;
+        }
+        const margins = resolveEdges(cb, cb_w);
+        cb.margin = .{ margins[0] orelse 0, margins[1] orelse 0, margins[2] orelse 0, margins[3] orelse 0 };
+        const extras = if (row) horizontalExtras(cb) else verticalExtras(cb);
+        const main_margins = if (row) cb.margin[1] + cb.margin[3] else cb.margin[0] + cb.margin[2];
+        const auto_main: u8 = if (row) @as(u8, @intFromBool(margins[3] == null)) + @intFromBool(margins[1] == null) else @as(u8, @intFromBool(margins[0] == null)) + @intFromBool(margins[2] == null);
+        // The flex base size: the basis, else the main size property,
+        // else the content's max-content (row) or its laid-out height
+        // (column).
+        const pref = try preferredWidths(l, c);
+        const cross_w_for_measure = if (row) content_w else measureCrossWidth(l, c, content_w, extras);
+        var base: ?f64 = null;
+        const basis = cb.style.flex_basis;
+        const main_prop = if (row) cb.style.width else cb.style.height;
+        if (basis != .auto) {
+            if (basis == .px) base = basis.px else if (main_avail) |m| base = basis.percent * m / 100;
+        }
+        if (base == null and main_prop != .auto) {
+            if (main_prop == .px) base = main_prop.px else if (main_avail) |m| base = main_prop.percent * m / 100;
+        }
+        if (base != null and cb.style.box_sizing == .border_box) base = base.? - extras;
+        if (base == null) {
+            if (row) {
+                base = @max(0, pref.max - horizontalExtras(cb));
+            } else {
+                try layoutFlexItem(l, c, 0, 0, cross_w_for_measure, null);
+                base = cb.h - verticalExtras(cb);
+            }
+        }
+        var min: f64 = 0;
+        var max: f64 = std.math.inf(f64);
+        if (row) {
+            min = resolveLP(cb.style.min_width, cb_w) - (if (cb.style.box_sizing == .border_box) extras else 0);
+            // `min-width: auto` on a flex item: the content's min size,
+            // no wider than the specified size.
+            if (cb.style.min_width == .px and cb.style.min_width.px == 0 and cb.style.overflow_x == .visible) {
+                const content = try contentWidths(l, c);
+                min = @min(@max(0, content.min - horizontalExtras(cb)), base.?);
+            }
+            switch (cb.style.max_width) {
+                .none => {},
+                .px => |x| max = x - (if (cb.style.box_sizing == .border_box) extras else 0),
+                .percent => |pc| max = cb_w * pc / 100 - (if (cb.style.box_sizing == .border_box) extras else 0),
+            }
+        } else {
+            min = resolveLP(cb.style.min_height, parent_h orelse 0) - (if (cb.style.box_sizing == .border_box) extras else 0);
+            switch (cb.style.max_height) {
+                .none => {},
+                .px => |x| max = x - (if (cb.style.box_sizing == .border_box) extras else 0),
+                .percent => |pc| if (definite_h) |h| {
+                    max = h * pc / 100 - (if (cb.style.box_sizing == .border_box) extras else 0);
+                },
+            }
+        }
+        min = @max(0, min);
+        max = @max(min, max);
+        const hyp = @min(@max(base.?, min), max);
+        try items.append(l.a, .{ .box = c, .base = base.?, .hyp = hyp, .min = min, .max = max, .outer = extras + main_margins, .auto_main = auto_main });
+    }
+    // `order`: a stable sort on the property.
+    std.mem.sort(FlexItem, items.items, l, struct {
+        fn lessThan(ctx: *Layout, x: FlexItem, y: FlexItem) bool {
+            return ctx.get(x.box).style.order < ctx.get(y.box).style.order;
+        }
+    }.lessThan);
+
+    // Lines: everything on one, or as many fit.
+    var lines: std.ArrayList(FlexLine) = .empty;
+    if (items.items.len > 0) {
+        if (st.flex_wrap == .nowrap or main_avail == null) {
+            try lines.append(l.a, .{ .first = 0, .count = items.items.len });
+        } else {
+            var first: usize = 0;
+            var used: f64 = 0;
+            for (items.items, 0..) |it, i| {
+                const outer = it.hyp + it.outer;
+                const with_gap = if (i > first) used + main_gap + outer else outer;
+                if (i > first and with_gap > main_avail.? + 0.01) {
+                    try lines.append(l.a, .{ .first = first, .count = i - first });
+                    first = i;
+                    used = outer;
+                } else used = with_gap;
+            }
+            try lines.append(l.a, .{ .first = first, .count = items.items.len - first });
+        }
+    }
+
+    // Flexible lengths per line, then cross sizes.
+    for (lines.items) |*line| {
+        const slice = items.items[line.first .. line.first + line.count];
+        const gaps = main_gap * @as(f64, @floatFromInt(@max(line.count, 1) - 1));
+        if (main_avail) |avail| {
+            try resolveFlexibleLengths(l, slice, avail - gaps);
+        } else for (slice) |*it| {
+            it.main = it.hyp;
+        }
+        var used: f64 = gaps;
+        for (slice) |it| used += it.main + it.outer;
+        line.main_used = used;
+        // Each item laid out at its main size; its cross size follows.
+        line.cross = 0;
+        for (slice) |*it| {
+            const cb = l.box(it.box);
+            if (row) {
+                try layoutFlexItem(l, it.box, 0, 0, it.main, null);
+                it.cross = cb.h + cb.margin[0] + cb.margin[2];
+            } else {
+                const w = measureCrossWidth(l, it.box, content_w, horizontalExtras(cb));
+                try layoutFlexItem(l, it.box, 0, 0, w, it.main);
+                it.cross = cb.w + cb.margin[1] + cb.margin[3];
+            }
+            line.cross = @max(line.cross, it.cross);
+        }
+    }
+    // A single line in a container with a definite cross size fills it.
+    if (lines.items.len == 1 and cross_avail != null and st.flex_wrap == .nowrap) lines.items[0].cross = cross_avail.?;
+
+    // `align-content`: where the lines go in the cross axis.
+    var lines_cross: f64 = 0;
+    for (lines.items) |ln| lines_cross += ln.cross;
+    const n_lines: f64 = @floatFromInt(lines.items.len);
+    lines_cross += cross_gap * @max(n_lines - 1, 0);
+    var cross_start: f64 = 0;
+    var cross_between: f64 = cross_gap;
+    if (cross_avail) |avail| if (lines.items.len > 0) {
+        const free = avail - lines_cross;
+        switch (st.align_content) {
+            .stretch => if (free > 0) {
+                for (lines.items) |*ln| ln.cross += free / n_lines;
+            },
+            .flex_end, .end => cross_start = free,
+            .center => cross_start = free / 2,
+            .space_between => if (lines.items.len > 1 and free > 0) {
+                cross_between += free / (n_lines - 1);
+            },
+            .space_around => if (free > 0) {
+                cross_start = free / n_lines / 2;
+                cross_between += free / n_lines;
+            },
+            .space_evenly => if (free > 0) {
+                cross_start = free / (n_lines + 1);
+                cross_between += free / (n_lines + 1);
+            },
+            .flex_start, .start => {},
+        }
+    };
+
+    // Place: main positions with `justify-content` and auto margins,
+    // cross positions with `align-self`, stretch resizing the item.
+    const main_origin = if (row) container.contentX() else container.contentY();
+    const cross_origin = if (row) container.contentY() else container.contentX();
+    var cross_pos = cross_origin + cross_start;
+    const wrap_reverse = st.flex_wrap == .wrap_reverse;
+    var line_index: usize = 0;
+    while (line_index < lines.items.len) : (line_index += 1) {
+        const line = lines.items[if (wrap_reverse) lines.items.len - 1 - line_index else line_index];
+        const slice = items.items[line.first .. line.first + line.count];
+        const avail = main_avail orelse line.main_used;
+        var free = @max(0, avail - line.main_used);
+        var auto_count: usize = 0;
+        for (slice) |it| auto_count += it.auto_main;
+        var main_start: f64 = 0;
+        var main_between: f64 = main_gap;
+        if (auto_count > 0) {
+            // Auto margins take the free space; justify-content is moot.
+        } else switch (st.justify_content) {
+            .flex_start, .start => {},
+            .flex_end, .end => main_start = free,
+            .center => main_start = free / 2,
+            .space_between => if (line.count > 1) {
+                main_between += free / @as(f64, @floatFromInt(line.count - 1));
+            },
+            .space_around => {
+                main_start = free / @as(f64, @floatFromInt(line.count)) / 2;
+                main_between += free / @as(f64, @floatFromInt(line.count));
+            },
+            .space_evenly => {
+                main_start = free / @as(f64, @floatFromInt(line.count + 1));
+                main_between += free / @as(f64, @floatFromInt(line.count + 1));
+            },
+        }
+        const auto_share: f64 = if (auto_count > 0) free / @as(f64, @floatFromInt(auto_count)) else 0;
+        if (auto_count > 0) free = 0;
+        var pos = main_origin + main_start;
+        for (slice, 0..) |*it, k| {
+            const cb = l.box(it.box);
+            if (k > 0) pos += main_between;
+            const margins = resolveEdges(cb, cb_w);
+            // Auto main margins get their share now.
+            if (row) {
+                if (margins[3] == null) cb.margin[3] = auto_share;
+                if (margins[1] == null) cb.margin[1] = auto_share;
+            } else {
+                if (margins[0] == null) cb.margin[0] = auto_share;
+                if (margins[2] == null) cb.margin[2] = auto_share;
+            }
+            const outer_main = it.main + (if (row) horizontalExtras(cb) + cb.margin[1] + cb.margin[3] else verticalExtras(cb) + cb.margin[0] + cb.margin[2]);
+            // Cross alignment: the item's own `align-self`, else the
+            // container's `align-items` (baseline taken as flex-start).
+            const alignment: style.AlignSelf = if (cb.style.align_self != .auto) cb.style.align_self else switch (st.align_items) {
+                .stretch => .stretch,
+                .flex_start, .start, .self_start, .baseline => .flex_start,
+                .flex_end, .end, .self_end => .flex_end,
+                .center => .center,
+            };
+            const cross_auto_margins = if (row) (margins[0] == null or margins[2] == null) else (margins[1] == null or margins[3] == null);
+            var cross_size = it.cross; // outer
+            if (alignment == .stretch and !cross_auto_margins and (if (row) cb.style.height == .auto else cb.style.width == .auto)) {
+                cross_size = line.cross;
+                if (row) {
+                    cb.h = @max(0, line.cross - cb.margin[0] - cb.margin[2]);
+                } else {
+                    // A column item stretches in width: laid out again at it.
+                    const w = @max(0, line.cross - cb.margin[1] - cb.margin[3] - horizontalExtras(cb));
+                    try layoutFlexItem(l, it.box, 0, 0, w, it.main);
+                }
+            }
+            var cross_offset: f64 = 0;
+            if (cross_auto_margins) {
+                // Auto cross margins centre (both) or push (one).
+                const spare = @max(0, line.cross - it.cross);
+                if (row) {
+                    if (margins[0] == null and margins[2] == null) cross_offset = spare / 2 else if (margins[0] == null) cross_offset = spare;
+                } else {
+                    if (margins[3] == null and margins[1] == null) cross_offset = spare / 2 else if (margins[3] == null) cross_offset = spare;
+                }
+            } else switch (alignment) {
+                .flex_end, .end, .self_end => cross_offset = line.cross - cross_size,
+                .center => cross_offset = (line.cross - cross_size) / 2,
+                else => {},
+            }
+            const main_pos = if (reverse_main) main_origin + avail - (pos - main_origin) - outer_main else pos;
+            const x = if (row) main_pos + cb.margin[3] else cross_pos + cross_offset + cb.margin[3];
+            const y = if (row) cross_pos + cross_offset + cb.margin[0] else main_pos + cb.margin[0];
+            try moveBox(l, it.box, x - cb.x, y - cb.y);
+            pos += outer_main;
+        }
+        cross_pos += line.cross + cross_between;
+    }
+    if (row) return if (definite_h) |h| h else lines_cross;
+    // A column: the main extent, or the definite height.
+    if (definite_h) |h| return h;
+    var main_extent: f64 = 0;
+    for (lines.items) |ln| main_extent = @max(main_extent, ln.main_used);
+    return main_extent;
+}
+
+/// A column item's width before its cross size is known: its `width`,
+/// else the container's content width (what stretch will give it).
+fn measureCrossWidth(l: *Layout, id: BoxId, content_w: f64, extras: f64) f64 {
+    const cb = l.box(id);
+    if (resolveLA(cb.style.width, content_w)) |w| return constrainWidth(cb, if (cb.style.box_sizing == .border_box) w - extras else w, content_w);
+    return constrainWidth(cb, @max(0, content_w - cb.margin[1] - cb.margin[3] - extras), content_w);
+}
+
+/// The flexible lengths algorithm (§9.7) for one line: grow or shrink
+/// the unfrozen items into `avail`, clamping by min and max and
+/// redistributing until nothing violates.
+fn resolveFlexibleLengths(l: *Layout, items: []FlexItem, avail: f64) Error!void {
+    var hyp_sum: f64 = 0;
+    for (items) |it| hyp_sum += it.hyp + it.outer;
+    const growing = hyp_sum < avail;
+    for (items) |*it| {
+        const cb = l.get(it.box);
+        const factor = if (growing) cb.style.flex_grow else cb.style.flex_shrink;
+        it.main = it.hyp;
+        // Inflexible, or already past what flexing would do to it.
+        it.frozen = factor == 0 or (growing and it.base > it.hyp) or (!growing and it.base < it.hyp);
+    }
+    var rounds: usize = 0;
+    while (rounds < 16) : (rounds += 1) {
+        var frozen_space: f64 = 0;
+        var unfrozen: usize = 0;
+        var factor_sum: f64 = 0;
+        var scaled_sum: f64 = 0;
+        for (items) |it| {
+            const cb = l.get(it.box);
+            if (it.frozen) {
+                frozen_space += it.main + it.outer;
+            } else {
+                unfrozen += 1;
+                frozen_space += it.base + it.outer;
+                factor_sum += if (growing) cb.style.flex_grow else cb.style.flex_shrink;
+                scaled_sum += cb.style.flex_shrink * it.base;
+            }
+        }
+        if (unfrozen == 0) break;
+        var free = avail - frozen_space;
+        if (factor_sum > 0 and factor_sum < 1) free *= factor_sum;
+        var total_violation: f64 = 0;
+        for (items) |*it| {
+            if (it.frozen) continue;
+            const cb = l.get(it.box);
+            var target = it.base;
+            if (growing and factor_sum > 0) {
+                target = it.base + free * cb.style.flex_grow / factor_sum;
+            } else if (!growing and scaled_sum > 0) {
+                target = it.base + free * (cb.style.flex_shrink * it.base) / scaled_sum;
+            }
+            const clamped = @min(@max(target, it.min), it.max);
+            total_violation += clamped - target;
+            it.main = clamped;
+        }
+        if (@abs(total_violation) < 0.001) {
+            for (items) |*it| it.frozen = true;
+            break;
+        }
+        for (items) |*it| {
+            if (it.frozen) continue;
+            const cb = l.get(it.box);
+            var target = it.base;
+            if (growing and factor_sum > 0) {
+                target = it.base + free * cb.style.flex_grow / factor_sum;
+            } else if (!growing and scaled_sum > 0) {
+                target = it.base + free * (cb.style.flex_shrink * it.base) / scaled_sum;
+            }
+            // Freeze the items clamped in the direction of the total.
+            if (total_violation > 0 and it.main > target) it.frozen = true;
+            if (total_violation < 0 and it.main < target) it.frozen = true;
+        }
+    }
+}
+
+/// Lay out a flex item as a block of its own formatting context at
+/// `content_w`, and at `content_h` when given (a column item's main
+/// size); its origin is placed by the caller. An item laid out again
+/// (a column item measured, then sized) first drops what its previous
+/// layout recorded.
+fn layoutFlexItem(l: *Layout, id: BoxId, x: f64, y: f64, content_w: f64, content_h: ?f64) Error!void {
+    const b = l.box(id);
+    if (b.laid_out) try purgeSubtree(l, id);
+    b.x = x + b.margin[3];
+    b.y = y + b.margin[0];
+    b.w = content_w + horizontalExtras(b);
+    var inner: Bfc = .{ .root = id };
+    try layoutBlockContents(l, id, &inner, content_w);
+    if (content_h) |h| b.h = h + verticalExtras(b);
+}
+
+/// Forget a subtree's layout records — floats, absolutes, fragments,
+/// lines, baselines — before it is laid out again.
+fn purgeSubtree(l: *Layout, root_id: BoxId) Error!void {
+    var i: usize = 0;
+    while (i < l.floats.items.len) {
+        if (isDescendant(l, l.floats.items[i].box, root_id)) {
+            _ = l.floats.orderedRemove(i);
+        } else i += 1;
+    }
+    i = 0;
+    while (i < l.absolutes.items.len) {
+        if (isDescendant(l, l.absolutes.items[i].box, root_id)) {
+            _ = l.absolutes.orderedRemove(i);
+        } else i += 1;
+    }
+    for (l.fragments.items) |*f| if (!f.dead and isDescendant(l, f.box, root_id)) {
+        f.dead = true;
+    };
+    try resetLines(l, root_id);
+}
+
+fn resetLines(l: *Layout, id: BoxId) Error!void {
+    const b = l.box(id);
+    b.lines = .empty;
+    b.first_baseline = null;
+    b.last_baseline = null;
+    b.laid_out = false;
+    for (b.children.items) |c| try resetLines(l, c);
+}
+
+/// Whether `id` is `root_id` or below it.
+fn isDescendant(l: *const Layout, id: BoxId, root_id: BoxId) bool {
+    var p: ?BoxId = id;
+    while (p) |pid| : (p = l.get(pid).parent) if (pid == root_id) return true;
+    return false;
+}
+
 // ------------------------------------------------------------------ tests
 
 const html = @import("html.zig");
@@ -1843,6 +2369,7 @@ fn boxDepth(l: *const Layout, id: BoxId) usize {
 /// fragments landed on the lines of the block that holds it.
 fn fragmentHolds(l: *const Layout, id: BoxId, x: f64, y: f64) bool {
     for (l.fragments.items) |f| {
+        if (f.dead) continue;
         if (f.box != id) continue;
         if (x >= f.x and x < f.x + f.w and y >= f.y and y < f.y + f.h) return true;
     }

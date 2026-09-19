@@ -833,7 +833,27 @@ supervises), and memory history per unit beside the CPU one.
       never hit; the parser's lists grow on shared stacks and are copied
       out exact. The browser drill loads a page whose heading, swatch
       and paragraph are styled only by a linked sheet and its import,
-      and counts their colours. Remaining for the stage: flexbox, grid,
+      and counts their colours. ✅ *Flexbox* (2026-09-18, Level 1): a
+      flex container's children become items (inline elements
+      blockified, text runs wrapped, floats ignored, absolutes out of
+      flow); base sizes from `flex-basis`, the main size property or
+      the content's max-content (a column item's laid-out height);
+      single and multi-line with `flex-wrap` and `wrap-reverse`; the
+      flexible-lengths algorithm with min/max clamping and the
+      automatic minimum (the content's min-content, no larger than the
+      specified size); `justify-content` with auto margins absorbing
+      the free space first; `align-items`/`align-self` with stretch
+      (a row item's height, a column item laid out again at the line's
+      width) and `align-content` across lines; `order`; row and column
+      gaps; both reverse directions; `flex`, `flex-flow` and `gap`
+      shorthands. Baseline alignment is taken as flex-start. Ten
+      reftests (27 of 27 agree), and Wikipedia's front page is itself:
+      the account links right-aligned, the columns side by side. Found
+      on the way: a box pointer held across an append into the box list
+      wrote a blockified kind into freed memory and made the tree a
+      cycle; and forgetting a re-laid item's fragments by removing them
+      shifted every other line's indexes into the list — they are marked
+      dead instead. Remaining for the stage: grid,
       positioned boxes (absolute,
       fixed, sticky), `calc()`, custom properties, transforms and
       opacity at paint time, tables, `overflow` scroll containers, then
