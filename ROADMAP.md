@@ -812,7 +812,29 @@ supervises), and memory history per unit beside the CPU one.
       from the pinned Phosphor revision; the icon compiler learned a
       filled circle (`info`'s dot) as the round stroke around a smaller
       one.
-    - **(9) Modern layout.** Flexbox, grid, positioned boxes (absolute,
+    - **(9) Modern layout.** ✅ *External stylesheets* (2026-09-18, the
+      stage's first item): the cascade takes a `Loader` and collects
+      `<link rel=stylesheet>` (rel as a token list, `alternate` and
+      `disabled` skipped, `media` honoured) in document order with
+      `<style>`, each sheet's `@import`s fetched and placed before it
+      (three deep), a sheet and its `@font-face`s remembering the URL
+      their `url()`s resolve against; the page's loader fetches through
+      the broker with a per-page cache and, on a theme change, pays no
+      network. Wikipedia and google paint with their own sheets. Found
+      on the way: Wikipedia's 198 KB bundle needed 13 MB to parse — the
+      parser held its token stream three times (blocks as values, then
+      re-flattened to tokens for every body) — so the parser has a
+      direct mode that parses rule bodies in place from the token
+      stream (5 MB for that bundle), and the page parses each sheet
+      through the empty layout arena and keeps a deep copy (447 KB) in
+      the document's, one sheet at a time (a `Keep` hook; a parent is
+      kept before its imports parse); the `list-style` shorthand handed
+      the cascade a slice of a stack array, a latent bug the fixtures
+      never hit; the parser's lists grow on shared stacks and are copied
+      out exact. The browser drill loads a page whose heading, swatch
+      and paragraph are styled only by a linked sheet and its import,
+      and counts their colours. Remaining for the stage: flexbox, grid,
+      positioned boxes (absolute,
       fixed, sticky), `calc()`, custom properties, transforms and
       opacity at paint time, tables, `overflow` scroll containers, then
       transitions and animations on the page's tick. *Exit:* WPT reftest

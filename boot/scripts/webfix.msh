@@ -23,6 +23,9 @@ let pages = [
   { path: "/img/blue.gif", file: "img/blue.gif" }
   { path: "/img/prog.jpg", file: "img/prog.jpg" }
   { path: "/img/plexserif.woff", file: "img/plexserif.woff" }
+  { path: "/linked.html", file: "linked.html" }
+  { path: "/linked.css", file: "linked.css" }
+  { path: "/css/imported.css", file: "css/imported.css" }
 ]
 def page [req] {
   match $req.path {

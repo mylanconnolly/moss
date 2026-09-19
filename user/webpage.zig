@@ -615,6 +615,7 @@ fn fresh() void {
     arena_fba.reset();
     layout_fba.reset();
     picture_fba.reset();
+    n_sheet_cache = 0;
     page_fonts.forgetWebFaces();
 }
 
@@ -649,7 +650,7 @@ fn present(markup: []const u8, failure: u64) void {
     eventText(.title, std.mem.trim(u8, title, " \t\r\n"));
     eventText(.url, page.url());
     phase = "collecting its style sheets";
-    page.sheets = web.style.collectDocumentSheetsWith(a, doc, env(), uaSheet(env())) catch outOfMemory();
+    page.sheets = collectSheets(doc);
     const t_sheets = usys.nowMs();
     phase = "loading its web fonts";
     loadFontFaces();
@@ -678,7 +679,9 @@ fn loadFontFaces() void {
     var loaded: usize = 0;
     for (page.sheets) |sheet| for (sheet.font_faces) |ff| {
         if (loaded == max_web_faces) return;
-        const u = web.url.resolve(arena(), ff.src, base) catch continue;
+        // A face declared by a fetched sheet resolves against that sheet.
+        const face_base: web.url.Url = if (ff.base) |b| (web.url.parse(arena(), b, null) catch base.*) else base.*;
+        const u = web.url.resolve(arena(), ff.src, &face_base) catch continue;
         const href = u.href(arena()) catch outOfMemory();
         const bytes = fetchResource(href, 4 << 20) orelse {
             logLine("webpage: font-face not loaded: ", ff.family);
@@ -701,6 +704,60 @@ fn loadFontFaces() void {
             logLine("webpage: font-face loaded: ", ff.family);
         }
     };
+}
+
+// ------------------------------------------------------- linked sheets
+
+/// A linked sheet's text, fetched through the host once per page: the
+/// cascade is collected again on a theme change and must not pay the
+/// network twice. Reset with the document.
+const max_sheets = 32;
+const max_sheet_bytes = 1 << 20;
+const CachedSheet = struct { url: []const u8, text: []const u8 };
+var sheet_cache: [max_sheets]CachedSheet = undefined;
+var n_sheet_cache: usize = 0;
+
+fn sheetFetch(_: *anyopaque, href: []const u8, base_text: ?[]const u8) ?web.style.Loader.Loaded {
+    const a = arena();
+    const page_base = &(page.base orelse return null);
+    const rel_base: web.url.Url = if (base_text) |b| (web.url.parse(a, b, null) catch page_base.*) else page_base.*;
+    const u = web.url.resolve(a, href, &rel_base) catch return null;
+    const url_text = u.href(a) catch return null;
+    for (sheet_cache[0..n_sheet_cache]) |c| if (std.mem.eql(u8, c.url, url_text)) return .{ .text = c.text, .url = c.url };
+    if (n_sheet_cache == max_sheets) return null;
+    const bytes = fetchResourceInto(a, url_text, max_sheet_bytes) orelse {
+        logLine("webpage: sheet not loaded: ", url_text);
+        return null;
+    };
+    const text = web.encoding.decode(a, web.encoding.detect(bytes, res_type[0..res_type_len]), bytes) catch return null;
+    sheet_cache[n_sheet_cache] = .{ .url = url_text, .text = text };
+    n_sheet_cache += 1;
+    logLine("webpage: sheet loaded: ", url_text);
+    return .{ .text = text, .url = url_text };
+}
+
+/// The document's sheets, parsed through the layout arena — empty here,
+/// reset by the relayout that follows — and kept as deep copies in the
+/// document arena: a parse holds ten times what it keeps.
+fn collectSheets(doc: *dom.Document) []const web.style.Sheet {
+    layout_fba.reset();
+    const scratch = layout_fba.allocator();
+    const keep: web.style.Keep = .{ .ctx = @ptrCast(&layout_fba), .a = arena(), .keep = keepSheet };
+    const kept = web.style.collectDocumentSheetsKept(scratch, doc, env(), uaSheet(env()), sheetLoader(), keep) catch outOfMemory();
+    layout_fba.reset();
+    return kept;
+}
+
+/// A parsed sheet deep-copied into the document arena; the scratch is
+/// then reset, so each sheet's parse starts from an empty one.
+fn keepSheet(_: *anyopaque, sheet: web.style.Sheet) web.style.Error!web.style.Sheet {
+    const kept = try web.style.cloneSheet(arena(), sheet);
+    layout_fba.reset();
+    return kept;
+}
+
+fn sheetLoader() web.style.Loader {
+    return .{ .ctx = @ptrCast(&sheet_cache), .fetch = sheetFetch };
 }
 
 fn logLine(prefix: []const u8, text: []const u8) void {
@@ -780,7 +837,7 @@ fn relayout(recollect: bool) void {
     layout_fba.reset();
     page.layout = null;
     page.styles = null;
-    if (recollect) page.sheets = web.style.collectDocumentSheetsWith(arena(), doc, env(), uaSheet(env())) catch outOfMemory();
+    if (recollect) page.sheets = collectSheets(doc);
     const a = layout_fba.allocator();
     web.style.root_font_size = 16 * @as(f64, @floatFromInt(zoom_pct)) / 100;
     const t_layout = usys.nowMs();

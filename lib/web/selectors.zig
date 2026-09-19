@@ -75,6 +75,40 @@ pub const Complex = struct {
     relative: ?Combinator = null,
 };
 
+/// Deep copies into `a`, for a selector that must outlive its parse.
+pub fn cloneComplex(a: std.mem.Allocator, c: Complex) std.mem.Allocator.Error!Complex {
+    const compounds = try a.alloc(Compound, c.compounds.len);
+    for (c.compounds, 0..) |cp, i| {
+        const simples = try a.alloc(Simple, cp.simples.len);
+        for (cp.simples, 0..) |sm, j| simples[j] = try cloneSimple(a, sm);
+        compounds[i] = .{ .simples = simples, .combinator = cp.combinator };
+    }
+    return .{ .compounds = compounds, .relative = c.relative };
+}
+
+fn cloneComplexes(a: std.mem.Allocator, list: []const Complex) std.mem.Allocator.Error![]const Complex {
+    const out = try a.alloc(Complex, list.len);
+    for (list, 0..) |c, i| out[i] = try cloneComplex(a, c);
+    return out;
+}
+
+fn cloneSimple(a: std.mem.Allocator, sm: Simple) std.mem.Allocator.Error!Simple {
+    return switch (sm) {
+        .universal => .universal,
+        .type => |t| .{ .type = try a.dupe(u8, t) },
+        .id => |t| .{ .id = try a.dupe(u8, t) },
+        .class => |t| .{ .class = try a.dupe(u8, t) },
+        .attr => |at| .{ .attr = .{ .name = try a.dupe(u8, at.name), .op = at.op, .value = try a.dupe(u8, at.value), .insensitive = at.insensitive } },
+        .pseudo => |ps| .{ .pseudo = switch (ps) {
+            .not => |l| .{ .not = try cloneComplexes(a, l) },
+            .is => |l| .{ .is = try cloneComplexes(a, l) },
+            .where => |l| .{ .where = try cloneComplexes(a, l) },
+            .has => |l| .{ .has = try cloneComplexes(a, l) },
+            else => ps,
+        } },
+    };
+}
+
 pub const Selector = struct {
     list: []const Complex,
 

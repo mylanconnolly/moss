@@ -1534,10 +1534,14 @@ fn opUdpClose(u: *Udp) shared.NetResp {
 const max_lookups = 8;
 const max_resolvers = 4;
 const cache_len = 16;
-const lookup_tries = 2;
-// 250: a resolver answers in tens of milliseconds or not at all, and the
-// first query to one just leased is dropped while its MAC is asked for,
-// so the wait is what a first lookup pays twice (2026-09-18).
+// Four tries of 250 ms: a second per resolver before the next is asked
+// and this one is left alone — a forwarder over TLS under load (the dot
+// drill's, 644 ms) or a cold recursive lookup must not be given up on,
+// while a name server that is not there costs a second once in thirty.
+const lookup_tries = 4;
+// 250 between tries: a resolver answers in tens of milliseconds, and the
+// first query to one just leased may be dropped while its MAC is asked
+// for, so the wait is what such a lookup pays once (2026-09-18).
 const lookup_wait_ms: i64 = 250;
 const negative_ttl_s: u32 = 60;
 const max_ttl_s: u32 = 3600;

@@ -669,7 +669,7 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   and the desktop's DNS queries and connects went out the hub as
   broadcasts instead of through the leased NIC beside it); anything
   else routes through an interface with a gateway, the leased one.
-- **Resolvers** are asked in order, AAAA and A together, two tries of
+- **Resolvers** are asked in order, AAAA and A together, four tries of
   250 ms each before the next; a resolver silent through its tries is
   left alone for thirty seconds and lookups start at the first live one
   (the desktop's cluster stack lists a name server its profile does not

@@ -6290,6 +6290,39 @@ was innocent. (2) A protocol's receiver has obligations too — a window
 update is not optional. (3) A rule true of loopback is not true of
 what listens there.
 
+**Stage 9, external stylesheets (as built, 2026-09-18).** A `Loader`
+is the cascade's one new seam: given an `href` and the URL it is
+relative to, the sheet's text and its resolved URL, or nothing. With
+one, `collectDocumentSheetsLoading` walks `<link>`s beside `<style>`s
+in document order, checks `rel` as a token list (`stylesheet` present,
+`alternate` absent), `disabled` and `media`, and places each fetched
+sheet's `@import`s before it, three deep, every sheet and the font
+faces it declares carrying their own base URL. The page's loader goes
+through the broker with a cache per page, so the recollection a theme
+change causes pays no network. The first real bundle said the parser
+was the problem: Wikipedia's 198 KB of CSS needed 13 MB, because the
+spec's shape — consume blocks as component values, then re-flatten
+each body to tokens to parse its declarations — held the token stream
+three times over, and the arena could take none of it back. The parser
+has a direct mode now: `parseStylesheetDirect` parses a rule body in
+place from the token stream, a `@media` or `@supports` body as rules,
+any other as items, and only declaration values are ever materialised;
+its lists grow on shared stacks and are copied out exact. That halved
+the bundle to 5 MB, still not something a page should keep, so the
+page parses each sheet through the layout arena, empty at that point
+and reset before layout anyway, and keeps a deep copy — `cloneSheet`,
+447 KB for the bundle — in the document arena, one sheet at a time
+through a `Keep` hook that copies before the scratch is reset (a
+parent is kept before its imports parse). On the way, `list-style`'s
+shorthand expansion was found handing the cascade a slice of a stack
+array; the fixtures had never used the shorthand, Wikipedia's bundle
+does. *Lessons:* (1) a parse's intermediates and its result belong in
+different arenas; measure the ratio before choosing where. (2) A
+`&.{v}` handed to something that keeps it is a bug the type system
+will not catch; keep values through the arena. (3) The first real
+input for a library is worth more than its conformance corpus for
+finding what the corpus never exercised.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

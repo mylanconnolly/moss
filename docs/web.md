@@ -30,7 +30,9 @@ serializer; `encoding` decodes the byte streams the web sends;
 `tokenizer` and `html` are the HTML Standard's parser into `dom`;
 `selectors` matches CSS selectors; `text` is the readable text of a
 page; `css`, `color` and `media` are CSS syntax, colours and media
-queries, `style` the cascade; `layout` places boxes and lines
+queries, `style` the cascade (with a `Loader` for linked sheets and
+their imports, and a direct parse mode that keeps a sheet at a tenth
+of what its parse needs); `layout` places boxes and lines
 (CSS 2.1's visual formatting model, with a `Fonts` vtable for text and an
 `Images` provider for pictures), and `paint` draws them into the
 toolkit's canvas; `lib/image.zig` decodes PNG, GIF and JPEG (baseline

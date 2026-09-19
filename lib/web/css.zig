@@ -493,8 +493,55 @@ pub const Value = union(enum) {
 };
 
 pub const Declaration = struct { name: []const u8, value: []const Value, important: bool };
-pub const AtRule = struct { name: []const u8, prelude: []const Value, block: ?[]const Value };
-pub const QualifiedRule = struct { prelude: []const Value, block: []const Value };
+
+/// A deep copy of values into `a`: every slice a token or a value holds
+/// duplicated, so the copy outlives the parse that made the original
+/// (a sheet parsed in a scratch arena and kept in another).
+pub fn cloneValues(a: std.mem.Allocator, values: []const Value) std.mem.Allocator.Error![]const Value {
+    const out = try a.alloc(Value, values.len);
+    for (values, 0..) |v, i| out[i] = try cloneValue(a, v);
+    return out;
+}
+
+pub fn cloneValue(a: std.mem.Allocator, v: Value) std.mem.Allocator.Error!Value {
+    return switch (v) {
+        .token => |t| .{ .token = try cloneToken(a, t) },
+        .block => |b| .{ .block = .{ .kind = b.kind, .values = try cloneValues(a, b.values) } },
+        .function => |f| .{ .function = .{ .name = try a.dupe(u8, f.name), .values = try cloneValues(a, f.values) } },
+        .err => |e| .{ .err = try a.dupe(u8, e) },
+    };
+}
+
+pub fn cloneToken(a: std.mem.Allocator, t: Token) std.mem.Allocator.Error!Token {
+    return switch (t) {
+        .ident => |x| .{ .ident = try a.dupe(u8, x) },
+        .function => |x| .{ .function = try a.dupe(u8, x) },
+        .at_keyword => |x| .{ .at_keyword = try a.dupe(u8, x) },
+        .hash => |h| .{ .hash = .{ .value = try a.dupe(u8, h.value), .id = h.id } },
+        .string => |x| .{ .string = try a.dupe(u8, x) },
+        .url => |x| .{ .url = try a.dupe(u8, x) },
+        .dimension => |d| .{ .dimension = .{ .num = d.num, .unit = try a.dupe(u8, d.unit) } },
+        .err => |x| .{ .err = try a.dupe(u8, x) },
+        else => t,
+    };
+}
+pub const AtRule = struct {
+    name: []const u8,
+    prelude: []const Value,
+    block: ?[]const Value,
+    /// Direct mode (`parseStylesheetDirect`): a `@media`/`@supports`
+    /// body as rules, any other body as items, and `block` empty — the
+    /// body's tokens were never materialised as values.
+    rules: ?[]const Rule = null,
+    items: ?[]const Item = null,
+};
+pub const QualifiedRule = struct {
+    prelude: []const Value,
+    block: []const Value,
+    /// Direct mode: the body's declarations and nested rules, parsed in
+    /// place from the token stream; `block` is then empty.
+    items: ?[]const Item = null,
+};
 
 /// A rule, or the record of one the parser could not make (a
 /// qualified rule with no block before the end): consumers skip `err`.
@@ -506,23 +553,71 @@ pub const Item = union(enum) { declaration: Declaration, at: AtRule, qualified: 
 
 pub const ParseError = error{ OutOfMemory, Empty, Invalid, ExtraInput };
 
+/// The scratch the consume algorithms build their value lists on: one
+/// stack, marked on entry and copied out exact on return, so a sheet's
+/// arena holds each list once at its final size. A block's own list
+/// growing by doubling in an arena that cannot take the old buffers
+/// back cost Wikipedia's 198 KB bundle 9.7 MB (2026-09-18); the
+/// cascade's per-block parsers share the sheet's stack.
+pub const Scratch = std.ArrayList(Value);
+
 pub const Parser = struct {
     a: std.mem.Allocator,
     tokens: []const Token,
     pos: usize = 0,
+    /// Null until first use: a parser is returned by value from `init`,
+    /// so its own stack is found by address only once it is in place.
+    scratch: ?*Scratch = null,
+    own_scratch: Scratch = .empty,
+    /// The item and rule lists of direct mode, the same way: stacks
+    /// marked on entry and copied out exact, since a list growing by
+    /// doubling per rule body left 2.7 KB a rule behind in the arena.
+    item_scratch: std.ArrayList(Item) = .empty,
+    rule_scratch: std.ArrayList(Rule) = .empty,
+    /// Sheet mode: rule bodies parsed in place (see `AtRule.rules`).
+    /// A stylesheet's blocks materialised as values and re-flattened for
+    /// every body held a token stream three times over; Wikipedia's
+    /// 198 KB bundle needed 13 MB that way (2026-09-18).
+    direct: bool = false,
 
     pub fn init(a: std.mem.Allocator, input: []const u8, unicode_ranges: bool) Error!Parser {
         var t = try Tokenizer.init(a, input);
         t.unicode_ranges = unicode_ranges;
         var list: std.ArrayList(Token) = .empty;
-        // About a token per three bytes of CSS: one allocation, no doubling.
+        // About a token per three bytes of CSS: one allocation, no doubling
+        // — then shrunk to what came, in place (the last allocation).
         try list.ensureTotalCapacity(a, input.len / 3 + 16);
         while (true) {
             const tok = try t.next();
             if (tok == .eof) break;
             try list.append(a, tok);
         }
-        return .{ .a = a, .tokens = list.items };
+        list.shrinkAndFree(a, list.items.len);
+        return .{ .a = a, .tokens = list.items, .scratch = null };
+    }
+
+    /// The scratch to hand a parser over this one's values (a block's
+    /// contents parsed as rules or declarations): the same stack.
+    pub fn scratchOf(p: *Parser) *Scratch {
+        if (p.scratch == null) p.scratch = &p.own_scratch;
+        return p.scratch.?;
+    }
+
+    fn mark(p: *Parser) usize {
+        return p.scratchOf().items.len;
+    }
+
+    fn push(p: *Parser, v: Value) Error!void {
+        try p.scratchOf().append(p.a, v);
+    }
+
+    /// The values pushed since `from`, copied out exact; the stack
+    /// shrinks back to the mark.
+    fn take(p: *Parser, from: usize) Error![]const Value {
+        const st = p.scratchOf();
+        const out = try p.a.dupe(Value, st.items[from..]);
+        st.shrinkRetainingCapacity(from);
+        return out;
     }
 
     /// A parser over component values already parsed (a block's
@@ -532,7 +627,15 @@ pub const Parser = struct {
         var list: std.ArrayList(Token) = .empty;
         try list.ensureTotalCapacity(a, countTokens(values));
         try flatten(a, values, &list);
-        return .{ .a = a, .tokens = list.items };
+        return .{ .a = a, .tokens = list.items, .scratch = null };
+    }
+
+    /// `fromValues` sharing a stack already grown (the enclosing sheet's).
+    pub fn fromValuesScratch(a: std.mem.Allocator, values: []const Value, scratch: *Scratch) Error!Parser {
+        var list: std.ArrayList(Token) = .empty;
+        try list.ensureTotalCapacity(a, countTokens(values));
+        try flatten(a, values, &list);
+        return .{ .a = a, .tokens = list.items, .scratch = scratch };
     }
 
     fn countTokens(values: []const Value) usize {
@@ -574,7 +677,7 @@ pub const Parser = struct {
         return if (p.pos < p.tokens.len) p.tokens[p.pos] else .eof;
     }
 
-    fn take(p: *Parser) Token {
+    fn next(p: *Parser) Token {
         const t = p.peek();
         if (p.pos < p.tokens.len) p.pos += 1;
         return t;
@@ -585,6 +688,13 @@ pub const Parser = struct {
     }
 
     // --- the entry points
+
+    /// A stylesheet with every rule body parsed in place: the cascade's
+    /// entry (the corpus tests keep `parseStylesheet`, the spec's shape).
+    pub fn parseStylesheetDirect(p: *Parser) Error![]const Rule {
+        p.direct = true;
+        return p.consumeListOfRules(true);
+    }
 
     pub fn parseStylesheet(p: *Parser) Error![]const Rule {
         return p.consumeListOfRules(true);
@@ -625,7 +735,7 @@ pub const Parser = struct {
                     // next semicolon, on their own.
                     const start = p.pos;
                     while (p.peek() != .semicolon and p.peek() != .eof) p.pos += 1;
-                    var sub: Parser = .{ .a = p.a, .tokens = p.tokens[start..p.pos] };
+                    var sub: Parser = .{ .a = p.a, .tokens = p.tokens[start..p.pos], .scratch = p.scratchOf() };
                     if (try sub.consumeDeclaration(false)) |d| try items.append(p.a, .{ .declaration = d }) else try items.append(p.a, .{ .err = "invalid" });
                 },
                 else => {
@@ -646,14 +756,14 @@ pub const Parser = struct {
                 .eof => return items.items,
                 .at_keyword => try items.append(p.a, .{ .at = try p.consumeAtRule(true) }),
                 else => {
-                    const mark = p.pos;
+                    const at = p.pos;
                     if (p.peek() == .ident) {
                         if (try p.consumeDeclaration(true)) |d| {
                             try items.append(p.a, .{ .declaration = d });
                             continue;
                         }
                     }
-                    p.pos = mark;
+                    p.pos = at;
                     if (try p.consumeQualifiedRule(true)) |q| try items.append(p.a, .{ .qualified = q }) else try items.append(p.a, .{ .err = "invalid" });
                 },
             }
@@ -670,111 +780,186 @@ pub const Parser = struct {
     }
 
     pub fn parseListOfComponentValues(p: *Parser) Error![]const Value {
-        var out: std.ArrayList(Value) = .empty;
-        while (p.peek() != .eof) try out.append(p.a, try p.consumeComponentValue());
-        return out.items;
+        const from = p.mark();
+        while (p.peek() != .eof) try p.push(try p.consumeComponentValue());
+        return p.take(from);
     }
 
     // --- the consume algorithms
 
+    fn takeRules(p: *Parser, from: usize) Error![]const Rule {
+        const out = try p.a.dupe(Rule, p.rule_scratch.items[from..]);
+        p.rule_scratch.shrinkRetainingCapacity(from);
+        return out;
+    }
+
+    fn takeItems(p: *Parser, from: usize) Error![]const Item {
+        const out = try p.a.dupe(Item, p.item_scratch.items[from..]);
+        p.item_scratch.shrinkRetainingCapacity(from);
+        return out;
+    }
+
     fn consumeListOfRules(p: *Parser, top_level: bool) Error![]const Rule {
-        var rules: std.ArrayList(Rule) = .empty;
+        const from = p.rule_scratch.items.len;
         while (true) {
             switch (p.peek()) {
                 .whitespace => p.pos += 1,
-                .eof => return rules.items,
+                .eof => return p.takeRules(from),
+                // A nested list (an at-rule's body, parsed in place) ends
+                // at its close brace, which is consumed.
+                .close_curly => if (!top_level) {
+                    p.pos += 1;
+                    return p.takeRules(from);
+                } else if (try p.consumeQualifiedRule(false)) |q| try p.rule_scratch.append(p.a, .{ .qualified = q }) else try p.rule_scratch.append(p.a, .{ .err = "invalid" }),
                 .cdo, .cdc => {
                     if (top_level) {
                         p.pos += 1;
                         continue;
                     }
-                    if (try p.consumeQualifiedRule(false)) |q| try rules.append(p.a, .{ .qualified = q }) else try rules.append(p.a, .{ .err = "invalid" });
+                    if (try p.consumeQualifiedRule(false)) |q| try p.rule_scratch.append(p.a, .{ .qualified = q }) else try p.rule_scratch.append(p.a, .{ .err = "invalid" });
                 },
-                .at_keyword => try rules.append(p.a, .{ .at = try p.consumeAtRule(false) }),
-                else => if (try p.consumeQualifiedRule(false)) |q| try rules.append(p.a, .{ .qualified = q }) else try rules.append(p.a, .{ .err = "invalid" }),
+                .at_keyword => {
+                    const at = try p.consumeAtRule(false);
+                    try p.rule_scratch.append(p.a, .{ .at = at });
+                },
+                else => if (try p.consumeQualifiedRule(false)) |q| try p.rule_scratch.append(p.a, .{ .qualified = q }) else try p.rule_scratch.append(p.a, .{ .err = "invalid" }),
             }
         }
     }
 
     fn consumeAtRule(p: *Parser, nested: bool) Error!AtRule {
-        const name = p.take().at_keyword;
-        var prelude: std.ArrayList(Value) = .empty;
+        const name = p.next().at_keyword;
+        const from = p.mark();
         while (true) {
             switch (p.peek()) {
                 .semicolon => {
                     p.pos += 1;
-                    return .{ .name = name, .prelude = prelude.items, .block = null };
+                    return .{ .name = name, .prelude = try p.take(from), .block = null };
                 },
-                .eof => return .{ .name = name, .prelude = prelude.items, .block = null },
+                .eof => return .{ .name = name, .prelude = try p.take(from), .block = null },
                 .close_curly => {
-                    if (nested) return .{ .name = name, .prelude = prelude.items, .block = null };
+                    if (nested) return .{ .name = name, .prelude = try p.take(from), .block = null };
                     p.pos += 1;
-                    try prelude.append(p.a, .{ .err = "}" });
+                    try p.push(.{ .err = "}" });
                 },
                 .open_curly => {
                     p.pos += 1;
+                    const prelude = try p.take(from);
+                    if (p.direct) {
+                        if (std.ascii.eqlIgnoreCase(name, "media") or std.ascii.eqlIgnoreCase(name, "supports")) {
+                            return .{ .name = name, .prelude = prelude, .block = &.{}, .rules = try p.consumeListOfRules(false) };
+                        }
+                        return .{ .name = name, .prelude = prelude, .block = &.{}, .items = try p.consumeBlockItems() };
+                    }
                     const block = try p.consumeSimpleBlock(.close_curly);
-                    return .{ .name = name, .prelude = prelude.items, .block = block };
+                    return .{ .name = name, .prelude = prelude, .block = block };
                 },
-                else => try prelude.append(p.a, try p.consumeComponentValue()),
+                else => try p.push(try p.consumeComponentValue()),
+            }
+        }
+    }
+
+    /// A block's contents parsed in place (direct mode): declarations
+    /// and nested rules up to the block's close brace, which is consumed.
+    fn consumeBlockItems(p: *Parser) Error![]const Item {
+        const from = p.item_scratch.items.len;
+        while (true) {
+            switch (p.peek()) {
+                .whitespace, .semicolon => p.pos += 1,
+                .eof => return p.takeItems(from),
+                .close_curly => {
+                    p.pos += 1;
+                    return p.takeItems(from);
+                },
+                .at_keyword => {
+                    const at = try p.consumeAtRule(true);
+                    try p.item_scratch.append(p.a, .{ .at = at });
+                },
+                else => {
+                    const at = p.pos;
+                    if (p.peek() == .ident) {
+                        if (try p.consumeDeclaration(true)) |d| {
+                            try p.item_scratch.append(p.a, .{ .declaration = d });
+                            continue;
+                        }
+                    }
+                    p.pos = at;
+                    if (try p.consumeQualifiedRule(true)) |q| try p.item_scratch.append(p.a, .{ .qualified = q }) else {
+                        // Not a rule either: skip to the next `;` or the
+                        // block's end rather than loop on the same token.
+                        try p.item_scratch.append(p.a, .{ .err = "invalid" });
+                        while (p.peek() != .eof and p.peek() != .semicolon and p.peek() != .close_curly) p.pos += 1;
+                    }
+                },
             }
         }
     }
 
     fn consumeQualifiedRule(p: *Parser, nested: bool) Error!?QualifiedRule {
-        var prelude: std.ArrayList(Value) = .empty;
+        const from = p.mark();
         while (true) {
             switch (p.peek()) {
-                .eof => return null,
+                .eof => {
+                    p.scratchOf().shrinkRetainingCapacity(from);
+                    return null;
+                },
                 .semicolon => {
-                    if (nested) return null;
+                    if (nested) {
+                        p.scratchOf().shrinkRetainingCapacity(from);
+                        return null;
+                    }
                     p.pos += 1;
-                    try prelude.append(p.a, .{ .token = .semicolon });
+                    try p.push(.{ .token = .semicolon });
                 },
                 .close_curly => {
-                    if (nested) return null;
+                    if (nested) {
+                        p.scratchOf().shrinkRetainingCapacity(from);
+                        return null;
+                    }
                     p.pos += 1;
-                    try prelude.append(p.a, .{ .err = "}" });
+                    try p.push(.{ .err = "}" });
                 },
                 .open_curly => {
                     p.pos += 1;
+                    const prelude = try p.take(from);
+                    if (p.direct) return .{ .prelude = prelude, .block = &.{}, .items = try p.consumeBlockItems() };
                     const block = try p.consumeSimpleBlock(.close_curly);
-                    return .{ .prelude = prelude.items, .block = block };
+                    return .{ .prelude = prelude, .block = block };
                 },
-                else => try prelude.append(p.a, try p.consumeComponentValue()),
+                else => try p.push(try p.consumeComponentValue()),
             }
         }
     }
 
     fn consumeSimpleBlock(p: *Parser, ending: std.meta.Tag(Token)) Error![]const Value {
-        var values: std.ArrayList(Value) = .empty;
+        const from = p.mark();
         while (true) {
             const t = p.peek();
-            if (t == .eof) return values.items;
+            if (t == .eof) return p.take(from);
             if (std.meta.activeTag(t) == ending) {
                 p.pos += 1;
-                return values.items;
+                return p.take(from);
             }
-            try values.append(p.a, try p.consumeComponentValue());
+            try p.push(try p.consumeComponentValue());
         }
     }
 
     fn consumeFunction(p: *Parser, name: []const u8) Error!Value {
-        var values: std.ArrayList(Value) = .empty;
+        const from = p.mark();
         while (true) {
             switch (p.peek()) {
-                .eof => return .{ .function = .{ .name = name, .values = values.items } },
+                .eof => return .{ .function = .{ .name = name, .values = try p.take(from) } },
                 .close_paren => {
                     p.pos += 1;
-                    return .{ .function = .{ .name = name, .values = values.items } };
+                    return .{ .function = .{ .name = name, .values = try p.take(from) } };
                 },
-                else => try values.append(p.a, try p.consumeComponentValue()),
+                else => try p.push(try p.consumeComponentValue()),
             }
         }
     }
 
     fn consumeComponentValue(p: *Parser) Error!Value {
-        const t = p.take();
+        const t = p.next();
         switch (t) {
             .open_curly => return .{ .block = .{ .kind = '{', .values = try p.consumeSimpleBlock(.close_curly) } },
             .open_square => return .{ .block = .{ .kind = '[', .values = try p.consumeSimpleBlock(.close_square) } },
@@ -788,57 +973,65 @@ pub const Parser = struct {
     }
 
     fn consumeDeclaration(p: *Parser, nested: bool) Error!?Declaration {
-        const name_tok = p.take();
+        const name_tok = p.next();
         if (name_tok != .ident) return null;
         const name = name_tok.ident;
         p.skipWs();
         if (p.peek() != .colon) return null;
         p.pos += 1;
         p.skipWs();
-        var values: std.ArrayList(Value) = .empty;
+        const from = p.mark();
         while (true) {
             switch (p.peek()) {
                 .eof, .semicolon => break,
                 .close_curly => {
                     if (nested) break;
                     p.pos += 1;
-                    try values.append(p.a, .{ .err = "}" });
+                    try p.push(.{ .err = "}" });
                 },
-                else => try values.append(p.a, try p.consumeComponentValue()),
+                else => try p.push(try p.consumeComponentValue()),
             }
         }
+        const st = p.scratchOf();
+        var seg: []const Value = st.items[from..];
         // A top-level {}-block is a declaration's whole value or not a
         // declaration at all (a nested rule's prelude looked like one).
         if (nested) {
             var has_block = false;
             var has_other = false;
-            for (values.items) |v| {
+            for (seg) |v| {
                 if (v == .block and v.block.kind == '{') has_block = true else if (!(v == .token and v.token == .whitespace)) has_other = true;
             }
-            if (has_block and has_other) return null;
+            if (has_block and has_other) {
+                st.shrinkRetainingCapacity(from);
+                return null;
+            }
         }
         // Trailing whitespace goes; `!important` is a flag, not a value.
         var important = false;
-        trimWs(&values);
-        if (values.items.len >= 2) {
-            const last = values.items[values.items.len - 1];
-            var i = values.items.len - 2;
-            while (i > 0 and values.items[i] == .token and values.items[i].token == .whitespace) i -= 1;
-            const bang = values.items[i];
+        seg = trimWs(seg);
+        if (seg.len >= 2) {
+            const last = seg[seg.len - 1];
+            var i = seg.len - 2;
+            while (i > 0 and seg[i] == .token and seg[i].token == .whitespace) i -= 1;
+            const bang = seg[i];
             if (last == .token and last.token == .ident and std.ascii.eqlIgnoreCase(last.token.ident, "important") and bang == .token and bang.token == .delim and bang.token.delim == '!') {
                 important = true;
-                values.items.len = i;
-                trimWs(&values);
+                seg = trimWs(seg[0..i]);
             }
         }
-        return .{ .name = name, .value = values.items, .important = important };
+        const value = try p.a.dupe(Value, seg);
+        st.shrinkRetainingCapacity(from);
+        return .{ .name = name, .value = value, .important = important };
     }
 
-    fn trimWs(values: *std.ArrayList(Value)) void {
-        while (values.items.len > 0) {
-            const last = values.items[values.items.len - 1];
-            if (last == .token and last.token == .whitespace) values.items.len -= 1 else break;
+    fn trimWs(values: []const Value) []const Value {
+        var n = values.len;
+        while (n > 0) {
+            const last = values[n - 1];
+            if (last == .token and last.token == .whitespace) n -= 1 else break;
         }
+        return values[0..n];
     }
 };
 

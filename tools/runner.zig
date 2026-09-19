@@ -1453,6 +1453,29 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, std.fmt.bufPrint(&b, "the pictures are not in the page rect (orange {d}, blue {d} of 3072)", .{ orange, blue }) catch "no pictures", log_path);
         return false;
     }
+    // A linked stylesheet and the sheet it imports, fetched through the
+    // broker: the heading's colour and a swatch come from the link, the
+    // paragraph's from the import; nothing is inline.
+    if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field for the linked page");
+    sleepMs(200);
+    if (!q.chord("meta_l", "a")) return false;
+    if (!q.typeText("http://www.moss.test:8080/linked.html")) return false;
+    const go5 = widgetCenter(readLog(log_path), "go") orelse return false;
+    if (!clickScanout(&q, go5[0], go5[1])) return sfail(spec, log_path, "click Go for the linked page");
+    if (!try waitLogN(log_path, "webpage: sheet loaded: http://www.moss.test:8080/linked.css", 1, "the linked sheet did not load", spec, polls)) return false;
+    if (!try waitLogN(log_path, "webpage: sheet loaded: http://www.moss.test:8080/css/imported.css", 1, "the imported sheet did not load", spec, polls)) return false;
+    if (!try waitLogN(log_path, "page t2: title \"moss fixture: linked\"", 1, "the linked page never loaded", spec, polls)) return false;
+    sleepMs(900);
+    _ = q.screendump(check_dir ++ "/browser-linked.ppm");
+    const linked = readPpm(check_dir ++ "/browser-linked.ppm") orelse return sfail(spec, log_path, "read the linked screendump");
+    const r5 = pageRect(readLog(log_path), "t2") orelse return false;
+    const swatch = countRgbIn(linked, r5, 0xcc, 0x00, 0x66);
+    const imported = countRgbIn(linked, r5, 0x00, 0x88, 0x77);
+    if (swatch < 7000 or imported < 40) {
+        var b: [96]u8 = undefined;
+        reportFailure(spec.name, std.fmt.bufPrint(&b, "the linked styles did not paint (swatch {d} of 8000, imported {d})", .{ swatch, imported }) catch "no linked styles", log_path);
+        return false;
+    }
     // A download: the page reports a resource it will not show, the app
     // fetches it and the Save dialog asks where; type a name.
     if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field for the download");

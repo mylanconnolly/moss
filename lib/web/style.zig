@@ -245,7 +245,13 @@ pub const Rule = struct {
 /// URL (a `local()` source is skipped), for a page to fetch and add
 /// to its faces. Weight and style are not matched yet: the first face
 /// declared for a family serves every variant.
-pub const FontFace = struct { family: []const u8, src: []const u8 };
+pub const FontFace = struct {
+    family: []const u8,
+    src: []const u8,
+    /// The URL of the sheet that declared it, when the sheet was
+    /// fetched: `src` resolves against it, not the page.
+    base: ?[]const u8 = null,
+};
 
 pub const Sheet = struct {
     origin: Origin,
@@ -254,6 +260,83 @@ pub const Sheet = struct {
     imports: []const []const u8,
     /// `@font-face` rules seen, in order.
     font_faces: []const FontFace = &.{},
+    /// The sheet's own URL when it was fetched (a `<link>` or an
+    /// `@import`); null for a `<style>` block, whose base is the page.
+    base: ?[]const u8 = null,
+};
+
+/// A deep copy of a sheet into `a`: parse a sheet through a scratch
+/// arena — its tokens, blocks and re-flattened token lists are ten
+/// times the rules that come out (Wikipedia's 198 KB bundle held
+/// 13 MB live, 2026-09-18) — and keep only this in the document's.
+pub fn cloneSheet(a: std.mem.Allocator, sheet: Sheet) Error!Sheet {
+    const rules = try a.alloc(Rule, sheet.rules.len);
+    for (sheet.rules, 0..) |r, i| {
+        const decls = try a.alloc(Declaration, r.declarations.len);
+        for (r.declarations, 0..) |d, j| decls[j] = .{ .prop = d.prop, .important = d.important, .value = switch (d.value) {
+            .values => |v| .{ .values = try css.cloneValues(a, v) },
+            else => d.value,
+        } };
+        rules[i] = .{ .selector = try selectors.cloneComplex(a, r.selector), .specificity = r.specificity, .declarations = decls };
+    }
+    const imports = try a.alloc([]const u8, sheet.imports.len);
+    for (sheet.imports, 0..) |u, i| imports[i] = try a.dupe(u8, u);
+    const faces = try a.alloc(FontFace, sheet.font_faces.len);
+    for (sheet.font_faces, 0..) |f, i| faces[i] = .{ .family = try a.dupe(u8, f.family), .src = try a.dupe(u8, f.src), .base = if (f.base) |b| try a.dupe(u8, b) else null };
+    return .{ .origin = sheet.origin, .rules = rules, .imports = imports, .font_faces = faces, .base = if (sheet.base) |b| try a.dupe(u8, b) else null };
+}
+
+test "style: a cloned sheet outlives the arena it was parsed in" {
+    var keep = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer keep.deinit();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    var cloned: Sheet = undefined;
+    {
+        var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer scratch.deinit();
+        const parsed = try parseSheetAt(scratch.allocator(), "@import \"x.css\"; @font-face { font-family: F; src: url(f.woff) } p.a > b[x=\"y\"]:not(.z) { color: rgb(1, 2, 3); margin: 4px 0 !important } @media (min-width: 10px) { i { color: red } }", .author, env, "http://h/s.css");
+        cloned = try cloneSheet(keep.allocator(), parsed);
+    }
+    // The scratch is gone; everything the clone holds is its own.
+    try std.testing.expectEqual(@as(usize, 2), cloned.rules.len);
+    try std.testing.expectEqualStrings("http://h/s.css", cloned.base.?);
+    try std.testing.expectEqualStrings("x.css", cloned.imports[0]);
+    try std.testing.expectEqualStrings("f.woff", cloned.font_faces[0].src);
+    try std.testing.expectEqual(@as(usize, 2), cloned.rules[0].selector.compounds.len);
+    const decl = cloned.rules[0].declarations[0];
+    try std.testing.expect(decl.value == .values);
+    const doc = try html.parse(keep.allocator(), "<p class=a><b x=y>t</b></p>", .{});
+    const styles = try compute(keep.allocator(), doc, &.{cloned}, env);
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| if (doc.isHtml(id, "b")) {
+        const c = styles.get(id).color;
+        try std.testing.expect(c.r == 1 and c.g == 2 and c.b == 3);
+    };
+}
+
+/// What fetches a linked sheet for the cascade: given an `href` and the
+/// URL it is relative to (the page's, or the importing sheet's), the
+/// sheet's text and its resolved URL, or null when it cannot be had.
+/// The library stays pure; a page hands one in that goes through its
+/// broker, `web-render` one that goes through the shell's network.
+pub const Loader = struct {
+    ctx: *anyopaque,
+    fetch: *const fn (ctx: *anyopaque, href: []const u8, base: ?[]const u8) ?Loaded,
+    pub const Loaded = struct { text: []const u8, url: []const u8 };
+};
+
+/// How deep `@import` chains go before they are left unread.
+const max_import_depth = 3;
+
+/// What keeps a parsed sheet: given the sheet as the scratch holds it,
+/// the sheet as the caller will hold it (a deep copy into the document's
+/// arena), after which the caller may reset the scratch — a parent
+/// sheet is kept before its imports are parsed, so a reset between
+/// sheets is safe. The sheet list itself is allocated from `a`.
+pub const Keep = struct {
+    ctx: *anyopaque,
+    a: std.mem.Allocator,
+    keep: *const fn (ctx: *anyopaque, sheet: Sheet) Error!Sheet,
 };
 
 pub const Env = media.Env;
@@ -262,25 +345,66 @@ pub const Env = media.Env;
 /// match are flattened in, those that do not are dropped, `@import`s
 /// recorded, other at-rules ignored.
 pub fn parseSheet(a: std.mem.Allocator, text: []const u8, origin: Origin, env: Env) Error!Sheet {
+    return parseSheetAt(a, text, origin, env, null);
+}
+
+/// The same for a sheet fetched from `base`: it and its font faces
+/// remember the URL their `url()`s resolve against.
+pub fn parseSheetAt(a: std.mem.Allocator, text: []const u8, origin: Origin, env: Env, base: ?[]const u8) Error!Sheet {
     var p = try css.Parser.init(a, text, false);
-    const rules = try p.parseStylesheet();
+    const rules = try p.parseStylesheetDirect();
     var out: std.ArrayList(Rule) = .empty;
     var imports: std.ArrayList([]const u8) = .empty;
     var faces: std.ArrayList(FontFace) = .empty;
-    try collectRulesFaces(a, rules, env, &out, &imports, &faces);
-    return .{ .origin = origin, .rules = out.items, .imports = imports.items, .font_faces = faces.items };
+    // The per-block parsers below share the sheet parser's value stack.
+    try collectRulesFaces(a, rules, env, &out, &imports, &faces, p.scratchOf());
+    if (base != null) for (faces.items) |*f| {
+        f.base = base;
+    };
+    return .{ .origin = origin, .rules = out.items, .imports = imports.items, .font_faces = faces.items, .base = base };
+}
+
+/// A sheet's `@import`s fetched and appended before it (an imported
+/// sheet's rules come first, as the cascade orders them), then the
+/// sheet itself; a chain deeper than `max_import_depth` or a fetch that
+/// fails leaves that import out, never the sheet.
+fn appendSheetWithImports(a: std.mem.Allocator, sheets: *std.ArrayList(Sheet), parsed: Sheet, env: Env, loader: ?Loader, keep: ?Keep, depth: usize) Error!void {
+    const sheet = if (keep) |k| try k.keep(k.ctx, parsed) else parsed;
+    const list_a = if (keep) |k| k.a else a;
+    if (loader) |ld| if (depth < max_import_depth) for (sheet.imports) |href| {
+        const got = ld.fetch(ld.ctx, href, sheet.base) orelse continue;
+        const imported = try parseSheetAt(a, got.text, sheet.origin, env, got.url);
+        try appendSheetWithImports(a, sheets, imported, env, loader, keep, depth + 1);
+    };
+    try sheets.append(list_a, sheet);
+}
+
+/// Whether a `<link>`'s `rel` names a stylesheet that applies: the
+/// token list holds `stylesheet`, not `alternate`; case does not matter.
+fn linkIsStylesheet(rel: []const u8) bool {
+    var has = false;
+    var it = std.mem.tokenizeAny(u8, rel, " \t\n\r\x0c");
+    while (it.next()) |tok| {
+        if (std.ascii.eqlIgnoreCase(tok, "stylesheet")) has = true;
+        if (std.ascii.eqlIgnoreCase(tok, "alternate")) return false;
+    }
+    return has;
 }
 
 fn collectRules(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8)) Error!void {
     var faces: std.ArrayList(FontFace) = .empty;
-    try collectRulesFaces(a, rules, env, out, imports, &faces);
+    var scratch: css.Scratch = .empty;
+    try collectRulesFaces(a, rules, env, out, imports, &faces, &scratch);
 }
 
 /// An `@font-face` block's descriptors: the family and the first
 /// `url()` in `src`.
-fn fontFaceOf(a: std.mem.Allocator, block: []const css.Value) Error!?FontFace {
-    var p = try css.Parser.fromValues(a, block);
-    const items = try p.parseListOfDeclarations();
+fn fontFaceOf(a: std.mem.Allocator, block: []const css.Value, scratch: *css.Scratch) Error!?FontFace {
+    var p = try css.Parser.fromValuesScratch(a, block, scratch);
+    return fontFaceOfItems(try p.parseListOfDeclarations());
+}
+
+fn fontFaceOfItems(items: []const css.Item) Error!?FontFace {
     var family: ?[]const u8 = null;
     var src: ?[]const u8 = null;
     for (items) |item| {
@@ -305,20 +429,28 @@ fn fontFaceOf(a: std.mem.Allocator, block: []const css.Value) Error!?FontFace {
     return .{ .family = family.?, .src = src.? };
 }
 
-fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8), faces: *std.ArrayList(FontFace)) Error!void {
+fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8), faces: *std.ArrayList(FontFace), scratch: *css.Scratch) Error!void {
     for (rules) |r| switch (r) {
         .err => {},
-        .qualified => |q| try addQualified(a, q, out),
+        .qualified => |q| if (q.items) |items| try addQualifiedItems(a, q.prelude, items, out) else try addQualified(a, q, out, scratch),
         .at => |at| {
             const eq = std.ascii.eqlIgnoreCase;
             if (eq(at.name, "media")) {
                 const q = try media.Query.parseValues(a, at.prelude);
                 if (!q.matches(env)) continue;
+                if (at.rules) |rs| {
+                    try collectRulesFaces(a, rs, env, out, imports, faces, scratch);
+                    continue;
+                }
                 const block = at.block orelse continue;
-                try collectRulesFaces(a, try rulesOfBlock(a, block), env, out, imports, faces);
+                try collectRulesFaces(a, try rulesOfBlock(a, block, scratch), env, out, imports, faces, scratch);
             } else if (eq(at.name, "font-face")) {
+                if (at.items) |items| {
+                    if (try fontFaceOfItems(items)) |f| try faces.append(a, f);
+                    continue;
+                }
                 const block = at.block orelse continue;
-                if (try fontFaceOf(a, block)) |f| try faces.append(a, f);
+                if (try fontFaceOf(a, block, scratch)) |f| try faces.append(a, f);
             } else if (eq(at.name, "import")) {
                 for (at.prelude) |v| {
                     if (v == .token and v.token == .string) try imports.append(a, v.token.string);
@@ -327,8 +459,12 @@ fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, ou
                 }
             } else if (eq(at.name, "supports")) {
                 if (!supportsMatches(a, at.prelude)) continue;
+                if (at.rules) |rs| {
+                    try collectRulesFaces(a, rs, env, out, imports, faces, scratch);
+                    continue;
+                }
                 const block = at.block orelse continue;
-                try collectRulesFaces(a, try rulesOfBlock(a, block), env, out, imports, faces);
+                try collectRulesFaces(a, try rulesOfBlock(a, block, scratch), env, out, imports, faces, scratch);
             }
         },
     };
@@ -336,8 +472,8 @@ fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, ou
 
 /// The rules inside a block's component values, parsed as a list of
 /// rules from the values themselves.
-fn rulesOfBlock(a: std.mem.Allocator, block: []const css.Value) Error![]const css.Rule {
-    var p = try css.Parser.fromValues(a, block);
+fn rulesOfBlock(a: std.mem.Allocator, block: []const css.Value, scratch: *css.Scratch) Error![]const css.Rule {
+    var p = try css.Parser.fromValuesScratch(a, block, scratch);
     return p.parseListOfRules();
 }
 
@@ -381,14 +517,18 @@ fn supportsBlock(a: std.mem.Allocator, values: []const css.Value) bool {
     return applyValues(&scratch, prop, values[i + 1 ..], &scratch, 16, .{ .width = 0, .height = 0 }, a) catch false;
 }
 
-fn addQualified(a: std.mem.Allocator, q: css.QualifiedRule, out: *std.ArrayList(Rule)) Error!void {
-    const sel_text = try css.valuesText(a, q.prelude);
+fn addQualified(a: std.mem.Allocator, q: css.QualifiedRule, out: *std.ArrayList(Rule), scratch: *css.Scratch) Error!void {
+    var bp = try css.Parser.fromValuesScratch(a, q.block, scratch);
+    try addQualifiedItems(a, q.prelude, try bp.parseBlockContents(), out);
+}
+
+/// A qualified rule from its prelude and its parsed body.
+fn addQualifiedItems(a: std.mem.Allocator, prelude: []const css.Value, items: []const css.Item, out: *std.ArrayList(Rule)) Error!void {
+    const sel_text = try css.valuesText(a, prelude);
     const sel = selectors.Selector.parse(a, sel_text) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Invalid => return, // a selector list with an unknown part drops the rule
     };
-    var bp = try css.Parser.fromValues(a, q.block);
-    const items = try bp.parseBlockContents();
     var decls: std.ArrayList(Declaration) = .empty;
     for (items) |item| if (item == .declaration) try expand(a, item.declaration, &decls);
     if (decls.items.len == 0) return;
@@ -426,10 +566,16 @@ fn wideKeyword(values: []const css.Value) ?Declared {
 fn push(a: std.mem.Allocator, decls: *std.ArrayList(Declaration), prop: Prop, values: []const css.Value, important: bool) Error!void {
     if (wideKeyword(values)) |w| return decls.append(a, .{ .prop = prop, .value = w, .important = important });
     // A value that does not parse for its property is dropped here, at
-    // parse time, so it never shadows a lesser rule in the cascade.
+    // parse time, so it never shadows a lesser rule in the cascade. The
+    // trial applies into a throwaway: what it allocates (a family list,
+    // a formatted string) is garbage the sheet's arena must not keep —
+    // 2.4 KB a declaration over Wikipedia's bundle (2026-09-18). A trial
+    // too big for the throwaway is taken as valid.
     var scratch: Computed = .{};
-    _ = applyValues(&scratch, prop, values, &scratch, 16, .{ .width = 0, .height = 0 }, a) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
+    var trial_mem: [4096]u8 = undefined;
+    var trial = std.heap.FixedBufferAllocator.init(&trial_mem);
+    _ = applyValues(&scratch, prop, values, &scratch, 16, .{ .width = 0, .height = 0 }, trial.allocator()) catch |e| switch (e) {
+        error.OutOfMemory => {},
         error.Invalid => return,
     };
     try decls.append(a, .{ .prop = prop, .value = .{ .values = values }, .important = important });
@@ -503,7 +649,10 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         }
         for (vals) |v| if (v == .token and v.token == .ident) {
             const w = v.token.ident;
-            if (eq(w, "inside") or eq(w, "outside")) try push(a, decls, .list_style_position, &.{v}, d.important) else try push(a, decls, .list_style_type, &.{v}, d.important);
+            // `single`: a value list the cascade keeps must be the arena's,
+            // never a pointer to a temporary (Wikipedia's bundle read a
+            // dead frame through one, 2026-09-18).
+            if (eq(w, "inside") or eq(w, "outside")) try push(a, decls, .list_style_position, try single(a, v), d.important) else try push(a, decls, .list_style_type, try single(a, v), d.important);
         };
         return;
     }
@@ -1175,19 +1324,103 @@ pub fn collectDocumentSheets(a: std.mem.Allocator, doc: *const Document, env: En
 /// The same with a user-agent sheet parsed earlier (a host keeps one
 /// across calls: parsing it is most of a small page's cascade).
 pub fn collectDocumentSheetsWith(a: std.mem.Allocator, doc: *const Document, env: Env, ua: Sheet) Error![]const Sheet {
+    return collectDocumentSheetsLoading(a, doc, env, ua, null);
+}
+
+/// `collectDocumentSheetsLoading` without a keeper: everything in `a`.
+pub fn collectDocumentSheetsLoading(a: std.mem.Allocator, doc: *const Document, env: Env, ua: Sheet, loader: ?Loader) Error![]const Sheet {
+    return collectDocumentSheetsKept(a, doc, env, ua, loader, null);
+}
+
+/// The document's sheets in document order — `<style>` blocks and, with
+/// a loader, `<link rel=stylesheet>`s fetched through it, each with its
+/// `@import`s before it — after the user-agent sheet. Without a loader
+/// the links are left out and the page paints as its inline styles.
+pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env: Env, ua: Sheet, loader: ?Loader, keep: ?Keep) Error![]const Sheet {
     var sheets: std.ArrayList(Sheet) = .empty;
-    try sheets.append(a, ua);
+    const list_a = if (keep) |k| k.a else a;
+    try sheets.append(list_a, ua);
     var w = doc.walk(dom.document_id);
     while (w.next()) |id| {
-        if (!doc.isHtml(id, "style")) continue;
+        const is_style = doc.isHtml(id, "style");
+        const is_link = doc.isHtml(id, "link");
+        if (!is_style and !is_link) continue;
+        if (is_link) {
+            if (loader == null) continue;
+            if (!linkIsStylesheet(doc.getAttr(id, "rel") orelse continue)) continue;
+            if (doc.getAttr(id, "disabled") != null) continue;
+        }
         if (doc.getAttr(id, "media")) |m| {
             const q = try media.Query.parseText(a, m);
             if (!q.matches(env)) continue;
         }
-        const text = try doc.textContent(id, a);
-        try sheets.append(a, try parseSheet(a, text, .author, env));
+        if (is_style) {
+            const text = try doc.textContent(id, a);
+            try appendSheetWithImports(a, &sheets, try parseSheet(a, text, .author, env), env, loader, keep, 0);
+        } else {
+            const href = std.mem.trim(u8, doc.getAttr(id, "href") orelse continue, " \t\n\r");
+            if (href.len == 0) continue;
+            const ld = loader.?;
+            const got = ld.fetch(ld.ctx, href, null) orelse continue;
+            try appendSheetWithImports(a, &sheets, try parseSheetAt(a, got.text, .author, env, got.url), env, loader, keep, 0);
+        }
     }
     return sheets.items;
+}
+
+test "style: linked sheets and their @imports join the cascade in order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    const Table = struct {
+        fetched: std.ArrayList([]const u8) = .empty,
+        a: std.mem.Allocator,
+        fn fetch(ctx: *anyopaque, href: []const u8, base: ?[]const u8) ?Loader.Loaded {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.fetched.append(self.a, href) catch return null;
+            // A toy resolver: a relative href joins the base's directory.
+            var url_buf: [128]u8 = undefined;
+            const url = if (std.mem.startsWith(u8, href, "http")) href else std.fmt.bufPrint(&url_buf, "{s}{s}", .{ if (base) |b| b[0 .. std.mem.lastIndexOfScalar(u8, b, '/').? + 1] else "http://x/", href }) catch return null;
+            const owned = self.a.dupe(u8, url) catch return null;
+            if (std.mem.endsWith(u8, owned, "/a.css")) return .{ .text = "@import \"deep/b.css\"; h1 { color: red }", .url = owned };
+            if (std.mem.endsWith(u8, owned, "/deep/b.css")) return .{ .text = "@font-face { font-family: F; src: url(f.woff) } h1 { color: blue; margin: 0 }", .url = owned };
+            if (std.mem.endsWith(u8, owned, "/gone.css")) return null;
+            return null;
+        }
+    };
+    var table = Table{ .a = a };
+    const loader: Loader = .{ .ctx = &table, .fetch = Table.fetch };
+    const doc = try html.parse(a,
+        \\<!DOCTYPE html><head>
+        \\<link rel="Stylesheet" href="a.css">
+        \\<link rel="alternate stylesheet" href="gone.css">
+        \\<link rel="stylesheet" href="gone.css" media="(max-width: 100px)">
+        \\<style>h1 { color: green }</style>
+        \\<link rel="stylesheet" href="gone.css">
+        \\</head><body><h1>t</h1></body>
+    , .{});
+    const ua = try parseSheet(a, ua_sheet, .user_agent, env);
+    const sheets = try collectDocumentSheetsLoading(a, doc, env, ua, loader);
+    // ua, b.css (imported, first), a.css, the style block; gone.css was
+    // asked for once (the alternate and the non-matching media never).
+    try std.testing.expectEqual(@as(usize, 4), sheets.len);
+    try std.testing.expectEqualStrings("http://x/deep/b.css", sheets[1].base.?);
+    try std.testing.expectEqualStrings("http://x/a.css", sheets[2].base.?);
+    try std.testing.expect(sheets[3].base == null);
+    try std.testing.expectEqual(@as(usize, 1), sheets[1].font_faces.len);
+    try std.testing.expectEqualStrings("http://x/deep/b.css", sheets[1].font_faces[0].base.?);
+    try std.testing.expectEqual(@as(usize, 3), table.fetched.items.len);
+    // The cascade: the style block wins (last), so the heading is green.
+    const styles = try compute(a, doc, sheets, env);
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| if (doc.isHtml(id, "h1")) {
+        const c = styles.get(id).color;
+        try std.testing.expect(c.r == 0 and c.g == 128 and c.b == 0);
+    };
+    // Without a loader the links are skipped and only the block applies.
+    const inline_only = try collectDocumentSheetsWith(a, doc, env, ua);
+    try std.testing.expectEqual(@as(usize, 2), inline_only.len);
 }
 
 test "style: a quoted family followed by more families is a list" {

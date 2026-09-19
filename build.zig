@@ -757,7 +757,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/gui-browser.msh",       "conf/sessiongui/browser.msh",
         "scripts/browser.msh",              "web/spoof.html",
         "web/form.html",                    "web/notes.txt",
-        "web/images.html",                  "web/img/solid.png",
+        "web/images.html",                  "web/linked.html", "web/linked.css", "web/css/imported.css", "web/img/solid.png",
         "web/img/grad.jpg",                 "web/img/blue.gif",
         "web/img/prog.jpg",                 "web/img/plexserif.woff",
         "web/index.html",                   "web/about.html",

@@ -1,0 +1,4 @@
+@import "css/imported.css";
+body { font-family: sans-serif; margin: 16px; background: #fff }
+h1 { color: #cc0066 }
+.swatch { width: 200px; height: 40px; background: #cc0066; margin: 8px 0 }
