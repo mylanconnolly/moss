@@ -5,7 +5,7 @@
 const std = @import("std");
 const path = @import("iconpath.zig");
 const Segment = path.Segment;
-pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close, activity, console, moss };
+pub const Icon = enum { folder, file, home, settings, terminal, grid, up, refresh, lock, back, network, close, activity, console, moss, forward, go, add, bookmark, bookmarks, find, zoom_out, zoom_in, info, caret_back };
 pub fn parse(name: []const u8) ?Icon {
     if (std.mem.eql(u8, name, "file-text")) return .file;
     if (std.mem.eql(u8, name, "house")) return .home;
@@ -19,6 +19,16 @@ pub fn parse(name: []const u8) ?Icon {
     if (std.mem.eql(u8, name, "tree-structure")) return .network;
     if (std.mem.eql(u8, name, "x")) return .close;
     if (std.mem.eql(u8, name, "pulse")) return .activity;
+    // The browser's chrome (2026-09-18).
+    if (std.mem.eql(u8, name, "caret-left")) return .caret_back;
+    if (std.mem.eql(u8, name, "caret-right")) return .forward;
+    if (std.mem.eql(u8, name, "arrow-right")) return .go;
+    if (std.mem.eql(u8, name, "plus")) return .add;
+    if (std.mem.eql(u8, name, "bookmark-simple")) return .bookmark;
+    if (std.mem.eql(u8, name, "bookmarks-simple")) return .bookmarks;
+    if (std.mem.eql(u8, name, "magnifying-glass")) return .find;
+    if (std.mem.eql(u8, name, "magnifying-glass-minus")) return .zoom_out;
+    if (std.mem.eql(u8, name, "magnifying-glass-plus")) return .zoom_in;
     return std.meta.stringToEnum(Icon, name);
 }
 fn segments(icon: Icon) []const Segment {
@@ -38,6 +48,16 @@ fn segments(icon: Icon) []const Segment {
         .activity => path.fromSvg(@embedFile("phosphor/regular/pulse.svg")),
         .console => path.fromSvg(@embedFile("phosphor/regular/article.svg")),
         .moss => path.fromSvg(@embedFile("branding/moss.svg")),
+        .caret_back => path.fromSvg(@embedFile("phosphor/regular/caret-left.svg")),
+        .forward => path.fromSvg(@embedFile("phosphor/regular/caret-right.svg")),
+        .go => path.fromSvg(@embedFile("phosphor/regular/arrow-right.svg")),
+        .add => path.fromSvg(@embedFile("phosphor/regular/plus.svg")),
+        .bookmark => path.fromSvg(@embedFile("phosphor/regular/bookmark-simple.svg")),
+        .bookmarks => path.fromSvg(@embedFile("phosphor/regular/bookmarks-simple.svg")),
+        .find => path.fromSvg(@embedFile("phosphor/regular/magnifying-glass.svg")),
+        .zoom_out => path.fromSvg(@embedFile("phosphor/regular/magnifying-glass-minus.svg")),
+        .zoom_in => path.fromSvg(@embedFile("phosphor/regular/magnifying-glass-plus.svg")),
+        .info => path.fromSvg(@embedFile("phosphor/regular/info.svg")),
     };
 }
 /// Base sizes are logical pixels at the 16px UI font size. Icons follow the

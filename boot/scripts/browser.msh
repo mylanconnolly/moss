@@ -141,26 +141,28 @@ let final = (gui {
     view: (fn [state] {
         let cur = (active-tab $state)
         let idx = (tab-index $state.tabs $state.active)
+        # The chrome's buttons are Phosphor glyphs (icon_only keeps the
+        # label as the button's name, which the drill clicks by id).
         let chrome = [
           { kind: "tabs", id: "tabs", bar: true, items: ($state.tabs | map { match $it.title { "" => "New Tab"; _ => $it.title } }), selected: $idx }
           { kind: "row", gap: 6, children: [
-              { kind: "button", id: "back", label: "<", disabled: ((len $cur.back) == 0) }
-              { kind: "button", id: "forward", label: ">", disabled: ((len $cur.fwd) == 0) }
-              { kind: "button", id: "reload", label: "Reload" }
+              { kind: "button", id: "back", label: "Back", icon: "caret-left", icon_only: true, disabled: ((len $cur.back) == 0) }
+              { kind: "button", id: "forward", label: "Forward", icon: "caret-right", icon_only: true, disabled: ((len $cur.fwd) == 0) }
+              { kind: "button", id: "reload", label: "Reload", icon: "arrow-clockwise", icon_only: true }
               { kind: "field", id: ("url-" + $cur.id + "-" + (str $cur.gen)), flex: 1, value: $cur.url }
-              { kind: "button", id: "go", label: "Go", variant: "primary" }
-              { kind: "button", id: "newtab", label: "New Tab" }
-              { kind: "button", id: "closetab", label: "Close Tab", disabled: ((len $state.tabs) < 2) }
+              { kind: "button", id: "go", label: "Go", icon: "arrow-right", icon_only: true, variant: "primary" }
+              { kind: "button", id: "newtab", label: "New Tab", icon: "plus", icon_only: true }
+              { kind: "button", id: "closetab", label: "Close Tab", icon: "x", icon_only: true, disabled: ((len $state.tabs) < 2) }
             ] }
           { kind: "row", gap: 6, children: [
-              { kind: "button", id: "bookmark", label: "Bookmark" }
-              { kind: "button", id: "bookmarks", label: ("Bookmarks (" + (str (len $state.bookmarks)) + ")") }
+              { kind: "button", id: "bookmark", label: "Bookmark", icon: "bookmark-simple", icon_only: true }
+              { kind: "button", id: "bookmarks", label: (str (len $state.bookmarks)), icon: "bookmarks-simple" }
               { kind: "field", id: ("find-" + (str $state.fgen)), flex: 1, value: $state.find }
-              { kind: "button", id: "find", label: "Find" }
-              { kind: "button", id: "zoomout", label: "-" }
+              { kind: "button", id: "find", label: "Find", icon: "magnifying-glass", icon_only: true }
+              { kind: "button", id: "zoomout", label: "Zoom out", icon: "magnifying-glass-minus", icon_only: true }
               { kind: "label", text: ((str $state.zoom) + "%") }
-              { kind: "button", id: "zoomin", label: "+" }
-              { kind: "button", id: "site", label: "Site" }
+              { kind: "button", id: "zoomin", label: "Zoom in", icon: "magnifying-glass-plus", icon_only: true }
+              { kind: "button", id: "site", label: "Site", icon: "info", icon_only: true }
             ] }
         ]
         let panel = (match $state.show {

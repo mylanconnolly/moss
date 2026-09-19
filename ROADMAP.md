@@ -802,10 +802,16 @@ supervises), and memory history per unit beside the CPU one.
       picture pays a handshake), and the desktop under HVF — ten times
       the speed — where the filesystem service never speaks after start
       (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
-    - *Polish, asked for 2026-09-18:* the Web app's chrome buttons (back,
-      forward, reload, Go, tabs, bookmark, find, zoom, site) as Phosphor
-      icons instead of words, the way the dock and top bar draw theirs;
-      the widget ids stay, the drill clicks by them.
+    - ✅ *Polish (asked for and landed 2026-09-18):* the Web app's chrome
+      buttons are Phosphor glyphs — carets back and forward, a refresh
+      arrow, the accent arrow for Go, plus and X for tabs, the bookmark
+      pair (the list's count beside its glyph), a magnifier for find and
+      the zoom pair, `info` for the site panel — through the toolkit's
+      `icon:` + `icon_only:` on a button, which keeps the label as the
+      button's name and the ids the drill clicks by. Ten glyphs vendored
+      from the pinned Phosphor revision; the icon compiler learned a
+      filled circle (`info`'s dot) as the round stroke around a smaller
+      one.
     - **(9) Modern layout.** Flexbox, grid, positioned boxes (absolute,
       fixed, sticky), `calc()`, custom properties, transforms and
       opacity at paint time, tables, `overflow` scroll containers, then

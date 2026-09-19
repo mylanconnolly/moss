@@ -157,6 +157,21 @@ fn decode(svg: []const u8) Builder {
         }
         if (std.mem.eql(u8, tag, "/svg")) continue;
         if (attr(tag, "stroke") == null) {
+            // A filled circle (the dot of `info`): a disk of radius r is
+            // the 16-unit round stroke around a circle of radius r - 8,
+            // and for r <= 8 a dot, which a zero-length segment draws.
+            if (std.mem.startsWith(u8, tag, "circle ")) {
+                const c = Point{ .x = value(tag, "cx", 0), .y = value(tag, "cy", 0) };
+                const r = value(tag, "r", 0);
+                if (r > 8) {
+                    b.move(.{ .x = c.x + r - 8, .y = c.y });
+                    b.circular(c, r - 8, 0, 2 * std.math.pi, b.current);
+                } else {
+                    b.move(c);
+                    b.line(c);
+                }
+                continue;
+            }
             std.debug.assert(std.mem.startsWith(u8, tag, "rect ") and value(tag, "width", 0) == 256 and value(tag, "height", 0) == 256 and std.mem.eql(u8, attr(tag, "fill").?, "none"));
             continue; // non-painting viewBox rectangle
         }

@@ -133,6 +133,13 @@ desktop is the cluster stack with its leased NIC as the way out. A site
 paints with its inline styles only (`<link rel=stylesheet>` is not
 fetched yet), so most look like plain documents until stage 9.
 
+The chrome's buttons are Phosphor glyphs (hover shows nothing yet; the
+labels are the buttons' names for the keyboard and the drills): carets
+for back and forward, a refresh arrow, the accent arrow to go, plus and
+X for tabs, a bookmark and the bookmarks list with its count, a
+magnifier to find, the zoom pair around the percentage, and an info
+glyph for the site panel.
+
 Forms work inside the page: the painter draws text and password
 fields, check boxes and radios, buttons, selects and text areas
 itself; the page keeps a focused element (Tab and Shift-Tab walk links

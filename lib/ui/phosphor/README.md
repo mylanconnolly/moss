@@ -5,6 +5,11 @@ revision `2b75f3ad12b420c9504ef05df8d2564a28f8500e`, directory `raw/regular/`.
 Copyright Phosphor Icons; MIT license in [LICENSE](LICENSE). The same license
 is included in the boot archive at `assets/licenses/phosphor.txt`.
 
+The browser's chrome added `caret-left`, `caret-right`, `arrow-right`, `plus`,
+`bookmark-simple`, `bookmarks-simple`, `magnifying-glass`,
+`magnifying-glass-minus`, `magnifying-glass-plus` and `info` from the same
+revision (2026-09-18).
+
 Moss keeps its semantic names (`settings`, `refresh`, etc.) and also accepts
 the upstream names. `lib/ui/icons.zig` records the mapping. The regular weight
 uses rounded 16-unit strokes on a 256-unit viewBox.
