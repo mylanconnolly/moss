@@ -669,6 +669,16 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   and the desktop's DNS queries and connects went out the hub as
   broadcasts instead of through the leased NIC beside it); anything
   else routes through an interface with a gateway, the leased one.
+- **Resolvers** are asked in order, AAAA and A together, two tries of
+  250 ms each before the next; a resolver silent through its tries is
+  left alone for thirty seconds and lookups start at the first live one
+  (the desktop's cluster stack lists a name server its profile does not
+  run). Answers are kept per family and ordered with the family the
+  stack can route first. A lease warms its gateway's and resolvers'
+  MACs as it binds. Every lookup logs one line.
+- **The receive window** is the free room in a 64 KB buffer; a read
+  that reopens a window under one segment sends a window update, or the
+  sender waits for its persist timer.
 - **Filtered views** answer `denied` to `tcp_listen`, `ping`, and
   `derive`, and to `tcp_connect` for any destination but their own.
   `derive(::, 0)` from an unrestricted view clones it unrestricted;

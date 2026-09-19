@@ -92,6 +92,8 @@ const Resource = struct {
     stash_off: usize = 0,
     served: usize = 0,
     done: bool = false,
+    opened_ms: u64 = 0,
+    got_bytes: usize = 0,
 };
 
 /// Chunked transfer coding, decoded as bytes arrive.
@@ -729,6 +731,7 @@ pub const Host = struct {
             // A failure to reach the site says why in the log: the word
             // is the network service's or the TLS client's, and a page
             // only hears a code.
+            const t_open = usys.nowMs();
             const conn: Conn = if (target.tls) switch (tlscmds.open(h.net, target.host, target.port, target.host)) {
                 .conn => |c| .{ .tls = c },
                 .failed => |why| {
@@ -814,7 +817,14 @@ pub const Host = struct {
                 conn.close(h.net);
                 return h.refuse(.too_large);
             }
-            p.open = .{ .conn = conn, .framing = if (head.bodiless) .none else head.framing };
+            // Where the time went: the timings are what a slow page is
+            // measured by (resolve+connect, the TLS handshake, the head).
+            if (target.tls) {
+                logf(h.log, "webhost: page {d}: {s}: resolve+connect {d} ms, handshake {d} ms, head {d} ms", .{ id, url, tlscmds.last_open_ms.resolve_connect, tlscmds.last_open_ms.handshake, usys.nowMs() - t_open - tlscmds.last_open_ms.resolve_connect - tlscmds.last_open_ms.handshake });
+            } else {
+                logf(h.log, "webhost: page {d}: {s}: connect+head {d} ms", .{ id, url, usys.nowMs() - t_open });
+            }
+            p.open = .{ .conn = conn, .framing = if (head.bodiless) .none else head.framing, .opened_ms = usys.nowMs() };
             const res = &p.open.?;
             if (head.bodiless) res.done = true;
             if (res.framing == .length) {

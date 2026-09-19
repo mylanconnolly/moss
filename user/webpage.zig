@@ -565,6 +565,7 @@ fn load(url_text: []const u8, post: bool, body_text: []const u8) void {
     @memcpy(body_keep[0..bn], body_text[0..bn]);
     const body = body_keep[0..bn];
     event(.load, @intFromEnum(wire.LoadState.loading), 0);
+    load_t0 = usys.nowMs();
     const status: u64 = switch (openUrl(target, post, body)) {
         .ok => |st| st,
         .refused => |code| {
@@ -596,12 +597,17 @@ fn load(url_text: []const u8, post: bool, body_text: []const u8) void {
             return;
         },
     };
+    fetch_ms = usys.nowMs() - load_t0;
     if (status >= 400) {
         showStatus(status);
         return;
     }
     present(markupOf(got), 0);
 }
+
+/// The last load's timings, for the log line `present` writes.
+var load_t0: u64 = 0;
+var fetch_ms: u64 = 0;
 
 /// Everything of the old page goes.
 fn fresh() void {
@@ -629,7 +635,9 @@ fn showStatus(status: u64) void {
 fn present(markup: []const u8, failure: u64) void {
     const a = arena();
     phase = "parsing the document";
+    const t_parse = usys.nowMs();
     const doc = web.html.parse(a, markup, .{}) catch outOfMemory();
+    const t_parsed = usys.nowMs();
     page.doc = doc;
     page.base = web.url.parse(a, page.url(), null) catch null;
     var title: []const u8 = "";
@@ -642,13 +650,21 @@ fn present(markup: []const u8, failure: u64) void {
     eventText(.url, page.url());
     phase = "collecting its style sheets";
     page.sheets = web.style.collectDocumentSheetsWith(a, doc, env(), uaSheet(env())) catch outOfMemory();
+    const t_sheets = usys.nowMs();
     phase = "loading its web fonts";
     loadFontFaces();
+    const t_fonts = usys.nowMs();
     phase = "laying it out";
     relayout(false);
+    const t_laid = usys.nowMs();
     phase = "loading its pictures";
     loadPicturesNear();
+    const t_pictures = usys.nowMs();
     phase = "editing it";
+    if (failure == 0) {
+        var line: [200]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes)", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_sheets - t_parsed, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.items.len }) catch "webpage: loaded");
+    }
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
 }
 
@@ -767,6 +783,7 @@ fn relayout(recollect: bool) void {
     if (recollect) page.sheets = web.style.collectDocumentSheetsWith(arena(), doc, env(), uaSheet(env())) catch outOfMemory();
     const a = layout_fba.allocator();
     web.style.root_font_size = 16 * @as(f64, @floatFromInt(zoom_pct)) / 100;
+    const t_layout = usys.nowMs();
     const styles = a.create(web.style.Styles) catch outOfMemory();
     styles.* = web.style.compute(a, doc, page.sheets, env()) catch outOfMemory();
     page.styles = styles;
@@ -777,8 +794,13 @@ fn relayout(recollect: bool) void {
     page.scroll_y = @min(page.scroll_y, max_y);
     event(.extent, @intFromFloat(@max(0, page.extent)), 0);
     if (page.find_len > 0) collectMatches();
+    last_layout_ms = usys.nowMs() - t_layout;
     paintAll();
 }
+
+/// The last relayout's layout time and the last paint's, for the log.
+var last_layout_ms: u64 = 0;
+var last_paint_ms: u64 = 0;
 
 /// The host's viewport changed: let the old pixels go, take the new
 /// buffer (none when hidden), and lay out for it.
@@ -820,6 +842,8 @@ var paint_highlights: [max_highlights + 64]web.paint.Highlight = undefined;
 fn paintAll() void {
     const l = page.layout orelse return;
     if (!has_pixels) return;
+    const t_paint = usys.nowMs();
+    defer last_paint_ms = usys.nowMs() - t_paint;
     const canvas = ui.Canvas.init(px, vw, vh);
     // White unless the page says otherwise: a page that knows nothing
     // of dark mode keeps black text, so the session's theme reaches it
@@ -839,6 +863,10 @@ fn paintAll() void {
 fn scrollBy(dy: f64) void {
     if (!scrollTo(page.scroll_y + dy)) return;
     paintAll();
+    if (last_paint_ms > 40) {
+        var line: [96]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: scroll repaint {d} ms", .{last_paint_ms}) catch "webpage: scroll");
+    }
     loadPicturesNear();
 }
 
@@ -1387,5 +1415,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, _: u64, _: u64) callconv(.c) 
     glyph_fba = std.heap.FixedBufferAllocator.init(&glyph_heap);
     attach();
     _ = usys.log(glog, "webpage: up");
+    // The user-agent sheet parsed now, while nothing is typed yet: it
+    // cost the first page 600 ms under emulation.
+    _ = uaSheet(env());
     serve();
 }

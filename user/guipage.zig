@@ -20,6 +20,7 @@ const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const usys = @import("usys.zig");
 const webhost = @import("webhost.zig");
+const tlscmds = @import("tlscmds.zig");
 const progload = @import("progload.zig");
 const loader = @import("loader.zig");
 const fscmds = @import("fscmds.zig");
@@ -161,6 +162,7 @@ fn ensureHost(it: *mshl.Interp) bool {
         host.reset(log_h, spawner, net.?);
         if (!host.init()) return false;
         if (view != 0) _ = host.loadFontsFrom(view, view_buf, if (view_is_assets) "" else "assets/");
+        tlscmds.warmRoots(); // before the first page's handshake
         host_ready = true;
     }
     if (stage == null) stage = loader.Stage.init(loader.Stage.default_pages) orelse return false;

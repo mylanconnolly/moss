@@ -224,6 +224,18 @@ pub const OpenOut = union(enum) { conn: Conn, failed: []const u8 };
 
 /// The client side: connect to `host`:`port` and shake hands as `name`,
 /// the name the certificate must carry (and the server is told, SNI).
+/// How long the last `open` spent resolving and connecting, then
+/// shaking hands: a host that logs its timings reads this.
+pub var last_open_ms: struct { resolve_connect: u64 = 0, handshake: u64 = 0 } = .{};
+
+/// Parse the trust roots now rather than at the first `open`: the
+/// public bundle costs the first https page 400 ms under emulation.
+pub fn warmRoots() void {
+    const st = stateNow() orelse return;
+    const now = usys.wallMs() orelse return;
+    _ = rootsNow(st, now);
+}
+
 pub fn open(n: *Net, host: []const u8, port: u64, name: []const u8) OpenOut {
     const st = stateNow() orelse return .{ .failed = "no_memory" };
     const now = usys.wallMs() orelse return .{ .failed = "no_clock" };
@@ -233,10 +245,12 @@ pub fn open(n: *Net, host: []const u8, port: u64, name: []const u8) OpenOut {
     };
     const idx = freeSlot(st) orelse return .{ .failed = "too_many" };
     const sl = &st.slots[idx];
+    const t_connect = usys.nowMs();
     sl.sock = switch (n.connectHost(host, port)) {
         .sock => |s| s,
         .failed => |m| return .{ .failed = m },
     };
+    const t_connected = usys.nowMs();
     sl.net = n;
     sl.used = true;
     sl.gen +%= 1;
@@ -255,6 +269,7 @@ pub fn open(n: *Net, host: []const u8, port: u64, name: []const u8) OpenOut {
         sl.used = false;
         return .{ .failed = why };
     };
+    last_open_ms = .{ .resolve_connect = t_connected - t_connect, .handshake = usys.nowMs() - t_connected };
     return .{ .conn = connOf(st, idx) };
 }
 

@@ -556,6 +556,14 @@ fn dhcpInput(f: *Iface, m: []const u8) void {
             var ab: [48]u8 = undefined;
             var gb: [48]u8 = undefined;
             logf("netsvc: {s} dhcp bound {s}/{d} via {s} lease {d}s", .{ f.name(&nb), shared.formatAddr(&ab, addrWords(v4Addr(f.ip4))), f.prefix4, if (f.gw4 != 0) shared.formatAddr(&gb, addrWords(v4Addr(f.gw4))) else "-", lease });
+            // The gateway's and the resolvers' MACs asked for now, not by
+            // the first packet that needs them: the desktop's first connect
+            // after boot waited out a retransmission while ARP ran, the
+            // lease having bound after the boot-time warm-up (2026-09-18).
+            if (f.gw4 != 0) _ = nextHopMac(f, v4Addr(f.gw4));
+            for (f.resolvers[0..f.n_resolvers]) |r| if (onLink(f, r) and !isLoopback(r)) {
+                _ = nextHopMac(f, r);
+            };
         },
         6 => { // NAK: start over
             dhcpLost(f);
@@ -1285,6 +1293,7 @@ fn addrWords(a: Addr) [2]u64 {
 /// entry's) — deduplicated, at most four.
 fn rebuildResolvers() void {
     n_resolvers = 0;
+    resolver_silent_until = @splat(0);
     for (conf_resolvers[0..conf_n_resolvers]) |r| addResolver(r);
     for (ifaces[0..n_ifaces]) |*f| {
         if (!f.up) continue;
@@ -1526,12 +1535,36 @@ const max_lookups = 8;
 const max_resolvers = 4;
 const cache_len = 16;
 const lookup_tries = 2;
-const lookup_wait_ms: i64 = 500;
+// 250: a resolver answers in tens of milliseconds or not at all, and the
+// first query to one just leased is dropped while its MAC is asked for,
+// so the wait is what a first lookup pays twice (2026-09-18).
+const lookup_wait_ms: i64 = 250;
 const negative_ttl_s: u32 = 60;
 const max_ttl_s: u32 = 3600;
 
 var resolvers: [max_resolvers]Addr = undefined;
 var n_resolvers: usize = 0;
+/// A resolver that answered nothing through a lookup's tries is left
+/// alone until this time: the desktop's cluster stack lists the node's
+/// own name server first, which its profile does not run, and every
+/// new host paid a second of silence before slirp's resolver was asked
+/// (2026-09-18). Reset with the list.
+var resolver_silent_until: [max_resolvers]i64 = @splat(0);
+const resolver_silence_ms: i64 = 30_000;
+
+/// The first resolver at or after `from` that is not being left alone
+/// (the last one is always asked, so a lookup can still fail honestly).
+fn isLoopback(a: Addr) bool {
+    if (isV4Mapped(a)) return (v4Of(a) >> 24) == 127;
+    return addrEq(a, addrFromWords(0, 1));
+}
+
+fn liveResolver(from: usize) usize {
+    const now = nowMs();
+    var i = from;
+    while (i + 1 < n_resolvers and resolver_silent_until[i] > now) i += 1;
+    return i;
+}
 var resolver_port: u16 = 0;
 
 const Lookup = struct {
@@ -1549,6 +1582,7 @@ const Lookup = struct {
     resolver: usize = 0,
     tries: u32 = 0,
     sent_at: i64 = 0,
+    started_ms: i64 = 0,
     addrs: [shared.resolve_max][2]u64 = undefined,
     n: usize = 0,
     /// The answers by family as they came (AAAA, then A), merged into
@@ -1677,6 +1711,9 @@ fn lookupOrder(l: *Lookup) void {
 fn lookupFinish(l: *Lookup) void {
     lookupOrder(l);
     if (l.n == 0 and l.err == null) l.err = if (l.nx) .nxdomain else if (l.declined) .refused else if (l.got[0] or l.got[1]) .nxdomain else .timeout;
+    // One line per lookup: how long, from which resolver — a slow page
+    // starts here more often than not.
+    logf("netsvc: resolved {s}: {d} address(es){s}{s} in {d} ms from resolver {d}", .{ l.nameSlice(), l.n, if (l.err != null) " " else "", if (l.err) |e| @tagName(e) else "", nowMs() - l.started_ms, l.resolver });
     l.done = true;
     cachePut(l);
     lookupRing(l);
@@ -1735,12 +1772,17 @@ fn lookupScan() void {
         if (!l.used or l.done) continue;
         if (now - l.sent_at < lookup_wait_ms) continue;
         l.tries += 1;
+        // Every resolver gets its tries, loopback too: the dot drill's
+        // forwarder there answers over TLS in 330 ms, which one try of
+        // 250 would have abandoned (2026-09-18).
         if (l.tries < lookup_tries) {
             lookupSend(l);
             continue;
         }
+        // Silent through its tries: left alone for a while.
+        if (!l.got[0] and !l.got[1] and l.resolver < n_resolvers) resolver_silent_until[l.resolver] = now + resolver_silence_ms;
         if (l.resolver + 1 < n_resolvers and l.n == 0) {
-            l.resolver += 1;
+            l.resolver = liveResolver(l.resolver + 1);
             l.tries = 0;
             l.got = .{ false, false };
             lookupSend(l);
@@ -1761,7 +1803,7 @@ fn opResolve(v: *NetView, badge: u64, len: u64) shared.NetResp {
         break;
     };
     const l = slot orelse return nerr(.no_space);
-    l.* = .{ .used = true, .badge = badge, .name_len = len };
+    l.* = .{ .used = true, .badge = badge, .name_len = len, .started_ms = nowMs() };
     @memcpy(l.name[0..len], name);
     if (cacheFind(name)) |c| {
         l.addrs = c.addrs;
@@ -1771,7 +1813,10 @@ fn opResolve(v: *NetView, badge: u64, len: u64) shared.NetResp {
     } else if (n_resolvers == 0) {
         l.err = .no_resolver;
         l.done = true;
-    } else lookupSend(l);
+    } else {
+        l.resolver = liveResolver(0);
+        lookupSend(l);
+    }
     return .{ .num = .{ .n = shared.lookup_base + (@intFromPtr(l) - @intFromPtr(&lookups[0])) / @sizeOf(Lookup) } };
 }
 
@@ -2354,6 +2399,11 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             if (!f.up or f.bcast_delivery) continue;
             if (f.gw4 != 0 and nextHopMac(f, v4Addr(f.gw4)) == null) pending = true;
             if (f.hasGw6() and nextHopMac(f, f.gw6) == null) pending = true;
+            // The resolvers on this link too: the first query would
+            // otherwise be dropped while their MAC is asked for.
+            for (f.resolvers[0..f.n_resolvers]) |r| if (onLink(f, r) and !isLoopback(r) and nextHopMac(f, r) == null) {
+                pending = true;
+            };
         }
         if (!pending) break;
         const w = usys.notifyWait(irq_notif);
@@ -2534,7 +2584,13 @@ fn opRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     if (n < s.rx_len) {
         for (0..s.rx_len - n) |i| rxBuf(s)[i] = rxBuf(s)[n + i];
     }
+    const was_free = rx_cap - s.rx_len;
     s.rx_len -= n;
+    // A window update: the peer last saw a window under one segment
+    // (a page reads slower than a site sends), and a sender in that
+    // state waits for us to say the room is back — or for its persist
+    // timer, five seconds later (Wikipedia's body, 2026-09-18).
+    if (was_free < s.mss and rx_cap - s.rx_len >= s.mss and s.state == .established) tcpEmit(s, s.snd_nxt, F_ACK, "", "");
     return .{ .num = .{ .n = n } };
 }
 

@@ -6263,6 +6263,33 @@ the site that knows it. (3) Nothing a user program links may be
 `threadlocal`. (4) A fixed buffer needs pre-sized lists, or a bigger
 arena than the bytes it will keep.
 
+**First real sites, made quick (as built, 2026-09-18).** "Incredibly
+slow" is not a bug report until it is a number, so the first change
+was timing: the broker logs each open's resolve+connect, handshake and
+head and each body's size and time, the page logs every phase of a
+load, and the resolver logs every lookup. The numbers said the network
+stack, not the engine: the engine parsed, styled, laid out and painted
+example.com in under 100 ms and Wikipedia's 3900 nodes in 200. A first
+page cost 2.8 s, of which 1.9 s was one name lookup — the cluster
+stack lists the node's own name server first, the desktop profile does
+not run it, and every lookup waited out two tries there before asking
+slirp's resolver. A silent resolver is left alone for thirty seconds
+now, and the wait between tries is 250 ms; loopback was going to get
+one try, until the dot drill's forwarder there, which answers over TLS
+in 330 ms, said no. The first packet to a freshly leased resolver or
+gateway was dropped while ARP ran, because the lease binds after the
+boot-time neighbour warm-up; a lease warms its own. And Wikipedia's
+body stalled five seconds in two loads of three: our TCP advertised a
+window of 384 bytes when the page read slower than the site sent, and
+never told the sender the room was back, so the sender waited for its
+persist timer — a read that reopens a window under one segment sends
+the update at once. The rest was first-use parsing moved off the first
+page: the user-agent sheet at the page's start, the trust roots when
+the host comes up. *Lessons:* (1) measure before touching; the engine
+was innocent. (2) A protocol's receiver has obligations too — a window
+update is not optional. (3) A rule true of loopback is not true of
+what listens there.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

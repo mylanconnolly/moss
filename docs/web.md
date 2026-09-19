@@ -162,6 +162,14 @@ decoded as the page loads and scrolls — at most 64 pictures, 6 MB
 decoded, 2 MB a file — and painted at their laid-out size; an image
 whose decoded size differs from what the page declared relays out.
 
+Every load is timed in the log: the broker's `webhost: page N: URL:
+resolve+connect A ms, handshake B ms, head C ms` and `body K KB in D ms`,
+the page's `webpage: loaded in T ms: fetch, parse, sheets, fonts,
+style+layout, paint, pictures`, and the resolver's `netsvc: resolved
+NAME`. Under emulation a first page is under a second and a cached host
+under half; a page with pictures pays a fresh TLS connection per
+picture.
+
 Three host commands serve the app: `save-as NAME DATA` (the Save
 dialog; answers with the chosen name), `page-info ID` (a page
 domain's memory and whether it is alive) and `log TEXT` (a line to the

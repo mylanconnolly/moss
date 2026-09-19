@@ -773,6 +773,39 @@ supervises), and memory history per unit beside the CPU one.
       Not built, said so: external stylesheets (`<link rel=stylesheet>`
       is not fetched yet, so a real site paints as its inline styles
       alone — the first item of stage 9), SVG and WebP pictures.
+    - ✅ **First real sites, made quick** (2026-09-18). "Incredibly slow"
+      was measured before it was touched: the broker logs resolve+
+      connect, handshake and head per open and the body's bytes and
+      time, the page logs fetch, parse, sheets, fonts, style+layout,
+      paint and pictures per load, the resolver one line per lookup.
+      Under emulation the first page took 2.8 s and google 1.8 s; the
+      first page is 0.9 s now, google 0.5, Wikipedia 2.5 (its pictures
+      over five fresh TLS connections). What it was: (1) a lookup asked
+      the cluster stack's loopback name server first, which the desktop
+      profile does not run, and waited two tries of 500 ms before slirp's
+      resolver — a resolver silent through its tries is left alone for
+      30 s, lookups start at the first live one, and the wait is 250 ms
+      (not one try for loopback: the dot drill's forwarder there answers
+      over TLS in 330 ms); (2) the first packet to the resolver and to
+      the gateway was dropped while ARP ran and retried a wait later —
+      the lease binds after the boot-time warm-up, so a lease warms its
+      gateway's and resolvers' neighbours itself; (3) our TCP never sent
+      a window update: the page reads slower than a site sends, the
+      receive buffer filled, we advertised 384 bytes, and the sender sat
+      in its persist timer for five seconds every time (Wikipedia's body,
+      5 s in 2 of 3 loads) — a read that reopens a window under one
+      segment ACKs at once; (4) the user-agent sheet (600 ms) and the
+      trust roots (400 ms) were parsed on the first page; the page
+      parses the sheet at start and the host the roots when it comes up;
+      (5) the archive passed the filesystem's 256-entry boot table
+      (512 now). Not done: a keep-alive connection per host (every
+      picture pays a handshake), and the desktop under HVF — ten times
+      the speed — where the filesystem service never speaks after start
+      (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
+    - *Polish, asked for 2026-09-18:* the Web app's chrome buttons (back,
+      forward, reload, Go, tabs, bookmark, find, zoom, site) as Phosphor
+      icons instead of words, the way the dock and top bar draw theirs;
+      the widget ids stay, the drill clicks by them.
     - **(9) Modern layout.** Flexbox, grid, positioned boxes (absolute,
       fixed, sticky), `calc()`, custom properties, transforms and
       opacity at paint time, tables, `overflow` scroll containers, then

@@ -80,7 +80,7 @@ const max_views = 64;
 /// only a *view* under boot/ saw the truncation (a unit given
 /// `fs: boot/web` was refused, `ls boot/conf/units` listed a sixth of
 /// them). An overflow is logged now.
-const max_boot = 256;
+const max_boot = 512; // the archive passed 256 entries with the browser's fixtures (2026-09-18)
 const max_fds = 8;
 const max_path = 256;
 const max_target = 200; // symlink target length cap
