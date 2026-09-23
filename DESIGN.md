@@ -6535,6 +6535,72 @@ sheet is many pictures; a renderer that does not clip viewports paints
 the neighbours in. (3) Budget a rasterizer's working memory against the
 largest picture a real site sends, at the zoom the user actually uses.
 
+**Stage 9, grid and the modern cascade (as built, 2026-09-23).** A
+sweep of real sites against headless Chrome — a Wikipedia article,
+GitHub, the Python docs, DuckDuckGo, lite CNN — found what the next
+layer of the web needs. *Grid*: Level 1's core. Track lists of lengths,
+percentages, `fr`, `auto`, `min-content`/`max-content`, `minmax()`,
+`fit-content()` and `repeat()` (counted, `auto-fill`, `auto-fit` whose
+empty tracks collapse), named lines, `grid-template-areas`; placement by
+line, negative line, span, name and area, the rest by the auto-placement
+cursor (row or column flow, `dense`), the implicit grid growing as it
+must; track sizing — fixed tracks, intrinsic ones from their items'
+min/max-content (spanning items spread over what they span), growth to
+limits, then `fr` shares with the inflexible-track loop, or `auto`
+tracks stretching when there is no `fr`; items laid out at their area's
+width (stretched or shrink-to-fit and aligned by `justify-self`/
+`-items`), rows sized from the laid-out heights, items aligned or
+stretched by `align-self`/`-items`; `justify-content` over the columns;
+grid containers' preferred widths from the same sizing. A grid's
+children become items exactly as a flex container's. Wikipedia's
+Vector skin lays out as three columns. *`calc()`*, `min()`, `max()`,
+`clamp()`: evaluated at computed-value time to `px + %`, a `Mix` that
+is a new variant of the length unions (layout resolves the percentage);
+`min`/`max`/`clamp` over comparable terms. *Cascade layers*: GitHub's
+whole reset lives in `@layer primer-css-base {…}`, which the direct
+parser read as a declaration block; `@layer` (and `@container`, taken
+against the viewport, and `@scope`) now parse as rule lists, each rule
+records its layer by order of first mention, and `Candidate.rank` (now
+`u128`) puts layers between origin and specificity — unlayered above,
+reversed for `!important`; presentational hints sit in the lowest layer.
+*Masks*: Wikipedia's Codex icons are `background-color: currentColor`
+shown through an SVG `mask-image`; `mask-image`, `-position`, `-size`,
+`-repeat`, the `mask` shorthand and the `-webkit-` spellings cascade,
+the page fetches masks like backgrounds, and paint shows the background
+colour through the mask's alpha (an element whose mask has not arrived
+shows nothing, as in browsers). *Transforms*: translations
+(`translate*()`, a matrix's offsets) move a box after layout, the rest
+parse and are not applied — `top:50%; transform:translateY(-50%)`
+centring works. *Logical properties* map to physical ones (left to
+right, horizontal): margins, paddings, insets, borders, sizes, radii,
+and their two-sided shorthands (`margin-inline-start` indented the
+Python docs' nested lists). *Selectors, faster*: GitHub's cascade took
+3.8 s on the Mac (so tens under emulation): every element against
+~20,000 rules, a class tokenizer per test, descendant selectors testing
+every ancestor. Rules are indexed by their subject compound's id, else a
+class, else a tag, else an attribute name; an element gathers its
+buckets in rule order; a 256-bit ancestor Bloom filter (tags, ids,
+classes) rejects a rule whose ancestor compounds need something absent;
+`hasClass` is a substring search with boundaries; each custom-property
+list gets a hash index on first lookup. 3.8 s → 66 ms, pixels
+identical. *Layout fixes*: `flex: 1 1 0` was dropped whole for its
+unitless zero basis (GitHub's sidebar wrapped under the content); while
+measuring intrinsic widths a percentage `width`/`max-width` is `auto`/
+`none` (a `max-width:100%` inline-block inside a flex item measured 0
+and GitHub's file names vanished); breaking a line at a space keeps the
+inline boxes that close right after it on that line (lite CNN's links
+underlined the rest of the line), and a trailing space just inside a
+closing box comes off; a list item whose content starts with a block
+gets its marker on its first line; list bullets are painted as shapes
+(the ◦ and ▪ glyphs are in no shipped face); text honours
+`visibility: hidden` (Sphinx's `¶`). Seventeen host tests. *Lessons:*
+(1) an at-rule the parser does not know is not harmless: it swallowed a
+design system's entire reset. (2) Profile before guessing — two
+plausible fixes (attribute buckets, custom-property maps) moved nothing;
+the sampler named the class tokenizer at once. (3) Percentages in a
+measurement are the classic cycle; the spec's answer (treat them as
+auto) is what every engine does.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

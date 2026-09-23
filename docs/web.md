@@ -32,11 +32,12 @@ serializer; `encoding` decodes the byte streams the web sends;
 page; `css`, `color` and `media` are CSS syntax, colours and media
 queries, `style` the cascade (with a `Loader` for linked sheets and
 their imports, a direct parse mode that keeps a sheet at a tenth
-of what its parse needs, custom properties and `var()`, HTML's
+of what its parse needs, cascade layers, custom properties and
+`var()`, `calc()`, logical properties, masks, HTML's
 presentational hints, and the page zoom as `px_scale`, device pixels
 per CSS pixel); `fonts` sets text in real faces with fallback across
 them and synthesized bold; `layout` places boxes and lines (tables and
-flexbox included, quirks mode's line heights too)
+flexbox and grid included, quirks mode's line heights too)
 (CSS 2.1's visual formatting model, with a `Fonts` vtable for text and an
 `Images` provider for pictures), and `paint` draws them into the
 toolkit's canvas (backgrounds, gradients and rounded corners
@@ -193,22 +194,24 @@ log from inside `update`, where `echo` waits for the window to close).
 
 ### What is not built
 
-No grid, no `calc()`, no masks or clip paths, no merged
-`border-collapse` borders, no WebP, animated GIF (the first frame
-shows) or `srcset` (stage 9's remainder); SVG draws its shapes, paths,
-strokes and `use`s but not gradients (their mean colour), clips, masks,
-filters or text; the scripts that need shaping or bidi (Arabic, Hebrew,
-the Indic scripts) show as boxes (Han, kana and Hangul come from the
-fallback face); bold is synthesized and there is no italic; no cache,
-no cookie jar and no connection pool yet (the session's `webfetch` unit
-of the plan); no content coding in the page; no stop button; a select
-cycles its options rather than opening a list; binary downloads wait
-for a bytes save in the picker; no JavaScript (stages 10–11: our own
-engine, off until it lands). Menus are the generic window menu until
-client-defined menus exist. The `page` leaf does not yet follow a
-window resize with a fresh buffer of the new size in one step: the
-leaf's rect changes on the next render and the page is told, so a
-maximized window shows the page relaid out after a tick.
+No `position: fixed`/`sticky` beyond relative, no scaling or rotating
+transforms (translations only), no merged `border-collapse` borders,
+no `overflow` scroll containers, no subgrid or masonry, no WebP,
+animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,
+paths, strokes and `use`s but not gradients (their mean colour), clips,
+masks, filters or text; the scripts that need shaping or bidi (Arabic,
+Hebrew, the Indic scripts) show as boxes, and emoji too (Han, kana and
+Hangul come from the fallback face); bold is synthesized and there is
+no italic; no cache, no cookie jar and no connection pool yet (the
+session's `webfetch` unit of the plan); no content coding in the page;
+no stop button; a select cycles its options rather than opening a
+list; binary downloads wait for a bytes save in the picker; no
+JavaScript (stages 10–11: our own engine, off until it lands). Menus
+are the generic window menu until client-defined menus exist. The
+`page` leaf does not yet follow a window resize with a fresh buffer of
+the new size in one step: the leaf's rect changes on the next render
+and the page is told, so a maximized window shows the page relaid out
+after a tick.
 
 ### Looking at a real site
 

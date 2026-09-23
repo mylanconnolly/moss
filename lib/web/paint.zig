@@ -127,7 +127,7 @@ const Painter = struct {
         if (b.kind != .root and b.kind != .inline_box and b.kind != .anon_block) {
             const radii = p.radiiOf(b);
             const rounded = radii[0] > 0 or radii[1] > 0 or radii[2] > 0 or radii[3] > 0;
-            if (!(isHtmlOrBody(p.l, id) and rootBackground(p.l) != null)) {
+            if (!(isHtmlOrBody(p.l, id) and rootBackground(p.l) != null) and !p.maskedBackground(b)) {
                 if (b.style.background_color.a > 0) {
                     // Rounded or translucent: blended per pixel.
                     if (rounded or b.style.background_color.a < 1) p.roundRect(b.x, b.y, b.w, b.h, radii, null, b.style.background_color) else p.fill(b.x, b.y, b.w, b.h, b.style.background_color.word());
@@ -235,6 +235,22 @@ const Painter = struct {
         if (closes and b.border[1] > 0) p.fill(f.x + f.w - b.border[1], f.y, b.border[1], f.h, st.borderColor(1).word());
     }
 
+    fn bullet(p: *const Painter, f: layout.Fragment, st: *const style.Computed) bool {
+        const kind = bulletKind(f.text) orelse return false;
+        const size = @max(3, @round(st.font_size * 0.36));
+        // Whole pixels: a small shape is crisper on the grid.
+        // Half an em before the marker's end (where the text starts).
+        const x = @round(@max(f.x, f.x + f.w - st.font_size * 0.5 - size));
+        const y = @round(f.baseline - st.font_size * 0.32 - size / 2);
+        const r = size / 2;
+        switch (kind) {
+            'd' => p.roundRect(x, y, size, size, .{ r, r, r, r }, null, st.color),
+            'c' => p.roundRect(x, y, size, size, .{ r, r, r, r }, .{ x + 1, y + 1, size - 2, size - 2, r - 1, r - 1, r - 1, r - 1 }, st.color),
+            else => p.roundRect(x, y, size, size, .{ 0, 0, 0, 0 }, null, st.color),
+        }
+        return true;
+    }
+
     /// A box's corner radii in pixels (a percentage of its width),
     /// shrunk together when two would overlap along a side.
     fn radiiOf(p: *const Painter, b: *const Box) [4]f64 {
@@ -243,6 +259,7 @@ const Painter = struct {
         for (0..4) |i| r[i] = @max(0, switch (b.style.border_radius[i]) {
             .px => |x| x,
             .percent => |pc| b.w * pc / 100,
+            .calc => |m| m.of(b.w),
         });
         const sums = [_]f64{ r[0] + r[1], r[1] + r[2], r[2] + r[3], r[3] + r[0] };
         const lens = [_]f64{ b.w, b.h, b.w, b.h };
@@ -319,30 +336,29 @@ const Painter = struct {
     /// The `background-image` layer: a picture placed in the padding box
     /// by `background-position` and `-size`, tiled by `-repeat`, clipped
     /// to the border box; or a linear gradient over it.
-    fn backgroundImage(p: *const Painter, b: *const Box) void {
-        const st = b.style;
-        switch (st.background_image) {
-            .none => return,
-            .linear => |g| return p.gradient(b, g.angle, g.stops, g.repeating),
-            .url => {},
-        }
-        const imgs = p.l.images orelse return;
-        const bm = imgs.background(st.background_image.url, st.background_base) orelse return;
-        if (bm.w == 0 or bm.h == 0) return;
+    /// Where a picture's tiles go in a box: the first tile's corner,
+    /// the tile size, whether it repeats on each axis.
+    const Tiles = struct { x: f64, y: f64, w: f64, h: f64, rep_x: bool, rep_y: bool };
+
+    /// A layer's tiles (a background's or a mask's) in the padding box:
+    /// sized by `size` from the picture's natural size, placed by
+    /// `position`, started early enough to cover the border box when it
+    /// repeats. Null when it has no size.
+    fn tilesFor(b: *const Box, bm: layout.Bitmap, size: style.BackgroundSize, position: [2]style.LengthPercent, repeat: [2]bool) ?Tiles {
         const ax = b.x + b.border[3];
         const ay = b.y + b.border[0];
         const aw = b.w - b.border[1] - b.border[3];
         const ah = b.h - b.border[0] - b.border[2];
-        if (aw <= 0 or ah <= 0) return;
+        if (aw <= 0 or ah <= 0 or bm.w == 0 or bm.h == 0) return null;
         const scale = style.px_scale / bm.density;
         const nw = @as(f64, @floatFromInt(bm.w)) * scale;
         const nh = @as(f64, @floatFromInt(bm.h)) * scale;
         var tw = nw;
         var th = nh;
-        switch (st.background_size) {
+        switch (size) {
             .auto => {},
             .cover, .contain => {
-                const f = if (st.background_size == .cover) @max(aw / nw, ah / nh) else @min(aw / nw, ah / nh);
+                const f = if (size == .cover) @max(aw / nw, ah / nh) else @min(aw / nw, ah / nh);
                 tw = nw * f;
                 th = nh * f;
             },
@@ -350,11 +366,13 @@ const Painter = struct {
                 const w_: ?f64 = switch (sz[0]) {
                     .px => |x| x,
                     .percent => |pc| aw * pc / 100,
+                    .calc => |m| m.of(aw),
                     .auto => null,
                 };
                 const h_: ?f64 = switch (sz[1]) {
                     .px => |x| x,
                     .percent => |pc| ah * pc / 100,
+                    .calc => |m| m.of(ah),
                     .auto => null,
                 };
                 if (w_ != null and h_ != null) {
@@ -369,41 +387,128 @@ const Painter = struct {
                 }
             },
         }
-        if (tw < 0.5 or th < 0.5) return;
-        const off_x = switch (st.background_position[0]) {
+        if (tw < 0.5 or th < 0.5) return null;
+        const off_x = switch (position[0]) {
             .px => |x| x,
             .percent => |pc| (aw - tw) * pc / 100,
+            .calc => |m| m.of(aw - tw),
         };
-        const off_y = switch (st.background_position[1]) {
+        const off_y = switch (position[1]) {
             .px => |x| x,
             .percent => |pc| (ah - th) * pc / 100,
+            .calc => |m| m.of(ah - th),
         };
-        // Clipped to the border box.
+        var t: Tiles = .{ .x = ax + off_x, .y = ay + off_y, .w = tw, .h = th, .rep_x = repeat[0], .rep_y = repeat[1] };
+        if (t.rep_x) t.x -= @ceil((t.x - b.x) / tw) * tw;
+        if (t.rep_y) t.y -= @ceil((t.y - b.y) / th) * th;
+        return t;
+    }
+
+    /// A painter clipped to a box's border box.
+    fn clippedTo(p: *const Painter, b: *const Box) ?Painter {
         var q = p.*;
         q.canvas.clip_x0 = @max(q.canvas.clip_x0, px(@max(0, b.x)));
         q.canvas.clip_x1 = @min(q.canvas.clip_x1, px(@max(0, b.x + b.w)));
         q.canvas.clip_y0 = @max(q.canvas.clip_y0, px(@max(0, b.y - p.scroll)));
         q.canvas.clip_y1 = @min(q.canvas.clip_y1, px(@max(0, b.y + b.h - p.scroll)));
-        if (q.canvas.clip_x1 <= q.canvas.clip_x0 or q.canvas.clip_y1 <= q.canvas.clip_y0) return;
-        var x_start = ax + off_x;
-        var y_start = ay + off_y;
-        const rep_x = st.background_repeat[0];
-        const rep_y = st.background_repeat[1];
-        if (rep_x) x_start -= @ceil((x_start - b.x) / tw) * tw;
-        if (rep_y) y_start -= @ceil((y_start - b.y) / th) * th;
-        var ty = y_start;
+        if (q.canvas.clip_x1 <= q.canvas.clip_x0 or q.canvas.clip_y1 <= q.canvas.clip_y0) return null;
+        return q;
+    }
+
+    /// The `background-image` layer: a picture placed in the padding box
+    /// by `background-position` and `-size`, tiled by `-repeat`, clipped
+    /// to the border box; or a linear gradient over it.
+    fn backgroundImage(p: *const Painter, b: *const Box) void {
+        const st = b.style;
+        switch (st.background_image) {
+            .none => return,
+            .linear => |g| return p.gradient(b, g.angle, g.stops, g.repeating),
+            .url => {},
+        }
+        const imgs = p.l.images orelse return;
+        const bm = imgs.background(st.background_image.url, st.background_base) orelse return;
+        const t = tilesFor(b, bm, st.background_size, st.background_position, st.background_repeat) orelse return;
+        const q = p.clippedTo(b) orelse return;
+        var ty = t.y;
         var rows: usize = 0;
         while (ty < b.y + b.h and rows < 4096) : (rows += 1) {
-            var tx = x_start;
+            var tx = t.x;
             var cols: usize = 0;
             while (tx < b.x + b.w and cols < 4096) : (cols += 1) {
-                q.bitmap(bm, tx, ty - p.scroll, tw, th, 0, 0, @floatFromInt(bm.w), @floatFromInt(bm.h));
-                if (!rep_x) break;
-                tx += tw;
+                q.bitmap(bm, tx, ty - p.scroll, t.w, t.h, 0, 0, @floatFromInt(bm.w), @floatFromInt(bm.h));
+                if (!t.rep_x) break;
+                tx += t.w;
             }
-            if (!rep_y) break;
-            ty += th;
+            if (!t.rep_y) break;
+            ty += t.h;
         }
+    }
+
+    /// An element with a `mask-image`: its background colour shows
+    /// through the mask's alpha (the icons a design system draws in
+    /// `currentColor`). A mask that has not loaded shows nothing, as in
+    /// browsers. True when the mask decided the background.
+    fn maskedBackground(p: *const Painter, b: *const Box) bool {
+        const st = b.style;
+        if (st.mask_image != .url) return false;
+        const imgs = p.l.images orelse return true;
+        const bm = imgs.background(st.mask_image.url, st.mask_base) orelse return true;
+        const c = st.background_color;
+        if (c.a <= 0) return true;
+        const t = tilesFor(b, bm, st.mask_size, st.mask_position, st.mask_repeat) orelse return true;
+        const q = p.clippedTo(b) orelse return true;
+        const word = c.word();
+        var ty = t.y;
+        var rows: usize = 0;
+        while (ty < b.y + b.h and rows < 4096) : (rows += 1) {
+            var tx = t.x;
+            var cols: usize = 0;
+            while (tx < b.x + b.w and cols < 4096) : (cols += 1) {
+                // The tile's pixels, each the mask's alpha at its centre.
+                const x0 = @max(@as(f64, @floatFromInt(q.canvas.clip_x0)), @floor(tx));
+                const x1 = @min(@as(f64, @floatFromInt(q.canvas.clip_x1)), @ceil(tx + t.w));
+                const y0 = @max(@as(f64, @floatFromInt(q.canvas.clip_y0)), @floor(ty - p.scroll));
+                const y1 = @min(@as(f64, @floatFromInt(@min(q.canvas.clip_y1, q.canvas.h))), @ceil(ty - p.scroll + t.h));
+                var sy = y0;
+                while (sy < y1) : (sy += 1) {
+                    var sx = x0;
+                    while (sx < x1) : (sx += 1) {
+                        const u = (sx + 0.5 - tx) / t.w * @as(f64, @floatFromInt(bm.w)) - 0.5;
+                        const v = (sy + 0.5 - (ty - p.scroll)) / t.h * @as(f64, @floatFromInt(bm.h)) - 0.5;
+                        const alpha = sampleAlpha(bm, u, v);
+                        if (alpha <= 0) continue;
+                        q.canvas.blend(@intFromFloat(sx), @intFromFloat(sy), word, @intFromFloat(@round(alpha * c.a * 255)));
+                    }
+                }
+                if (!t.rep_x) break;
+                tx += t.w;
+            }
+            if (!t.rep_y) break;
+            ty += t.h;
+        }
+        return true;
+    }
+
+    /// A bitmap's alpha at source coordinates (pixel centres at .5),
+    /// bilinear; 0 outside.
+    fn sampleAlpha(bm: layout.Bitmap, u: f64, v: f64) f64 {
+        const fw: f64 = @floatFromInt(bm.w);
+        const fh: f64 = @floatFromInt(bm.h);
+        if (u < -0.5 or v < -0.5 or u > fw - 0.5 or v > fh - 0.5) return 0;
+        const uc = std.math.clamp(u, 0, fw - 1);
+        const vc = std.math.clamp(v, 0, fh - 1);
+        const x0: u32 = @intFromFloat(@floor(uc));
+        const y0: u32 = @intFromFloat(@floor(vc));
+        const x1 = @min(bm.w - 1, x0 + 1);
+        const y1 = @min(bm.h - 1, y0 + 1);
+        const ax = uc - @floor(uc);
+        const ay = vc - @floor(vc);
+        const at = struct {
+            fn f(m: layout.Bitmap, x: u32, y: u32) f64 {
+                return @as(f64, @floatFromInt(m.rgba[(@as(usize, y) * m.w + x) * 4 + 3])) / 255;
+            }
+        }.f;
+        return at(bm, x0, y0) * (1 - ax) * (1 - ay) + at(bm, x1, y0) * ax * (1 - ay) + at(bm, x0, y1) * (1 - ax) * ay + at(bm, x1, y1) * ax * ay;
     }
 
     /// A linear gradient over the border box: the colour at each pixel
@@ -424,6 +529,7 @@ const Painter = struct {
         for (stops[0..n], 0..) |st, i| pos[i] = if (st.at) |at| switch (at) {
             .px => |x| x / len,
             .percent => |pc| pc / 100,
+            .calc => |m| m.of(len) / len,
         } else -1;
         if (pos[0] < 0) pos[0] = 0;
         if (pos[n - 1] < 0) pos[n - 1] = 1;
@@ -652,6 +758,10 @@ const Painter = struct {
         const font = layout.fontOf(st);
         const word = st.color.word();
         if (f.text.len == 0) return;
+        // Text takes its box's visibility (a hidden header link inside a
+        // visible heading).
+        if (st.visibility != .visible) return;
+        if (f.kind == .marker) if (p.bullet(f, st)) return;
         if (f.x + f.w <= 0 or f.y + f.h - p.scroll <= 0) return;
         p.l.fonts.draw(&p.canvas, font, f.x, f.baseline - p.scroll, f.text, word);
         // Decorations: one pixel lines, or thicker with the font.
@@ -661,6 +771,16 @@ const Painter = struct {
         if (st.text_decoration.overline) p.fill(f.x, f.y, f.w, thick, word);
     }
 };
+
+/// A bullet marker painted as a shape (a disc, a circle, a square), as
+/// browsers draw them — their glyphs are not in every face. False for a
+/// counter, which is text.
+fn bulletKind(text: []const u8) ?u8 {
+    if (std.mem.startsWith(u8, text, "\u{2022}")) return 'd';
+    if (std.mem.startsWith(u8, text, "\u{25e6}")) return 'c';
+    if (std.mem.startsWith(u8, text, "\u{25aa}")) return 's';
+    return null;
+}
 
 /// The kinds of control the painter draws itself.
 pub const Control = enum { text, password, checkbox, radio, button, select, textarea };

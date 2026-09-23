@@ -248,12 +248,7 @@ fn matchSimple(doc: *const Document, id: NodeId, s: Simple) bool {
         // exactly.
         .type => |t| return if (n.namespace == .html) std.ascii.eqlIgnoreCase(n.name, t) else std.mem.eql(u8, n.name, t),
         .id => |v| return if (doc.getAttr(id, "id")) |have| std.mem.eql(u8, have, v) else false,
-        .class => |v| {
-            const have = doc.getAttr(id, "class") orelse return false;
-            var it = std.mem.tokenizeAny(u8, have, " \t\n\r\x0c");
-            while (it.next()) |c| if (std.mem.eql(u8, c, v)) return true;
-            return false;
-        },
+        .class => |v| return hasClass(doc.getAttr(id, "class") orelse return false, v),
         .attr => |at| {
             const have = attrValue(doc, id, at.name) orelse return false;
             const ci = at.insensitive;
@@ -376,6 +371,26 @@ fn isEditable(doc: *const Document, id: NodeId) bool {
     const t = attrValue(doc, id, "type") orelse return true;
     const eq = std.ascii.eqlIgnoreCase;
     return eq(t, "text") or eq(t, "search") or eq(t, "email") or eq(t, "url") or eq(t, "tel") or eq(t, "password") or eq(t, "number") or t.len == 0;
+}
+
+/// Whether a class list holds `class`: a substring search with the
+/// boundaries checked (a tokenizer per test was most of a large site's
+/// cascade — descendant selectors test every ancestor).
+fn hasClass(list: []const u8, class: []const u8) bool {
+    if (class.len == 0 or class.len > list.len) return false;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, list, from, class)) |at| {
+        const end = at + class.len;
+        const before_ok = at == 0 or isClassSpace(list[at - 1]);
+        const after_ok = end == list.len or isClassSpace(list[end]);
+        if (before_ok and after_ok) return true;
+        from = at + 1;
+    }
+    return false;
+}
+
+fn isClassSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0c;
 }
 
 fn parentIsElement(doc: *const Document, id: NodeId) bool {

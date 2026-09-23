@@ -162,9 +162,13 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     const images: web.layout.Images = .{ .ctx = @ptrCast(&dummy), .vtable = &images_vtable };
+    const t_sheets = std.Io.Clock.awake.now(io);
     var styles = try gpa.create(web.style.Styles);
     styles.* = try web.style.compute(gpa, doc, sheets, env);
+    const t_style = std.Io.Clock.awake.now(io);
     var l = try web.layout.layoutDocumentWith(gpa, doc, styles, faces.fonts(), images, @floatFromInt(vw), @floatFromInt(vh));
+    const t_layout = std.Io.Clock.awake.now(io);
+    std.debug.print("webshot: to sheets {d} ms, style {d} ms, layout {d} ms\n", .{ @divTrunc(t0.durationTo(t_sheets).nanoseconds, std.time.ns_per_ms), @divTrunc(t_sheets.durationTo(t_style).nanoseconds, std.time.ns_per_ms), @divTrunc(t_style.durationTo(t_layout).nanoseconds, std.time.ns_per_ms) });
 
     // Every picture the layout has a box for, then a relayout.
     for (l.boxes.items) |b| {
@@ -196,9 +200,9 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("webshot: image {d}x{d} {s}\n", .{ bm.?.w, bm.?.h, href });
     }
     // Every background picture a box asks for.
-    for (l.boxes.items) |b| {
-        if (b.kind == .text or b.style.background_image != .url) continue;
-        const href = resolve(b.style.background_image.url, b.style.background_base) orelse continue;
+    for (l.boxes.items) |b| for ([_]struct { img: web.style.BackgroundImage, base: ?[]const u8 }{ .{ .img = b.style.background_image, .base = b.style.background_base }, .{ .img = b.style.mask_image, .base = b.style.mask_base } }) |layer| {
+        if (b.kind == .text or layer.img != .url) continue;
+        const href = resolve(layer.img.url, layer.base) orelse continue;
         var known = false;
         for (backgrounds.items) |k| if (std.mem.eql(u8, k.href, href)) {
             known = true;
@@ -207,8 +211,8 @@ pub fn main(init: std.process.Init) !u8 {
         const f = fetch(href) orelse continue;
         const bm = decodePicture(f.body, href);
         try backgrounds.append(gpa, .{ .href = href, .bm = bm });
-        if (bm) |x| std.debug.print("webshot: background {d}x{d} {s}\n", .{ x.w, x.h, href });
-    }
+        if (bm) |x| std.debug.print("webshot: background {d}x{d} {s}\n", .{ x.w, x.h, href[0..@min(href.len, 120)] });
+    };
     styles = try gpa.create(web.style.Styles);
     styles.* = try web.style.compute(gpa, doc, sheets, env);
     l = try web.layout.layoutDocumentWith(gpa, doc, styles, faces.fonts(), images, @floatFromInt(vw), @floatFromInt(vh));

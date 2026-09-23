@@ -17,7 +17,9 @@
 //! so the whole engine runs on the host. Coordinates are document
 //! pixels as `f64`; the painter rounds.
 //!
-//! Not built (the arc's stage 9): grid, `position: sticky` beyond
+//! Grid (Level 1's core) lays out too.
+//!
+//! Not built (the arc's stage 9): subgrid, `position: sticky` beyond
 //! relative, merged collapsed table borders, bidi and complex shaping,
 //! hyphenation, `overflow: scroll` scrolling inside a box.
 const std = @import("std");
@@ -411,7 +413,8 @@ fn buildBoxes(l: *Layout, parent: BoxId, id: NodeId) Error!void {
     if (st.display == .list_item) l.box(bid).marker_text = try markerText(l, id, st);
     var c = n.first_child;
     while (c) |cid| : (c = doc.get(cid).next) try buildBoxes(l, bid, cid);
-    if (isFlexDisplay(st.display)) {
+    if (isFlexDisplay(st.display) or isGridDisplay(st.display)) {
+        // A grid's children become items exactly as a flex container's.
         try wrapFlexItems(l, bid);
     } else if (kind == .block or kind == .inline_block) {
         try fixTableParts(l, bid);
@@ -670,6 +673,7 @@ fn resolveLP(lp: style.LengthPercent, base: f64) f64 {
     return switch (lp) {
         .px => |x| x,
         .percent => |p| base * p / 100,
+        .calc => |m| m.of(base),
     };
 }
 
@@ -677,6 +681,7 @@ fn resolveLA(la: style.LengthAuto, base: f64) ?f64 {
     return switch (la) {
         .px => |x| x,
         .percent => |p| base * p / 100,
+        .calc => |m| m.of(base),
         .auto => null,
     };
 }
@@ -707,10 +712,14 @@ fn verticalExtras(b: *const Box) f64 {
 fn constrainWidth(b: *const Box, w: f64, cb_w: f64) f64 {
     var out = w;
     const st = b.style;
+    // Measuring intrinsic widths, a percentage max-width is `none` (it
+    // would be of a width the measurement is finding).
+    if (measuring > 0 and st.max_width != .px) return @max(out, resolveLP(st.min_width, cb_w) - (if (st.box_sizing == .border_box) horizontalExtras(b) else 0), 0);
     switch (st.max_width) {
         .none => {},
         .px => |x| out = @min(out, if (st.box_sizing == .border_box) x - horizontalExtras(b) else x),
         .percent => |p| out = @min(out, cb_w * p / 100 - (if (st.box_sizing == .border_box) horizontalExtras(b) else 0)),
+        .calc => |m| out = @min(out, m.of(cb_w) - (if (st.box_sizing == .border_box) horizontalExtras(b) else 0)),
     }
     const min = resolveLP(st.min_width, cb_w) - (if (st.box_sizing == .border_box) horizontalExtras(b) else 0);
     return @max(out, min, 0);
@@ -839,7 +848,7 @@ fn isBfcRoot(b: *const Box) bool {
     if (b.kind == .root or b.kind == .inline_block) return true;
     if (b.isOutOfFlow()) return true;
     if (b.style.overflow_x != .visible or b.style.overflow_y != .visible) return true;
-    return b.style.display == .flow_root or b.style.display == .table or b.style.display == .table_cell;
+    return b.style.display == .flow_root or b.style.display == .table or b.style.display == .table_cell or b.style.display == .grid or b.style.display == .inline_grid;
 }
 
 fn topCollapsible(b: *const Box) bool {
@@ -1106,9 +1115,12 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
             const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
             try moveBox(l, id, dx, dy);
         }
+        try translateBox(l, id);
         return;
     } else if (isTableBox(b)) {
         content_h = try layoutTableContents(l, id, cb_w);
+    } else if (isGridContainer(b)) {
+        content_h = try layoutGridContents(l, id, cb_w);
     } else if (isFlexContainer(b)) {
         content_h = try layoutFlexContents(l, id, cb_w);
     } else if (hasInlineContent(l, id)) {
@@ -1124,9 +1136,21 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
                 content_h = @max(content_h, f.y + f.h - b.contentY());
             };
         }
+        // A list item whose content starts with a block: its outside
+        // marker sits on the first line inside it, as a line of its own.
+        if (b.marker_text.len > 0 and st.list_style_position == .outside and b.lines.items.len == 0) {
+            if (firstLine(l, id)) |ln| {
+                const font = fontOf(st);
+                const m = l.fonts.metrics(font);
+                const mw = l.fonts.advance(font, b.marker_text);
+                const first: u32 = @intCast(l.fragments.items.len);
+                try l.fragments.append(l.a, .{ .box = id, .kind = .marker, .x = b.contentX() - mw, .y = ln.baseline - m.ascent, .w = mw, .h = m.ascent + m.descent, .baseline = ln.baseline, .text = b.marker_text });
+                try l.box(id).lines.append(l.a, .{ .x = b.contentX(), .y = ln.y, .w = 0, .h = ln.h, .baseline = ln.baseline, .first_frag = first, .frag_count = 1 });
+            }
+        }
     }
     const cb_h: ?f64 = if (b.parent) |p| (if (l.get(p).style.height == .auto and l.get(p).kind != .root) null else l.get(p).contentH()) else null;
-    if (st.height == .px or (st.height == .percent and cb_h != null)) {
+    if (st.height == .px or ((st.height == .percent or st.height == .calc) and cb_h != null)) {
         content_h = resolveLA(st.height, cb_h orelse 0).?;
         if (st.box_sizing == .border_box) content_h -= verticalExtras(b);
     }
@@ -1137,6 +1161,9 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
         .percent => |p| if (cb_h) |h| {
             content_h = @min(content_h, h * p / 100);
         },
+        .calc => |m| if (cb_h) |h| {
+            content_h = @min(content_h, m.of(h));
+        },
     }
     b.h = @max(0, content_h) + verticalExtras(b);
     b.laid_out = true;
@@ -1146,6 +1173,7 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
         const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
         try moveBox(l, id, dx, dy);
     }
+    try translateBox(l, id);
 }
 
 fn layoutAbsolute(l: *Layout, id: BoxId, cb: BoxId) Error!void {
@@ -1182,6 +1210,543 @@ fn layoutAbsolute(l: *Layout, id: BoxId, cb: BoxId) Error!void {
     b.y = if (top) |t| cb_y + t + b.margin[0] else if (bottom != null) cb_y else cb_y + b.margin[0];
     try layoutBlockContents(l, id, &inner, cb_w);
     if (top == null and bottom != null) try moveBox(l, id, 0, cb_y + cb_h - bottom.? - b.margin[2] - l.get(id).h - l.get(id).y);
+}
+
+// -------------------------------------------------------------- grid
+
+fn isGridDisplay(d: style.Display) bool {
+    return d == .grid or d == .inline_grid;
+}
+
+fn isGridContainer(b: *const Box) bool {
+    return (b.kind == .block or b.kind == .inline_block) and isGridDisplay(b.style.display);
+}
+
+const GridItem = struct { box: BoxId, row0: u32, row1: u32, col0: u32, col1: u32 };
+
+/// One axis of the explicit grid with its `auto-fill`/`auto-fit`
+/// repeat expanded for `avail`: the tracks, and a map from an explicit
+/// line number (1-based, before the expansion) to the line it became.
+const Axis = struct {
+    tracks: []style.Track,
+    names: []const style.LineName,
+    repeat_at: u32 = 0,
+    repeat_added: u32 = 0,
+
+    fn line(ax: *const Axis, explicit: u32) u32 {
+        return if (explicit > ax.repeat_at + 1) explicit + ax.repeat_added else explicit;
+    }
+    fn explicitLines(ax: *const Axis) u32 {
+        return @intCast(ax.tracks.len + 1);
+    }
+};
+
+fn fixedTrackSize(t: style.TrackSize, avail: ?f64) ?f64 {
+    return switch (t) {
+        .px => |x| x,
+        .percent => |p| if (avail) |a| a * p / 100 else null,
+        else => null,
+    };
+}
+
+fn expandAxis(l: *Layout, list: style.TrackList, avail: ?f64, gap: f64) Error!Axis {
+    var tracks: std.ArrayList(style.Track) = .empty;
+    const ar = list.auto_repeat orelse {
+        try tracks.appendSlice(l.a, list.tracks);
+        return .{ .tracks = tracks.items, .names = list.names };
+    };
+    // How many repetitions fit: each repeated track at its fixed size
+    // (its max, else its min), the explicit ones too.
+    var count: u32 = 1;
+    if (avail) |av| {
+        var fixed: f64 = 0;
+        for (list.tracks) |t| fixed += (fixedTrackSize(t.max, av) orelse fixedTrackSize(t.min, av) orelse 0) + gap;
+        var per: f64 = 0;
+        for (ar.tracks) |t| per += (fixedTrackSize(t.max, av) orelse fixedTrackSize(t.min, av) orelse 0) + gap;
+        if (per > 0) count = @max(1, @as(u32, @intFromFloat(@floor((av - fixed + gap) / per))));
+        count = @min(count, 1000);
+    }
+    try tracks.appendSlice(l.a, list.tracks[0..@min(ar.at, list.tracks.len)]);
+    for (0..count) |_| try tracks.appendSlice(l.a, ar.tracks);
+    try tracks.appendSlice(l.a, list.tracks[@min(ar.at, list.tracks.len)..]);
+    return .{ .tracks = tracks.items, .names = list.names, .repeat_at = ar.at, .repeat_added = count * @as(u32, @intCast(ar.tracks.len)) };
+}
+
+/// A placement's start line (0-based index) and span on one axis, or
+/// null for automatic.
+const Span = struct { start: ?i64, span: u32 };
+
+fn resolvePlacement(start: style.GridLine, end: style.GridLine, ax: *const Axis, areas: []const style.GridArea, rows: bool) Span {
+    const n_lines: i64 = @intCast(ax.tracks.len + 1);
+    const lineOf = struct {
+        fn f(g: style.GridLine, a: *const Axis, ar: []const style.GridArea, is_rows: bool, is_end: bool, lines: i64) ?i64 {
+            switch (g) {
+                .line => |n| {
+                    if (n > 0) return @as(i64, a.line(@intCast(n))) - 1;
+                    return lines + n; // -1 is the last line
+                },
+                .name => |nm| {
+                    for (ar) |area| if (std.mem.eql(u8, area.name, nm)) {
+                        return if (is_rows) (if (is_end) area.row1 else area.row0) else (if (is_end) area.col1 else area.col0);
+                    };
+                    // `name-start` / `name-end` lines, then the name itself.
+                    const suffix: []const u8 = if (is_end) "-end" else "-start";
+                    for (a.names) |ln| {
+                        if (ln.name.len == nm.len + suffix.len and std.mem.startsWith(u8, ln.name, nm) and std.mem.eql(u8, ln.name[nm.len..], suffix)) return @as(i64, a.line(ln.line)) - 1;
+                    }
+                    for (a.names) |ln| if (std.mem.eql(u8, ln.name, nm)) return @as(i64, a.line(ln.line)) - 1;
+                    return null;
+                },
+                else => return null,
+            }
+        }
+    }.f;
+    const s = lineOf(start, ax, areas, rows, false, n_lines);
+    const e = lineOf(end, ax, areas, rows, true, n_lines);
+    if (s != null and e != null) {
+        const lo = @min(s.?, e.?);
+        const hi = @max(s.?, e.?);
+        return .{ .start = lo, .span = @intCast(@max(1, hi - lo)) };
+    }
+    if (s) |sv| return .{ .start = sv, .span = if (end == .span) end.span else 1 };
+    if (e) |ev| {
+        const sp: u32 = if (start == .span) start.span else 1;
+        return .{ .start = ev - sp, .span = sp };
+    }
+    const sp: u32 = if (start == .span) start.span else if (end == .span) end.span else 1;
+    return .{ .start = null, .span = sp };
+}
+
+/// Place a grid's items: definite placements first, then the rest by
+/// the auto-placement cursor (row by row, or column by column). The
+/// grid grows implicit tracks as they are needed.
+fn placeGridItems(l: *Layout, id: BoxId, cols: *const Axis, rows: *const Axis) Error!struct { items: []GridItem, ncols: u32, nrows: u32 } {
+    const st = l.get(id).style;
+    const column_flow = st.grid_auto_flow.column;
+    var items: std.ArrayList(GridItem) = .empty;
+    var pending: std.ArrayList(struct { box: BoxId, r: Span, c: Span }) = .empty;
+    var ncols: i64 = @intCast(cols.tracks.len);
+    var nrows: i64 = @intCast(rows.tracks.len);
+    var min_col: i64 = 0;
+    var min_row: i64 = 0;
+    for (l.get(id).children.items) |c| {
+        const cb = l.get(c);
+        if (cb.isPositioned()) {
+            try addAbsolute(l, c);
+            continue;
+        }
+        const gp = cb.style.grid_place;
+        const r = resolvePlacement(gp[0], gp[2], rows, st.grid_template_areas, true);
+        const k = resolvePlacement(gp[1], gp[3], cols, st.grid_template_areas, false);
+        try pending.append(l.a, .{ .box = c, .r = r, .c = k });
+        if (r.start) |sv| {
+            nrows = @max(nrows, sv + r.span);
+            min_row = @min(min_row, sv);
+        } else nrows = @max(nrows, r.span);
+        if (k.start) |sv| {
+            ncols = @max(ncols, sv + k.span);
+            min_col = @min(min_col, sv);
+        } else ncols = @max(ncols, k.span);
+    }
+    // Lines before the explicit grid (negative indexes) shift it.
+    const shift_c: i64 = -min_col;
+    const shift_r: i64 = -min_row;
+    ncols += shift_c;
+    nrows += shift_r;
+    if (ncols < 1) ncols = 1;
+    // Occupancy, grown as rows (or columns) are added.
+    var occ: std.ArrayList(bool) = .empty;
+    const major_len: usize = @intCast(if (column_flow) nrows else ncols);
+    const Grow = struct {
+        fn ensure(a: std.mem.Allocator, o: *std.ArrayList(bool), lines: usize, width: usize) Error!void {
+            while (o.items.len < lines * width) try o.append(a, false);
+        }
+    };
+    const width: usize = @max(1, major_len);
+    const mark = struct {
+        fn f(a: std.mem.Allocator, o: *std.ArrayList(bool), w: usize, minor0: usize, minor_span: usize, major0: usize, major_span: usize) Error!void {
+            try Grow.ensure(a, o, minor0 + minor_span, w);
+            for (minor0..minor0 + minor_span) |mi| for (major0..@min(w, major0 + major_span)) |ma| {
+                o.items[mi * w + ma] = true;
+            };
+        }
+        fn free(o: *const std.ArrayList(bool), w: usize, minor0: usize, minor_span: usize, major0: usize, major_span: usize) bool {
+            if (major0 + major_span > w) return false;
+            for (minor0..minor0 + minor_span) |mi| for (major0..major0 + major_span) |ma| {
+                const idx = mi * w + ma;
+                if (idx < o.items.len and o.items[idx]) return false;
+            };
+            return true;
+        }
+    };
+    // Definite on both axes first.
+    for (pending.items) |p| if (p.r.start != null and p.c.start != null) {
+        const r0: usize = @intCast(p.r.start.? + shift_r);
+        const c0: usize = @intCast(p.c.start.? + shift_c);
+        try items.append(l.a, .{ .box = p.box, .row0 = @intCast(r0), .row1 = @intCast(r0 + p.r.span), .col0 = @intCast(c0), .col1 = @intCast(c0 + p.c.span) });
+        if (column_flow) try mark.f(l.a, &occ, width, c0, p.c.span, r0, p.r.span) else try mark.f(l.a, &occ, width, r0, p.r.span, c0, p.c.span);
+    };
+    // Then the rest, in order, by the cursor.
+    var cur_minor: usize = 0;
+    var cur_major: usize = 0;
+    for (pending.items) |p| {
+        if (p.r.start != null and p.c.start != null) continue;
+        const major_fixed: ?i64 = if (column_flow) p.r.start else p.c.start;
+        const minor_fixed: ?i64 = if (column_flow) p.c.start else p.r.start;
+        const major_span: usize = @min(width, @as(usize, if (column_flow) p.r.span else p.c.span));
+        const minor_span: usize = if (column_flow) p.c.span else p.r.span;
+        var mi: usize = if (minor_fixed) |v| @intCast(v + (if (column_flow) shift_c else shift_r)) else if (st.grid_auto_flow.dense) 0 else cur_minor;
+        var ma: usize = if (major_fixed) |v| @intCast(v + (if (column_flow) shift_r else shift_c)) else if (st.grid_auto_flow.dense or minor_fixed != null) 0 else cur_major;
+        var guard: usize = 0;
+        while (guard < 100000) : (guard += 1) {
+            if (major_fixed != null) {
+                if (mark.free(&occ, width, mi, minor_span, ma, major_span)) break;
+                mi += 1;
+                continue;
+            }
+            if (ma + major_span <= width and mark.free(&occ, width, mi, minor_span, ma, major_span)) break;
+            ma += 1;
+            if (ma + major_span > width) {
+                if (minor_fixed != null) {
+                    // A fixed row with no room left: past the end.
+                    ma = 0;
+                    mi += 0;
+                    if (guard > width) break;
+                    continue;
+                }
+                ma = 0;
+                mi += 1;
+            }
+        }
+        try mark.f(l.a, &occ, width, mi, minor_span, ma, major_span);
+        if (major_fixed == null and minor_fixed == null) {
+            cur_minor = mi;
+            cur_major = ma + major_span;
+        }
+        const r0 = if (column_flow) ma else mi;
+        const c0 = if (column_flow) mi else ma;
+        const rs = if (column_flow) major_span else minor_span;
+        const cs = if (column_flow) minor_span else major_span;
+        try items.append(l.a, .{ .box = p.box, .row0 = @intCast(r0), .row1 = @intCast(r0 + rs), .col0 = @intCast(c0), .col1 = @intCast(c0 + cs) });
+    }
+    var nr: u32 = @intCast(nrows);
+    var nc: u32 = @intCast(ncols);
+    for (items.items) |it| {
+        nr = @max(nr, it.row1);
+        nc = @max(nc, it.col1);
+    }
+    return .{ .items = items.items, .ncols = nc, .nrows = nr };
+}
+
+/// The track sizing algorithm (§12), simplified: fixed tracks at their
+/// size; intrinsic ones from their items' contributions (`contrib`
+/// gives an item's min and max on this axis), spanning items spread
+/// over what they span; free space grows tracks to their limits, then
+/// `fr` tracks share what is left (with no `fr` track, `auto` tracks
+/// stretch to fill it). `avail` null sizes for max-content.
+fn sizeTracks(l: *Layout, tracks_in: []const style.Track, count: u32, auto_track: style.Track, items: []const GridItem, rows: bool, avail: ?f64, gap: f64, contrib: *const fn (l: *Layout, it: GridItem) Error!Widths, stretch_auto: bool) Error![]f64 {
+    const n: usize = count;
+    const base = try l.a.alloc(f64, n);
+    const limit = try l.a.alloc(f64, n);
+    const tracks = try l.a.alloc(style.Track, n);
+    for (0..n) |k| tracks[k] = if (k < tracks_in.len) tracks_in[k] else auto_track;
+    for (tracks, 0..) |t, k| {
+        base[k] = fixedTrackSize(t.min, avail) orelse 0;
+        limit[k] = switch (t.max) {
+            .px, .percent => fixedTrackSize(t.max, avail) orelse std.math.inf(f64),
+            .fr => std.math.inf(f64),
+            else => -1, // from the items
+        };
+    }
+    const isFlex = struct {
+        fn f(t: style.Track) bool {
+            return t.max == .fr;
+        }
+    }.f;
+    // Contributions, one-track items first.
+    for ([_]bool{ false, true }) |spanning| for (items) |it| {
+        const a0: usize = if (rows) it.row0 else it.col0;
+        const a1: usize = if (rows) it.row1 else it.col1;
+        if ((a1 - a0 > 1) != spanning) continue;
+        var any_flex = false;
+        for (a0..a1) |k| if (isFlex(tracks[k])) {
+            any_flex = true;
+        };
+        const cw = try contrib(l, it);
+        const gaps = gap * @as(f64, @floatFromInt(a1 - a0 - 1));
+        if (!spanning) {
+            const k = a0;
+            const t = tracks[k];
+            switch (t.min) {
+                .auto, .min_content => base[k] = @max(base[k], cw.min),
+                .max_content => base[k] = @max(base[k], cw.max),
+                else => {},
+            }
+            // A flexible track's automatic minimum is the content's.
+            switch (t.max) {
+                .auto, .max_content => limit[k] = @max(limit[k], cw.max),
+                .min_content => limit[k] = @max(limit[k], cw.min),
+                else => {},
+            }
+            continue;
+        }
+        // Spanning: the excess over what the tracks have, spread over
+        // the intrinsic ones among them (the flexible ones when any).
+        var have: f64 = gaps;
+        var have_lim: f64 = gaps;
+        var intrinsic: usize = 0;
+        for (a0..a1) |k| {
+            have += base[k];
+            have_lim += if (limit[k] < 0) base[k] else if (std.math.isInf(limit[k])) base[k] else limit[k];
+            const t = tracks[k];
+            if ((any_flex and isFlex(t)) or (!any_flex and (t.min == .auto or t.min == .min_content or t.min == .max_content))) intrinsic += 1;
+        }
+        if (intrinsic == 0) continue;
+        const nf: f64 = @floatFromInt(intrinsic);
+        for (a0..a1) |k| {
+            const t = tracks[k];
+            if (!((any_flex and isFlex(t)) or (!any_flex and (t.min == .auto or t.min == .min_content or t.min == .max_content)))) continue;
+            if (cw.min > have) base[k] += (cw.min - have) / nf;
+            if (!any_flex and cw.max > have_lim and limit[k] >= 0 and !std.math.isInf(limit[k])) limit[k] += (cw.max - have_lim) / nf;
+            if (!any_flex and limit[k] < 0) limit[k] = @max(0, base[k]);
+        }
+    };
+    for (0..n) |k| {
+        if (limit[k] < 0) limit[k] = base[k];
+        if (!std.math.isInf(limit[k])) limit[k] = @max(limit[k], base[k]);
+    }
+    const gaps_total = gap * @as(f64, @floatFromInt(if (n > 0) n - 1 else 0));
+    var sum: f64 = gaps_total;
+    for (base) |b| sum += b;
+    const room: ?f64 = if (avail) |a| a - sum else null;
+    // Grow toward the limits.
+    if (room == null) {
+        for (0..n) |k| if (!isFlex(tracks[k]) and !std.math.isInf(limit[k])) {
+            base[k] = limit[k];
+        };
+    } else if (room.? > 0) {
+        var free = room.?;
+        var rounds: usize = 0;
+        while (free > 0.01 and rounds < 8) : (rounds += 1) {
+            var growable: usize = 0;
+            for (0..n) |k| if (!isFlex(tracks[k]) and base[k] < limit[k]) {
+                growable += 1;
+            };
+            if (growable == 0) break;
+            const share = free / @as(f64, @floatFromInt(growable));
+            for (0..n) |k| if (!isFlex(tracks[k]) and base[k] < limit[k]) {
+                const g = @min(share, limit[k] - base[k]);
+                base[k] += g;
+                free -= g;
+            };
+        }
+    }
+    // Flexible tracks share what is left.
+    var flex_sum: f64 = 0;
+    for (tracks) |t| if (isFlex(t)) {
+        flex_sum += t.max.fr;
+    };
+    if (flex_sum > 0) {
+        var inflexible = try l.a.alloc(bool, n);
+        @memset(inflexible, false);
+        if (avail) |a| {
+            var rounds: usize = 0;
+            while (rounds < 8) : (rounds += 1) {
+                var left: f64 = a - gaps_total;
+                var fs: f64 = 0;
+                for (0..n) |k| {
+                    if (isFlex(tracks[k]) and !inflexible[k]) fs += tracks[k].max.fr else left -= base[k];
+                }
+                if (fs <= 0) break;
+                const unit = @max(0, left) / @max(1, fs);
+                var changed = false;
+                for (0..n) |k| if (isFlex(tracks[k]) and !inflexible[k] and base[k] > unit * tracks[k].max.fr) {
+                    inflexible[k] = true;
+                    changed = true;
+                };
+                if (!changed) {
+                    for (0..n) |k| if (isFlex(tracks[k]) and !inflexible[k]) {
+                        base[k] = unit * tracks[k].max.fr;
+                    };
+                    break;
+                }
+            }
+        } else {
+            // Max-content: the fr unit that gives every flexible track
+            // its content.
+            var unit: f64 = 0;
+            for (0..n) |k| if (isFlex(tracks[k]) and tracks[k].max.fr > 0) {
+                unit = @max(unit, base[k] / tracks[k].max.fr);
+            };
+            for (0..n) |k| if (isFlex(tracks[k])) {
+                base[k] = @max(base[k], unit * tracks[k].max.fr);
+            };
+        }
+    } else if (stretch_auto) if (avail) |a| {
+        // No flexible track: `auto` ones stretch into the rest.
+        var total: f64 = gaps_total;
+        for (base) |b| total += b;
+        var autos: usize = 0;
+        for (tracks) |t| if (t.max == .auto) {
+            autos += 1;
+        };
+        if (autos > 0 and a > total) for (0..n) |k| if (tracks[k].max == .auto) {
+            base[k] += (a - total) / @as(f64, @floatFromInt(autos));
+        };
+    };
+    return base;
+}
+
+fn colContrib(l: *Layout, it: GridItem) Error!Widths {
+    const cb = l.box(it.box);
+    const pw = try preferredWidths(l, it.box);
+    const m = (resolveLA(cb.style.margin[1], 0) orelse 0) + (resolveLA(cb.style.margin[3], 0) orelse 0);
+    return .{ .min = pw.min + m, .max = pw.max + m };
+}
+
+fn rowContrib(l: *Layout, it: GridItem) Error!Widths {
+    // Laid out at its column width already: its margin box height.
+    const cb = l.get(it.box);
+    const h = cb.h + cb.margin[0] + cb.margin[2];
+    return .{ .min = h, .max = h };
+}
+
+fn gridWidths(l: *Layout, id: BoxId) Error!Widths {
+    const st = l.get(id).style;
+    const gap = resolveLP(st.column_gap, 0);
+    const cols = try expandAxis(l, st.grid_template_columns, null, gap);
+    const rows = try expandAxis(l, st.grid_template_rows, null, resolveLP(st.row_gap, 0));
+    const placed = try placeGridItems(l, id, &cols, &rows);
+    const max = try sizeTracks(l, cols.tracks, placed.ncols, st.grid_auto_columns, placed.items, false, null, gap, colContrib, false);
+    const min = try sizeTracks(l, cols.tracks, placed.ncols, st.grid_auto_columns, placed.items, false, 0, gap, colContrib, false);
+    const gaps = gap * @as(f64, @floatFromInt(if (placed.ncols > 0) placed.ncols - 1 else 0));
+    var out: Widths = .{ .min = gaps, .max = gaps };
+    for (min) |x| out.min += x;
+    for (max) |x| out.max += x;
+    out.max = @max(out.max, out.min);
+    return out;
+}
+
+/// Lay a grid container's items out in its content box; returns the
+/// content height.
+fn layoutGridContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
+    _ = cb_w;
+    const g = l.get(id);
+    const st = g.style;
+    const content_x = g.contentX();
+    const content_y = g.contentY();
+    const content_w = g.contentW();
+    const col_gap = resolveLP(st.column_gap, content_w);
+    const row_gap = resolveLP(st.row_gap, content_w);
+    const parent_h: ?f64 = if (g.parent) |p| (if (l.get(p).style.height == .auto and l.get(p).kind != .root) null else l.get(p).contentH()) else null;
+    var definite_h: ?f64 = null;
+    if (st.height == .px) definite_h = st.height.px - (if (st.box_sizing == .border_box) verticalExtras(g) else 0);
+    if ((st.height == .percent or st.height == .calc) and parent_h != null) definite_h = resolveLA(st.height, parent_h.?).? - (if (st.box_sizing == .border_box) verticalExtras(g) else 0);
+    const cols = try expandAxis(l, st.grid_template_columns, content_w, col_gap);
+    const rows = try expandAxis(l, st.grid_template_rows, definite_h, row_gap);
+    const placed = try placeGridItems(l, id, &cols, &rows);
+    const widths = try sizeTracks(l, cols.tracks, placed.ncols, st.grid_auto_columns, placed.items, false, content_w, col_gap, colContrib, true);
+    // `auto-fit`: empty repeated tracks collapse.
+    if (st.grid_template_columns.auto_repeat) |ar| if (ar.fit) {
+        for (cols.repeat_at..cols.repeat_at + cols.repeat_added) |k| {
+            if (k >= widths.len) break;
+            var used = false;
+            for (placed.items) |it| if (it.col0 <= k and k < it.col1) {
+                used = true;
+            };
+            if (!used) widths[k] = 0;
+        }
+    };
+    const col_x = try l.a.alloc(f64, placed.ncols + 1);
+    // `justify-content` over the tracks when they leave room.
+    var used_w: f64 = col_gap * @as(f64, @floatFromInt(if (placed.ncols > 0) placed.ncols - 1 else 0));
+    for (widths) |w| used_w += w;
+    const spare_w = @max(0, content_w - used_w);
+    var x0 = content_x;
+    var between: f64 = 0;
+    switch (st.justify_content) {
+        .center => x0 += spare_w / 2,
+        .flex_end, .end => x0 += spare_w,
+        .space_between => if (placed.ncols > 1) {
+            between = spare_w / @as(f64, @floatFromInt(placed.ncols - 1));
+        },
+        .space_around => if (placed.ncols > 0) {
+            between = spare_w / @as(f64, @floatFromInt(placed.ncols));
+            x0 += between / 2;
+        },
+        .space_evenly => if (placed.ncols > 0) {
+            between = spare_w / @as(f64, @floatFromInt(placed.ncols + 1));
+            x0 += between;
+        },
+        else => {},
+    }
+    col_x[0] = x0;
+    for (0..placed.ncols) |k| col_x[k + 1] = col_x[k] + widths[k] + col_gap + between;
+    // Each item laid out at its area's width (or its own, aligned).
+    for (placed.items) |it| {
+        const cb = l.box(it.box);
+        const margins = resolveEdges(cb, content_w);
+        cb.margin = .{ margins[0] orelse 0, margins[1] orelse 0, margins[2] orelse 0, margins[3] orelse 0 };
+        const area_w = col_x[it.col1] - col_gap - between - col_x[it.col0];
+        const extras = horizontalExtras(cb);
+        const justify: style.AlignSelf = if (cb.style.justify_self != .auto) cb.style.justify_self else switch (st.justify_items) {
+            .stretch, .normal => .stretch,
+            .center => .center,
+            .end, .flex_end, .self_end, .right => .end,
+            else => .start,
+        };
+        const auto_margins = margins[1] == null or margins[3] == null;
+        var w: f64 = undefined;
+        if (resolveLA(cb.style.width, area_w)) |sw| {
+            w = constrainWidth(cb, if (cb.style.box_sizing == .border_box) sw - extras else sw, area_w);
+        } else if (isReplacedBox(l, cb)) {
+            w = replacedSize(l, it.box, area_w)[0];
+        } else if ((justify == .stretch or justify == .normal) and !auto_margins) {
+            w = constrainWidth(cb, @max(0, area_w - cb.margin[1] - cb.margin[3] - extras), area_w);
+        } else {
+            // Shrink-to-fit in the area (preferred widths are border-box).
+            const pw = try preferredWidths(l, it.box);
+            const room = area_w - cb.margin[1] - cb.margin[3] - extras;
+            w = constrainWidth(cb, @min(@max(pw.min - extras, room), pw.max - extras), area_w);
+        }
+        const free_w = @max(0, area_w - cb.margin[1] - cb.margin[3] - extras - w);
+        var dx: f64 = 0;
+        if (auto_margins) {
+            if (margins[1] == null and margins[3] == null) dx = free_w / 2 else if (margins[3] == null) dx = free_w;
+        } else switch (justify) {
+            .center => dx = free_w / 2,
+            .end, .flex_end, .self_end, .right => dx = free_w,
+            else => {},
+        }
+        try layoutFlexItem(l, it.box, col_x[it.col0] + dx, 0, w, null);
+    }
+    const heights = try sizeTracks(l, rows.tracks, placed.nrows, st.grid_auto_rows, placed.items, true, definite_h, row_gap, rowContrib, definite_h != null);
+    const row_y = try l.a.alloc(f64, placed.nrows + 1);
+    row_y[0] = content_y;
+    for (0..placed.nrows) |k| row_y[k + 1] = row_y[k] + heights[k] + row_gap;
+    // Items into their rows, stretched or aligned.
+    for (placed.items) |it| {
+        const cb = l.box(it.box);
+        const area_h = row_y[it.row1] - row_gap - row_y[it.row0];
+        const alignment: style.AlignSelf = if (cb.style.align_self != .auto) cb.style.align_self else switch (st.align_items) {
+            .stretch, .normal => .stretch,
+            .center => .center,
+            .end, .flex_end, .self_end => .end,
+            else => .start,
+        };
+        const outer_h = cb.h + cb.margin[0] + cb.margin[2];
+        var dy: f64 = 0;
+        if ((alignment == .stretch or alignment == .normal) and cb.style.height == .auto and !isReplacedBox(l, cb)) {
+            cb.h = @max(cb.h, area_h - cb.margin[0] - cb.margin[2]);
+        } else switch (alignment) {
+            .center => dy = (area_h - outer_h) / 2,
+            .end, .flex_end, .self_end => dy = area_h - outer_h,
+            else => {},
+        }
+        try moveBox(l, it.box, 0, row_y[it.row0] + cb.margin[0] + dy - cb.y);
+    }
+    const total = if (placed.nrows > 0) row_y[placed.nrows] - row_gap - content_y else 0;
+    return @max(0, total);
 }
 
 // ------------------------------------------------------------ tables
@@ -1590,7 +2155,13 @@ fn contentWidths(l: *Layout, id: BoxId) Error!Widths {
     return preferredWidthsOf(l, id, true);
 }
 
+/// Nonzero while intrinsic widths are being measured (the engine is
+/// single-threaded; a counter, since measurements nest).
+var measuring: u32 = 0;
+
 fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
+    measuring += 1;
+    defer measuring -= 1;
     const b = l.box(id);
     const st = b.style;
     for (0..4) |i| {
@@ -1616,7 +2187,11 @@ fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
     }
     var min: f64 = 0;
     var max: f64 = 0;
-    if (isFlexContainer(b)) {
+    if (isGridContainer(b)) {
+        const gw = try gridWidths(l, id);
+        min = gw.min;
+        max = gw.max;
+    } else if (isFlexContainer(b)) {
         // A row's max-content is its items' side by side (plus gaps),
         // its min-content the widest item's unless it cannot wrap; a
         // column's are the widest item's.
@@ -1871,7 +2446,10 @@ fn layoutAtomic(l: *Layout, id: BoxId) Error!AtomicSize {
         // A replaced element sits on its bottom margin edge.
         return .{ .w = b.w + b.margin[1] + b.margin[3], .h = b.h + b.margin[0] + b.margin[2], .baseline = b.h + b.margin[0] };
     }
-    const width = if (resolveLA(b.style.width, cb_w)) |w| (if (b.style.box_sizing == .border_box) w - extras else w) else blk: {
+    // Measuring, a percentage width is `auto` (CSS Sizing's cyclic
+    // percentages).
+    const pct_width = b.style.width == .percent or b.style.width == .calc;
+    const width = if (if (measuring > 0 and pct_width) null else resolveLA(b.style.width, cb_w)) |w| (if (b.style.box_sizing == .border_box) w - extras else w) else blk: {
         // Shrink-to-fit: the preferred widths are border-box ones.
         const pref = try preferredWidths(l, id);
         const avail = cb_w - b.margin[1] - b.margin[3] - extras;
@@ -1889,6 +2467,18 @@ fn layoutAtomic(l: *Layout, id: BoxId) Error!AtomicSize {
         baseline = lb - b.y + b.margin[0];
     };
     return .{ .w = b.w + b.margin[1] + b.margin[3], .h = b.h + b.margin[0] + b.margin[2], .baseline = baseline };
+}
+
+/// The first line box in a block's in-flow subtree.
+fn firstLine(l: *const Layout, id: BoxId) ?Line {
+    const b = l.get(id);
+    if (b.lines.items.len > 0) return b.lines.items[0];
+    for (b.children.items) |c| {
+        const cb = l.get(c);
+        if (cb.isOutOfFlow() or !cb.isBlockLevel()) continue;
+        if (firstLine(l, c)) |ln| return ln;
+    }
+    return null;
 }
 
 fn lastBaseline(l: *const Layout, id: BoxId) ?f64 {
@@ -2019,6 +2609,15 @@ fn replacedSize(l: *const Layout, id: BoxId, cb_w: f64) [2]f64 {
     return .{ w orelse em * 0.5 * @max(1, chars), h orelse em * 1.25 };
 }
 
+/// A `transform`'s translation, applied as layout's last word on a box
+/// (percentages of its own border box).
+fn translateBox(l: *Layout, id: BoxId) Error!void {
+    const b = l.get(id);
+    const t = b.style.translate;
+    if (t[0] == .px and t[0].px == 0 and t[1] == .px and t[1].px == 0) return;
+    try moveBox(l, id, resolveLP(t[0], b.w), resolveLP(t[1], b.h));
+}
+
 /// A replaced box's content height once its content width is settled
 /// (by a flex line, a stretch, or `left` and `right`): its own height,
 /// else the width over its ratio.
@@ -2107,8 +2706,19 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
             if (!fits and pending.items.len > 0 and (it.kind == .text or it.kind == .atomic or (it.kind == .space and it.no_break))) {
                 // Break at the last opportunity, or before this item.
                 if (last_break) |lb| {
-                    consumed = pending.items[lb].item_index_after;
-                    pending.items.len = lb + 1;
+                    // Inline boxes closing right after the break close on
+                    // this line (else `<a>word </a>` spans to the line's
+                    // end, underline and all).
+                    var keep = lb + 1;
+                    while (keep < pending.items.len and pending.items[keep].item.kind == .inline_close) keep += 1;
+                    consumed = pending.items[keep - 1].item_index_after;
+                    pending.items.len = keep;
+                    line_open.clearRetainingCapacity();
+                    try line_open.appendSlice(l.a, open_stack.items);
+                    for (pending.items) |pi| {
+                        if (pi.item.kind == .inline_open) try line_open.append(l.a, pi.item.box);
+                        if (pi.item.kind == .inline_close and line_open.items.len > 0) line_open.items.len -= 1;
+                    }
                 } else break;
                 break;
             }
@@ -2130,11 +2740,19 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
             }
             consumed += 1;
         }
-        // Trailing collapsible spaces come off the line.
+        // Trailing collapsible spaces come off the line — also one just
+        // inside a closing inline box (`<a>text </a>`, whose underline
+        // would otherwise run on under it).
         while (pending.items.len > 0) {
-            const last = pending.items[pending.items.len - 1];
+            var k = pending.items.len;
+            while (k > 0 and (pending.items[k - 1].item.kind == .inline_close or pending.items[k - 1].item.kind == .inline_open)) k -= 1;
+            if (k == 0) break;
+            const last = pending.items[k - 1];
             if (last.item.kind == .space and !last.item.no_break and last.item.text.len == 1 and l.get(last.item.box).style.white_space != .pre_wrap) {
-                pending.items.len -= 1;
+                // Later items shift left by the space's width.
+                const w = last.item.w;
+                _ = pending.orderedRemove(k - 1);
+                for (pending.items[k - 1 ..]) |*q| q.x -= w;
             } else break;
         }
         // Floats met on this line go beside it (or below it if they do
@@ -2439,7 +3057,7 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
     const parent_h: ?f64 = if (container.parent) |p| (if (l.get(p).style.height == .auto and l.get(p).kind != .root) null else l.get(p).contentH()) else null;
     var definite_h: ?f64 = null;
     if (st.height == .px) definite_h = st.height.px - (if (st.box_sizing == .border_box) verticalExtras(container) else 0);
-    if (st.height == .percent and parent_h != null) definite_h = resolveLA(st.height, parent_h.?).? - (if (st.box_sizing == .border_box) verticalExtras(container) else 0);
+    if ((st.height == .percent or st.height == .calc) and parent_h != null) definite_h = resolveLA(st.height, parent_h.?).? - (if (st.box_sizing == .border_box) verticalExtras(container) else 0);
     const main_avail: ?f64 = if (row) content_w else definite_h;
     const cross_avail: ?f64 = if (row) definite_h else content_w;
     const main_gap = resolveLP(if (row) st.column_gap else st.row_gap, content_w);
@@ -2495,6 +3113,7 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
                 .none => {},
                 .px => |x| max = x - (if (cb.style.box_sizing == .border_box) extras else 0),
                 .percent => |pc| max = cb_w * pc / 100 - (if (cb.style.box_sizing == .border_box) extras else 0),
+                .calc => |m| max = m.of(cb_w) - (if (cb.style.box_sizing == .border_box) extras else 0),
             }
         } else {
             min = resolveLP(cb.style.min_height, parent_h orelse 0) - (if (cb.style.box_sizing == .border_box) extras else 0);
@@ -2503,6 +3122,9 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
                 .px => |x| max = x - (if (cb.style.box_sizing == .border_box) extras else 0),
                 .percent => |pc| if (definite_h) |h| {
                     max = h * pc / 100 - (if (cb.style.box_sizing == .border_box) extras else 0);
+                },
+                .calc => |m| if (definite_h) |h| {
+                    max = m.of(h) - (if (cb.style.box_sizing == .border_box) extras else 0);
                 },
             }
         }
@@ -2652,14 +3274,14 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
             // Cross alignment: the item's own `align-self`, else the
             // container's `align-items` (baseline taken as flex-start).
             const alignment: style.AlignSelf = if (cb.style.align_self != .auto) cb.style.align_self else switch (st.align_items) {
-                .stretch => .stretch,
-                .flex_start, .start, .self_start, .baseline => .flex_start,
-                .flex_end, .end, .self_end => .flex_end,
+                .stretch, .normal => .stretch,
+                .flex_start, .start, .self_start, .baseline, .left => .flex_start,
+                .flex_end, .end, .self_end, .right => .flex_end,
                 .center => .center,
             };
             const cross_auto_margins = if (row) (margins[0] == null or margins[2] == null) else (margins[1] == null or margins[3] == null);
             var cross_size = it.cross; // outer
-            if (alignment == .stretch and !cross_auto_margins and (if (row) cb.style.height == .auto else cb.style.width == .auto)) {
+            if ((alignment == .stretch or alignment == .normal) and !cross_auto_margins and (if (row) cb.style.height == .auto else cb.style.width == .auto)) {
                 cross_size = line.cross;
                 if (row) {
                     cb.h = @max(0, line.cross - cb.margin[0] - cb.margin[2]);
@@ -2679,7 +3301,7 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
                     if (margins[3] == null and margins[1] == null) cross_offset = spare / 2 else if (margins[3] == null) cross_offset = spare;
                 }
             } else switch (alignment) {
-                .flex_end, .end, .self_end => cross_offset = line.cross - cross_size,
+                .flex_end, .end, .self_end, .right => cross_offset = line.cross - cross_size,
                 .center => cross_offset = (line.cross - cross_size) / 2,
                 else => {},
             }
@@ -3169,4 +3791,112 @@ test "layout: an inline svg with only a viewBox fills its container's width" {
     try std.testing.expectEqual(@as(f64, 24), s.w);
     try std.testing.expectEqual(@as(f64, 12), s.h);
     try std.testing.expectEqual(@as(f64, 30), boxOf(l, doc, "#t").w);
+}
+
+test "layout: grid tracks — fixed, fr, auto — with gaps and explicit placement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px;line-height:20px'><div style='display:grid;grid-template-columns:100px 1fr 2fr;column-gap:10px;row-gap:5px'><div id=a>a</div><div id=b>b</div><div id=c>c</div><div id=d style='grid-column:2 / 4'>d</div><div id=e style='grid-row:3;grid-column:1'>e</div></div>", 400);
+    const doc = l.doc;
+    const ba = boxOf(l, doc, "#a");
+    const bb = boxOf(l, doc, "#b");
+    const bc = boxOf(l, doc, "#c");
+    const bd = boxOf(l, doc, "#d");
+    const be = boxOf(l, doc, "#e");
+    // 400 - 100 - 20 = 280 for 3fr: 93.33 and 186.67.
+    try std.testing.expectEqual(@as(f64, 100), ba.w);
+    try std.testing.expectEqual(@as(f64, 110), bb.x);
+    try std.testing.expectApproxEqAbs(@as(f64, 280.0 / 3.0), bb.w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, 400), bc.x + bc.w, 0.01);
+    // The spanning item covers columns 2 and 3 and the gap between.
+    try std.testing.expectEqual(@as(f64, 110), bd.x);
+    try std.testing.expectApproxEqAbs(@as(f64, 290), bd.w, 0.01);
+    try std.testing.expectEqual(ba.y + 20 + 5, bd.y);
+    try std.testing.expectEqual(bd.y + 20 + 5, be.y);
+}
+
+test "layout: grid areas, auto-fill and auto-placement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px;line-height:20px'><div style=\"display:grid;grid-template-columns:120px 1fr;grid-template-areas:'side main' 'foot foot'\"><div id=m style='grid-area:main'>m</div><div id=s style='grid-area:side'>s</div><div id=f style='grid-area:foot'>f</div></div><div style='display:grid;grid-template-columns:repeat(auto-fill, 100px)'><i id=i1>1</i><i id=i2>2</i><i id=i3>3</i><i id=i4>4</i><i id=i5>5</i></div>", 400);
+    const doc = l.doc;
+    const m = boxOf(l, doc, "#m");
+    const s = boxOf(l, doc, "#s");
+    const f = boxOf(l, doc, "#f");
+    try std.testing.expectEqual(@as(f64, 0), s.x);
+    try std.testing.expectEqual(@as(f64, 120), m.x);
+    try std.testing.expectEqual(m.y, s.y);
+    try std.testing.expectEqual(@as(f64, 400), f.w);
+    try std.testing.expect(f.y > m.y);
+    // Four 100px columns fit in 400: the fifth item wraps.
+    const r1 = boxOf(l, doc, "#i4");
+    const r2 = boxOf(l, doc, "#i5");
+    try std.testing.expectEqual(@as(f64, 300), r1.x);
+    try std.testing.expectEqual(@as(f64, 0), r2.x);
+    try std.testing.expect(r2.y > r1.y);
+}
+
+// GitHub (2026-09-23): `flex: 1 1 0` was dropped whole for its
+// unitless zero, so a `width:100%` item took the line and the sidebar
+// wrapped below it.
+test "layout: flex 1 1 0 shares the line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0'><div style='display:flex;flex-wrap:wrap'><div id=c style='flex:1 1 0;width:100%'>c</div><div id=p style='width:100px'>p</div></div>", 400);
+    const doc = l.doc;
+    try std.testing.expectEqual(@as(f64, 300), boxOf(l, doc, "#c").w);
+    try std.testing.expectEqual(@as(f64, 300), boxOf(l, doc, "#p").x);
+}
+
+// GitHub's file names: a `max-width:100%` inline-block measured inside
+// a flex item came out 0 wide.
+test "layout: a percentage size is auto while intrinsic widths are measured" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px'><div style='display:flex'><div id=o style='overflow:hidden'><span style='display:inline-block;max-width:100%;white-space:nowrap'>abcdef</span></div></div>", 400);
+    try std.testing.expectEqual(@as(f64, 48), boxOf(l, l.doc, "#o").w);
+}
+
+test "layout: translate moves a box after layout; logical margins are physical" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0'><div style='position:relative;height:100px'><div id=t style='position:absolute;top:50%;width:20px;height:20px;transform:translateY(-50%) translateX(5px)'></div></div><div id=m style='margin-inline-start:12px;padding-block:3px 4px'></div>", 400);
+    const t = boxOf(l, l.doc, "#t");
+    try std.testing.expectEqual(@as(f64, 40), t.y);
+    try std.testing.expectEqual(@as(f64, 5), t.x);
+    const m = boxOf(l, l.doc, "#m");
+    try std.testing.expectEqual(@as(f64, 12), m.x);
+    try std.testing.expectEqual(@as(f64, 7), m.h);
+}
+
+// Lite CNN: `<a>headline </a>` at a line's end underlined the space.
+test "layout: a trailing space inside a closing inline box comes off the line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px'><div style='width:64px'><a id=a href=x>aaaa </a>bbbbbbbb</div>", 400);
+    for (l.fragments.items) |f| {
+        if (f.dead or f.kind != .inline_span) continue;
+        // The link's span ends where its text does: 4 cells.
+        try std.testing.expectEqual(@as(f64, 32), f.w);
+    }
+}
+
+// The Python docs' contents: an item whose text is an anonymous block
+// before a nested list had no bullet.
+test "layout: an item that starts with a block still has its marker" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px;line-height:20px'><ul style='margin:0;padding-left:40px'><li id=i>text<ul><li>inner</li></ul></li></ul>", 400);
+    const li = boxOf(l, l.doc, "#i");
+    try std.testing.expectEqual(@as(usize, 1), li.lines.items.len);
+    const f = l.fragments.items[li.lines.items[0].first_frag];
+    try std.testing.expect(f.kind == .marker);
+    try std.testing.expectEqual(li.y, li.lines.items[0].y);
 }

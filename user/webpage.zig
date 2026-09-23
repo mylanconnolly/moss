@@ -695,6 +695,9 @@ fn loadPicturesNear() void {
             if (b.kind != .text and b.style.background_image == .url and page.n_backgrounds < max_backgrounds) {
                 if (loadBackground(b.style.background_image.url, b.style.background_base)) got_bg += 1;
             }
+            if (b.kind != .text and b.style.mask_image == .url and page.n_backgrounds < max_backgrounds) {
+                if (loadBackground(b.style.mask_image.url, b.style.mask_base)) got_bg += 1;
+            }
             const node = b.node orelse continue;
             if (b.kind != .text and doc.get(node).namespace == .svg and std.mem.eql(u8, doc.get(node).name, "svg")) {
                 if (pictureOf(node) == null and page.n_pictures < max_pictures) {

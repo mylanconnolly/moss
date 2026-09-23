@@ -161,6 +161,7 @@ fn lengthAutoValue(it: *mshl.Interp, l: web.style.LengthAuto) mshl.Error!Value {
     return switch (l) {
         .px => |x| .{ .float = x },
         .percent => |x| try percentText(it, x),
+        .calc => |m| .{ .str = try std.fmt.allocPrint(it.arena, "calc({d}% + {d}px)", .{ m.pct, m.px }) },
         .auto => .{ .str = "auto" },
     };
 }
@@ -169,6 +170,7 @@ fn lengthPercentValue(it: *mshl.Interp, l: web.style.LengthPercent) mshl.Error!V
     return switch (l) {
         .px => |x| .{ .float = x },
         .percent => |x| try percentText(it, x),
+        .calc => |m| .{ .str = try std.fmt.allocPrint(it.arena, "calc({d}% + {d}px)", .{ m.pct, m.px }) },
     };
 }
 

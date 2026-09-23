@@ -846,7 +846,7 @@ pub const Parser = struct {
                     p.pos += 1;
                     const prelude = try p.take(from);
                     if (p.direct) {
-                        if (std.ascii.eqlIgnoreCase(name, "media") or std.ascii.eqlIgnoreCase(name, "supports")) {
+                        if (std.ascii.eqlIgnoreCase(name, "media") or std.ascii.eqlIgnoreCase(name, "supports") or std.ascii.eqlIgnoreCase(name, "layer") or std.ascii.eqlIgnoreCase(name, "container") or std.ascii.eqlIgnoreCase(name, "scope")) {
                             return .{ .name = name, .prelude = prelude, .block = &.{}, .rules = try p.consumeListOfRules(false) };
                         }
                         return .{ .name = name, .prelude = prelude, .block = &.{}, .items = try p.consumeBlockItems() };

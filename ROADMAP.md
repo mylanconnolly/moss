@@ -868,10 +868,13 @@ supervises), and memory history per unit beside the CPU one.
       resets and line heights, backgrounds (images, gradients, the
       shorthand, sheet-relative urls), `border-radius`, `lib/svg` (SVG
       pictures, sprites, inline `<svg>`), `data:` URLs, placeholders.
-      Remaining for the stage: grid, `calc()`, masks and clip paths,
-      fixed and sticky, transforms and opacity at paint time,
-      `overflow` scroll containers, then transitions and animations on
-      the page's tick; shaping and bidi for the scripts that need them. *Exit:* WPT reftest
+      Then grid (Level 1's core), `calc()`/`min()`/`max()`/`clamp()`,
+      cascade layers, masks, translations, logical properties, and a
+      cascade 50× faster (rule buckets, an ancestor Bloom filter).
+      Remaining for the stage: fixed and sticky, scaling and rotating
+      transforms and opacity at paint time, clip paths, `overflow`
+      scroll containers, then transitions and animations on the page's
+      tick; shaping and bidi for the scripts that need them. *Exit:* WPT reftest
       subsets per module with counts; Acid2 paints as its reference.
     - **(10) JavaScript, the engine.** `lib/js/`: lexer and parser for
       the ES2020 grammar (ASI, regex literals, templates, classes,
