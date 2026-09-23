@@ -46,6 +46,17 @@ pub const Pseudo = union(enum) {
     disabled,
     enabled,
     link,
+    /// An interaction state no static match has (`:hover`, `:focus`,
+    /// `:active`, `:visited`, `:target`…), or a pseudo-element (the
+    /// boxes they make are not built): parsed so the rest of a selector
+    /// list stands, matched by nothing.
+    never,
+    required,
+    optional,
+    read_write,
+    read_only,
+    placeholder_shown,
+    lang: []const u8,
 };
 
 pub const Simple = union(enum) {
@@ -104,6 +115,7 @@ fn cloneSimple(a: std.mem.Allocator, sm: Simple) std.mem.Allocator.Error!Simple 
             .is => |l| .{ .is = try cloneComplexes(a, l) },
             .where => |l| .{ .where = try cloneComplexes(a, l) },
             .has => |l| .{ .has = try cloneComplexes(a, l) },
+            .lang => |t| .{ .lang = try a.dupe(u8, t) },
             else => ps,
         } },
     };
@@ -331,7 +343,39 @@ fn matchPseudo(doc: *const Document, id: NodeId, ps: Pseudo) bool {
         .disabled => return attrValue(doc, id, "disabled") != null,
         .enabled => return attrValue(doc, id, "disabled") == null and (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "button") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "textarea")),
         .link => return (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) and attrValue(doc, id, "href") != null,
+        .never => return false,
+        .required => return isFormField(n.name) and attrValue(doc, id, "required") != null,
+        .optional => return isFormField(n.name) and attrValue(doc, id, "required") == null,
+        .read_write => return isEditable(doc, id),
+        .read_only => return !isEditable(doc, id),
+        .placeholder_shown => return isEditable(doc, id) and attrValue(doc, id, "placeholder") != null and (attrValue(doc, id, "value") orelse @as([]const u8, "")).len == 0,
+        .lang => |want| {
+            // The nearest `lang` up the tree, matched as a range.
+            var q: ?NodeId = id;
+            while (q) |qid| : (q = doc.get(qid).parent) {
+                if (doc.get(qid).kind != .element) continue;
+                const have = attrValue(doc, qid, "lang") orelse continue;
+                if (have.len < want.len or !std.ascii.eqlIgnoreCase(have[0..want.len], want)) return false;
+                return have.len == want.len or have[want.len] == '-';
+            }
+            return false;
+        },
     }
+}
+
+fn isFormField(name: []const u8) bool {
+    return std.mem.eql(u8, name, "input") or std.mem.eql(u8, name, "select") or std.mem.eql(u8, name, "textarea");
+}
+
+/// A text field the user can type into.
+fn isEditable(doc: *const Document, id: NodeId) bool {
+    const n = doc.get(id);
+    if (attrValue(doc, id, "readonly") != null or attrValue(doc, id, "disabled") != null) return false;
+    if (std.mem.eql(u8, n.name, "textarea")) return true;
+    if (!std.mem.eql(u8, n.name, "input")) return false;
+    const t = attrValue(doc, id, "type") orelse return true;
+    const eq = std.ascii.eqlIgnoreCase;
+    return eq(t, "text") or eq(t, "search") or eq(t, "email") or eq(t, "url") or eq(t, "tel") or eq(t, "password") or eq(t, "number") or t.len == 0;
 }
 
 fn parentIsElement(doc: *const Document, id: NodeId) bool {
@@ -562,8 +606,12 @@ const Parser = struct {
                 },
                 ':' => {
                     p.pos += 1;
-                    if (p.peek() == ':') return error.Invalid; // pseudo-elements: not here
-                    try simples.append(p.a, .{ .pseudo = try p.parsePseudo() });
+                    if (p.peek() == ':') {
+                        // A pseudo-element: its boxes are not built, so it
+                        // matches nothing — but a list it is in stands.
+                        p.pos += 1;
+                        try simples.append(p.a, .{ .pseudo = try p.parsePseudoElement() });
+                    } else try simples.append(p.a, .{ .pseudo = try p.parsePseudo() });
                 },
                 else => break,
             }
@@ -631,9 +679,51 @@ const Parser = struct {
         return error.Invalid;
     }
 
+    const pseudo_elements = [_][]const u8{ "before", "after", "first-line", "first-letter", "marker", "placeholder", "selection", "backdrop", "file-selector-button", "cue", "slotted", "part", "highlight", "target-text", "spelling-error", "grammar-error", "details-content" };
+
+    fn parsePseudoElement(p: *Parser) Error!Pseudo {
+        const name = try p.ident();
+        var known = std.ascii.startsWithIgnoreCase(name, "-webkit-");
+        for (pseudo_elements) |pe| if (std.ascii.eqlIgnoreCase(pe, name)) {
+            known = true;
+        };
+        if (!known) return error.Invalid;
+        if (p.peek() == '(') try p.skipParens();
+        return .never;
+    }
+
+    /// Past a balanced `( … )`.
+    fn skipParens(p: *Parser) Error!void {
+        var depth: usize = 0;
+        while (p.peek()) |c| {
+            p.pos += 1;
+            if (c == '(') depth += 1;
+            if (c == ')') {
+                depth -= 1;
+                if (depth == 0) return;
+            }
+        }
+        return error.Invalid;
+    }
+
     fn parsePseudo(p: *Parser) Error!Pseudo {
         const name = try p.ident();
         const eq = std.ascii.eqlIgnoreCase;
+        // The legacy single-colon pseudo-elements.
+        if (eq(name, "before") or eq(name, "after") or eq(name, "first-line") or eq(name, "first-letter")) return .never;
+        if (p.peek() == '(' and (eq(name, "lang"))) {
+            p.pos += 1;
+            p.skipWs();
+            const want = try p.stringOrIdent();
+            p.skipWs();
+            if (p.peek() != ')') return error.Invalid;
+            p.pos += 1;
+            return .{ .lang = want };
+        }
+        if (p.peek() == '(' and (eq(name, "dir") or eq(name, "state") or eq(name, "host") or eq(name, "host-context"))) {
+            try p.skipParens();
+            return .never;
+        }
         if (p.peek() == '(') {
             p.pos += 1;
             p.skipWs();
@@ -672,6 +762,14 @@ const Parser = struct {
         if (eq(name, "disabled")) return .disabled;
         if (eq(name, "enabled")) return .enabled;
         if (eq(name, "link") or eq(name, "any-link")) return .link;
+        if (eq(name, "required")) return .required;
+        if (eq(name, "optional")) return .optional;
+        if (eq(name, "read-write")) return .read_write;
+        if (eq(name, "read-only")) return .read_only;
+        if (eq(name, "placeholder-shown")) return .placeholder_shown;
+        // Interaction and history states: valid, never matched here.
+        const states = [_][]const u8{ "hover", "active", "focus", "focus-visible", "focus-within", "visited", "target", "target-within", "default", "indeterminate", "valid", "invalid", "in-range", "out-of-range", "user-invalid", "user-valid", "autofill", "fullscreen", "modal", "open", "closed", "popover-open", "playing", "paused", "defined", "scope", "host", "blank", "current", "past", "future", "local-link" };
+        for (states) |st| if (eq(name, st)) return .never;
         return error.Invalid;
     }
 
@@ -748,8 +846,14 @@ test "selectors: simple, attribute, structural, combinators" {
     try std.testing.expectEqual(@as(usize, 1), try count(a, doc, ":root"));
     try std.testing.expectEqual(@as(usize, 2), try count(a, doc, "title, span"));
     try std.testing.expectError(error.Invalid, Selector.parse(a, "p >"));
-    try std.testing.expectError(error.Invalid, Selector.parse(a, ":hover"));
-    try std.testing.expectError(error.Invalid, Selector.parse(a, "p::before"));
+    // Interaction states and pseudo-elements parse (a list holding one
+    // still applies its other selectors) and match nothing; an unknown
+    // pseudo-class is invalid.
+    try std.testing.expectEqual(@as(usize, 0), try count(a, doc, ":hover"));
+    try std.testing.expectEqual(@as(usize, 0), try count(a, doc, "p::before"));
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "ul, a:focus, p::after"));
+    try std.testing.expectError(error.Invalid, Selector.parse(a, ":bogus"));
+    try std.testing.expectError(error.Invalid, Selector.parse(a, "p::bogus"));
     const sp = try Selector.parse(a, "#a .b.c p:first-child, :where(#x) span, :is(#y, .z)");
     try std.testing.expectEqual(@as(u32, (1 << 20) | (3 << 10) | 1), specificity(sp.list[0]));
     try std.testing.expectEqual(@as(u32, 1), specificity(sp.list[1]));

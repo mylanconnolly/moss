@@ -11,9 +11,13 @@
 //! does not know is kept nowhere. The user-agent sheet is the HTML
 //! Standard's rendering section, trimmed to those properties.
 //!
+//! Custom properties cascade and inherit, and `var()` is substituted at
+//! computed-value time; HTML's presentational hints join the cascade
+//! under every author rule; `px_scale` is the page zoom.
+//!
 //! Not built: `calc()` and the other math functions (a declaration
-//! with one is dropped), `@import` (recorded, not fetched), `@supports`
-//! beyond a property check, the user origin, `revert`, and animations.
+//! with one is dropped), `@supports` beyond a property check, the user
+//! origin, `revert`, and animations.
 const std = @import("std");
 const css = @import("css.zig");
 const color = @import("color.zig");
@@ -67,6 +71,28 @@ pub const ListStylePosition = enum { inside, outside };
 pub const Overflow = enum { visible, hidden, scroll, auto, clip };
 pub const Visibility = enum { visible, hidden, collapse };
 pub const BoxSizing = enum { content_box, border_box };
+pub const BorderCollapse = enum { separate, collapse };
+pub const BackgroundRepeat = enum { repeat, repeat_x, repeat_y, no_repeat };
+pub const FillPaint = union(enum) { none, current, color: Color };
+
+/// A gradient's colour stop: its colour and, when given, where it sits
+/// along the line (a fraction; percentages and lengths alike are taken
+/// against the line when painted).
+pub const Stop = struct { color: Color, at: ?LengthPercent = null };
+
+/// `background-image`: one layer — a picture by URL (as written; the
+/// declaring sheet's URL is `background_base`) or a linear gradient.
+pub const BackgroundImage = union(enum) {
+    none,
+    url: []const u8,
+    /// `angle` in degrees, CSS's (0 up, 90 right, 180 down); `repeating`
+    /// tiles the stops.
+    linear: struct { angle: f64, stops: []const Stop, repeating: bool = false },
+};
+
+/// `background-size`: `auto` (the picture's own), `cover`, `contain`, or
+/// a width and height (either `auto`).
+pub const BackgroundSize = union(enum) { auto, cover, contain, size: [2]LengthAuto };
 pub const VerticalAlign = union(enum) { baseline, top, middle, bottom, sub, super, text_top, text_bottom, length: LengthPercent };
 pub const LineHeight = union(enum) { normal, number: f64, px: f64 };
 
@@ -128,6 +154,27 @@ pub const Computed = struct {
     order: i32 = 0,
     row_gap: LengthPercent = .{ .px = 0 },
     column_gap: LengthPercent = .{ .px = 0 },
+    /// Tables: the spacing between cells (horizontal, vertical) and
+    /// whether adjacent borders collapse into one. Inherited.
+    border_spacing_x: f64 = 0,
+    border_spacing_y: f64 = 0,
+    border_collapse: BorderCollapse = .separate,
+    background_image: BackgroundImage = .none,
+    /// The URL a `background-image` url is relative to: the sheet that
+    /// declared it (null: the page).
+    background_base: ?[]const u8 = null,
+    background_position: [2]LengthPercent = .{ .{ .percent = 0 }, .{ .percent = 0 } },
+    background_size: BackgroundSize = .auto,
+    background_repeat: [2]bool = .{ true, true },
+    /// SVG's `fill` as page CSS gives it to an inline `<svg>` (inherited):
+    /// null when no rule sets it; `current` is `currentColor`.
+    fill: ?FillPaint = null,
+    /// Corner radii, horizontal only (top-left, top-right, bottom-right,
+    /// bottom-left).
+    border_radius: [4]LengthPercent = .{ .{ .px = 0 }, .{ .px = 0 }, .{ .px = 0 }, .{ .px = 0 } },
+    /// The custom properties in force, inherited: the parent's list,
+    /// shared unless this element declares some of its own.
+    customs: []const Custom = &.{},
 
     /// The four sides' order everywhere: top, right, bottom, left.
     pub const top = 0;
@@ -226,10 +273,23 @@ pub const Prop = enum {
     order,
     row_gap,
     column_gap,
+    border_spacing_x,
+    border_spacing_y,
+    border_collapse,
+    background_image,
+    background_position_x,
+    background_position_y,
+    background_size,
+    background_repeat,
+    border_top_left_radius,
+    border_top_right_radius,
+    border_bottom_right_radius,
+    border_bottom_left_radius,
+    fill,
 
     pub fn inherited(p: Prop) bool {
         return switch (p) {
-            .color, .font_size, .font_weight, .font_style, .font_family, .line_height, .text_align, .text_indent, .text_transform, .white_space, .list_style_type, .list_style_position, .visibility => true,
+            .color, .font_size, .font_weight, .font_style, .font_family, .line_height, .text_align, .text_indent, .text_transform, .white_space, .list_style_type, .list_style_position, .visibility, .border_spacing_x, .border_spacing_y, .border_collapse, .fill => true,
             else => false,
         };
     }
@@ -257,13 +317,24 @@ pub const Declared = union(enum) {
     initial,
     unset,
     values: []const css.Value,
+    /// A custom property's value (`--name: …`), kept as written; the
+    /// declaration's `name` says which, and its `prop` means nothing.
+    custom: []const css.Value,
+    /// A value with `var()` in it: checked only once the variables are
+    /// substituted at computed-value time. When the declaration came from
+    /// a shorthand, its `name` is the shorthand, expanded again then.
+    pending: []const css.Value,
 };
 
 pub const Declaration = struct {
     prop: Prop,
     value: Declared,
     important: bool,
+    name: []const u8 = "",
 };
+
+/// A custom property an element has: its computed value.
+pub const Custom = struct { name: []const u8, values: []const css.Value };
 
 pub const Origin = enum(u8) { user_agent = 0, author = 1 };
 
@@ -307,8 +378,10 @@ pub fn cloneSheet(a: std.mem.Allocator, sheet: Sheet) Error!Sheet {
     const rules = try a.alloc(Rule, sheet.rules.len);
     for (sheet.rules, 0..) |r, i| {
         const decls = try a.alloc(Declaration, r.declarations.len);
-        for (r.declarations, 0..) |d, j| decls[j] = .{ .prop = d.prop, .important = d.important, .value = switch (d.value) {
+        for (r.declarations, 0..) |d, j| decls[j] = .{ .prop = d.prop, .important = d.important, .name = if (d.name.len > 0) try a.dupe(u8, d.name) else "", .value = switch (d.value) {
             .values => |v| .{ .values = try css.cloneValues(a, v) },
+            .custom => |v| .{ .custom = try css.cloneValues(a, v) },
+            .pending => |v| .{ .pending = try css.cloneValues(a, v) },
             else => d.value,
         } };
         rules[i] = .{ .selector = try selectors.cloneComplex(a, r.selector), .specificity = r.specificity, .declarations = decls };
@@ -620,7 +693,21 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
     const eq = std.ascii.eqlIgnoreCase;
     const name = d.name;
     const vals = try nonWs(a, d.value);
+    // A custom property: any value, even none, kept for `var()`.
+    if (name.len > 2 and name[0] == '-' and name[1] == '-') {
+        const value: Declared = if (wideKeyword(vals)) |w| w else .{ .custom = vals };
+        return decls.append(a, .{ .prop = .display, .value = value, .important = d.important, .name = name });
+    }
     if (vals.len == 0) return;
+    if (containsVar(vals)) {
+        // Unchecked until computed-value time; a shorthand stands for
+        // each of its longhands (found by expanding `initial`).
+        if (Prop.parse(name)) |p| return decls.append(a, .{ .prop = p, .value = .{ .pending = vals }, .important = d.important });
+        var longhands: std.ArrayList(Declaration) = .empty;
+        try expand(a, .{ .name = name, .value = &.{.{ .token = .{ .ident = "initial" } }}, .important = false }, &longhands);
+        for (longhands.items) |lh| try decls.append(a, .{ .prop = lh.prop, .value = .{ .pending = vals }, .important = d.important, .name = name });
+        return;
+    }
     if (Prop.parse(name)) |p| return push(a, decls, p, vals, d.important);
     const wide = wideKeyword(vals) != null;
     const sides = [_][4]Prop{
@@ -652,14 +739,101 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         return;
     };
     if (eq(name, "background")) {
-        // Only the colour is kept: the last value that parses as one.
-        var i = vals.len;
-        while (i > 0) {
-            i -= 1;
-            if (color.parseValue(vals[i]) != null) return push(a, decls, .background_color, vals[i .. i + 1], d.important);
+        const bg_props = [_]Prop{ .background_color, .background_image, .background_position_x, .background_position_y, .background_size, .background_repeat };
+        if (wide) {
+            for (bg_props) |p| try push(a, decls, p, vals, d.important);
+            return;
         }
-        if (wide) return push(a, decls, .background_color, vals, d.important);
-        return push(a, decls, .background_color, &.{}, d.important);
+        // The layers: the image from whichever has one (a url before a
+        // gradient), position, size and repeat from that layer, the
+        // colour from the last. What a layer does not say is reset.
+        var layers: std.ArrayList([]const css.Value) = .empty;
+        var start: usize = 0;
+        for (vals, 0..) |v, i| if (v == .token and v.token == .comma) {
+            try layers.append(a, vals[start..i]);
+            start = i + 1;
+        };
+        try layers.append(a, vals[start..]);
+        var chosen: ?usize = null;
+        for (layers.items, 0..) |layer, li| for (layer) |v| if (urlOf(v) != null) {
+            if (chosen == null) chosen = li;
+        };
+        if (chosen == null) for (layers.items, 0..) |layer, li| for (layer) |v| if (isGradient(v)) {
+            if (chosen == null) chosen = li;
+        };
+        const last = layers.items[layers.items.len - 1];
+        var col: []const css.Value = &.{};
+        for (last) |v| if (color.parseValue(v) != null and urlOf(v) == null) {
+            col = try single(a, v);
+        };
+        try push(a, decls, .background_color, col, d.important);
+        var image: []const css.Value = &.{};
+        var pos: std.ArrayList(css.Value) = .empty;
+        var size: []const css.Value = &.{};
+        var repeat: std.ArrayList(css.Value) = .empty;
+        if (chosen) |li| {
+            const layer = layers.items[li];
+            var k: usize = 0;
+            while (k < layer.len) : (k += 1) {
+                const v = layer[k];
+                if (urlOf(v) != null or isGradient(v)) {
+                    image = try single(a, v);
+                } else if (v == .token and v.token == .delim and v.token.delim == '/') {
+                    // The size follows the position.
+                    var e = k + 1;
+                    while (e < layer.len and e < k + 3 and (lengthAuto(layer[e], 16, .{ .width = 0, .height = 0 }) != null or (ident(layer[e]) != null and (eq(ident(layer[e]).?, "cover") or eq(ident(layer[e]).?, "contain") or eq(ident(layer[e]).?, "auto"))))) e += 1;
+                    size = layer[k + 1 .. e];
+                    k = e - 1;
+                } else if (ident(v)) |w| {
+                    if (eq(w, "repeat") or eq(w, "repeat-x") or eq(w, "repeat-y") or eq(w, "no-repeat") or eq(w, "space") or eq(w, "round")) {
+                        try repeat.append(a, v);
+                    } else if (eq(w, "left") or eq(w, "right") or eq(w, "top") or eq(w, "bottom") or eq(w, "center")) {
+                        try pos.append(a, v);
+                    }
+                } else if (v == .token and (v.token == .dimension or v.token == .percentage or v.token == .number)) {
+                    try pos.append(a, v);
+                }
+            }
+        }
+        try push(a, decls, .background_image, image, d.important);
+        if (try splitPosition(a, pos.items)) |xy| {
+            try push(a, decls, .background_position_x, xy[0], d.important);
+            try push(a, decls, .background_position_y, xy[1], d.important);
+        } else {
+            try push(a, decls, .background_position_x, &.{}, d.important);
+            try push(a, decls, .background_position_y, &.{}, d.important);
+        }
+        try push(a, decls, .background_size, size, d.important);
+        try push(a, decls, .background_repeat, repeat.items, d.important);
+        return;
+    }
+    if (eq(name, "background-position")) {
+        if (wide) {
+            try push(a, decls, .background_position_x, vals, d.important);
+            try push(a, decls, .background_position_y, vals, d.important);
+            return;
+        }
+        var n: usize = 0;
+        while (n < vals.len and !(vals[n] == .token and vals[n].token == .comma)) n += 1;
+        const xy = (try splitPosition(a, vals[0..n])) orelse return;
+        try push(a, decls, .background_position_x, xy[0], d.important);
+        try push(a, decls, .background_position_y, xy[1], d.important);
+        return;
+    }
+    if (eq(name, "border-radius")) {
+        const corners = [_]Prop{ .border_top_left_radius, .border_top_right_radius, .border_bottom_right_radius, .border_bottom_left_radius };
+        if (wide) {
+            for (corners) |p| try push(a, decls, p, vals, d.important);
+            return;
+        }
+        // The horizontal radii (before any `/`), one to four.
+        var n: usize = 0;
+        while (n < vals.len and !(vals[n] == .token and vals[n].token == .delim and vals[n].token.delim == '/')) n += 1;
+        const h = vals[0..n];
+        if (h.len == 0 or h.len > 4) return;
+        const idx = [_][4]usize{ .{ 0, 0, 0, 0 }, .{ 0, 1, 0, 1 }, .{ 0, 1, 2, 1 }, .{ 0, 1, 2, 3 } };
+        for (corners, 0..) |p, c| try push(a, decls, p, h[idx[h.len - 1][c] .. idx[h.len - 1][c] + 1], d.important);
+        return;
     }
     if (eq(name, "overflow")) {
         if (vals.len > 2) return;
@@ -668,6 +842,7 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         return;
     }
     if (eq(name, "text-decoration")) {
+        if (wide) return push(a, decls, .text_decoration_line, vals, d.important);
         // The line keywords, whatever else is there.
         for (vals) |v| if (v == .token and v.token == .ident) {
             const w = v.token.ident;
@@ -743,9 +918,20 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         return;
     }
     if (eq(name, "flex-flow")) {
+        if (wide) {
+            try push(a, decls, .flex_direction, vals, d.important);
+            try push(a, decls, .flex_wrap, vals, d.important);
+            return;
+        }
         for (vals) |v| {
             if (keyword(FlexDirection, v) != null) try push(a, decls, .flex_direction, try single(a, v), d.important) else if (keyword(FlexWrap, v) != null) try push(a, decls, .flex_wrap, try single(a, v), d.important) else return;
         }
+        return;
+    }
+    if (eq(name, "border-spacing")) {
+        if (vals.len == 0 or vals.len > 2) return;
+        try push(a, decls, .border_spacing_x, vals[0..1], d.important);
+        try push(a, decls, .border_spacing_y, if (vals.len == 2) vals[1..2] else vals[0..1], d.important);
         return;
     }
     if (eq(name, "gap")) {
@@ -754,6 +940,237 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         try push(a, decls, .column_gap, if (vals.len == 2) vals[1..2] else vals[0..1], d.important);
         return;
     }
+}
+
+/// A `url()` in either spelling: the tokenizer's url token, or the
+/// function around a string.
+fn urlOf(v: css.Value) ?[]const u8 {
+    if (v == .token and v.token == .url) return v.token.url;
+    if (v == .function and std.ascii.eqlIgnoreCase(v.function.name, "url")) {
+        for (v.function.values) |x| if (x == .token and x.token == .string) return x.token.string;
+    }
+    return null;
+}
+
+fn isGradient(v: css.Value) bool {
+    if (v != .function) return false;
+    const n = v.function.name;
+    return std.ascii.eqlIgnoreCase(n, "linear-gradient") or std.ascii.eqlIgnoreCase(n, "repeating-linear-gradient") or std.ascii.eqlIgnoreCase(n, "radial-gradient") or std.ascii.eqlIgnoreCase(n, "repeating-radial-gradient") or std.ascii.eqlIgnoreCase(n, "conic-gradient") or std.ascii.startsWithIgnoreCase(n, "-webkit-");
+}
+
+/// The layers of `background-image`: the first url, else the first
+/// gradient that paints anything, else none. (One layer is kept: a
+/// gradient under a picture is almost always a fallback or a tint.)
+fn backgroundImageOf(vals: []const css.Value, font_size: f64, env: Env, a: std.mem.Allocator) ParseFail!?BackgroundImage {
+    var gradient: ?BackgroundImage = null;
+    var any = false;
+    for (vals) |v| {
+        if (v == .token and v.token == .comma) continue;
+        any = true;
+        if (urlOf(v)) |u| return .{ .url = u };
+        if (ident(v)) |w| if (std.ascii.eqlIgnoreCase(w, "none")) continue;
+        if (isGradient(v)) {
+            if (gradient == null) if (try linearGradientOf(v, font_size, env, a)) |g| {
+                gradient = g;
+            };
+            continue;
+        }
+        return null;
+    }
+    if (!any) return null;
+    return gradient orelse .none;
+}
+
+/// `linear-gradient([<angle> | to <side-or-corner>,]? <stop>, …)`; a
+/// gradient whose stops are all transparent is none.
+fn linearGradientOf(v: css.Value, font_size: f64, env: Env, a: std.mem.Allocator) ParseFail!?BackgroundImage {
+    const f = v.function;
+    const repeating = std.ascii.eqlIgnoreCase(f.name, "repeating-linear-gradient");
+    if (!repeating and !std.ascii.eqlIgnoreCase(f.name, "linear-gradient")) return null;
+    // Split the arguments at top-level commas.
+    var args: std.ArrayList([]const css.Value) = .empty;
+    var start: usize = 0;
+    for (f.values, 0..) |x, i| if (x == .token and x.token == .comma) {
+        try args.append(a, try nonWs(a, f.values[start..i]));
+        start = i + 1;
+    };
+    try args.append(a, try nonWs(a, f.values[start..]));
+    var angle: f64 = 180;
+    var first: usize = 0;
+    if (args.items.len > 0 and args.items[0].len > 0) {
+        const head = args.items[0];
+        if (head[0] == .token and head[0].token == .dimension) {
+            const d = head[0].token.dimension;
+            const eq = std.ascii.eqlIgnoreCase;
+            angle = if (eq(d.unit, "deg")) d.num.value else if (eq(d.unit, "rad")) d.num.value * 180 / std.math.pi else if (eq(d.unit, "turn")) d.num.value * 360 else if (eq(d.unit, "grad")) d.num.value * 0.9 else return null;
+            first = 1;
+        } else if (ident(head[0])) |w| if (std.ascii.eqlIgnoreCase(w, "to")) {
+            var dx: f64 = 0;
+            var dy: f64 = 0;
+            for (head[1..]) |side| {
+                const s = ident(side) orelse return null;
+                const eq = std.ascii.eqlIgnoreCase;
+                if (eq(s, "top")) dy = -1 else if (eq(s, "bottom")) dy = 1 else if (eq(s, "left")) dx = -1 else if (eq(s, "right")) dx = 1 else return null;
+            }
+            angle = std.math.atan2(dx, -dy) * 180 / std.math.pi;
+            first = 1;
+        };
+    }
+    var stops: std.ArrayList(Stop) = .empty;
+    var visible = false;
+    for (args.items[first..]) |arg| {
+        if (arg.len == 0) continue;
+        const c = switch (color.parseValue(arg[0]) orelse return null) {
+            .color => |col| col,
+            .current => Color.rgb(0, 0, 0),
+        };
+        if (c.a > 0) visible = true;
+        const at: ?LengthPercent = if (arg.len > 1) lengthPercent(arg[1], font_size, env) else null;
+        try stops.append(a, .{ .color = c, .at = at });
+        if (arg.len > 2) if (lengthPercent(arg[2], font_size, env)) |at2| try stops.append(a, .{ .color = c, .at = at2 });
+    }
+    if (stops.items.len == 0) return null;
+    if (!visible) return .none;
+    return .{ .linear = .{ .angle = angle, .stops = stops.items, .repeating = repeating } };
+}
+
+fn backgroundSizeOf(vals: []const css.Value, font_size: f64, env: Env) ?BackgroundSize {
+    // The first layer's.
+    var n: usize = 0;
+    while (n < vals.len and !(vals[n] == .token and vals[n].token == .comma)) n += 1;
+    const layer = vals[0..n];
+    if (layer.len == 0 or layer.len > 2) return null;
+    if (ident(layer[0])) |w| {
+        if (std.ascii.eqlIgnoreCase(w, "cover")) return .cover;
+        if (std.ascii.eqlIgnoreCase(w, "contain")) return .contain;
+    }
+    var out: [2]LengthAuto = .{ .auto, .auto };
+    for (layer, 0..) |x, i| out[i] = lengthAuto(x, font_size, env) orelse return null;
+    if (layer.len == 1 and out[0] == .auto) return .auto;
+    return .{ .size = out };
+}
+
+fn backgroundRepeatOf(vals: []const css.Value) ?[2]bool {
+    var n: usize = 0;
+    while (n < vals.len and !(vals[n] == .token and vals[n].token == .comma)) n += 1;
+    const layer = vals[0..n];
+    if (layer.len == 0 or layer.len > 2) return null;
+    const eq = std.ascii.eqlIgnoreCase;
+    const w0 = ident(layer[0]) orelse return null;
+    if (layer.len == 1) {
+        if (eq(w0, "repeat-x")) return .{ true, false };
+        if (eq(w0, "repeat-y")) return .{ false, true };
+        if (eq(w0, "repeat") or eq(w0, "space") or eq(w0, "round")) return .{ true, true };
+        if (eq(w0, "no-repeat")) return .{ false, false };
+        return null;
+    }
+    const w1 = ident(layer[1]) orelse return null;
+    const r = struct {
+        fn f(w: []const u8) ?bool {
+            if (std.ascii.eqlIgnoreCase(w, "no-repeat")) return false;
+            if (std.ascii.eqlIgnoreCase(w, "repeat") or std.ascii.eqlIgnoreCase(w, "space") or std.ascii.eqlIgnoreCase(w, "round")) return true;
+            return null;
+        }
+    }.f;
+    return .{ r(w0) orelse return null, r(w1) orelse return null };
+}
+
+/// One axis of `background-position` (its longhands take a keyword or a
+/// length; `right 10px` style offsets are taken from their side).
+fn positionComponent(vals: []const css.Value, horizontal: bool, font_size: f64, env: Env) ?LengthPercent {
+    var n: usize = 0;
+    while (n < vals.len and !(vals[n] == .token and vals[n].token == .comma)) n += 1;
+    const layer = vals[0..n];
+    if (layer.len == 0 or layer.len > 2) return null;
+    const eq = std.ascii.eqlIgnoreCase;
+    if (ident(layer[0])) |w| {
+        const pct: f64 = if (eq(w, "left") or eq(w, "top")) 0 else if (eq(w, "center")) 50 else if (eq(w, "right") or eq(w, "bottom")) 100 else return null;
+        _ = horizontal;
+        if (layer.len == 2) {
+            const off = lengthPx(layer[1], font_size, env) orelse return null;
+            // An offset from the far side cannot be one length; its
+            // nearest reading keeps the side.
+            return if (pct == 100) .{ .percent = 100 } else .{ .px = off };
+        }
+        return .{ .percent = pct };
+    }
+    return lengthPercent(layer[0], font_size, env);
+}
+
+/// `background-position`'s one or two components (with keywords in
+/// either order) as the x and y longhands' values.
+fn splitPosition(a: std.mem.Allocator, layer: []const css.Value) Error!?[2][]const css.Value {
+    if (layer.len == 0) return null;
+    const eq = std.ascii.eqlIgnoreCase;
+    if (layer.len == 1) {
+        if (ident(layer[0])) |w| {
+            if (eq(w, "top") or eq(w, "bottom")) return .{ try single(a, .{ .token = .{ .ident = "center" } }), layer[0..1] };
+            return .{ layer[0..1], try single(a, .{ .token = .{ .ident = "center" } }) };
+        }
+        return .{ layer[0..1], try single(a, .{ .token = .{ .ident = "center" } }) };
+    }
+    if (layer.len == 2) {
+        // `top left` is `left top`.
+        if (ident(layer[0])) |w| if (eq(w, "top") or eq(w, "bottom")) return .{ layer[1..2], layer[0..1] };
+        return .{ layer[0..1], layer[1..2] };
+    }
+    if (layer.len == 4) return .{ layer[0..2], layer[2..4] };
+    return null;
+}
+
+/// Whether a value list uses `var()` anywhere, however deep.
+fn containsVar(vals: []const css.Value) bool {
+    for (vals) |v| switch (v) {
+        .function => |f| if (std.ascii.eqlIgnoreCase(f.name, "var") or containsVar(f.values)) return true,
+        .block => |b| if (containsVar(b.values)) return true,
+        else => {},
+    };
+    return false;
+}
+
+fn lookupCustom(customs: []const Custom, name: []const u8) ?[]const css.Value {
+    // Later entries override earlier ones (an element's own after its
+    // parent's), so search from the end.
+    var i = customs.len;
+    while (i > 0) {
+        i -= 1;
+        if (std.mem.eql(u8, customs[i].name, name)) return customs[i].values;
+    }
+    return null;
+}
+
+/// Substitute every `var()` in `vals` from `customs`: the variable's
+/// value, else the fallback after the comma; null when neither exists
+/// (the declaration is then invalid at computed-value time) or the
+/// references nest past any sane depth (a cycle).
+fn substitute(a: std.mem.Allocator, vals: []const css.Value, customs: []const Custom, depth: u8) Error!?[]const css.Value {
+    if (depth > 16) return null;
+    var out: std.ArrayList(css.Value) = .empty;
+    for (vals) |v| switch (v) {
+        .function => |f| {
+            if (std.ascii.eqlIgnoreCase(f.name, "var")) {
+                var i: usize = 0;
+                while (i < f.values.len and isWs(f.values[i])) : (i += 1) {}
+                if (i == f.values.len or ident(f.values[i]) == null) return null;
+                const var_name = ident(f.values[i]).?;
+                i += 1;
+                while (i < f.values.len and isWs(f.values[i])) : (i += 1) {}
+                const fallback: ?[]const css.Value = if (i < f.values.len and f.values[i] == .token and f.values[i].token == .comma) f.values[i + 1 ..] else null;
+                const got = lookupCustom(customs, var_name) orelse fallback orelse return null;
+                const sub = (try substitute(a, got, customs, depth + 1)) orelse return null;
+                for (sub) |sv| if (!isWs(sv)) try out.append(a, sv);
+            } else {
+                const inner = (try substitute(a, f.values, customs, depth + 1)) orelse return null;
+                try out.append(a, .{ .function = .{ .name = f.name, .values = inner } });
+            }
+        },
+        .block => |b| {
+            const inner = (try substitute(a, b.values, customs, depth + 1)) orelse return null;
+            try out.append(a, .{ .block = .{ .kind = b.kind, .values = inner } });
+        },
+        else => try out.append(a, v),
+    };
+    return out.items;
 }
 
 fn single(a: std.mem.Allocator, v: css.Value) Error![]const css.Value {
@@ -860,6 +1277,9 @@ const Candidate = struct {
     origin: Origin,
     specificity: u32,
     order: u32,
+    /// The declaring sheet's URL (a fetched sheet's); its `url()`s are
+    /// relative to it.
+    base: ?[]const u8 = null,
 
     /// Higher wins: importance and origin first, then specificity, then
     /// order.
@@ -875,35 +1295,246 @@ pub fn compute(a: std.mem.Allocator, doc: *const Document, sheets: []const Sheet
     const computed = try a.alloc(Computed, doc.nodes.items.len);
     for (computed) |*c| c.* = .{};
     computed[dom.document_id].color = env_text;
+    // The initial font size (`medium`), zoomed; `rem` is of it until
+    // the root element has its own.
+    computed[dom.document_id].font_size = 16 * px_scale;
+    root_font_size = 16 * px_scale;
     var winners: [@typeInfo(Prop).@"enum".fields.len]?Candidate = undefined;
+    var custom_winners: std.ArrayList(Candidate) = .empty;
     var order: u32 = 0;
     var w = doc.walk(dom.document_id);
     while (w.next()) |id| {
         const parent_id = doc.get(id).parent orelse dom.document_id;
         const parent = &computed[parent_id];
         @memset(&winners, null);
+        custom_winners.clearRetainingCapacity();
         order = 0;
         for (sheets) |sheet| for (sheet.rules) |rule| {
             if (!selectors.Selector.matchesOne(doc, id, rule.selector)) continue;
             for (rule.declarations) |d| {
                 order += 1;
-                const cand: Candidate = .{ .decl = d, .origin = sheet.origin, .specificity = rule.specificity, .order = order };
+                const cand: Candidate = .{ .decl = d, .origin = sheet.origin, .specificity = rule.specificity, .order = order, .base = sheet.base };
+                if (d.name.len > 0 and d.value != .pending) {
+                    try customCandidate(a, &custom_winners, cand);
+                    continue;
+                }
                 const slot = &winners[@intFromEnum(d.prop)];
                 if (slot.* == null or cand.rank() > slot.*.?.rank()) slot.* = cand;
             }
+        };
+        // Presentational hints (HTML's `width`, `bgcolor`, `align`…):
+        // author-level, beneath every author rule.
+        if (try presentationalHints(a, doc, id)) |decls| for (decls) |d| {
+            const cand: Candidate = .{ .decl = d, .origin = .author, .specificity = 0, .order = 0 };
+            const slot = &winners[@intFromEnum(d.prop)];
+            if (slot.* == null or cand.rank() > slot.*.?.rank()) slot.* = cand;
         };
         if (doc.getAttr(id, "style")) |text| {
             const decls = try parseInline(a, text);
             for (decls) |d| {
                 order += 1;
                 const cand: Candidate = .{ .decl = d, .origin = .author, .specificity = 0x3fff_ffff, .order = order };
+                if (d.name.len > 0 and d.value != .pending) {
+                    try customCandidate(a, &custom_winners, cand);
+                    continue;
+                }
                 const slot = &winners[@intFromEnum(d.prop)];
                 if (slot.* == null or cand.rank() > slot.*.?.rank()) slot.* = cand;
             }
         }
+        // The custom properties first: the parent's, then this element's
+        // own, each computed (its own `var()`s substituted) as it is set.
+        var customs = parent.customs;
+        if (custom_winners.items.len > 0) customs = try ownCustoms(a, parent.customs, custom_winners.items);
+        // Then every declaration waiting on them: substituted, and a
+        // shorthand's expanded again for the longhand it stands for.
+        // What fails is invalid at computed-value time: `unset`.
+        var scratch = std.heap.stackFallback(16 << 10, a);
+        const sa = scratch.get();
+        for (&winners) |*slot| if (slot.*) |*c| if (c.decl.value == .pending) {
+            c.decl.value = try resolvePending(sa, c.decl, customs);
+        };
         try computeOne(a, &computed[id], parent, &winners, env);
+        computed[id].customs = customs;
+        if (winners[@intFromEnum(Prop.background_image)]) |c| if (computed[id].background_image == .url) {
+            computed[id].background_base = c.base;
+        };
+        if (parent_id == dom.document_id and doc.get(id).kind == .element) root_font_size = computed[id].font_size;
     }
     return .{ .computed = computed };
+}
+
+/// A custom property's candidate: the best per name wins.
+fn customCandidate(a: std.mem.Allocator, list: *std.ArrayList(Candidate), cand: Candidate) Error!void {
+    for (list.items) |*c| if (std.mem.eql(u8, c.decl.name, cand.decl.name)) {
+        if (cand.rank() > c.rank()) c.* = cand;
+        return;
+    };
+    try list.append(a, cand);
+}
+
+/// An element's custom properties: its parent's, then its own winners
+/// (later entries override earlier ones by name). `initial` removes one
+/// (an empty value stands for the guaranteed-invalid one); `inherit` and
+/// `unset` keep the parent's.
+fn ownCustoms(a: std.mem.Allocator, inherited_list: []const Custom, own: []const Candidate) Error![]const Custom {
+    const out = try a.alloc(Custom, inherited_list.len + own.len);
+    @memcpy(out[0..inherited_list.len], inherited_list);
+    var n = inherited_list.len;
+    for (own) |c| switch (c.decl.value) {
+        .custom => |vals| {
+            var value = vals;
+            if (containsVar(vals)) value = (try substitute(a, vals, out[0..n], 0)) orelse &.{};
+            out[n] = .{ .name = c.decl.name, .values = value };
+            n += 1;
+        },
+        .initial => {
+            out[n] = .{ .name = c.decl.name, .values = &.{} };
+            n += 1;
+        },
+        else => {},
+    };
+    return out[0..n];
+}
+
+/// A pending declaration made ordinary, or `unset` when its variables
+/// do not resolve or the result does not parse.
+fn resolvePending(a: std.mem.Allocator, d: Declaration, customs: []const Custom) Error!Declared {
+    const sub = (try substitute(a, d.value.pending, customs, 0)) orelse return .unset;
+    if (d.name.len == 0) {
+        if (wideKeyword(sub)) |wk| return wk;
+        return .{ .values = sub };
+    }
+    var decls: std.ArrayList(Declaration) = .empty;
+    try expand(a, .{ .name = d.name, .value = sub, .important = d.important }, &decls);
+    for (decls.items) |e| if (e.prop == d.prop) return e.value;
+    return .unset;
+}
+
+/// The presentational hints of an element's attributes (HTML §15), as
+/// declarations the cascade ranks under every author rule: the sizes of
+/// pictures and table parts, `bgcolor`, `align`, `valign`, `nowrap`,
+/// `<body text>`, `<font color size face>`, an image's `border`,
+/// `hspace` and `vspace`. Null when the element has none.
+fn presentationalHints(a: std.mem.Allocator, doc: *const Document, id: NodeId) Error!?[]const Declaration {
+    const n = doc.get(id);
+    if (n.kind != .element or n.namespace != .html) return null;
+    const name = n.name;
+    const is_cell = std.mem.eql(u8, name, "td") or std.mem.eql(u8, name, "th");
+    if (n.attrs.items.len == 0 and !is_cell) return null;
+    const eq = std.mem.eql;
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const sized = eq(u8, name, "img") or eq(u8, name, "video") or eq(u8, name, "canvas") or eq(u8, name, "iframe") or eq(u8, name, "embed") or eq(u8, name, "object") or eq(u8, name, "table") or eq(u8, name, "td") or eq(u8, name, "th") or eq(u8, name, "col") or eq(u8, name, "hr") or eq(u8, name, "svg") or (eq(u8, name, "input") and std.ascii.eqlIgnoreCase(doc.getAttr(id, "type") orelse "", "image"));
+    if (sized) {
+        if (doc.getAttr(id, "width")) |v| hintLength(&w, "width", v);
+        if (!eq(u8, name, "hr")) if (doc.getAttr(id, "height")) |v| hintLength(&w, "height", v);
+    }
+    if (eq(u8, name, "body") or eq(u8, name, "table") or eq(u8, name, "tr") or eq(u8, name, "td") or eq(u8, name, "th") or eq(u8, name, "thead") or eq(u8, name, "tbody") or eq(u8, name, "tfoot")) {
+        if (doc.getAttr(id, "bgcolor")) |v| hintColor(&w, "background-color", v);
+    }
+    if (eq(u8, name, "body")) if (doc.getAttr(id, "text")) |v| hintColor(&w, "color", v);
+    if (eq(u8, name, "font")) {
+        if (doc.getAttr(id, "color")) |v| hintColor(&w, "color", v);
+        if (doc.getAttr(id, "face")) |v| if (safeHint(v)) w.print("font-family:{s};", .{v}) catch {};
+        if (doc.getAttr(id, "size")) |v| hintFontSize(&w, v);
+    }
+    if (doc.getAttr(id, "align")) |v_raw| {
+        const v = std.mem.trim(u8, v_raw, " \t\r\n");
+        const ieq = std.ascii.eqlIgnoreCase;
+        if (eq(u8, name, "img") or eq(u8, name, "iframe") or eq(u8, name, "embed") or eq(u8, name, "object") or eq(u8, name, "input")) {
+            if (ieq(v, "left") or ieq(v, "right")) w.print("float:{s};", .{if (ieq(v, "left")) "left" else "right"}) catch {};
+            if (ieq(v, "middle") or ieq(v, "absmiddle")) w.writeAll("vertical-align:middle;") catch {};
+            if (ieq(v, "top") or ieq(v, "bottom")) w.print("vertical-align:{s};", .{if (ieq(v, "top")) "top" else "bottom"}) catch {};
+        } else if (eq(u8, name, "table")) {
+            if (ieq(v, "center")) w.writeAll("margin-left:auto;margin-right:auto;") catch {};
+            if (ieq(v, "left") or ieq(v, "right")) w.print("float:{s};", .{if (ieq(v, "left")) "left" else "right"}) catch {};
+        } else if (eq(u8, name, "hr")) {
+            if (ieq(v, "center")) w.writeAll("margin-left:auto;margin-right:auto;") catch {};
+            if (ieq(v, "left")) w.writeAll("margin-left:0;margin-right:auto;") catch {};
+            if (ieq(v, "right")) w.writeAll("margin-left:auto;margin-right:0;") catch {};
+        } else if (ieq(v, "left") or ieq(v, "right") or ieq(v, "center") or ieq(v, "justify") or ieq(v, "middle")) {
+            w.print("text-align:{s};", .{if (ieq(v, "middle")) "center" else if (ieq(v, "left")) "left" else if (ieq(v, "right")) "right" else if (ieq(v, "center")) "center" else "justify"}) catch {};
+        }
+    }
+    if (eq(u8, name, "td") or eq(u8, name, "th") or eq(u8, name, "tr") or eq(u8, name, "thead") or eq(u8, name, "tbody") or eq(u8, name, "tfoot")) {
+        if (doc.getAttr(id, "valign")) |v| {
+            const ieq = std.ascii.eqlIgnoreCase;
+            if (ieq(v, "top") or ieq(v, "middle") or ieq(v, "bottom") or ieq(v, "baseline")) w.print("vertical-align:{s};", .{if (ieq(v, "top")) "top" else if (ieq(v, "middle")) "middle" else if (ieq(v, "bottom")) "bottom" else "baseline"}) catch {};
+        }
+        if (doc.hasAttr(id, "nowrap")) w.writeAll("white-space:nowrap;") catch {};
+    }
+    if (eq(u8, name, "img") or eq(u8, name, "object")) {
+        if (doc.getAttr(id, "hspace")) |v| if (hintNumber(v)) |x| w.print("margin-left:{d}px;margin-right:{d}px;", .{ x, x }) catch {};
+        if (doc.getAttr(id, "vspace")) |v| if (hintNumber(v)) |x| w.print("margin-top:{d}px;margin-bottom:{d}px;", .{ x, x }) catch {};
+        if (doc.getAttr(id, "border")) |v| if (hintNumber(v)) |x| w.print("border:{d}px solid;", .{x}) catch {};
+    }
+    if (eq(u8, name, "table")) {
+        if (doc.getAttr(id, "border")) |v| {
+            const x = hintNumber(v) orelse 1;
+            if (x > 0) w.print("border:{d}px outset;", .{x}) catch {};
+        }
+        if (doc.getAttr(id, "cellspacing")) |v| if (hintNumber(v)) |x| w.print("border-spacing:{d}px;", .{x}) catch {};
+    }
+    // A cell takes its table's `cellpadding`, and a 1px inset border
+    // when the table has a border.
+    if (eq(u8, name, "td") or eq(u8, name, "th")) {
+        var q = n.parent;
+        while (q) |qid| : (q = doc.get(qid).parent) if (doc.isHtml(qid, "table")) {
+            if (doc.getAttr(qid, "cellpadding")) |v| if (hintNumber(v)) |x| w.print("padding:{d}px;", .{x}) catch {};
+            if (doc.getAttr(qid, "border")) |v| if ((hintNumber(v) orelse 1) > 0) w.writeAll("border:1px inset #808080;") catch {};
+            break;
+        };
+    }
+    if (w.end == 0) return null;
+    return try parseInline(a, try a.dupe(u8, w.buffered()));
+}
+
+/// A non-negative number an attribute gives (leading digits, as HTML's
+/// rules for dimension values parse them).
+fn hintNumber(v_raw: []const u8) ?f64 {
+    const v = std.mem.trim(u8, v_raw, " \t\r\n");
+    var end: usize = 0;
+    while (end < v.len and (std.ascii.isDigit(v[end]) or v[end] == '.')) : (end += 1) {}
+    if (end == 0) return null;
+    return std.fmt.parseFloat(f64, v[0..end]) catch null;
+}
+
+fn hintLength(w: *std.Io.Writer, prop: []const u8, v_raw: []const u8) void {
+    const x = hintNumber(v_raw) orelse return;
+    const v = std.mem.trim(u8, v_raw, " \t\r\n");
+    const pct = v.len > 0 and v[v.len - 1] == '%';
+    w.print("{s}:{d}{s};", .{ prop, x, if (pct) "%" else "px" }) catch {};
+}
+
+/// An attribute's value is only ever copied into a declaration when it
+/// cannot close one or open another.
+fn safeHint(v: []const u8) bool {
+    for (v) |c| if (c == ';' or c == '{' or c == '}' or c == '<' or c == '\\' or c == '!') return false;
+    return v.len > 0 and v.len < 128;
+}
+
+fn hintColor(w: *std.Io.Writer, prop: []const u8, v_raw: []const u8) void {
+    const v = std.mem.trim(u8, v_raw, " \t\r\n");
+    if (!safeHint(v)) return;
+    // Legacy colours are often bare hex digits.
+    var hex = v.len == 6 or v.len == 3;
+    for (v) |c| if (!std.ascii.isHex(c)) {
+        hex = false;
+    };
+    if (hex and v[0] != '#') w.print("{s}:#{s};", .{ prop, v }) catch {} else w.print("{s}:{s};", .{ prop, v }) catch {};
+}
+
+/// `<font size>`: 1 to 7, or relative to 3.
+fn hintFontSize(w: *std.Io.Writer, v_raw: []const u8) void {
+    const v = std.mem.trim(u8, v_raw, " \t\r\n");
+    if (v.len == 0) return;
+    const rel = v[0] == '+' or v[0] == '-';
+    const x = hintNumber(if (rel) v[1..] else v) orelse return;
+    var n: i64 = @intFromFloat(x);
+    if (rel) n = if (v[0] == '+') 3 + n else 3 - n;
+    const names = [_][]const u8{ "x-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "xxx-large" };
+    w.print("font-size:{s};", .{names[@intCast(std.math.clamp(n, 1, 7))]}) catch {};
 }
 
 /// The initial `color`, the text colour a page starts with.
@@ -938,6 +1569,7 @@ fn applyDeclared(a: std.mem.Allocator, out: *Computed, p: Prop, d: Declared, par
         .inherit => copyProp(out, parent, p),
         .initial => resetProp(out, p),
         .unset => if (p.inherited()) copyProp(out, parent, p) else resetProp(out, p),
+        .custom, .pending => {},
         .values => |vals| {
             // A value that does not parse for its property is as if
             // undeclared: the inherited or initial value already stands.
@@ -1007,6 +1639,22 @@ fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
         .order => out.order = from.order,
         .row_gap => out.row_gap = from.row_gap,
         .column_gap => out.column_gap = from.column_gap,
+        .border_spacing_x => out.border_spacing_x = from.border_spacing_x,
+        .border_spacing_y => out.border_spacing_y = from.border_spacing_y,
+        .border_collapse => out.border_collapse = from.border_collapse,
+        .background_image => {
+            out.background_image = from.background_image;
+            out.background_base = from.background_base;
+        },
+        .background_position_x => out.background_position[0] = from.background_position[0],
+        .background_position_y => out.background_position[1] = from.background_position[1],
+        .background_size => out.background_size = from.background_size,
+        .background_repeat => out.background_repeat = from.background_repeat,
+        .border_top_left_radius => out.border_radius[0] = from.border_radius[0],
+        .border_top_right_radius => out.border_radius[1] = from.border_radius[1],
+        .border_bottom_right_radius => out.border_radius[2] = from.border_radius[2],
+        .border_bottom_left_radius => out.border_radius[3] = from.border_radius[3],
+        .fill => out.fill = from.fill,
         .box_sizing => out.box_sizing = from.box_sizing,
         .z_index => out.z_index = from.z_index,
     }
@@ -1055,27 +1703,27 @@ fn lengthPx(v: css.Value, font_size: f64, env: Env) ?f64 {
         .dimension => |d| {
             const eq = std.ascii.eqlIgnoreCase;
             const x = d.num.value;
-            if (eq(d.unit, "px")) return x;
+            // Font-relative units are of sizes already in device pixels;
+            // the rest are CSS pixels, `px_scale` device pixels each (the
+            // viewport `env` gives is in CSS pixels too).
             if (eq(d.unit, "em")) return x * font_size;
             if (eq(d.unit, "rem")) return x * root_font_size;
             if (eq(d.unit, "ex") or eq(d.unit, "ch")) return x * font_size * 0.5;
-            if (eq(d.unit, "vw")) return x * env.width / 100;
-            if (eq(d.unit, "vh")) return x * env.height / 100;
-            if (eq(d.unit, "vmin")) return x * @min(env.width, env.height) / 100;
-            if (eq(d.unit, "vmax")) return x * @max(env.width, env.height) / 100;
-            if (eq(d.unit, "in")) return x * 96;
-            if (eq(d.unit, "cm")) return x * 96 / 2.54;
-            if (eq(d.unit, "mm")) return x * 96 / 25.4;
-            if (eq(d.unit, "q")) return x * 96 / 101.6;
-            if (eq(d.unit, "pt")) return x * 96 / 72;
-            if (eq(d.unit, "pc")) return x * 16;
-            return null;
+            const css_px: f64 = if (eq(d.unit, "px")) x else if (eq(d.unit, "vw")) x * env.width / 100 else if (eq(d.unit, "vh")) x * env.height / 100 else if (eq(d.unit, "vmin")) x * @min(env.width, env.height) / 100 else if (eq(d.unit, "vmax")) x * @max(env.width, env.height) / 100 else if (eq(d.unit, "in")) x * 96 else if (eq(d.unit, "cm")) x * 96 / 2.54 else if (eq(d.unit, "mm")) x * 96 / 25.4 else if (eq(d.unit, "q")) x * 96 / 101.6 else if (eq(d.unit, "pt")) x * 96 / 72 else if (eq(d.unit, "pc")) x * 16 else return null;
+            return css_px * px_scale;
         },
         else => return null,
     }
 }
 
+/// The root element's computed font size, which `rem` is of: set by
+/// `compute` once the root is computed (before, the initial size).
 pub var root_font_size: f64 = 16;
+/// Device pixels per CSS pixel: the page zoom. Every absolute length,
+/// font-size keyword and border-width keyword is scaled by it, and a
+/// picture's natural size (layout); media queries see the viewport in
+/// CSS pixels (the host divides its `Env` by it).
+pub var px_scale: f64 = 1;
 
 fn lengthPercent(v: css.Value, font_size: f64, env: Env) ?LengthPercent {
     if (v == .token and v.token == .percentage) return .{ .percent = v.token.percentage.value };
@@ -1094,9 +1742,9 @@ fn lengthAuto(v: css.Value, font_size: f64, env: Env) ?LengthAuto {
 fn borderWidthOf(v: css.Value, font_size: f64, env: Env) ?f64 {
     if (ident(v)) |w| {
         const eq = std.ascii.eqlIgnoreCase;
-        if (eq(w, "thin")) return 1;
-        if (eq(w, "medium")) return 3;
-        if (eq(w, "thick")) return 5;
+        if (eq(w, "thin")) return 1 * px_scale;
+        if (eq(w, "medium")) return 3 * px_scale;
+        if (eq(w, "thick")) return 5 * px_scale;
         return null;
     }
     return lengthPx(v, font_size, env);
@@ -1125,6 +1773,38 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
         // An empty value from a shorthand means "the initial value".
         resetProp(out, p);
         return true;
+    }
+    switch (p) {
+        .background_image => {
+            out.background_image = (try backgroundImageOf(vals, font_size, env, a)) orelse return error.Invalid;
+            return true;
+        },
+        .background_size => {
+            out.background_size = backgroundSizeOf(vals, font_size, env) orelse return error.Invalid;
+            return true;
+        },
+        .background_repeat => {
+            out.background_repeat = backgroundRepeatOf(vals) orelse return error.Invalid;
+            return true;
+        },
+        .background_position_x, .background_position_y => {
+            const pos = positionComponent(vals, p == .background_position_x, font_size, env) orelse return error.Invalid;
+            out.background_position[if (p == .background_position_x) 0 else 1] = pos;
+            return true;
+        },
+        .border_top_left_radius, .border_top_right_radius, .border_bottom_right_radius, .border_bottom_left_radius => {
+            // `a b` (elliptical) keeps the horizontal radius.
+            const r = lengthPercent(vals[0], font_size, env) orelse return error.Invalid;
+            const idx: usize = switch (p) {
+                .border_top_left_radius => 0,
+                .border_top_right_radius => 1,
+                .border_bottom_right_radius => 2,
+                else => 3,
+            };
+            out.border_radius[idx] = r;
+            return true;
+        },
+        else => {},
     }
     const v = vals[0];
     switch (p) {
@@ -1170,7 +1850,7 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
         .font_size => {
             if (ident(v)) |w| {
                 for (font_size_keywords) |k| if (std.ascii.eqlIgnoreCase(k.n, w)) {
-                    out.font_size = k.px;
+                    out.font_size = k.px * px_scale;
                     return true;
                 };
                 if (std.ascii.eqlIgnoreCase(w, "smaller")) {
@@ -1318,6 +1998,23 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
             if (v != .token or v.token != .number or !v.token.number.integer) return error.Invalid;
             out.order = @intFromFloat(v.token.number.value);
         },
+        .border_spacing_x, .border_spacing_y => {
+            const x = lengthPx(v, font_size, env) orelse return error.Invalid;
+            if (x < 0) return error.Invalid;
+            if (p == .border_spacing_x) out.border_spacing_x = x else out.border_spacing_y = x;
+        },
+        .border_collapse => out.border_collapse = keyword(BorderCollapse, v) orelse return error.Invalid,
+        .fill => {
+            if (ident(v)) |w| if (std.ascii.eqlIgnoreCase(w, "none")) {
+                out.fill = .none;
+                return true;
+            };
+            out.fill = switch (color.parseValue(v) orelse return error.Invalid) {
+                .color => |c| .{ .color = c },
+                .current => .current,
+            };
+        },
+        .background_image, .background_size, .background_repeat, .background_position_x, .background_position_y, .border_top_left_radius, .border_top_right_radius, .border_bottom_right_radius, .border_bottom_left_radius => unreachable,
         .row_gap, .column_gap => {
             const lp: LengthPercent = if (ident(v) != null and std.ascii.eqlIgnoreCase(ident(v).?, "normal")) .{ .px = 0 } else lengthPercent(v, font_size, env) orelse return error.Invalid;
             if (p == .row_gap) out.row_gap = lp else out.column_gap = lp;
@@ -1336,6 +2033,13 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
 }
 
 // ------------------------------------------------------ the UA sheet
+
+/// The quirks-mode additions (HTML §15.3.2's, as browsers ship them):
+/// a table does not inherit its text's size, weight, alignment or
+/// wrapping from outside it.
+pub const quirks_sheet =
+    \\table { font-weight: normal; font-style: normal; font-size: medium; line-height: normal; white-space: normal; text-align: start }
+;
 
 /// The HTML Standard's rendering section, the part these properties
 /// can say. `a[href]` stands for `:link` (every link is unvisited).
@@ -1369,13 +2073,24 @@ pub const ua_sheet =
     \\sup { vertical-align: super; font-size: smaller }
     \\a[href] { color: #0000ee; text-decoration: underline }
     \\hr { color: gray; border-style: inset; border-width: 1px; margin: 0.5em auto }
-    \\table { display: table; box-sizing: border-box; text-indent: 0 }
+    \\table { display: table; box-sizing: border-box; text-indent: 0; border-spacing: 2px; border-collapse: separate }
+    \\thead, tbody, tfoot, tr { vertical-align: middle } td, th { vertical-align: inherit }
     \\caption { display: table-caption; text-align: center }
     \\thead { display: table-header-group } tbody { display: table-row-group } tfoot { display: table-footer-group }
     \\tr { display: table-row } td, th { display: table-cell; padding: 1px } th { font-weight: bold; text-align: center }
     \\colgroup { display: table-column-group } col { display: table-column }
     \\input, select, button, textarea, meter, progress { display: inline-block }
     \\button, select, input { font-family: sans-serif }
+    \\button { padding: 1px 6px; border: 1px solid #767676; background-color: #efefef; text-align: center }
+    \\input, select, textarea, button { font-size: 13.333px }
+    \\input, select, textarea { border: 1px solid #767676; background-color: #ffffff; padding: 1px 2px }
+    \\input[type=submit], input[type=button], input[type=reset] { background-color: #efefef; padding: 1px 6px; text-align: center }
+    \\input[type=checkbox], input[type=radio], input[type=image] { border: 0; padding: 0; background-color: transparent }
+    \\input[type=checkbox], input[type=radio] { margin: 3px 3px 3px 4px }
+    \\input[type=hidden] { display: none }
+    \\dialog:not([open]) { display: none }
+    \\dialog { position: absolute; left: 0; right: 0; margin: auto; border: solid; padding: 1em; background-color: #ffffff; color: #000000 }
+    \\details:not([open]) > :not(summary:first-of-type) { display: none }
     \\textarea { white-space: pre-wrap }
     \\center { text-align: center }
     \\iframe { border: 2px inset }
@@ -1474,6 +2189,11 @@ pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env
     var sheets: std.ArrayList(Sheet) = .empty;
     const list_a = if (keep) |k| k.a else a;
     try sheets.append(list_a, ua);
+    // A document in quirks mode: the rules the HTML Standard keeps for it.
+    if (doc.quirks == .quirks) {
+        const q = try parseSheet(a, quirks_sheet, .user_agent, env);
+        try sheets.append(list_a, if (keep) |k| try k.keep(k.ctx, q) else q);
+    }
     var w = doc.walk(dom.document_id);
     while (w.next()) |id| {
         const is_style = doc.isHtml(id, "style");
@@ -1607,4 +2327,137 @@ test "style: @font-face rules are collected with their family and first url" {
     try std.testing.expectEqualStrings("Mono", sheet.font_faces[1].family);
     try std.testing.expectEqualStrings("mono.ttf", sheet.font_faces[1].src);
     try std.testing.expectEqual(@as(usize, 1), sheet.rules.len);
+}
+
+test "style: custom properties cascade, inherit and substitute" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    const doc = try html.parse(a,
+        \\<!DOCTYPE html><style>
+        \\  :root { --c: rgb(1, 2, 3); --w: 4px; --b: var(--w) solid var(--c) }
+        \\  .x { --w: 6px; color: var(--c); border: var(--b); margin: var(--w) 0 }
+        \\  .y { color: var(--missing, #0a0b0c); padding-left: var(--nope) }
+        \\  .z { --c: red }
+        \\</style>
+        \\<p class=x>a</p><p class=y>b</p><div class=z><p class=x>c</p></div>
+    , .{});
+    const sheets = try collectDocumentSheets(a, doc, env);
+    const styles = try compute(a, doc, sheets, env);
+    var ps: [3]NodeId = undefined;
+    var n: usize = 0;
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| if (doc.isHtml(id, "p")) {
+        ps[n] = id;
+        n += 1;
+    };
+    const x = styles.get(ps[0]);
+    try std.testing.expect(x.color.r == 1 and x.color.g == 2 and x.color.b == 3);
+    // --b was computed at the root, where --w is 4px.
+    try std.testing.expectEqual(@as(f64, 4), x.border_width[0]);
+    try std.testing.expectEqual(BorderStyle.solid, x.border_style[3]);
+    try std.testing.expectEqual(@as(f64, 6), x.margin[0].px);
+    const y = styles.get(ps[1]);
+    try std.testing.expect(y.color.r == 10 and y.color.b == 12);
+    // An unresolved var() is invalid at computed-value time: unset.
+    try std.testing.expectEqual(@as(f64, 0), y.padding[3].px);
+    // Custom properties inherit; the nearer declaration wins.
+    const z = styles.get(ps[2]);
+    try std.testing.expect(z.color.r == 255 and z.color.g == 0);
+}
+
+test "style: rem is of the root's size, and zoom scales every absolute length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    const doc = try html.parse(a, "<!DOCTYPE html><style>html { font-size: 62.5% } p { font-size: 1.4rem; margin-left: 10px; border-top: thin solid }</style><p>x</p>", .{});
+    const sheets = try collectDocumentSheets(a, doc, env);
+    var p_id: NodeId = 0;
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| if (doc.isHtml(id, "p")) {
+        p_id = id;
+    };
+    const plain = try compute(a, doc, sheets, env);
+    try std.testing.expectEqual(@as(f64, 14), plain.get(p_id).font_size);
+    px_scale = 2;
+    defer px_scale = 1;
+    const zoomed = try compute(a, doc, sheets, env);
+    try std.testing.expectEqual(@as(f64, 28), zoomed.get(p_id).font_size);
+    try std.testing.expectEqual(@as(f64, 20), zoomed.get(p_id).margin[3].px);
+    try std.testing.expectEqual(@as(f64, 2), zoomed.get(p_id).border_width[0]);
+}
+
+test "style: presentational hints sit under every author rule" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    const doc = try html.parse(a, "<!DOCTYPE html><style>.w { width: 30px }</style><body bgcolor=ff0000 text=\"#00ff00\"><img class=w width=10 height=20><img width=\"50%\"><font color=blue size=5>f</font><td align=center valign=top nowrap>c</td>", .{});
+    const sheets = try collectDocumentSheets(a, doc, env);
+    const styles = try compute(a, doc, sheets, env);
+    var imgs: [2]NodeId = undefined;
+    var n: usize = 0;
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| {
+        if (doc.isHtml(id, "img")) {
+            imgs[n] = id;
+            n += 1;
+        }
+        if (doc.isHtml(id, "body")) {
+            try std.testing.expectEqual(@as(f64, 255), styles.get(id).background_color.r);
+            try std.testing.expectEqual(@as(f64, 255), styles.get(id).color.g);
+        }
+        if (doc.isHtml(id, "font")) {
+            try std.testing.expectEqual(@as(f64, 255), styles.get(id).color.b);
+            try std.testing.expectEqual(@as(f64, 24), styles.get(id).font_size);
+        }
+    }
+    try std.testing.expectEqual(@as(f64, 30), styles.get(imgs[0]).width.px);
+    try std.testing.expectEqual(@as(f64, 20), styles.get(imgs[0]).height.px);
+    try std.testing.expectEqual(@as(f64, 50), styles.get(imgs[1]).width.percent);
+}
+
+test "style: backgrounds, gradients and radii" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    const doc = try html.parse(a,
+        \\<!DOCTYPE html><style>
+        \\  .a { background: url(sprite.svg) no-repeat 10px -20px / 30px auto #fff }
+        \\  .b { background-image: linear-gradient(transparent, transparent), url("x.png"); background-position: right bottom }
+        \\  .c { background: linear-gradient(to right, red, blue 75%); border-radius: 4px 50% }
+        \\  .d { background-image: linear-gradient(transparent, transparent) }
+        \\</style><p class=a>a</p><p class=b>b</p><p class=c>c</p><p class=d>d</p>
+    , .{});
+    const sheets = try collectDocumentSheets(a, doc, env);
+    const styles = try compute(a, doc, sheets, env);
+    var ps: [4]NodeId = undefined;
+    var n: usize = 0;
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| if (doc.isHtml(id, "p")) {
+        ps[n] = id;
+        n += 1;
+    };
+    const pa = styles.get(ps[0]);
+    try std.testing.expectEqualStrings("sprite.svg", pa.background_image.url);
+    try std.testing.expectEqual(@as(f64, 10), pa.background_position[0].px);
+    try std.testing.expectEqual(@as(f64, -20), pa.background_position[1].px);
+    try std.testing.expectEqual(@as(f64, 30), pa.background_size.size[0].px);
+    try std.testing.expect(!pa.background_repeat[0] and !pa.background_repeat[1]);
+    try std.testing.expectEqual(@as(f64, 255), pa.background_color.r);
+    const pb = styles.get(ps[1]);
+    // Of a tint over a picture, the picture.
+    try std.testing.expectEqualStrings("x.png", pb.background_image.url);
+    try std.testing.expectEqual(@as(f64, 100), pb.background_position[0].percent);
+    const pc = styles.get(ps[2]);
+    try std.testing.expectEqual(@as(f64, 90), pc.background_image.linear.angle);
+    try std.testing.expectEqual(@as(usize, 2), pc.background_image.linear.stops.len);
+    try std.testing.expectEqual(@as(f64, 75), pc.background_image.linear.stops[1].at.?.percent);
+    try std.testing.expectEqual(@as(f64, 4), pc.border_radius[0].px);
+    try std.testing.expectEqual(@as(f64, 50), pc.border_radius[1].percent);
+    // An all-transparent gradient paints nothing.
+    try std.testing.expect(styles.get(ps[3]).background_image == .none);
 }

@@ -110,11 +110,13 @@ const Painter = struct {
         if (b.style.visibility != .visible or b.style.opacity == 0) return;
         if (b.style.display == .none) return;
         if (b.kind == .text or b.kind == .br) return;
-        if (b.node) |n| if (controlOf(p.l.doc, n)) |kind| {
+        // A control paints itself — except a `button` element, whose
+        // face is its style and whose content is laid out like any box's.
+        if (b.node) |n| if (controlOf(p.l.doc, n)) |kind| if (!p.l.doc.isHtml(n, "button")) {
             p.control(b, n, kind);
             return;
         };
-        if (b.node) |n| if (p.l.doc.isHtml(n, "img")) {
+        if (b.node) |n| if (p.l.doc.isHtml(n, "img") or (p.l.doc.get(n).namespace == .svg and std.mem.eql(u8, p.l.doc.get(n).name, "svg"))) {
             if (p.l.images) |imgs| if (imgs.get(n)) |bm| {
                 p.picture(b, bm);
                 return;
@@ -123,10 +125,16 @@ const Painter = struct {
         // Backgrounds and borders on the border box (the root's are the
         // canvas's).
         if (b.kind != .root and b.kind != .inline_box and b.kind != .anon_block) {
+            const radii = p.radiiOf(b);
+            const rounded = radii[0] > 0 or radii[1] > 0 or radii[2] > 0 or radii[3] > 0;
             if (!(isHtmlOrBody(p.l, id) and rootBackground(p.l) != null)) {
-                if (b.style.background_color.a > 0) p.fill(b.x, b.y, b.w, b.h, b.style.background_color.word());
+                if (b.style.background_color.a > 0) {
+                    // Rounded or translucent: blended per pixel.
+                    if (rounded or b.style.background_color.a < 1) p.roundRect(b.x, b.y, b.w, b.h, radii, null, b.style.background_color) else p.fill(b.x, b.y, b.w, b.h, b.style.background_color.word());
+                }
+                p.backgroundImage(b);
             }
-            p.borders(b);
+            if (rounded) p.roundBorders(b, radii) else p.borders(b);
         }
         // Clip children to the padding box when overflow says so.
         const saved = p.canvas;
@@ -227,35 +235,317 @@ const Painter = struct {
         if (closes and b.border[1] > 0) p.fill(f.x + f.w - b.border[1], f.y, b.border[1], f.h, st.borderColor(1).word());
     }
 
-    /// A picture into its box's content area, scaled to it by nearest
-    /// sample (a box its own size copies pixel for pixel); alpha blends
-    /// over what is under it.
+    /// A box's corner radii in pixels (a percentage of its width),
+    /// shrunk together when two would overlap along a side.
+    fn radiiOf(p: *const Painter, b: *const Box) [4]f64 {
+        _ = p;
+        var r: [4]f64 = undefined;
+        for (0..4) |i| r[i] = @max(0, switch (b.style.border_radius[i]) {
+            .px => |x| x,
+            .percent => |pc| b.w * pc / 100,
+        });
+        const sums = [_]f64{ r[0] + r[1], r[1] + r[2], r[2] + r[3], r[3] + r[0] };
+        const lens = [_]f64{ b.w, b.h, b.w, b.h };
+        var f: f64 = 1;
+        for (sums, lens) |sum, len| if (sum > len and sum > 0) {
+            f = @min(f, len / sum);
+        };
+        for (&r) |*x| x.* *= f;
+        return r;
+    }
+
+    /// How much of the pixel at (px_, py_) a rounded rect covers: exact
+    /// inside, a one-pixel feather across a corner's arc.
+    fn roundCover(x: f64, y: f64, w: f64, h: f64, r: [4]f64, px_: f64, py_: f64) f64 {
+        const cx = px_ + 0.5;
+        const cy = py_ + 0.5;
+        if (cx < x or cy < y or cx > x + w or cy > y + h) {
+            // Partly covered edge pixels.
+            const ox = @max(0, @min(1, @min(cx - x + 0.5, x + w - cx + 0.5)));
+            const oy = @max(0, @min(1, @min(cy - y + 0.5, y + h - cy + 0.5)));
+            if (ox <= 0 or oy <= 0) return 0;
+            return ox * oy;
+        }
+        const corners = [_][3]f64{ .{ x + r[0], y + r[0], r[0] }, .{ x + w - r[1], y + r[1], r[1] }, .{ x + w - r[2], y + h - r[2], r[2] }, .{ x + r[3], y + h - r[3], r[3] } };
+        for (corners, 0..) |c, i| {
+            if (c[2] <= 0) continue;
+            const in_x = if (i == 0 or i == 3) cx < c[0] else cx > c[0];
+            const in_y = if (i == 0 or i == 1) cy < c[1] else cy > c[1];
+            if (in_x and in_y) {
+                const d = @sqrt((cx - c[0]) * (cx - c[0]) + (cy - c[1]) * (cy - c[1])) - c[2];
+                return std.math.clamp(0.5 - d, 0, 1);
+            }
+        }
+        const ox = @min(1, @min(cx - x + 0.5, x + w - cx + 0.5));
+        const oy = @min(1, @min(cy - y + 0.5, y + h - cy + 0.5));
+        return @max(0, ox) * @max(0, oy);
+    }
+
+    /// Fill a rounded rect (minus `hole`, another, for a border ring).
+    fn roundRect(p: *const Painter, x: f64, y: f64, w: f64, h: f64, r: [4]f64, hole: ?[8]f64, c: color.Color) void {
+        if (w <= 0 or h <= 0 or c.a <= 0) return;
+        const word = c.word();
+        const alpha = c.a;
+        const y0 = @max(0, @floor(y - p.scroll));
+        const y1 = @min(@as(f64, @floatFromInt(p.canvas.h)), @ceil(y + h - p.scroll));
+        const x0 = @max(0, @floor(x));
+        const x1 = @min(@as(f64, @floatFromInt(p.canvas.w)), @ceil(x + w));
+        var sy = y0;
+        while (sy < y1) : (sy += 1) {
+            var sx = x0;
+            while (sx < x1) : (sx += 1) {
+                var cov = roundCover(x, y - p.scroll, w, h, r, sx, sy);
+                if (hole) |ho| if (cov > 0) {
+                    cov -= roundCover(ho[0], ho[1] - p.scroll, ho[2], ho[3], .{ ho[4], ho[5], ho[6], ho[7] }, sx, sy);
+                };
+                if (cov <= 0) continue;
+                p.canvas.blend(@intFromFloat(sx), @intFromFloat(sy), word, @intFromFloat(@round(@min(1, cov) * alpha * 255)));
+            }
+        }
+    }
+
+    /// Borders around rounded corners: the ring between the border box
+    /// and the padding box, one colour (the top's) all round.
+    fn roundBorders(p: *const Painter, b: *const Box, r: [4]f64) void {
+        const bw = b.border;
+        if (bw[0] <= 0 and bw[1] <= 0 and bw[2] <= 0 and bw[3] <= 0) return;
+        var side: usize = 0;
+        while (side < 4 and bw[side] <= 0) side += 1;
+        const c = b.style.borderColor(side);
+        const inner_r = [4]f64{ @max(0, r[0] - @max(bw[0], bw[3])), @max(0, r[1] - @max(bw[0], bw[1])), @max(0, r[2] - @max(bw[2], bw[1])), @max(0, r[3] - @max(bw[2], bw[3])) };
+        p.roundRect(b.x, b.y, b.w, b.h, r, .{ b.x + bw[3], b.y + bw[0], b.w - bw[1] - bw[3], b.h - bw[0] - bw[2], inner_r[0], inner_r[1], inner_r[2], inner_r[3] }, c);
+    }
+
+    /// The `background-image` layer: a picture placed in the padding box
+    /// by `background-position` and `-size`, tiled by `-repeat`, clipped
+    /// to the border box; or a linear gradient over it.
+    fn backgroundImage(p: *const Painter, b: *const Box) void {
+        const st = b.style;
+        switch (st.background_image) {
+            .none => return,
+            .linear => |g| return p.gradient(b, g.angle, g.stops, g.repeating),
+            .url => {},
+        }
+        const imgs = p.l.images orelse return;
+        const bm = imgs.background(st.background_image.url, st.background_base) orelse return;
+        if (bm.w == 0 or bm.h == 0) return;
+        const ax = b.x + b.border[3];
+        const ay = b.y + b.border[0];
+        const aw = b.w - b.border[1] - b.border[3];
+        const ah = b.h - b.border[0] - b.border[2];
+        if (aw <= 0 or ah <= 0) return;
+        const scale = style.px_scale / bm.density;
+        const nw = @as(f64, @floatFromInt(bm.w)) * scale;
+        const nh = @as(f64, @floatFromInt(bm.h)) * scale;
+        var tw = nw;
+        var th = nh;
+        switch (st.background_size) {
+            .auto => {},
+            .cover, .contain => {
+                const f = if (st.background_size == .cover) @max(aw / nw, ah / nh) else @min(aw / nw, ah / nh);
+                tw = nw * f;
+                th = nh * f;
+            },
+            .size => |sz| {
+                const w_: ?f64 = switch (sz[0]) {
+                    .px => |x| x,
+                    .percent => |pc| aw * pc / 100,
+                    .auto => null,
+                };
+                const h_: ?f64 = switch (sz[1]) {
+                    .px => |x| x,
+                    .percent => |pc| ah * pc / 100,
+                    .auto => null,
+                };
+                if (w_ != null and h_ != null) {
+                    tw = w_.?;
+                    th = h_.?;
+                } else if (w_) |ww| {
+                    tw = ww;
+                    th = ww * nh / nw;
+                } else if (h_) |hh| {
+                    th = hh;
+                    tw = hh * nw / nh;
+                }
+            },
+        }
+        if (tw < 0.5 or th < 0.5) return;
+        const off_x = switch (st.background_position[0]) {
+            .px => |x| x,
+            .percent => |pc| (aw - tw) * pc / 100,
+        };
+        const off_y = switch (st.background_position[1]) {
+            .px => |x| x,
+            .percent => |pc| (ah - th) * pc / 100,
+        };
+        // Clipped to the border box.
+        var q = p.*;
+        q.canvas.clip_x0 = @max(q.canvas.clip_x0, px(@max(0, b.x)));
+        q.canvas.clip_x1 = @min(q.canvas.clip_x1, px(@max(0, b.x + b.w)));
+        q.canvas.clip_y0 = @max(q.canvas.clip_y0, px(@max(0, b.y - p.scroll)));
+        q.canvas.clip_y1 = @min(q.canvas.clip_y1, px(@max(0, b.y + b.h - p.scroll)));
+        if (q.canvas.clip_x1 <= q.canvas.clip_x0 or q.canvas.clip_y1 <= q.canvas.clip_y0) return;
+        var x_start = ax + off_x;
+        var y_start = ay + off_y;
+        const rep_x = st.background_repeat[0];
+        const rep_y = st.background_repeat[1];
+        if (rep_x) x_start -= @ceil((x_start - b.x) / tw) * tw;
+        if (rep_y) y_start -= @ceil((y_start - b.y) / th) * th;
+        var ty = y_start;
+        var rows: usize = 0;
+        while (ty < b.y + b.h and rows < 4096) : (rows += 1) {
+            var tx = x_start;
+            var cols: usize = 0;
+            while (tx < b.x + b.w and cols < 4096) : (cols += 1) {
+                q.bitmap(bm, tx, ty - p.scroll, tw, th, 0, 0, @floatFromInt(bm.w), @floatFromInt(bm.h));
+                if (!rep_x) break;
+                tx += tw;
+            }
+            if (!rep_y) break;
+            ty += th;
+        }
+    }
+
+    /// A linear gradient over the border box: the colour at each pixel
+    /// from its projection on the gradient line (CSS's length for the
+    /// angle), stops interpolated in straight sRGB.
+    fn gradient(p: *const Painter, b: *const Box, angle: f64, stops: []const style.Stop, repeating: bool) void {
+        if (stops.len == 0 or b.w <= 0 or b.h <= 0) return;
+        const rad = angle * std.math.pi / 180;
+        const dx = @sin(rad);
+        const dy = -@cos(rad);
+        const len = @abs(b.w * dx) + @abs(b.h * dy);
+        if (len <= 0) return;
+        // Stop positions as fractions, the unplaced spread between the
+        // placed (CSS Images §3.5.1).
+        var pos_buf: [32]f64 = undefined;
+        const n = @min(stops.len, pos_buf.len);
+        const pos = pos_buf[0..n];
+        for (stops[0..n], 0..) |st, i| pos[i] = if (st.at) |at| switch (at) {
+            .px => |x| x / len,
+            .percent => |pc| pc / 100,
+        } else -1;
+        if (pos[0] < 0) pos[0] = 0;
+        if (pos[n - 1] < 0) pos[n - 1] = 1;
+        var i: usize = 1;
+        while (i < n) : (i += 1) {
+            if (pos[i] >= 0) {
+                pos[i] = @max(pos[i], pos[i - 1]);
+                continue;
+            }
+            var j = i;
+            while (pos[j] < 0) j += 1;
+            const from = pos[i - 1];
+            const to = @max(pos[j], from);
+            for (i..j) |k| pos[k] = from + (to - from) * @as(f64, @floatFromInt(k - i + 1)) / @as(f64, @floatFromInt(j - i + 1));
+            i = j;
+        }
+        const cxm = b.x + b.w / 2;
+        const cym = b.y + b.h / 2;
+        const y0 = @max(0, @floor(b.y - p.scroll));
+        const y1 = @min(@as(f64, @floatFromInt(p.canvas.h)), @ceil(b.y + b.h - p.scroll));
+        const x0 = @max(0, @floor(b.x));
+        const x1 = @min(@as(f64, @floatFromInt(p.canvas.w)), @ceil(b.x + b.w));
+        var sy = y0;
+        while (sy < y1) : (sy += 1) {
+            var sx = x0;
+            while (sx < x1) : (sx += 1) {
+                var t = ((sx + 0.5 - cxm) * dx + (sy + 0.5 + p.scroll - cym) * dy) / len + 0.5;
+                if (repeating and pos[n - 1] > pos[0]) {
+                    const span = pos[n - 1] - pos[0];
+                    t = pos[0] + @mod(t - pos[0], span);
+                }
+                var c = stops[0].color;
+                if (t >= pos[n - 1]) {
+                    c = stops[n - 1].color;
+                } else if (t > pos[0]) {
+                    var k: usize = 1;
+                    while (k < n and pos[k] < t) k += 1;
+                    const a0 = stops[k - 1].color;
+                    const a1 = stops[@min(k, n - 1)].color;
+                    const span = pos[@min(k, n - 1)] - pos[k - 1];
+                    const f = if (span > 0) (t - pos[k - 1]) / span else 1;
+                    c = .{ .r = a0.r + (a1.r - a0.r) * f, .g = a0.g + (a1.g - a0.g) * f, .b = a0.b + (a1.b - a0.b) * f, .a = a0.a + (a1.a - a0.a) * f };
+                }
+                if (c.a <= 0) continue;
+                p.canvas.blend(@intFromFloat(sx), @intFromFloat(sy), c.word(), @intFromFloat(@round(@min(1, c.a) * 255)));
+            }
+        }
+    }
+
+    /// A picture into its box's content area, scaled to it — pixel for
+    /// pixel at its own size, else bilinearly (a zoomed page scales
+    /// every picture) — alpha blending over what is under it.
     fn picture(p: *const Painter, b: *const layout.Box, bm: layout.Bitmap) void {
         const x0f = b.x + b.border[3] + b.padding[3];
         const y0f = b.y + b.border[0] + b.padding[0] - p.scroll;
         const cw = b.w - b.border[1] - b.border[3] - b.padding[1] - b.padding[3];
         const chh = b.h - b.border[0] - b.border[2] - b.padding[0] - b.padding[2];
         if (cw <= 0 or chh <= 0 or bm.w == 0 or bm.h == 0) return;
-        const dw: usize = px(cw);
-        const dh: usize = px(chh);
-        if (dw == 0 or dh == 0) return;
-        const ox: i64 = @intFromFloat(@round(x0f));
-        const oy: i64 = @intFromFloat(@round(y0f));
-        var y: usize = 0;
-        while (y < dh) : (y += 1) {
-            const sy = @min(bm.h - 1, @as(u32, @intCast(y * bm.h / dh)));
-            const ty = oy + @as(i64, @intCast(y));
+        p.bitmap(bm, x0f, y0f, cw, chh, 0, 0, @floatFromInt(bm.w), @floatFromInt(bm.h));
+    }
+
+    /// The source rect (sx, sy, sw, sh) of a bitmap drawn into the
+    /// screen rect (x, y, w, h), clipped by the canvas.
+    fn bitmap(p: *const Painter, bm: layout.Bitmap, x: f64, y: f64, w: f64, h: f64, sx: f64, sy: f64, sw: f64, sh: f64) void {
+        const dw: usize = px(w);
+        const dh: usize = px(h);
+        if (dw == 0 or dh == 0 or bm.w == 0 or bm.h == 0) return;
+        const ox: i64 = @intFromFloat(@round(x));
+        const oy: i64 = @intFromFloat(@round(y));
+        const exact = @abs(sw - w) < 0.01 and @abs(sh - h) < 0.01;
+        const fx = sw / @as(f64, @floatFromInt(dw));
+        const fy = sh / @as(f64, @floatFromInt(dh));
+        const cx0: i64 = @intCast(p.canvas.clip_x0);
+        const cx1: i64 = @intCast(p.canvas.clip_x1);
+        const cy1: i64 = @intCast(@min(p.canvas.h, p.canvas.clip_y1));
+        var yy: usize = 0;
+        while (yy < dh) : (yy += 1) {
+            const ty = oy + @as(i64, @intCast(yy));
             if (ty < 0) continue;
-            if (ty >= @as(i64, @intCast(p.canvas.h))) break;
-            var x: usize = 0;
-            while (x < dw) : (x += 1) {
-                const tx = ox + @as(i64, @intCast(x));
-                if (tx < 0) continue;
-                if (tx >= @as(i64, @intCast(p.canvas.w))) break;
-                const sx = @min(bm.w - 1, @as(u32, @intCast(x * bm.w / dw)));
-                const o = (@as(usize, sy) * bm.w + sx) * 4;
-                const word = (@as(u32, bm.rgba[o]) << 16) | (@as(u32, bm.rgba[o + 1]) << 8) | bm.rgba[o + 2];
-                p.canvas.blend(@intCast(tx), @intCast(ty), word, bm.rgba[o + 3]);
+            if (ty >= cy1) break;
+            var xx: usize = 0;
+            while (xx < dw) : (xx += 1) {
+                const tx = ox + @as(i64, @intCast(xx));
+                if (tx < cx0) continue;
+                if (tx >= cx1) break;
+                var rgba: [4]f64 = undefined;
+                if (exact) {
+                    const ix: u32 = @intFromFloat(@min(@as(f64, @floatFromInt(bm.w - 1)), sx + @as(f64, @floatFromInt(xx))));
+                    const iy: u32 = @intFromFloat(@min(@as(f64, @floatFromInt(bm.h - 1)), sy + @as(f64, @floatFromInt(yy))));
+                    const o = (@as(usize, iy) * bm.w + ix) * 4;
+                    for (0..4) |k| rgba[k] = @floatFromInt(bm.rgba[o + k]);
+                } else {
+                    // The sample point in source pixels, pixel centres at
+                    // .5; the four around it weighted by distance, colour
+                    // premultiplied so a transparent edge does not darken.
+                    const u = std.math.clamp(sx + (@as(f64, @floatFromInt(xx)) + 0.5) * fx - 0.5, 0, @as(f64, @floatFromInt(bm.w - 1)));
+                    const v = std.math.clamp(sy + (@as(f64, @floatFromInt(yy)) + 0.5) * fy - 0.5, 0, @as(f64, @floatFromInt(bm.h - 1)));
+                    const x_0: u32 = @intFromFloat(@floor(u));
+                    const y_0: u32 = @intFromFloat(@floor(v));
+                    const x_1 = @min(bm.w - 1, x_0 + 1);
+                    const y_1 = @min(bm.h - 1, y_0 + 1);
+                    const ax = u - @floor(u);
+                    const ay = v - @floor(v);
+                    rgba = .{ 0, 0, 0, 0 };
+                    const taps = [_]struct { x: u32, y: u32, wt: f64 }{
+                        .{ .x = x_0, .y = y_0, .wt = (1 - ax) * (1 - ay) },
+                        .{ .x = x_1, .y = y_0, .wt = ax * (1 - ay) },
+                        .{ .x = x_0, .y = y_1, .wt = (1 - ax) * ay },
+                        .{ .x = x_1, .y = y_1, .wt = ax * ay },
+                    };
+                    for (taps) |t| {
+                        const o = (@as(usize, t.y) * bm.w + t.x) * 4;
+                        const a: f64 = @floatFromInt(bm.rgba[o + 3]);
+                        for (0..3) |k| rgba[k] += @as(f64, @floatFromInt(bm.rgba[o + k])) * a * t.wt;
+                        rgba[3] += a * t.wt;
+                    }
+                    if (rgba[3] > 0) for (0..3) |k| {
+                        rgba[k] /= rgba[3];
+                    };
+                }
+                const word = (@as(u32, @intFromFloat(@round(rgba[0]))) << 16) | (@as(u32, @intFromFloat(@round(rgba[1]))) << 8) | @as(u32, @intFromFloat(@round(rgba[2])));
+                p.canvas.blend(@intCast(tx), @intCast(ty), word, @intFromFloat(@round(rgba[3])));
             }
         }
     }
@@ -307,51 +597,53 @@ const Painter = struct {
         const m = p.l.fonts.metrics(font);
         const white: u32 = 0xffffff;
         switch (kind) {
-            .text, .password, .textarea, .select => {
-                p.fill(b.x, b.y, b.w, b.h, if (st.background_color.a > 0) st.background_color.word() else white);
-                p.stroke(b.x, b.y, b.w, b.h, 1, p.opts.frame);
-                var value: []const u8 = if (kind == .textarea) (doc.textContent(node, p.l.a) catch "") else (doc.getAttr(node, "value") orelse "");
-                if (kind == .textarea) if (doc.getAttr(node, "value")) |v| {
-                    value = v;
-                };
-                if (kind == .select) value = selectedOption(doc, node);
-                var dots: [64]u8 = undefined;
-                if (kind == .password) {
-                    const n = @min(value.len, dots.len);
-                    @memset(dots[0..n], '*');
-                    value = dots[0..n];
-                }
-                // The text sits on the control's centre line; what does not
-                // fit is cut at the frame.
-                const saved = p.canvas;
-                var clipped = p.canvas;
-                clipped.clip_x0 = @max(clipped.clip_x0, px(@max(0, b.x + 2)));
-                clipped.clip_x1 = @min(clipped.clip_x1, px(@max(0, b.x + b.w - 2)));
-                const inner_h = m.ascent + m.descent;
-                const baseline = b.y + (b.h - inner_h) / 2 + m.ascent;
-                var q = p.*;
-                q.canvas = clipped;
-                p.l.fonts.draw(&q.canvas, font, b.x + 4, baseline - p.scroll, value, st.color.word());
-                if (kind == .select) p.l.fonts.draw(&q.canvas, font, b.x + b.w - 4 - p.l.fonts.advance(font, "v"), baseline - p.scroll, "v", p.opts.frame);
-                _ = saved;
-            },
             .checkbox, .radio => {
                 p.fill(b.x, b.y, b.w, b.h, white);
                 p.stroke(b.x, b.y, b.w, b.h, 1, p.opts.frame);
                 if (doc.hasAttr(node, "checked")) p.fill(b.x + 3, b.y + 3, @max(1, b.w - 6), @max(1, b.h - 6), p.opts.accent);
+                return;
             },
-            .button => {
-                p.fill(b.x, b.y, b.w, b.h, if (st.background_color.a > 0) st.background_color.word() else p.opts.face);
-                p.stroke(b.x, b.y, b.w, b.h, 1, p.opts.frame);
-                var label: []const u8 = doc.getAttr(node, "value") orelse "";
-                if (doc.isHtml(node, "button")) label = doc.textContent(node, p.l.a) catch "";
-                if (label.len == 0) label = "Submit";
-                const tw = p.l.fonts.advance(font, label);
-                const inner_h = m.ascent + m.descent;
-                const baseline = b.y + (b.h - inner_h) / 2 + m.ascent;
-                p.l.fonts.draw(&p.canvas, font, b.x + @max(0, (b.w - tw) / 2), baseline - p.scroll, label, st.color.word());
-            },
+            else => {},
         }
+        // A field or a button is a box first — its background and borders
+        // as its style says (the UA sheet's, or the page's own) — with its
+        // value or label set in its content box.
+        if (st.background_color.a > 0) p.fill(b.x, b.y, b.w, b.h, st.background_color.word());
+        p.borders(b);
+        const cx = b.x + b.border[3] + b.padding[3];
+        const cw = b.w - b.border[1] - b.border[3] - b.padding[1] - b.padding[3];
+        const cy = b.y + b.border[0] + b.padding[0];
+        const ch = b.h - b.border[0] - b.border[2] - b.padding[0] - b.padding[2];
+        var value: []const u8 = switch (kind) {
+            .textarea => doc.getAttr(node, "value") orelse (doc.textContent(node, p.l.a) catch ""),
+            .select => selectedOption(doc, node),
+            .button => blk: {
+                const v = doc.getAttr(node, "value") orelse "";
+                break :blk if (v.len == 0) "Submit" else v;
+            },
+            else => doc.getAttr(node, "value") orelse "",
+        };
+        var dots: [64]u8 = undefined;
+        if (kind == .password) {
+            const n = @min(value.len, dots.len);
+            @memset(dots[0..n], '*');
+            value = dots[0..n];
+        }
+        // What does not fit is cut at the content box; the text sits on
+        // its centre line (a textarea's from the top).
+        var q = p.*;
+        q.canvas.clip_x0 = @max(q.canvas.clip_x0, px(@max(0, cx)));
+        q.canvas.clip_x1 = @min(q.canvas.clip_x1, px(@max(0, cx + cw)));
+        const inner_h = m.ascent + m.descent;
+        const baseline = if (kind == .textarea) cy + m.ascent else cy + (ch - inner_h) / 2 + m.ascent;
+        const tx = if (kind == .button) cx + @max(0, (cw - p.l.fonts.advance(font, value)) / 2) else cx;
+        // An empty field shows its placeholder, greyed.
+        if (value.len == 0 and (kind == .text or kind == .textarea or kind == .password)) if (doc.getAttr(node, "placeholder")) |ph| {
+            p.l.fonts.draw(&q.canvas, font, tx, baseline - p.scroll, ph, 0x757575);
+            return;
+        };
+        p.l.fonts.draw(&q.canvas, font, tx, baseline - p.scroll, value, st.color.word());
+        if (kind == .select) p.l.fonts.draw(&q.canvas, font, cx + cw - p.l.fonts.advance(font, "v"), baseline - p.scroll, "v", p.opts.frame);
     }
 
     fn text(p: *const Painter, f: layout.Fragment) void {

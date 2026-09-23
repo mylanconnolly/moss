@@ -252,6 +252,36 @@ fn forbiddenDomain(c: u8) bool {
 }
 
 /// The host parser.
+/// A `data:` URL's payload (the Fetch Standard's data: URL processor,
+/// without MIME parameters): its media type as written and its bytes,
+/// percent-decoded and, with `;base64`, base64-decoded. Null when the
+/// URL is not one or its base64 is bad.
+pub const Data = struct { mime: []const u8, bytes: []const u8 };
+
+pub fn decodeData(a: std.mem.Allocator, href: []const u8) Error!?Data {
+    if (href.len < 5 or !std.ascii.eqlIgnoreCase(href[0..5], "data:")) return null;
+    const rest = href[5..];
+    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
+    var mime = std.mem.trim(u8, rest[0..comma], " \t\r\n");
+    const body = try percentDecode(a, rest[comma + 1 ..]);
+    var base64 = false;
+    if (mime.len >= 7 and std.ascii.eqlIgnoreCase(std.mem.trimEnd(u8, mime, " ")[@max(7, mime.len) - 7 ..], ";base64")) {
+        base64 = true;
+        mime = mime[0 .. mime.len - 7];
+    }
+    if (!base64) return .{ .mime = mime, .bytes = body };
+    // Forgiving base64: whitespace dropped, padding optional.
+    var clean: std.ArrayList(u8) = .empty;
+    for (body) |c| if (!std.ascii.isWhitespace(c)) try clean.append(a, c);
+    var text = clean.items;
+    while (text.len > 0 and text[text.len - 1] == '=') text.len -= 1;
+    const dec = std.base64.standard_no_pad.Decoder;
+    const n = dec.calcSizeForSlice(text) catch return null;
+    const out = try a.alloc(u8, n);
+    dec.decode(out, text) catch return null;
+    return .{ .mime = mime, .bytes = out };
+}
+
 pub fn parseHost(a: std.mem.Allocator, input: []const u8, is_opaque: bool) Error!Host {
     if (input.len > 0 and input[0] == '[') {
         if (input[input.len - 1] != ']') return error.Invalid;
@@ -1053,4 +1083,17 @@ test "url: the WPT corpus, counted" {
     // The floor is the count as of 2026-09-18 (`verbose` lists the rest):
     // a change that loses an entry fails here.
     try std.testing.expect(passed >= 875);
+}
+
+test "url: data: URLs decode, plain and base64" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = (try decodeData(a, "data:image/svg+xml;utf8,<svg fill=%22%23000%22/>")).?;
+    try std.testing.expectEqualStrings("image/svg+xml;utf8", plain.mime);
+    try std.testing.expectEqualStrings("<svg fill=\"#000\"/>", plain.bytes);
+    const b64 = (try decodeData(a, "data:text/plain;base64,aGVsbG8=")).?;
+    try std.testing.expectEqualStrings("text/plain", b64.mime);
+    try std.testing.expectEqualStrings("hello", b64.bytes);
+    try std.testing.expect((try decodeData(a, "https://x/")) == null);
 }

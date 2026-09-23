@@ -327,11 +327,14 @@ pub const Host = struct {
     pub fn loadFontsFrom(h: *Host, view: u64, view_buf: [*]u8, prefix: []const u8) bool {
         var p0: [64]u8 = undefined;
         var p1: [64]u8 = undefined;
+        var p2: [64]u8 = undefined;
+        // Sans, mono, then the fallback for Han, kana and Hangul.
         const files = [_][]const u8{
             std.fmt.bufPrint(&p0, "{s}fonts/IBMPlexSans.ttf", .{prefix}) catch return false,
             std.fmt.bufPrint(&p1, "{s}fonts/IBMPlexMono-Regular.ttf", .{prefix}) catch return false,
+            std.fmt.bufPrint(&p2, "{s}fallback/DroidSansFallbackFull.ttf", .{prefix}) catch return false,
         };
-        const pages: u64 = 200; // 800 KB: the two faces are 673 KB
+        const pages: u64 = 1200; // 4.7 MB: the faces are 673 KB + 4.0 MB
         const s = usys.shmCreate(pages);
         if (s.err != .ok) return false;
         const m = usys.shmMap(s.data[0]);

@@ -500,6 +500,16 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   URL): the exact desktop the user runs, without a window. Add
   `-object filter-dump,id=fd,netdev=n2,file=x.pcap` to the QEMU
   command line and `tcpdump -nr x.pcap` says what left the guest.
+- A site that renders wrong: reproduce it on the host before booting.
+  `zig build webshot -- URL OUT.ppm [W] [H] [ZOOM%]` runs the page
+  domain's pipeline (sheets, fonts, pictures, layout, paint) on the
+  Mac with the same faces, caching what it fetches under
+  `zig-out/webshot-cache`; `WEBSHOT_DUMP=needle` prints box subtrees by
+  id/class, `WEBSHOT_FRAG=text` the fragments holding a string. The
+  reference is headless Chrome with the page's User-Agent:
+  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  --headless=new --window-size=W,H --user-agent="moss/0.0 (webpage)"
+  --screenshot=out.png URL`.
 - Budgets: the kernel charges a child's *image* (text, data, BSS,
   stack) to the parent chain at spawn and refuses when the parent's room
   is short of it; a child's own limit is its cap, not what it costs

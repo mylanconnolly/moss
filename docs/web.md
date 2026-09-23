@@ -31,12 +31,17 @@ serializer; `encoding` decodes the byte streams the web sends;
 `selectors` matches CSS selectors; `text` is the readable text of a
 page; `css`, `color` and `media` are CSS syntax, colours and media
 queries, `style` the cascade (with a `Loader` for linked sheets and
-their imports, and a direct parse mode that keeps a sheet at a tenth
-of what its parse needs); `layout` places boxes and lines
+their imports, a direct parse mode that keeps a sheet at a tenth
+of what its parse needs, custom properties and `var()`, HTML's
+presentational hints, and the page zoom as `px_scale`, device pixels
+per CSS pixel); `fonts` sets text in real faces with fallback across
+them and synthesized bold; `layout` places boxes and lines (tables and
+flexbox included, quirks mode's line heights too)
 (CSS 2.1's visual formatting model, with a `Fonts` vtable for text and an
 `Images` provider for pictures), and `paint` draws them into the
-toolkit's canvas; `lib/image.zig` decodes PNG, GIF and JPEG (baseline
-and progressive) into RGBA, tested against a corpus `tools/mkimages.sh`
+toolkit's canvas (backgrounds, gradients and rounded corners
+included); `lib/image.zig` decodes PNG, GIF and JPEG (baseline
+and progressive) into RGBA and `lib/svg.zig` draws SVG at any scale, tested against a corpus `tools/mkimages.sh`
 generates with ImageMagick. The corpora under
 `tools/testdata/web/` are vendored at pinned commits; every `zig build
 test` prints the counts (see [Testing](testing.md)) and asserts a floor,
@@ -188,19 +193,32 @@ log from inside `update`, where `echo` waits for the window to close).
 
 ### What is not built
 
-No external stylesheets yet (`<link rel=stylesheet>`; the page's own
-`<style>` blocks and attributes are the cascade); no cache, no cookie
-jar and no connection pool yet (the session's
-`webfetch` unit of the plan); no content coding in the page; no stop
-button; a select cycles its options rather than opening a list; binary
-downloads wait for a bytes save in the picker; no SVG, WebP, animated
-GIF (the first frame shows), `srcset` or `background-image`; no grid or tables beyond block rows, no `calc()` or custom properties
-(flexbox is built; stage 9's remainder); no JavaScript
-(stages 10–11: our own engine, off until it lands). Menus are the
-generic window menu until client-defined menus exist. The `page` leaf
-does not yet follow a window resize with a fresh buffer of the new size
-in one step: the leaf's rect changes on the next render and the page is
-told, so a maximized window shows the page relaid out after a tick.
+No grid, no `calc()`, no masks or clip paths, no merged
+`border-collapse` borders, no WebP, animated GIF (the first frame
+shows) or `srcset` (stage 9's remainder); SVG draws its shapes, paths,
+strokes and `use`s but not gradients (their mean colour), clips, masks,
+filters or text; the scripts that need shaping or bidi (Arabic, Hebrew,
+the Indic scripts) show as boxes (Han, kana and Hangul come from the
+fallback face); bold is synthesized and there is no italic; no cache,
+no cookie jar and no connection pool yet (the session's `webfetch` unit
+of the plan); no content coding in the page; no stop button; a select
+cycles its options rather than opening a list; binary downloads wait
+for a bytes save in the picker; no JavaScript (stages 10–11: our own
+engine, off until it lands). Menus are the generic window menu until
+client-defined menus exist. The `page` leaf does not yet follow a
+window resize with a fresh buffer of the new size in one step: the
+leaf's rect changes on the next render and the page is told, so a
+maximized window shows the page relaid out after a tick.
+
+### Looking at a real site
+
+`zig build webshot -- URL OUT.ppm [WIDTH] [HEIGHT] [ZOOM%]` renders a
+URL on the host with the page domain's own pipeline and faces, caching
+what it fetches under `zig-out/webshot-cache` (delete it to refetch).
+`WEBSHOT_DUMP=needle` prints the box subtree of every element whose id
+or class holds the needle; `WEBSHOT_FRAG=text` prints the fragments
+carrying a string and the lines that reach them. Headless Chrome with
+the page's User-Agent (`moss/0.0 (webpage)`) makes the reference.
 
 ## Dig deeper
 

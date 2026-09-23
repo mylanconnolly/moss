@@ -2209,6 +2209,12 @@ pub fn serialize(a: std.mem.Allocator, doc: *const Document, root: NodeId, out: 
     while (c) |cid| : (c = doc.get(cid).next) try serializeNode(a, doc, cid, out);
 }
 
+/// An element with its own tags: its outer markup (an inline `<svg>`
+/// handed to the SVG renderer as a document of its own).
+pub fn serializeOuter(a: std.mem.Allocator, doc: *const Document, id: NodeId, out: *std.ArrayList(u8)) Error!void {
+    try serializeNode(a, doc, id, out);
+}
+
 fn serializeNode(a: std.mem.Allocator, doc: *const Document, id: NodeId, out: *std.ArrayList(u8)) Error!void {
     const n = doc.get(id);
     switch (n.kind) {

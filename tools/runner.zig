@@ -1429,6 +1429,12 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!clickScanout(&q, site[0], site[1])) return sfail(spec, log_path, "click Site again");
     if (!try waitLogN(log_path, "gui: action site", 2, "the Site panel did not close", spec, polls)) return false;
     sleepMs(300);
+    // Back to 100%: zoom is the page's, pictures included, and the
+    // pictures below are counted at their unzoomed places.
+    const zo = widgetCenter(readLog(log_path), "zoomout") orelse return false;
+    if (!clickScanout(&q, zo[0], zo[1])) return sfail(spec, log_path, "click zoom out");
+    if (!try waitLogN(log_path, "gui: action zoomout", 1, "zoom out did not reach the app", spec, polls)) return false;
+    sleepMs(400);
     // Pictures and a web font: the page fetches four images and a WOFF
     // through its broker and decodes them itself; the solid ones are
     // counted in the screendump, the font by the page's word.

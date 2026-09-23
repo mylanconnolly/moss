@@ -9,7 +9,7 @@
 //! syntax, colours and media queries, and `style` is the cascade that
 //! turns them into every element's computed values; `layout` places
 //! boxes and lines from those, and `paint` draws them into the toolkit's
-//! canvas.
+//! canvas; `fonts` sets the text in real faces with fallback.
 pub const url = @import("web/url.zig");
 pub const encoding = @import("web/encoding.zig");
 pub const dom = @import("web/dom.zig");
@@ -23,6 +23,7 @@ pub const media = @import("web/media.zig");
 pub const style = @import("web/style.zig");
 pub const layout = @import("web/layout.zig");
 pub const paint = @import("web/paint.zig");
+pub const fonts = @import("web/fonts.zig");
 
 test {
     _ = url;
@@ -38,4 +39,5 @@ test {
     _ = style;
     _ = layout;
     _ = paint;
+    _ = fonts;
 }

@@ -59,7 +59,6 @@ var layout_heap: [12 << 20]u8 = undefined;
 var layout_fba: std.heap.FixedBufferAllocator = undefined;
 /// Rasterized glyphs, kept across navigations.
 var glyph_heap: [2 << 20]u8 = undefined;
-var glyph_fba: std.heap.FixedBufferAllocator = undefined;
 /// The user-agent stylesheet, parsed once.
 var ua_heap: [512 << 10]u8 = undefined;
 var ua_sheet: ?web.style.Sheet = null;
@@ -160,7 +159,7 @@ fn attach() void {
                 _ = usys.capDrop(f.cap);
                 if (fm.err == .ok) {
                     const pack = @as([*]const u8, @ptrFromInt(fm.data[0]))[0..@min(ff.len, fm.data[1] * 4096)];
-                    page_fonts.load(pack);
+                    loadPack(pack);
                 }
             }
         },
@@ -173,181 +172,23 @@ fn attach() void {
 // ------------------------------------------------------------- fonts
 
 /// Text for layout and paint: the faces the host packed (sans first,
-/// mono second), rasterized by `lib/font` into a bounded glyph cache;
-/// without any, fixed cells, so a headless page still lays out.
-const max_web_faces = 8;
+/// mono second, then fallbacks for the scripts those lack) plus the
+/// page's own `@font-face` faces, over `lib/web/fonts`; without any,
+/// fixed cells, so a headless page still lays out.
+const max_web_faces = web.fonts.max_web;
 
-const PageFonts = struct {
-    faces: [2]?font.Font = .{ null, null },
-    /// `@font-face` faces the page fetched, by the family they declare.
-    extra: [max_web_faces]WebFace = undefined,
-    n_extra: usize = 0,
-    cache: [512]Entry = undefined,
-    cache_len: usize = 0,
-    fixed: web.layout.FixedFonts = .{},
-
-    const WebFace = struct { name: [64]u8, name_len: usize, face: font.Font, used: bool = false };
-    const Entry = struct { face: u8, gid: u16, size: u16, glyph: font.Glyph };
-
-    /// Add a fetched face under its family name; the glyph cache starts
-    /// over (its indices may be reused across pages).
-    fn addWebFace(self: *PageFonts, family: []const u8, face: font.Font) bool {
-        if (self.n_extra == max_web_faces) return false;
-        const w = &self.extra[self.n_extra];
-        w.name_len = @min(family.len, w.name.len);
-        @memcpy(w.name[0..w.name_len], family[0..w.name_len]);
-        w.face = face;
-        w.used = false;
-        self.n_extra += 1;
-        return true;
+fn loadPack(pack: []const u8) void {
+    for (0..web.fonts.max_system) |i| {
+        const bytes = wire.FontPack.file(pack, i) orelse continue;
+        page_fonts.setSystem(i, font.Font.parse(bytes) catch null);
     }
+}
 
-    /// A new page: its web faces go (their bytes went with the arena).
-    fn forgetWebFaces(self: *PageFonts) void {
-        if (self.n_extra == 0) return;
-        self.n_extra = 0;
-        self.cache_len = 0;
-        glyph_fba.reset();
-    }
+fn webFaceUsed(name: []const u8) void {
+    logLine("webpage: web face in use: ", name);
+}
 
-    fn load(self: *PageFonts, pack: []const u8) void {
-        for (0..2) |i| {
-            const bytes = wire.FontPack.file(pack, i) orelse continue;
-            self.faces[i] = font.Font.parse(bytes) catch null;
-        }
-        if (self.faces[0] == null) self.faces[0] = self.faces[1];
-    }
-
-    fn fonts(self: *PageFonts) web.layout.Fonts {
-        if (self.faces[0] == null) return self.fixed.fonts();
-        return .{ .ctx = @ptrCast(self), .vtable = &vtable };
-    }
-
-    const vtable: web.layout.Fonts.VTable = .{ .advance = adv, .metrics = met, .draw = draw };
-
-    fn faceFor(self: *PageFonts, f: web.layout.Font) struct { face: *const font.Font, idx: u8 } {
-        // The computed family list, first choice first: a web face by its
-        // declared name wins; the generic families fall to the packed ones.
-        for (f.families) |fam| {
-            for (self.extra[0..self.n_extra], 0..) |*w, i| {
-                if (std.ascii.eqlIgnoreCase(w.name[0..w.name_len], fam)) return .{ .face = &w.face, .idx = @intCast(2 + i) };
-            }
-            if (std.ascii.eqlIgnoreCase(fam, "monospace")) if (self.faces[1]) |*m| return .{ .face = m, .idx = 1 };
-            if (std.ascii.eqlIgnoreCase(fam, "sans-serif") or std.ascii.eqlIgnoreCase(fam, "serif")) break;
-        }
-        if (f.monospace) if (self.faces[1]) |*m| return .{ .face = m, .idx = 1 };
-        return .{ .face = &self.faces[0].?, .idx = 0 };
-    }
-
-    fn scaleOf(face: *const font.Font, size: f64) f64 {
-        return size / @as(f64, @floatFromInt(face.units_per_em));
-    }
-
-    fn adv(ctx: *anyopaque, f: web.layout.Font, text: []const u8) f64 {
-        const self: *PageFonts = @ptrCast(@alignCast(ctx));
-        const face = self.faceFor(f);
-        const scale = scaleOf(face.face, f.size);
-        var total: f64 = 0;
-        var it = CodePoints{ .s = text };
-        while (it.next()) |cp| {
-            const gid = face.face.glyphIndex(cp);
-            total += @as(f64, @floatFromInt(face.face.advance(gid))) * scale;
-        }
-        return total;
-    }
-
-    fn met(ctx: *anyopaque, f: web.layout.Font) web.layout.FontMetrics {
-        const self: *PageFonts = @ptrCast(@alignCast(ctx));
-        const face = self.faceFor(f);
-        const scale = scaleOf(face.face, f.size);
-        const asc = @as(f64, @floatFromInt(face.face.ascent)) * scale;
-        const desc = -@as(f64, @floatFromInt(face.face.descent)) * scale;
-        return .{ .ascent = @round(@max(asc, f.size * 0.6)), .descent = @round(@max(desc, f.size * 0.15)) };
-    }
-
-    fn glyph(self: *PageFonts, idx: u8, face: *const font.Font, gid: u16, size: f64) ?*const font.Glyph {
-        const size_q: u16 = @intFromFloat(@min(65535, @max(0, size * 4)));
-        for (self.cache[0..self.cache_len]) |*e| {
-            if (e.face == idx and e.gid == gid and e.size == size_q) return &e.glyph;
-        }
-        if (self.cache_len == self.cache.len) {
-            // Full: start over. A page rarely uses this many glyph
-            // shapes at once; when it does, the miss is a rasterization.
-            self.cache_len = 0;
-            glyph_fba.reset();
-        }
-        const g = font.rasterize(face, glyph_fba.allocator(), gid, @floatCast(size)) catch |e| switch (e) {
-            error.OutOfMemory => blk: {
-                self.cache_len = 0;
-                glyph_fba.reset();
-                break :blk font.rasterize(face, glyph_fba.allocator(), gid, @floatCast(size)) catch return null;
-            },
-            else => return null,
-        };
-        self.cache[self.cache_len] = .{ .face = idx, .gid = gid, .size = size_q, .glyph = g };
-        self.cache_len += 1;
-        // The first glyph a web face draws says so (the drill checks a
-        // page's text really is set in the face it fetched).
-        if (idx >= 2) {
-            const w = &self.extra[idx - 2];
-            if (!w.used) {
-                w.used = true;
-                logLine("webpage: web face in use: ", w.name[0..w.name_len]);
-            }
-        }
-        return &self.cache[self.cache_len - 1].glyph;
-    }
-
-    fn draw(ctx: *anyopaque, canvas: *const ui.Canvas, f: web.layout.Font, x: f64, baseline: f64, text: []const u8, color: u32) void {
-        const self: *PageFonts = @ptrCast(@alignCast(ctx));
-        const face = self.faceFor(f);
-        const scale = scaleOf(face.face, f.size);
-        var pen = x;
-        var it = CodePoints{ .s = text };
-        while (it.next()) |cp| {
-            const gid = face.face.glyphIndex(cp);
-            const advance = @as(f64, @floatFromInt(face.face.advance(gid))) * scale;
-            if (cp != ' ' and cp != 0xa0) if (self.glyph(face.idx, face.face, gid, f.size)) |g| {
-                const gx: i64 = @as(i64, @intFromFloat(@round(pen))) + g.left;
-                // `top` is the bitmap's top from the baseline, downward
-                // (negative above it), as the toolkit reads it.
-                const gy: i64 = @as(i64, @intFromFloat(@round(baseline))) + g.top;
-                for (0..g.h) |row| {
-                    const y = gy + @as(i64, @intCast(row));
-                    if (y < 0) continue;
-                    for (0..g.w) |col| {
-                        const xx = gx + @as(i64, @intCast(col));
-                        if (xx < 0) continue;
-                        canvas.blend(@intCast(xx), @intCast(y), color, g.cov[row * g.w + col]);
-                    }
-                }
-            };
-            pen += advance;
-        }
-    }
-};
-
-const CodePoints = struct {
-    s: []const u8,
-    i: usize = 0,
-
-    fn next(it: *CodePoints) ?u21 {
-        if (it.i >= it.s.len) return null;
-        const len = std.unicode.utf8ByteSequenceLength(it.s[it.i]) catch {
-            it.i += 1;
-            return 0xfffd;
-        };
-        if (it.i + len > it.s.len) {
-            it.i = it.s.len;
-            return 0xfffd;
-        }
-        const cp = std.unicode.utf8Decode(it.s[it.i .. it.i + len]) catch 0xfffd;
-        it.i += len;
-        return cp;
-    }
-};
-
-var page_fonts: PageFonts = .{};
+var page_fonts: web.fonts.FaceFonts = undefined;
 
 // ------------------------------------------------------------- the page
 
@@ -358,6 +199,20 @@ const max_pictures = 64;
 const max_picture_bytes: usize = 6 << 20;
 
 const Picture = struct { node: dom.NodeId, state: enum { loaded, failed }, bm: web.layout.Bitmap };
+
+/// A `background-image` picture, by the URL it resolved to; `url` and
+/// `base` are the slices the style held when it was last looked up (a
+/// relayout keeps them, so the lookup is by identity first).
+const max_backgrounds = 48;
+const Background = struct {
+    /// In the picture store (a `data:` URL can be long).
+    href: []const u8 = "",
+    url_ptr: usize = 0,
+    url_len: usize = 0,
+    base_ptr: usize = 0,
+    state: enum { loaded, failed } = .failed,
+    bm: web.layout.Bitmap = .{ .w = 0, .h = 0, .rgba = &.{} },
+};
 
 const Page = struct {
     doc: ?*dom.Document = null,
@@ -391,6 +246,8 @@ const Page = struct {
     /// The pictures fetched and decoded so far (or refused), by node.
     pictures: [max_pictures]Picture = undefined,
     n_pictures: usize = 0,
+    backgrounds: [max_backgrounds]Background = undefined,
+    n_backgrounds: usize = 0,
     picture_bytes: usize = 0,
     fonts_loaded: bool = false,
 
@@ -403,8 +260,8 @@ const Page = struct {
 };
 
 var page: Page = .{};
-/// Text zoom in percent, and the session's appearance: kept across
-/// navigations.
+/// Page zoom in percent (CSS pixels to device pixels), and the
+/// session's appearance: kept across navigations.
 var zoom_pct: u64 = 100;
 var theme_flags: u64 = 0;
 
@@ -419,10 +276,18 @@ fn uaSheet(e: web.style.Env) web.style.Sheet {
     return ua_sheet.?;
 }
 
+/// Device pixels per CSS pixel: the page zoom (the host seeds it from
+/// the user's scale, so "100%" reads like the rest of the desktop).
+fn zoomScale() f64 {
+    return @as(f64, @floatFromInt(@max(25, zoom_pct))) / 100;
+}
+
+/// The viewport as media queries and viewport units see it: in CSS
+/// pixels.
 fn env() web.style.Env {
     return .{
-        .width = @floatFromInt(vw),
-        .height = @floatFromInt(vh),
+        .width = @as(f64, @floatFromInt(vw)) / zoomScale(),
+        .height = @as(f64, @floatFromInt(vh)) / zoomScale(),
         .dark = theme_flags & wire.ThemeFlags.dark != 0,
         .high_contrast = theme_flags & wire.ThemeFlags.high_contrast != 0,
     };
@@ -465,8 +330,15 @@ fn fetchResource(url_text: []const u8, max: usize) ?[]u8 {
     return fetchResourceInto(arena(), url_text, max);
 }
 
-/// A resource through the host, whole, into `a` (up to `max` bytes).
+/// A resource through the host, whole, into `a` (up to `max` bytes); a
+/// `data:` URL is decoded here, with no host involved.
 fn fetchResourceInto(a: std.mem.Allocator, url_text: []const u8, max: usize) ?[]u8 {
+    if (web.url.decodeData(a, url_text) catch null) |d| {
+        if (d.bytes.len > max) return null;
+        res_type_len = @min(d.mime.len, res_type.len);
+        @memcpy(res_type[0..res_type_len], d.mime[0..res_type_len]);
+        return @constCast(d.bytes);
+    }
     switch (openUrl(url_text, false, "")) {
         .ok => |st| if (st >= 400) {
             _ = call(.cancel);
@@ -770,9 +642,44 @@ fn pictureOf(node: dom.NodeId) ?*Picture {
     return null;
 }
 
-/// The pictures for the `img` boxes near the viewport (a screen above
-/// and two below), fetched and decoded lazily; a relayout follows when
-/// any arrived, since their sizes are now known. Returns how many.
+/// A picture's pixels from its file: SVG rasterized at the zoom (so it
+/// paints pixel for pixel; its density says so), anything else decoded.
+fn decodePicture(scratch: std.mem.Allocator, bytes: []const u8) ?web.layout.Bitmap {
+    if (mosslib.svg.sniff(bytes)) {
+        const img = mosslib.svg.render(scratch, bytes, zoomScale()) catch |e| {
+            logLine("webpage: svg not drawn: ", @errorName(e));
+            return null;
+        };
+        return .{ .w = img.w, .h = img.h, .rgba = img.rgba, .density = zoomScale() };
+    }
+    const img = mosslib.image.decode(scratch, bytes) catch |e| {
+        logLine("webpage: image not decoded: ", @errorName(e));
+        return null;
+    };
+    return .{ .w = img.w, .h = img.h, .rgba = img.rgba };
+}
+
+/// Keep a decoded picture's pixels in the store, within its budget.
+fn keepPixels(bm: web.layout.Bitmap) ?web.layout.Bitmap {
+    const len = @as(usize, bm.w) * bm.h * 4;
+    if (page.picture_bytes + len > max_picture_bytes) return null;
+    const kept = picture_fba.allocator().dupe(u8, bm.rgba[0..len]) catch return null;
+    page.picture_bytes += kept.len;
+    return .{ .w = bm.w, .h = bm.h, .rgba = kept, .density = bm.density };
+}
+
+/// A background url resolved against its sheet (or the page).
+fn backgroundHref(a: std.mem.Allocator, url_text: []const u8, base_text: ?[]const u8) ?[]const u8 {
+    const page_base = &(page.base orelse return null);
+    const b: web.url.Url = if (base_text) |bt| (web.url.parse(a, bt, null) catch page_base.*) else page_base.*;
+    const u = web.url.resolve(a, url_text, &b) catch return null;
+    return u.href(a) catch null;
+}
+
+/// The pictures near the viewport (a screen above and two below) —
+/// `img` boxes' and `background-image`s' — fetched and decoded lazily;
+/// a relayout follows when any arrived, since their sizes are now
+/// known.
 fn loadPicturesNear() void {
     var rounds: usize = 0;
     while (rounds < 3) : (rounds += 1) {
@@ -782,12 +689,22 @@ fn loadPicturesNear() void {
         const top = page.scroll_y - @as(f64, @floatFromInt(vh));
         const bottom = page.scroll_y + 3 * @as(f64, @floatFromInt(vh));
         var got: usize = 0;
+        var got_bg: usize = 0;
         for (l.boxes.items) |b| {
-            const node = b.node orelse continue;
-            if (!doc.isHtml(node, "img")) continue;
             if (b.y + b.h < top or b.y > bottom) continue;
+            if (b.kind != .text and b.style.background_image == .url and page.n_backgrounds < max_backgrounds) {
+                if (loadBackground(b.style.background_image.url, b.style.background_base)) got_bg += 1;
+            }
+            const node = b.node orelse continue;
+            if (b.kind != .text and doc.get(node).namespace == .svg and std.mem.eql(u8, doc.get(node).name, "svg")) {
+                if (pictureOf(node) == null and page.n_pictures < max_pictures) {
+                    if (inlineSvg(doc, node, &b)) got += 1;
+                }
+                continue;
+            }
+            if (!doc.isHtml(node, "img")) continue;
             if (pictureOf(node) != null) continue;
-            if (page.n_pictures == max_pictures) break;
+            if (page.n_pictures == max_pictures) continue;
             const slot = &page.pictures[page.n_pictures];
             slot.* = .{ .node = node, .state = .failed, .bm = .{ .w = 0, .h = 0, .rgba = &.{} } };
             page.n_pictures += 1;
@@ -799,22 +716,114 @@ fn loadPicturesNear() void {
             const u = web.url.resolve(scratch, src, base) catch continue;
             const href = u.href(scratch) catch continue;
             const bytes = fetchResourceInto(scratch, href, 2 << 20) orelse continue;
-            const img = mosslib.image.decode(scratch, bytes) catch |e| {
-                logLine("webpage: image not decoded: ", @errorName(e));
-                continue;
-            };
-            if (page.picture_bytes + img.rgba.len > max_picture_bytes) continue;
-            const kept = picture_fba.allocator().dupe(u8, img.rgba) catch continue;
-            page.picture_bytes += kept.len;
+            const bm = decodePicture(scratch, bytes) orelse continue;
+            slot.bm = keepPixels(bm) orelse continue;
             slot.state = .loaded;
-            slot.bm = .{ .w = img.w, .h = img.h, .rgba = kept };
             var line: [200]u8 = undefined;
-            _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: image {s} {d}x{d}", .{ src[0..@min(src.len, 120)], img.w, img.h }) catch "webpage: image");
+            _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: image {s} {d}x{d}", .{ src[0..@min(src.len, 120)], bm.w, bm.h }) catch "webpage: image");
             got += 1;
         }
-        if (got == 0) return;
+        // A background changes no size: a repaint shows it.
+        if (got == 0) {
+            if (got_bg > 0) paintAll();
+            return;
+        }
         relayout(false);
     }
+}
+
+/// The fill page CSS gives an inline `<svg>`, as the renderer takes it.
+fn svgFill(st: *const web.style.Computed) ?[4]f64 {
+    const f = st.fill orelse return null;
+    return switch (f) {
+        .none => .{ 0, 0, 0, 0 },
+        .current => .{ st.color.r, st.color.g, st.color.b, st.color.a },
+        .color => |c| .{ c.r, c.g, c.b, c.a },
+    };
+}
+
+/// An inline `<svg>`: its own markup drawn at its box's content size
+/// in its element's colour (for `currentColor`). True when drawn.
+fn inlineSvg(doc: *const dom.Document, node: dom.NodeId, b: *const web.layout.Box) bool {
+    const slot = &page.pictures[page.n_pictures];
+    slot.* = .{ .node = node, .state = .failed, .bm = .{ .w = 0, .h = 0, .rgba = &.{} } };
+    page.n_pictures += 1;
+    const cw = b.w - b.border[1] - b.border[3] - b.padding[1] - b.padding[3];
+    const ch = b.h - b.border[0] - b.border[2] - b.padding[0] - b.padding[2];
+    if (cw < 1 or ch < 1) return false;
+    picture_scratch_fba.reset();
+    const scratch = picture_scratch_fba.allocator();
+    var markup: std.ArrayList(u8) = .empty;
+    web.html.serializeOuter(scratch, doc, node, &markup) catch return false;
+    const c = b.style.color;
+    const w: usize = @intFromFloat(@round(cw));
+    const h: usize = @intFromFloat(@round(ch));
+    const img = mosslib.svg.renderSize(scratch, markup.items, w, h, .{ c.r, c.g, c.b, c.a }, svgFill(b.style)) catch |e| {
+        logLine("webpage: inline svg not drawn: ", @errorName(e));
+        return false;
+    };
+    // Its density makes its size in CSS pixels the box's: a relayout
+    // keeps the box as it was.
+    const bm: web.layout.Bitmap = .{ .w = img.w, .h = img.h, .rgba = img.rgba, .density = @as(f64, @floatFromInt(img.w)) / cw * zoomScale() };
+    slot.bm = keepPixels(bm) orelse return false;
+    slot.state = .loaded;
+    return true;
+}
+
+/// Fetch and decode one background picture unless it is known; true
+/// when a new one arrived.
+fn loadBackground(url_text: []const u8, base_text: ?[]const u8) bool {
+    if (findBackground(url_text, base_text) != null) return false;
+    picture_scratch_fba.reset();
+    const scratch = picture_scratch_fba.allocator();
+    const href = backgroundHref(scratch, url_text, base_text) orelse return false;
+    for (page.backgrounds[0..page.n_backgrounds]) |*bg| if (std.mem.eql(u8, bg.href, href)) {
+        // The same picture under another spelling (or sheet).
+        bg.url_ptr = @intFromPtr(url_text.ptr);
+        bg.url_len = url_text.len;
+        bg.base_ptr = if (base_text) |bt| @intFromPtr(bt.ptr) else 0;
+        return false;
+    };
+    const slot = &page.backgrounds[page.n_backgrounds];
+    slot.* = .{};
+    slot.href = picture_fba.allocator().dupe(u8, href) catch return false;
+    slot.url_ptr = @intFromPtr(url_text.ptr);
+    slot.url_len = url_text.len;
+    slot.base_ptr = if (base_text) |bt| @intFromPtr(bt.ptr) else 0;
+    page.n_backgrounds += 1;
+    const bytes = fetchResourceInto(scratch, href, 2 << 20) orelse return false;
+    const bm = decodePicture(scratch, bytes) orelse return false;
+    slot.bm = keepPixels(bm) orelse return false;
+    slot.state = .loaded;
+    logLine("webpage: background ", href[0..@min(href.len, 100)]);
+    return true;
+}
+
+fn findBackground(url_text: []const u8, base_text: ?[]const u8) ?*Background {
+    const bp: usize = if (base_text) |bt| @intFromPtr(bt.ptr) else 0;
+    for (page.backgrounds[0..page.n_backgrounds]) |*bg| {
+        if (bg.url_ptr == @intFromPtr(url_text.ptr) and bg.url_len == url_text.len and bg.base_ptr == bp) return bg;
+    }
+    return null;
+}
+
+fn imagesBackground(_: *anyopaque, url_text: []const u8, base_text: ?[]const u8) ?web.layout.Bitmap {
+    const bg = findBackground(url_text, base_text) orelse blk: {
+        // The sheets were read again (a theme or zoom change): the same
+        // url is a new slice. Matched by what it resolves to, and
+        // rebound so the next lookup is by identity.
+        var buf: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&buf);
+        const href = backgroundHref(fba.allocator(), url_text, base_text) orelse return null;
+        for (page.backgrounds[0..page.n_backgrounds]) |*b| if (std.mem.eql(u8, b.href, href)) {
+            b.url_ptr = @intFromPtr(url_text.ptr);
+            b.url_len = url_text.len;
+            b.base_ptr = if (base_text) |bt| @intFromPtr(bt.ptr) else 0;
+            break :blk b;
+        };
+        return null;
+    };
+    return if (bg.state == .loaded) bg.bm else null;
 }
 
 fn imagesGet(_: *anyopaque, node: dom.NodeId) ?web.layout.Bitmap {
@@ -822,7 +831,7 @@ fn imagesGet(_: *anyopaque, node: dom.NodeId) ?web.layout.Bitmap {
     return if (p.state == .loaded) p.bm else null;
 }
 
-const images_vtable: web.layout.Images.VTable = .{ .get = imagesGet };
+const images_vtable: web.layout.Images.VTable = .{ .get = imagesGet, .background = imagesBackground };
 
 fn imagesProvider() web.layout.Images {
     return .{ .ctx = @ptrCast(&page), .vtable = &images_vtable };
@@ -839,7 +848,7 @@ fn relayout(recollect: bool) void {
     page.styles = null;
     if (recollect) page.sheets = collectSheets(doc);
     const a = layout_fba.allocator();
-    web.style.root_font_size = 16 * @as(f64, @floatFromInt(zoom_pct)) / 100;
+    web.style.px_scale = zoomScale();
     const t_layout = usys.nowMs();
     const styles = a.create(web.style.Styles) catch outOfMemory();
     styles.* = web.style.compute(a, doc, page.sheets, env()) catch outOfMemory();
@@ -1448,7 +1457,9 @@ fn serve() noreturn {
                 const pct = @min(400, @max(25, z.percent));
                 if (pct != zoom_pct) {
                     zoom_pct = pct;
-                    relayout(false);
+                    // The viewport in CSS pixels changed: `@media` may
+                    // decide differently, so the sheets are read again.
+                    relayout(true);
                 }
             },
             .theme => |t| if (t.flags != theme_flags) {
@@ -1472,7 +1483,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, _: u64, _: u64) callconv(.c) 
     layout_fba = std.heap.FixedBufferAllocator.init(&layout_heap);
     picture_fba = std.heap.FixedBufferAllocator.init(&picture_heap);
     picture_scratch_fba = std.heap.FixedBufferAllocator.init(&picture_scratch);
-    glyph_fba = std.heap.FixedBufferAllocator.init(&glyph_heap);
+    page_fonts = web.fonts.FaceFonts.init(&glyph_heap);
+    page_fonts.on_web_face_used = webFaceUsed;
     attach();
     _ = usys.log(glog, "webpage: up");
     // The user-agent sheet parsed now, while nothing is typed yet: it

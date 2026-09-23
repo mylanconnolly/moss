@@ -853,11 +853,25 @@ supervises), and memory history per unit beside the CPU one.
       wrote a blockified kind into freed memory and made the tree a
       cycle; and forgetting a re-laid item's fragments by removing them
       shifted every other line's indexes into the list — they are marked
-      dead instead. Remaining for the stage: grid,
-      positioned boxes (absolute,
-      fixed, sticky), `calc()`, custom properties, transforms and
-      opacity at paint time, tables, `overflow` scroll containers, then
-      transitions and animations on the page's tick. *Exit:* WPT reftest
+      dead instead. Then the second real sites (2026-09-23, the user's
+      Wikipedia and Google): custom properties and `var()` (invalid at
+      computed-value time is `unset`), `rem` of the root's size, zoom as
+      a device-pixel ratio over every absolute length (it had been text
+      zoom), presentational hints, interaction pseudo-classes and
+      pseudo-elements parsing (matching nothing), replaced elements
+      sized on every layout path, idempotent re-layout of measured
+      atomics, nested absolutes, `vertical-align` line heights, buttons
+      and controls as styled boxes, a CJK fallback face with fallback
+      across faces, synthesized bold; and `zig build webshot`, the host
+      renderer the round was debugged with. Then tables (auto layout,
+      spans, percentages, anonymous wrappers), quirks mode's table
+      resets and line heights, backgrounds (images, gradients, the
+      shorthand, sheet-relative urls), `border-radius`, `lib/svg` (SVG
+      pictures, sprites, inline `<svg>`), `data:` URLs, placeholders.
+      Remaining for the stage: grid, `calc()`, masks and clip paths,
+      fixed and sticky, transforms and opacity at paint time,
+      `overflow` scroll containers, then transitions and animations on
+      the page's tick; shaping and bidi for the scripts that need them. *Exit:* WPT reftest
       subsets per module with counts; Acid2 paints as its reference.
     - **(10) JavaScript, the engine.** `lib/js/`: lexer and parser for
       the ES2020 grammar (ASI, regex literals, templates, classes,

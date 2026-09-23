@@ -863,6 +863,11 @@ pub fn build(b: *std.Build) void {
         // tier where fontsvc reads them.
         .{ .at = "assets/fonts/IBMPlexSans.ttf", .from = "assets/fonts/IBMPlexSans.ttf" },
         .{ .at = "assets/fonts/IBMPlexMono-Regular.ttf", .from = "assets/fonts/IBMPlexMono-Regular.ttf" },
+        // The web's fallback face (Apache-2.0): Han, kana and Hangul for
+        // the text a page's own faces lack. Not a system family, so not
+        // under fonts/ where fontsvc registers them; the web host packs it
+        // for every page as the third face.
+        .{ .at = "assets/fallback/DroidSansFallbackFull.ttf", .from = "assets/fonts/DroidSansFallbackFull.ttf" },
         // Serif (WOFF) and Source Code Pro (OpenType/CFF) ship uninstalled,
         // in a staging tier — fonts a user can install (copy into
         // assets/fonts and rescan), which the fontrescan drill exercises.
@@ -1337,6 +1342,19 @@ pub fn build(b: *std.Build) void {
             "Host baselines with software AES (the pre-FP/SIMD reference point)"
         else
             "Host baselines (native AES)").dependOn(&brun.step);
+    }
+
+    // webshot: render a real URL on the host with the page's pipeline
+    // into a PPM (`zig build webshot -- URL OUT.ppm [W] [H] [ZOOM%]`);
+    // resources cached under zig-out/webshot-cache.
+    {
+        const wlib = b.createModule(.{ .root_source_file = b.path("lib/lib.zig"), .target = host_target, .optimize = .ReleaseSafe });
+        const wmod = b.createModule(.{ .root_source_file = b.path("tools/webshot.zig"), .target = host_target, .optimize = .ReleaseSafe });
+        wmod.addImport("mosslib", wlib);
+        const wexe = b.addExecutable(.{ .name = "webshot", .root_module = wmod });
+        const wrun = b.addRunArtifact(wexe);
+        if (b.args) |args| wrun.addArgs(args);
+        b.step("webshot", "Render a URL on the host with moss's web engine into a PPM").dependOn(&wrun.step);
     }
 
     const lib_test_mod = b.createModule(.{

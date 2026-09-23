@@ -8,16 +8,18 @@
 //! greedily at the break opportunities a Latin/CJK text has, inline
 //! boxes with their padding and borders across lines, atomic inlines,
 //! vertical alignment on the line, `text-align` including `justify`,
-//! `text-indent`), and relative and absolute positioning. Text is
-//! measured through `Fonts`, an interface the page domain implements
-//! over its typefaces and a test over fixed cells, so the whole engine
-//! runs on the host. Coordinates are document pixels as `f64`; the
-//! painter rounds.
+//! `text-indent`, quirks mode's line heights), relative and absolute
+//! positioning, flexbox (Level 1) and tables (CSS 2.1 §17's auto
+//! layout: anonymous parts, spans, percentage columns). Replaced
+//! elements (pictures, inline `<svg>`, controls) size by their ratio on
+//! every path. Text is measured through `Fonts`, an interface the page
+//! domain implements over its typefaces and a test over fixed cells,
+//! so the whole engine runs on the host. Coordinates are document
+//! pixels as `f64`; the painter rounds.
 //!
-//! Not built (the arc's stage 9): tables beyond block-ified rows and
-//! inline-block cells, flexbox and grid, `position: sticky` beyond
-//! relative, bidi and complex shaping, hyphenation, `overflow: scroll`
-//! scrolling inside a box.
+//! Not built (the arc's stage 9): grid, `position: sticky` beyond
+//! relative, merged collapsed table borders, bidi and complex shaping,
+//! hyphenation, `overflow: scroll` scrolling inside a box.
 const std = @import("std");
 const dom = @import("dom.zig");
 const style = @import("style.zig");
@@ -42,7 +44,9 @@ pub const Font = struct {
 };
 
 /// A picture the page has for an element: its pixels, RGBA rows of `w`.
-pub const Bitmap = struct { w: u32, h: u32, rgba: []const u8 };
+/// `density` is its pixels per CSS pixel: 1 for a PNG or JPEG, the zoom
+/// for an SVG the page rasterized at it (so it paints pixel for pixel).
+pub const Bitmap = struct { w: u32, h: u32, rgba: []const u8, density: f64 = 1 };
 
 /// What layout (and paint) ask of images: the picture for a node, if
 /// the host has decoded one. An `img` without one is sized by its
@@ -53,10 +57,18 @@ pub const Images = struct {
 
     pub const VTable = struct {
         get: *const fn (ctx: *anyopaque, node: NodeId) ?Bitmap,
+        /// A `background-image` url as written, and the URL of the sheet
+        /// that declared it (null: the page's).
+        background: ?*const fn (ctx: *anyopaque, url: []const u8, base: ?[]const u8) ?Bitmap = null,
     };
 
     pub fn get(i: Images, node: NodeId) ?Bitmap {
         return i.vtable.get(i.ctx, node);
+    }
+
+    pub fn background(i: Images, url: []const u8, base: ?[]const u8) ?Bitmap {
+        const f = i.vtable.background orelse return null;
+        return f(i.ctx, url, base);
     }
 };
 
@@ -311,7 +323,12 @@ pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *c
     for (l.floats.items) |f| height = @max(height, f.y + f.h);
     root.h = @max(viewport_h, height);
     // Absolutely positioned boxes, against their containing blocks.
-    for (l.absolutes.items) |ab| try layoutAbsolute(l, ab.box, ab.cb);
+    // By index: laying one out can add those inside it to the list.
+    var ai: usize = 0;
+    while (ai < l.absolutes.items.len) : (ai += 1) {
+        const ab = l.absolutes.items[ai];
+        try layoutAbsolute(l, ab.box, ab.cb);
+    }
     for (l.absolutes.items) |ab| {
         const b = l.get(ab.box);
         root.h = @max(root.h, b.y + b.h);
@@ -333,23 +350,29 @@ fn addBox(l: *Layout, parent: BoxId, b: Box) Error!BoxId {
 
 fn isBlockDisplay(d: style.Display) bool {
     return switch (d) {
-        .block, .list_item, .flex, .grid, .table, .table_row, .table_row_group, .table_header_group, .table_footer_group, .table_caption, .flow_root => true,
+        .block, .list_item, .flex, .grid, .table, .table_row, .table_row_group, .table_header_group, .table_footer_group, .table_caption, .table_cell, .flow_root => true,
         else => false,
     };
 }
 
 fn isInlineBlockDisplay(d: style.Display) bool {
     return switch (d) {
-        .inline_block, .inline_flex, .inline_grid, .inline_table, .table_cell => true,
+        .inline_block, .inline_flex, .inline_grid, .inline_table => true,
         else => false,
     };
 }
 
 /// Elements whose content is not laid out as their children (replaced
-/// or form controls): an atomic inline with a size of its own.
+/// or form controls): an atomic inline with a size of its own. A
+/// `button` is not one: its content is laid out, in its own face.
 fn isReplaced(doc: *const Document, id: NodeId) bool {
     const n = doc.get(id);
-    return n.namespace == .html and (std.mem.eql(u8, n.name, "img") or std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "textarea") or std.mem.eql(u8, n.name, "button") or std.mem.eql(u8, n.name, "video") or std.mem.eql(u8, n.name, "canvas") or std.mem.eql(u8, n.name, "iframe") or std.mem.eql(u8, n.name, "svg") or std.mem.eql(u8, n.name, "embed") or std.mem.eql(u8, n.name, "object") or std.mem.eql(u8, n.name, "meter") or std.mem.eql(u8, n.name, "progress"));
+    // An outermost `<svg>` in HTML is a picture of its own markup.
+    if (n.namespace == .svg and std.mem.eql(u8, n.name, "svg")) {
+        const p = n.parent orelse return true;
+        return doc.get(p).namespace != .svg;
+    }
+    return n.namespace == .html and (std.mem.eql(u8, n.name, "img") or std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "textarea") or std.mem.eql(u8, n.name, "video") or std.mem.eql(u8, n.name, "canvas") or std.mem.eql(u8, n.name, "iframe") or std.mem.eql(u8, n.name, "svg") or std.mem.eql(u8, n.name, "embed") or std.mem.eql(u8, n.name, "object") or std.mem.eql(u8, n.name, "meter") or std.mem.eql(u8, n.name, "progress"));
 }
 
 fn buildBoxes(l: *Layout, parent: BoxId, id: NodeId) Error!void {
@@ -366,6 +389,8 @@ fn buildBoxes(l: *Layout, parent: BoxId, id: NodeId) Error!void {
     }
     const st = l.styles.get(id);
     if (st.display == .none) return;
+    // Columns size nothing yet (their widths are not read): no boxes.
+    if (st.display == .table_column or st.display == .table_column_group) return;
     if (st.display == .contents) {
         var c = n.first_child;
         while (c) |cid| : (c = doc.get(cid).next) try buildBoxes(l, parent, cid);
@@ -374,7 +399,7 @@ fn buildBoxes(l: *Layout, parent: BoxId, id: NodeId) Error!void {
     const replaced = isReplaced(doc, id);
     var kind: Kind = .inline_box;
     if (replaced) {
-        kind = .inline_block;
+        kind = if (isBlockDisplay(st.display)) .block else .inline_block;
     } else if (isBlockDisplay(st.display)) {
         kind = .block;
     } else if (isInlineBlockDisplay(st.display)) {
@@ -388,7 +413,10 @@ fn buildBoxes(l: *Layout, parent: BoxId, id: NodeId) Error!void {
     while (c) |cid| : (c = doc.get(cid).next) try buildBoxes(l, bid, cid);
     if (isFlexDisplay(st.display)) {
         try wrapFlexItems(l, bid);
-    } else if (kind == .block or kind == .inline_block) try wrapInlines(l, bid);
+    } else if (kind == .block or kind == .inline_block) {
+        try fixTableParts(l, bid);
+        try wrapInlines(l, bid);
+    }
 }
 
 fn isFlexDisplay(d: style.Display) bool {
@@ -827,6 +855,9 @@ fn bottomCollapsible(b: *const Box) bool {
 fn collapsesThrough(l: *const Layout, id: BoxId) bool {
     const b = l.get(id);
     if (b.kind == .inline_block or b.kind == .root) return false;
+    // A picture or a control has a height of its own (a picture that has
+    // not arrived and has no size yet is 0 tall, and still not empty).
+    if (isReplacedBox(l, b)) return false;
     if (b.border[0] != 0 or b.padding[0] != 0 or b.border[2] != 0 or b.padding[2] != 0) return false;
     if (b.style.height != .auto or resolveLP(b.style.min_height, 0) > 0) return false;
     if (isBfcRoot(b)) return false;
@@ -901,7 +932,7 @@ fn layoutBlockChildren(l: *Layout, id: BoxId, bfc: *Bfc) Error!FlowEnd {
     for (children) |c| {
         const cb = l.box(c);
         if (cb.isPositioned()) {
-            try l.absolutes.append(l.a, .{ .box = c, .cb = containingBlockFor(l, c) });
+            try addAbsolute(l, c);
             continue;
         }
         if (cb.isFloat()) {
@@ -961,7 +992,7 @@ fn positionEmptyBlock(l: *Layout, id: BoxId, bfc: *Bfc, cb_x: f64, y: f64, cb_w:
         const cb = l.get(c);
         // An empty block still places what floats out of it.
         if (cb.isPositioned()) {
-            try l.absolutes.append(l.a, .{ .box = c, .cb = containingBlockFor(l, c) });
+            try addAbsolute(l, c);
         } else if (cb.isFloat()) {
             try placeFloat(l, c, bfc, b.x, b.w, y);
         } else try positionEmptyBlock(l, c, bfc, b.x, y, b.w);
@@ -1008,8 +1039,20 @@ fn layoutBlockAt(l: *Layout, id: BoxId, bfc: *Bfc, cb_x: f64, y: f64, cb_w: f64)
     var ml = margins[3];
     var mr = margins[1];
     var content_w: f64 = undefined;
-    if (resolveLA(st.width, cb_w)) |w| {
-        content_w = constrainWidth(b, if (st.box_sizing == .border_box) w - extras else w, cb_w);
+    const replaced_w: ?f64 = if (isReplacedBox(l, b)) blk: {
+        for (0..4) |i| b.padding[i] = resolveLP(st.padding[i], cb_w);
+        break :blk replacedSize(l, id, cb_w)[0];
+    } else if (isTableBox(b)) blk: {
+        // A table: its width, or shrink-to-fit — never narrower than its
+        // columns' minimum.
+        const tw = try tableWidths(l, id);
+        const min_c = tw.min - extras;
+        if (resolveLA(st.width, cb_w)) |w| break :blk @max(min_c, if (st.box_sizing == .border_box) w - extras else w);
+        const avail = cb_w - (margins[3] orelse 0) - (margins[1] orelse 0) - extras;
+        break :blk @max(min_c, @min(tw.max - extras, avail));
+    } else null;
+    if (replaced_w orelse (if (resolveLA(st.width, cb_w)) |w| constrainWidth(b, if (st.box_sizing == .border_box) w - extras else w, cb_w) else null)) |cw| {
+        content_w = cw;
         const rest = cb_w - content_w - extras;
         if (ml == null and mr == null) {
             ml = @max(0, rest / 2);
@@ -1053,7 +1096,20 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
     const b = l.box(id);
     const st = b.style;
     var content_h: f64 = 0;
-    if (isFlexContainer(b)) {
+    if (isReplacedBox(l, b)) {
+        // Its height from its width and ratio, whatever laid it out.
+        const size = replacedSizeAtWidth(l, id, cb_w, b.contentW());
+        b.h = size + verticalExtras(b);
+        b.laid_out = true;
+        if (st.position == .relative or st.position == .sticky) {
+            const dx: f64 = resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
+            const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
+            try moveBox(l, id, dx, dy);
+        }
+        return;
+    } else if (isTableBox(b)) {
+        content_h = try layoutTableContents(l, id, cb_w);
+    } else if (isFlexContainer(b)) {
         content_h = try layoutFlexContents(l, id, cb_w);
     } else if (hasInlineContent(l, id)) {
         content_h = try layoutInlineContent(l, id, bfc);
@@ -1109,20 +1165,414 @@ fn layoutAbsolute(l: *Layout, id: BoxId, cb: BoxId) Error!void {
     var inner: Bfc = .{ .root = id };
     const extras = horizontalExtras(b);
     var content_w: f64 = undefined;
-    if (resolveLA(st.width, cb_w)) |w| {
+    if (isReplacedBox(l, b)) {
+        content_w = replacedSize(l, id, cb_w)[0];
+    } else if (resolveLA(st.width, cb_w)) |w| {
         content_w = if (st.box_sizing == .border_box) w - extras else w;
     } else if (left != null and right != null) {
         content_w = cb_w - left.? - right.? - b.margin[1] - b.margin[3] - extras;
     } else {
+        // Shrink-to-fit: the preferred widths are border-box ones.
         const pref = try preferredWidths(l, id);
         const avail = cb_w - (left orelse 0) - (right orelse 0) - b.margin[1] - b.margin[3] - extras;
-        content_w = @min(@max(pref.min, avail), pref.max);
+        content_w = @min(@max(pref.min - extras, avail), pref.max - extras);
     }
     b.w = constrainWidth(b, content_w, cb_w) + extras;
     b.x = if (left) |x| cb_x + x + b.margin[3] else if (right) |r| cb_x + cb_w - r - b.margin[1] - b.w else cb_x + b.margin[3];
     b.y = if (top) |t| cb_y + t + b.margin[0] else if (bottom != null) cb_y else cb_y + b.margin[0];
     try layoutBlockContents(l, id, &inner, cb_w);
     if (top == null and bottom != null) try moveBox(l, id, 0, cb_y + cb_h - bottom.? - b.margin[2] - l.get(id).h - l.get(id).y);
+}
+
+// ------------------------------------------------------------ tables
+
+fn isTableBox(b: *const Box) bool {
+    return (b.kind == .block or b.kind == .inline_block) and (b.style.display == .table or b.style.display == .inline_table);
+}
+
+fn isRowGroupDisplay(d: style.Display) bool {
+    return d == .table_row_group or d == .table_header_group or d == .table_footer_group;
+}
+
+fn isTablePart(d: style.Display) bool {
+    return isRowGroupDisplay(d) or d == .table_row or d == .table_cell or d == .table_caption;
+}
+
+/// CSS 2.1 §17.2.1, the common cases: inside a table, a row group or a
+/// row, whitespace between the parts is nothing; a run of cells outside
+/// a row gets an anonymous row; a run of table parts outside a table
+/// gets an anonymous table (so `display: table-cell` columns lay out
+/// side by side).
+fn fixTableParts(l: *Layout, id: BoxId) Error!void {
+    const d = l.get(id).style.display;
+    const in_table = d == .table or d == .inline_table;
+    const in_group = isRowGroupDisplay(d);
+    const in_row = d == .table_row;
+    const old = try l.a.dupe(BoxId, l.get(id).children.items);
+    var any_part = false;
+    for (old) |c| {
+        const cb = l.get(c);
+        if (cb.kind != .text and isTablePart(cb.style.display)) any_part = true;
+    }
+    if (!any_part and !in_table and !in_group and !in_row) return;
+    var out: std.ArrayList(BoxId) = .empty;
+    var run: ?BoxId = null; // the anonymous wrapper being filled
+    for (old) |c| {
+        const cb = l.get(c);
+        const cd = cb.style.display;
+        const is_part = cb.kind != .text and !cb.isOutOfFlow() and isTablePart(cd);
+        if ((in_table or in_group or in_row) and cb.kind == .text and isBlank(cb.text)) continue;
+        var wrap_as: ?style.Display = null;
+        if (in_row) {
+            // Everything in a row is a cell.
+            if (!(is_part and cd == .table_cell)) wrap_as = .table_cell;
+        } else if (in_table or in_group) {
+            if (is_part and cd == .table_cell) wrap_as = .table_row;
+            if (!is_part) wrap_as = .table_row;
+        } else if (is_part) {
+            wrap_as = .table;
+        }
+        if (wrap_as) |wd| {
+            if (run) |r| if (l.get(r).style.display == wd) {
+                try l.box(r).children.append(l.a, c);
+                l.box(c).parent = r;
+                continue;
+            };
+            const st = try l.a.create(style.Computed);
+            st.* = style.anonymous(l.get(id).style);
+            st.display = wd;
+            if (wd == .table) {
+                st.border_spacing_x = 0;
+                st.border_spacing_y = 0;
+            }
+            try l.boxes.append(l.a, .{ .kind = .block, .node = null, .style = st, .parent = id });
+            const nid: BoxId = @intCast(l.boxes.items.len - 1);
+            try l.box(nid).children.append(l.a, c);
+            l.box(c).parent = nid;
+            try out.append(l.a, nid);
+            run = nid;
+        } else {
+            run = null;
+            try out.append(l.a, c);
+        }
+    }
+    l.box(id).children = out;
+    // A new wrapper's own contents need the same fix-up (a cell wrapped
+    // into a row wrapped into a table), and a cell made of text is a
+    // block of inline content.
+    for (out.items) |c| if (l.get(c).node == null and l.get(c).kind == .block) {
+        try fixTableParts(l, c);
+        try wrapInlines(l, c);
+    };
+}
+
+const TableCell = struct { box: BoxId, row: u32, col: u32, rows: u32, cols: u32 };
+
+const TableGrid = struct {
+    rows: []BoxId,
+    cells: []TableCell,
+    ncols: u32,
+    captions: []BoxId,
+    spacing_x: f64,
+    spacing_y: f64,
+};
+
+fn spanAttr(l: *const Layout, node: ?NodeId, name: []const u8) u32 {
+    const n = node orelse return 1;
+    const v = attrNumber(l.doc, n, name) orelse return 1;
+    return @intFromFloat(std.math.clamp(@floor(v), 0, 1000));
+}
+
+/// The table's rows in visual order (header groups, then bodies and
+/// bare rows, then footers) and its cells placed in slots by their
+/// spans.
+fn tableGrid(l: *Layout, id: BoxId) Error!TableGrid {
+    const b = l.get(id);
+    var heads: std.ArrayList(BoxId) = .empty;
+    var bodies: std.ArrayList(BoxId) = .empty;
+    var feet: std.ArrayList(BoxId) = .empty;
+    var captions: std.ArrayList(BoxId) = .empty;
+    for (b.children.items) |c| {
+        const cb = l.get(c);
+        if (cb.isOutOfFlow()) continue;
+        switch (cb.style.display) {
+            .table_caption => try captions.append(l.a, c),
+            .table_header_group, .table_footer_group, .table_row_group => {
+                const list = if (cb.style.display == .table_header_group) &heads else if (cb.style.display == .table_footer_group) &feet else &bodies;
+                for (cb.children.items) |r| if (l.get(r).style.display == .table_row) try list.append(l.a, r);
+            },
+            .table_row => try bodies.append(l.a, c),
+            else => {},
+        }
+    }
+    var rows: std.ArrayList(BoxId) = .empty;
+    try rows.appendSlice(l.a, heads.items);
+    try rows.appendSlice(l.a, bodies.items);
+    try rows.appendSlice(l.a, feet.items);
+    // Slots taken by row spans from rows above, per column.
+    var busy: std.ArrayList(u32) = .empty; // rows still covered, by column
+    var cells: std.ArrayList(TableCell) = .empty;
+    var ncols: u32 = 0;
+    const nrows: u32 = @intCast(rows.items.len);
+    for (rows.items, 0..) |r, ri| {
+        var col: u32 = 0;
+        for (l.get(r).children.items) |c| {
+            const cb = l.get(c);
+            if (cb.isOutOfFlow() or cb.style.display != .table_cell) continue;
+            while (col < busy.items.len and busy.items[col] > 0) col += 1;
+            const cs = @max(1, spanAttr(l, cb.node, "colspan"));
+            var rs = spanAttr(l, cb.node, "rowspan");
+            if (rs == 0) rs = nrows - @as(u32, @intCast(ri));
+            rs = @max(1, @min(rs, nrows - @as(u32, @intCast(ri))));
+            try cells.append(l.a, .{ .box = c, .row = @intCast(ri), .col = col, .rows = rs, .cols = cs });
+            while (busy.items.len < col + cs) try busy.append(l.a, 0);
+            for (col..col + cs) |k| busy.items[k] = @max(busy.items[k], rs);
+            col += cs;
+            ncols = @max(ncols, col);
+        }
+        // A row ends: every span covers one row fewer.
+        for (busy.items) |*v| v.* -|= 1;
+    }
+    const collapse = b.style.border_collapse == .collapse;
+    return .{
+        .rows = rows.items,
+        .cells = cells.items,
+        .ncols = ncols,
+        .captions = captions.items,
+        .spacing_x = if (collapse) 0 else b.style.border_spacing_x,
+        .spacing_y = if (collapse) 0 else b.style.border_spacing_y,
+    };
+}
+
+/// Per column: the minimum and maximum widths, and the percentage of
+/// the table its cells ask for (0: none).
+const ColumnWidths = struct { min: []f64, max: []f64, pct: []f64 };
+
+/// Each column's minimum and maximum width from its cells' (a cell's
+/// fixed width raises both), a spanning cell's excess spread over the
+/// columns it spans.
+fn columnWidths(l: *Layout, g: TableGrid) Error!ColumnWidths {
+    const min = try l.a.alloc(f64, g.ncols);
+    const max = try l.a.alloc(f64, g.ncols);
+    const pct = try l.a.alloc(f64, g.ncols);
+    @memset(min, 0);
+    @memset(max, 0);
+    @memset(pct, 0);
+    for ([_]bool{ false, true }) |spanning| for (g.cells) |c| {
+        if ((c.cols > 1) != spanning) continue;
+        const cb = l.box(c.box);
+        const pw = try preferredWidths(l, c.box);
+        var cmin = pw.min;
+        var cmax = @max(pw.max, pw.min);
+        if (cb.style.width == .px) {
+            const w = if (cb.style.box_sizing == .border_box) cb.style.width.px else cb.style.width.px + horizontalExtras(cb);
+            cmin = @max(cmin, @min(w, cmax));
+            cmax = @max(cmin, w);
+        }
+        if (cb.style.width == .percent and c.cols == 1) pct[c.col] = @max(pct[c.col], cb.style.width.percent);
+        const span_space = g.spacing_x * @as(f64, @floatFromInt(c.cols - 1));
+        var have_min: f64 = span_space;
+        var have_max: f64 = span_space;
+        for (c.col..c.col + c.cols) |k| {
+            have_min += min[k];
+            have_max += max[k];
+        }
+        const n: f64 = @floatFromInt(c.cols);
+        if (cmin > have_min) for (c.col..c.col + c.cols) |k| {
+            min[k] += (cmin - have_min) / n;
+        };
+        if (cmax > have_max) for (c.col..c.col + c.cols) |k| {
+            max[k] += (cmax - have_max) / n;
+        };
+        for (c.col..c.col + c.cols) |k| max[k] = @max(max[k], min[k]);
+    };
+    return .{ .min = min, .max = max, .pct = pct };
+}
+
+/// Column widths for `avail`: percentage columns take their share (at
+/// least their minimum) first; the rest share what is left between their
+/// minimum and maximum, or past the maximum by it.
+fn distributeColumns(cw: ColumnWidths, avail: f64, out: []f64) void {
+    const n = out.len;
+    var sum_pct: f64 = 0;
+    for (cw.pct) |x| sum_pct += x;
+    const pct_scale: f64 = if (sum_pct > 100) 100 / sum_pct else 1;
+    var used: f64 = 0;
+    var sum_min: f64 = 0;
+    var sum_max: f64 = 0;
+    var free_cols: usize = 0;
+    for (0..n) |k| {
+        if (cw.pct[k] > 0) {
+            out[k] = @max(cw.min[k], avail * cw.pct[k] * pct_scale / 100);
+            used += out[k];
+        } else {
+            sum_min += cw.min[k];
+            sum_max += cw.max[k];
+            free_cols += 1;
+        }
+    }
+    const left = @max(0, avail - used);
+    if (free_cols == 0) {
+        // Only percentage columns: what is left goes to them by share.
+        if (used > 0 and left > 0) for (0..n) |k| {
+            out[k] += left * out[k] / used;
+        };
+        return;
+    }
+    for (0..n) |k| {
+        if (cw.pct[k] > 0) continue;
+        if (sum_max <= left) {
+            const extra = left - sum_max;
+            out[k] = cw.max[k] + if (sum_max > 0) extra * cw.max[k] / sum_max else extra / @as(f64, @floatFromInt(free_cols));
+        } else if (sum_min >= left) {
+            out[k] = cw.min[k];
+        } else {
+            out[k] = cw.min[k] + (cw.max[k] - cw.min[k]) * (left - sum_min) / (sum_max - sum_min);
+        }
+    }
+}
+
+/// A table's minimum and maximum border-box widths (its columns, the
+/// spacing and its own edges; a caption can widen it).
+fn tableWidths(l: *Layout, id: BoxId) Error!Widths {
+    const g = try tableGrid(l, id);
+    const cw = try columnWidths(l, g);
+    const spacing = g.spacing_x * @as(f64, @floatFromInt(g.ncols + 1));
+    var min: f64 = spacing;
+    var max: f64 = spacing;
+    for (cw.min, cw.max) |a, x| {
+        min += a;
+        max += x;
+    }
+    // Percentage columns widen the table until each gets its share and
+    // the others their maximum in what is left.
+    var sum_pct: f64 = 0;
+    var other_max: f64 = 0;
+    var need: f64 = max - spacing;
+    for (cw.pct, cw.max) |pc, x| {
+        if (pc > 0) {
+            sum_pct += pc;
+            need = @max(need, x * 100 / pc);
+        } else other_max += x;
+    }
+    if (sum_pct > 0 and sum_pct < 100) need = @max(need, other_max * 100 / (100 - sum_pct));
+    max = @max(max, need + spacing);
+    for (g.captions) |c| {
+        const pw = try preferredWidths(l, c);
+        min = @max(min, pw.min);
+    }
+    const extras = horizontalExtras(l.get(id));
+    return .{ .min = min + extras, .max = @max(min, max) + extras };
+}
+
+/// Lay a table's parts out inside its content box (its width already
+/// set): captions on top, columns sized from the cells, each row as
+/// tall as its tallest cell, cells aligned in their rows by
+/// `vertical-align`. Returns the content height.
+fn layoutTableContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
+    _ = cb_w;
+    const g = try tableGrid(l, id);
+    const cw = try columnWidths(l, g);
+    const t = l.get(id);
+    const content_x = t.contentX();
+    const content_w = t.contentW();
+    var y = t.contentY();
+    for (g.captions) |c| {
+        var bfc: Bfc = .{ .root = c };
+        if (l.get(c).laid_out) try purgeSubtree(l, c);
+        try layoutBlockAt(l, c, &bfc, content_x, y, content_w);
+        const cb = l.get(c);
+        y = cb.y + cb.h + cb.margin[2];
+    }
+    // Column widths into the space the table has.
+    const n = g.ncols;
+    const widths = try l.a.alloc(f64, n);
+    const avail = @max(0, content_w - g.spacing_x * @as(f64, @floatFromInt(n + 1)));
+    var sum_min: f64 = 0;
+    var sum_max: f64 = 0;
+    for (cw.min, cw.max) |a, x| {
+        sum_min += a;
+        sum_max += x;
+    }
+    distributeColumns(cw, avail, widths);
+    const col_x = try l.a.alloc(f64, n + 1);
+    col_x[0] = content_x + g.spacing_x;
+    for (0..n) |k| col_x[k + 1] = col_x[k] + widths[k] + g.spacing_x;
+    // Every cell laid out at its width (at the top for now), then the
+    // rows sized from the cells that end in them.
+    const nrows = g.rows.len;
+    const row_h = try l.a.alloc(f64, nrows);
+    @memset(row_h, 0);
+    for (g.rows, 0..) |r, ri| if (l.get(r).style.height == .px) {
+        row_h[ri] = l.get(r).style.height.px;
+    };
+    for (g.cells) |c| {
+        if (l.get(c.box).laid_out) try purgeSubtree(l, c.box);
+        const cb = l.box(c.box);
+        _ = resolveEdges(cb, content_w);
+        cb.margin = .{ 0, 0, 0, 0 };
+        cb.x = col_x[c.col];
+        cb.y = 0;
+        cb.w = col_x[c.col + c.cols] - g.spacing_x - col_x[c.col];
+        var inner: Bfc = .{ .root = c.box };
+        try layoutBlockContents(l, c.box, &inner, cb.w);
+        if (c.rows == 1) row_h[c.row] = @max(row_h[c.row], l.get(c.box).h);
+    }
+    for (g.cells) |c| if (c.rows > 1) {
+        var have = g.spacing_y * @as(f64, @floatFromInt(c.rows - 1));
+        for (c.row..c.row + c.rows) |k| have += row_h[k];
+        const need = l.get(c.box).h;
+        if (need > have) row_h[c.row + c.rows - 1] += need - have;
+    };
+    // Row tops; then each cell moved into place, as tall as its rows,
+    // its content aligned in it.
+    const row_y = try l.a.alloc(f64, nrows + 1);
+    row_y[0] = y + g.spacing_y;
+    for (0..nrows) |k| row_y[k + 1] = row_y[k] + row_h[k] + g.spacing_y;
+    for (g.cells) |c| {
+        const cb = l.box(c.box);
+        const top = row_y[c.row];
+        const span_h = row_y[c.row + c.rows] - g.spacing_y - top;
+        const natural = cb.h;
+        const free = @max(0, span_h - natural);
+        const offset: f64 = switch (cb.style.vertical_align) {
+            .middle => free / 2,
+            .bottom => free,
+            else => 0,
+        };
+        try moveBox(l, c.box, 0, top + offset);
+        const moved = l.box(c.box);
+        moved.y = top;
+        moved.h = span_h;
+    }
+    // The rows and their groups cover what their cells do (for their
+    // backgrounds and hit tests).
+    for (g.rows, 0..) |r, ri| {
+        const rb = l.box(r);
+        rb.x = content_x;
+        rb.w = content_w;
+        rb.y = row_y[ri];
+        rb.h = row_h[ri];
+        rb.laid_out = true;
+    }
+    for (t.children.items) |c| {
+        const gb = l.box(c);
+        if (!isRowGroupDisplay(gb.style.display)) continue;
+        var lo: ?f64 = null;
+        var hi: f64 = 0;
+        for (gb.children.items) |r| {
+            const rb = l.get(r);
+            if (!rb.laid_out) continue;
+            lo = if (lo) |v| @min(v, rb.y) else rb.y;
+            hi = @max(hi, rb.y + rb.h);
+        }
+        gb.x = content_x;
+        gb.w = content_w;
+        gb.y = lo orelse y;
+        gb.h = if (lo) |v| hi - v else 0;
+        gb.laid_out = true;
+    }
+    return row_y[nrows] - t.contentY();
 }
 
 // ---------------------------------------------------- intrinsic widths
@@ -1148,9 +1598,17 @@ fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
         b.border[i] = st.borderWidth(i);
     }
     const extras = horizontalExtras(b);
-    if (b.kind == .inline_block and b.node != null and isReplaced(l.doc, b.node.?)) {
+    if (isReplacedBox(l, b)) {
         const size = replacedSize(l, id, 0);
         return .{ .min = size[0] + extras, .max = size[0] + extras };
+    }
+    if (isTableBox(b)) {
+        const tw = try tableWidths(l, id);
+        if (st.width == .px and !contents_only) {
+            const w = @max(tw.min, if (st.box_sizing == .border_box) st.width.px else st.width.px + extras);
+            return .{ .min = w, .max = w };
+        }
+        return tw;
     }
     if (st.width == .px and !contents_only) {
         const w = if (st.box_sizing == .border_box) st.width.px else st.width.px + extras;
@@ -1268,7 +1726,7 @@ fn collectInto(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item),
     for (children) |c| {
         const cb = l.box(c);
         if (cb.isPositioned()) {
-            try l.absolutes.append(l.a, .{ .box = c, .cb = containingBlockFor(l, c) });
+            try addAbsolute(l, c);
             continue;
         }
         if (cb.isFloat()) {
@@ -1395,6 +1853,9 @@ const AtomicSize = struct { w: f64, h: f64, baseline: f64 };
 /// An inline-block or replaced element laid out on its own: its
 /// margin box size and its baseline.
 fn layoutAtomic(l: *Layout, id: BoxId) Error!AtomicSize {
+    // Measured before (a container's preferred widths lay its atomics
+    // out): what that left behind goes first.
+    if (l.get(id).laid_out) try purgeSubtree(l, id);
     const b = l.box(id);
     const cb_w = containerWidth(l, id);
     const margins = resolveEdges(b, cb_w);
@@ -1411,9 +1872,10 @@ fn layoutAtomic(l: *Layout, id: BoxId) Error!AtomicSize {
         return .{ .w = b.w + b.margin[1] + b.margin[3], .h = b.h + b.margin[0] + b.margin[2], .baseline = b.h + b.margin[0] };
     }
     const width = if (resolveLA(b.style.width, cb_w)) |w| (if (b.style.box_sizing == .border_box) w - extras else w) else blk: {
+        // Shrink-to-fit: the preferred widths are border-box ones.
         const pref = try preferredWidths(l, id);
         const avail = cb_w - b.margin[1] - b.margin[3] - extras;
-        break :blk @min(@max(pref.min, avail), pref.max);
+        break :blk @min(@max(pref.min - extras, avail), pref.max - extras);
     };
     b.w = constrainWidth(b, width, cb_w) + extras;
     b.x = 0;
@@ -1442,57 +1904,141 @@ fn lastBaseline(l: *const Layout, id: BoxId) ?f64 {
     return null;
 }
 
-/// A replaced element's content size: CSS width/height, else the
-/// `width`/`height` attributes, else a default (300×150 for an image
-/// with no size, a text field 12em wide, a button around its text).
+/// A replaced element's content size. A picture: the `width` and
+/// `height` it is given (HTML's attributes arrive as presentational
+/// hints), one of them completing the other by the picture's ratio (or
+/// the attributes' when it has not arrived), else its natural size —
+/// then min/max width, the ratio kept. Without a picture or a size, an
+/// image takes no room; video, canvas and frames are 300×150. A control
+/// sizes by its type (a text field 12em wide, a button around its text).
 fn replacedSize(l: *const Layout, id: BoxId, cb_w: f64) [2]f64 {
     const b = l.get(id);
     const node = b.node.?;
     const doc = l.doc;
     const st = b.style;
+    const border_box = st.box_sizing == .border_box;
     var w: ?f64 = resolveLA(st.width, cb_w);
-    var h: ?f64 = resolveLA(st.height, 0);
-    if (w == null) if (doc.getAttr(node, "width")) |s| {
-        w = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " ")) catch null;
-    };
-    if (h == null) if (doc.getAttr(node, "height")) |s| {
-        h = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " ")) catch null;
-    };
+    if (w != null and border_box) w = @max(0, w.? - horizontalExtras(b));
+    var h: ?f64 = if (st.height == .px) st.height.px else null;
+    if (h != null and border_box) h = @max(0, h.? - verticalExtras(b));
     const em = st.font_size;
     const name = doc.get(node).name;
     if (std.mem.eql(u8, name, "img") or std.mem.eql(u8, name, "video") or std.mem.eql(u8, name, "canvas") or std.mem.eql(u8, name, "iframe") or std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "embed") or std.mem.eql(u8, name, "object")) {
-        // A decoded picture has its own size; one given dimension keeps
-        // its ratio. Without one: a placeholder, 2:1.
+        var natural: ?[2]f64 = null;
         if (l.images) |imgs| if (imgs.get(node)) |bm| {
-            const iw: f64 = @floatFromInt(bm.w);
-            const ih: f64 = @floatFromInt(bm.h);
-            if (w == null and h == null) return .{ iw, ih };
-            if (w == null) return .{ h.? * iw / ih, h.? };
-            if (h == null) return .{ w.?, w.? * ih / iw };
-            return .{ w.?, h.? };
+            // A picture's size is in CSS pixels (its pixels over its
+            // density): zoomed like the rest.
+            if (bm.w > 0 and bm.h > 0) natural = .{ @as(f64, @floatFromInt(bm.w)) / bm.density * style.px_scale, @as(f64, @floatFromInt(bm.h)) / bm.density * style.px_scale };
         };
-        if (w == null and h == null) return .{ 300, 150 };
-        if (w == null) return .{ h.? * 2, h.? };
-        if (h == null) return .{ w.?, w.? / 2 };
-        return .{ w.?, h.? };
+        // An inline `<svg>` is sized by its `width` and `height`
+        // attributes (CSS pixels) or its viewBox's ratio.
+        if (natural == null and std.mem.eql(u8, name, "svg")) {
+            const aw = attrNumber(doc, node, "width");
+            const ah = attrNumber(doc, node, "height");
+            var vr: ?f64 = null;
+            if (doc.getAttr(node, "viewBox")) |vb| {
+                var it = std.mem.tokenizeAny(u8, vb, " ,\t\r\n");
+                _ = it.next();
+                _ = it.next();
+                const vw = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+                const vh = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+                if (vw > 0 and vh > 0) vr = vw / vh;
+            }
+            if (w == null and h == null and aw != null and ah != null) {
+                w = aw.? * style.px_scale;
+                h = ah.? * style.px_scale;
+            } else if (w == null and h == null and aw != null) {
+                w = aw.? * style.px_scale;
+                if (vr) |r| h = w.? / r;
+            } else if (w == null and h == null and ah != null) {
+                h = ah.? * style.px_scale;
+                if (vr) |r| w = h.? * r;
+            }
+            // A ratio and no size: the containing block's width (CSS
+            // 2.1 §10.3.2's suggestion, and what browsers do).
+            if (w == null and h == null and aw == null and ah == null) if (vr) |r| {
+                w = cb_w;
+                h = cb_w / r;
+            };
+            if (w != null and h == null) if (vr) |r| {
+                h = w.? / r;
+            };
+            if (h != null and w == null) if (vr) |r| {
+                w = h.? * r;
+            };
+        }
+        // The ratio: the picture's, else the size attributes'.
+        var ratio: ?f64 = if (natural) |nat| nat[0] / nat[1] else null;
+        if (ratio == null) {
+            const aw = attrNumber(doc, node, "width");
+            const ah = attrNumber(doc, node, "height");
+            if (aw != null and ah != null and ah.? > 0) ratio = aw.? / ah.?;
+        }
+        const is_img = std.mem.eql(u8, name, "img");
+        const default: [2]f64 = if (natural) |nat| nat else if (is_img) .{ 0, 0 } else .{ 300 * style.px_scale, 150 * style.px_scale };
+        var out: [2]f64 = undefined;
+        if (w != null and h != null) {
+            out = .{ w.?, h.? };
+        } else if (w) |ww| {
+            out = .{ ww, if (ratio) |r| ww / r else default[1] };
+        } else if (h) |hh| {
+            out = .{ if (ratio) |r| hh * r else default[0], hh };
+        } else out = default;
+        // min/max width, the height following when it was not given.
+        const cw = constrainWidth(b, out[0], cb_w);
+        if (cw != out[0]) {
+            if (h == null) if (ratio) |r| {
+                out[1] = cw / r;
+            };
+            out[0] = cw;
+        }
+        switch (st.max_height) {
+            .px => |mh| if (out[1] > mh) {
+                if (w == null) if (ratio) |r| {
+                    out[0] = mh * r;
+                };
+                out[1] = mh;
+            },
+            else => {},
+        }
+        return out;
     }
     if (std.mem.eql(u8, name, "textarea")) return .{ w orelse em * 20, h orelse em * 1.2 * 3 };
-    if (std.mem.eql(u8, name, "select")) return .{ w orelse em * 8, h orelse em * 1.5 };
-    if (std.mem.eql(u8, name, "button")) {
-        const font = fontOf(st);
-        const label = doc.textContent(node, l.a) catch "";
-        return .{ w orelse (l.fonts.advance(font, label) + em), h orelse em * 1.5 };
-    }
+    if (std.mem.eql(u8, name, "select")) return .{ w orelse em * 8, h orelse em * 1.25 };
     // input: by type.
     const t = doc.getAttr(node, "type") orelse "text";
-    if (std.ascii.eqlIgnoreCase(t, "checkbox") or std.ascii.eqlIgnoreCase(t, "radio")) return .{ w orelse 13, h orelse 13 };
+    if (std.ascii.eqlIgnoreCase(t, "checkbox") or std.ascii.eqlIgnoreCase(t, "radio")) return .{ w orelse 13 * style.px_scale, h orelse 13 * style.px_scale };
     if (std.ascii.eqlIgnoreCase(t, "submit") or std.ascii.eqlIgnoreCase(t, "button") or std.ascii.eqlIgnoreCase(t, "reset")) {
         const font = fontOf(st);
         const label = doc.getAttr(node, "value") orelse "Submit";
-        return .{ w orelse (l.fonts.advance(font, label) + em), h orelse em * 1.5 };
+        return .{ w orelse l.fonts.advance(font, label), h orelse em * 1.25 };
     }
     if (std.ascii.eqlIgnoreCase(t, "hidden")) return .{ 0, 0 };
-    return .{ w orelse em * 12, h orelse em * 1.5 };
+    // A text field: `size` characters wide (20 by default).
+    const chars = attrNumber(doc, node, "size") orelse 20;
+    return .{ w orelse em * 0.5 * @max(1, chars), h orelse em * 1.25 };
+}
+
+/// A replaced box's content height once its content width is settled
+/// (by a flex line, a stretch, or `left` and `right`): its own height,
+/// else the width over its ratio.
+fn replacedSizeAtWidth(l: *const Layout, id: BoxId, cb_w: f64, content_w: f64) f64 {
+    const size = replacedSize(l, id, cb_w);
+    const st = l.get(id).style;
+    if (st.height != .auto or size[0] <= 0 or size[1] <= 0) return size[1];
+    return content_w * size[1] / size[0];
+}
+
+fn attrNumber(doc: *const Document, node: NodeId, name: []const u8) ?f64 {
+    const v = std.mem.trim(u8, doc.getAttr(node, name) orelse return null, " \t\r\n");
+    var end: usize = 0;
+    while (end < v.len and (std.ascii.isDigit(v[end]) or v[end] == '.')) : (end += 1) {}
+    if (end == 0 or (end < v.len and v[end] == '%')) return null;
+    return std.fmt.parseFloat(f64, v[0..end]) catch null;
+}
+
+fn isReplacedBox(l: *const Layout, b: *const Box) bool {
+    return b.node != null and b.kind != .text and isReplaced(l.doc, b.node.?);
 }
 
 /// A fragment being assembled on the current line.
@@ -1614,9 +2160,20 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
         }
         i = consumed;
         if (pending.items.len == 0 and !forced and i >= items.len) break;
-        // The line's height and baseline from its fragments.
-        var above: f64 = strut_m.ascent + (strut_lh - (strut_m.ascent + strut_m.descent)) / 2;
-        var below: f64 = strut_lh - above;
+        // The line's height and baseline from its fragments. The strut
+        // (the container's own font and line height) holds every line
+        // open — except in quirks mode, where a line whose text is all
+        // inside inline boxes (or that has none: a picture alone) is only
+        // as tall as what it holds (the line height calculation quirk).
+        var strut = true;
+        if (l.doc.quirks != .no_quirks) {
+            strut = forced and pending.items.len == 0;
+            for (pending.items) |p| if ((p.item.kind == .text or p.item.kind == .space or p.item.kind == .marker) and l.get(p.item.box).parent == id) {
+                strut = true;
+            };
+        }
+        var above: f64 = if (strut) strut_m.ascent + (strut_lh - (strut_m.ascent + strut_m.descent)) / 2 else 0;
+        var below: f64 = if (strut) strut_lh - above else 0;
         if (pending.items.len == 0 and forced) {
             // An empty line still has the strut's height.
         }
@@ -1628,9 +2185,11 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
                 .text, .space, .marker => {
                     const lh = ib.style.lineHeightPx();
                     const half = (lh - it.h) / 2;
+                    // A fragment sits `shift` above the baseline (placed
+                    // below at baseline - shift - its own ascent).
                     const shift = baselineShift(ib.style, it.h, it.baseline);
-                    above = @max(above, it.baseline + half - shift);
-                    below = @max(below, (it.h - it.baseline) + half + shift);
+                    above = @max(above, it.baseline + half + shift);
+                    below = @max(below, (it.h - it.baseline) + half - shift);
                 },
                 .atomic => {
                     const va = ib.style.vertical_align;
@@ -1638,8 +2197,8 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
                         .top, .bottom => {},
                         else => {
                             const shift = baselineShift(ib.style, it.h, it.baseline);
-                            above = @max(above, it.baseline - shift);
-                            below = @max(below, it.h - it.baseline + shift);
+                            above = @max(above, it.baseline + shift);
+                            below = @max(below, it.h - it.baseline - shift);
                         },
                     }
                 },
@@ -1891,7 +2450,7 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
     for (container.children.items) |c| {
         const cb = l.box(c);
         if (cb.isPositioned()) {
-            try l.absolutes.append(l.a, .{ .box = c, .cb = containingBlockFor(l, c) });
+            try addAbsolute(l, c);
             continue;
         }
         const margins = resolveEdges(cb, cb_w);
@@ -2232,8 +2791,15 @@ fn layoutFlexItem(l: *Layout, id: BoxId, x: f64, y: f64, content_w: f64, content
     if (content_h) |h| b.h = h + verticalExtras(b);
 }
 
-/// Forget a subtree's layout records — floats, absolutes, fragments,
-/// lines, baselines — before it is laid out again.
+/// An out-of-flow box for the end of layout, once however often its
+/// container was measured or laid out.
+fn addAbsolute(l: *Layout, id: BoxId) Error!void {
+    for (l.absolutes.items) |ab| if (ab.box == id) return;
+    try l.absolutes.append(l.a, .{ .box = id, .cb = containingBlockFor(l, id) });
+}
+
+/// Forget a subtree's layout records — floats, fragments, lines,
+/// baselines — before it is laid out again.
 fn purgeSubtree(l: *Layout, root_id: BoxId) Error!void {
     var i: usize = 0;
     while (i < l.floats.items.len) {
@@ -2241,20 +2807,17 @@ fn purgeSubtree(l: *Layout, root_id: BoxId) Error!void {
             _ = l.floats.orderedRemove(i);
         } else i += 1;
     }
-    i = 0;
-    while (i < l.absolutes.items.len) {
-        if (isDescendant(l, l.absolutes.items[i].box, root_id)) {
-            _ = l.absolutes.orderedRemove(i);
-        } else i += 1;
-    }
-    for (l.fragments.items) |*f| if (!f.dead and isDescendant(l, f.box, root_id)) {
-        f.dead = true;
-    };
+    // Absolutes stay: each is listed once (`addAbsolute`) and laid out
+    // at the end whatever measured its container.
     try resetLines(l, root_id);
 }
 
+/// A subtree's lines go, and the fragments they held die with them.
 fn resetLines(l: *Layout, id: BoxId) Error!void {
     const b = l.box(id);
+    for (b.lines.items) |ln| for (l.fragments.items[ln.first_frag .. ln.first_frag + ln.frag_count]) |*f| {
+        f.dead = true;
+    };
     b.lines = .empty;
     b.first_baseline = null;
     b.last_baseline = null;
@@ -2394,4 +2957,216 @@ test "layout: hit test finds the link under a point" {
     try std.testing.expect(doc.isHtml(before, "p"));
     const above = hitTest(l, 5, 10) orelse return error.TestUnexpectedResult;
     try std.testing.expect(doc.isHtml(above, "div"));
+}
+
+/// A stand-in picture provider: every `img` is a `w`×`h` bitmap.
+const TestImages = struct {
+    w: u32,
+    h: u32,
+    px: [4]u8 = .{ 0, 0, 0, 255 },
+
+    fn get(ctx: *anyopaque, _: NodeId) ?Bitmap {
+        const self: *TestImages = @ptrCast(@alignCast(ctx));
+        return .{ .w = self.w, .h = self.h, .rgba = &self.px };
+    }
+    const vtable: Images.VTable = .{ .get = get };
+    fn images(self: *TestImages) Images {
+        return .{ .ctx = @ptrCast(self), .vtable = &vtable };
+    }
+};
+
+fn layoutWithImages(a: std.mem.Allocator, src: []const u8, w: f64, imgs: *TestImages) !*Layout {
+    const doc = try html.parse(a, src, .{});
+    const env: style.Env = .{ .width = w, .height = 300 };
+    const sheets = try style.collectDocumentSheets(a, doc, env);
+    const styles = try a.create(style.Styles);
+    styles.* = try style.compute(a, doc, sheets, env);
+    var fixed: FixedFonts = .{};
+    return layoutDocumentWith(a, doc, styles, fixed.fonts(), imgs.images(), w, 300);
+}
+
+// Wikipedia's globe (2026-09-23): an absolutely positioned picture took
+// the block path and was laid out 0 tall; a block picture that had not
+// arrived collapsed through like an empty div.
+test "layout: a picture keeps its size however it is laid out" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var imgs: TestImages = .{ .w = 200, .h = 100 };
+    const l = try layoutWithImages(a, "<body style='margin:0'><div style='position:relative'><img id=abs style='position:absolute;top:5px;left:7px' src=x></div><img id=blk style='display:block;margin:0 auto' src=x><img id=css style='display:block;width:50px;height:auto' width=200 height=100 src=x><div style='display:flex'><img id=flex src=x></div>", 400, &imgs);
+    const doc = l.doc;
+    const abs = boxOf(l, doc, "#abs");
+    try std.testing.expectEqual(@as(f64, 200), abs.w);
+    try std.testing.expectEqual(@as(f64, 100), abs.h);
+    try std.testing.expectEqual(@as(f64, 7), abs.x);
+    const blk = boxOf(l, doc, "#blk");
+    // A block picture is its own width, centred by auto margins.
+    try std.testing.expectEqual(@as(f64, 200), blk.w);
+    try std.testing.expectEqual(@as(f64, 100), blk.h);
+    try std.testing.expectEqual(@as(f64, 100), blk.x);
+    // CSS width wins over the attribute; `height: auto` keeps the ratio.
+    const css_img = boxOf(l, doc, "#css");
+    try std.testing.expectEqual(@as(f64, 50), css_img.w);
+    try std.testing.expectEqual(@as(f64, 25), css_img.h);
+    const flex = boxOf(l, doc, "#flex");
+    try std.testing.expectEqual(@as(f64, 100), flex.h);
+}
+
+test "layout: size attributes are hints, and give a ratio before the picture" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<body style='margin:0'><img id=hint width=120 height=60><img id=ratio style='width:60px' width=120 height=60><img id=none>", 400);
+    const doc = l.doc;
+    try std.testing.expectEqual(@as(f64, 120), boxOf(l, doc, "#hint").w);
+    try std.testing.expectEqual(@as(f64, 60), boxOf(l, doc, "#hint").h);
+    // The author's width wins over the hint and the attribute's height
+    // stands (the presentational hint is a declaration like any other).
+    try std.testing.expectEqual(@as(f64, 60), boxOf(l, doc, "#ratio").w);
+    try std.testing.expectEqual(@as(f64, 60), boxOf(l, doc, "#ratio").h);
+    // A picture with no size that has not arrived takes no room.
+    try std.testing.expectEqual(@as(f64, 0), boxOf(l, doc, "#none").w);
+}
+
+// Google's bar (2026-09-23): measuring a container's widths laid its
+// inline-blocks out, and every measurement added another set of lines —
+// "Gmail" painted four times, each pass a little further along.
+test "layout: an inline-block measured and laid out again keeps one set of lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<body style='margin:0'><div style='display:flex;justify-content:flex-end'><div style='display:inline-block'><a id=g style='display:inline-block;padding:0 4px'>Gmail</a> <a style='display:inline-block'>Images</a></div></div>", 400);
+    const doc = l.doc;
+    const g = boxOf(l, doc, "#g");
+    try std.testing.expectEqual(@as(usize, 1), g.lines.items.len);
+    var live: usize = 0;
+    for (l.fragments.items) |f| {
+        if (!f.dead and std.mem.eql(u8, f.text, "Gmail")) live += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), live);
+}
+
+test "layout: an absolute inside an absolute is laid out" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<body style='margin:0'><div style='position:absolute;top:10px;left:10px;width:100px;height:100px'><div id=in style='position:absolute;top:5px;left:5px;width:20px;height:20px'></div></div>", 400);
+    const inner = boxOf(l, l.doc, "#in");
+    try std.testing.expectEqual(@as(f64, 15), inner.x);
+    try std.testing.expectEqual(@as(f64, 15), inner.y);
+    try std.testing.expectEqual(@as(f64, 20), inner.h);
+}
+
+// Wikipedia's search row: a 44px field with `vertical-align: middle` sat
+// 36px down its line — the line's height counted the shift the wrong way.
+test "layout: a middle-aligned atomic grows its line on both sides of the baseline" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<body style='margin:0;font-size:16px;line-height:20px'><div id=line><span id=box style='display:inline-block;height:40px;width:10px;vertical-align:middle'></span>x</div>", 400);
+    const doc = l.doc;
+    const line = boxOf(l, doc, "#line");
+    const box = boxOf(l, doc, "#box");
+    // The box starts at the line's top, not below it.
+    try std.testing.expectEqual(line.y, box.y);
+    try std.testing.expect(line.h >= 40 and line.h < 50);
+}
+
+test "layout: a button's content is laid out like any box's" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<body style='margin:0'><button id=b>\n<i id=i style='display:inline-block;width:22px;height:22px'></i>\n</button>", 400);
+    const doc = l.doc;
+    const i = boxOf(l, doc, "#i");
+    const b = boxOf(l, doc, "#b");
+    try std.testing.expectEqual(@as(f64, 22), i.h);
+    try std.testing.expect(i.x > b.x and i.x + i.w < b.x + b.w);
+}
+
+test "layout: a table sizes its columns from its cells and its rows from the tallest" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // FixedFonts: 16px text is 8px a character.
+    const l = try layoutText(a, "<body style='margin:0;font-size:16px;line-height:20px'><table id=t cellspacing=4 cellpadding=0><tr><td id=a>aaaa</td><td id=b>bb</td></tr><tr><td id=c colspan=2>cccccccccccccccc</td></tr><tr><td id=d style='height:50px'>d</td><td id=e style='vertical-align:bottom'>e</td></tr></table>", 400);
+    const doc = l.doc;
+    const t = boxOf(l, doc, "#t");
+    const ba = boxOf(l, doc, "#a");
+    const bb = boxOf(l, doc, "#b");
+    const bc = boxOf(l, doc, "#c");
+    const bd = boxOf(l, doc, "#d");
+    const be = boxOf(l, doc, "#e");
+    // Shrink-to-fit: the spanning cell's 128px is the widest need.
+    try std.testing.expectEqual(@as(f64, 4 + 128 + 4), t.w);
+    try std.testing.expectEqual(@as(f64, 4), ba.x);
+    try std.testing.expectEqual(ba.x + ba.w + 4, bb.x);
+    try std.testing.expectEqual(@as(f64, 128), bc.w);
+    // Cells in a row share its top and its height.
+    try std.testing.expectEqual(bd.y, be.y);
+    try std.testing.expectApproxEqAbs(@as(f64, 50), be.h, 0.001);
+    // A bottom-aligned cell's line sits at the bottom.
+    try std.testing.expect(be.lines.items[0].y > be.y + 20);
+    try std.testing.expectApproxEqAbs(ba.y + ba.h + 4, bc.y, 0.001);
+}
+
+test "layout: percentage columns widen an auto table and take their share" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<body style='margin:0;font-size:16px'><table cellspacing=0 cellpadding=0><tr><td id=l width='25%'>x</td><td id=m>mmmmmmmmmmmmmmmmmmmm</td><td id=r width='25%'>y</td></tr></table>", 800);
+    const doc = l.doc;
+    const m = boxOf(l, doc, "#m");
+    const left = boxOf(l, doc, "#l");
+    // The middle's 160px is half: the table is 320 and each side 80.
+    try std.testing.expectEqual(@as(f64, 160), m.w);
+    try std.testing.expectEqual(@as(f64, 80), left.w);
+    try std.testing.expectEqual(@as(f64, 80), m.x);
+}
+
+test "layout: table-cell boxes outside a table get an anonymous one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<body style='margin:0;font-size:16px'><div><div id=x style='display:table-cell;width:100px'>a</div><div id=y style='display:table-cell;width:50px'>b</div></div>", 400);
+    const doc = l.doc;
+    const x = boxOf(l, doc, "#x");
+    const y = boxOf(l, doc, "#y");
+    try std.testing.expectEqual(x.y, y.y);
+    try std.testing.expectEqual(@as(f64, 100), x.w);
+    try std.testing.expectEqual(x.x + 100, y.x);
+}
+
+// Hacker News (2026-09-23): no doctype, so quirks mode — its tables do
+// not inherit `<center>`'s alignment, and a line whose text is all in
+// inline boxes is only as tall as that text.
+test "layout: quirks mode resets tables and drops the strut from text-less roots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "<body style='margin:0;font-size:32px'><center><table cellspacing=0 cellpadding=0 width=400><tr><td id=c><span id=s style='font-size:10px;line-height:12px'>x</span></td></tr></table></center>";
+    const quirky = try layoutText(a, src, 400);
+    const cq = boxOf(quirky, quirky.doc, "#c");
+    try std.testing.expectEqual(@as(f64, 12), cq.h);
+    // The span's text starts at the cell's left (not centred).
+    var text_x: f64 = -1;
+    for (quirky.fragments.items) |f| if (!f.dead and std.mem.eql(u8, f.text, "x")) {
+        text_x = f.x;
+    };
+    try std.testing.expectEqual(@as(f64, 0), text_x);
+    const standard = try layoutText(a, try std.mem.concat(a, u8, &.{ "<!DOCTYPE html>", src }), 400);
+    const cs = boxOf(standard, standard.doc, "#c");
+    try std.testing.expect(cs.h > 30);
+}
+
+test "layout: an inline svg with only a viewBox fills its container's width" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0'><div style='width:24px'><svg id=s viewBox='0 0 24 12'><path d='M0 0h24v12z'/></svg></div><svg id=t width=30 height=10></svg>", 400);
+    const doc = l.doc;
+    const s = boxOf(l, doc, "#s");
+    try std.testing.expectEqual(@as(f64, 24), s.w);
+    try std.testing.expectEqual(@as(f64, 12), s.h);
+    try std.testing.expectEqual(@as(f64, 30), boxOf(l, doc, "#t").w);
 }

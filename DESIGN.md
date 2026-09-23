@@ -6358,6 +6358,183 @@ list is a promise never to remove from it. (2) A pointer into an
 can grow the list. (3) The first layout algorithm that lays out twice
 audits everything the first layout recorded.
 
+**Stage 9, the second real sites (as built, 2026-09-23).** The user
+opened Wikipedia and Google in the desktop and saw Wikipedia's globe
+missing while Google's logo showed, CJK as boxes, a "□Search□"
+button, Wikipedia's type half again too big beside Google's, and
+Google's "Gmail Images" painted four times, each copy a little further
+along. Every one reproduced on the host first, with a new tool:
+`zig build webshot -- URL OUT.ppm [W] [H] [ZOOM%]` runs the page
+domain's pipeline (linked sheets, `@font-face`, pictures, style,
+layout, paint, the same system faces) on the Mac, fetching through
+`curl` into `zig-out/webshot-cache` so a rerun is offline, with
+`WEBSHOT_DUMP=needle` (box subtrees by id/class) and
+`WEBSHOT_FRAG=text` (the fragments carrying a string and the lines
+that reach them); headless Chrome with the same User-Agent is the
+reference picture. What they were: (1) *The globe*: a replaced element
+was always an inline-block, and one blockified — absolutely positioned
+here — took the block path, which sized its height from children it
+does not have: 0. Replaced elements are now block boxes when their
+display is, and every path (block, absolute, flex item, shrink-to-fit)
+sizes them by `replacedSize` — the CSS size, one dimension completing
+the other by the picture's ratio (or the size attributes' before it
+arrives), else the natural size, min/max width keeping the ratio; a
+picture's pixels are CSS pixels. A block picture that had not arrived
+counted as an empty block and collapsed through (the browser drill's
+`img { display: block }` caught that). HTML's `width`/`height` moved
+into the cascade as *presentational hints* — author-level declarations
+under every author rule, so `height: auto` beats them as it does in
+every browser — with `bgcolor`, `align`, `valign`, `nowrap`, `<body
+text>`, `<font color size face>`, an image's `border`/`hspace`/`vspace`
+and a table's `border`; an attribute's value reaches a declaration only
+when it cannot close one. (2) *Gmail ×4*: measuring a container's
+preferred widths collects its inline items, which lays each atomic
+child out for real — and each measurement appended another set of line
+boxes to it. Laying out an atomic that was laid out before now purges
+its subtree first; purging walks the subtree's own lines (their
+fragments die), not the whole fragment list; absolutes register once
+(`addAbsolute`) instead of being removed and re-added. The absolutes
+loop iterated a slice captured before nested absolutes appended to the
+list, so an absolute inside an absolute was never laid out; it walks
+by index now. (3) *Sizes*: `rem` was of a fixed 16 px, so
+`html { font-size: 62.5% }` did nothing and Wikipedia's `1.4rem` text
+was 22 px, not 14 — `compute` now sets `root_font_size` from the root
+element's computed size. And "zoom" was text zoom: the page's
+`root_font_size` scaled by the user's UI scale, so rem-sized sites
+grew and px-sized ones did not. Zoom is a device-pixel ratio now,
+`style.px_scale`: every absolute length, the font-size and border-width
+keywords, the initial size and a picture's natural size are scaled;
+media queries and viewport units see the viewport in CSS pixels (the
+page divides its `Env`), and a zoom change re-reads the sheets since
+`@media` may decide differently. (4) *Custom properties*: Wikipedia's
+colours, borders and positions are all `var(--…)`. A `--name`
+declaration is kept as written (`Declared.custom`, `Declaration.name`);
+one with `var()` anywhere is `pending`, unchecked — a shorthand stands
+for each of its longhands (found by expanding `initial`) with its own
+name recorded. At computed-value time each element's custom properties
+are its parent's list (shared) plus its own winners (a new list, their
+own `var()`s substituted there), then every pending winner is
+substituted — the fallback after the comma, a depth bound for cycles —
+and a shorthand expanded again for the longhand it stands for; what
+fails is `unset`, as the spec's invalid-at-computed-value-time says.
+Substitution goes through a 16 KB stack-fallback scratch per element.
+(5) *Selectors*: `a, a:active, a:focus { color: … }` was dropped whole
+because `:active` did not parse, and so was any list with a
+pseudo-element. Interaction states (`:hover`, `:focus`, `:visited`,
+`:target`…) and the pseudo-elements now parse and match nothing;
+`:lang()`, `:required`/`:optional`, `:read-only`/`:read-write` and
+`:placeholder-shown` match statically. (6) *Controls*: a `button` was
+a replaced element whose label was its raw text content — the
+newlines around its icon drew as boxes. It is an inline-block whose
+content lays out like any box's, its face from the UA sheet; inputs,
+selects and textareas are styled boxes too (Chrome's UA borders,
+backgrounds, paddings and 13.333 px), so a page's `border: 0;
+background: transparent` takes, and the painter only sets the value or
+label in the content box; a text field is `size` characters wide;
+`input[type=hidden]` is `display: none`. (7) *Lines*: the line box
+counted `vertical-align`'s shift with the wrong sign, for text and
+atomics alike, so a 44 px field with `vertical-align: middle` sat 36 px
+down its line. (8) *Text*: `lib/web/fonts.zig` is the page's font
+provider now (the page domain's `PageFonts` moved there so `webshot`
+shares it): a code point the chosen face lacks is found in the other
+system faces in order, and the host packs a third one, Droid Sans
+Fallback (Apache-2.0, 4 MB, Han, kana and Hangul) under
+`assets/fallback/` — not `assets/fonts/`, where fontsvc would register
+it as a family; default-ignorable format characters (direction marks,
+joiners, the soft hyphen) take no room; and bold is synthesized — every
+face shipped is a regular one — by drawing each glyph again a pixel or
+more to the right (a pixel takes the most coverage of its copies) and
+widening the advance by as much. Wikipedia's front page now matches
+Chrome's layout to the pixel row for its language grid, its search row
+and its panels; Google's bar paints once, with its Sign in button (the
+selector fix revealed it). Nine host tests pin the fixes. *Not yet:*
+tables (Google's search form is one), `background-image` and SVG (the
+Wikipedia wordmark and every sprite), `border-radius`, `calc()`, and
+the scripts that need shaping or bidi (Arabic, Hebrew, the Indic
+scripts) — still boxes. *Lessons:* (1) a tool that renders the real
+page on the host in a second, beside a reference browser's picture,
+turned a boot-and-squint loop into a diff; build it before the second
+round, not the fifth. (2) A measurement that lays out for real must be
+idempotent, or every caller that measures twice leaves a copy behind.
+(3) "Zoom" that scales only some units is a bug that looks like a site
+being odd; the unit of zoom is the CSS pixel.
+
+**Stage 9, tables, backgrounds and SVG (as built, 2026-09-23).** The
+same afternoon, the gaps the first round listed. *Tables*: CSS 2.1
+§17's auto layout. At box building, a table, row group or row drops
+the whitespace between its parts; a run of cells outside a row gets an
+anonymous row, and a run of table parts outside a table an anonymous
+table (so `display: table-cell` columns sit side by side); cells are
+block boxes now, columns make none. `tableGrid` lists the rows in
+visual order (header groups, bodies and bare rows, footers) and places
+each cell in slots by `colspan` and `rowspan` (0 to the end);
+`columnWidths` takes each column's min and max from its single-span
+cells (a fixed width raising both) and then spreads a spanning cell's
+excess; a `width` percentage claims a share. An auto-width table
+shrinks to fit (`tableWidths`, which a percentage column widens until
+it gets its share and the rest their maximum — Google's search form is
+a 25% / auto / 25% table); `distributeColumns` gives percentage columns
+their share, then the rest between min and max or past max by weight.
+Cells are laid out at their widths, rows are as tall as their tallest
+single-row cell (a `rowspan` cell's excess to its last row), each cell
+is moved into place as tall as its rows with its content aligned by
+`vertical-align`, and rows and groups take the geometry their cells
+cover so their backgrounds paint. `border-spacing` (the `cellspacing`
+hint), `cellpadding` and a bordered table's cell borders are hints;
+`border-collapse: collapse` is zero spacing (the borders are not yet
+merged). Captions sit on top. *Quirks*: Hacker News has no doctype.
+The parser always knew the mode; now a quirks document gets the
+Standard's extra UA rule (a table resets `font-size`, `line-height`,
+`white-space`, `text-align` — so `<center>` does not centre cell text)
+and the line height quirk (a line whose text is all inside inline
+boxes, or a picture alone, is only as tall as what it holds: the
+strut is dropped). *Backgrounds*: `background-image` (the url layer of
+several, else a linear gradient), `-position`, `-size` (`cover`,
+`contain`, lengths), `-repeat`, the `background` and
+`background-position` shorthands in full; the declaring sheet's URL
+rides the cascade (`Candidate.base` → `Computed.background_base`) so a
+sheet-relative `url()` resolves against the sheet. Paint places the
+picture in the padding box, tiles it, clips to the border box; linear
+gradients (angles, `to` sides, stop positions, repeating) are painted
+per pixel; `border-radius` rounds backgrounds and a one-colour border
+ring with an anti-aliased edge; translucent backgrounds blend (they
+were painted opaque). The page fetches background pictures near the
+viewport like `img`s, keyed by the URL they resolve to and found at
+paint by the style's slices (rebound by resolving when a sheet re-read
+makes new ones). *SVG*: `lib/svg.zig`, a runtime renderer — an XML
+tree, simple `<style>` rules, presentation and `style` attributes,
+transforms, every path command (arcs included), the basic shapes,
+`use`/`symbol`, nested viewports that clip (Wikipedia's sprite sheet
+bled the Wikiquote logo into the wordmark until they did), strokes as
+oriented quads with round joins, fills non-zero or even-odd with five
+sub-scanlines and exact horizontal coverage, into 8-bit premultiplied
+RGBA (the sprite at 150% did not fit the page's 6 MB picture scratch
+in floats). Gradient fills paint their stops' mean; clip paths and
+masks are not applied. An SVG picture is rasterized at the zoom, and
+`Bitmap.density` says so, so it paints pixel for pixel. An outermost
+inline `<svg>` in HTML is a replaced element whose picture is its own
+markup (`html.serializeOuter`) drawn at its box's size in its colour,
+with CSS `fill` (new, inherited) as its root fill; one with a viewBox
+and no size fills its containing block's width (CSS 2.1 §10.3.2's
+suggestion — Google's apps grid is 24 px because its link is). Pictures
+now scale bilinearly (premultiplied) instead of nearest. *Smaller*:
+`data:` URLs decode in the page (`url.decodeData`, percent and base64);
+empty fields show their `placeholder`; a closed `<dialog>` and a closed
+`<details>`' content are hidden (Wikipedia's no-JS fundraising dialog
+showed its back arrow); shrink-to-fit for inline-blocks and absolutes
+mixed border-box preferred widths with content-box space, so every
+padded one was too wide by its padding and borders. Wikipedia's front
+page now has its wordmark, search icon and language arrow from the
+sprite; Google's search form, rounded Sign in and apps grid match
+Chrome's; Hacker News reads like Hacker News. Twelve more host tests,
+two for `lib/svg`. *Not yet:* CSS grid (Wikipedia's article skin is a
+grid, and stacks), `calc()`, masks, clip paths, `border-collapse`'s
+merged borders. *Lessons:* (1) quirks mode is not a curiosity: a
+famous site without a doctype renders wrong without it. (2) A sprite
+sheet is many pictures; a renderer that does not clip viewports paints
+the neighbours in. (3) Budget a rasterizer's working memory against the
+largest picture a real site sends, at the zoom the user actually uses.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
