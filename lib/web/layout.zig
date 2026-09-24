@@ -252,6 +252,9 @@ pub const Box = struct {
 pub const Absolute = struct { box: BoxId, cb: BoxId };
 
 pub const Layout = struct {
+    /// Preferred and content-only widths by box, measured once a layout.
+    preferred_widths: std.ArrayList(?Widths) = .empty,
+    content_widths: std.ArrayList(?Widths) = .empty,
     a: std.mem.Allocator,
     doc: *const Document,
     styles: *const style.Styles,
@@ -299,8 +302,8 @@ pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *c
     // doubling list leaves behind, and a 3900-node page grew these lists
     // through 10 MB of an 8 MB arena (Wikipedia, 2026-09-18).
     const n = doc.nodes.items.len;
-    try l.boxes.ensureTotalCapacity(a, n + n / 4 + 8);
-    try l.fragments.ensureTotalCapacity(a, 2 * n + 8);
+    try l.boxes.ensureTotalCapacity(a, n + 64);
+    try l.fragments.ensureTotalCapacity(a, n + n / 4 + 64);
     try l.boxes.append(a, .{ .kind = .root, .node = null, .style = &l.root_style });
     // The root element's box is the html element's, a block under the
     // initial containing block.
@@ -2160,6 +2163,24 @@ fn contentWidths(l: *Layout, id: BoxId) Error!Widths {
 var measuring: u32 = 0;
 
 fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
+    // A box's preferred widths are its subtree's alone: measured once
+    // per layout (nested flex containers measure their items again at
+    // every level — GitHub's menus cost megabytes before this).
+    const cache = if (contents_only) &l.content_widths else &l.preferred_widths;
+    if (cache.items.len < l.boxes.items.len) {
+        const old = cache.items.len;
+        try cache.resize(l.a, l.boxes.items.len);
+        @memset(cache.items[old..], null);
+    }
+    if (cache.items[id]) |w| return w;
+    const w = try measureWidths(l, id, contents_only);
+    // (The list may have grown while measuring.)
+    const again = if (contents_only) &l.content_widths else &l.preferred_widths;
+    if (id < again.items.len) again.items[id] = w;
+    return w;
+}
+
+fn measureWidths(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
     measuring += 1;
     defer measuring -= 1;
     const b = l.box(id);
@@ -2217,14 +2238,14 @@ fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
             if (st.flex_wrap == .nowrap) min += gap;
         }
     } else if (hasInlineContent(l, id)) {
-        const items = try collectItems(l, id, l.fonts);
+        const items = try collectItemsFor(l, id, l.fonts, true);
         var line: f64 = 0;
         var word: f64 = 0;
         for (items) |it| {
             switch (it.kind) {
                 .text, .atomic, .inline_open, .inline_close, .marker => {
                     line += it.w;
-                    word += it.w;
+                    word += it.min_w orelse it.w;
                     if (it.kind == .atomic or it.kind == .text) {
                         min = @max(min, word);
                         if (it.kind == .atomic) word = 0;
@@ -2273,6 +2294,8 @@ const Item = struct {
     baseline: f64 = 0,
     /// A space that must not be a break opportunity (`nowrap`).
     no_break: bool = false,
+    /// Measuring: an atomic's min-content width (`w` is its max).
+    min_w: ?f64 = null,
 };
 
 /// Whether a break may occur between two ideographs (each is a word).
@@ -2284,6 +2307,13 @@ fn isCjk(cp: u21) bool {
 /// opportunities with white-space applied, inline boxes opened and
 /// closed, atomic inlines sized.
 fn collectItems(l: *Layout, id: BoxId, fonts: Fonts) Error![]const Item {
+    return collectItemsFor(l, id, fonts, false);
+}
+
+/// `measure`: for intrinsic widths only — an atomic inline is not laid
+/// out, its preferred widths stand for it (laying it out for every
+/// measurement of every ancestor cost deep flex pages megabytes).
+fn collectItemsFor(l: *Layout, id: BoxId, fonts: Fonts, measure: bool) Error![]const Item {
     var items: std.ArrayList(Item) = .empty;
     const b = l.get(id);
     if (b.marker_text.len > 0 and b.style.list_style_position == .inside) {
@@ -2292,11 +2322,11 @@ fn collectItems(l: *Layout, id: BoxId, fonts: Fonts) Error![]const Item {
         try items.append(l.a, .{ .kind = .marker, .box = id, .text = b.marker_text, .w = fonts.advance(font, b.marker_text), .h = m.ascent + m.descent, .baseline = m.ascent });
     }
     var prev_space = true; // a line starts as if after a space
-    try collectInto(l, id, fonts, &items, &prev_space);
+    try collectInto(l, id, fonts, &items, &prev_space, measure);
     return items.items;
 }
 
-fn collectInto(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item), prev_space: *bool) Error!void {
+fn collectInto(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item), prev_space: *bool, measure: bool) Error!void {
     const children = l.get(id).children.items;
     for (children) |c| {
         const cb = l.box(c);
@@ -2321,10 +2351,17 @@ fn collectInto(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item),
                 _ = resolveEdges(cb, cb_w);
                 cb.margin = .{ 0, resolveLA(cb.style.margin[1], cb_w) orelse 0, 0, resolveLA(cb.style.margin[3], cb_w) orelse 0 };
                 try items.append(l.a, .{ .kind = .inline_open, .box = c, .w = cb.margin[3] + cb.border[3] + cb.padding[3] });
-                try collectInto(l, c, fonts, items, prev_space);
+                try collectInto(l, c, fonts, items, prev_space, measure);
                 try items.append(l.a, .{ .kind = .inline_close, .box = c, .w = cb.margin[1] + cb.border[1] + cb.padding[1] });
             },
             .inline_block, .block, .anon_block => {
+                if (measure) {
+                    const pw = try preferredWidths(l, c);
+                    const m = (resolveLA(cb.style.margin[1], 0) orelse 0) + (resolveLA(cb.style.margin[3], 0) orelse 0);
+                    try items.append(l.a, .{ .kind = .atomic, .box = c, .w = pw.max + m, .min_w = pw.min + m });
+                    prev_space.* = false;
+                    continue;
+                }
                 const size = try layoutAtomic(l, c);
                 try items.append(l.a, .{ .kind = .atomic, .box = c, .w = size.w, .h = size.h, .baseline = size.baseline });
                 prev_space.* = false;
@@ -3117,6 +3154,15 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
             }
         } else {
             min = resolveLP(cb.style.min_height, parent_h orelse 0) - (if (cb.style.box_sizing == .border_box) extras else 0);
+            // `min-height: auto` on a column item: its content's height,
+            // no taller than a specified height (GitHub's content, basis
+            // 0 in an indefinite column, stayed 0 tall without it).
+            if (cb.style.min_height == .px and cb.style.min_height.px == 0 and cb.style.overflow_y == .visible) {
+                try layoutFlexItem(l, c, 0, 0, cross_w_for_measure, null);
+                var content_min = @max(0, l.get(c).h - verticalExtras(cb));
+                if (cb.style.height == .px) content_min = @min(content_min, cb.style.height.px - (if (cb.style.box_sizing == .border_box) extras else 0));
+                min = @max(min, content_min);
+            }
             switch (cb.style.max_height) {
                 .none => {},
                 .px => |x| max = x - (if (cb.style.box_sizing == .border_box) extras else 0),
@@ -3899,4 +3945,16 @@ test "layout: an item that starts with a block still has its marker" {
     const f = l.fragments.items[li.lines.items[0].first_frag];
     try std.testing.expect(f.kind == .marker);
     try std.testing.expectEqual(li.y, li.lines.items[0].y);
+}
+
+// GitHub's narrow layout: `flex: 1 1 0` in an indefinite column made the
+// content 0 tall; a flex item's automatic minimum is its content.
+test "layout: a column item's automatic minimum height is its content" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px;line-height:20px'><div style='display:flex;flex-direction:column'><div id=c style='flex:1 1 0'><p style='margin:0'>a</p><p style='margin:0'>b</p></div><div id=n style='flex:1 1 0;overflow:hidden'>x</div></div>", 400);
+    try std.testing.expectEqual(@as(f64, 40), boxOf(l, l.doc, "#c").h);
+    // Not so for one that clips its overflow.
+    try std.testing.expectEqual(@as(f64, 0), boxOf(l, l.doc, "#n").h);
 }

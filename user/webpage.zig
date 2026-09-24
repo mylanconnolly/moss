@@ -47,16 +47,88 @@ var host: u64 = 0;
 
 // ---------------------------------------------------------------- memory
 
-/// The document arena: the bytes, the tree and its sheets, and what
-/// the user changes in it (a typed value, a ticked box) — reset on
-/// every navigation. Its size is the page's budget for a document; a
-/// page that needs more dies of it.
-var heap: [12 << 20]u8 = undefined;
-var arena_fba: std.heap.FixedBufferAllocator = undefined;
-/// The layout arena: the computed styles and the box tree, reset whole
-/// on every relayout (a resize, a keystroke into a field, a zoom).
-var layout_heap: [12 << 20]u8 = undefined;
-var layout_fba: std.heap.FixedBufferAllocator = undefined;
+/// The page's memory for a document, one region used from both ends.
+/// From the bottom, the document arena: the bytes, the tree and its
+/// kept sheets, and what the user changes in it (a typed value, a
+/// ticked box) — reset on every navigation. From the top, the layout
+/// arena: sheets being parsed, the computed styles and the box tree,
+/// reset whole on every relayout (a resize, a keystroke, a zoom). A page
+/// dies only when the two together outgrow it: GitHub keeps 12 MB of
+/// document and sheets, the Python docs lay out 30,000 nodes, and two
+/// fixed halves fit neither (2026-09-23).
+var region: [24 << 20]u8 align(16) = undefined;
+/// The document arena is [0, lo); the layout arena [hi, len).
+var reg_lo: usize = 0;
+var reg_hi: usize = region.len;
+
+fn regionOffset(p: [*]u8) usize {
+    return @intFromPtr(p) - @intFromPtr(&region);
+}
+
+const doc_vtable: std.mem.Allocator.VTable = .{ .alloc = docAlloc, .resize = docResize, .remap = docRemap, .free = docFree };
+
+fn docAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    const base = @intFromPtr(&region);
+    const start = alignment.forward(base + reg_lo) - base;
+    if (start + len > reg_hi) return null;
+    reg_lo = start + len;
+    return region[start..].ptr;
+}
+
+fn docResize(_: *anyopaque, mem: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
+    const start = regionOffset(mem.ptr);
+    // Only the last allocation grows in place; any may shrink.
+    if (start + mem.len != reg_lo) return new_len <= mem.len;
+    if (start + new_len > reg_hi) return false;
+    reg_lo = start + new_len;
+    return true;
+}
+
+fn docRemap(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+    return if (docResize(ctx, mem, alignment, new_len, ra)) mem.ptr else null;
+}
+
+fn docFree(_: *anyopaque, mem: []u8, _: std.mem.Alignment, _: usize) void {
+    const start = regionOffset(mem.ptr);
+    if (start + mem.len == reg_lo) reg_lo = start;
+}
+
+const layout_vtable: std.mem.Allocator.VTable = .{ .alloc = layoutAlloc, .resize = layoutResize, .remap = layoutRemap, .free = layoutFree };
+
+fn layoutAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    const base = @intFromPtr(&region);
+    if (len > reg_hi) return null;
+    const start = alignment.backward(base + reg_hi - len) - base;
+    if (start < reg_lo) return null;
+    reg_hi = start;
+    return region[start..].ptr;
+}
+
+fn layoutResize(_: *anyopaque, mem: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
+    // Growing downward cannot keep the address: only shrinking holds.
+    return new_len <= mem.len;
+}
+
+fn layoutRemap(_: *anyopaque, mem: []u8, _: std.mem.Alignment, new_len: usize, _: usize) ?[*]u8 {
+    return if (new_len <= mem.len) mem.ptr else null;
+}
+
+fn layoutFree(_: *anyopaque, mem: []u8, _: std.mem.Alignment, _: usize) void {
+    const start = regionOffset(mem.ptr);
+    if (start == reg_hi) reg_hi = start + mem.len;
+}
+
+fn layoutArena() std.mem.Allocator {
+    return .{ .ptr = @ptrCast(&region), .vtable = &layout_vtable };
+}
+
+fn resetLayout() void {
+    reg_hi = region.len;
+}
+
+fn resetDocument() void {
+    reg_lo = 0;
+}
 /// Rasterized glyphs, kept across navigations.
 var glyph_heap: [2 << 20]u8 = undefined;
 /// The user-agent stylesheet, parsed once.
@@ -77,7 +149,7 @@ var phase: []const u8 = "loading";
 
 fn outOfMemory() noreturn {
     var line: [160]u8 = undefined;
-    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document arena {d} of {d} KB, layout arena {d} of {d} KB)", .{ phase, arena_fba.end_index / 1024, heap.len / 1024, layout_fba.end_index / 1024, layout_heap.len / 1024 }) catch "webpage: out of memory");
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB)", .{ phase, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024 }) catch "webpage: out of memory");
     usys.exit(137);
 }
 
@@ -266,7 +338,7 @@ var zoom_pct: u64 = 100;
 var theme_flags: u64 = 0;
 
 fn arena() std.mem.Allocator {
-    return arena_fba.allocator();
+    return .{ .ptr = @ptrCast(&region), .vtable = &doc_vtable };
 }
 
 fn uaSheet(e: web.style.Env) web.style.Sheet {
@@ -484,8 +556,8 @@ var fetch_ms: u64 = 0;
 /// Everything of the old page goes.
 fn fresh() void {
     page = .{};
-    arena_fba.reset();
-    layout_fba.reset();
+    resetDocument();
+    resetLayout();
     picture_fba.reset();
     n_sheet_cache = 0;
     page_fonts.forgetWebFaces();
@@ -612,11 +684,11 @@ fn sheetFetch(_: *anyopaque, href: []const u8, base_text: ?[]const u8) ?web.styl
 /// reset by the relayout that follows — and kept as deep copies in the
 /// document arena: a parse holds ten times what it keeps.
 fn collectSheets(doc: *dom.Document) []const web.style.Sheet {
-    layout_fba.reset();
-    const scratch = layout_fba.allocator();
-    const keep: web.style.Keep = .{ .ctx = @ptrCast(&layout_fba), .a = arena(), .keep = keepSheet };
+    resetLayout();
+    const scratch = layoutArena();
+    const keep: web.style.Keep = .{ .ctx = @ptrCast(&region), .a = arena(), .keep = keepSheet };
     const kept = web.style.collectDocumentSheetsKept(scratch, doc, env(), uaSheet(env()), sheetLoader(), keep) catch outOfMemory();
-    layout_fba.reset();
+    resetLayout();
     return kept;
 }
 
@@ -624,7 +696,7 @@ fn collectSheets(doc: *dom.Document) []const web.style.Sheet {
 /// then reset, so each sheet's parse starts from an empty one.
 fn keepSheet(_: *anyopaque, sheet: web.style.Sheet) web.style.Error!web.style.Sheet {
     const kept = try web.style.cloneSheet(arena(), sheet);
-    layout_fba.reset();
+    resetLayout();
     return kept;
 }
 
@@ -846,11 +918,11 @@ fn imagesProvider() web.layout.Images {
 /// decide differently).
 fn relayout(recollect: bool) void {
     const doc = page.doc orelse return;
-    layout_fba.reset();
+    resetLayout();
     page.layout = null;
     page.styles = null;
     if (recollect) page.sheets = collectSheets(doc);
-    const a = layout_fba.allocator();
+    const a = layoutArena();
     web.style.px_scale = zoomScale();
     const t_layout = usys.nowMs();
     const styles = a.create(web.style.Styles) catch outOfMemory();
@@ -1482,8 +1554,6 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, _: u64, _: u64) callconv(.c) 
         _ = usys.log(glog, "webpage: spawned without a host to serve");
         usys.exit(2);
     }
-    arena_fba = std.heap.FixedBufferAllocator.init(&heap);
-    layout_fba = std.heap.FixedBufferAllocator.init(&layout_heap);
     picture_fba = std.heap.FixedBufferAllocator.init(&picture_heap);
     picture_scratch_fba = std.heap.FixedBufferAllocator.init(&picture_scratch);
     page_fonts = web.fonts.FaceFonts.init(&glyph_heap);

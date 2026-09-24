@@ -6601,6 +6601,57 @@ the sampler named the class tokenizer at once. (3) Percentages in a
 measurement are the classic cycle; the spec's answer (treat them as
 auto) is what every engine does.
 
+**Stage 9, fitting real pages in a page's memory (as built,
+2026-09-23).** The host renderer has all the memory it wants; the page
+domain has fixed arenas, and on the desktop the Wikipedia article and
+GitHub died "out of memory". `WEBSHOT_PAGE=1` makes webshot parse sheets
+through a fixed scratch into a kept arena as the page does, and
+temporary probes charged each phase its growth. What they found, in
+order: (1) `Computed` had grown to 1,776 bytes (the `calc` variant made
+every length 24), times every node — styles are now *interned*: each
+element computes into a temporary and points at a shared copy (a hash
+over the fields that usually differ, `std.meta.eql` to confirm), with
+font-family lists interned first so equal styles compare equal; a
+30,000-node page has a few thousand distinct styles. (2) A 700 KB
+stylesheet parses in ~20× its size; with a keeper, a sheet over 64 KB
+is parsed in pieces cut at top-level rule boundaries — or inside a
+wrapping `@layer`/`@media`/`@supports`/`@container` block, closed at a
+piece's end and reopened at the next's (GitHub's primer-react sheet is
+one 300 KB layer) — sharing one layer registry kept where the rules
+are. (3) The document cannot change yet (no script), so a rule whose
+selector needs an id, class, tag, attribute or `[attr=value]` that
+appears nowhere in it is dropped as it is parsed (quirks mode folds
+case): GitHub keeps 3.4 MB of rules, not 4.6 — revisit when scripts
+arrive. (4) Custom properties are a chain of scopes: an element that
+changes some variables gets a node of just those over its parent's
+(with a hash index when large), and one that changes nothing — the
+same declaration, or the same substituted value — shares its parent's;
+`var()` resolution's temporaries go through a scratch reset per element
+(claimed on first use, since the shell's `html-style` runs in a 1 MB
+line heap). The first cut of that concatenated the changed list for
+each `var()`-bearing variable, quadratic on `<html>`'s thousands.
+(5) Preferred widths are cached per box for a layout, and measuring an
+inline container's widths takes an atomic child's preferred widths
+instead of laying it out (a hidden GitHub menu cost 2.8 MB of repeated
+nested measurement). (6) Layout reserves one box per node (pages make
+~0.87), not 1.25. (7) The page's two 12 MB arenas became one 24 MB
+region used from both ends — the document bumping up (growing its last
+allocation in place), layout bumping down — so a page fails only when
+both together outgrow it: GitHub keeps ~11 MB of document, the article
+needs ~9 MB of layout. On the way the narrow GitHub layout showed two
+more gaps: `@media (width<=calc(48rem - .02px))` (media lengths take
+math functions now) and a column flex item's automatic minimum height
+(its content; `flex: 1 1 0` in an indefinite column had made the file
+list 0 tall). Wikipedia's front page and article, GitHub, Google and
+Hacker News all load in the desktop now; the Python docs (30,000 nodes,
+98,000 px) still need over 20 MB of layout and die — the next lever is a
+smaller `Box`. *Lessons:* (1) measure memory where it is spent, not
+where it is suspected — twice a plausible fix (attribute buckets, a
+custom-property map) moved nothing while the probe named the phase at
+once. (2) Pointer equality is a cheap test for sharing only once the
+pointers are canonical. (3) An intrinsic-size measurement that lays
+out for real is an allocation multiplier by nesting depth.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

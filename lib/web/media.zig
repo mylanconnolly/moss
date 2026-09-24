@@ -217,6 +217,7 @@ fn featureNode(feature: Feature, cmp: Cmp, v: css.Value) Node {
 
 /// A length in CSS pixels: px, em/rem at 16px, and the absolute units.
 pub fn lengthOf(v: css.Value) ?f64 {
+    if (v == .function) return mathOf(v, 0);
     if (v != .token) return null;
     switch (v.token) {
         .number => |n| return if (n.value == 0) 0 else null,
@@ -233,6 +234,96 @@ pub fn lengthOf(v: css.Value) ?f64 {
             if (eq(d.unit, "q")) return x * 96 / 101.6;
             return null;
         },
+        else => return null,
+    }
+}
+
+/// `calc()`, `min()`, `max()`, `clamp()` of lengths (no percentages
+/// in a media query): `(width <= calc(48rem - .02px))`.
+fn mathOf(v: css.Value, depth: u8) ?f64 {
+    if (depth > 8 or v != .function) return null;
+    const eq = std.ascii.eqlIgnoreCase;
+    const f = v.function;
+    if (eq(f.name, "calc")) return (mathSum(f.values, depth) orelse return null).len;
+    if (!(eq(f.name, "min") or eq(f.name, "max") or eq(f.name, "clamp"))) return null;
+    var args: [4]f64 = undefined;
+    var n: usize = 0;
+    var start: usize = 0;
+    for (0..f.values.len + 1) |i| {
+        if (i < f.values.len and !(f.values[i] == .token and f.values[i].token == .comma)) continue;
+        if (n == args.len) return null;
+        args[n] = (mathSum(f.values[start..i], depth) orelse return null).len;
+        n += 1;
+        start = i + 1;
+    }
+    if (n == 0) return null;
+    if (eq(f.name, "clamp")) return if (n == 3) @max(args[0], @min(args[1], args[2])) else null;
+    var best = args[0];
+    for (args[1..n]) |x| best = if (eq(f.name, "min")) @min(best, x) else @max(best, x);
+    return best;
+}
+
+const MathTerm = struct { len: f64 = 0, num: f64 = 0, is_len: bool = false };
+
+fn mathSum(vals_in: []const css.Value, depth: u8) ?MathTerm {
+    var buf: [32]css.Value = undefined;
+    var n: usize = 0;
+    for (vals_in) |x| if (!(x == .token and x.token == .whitespace)) {
+        if (n == buf.len) return null;
+        buf[n] = x;
+        n += 1;
+    };
+    const vals = buf[0..n];
+    var total: MathTerm = .{};
+    var sign: f64 = 1;
+    var i: usize = 0;
+    while (i < vals.len) {
+        var j = i;
+        while (j < vals.len and !isDelim(vals[j], '+') and !isDelim(vals[j], '-')) j += 1;
+        const t = mathProduct(vals[i..j], depth) orelse return null;
+        total.len += sign * t.len;
+        total.num += sign * t.num;
+        total.is_len = total.is_len or t.is_len;
+        if (j == vals.len) break;
+        sign = if (isDelim(vals[j], '+')) 1 else -1;
+        i = j + 1;
+    }
+    return if (vals.len == 0) null else total;
+}
+
+fn isDelim(v: css.Value, c: u8) bool {
+    return v == .token and v.token == .delim and v.token.delim == c;
+}
+
+fn mathProduct(vals: []const css.Value, depth: u8) ?MathTerm {
+    if (vals.len == 0) return null;
+    var acc = mathAtom(vals[0], depth) orelse return null;
+    var i: usize = 1;
+    while (i + 1 < vals.len + 1 and i < vals.len) : (i += 2) {
+        if (i + 1 >= vals.len) return null;
+        const rhs = mathAtom(vals[i + 1], depth) orelse return null;
+        if (isDelim(vals[i], '*')) {
+            if (acc.is_len and rhs.is_len) return null;
+            if (rhs.is_len) {
+                acc = .{ .len = rhs.len * acc.num, .is_len = true };
+            } else if (acc.is_len) acc.len *= rhs.num else acc.num *= rhs.num;
+        } else if (isDelim(vals[i], '/')) {
+            if (rhs.is_len or rhs.num == 0) return null;
+            if (acc.is_len) acc.len /= rhs.num else acc.num /= rhs.num;
+        } else return null;
+    }
+    return acc;
+}
+
+fn mathAtom(v: css.Value, depth: u8) ?MathTerm {
+    switch (v) {
+        .token => |t| switch (t) {
+            .number => |num| return .{ .num = num.value },
+            .dimension => return .{ .len = lengthOf(v) orelse return null, .is_len = true },
+            else => return null,
+        },
+        .block => |b| return if (b.kind == '(') mathSum(b.values, depth + 1) else null,
+        .function => return .{ .len = mathOf(v, depth + 1) orelse return null, .is_len = true },
         else => return null,
     }
 }
@@ -314,4 +405,16 @@ test "media: types, features, ranges, preferences" {
         const q = try Query.parseText(a, c.q);
         try std.testing.expectEqual(c.want, q.matches(env));
     }
+}
+
+test "media: calc() in a range" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const narrow = try Query.parseText(a, "(width<=calc(48rem - .02px))");
+    try std.testing.expect(narrow.matches(.{ .width = 700, .height = 500 }));
+    try std.testing.expect(!narrow.matches(.{ .width = 768, .height = 500 }));
+    const wide = try Query.parseText(a, "(min-width: max(30em, 500px))");
+    try std.testing.expect(wide.matches(.{ .width = 500, .height = 500 }));
+    try std.testing.expect(!wide.matches(.{ .width = 479, .height = 500 }));
 }

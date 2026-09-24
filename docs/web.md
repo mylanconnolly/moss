@@ -194,7 +194,8 @@ log from inside `update`, where `echo` waits for the window to close).
 
 ### What is not built
 
-No `position: fixed`/`sticky` beyond relative, no scaling or rotating
+Very large pages (30,000 nodes) outgrow the page's 24 MB for a document
+and its layout and die; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,
@@ -220,7 +221,10 @@ URL on the host with the page domain's own pipeline and faces, caching
 what it fetches under `zig-out/webshot-cache` (delete it to refetch).
 `WEBSHOT_DUMP=needle` prints the box subtree of every element whose id
 or class holds the needle; `WEBSHOT_FRAG=text` prints the fragments
-carrying a string and the lines that reach them. Headless Chrome with
+carrying a string and the lines that reach them; `WEBSHOT_AT=x,y` the
+boxes under a point and `WEBSHOT_BOX=n` a box's ancestors;
+`WEBSHOT_PAGE=1` runs the sheets, cascade and layout in the page
+domain's memory and says what each took. Headless Chrome with
 the page's User-Agent (`moss/0.0 (webpage)`) makes the reference.
 
 ## Dig deeper

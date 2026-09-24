@@ -505,7 +505,9 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   domain's pipeline (sheets, fonts, pictures, layout, paint) on the
   Mac with the same faces, caching what it fetches under
   `zig-out/webshot-cache`; `WEBSHOT_DUMP=needle` prints box subtrees by
-  id/class, `WEBSHOT_FRAG=text` the fragments holding a string. The
+  id/class, `WEBSHOT_FRAG=text` the fragments holding a string,
+  `WEBSHOT_AT=x,y` / `WEBSHOT_BOX=n` what is at a point or above a box;
+  `WEBSHOT_PAGE=1` reproduces the page domain's memory limits. The
   reference is headless Chrome with the page's User-Agent:
   `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   --headless=new --window-size=W,H --user-agent="moss/0.0 (webpage)"

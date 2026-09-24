@@ -74,6 +74,18 @@ fn sheetFetch(_: *anyopaque, href: []const u8, base_text: ?[]const u8) ?web.styl
     return .{ .text = text, .url = url_text };
 }
 
+var page_scratch: std.heap.FixedBufferAllocator = undefined;
+var probe_fba: std.heap.FixedBufferAllocator = undefined;
+var page_keep: std.heap.FixedBufferAllocator = undefined;
+var scratch_peak: usize = 0;
+
+fn keepSheet(_: *anyopaque, sheet: web.style.Sheet) web.style.Error!web.style.Sheet {
+    scratch_peak = @max(scratch_peak, page_scratch.end_index);
+    const kept = try web.style.cloneSheet(page_keep.allocator(), sheet);
+    page_scratch.reset();
+    return kept;
+}
+
 const Picture = struct { node: dom.NodeId, bm: ?web.layout.Bitmap };
 var pictures: std.ArrayList(Picture) = .empty;
 const Background = struct { href: []const u8, bm: ?web.layout.Bitmap };
@@ -144,7 +156,20 @@ pub fn main(init: std.process.Init) !u8 {
     const ua = try web.style.parseSheet(gpa, web.style.ua_sheet, .user_agent, env);
     var dummy: u8 = 0;
     const loader: web.style.Loader = .{ .ctx = @ptrCast(&dummy), .fetch = sheetFetch };
-    const sheets = try web.style.collectDocumentSheetsLoading(gpa, doc, env, ua, loader);
+    // WEBSHOT_PAGE=1: the page domain's memory — sheets parsed through a
+    // 12 MB scratch and kept (deep-copied) in a 12 MB document arena.
+    const page_mode = std.c.getenv("WEBSHOT_PAGE") != null;
+    const sheets = if (page_mode) blk: {
+        page_scratch = std.heap.FixedBufferAllocator.init(try gpa.alloc(u8, 12 << 20));
+        page_keep = std.heap.FixedBufferAllocator.init(try gpa.alloc(u8, 12 << 20));
+        const keep: web.style.Keep = .{ .ctx = @ptrCast(&dummy), .a = page_keep.allocator(), .keep = keepSheet };
+        const got = web.style.collectDocumentSheetsKept(page_scratch.allocator(), doc, env, ua, loader, keep) catch |e| {
+            std.debug.print("webshot: page memory: {s} (scratch peak {d} KB, kept {d} KB)\n", .{ @errorName(e), scratch_peak / 1024, page_keep.end_index / 1024 });
+            return 1;
+        };
+        std.debug.print("webshot: page memory: scratch peak {d} KB, kept {d} KB\n", .{ scratch_peak / 1024, page_keep.end_index / 1024 });
+        break :blk got;
+    } else try web.style.collectDocumentSheetsLoading(gpa, doc, env, ua, loader);
 
     // Web fonts, as the page loads them.
     for (sheets) |sheet| for (sheet.font_faces) |ff| {
@@ -163,6 +188,25 @@ pub fn main(init: std.process.Init) !u8 {
 
     const images: web.layout.Images = .{ .ctx = @ptrCast(&dummy), .vtable = &images_vtable };
     const t_sheets = std.Io.Clock.awake.now(io);
+    if (page_mode) {
+        // The cascade and layout in the page's 12 MB layout arena.
+        // What the shared 24 MB region leaves after the kept sheets (the
+        // DOM and the page's bytes live there too: this is optimistic).
+        probe_fba = std.heap.FixedBufferAllocator.init(try gpa.alloc(u8, (24 << 20) - page_keep.end_index));
+        var fba = &probe_fba;
+        const la = fba.allocator();
+        const st = try la.create(web.style.Styles);
+        st.* = web.style.compute(la, doc, sheets, env) catch |e| {
+            std.debug.print("webshot: page memory: cascade {s} at {d} KB\n", .{ @errorName(e), fba.end_index / 1024 });
+            return 1;
+        };
+        const after_style = fba.end_index;
+        _ = web.layout.layoutDocumentWith(la, doc, st, faces.fonts(), images, @floatFromInt(vw), @floatFromInt(vh)) catch |e| {
+            std.debug.print("webshot: page memory: layout {s} (cascade {d} KB, at {d} KB)\n", .{ @errorName(e), after_style / 1024, fba.end_index / 1024 });
+            return 1;
+        };
+        std.debug.print("webshot: page memory: cascade {d} KB, layout {d} KB\n", .{ after_style / 1024, (fba.end_index - after_style) / 1024 });
+    }
     var styles = try gpa.create(web.style.Styles);
     styles.* = try web.style.compute(gpa, doc, sheets, env);
     const t_style = std.Io.Clock.awake.now(io);
@@ -229,6 +273,11 @@ pub fn main(init: std.process.Init) !u8 {
             dumpBox(doc, l, @intCast(i), 0);
         }
     }
+    if (std.c.getenv("WEBSHOT_BOX")) |bz| {
+        const bi = std.fmt.parseInt(u32, std.mem.span(bz), 10) catch 0;
+        var q: ?u32 = bi;
+        while (q) |qq| : (q = l.get(qq).parent) dumpBox(doc, l, qq, 3);
+    }
     if (std.c.getenv("WEBSHOT_AT")) |at_z| {
         // Every box holding the point, outermost first.
         const at = std.mem.span(at_z);
@@ -282,7 +331,7 @@ fn dumpBox(doc: *const dom.Document, l: *const web.layout.Layout, id: u32, depth
     var ind: [16]u8 = @splat(' ');
     const name = if (b.node) |n| (if (doc.get(n).kind == .element) doc.get(n).name else "#text") else "-";
     const cls = if (b.node) |n| (doc.getAttr(n, "class") orelse doc.getAttr(n, "id") orelse "") else "";
-    std.debug.print("{s}[{d}] {s} {s}.{s} at {d:.1},{d:.1} {d:.1}x{d:.1} disp={s} pos={s} w={any} h={any} m={any}\n", .{ ind[0..@min(16, depth * 2)], id, @tagName(b.kind), name, cls[0..@min(cls.len, 40)], b.x, b.y, b.w, b.h, @tagName(st.display), @tagName(st.position), st.width, st.height, b.margin });
+    std.debug.print("{s}[{d}] {s} {s}.{s} at {d:.1},{d:.1} {d:.1}x{d:.1} disp={s} pos={s} order={d} w={any} h={any} m={any}\n", .{ ind[0..@min(16, depth * 2)], id, @tagName(b.kind), name, cls[0..@min(cls.len, 40)], b.x, b.y, b.w, b.h, @tagName(st.display), @tagName(st.position), st.order, st.width, st.height, b.margin });
     if (depth >= 3) return;
     for (b.children.items) |c| dumpBox(doc, l, c, depth + 1);
 }

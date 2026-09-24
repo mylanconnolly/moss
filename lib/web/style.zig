@@ -234,7 +234,7 @@ pub const Computed = struct {
     border_radius: [4]LengthPercent = .{ .{ .px = 0 }, .{ .px = 0 }, .{ .px = 0 }, .{ .px = 0 } },
     /// The custom properties in force, inherited: the parent's list,
     /// shared unless this element declares some of its own.
-    customs: []const Custom = &.{},
+    customs: ?*const CustomScope = null,
 
     /// The four sides' order everywhere: top, right, bottom, left.
     pub const top = 0;
@@ -411,8 +411,33 @@ pub const Declaration = struct {
     name: []const u8 = "",
 };
 
-/// A custom property an element has: its computed value.
-pub const Custom = struct { name: []const u8, values: []const css.Value };
+/// An element's custom properties: the ones its own declarations
+/// changed, over its parent's scope (shared by every element that
+/// changes nothing). A theme's `:root` holds thousands; an element that
+/// sets three gets a node of three, not a copy of all of them.
+pub const CustomScope = struct {
+    parent: ?*const CustomScope,
+    names: []const []const u8,
+    values: []const []const css.Value,
+    /// A large scope's names to their positions.
+    map: ?*const std.StringHashMapUnmanaged(u32) = null,
+
+    pub fn get(scope: ?*const CustomScope, name: []const u8) ?[]const css.Value {
+        var cur = scope;
+        while (cur) |c| : (cur = c.parent) {
+            if (c.map) |m| {
+                if (m.get(name)) |i| return c.values[i];
+                continue;
+            }
+            var i = c.names.len;
+            while (i > 0) {
+                i -= 1;
+                if (std.mem.eql(u8, c.names[i], name)) return c.values[i];
+            }
+        }
+        return null;
+    }
+};
 
 pub const Origin = enum(u8) { user_agent = 0, author = 1 };
 
@@ -541,14 +566,23 @@ pub fn parseSheet(a: std.mem.Allocator, text: []const u8, origin: Origin, env: E
 /// The same for a sheet fetched from `base`: it and its font faces
 /// remember the URL their `url()`s resolve against.
 pub fn parseSheetAt(a: std.mem.Allocator, text: []const u8, origin: Origin, env: Env, base: ?[]const u8) Error!Sheet {
+    var list: std.ArrayList([]const u8) = .empty;
+    return parseSheetLayered(a, text, origin, env, base, .{ .list = &list, .a = a });
+}
+
+/// A sheet's cascade layers by name, in order of first mention; shared
+/// by the pieces of a sheet parsed in pieces, so it lives where they
+/// are kept.
+const Layers = struct { list: *std.ArrayList([]const u8), a: std.mem.Allocator };
+
+fn parseSheetLayered(a: std.mem.Allocator, text: []const u8, origin: Origin, env: Env, base: ?[]const u8, layers: Layers) Error!Sheet {
     var p = try css.Parser.init(a, text, false);
     const rules = try p.parseStylesheetDirect();
     var out: std.ArrayList(Rule) = .empty;
     var imports: std.ArrayList([]const u8) = .empty;
     var faces: std.ArrayList(FontFace) = .empty;
     // The per-block parsers below share the sheet parser's value stack.
-    var layers: std.ArrayList([]const u8) = .empty;
-    try collectRulesFaces(a, rules, env, &out, &imports, &faces, p.scratchOf(), &layers, "");
+    try collectRulesFaces(a, rules, env, &out, &imports, &faces, p.scratchOf(), layers, "");
     if (base != null) for (faces.items) |*f| {
         f.base = base;
     };
@@ -559,6 +593,193 @@ pub fn parseSheetAt(a: std.mem.Allocator, text: []const u8, origin: Origin, env:
 /// sheet's rules come first, as the cascade orders them), then the
 /// sheet itself; a chain deeper than `max_import_depth` or a fetch that
 /// fails leaves that import out, never the sheet.
+/// Every id, class, tag and attribute name a document uses.
+const DocKeys = struct {
+    set: std.StringHashMapUnmanaged(void) = .empty,
+    /// Quirks mode matches classes and ids ignoring case.
+    fold: bool = false,
+
+    fn of(a: std.mem.Allocator, doc: *const Document) Error!DocKeys {
+        var k: DocKeys = .{ .fold = doc.quirks == .quirks };
+        var w = doc.walk(dom.document_id);
+        while (w.next()) |id| {
+            const n = doc.get(id);
+            if (n.kind != .element) continue;
+            try k.put(a, 't', n.name, true);
+            for (n.attrs.items) |at| {
+                try k.put(a, 'a', at.name, true);
+                // `name=value`, for `[name=value]` (short values only).
+                if (at.value.len < 128 and at.name.len < 64) {
+                    var buf: [200]u8 = undefined;
+                    const nv = std.fmt.bufPrint(&buf, "{s}={s}", .{ at.name, at.value }) catch continue;
+                    try k.put(a, 'v', nv, false);
+                }
+                if (std.mem.eql(u8, at.name, "id")) try k.put(a, '#', at.value, k.fold);
+                if (std.mem.eql(u8, at.name, "class")) {
+                    var it = std.mem.tokenizeAny(u8, at.value, " \t\r\n\x0c");
+                    while (it.next()) |c| try k.put(a, '.', c, k.fold);
+                }
+            }
+        }
+        return k;
+    }
+
+    fn key(buf: []u8, kind: u8, name: []const u8, lower: bool) ?[]const u8 {
+        if (name.len + 1 > buf.len) return null;
+        buf[0] = kind;
+        for (name, 0..) |c, i| buf[i + 1] = if (lower) std.ascii.toLower(c) else c;
+        return buf[0 .. name.len + 1];
+    }
+
+    fn put(k: *DocKeys, a: std.mem.Allocator, kind: u8, name: []const u8, lower: bool) Error!void {
+        var buf: [256]u8 = undefined;
+        const kk = key(&buf, kind, name, lower) orelse return;
+        if (k.set.contains(kk)) return;
+        try k.set.put(a, try a.dupe(u8, kk), {});
+    }
+
+    fn has(k: *const DocKeys, kind: u8, name: []const u8, lower: bool) bool {
+        var buf: [256]u8 = undefined;
+        const kk = key(&buf, kind, name, lower) orelse return true;
+        return k.set.contains(kk);
+    }
+
+    /// Whether a selector could match anything here: each compound's
+    /// ids, classes, tags and attribute names must occur somewhere.
+    fn couldMatch(k: *const DocKeys, c: selectors.Complex) bool {
+        for (c.compounds) |comp| for (comp.simples) |sm| switch (sm) {
+            .id => |v| if (!k.has('#', v, k.fold)) return false,
+            .class => |v| if (!k.has('.', v, k.fold)) return false,
+            .type => |v| if (!std.mem.eql(u8, v, "*") and !k.has('t', v, true)) return false,
+            .attr => |at| {
+                if (!k.has('a', at.name, true)) return false;
+                if (at.op == .eq and !at.insensitive and at.value.len < 128 and at.name.len < 64) {
+                    var buf: [200]u8 = undefined;
+                    const nv = std.fmt.bufPrint(&buf, "{s}={s}", .{ at.name, at.value }) catch return true;
+                    if (!k.has('v', nv, false)) return false;
+                }
+            },
+            else => {},
+        };
+        return true;
+    }
+};
+
+/// A keeper that first drops the rules that cannot match the document,
+/// then hands the sheet to the real keeper (if any).
+const Filter = struct {
+    has: DocKeys,
+    inner: ?Keep,
+
+    fn keepFn(ctx: *anyopaque, sheet: Sheet) Error!Sheet {
+        const f: *Filter = @ptrCast(@alignCast(ctx));
+        var s = sheet;
+        // Filtered in place: the sheet's own rule list, parsed just now.
+        const rules = @constCast(sheet.rules);
+        var n: usize = 0;
+        for (rules) |r| {
+            // Custom properties on the root go wherever the root does;
+            // everything else is judged by its selector.
+            if (!f.has.couldMatch(r.selector)) continue;
+            rules[n] = r;
+            n += 1;
+        }
+        s.rules = rules[0..n];
+        return if (f.inner) |k| k.keep(k.ctx, s) else s;
+    }
+};
+
+/// A sheet this big is parsed in pieces when its rules are kept
+/// elsewhere: a parse holds ~20 times the text (GitHub sends 700 KB).
+const piece_bytes = 64 << 10;
+
+/// An author sheet's text into the list: whole, or — when a keeper
+/// copies each parse out and frees the scratch — in pieces cut at
+/// top-level rule boundaries, sharing one layer registry.
+fn appendSheetText(a: std.mem.Allocator, sheets: *std.ArrayList(Sheet), text: []const u8, env: Env, base: ?[]const u8, loader: ?Loader, keep: ?Keep) Error!void {
+    const k = keep orelse return appendSheetWithImports(a, sheets, try parseSheetAt(a, text, .author, env, base), env, loader, keep, 0);
+    const pieces = (@as(*Filter, @ptrCast(@alignCast(k.ctx)))).inner != null;
+    if (text.len <= piece_bytes or !pieces) return appendSheetWithImports(a, sheets, try parseSheetAt(a, text, .author, env, base), env, loader, keep, 0);
+    const list = try k.a.create(std.ArrayList([]const u8));
+    list.* = .empty;
+    const layers: Layers = .{ .list = list, .a = k.a };
+    var start: usize = 0;
+    var first = true;
+    // A wrapper (`@layer x`, `@media …`) a piece ended inside, reopened
+    // at the next piece's start.
+    var wrapper: ?[]const u8 = null;
+    while (start < text.len) {
+        const piece = nextPiece(text, start, wrapper);
+        const body = text[start..piece.end];
+        const piece_text = if (wrapper == null and piece.open == null) body else try std.mem.concat(a, u8, &.{ if (wrapper) |w| w else "", if (wrapper != null) "{" else "", body, if (piece.open != null) "}" else "" });
+        const parsed = try parseSheetLayered(a, piece_text, .author, env, base, layers);
+        // The first piece carries the `@import`s; the rest are rules.
+        if (first) try appendSheetWithImports(a, sheets, parsed, env, loader, keep, 0) else try sheets.append(k.a, try k.keep(k.ctx, parsed));
+        first = false;
+        start = piece.end;
+        // The prelude is a slice of the text, which outlives the scratch.
+        wrapper = piece.open;
+    }
+}
+
+const Piece = struct { end: usize, open: ?[]const u8 };
+
+/// Where a piece starting at `start` ends: past the first top-level `}`
+/// (or `;`) after `piece_bytes` of text — or, inside a wrapping at-rule
+/// of rules, past the first `}` that closes one of its rules, the
+/// wrapper then left open (`open`, its prelude) for the next piece to
+/// reopen. Strings and comments are skipped.
+fn nextPiece(text: []const u8, start: usize, wrapper_in: ?[]const u8) Piece {
+    var depth: usize = if (wrapper_in != null) 1 else 0;
+    var wrapper: ?[]const u8 = wrapper_in;
+    var boundary = start;
+    var i = start;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        switch (c) {
+            '/' => if (i + 1 < text.len and text[i + 1] == '*') {
+                i = if (std.mem.indexOfPos(u8, text, i + 2, "*/")) |e| e + 1 else text.len;
+            },
+            '"', '\'' => {
+                i += 1;
+                while (i < text.len and text[i] != c) : (i += 1) {
+                    if (text[i] == '\\') i += 1;
+                }
+            },
+            '{' => {
+                if (depth == 0) {
+                    const prelude = std.mem.trim(u8, text[boundary..i], " \t\r\n");
+                    wrapper = if (isRuleWrapper(prelude)) prelude else null;
+                }
+                depth += 1;
+            },
+            '}' => {
+                if (depth > 0) depth -= 1;
+                if (depth == 0) {
+                    boundary = i + 1;
+                    wrapper = null;
+                    if (i - start >= piece_bytes) return .{ .end = i + 1, .open = null };
+                } else if (depth == 1 and wrapper != null and i - start >= piece_bytes) {
+                    return .{ .end = i + 1, .open = wrapper };
+                }
+            },
+            ';' => if (depth == 0) {
+                boundary = i + 1;
+                if (i - start >= piece_bytes) return .{ .end = i + 1, .open = null };
+            },
+            else => {},
+        }
+    }
+    return .{ .end = text.len, .open = null };
+}
+
+/// An at-rule whose block holds rules, safe to close and reopen.
+fn isRuleWrapper(prelude: []const u8) bool {
+    const names = [_][]const u8{ "@layer", "@media", "@supports", "@container" };
+    for (names) |n| if (std.ascii.startsWithIgnoreCase(prelude, n)) return true;
+    return false;
+}
+
 fn appendSheetWithImports(a: std.mem.Allocator, sheets: *std.ArrayList(Sheet), parsed: Sheet, env: Env, loader: ?Loader, keep: ?Keep, depth: usize) Error!void {
     const sheet = if (keep) |k| try k.keep(k.ctx, parsed) else parsed;
     const list_a = if (keep) |k| k.a else a;
@@ -621,14 +842,14 @@ fn fontFaceOfItems(items: []const css.Item) Error!?FontFace {
 }
 
 /// A layer's index by its full name, registered on first mention.
-fn layerIndex(a: std.mem.Allocator, layers: *std.ArrayList([]const u8), name: []const u8) Error!u8 {
-    for (layers.items, 0..) |n, i| if (std.mem.eql(u8, n, name)) return @intCast(i);
-    if (layers.items.len >= unlayered - 1) return unlayered - 1;
-    try layers.append(a, name);
-    return @intCast(layers.items.len - 1);
+fn layerIndex(layers: Layers, name: []const u8) Error!u8 {
+    for (layers.list.items, 0..) |n, i| if (std.mem.eql(u8, n, name)) return @intCast(i);
+    if (layers.list.items.len >= unlayered - 1) return unlayered - 1;
+    try layers.list.append(layers.a, try layers.a.dupe(u8, name));
+    return @intCast(layers.list.items.len - 1);
 }
 
-fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8), faces: *std.ArrayList(FontFace), scratch: *css.Scratch, layers: *std.ArrayList([]const u8), layer_prefix: []const u8) Error!void {
+fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8), faces: *std.ArrayList(FontFace), scratch: *css.Scratch, layers: Layers, layer_prefix: []const u8) Error!void {
     for (rules) |r| switch (r) {
         .err => {},
         .qualified => |q| if (q.items) |items| try addQualifiedItems(a, q.prelude, items, out) else try addQualified(a, q, out, scratch),
@@ -665,11 +886,11 @@ fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, ou
                     try names.append(a, full);
                 };
                 const rs = at.rules orelse {
-                    for (names.items) |n| _ = try layerIndex(a, layers, n);
+                    for (names.items) |n| _ = try layerIndex(layers, n);
                     continue;
                 };
-                const name = if (names.items.len > 0) names.items[0] else try std.fmt.allocPrint(a, "{s}.#anon{d}", .{ layer_prefix, layers.items.len });
-                const idx = try layerIndex(a, layers, name);
+                const name = if (names.items.len > 0) names.items[0] else try std.fmt.allocPrint(a, "{s}.#anon{d}", .{ layer_prefix, layers.list.items.len });
+                const idx = try layerIndex(layers, name);
                 const first = out.items.len;
                 try collectRulesFaces(a, rs, env, out, imports, faces, scratch, layers, name);
                 for (out.items[first..]) |*rule| if (rule.layer == unlayered) {
@@ -1645,30 +1866,27 @@ fn containsVar(vals: []const css.Value) bool {
     return false;
 }
 
-const CustomMap = std.StringHashMapUnmanaged([]const css.Value);
-
-/// The hash index of the custom-property list being substituted from,
-/// when `compute` built one (a site's `:root` can declare a thousand;
-/// scanning that per `var()` was most of GitHub's cascade).
-var lookup_index: ?struct { ptr: usize, len: usize, map: *const CustomMap } = null;
-
-fn lookupCustom(customs: []const Custom, name: []const u8) ?[]const css.Value {
-    if (lookup_index) |ix| if (ix.ptr == @intFromPtr(customs.ptr) and ix.len == customs.len) return ix.map.get(name);
-    // Later entries override earlier ones (an element's own after its
-    // parent's), so search from the end.
-    var i = customs.len;
-    while (i > 0) {
-        i -= 1;
-        if (std.mem.eql(u8, customs[i].name, name)) return customs[i].values;
-    }
-    return null;
-}
-
 /// Substitute every `var()` in `vals` from `customs`: the variable's
 /// value, else the fallback after the comma; null when neither exists
 /// (the declaration is then invalid at computed-value time) or the
 /// references nest past any sane depth (a cycle).
-fn substitute(a: std.mem.Allocator, vals: []const css.Value, customs: []const Custom, depth: u8) Error!?[]const css.Value {
+/// Where `var()` looks: an element's own new values first (while its
+/// scope is being made), then a scope.
+const Scope = struct {
+    customs: ?*const CustomScope,
+    overlay: ?*const std.StringHashMapUnmanaged([]const css.Value) = null,
+
+    fn get(sc: Scope, name: []const u8) ?[]const css.Value {
+        if (sc.overlay) |o| if (o.get(name)) |v| return v;
+        return CustomScope.get(sc.customs, name);
+    }
+};
+
+fn substitute(a: std.mem.Allocator, vals: []const css.Value, customs: ?*const CustomScope, depth: u8) Error!?[]const css.Value {
+    return substituteIn(a, vals, .{ .customs = customs }, depth);
+}
+
+fn substituteIn(a: std.mem.Allocator, vals: []const css.Value, scope: Scope, depth: u8) Error!?[]const css.Value {
     if (depth > 16) return null;
     var out: std.ArrayList(css.Value) = .empty;
     for (vals) |v| switch (v) {
@@ -1681,16 +1899,16 @@ fn substitute(a: std.mem.Allocator, vals: []const css.Value, customs: []const Cu
                 i += 1;
                 while (i < f.values.len and isWs(f.values[i])) : (i += 1) {}
                 const fallback: ?[]const css.Value = if (i < f.values.len and f.values[i] == .token and f.values[i].token == .comma) f.values[i + 1 ..] else null;
-                const got = lookupCustom(customs, var_name) orelse fallback orelse return null;
-                const sub = (try substitute(a, got, customs, depth + 1)) orelse return null;
+                const got = scope.get(var_name) orelse fallback orelse return null;
+                const sub = (try substituteIn(a, got, scope, depth + 1)) orelse return null;
                 for (sub) |sv| if (!isWs(sv)) try out.append(a, sv);
             } else {
-                const inner = (try substitute(a, f.values, customs, depth + 1)) orelse return null;
+                const inner = (try substituteIn(a, f.values, scope, depth + 1)) orelse return null;
                 try out.append(a, .{ .function = .{ .name = f.name, .values = inner } });
             }
         },
         .block => |b| {
-            const inner = (try substitute(a, b.values, customs, depth + 1)) orelse return null;
+            const inner = (try substituteIn(a, b.values, scope, depth + 1)) orelse return null;
             try out.append(a, .{ .block = .{ .kind = b.kind, .values = inner } });
         },
         else => try out.append(a, v),
@@ -1789,13 +2007,88 @@ fn expandFont(a: std.mem.Allocator, vals: []const css.Value, important: bool, de
 
 /// Every element's computed style, by node id (non-elements get the
 /// default).
+/// Every node's computed style, shared: elements whose styles come out
+/// identical point at one copy (siblings in a list, cells in a table —
+/// a 30,000-node page has a few thousand distinct styles, and a
+/// `Computed` is well over a kilobyte).
 pub const Styles = struct {
-    computed: []Computed,
+    computed: []*const Computed,
 
     pub fn get(s: *const Styles, id: NodeId) *const Computed {
-        return &s.computed[id];
+        return s.computed[id];
     }
 };
+
+const InternCtx = struct {
+    pub fn hash(_: InternCtx, c: *const Computed) u64 {
+        var h = std.hash.Wyhash.init(0x7374796c);
+        const f = struct {
+            fn add(hh: *std.hash.Wyhash, x: anytype) void {
+                const T = @TypeOf(x);
+                switch (@typeInfo(T)) {
+                    .float => hh.update(std.mem.asBytes(&@as(f64, x))),
+                    .@"enum" => hh.update(std.mem.asBytes(&@as(u32, @intFromEnum(x)))),
+                    .int => hh.update(std.mem.asBytes(&@as(u64, @intCast(x)))),
+                    .@"union" => {
+                        hh.update(std.mem.asBytes(&@as(u32, @intFromEnum(std.meta.activeTag(x)))));
+                        switch (x) {
+                            inline else => |payload| if (@TypeOf(payload) == f64) hh.update(std.mem.asBytes(&payload)),
+                        }
+                    },
+                    else => @compileError("hash " ++ @typeName(T)),
+                }
+            }
+        }.add;
+        f(&h, c.display);
+        f(&h, c.position);
+        f(&h, c.float);
+        f(&h, c.font_size);
+        f(&h, c.font_weight);
+        f(&h, c.color.r);
+        f(&h, c.color.g);
+        f(&h, c.color.b);
+        f(&h, c.background_color.r);
+        f(&h, c.background_color.a);
+        f(&h, c.width);
+        f(&h, c.height);
+        for (c.margin) |m| f(&h, m);
+        for (c.padding) |m| f(&h, m);
+        for (c.border_width) |x| f(&h, x);
+        for (c.border_style) |x| f(&h, x);
+        f(&h, c.text_align);
+        f(&h, c.white_space);
+        h.update(std.mem.asBytes(&@intFromPtr(c.customs)));
+        h.update(std.mem.asBytes(&@intFromPtr(c.font_family.ptr)));
+        return h.final();
+    }
+    pub fn eql(_: InternCtx, x: *const Computed, y: *const Computed) bool {
+        return std.meta.eql(x.*, y.*);
+    }
+};
+
+/// A font-family list's shared copy (a page has a handful of distinct
+/// ones; each element that declares one allocates its own).
+fn internFamily(a: std.mem.Allocator, families: *std.ArrayList(FontFamily), f: FontFamily) Error!FontFamily {
+    outer: for (families.items) |known| {
+        if (known.ptr == f.ptr and known.len == f.len) return known;
+        if (known.len != f.len) continue;
+        for (known, f) |x, y| if (!std.mem.eql(u8, x, y)) continue :outer;
+        return known;
+    }
+    try families.append(a, f);
+    return f;
+}
+
+/// A computed style's shared copy: an equal one already made, or a new
+/// one.
+fn intern(a: std.mem.Allocator, set: *std.HashMapUnmanaged(*const Computed, void, InternCtx, 80), c: *const Computed) Error!*const Computed {
+    const e = try set.getOrPutContext(a, c, .{});
+    if (e.found_existing) return e.key_ptr.*;
+    const copy = try a.create(Computed);
+    copy.* = c.*;
+    e.key_ptr.* = copy;
+    return copy;
+}
 
 const Candidate = struct {
     decl: Declaration,
@@ -1821,18 +2114,23 @@ const Candidate = struct {
 /// Compute the whole document's styles from the sheets (the user-agent
 /// sheet first), with `style` attributes as the last author rules.
 pub fn compute(a: std.mem.Allocator, doc: *const Document, sheets: []const Sheet, env: Env) Error!Styles {
-    const computed = try a.alloc(Computed, doc.nodes.items.len);
-    for (computed) |*c| c.* = .{};
-    computed[dom.document_id].color = env_text;
+    const computed = try a.alloc(*const Computed, doc.nodes.items.len);
+    const doc_style = try a.create(Computed);
+    doc_style.* = .{};
+    doc_style.color = env_text;
     // The initial font size (`medium`), zoomed; `rem` is of it until
     // the root element has its own.
-    computed[dom.document_id].font_size = 16 * px_scale;
+    doc_style.font_size = 16 * px_scale;
+    for (computed) |*c| c.* = doc_style;
+    var interned: std.HashMapUnmanaged(*const Computed, void, InternCtx, 80) = .empty;
+    var tmp: Computed = .{};
     root_font_size = 16 * px_scale;
     var winners: [@typeInfo(Prop).@"enum".fields.len]?Candidate = undefined;
     var custom_winners: std.ArrayList(Candidate) = .empty;
     var order: u32 = 0;
     const index = try RuleIndex.build(a, sheets);
-    var custom_maps: std.AutoHashMapUnmanaged(usize, *CustomMap) = .empty;
+    var pending_scratch = try ScratchFallback.init(a, 64 << 10);
+    var families: std.ArrayList(FontFamily) = .empty;
     // Each node's ancestors' keys (a parent is walked before its children).
     const ancestors = try a.alloc(Bloom, doc.nodes.items.len);
     ancestors[dom.document_id] = @splat(0);
@@ -1840,7 +2138,8 @@ pub fn compute(a: std.mem.Allocator, doc: *const Document, sheets: []const Sheet
     var w = doc.walk(dom.document_id);
     while (w.next()) |id| {
         const parent_id = doc.get(id).parent orelse dom.document_id;
-        const parent = &computed[parent_id];
+        if (id == dom.document_id) continue;
+        const parent = computed[parent_id];
         @memset(&winners, null);
         custom_winners.clearRetainingCapacity();
         order = 0;
@@ -1891,33 +2190,25 @@ pub fn compute(a: std.mem.Allocator, doc: *const Document, sheets: []const Sheet
         // Then every declaration waiting on them: substituted, and a
         // shorthand's expanded again for the longhand it stands for.
         // What fails is invalid at computed-value time: `unset`.
-        var scratch = std.heap.stackFallback(16 << 10, a);
-        const sa = scratch.get();
-        if (customs.len > 8) {
-            const key = @intFromPtr(customs.ptr) ^ (customs.len << 48);
-            const e = try custom_maps.getOrPut(a, key);
-            if (!e.found_existing) {
-                const m = try a.create(CustomMap);
-                m.* = .empty;
-                try m.ensureTotalCapacity(a, @intCast(customs.len));
-                for (customs) |c| m.putAssumeCapacity(c.name, c.values);
-                e.value_ptr.* = m;
-            }
-            lookup_index = .{ .ptr = @intFromPtr(customs.ptr), .len = customs.len, .map = e.value_ptr.* };
-        }
-        defer lookup_index = null;
+        // `var()` substitution's temporaries: a scratch reset per element
+        // (what the computed style keeps, applyValues copies into `a`).
+        pending_scratch.reset();
+        const sa = pending_scratch.allocator();
         for (&winners) |*slot| if (slot.*) |*c| if (c.decl.value == .pending) {
             c.decl.value = try resolvePending(sa, c.decl, customs);
         };
-        try computeOne(a, &computed[id], parent, &winners, env);
-        computed[id].customs = customs;
-        if (winners[@intFromEnum(Prop.background_image)]) |c| if (computed[id].background_image == .url) {
-            computed[id].background_base = c.base;
+        try computeOne(a, &tmp, parent, &winners, env);
+        tmp.customs = customs;
+        if (winners[@intFromEnum(Prop.background_image)]) |c| if (tmp.background_image == .url) {
+            tmp.background_base = c.base;
         };
-        if (winners[@intFromEnum(Prop.mask_image)]) |c| if (computed[id].mask_image == .url) {
-            computed[id].mask_base = c.base;
+        if (winners[@intFromEnum(Prop.mask_image)]) |c| if (tmp.mask_image == .url) {
+            tmp.mask_base = c.base;
         };
-        if (parent_id == dom.document_id and doc.get(id).kind == .element) root_font_size = computed[id].font_size;
+        // Equal family lists become one list, so equal styles can share.
+        if (tmp.font_family.len > 0) tmp.font_family = try internFamily(a, &families, tmp.font_family);
+        computed[id] = try intern(a, &interned, &tmp);
+        if (parent_id == dom.document_id and doc.get(id).kind == .element) root_font_size = tmp.font_size;
     }
     return .{ .computed = computed };
 }
@@ -2080,29 +2371,136 @@ fn customCandidate(a: std.mem.Allocator, list: *std.ArrayList(Candidate), cand: 
 /// (later entries override earlier ones by name). `initial` removes one
 /// (an empty value stands for the guaranteed-invalid one); `inherit` and
 /// `unset` keep the parent's.
-fn ownCustoms(a: std.mem.Allocator, inherited_list: []const Custom, own: []const Candidate) Error![]const Custom {
-    const out = try a.alloc(Custom, inherited_list.len + own.len);
-    @memcpy(out[0..inherited_list.len], inherited_list);
-    var n = inherited_list.len;
-    for (own) |c| switch (c.decl.value) {
-        .custom => |vals| {
-            var value = vals;
-            if (containsVar(vals)) value = (try substitute(a, vals, out[0..n], 0)) orelse &.{};
-            out[n] = .{ .name = c.decl.name, .values = value };
-            n += 1;
-        },
-        .initial => {
-            out[n] = .{ .name = c.decl.name, .values = &.{} };
-            n += 1;
-        },
-        else => {},
-    };
-    return out[0..n];
+/// Whether two value lists say the same thing.
+fn valuesEql(x: []const css.Value, y: []const css.Value) bool {
+    if (x.ptr == y.ptr and x.len == y.len) return true;
+    if (x.len != y.len) return false;
+    for (x, y) |p, q| {
+        if (std.meta.activeTag(p) != std.meta.activeTag(q)) return false;
+        switch (p) {
+            .token => |t| {
+                const u = q.token;
+                if (std.meta.activeTag(t) != std.meta.activeTag(u)) return false;
+                switch (t) {
+                    .ident, .function, .at_keyword, .string, .url => |sv| if (!std.mem.eql(u8, sv, switch (u) {
+                        .ident, .function, .at_keyword, .string, .url => |uv| uv,
+                        else => unreachable,
+                    })) return false,
+                    .hash => |h| if (!std.mem.eql(u8, h.value, u.hash.value)) return false,
+                    .delim => |c| if (c != u.delim) return false,
+                    .number, .percentage => |n| if (n.value != (if (u == .number) u.number.value else u.percentage.value)) return false,
+                    .dimension => |d| if (d.num.value != u.dimension.num.value or !std.ascii.eqlIgnoreCase(d.unit, u.dimension.unit)) return false,
+                    else => {},
+                }
+            },
+            .function => |f| if (!std.mem.eql(u8, f.name, q.function.name) or !valuesEql(f.values, q.function.values)) return false,
+            .block => |b| if (b.kind != q.block.kind or !valuesEql(b.values, q.block.values)) return false,
+            .err => {},
+        }
+    }
+    return true;
 }
+
+/// A value list's arrays copied into `a` (their strings are the sheet's,
+/// which outlive the cascade).
+fn dupeValues(a: std.mem.Allocator, vals: []const css.Value) Error![]const css.Value {
+    const out = try a.alloc(css.Value, vals.len);
+    for (vals, 0..) |v, i| out[i] = switch (v) {
+        .function => |f| .{ .function = .{ .name = f.name, .values = try dupeValues(a, f.values) } },
+        .block => |b| .{ .block = .{ .kind = b.kind, .values = try dupeValues(a, b.values) } },
+        else => v,
+    };
+    return out;
+}
+
+/// An element's custom-property scope: its parent's, unless its own
+/// declarations change something — then a node of just those changes
+/// over the parent's. `initial` makes one guaranteed-invalid (empty);
+/// `inherit`/`unset` keep the parent's.
+fn ownCustoms(a: std.mem.Allocator, parent: ?*const CustomScope, own: []const Candidate) Error!?*const CustomScope {
+    var scratch = std.heap.stackFallback(8 << 10, a);
+    const sa = scratch.get();
+    var names: std.ArrayList([]const u8) = .empty;
+    var values: std.ArrayList([]const css.Value) = .empty;
+    // The changes so far by name, for `var()`s among them.
+    var overlay: std.StringHashMapUnmanaged([]const css.Value) = .empty;
+    for (own) |c| {
+        const before = CustomScope.get(parent, c.decl.name);
+        var value: []const css.Value = &.{};
+        switch (c.decl.value) {
+            .custom => |vals| {
+                value = vals;
+                if (containsVar(vals)) value = (try substituteIn(sa, vals, .{ .customs = parent, .overlay = &overlay }, 0)) orelse &.{};
+                if (before) |bv| if (valuesEql(bv, value)) continue;
+                if (containsVar(vals)) value = try dupeValues(a, value);
+            },
+            .initial => if (before == null) continue,
+            else => continue,
+        }
+        try names.append(sa, c.decl.name);
+        try values.append(sa, value);
+        try overlay.put(sa, c.decl.name, value);
+    }
+    if (names.items.len == 0) return parent;
+    const node = try a.create(CustomScope);
+    node.* = .{ .parent = parent, .names = try a.dupe([]const u8, names.items), .values = try a.dupe([]const css.Value, values.items) };
+    if (names.items.len > 16) {
+        const m = try a.create(std.StringHashMapUnmanaged(u32));
+        m.* = .empty;
+        try m.ensureTotalCapacity(a, @intCast(names.items.len));
+        for (node.names, 0..) |n, i| m.putAssumeCapacity(n, @intCast(i));
+        node.map = m;
+    }
+    return node;
+}
+
+/// A fixed scratch reset per element, falling back to the arena when an
+/// element needs more (what falls back is simply not reclaimed).
+const ScratchFallback = struct {
+    fba: std.heap.FixedBufferAllocator = std.heap.FixedBufferAllocator.init(&.{}),
+    fallback: std.mem.Allocator,
+    size: usize,
+
+    /// The buffer is taken on first use: a small document (or a caller
+    /// with a small heap, the shell's `html-style`) may need none.
+    fn init(a: std.mem.Allocator, size: usize) Error!ScratchFallback {
+        return .{ .fallback = a, .size = size };
+    }
+    fn reset(s: *ScratchFallback) void {
+        s.fba.reset();
+    }
+    fn allocator(s: *ScratchFallback) std.mem.Allocator {
+        return .{ .ptr = s, .vtable = &.{ .alloc = allocFn, .resize = resizeFn, .remap = remapFn, .free = freeFn } };
+    }
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const s: *ScratchFallback = @ptrCast(@alignCast(ctx));
+        if (s.fba.buffer.len == 0 and s.size > 0) {
+            const buf = s.fallback.alloc(u8, s.size) catch null;
+            s.size = 0; // one try
+            if (buf) |b| s.fba = std.heap.FixedBufferAllocator.init(b);
+        }
+        return s.fba.allocator().rawAlloc(len, alignment, ra) orelse s.fallback.rawAlloc(len, alignment, ra);
+    }
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const s: *ScratchFallback = @ptrCast(@alignCast(ctx));
+        if (s.fba.ownsSlice(mem)) return s.fba.allocator().rawResize(mem, alignment, new_len, ra);
+        return s.fallback.rawResize(mem, alignment, new_len, ra);
+    }
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const s: *ScratchFallback = @ptrCast(@alignCast(ctx));
+        if (s.fba.ownsSlice(mem)) return s.fba.allocator().rawRemap(mem, alignment, new_len, ra);
+        return s.fallback.rawRemap(mem, alignment, new_len, ra);
+    }
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const s: *ScratchFallback = @ptrCast(@alignCast(ctx));
+        if (s.fba.ownsSlice(mem)) return s.fba.allocator().rawFree(mem, alignment, ra);
+        s.fallback.rawFree(mem, alignment, ra);
+    }
+};
 
 /// A pending declaration made ordinary, or `unset` when its variables
 /// do not resolve or the result does not parse.
-fn resolvePending(a: std.mem.Allocator, d: Declaration, customs: []const Custom) Error!Declared {
+fn resolvePending(a: std.mem.Allocator, d: Declaration, customs: ?*const CustomScope) Error!Declared {
     const sub = (try substitute(a, d.value.pending, customs, 0)) orelse return .unset;
     if (d.name.len == 0) {
         if (wideKeyword(sub)) |wk| return wk;
@@ -3120,9 +3518,14 @@ pub fn collectDocumentSheetsLoading(a: std.mem.Allocator, doc: *const Document, 
 /// a loader, `<link rel=stylesheet>`s fetched through it, each with its
 /// `@import`s before it — after the user-agent sheet. Without a loader
 /// the links are left out and the page paints as its inline styles.
-pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env: Env, ua: Sheet, loader: ?Loader, keep: ?Keep) Error![]const Sheet {
+pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env: Env, ua: Sheet, loader: ?Loader, keep_in: ?Keep) Error![]const Sheet {
     var sheets: std.ArrayList(Sheet) = .empty;
-    const list_a = if (keep) |k| k.a else a;
+    const list_a = if (keep_in) |k| k.a else a;
+    // What the document has, so rules that can never match it are not
+    // kept (the tree does not change: there is no script yet).
+    const has = try DocKeys.of(list_a, doc);
+    var filter: Filter = .{ .has = has, .inner = keep_in };
+    const keep: ?Keep = .{ .ctx = @ptrCast(&filter), .a = list_a, .keep = Filter.keepFn };
     try sheets.append(list_a, ua);
     // A document in quirks mode: the rules the HTML Standard keeps for it.
     if (doc.quirks == .quirks) {
@@ -3144,14 +3547,15 @@ pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env
             if (!q.matches(env)) continue;
         }
         if (is_style) {
-            const text = try doc.textContent(id, a);
-            try appendSheetWithImports(a, &sheets, try parseSheet(a, text, .author, env), env, loader, keep, 0);
+            // Where it survives the scratch being reset between pieces.
+            const text = try doc.textContent(id, if (keep) |k| k.a else a);
+            try appendSheetText(a, &sheets, text, env, null, loader, keep);
         } else {
             const href = std.mem.trim(u8, doc.getAttr(id, "href") orelse continue, " \t\n\r");
             if (href.len == 0) continue;
             const ld = loader.?;
             const got = ld.fetch(ld.ctx, href, null) orelse continue;
-            try appendSheetWithImports(a, &sheets, try parseSheetAt(a, got.text, .author, env, got.url), env, loader, keep, 0);
+            try appendSheetText(a, &sheets, got.text, env, got.url, loader, keep);
         }
     }
     return sheets.items;
@@ -3454,4 +3858,99 @@ test "style: cascade layers rank below unlayered rules, later layers above earli
         }
         if (doc.isHtml(id, "a")) try std.testing.expect(!styles.get(id).text_decoration.underline);
     }
+}
+
+test "style: a big sheet parsed in pieces cascades as it does whole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "<!DOCTYPE html><style>@layer base, top; @layer top { p { color: rgb(0, 0, 7) } }");
+    for (0..4000) |i| try src.print(a, ".f{d} {{ color: red; margin: 1px }} ", .{i});
+    try src.appendSlice(a, "@layer base { p { color: rgb(0, 0, 3); padding-left: 4px } } p { margin-left: 5px }</style><p>x</p>");
+    try std.testing.expect(src.items.len > 2 * piece_bytes);
+    const doc = try html.parse(a, src.items, .{});
+    const whole = try collectDocumentSheets(a, doc, env);
+    // A keeper that copies each parse into its own arena, as a page does.
+    var kept_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer kept_arena.deinit();
+    const K = struct {
+        fn keepFn(_: *anyopaque, sheet: Sheet) Error!Sheet {
+            return sheet;
+        }
+    };
+    var dummy: u8 = 0;
+    const keep: Keep = .{ .ctx = @ptrCast(&dummy), .a = kept_arena.allocator(), .keep = K.keepFn };
+    const pieces = try collectDocumentSheetsKept(a, doc, env, try parseSheet(a, ua_sheet, .user_agent, env), null, keep);
+    try std.testing.expect(pieces.len > whole.len);
+    for ([_][]const Sheet{ whole, pieces }) |sheets| {
+        const styles = try compute(a, doc, sheets, env);
+        var w = doc.walk(dom.document_id);
+        while (w.next()) |id| if (doc.isHtml(id, "p")) {
+            const c = styles.get(id);
+            // The later layer wins over the earlier across pieces.
+            try std.testing.expectEqual(@as(f64, 7), c.color.b);
+            try std.testing.expectEqual(@as(f64, 4), c.padding[3].px);
+            try std.testing.expectEqual(@as(f64, 5), c.margin[3].px);
+        };
+    }
+}
+
+// GitHub's primer-react sheet is one `@layer` block of 300 KB: the
+// pieces cut inside it close and reopen the layer.
+test "style: a sheet wrapped in one layer is cut inside it and still cascades" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "<!DOCTYPE html><style>@layer lo, hi; @layer hi { p { padding-left: 9px } } @layer lo { p { color: rgb(0, 0, 3) }");
+    for (0..4000) |i| try src.print(a, " .f{d} {{ color: red }} @media (min-width: 1px) {{ .g{d} {{ margin: 1px }} }}", .{ i, i });
+    try src.appendSlice(a, " p { padding-left: 4px; margin-left: 6px } } p { margin-top: 2px }</style><p class=f3>x</p>");
+    const doc = try html.parse(a, src.items, .{});
+    var kept_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer kept_arena.deinit();
+    const K = struct {
+        fn keepFn(_: *anyopaque, sheet: Sheet) Error!Sheet {
+            return sheet;
+        }
+    };
+    var dummy: u8 = 0;
+    const keep: Keep = .{ .ctx = @ptrCast(&dummy), .a = kept_arena.allocator(), .keep = K.keepFn };
+    const pieces = try collectDocumentSheetsKept(a, doc, env, try parseSheet(a, ua_sheet, .user_agent, env), null, keep);
+    try std.testing.expect(pieces.len > 3);
+    const styles = try compute(a, doc, pieces, env);
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| if (doc.isHtml(id, "p")) {
+        const c = styles.get(id);
+        // `.f3 { color: red }` inside the layer wins over `p` there.
+        try std.testing.expectEqual(@as(f64, 255), c.color.r);
+        // The later layer's padding beats the earlier's, across pieces.
+        try std.testing.expectEqual(@as(f64, 9), c.padding[3].px);
+        try std.testing.expectEqual(@as(f64, 6), c.margin[3].px);
+        try std.testing.expectEqual(@as(f64, 2), c.margin[0].px);
+    };
+}
+
+test "style: rules that cannot match the document are not kept, and equal styles are shared" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 1000, .height = 800, .dark = false };
+    const doc = try html.parse(a, "<!DOCTYPE html><style>.absent { color: red } p { color: blue } [data-theme=dark] p { color: green } .here p { margin: 1px }</style><div class=here data-theme=light><p>a</p><p>b</p></div>", .{});
+    const sheets = try collectDocumentSheets(a, doc, env);
+    const author = sheets[sheets.len - 1];
+    // `.absent` and `[data-theme=dark]` cannot match: two rules left.
+    try std.testing.expectEqual(@as(usize, 2), author.rules.len);
+    const styles = try compute(a, doc, sheets, env);
+    var ps: [2]NodeId = undefined;
+    var n: usize = 0;
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| if (doc.isHtml(id, "p")) {
+        ps[n] = id;
+        n += 1;
+    };
+    try std.testing.expect(styles.get(ps[0]) == styles.get(ps[1]));
+    try std.testing.expectEqual(@as(f64, 255), styles.get(ps[0]).color.b);
 }
