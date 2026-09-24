@@ -6708,6 +6708,30 @@ do slow work on — fetches belong to idle time, never to an input
 handler; and a queue that drops input under load must fold it instead,
 because the wheel has already moved.
 
+**The reload loop (2026-09-24).** The user typed wikipedia.org, clicked
+English, and watched the two pages load in turn forever. Reproduced in
+the headless desktop with that exact URL (typing
+`https://www.wikipedia.org` did not loop — the difference was the
+redirect). The `page` leaf's runtime, `guipage.sync`, loads when the
+leaf's URL is neither what the page reports nor what it last
+commanded; the app adopts the URL the page reports (a redirect's final
+one, a clicked link's) into the leaf without a `nav` bump, and the
+commanded URL stayed the typed `http://wikipedia.org`. A link click
+made the page report `title`, `url`, `load` — the app takes one page
+event a tick, and the render for `title` synced a leaf still saying
+`www.wikipedia.org/` against a page already reporting
+`en.wikipedia.org/wiki/Main_Page`: neither matched, so it loaded the
+old one; then the app adopted the new one and the same test loaded
+that, twenty milliseconds after each `load done`. The fix is one
+rule: a leaf whose URL the page reports is the commanded URL from
+then on. The browser drill now reaches about.html through the three
+redirect hops and follows its Back link with Tab and Enter, then
+watches three seconds for another `url` report (the step fails on the
+old runtime). *Lesson:* a widget with two sources of truth for the
+same value — what the app says and what the thing reports — must
+record which it is following, or a one-event lag between them is a
+loop.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

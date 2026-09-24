@@ -413,10 +413,21 @@ pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32) void {
         }
     }
     // A leaf whose URL is what the page already reports (the app took
-    // the page's final URL into its state) asks for nothing new.
+    // the page's final URL into its state) asks for nothing new — and
+    // that URL is the commanded one from here on. Without that, a page
+    // reached by a redirect and then navigated by a link reloaded
+    // forever: the app takes one page event a tick, so the render for
+    // the `title` before the `url` event found a leaf matching neither
+    // the page's new URL nor the URL typed, and loaded the old one; the
+    // app then adopted the new one, and the same test loaded that
+    // (wikipedia.org → English, 2026-09-24).
     host.lock.acquire();
     const shown = std.mem.eql(u8, host.page(s.page).urlText(), url);
     host.lock.release();
+    if (shown and !std.mem.eql(u8, s.urlText(), url)) {
+        s.url_len = @min(url.len, s.url.len);
+        @memcpy(s.url[0..s.url_len], url[0..s.url_len]);
+    }
     const changed = (!std.mem.eql(u8, s.urlText(), url) and !shown) or nav != s.nav;
     if (url.len > 0 and (changed or !s.loaded_once)) {
         s.url_len = @min(url.len, s.url.len);

@@ -1495,6 +1495,35 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(300);
     if (!q.chord("meta_l", "a") or !q.typeText("moss-notes.txt") or !q.sendKey("ret")) return false;
     if (!try waitLogN(log_path, "browser: saved moss-notes.txt", 1, "the download was not saved through the picker", spec, polls)) return false;
+    // A redirect, then a link: /r1 lands on about.html through two more
+    // hops, and its "Back" link (Tab, Enter) goes to index.html — once.
+    // Until 2026-09-24 a page reached by a redirect and then navigated
+    // by a link reloaded the two forever: the runtime compared the leaf
+    // against the URL it had typed, not the one the app adopted.
+    sleepMs(800); // the Save dialog is closing; the field must have the focus before the typing
+    if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field for the redirect");
+    sleepMs(300);
+    if (!q.chord("meta_l", "a")) return false;
+    if (!q.typeText("http://www.moss.test:8080/r1")) return false;
+    const about_urls = countOccurrences(readLog(log_path), "page t2: url \"http://www.moss.test:8080/about.html\"") + 1;
+    const go6 = widgetCenter(readLog(log_path), "go") orelse return false;
+    if (!clickScanout(&q, go6[0], go6[1])) return sfail(spec, log_path, "click Go for the redirect");
+    if (!try waitLogN(log_path, "page t2: url \"http://www.moss.test:8080/about.html\"", about_urls, "the redirect did not land on about.html", spec, polls)) return false;
+    if (!try waitLogN(log_path, "page t2: title \"moss fixture: about\"", 1, "the about page never loaded", spec, polls)) return false;
+    sleepMs(500);
+    const r6 = pageRect(readLog(log_path), "t2") orelse return false;
+    if (!clickScanout(&q, r6[0] + r6[2] / 2, r6[1] + r6[3] - 20)) return sfail(spec, log_path, "click into the about page");
+    sleepMs(200);
+    if (!q.sendKey("tab")) return false;
+    if (!try waitLogN(log_path, "webpage: focus link at", 1, "Tab did not focus the Back link", spec, polls)) return false;
+    if (!q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "page t2: url \"http://www.moss.test:8080/index.html\"", 1, "the Back link did not navigate", spec, polls)) return false;
+    const urls_after_link = countOccurrences(readLog(log_path), "page t2: url \"");
+    sleepMs(3000); // the old loop's next turn came 20 ms after the load
+    if (countOccurrences(readLog(log_path), "page t2: url \"") != urls_after_link) {
+        reportFailure(spec.name, "the page kept reloading after the link", log_path);
+        return false;
+    }
     // Close the second tab: its page domain is reaped with its leaf.
     const closetab = widgetCenter(readLog(log_path), "closetab") orelse return false;
     if (!clickScanout(&q, closetab[0], closetab[1])) return sfail(spec, log_path, "click Close Tab");

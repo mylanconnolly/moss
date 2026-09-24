@@ -110,7 +110,11 @@ title, URL, load state, hover or death — is a coarse record to
 ```
 
 A `page` leaf is a page domain. The runtime spawns one the first time it
-sees the id, navigates it when `url` (or the `nav` nonce) changes,
+sees the id, navigates it when `url` (or the `nav` nonce) changes — a
+`url` the page itself reports (a redirect's final one, a clicked
+link's), once the app has taken it into the leaf, is the leaf's
+navigation from then on, never a reason to load it again (a redirect
+followed by a link looped between the two pages until 2026-09-24) —
 gives it a pixel buffer the size of the leaf's rect while it is visible
 and takes it back when it is not (a hidden tab keeps its document and
 holds no pixels), blits its pixels inside the rect on every render,

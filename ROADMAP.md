@@ -809,7 +809,14 @@ supervises), and memory history per unit beside the CPU one.
       instead of being dropped; a finished response's connection is
       parked and reused (`Connection: close` had been sent all along),
       retried fresh when the server let it go. Wikipedia's article
-      9.4 s → 5.9 s, a wheel notch 45–53 ms with nothing dropped. Not
+      9.4 s → 5.9 s, a wheel notch 45–53 ms with nothing dropped. Then
+      (2026-09-24) the reload loop: wikipedia.org → English loaded the
+      two pages in turn forever, because the `page` leaf's runtime
+      compared the leaf against the URL it had typed rather than the
+      one the app adopted from the page (a redirect's), and the app
+      takes one page event a tick; a URL the page reports is the
+      commanded one once the leaf carries it, and the browser drill
+      follows a link after a redirect and watches for a reload. Not
       done: the desktop under HVF — ten times
       the speed — where the filesystem service never speaks after start
       (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
