@@ -3755,6 +3755,21 @@ render; comments that had drifted onto the wrong declarations. Left as
 noted: the host holds its lock through a TLS handshake (the GUI thread
 spins meanwhile) — a real seam to open next.
 
+**The page that went grey as it scrolled (2026-09-24).** The user
+scrolled the Persona article and most of the page turned the page's
+background grey, one band of content at the bottom. The host could not
+show it (`WEBSHOT_SCROLL` paints a band the same way and looked the
+same before and after), so the target did, a screendump after one
+wheel notch: the rows the scroll had moved were blank, the band right.
+The painter's first act is the canvas's background, `fillAll` — which
+ignores the clip; a band repaint painted the whole viewport grey and
+then content inside the band. Every scroll since the band repaint
+landed did this; the earlier scroll tests read timings, not pixels.
+A `fillRect` over the canvas (the toolkit clips it) and a unit test
+that paints under a clip into a canvas of sentinel pixels and expects
+them untouched. *Lesson (again):* look at the screendump — a scroll
+that is fast and wrong reads as fast.
+
 **Maximize (as built, 2026-09-10).** The green traffic-light, a stub since
 stage 1, now maximizes the window to fill the work area — full width, from
 just below the top bar's strut down to just above the dock — and a second

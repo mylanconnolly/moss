@@ -403,9 +403,17 @@ pub fn main(init: std.process.Init) !u8 {
         try web.paint.paint(l, &vc, at);
         const t2 = std.Io.Clock.awake.now(io);
         vc.clip_y0 = vh - 100;
+        vc.fillRect(0, vh - 100, vw, 100, 0xffffff);
         try web.paint.paint(l, &vc, at + 100);
         const t3 = std.Io.Clock.awake.now(io);
         std.debug.print("webshot: viewport paint at {d}: {d} ms; a 100-row band: {d} ms\n", .{ at, @divTrunc(t1.durationTo(t2).nanoseconds, std.time.ns_per_ms), @divTrunc(t2.durationTo(t3).nanoseconds, std.time.ns_per_ms) });
+        // The scrolled viewport with its band, beside the page: what a
+        // band repaint on the target would show.
+        var spm: std.ArrayList(u8) = .empty;
+        try spm.print(gpa, "P6\n{d} {d}\n255\n", .{ vw, vh });
+        for (vpx) |q| try spm.appendSlice(gpa, &.{ @truncate(q >> 16), @truncate(q >> 8), @truncate(q) });
+        const scroll_path = try std.fmt.allocPrint(gpa, "{s}.scroll.ppm", .{out_path});
+        try cwd.writeFile(io, .{ .sub_path = scroll_path, .data = spm.items });
     }
     const ms = @divTrunc(t0.durationTo(std.Io.Clock.awake.now(io)).nanoseconds, std.time.ns_per_ms);
     std.debug.print("webshot: {s}: {d} nodes, extent {d}px, {d} ms\n", .{ doc_f.url, doc.nodes.len, extent, ms });

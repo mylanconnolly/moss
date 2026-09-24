@@ -48,7 +48,10 @@ pub fn paintWith(l: *const Layout, canvas: *const Canvas, scroll_y: f64, opts: O
     var p: Painter = .{ .l = l, .canvas = canvas.*, .scroll = scroll_y, .opts = opts };
     // The canvas background: the root element's, else the body's, as
     // CSS propagates it; else left as the caller filled it.
-    if (rootBackground(l)) |bg| p.canvas.fillAll(bg);
+    // The canvas's background — inside the clip only: a band repaint that
+    // filled the whole viewport erased the rows a scroll had just moved
+    // (the page went page-background grey as it scrolled, 2026-09-24).
+    if (rootBackground(l)) |bg| p.canvas.fillRect(0, 0, p.canvas.w, p.canvas.h, bg);
     // Positioned boxes paint in z-index order around the flow: the
     // negative ones beneath it, the rest (auto counting as 0) above,
     // ties in document order.
@@ -94,14 +97,17 @@ const Painter = struct {
     }
 
     /// A rectangle in document coordinates, clipped by the canvas.
+    /// A solid rect, clamped to the canvas's clip: the page's background
+    /// is one of these, and a band repaint that let it cover the whole
+    /// viewport erased the rows a scroll had just moved (2026-09-24).
     fn fill(p: *const Painter, x: f64, y: f64, w: f64, h: f64, word: u32) void {
         const y0 = y - p.scroll;
         if (w <= 0 or h <= 0) return;
-        const x0 = @max(0, x);
-        const yy = @max(0, y0);
-        const x1 = x + w;
-        const y1 = y0 + h;
-        if (x1 <= 0 or y1 <= 0) return;
+        const x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), x);
+        const yy = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), y0);
+        const x1 = @min(@as(f64, @floatFromInt(p.canvas.clip_x1)), x + w);
+        const y1 = @min(@as(f64, @floatFromInt(p.canvas.clip_y1)), y0 + h);
+        if (x1 <= x0 or y1 <= yy) return;
         p.canvas.fillRect(px(x0), px(yy), px(x1 - x0), px(y1 - yy), word);
     }
 
@@ -883,6 +889,29 @@ fn reftestSize(src: []const u8) [2]usize {
 // The reftests: every `NAME.html` under tools/testdata/web/reftests
 // beside its `NAME-ref.html` must paint the same pixels; the count is
 // printed and asserted. A difference names its first pixel.
+test "paint: a clipped repaint leaves the rows outside the clip alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "<!DOCTYPE html><body style='margin:0;background:#abcdef'><p style='margin:0;height:200px'>text</p><p>more text</p>";
+    const w: usize = 120;
+    const h: usize = 100;
+    const doc = try html.parse(a, src, .{});
+    const env: style.Env = .{ .width = @floatFromInt(w), .height = @floatFromInt(h) };
+    const sheets = try style.collectDocumentSheets(a, doc, env);
+    const styles = try a.create(style.Styles);
+    styles.* = try style.compute(a, doc, sheets, env);
+    var fixed: layout.FixedFonts = .{};
+    const l = try layout.layoutDocument(a, doc, styles, fixed.fonts(), @floatFromInt(w), @floatFromInt(h));
+    const px = try a.alloc(u32, w * h);
+    var canvas = Canvas.init(px.ptr, w, h);
+    canvas.fillAll(0x123456); // the rows a scroll moved into place
+    canvas.clip_y0 = h / 2; // the band that came in
+    try paint(l, &canvas, 0);
+    for (px[0 .. w * (h / 2)]) |v| try std.testing.expectEqual(@as(u32, 0x123456), v);
+    try std.testing.expectEqual(@as(u32, 0xabcdef), px[w * (h / 2) + 1]);
+}
+
 test "paint: the reftests, counted" {
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
