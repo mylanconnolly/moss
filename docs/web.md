@@ -133,15 +133,18 @@ for two.
 
 ### Using it
 
-The first tab opens blank; a home page is a URL as data in
-`state/browser/home.msh` in the home. A real site opens over http or
-https — the system's trust roots are the drills' test CA followed by
+The first tab opens blank ("Type an address and press Enter"); a home
+page is a URL as data in `state/browser/home.msh` in the home. Enter
+in the address field goes, as the arrow button does (until 2026-09-23
+only the button did, and a blank tab said "Loading" — the user waited a
+minute for a load that was never asked for). A real site opens over
+http or https — the system's trust roots are the drills' test CA followed by
 the Mozilla bundle — through the session's network view, which in the
 desktop is the cluster stack with its leased NIC as the way out. A
 site's linked stylesheets and their imports are fetched through the
 broker and join the cascade, and flexbox lays its rows and columns
-out; what a real site still lacks is grid, sticky boxes and tables
-beyond block rows, the rest of stage 9.
+out, and grid, tables and SVG are built; what a real site still lacks
+is in "What is not built".
 
 The chrome's buttons are Phosphor glyphs (hover shows nothing yet; the
 labels are the buttons' names for the keyboard and the drills): carets

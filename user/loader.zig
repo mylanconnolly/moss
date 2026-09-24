@@ -35,12 +35,14 @@ pub const Stage = struct {
     /// is ~900 KB of ReleaseSafe code (TLS 1.3 with its cipher suites and
     /// certificate parsing is 450 KB of it); a stage too small reports
     /// "image missing from the boot archive".
-    // 512 (2 MB): the biggest program image must fit in the stage it is
+    // 768 (3 MB): the biggest program image must fit in the stage it is
     // copied through — msh was ~1.05 MB with every command module and the
-    // interpreter (384 pages), and mshrun crossed 1.5 MB on 2026-09-18
-    // when the HTML parser and its 2231 named character references
-    // joined it. Bounded by ipc.shm_max_pages (2250), far above.
-    pub const default_pages: u64 = 512;
+    // interpreter (384 pages), mshrun crossed 1.5 MB on 2026-09-18 when
+    // the HTML parser and its 2231 named character references joined it,
+    // and sat 2 KB under 2 MB on 2026-09-23 with the web engine's grid,
+    // tables and SVG in it, so a 4 KB change stopped the greeter. Bounded
+    // by ipc.shm_max_pages (2250), far above.
+    pub const default_pages: u64 = 768;
 
     /// Why the last `load` refused, for the caller's log: a stage too
     /// small once read as "image missing" for a day.

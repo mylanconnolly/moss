@@ -6652,6 +6652,18 @@ once. (2) Pointer equality is a cheap test for sharing only once the
 pointers are canonical. (3) An intrinsic-size measurement that lays
 out for real is an allocation multiplier by nesting depth.
 
+**Enter goes (2026-09-23).** The user typed wikipedia.org into the
+desktop's address field, pressed Enter, and watched "Loading" for a
+minute: Enter in a toolkit field only advanced focus, the arrow button
+was the only way to go, and a new tab with no URL started in the
+`loading` state with nothing asked for. Fields take `submit: ID` now —
+Enter presses that button (the address field's Go, the find field's
+Find) — and an empty tab is `empty`, saying what to do. Fixing it
+stopped the greeter: the change added 4 KB to `mshrun`, whose image
+sat 2 KB under the 2 MB program stage; the stage is 3 MB. *Lesson:* a
+status line must never say "Loading" for something not requested; the
+user reads it as the system's promise.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

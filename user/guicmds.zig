@@ -218,7 +218,7 @@ var content_h: usize = 0;
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
 // the surface (so a pointer press can hit-test which widget it landed on).
-const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, is_list: bool = false, is_page: bool = false, page_slot: usize = 0, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
+const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, submit: []const u8 = "", is_list: bool = false, is_page: bool = false, page_slot: usize = 0, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
 var focusables: [64]Focus = undefined;
 
 // Every window has an implicit viewport; explicit `scroll` nodes can nest.
@@ -1328,7 +1328,8 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     } else drawStr(tx, ty, R_UI, shown[ed.first..last], pal.text, pal.field_bg);
     if (focused) fillRect(tx + strW(R_UI, shown[ed.first..ed.cursor]), ty, 2, lineOf(R_UI), pal.focus);
     if (nfoc < focusables.len) {
-        recordFocus(.{ .id = id, .is_field = true, .bx = x, .by = yy, .bw = avail_w, .bh = bh });
+        // `submit: "go"`: Enter in the field presses that button.
+        recordFocus(.{ .id = id, .is_field = true, .submit = strField(rec, "submit"), .bx = x, .by = yy, .bw = avail_w, .bh = bh });
     }
     return .{ .w = avail_w, .h = (yy - y) + bh };
 }
@@ -2686,7 +2687,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 },
                 '\n' => {
                     if (cur) |c| {
-                        if (c.is_field) {
+                        if (c.is_field and c.submit.len > 0) {
+                            fired = c.submit; // Enter submits the field's button
+                        } else if (c.is_field) {
                             reveal_focus = true;
                             focus = (focus + 1) % nfocus; // advance past a field
                         } else if (c.is_list) {
