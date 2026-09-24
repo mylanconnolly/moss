@@ -296,9 +296,15 @@ pub fn layoutDocument(a: std.mem.Allocator, doc: *const Document, styles: *const
 }
 
 /// The same, with the host's pictures for `img` sizes.
+/// The layout under construction, for a page that runs out of memory
+/// building it to say how far it got: set until a layout succeeds, so
+/// the caller's error path still finds it (a `defer` cleared it first).
+pub var in_progress: ?*const Layout = null;
+
 pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *const style.Styles, fonts: Fonts, images: ?Images, viewport_w: f64, viewport_h: f64) Error!*Layout {
     const l = try a.create(Layout);
     l.* = .{ .a = a, .doc = doc, .styles = styles, .fonts = fonts, .images = images, .viewport_w = viewport_w, .viewport_h = viewport_h };
+    in_progress = l;
     l.root_style.display = .block;
     try l.boxes.append(a, .{ .kind = .root, .node = null, .style = &l.root_style });
     // The root element's box is the html element's, a block under the

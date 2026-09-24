@@ -109,8 +109,20 @@ fn layoutResize(_: *anyopaque, mem: []u8, _: std.mem.Alignment, new_len: usize, 
     return new_len <= mem.len;
 }
 
-fn layoutRemap(_: *anyopaque, mem: []u8, _: std.mem.Alignment, new_len: usize, _: usize) ?[*]u8 {
-    return if (new_len <= mem.len) mem.ptr else null;
+/// The most recent allocation grows by moving down, so the arena stays
+/// dense — what a bump allocator growing upward does in place. Without
+/// it every list growth was a fresh block and a dead one: the cascade
+/// of a 1.2 MB article, 2 MB on the host, was 29 MB here (2026-09-24).
+fn layoutRemap(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, _: usize) ?[*]u8 {
+    if (new_len <= mem.len) return mem.ptr;
+    const base = @intFromPtr(&region);
+    const start = regionOffset(mem.ptr);
+    if (start != reg_hi or new_len > reg_hi + mem.len) return null;
+    const new_start = alignment.backward(base + reg_hi + mem.len - new_len) - base;
+    if (new_start < reg_lo) return null;
+    std.mem.copyForwards(u8, region[new_start .. new_start + mem.len], region[start .. start + mem.len]);
+    reg_hi = new_start;
+    return region[new_start..].ptr;
 }
 
 fn layoutFree(_: *anyopaque, mem: []u8, _: std.mem.Alignment, _: usize) void {
@@ -148,8 +160,13 @@ var picture_scratch_fba: std.heap.FixedBufferAllocator = undefined;
 var phase: []const u8 = "loading";
 
 fn outOfMemory() noreturn {
-    var line: [160]u8 = undefined;
-    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB)", .{ phase, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024 }) catch "webpage: out of memory");
+    var line: [200]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB; viewport {d}x{d} at {d}%)", .{ phase, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024, vw, vh, zoom_pct }) catch "webpage: out of memory");
+    // How far a layout got: the counts say whether the page is big or
+    // the layout is wasteful.
+    if (web.layout.in_progress) |l| {
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: the layout so far: {d} boxes, {d} fragments, {d} nodes", .{ l.boxes.len, l.fragments.len, l.doc.nodes.len }) catch "webpage: layout so far");
+    }
     usys.exit(137);
 }
 
@@ -608,7 +625,7 @@ fn present(markup: []const u8, failure: u64) void {
     phase = "editing it";
     if (failure == 0) {
         var line: [200]u8 = undefined;
-        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes)", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_sheets - t_parsed, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len }) catch "webpage: loaded");
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes; document {d} KB, layout {d} KB of {d})", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_sheets - t_parsed, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024 }) catch "webpage: loaded");
     }
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
 }

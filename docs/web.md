@@ -191,7 +191,10 @@ whose decoded size differs from what the page declared relays out.
 Every load is timed in the log: the broker's `webhost: page N: URL:
 resolve+connect A ms, handshake B ms, head C ms` and `body K KB in D ms`,
 the page's `webpage: loaded in T ms: fetch, parse, sheets, fonts,
-style+layout, paint, pictures`, and the resolver's `netsvc: resolved
+style+layout, paint, pictures (N nodes; document D KB, layout L KB of
+the region)` — a page that dies of its region says the same numbers
+and, when the fault is in the layout itself, how far it got — and the
+resolver's `netsvc: resolved
 NAME`. Under emulation a first page is under a second and a cached host
 under half; a page's resources on one host share its kept-alive
 connection (`reused connection, head N ms`; a parked connection is

@@ -6769,6 +6769,27 @@ here; worth watching. The article loads in 7.3 s on the target now.
 twice; and measure by census before sizing anything — the budget was
 raised only once the census said what was left was real.
 
+**The same page in the desktop (2026-09-24, the same afternoon).** The
+user opened it in `run-gui`, maximized, and the page died again: `out
+of memory while laying it out (document 11565 KB and layout 29391 KB
+of 40960 KB; viewport 1872x777 at 150%)` — the session's font scale
+seeds the page at 1.5×, and the headless runs had been at a smaller
+window. The host census at that viewport and scale said 23 MB. The
+"how far the layout got" line added for the occasion never printed,
+which located the fault: the cascade, before layout. And the host's
+histogram had already shown the difference — hundreds of list growths
+"grown in place", because a bump allocator can extend its most recent
+allocation, while the page's layout arena grows *downward* and its
+`resize` refused every growth: each became a fresh block and a dead
+one, 756 growths of ~12 KB blocks in the cascade alone. The arena's
+`remap` now grows the newest block by moving it down (`copyForwards`
+over the overlap), which keeps the arena as dense as the host's; the
+page loads maximized in 7.4 s, and every successful load logs the
+region's use. *Lesson:* an allocator that cannot grow its last block
+turns every list into a quadratic one; and a host model of a target's
+memory is only as good as the allocator it models — the histogram's
+"grown in place" column was the tell.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

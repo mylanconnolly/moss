@@ -824,7 +824,10 @@ supervises), and memory history per unit beside the CPU one.
       pointer-stable), attribute lists are adopted from the tokenizer,
       `webshot` page mode is a memory census, and the region is 40 MB
       (page 60, Web 136, session 224, manager 256, init 320, root
-      384). Not done: the desktop under HVF — ten times
+      384); the layout arena grows its newest block in place (it grows
+      downward and had refused every list growth — the cascade cost
+      29 MB on the target, 2 on the host). Not done: the desktop under
+      HVF — ten times
       the speed — where the filesystem service never speaks after start
       (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
     - ✅ *Polish (asked for and landed 2026-09-18):* the Web app's chrome
