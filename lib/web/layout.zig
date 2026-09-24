@@ -23,6 +23,7 @@
 //! relative, merged collapsed table borders, bidi and complex shaping,
 //! hyphenation, `overflow: scroll` scrolling inside a box.
 const std = @import("std");
+const store = @import("store.zig");
 const dom = @import("dom.zig");
 const style = @import("style.zig");
 const ui = @import("../ui.zig");
@@ -261,8 +262,10 @@ pub const Layout = struct {
     fonts: Fonts,
     /// The host's pictures, if it has any.
     images: ?Images = null,
-    boxes: std.ArrayList(Box) = .empty,
-    fragments: std.ArrayList(Fragment) = .empty,
+    /// Chunked lists (`store`): an append never moves a box or a
+    /// fragment, and a bump arena never pays for a doubling.
+    boxes: store.Chunked(Box, 8) = .{},
+    fragments: store.Chunked(Fragment, 9) = .{},
     root: BoxId = 0,
     viewport_w: f64,
     viewport_h: f64,
@@ -276,10 +279,10 @@ pub const Layout = struct {
     root_style: Computed = .{},
 
     pub fn box(l: *Layout, id: BoxId) *Box {
-        return &l.boxes.items[id];
+        return l.boxes.at(id);
     }
     pub fn get(l: *const Layout, id: BoxId) *const Box {
-        return &l.boxes.items[id];
+        return l.boxes.get(id);
     }
 };
 
@@ -297,13 +300,6 @@ pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *c
     const l = try a.create(Layout);
     l.* = .{ .a = a, .doc = doc, .styles = styles, .fonts = fonts, .images = images, .viewport_w = viewport_w, .viewport_h = viewport_h };
     l.root_style.display = .block;
-    // The box and fragment lists sized from the node count up front: a
-    // page's allocator is a fixed buffer that cannot take back what a
-    // doubling list leaves behind, and a 3900-node page grew these lists
-    // through 10 MB of an 8 MB arena (Wikipedia, 2026-09-18).
-    const n = doc.nodes.items.len;
-    try l.boxes.ensureTotalCapacity(a, n + 64);
-    try l.fragments.ensureTotalCapacity(a, n + n / 4 + 64);
     try l.boxes.append(a, .{ .kind = .root, .node = null, .style = &l.root_style });
     // The root element's box is the html element's, a block under the
     // initial containing block.
@@ -348,7 +344,7 @@ fn addBox(l: *Layout, parent: BoxId, b: Box) Error!BoxId {
     var nb = b;
     nb.parent = parent;
     try l.boxes.append(l.a, nb);
-    const id: BoxId = @intCast(l.boxes.items.len - 1);
+    const id: BoxId = @intCast(l.boxes.len - 1);
     try l.box(parent).children.append(l.a, id);
     return id;
 }
@@ -454,7 +450,7 @@ fn wrapFlexItems(l: *Layout, id: BoxId) Error!void {
             if (isBlank(cb.text) and cb.style.white_space != .pre and cb.style.white_space != .pre_wrap) continue;
             if (anon == null) {
                 try l.boxes.append(l.a, .{ .kind = .anon_block, .node = null, .style = try anonStyle(l, l.get(id).style), .parent = id });
-                anon = @intCast(l.boxes.items.len - 1);
+                anon = @intCast(l.boxes.len - 1);
                 try l.box(id).children.append(l.a, anon.?);
             }
             try l.box(anon.?).children.append(l.a, c);
@@ -566,7 +562,7 @@ fn wrapInlines(l: *Layout, id: BoxId) Error!void {
         if (inline_level) {
             if (anon == null) {
                 try l.boxes.append(l.a, .{ .kind = .anon_block, .node = null, .style = try anonStyle(l, l.get(id).style), .parent = id });
-                anon = @intCast(l.boxes.items.len - 1);
+                anon = @intCast(l.boxes.len - 1);
                 try l.box(id).children.append(l.a, anon.?);
             }
             try l.box(anon.?).children.append(l.a, c);
@@ -650,7 +646,7 @@ fn splitInline(l: *Layout, ib: BoxId, container: BoxId, out: *std.ArrayList(BoxI
 fn newPiece(l: *Layout, like: BoxId, container: BoxId) Error!BoxId {
     const src = l.get(like);
     try l.boxes.append(l.a, .{ .kind = .inline_box, .node = src.node, .style = src.style, .parent = container });
-    return @intCast(l.boxes.items.len - 1);
+    return @intCast(l.boxes.len - 1);
 }
 
 /// An empty piece is dropped, except the first, which carries the
@@ -817,7 +813,8 @@ fn moveBox(l: *Layout, id: BoxId, dx: f64, dy: f64) Error!void {
         ln.x += dx;
         ln.y += dy;
         ln.baseline += dy;
-        for (l.fragments.items[ln.first_frag .. ln.first_frag + ln.frag_count]) |*f| {
+        for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
+            const f = l.fragments.at(fi);
             f.x += dx;
             f.y += dy;
             f.baseline += dy;
@@ -1146,7 +1143,7 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
                 const font = fontOf(st);
                 const m = l.fonts.metrics(font);
                 const mw = l.fonts.advance(font, b.marker_text);
-                const first: u32 = @intCast(l.fragments.items.len);
+                const first: u32 = @intCast(l.fragments.len);
                 try l.fragments.append(l.a, .{ .box = id, .kind = .marker, .x = b.contentX() - mw, .y = ln.baseline - m.ascent, .w = mw, .h = m.ascent + m.descent, .baseline = ln.baseline, .text = b.marker_text });
                 try l.box(id).lines.append(l.a, .{ .x = b.contentX(), .y = ln.y, .w = 0, .h = ln.h, .baseline = ln.baseline, .first_frag = first, .frag_count = 1 });
             }
@@ -1814,7 +1811,7 @@ fn fixTableParts(l: *Layout, id: BoxId) Error!void {
                 st.border_spacing_y = 0;
             }
             try l.boxes.append(l.a, .{ .kind = .block, .node = null, .style = st, .parent = id });
-            const nid: BoxId = @intCast(l.boxes.items.len - 1);
+            const nid: BoxId = @intCast(l.boxes.len - 1);
             try l.box(nid).children.append(l.a, c);
             l.box(c).parent = nid;
             try out.append(l.a, nid);
@@ -2167,9 +2164,9 @@ fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
     // per layout (nested flex containers measure their items again at
     // every level — GitHub's menus cost megabytes before this).
     const cache = if (contents_only) &l.content_widths else &l.preferred_widths;
-    if (cache.items.len < l.boxes.items.len) {
+    if (cache.items.len < l.boxes.len) {
         const old = cache.items.len;
-        try cache.resize(l.a, l.boxes.items.len);
+        try cache.resize(l.a, l.boxes.len);
         @memset(cache.items[old..], null);
     }
     if (cache.items[id]) |w| return w;
@@ -2832,7 +2829,7 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
         if (pending.items.len == 0 and forced) {
             // An empty line still has the strut's height.
         }
-        const first_frag: u32 = @intCast(l.fragments.items.len);
+        const first_frag: u32 = @intCast(l.fragments.len);
         for (pending.items) |p| {
             const it = p.item;
             const ib = l.get(it.box);
@@ -2915,7 +2912,7 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
         // its open (or the line start) to its close (or the line end).
         try spanFragments(l, id, first_frag, line_x + shift_x, line_x + shift_x + used + extra_so_far, y, line_h, baseline);
         used = used;
-        try b.lines.append(l.a, .{ .x = line_x, .y = y, .w = avail, .h = line_h, .baseline = baseline, .first_frag = first_frag, .frag_count = @intCast(l.fragments.items.len - first_frag) });
+        try b.lines.append(l.a, .{ .x = line_x, .y = y, .w = avail, .h = line_h, .baseline = baseline, .first_frag = first_frag, .frag_count = @intCast(l.fragments.len - first_frag) });
         if (b.first_baseline == null) b.first_baseline = baseline;
         b.last_baseline = baseline;
         // Inline boxes still open carry to the next line.
@@ -2938,12 +2935,12 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
         // after the first line's, which is fine only when it is the last
         // line too; otherwise swap it into place.
         if (b.lines.items.len > 1) {
-            const last_idx = l.fragments.items.len - 1;
+            const last_idx = l.fragments.len - 1;
             const want = ln.first_frag + ln.frag_count - 1;
-            const moved = l.fragments.items[last_idx];
+            const moved = l.fragments.get(last_idx).*;
             var k = last_idx;
-            while (k > want) : (k -= 1) l.fragments.items[k] = l.fragments.items[k - 1];
-            l.fragments.items[want] = moved;
+            while (k > want) : (k -= 1) l.fragments.at(k).* = l.fragments.get(k - 1).*;
+            l.fragments.at(want).* = moved;
             for (b.lines.items[1..]) |*later| later.first_frag += 1;
         }
     }
@@ -2981,11 +2978,11 @@ fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64,
     // appended below grow the same list, and a slice taken once pointed
     // into its freed buffer (Wikipedia's front page, 2026-09-18: a box id
     // read from that memory indexed past the box list).
-    const last_frag = l.fragments.items.len;
-    const frags = l.fragments.items[first_frag..last_frag];
+    const last_frag = l.fragments.len;
     // Boxes seen on this line, in order of first appearance.
     var seen: std.ArrayList(BoxId) = .empty;
-    for (frags) |f| {
+    for (first_frag..last_frag) |fi| {
+        const f = l.fragments.get(fi);
         const fb = l.get(f.box);
         // An inline box is any ancestor inline of a fragment up to the
         // container; spans cover the box's own open/close and its content.
@@ -3013,7 +3010,8 @@ fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64,
         var x1 = line_end;
         var opened = false;
         var closed = false;
-        for (l.fragments.items[first_frag..last_frag]) |f| {
+        for (first_frag..last_frag) |fi| {
+            const f = l.fragments.get(fi);
             if (f.box == bid and f.kind == .inline_open) {
                 x0 = f.x;
                 opened = true;
@@ -3027,7 +3025,8 @@ fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64,
             // Extend to the box's content extent on this line.
             var lo: ?f64 = null;
             var hi: ?f64 = null;
-            for (l.fragments.items[first_frag..last_frag]) |f| {
+            for (first_frag..last_frag) |fi| {
+                const f = l.fragments.get(fi);
                 if (!isInsideInline(l, f.box, bid)) continue;
                 lo = if (lo) |v| @min(v, f.x) else f.x;
                 hi = if (hi) |v| @max(v, f.x + f.w) else f.x + f.w;
@@ -3483,8 +3482,8 @@ fn purgeSubtree(l: *Layout, root_id: BoxId) Error!void {
 /// A subtree's lines go, and the fragments they held die with them.
 fn resetLines(l: *Layout, id: BoxId) Error!void {
     const b = l.box(id);
-    for (b.lines.items) |ln| for (l.fragments.items[ln.first_frag .. ln.first_frag + ln.frag_count]) |*f| {
-        f.dead = true;
+    for (b.lines.items) |ln| for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
+        l.fragments.at(fi).dead = true;
     };
     b.lines = .empty;
     b.first_baseline = null;
@@ -3518,7 +3517,7 @@ fn boxOf(l: *const Layout, doc: *const dom.Document, sel_text: []const u8) *cons
     const selectors = @import("selectors.zig");
     const sel = selectors.Selector.parse(l.a, sel_text) catch unreachable;
     const id = sel.queryFirst(doc, dom.document_id).?;
-    for (l.boxes.items) |*b| if (b.node == id) return b;
+    for (0..l.boxes.len) |i| if (l.boxes.get(i).node == id) return l.boxes.get(i);
     unreachable;
 }
 
@@ -3567,7 +3566,8 @@ test "layout: lines wrap, floats intrude, inline-block sits on the baseline" {
 pub fn hitTest(l: *const Layout, x: f64, y: f64) ?NodeId {
     var best: ?BoxId = null;
     var best_depth: usize = 0;
-    for (l.boxes.items, 0..) |b, i| {
+    for (0..l.boxes.len) |i| {
+        const b = l.boxes.get(i);
         if (b.kind == .root) continue;
         const inside = switch (b.kind) {
             .text, .inline_box => fragmentHolds(l, @intCast(i), x, y),
@@ -3599,7 +3599,8 @@ fn boxDepth(l: *const Layout, id: BoxId) usize {
 /// Inline content has no box of its own on the page: it is where its
 /// fragments landed on the lines of the block that holds it.
 fn fragmentHolds(l: *const Layout, id: BoxId, x: f64, y: f64) bool {
-    for (l.fragments.items) |f| {
+    for (0..l.fragments.len) |fi| {
+        const f = l.fragments.get(fi);
         if (f.dead) continue;
         if (f.box != id) continue;
         if (x >= f.x and x < f.x + f.w and y >= f.y and y < f.y + f.h) return true;
@@ -3708,7 +3709,8 @@ test "layout: an inline-block measured and laid out again keeps one set of lines
     const g = boxOf(l, doc, "#g");
     try std.testing.expectEqual(@as(usize, 1), g.lines.items.len);
     var live: usize = 0;
-    for (l.fragments.items) |f| {
+    for (0..l.fragments.len) |fi| {
+        const f = l.fragments.get(fi);
         if (!f.dead and std.mem.eql(u8, f.text, "Gmail")) live += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), live);
@@ -3818,9 +3820,10 @@ test "layout: quirks mode resets tables and drops the strut from text-less roots
     try std.testing.expectEqual(@as(f64, 12), cq.h);
     // The span's text starts at the cell's left (not centred).
     var text_x: f64 = -1;
-    for (quirky.fragments.items) |f| if (!f.dead and std.mem.eql(u8, f.text, "x")) {
-        text_x = f.x;
-    };
+    for (0..quirky.fragments.len) |fi| {
+        const f = quirky.fragments.get(fi);
+        if (!f.dead and std.mem.eql(u8, f.text, "x")) text_x = f.x;
+    }
     try std.testing.expectEqual(@as(f64, 0), text_x);
     const standard = try layoutText(a, try std.mem.concat(a, u8, &.{ "<!DOCTYPE html>", src }), 400);
     const cs = boxOf(standard, standard.doc, "#c");
@@ -3926,7 +3929,8 @@ test "layout: a trailing space inside a closing inline box comes off the line" {
     defer arena.deinit();
     const a = arena.allocator();
     const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px'><div style='width:64px'><a id=a href=x>aaaa </a>bbbbbbbb</div>", 400);
-    for (l.fragments.items) |f| {
+    for (0..l.fragments.len) |fi| {
+        const f = l.fragments.get(fi);
         if (f.dead or f.kind != .inline_span) continue;
         // The link's span ends where its text does: 4 cells.
         try std.testing.expectEqual(@as(f64, 32), f.w);
@@ -3942,7 +3946,7 @@ test "layout: an item that starts with a block still has its marker" {
     const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0;font-size:16px;line-height:20px'><ul style='margin:0;padding-left:40px'><li id=i>text<ul><li>inner</li></ul></li></ul>", 400);
     const li = boxOf(l, l.doc, "#i");
     try std.testing.expectEqual(@as(usize, 1), li.lines.items.len);
-    const f = l.fragments.items[li.lines.items[0].first_frag];
+    const f = l.fragments.get(li.lines.items[0].first_frag);
     try std.testing.expect(f.kind == .marker);
     try std.testing.expectEqual(li.y, li.lines.items[0].y);
 }

@@ -17,7 +17,7 @@
 {
   image:    users
   arg:      1
-  budget:   { kobj: 8mb, user: 224mb }
+  budget:   { kobj: 8mb, user: 256mb }
   grant:    [log, spawner, bootfs]
   profiles: [guishell]
   after:    apply

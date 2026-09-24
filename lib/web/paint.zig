@@ -160,13 +160,18 @@ const Painter = struct {
         for (b.children.items) |c| if (p.l.get(c).isFloat()) try p.paintBox(c);
         // Lines: inline backgrounds, then text and atomics in order.
         for (b.lines.items) |ln| {
-            const frags = p.l.fragments.items[ln.first_frag .. ln.first_frag + ln.frag_count];
-            for (frags) |f| if (f.kind == .inline_span) p.inlineSpan(f);
-            for (frags) |f| switch (f.kind) {
-                .text, .marker => p.text(f),
-                .atomic => try p.paintBox(f.box),
-                else => {},
-            };
+            for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
+                const f = p.l.fragments.get(fi);
+                if (f.kind == .inline_span) p.inlineSpan(f.*);
+            }
+            for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
+                const f = p.l.fragments.get(fi);
+                switch (f.kind) {
+                    .text, .marker => p.text(f.*),
+                    .atomic => try p.paintBox(f.box),
+                    else => {},
+                }
+            }
         }
     }
 
@@ -683,10 +688,12 @@ const Painter = struct {
     /// The focus ring: around the focused element's box, or around each
     /// of its fragments when it is inline (a link).
     fn focusRing(p: *const Painter, node: NodeId) void {
-        for (p.l.boxes.items, 0..) |b, i| {
+        for (0..p.l.boxes.len) |i| {
+            const b = p.l.boxes.get(i);
             if (b.node != node) continue;
             switch (b.kind) {
-                .inline_box, .text => for (p.l.fragments.items) |f| {
+                .inline_box, .text => for (0..p.l.fragments.len) |fi| {
+                    const f = p.l.fragments.get(fi);
                     if (f.dead) continue;
                     if (f.box == @as(BoxId, @intCast(i)) and f.kind == .inline_span) p.stroke(f.x - 2, f.y - 2, f.w + 4, f.h + 4, 2, p.opts.accent);
                 },

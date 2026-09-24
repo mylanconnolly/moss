@@ -56,7 +56,7 @@ var host: u64 = 0;
 /// dies only when the two together outgrow it: GitHub keeps 12 MB of
 /// document and sheets, the Python docs lay out 30,000 nodes, and two
 /// fixed halves fit neither (2026-09-23).
-var region: [24 << 20]u8 align(16) = undefined;
+var region: [40 << 20]u8 align(16) = undefined;
 /// The document arena is [0, lo); the layout arena [hi, len).
 var reg_lo: usize = 0;
 var reg_hi: usize = region.len;
@@ -608,7 +608,7 @@ fn present(markup: []const u8, failure: u64) void {
     phase = "editing it";
     if (failure == 0) {
         var line: [200]u8 = undefined;
-        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes)", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_sheets - t_parsed, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.items.len }) catch "webpage: loaded");
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes)", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_sheets - t_parsed, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len }) catch "webpage: loaded");
     }
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
 }
@@ -762,7 +762,8 @@ fn loadPicturesNear() void {
         const bottom = page.scroll_y + 3 * @as(f64, @floatFromInt(vh));
         var got: usize = 0;
         var got_bg: usize = 0;
-        for (l.boxes.items) |b| {
+        for (0..l.boxes.len) |bi| {
+            const b = l.boxes.get(bi);
             if (b.y + b.h < top or b.y > bottom) continue;
             if (b.kind != .text and b.style.background_image == .url and page.n_backgrounds < max_backgrounds) {
                 if (loadBackground(b.style.background_image.url, b.style.background_base)) got_bg += 1;
@@ -773,7 +774,7 @@ fn loadPicturesNear() void {
             const node = b.node orelse continue;
             if (b.kind != .text and doc.get(node).namespace == .svg and std.mem.eql(u8, doc.get(node).name, "svg")) {
                 if (pictureOf(node) == null and page.n_pictures < max_pictures) {
-                    if (inlineSvg(doc, node, &b)) got += 1;
+                    if (inlineSvg(doc, node, b)) got += 1;
                 }
                 continue;
             }
@@ -1078,10 +1079,12 @@ fn nodeRect(id: dom.NodeId) ?[4]f64 {
     const l = page.layout orelse return null;
     var have = false;
     var r: [4]f64 = .{ 0, 0, 0, 0 };
-    for (l.boxes.items, 0..) |b, i| {
+    for (0..l.boxes.len) |i| {
+        const b = l.boxes.get(i);
         if (b.node != id) continue;
         switch (b.kind) {
-            .inline_box, .text => for (l.fragments.items) |f| {
+            .inline_box, .text => for (0..l.fragments.len) |fi| {
+                const f = l.fragments.get(fi);
                 if (f.dead) continue;
                 if (f.box != @as(web.layout.BoxId, @intCast(i))) continue;
                 r = if (have) union4(r, .{ f.x, f.y, f.w, f.h }) else .{ f.x, f.y, f.w, f.h };
@@ -1116,7 +1119,8 @@ fn hitFragment(x: u64, y: u64) ?usize {
     const fy = @as(f64, @floatFromInt(y)) + page.scroll_y;
     var best: ?usize = null;
     var best_d: f64 = 1e18;
-    for (l.fragments.items, 0..) |f, i| {
+    for (0..l.fragments.len) |i| {
+        const f = l.fragments.get(i);
         if (f.dead) continue;
         if (f.kind != .text) continue;
         const dx = if (fx < f.x) f.x - fx else if (fx > f.x + f.w) fx - (f.x + f.w) else 0;
@@ -1411,8 +1415,8 @@ fn selectionHighlights(out: []web.paint.Highlight) usize {
     const hi = @max(from, to);
     var n: usize = 0;
     var i = lo;
-    while (i <= hi and i < l.fragments.items.len and n < out.len) : (i += 1) {
-        const f = l.fragments.items[i];
+    while (i <= hi and i < l.fragments.len and n < out.len) : (i += 1) {
+        const f = l.fragments.get(i);
         if (f.kind != .text or f.dead) continue;
         out[n] = .{ .x = f.x, .y = f.y, .w = f.w, .h = f.h, .color = 0x3b82f6 };
         n += 1;
@@ -1431,8 +1435,8 @@ fn selectionText(out: []u8) usize {
     var n: usize = 0;
     var last_y: ?f64 = null;
     var i = lo;
-    while (i <= hi and i < l.fragments.items.len) : (i += 1) {
-        const f = l.fragments.items[i];
+    while (i <= hi and i < l.fragments.len) : (i += 1) {
+        const f = l.fragments.get(i);
         if (f.kind != .text or f.dead) continue;
         if (last_y) |ly| {
             const sep: u8 = if (f.y != ly) '\n' else ' ';
@@ -1513,7 +1517,8 @@ fn collectMatches() void {
     const l = page.layout orelse return;
     const needle = page.findText();
     if (needle.len == 0) return;
-    for (l.fragments.items) |f| {
+    for (0..l.fragments.len) |fi| {
+        const f = l.fragments.get(fi);
         if (f.dead) continue;
         if (f.kind != .text) continue;
         var start: usize = 0;

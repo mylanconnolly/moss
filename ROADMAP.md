@@ -816,8 +816,15 @@ supervises), and memory history per unit beside the CPU one.
       one the app adopted from the page (a redirect's), and the app
       takes one page event a tick; a URL the page reports is the
       commanded one once the leaf carries it, and the browser drill
-      follows a link after a redirect and watches for a reload. Not
-      done: the desktop under HVF — ten times
+      follows a link after a redirect and watches for a reload. Then
+      (2026-09-24) a 1.2 MB article died of its 24 MB region: the
+      node, box and fragment lists grew by doubling in bump arenas that
+      cannot take back the old buffers (11.6 MB dead in the layout
+      alone); they are chunked stores now (`lib/web/store.zig`,
+      pointer-stable), attribute lists are adopted from the tokenizer,
+      `webshot` page mode is a memory census, and the region is 40 MB
+      (page 60, Web 136, session 224, manager 256, init 320, root
+      384). Not done: the desktop under HVF — ten times
       the speed — where the filesystem service never speaks after start
       (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
     - ✅ *Polish (asked for and landed 2026-09-18):* the Web app's chrome

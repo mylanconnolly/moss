@@ -105,6 +105,36 @@ fn imagesBackground(_: *anyopaque, url_text: []const u8, base: ?[]const u8) ?web
 const images_vtable: web.layout.Images.VTable = .{ .get = imagesGet, .background = imagesBackground };
 
 /// A picture's pixels, as the page decodes them: SVG at the zoom.
+const Histo = struct { count: usize = 0, bytes: usize = 0, freed: usize = 0, resized: usize = 0, grown: usize = 0 };
+var histo: [40]Histo = @splat(.{});
+var histo_inner: std.mem.Allocator = undefined;
+fn bucket(n: usize) usize {
+    return if (n == 0) 0 else std.math.log2_int_ceil(usize, n) + 1;
+}
+fn histoAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+    const b = &histo[bucket(len)];
+    b.count += 1;
+    b.bytes += len;
+    return histo_inner.rawAlloc(len, alignment, ra);
+}
+fn histoResize(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+    const ok = histo_inner.rawResize(mem, alignment, new_len, ra);
+    histo[bucket(mem.len)].resized += 1;
+    if (ok and new_len > mem.len) histo[bucket(mem.len)].grown += 1;
+    return ok;
+}
+fn histoRemap(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+    const p = histo_inner.rawRemap(mem, alignment, new_len, ra);
+    histo[bucket(mem.len)].resized += 1;
+    if (p != null and new_len > mem.len) histo[bucket(mem.len)].grown += 1;
+    return p;
+}
+fn histoFree(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) void {
+    histo[bucket(mem.len)].freed += 1;
+    histo_inner.rawFree(mem, alignment, ra);
+}
+const histo_vtable: std.mem.Allocator.VTable = .{ .alloc = histoAlloc, .resize = histoResize, .remap = histoRemap, .free = histoFree };
+
 fn decodePicture(bytes: []const u8, href: []const u8) ?web.layout.Bitmap {
     if (mosslib.svg.sniff(bytes)) {
         const img = mosslib.svg.render(gpa, bytes, zoom) catch |e| {
@@ -150,15 +180,33 @@ pub fn main(init: std.process.Init) !u8 {
     const doc_f = fetch(url_arg) orelse return 1;
     page_base = try web.url.parse(gpa, doc_f.url, null);
     const text = try web.encoding.decode(gpa, web.encoding.detect(doc_f.body, doc_f.content_type), doc_f.body);
-    const doc = try web.html.parse(gpa, text, .{});
+    // WEBSHOT_PAGE=1: the DOM through a fixed region too, so its cost
+    // shows (a list that doubles inside a bump allocator leaves its old
+    // buffers behind).
+    const page_mode = std.c.getenv("WEBSHOT_PAGE") != null;
+    const region_mb: usize = if (std.c.getenv("WEBSHOT_REGION")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 24;
+    var dom_fba = std.heap.FixedBufferAllocator.init(if (page_mode) try gpa.alloc(u8, region_mb << 20) else &[_]u8{});
+    const doc = try web.html.parse(if (page_mode) dom_fba.allocator() else gpa, text, .{});
+    if (page_mode) {
+        var text_bytes: usize = 0;
+        var attr_bytes: usize = 0;
+        var attrs_n: usize = 0;
+        for (0..doc.nodes.len) |ni| {
+            const n = doc.nodes.get(ni);
+            text_bytes += n.text.capacity;
+            attr_bytes += n.attrs.capacity * @sizeOf(web.dom.Attr);
+            attrs_n += n.attrs.items.len;
+        }
+        std.debug.print("webshot: page memory: markup {d} KB, dom {d} KB for {d} nodes (node {d} B, list capacity {d} = {d} KB, text buffers {d} KB, attribute lists {d} KB for {d} attrs)\n", .{ text.len / 1024, dom_fba.end_index / 1024, doc.nodes.len, @sizeOf(web.dom.Node), doc.nodes.capacity(), doc.nodes.capacity() * @sizeOf(web.dom.Node) / 1024, text_bytes / 1024, attr_bytes / 1024, attrs_n });
+    }
     web.style.px_scale = zoom;
     const env: web.style.Env = .{ .width = @as(f64, @floatFromInt(vw)) / zoom, .height = @as(f64, @floatFromInt(vh)) / zoom };
     const ua = try web.style.parseSheet(gpa, web.style.ua_sheet, .user_agent, env);
     var dummy: u8 = 0;
     const loader: web.style.Loader = .{ .ctx = @ptrCast(&dummy), .fetch = sheetFetch };
     // WEBSHOT_PAGE=1: the page domain's memory — sheets parsed through a
-    // 12 MB scratch and kept (deep-copied) in a 12 MB document arena.
-    const page_mode = std.c.getenv("WEBSHOT_PAGE") != null;
+    // scratch and kept (deep-copied) in the document arena, then the
+    // cascade and layout in what the region leaves.
     const sheets = if (page_mode) blk: {
         page_scratch = std.heap.FixedBufferAllocator.init(try gpa.alloc(u8, 12 << 20));
         page_keep = std.heap.FixedBufferAllocator.init(try gpa.alloc(u8, 12 << 20));
@@ -192,20 +240,43 @@ pub fn main(init: std.process.Init) !u8 {
         // The cascade and layout in the page's 12 MB layout arena.
         // What the shared 24 MB region leaves after the kept sheets (the
         // DOM and the page's bytes live there too: this is optimistic).
-        probe_fba = std.heap.FixedBufferAllocator.init(try gpa.alloc(u8, (24 << 20) - page_keep.end_index));
+        probe_fba = std.heap.FixedBufferAllocator.init(try gpa.alloc(u8, (region_mb << 20) - page_keep.end_index));
         var fba = &probe_fba;
-        const la = fba.allocator();
+        // Every allocation by size, to see what the layout arena holds.
+        histo_inner = fba.allocator();
+        const la: std.mem.Allocator = .{ .ptr = @ptrCast(&dummy), .vtable = &histo_vtable };
         const st = try la.create(web.style.Styles);
         st.* = web.style.compute(la, doc, sheets, env) catch |e| {
             std.debug.print("webshot: page memory: cascade {s} at {d} KB\n", .{ @errorName(e), fba.end_index / 1024 });
             return 1;
         };
         const after_style = fba.end_index;
-        _ = web.layout.layoutDocumentWith(la, doc, st, faces.fonts(), images, @floatFromInt(vw), @floatFromInt(vh)) catch |e| {
+        const pl = web.layout.layoutDocumentWith(la, doc, st, faces.fonts(), images, @floatFromInt(vw), @floatFromInt(vh)) catch |e| {
             std.debug.print("webshot: page memory: layout {s} (cascade {d} KB, at {d} KB)\n", .{ @errorName(e), after_style / 1024, fba.end_index / 1024 });
             return 1;
         };
-        std.debug.print("webshot: page memory: cascade {d} KB, layout {d} KB\n", .{ after_style / 1024, (fba.end_index - after_style) / 1024 });
+        var kids_cap: usize = 0;
+        var kids_n: usize = 0;
+        var lines_cap: usize = 0;
+        var lines_n: usize = 0;
+        var dead_boxes: usize = 0;
+        for (0..pl.boxes.len) |bi| {
+            const b = pl.boxes.get(bi);
+            kids_cap += b.children.capacity;
+            kids_n += b.children.items.len;
+            lines_cap += b.lines.capacity;
+            lines_n += b.lines.items.len;
+            if (b.style.display == .none) dead_boxes += 1;
+        }
+        var dead_frags: usize = 0;
+        for (0..pl.fragments.len) |fi| if (pl.fragments.get(fi).dead) {
+            dead_frags += 1;
+        };
+        for (histo, 0..) |h, i| if (h.count > 0) {
+            std.debug.print("webshot: page memory: allocs <{d} B: {d} for {d} KB (freed {d}, resized {d}, grown in place {d})\n", .{ @as(usize, 1) << @intCast(i), h.count, h.bytes / 1024, h.freed, h.resized, h.grown });
+        };
+        std.debug.print("webshot: page memory: children lists {d} KB capacity for {d} entries, line lists {d} KB capacity for {d} lines (line {d} B), dead fragments {d}, display-none boxes {d}\n", .{ kids_cap * 4 / 1024, kids_n, lines_cap * @sizeOf(web.layout.Line) / 1024, lines_n, @sizeOf(web.layout.Line), dead_frags, dead_boxes });
+        std.debug.print("webshot: page memory: cascade {d} KB ({d} computed styles of {d} B), layout {d} KB ({d} boxes of {d} B, capacity {d}; {d} fragments of {d} B, capacity {d})\n", .{ after_style / 1024, st.computed.len, @sizeOf(web.style.Computed), (fba.end_index - after_style) / 1024, pl.boxes.len, @sizeOf(web.layout.Box), pl.boxes.capacity(), pl.fragments.len, @sizeOf(web.layout.Fragment), pl.fragments.capacity() });
     }
     var styles = try gpa.create(web.style.Styles);
     styles.* = try web.style.compute(gpa, doc, sheets, env);
@@ -215,7 +286,8 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("webshot: to sheets {d} ms, style {d} ms, layout {d} ms\n", .{ @divTrunc(t0.durationTo(t_sheets).nanoseconds, std.time.ns_per_ms), @divTrunc(t_sheets.durationTo(t_style).nanoseconds, std.time.ns_per_ms), @divTrunc(t_style.durationTo(t_layout).nanoseconds, std.time.ns_per_ms) });
 
     // Every picture the layout has a box for, then a relayout.
-    for (l.boxes.items) |b| {
+    for (0..l.boxes.len) |bi| {
+        const b = l.boxes.get(bi);
         const node = b.node orelse continue;
         if (b.kind != .text and doc.get(node).namespace == .svg and std.mem.eql(u8, doc.get(node).name, "svg")) {
             const cw = b.w - b.border[1] - b.border[3] - b.padding[1] - b.padding[3];
@@ -244,8 +316,8 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("webshot: image {d}x{d} {s}\n", .{ bm.?.w, bm.?.h, href });
     }
     // Every background picture a box asks for.
-    for (l.boxes.items) |b| for ([_]struct { img: web.style.BackgroundImage, base: ?[]const u8 }{ .{ .img = b.style.background_image, .base = b.style.background_base }, .{ .img = b.style.mask_image, .base = b.style.mask_base } }) |layer| {
-        if (b.kind == .text or layer.img != .url) continue;
+    for (0..l.boxes.len) |bi| for ([_]struct { img: web.style.BackgroundImage, base: ?[]const u8 }{ .{ .img = l.boxes.get(bi).style.background_image, .base = l.boxes.get(bi).style.background_base }, .{ .img = l.boxes.get(bi).style.mask_image, .base = l.boxes.get(bi).style.mask_base } }) |layer| {
+        if (l.boxes.get(bi).kind == .text or layer.img != .url) continue;
         const href = resolve(layer.img.url, layer.base) orelse continue;
         var known = false;
         for (backgrounds.items) |k| if (std.mem.eql(u8, k.href, href)) {
@@ -265,7 +337,8 @@ pub fn main(init: std.process.Init) !u8 {
         // Every box whose element's id or class holds the needle, with
         // its subtree three deep.
         const needle = std.mem.span(needle_z);
-        for (l.boxes.items, 0..) |b, i| {
+        for (0..l.boxes.len) |i| {
+            const b = l.boxes.get(i);
             const node = b.node orelse continue;
             const idv = doc.getAttr(node, "id") orelse "";
             const cls = doc.getAttr(node, "class") orelse "";
@@ -284,14 +357,16 @@ pub fn main(init: std.process.Init) !u8 {
         const comma = std.mem.indexOfScalar(u8, at, ',') orelse 0;
         const px_ = std.fmt.parseFloat(f64, at[0..comma]) catch 0;
         const py_ = std.fmt.parseFloat(f64, at[comma + 1 ..]) catch 0;
-        for (l.boxes.items, 0..) |b, i| {
+        for (0..l.boxes.len) |i| {
+            const b = l.boxes.get(i);
             if (b.kind == .text or px_ < b.x or py_ < b.y or px_ >= b.x + b.w or py_ >= b.y + b.h) continue;
             dumpBox(doc, l, @intCast(i), 3);
         }
     }
     if (std.c.getenv("WEBSHOT_FRAG")) |needle_z| {
         const needle = std.mem.span(needle_z);
-        for (l.fragments.items, 0..) |f, i| {
+        for (0..l.fragments.len) |i| {
+            const f = l.fragments.get(i);
             if (std.mem.indexOf(u8, f.text, needle) == null) continue;
             std.debug.print("frag {d}: box {d} dead={} at {d:.1},{d:.1} text \"{s}\" chain:", .{ i, f.box, f.dead, f.x, f.y, f.text });
             var q: ?u32 = f.box;
@@ -302,9 +377,9 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("\n", .{});
         }
         // which boxes' lines reach each frag
-        for (l.boxes.items, 0..) |b, bi| for (b.lines.items) |ln| {
+        for (0..l.boxes.len) |bi| for (l.boxes.get(bi).lines.items) |ln| {
             for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
-                if (std.mem.indexOf(u8, l.fragments.items[fi].text, needle) != null) std.debug.print("  box {d} line reaches frag {d}\n", .{ bi, fi });
+                if (std.mem.indexOf(u8, l.fragments.get(fi).text, needle) != null) std.debug.print("  box {d} line reaches frag {d}\n", .{ bi, fi });
             }
         };
     }
@@ -329,7 +404,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("webshot: viewport paint at {d}: {d} ms; a 100-row band: {d} ms\n", .{ at, @divTrunc(t1.durationTo(t2).nanoseconds, std.time.ns_per_ms), @divTrunc(t2.durationTo(t3).nanoseconds, std.time.ns_per_ms) });
     }
     const ms = @divTrunc(t0.durationTo(std.Io.Clock.awake.now(io)).nanoseconds, std.time.ns_per_ms);
-    std.debug.print("webshot: {s}: {d} nodes, extent {d}px, {d} ms\n", .{ doc_f.url, doc.nodes.items.len, extent, ms });
+    std.debug.print("webshot: {s}: {d} nodes, extent {d}px, {d} ms\n", .{ doc_f.url, doc.nodes.len, extent, ms });
 
     var ppm: std.ArrayList(u8) = .empty;
     try ppm.print(gpa, "P6\n{d} {d}\n255\n", .{ vw, h });

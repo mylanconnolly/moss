@@ -24,6 +24,7 @@ pub const style = @import("web/style.zig");
 pub const layout = @import("web/layout.zig");
 pub const paint = @import("web/paint.zig");
 pub const fonts = @import("web/fonts.zig");
+pub const store = @import("web/store.zig");
 
 test {
     _ = url;
@@ -38,6 +39,7 @@ test {
     _ = media;
     _ = style;
     _ = layout;
+    _ = store;
     _ = paint;
     _ = fonts;
 }

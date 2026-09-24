@@ -2114,7 +2114,7 @@ const Candidate = struct {
 /// Compute the whole document's styles from the sheets (the user-agent
 /// sheet first), with `style` attributes as the last author rules.
 pub fn compute(a: std.mem.Allocator, doc: *const Document, sheets: []const Sheet, env: Env) Error!Styles {
-    const computed = try a.alloc(*const Computed, doc.nodes.items.len);
+    const computed = try a.alloc(*const Computed, doc.nodes.len);
     const doc_style = try a.create(Computed);
     doc_style.* = .{};
     doc_style.color = env_text;
@@ -2132,7 +2132,7 @@ pub fn compute(a: std.mem.Allocator, doc: *const Document, sheets: []const Sheet
     var pending_scratch = try ScratchFallback.init(a, 64 << 10);
     var families: std.ArrayList(FontFamily) = .empty;
     // Each node's ancestors' keys (a parent is walked before its children).
-    const ancestors = try a.alloc(Bloom, doc.nodes.items.len);
+    const ancestors = try a.alloc(Bloom, doc.nodes.len);
     ancestors[dom.document_id] = @splat(0);
     var candidates: std.ArrayList(u32) = .empty;
     var w = doc.walk(dom.document_id);

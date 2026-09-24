@@ -6732,6 +6732,43 @@ same value — what the app says and what the thing reports — must
 record which it is following, or a one-event lag between them is a
 loop.
 
+**A 1.2 MB article, and where a page's memory went (2026-09-24).**
+Persona (series) on Wikipedia killed its page: `out of memory while
+laying it out (document 20538 KB and layout 2451 KB of 24576 KB)`. The
+host renderer reproduced it, so `webshot`'s page mode grew a census —
+the DOM's node count and list capacities, text and attribute buffers,
+the computed styles, the box and fragment lists, and a histogram of
+every layout allocation by size — and the census said the page was
+mostly waste. 17,815 nodes: the DOM took 16.4 MB for 1.2 MB of markup,
+the layout 26.7 MB for 15,824 boxes. The node list, the box list and
+the fragment list grow by doubling, and a page's arenas are bump
+regions that cannot take back the buffer a doubling leaves behind: the
+box list outgrew its reserve once and the fragment list (56,418
+fragments, 3.2 a node, against a reserve of 1.25) three times, 11.6 MB
+of dead buffers in the layout arena alone, and the node list's dead
+buffers were a third of the DOM. Every attribute list and text buffer
+did the same in small. The three lists are `store.Chunked` now
+(`lib/web/store.zig`): fixed chunks appended on demand, never
+reallocated — nothing dead, at most one chunk spare, and an element
+that never moves, which is the pointer stability the parser and the
+layout each lost a day to (a box pointer across an append, a node
+pointer across a create). A fresh element takes the tokenizer's exact
+attribute list as its own instead of copying it (the tokenizer's
+`Attr` is the DOM's), and the tokenizer reuses one attribute list tag
+after tag. DOM 16.4 → 7.4 MB, layout 26.7 → 17.4 MB — and the rest is
+real: boxes of 272 B, fragments of 64 B, the width caches, the line
+layout's working lists, 1.1 KB a box. A page that size still needs 29
+MB, so the region is 40 MB (it was 24, sized when 4,000 nodes was a
+big page): the page is 60 MB, the Web window 136 for two, a session
+224, its manager 256, init 320, root 384. The gate found the shell's
+1 MB line heap next: `html-style` runs the cascade there, and 512-node
+chunks (76 KB each) tipped it — chunks are 128 nodes, 256 boxes, 512
+fragments. `Computed` has grown to 1768 B, interned, so it costs 2 MB
+here; worth watching. The article loads in 7.3 s on the target now.
+*Lesson:* a list that grows inside a bump arena is a list that costs
+twice; and measure by census before sizing anything — the budget was
+raised only once the census said what was left was real.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

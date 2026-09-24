@@ -72,11 +72,11 @@ pointer), `extent` (how tall the document is), `dumped`.
 
 `user/webpage.zig` is the domain: static arenas that are the page's
 whole memory budget (a program's memory here is its image's static
-size, charged at spawn) — the document's, 12 MB, holding the bytes,
-the tree, its sheets and every later edit until the next navigation,
-the layout's, 12 MB, reset whole on every relayout, the picture store
-(6 MB of decoded pixels) and a per-picture scratch the file bytes and
-the decoder pass through —
+size, charged at spawn) — one 40 MB region used from both ends, the
+document's, holding the bytes, the tree, its sheets and every later
+edit until the next navigation, and the layout's, reset whole on every
+relayout; the picture store (6 MB of decoded pixels) and a per-picture
+scratch the file bytes and the decoder pass through —
 `lib/font` over the packed faces with a bounded glyph cache, the parser,
 cascade, layout and painter over the granted pixels, a hit test that
 walks the DOM up to a link, hover when the link under the pointer
@@ -132,7 +132,7 @@ A session app that hosts pages needs a `spawner`, the session's
 network view, the assets tier (`{ tag: assets, session: true }`: the
 trust roots and the fonts the pages rasterize — a session's own view is
 its home, never the disk root) and the system store the `webpage` image
-is staged from, and a budget for its pages: 44 MB each. `Web` is 104 MB
+is staged from, and a budget for its pages: 60 MB each. `Web` is 136 MB
 for two.
 
 ### Using it
@@ -208,8 +208,9 @@ log from inside `update`, where `echo` waits for the window to close).
 
 ### What is not built
 
-Very large pages (30,000 nodes) outgrow the page's 24 MB for a document
-and its layout and die; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
+Very large pages outgrow the page's 40 MB for a document
+and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
+DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); no `position: fixed`/`sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,
@@ -237,8 +238,11 @@ what it fetches under `zig-out/webshot-cache` (delete it to refetch).
 or class holds the needle; `WEBSHOT_FRAG=text` prints the fragments
 carrying a string and the lines that reach them; `WEBSHOT_AT=x,y` the
 boxes under a point and `WEBSHOT_BOX=n` a box's ancestors;
-`WEBSHOT_PAGE=1` runs the sheets, cascade and layout in the page
-domain's memory and says what each took. Headless Chrome with
+`WEBSHOT_PAGE=1` runs the parse, sheets, cascade and layout in the page
+domain's memory and prints a census — node, box and fragment counts and
+record sizes, list capacities, text and attribute buffers, and a
+histogram of the layout's allocations by size — and `WEBSHOT_REGION=MB`
+sizes the region it probes (default 40). Headless Chrome with
 the page's User-Agent (`moss/0.0 (webpage)`) makes the reference.
 
 ## Dig deeper

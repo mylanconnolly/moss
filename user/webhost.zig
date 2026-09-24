@@ -42,13 +42,15 @@ pub const Lock = struct {
     }
 };
 
-/// A page's memory: its arenas — the document's (12 MB), the layout's
-/// (12), the glyph cache (2), the picture store (6) and the picture
-/// scratch (6) — plus the image and its 512K stack. Wikipedia's front
-/// page, the first real site opened, died twice of a 28 MB page: of
-/// the pictures it decoded into the document arena, then of an 8 MB
-/// layout arena a 3900-node page asks 10 MB of (2026-09-18).
-pub const page_user_kb: u64 = 44 << 10;
+/// A page's memory: its arenas — the document-and-layout region (40 MB),
+/// the glyph cache (2), the picture store (6) and the picture scratch
+/// (6) — plus the image and its 512K stack. Wikipedia's front page,
+/// the first real site opened, died twice of a 28 MB page: of the
+/// pictures it decoded into the document arena, then of an 8 MB layout
+/// arena a 3900-node page asks 10 MB of (2026-09-18); a 1.2 MB article
+/// died of a 24 MB region a 17,800-node page asks 29 MB of, once its
+/// lists stopped leaving their old buffers behind (2026-09-24).
+pub const page_user_kb: u64 = 60 << 10;
 pub const page_kobj_kb: u64 = 2 << 10;
 
 const stall_ms: u64 = 10_000;

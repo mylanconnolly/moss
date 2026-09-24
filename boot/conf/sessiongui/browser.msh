@@ -3,7 +3,7 @@
 # network view (their broker fetches over it; a page itself holds no
 # network), the assets tier for the trust roots and the fonts its pages
 # rasterize, and the system store the `webpage` image is staged from.
-# The budget hosts the pages: 44 MB each, two open at once with room for
+# The budget hosts the pages: 60 MB each, two open at once with room for
 # the window itself. The picker is for downloads: a download is a grant
 # the user makes in the Save dialog, never a write to the home by this
 # app. Non-essential: closing its window ends only this.
@@ -11,7 +11,7 @@
   app:       { name: "Web", description: "Browse the web in sandboxed pages", icon: network, window: "Web", dock: true, order: 55 }
   image:     mshrun
   script:    scripts/browser.msh
-  budget:    { user: 104mb, kobj: 8mb }
+  budget:    { user: 136mb, kobj: 8mb }
   grant:     [log, spawner, bootfs]
   essential: false
   give: [

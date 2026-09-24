@@ -6,6 +6,7 @@
 //! its nodes through the allocator it was given and frees nothing
 //! piecemeal: the arena that made it drops it whole.
 const std = @import("std");
+const store = @import("store.zig");
 
 pub const Error = error{OutOfMemory};
 
@@ -51,7 +52,8 @@ pub const Node = struct {
 
 pub const Document = struct {
     a: std.mem.Allocator,
-    nodes: std.ArrayList(Node) = .empty,
+    /// Chunked: an appended node never moves the others (`store`).
+    nodes: store.Chunked(Node, 7) = .{},
     quirks: QuirksMode = .no_quirks,
 
     pub fn init(a: std.mem.Allocator) Error!Document {
@@ -61,16 +63,16 @@ pub const Document = struct {
     }
 
     pub fn node(d: *Document, id: NodeId) *Node {
-        return &d.nodes.items[id];
+        return d.nodes.at(id);
     }
 
     pub fn get(d: *const Document, id: NodeId) *const Node {
-        return &d.nodes.items[id];
+        return d.nodes.get(id);
     }
 
     fn add(d: *Document, n: Node) Error!NodeId {
         try d.nodes.append(d.a, n);
-        return @intCast(d.nodes.items.len - 1);
+        return @intCast(d.nodes.len - 1);
     }
 
     pub fn createElement(d: *Document, ns: Namespace, name: []const u8) Error!NodeId {

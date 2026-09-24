@@ -316,7 +316,15 @@ pub const Parser = struct {
     fn createElementFor(p: *Parser, t: Tag, ns: dom.Namespace) Error!NodeId {
         const id = try p.doc.createElement(ns, t.name);
         const n = p.doc.node(id);
+        // A fresh HTML element takes the token's attribute list as its
+        // own (the tokenizer made an exact copy with no duplicates);
+        // otherwise room for every attribute at once — a list that grows
+        // by doubling in a bump arena leaves its old buffers behind.
+        if (ns == .html and n.attrs.items.len == 0) {
+            n.attrs = .fromOwnedSlice(@constCast(t.attrs));
+        } else try n.attrs.ensureTotalCapacityPrecise(p.a, n.attrs.items.len + t.attrs.len);
         for (t.attrs) |at| {
+            if (n.attrs.items.ptr == t.attrs.ptr) break; // adopted whole
             var dup = false;
             for (n.attrs.items) |have| if (eq(have.name, at.name) and have.prefix == null) {
                 dup = true;
@@ -1933,7 +1941,7 @@ pub fn parse(a: std.mem.Allocator, input: []const u8, opts: Options) Error!*Docu
 /// tree is complete.
 fn mirrorSelectedContent(doc: *Document) Error!void {
     var i: NodeId = 1;
-    while (i < doc.nodes.items.len) : (i += 1) {
+    while (i < doc.nodes.len) : (i += 1) {
         if (!doc.isHtml(i, "selectedcontent")) continue;
         var sel: ?NodeId = doc.get(i).parent;
         while (sel) |s| : (sel = doc.get(s).parent) if (doc.isHtml(s, "select")) break;

@@ -14,7 +14,9 @@ const entities = @import("entities.zig");
 
 pub const Error = error{OutOfMemory};
 
-pub const Attr = struct { name: []const u8, value: []const u8 };
+/// The DOM's attribute record, so a fresh element can take a token's
+/// list as its own without a copy (the prefix stays null here).
+pub const Attr = @import("dom.zig").Attr;
 
 pub const Tag = struct {
     name: []const u8,
@@ -221,7 +223,7 @@ pub const Tokenizer = struct {
         t.tag_name.clearRetainingCapacity();
         t.tag_is_end = is_end;
         t.tag_self_closing = false;
-        t.attrs = .empty;
+        t.attrs.clearRetainingCapacity();
         t.attr_name.clearRetainingCapacity();
         t.attr_value.clearRetainingCapacity();
         t.attr_dup = false;
@@ -256,7 +258,8 @@ pub const Tokenizer = struct {
         const name = try t.a.dupe(u8, t.tag_name.items);
         if (t.tag_is_end) return t.emit(.{ .end_tag = .{ .name = name } });
         t.last_start_tag = name;
-        return t.emit(.{ .start_tag = .{ .name = name, .attrs = t.attrs.items, .self_closing = t.tag_self_closing } });
+        // An exact copy: the list itself is reused tag after tag.
+        return t.emit(.{ .start_tag = .{ .name = name, .attrs = try t.a.dupe(Attr, t.attrs.items), .self_closing = t.tag_self_closing } });
     }
 
     fn emitComment(t: *Tokenizer) Error!Token {

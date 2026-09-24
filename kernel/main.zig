@@ -1169,11 +1169,11 @@ fn guiRunWorker(_: u64) void {
         .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 48 << 20,
-        // 352 MB: room for init (288) and under it a guest node's VMM
+        // 384 MB: room for init (320) and under it a guest node's VMM
         // with 128 MB of guest RAM beside the desktop (the desktop's
         // session grew to 192 MB on 2026-09-18 for page domains that
         // hold a real site's pictures).
-        .user_limit = 352 << 20,
+        .user_limit = 384 << 20,
         // The hypervisor: root passes it to init, init to a `vmm` unit
         // whose file says `grant: [hypervisor]` — a guest node started
         // from the desktop.
@@ -1203,11 +1203,11 @@ fn systemDrill(comptime name: []const u8) void {
         .grant_windows = true,
         .grant_entropy = true,
         .kobj_limit = 48 << 20,
-        // 352 MB: room for init (288) and under it a guest node's VMM
+        // 384 MB: room for init (320) and under it a guest node's VMM
         // with 128 MB of guest RAM beside the desktop (the desktop's
         // session grew to 192 MB on 2026-09-18 for page domains that
         // hold a real site's pictures).
-        .user_limit = 352 << 20,
+        .user_limit = 384 << 20,
         // The hypervisor: root passes it to init, init to a `vmm` unit
         // whose file says `grant: [hypervisor]` — a guest node started
         // from the desktop.
