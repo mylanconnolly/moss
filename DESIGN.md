@@ -4348,6 +4348,23 @@ credentials out of `$ev.fields`. The host types a username, Tab, a
 password, then submits; the app accepts `alice`/`secret` and logs
 `who=alice` — proof the typed text crossed to `update` intact.
 
+**Forms, as a hand expects them (as built, 2026-09-24).** Two habits
+from every other desktop, asked for by name. Clicks on a field in quick
+succession widen the selection — the second selects the run of like
+characters under the pointer (`wikipedia` in a URL, or the `://`
+between words), the third the line, the fourth everything; a field is
+one line, so the last two agree — through `ui.pointer.MultiClick`,
+the list rows' double-click generalized to a count, and the editor's
+`selectWordAt` and `selectLine`. And Enter in a field submits its
+form: the runtime fires the next button after the field in focus order
+(wrapping), which is what a `submit:` binding would have named; a form
+with no button advances the focus as before, and a field's own
+`submit:` still wins. The drills' shared sign-in presses Enter in the
+password field now, and the browser drill replaces the address bar
+with a triple-click. The web page's own inputs are another matter:
+they have no caret or selection yet, typing appends and Enter already
+submits.
+
 **Stage 3 (as built, 2026-09-08).** The GUI login on the trusted path —
 the vision's "users log in via the GUI", made safe. The two halves were
 already built: the trusted-path compositor (a client proves the boot

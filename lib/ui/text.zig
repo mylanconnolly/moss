@@ -149,6 +149,30 @@ pub const Editor = struct {
         self.cursor = @min(pos, self.len);
         if (!select) self.anchor = self.cursor;
     }
+    /// A word character: letters, digits, underscore, and anything
+    /// beyond ASCII; a double-click selects the run around `pos` of
+    /// whichever class is there (the punctuation between words too).
+    fn wordChar(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+    }
+    /// Select the run of like characters around `pos` (a double-click).
+    pub fn selectWordAt(self: *Editor, pos: usize) void {
+        if (self.len == 0) return;
+        const at = @min(pos, self.len - 1);
+        const class = wordChar(self.buf[at]);
+        var lo = at;
+        while (lo > 0 and wordChar(self.buf[lo - 1]) == class) lo -= 1;
+        var hi = at + 1;
+        while (hi < self.len and wordChar(self.buf[hi]) == class) hi += 1;
+        self.move(lo, false);
+        self.move(hi, true);
+    }
+    /// Select the line around the cursor: a field is one line, so
+    /// everything (a triple-click); the quadruple click is the same.
+    pub fn selectLine(self: *Editor) void {
+        self.move(0, false);
+        self.move(self.len, true);
+    }
     fn word(self: *const Editor, left: bool) usize {
         var p = self.cursor;
         if (left) {
@@ -244,6 +268,20 @@ test "selection replacement, collapse, UTF-8 deletion and kill/yank" {
     e.seed("é");
     e.apply(.backspace);
     try std.testing.expectEqual(@as(usize, 0), e.len);
+}
+test "a double-click selects the run of like characters under it" {
+    var e: Editor = .{};
+    e.seed("https://en.wikipedia.org");
+    e.selectWordAt(12);
+    try std.testing.expectEqualStrings("wikipedia", e.buf[e.low()..e.high()]);
+    e.selectWordAt(5);
+    try std.testing.expectEqualStrings("://", e.buf[e.low()..e.high()]);
+    e.selectWordAt(99);
+    try std.testing.expectEqualStrings("org", e.buf[e.low()..e.high()]);
+    e.selectLine();
+    try std.testing.expectEqualStrings("https://en.wikipedia.org", e.buf[e.low()..e.high()]);
+    e.apply(.{ .insert = 'x' });
+    try std.testing.expectEqualStrings("x", e.buf[0..e.len]);
 }
 test "full buffer replacement and word selection" {
     var e: Editor = .{};

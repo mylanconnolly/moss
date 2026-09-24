@@ -218,7 +218,7 @@ var content_h: usize = 0;
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
 // the surface (so a pointer press can hit-test which widget it landed on).
-const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, submit: []const u8 = "", is_list: bool = false, is_page: bool = false, page_slot: usize = 0, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
+const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, submit: []const u8 = "", is_list: bool = false, is_page: bool = false, is_button: bool = false, page_slot: usize = 0, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
 var focusables: [64]Focus = undefined;
 
 // Every window has an implicit viewport; explicit `scroll` nodes can nest.
@@ -468,6 +468,9 @@ fn fieldFor(id: []const u8, seed: []const u8) *FieldBuf {
 }
 
 var field_drag: ?usize = null;
+/// Clicks on one field in quick succession: the second selects the word
+/// under the pointer, the third the line, the fourth everything.
+var field_clicks: ui.pointer.MultiClick = .{};
 fn fieldClick(focus: Focus, x: usize, select: bool) void {
     const f = fieldFor(focus.id, "");
     const ed = &f.edit;
@@ -1275,7 +1278,7 @@ fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     fillRect(x + r_btn, y + ring_w, w -| (2 * r_btn), 1, shade(fill, 6, 5));
     drawIconLabel(rec, "label", x + bpx, y, w -| (2 * bpx), h, ink, fill);
     if (!disabled and nfoc < focusables.len) {
-        recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .bx = x, .by = y, .bw = w, .bh = h });
+        recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .is_button = true, .bx = x, .by = y, .bw = w, .bh = h });
     }
     return .{ .w = w, .h = h };
 }
@@ -2529,8 +2532,16 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                                 pressed = wi;
                                 break :input;
                             }
-                            // Place the caret using the same font metrics as rendering.
+                            // Place the caret using the same font metrics as rendering;
+                            // a repeated click widens the selection.
                             fieldClick(focusables[wi], cev.x, false);
+                            const clicks = field_clicks.press(wi, usys.nowMs());
+                            if (clicks >= 2) {
+                                const ed = &fieldFor(focusables[wi].id, "").edit;
+                                if (clicks == 2) ed.selectWordAt(ed.cursor) else ed.selectLine();
+                                var lb: [128]u8 = undefined;
+                                _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: field {s} click {d} selected {d}..{d}", .{ focusables[wi].id, clicks, ed.low(), ed.high() }) catch "gui: field clicks");
+                            }
                             field_drag = wi;
                             break :input;
                         }
@@ -2691,8 +2702,23 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         if (c.is_field and c.submit.len > 0) {
                             fired = c.submit; // Enter submits the field's button
                         } else if (c.is_field) {
-                            reveal_focus = true;
-                            focus = (focus + 1) % nfocus; // advance past a field
+                            // Enter in a form submits it: the next button after the
+                            // field in focus order (wrapping), as `submit:` would name
+                            // it; a form with no button advances the focus instead.
+                            var k: usize = 1;
+                            while (k < nfocus) : (k += 1) {
+                                const cand = focusables[(focus + k) % nfocus];
+                                if (cand.is_button) break;
+                            }
+                            if (k < nfocus) {
+                                const button = focusables[(focus + k) % nfocus].id;
+                                fired = button;
+                                var lb: [128]u8 = undefined;
+                                _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: enter in {s} submits {s}", .{ c.id, button }) catch "gui: enter submits");
+                            } else {
+                                reveal_focus = true;
+                                focus = (focus + 1) % nfocus; // advance past a field
+                            }
                         } else if (c.is_list) {
                             if (listStateById(c.id)) |st| {
                                 fired = c.id;

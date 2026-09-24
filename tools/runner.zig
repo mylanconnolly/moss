@@ -1501,9 +1501,12 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // by a link reloaded the two forever: the runtime compared the leaf
     // against the URL it had typed, not the one the app adopted.
     sleepMs(800); // the Save dialog is closing; the field must have the focus before the typing
+    // A triple-click on the address field selects its whole line, so the
+    // typing replaces it (the second click alone selects a word).
     if (!clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field for the redirect");
     sleepMs(300);
-    if (!q.chord("meta_l", "a")) return false;
+    if (!clickScanout(&q, field[0], field[1]) or !clickScanout(&q, field[0], field[1])) return sfail(spec, log_path, "click the address field again");
+    if (!try waitLogN(log_path, "click 3 selected 0..", 1, "the triple-click did not select the address line", spec, polls)) return false;
     if (!q.typeText("http://www.moss.test:8080/r1")) return false;
     const about_urls = countOccurrences(readLog(log_path), "page t2: url \"http://www.moss.test:8080/about.html\"") + 1;
     const go6 = widgetCenter(readLog(log_path), "go") orelse return false;
@@ -3172,8 +3175,8 @@ fn desktopSignIn(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, user: [
         return false;
     }
     sleepMs(100);
-    _ = q.sendKey("tab");
-    sleepMs(100);
+    // Enter in the password field submits the form: the runtime presses
+    // the next button after the field (2026-09-24).
     _ = q.sendKey("ret");
     return true;
 }
