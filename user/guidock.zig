@@ -148,6 +148,7 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
     var state = init_state;
     var tree = try it.callValue(view, &.{state}, null, null);
     var announced = false;
+    var announced_n: usize = 0;
     var evaluated = true;
     while (true) {
         if (evaluated) {
@@ -166,7 +167,11 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
         }
         renderDock(tree);
         if (!wf.commitSurface()) return it.fail("gui: dock commit failed", .{});
+        // A pill came or went (an app not on the dock started or exited):
+        // the centres moved, so they are announced again.
+        if (dock_nitems != announced_n) announced = false;
         if (!announced) {
+            announced_n = dock_nitems;
             var lb: [64]u8 = undefined;
             _ = usys.log(core.log_h, std.fmt.bufPrint(&lb, "dock: ready n={d}", .{dock_nitems}) catch "dock: ready n=0");
             // The click router needs each pill's centre; log them so a drill
@@ -189,6 +194,9 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
             if (ev.kind == 1) {
                 const down = ev.btn & 1 != 0;
                 const press = down and !wf.ptr_down;
+                // A press with the button believed held is no click: a lost
+                // release would disarm every pill, so say so (2026-09-24).
+                if (down and !press) _ = usys.log(core.log_h, "dock: press with the button held");
                 wf.ptr_down = down;
                 if (press and ev.surface == wf.surf) {
                     if (dockItemAt(ev.x)) |idx| {

@@ -3247,6 +3247,15 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "restoring the window opened a new one instead", log_path);
         return false;
     }
+    // The pill toggles: clicked with the window in front it hides the
+    // window (the app parks as after the amber dot), clicked once more it
+    // brings it back (2026-09-24).
+    sleepMs(500);
+    if (!clickScanout(&q, dem2[0], dem2[1])) return sfail(spec, log_path, "click the Demo pill to hide");
+    if (!try waitLogN(log_path, "gui: minimized", 2, "the pill did not hide the window in front", spec, polls)) return false;
+    sleepMs(500);
+    if (!clickScanout(&q, dem2[0], dem2[1])) return sfail(spec, log_path, "click the Demo pill to bring the window back");
+    if (!try waitLogN(log_path, "gui: restored", 2, "the pill did not bring the hidden window back", spec, polls)) return false;
     sleepMs(500);
     // Minimize it again and switch to it with Alt-Tab: the only window on
     // the desktop is hidden, so the switch must restore it (unhide, raise,
@@ -3584,6 +3593,31 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const closed_before_console = countOccurrences(readLog(log_path), "gui: closed");
     if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Console");
     if (!try waitLogN(log_path, "gui: closed", closed_before_console + 1, "Console did not close", spec, polls)) return false;
+
+    // An app that is not on the dock gets a pill while it runs: Activity
+    // from the launcher adds a seventh pill, which toggles its window like
+    // any other, and the pill goes when the app closes (2026-09-24).
+    const activity_before = countOccurrences(readLog(log_path), "activity: machine cores=");
+    if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher for Activity");
+    if (!try waitLogN(log_path, launcher_ready_line, 7, "the launcher did not open for Activity", spec, polls)) return false;
+    if (!q.typeText("activity") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Activity");
+    if (!try waitLogN(log_path, "activity: machine cores=", activity_before + 1, "Activity never came up for alice", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: ready n=7", 1, "the dock did not add a pill for the running Activity", spec, polls)) return false;
+    sleepMs(500);
+    const act_pill = parseDockItem(readLog(log_path), 6) orelse return sfail(spec, log_path, "parse the Activity pill");
+    const min_before = countOccurrences(readLog(log_path), "gui: minimized");
+    if (!clickScanout(&q, act_pill[0], act_pill[1])) return sfail(spec, log_path, "click the Activity pill to hide");
+    if (!try waitLogN(log_path, "gui: minimized", min_before + 1, "the Activity pill did not hide its window", spec, polls)) return false;
+    sleepMs(500);
+    const rest_before = countOccurrences(readLog(log_path), "gui: restored");
+    if (!clickScanout(&q, act_pill[0], act_pill[1])) return sfail(spec, log_path, "click the Activity pill to bring it back");
+    if (!try waitLogN(log_path, "gui: restored", rest_before + 1, "the Activity pill did not bring its window back", spec, polls)) return false;
+    sleepMs(300);
+    const closed_before_activity = countOccurrences(readLog(log_path), "gui: closed");
+    const six_before = countOccurrences(readLog(log_path), "dock: ready n=6");
+    if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
+    if (!try waitLogN(log_path, "gui: closed", closed_before_activity + 1, "Activity did not close", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: ready n=6", six_before + 1, "the dock kept Activity's pill after it closed", spec, polls)) return false;
 
     // Log out from the top bar — its menu sits above the windows — ending the
     // whole session.
@@ -5782,9 +5816,8 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
             if (!q.typeText("stop dock\nstart dock\n")) return false;
             if (!try waitLogN(log_path, "display: mode confirmed", confirmations + 1, "dock did not restore the saved resolution", spec, polls)) return false;
             sleepMs(200);
-            const restored_term = parseDockItem(readLog(log_path), 3) orelse return false;
-            if (!clickOutput(q, restored_term, width, height)) return false;
-            sleepMs(150);
+            // The terminal kept the focus through the dock's restart; its
+            // pill would now hide it (a pill toggles the window in front).
             ready = countOccurrences(readLog(log_path), "gui: ready");
             // Only start Settings when the home file holds the CONFIRMED
             // mode, not the abandoned 1024x768 preview.
@@ -6050,12 +6083,14 @@ fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp)
             const launcher = parseDockItem(readLog(log_path), 4) orelse return false;
             if (!clickOutput(q, launcher, width, height)) return false;
             if (!try waitLogN(log_path, "editor: ready", editor_ready + 1, "session editor did not launch", spec, polls)) return false;
+            const settings_active = countOccurrences(readLog(log_path), "topbar: active Settings");
             if (!try editorMenuDrive(spec, log_path, polls, q, width, height)) return false;
             if (!try waitLogN(log_path, "editor: exit", editor_exit + 1, "session editor did not close", spec, polls)) return false;
-            const settings_launcher = parseDockItem(readLog(log_path), 0) orelse return false;
-            if (!clickOutput(q, settings_launcher, width, height)) return false;
-            sleepMs(200); // focus restoration follows asynchronous app teardown
-
+            // Focus returns to Settings after the editor's asynchronous
+            // teardown: the top bar says so (its pill would hide the window
+            // now in front rather than raise it).
+            if (!try waitLogN(log_path, "topbar: active Settings", settings_active + 1, "focus did not return to Settings after the editor closed", spec, polls)) return false;
+            sleepMs(200);
         }
     }
     // Focus sits on the tab strip; Tab reveals Smaller. Restore the

@@ -131,6 +131,10 @@ const Surface = struct {
     dialog: bool = false, // a panel for `dialog_for` (gpu_dialog)
     dialog_for: u64 = 0, // the surface focused when the dialog was created
     hidden: bool = false, // minimized: retained but not composited, not focusable
+    /// A restore (3) or a dock hide (5) the owner has not heard yet: it
+    /// had no reader parked when it happened, so pumpFocus delivers it
+    /// when one is — an event to an unparked owner used to be lost.
+    wake_kind: u64 = 0,
     title: [16]u8 = @splat(0), // the window title, so the dock can restore it by name
     title_len: u8 = 0,
     menu_profile: shared.menus.Profile = .generic,
@@ -386,6 +390,25 @@ fn transferFlushRect(r: Rect) bool {
 /// Focus the topmost (highest-z) live surface, or none (0) — used when
 /// the focused surface is destroyed (a GUI login closing leaves the
 /// terminal beneath it focused, so keys reach the shell).
+/// The frontmost visible window — what a pill's toggle hides when it is
+/// the one clicked. The desktop's chrome (the strut surfaces: the click
+/// itself focused and raised the dock) and dialogs do not count; a window
+/// that has not named itself yet does (a terminal is one before its
+/// title, and it is in front of what it covers).
+fn topmostWindow() u64 {
+    var best_id: u64 = 0;
+    var best_z: u32 = 0;
+    for (&surfaces, 0..) |*sf, i| {
+        if (!sf.used or sf.hidden or sf.dialog) continue;
+        if (i + 1 == strut_top.surface or i + 1 == strut_bottom.surface) continue;
+        if (best_id == 0 or sf.z >= best_z) {
+            best_id = i + 1;
+            best_z = sf.z;
+        }
+    }
+    return best_id;
+}
+
 fn focusTopmost() void {
     var best_id: u64 = 0;
     var best_z: u32 = 0;
@@ -933,6 +956,8 @@ fn wakeReader(chan_h: u64, badge: u64, surface: u64, kind: u64) void {
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = surface, .kind = kind, .arg = 0 } }, 0, t);
         return;
     };
+    // Nobody parked: kept on the surface for the next park (2026-09-24).
+    if (findSurface(surface)) |sf| sf.wake_kind = kind;
 }
 
 /// Tell each surface whose focus state changed about it — a `kind` 4 event
@@ -953,6 +978,13 @@ fn pumpFocus(chan_h: u64) void {
             if (takeReader(sf.owner)) |t| {
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 0, .arg = sf.menu_key } }, 0, t);
                 sf.menu_key = 0;
+            }
+            continue;
+        }
+        if (sf.wake_kind != 0) {
+            if (takeReader(sf.owner)) |t| {
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = sf.wake_kind, .arg = 0 } }, 0, t);
+                sf.wake_kind = 0;
             }
             continue;
         }
@@ -1293,6 +1325,12 @@ fn dispatchPointer(chan_h: u64) void {
                 continue;
             }
         }
+        // A press the owner was too busy to take is worth a line: the
+        // dock-pill flake's log had a raise and no click (2026-09-24).
+        if (press) {
+            var lb: [80]u8 = undefined;
+            _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: press queued surface={d}", .{id}) catch "comp: press queued");
+        }
         pendPush(sf, .{ .lx = lx, .ly = ly, .buttons = e.buttons });
     }
     flushPendingPtr(chan_h);
@@ -1323,6 +1361,8 @@ fn flushPendingPtr(chan_h: u64) void {
         const token = takeReader(sf.owner) orelse continue;
         const e = sf.pend[sf.pend_head];
         sf.pend_head = (sf.pend_head + 1) % pend_cap;
+        var lb: [80]u8 = undefined;
+        _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: flush ptr surface={d} buttons={d}", .{ i + 1, e.buttons }) catch "comp: flush ptr");
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(e.lx, e.ly, e.buttons) } }, 0, token);
     }
 }
@@ -1410,6 +1450,10 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 if (ok) {
                     const strut = if (q.edge == 0) &strut_top else &strut_bottom;
                     strut.* = .{ .surface = if (q.size == 0) 0 else q.surface, .size = @intCast(q.size) };
+                    // Chrome never keeps the keyboard: a dock that came up
+                    // with the focus (a restart) hands it back to the window
+                    // (the drill typed into a terminal that had lost it).
+                    if (q.size != 0 and focused == q.surface) focusTopmost();
                     var l: [48]u8 = undefined;
                     _ = usys.log(comp_log, std.fmt.bufPrint(&l, "comp: strut top={d} bottom={d}", .{ strut_top.size, strut_bottom.size }) catch "comp: strut");
                 }
@@ -1654,6 +1698,46 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 wakeReader(chan_h, sf.owner, hit, 3);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
+            .toggle_titled => |q| {
+                // A pill click on a running window: bring a hidden one
+                // back, hide a focused one, raise one that is behind.
+                var nbuf: [24]u8 = undefined;
+                const want = shared.wordsToStr(&nbuf, .{ q.a, q.b, 0 });
+                var hit: u64 = 0;
+                for (&surfaces, 0..) |*sf, i| {
+                    if (!sf.used) continue;
+                    if (std.mem.eql(u8, sf.title[0..sf.title_len], want)) {
+                        hit = i + 1;
+                        break;
+                    }
+                }
+                if (hit == 0) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 14 } }, 0, token);
+                    continue;
+                }
+                const sf = findSurface(hit).?;
+                const hide = !sf.hidden and topmostWindow() == hit;
+                var lb: [64]u8 = undefined;
+                _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: toggle {s}: {s}", .{ want, if (hide) "hide" else if (sf.hidden) "show" else "raise" }) catch "comp: toggle");
+                if (hide) {
+                    sf.hidden = true;
+                    focusTopmost();
+                    _ = composite();
+                    wakeReader(chan_h, sf.owner, hit, 5);
+                } else {
+                    sf.hidden = false;
+                    raiseSurface(hit);
+                    focusSurface(hit);
+                    if (dialogFor(hit)) |d| {
+                        const did = (@intFromPtr(d) - @intFromPtr(&surfaces)) / @sizeOf(Surface) + 1;
+                        raiseSurface(did);
+                        focusSurface(did);
+                    }
+                    _ = composite();
+                    wakeReader(chan_h, sf.owner, hit, 3);
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
             .appearance_changed => {
                 // Every parked reader gets a tick now: their loops re-read
                 // font metrics on any wake, so the bar and the dock declare
@@ -1708,7 +1792,15 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // the caller's focused surface arrives. The serve loop
                 // stays free to handle every other client meanwhile.
                 parkReader(badge, token, 0);
+                // Keys first (the policy here), then a pointer event queued
+                // while this client was busy — older than anything still in
+                // the ring, and delivered now rather than on the next pointer
+                // event: a dock click landing in its tick's render waited for
+                // the mouse to move again, the pill-click flake, one drill a
+                // gate (2026-09-24). Flushed before the keys it once put a
+                // click ahead of the letters typed before it.
                 dispatchKeys(chan_h);
+                flushPendingPtr(chan_h);
                 dispatchPointer(chan_h);
             },
             .next_input_tick => |q| {
@@ -1725,6 +1817,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // continuous motion nor a slow-rendering client starves the other.
                 dispatchDueTicks(chan_h, true);
                 dispatchKeys(chan_h);
+                flushPendingPtr(chan_h);
                 dispatchPointer(chan_h);
                 pumpFocus(chan_h);
                 dispatchDueTicks(chan_h, false);

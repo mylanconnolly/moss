@@ -2,10 +2,12 @@
 # Each pill opens a session unit's window on the shared compositor. A pill
 # doubles as the app's presence: click it once and the app launches
 # (`launch NAME` through the session's init front channel); click it again
-# while the app is up — including after the amber traffic-light minimized
-# its window — and the window is brought back (`restore-window TITLE`)
-# instead of the app relaunching. The pill's `title` is the window title the
-# compositor restores by, so they must match ("Settings", "Demo").
+# while the app is up and its window toggles (`toggle-window TITLE`): a
+# minimized one — the amber traffic-light's, or this pill's — comes back,
+# the focused one hides, one behind others comes forward. The pill's
+# `title` is the window title the compositor finds by, so they must match
+# ("Settings", "Demo"). An app that is not on the dock gets a pill while
+# it runs (Activity from the launcher), and the pill goes when it exits.
 #
 # A pill's *running* dot is not remembered state — it is polled live: the
 # view reads init's application catalog (`apps`, with each unit's up flag)
@@ -38,11 +40,11 @@ let final = (gui {
     init: { }
     view: (fn [state] {
         {
-          items: (apps | where dock)
+          items: ((apps | where dock) + (apps | where running | where dock == false))
         }
       })
     update: (fn [state, ev] {
-        match (restore-window $ev.title) {
+        match (toggle-window $ev.title) {
           ok _ => { { } }
           _ => { launch $ev.unit; { } }
         }

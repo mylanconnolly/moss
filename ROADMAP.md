@@ -1954,6 +1954,17 @@ supervises), and memory history per unit beside the CPU one.
   `launch`es when nothing by that title is up, so a pill click restores
   rather than relaunches (the per-click log became "dock: activate"). The
   `guishell` drill minimizes the demo window and restores it from its pill.
+  Then (2026-09-24) the pill is a switch — `toggle_titled`: hidden comes
+  back, frontmost hides (the owner hears a `kind` 5 and parks), behind
+  comes forward — and an app not on the dock gets a pill while it runs
+  (the view adds `apps | where running | where dock == false`); a wake
+  the owner had no reader parked for is kept on the surface and delivered
+  on its next park instead of being dropped, and the dock re-announces
+  its pills when their count changes. The dock-pill-click flake (a drill
+  a gate since 2026-09-17) fell out of the same log: a pointer event
+  queued for a busy surface was flushed only on the next pointer event,
+  never when its owner parked — a click in the dock's tick render waited
+  for the mouse to move; `next_input` flushes the queue now.
   **Dock running-mark clearing** landed 2026-09-10: a pill's *running* dot
   is polled live — a new `unit-up NAME` mshl command asks init for its unit
   list (init reports a dead unit as down) and the dock's `view` calls it per

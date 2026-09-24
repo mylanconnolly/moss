@@ -186,6 +186,12 @@ pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "restore-window")) {
         return .{ .params = &.{.{ .name = "title", .shape = .string }}, .ret = restore_result };
     }
+    // `toggle-window TITLE` is the dock pill's click on a running app:
+    // a hidden window comes back, the focused one hides, one behind
+    // others comes forward. `ok` when one matched, else an error.
+    if (std.mem.eql(u8, name, "toggle-window")) {
+        return .{ .params = &.{.{ .name = "title", .shape = .string }}, .ret = restore_result };
+    }
     // `quit-window TITLE` asks the running window with that title to close
     // itself — the close_window key its app handles like the red dot or
     // Cmd-W, so an editor may ask about unsaved work. Needs the display
@@ -2042,6 +2048,19 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         else
             try it.mkResult(false, .{ .str = "not running" });
     }
+    if (std.mem.eql(u8, name, "toggle-window")) {
+        if (wf.display == 0) return it.fail("toggle-window: no display", .{});
+        if (args.len == 0 or args[0] != .str) return it.fail("toggle-window: a window title expected", .{});
+        const w = shared.strToWords(args[0].str);
+        const ok = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .{ .toggle_titled = .{ .a = w[0], .b = w[1] } }, 0)) {
+            .ok => |r| r == .ok,
+            .err => false,
+        };
+        return if (ok)
+            try it.mkResult(true, .{ .str = try it.arena.dupe(u8, args[0].str) })
+        else
+            try it.mkResult(false, .{ .str = "not running" });
+    }
     if (std.mem.eql(u8, name, "quit-window")) {
         if (output_control == 0) return it.fail("quit-window: this program holds no display control", .{});
         if (args.len == 0 or args[0] != .str) return it.fail("quit-window: a window title expected", .{});
@@ -2392,6 +2411,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 minimized = false;
                 _ = usys.log(log_h, "gui: restored");
                 break :input;
+            }
+            // The dock hid this window (its pill, clicked while focused):
+            // park as after the amber dot until a restore.
+            if (ev.kind == 5) {
+                minimized = true;
+                _ = usys.log(log_h, "gui: minimized");
+                continue :input;
             }
             // A timer tick: re-render so a `view` reading the time updates
             // — but never mid-drag (a ticking clock must not drop a drag),

@@ -3672,6 +3672,52 @@ restore needs no cooperation from the app for the *pixels* — the wake event
 is for the app to resume its own logic (a clock that paused while hidden),
 not to redraw. Owed next: a wallpaper (the ground is a solid fill).
 
+**The pill as a switch, and pills for what runs (as built, 2026-09-24).**
+Two things the user expected of the dock. A pill's click on a running
+app *toggles* its window now — `toggle_titled`: hidden, it comes back
+as a restore; in front, it hides (the owner hears a `kind` 5 and parks
+as after the amber dot); behind others, it comes forward. "In front"
+is the frontmost visible titled window, not the focused one — the
+click itself focused and raised the dock, which is titleless. And an
+app that is not on the dock gets a pill while it runs: the dock's
+view is `(apps | where dock) + (apps | where running | where dock ==
+false)`, so Activity from the launcher adds a seventh pill on the next
+tick and it goes when the app exits — the same live poll of init's
+catalog the running dot uses, no dock state. The `guishell` drill
+hides and restores the demo through its pill, then launches Activity,
+counts seven pills, toggles it through the new one, closes it and
+counts six. Four things the gate found on the way. The first hide
+never reached the demo: `wakeReader` handed an event only to a
+*parked* reader and dropped it otherwise, and the app had just
+re-rendered for its focus change — a wake with nobody parked is kept
+on the surface (`wake_kind`) and delivered by `pumpFocus` on the next
+park, like `output_dirty`. Then the dock-pill-click flake itself, a
+drill a gate since 2026-09-17, showed its log one more time — the
+compositor raised the dock on the press, the dock never logged the
+click — and with the pieces in hand it read at once: a pointer event
+for a busy surface is queued on it (`pendPush`), and the queue was
+flushed only from the pointer path, never when the owner *parked*, so
+a click landing in the dock's once-a-second tick render waited for
+the mouse to move again, which a QMP drill never does. `next_input`
+flushes now — after the keys, not before: the first version put a
+queued click ahead of letters typed before it, and the console drill's
+Filter fired on "fo". Nine drills in a row under load where one in
+eighty had failed — and then one more failure with the same log two
+gates later, so that was a hole but not the only one. The dock fires
+on a press it believes follows a release (`ptr_down`), so a release
+lost anywhere disarms the next click; the per-surface queue holds
+eight and drops the oldest on overflow. The compositor now logs a
+press it had to queue and every queued event it flushes, and the dock
+a press it ignored for a held button: the next occurrence names its
+cause. "In front" was first "the topmost
+titled window", which hid Settings under a terminal that had not named
+itself yet; it is the topmost surface that is neither chrome (the two
+struts) nor a dialog. And two drills clicked a pill to *give a window
+focus* — after a dock restart, after an editor closed — which a toggle
+now hides: one waits on the top bar's word instead, and for the other
+the compositor hands focus back when a surface that holds it declares
+itself a strut, since chrome never keeps the keyboard.
+
 **Maximize (as built, 2026-09-10).** The green traffic-light, a stub since
 stage 1, now maximizes the window to fill the work area — full width, from
 just below the top bar's strut down to just above the dock — and a second

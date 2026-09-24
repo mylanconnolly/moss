@@ -1042,6 +1042,12 @@ pub const GpuReq = union(enum(u64)) {
     /// `kind` 3 restore event so it repaints. -> ok when one matched, else
     /// `gpu_err` (nothing by that title) so the dock launches instead.
     restore_titled: struct { a: u64, b: u64 },
+    /// The dock's pill was clicked for a running window: hidden, it comes
+    /// back as `restore_titled` would bring it; visible and focused, it
+    /// hides (its owner hears a `kind` 5 and parks, as after the amber
+    /// dot); visible behind others, it comes forward. -> ok, else
+    /// `gpu_err` (nothing by that title).
+    toggle_titled: struct { a: u64, b: u64 },
     /// Ask the window titled `a`/`b` to close: its owner receives the
     /// same `close_window` key the red dot or Cmd-W sends, through the
     /// menu-key slot, and decides for itself (an editor asks about unsaved
