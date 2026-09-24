@@ -786,7 +786,10 @@ supervises), and memory history per unit beside the CPU one.
       resolver — a resolver silent through its tries is left alone for
       30 s, lookups start at the first live one, and the wait is 250 ms
       (not one try for loopback: the dot drill's forwarder there answers
-      over TLS in 330 ms); (2) the first packet to the resolver and to
+      over TLS in 330 ms) — and since 2026-09-24 a resolver at the
+      stack's own address is skipped while nothing is bound to 53, so
+      the second of silence is never paid (it had been, once per 30 s:
+      the user's "ungodly" 1.4 s first resolve); (2) the first packet to the resolver and to
       the gateway was dropped while ARP ran and retried a wait later —
       the lease binds after the boot-time warm-up, so a lease warms its
       gateway's and resolvers' neighbours itself; (3) our TCP never sent

@@ -671,9 +671,12 @@ NIC through to a moss guest that runs its own `netsvc` as node 2.
   else routes through an interface with a gateway, the leased one.
 - **Resolvers** are asked in order, AAAA and A together, four tries of
   250 ms each before the next; a resolver silent through its tries is
-  left alone for thirty seconds and lookups start at the first live one
-  (the desktop's cluster stack lists a name server its profile does not
-  run). Answers are kept per family and ordered with the family the
+  left alone for thirty seconds and lookups start at the first live one.
+  A resolver at one of the stack's own addresses is skipped outright
+  while nothing here is bound to UDP 53 (the desktop's stack lists the
+  node's name server, which its profile does not run; until 2026-09-24
+  the first lookup of every thirty seconds paid a second of silence to
+  learn that). Answers are kept per family and ordered with the family the
   stack can route first. A lease warms its gateway's and resolvers'
   MACs as it binds. Every lookup logs one line.
 - **The receive window** is the free room in a 64 KB buffer; a read

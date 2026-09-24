@@ -1566,8 +1566,19 @@ fn isLoopback(a: Addr) bool {
 fn liveResolver(from: usize) usize {
     const now = nowMs();
     var i = from;
-    while (i + 1 < n_resolvers and resolver_silent_until[i] > now) i += 1;
+    while (i + 1 < n_resolvers and (resolver_silent_until[i] > now or !resolverListens(resolvers[i]))) i += 1;
     return i;
+}
+
+/// A resolver at one of this stack's own addresses is delivered to
+/// here, to a socket bound to port 53 — and when none is, there is
+/// nothing to wait for: the desktop lists the node's name server the
+/// profile does not run, and the first lookup of every 30 s paid a
+/// second of silence to find that out (2026-09-24).
+fn resolverListens(r: Addr) bool {
+    if (!isLocalAddr(r)) return true;
+    for (&udps) |*u| if (u.used and u.lport == 53) return true;
+    return false;
 }
 var resolver_port: u16 = 0;
 
