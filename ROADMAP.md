@@ -798,8 +798,16 @@ supervises), and memory history per unit beside the CPU one.
       trust roots (400 ms) were parsed on the first page; the page
       parses the sheet at start and the host the roots when it comes up;
       (5) the archive passed the filesystem's 256-entry boot table
-      (512 now). Not done: a keep-alive connection per host (every
-      picture pays a handshake), and the desktop under HVF — ten times
+      (512 now). Then (2026-09-23, "horrendous" scrolling): a scroll
+      moves the rows it keeps and paints the band that came in under a
+      clip the painter and the glyph drawer honour; pictures load on
+      the host's `idle` (250 ms of quiet), never in the scroll handler;
+      queued scrolls add up and pointer moves replace each other
+      instead of being dropped; a finished response's connection is
+      parked and reused (`Connection: close` had been sent all along),
+      retried fresh when the server let it go. Wikipedia's article
+      9.4 s → 5.9 s, a wheel notch 45–53 ms with nothing dropped. Not
+      done: the desktop under HVF — ten times
       the speed — where the filesystem service never speaks after start
       (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
     - ✅ *Polish (asked for and landed 2026-09-18):* the Web app's chrome

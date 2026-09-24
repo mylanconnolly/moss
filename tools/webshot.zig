@@ -314,6 +314,20 @@ pub fn main(init: std.process.Init) !u8 {
     const canvas = ui.Canvas.init(px.ptr, vw, h);
     canvas.fillAll(0xffffff);
     try web.paint.paint(l, &canvas, 0);
+    // WEBSHOT_SCROLL=N: paint the viewport again scrolled to N, timed.
+    if (std.c.getenv("WEBSHOT_SCROLL")) |sc| {
+        const at = std.fmt.parseFloat(f64, std.mem.span(sc)) catch 0;
+        const vpx = try gpa.alloc(u32, vw * vh);
+        var vc = ui.Canvas.init(vpx.ptr, vw, vh);
+        const t1 = std.Io.Clock.awake.now(io);
+        vc.fillAll(0xffffff);
+        try web.paint.paint(l, &vc, at);
+        const t2 = std.Io.Clock.awake.now(io);
+        vc.clip_y0 = vh - 100;
+        try web.paint.paint(l, &vc, at + 100);
+        const t3 = std.Io.Clock.awake.now(io);
+        std.debug.print("webshot: viewport paint at {d}: {d} ms; a 100-row band: {d} ms\n", .{ at, @divTrunc(t1.durationTo(t2).nanoseconds, std.time.ns_per_ms), @divTrunc(t2.durationTo(t3).nanoseconds, std.time.ns_per_ms) });
+    }
     const ms = @divTrunc(t0.durationTo(std.Io.Clock.awake.now(io)).nanoseconds, std.time.ns_per_ms);
     std.debug.print("webshot: {s}: {d} nodes, extent {d}px, {d} ms\n", .{ doc_f.url, doc.nodes.items.len, extent, ms });
 

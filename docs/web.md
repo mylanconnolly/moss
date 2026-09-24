@@ -178,7 +178,9 @@ its broker, inflates WOFF or WOFF2 to SFNT and parses it with
 `lib/font`, and text whose family list names the face is set in it
 (the page logs `web face in use: NAME` the first time one draws). The
 `img`s laid out within a screen of the viewport are fetched and
-decoded as the page loads and scrolls — at most 64 pictures, 6 MB
+decoded as the page loads and, afterwards, when its input has been
+quiet for a quarter of a second (the host's `idle` command — never
+inside a scroll, which only paints) — at most 64 pictures, 6 MB
 decoded, 2 MB a file — and painted at their laid-out size; an image
 whose decoded size differs from what the page declared relays out.
 
@@ -187,8 +189,13 @@ resolve+connect A ms, handshake B ms, head C ms` and `body K KB in D ms`,
 the page's `webpage: loaded in T ms: fetch, parse, sheets, fonts,
 style+layout, paint, pictures`, and the resolver's `netsvc: resolved
 NAME`. Under emulation a first page is under a second and a cached host
-under half; a page with pictures pays a fresh TLS connection per
-picture.
+under half; a page's resources on one host share its kept-alive
+connection (`reused connection, head N ms`; a parked connection is
+dropped after 8 s, and one the server let go is retried fresh). A
+scroll moves the rows it keeps and paints only the band that came in;
+one slower than 40 ms logs `webpage: scroll repaint T ms (rows,
+glyphs rasterized, commit)`, and wheel notches the page has not taken
+yet add up in the host's queue rather than being dropped.
 
 Three host commands serve the app: `save-as NAME DATA` (the Save
 dialog; answers with the chosen name), `page-info ID` (a page
@@ -206,8 +213,8 @@ paths, strokes and `use`s but not gradients (their mean colour), clips,
 masks, filters or text; the scripts that need shaping or bidi (Arabic,
 Hebrew, the Indic scripts) show as boxes, and emoji too (Han, kana and
 Hangul come from the fallback face); bold is synthesized and there is
-no italic; no cache, no cookie jar and no connection pool yet (the
-session's `webfetch` unit of the plan); no content coding in the page;
+no italic; no cache, no cookie jar, and one parked connection per
+page rather than a pool (the session's `webfetch` unit of the plan); no content coding in the page;
 no stop button; a select cycles its options rather than opening a
 list; binary downloads wait for a bytes save in the picker; no
 JavaScript (stages 10–11: our own engine, off until it lands). Menus

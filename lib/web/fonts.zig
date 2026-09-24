@@ -14,6 +14,10 @@ const ui = @import("../ui.zig");
 const layout = @import("layout.zig");
 
 pub const max_system = 6;
+
+/// Rasterizations since the counter was last read: what a paint cost
+/// in glyphs it had not seen at that size.
+pub var rasterized: usize = 0;
 pub const max_web = 8;
 
 pub const FaceFonts = struct {
@@ -174,6 +178,7 @@ pub const FaceFonts = struct {
         };
         self.cache[self.cache_len] = .{ .face = idx, .gid = gid, .size = size_q, .glyph = g };
         self.cache_len += 1;
+        rasterized += 1;
         if (idx >= web_base) {
             const w = &self.web[idx - web_base];
             if (!w.used) {
@@ -199,7 +204,11 @@ pub const FaceFonts = struct {
                 // `top` is the bitmap's top from the baseline, downward
                 // (negative above it), as the toolkit reads it.
                 const gy: i64 = @as(i64, @intFromFloat(@round(baseline))) + g.top;
+                // Wholly outside the clip: not a pixel to blend.
+                const off = gy + canvas.offset_y;
+                const inside = gx < @as(i64, @intCast(canvas.clip_x1)) and gx + @as(i64, @intCast(g.w + smear)) > @as(i64, @intCast(canvas.clip_x0)) and off < @as(i64, @intCast(canvas.clip_y1)) and off + @as(i64, @intCast(g.h)) > @as(i64, @intCast(canvas.clip_y0));
                 for (0..g.h) |row| {
+                    if (!inside) break;
                     const y = gy + @as(i64, @intCast(row));
                     if (y < 0) continue;
                     // Emboldened, a pixel takes the most coverage of the

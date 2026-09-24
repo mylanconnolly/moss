@@ -57,6 +57,10 @@ pub const Slot = struct {
     find_len: usize = 0,
     find_nav: i64 = 0,
     find_sent: bool = false,
+    /// When the page was last commanded, and whether it has been told
+    /// the input went quiet since (once).
+    last_cmd_ms: u64 = 0,
+    idle_sent: bool = true,
     /// The last selection the page reported (what Copy takes).
     sel: [2048]u8 = undefined,
     sel_len: usize = 0,
@@ -70,6 +74,11 @@ pub const Slot = struct {
     }
     pub fn urlText(s: *const Slot) []const u8 {
         return s.url[0..s.url_len];
+    }
+
+    fn touched(s: *Slot) void {
+        s.last_cmd_ms = usys.nowMs();
+        s.idle_sent = false;
     }
 };
 
@@ -415,6 +424,7 @@ pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32) void {
         s.nav = nav;
         s.loaded_once = true;
         _ = host.send(s.page, .{ .load = s.urlText() });
+        s.touched();
     }
 }
 
@@ -439,14 +449,33 @@ pub var last_refusal: []const u8 = "";
 
 pub fn pointer(s: *Slot, kind: wire.PointerKind, x: u32, y: u32) void {
     _ = host.send(s.page, .{ .pointer = .{ .kind = kind, .x = x, .y = y } });
+    s.touched();
 }
 
 pub fn scroll(s: *Slot, dy: i64) void {
     _ = host.send(s.page, .{ .scroll = dy });
+    s.touched();
 }
 
 pub fn key(s: *Slot, ch: u8) void {
     _ = host.send(s.page, .{ .key = .{ .code = ch, .ch = ch } });
+    s.touched();
+}
+
+/// How long the input must be quiet before a page is told so.
+const idle_after_ms: u64 = 250;
+
+/// Every tick: a page whose input has been quiet for a while is told
+/// `idle`, once — its cue for the work that must not slow a scroll
+/// (fetching the pictures that came into view).
+pub fn tick() void {
+    const now = usys.nowMs();
+    for (&slots) |*s| {
+        if (!s.used or s.idle_sent) continue;
+        if (now - s.last_cmd_ms < idle_after_ms) continue;
+        s.idle_sent = true;
+        _ = host.send(s.page, .idle);
+    }
 }
 
 /// A page's own state for the app: the state the broker last reported.

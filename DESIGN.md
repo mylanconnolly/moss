@@ -6664,6 +6664,50 @@ sat 2 KB under the 2 MB program stage; the stage is 3 MB. *Lesson:* a
 status line must never say "Loading" for something not requested; the
 user reads it as the system's promise.
 
+**Scrolling and loading, made quick (as built, 2026-09-23).** The
+user's next word was "horrendous": a wheel notch took 40–70 ms of
+repaint under emulation and, every few notches, 650–720 ms — and the
+log said `command queue full; scroll dropped`. Four things, measured
+on Wikipedia's article page in the headless desktop
+(`tools/guidrive.py`). (1) A scroll repainted the whole viewport. Now
+`scrollBy` moves the rows it keeps (`copyForwards`/`copyBackwards`
+over the pixel buffer) and paints only the band that came in, the
+canvas clipped to it — the painter skips text fragments, rounded
+rects, gradients and bitmap rows outside the clip, and `fonts.draw` a
+glyph outside it — with a full paint only for a jump of a viewport or
+more. A twelve-notch scroll is 45–53 ms a band (372 or 186 of 520
+rows, 17–44 glyphs rasterized, the commit under a millisecond); the
+host paints the same band in 0 ms, so what remains is the emulated
+cost of blending pixels and of rasterizing glyphs at a size the cache
+has not seen. (2) The spikes were pictures: the scroll handler fetched
+every `img` within three viewports, each over a fresh TLS handshake,
+inside the scroll. The host sends `idle` — once, after 250 ms with no
+input, from the app's timer tick (`guipage.tick`) — and the page loads
+pictures then; a scroll only paints. (3) Input the page had not taken
+was dropped: the host's queue holds 64 commands, a wheel under a
+slow repaint (with a pointer move between notches) filled it, and the
+page landed short of where the wheel went. `sendLocked` scans the queue now: a scroll adds into a queued
+scroll, a pointer move replaces the queued move, a second `idle` is
+not queued, and a press or release stops the scan so a click stays
+where it was. (4) Every resource opened a connection: `formatRequest`
+was passed `keep = false` and sent `Connection: close`, so no server
+ever kept one. It sends keep-alive now; a page parks the connection a
+finished response leaves (keyed scheme|host|port, for 8 s), the next
+open on the same key reuses it, and when the server had let it go — a
+send failure, or a close with no bytes before the head — the request
+goes again on a fresh one, the same hop. Wikipedia's article: 9.4 s →
+5.9 s to load (its pictures 5.2 s → 2.1 s), `reused connection, head
+33 ms` where a handshake had been 60–600. The first gate caught the
+retry counting the hop down from zero (the drill's fixture server had
+closed the parked connection before the images page): an integer
+overflow in `mshrun`, the retry is no hop now. What still dominates a
+load under emulation: the first resolve (1.4 s), a TLS handshake per
+new host, sheet parsing (0.9–1.7 s for Wikipedia's) and cascade+layout
+(0.3–0.9 s). *Lessons:* scrolling is the one path a browser must never
+do slow work on — fetches belong to idle time, never to an input
+handler; and a queue that drops input under load must fold it instead,
+because the wheel has already moved.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

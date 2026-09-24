@@ -84,6 +84,9 @@ pub const HostResp = union(enum(u64)) {
     find: struct { len: u64, index: u64 },
     /// Text zoom, in percent of the page's own sizes.
     zoom: struct { percent: u64 },
+    /// Nothing has happened for a while: a good time for the work that
+    /// can wait (pictures near the viewport).
+    idle: void,
     /// The session's appearance: `flags` bit 0 = dark, bit 1 = high
     /// contrast (the page's `prefers-color-scheme` and forced colours).
     theme: struct { flags: u64 },

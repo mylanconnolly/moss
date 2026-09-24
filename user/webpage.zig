@@ -990,6 +990,68 @@ fn paintAll() void {
     // of dark mode keeps black text, so the session's theme reaches it
     // only as `prefers-color-scheme`, never as a canvas it did not ask for.
     canvas.fillAll(0xffffff);
+    web.fonts.rasterized = 0;
+    web.paint.paintWith(l, &canvas, page.scroll_y, .{ .highlights = highlightsNow(), .focus = page.focus }) catch outOfMemory();
+    last_glyphs = web.fonts.rasterized;
+    commitAll();
+}
+
+/// Scroll: the pixels already painted move by the distance, and only
+/// the band that came into view is painted (a whole viewport a wheel
+/// notch was 50 ms under emulation, and the pictures it fetched 700).
+/// Pictures wait for `idle`.
+fn scrollBy(dy: f64) void {
+    const before = page.scroll_y;
+    if (!scrollTo(page.scroll_y + dy)) return;
+    const moved: i64 = @intFromFloat(@round(page.scroll_y - before));
+    if (!has_pixels or moved == 0 or @abs(moved) >= @as(i64, @intCast(vh))) {
+        paintAll();
+    } else {
+        const n: usize = @intCast(@abs(moved));
+        const rows = vh - n;
+        const canvas = ui.Canvas.init(px, vw, vh);
+        if (moved > 0) {
+            // Down: rows move up; the bottom band is new.
+            std.mem.copyForwards(u32, px[0 .. rows * vw], px[n * vw .. vh * vw]);
+            paintBand(rows, vh, &canvas);
+        } else {
+            std.mem.copyBackwards(u32, px[n * vw .. vh * vw], px[0 .. rows * vw]);
+            paintBand(0, n, &canvas);
+        }
+    }
+    if (last_paint_ms > 40) {
+        var line: [128]u8 = undefined;
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: scroll repaint {d} ms ({d} of {d} rows, {d} glyphs rasterized, commit {d} ms)", .{ last_paint_ms, @min(@abs(moved), vh), vh, last_glyphs, last_commit_ms }) catch "webpage: scroll");
+    }
+}
+
+/// What the last paint cost in glyph rasterizations and in the commit
+/// round trip to the host, for the log.
+var last_glyphs: usize = 0;
+var last_commit_ms: u64 = 0;
+
+fn commitAll() void {
+    const t = usys.nowMs();
+    event(.commit, shared.packPair(0, 0), shared.packPair(@intCast(vw), @intCast(vh)));
+    last_commit_ms = usys.nowMs() - t;
+}
+
+/// Paint the viewport's rows [y0, y1) and commit them.
+fn paintBand(y0: usize, y1: usize, canvas_in: *const ui.Canvas) void {
+    const l = page.layout orelse return;
+    const t_paint = usys.nowMs();
+    defer last_paint_ms = usys.nowMs() - t_paint;
+    var canvas = canvas_in.*;
+    canvas.clip_y0 = y0;
+    canvas.clip_y1 = y1;
+    canvas.fillRect(0, y0, vw, y1 - y0, 0xffffff);
+    web.fonts.rasterized = 0;
+    web.paint.paintWith(l, &canvas, page.scroll_y, .{ .highlights = highlightsNow(), .focus = page.focus }) catch outOfMemory();
+    last_glyphs = web.fonts.rasterized;
+    commitAll();
+}
+
+fn highlightsNow() []const web.paint.Highlight {
     var n: usize = 0;
     for (page.matches[0..page.n_matches], 0..) |m, i| {
         paint_highlights[n] = m;
@@ -997,18 +1059,7 @@ fn paintAll() void {
         n += 1;
     }
     n += selectionHighlights(paint_highlights[n..]);
-    web.paint.paintWith(l, &canvas, page.scroll_y, .{ .highlights = paint_highlights[0..n], .focus = page.focus }) catch outOfMemory();
-    event(.commit, shared.packPair(0, 0), shared.packPair(@intCast(vw), @intCast(vh)));
-}
-
-fn scrollBy(dy: f64) void {
-    if (!scrollTo(page.scroll_y + dy)) return;
-    paintAll();
-    if (last_paint_ms > 40) {
-        var line: [96]u8 = undefined;
-        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: scroll repaint {d} ms", .{last_paint_ms}) catch "webpage: scroll");
-    }
-    loadPicturesNear();
+    return paint_highlights[0..n];
 }
 
 fn scrollTo(y_in: f64) bool {
@@ -1528,6 +1579,7 @@ fn serve() noreturn {
                 @memcpy(text[0..n], data[0..n]);
                 find(text[0..n], f.index);
             },
+            .idle => loadPicturesNear(),
             .zoom => |z| {
                 const pct = @min(400, @max(25, z.percent));
                 if (pct != zoom_pct) {

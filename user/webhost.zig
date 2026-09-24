@@ -94,6 +94,8 @@ const Resource = struct {
     done: bool = false,
     opened_ms: u64 = 0,
     got_bytes: usize = 0,
+    /// The response allows the connection to carry another request.
+    keep: bool = false,
 };
 
 /// Chunked transfer coding, decoded as bytes arrive.
@@ -177,6 +179,7 @@ pub const Command = union(enum) {
     find: struct { text: []const u8, index: u32 },
     zoom: u32,
     theme: u64,
+    idle,
     stop,
 };
 
@@ -209,6 +212,13 @@ pub const Page = struct {
     texts: [text_slots][2048]u8 = undefined,
     text_len: [text_slots]usize = @splat(0),
     open: ?Resource = null,
+    /// A connection kept open after a response that allowed it, for the
+    /// next request to the same host (a site's pictures came one fresh
+    /// TLS handshake each, ~400 ms under emulation, 2026-09-23).
+    kept: ?Conn = null,
+    kept_key: [320]u8 = undefined,
+    kept_key_len: usize = 0,
+    kept_ms: u64 = 0,
     // What the page reported, kept for the host program.
     title: [256]u8 = undefined,
     title_len: usize = 0,
@@ -467,6 +477,7 @@ pub const Host = struct {
         const p = &h.pages[id];
         if (!p.used) return;
         if (p.open) |*r| r.conn.close(h.net);
+        h.dropParked(p);
         if (p.ctl != 0) {
             _ = usys.domainDestroy(p.ctl);
             // Its memory comes back when the kernel reaps it, which is
@@ -518,6 +529,28 @@ pub const Host = struct {
     fn sendLocked(h: *Host, id: PageId, cmd: Command) bool {
         const p = &h.pages[id];
         if (!p.used or p.dead) return false;
+        // Input the page has not taken yet folds together: scrolls add up
+        // and a pointer move replaces the move before it — a wheel under a
+        // slow repaint filled the queue and dropped what came after
+        // (2026-09-23).
+        if (cmd == .scroll or (cmd == .pointer and cmd.pointer.kind == .move) or cmd == .idle) {
+            var i = p.qlen;
+            while (i > 0) {
+                i -= 1;
+                const q = &p.queue[i].cmd;
+                if (cmd == .scroll and q.* == .scroll) {
+                    q.scroll += cmd.scroll;
+                    return true;
+                }
+                if (cmd == .pointer and q.* == .pointer and q.pointer.kind == .move) {
+                    q.* = cmd;
+                    return true;
+                }
+                if (cmd == .idle and q.* == .idle) return true;
+                // A press or release in between keeps what came before it.
+                if (q.* == .pointer and q.pointer.kind != .move) break;
+            }
+        }
         if (p.qlen == p.queue.len) {
             logf(h.log, "webhost: page {d}: command queue full; {s} dropped", .{ id, @tagName(cmd) });
             return false;
@@ -572,6 +605,7 @@ pub const Host = struct {
             },
             .zoom => |z| .{ .zoom = .{ .percent = z } },
             .theme => |t| .{ .theme = .{ .flags = t } },
+            .idle => .idle,
             .stop => .stop,
         };
         // Shift the queue.
@@ -704,6 +738,21 @@ pub const Host = struct {
         h.reply(.{ .refused = .{ .code = @intFromEnum(code) } }, 0);
     }
 
+    /// A connection's identity for reuse: scheme, host and port.
+    fn connKey(buf: []u8, target: anytype) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}|{s}|{d}", .{ if (target.tls) "https" else "http", target.host, target.port }) catch buf[0..0];
+    }
+
+    /// How long a parked connection is trusted before being dropped
+    /// unused (servers close idle ones after a few seconds).
+    const park_ms: u64 = 8_000;
+
+    fn dropParked(h: *Host, p: *Page) void {
+        if (p.kept) |c| c.close(h.net);
+        p.kept = null;
+        p.kept_key_len = 0;
+    }
+
     fn open(h: *Host, id: PageId, off: u64, len: u64, flags: u64) void {
         const p = &h.pages[id];
         if (p.open) |*res| {
@@ -725,17 +774,34 @@ pub const Host = struct {
         var body: []const u8 = h.body[0..body_len];
         var fba = std.heap.FixedBufferAllocator.init(&h.scratch);
         var hops: usize = 0;
-        while (true) : (hops += 1) {
+        // A parked connection is tried first; when it turns out dead (the
+        // server closed it), the request goes again on a fresh one — the
+        // same hop, not a redirect (counting it down from zero was the
+        // browser drill's first integer overflow, 2026-09-23).
+        var retry_fresh = false;
+        while (true) {
             if (hops > max_redirects) return h.refuse(.redirects);
             fba.reset();
             const a = fba.allocator();
             const target = http.parseUrl(url) orelse return h.refuse(if (std.mem.indexOf(u8, url, "://") == null) .bad_url else .scheme);
             if (!h.net.attach()) return h.refuse(.connect);
+            var key_buf: [320]u8 = undefined;
+            const key = connKey(&key_buf, target);
+            var reused = false;
+            if (p.kept != null and !retry_fresh and usys.nowMs() - p.kept_ms < park_ms and std.mem.eql(u8, p.kept_key[0..p.kept_key_len], key)) {
+                reused = true;
+            } else h.dropParked(p);
+            retry_fresh = false;
             // A failure to reach the site says why in the log: the word
             // is the network service's or the TLS client's, and a page
             // only hears a code.
             const t_open = usys.nowMs();
-            const conn: Conn = if (target.tls) switch (tlscmds.open(h.net, target.host, target.port, target.host)) {
+            const conn: Conn = if (reused) blk: {
+                const c = p.kept.?;
+                p.kept = null;
+                p.kept_key_len = 0;
+                break :blk c;
+            } else if (target.tls) switch (tlscmds.open(h.net, target.host, target.port, target.host)) {
                 .conn => |c| .{ .tls = c },
                 .failed => |why| {
                     logf(h.log, "webhost: page {d}: {s}: {s}", .{ id, url, why });
@@ -760,9 +826,13 @@ pub const Host = struct {
                 .{ .name = "User-Agent", .value = "moss/0.0 (webpage)" },
             };
             const headers_post = headers_get ++ [_]http.Header{.{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" }};
-            http.formatRequest(a, &req, if (post) "POST" else "GET", target.path, host_text, if (post) &headers_post else &headers_get, body, false) catch return h.refuse(.memory);
+            http.formatRequest(a, &req, if (post) "POST" else "GET", target.path, host_text, if (post) &headers_post else &headers_get, body, true) catch return h.refuse(.memory);
             if (conn.send(h.net, req.items)) |_| {
                 conn.close(h.net);
+                if (reused) {
+                    retry_fresh = true;
+                    continue;
+                }
                 return h.refuse(.connect);
             }
             // The head, from as many receives as it takes.
@@ -784,9 +854,19 @@ pub const Host = struct {
                     .closed => closed = true,
                     .failed, .timeout => {
                         conn.close(h.net);
+                        if (reused and got == 0) {
+                            retry_fresh = true;
+                            break;
+                        }
                         logf(h.log, "webhost: page {d}: {s}: no head after {d} bytes (the connection failed or stalled)", .{ id, url, got });
                         return h.refuse(.connect);
                     },
+                }
+                if (closed and got == 0 and reused) {
+                    // The server had let the parked connection go.
+                    conn.close(h.net);
+                    retry_fresh = true;
+                    break;
                 }
                 const parsed = http.parseHead(a, head_buf[0..got]) catch |e| {
                     conn.close(h.net);
@@ -803,7 +883,9 @@ pub const Host = struct {
                     return h.refuse(.protocol);
                 }
             }
+            if (retry_fresh) continue;
             if (head.status >= 300 and head.status < 400) if (http.headerValue(head.headers, "location")) |loc| {
+                // A redirect's body is left unread: the connection goes.
                 conn.close(h.net);
                 const base = web.url.parse(a, url, null) catch return h.refuse(.bad_url);
                 const next = web.url.resolve(a, loc, &base) catch return h.refuse(.bad_url);
@@ -814,6 +896,7 @@ pub const Host = struct {
                 // A redirected POST is followed as a GET, as browsers do.
                 post = false;
                 body = "";
+                hops += 1;
                 continue;
             };
             if (head.framing == .length and head.framing.length > wire.max_resource) {
@@ -822,12 +905,16 @@ pub const Host = struct {
             }
             // Where the time went: the timings are what a slow page is
             // measured by (resolve+connect, the TLS handshake, the head).
-            if (target.tls) {
+            if (reused) {
+                logf(h.log, "webhost: page {d}: {s}: reused connection, head {d} ms", .{ id, url, usys.nowMs() - t_open });
+            } else if (target.tls) {
                 logf(h.log, "webhost: page {d}: {s}: resolve+connect {d} ms, handshake {d} ms, head {d} ms", .{ id, url, tlscmds.last_open_ms.resolve_connect, tlscmds.last_open_ms.handshake, usys.nowMs() - t_open - tlscmds.last_open_ms.resolve_connect - tlscmds.last_open_ms.handshake });
             } else {
                 logf(h.log, "webhost: page {d}: {s}: connect+head {d} ms", .{ id, url, usys.nowMs() - t_open });
             }
-            p.open = .{ .conn = conn, .framing = if (head.bodiless) .none else head.framing, .opened_ms = usys.nowMs() };
+            p.open = .{ .conn = conn, .framing = if (head.bodiless) .none else head.framing, .opened_ms = usys.nowMs(), .keep = head.keep };
+            @memcpy(p.kept_key[0..key.len], key);
+            p.kept_key_len = key.len;
             const res = &p.open.?;
             if (head.bodiless) res.done = true;
             if (res.framing == .length) {
@@ -935,8 +1022,20 @@ pub const Host = struct {
         h.chunkReply(produced, end);
     }
 
+    /// A finished response: its connection is parked for the next
+    /// request when it may be (read to its end, and the server said
+    /// keep-alive), else closed.
     fn finish(h: *Host, p: *Page) void {
-        if (p.open) |*res| res.conn.close(h.net);
+        if (p.open) |*res| {
+            if (res.done and res.keep and res.framing != .none) {
+                if (p.kept) |c| c.close(h.net);
+                p.kept = res.conn;
+                p.kept_ms = usys.nowMs();
+            } else {
+                res.conn.close(h.net);
+                p.kept_key_len = 0;
+            }
+        }
         p.open = null;
     }
 };

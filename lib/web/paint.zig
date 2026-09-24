@@ -303,10 +303,10 @@ const Painter = struct {
         if (w <= 0 or h <= 0 or c.a <= 0) return;
         const word = c.word();
         const alpha = c.a;
-        const y0 = @max(0, @floor(y - p.scroll));
-        const y1 = @min(@as(f64, @floatFromInt(p.canvas.h)), @ceil(y + h - p.scroll));
-        const x0 = @max(0, @floor(x));
-        const x1 = @min(@as(f64, @floatFromInt(p.canvas.w)), @ceil(x + w));
+        const y0 = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), @floor(y - p.scroll));
+        const y1 = @min(@as(f64, @floatFromInt(@min(p.canvas.h, p.canvas.clip_y1))), @ceil(y + h - p.scroll));
+        const x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), @floor(x));
+        const x1 = @min(@as(f64, @floatFromInt(@min(p.canvas.w, p.canvas.clip_x1))), @ceil(x + w));
         var sy = y0;
         while (sy < y1) : (sy += 1) {
             var sx = x0;
@@ -548,10 +548,10 @@ const Painter = struct {
         }
         const cxm = b.x + b.w / 2;
         const cym = b.y + b.h / 2;
-        const y0 = @max(0, @floor(b.y - p.scroll));
-        const y1 = @min(@as(f64, @floatFromInt(p.canvas.h)), @ceil(b.y + b.h - p.scroll));
-        const x0 = @max(0, @floor(b.x));
-        const x1 = @min(@as(f64, @floatFromInt(p.canvas.w)), @ceil(b.x + b.w));
+        const y0 = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), @floor(b.y - p.scroll));
+        const y1 = @min(@as(f64, @floatFromInt(@min(p.canvas.h, p.canvas.clip_y1))), @ceil(b.y + b.h - p.scroll));
+        const x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), @floor(b.x));
+        const x1 = @min(@as(f64, @floatFromInt(@min(p.canvas.w, p.canvas.clip_x1))), @ceil(b.x + b.w));
         var sy = y0;
         while (sy < y1) : (sy += 1) {
             var sx = x0;
@@ -604,11 +604,12 @@ const Painter = struct {
         const fy = sh / @as(f64, @floatFromInt(dh));
         const cx0: i64 = @intCast(p.canvas.clip_x0);
         const cx1: i64 = @intCast(p.canvas.clip_x1);
+        const cy0: i64 = @intCast(p.canvas.clip_y0);
         const cy1: i64 = @intCast(@min(p.canvas.h, p.canvas.clip_y1));
         var yy: usize = 0;
         while (yy < dh) : (yy += 1) {
             const ty = oy + @as(i64, @intCast(yy));
-            if (ty < 0) continue;
+            if (ty < cy0) continue;
             if (ty >= cy1) break;
             var xx: usize = 0;
             while (xx < dw) : (xx += 1) {
@@ -758,6 +759,10 @@ const Painter = struct {
         const font = layout.fontOf(st);
         const word = st.color.word();
         if (f.text.len == 0) return;
+        // Outside the clip: nothing to draw, and no glyph to rasterize.
+        const top = f.y - p.scroll;
+        if (top >= @as(f64, @floatFromInt(p.canvas.clip_y1)) or top + f.h <= @as(f64, @floatFromInt(p.canvas.clip_y0))) return;
+        if (f.x >= @as(f64, @floatFromInt(p.canvas.clip_x1)) or f.x + f.w <= @as(f64, @floatFromInt(p.canvas.clip_x0))) return;
         // Text takes its box's visibility (a hidden header link inside a
         // visible heading).
         if (st.visibility != .visible) return;

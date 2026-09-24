@@ -2394,6 +2394,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // — but never mid-drag (a ticking clock must not drop a drag),
             // and never while minimized (nothing is on screen to update).
             if (ev.kind == 2) {
+                guipage.tick();
                 // A page's news first: an event for `update`, or a fresh
                 // commit to blit.
                 if (guipage.take()) |pe| {
