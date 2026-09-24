@@ -122,6 +122,9 @@ pub const Event = enum(u64) {
     /// for none); `b` packs its viewport rect as (x, y) in the high and
     /// (w, h) in the low word, each pair 16 bits.
     focus = 11,
+    /// More of the work that waits for quiet remains (pictures near the
+    /// viewport past one idle's budget): another `idle` is welcome.
+    want_idle = 12,
 };
 
 pub const ThemeFlags = struct {

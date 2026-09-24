@@ -826,7 +826,12 @@ supervises), and memory history per unit beside the CPU one.
       (page 60, Web 136, session 224, manager 256, init 320, root
       384); the layout arena grows its newest block in place (it grows
       downward and had refused every list growth — the cascade cost
-      29 MB on the target, 2 on the host). Not done: the desktop under
+      29 MB on the target, 2 on the host). A review pass the same day
+      fixed what three reviewers found (DESIGN, "A review pass") and made
+      the hover hit test one pass and the glyph cache a table; a scroll
+      band is under 40 ms now. Not done: the host holds its lock through
+      a TLS handshake, so the GUI thread's sends wait on the network —
+      open the lock around the socket calls; and the desktop under
       HVF — ten times
       the speed — where the filesystem service never speaks after start
       (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).

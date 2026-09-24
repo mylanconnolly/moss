@@ -254,8 +254,10 @@ pub const Absolute = struct { box: BoxId, cb: BoxId };
 
 pub const Layout = struct {
     /// Preferred and content-only widths by box, measured once a layout.
-    preferred_widths: std.ArrayList(?Widths) = .empty,
-    content_widths: std.ArrayList(?Widths) = .empty,
+    /// One entry per box, appended as boxes are seen (chunked: the
+    /// doubling `resize` of a list left its old buffers in the arena).
+    preferred_widths: store.Chunked(?Widths, 8) = .{},
+    content_widths: store.Chunked(?Widths, 8) = .{},
     a: std.mem.Allocator,
     doc: *const Document,
     styles: *const style.Styles,
@@ -295,12 +297,14 @@ pub fn layoutDocument(a: std.mem.Allocator, doc: *const Document, styles: *const
     return layoutDocumentWith(a, doc, styles, fonts, null, viewport_w, viewport_h);
 }
 
-/// The same, with the host's pictures for `img` sizes.
 /// The layout under construction, for a page that runs out of memory
-/// building it to say how far it got: set until a layout succeeds, so
-/// the caller's error path still finds it (a `defer` cleared it first).
+/// building it to say how far it got: set until the layout succeeds, so
+/// the caller's error path still finds it (a `defer` cleared it first);
+/// a page clears it when it resets its layout arena, since the struct
+/// lives there.
 pub var in_progress: ?*const Layout = null;
 
+/// The same, with the host's pictures for `img` sizes.
 pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *const style.Styles, fonts: Fonts, images: ?Images, viewport_w: f64, viewport_h: f64) Error!*Layout {
     const l = try a.create(Layout);
     l.* = .{ .a = a, .doc = doc, .styles = styles, .fonts = fonts, .images = images, .viewport_w = viewport_w, .viewport_h = viewport_h };
@@ -341,6 +345,7 @@ pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *c
         root.h = @max(root.h, b.y + b.h);
     }
     l.height = root.h;
+    in_progress = null;
     return l;
 }
 
@@ -2170,16 +2175,11 @@ fn preferredWidthsOf(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
     // per layout (nested flex containers measure their items again at
     // every level — GitHub's menus cost megabytes before this).
     const cache = if (contents_only) &l.content_widths else &l.preferred_widths;
-    if (cache.items.len < l.boxes.len) {
-        const old = cache.items.len;
-        try cache.resize(l.a, l.boxes.len);
-        @memset(cache.items[old..], null);
-    }
-    if (cache.items[id]) |w| return w;
+    while (cache.len < l.boxes.len) try cache.append(l.a, null);
+    if (cache.get(id).*) |w| return w;
     const w = try measureWidths(l, id, contents_only);
-    // (The list may have grown while measuring.)
-    const again = if (contents_only) &l.content_widths else &l.preferred_widths;
-    if (id < again.items.len) again.items[id] = w;
+    // (The list may have grown while measuring; an entry never moves.)
+    if (id < cache.len) cache.at(id).* = w;
     return w;
 }
 
@@ -2980,10 +2980,8 @@ fn baselineShift(st: *const Computed, h: f64, baseline: f64) f64 {
 /// close fragment (or the line end).
 fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64, line_end: f64, y: f64, h: f64, baseline: f64) Error!void {
     _ = container;
-    // The line's fragments are a range, re-sliced at each use: the spans
-    // appended below grow the same list, and a slice taken once pointed
-    // into its freed buffer (Wikipedia's front page, 2026-09-18: a box id
-    // read from that memory indexed past the box list).
+    // The line's fragments are the range [first_frag, last_frag) of the
+    // list; the spans appended below join the same list past it.
     const last_frag = l.fragments.len;
     // Boxes seen on this line, in order of first appearance.
     var seen: std.ArrayList(BoxId) = .empty;
@@ -3572,18 +3570,36 @@ test "layout: lines wrap, floats intrude, inline-block sits on the baseline" {
 pub fn hitTest(l: *const Layout, x: f64, y: f64) ?NodeId {
     var best: ?BoxId = null;
     var best_depth: usize = 0;
-    for (0..l.boxes.len) |i| {
-        const b = l.boxes.get(i);
-        if (b.kind == .root) continue;
-        const inside = switch (b.kind) {
-            .text, .inline_box => fragmentHolds(l, @intCast(i), x, y),
-            else => b.laid_out and x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h,
-        };
-        if (!inside) continue;
-        const depth = boxDepth(l, @intCast(i));
-        if (best == null or depth >= best_depth) {
-            best = @intCast(i);
-            best_depth = depth;
+    // Inline content is where its fragments landed: one pass over them
+    // finds every inline box under the point (a pass per box scanned the
+    // whole list per box — 10⁸ compares a mouse move on a long article).
+    var i: usize = 0;
+    while (i < l.fragments.len) {
+        const run = l.fragments.slice(i);
+        i += run.len;
+        for (run) |*f| {
+            if (f.dead or !(x >= f.x and x < f.x + f.w and y >= f.y and y < f.y + f.h)) continue;
+            const depth = boxDepth(l, f.box);
+            if (best == null or depth >= best_depth) {
+                best = f.box;
+                best_depth = depth;
+            }
+        }
+    }
+    var bi: usize = 0;
+    while (bi < l.boxes.len) {
+        const run = l.boxes.slice(bi);
+        const base = bi;
+        bi += run.len;
+        for (run, 0..) |*b, k| {
+            if (b.kind == .root or b.kind == .text or b.kind == .inline_box) continue;
+            if (!(b.laid_out and x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h)) continue;
+            const id: BoxId = @intCast(base + k);
+            const depth = boxDepth(l, id);
+            if (best == null or depth >= best_depth) {
+                best = id;
+                best_depth = depth;
+            }
         }
     }
     const id = best orelse return null;
@@ -3600,18 +3616,6 @@ fn boxDepth(l: *const Layout, id: BoxId) usize {
     var b = l.get(id);
     while (b.parent) |p| : (b = l.get(p)) d += 1;
     return d;
-}
-
-/// Inline content has no box of its own on the page: it is where its
-/// fragments landed on the lines of the block that holds it.
-fn fragmentHolds(l: *const Layout, id: BoxId, x: f64, y: f64) bool {
-    for (0..l.fragments.len) |fi| {
-        const f = l.fragments.get(fi);
-        if (f.dead) continue;
-        if (f.box != id) continue;
-        if (x >= f.x and x < f.x + f.w and y >= f.y and y < f.y + f.h) return true;
-    }
-    return false;
 }
 
 test "layout: hit test finds the link under a point" {

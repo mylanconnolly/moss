@@ -387,9 +387,6 @@ fn transferFlushRect(r: Rect) bool {
 
 // -------------------------------------------------------- surfaces
 
-/// Focus the topmost (highest-z) live surface, or none (0) — used when
-/// the focused surface is destroyed (a GUI login closing leaves the
-/// terminal beneath it focused, so keys reach the shell).
 /// The frontmost visible window — what a pill's toggle hides when it is
 /// the one clicked. The desktop's chrome (the strut surfaces: the click
 /// itself focused and raised the dock) and dialogs do not count; a window
@@ -407,6 +404,44 @@ fn topmostWindow() u64 {
         }
     }
     return best_id;
+}
+
+/// Focus the topmost (highest-z) live surface, or none (0) — used when
+/// the focused surface is destroyed (a GUI login closing leaves the
+/// terminal beneath it focused, so keys reach the shell).
+/// The surface titled by the two words `a`/`b`, or 0.
+fn surfaceByTitle(a: u64, b: u64) u64 {
+    var nbuf: [24]u8 = undefined;
+    const want = shared.wordsToStr(&nbuf, .{ a, b, 0 });
+    for (&surfaces, 0..) |*sf, i| {
+        if (sf.used and std.mem.eql(u8, sf.title[0..sf.title_len], want)) return i + 1;
+    }
+    return 0;
+}
+
+/// A surface's id from its record.
+fn surfaceId(sf: *const Surface) u64 {
+    return (@intFromPtr(sf) - @intFromPtr(&surfaces)) / @sizeOf(Surface) + 1;
+}
+
+/// Bring a window forward: unhide it, raise and focus it (its dialog in
+/// front of it, since a window waiting on its dialog cannot take keys),
+/// and wake its owner to repaint with a `kind` 3 — only when it had been
+/// hidden; a raise from behind changes no pixels of its own.
+fn showWindow(chan_h: u64, id: u64) void {
+    const sf = findSurface(id) orelse return;
+    const was_hidden = sf.hidden;
+    sf.hidden = false;
+    raiseSurface(id);
+    focusSurface(id);
+    if (dialogFor(id)) |d| {
+        d.hidden = false;
+        const did = surfaceId(d);
+        raiseSurface(did);
+        focusSurface(did);
+    }
+    _ = composite();
+    if (was_hidden) wakeReader(chan_h, sf.owner, id, 3);
 }
 
 fn focusTopmost() void {
@@ -1361,8 +1396,12 @@ fn flushPendingPtr(chan_h: u64) void {
         const token = takeReader(sf.owner) orelse continue;
         const e = sf.pend[sf.pend_head];
         sf.pend_head = (sf.pend_head + 1) % pend_cap;
-        var lb: [80]u8 = undefined;
-        _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: flush ptr surface={d} buttons={d}", .{ i + 1, e.buttons }) catch "comp: flush ptr");
+        // A press delivered late is worth a line (the pill-click hunt);
+        // the moves and releases around it are not.
+        if (e.buttons & 1 != 0) {
+            var lb: [80]u8 = undefined;
+            _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: flush press surface={d}", .{i + 1}) catch "comp: flush press");
+        }
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(e.lx, e.ly, e.buttons) } }, 0, token);
     }
 }
@@ -1669,73 +1708,37 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // minimized) and wake its owner to repaint. Any client may
                 // ask — it only shows and focuses an existing surface, never
                 // creates or hides one, so it cannot be used to spy.
-                var nbuf: [24]u8 = undefined;
-                const want = shared.wordsToStr(&nbuf, .{ q.a, q.b, 0 });
-                var hit: u64 = 0;
-                for (&surfaces, 0..) |*sf, i| {
-                    if (!sf.used) continue;
-                    if (std.mem.eql(u8, sf.title[0..sf.title_len], want)) {
-                        hit = i + 1;
-                        break;
-                    }
-                }
+                const hit = surfaceByTitle(q.a, q.b);
                 if (hit == 0) {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 14 } }, 0, token);
                     continue;
                 }
-                const sf = findSurface(hit).?;
-                sf.hidden = false;
-                raiseSurface(hit);
-                focusSurface(hit);
-                // A window waiting on its dialog cannot take keys: the
-                // restore lands on the dialog, in front of it.
-                if (dialogFor(hit)) |d| {
-                    const did = (@intFromPtr(d) - @intFromPtr(&surfaces)) / @sizeOf(Surface) + 1;
-                    raiseSurface(did);
-                    focusSurface(did);
-                }
-                _ = composite();
-                wakeReader(chan_h, sf.owner, hit, 3);
+                showWindow(chan_h, hit);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
             .toggle_titled => |q| {
                 // A pill click on a running window: bring a hidden one
-                // back, hide a focused one, raise one that is behind.
-                var nbuf: [24]u8 = undefined;
-                const want = shared.wordsToStr(&nbuf, .{ q.a, q.b, 0 });
-                var hit: u64 = 0;
-                for (&surfaces, 0..) |*sf, i| {
-                    if (!sf.used) continue;
-                    if (std.mem.eql(u8, sf.title[0..sf.title_len], want)) {
-                        hit = i + 1;
-                        break;
-                    }
-                }
-                if (hit == 0) {
-                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 14 } }, 0, token);
+                // back, hide the one in front, raise one that is behind.
+                // The desktop's control badge only — unlike a restore,
+                // this can hide a window, which no client may do to another.
+                const hit = surfaceByTitle(q.a, q.b);
+                if (badge != control_badge or hit == 0) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = if (hit == 0) 14 else 25 } }, 0, token);
                     continue;
                 }
                 const sf = findSurface(hit).?;
                 const hide = !sf.hidden and topmostWindow() == hit;
                 var lb: [64]u8 = undefined;
-                _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: toggle {s}: {s}", .{ want, if (hide) "hide" else if (sf.hidden) "show" else "raise" }) catch "comp: toggle");
+                _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: toggle {s}: {s}", .{ sf.title[0..sf.title_len], if (hide) "hide" else if (sf.hidden) "show" else "raise" }) catch "comp: toggle");
                 if (hide) {
                     sf.hidden = true;
+                    // Its dialog goes with it: a panel left floating for a
+                    // window that is not there would be a puzzle.
+                    if (dialogFor(hit)) |d| d.hidden = true;
                     focusTopmost();
                     _ = composite();
                     wakeReader(chan_h, sf.owner, hit, 5);
-                } else {
-                    sf.hidden = false;
-                    raiseSurface(hit);
-                    focusSurface(hit);
-                    if (dialogFor(hit)) |d| {
-                        const did = (@intFromPtr(d) - @intFromPtr(&surfaces)) / @sizeOf(Surface) + 1;
-                        raiseSurface(did);
-                        focusSurface(did);
-                    }
-                    _ = composite();
-                    wakeReader(chan_h, sf.owner, hit, 3);
-                }
+                } else showWindow(chan_h, hit);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
             .appearance_changed => {
@@ -1763,16 +1766,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // control badge only — asking a window to close is the task
                 // manager's to do, not any client's — and never a trusted
                 // surface, whose keys are the seat's alone.
-                var nbuf: [24]u8 = undefined;
-                const want = shared.wordsToStr(&nbuf, .{ q.a, q.b, 0 });
-                var hit: u64 = 0;
-                for (&surfaces, 0..) |*sf, i| {
-                    if (!sf.used) continue;
-                    if (std.mem.eql(u8, sf.title[0..sf.title_len], want)) {
-                        hit = i + 1;
-                        break;
-                    }
-                }
+                const hit = surfaceByTitle(q.a, q.b);
                 const sf = findSurface(hit);
                 const code: u64 = if (badge != control_badge) 25 else if (sf == null) 14 else if (sf.?.trusted) 25 else if (sf.?.menu_key != 0) 22 else 0;
                 if (code == 0) {
@@ -1792,15 +1786,10 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // the caller's focused surface arrives. The serve loop
                 // stays free to handle every other client meanwhile.
                 parkReader(badge, token, 0);
-                // Keys first (the policy here), then a pointer event queued
-                // while this client was busy — older than anything still in
-                // the ring, and delivered now rather than on the next pointer
-                // event: a dock click landing in its tick's render waited for
-                // the mouse to move again, the pill-click flake, one drill a
-                // gate (2026-09-24). Flushed before the keys it once put a
-                // click ahead of the letters typed before it.
+                // Keys first (the policy here), then the pointer ring —
+                // which flushes what was queued for a busy surface before
+                // and after it.
                 dispatchKeys(chan_h);
-                flushPendingPtr(chan_h);
                 dispatchPointer(chan_h);
             },
             .next_input_tick => |q| {
@@ -1817,7 +1806,6 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // continuous motion nor a slow-rendering client starves the other.
                 dispatchDueTicks(chan_h, true);
                 dispatchKeys(chan_h);
-                flushPendingPtr(chan_h);
                 dispatchPointer(chan_h);
                 pumpFocus(chan_h);
                 dispatchDueTicks(chan_h, false);

@@ -1,14 +1,22 @@
 //! Pointer gestures that are timing, not pixels.
 const std = @import("std");
 
-/// Two presses on one row within `window_ms` activate it; a later click selects.
 pub const double_click_ms: u64 = 500;
+
+/// Two presses on one row within the window activate it (a list's
+/// double-click); the pair then resets, so a third press selects again.
 pub const DoubleClick = struct {
-    row: ?usize = null,
-    at_ms: u64 = 0,
-    pub fn press(self: *DoubleClick, row: usize, now_ms: u64) bool {
-        const activate = self.row == row and now_ms >= self.at_ms and now_ms - self.at_ms <= double_click_ms;
-        self.* = if (activate) .{} else .{ .row = row, .at_ms = now_ms };
+    clicks: MultiClick = .{},
+    /// The row and time of the pending first click (for a caller's log).
+    pub fn row(self: *const DoubleClick) ?usize {
+        return self.clicks.target;
+    }
+    pub fn atMs(self: *const DoubleClick) u64 {
+        return self.clicks.at_ms;
+    }
+    pub fn press(self: *DoubleClick, row_: usize, now_ms: u64) bool {
+        const activate = self.clicks.press(row_, now_ms) == 2;
+        if (activate) self.clicks = .{};
         return activate;
     }
 };

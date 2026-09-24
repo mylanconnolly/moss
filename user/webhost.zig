@@ -44,13 +44,16 @@ pub const Lock = struct {
 
 /// A page's memory: its arenas — the document-and-layout region (40 MB),
 /// the glyph cache (2), the picture store (6) and the picture scratch
-/// (6) — plus the image and its 512K stack. Wikipedia's front page,
+/// (6), the user-agent sheet (0.5) — plus the image and its 512K stack:
+/// 54.5 MB of statics under a 60 MB budget, 5 MB of headroom. Wikipedia's front page,
 /// the first real site opened, died twice of a 28 MB page: of the
 /// pictures it decoded into the document arena, then of an 8 MB layout
 /// arena a 3900-node page asks 10 MB of (2026-09-18); a 1.2 MB article
 /// died of a 24 MB region a 17,800-node page asks 29 MB of, once its
 /// lists stopped leaving their old buffers behind (2026-09-24).
 pub const page_user_kb: u64 = 60 << 10;
+/// A connection key: scheme|host|port, a host name's worst case.
+const conn_key_max = 320;
 pub const page_kobj_kb: u64 = 2 << 10;
 
 const stall_ms: u64 = 10_000;
@@ -218,7 +221,10 @@ pub const Page = struct {
     /// next request to the same host (a site's pictures came one fresh
     /// TLS handshake each, ~400 ms under emulation, 2026-09-23).
     kept: ?Conn = null,
-    kept_key: [320]u8 = undefined,
+    /// The parked connection's scheme|host|port — written when a
+    /// connection opens (it is the resource's until `finish` parks it),
+    /// so a reuse test always pairs with `kept != null`.
+    kept_key: [conn_key_max]u8 = undefined,
     kept_key_len: usize = 0,
     kept_ms: u64 = 0,
     // What the page reported, kept for the host program.
@@ -549,8 +555,10 @@ pub const Host = struct {
                     return true;
                 }
                 if (cmd == .idle and q.* == .idle) return true;
-                // A press or release in between keeps what came before it.
-                if (q.* == .pointer and q.pointer.kind != .move) break;
+                // Anything else in between — a press, a load, a resize, a
+                // key — keeps its place: input folds only across input
+                // that folds.
+                if (q.* != .scroll and q.* != .idle and !(q.* == .pointer and q.pointer.kind == .move)) break;
             }
         }
         if (p.qlen == p.queue.len) {
@@ -645,6 +653,7 @@ pub const Host = struct {
                 res.conn.close(h.net);
                 h.pages[id].open = null;
             }
+            h.dropParked(&h.pages[id]); // a dead page keeps no socket open
             return .{ .dead = id };
         }
         if (r.err != .ok) {
@@ -731,6 +740,7 @@ pub const Host = struct {
                 p.found_count = a;
                 p.found_index = b;
             },
+            .want_idle => {}, // the host's runtime answers it, not the record
         }
     }
 
@@ -787,7 +797,7 @@ pub const Host = struct {
             const a = fba.allocator();
             const target = http.parseUrl(url) orelse return h.refuse(if (std.mem.indexOf(u8, url, "://") == null) .bad_url else .scheme);
             if (!h.net.attach()) return h.refuse(.connect);
-            var key_buf: [320]u8 = undefined;
+            var key_buf: [conn_key_max]u8 = undefined;
             const key = connKey(&key_buf, target);
             var reused = false;
             if (p.kept != null and !retry_fresh and usys.nowMs() - p.kept_ms < park_ms and std.mem.eql(u8, p.kept_key[0..p.kept_key_len], key)) {
@@ -854,13 +864,26 @@ pub const Host = struct {
                         got += bytes.len;
                     },
                     .closed => closed = true,
-                    .failed, .timeout => {
+                    .failed => {
                         conn.close(h.net);
                         if (reused and got == 0) {
                             retry_fresh = true;
                             break;
                         }
-                        logf(h.log, "webhost: page {d}: {s}: no head after {d} bytes (the connection failed or stalled)", .{ id, url, got });
+                        logf(h.log, "webhost: page {d}: {s}: no head after {d} bytes (the connection failed)", .{ id, url, got });
+                        return h.refuse(.connect);
+                    },
+                    .timeout => {
+                        conn.close(h.net);
+                        // A parked connection that answers nothing is retried
+                        // on a fresh one for a GET; a POST is not — after a
+                        // stall the server may have taken the form, and it
+                        // must not be sent twice.
+                        if (reused and got == 0 and !post) {
+                            retry_fresh = true;
+                            break;
+                        }
+                        logf(h.log, "webhost: page {d}: {s}: no head after {d} bytes (the connection stalled)", .{ id, url, got });
                         return h.refuse(.connect);
                     },
                 }

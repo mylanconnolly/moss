@@ -104,7 +104,7 @@ fn imagesBackground(_: *anyopaque, url_text: []const u8, base: ?[]const u8) ?web
 }
 const images_vtable: web.layout.Images.VTable = .{ .get = imagesGet, .background = imagesBackground };
 
-/// A picture's pixels, as the page decodes them: SVG at the zoom.
+/// Every allocation of the page-mode probe by size class (`WEBSHOT_PAGE`).
 const Histo = struct { count: usize = 0, bytes: usize = 0, freed: usize = 0, resized: usize = 0, grown: usize = 0 };
 var histo: [40]Histo = @splat(.{});
 var histo_inner: std.mem.Allocator = undefined;
@@ -135,6 +135,7 @@ fn histoFree(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) 
 }
 const histo_vtable: std.mem.Allocator.VTable = .{ .alloc = histoAlloc, .resize = histoResize, .remap = histoRemap, .free = histoFree };
 
+/// A picture's pixels, as the page decodes them: SVG at the zoom.
 fn decodePicture(bytes: []const u8, href: []const u8) ?web.layout.Bitmap {
     if (mosslib.svg.sniff(bytes)) {
         const img = mosslib.svg.render(gpa, bytes, zoom) catch |e| {
@@ -316,19 +317,22 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("webshot: image {d}x{d} {s}\n", .{ bm.?.w, bm.?.h, href });
     }
     // Every background picture a box asks for.
-    for (0..l.boxes.len) |bi| for ([_]struct { img: web.style.BackgroundImage, base: ?[]const u8 }{ .{ .img = l.boxes.get(bi).style.background_image, .base = l.boxes.get(bi).style.background_base }, .{ .img = l.boxes.get(bi).style.mask_image, .base = l.boxes.get(bi).style.mask_base } }) |layer| {
-        if (l.boxes.get(bi).kind == .text or layer.img != .url) continue;
-        const href = resolve(layer.img.url, layer.base) orelse continue;
-        var known = false;
-        for (backgrounds.items) |k| if (std.mem.eql(u8, k.href, href)) {
-            known = true;
-        };
-        if (known) continue;
-        const f = fetch(href) orelse continue;
-        const bm = decodePicture(f.body, href);
-        try backgrounds.append(gpa, .{ .href = href, .bm = bm });
-        if (bm) |x| std.debug.print("webshot: background {d}x{d} {s}\n", .{ x.w, x.h, href[0..@min(href.len, 120)] });
-    };
+    for (0..l.boxes.len) |bi| {
+        const b = l.boxes.get(bi);
+        for ([_]struct { img: web.style.BackgroundImage, base: ?[]const u8 }{ .{ .img = b.style.background_image, .base = b.style.background_base }, .{ .img = b.style.mask_image, .base = b.style.mask_base } }) |layer| {
+            if (b.kind == .text or layer.img != .url) continue;
+            const href = resolve(layer.img.url, layer.base) orelse continue;
+            var known = false;
+            for (backgrounds.items) |k| if (std.mem.eql(u8, k.href, href)) {
+                known = true;
+            };
+            if (known) continue;
+            const f = fetch(href) orelse continue;
+            const bm = decodePicture(f.body, href);
+            try backgrounds.append(gpa, .{ .href = href, .bm = bm });
+            if (bm) |x| std.debug.print("webshot: background {d}x{d} {s}\n", .{ x.w, x.h, href[0..@min(href.len, 120)] });
+        }
+    }
     styles = try gpa.create(web.style.Styles);
     styles.* = try web.style.compute(gpa, doc, sheets, env);
     l = try web.layout.layoutDocumentWith(gpa, doc, styles, faces.fonts(), images, @floatFromInt(vw), @floatFromInt(vh));

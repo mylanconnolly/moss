@@ -372,6 +372,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
         if (wf.refreshFontMetrics() or output_changed) {
             dismissPopup(true);
             wf.closeSurface();
+            wf.ptr_down = false; // the old surface's queue went with it
             wf.win_w = wf.scanout_w;
             wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
             if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});

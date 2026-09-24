@@ -857,6 +857,8 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
             }
         } else if (ev.kind == 3) {
             hidden = false;
+        } else if (ev.kind == 5) {
+            hidden = true; // the dock hid us; a restore brings us back
         } else if (ev.kind == 2) {
             if (wf.refreshFontMetrics()) {
                 wf.refreshAppearance();

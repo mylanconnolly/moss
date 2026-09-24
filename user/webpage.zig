@@ -136,6 +136,7 @@ fn layoutArena() std.mem.Allocator {
 
 fn resetLayout() void {
     reg_hi = region.len;
+    web.layout.in_progress = null; // a failed layout's struct lived here
 }
 
 fn resetDocument() void {
@@ -160,7 +161,7 @@ var picture_scratch_fba: std.heap.FixedBufferAllocator = undefined;
 var phase: []const u8 = "loading";
 
 fn outOfMemory() noreturn {
-    var line: [200]u8 = undefined;
+    var line: [256]u8 = undefined;
     _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB; viewport {d}x{d} at {d}%)", .{ phase, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024, vw, vh, zoom_pct }) catch "webpage: out of memory");
     // How far a layout got: the counts say whether the page is big or
     // the layout is wasteful.
@@ -620,11 +621,11 @@ fn present(markup: []const u8, failure: u64) void {
     relayout(false);
     const t_laid = usys.nowMs();
     phase = "loading its pictures";
-    loadPicturesNear();
+    loadPictures(std.math.maxInt(usize));
     const t_pictures = usys.nowMs();
     phase = "editing it";
     if (failure == 0) {
-        var line: [200]u8 = undefined;
+        var line: [256]u8 = undefined;
         _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes; document {d} KB, layout {d} KB of {d})", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_sheets - t_parsed, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024 }) catch "webpage: loaded");
     }
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
@@ -765,11 +766,20 @@ fn backgroundHref(a: std.mem.Allocator, url_text: []const u8, base_text: ?[]cons
     return u.href(a) catch null;
 }
 
+/// Pictures fetched on one `idle`: enough to keep the serve loop
+/// answering a scroll between them; the page asks for another idle
+/// while more remain.
+const idle_picture_budget: usize = 4;
+
 /// The pictures near the viewport (a screen above and two below) —
-/// `img` boxes' and `background-image`s' — fetched and decoded lazily;
-/// a relayout follows when any arrived, since their sizes are now
-/// known.
-fn loadPicturesNear() void {
+/// `img` boxes' and `background-image`s' — fetched and decoded lazily,
+/// at most `budget` of them; a relayout follows when any arrived, since
+/// their sizes are now known, and a `want_idle` event when the budget
+/// ran out with more to fetch.
+fn loadPictures(budget: usize) void {
+    var fetched: usize = 0;
+    var more = false;
+    defer if (more) event(.want_idle, 0, 0);
     var rounds: usize = 0;
     while (rounds < 3) : (rounds += 1) {
         const l = page.layout orelse return;
@@ -782,11 +792,21 @@ fn loadPicturesNear() void {
         for (0..l.boxes.len) |bi| {
             const b = l.boxes.get(bi);
             if (b.y + b.h < top or b.y > bottom) continue;
+            if (fetched >= budget) {
+                more = true;
+                break;
+            }
             if (b.kind != .text and b.style.background_image == .url and page.n_backgrounds < max_backgrounds) {
-                if (loadBackground(b.style.background_image.url, b.style.background_base)) got_bg += 1;
+                if (loadBackground(b.style.background_image.url, b.style.background_base)) {
+                    got_bg += 1;
+                    fetched += 1;
+                }
             }
             if (b.kind != .text and b.style.mask_image == .url and page.n_backgrounds < max_backgrounds) {
-                if (loadBackground(b.style.mask_image.url, b.style.mask_base)) got_bg += 1;
+                if (loadBackground(b.style.mask_image.url, b.style.mask_base)) {
+                    got_bg += 1;
+                    fetched += 1;
+                }
             }
             const node = b.node orelse continue;
             if (b.kind != .text and doc.get(node).namespace == .svg and std.mem.eql(u8, doc.get(node).name, "svg")) {
@@ -802,6 +822,7 @@ fn loadPicturesNear() void {
             slot.* = .{ .node = node, .state = .failed, .bm = .{ .w = 0, .h = 0, .rgba = &.{} } };
             page.n_pictures += 1;
             const src = doc.getAttr(node, "src") orelse continue;
+            fetched += 1;
             // The file and the decoder's working memory in the scratch,
             // reset per picture; only the pixels are kept, in the store.
             picture_scratch_fba.reset();
@@ -1081,8 +1102,10 @@ fn highlightsNow() []const web.paint.Highlight {
 }
 
 fn scrollTo(y_in: f64) bool {
-    const max_y = @max(0, page.extent - @as(f64, @floatFromInt(vh)));
-    const y = @min(max_y, @max(0, y_in));
+    // Whole pixels: a scroll moves rows, and a band painted at a
+    // fraction would sit a row off the rows it joins.
+    const max_y = @floor(@max(0, page.extent - @as(f64, @floatFromInt(vh))));
+    const y = @floor(@min(max_y, @max(0, y_in)));
     if (y == page.scroll_y) return false;
     page.scroll_y = y;
     return true;
@@ -1601,7 +1624,7 @@ fn serve() noreturn {
                 @memcpy(text[0..n], data[0..n]);
                 find(text[0..n], f.index);
             },
-            .idle => loadPicturesNear(),
+            .idle => loadPictures(idle_picture_budget),
             .zoom => |z| {
                 const pct = @min(400, @max(25, z.percent));
                 if (pct != zoom_pct) {

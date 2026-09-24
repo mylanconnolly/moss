@@ -3709,7 +3709,16 @@ lost anywhere disarms the next click; the per-surface queue holds
 eight and drops the oldest on overflow. The compositor now logs a
 press it had to queue and every queued event it flushes, and the dock
 a press it ignored for a held button: the next occurrence names its
-cause. "In front" was first "the topmost
+cause. It did not need to: a review pass the same evening read it off
+the code. The dock and the top bar recreate their surface on a font or
+output change; `destroySurface` clears the surface's record, pending
+pointer queue included — a release queued while the dock was busy
+launching goes with it — and the dock's `ptr_down` stayed true, so
+every press after was "the button still held" and no click. Both
+flaking drills change the font scale. The chrome resets `ptr_down`
+when it recreates its surface now; the park-time flush, which turned
+out to be a no-op (`dispatchPointer` already flushed first and last),
+is gone. "In front" was first "the topmost
 titled window", which hid Settings under a terminal that had not named
 itself yet; it is the topmost surface that is neither chrome (the two
 struts) nor a dialog. And two drills clicked a pill to *give a window
@@ -3717,6 +3726,34 @@ focus* — after a dock restart, after an editor closed — which a toggle
 now hides: one waits on the top bar's word instead, and for the other
 the compositor hands focus back when a surface that holds it declares
 itself a strut, since chrome never keeps the keyboard.
+
+**A review pass (2026-09-24).** Three reviewers over the day's diff,
+findings verified against the code before any was acted on. Fixed:
+adoption-agency clones shared one attribute list with the element they
+were remade from (`setAttr` on one rewrote the other) — a copy per
+clone; `layout.in_progress` dangled across a navigation into the OOM
+handler — cleared on success and at the arena reset; `toggle_titled`
+let any client hide any window — the control badge only, and a hidden
+window takes its dialog with it; a raise from behind woke the owner
+with a "restored"; the editor did not know `kind` 5; a POST was re-sent
+after a stall on a parked connection (the server may have taken it) —
+only a GET retries after a stall; the queue folding scanned past loads
+and resizes; a dead page kept its parked socket; a find scrolled without
+an idle to follow; a scroll to a fractional offset blitted rows a
+half-pixel from the band. Made quick: the hover hit test was a pass
+over all fragments per inline box (10⁸ compares a mouse move on a long
+article) — one pass over fragments now; the glyph cache was a 512-entry
+list scanned per glyph and cleared whole when full, which an article's
+few sizes of two faces filled every scroll — an open-addressed table of
+4096; a text run stops rasterizing past the clip's right edge; a line
+outside the clip band paints nothing; the width caches are chunked like
+the lists they index; one idle fetches four pictures and asks for
+another. Tidied: one title lookup and one "show window" for restore,
+toggle and close; one `windowByTitle` for the two mshl commands;
+`DoubleClick` over `MultiClick`; the dock reads the catalog once per
+render; comments that had drifted onto the wrong declarations. Left as
+noted: the host holds its lock through a TLS handshake (the GUI thread
+spins meanwhile) — a real seam to open next.
 
 **Maximize (as built, 2026-09-10).** The green traffic-light, a stub since
 stage 1, now maximizes the window to fill the work area — full width, from

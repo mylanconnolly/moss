@@ -39,8 +39,9 @@ let final = (gui {
     tick: 1000
     init: { }
     view: (fn [state] {
+        let all = (apps)
         {
-          items: ((apps | where dock) + (apps | where running | where dock == false))
+          items: (($all | where dock) + ($all | where running | where dock == false))
         }
       })
     update: (fn [state, ev] {

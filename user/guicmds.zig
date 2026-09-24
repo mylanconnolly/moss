@@ -205,6 +205,26 @@ pub fn signature(name: []const u8) ?mshl.Signature {
 
 const restore_result = mshl.resultShape(.string, .string);
 
+/// `restore-window` and `toggle-window`: the titled window through the
+/// given endpoint; `ok TITLE` when one matched, else `err "not running"`.
+fn windowByTitle(it: *mshl.Interp, name: []const u8, args: []const Value, chan: u64, what: enum { restore, toggle }) mshl.Error!?Value {
+    if (chan == 0) return it.fail("{s}: this program holds no display for it", .{name});
+    if (args.len == 0 or args[0] != .str) return it.fail("{s}: a window title expected", .{name});
+    const w = shared.strToWords(args[0].str);
+    const req: shared.GpuReq = switch (what) {
+        .restore => .{ .restore_titled = .{ .a = w[0], .b = w[1] } },
+        .toggle => .{ .toggle_titled = .{ .a = w[0], .b = w[1] } },
+    };
+    const ok = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, chan, req, 0)) {
+        .ok => |r| r == .ok,
+        .err => false,
+    };
+    return if (ok)
+        try it.mkResult(true, .{ .str = try it.arena.dupe(u8, args[0].str) })
+    else
+        try it.mkResult(false, .{ .str = "not running" });
+}
+
 // ------------------------------------------------------------ rendering
 //
 // The drawing primitives, the system font (fontsvc) and the semantic
@@ -1694,8 +1714,8 @@ fn listClick(id: []const u8, x: usize, screen_y: usize) ListClick {
         const row = st.scroll + (y - lh.rows_top) / lh.row_h;
         if (row >= st.nrows) return .{};
         const now_ms = usys.nowMs();
-        const prev_row = st.click.row;
-        const prev_at = st.click.at_ms;
+        const prev_row = st.click.row();
+        const prev_at = st.click.atMs();
         const activated = st.click.press(row, now_ms);
         // One line per click, so a drill can see why a double-click did or
         // did not activate (the two clocks, the two rows).
@@ -2035,32 +2055,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         vals[5] = .{ .bool = locked & 4 != 0 };
         return Value{ .record = .{ .keys = keys, .vals = vals } };
     }
-    if (std.mem.eql(u8, name, "restore-window")) {
-        if (wf.display == 0) return it.fail("restore-window: no display", .{});
-        if (args.len == 0 or args[0] != .str) return it.fail("restore-window: a window title expected", .{});
-        const w = shared.strToWords(args[0].str);
-        const ok = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .{ .restore_titled = .{ .a = w[0], .b = w[1] } }, 0)) {
-            .ok => |r| r == .ok,
-            .err => false,
-        };
-        return if (ok)
-            try it.mkResult(true, .{ .str = try it.arena.dupe(u8, args[0].str) })
-        else
-            try it.mkResult(false, .{ .str = "not running" });
-    }
-    if (std.mem.eql(u8, name, "toggle-window")) {
-        if (wf.display == 0) return it.fail("toggle-window: no display", .{});
-        if (args.len == 0 or args[0] != .str) return it.fail("toggle-window: a window title expected", .{});
-        const w = shared.strToWords(args[0].str);
-        const ok = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, wf.display, .{ .toggle_titled = .{ .a = w[0], .b = w[1] } }, 0)) {
-            .ok => |r| r == .ok,
-            .err => false,
-        };
-        return if (ok)
-            try it.mkResult(true, .{ .str = try it.arena.dupe(u8, args[0].str) })
-        else
-            try it.mkResult(false, .{ .str = "not running" });
-    }
+    if (std.mem.eql(u8, name, "restore-window")) return windowByTitle(it, name, args, wf.display, .restore);
+    // A toggle can hide: the display control endpoint, the desktop's own.
+    if (std.mem.eql(u8, name, "toggle-window")) return windowByTitle(it, name, args, output_control, .toggle);
     if (std.mem.eql(u8, name, "quit-window")) {
         if (output_control == 0) return it.fail("quit-window: this program holds no display control", .{});
         if (args.len == 0 or args[0] != .str) return it.fail("quit-window: a window title expected", .{});

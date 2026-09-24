@@ -40,7 +40,19 @@ pub fn Chunked(comptime T: type, comptime chunk_bits: u5) type {
             return self.at(self.len - 1);
         }
 
-        /// Chunks held, counting the partial last one.
+        /// The rest of the chunk holding element `i`: the run from `i`
+        /// to the chunk's end (or the list's), for loops that want to
+        /// walk the list a chunk at a time instead of a `get` per element.
+        pub fn slice(self: *const Self, i: usize) []T {
+            std.debug.assert(i < self.len);
+            const chunk = self.chunks.items[i >> chunk_bits];
+            const from = i & mask;
+            const to = @min(chunk_len, self.len - (i - from));
+            return chunk[from..to];
+        }
+
+        /// Elements the chunks held so far have room for, the partial
+        /// last one counted whole.
         pub fn capacity(self: *const Self) usize {
             return self.chunks.items.len * chunk_len;
         }
@@ -66,4 +78,15 @@ test "store: a chunked list keeps its elements in place across growth" {
     try std.testing.expectEqual(@as(u64, 70), s.get(7).*);
     s.at(7).* = 71;
     try std.testing.expectEqual(@as(u64, 71), s.last().* - 29);
+    // Chunk runs cover the list exactly once, in order.
+    var seen: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const run = s.slice(i);
+        try std.testing.expect(run.len > 0 and run.len <= @TypeOf(s).chunk_len);
+        seen += run.len;
+        i += run.len;
+    }
+    try std.testing.expectEqual(s.len, seen);
+    try std.testing.expectEqual(@as(usize, 3), s.slice(8).len);
 }

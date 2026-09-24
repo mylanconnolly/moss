@@ -232,6 +232,12 @@ fn serve(_: u64) callconv(.c) void {
                         push(e.page, .selection, e.a, p.noteText());
                     },
                     .focus => push(e.page, .focus, e.b, p.noteText()),
+                    // The page wants another idle: the next tick sends one
+                    // unless input arrives first.
+                    .want_idle => if (slotOfPage(e.page)) |i| {
+                        slots[i].idle_sent = false;
+                        slots[i].last_cmd_ms = 0;
+                    },
                     else => {},
                 }
             },
@@ -380,6 +386,7 @@ pub fn syncExtras(s: *Slot, x: Extras) void {
         s.find_nav = x.find_nav;
         s.find_sent = true;
         _ = host.send(s.page, .{ .find = .{ .text = s.find[0..s.find_len], .index = @intCast(@max(0, x.find_nav)) } });
+        s.touched(); // a find scrolls to its match: pictures there follow on idle
     }
 }
 

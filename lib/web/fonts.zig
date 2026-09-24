@@ -14,11 +14,11 @@ const ui = @import("../ui.zig");
 const layout = @import("layout.zig");
 
 pub const max_system = 6;
+pub const max_web = 8;
 
 /// Rasterizations since the counter was last read: what a paint cost
 /// in glyphs it had not seen at that size.
 pub var rasterized: usize = 0;
-pub const max_web = 8;
 
 pub const FaceFonts = struct {
     /// Sans first, mono second, then the fallbacks; null where absent.
@@ -26,7 +26,12 @@ pub const FaceFonts = struct {
     /// `@font-face` faces the page fetched, by the family they declare.
     web: [max_web]WebFace = undefined,
     n_web: usize = 0,
-    cache: [512]Entry = undefined,
+    /// Rasterized glyphs by (face, glyph, size): an open-addressed table
+    /// — a 512-entry list scanned per glyph drawn was cleared whole once
+    /// full, and an article's few sizes of two faces filled it, so every
+    /// scroll rasterized again (2026-09-24). Cleared whole only when the
+    /// table or the glyph heap is full, which a page rarely reaches.
+    cache: [cache_slots]Entry = undefined,
     cache_len: usize = 0,
     glyph_fba: std.heap.FixedBufferAllocator,
     fixed: layout.FixedFonts = .{},
@@ -35,11 +40,27 @@ pub const FaceFonts = struct {
     on_web_face_used: ?*const fn (name: []const u8) void = null,
 
     pub const WebFace = struct { name: [64]u8, name_len: usize, face: font.Font, used: bool = false };
-    const Entry = struct { face: u8, gid: u16, size: u16, glyph: font.Glyph };
+    const Entry = struct { key: u64, glyph: font.Glyph };
+    const cache_slots = 4096;
+    const cache_fill = cache_slots * 3 / 4;
+    const empty_key: u64 = 0;
     const web_base: u8 = max_system;
 
     pub fn init(glyph_heap: []u8) FaceFonts {
-        return .{ .glyph_fba = std.heap.FixedBufferAllocator.init(glyph_heap) };
+        var self: FaceFonts = .{ .glyph_fba = std.heap.FixedBufferAllocator.init(glyph_heap) };
+        self.dropCache();
+        return self;
+    }
+
+    fn cacheKey(idx: u8, gid: u16, size_q: u16) u64 {
+        // Never zero (the empty slot): the face index is offset by one.
+        return (@as(u64, idx) + 1) << 32 | @as(u64, gid) << 16 | size_q;
+    }
+
+    fn cacheSlot(key: u64) usize {
+        var h = key *% 0x9e3779b97f4a7c15;
+        h ^= h >> 29;
+        return @intCast(h & (cache_slots - 1));
     }
 
     /// A system face at `slot` (0 sans, 1 mono, 2.. fallbacks).
@@ -69,6 +90,7 @@ pub const FaceFonts = struct {
     }
 
     fn dropCache(self: *FaceFonts) void {
+        for (&self.cache) |*e| e.key = empty_key;
         self.cache_len = 0;
         self.glyph_fba.reset();
     }
@@ -162,21 +184,27 @@ pub const FaceFonts = struct {
 
     fn glyph(self: *FaceFonts, idx: u8, gid: u16, size: f64) ?*const font.Glyph {
         const size_q: u16 = @intFromFloat(@min(65535, @max(0, size * 4)));
-        for (self.cache[0..self.cache_len]) |*e| {
-            if (e.face == idx and e.gid == gid and e.size == size_q) return &e.glyph;
+        const key = cacheKey(idx, gid, size_q);
+        var slot = cacheSlot(key);
+        while (self.cache[slot].key != empty_key) : (slot = (slot + 1) & (cache_slots - 1)) {
+            if (self.cache[slot].key == key) return &self.cache[slot].glyph;
         }
         // Full: start over. A page rarely uses this many glyph shapes at
         // once; when it does, the miss is a rasterization.
-        if (self.cache_len == self.cache.len) self.dropCache();
+        if (self.cache_len >= cache_fill) {
+            self.dropCache();
+            slot = cacheSlot(key);
+        }
         const face = self.faceAt(idx);
         const g = font.rasterize(face, self.glyph_fba.allocator(), gid, @floatCast(size)) catch |e| switch (e) {
             error.OutOfMemory => blk: {
                 self.dropCache();
+                slot = cacheSlot(key);
                 break :blk font.rasterize(face, self.glyph_fba.allocator(), gid, @floatCast(size)) catch return null;
             },
             else => return null,
         };
-        self.cache[self.cache_len] = .{ .face = idx, .gid = gid, .size = size_q, .glyph = g };
+        self.cache[slot] = .{ .key = key, .glyph = g };
         self.cache_len += 1;
         rasterized += 1;
         if (idx >= web_base) {
@@ -186,7 +214,7 @@ pub const FaceFonts = struct {
                 if (self.on_web_face_used) |cb| cb(w.name[0..w.name_len]);
             }
         }
-        return &self.cache[self.cache_len - 1].glyph;
+        return &self.cache[slot].glyph;
     }
 
     fn draw(ctx: *anyopaque, canvas: *const ui.Canvas, f: layout.Font, x: f64, baseline: f64, text: []const u8, color: u32) void {
@@ -198,6 +226,9 @@ pub const FaceFonts = struct {
         var it = CodePoints{ .s = text };
         while (it.next()) |cp| {
             if (invisible(cp)) continue;
+            // Past the clip's right edge: the run reads left to right, so
+            // nothing after this pen would show (nor needs rasterizing).
+            if (pen >= @as(f64, @floatFromInt(canvas.clip_x1))) break;
             const p = self.pick(want, cp);
             if (cp != ' ' and cp != 0xa0) if (self.glyph(p.idx, p.gid, f.size)) |g| {
                 const gx: i64 = @as(i64, @intFromFloat(@round(pen))) + g.left;

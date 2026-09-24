@@ -317,9 +317,12 @@ pub const Parser = struct {
         const id = try p.doc.createElement(ns, t.name);
         const n = p.doc.node(id);
         // A fresh HTML element takes the token's attribute list as its
-        // own (the tokenizer made an exact copy with no duplicates);
-        // otherwise room for every attribute at once — a list that grows
-        // by doubling in a bump arena leaves its old buffers behind.
+        // own — the tokenizer made an exact copy with no duplicates, and an
+        // element remade from the active-formatting list gets a copy of
+        // its entry's (setAttr writes in place: two elements must never
+        // share one). Otherwise room for every attribute at once — a
+        // list that grows by doubling in a bump arena leaves its old
+        // buffers behind.
         if (ns == .html and n.attrs.items.len == 0) {
             n.attrs = .fromOwnedSlice(@constCast(t.attrs));
         } else try n.attrs.ensureTotalCapacityPrecise(p.a, n.attrs.items.len + t.attrs.len);
@@ -463,7 +466,7 @@ pub const Parser = struct {
         // Advance, remaking each.
         while (i < p.afe.items.len) : (i += 1) {
             const f = p.afe.items[i];
-            const id = try p.insertHtmlElement(.{ .name = f.name, .attrs = f.attrs });
+            const id = try p.insertHtmlElement(.{ .name = f.name, .attrs = try p.a.dupe(tokenizer.Attr, f.attrs) });
             p.afe.items[i].node = id;
         }
     }
@@ -1257,7 +1260,7 @@ pub const Parser = struct {
                 }
                 // Remake the node from its formatting entry.
                 const f = p.afe.items[node_afe.?];
-                const fresh = try p.createElementFor(.{ .name = f.name, .attrs = f.attrs }, .html);
+                const fresh = try p.createElementFor(.{ .name = f.name, .attrs = try p.a.dupe(tokenizer.Attr, f.attrs) }, .html);
                 p.afe.items[node_afe.?].node = fresh;
                 p.open.items[node_idx] = fresh;
                 node = fresh;
@@ -1271,7 +1274,7 @@ pub const Parser = struct {
             p.doc.detach(last_node);
             p.insertAt(place, last_node);
             const fe_entry = p.afe.items[fe_idx];
-            const fresh_fe = try p.createElementFor(.{ .name = fe_entry.name, .attrs = fe_entry.attrs }, .html);
+            const fresh_fe = try p.createElementFor(.{ .name = fe_entry.name, .attrs = try p.a.dupe(tokenizer.Attr, fe_entry.attrs) }, .html);
             p.doc.reparentChildren(fb, fresh_fe);
             p.doc.appendChild(fb, fresh_fe);
             // Move the formatting entry to the bookmark.

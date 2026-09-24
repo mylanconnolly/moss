@@ -158,6 +158,10 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
         const output_changed = wf.refreshOutput();
         if (wf.refreshFontMetrics() or output_changed) {
             wf.closeSurface();
+            // A new surface has no queue: a release queued for the old one
+            // is gone with it, and a button believed held would ignore
+            // every press after — the pill-click flake (2026-09-24).
+            wf.ptr_down = false;
             wf.win_w = wf.scanout_w;
             wf.win_h = dockHeight();
             wf.win_y = wf.scanout_h - wf.win_h;
@@ -194,15 +198,15 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
             if (ev.kind == 1) {
                 const down = ev.btn & 1 != 0;
                 const press = down and !wf.ptr_down;
-                // A press with the button believed held is no click: a lost
-                // release would disarm every pill, so say so (2026-09-24).
-                if (down and !press) _ = usys.log(core.log_h, "dock: press with the button held");
                 wf.ptr_down = down;
                 if (press and ev.surface == wf.surf) {
                     if (dockItemAt(ev.x)) |idx| {
                         fired = idx;
                         break :input;
                     }
+                    // Between pills (the centres move as pills come and go).
+                    var lb: [48]u8 = undefined;
+                    _ = usys.log(core.log_h, std.fmt.bufPrint(&lb, "dock: press missed x={d}", .{ev.x}) catch "dock: press missed");
                 }
                 continue :input;
             }

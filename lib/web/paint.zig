@@ -158,8 +158,11 @@ const Painter = struct {
             if (cb.isBlockLevel()) try p.paintBox(c);
         }
         for (b.children.items) |c| if (p.l.get(c).isFloat()) try p.paintBox(c);
-        // Lines: inline backgrounds, then text and atomics in order.
+        // Lines: inline backgrounds, then text and atomics in order — a
+        // line wholly outside the clip band paints nothing (a band
+        // repaint walks every box of the page).
         for (b.lines.items) |ln| {
+            if (ln.y + ln.h - p.scroll <= @as(f64, @floatFromInt(p.canvas.clip_y0)) or ln.y - p.scroll >= @as(f64, @floatFromInt(p.canvas.clip_y1))) continue;
             for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
                 const f = p.l.fragments.get(fi);
                 if (f.kind == .inline_span) p.inlineSpan(f.*);
@@ -303,15 +306,27 @@ const Painter = struct {
         return @max(0, ox) * @max(0, oy);
     }
 
+    /// A document rect's pixel rows and columns inside the canvas and its
+    /// clip: [y0, y1) canvas rows, [x0, x1) columns.
+    fn clipBounds(p: *const Painter, x: f64, y: f64, w: f64, h: f64) struct { x0: f64, x1: f64, y0: f64, y1: f64 } {
+        return .{
+            .y0 = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), @floor(y - p.scroll)),
+            .y1 = @min(@as(f64, @floatFromInt(@min(p.canvas.h, p.canvas.clip_y1))), @ceil(y + h - p.scroll)),
+            .x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), @floor(x)),
+            .x1 = @min(@as(f64, @floatFromInt(@min(p.canvas.w, p.canvas.clip_x1))), @ceil(x + w)),
+        };
+    }
+
     /// Fill a rounded rect (minus `hole`, another, for a border ring).
     fn roundRect(p: *const Painter, x: f64, y: f64, w: f64, h: f64, r: [4]f64, hole: ?[8]f64, c: color.Color) void {
         if (w <= 0 or h <= 0 or c.a <= 0) return;
         const word = c.word();
         const alpha = c.a;
-        const y0 = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), @floor(y - p.scroll));
-        const y1 = @min(@as(f64, @floatFromInt(@min(p.canvas.h, p.canvas.clip_y1))), @ceil(y + h - p.scroll));
-        const x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), @floor(x));
-        const x1 = @min(@as(f64, @floatFromInt(@min(p.canvas.w, p.canvas.clip_x1))), @ceil(x + w));
+        const cb = p.clipBounds(x, y, w, h);
+        const y0 = cb.y0;
+        const y1 = cb.y1;
+        const x0 = cb.x0;
+        const x1 = cb.x1;
         var sy = y0;
         while (sy < y1) : (sy += 1) {
             var sx = x0;
@@ -553,10 +568,11 @@ const Painter = struct {
         }
         const cxm = b.x + b.w / 2;
         const cym = b.y + b.h / 2;
-        const y0 = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), @floor(b.y - p.scroll));
-        const y1 = @min(@as(f64, @floatFromInt(@min(p.canvas.h, p.canvas.clip_y1))), @ceil(b.y + b.h - p.scroll));
-        const x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), @floor(b.x));
-        const x1 = @min(@as(f64, @floatFromInt(@min(p.canvas.w, p.canvas.clip_x1))), @ceil(b.x + b.w));
+        const cb = p.clipBounds(b.x, b.y, b.w, b.h);
+        const y0 = cb.y0;
+        const y1 = cb.y1;
+        const x0 = cb.x0;
+        const x1 = cb.x1;
         var sy = y0;
         while (sy < y1) : (sy += 1) {
             var sx = x0;
@@ -774,7 +790,6 @@ const Painter = struct {
         // visible heading).
         if (st.visibility != .visible) return;
         if (f.kind == .marker) if (p.bullet(f, st)) return;
-        if (f.x + f.w <= 0 or f.y + f.h - p.scroll <= 0) return;
         p.l.fonts.draw(&p.canvas, font, f.x, f.baseline - p.scroll, f.text, word);
         // Decorations: one pixel lines, or thicker with the font.
         const thick = @max(1, @round(st.font_size / 16));
