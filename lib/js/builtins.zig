@@ -38,6 +38,9 @@ pub const proxy = @import("builtins/proxy.zig");
 pub const promise = @import("builtins/promise.zig");
 pub const map = @import("builtins/map.zig");
 pub const date = @import("builtins/date.zig");
+pub const arraybuffer = @import("builtins/arraybuffer.zig");
+pub const typedarray = @import("builtins/typedarray.zig");
+pub const atomics = @import("builtins/atomics.zig");
 
 pub fn install(vm: *Vm) Error!void {
     try object.install(vm);
@@ -59,6 +62,9 @@ pub fn install(vm: *Vm) Error!void {
     try proxy.install(vm);
     try map.install(vm);
     try date.install(vm);
+    try arraybuffer.install(vm);
+    try typedarray.install(vm);
+    try atomics.install(vm);
 }
 
 pub fn traceExtra(o: *Object, m: *heap.Marker) void {
@@ -67,6 +73,8 @@ pub fn traceExtra(o: *Object, m: *heap.Marker) void {
         .generator => generator.trace(o, m),
         .proxy => proxy.trace(o, m),
         .map, .set, .weak_map, .weak_set => map.trace(o, m),
+        .array_buffer, .data_view => arraybuffer.trace(o, m),
+        .typed_array => typedarray.trace(o, m),
         else => {},
     }
 }
@@ -76,6 +84,7 @@ pub fn finalizeExtra(vm: *Vm, o: *Object) void {
         .regexp => regexp.finalize(vm, o),
         .generator => generator.finalize(vm, o),
         .map, .set, .weak_map, .weak_set => map.finalize(vm, o),
+        .array_buffer => arraybuffer.finalize(vm, o),
         else => {},
     }
 }

@@ -2,6 +2,7 @@
 //! the for-in enumerator's prototype.
 const std = @import("std");
 const b = @import("../builtins.zig");
+const realm = @import("../realm.zig");
 const vmod = @import("../vm.zig");
 const Vm = b.Vm;
 const Value = b.Value;
@@ -41,7 +42,7 @@ fn arrayIteratorNext(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Val
     const d = asObject(this).internal(vmod.ArrayIteratorData);
     if (d.target.isUndefined()) return vm.iterResult(Value.undefined_, true);
     const target = asObject(d.target);
-    const len: u64 = if (target.class == .typed_array) try vm.lengthOfArrayLike(target) else try vm.lengthOfArrayLike(target);
+    const len: u64 = if (target.class == .typed_array) try realm.typedArrayIterLength(vm, target) else try vm.lengthOfArrayLike(target);
     if (d.index >= len) {
         d.target = Value.undefined_;
         return vm.iterResult(Value.undefined_, true);

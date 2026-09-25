@@ -48,7 +48,14 @@ the as-built account with the test262 numbers.
   methods and `getOrInsert`), Proxy (every trap with its invariants),
   BigInt (`bigint.zig`, cells of limbs over `std.math.big`), Date
   (`date.zig`, the calendar arithmetic of §21.4.1, the string formats
-  and their parsers; local time is UTC until a host offers a zone).
+  and their parsers; local time is UTC until a host offers a zone),
+  ArrayBuffer, SharedArrayBuffer and DataView (`arraybuffer.zig`: the
+  bytes live outside the collected heap and are freed with the buffer;
+  resizable, transferable, detachable and immutable buffers), the
+  typed arrays (`typedarray.zig`: %TypedArray% and its twelve
+  constructors including Float16Array, the integer-indexed exotic
+  object's internal methods, `Uint8Array`'s base64 and hex methods),
+  and Atomics (`atomics.zig`, for the one agent there is).
 - `regexp.zig` — the regular expression engine: a parser for the
   ES2023 grammar with Annex B's tolerance (u/v modes, named groups,
   lookbehind, property escapes), a compiler to a small instruction set
@@ -63,8 +70,8 @@ the as-built account with the test262 numbers.
 - `module.zig` — module records, linking with live import bindings,
   namespace objects, evaluation with top-level await, `import()` and
   `import.meta`; sources come only from the embedder's `Vm.host_load`.
-  Typed arrays, ArrayBuffer, Iterator helpers and Temporal are later
-  stages and count as misses until they land.
+  Iterator helpers and Temporal are later stages and count as misses
+  until they land.
 
 ## Running it
 

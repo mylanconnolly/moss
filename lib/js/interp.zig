@@ -1856,6 +1856,8 @@ const interp_cases = [_]struct { src: []const u8, want: f64 }{
     .{ .src = "var b = 2n ** 64n; var q = -7n / 2n; Number(b >> 60n) + Number(q) + Number(BigInt.asIntN(8, 255n)) + Number(BigInt('0x1f') & 0xfn) + (b > 1.8e19 ? 1 : 0) + (5n == 5 ? 1 : 0) + ((b + 1n).toString(16).length)", .want = 46 },
     .{ .src = "var d = new Date(2026, 8, 25, 10, 30, 15, 250); var u = Date.UTC(2000, 0, 1); d.getDay() + d.getMonth() + (d.toISOString() === '2026-09-25T10:30:15.250Z' ? 1 : 0) + (Date.parse(d.toString()) === d.getTime() - 250 ? 1 : 0) + (u === 946684800000 ? 1 : 0) + (Date.parse('Sat, 01 Jan 2000 00:00:00 GMT') === u ? 1 : 0) + (isNaN(new Date(8.64e15 + 1).getTime()) ? 1 : 0)", .want = 18 },
     .{ .src = "/(?<y>\\d{4})-(?<m>\\d\\d)/u.exec('on 2026-09-25').groups.m * 1 + 'a-b_c'.replace(/[-_]/g, ' ').split(' ').length + ('x'.match(/y/) === null ? 1 : 0)", .want = 13 },
+    .{ .src = "var acc = 0; for (const x of [1, 2, 3, 4]) { if (x % 2) continue; acc += x; } outer: for (const a of [1, 2]) for (const c of [10, 20, 30]) { if (c === 20) continue outer; acc += c; } acc", .want = 26 },
+    .{ .src = "var ta = new Int16Array([1, -2, 300]); var dv = new DataView(ta.buffer); ta.set([5], 2); Uint8Array.from('abc', c => c.charCodeAt(0)).length + ta[2] + dv.getInt16(2, true) + new Float32Array(ta).reduce((a, b) => a + b) + Atomics.add(ta, 0, 1) + ta[0] + new Uint8Array([200]).toBase64().length + (ta['1.5'] === undefined ? 1 : 0) + new Uint8Array(ta.buffer.transfer()).length + (ta.length === 0 ? 1 : 0)", .want = 25 },
 };
 
 fn runCases(vm: *Vm) !void {

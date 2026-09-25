@@ -61,6 +61,15 @@ pub const Intrinsics = struct {
     weak_map_prototype: *Object,
     weak_set_prototype: *Object,
     date_prototype: *Object,
+    array_buffer_prototype: *Object,
+    array_buffer_ctor: *Object,
+    shared_array_buffer_prototype: *Object,
+    shared_array_buffer_ctor: *Object,
+    data_view_prototype: *Object,
+    typed_array_ctor: *Object,
+    typed_array_prototype: *Object,
+    typed_array_ctors: [builtins.typedarray.kind_count]*Object,
+    typed_array_protos: [builtins.typedarray.kind_count]*Object,
     promise_ctor: *Object,
     generator_function: *Object,
     async_generator_function: *Object,
@@ -77,7 +86,11 @@ pub const Intrinsics = struct {
 
     pub fn each(i: *Intrinsics, m: *heap.Marker) void {
         inline for (@typeInfo(Intrinsics).@"struct".fields) |f| {
-            if (f.type == *Object) m.markCell(@field(i, f.name).cell());
+            if (f.type == *Object) {
+                m.markCell(@field(i, f.name).cell());
+            } else if (f.type == [builtins.typedarray.kind_count]*Object) {
+                for (@field(i, f.name)) |o| m.markCell(o.cell());
+            }
         }
     }
 };
@@ -235,7 +248,11 @@ pub fn create(vm: *Vm) Error!void {
     vm.intrinsics.function_prototype = fnp;
     inline for (@typeInfo(Intrinsics).@"struct".fields) |f| {
         if (!std.mem.eql(u8, f.name, "object_prototype") and !std.mem.eql(u8, f.name, "function_prototype")) {
-            @field(vm.intrinsics, f.name) = objp; // placeholders until installed
+            if (f.type == *Object) {
+                @field(vm.intrinsics, f.name) = objp; // placeholders until installed
+            } else {
+                @field(vm.intrinsics, f.name) = @splat(objp);
+            }
         }
     }
     const mk = struct {
@@ -596,15 +613,27 @@ pub fn proxyConstruct(vm: *Vm, o: *Object, args: []const Value, new_target: Valu
     return builtins.proxy.construct(vm, o, args, new_target);
 }
 
-pub fn typedArrayGetOwn(vm: *Vm, o: *Object, key: Key) Error!?object.Objects.Own {
-    _ = vm;
-    _ = o;
-    _ = key;
-    return null;
+pub fn typedArrayNumericKey(vm: *Vm, key: Key) Error!?f64 {
+    return builtins.typedarray.numericKey(vm, key);
 }
-pub fn typedArrayDefineOwn(vm: *Vm, o: *Object, index: u32, desc: Vm.Descriptor) Error!bool {
-    return vm.ordinaryDefineOwnProperty(o, .{ .index = index }, desc);
+pub fn typedArrayGetOwn(vm: *Vm, o: *Object, index: f64) Error!?object.Objects.Own {
+    return builtins.typedarray.getOwn(vm, o, index);
+}
+pub fn typedArrayGetElement(vm: *Vm, o: *Object, index: f64) Error!Value {
+    return builtins.typedarray.getElement(vm, o, index);
+}
+pub fn typedArraySetNumeric(vm: *Vm, o: *Object, index: f64, v: Value, receiver: Value, result: *bool) Error!bool {
+    return builtins.typedarray.setNumeric(vm, o, index, v, receiver, result);
+}
+pub fn typedArrayIsValidIndex(o: *Object, index: f64) bool {
+    return builtins.typedarray.isValidIndex(builtins.typedarray.data(o), index);
+}
+pub fn typedArrayDefineOwn(vm: *Vm, o: *Object, index: f64, desc: Vm.Descriptor) Error!bool {
+    return builtins.typedarray.defineOwn(vm, o, index, desc);
 }
 pub fn typedArrayOwnKeys(vm: *Vm, o: *Object, out: *std.ArrayList(Key)) Error!void {
-    return vm.objects.ownKeys(o, out);
+    return builtins.typedarray.ownKeys(vm, o, out);
+}
+pub fn typedArrayIterLength(vm: *Vm, o: *Object) Error!u64 {
+    return builtins.typedarray.iterLength(vm, o);
 }

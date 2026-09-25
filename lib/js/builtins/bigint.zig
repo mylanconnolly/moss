@@ -62,6 +62,20 @@ pub fn fromI64(vm: *Vm, v: i64) Error!Value {
     return fromConst(vm, m.toConst());
 }
 
+pub fn fromU64(vm: *Vm, v: u64) Error!Value {
+    var m = try Managed.initSet(vm.meta, v);
+    defer m.deinit();
+    return fromConst(vm, m.toConst());
+}
+
+/// The low 64 bits of a BigInt in two's complement (the value modulo
+/// 2^64): what the 64-bit typed arrays store.
+pub fn toU64Bits(v: Value) u64 {
+    const c = cellOf(v);
+    const low: u64 = @truncate(c.limbs()[0]);
+    return if (c.negative) 0 -% low else low;
+}
+
 /// A double that is an integer, as a BigInt.
 fn fromF64(vm: *Vm, d: f64) Error!Value {
     if (@abs(d) < 9.0e18) return fromI64(vm, @intFromFloat(d));

@@ -1175,6 +1175,9 @@ pub const Compiler = struct {
                 .try_region => try c.emit(.poptry, 0, 0, 0),
                 .for_of => |f| {
                     try c.emit(.poptry, 0, 0, 0);
+                    // A `continue` to this very loop keeps its iterator
+                    // open; only loops left behind are closed.
+                    if (is_continue and i == target + 1) continue;
                     if (f.is_await) try c.asyncIteratorClose(f.iter, false) else try c.emit(.iterclose, f.iter, 0, 0);
                 },
                 .finally => |*fi| {

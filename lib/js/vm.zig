@@ -403,7 +403,7 @@ pub const Vm = struct {
                 m.markValue(d.fulfill_reactions);
                 m.markValue(d.reject_reactions);
             },
-            .map, .set, .weak_map, .weak_set, .proxy, .regexp, .date, .array_buffer, .typed_array, .namespace => {
+            .map, .set, .weak_map, .weak_set, .proxy, .regexp, .date, .array_buffer, .typed_array, .data_view, .namespace => {
                 // Stage c/d classes trace through their own hooks.
                 realm.traceExtra(o, m);
             },
@@ -1158,7 +1158,7 @@ pub const Vm = struct {
             .arguments => if (key == .index) if (try realm.argumentsGetOwn(vm, o, key.index)) |own| return own,
             .proxy => return realm.proxyGetOwnProperty(vm, o, key),
             .namespace => return module.nsGetOwnProperty(vm, o, key),
-            .typed_array => if (try realm.typedArrayGetOwn(vm, o, key)) |own| return own,
+            .typed_array => if (try realm.typedArrayNumericKey(vm, key)) |n| return realm.typedArrayGetOwn(vm, o, n),
             else => {},
         }
         return vm.objects.getOwn(o, key);
@@ -1173,6 +1173,7 @@ pub const Vm = struct {
         var cur: *Object = o;
         while (true) {
             if (cur.class == .proxy) return realm.proxyGet(vm, cur, key, receiver);
+            if (cur.class == .typed_array) if (try realm.typedArrayNumericKey(vm, key)) |n| return realm.typedArrayGetElement(vm, cur, n);
             if (try vm.getOwnProperty(cur, key)) |own| {
                 if (own.attrs.accessor) {
                     const acc = own.val.asCell().as(Accessor);
@@ -1225,6 +1226,10 @@ pub const Vm = struct {
         while (true) {
             if (cur.class == .proxy) return realm.proxySet(vm, cur, key, v, receiver);
             if (cur.class == .namespace and key != .symbol) return false;
+            if (cur.class == .typed_array) if (try realm.typedArrayNumericKey(vm, key)) |n| {
+                var result = false;
+                if (try realm.typedArraySetNumeric(vm, cur, n, v, receiver, &result)) return result;
+            };
             own_desc = try vm.getOwnProperty(cur, key);
             if (own_desc != null) break;
             const p = cur.shape.proto;
@@ -1296,6 +1301,7 @@ pub const Vm = struct {
         var cur: *Object = o;
         while (true) {
             if (cur.class == .proxy) return realm.proxyHas(vm, cur, key);
+            if (cur.class == .typed_array) if (try realm.typedArrayNumericKey(vm, key)) |n| return realm.typedArrayIsValidIndex(cur, n);
             if ((try vm.getOwnProperty(cur, key)) != null) return true;
             const p = cur.shape.proto;
             if (!p.isObject()) return false;
@@ -1355,7 +1361,7 @@ pub const Vm = struct {
             .arguments => if (key == .index) return realm.argumentsDefineOwn(vm, o, key.index, desc),
             .proxy => return realm.proxyDefineOwnProperty(vm, o, key, desc),
             .namespace => return module.nsDefineOwnProperty(vm, o, key, desc),
-            .typed_array => if (key == .index) return realm.typedArrayDefineOwn(vm, o, key.index, desc),
+            .typed_array => if (try realm.typedArrayNumericKey(vm, key)) |n| return realm.typedArrayDefineOwn(vm, o, n, desc),
             .string => if (key == .index) {
                 // String index properties are not redefinable.
                 const s = o.internal(PrimitiveData).value;
@@ -1547,6 +1553,7 @@ pub const Vm = struct {
             .proxy => return realm.proxyDelete(vm, o, key),
             .namespace => return module.nsDelete(vm, o, key),
             .arguments => if (key == .index) return realm.argumentsDelete(vm, o, key.index),
+            .typed_array => if (try realm.typedArrayNumericKey(vm, key)) |n| return !realm.typedArrayIsValidIndex(o, n),
             .string => if (key == .index) {
                 const s = o.internal(PrimitiveData).value;
                 if (key.index < asString(s).len) return false;

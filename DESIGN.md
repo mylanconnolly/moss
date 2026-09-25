@@ -7260,6 +7260,60 @@ stale binary cost an hour: rebuild *both* runners). The lesson that
 generalizes: a fast path guarded by a flag needs a test that raises the
 flag, or the flag is a comment.
 
+**Stage 10d, continued: buffers, typed arrays, DataView and Atomics
+(as built, 2026-09-25).** An ArrayBuffer (`builtins/arraybuffer.zig`)
+keeps its bytes in the bookkeeping allocator, not the collected region
+— a page's buffers can be large and are never moved — and frees them
+when the collector finalizes the object; a resizable buffer allocates
+its maximum up front so resizing never moves bytes, and a detached or
+immutable one is a flag every view reads through the buffer object it
+holds, so `$262.detachArrayBuffer` (the runner's), `transfer`,
+`transferToImmutable` and `resize` are seen by every view at once
+(the immutable-buffers proposal is implemented because test262's
+typed-array suites drive their argument factories through it).
+SharedArrayBuffer is the same object with a flag: there is one agent,
+so "shared" changes only which prototype and which checks apply.
+Typed arrays (`builtins/typedarray.zig`) are `Class.typed_array` with a
+buffer, byte offset, length or length-tracking flag and element kind;
+the integer-indexed exotic object's internal methods are hooks in the
+VM's [[Get]]/[[Set]]/[[HasProperty]]/[[Delete]]/[[DefineOwnProperty]]/
+[[OwnPropertyKeys]] walks keyed on CanonicalNumericIndexString (an
+atom that round-trips through ToNumber and ToString, or `-0`), so
+`ta["1.5"]` and `ta[-0]` are the absent properties the specification
+says and never reach the prototype chain. Elements are raw bits read
+and written through `readRaw`/`writeRaw` with the conversions of
+§7.1 (ToInt8 ... ToUint8Clamp, the IEEE casts including binary16 for
+Float16Array, BigInt's low 64 bits in two's complement); %TypedArray%
+and the twelve constructors share one native keyed by kind, `from`/`of`
+and the species machinery validate their results as the specification
+does (in bounds, not immutable when they will be written, long enough,
+same content type). `Uint8Array`'s base64 and hex methods write what
+they decoded before a SyntaxError, as the proposal requires. DataView
+reads and writes with explicit endianness over the same raw
+conversions. Atomics (`builtins/atomics.zig`) is every operation as an
+ordinary read-modify-write with the specification's validations;
+`wait` reports `not-equal` or `timed-out` at once because no other
+agent can ever notify, and `notify` finds no waiters.
+
+The suites: TypedArray 1,453/1,453, TypedArrayConstructors 714/738
+(the rest need `$262.createRealm`), ArrayBuffer 220/221,
+SharedArrayBuffer 103/104, DataView 559/561, Uint8Array 70/70,
+ArrayIteratorPrototype 27/27, Atomics 271/389 (the rest need
+`$262.agent`, a second thread of execution). `test/built-ins` 17,420/23,821 (73.1%, from 13,914),
+`test/language` 22,724/23,726 (95.8%). Under `TEST262_GC_STRESS` the new suites pass
+what they pass without it.
+
+The bug the harness found: `continue` inside any `for...of` closed the
+loop's own iterator — the unwinder that emits iterator closes for the
+loops a `break` or labeled `continue` leaves treated the target loop's
+own record like the ones being left, so `continue` called
+`iterator.return()` and then `next` on a finished record. Arrays, whose
+iterators have no `return`, hid it until the resizable-buffer harness
+ran nested `for...of` loops with `continue` over constructors whose
+iterator records were then marked done — "is not a function" on the
+eleventh constructor. A one-line condition in `unwindTo` fixes it and
+the interpreter's own test table now has the nested-loop case.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

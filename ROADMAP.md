@@ -947,14 +947,20 @@ supervises), and memory history per unit beside the CPU one.
       host offers a zone; `lib/civil` was never needed): RegExp
       1,681/1,879, Map 202/204, Set 381/383, Proxy 274/311, BigInt
       76/77, Date 583/594; test/language 22,659/23,726 (95.5%), test/built-ins
-      13,914/23,821. Residuals of (b)–(d): typed arrays, ArrayBuffer
-      and DataView (2,500 files, the largest remaining block), Iterator
-      helpers, the moving nursery (the barrier is in place) and
-      ephemeron keys for the weak collections, eval's `arguments`
-      early errors, rooting natives' locals so collection can run at
-      any depth (today only at native depth zero), import attributes,
-      `$262.createRealm` in the runner, the regexp modifiers and
-      `unicodeSets` string properties, time zones for Date.
+      13,914/23,821; then, the same day, ArrayBuffer (resizable,
+      transferable, immutable), SharedArrayBuffer, the typed arrays
+      with Float16Array and Uint8Array's base64/hex, DataView and
+      Atomics: TypedArray 1,453/1,453, TypedArrayConstructors 714/738,
+      DataView 559/561, Atomics 271/389 (the rest need a second
+      agent); test/built-ins 17,420/23,821 (73.1%), test/language
+      22,724/23,726 (95.8%).
+      Residuals of (b)–(d): Iterator helpers, the moving nursery (the
+      barrier is in place) and ephemeron keys for the weak
+      collections, eval's `arguments` early errors, rooting natives'
+      locals so collection can run at any depth (today only at native
+      depth zero), import attributes, `$262.createRealm` and
+      `$262.agent` in the runner, the regexp modifiers and
+      `unicodeSets` string properties, time zones for Date, Temporal.
     - **(11) Scripts meet the page.** Bindings generated from one
       comptime interface table; the event loop in `webpage` (tasks,
       microtasks, timers on a kernel timer, animation frames on the

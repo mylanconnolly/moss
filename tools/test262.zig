@@ -358,7 +358,7 @@ fn installHost(vm: *Vm) !void {
     _ = try vm.defineNative(h, "evalScript", 1, hostEvalScript);
     _ = try vm.defineNative(h, "gc", 0, hostGc);
     _ = try vm.defineNative(h, "createRealm", 0, hostUnsupported);
-    _ = try vm.defineNative(h, "detachArrayBuffer", 1, hostUnsupported);
+    _ = try vm.defineNative(h, "detachArrayBuffer", 1, hostDetach);
     const agent = try vm.newObject();
     try vm.defineValue(h, "agent", agent.asValue(), .hidden);
 }
@@ -385,6 +385,13 @@ fn hostEvalScript(vm: *Vm, _: Value, args: []const Value, _: Value) js.vm.Error!
 fn hostGc(vm: *Vm, _: Value, _: []const Value, _: Value) js.vm.Error!Value {
     _ = vm;
     return Value.undefined_;
+}
+
+fn hostDetach(vm: *Vm, _: Value, args: []const Value, _: Value) js.vm.Error!Value {
+    const v = if (args.len > 0) args[0] else Value.undefined_;
+    if (!js.builtins.arraybuffer.isBuffer(v)) return vm.throwTypeError("detachArrayBuffer: not an ArrayBuffer");
+    try js.builtins.arraybuffer.detach(vm, Vm.asObject(v), if (args.len > 1) args[1] else Value.undefined_);
+    return Value.null_;
 }
 
 fn hostUnsupported(vm: *Vm, _: Value, _: []const Value, _: Value) js.vm.Error!Value {

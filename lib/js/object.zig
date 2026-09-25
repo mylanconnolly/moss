@@ -153,7 +153,7 @@ pub const KeyContext = struct {
 
 /// What kind of object: the ordinary one, or an exotic one whose
 /// internal methods differ, or an ordinary one with internal slots.
-pub const Class = enum(u8) { ordinary, array, function, bound_function, arguments, error_, boolean, number, string, symbol, bigint, date, regexp, map, set, weak_map, weak_set, promise, proxy, array_buffer, typed_array, iterator, generator, namespace, global };
+pub const Class = enum(u8) { ordinary, array, function, bound_function, arguments, error_, boolean, number, string, symbol, bigint, date, regexp, map, set, weak_map, weak_set, promise, proxy, array_buffer, typed_array, data_view, iterator, generator, namespace, global };
 
 pub const Object = extern struct {
     header: Cell,
