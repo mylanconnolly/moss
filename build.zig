@@ -1357,6 +1357,19 @@ pub fn build(b: *std.Build) void {
         b.step("webshot", "Render a URL on the host with moss's web engine into a PPM").dependOn(&wrun.step);
     }
 
+    // test262: the JavaScript engine against the conformance suite at its
+    // pinned commit (tools/fetch-test262.sh fetches it; not part of
+    // `check`, like `bench`): `zig build test262 -- [test/language/...]`.
+    {
+        const tlib = b.createModule(.{ .root_source_file = b.path("lib/lib.zig"), .target = host_target, .optimize = .ReleaseSafe });
+        const tmod = b.createModule(.{ .root_source_file = b.path("tools/test262.zig"), .target = host_target, .optimize = .ReleaseSafe });
+        tmod.addImport("mosslib", tlib);
+        const texe = b.addExecutable(.{ .name = "test262", .root_module = tmod });
+        const trun = b.addRunArtifact(texe);
+        if (b.args) |args| trun.addArgs(args);
+        b.step("test262", "Run the JavaScript engine over test262 (fetch it first with tools/fetch-test262.sh)").dependOn(&trun.step);
+    }
+
     const lib_test_mod = b.createModule(.{
         .root_source_file = b.path("lib/lib.zig"),
         .target = host_target,

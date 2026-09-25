@@ -6926,6 +6926,60 @@ turns every list into a quadratic one; and a host model of a target's
 memory is only as good as the allocator it models — the histogram's
 "grown in place" column was the tell.
 
+## JavaScript
+
+The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is
+our own engine, ES2023, a library with no authority of its own that a
+domain embeds; no machine code, ever, in a page; compliance is
+test262's numbers per directory, fetched at a pinned commit and run by
+`zig build test262`. The arc's stages are in ROADMAP under "A web
+browser", stage 10.
+
+**Stage 10a, the lexer and parser (as built, 2026-09-24).** `lexer.zig`
+is the lexical grammar: tokens scanned under the ordinary goal with the
+parser asking for `rescanRegExp` and `rescanTemplateContinuation` when
+the syntactic context knows better (a `/` is division after an
+expression and a regular expression before one; a `}` closes a block
+or continues a template); every token carries whether a line
+terminator preceded it, which is what automatic semicolon insertion and
+the restricted productions read; identifiers, strings and templates
+are cooked into the arena (escapes decoded, lone surrogates kept as
+WTF-8 for the string layer), numbers in every radix with separators and
+BigInt suffixes, legacy octal forms flagged for strict code to refuse,
+Annex B's HTML-like comments in script code, hashbangs. `ast.zig` is
+the tree: nodes in the arena carrying their source position; patterns
+are nodes of their own. `parser.zig` is the syntactic grammar with its
+early errors: recursive descent, binary operators by precedence
+climbing (`??` refusing to mix with `||`/`&&` unparenthesized), the
+cover grammars as the specification does them — a parenthesized
+expression reinterpreted as arrow parameters, an object or array
+literal reinterpreted as an assignment target, a `{ a = 1 }` remembered
+until a pattern claims it or the enclosing expression ends. Context
+travels in the parser's flags and is saved and restored around every
+function and class: strict mode, `yield` and `await` as keywords,
+where `super` and `new.target` may appear, what `break` and `continue`
+may reach, a scope stack for lexical redeclaration (var hoisting
+through blocks, a body's names against its parameters, a catch
+parameter, Annex B's tolerated duplicate plain functions in sloppy
+blocks, a module's top level where functions are lexical), private
+names checked against their class's declarations when the body ends,
+`yield`/`await` counted so a parameter list can be refused for holding
+one, module exports each once and each naming a declaration.
+
+The number: `zig build test262` over `test/language` (23,726 files at
+commit `7ab7fafa`), every file judged by its front matter — a
+`negative: phase: parse` file passes when refused in every mode it
+would run in, any other when it parses (sloppy and strict, or as a
+module) — 23,043 agree (97.1%). Of the 683 that do not: 113 are
+regular-expression bodies the lexer does not yet validate (the RegExp
+compiler's stage), 124 are the Unicode identifier tables approximated
+by ranges, and the rest are proposals beyond ES2023 — explicit
+resource management (`using`), `import defer`, decorators' `accessor`,
+source-phase imports — which count as misses rather than being hidden.
+An afternoon from an empty directory to that number is what the
+reference corpus makes possible: every fix was a failing file's front
+matter, read, and the count is the claim.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
