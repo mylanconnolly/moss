@@ -41,4 +41,28 @@ match (js-run "import { read } from 'moss:fs'; read('../fs.key')" { fs: state/js
   ok $v => (err "js-run: a program read outside its view")?
   err $e => { if ($e | split "not_found" | len) < 2 { (err "js-run escape: $e")? } }
 }
+# The network as a module: a program lent `net: true` fetches the web
+# drill's fixture through the page host's broker; one lent nothing
+# finds no `moss:net`. (The fixture server is a unit of the same
+# profile, so the first fetch waits for it — and keeps no connection,
+# which the single-threaded fixture would make the program's own
+# fetch queue behind.)
+def try-fetch [url, n] {
+  match (fetch $url { keep: false }) {
+    ok $r => (ok $r)
+    err $e => (match ($n > 0) {
+        true => { sleep 500; try-fetch $url ($n - 1) }
+        _ => (err "fetch $url: $e")
+      })
+  }
+}
+let warm = (try-fetch http://www.moss.test:8080/ 60)?
+let netprog = "import { fetch } from 'moss:net'; const r = await fetch('http://www.moss.test:8080/'); console.log(r.ok, r.status, r.url, r.type.startsWith('text/html'), r.text.includes('A moss fixture')); const m = await fetch('http://www.moss.test:8080/missing.html'); console.log(m.ok, m.status);"
+let n = (js-run $netprog { net: true, module: true })?
+if $n.lines != ["true 200 http://www.moss.test:8080/ true true", "false 404"] { (err "js-run net: lines $n.lines")? }
+match (js-run "import { fetch } from 'moss:net'; await fetch('http://www.moss.test:8080/')" { module: true }) {
+  ok $v => (err "js-run: a program lent no network fetched")?
+  err $e => { if ($e | split "moss:net" | len) < 2 { (err "js-run no net: $e")? } }
+}
+echo "script: js-run net ok"
 echo "script: jsrun ok"

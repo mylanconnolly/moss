@@ -91,8 +91,12 @@ directory of the shell's view, derived for the run, as `moss:fs`
 (`read`, `write`, `list`, `stat`, `exists`, all calls back to the host)
 and as the place relative imports come from; `module: true` runs the
 source as a module with `import`, `export` and top-level `await`;
-`console` and `print` are the output. A program lent nothing finds no
-`moss:fs`, and none can climb out of the directory it was lent. The
+`net: true` lends the shell's network view as `moss:net`, whose
+`fetch(url, { method, body })` goes through the page host's broker
+(redirects, keep-alive, the same refusals as a page's) and resolves to
+`{ ok, status, url, type, text }`; `console` and `print` are the
+output. A program lent nothing finds no `moss:fs` or `moss:net`, and
+none can climb out of the directory it was lent. The
 `jsrun` drill (`zig build check -Donly=jsrun`) is the integration test.
 
 ```

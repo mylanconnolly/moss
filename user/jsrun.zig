@@ -236,6 +236,91 @@ fn fsExists(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
     };
 }
 
+// ----------------------------------------------------------- moss:net
+
+fn refuseText(code: u64) []const u8 {
+    if (code == 0) return "the domain holds no network view";
+    return if (std.enums.fromInt(shared.web.RefuseCode, code)) |c| @tagName(c) else "refused";
+}
+
+/// `fetch(url, { method, body })`: the whole resource through the
+/// host's broker, chunk by chunk through the data buffer, as a promise
+/// of `{ ok, status, url, type, text }`.
+fn netFetch(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    if (args.len < 1 or !args[0].isString()) return v.throwTypeError("fetch(url) needs a URL string");
+    const url = try v.utf8(Vm.asString(args[0]), v.meta);
+    defer v.meta.free(url);
+    var post = false;
+    var body: []const u8 = "";
+    var body_owned: ?[]u8 = null;
+    defer if (body_owned) |b| v.meta.free(b);
+    if (args.len > 1 and args[1].isObject()) {
+        const o = Vm.asObject(args[1]);
+        const m = try v.get(o, .{ .atom = try v.atom("method") }, args[1]);
+        if (m.isString()) {
+            const mt = try v.utf8(Vm.asString(m), v.meta);
+            defer v.meta.free(mt);
+            post = std.ascii.eqlIgnoreCase(mt, "POST");
+        }
+        const b = try v.get(o, .{ .atom = try v.atom("body") }, args[1]);
+        if (!b.isUndefined()) {
+            body_owned = try v.utf8(try v.toString(b), v.meta);
+            body = body_owned.?;
+        }
+    }
+    if (url.len + body.len > data_len or url.len > 2048) return v.throwRangeError("fetch: the URL and body do not fit the data buffer");
+    @memcpy(data[0..url.len], url);
+    @memcpy(data[url.len .. url.len + body.len], body);
+    const open_flags: u64 = (if (post) @as(u64, 1) else 0) | (@as(u64, body.len) << 8);
+    var status: u64 = 0;
+    var final_url: []u8 = undefined;
+    var ctype: []u8 = undefined;
+    switch (call(.{ .net_open = .{ .off = 0, .len = url.len, .flags = open_flags } })) {
+        .opened => |op| {
+            status = op.status;
+            const ul = @min(op.url_len, data_len);
+            final_url = try v.meta.dupe(u8, data[0..ul]);
+            const cl = @min(op.type_len, data_len - ul);
+            ctype = try v.meta.dupe(u8, data[ul .. ul + cl]);
+        },
+        .refused => |r| {
+            var msg: [2200]u8 = undefined;
+            return v.throwError(.Error, std.fmt.bufPrint(&msg, "fetch {s}: {s}", .{ url, refuseText(r.code) }) catch "fetch refused");
+        },
+        else => return v.throwError(.Error, "fetch: the host answered with nonsense"),
+    }
+    defer v.meta.free(final_url);
+    defer v.meta.free(ctype);
+    // The body, a chunk at a time.
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(v.meta);
+    while (true) {
+        switch (call(.{ .net_read = .{ .max = data_len } })) {
+            .chunk => |c| {
+                const n = @min(c.len, data_len);
+                try bytes.appendSlice(v.meta, data[0..n]);
+                const end = std.enums.fromInt(shared.web.ChunkEnd, c.done) orelse .failed;
+                if (end == .failed) return v.throwError(.Error, "fetch: the body was cut short");
+                if (end == .done) break;
+            },
+            else => return v.throwError(.Error, "fetch: the host answered with nonsense"),
+        }
+    }
+    const result = try v.newObject();
+    try v.defineValue(result, "ok", Value.fromBool(status >= 200 and status < 300), .default);
+    try v.defineValue(result, "status", Value.fromF64(@floatFromInt(status)), .default);
+    try v.defineValue(result, "url", Vm.strValue(try v.strings.fromUtf8(final_url)), .default);
+    try v.defineValue(result, "type", Vm.strValue(try v.strings.fromUtf8(ctype)), .default);
+    try v.defineValue(result, "text", Vm.strValue(try v.strings.fromUtf8(bytes.items)), .default);
+    return js.realm.promiseResolve(v, result.asValue());
+}
+
+const net_module_source =
+    \\const net = globalThis.__moss_net;
+    \\export const fetch = net.fetch;
+    \\export default net;
+;
+
 /// The `moss:fs` module's text: its exports are the natives on the
 /// hidden `__moss_fs` object, the domain's one view.
 const fs_module_source =
@@ -255,6 +340,10 @@ fn hostLoad(v: *Vm, referrer: ?[]const u8, specifier: []const u8) Error!?js.modu
     if (std.mem.eql(u8, specifier, "moss:fs")) {
         if (flags & wire.flag_fs == 0) return null;
         return .{ .name = try a.dupe(u8, "moss:fs"), .source = try a.dupe(u8, fs_module_source) };
+    }
+    if (std.mem.eql(u8, specifier, "moss:net")) {
+        if (flags & wire.flag_net == 0) return null;
+        return .{ .name = try a.dupe(u8, "moss:net"), .source = try a.dupe(u8, net_module_source) };
     }
     if (flags & wire.flag_fs == 0) return null;
     var path: std.ArrayList(u8) = .empty;
@@ -301,6 +390,11 @@ fn installHostObjects() Error!void {
         _ = try vm.defineNative(fs, "stat", 1, fsStat);
         _ = try vm.defineNative(fs, "exists", 1, fsExists);
         try vm.defineValue(vm.global, "__moss_fs", fs.asValue(), .frozen);
+    }
+    if (flags & wire.flag_net != 0) {
+        const net = try vm.newObject();
+        _ = try vm.defineNative(net, "fetch", 1, netFetch);
+        try vm.defineValue(vm.global, "__moss_net", net.asValue(), .frozen);
     }
     vm.host_load = hostLoad;
 }

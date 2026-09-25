@@ -966,9 +966,12 @@ supervises), and memory history per unit beside the CPU one.
       module: true }` lends one directory of the shell's view, derived
       for the run, as `moss:fs` (read, write, list, stat, exists) and
       as the place relative imports come from; `console`; top-level
-      `await`. Still to come in (e): the network view as a module over
-      the web host's broker, `web-eval`, quickening, the bench row, a
-      real bookkeeping allocator for a script domain.
+      `await`; and `net: true` lends the network as `moss:net`, whose
+      `fetch` goes through the page host's broker — the broker now has
+      a client-independent face (`webhost.Client`, `brokerOpen`/
+      `brokerRead`) that pages and script runs share. Still to come in
+      (e): `web-eval`, quickening, the bench row, a real bookkeeping
+      allocator for a script domain.
       Residuals of (b)–(d): the moving nursery (the barrier is in
       place) and ephemeron keys for the weak collections, eval's
       `arguments` early errors, rooting natives' locals so collection

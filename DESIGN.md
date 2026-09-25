@@ -7409,6 +7409,37 @@ shares is where a file's bytes must land anyway, so it is the read
 target, the write source and the list's workspace, and the host keeps
 a path.
 
+**Stage 10e, the network as a module (as built, 2026-09-25).** The
+web host's broker was written for pages: `open` and `read` took a
+page id, read the URL out of that page's buffer and replied on the
+host's wire. Lending the network to a script domain meant one of two
+things — a second broker in the script host (a static buffer in
+`mshrun`, paid by every shell, and a second place fetches are
+policed) or the same broker with a client-independent face. It is the
+second: `webhost.Client` is the broker's state for one client (the
+open resource, the parked connection and its key), a `Page` embeds
+one, and `brokerOpen(client, url, post, body, tag)` /
+`brokerRead(client, out, tag)` / `brokerCancel` / `dropParked` are the
+broker as functions of a client that return what they found —
+`OpenOut` (a refusal code, or status with the final URL and content
+type in the broker's own buffers) and `ReadOut` (a chunk's length and
+end) — for the caller to put on its wire. The page's `open` and `read`
+are ten-line wrappers over them now; the web, webpage and browser
+drills are the proof that nothing moved. `js-run SOURCE { net: true
+}` asks the shell's page host (set up on first use, `webrender.
+ensureHost`) and lends it to the run: the script domain's `moss:net`
+has one export, `fetch(url, { method, body })`, whose `net_open`,
+`net_read` and `net_cancel` are the page seam's `open`, `read` and
+`cancel` under other names, answered by the broker for the run's own
+`Client` (kept in the script host, 33 KB), so a program's fetches
+follow redirects, reuse a parked connection and are refused by the
+same rules and the same network view as a page's — the drill's second
+fetch reuses the first's connection, as the log says. `fetch` returns
+a promise of `{ ok, status, url, type, text }` with the body gathered a
+chunk at a time through the data buffer, which is what keeps a 24 MB
+resource off the script host's static memory. A program lent no
+network finds no `moss:net`.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

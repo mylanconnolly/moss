@@ -10,7 +10,9 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
 const fscmds = @import("fscmds.zig");
+const webhost = @import("webhost.zig");
 const wire = shared.js;
+const web = shared.web;
 
 /// The script's memory: its image's static heaps (8 MB of JavaScript
 /// values, 12 MB of bookkeeping) plus stack and the data buffer.
@@ -33,6 +35,9 @@ pub const Options = struct {
     fs_chan: u64 = 0,
     fs_buf: [*]u8 = undefined,
     module: bool = false,
+    /// The page host whose broker answers the program's fetches (the
+    /// shell's own network view, policed as a page's is), or null.
+    web: ?*webhost.Host = null,
 };
 
 pub const Host = struct {
@@ -51,6 +56,9 @@ pub const Host = struct {
     /// (No larger scratch here: a static buffer in `mshrun` is paid by
     /// every shell it spawns, and 256 KB tipped a worker's budget.)
     path: [1024]u8 = undefined,
+    /// The broker's state for the running program (what it has open,
+    /// the connection it parks between requests).
+    client: webhost.Client = .{},
 
     pub fn reset(h: *Host, log: u64, spawner: u64) void {
         h.* = .{ .log = log, .spawner = spawner };
@@ -150,10 +158,49 @@ pub const Host = struct {
         }
     }
 
+    /// The network requests: the page seam's open/read/cancel, answered
+    /// by the web host's broker for this run's client.
+    fn serveNet(h: *Host, opts: Options, buf: []u8, req: wire.RunReq, token: u64) void {
+        const w = opts.web orelse return h.refuse(token, 0);
+        switch (req) {
+            .net_open => |o| {
+                if (o.off > buf.len or o.len > buf.len - o.off or o.len == 0) return h.refuse(token, @intFromEnum(web.RefuseCode.bad_url));
+                const post = o.flags & 1 != 0;
+                const body_len: usize = @intCast(@min(o.flags >> 8, buf.len - (o.off + o.len)));
+                const url = buf[@intCast(o.off)..@intCast(o.off + o.len)];
+                const body = buf[@intCast(o.off + o.len)..@intCast(o.off + o.len + body_len)];
+                switch (w.brokerOpen(&h.client, url, post, body, "script")) {
+                    .refused => |code| h.refuse(token, @intFromEnum(code)),
+                    .opened => |op| {
+                        const url_len = @min(op.url.len, buf.len);
+                        @memcpy(buf[0..url_len], op.url[0..url_len]);
+                        const ct_len = @min(op.ct.len, buf.len - url_len);
+                        @memcpy(buf[url_len .. url_len + ct_len], op.ct[0..ct_len]);
+                        h.reply(.{ .opened = .{ .status = op.status, .url_len = url_len, .type_len = ct_len } }, 0, token);
+                    },
+                }
+            },
+            .net_read => |r| {
+                const out = w.brokerRead(&h.client, buf[0..@intCast(@min(r.max, buf.len))], "script");
+                h.reply(.{ .chunk = .{ .len = out.len, .done = @intFromEnum(out.end) } }, 0, token);
+            },
+            .net_cancel => {
+                w.brokerCancel(&h.client);
+                h.reply(.ok, 0, token);
+            },
+            else => h.reply(.none, 0, token),
+        }
+    }
+
     /// Run `source` in a fresh script domain and wait for its end.
     pub fn run(h: *Host, stage_handle: u64, source: []const u8, opts: Options) Result {
         h.output_len = 0;
         h.text_len = 0;
+        h.client = .{};
+        defer if (opts.web) |w| {
+            w.brokerCancel(&h.client);
+            w.dropParked(&h.client);
+        };
         const d = usys.shmCreate(wire.data_pages);
         if (d.err != .ok) return .{ .outcome = .refused, .text = "no room for the data buffer", .output = "" };
         defer _ = usys.capDrop(d.data[0]);
@@ -166,6 +213,7 @@ pub const Host = struct {
         var flags: u64 = 0;
         if (opts.fs_chan != 0) flags |= wire.flag_fs;
         if (opts.module) flags |= wire.flag_module;
+        if (opts.web != null) flags |= wire.flag_net;
 
         const badge = h.next_badge;
         h.next_badge += 1;
@@ -229,6 +277,7 @@ pub const Host = struct {
                     return .{ .outcome = if (dn.ok != 0) .ok else .threw, .text = h.text[0..n], .output = h.output[0..h.output_len] };
                 },
                 .fs_read, .fs_write, .fs_list, .fs_stat => h.serveFs(opts, buf, req, r.token),
+                .net_open, .net_read, .net_cancel => h.serveNet(opts, buf, req, r.token),
             }
         }
     }

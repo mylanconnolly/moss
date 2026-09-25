@@ -127,7 +127,7 @@ const specs = [_]Spec{
     },
     .{ .name = "net", .kind = .net, .pass = "net-test: PASS", .extra = "mshrun: script: served 7", .always_extra = "echocli: handed-off socket echoed on a new view", .append = "profile=net" },
     .{ .name = "dot", .kind = .dot, .pass = "dot-test: PASS", .extra = "mshrun: script: dot resolve ok", .append = "profile=dot" },
-    .{ .name = "jsrun", .kind = .blk, .pass = "jsrun-test: PASS", .extra = "mshrun: script: jsrun ok", .always_extra = "mshrun: script: js-run value ok", .append = "profile=jsrun" },
+    .{ .name = "jsrun", .kind = .web, .pass = "jsrun-test: PASS", .extra = "mshrun: script: jsrun ok", .always_extra = "mshrun: script: js-run value ok", .append = "profile=jsrun" },
     .{ .name = "web", .kind = .web, .pass = "web-test: PASS", .extra = "mshrun: script: web fixtures ok", .append = "profile=web" },
     .{ .name = "browser", .kind = .browser, .pass = "browser-test: PASS", .extra = "browser: closed tabs=1", .always_extra = "page t1: load done", .extra2 = "topbar: exit note=logging out", .append = "profile=browser", .timeout_s = 180 },
     .{ .name = "webpage", .kind = .web, .pass = "webpage-test: PASS", .extra = "webpagecli: page domains ok", .extra2 = "webpagecli: the page that read past its arena died, as it should", .append = "profile=webpage", .timeout_s = 150 },

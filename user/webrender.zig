@@ -35,6 +35,21 @@ var host_ready = false;
 var stage: ?loader.Stage = null;
 var staged = false;
 
+/// The page host, set up on first use; `js-run { net: true }` lends its
+/// broker to script domains, so a program's fetches are policed in the
+/// one place a page's are. Null without a network view or a channel.
+pub fn ensureHost() ?*webhost.Host {
+    const n = net orelse return null;
+    if (n.chan == 0) return null;
+    if (!host_ready) {
+        host.reset(log_h, spawner, n);
+        if (!host.init()) return null;
+        if (view != 0) _ = host.loadFonts(view, view_buf);
+        host_ready = true;
+    }
+    return &host;
+}
+
 pub fn setup(spawner_cap: u64, n: *netcmds.Net, view_chan: u64, buf: [*]u8, s: []const ?fscmds.Store, log: u64) void {
     spawner = spawner_cap;
     net = n;
@@ -71,13 +86,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (spawner == 0) return errResult(it, "web-render: this program holds no spawner", .{});
     const n = net orelse return errResult(it, "web-render: no network view", .{});
     if (n.chan == 0) return errResult(it, "web-render: no network view", .{});
-    if (!host_ready) {
-        host.reset(log_h, spawner, n);
-        if (!host.init()) return errResult(it, "web-render: out of channels", .{});
-        if (view != 0) _ = host.loadFonts(view, view_buf);
-        host_ready = true;
-    }
-    const h = &host;
+    const h = ensureHost() orelse return errResult(it, "web-render: out of channels", .{});
     if (stage == null) stage = loader.Stage.init(loader.Stage.default_pages) orelse return errResult(it, "web-render: no room to stage the page image", .{});
     if (!staged) {
         _ = progload.loadImage(it, "webpage", stores, &stage.?) orelse return errResult(it, "web-render: the webpage image is not in the store", .{});

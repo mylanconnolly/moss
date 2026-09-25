@@ -27,6 +27,8 @@ pub const data_pages: u64 = 64;
 pub const flag_fs: u64 = 1 << 0;
 /// The source is a module: `import`/`export` and top-level `await`.
 pub const flag_module: u64 = 1 << 1;
+/// The host lends its network view: `moss:net` works.
+pub const flag_net: u64 = 1 << 2;
 
 pub const RunReq = union(enum(u64)) {
     /// The script's data buffer: the reply carries the shm cap, the
@@ -48,6 +50,15 @@ pub const RunReq = union(enum(u64)) {
     fs_list: struct { len: u64 },
     /// The object at data[0..len]: the reply is `stat`, or `refused`.
     fs_stat: struct { len: u64 },
+    /// Open the resource at data[off..off+len] (an absolute URL) through
+    /// the host's broker — the page seam's `open`: `flags` bit 0 = POST,
+    /// with a body of `flags >> 8` bytes following the URL.
+    net_open: struct { off: u64, len: u64, flags: u64 },
+    /// The next chunk of the open resource, at most `max` bytes, into
+    /// data[0..].
+    net_read: struct { max: u64 },
+    /// Drop the open resource.
+    net_cancel: void,
 };
 
 pub const HostResp = union(enum(u64)) {
@@ -61,6 +72,12 @@ pub const HostResp = union(enum(u64)) {
     refused: struct { code: u64 },
     /// `kind` is a `FsType`.
     stat: struct { kind: u64, size: u64 },
+    /// The resource is open: its status, and at data[0..] the final URL
+    /// (after redirects) then the content type, by length. A refusal is
+    /// `refused` with a `web.RefuseCode`.
+    opened: struct { status: u64, url_len: u64, type_len: u64 },
+    /// `len` bytes at data[0..]; `done` is a `web.ChunkEnd`.
+    chunk: struct { len: u64, done: u64 },
 };
 
 test "encode/decode round trip" {

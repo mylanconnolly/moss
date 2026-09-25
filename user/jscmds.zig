@@ -18,6 +18,7 @@ const Shape = mshl.Shape;
 const usys = @import("usys.zig");
 const fsc = @import("fsclient.zig");
 const jshost = @import("jshost.zig");
+const webrender = @import("webrender.zig");
 const progload = @import("progload.zig");
 const loader = @import("loader.zig");
 const fscmds = @import("fscmds.zig");
@@ -75,6 +76,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             fs_path = v.str;
         }
         if (rec.get("module")) |v| opts.module = v.asBool();
+        if (rec.get("net")) |v| if (v.asBool()) {
+            opts.web = webrender.ensureHost() orelse return errResult(it, "js-run: this program holds no network view to lend", .{});
+        };
     }
     if (!host_ready) {
         host.reset(log_h, spawner);
