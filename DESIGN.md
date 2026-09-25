@@ -7375,6 +7375,40 @@ carries every program too — crossed once `jsrun` joined; the cap is
 in the page domain's own heap next (stage 11), and `jsrun`'s modules
 over its capabilities are the other half of the decision row.
 
+**Stage 10e, capabilities as modules (as built, 2026-09-25).** The
+decision row's other half: a program gets exactly what its domain
+holds, and it gets it as modules. `js-run SOURCE { fs: DIR, module:
+true }` derives a view of DIR from the shell's own view for the one
+run (`fs-derive`'s primitive; the derived cap goes with the run) and
+lends it to the script domain, which still holds nothing but its
+channel: the `moss:fs` module's `read`, `write`, `list`, `stat` and
+`exists` are natives that call back to the host through the seam
+(`fs_read`, `fs_write`, `fs_list`, `fs_stat` in `shared/js.zig`), and
+the host answers through that view and nothing wider — a path with
+`..` in it is refused before it reaches the filesystem, so the drill's
+`read('../fs.key')` finds nothing. The module itself is synthesized
+text over a hidden frozen global (`__moss_fs`), which is the same
+authority under another name; a program lent no view finds no
+`moss:fs` at all, and the resolution error names the specifier. A
+relative import is a file of the lent view, resolved against the
+importing module as the host runner resolves against a directory,
+which makes a program and its helpers a directory the user hands
+over. `module: true` runs the source as a module — `import`, `export`,
+top-level `await`; the completion value is then empty and a rejection
+of the module's promise is the uncaught exception — and `console`
+(`log`, `info`, `debug`, `warn`, `error`) joins `print` as the
+output. What `moss:fs` does not do is as deliberate: no paths outside
+the lent directory, no other view, no network; the network view will
+come as a module over the web host's broker, the one place fetches
+are already policed. And the lesson of stage 5 was paid once more,
+at once: the host's first draft kept a 256 KB scratch for file
+contents in `mshrun`'s static memory, and the `flogin` drill's remote
+spawn on node 1 was refused for room — a static buffer in a program
+every shell spawns is paid by every shell. The data buffer the script
+shares is where a file's bytes must land anyway, so it is the read
+target, the write source and the list's workspace, and the host keeps
+a path.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

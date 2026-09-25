@@ -342,7 +342,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     // this script's network view; self-guards without a spawner.
     // `js-run`: script domains spawned from the store; self-guards
     // without a spawner.
-    jscmds.setup(worker_spawner, &stores, log_h);
+    jscmds.setup(worker_spawner, &stores, view_chan, view_buf, log_h);
     if (net) |*n| {
         webrender.setup(worker_spawner, n, view_chan, view_buf, &stores, log_h);
         guicmds.setupPages(worker_spawner, n, if (assets_chan != 0) assets_chan else view_chan, if (assets_chan != 0) assets_buf else view_buf, assets_chan != 0, &stores, log_h);

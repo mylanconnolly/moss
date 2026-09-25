@@ -86,12 +86,24 @@ attach, each `print` line, the ending). The shell's `js-run SOURCE`
 image from the program store, serves the run and destroys the domain,
 answering `{ value, lines }` or an error naming the uncaught exception,
 the syntax error or the death. A program gets exactly what its domain
-holds — today that is nothing but the channel; modules over the
-domain's capabilities are the next slice. The `jsrun` drill (`zig build
-check -Donly=jsrun`) is the integration test.
+holds, as modules: `js-run SOURCE { fs: DIR, module: true }` lends one
+directory of the shell's view, derived for the run, as `moss:fs`
+(`read`, `write`, `list`, `stat`, `exists`, all calls back to the host)
+and as the place relative imports come from; `module: true` runs the
+source as a module with `import`, `export` and top-level `await`;
+`console` and `print` are the output. A program lent nothing finds no
+`moss:fs`, and none can climb out of the directory it was lent. The
+`jsrun` drill (`zig build check -Donly=jsrun`) is the integration test.
 
 ```
 zig build check -Donly=jsrun            # the script-domain drill
+```
+
+```msh
+(js-run "import { read, list } from 'moss:fs';
+         import { helper } from './lib.js';
+         console.log(list('.').map(e => e.name), read('note.txt'), await helper());"
+        { fs: state/work, module: true })
 ```
 
 Nothing the engine links may be `threadlocal` (a user program has no

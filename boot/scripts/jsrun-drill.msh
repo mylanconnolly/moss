@@ -23,4 +23,22 @@ match (js-run "function f() { return f() + 1; } f()") {
 }
 let again = (js-run "[1, 2, 3].map(x => x * x).reduce((a, b) => a + b)")?
 if $again.value != "14" { (err "js-run again: $again.value")? }
+# Modules over the domain's one capability: a directory of this
+# script's view, lent to the program as `moss:fs` and as the place its
+# relative imports come from; a program lent nothing finds no module.
+(mkdir state/jsdrill)?
+(write state/jsdrill/lib.js "export const twice = x => x * 2;")?
+let mod = "import { twice } from './lib.js'; import { read, write, list, exists } from 'moss:fs'; console.log('lib', twice(21)); write('note.txt', 'hello from js'); console.log(read('note.txt')); console.log(list('.').map(e => e.name).sort().join(',')); console.log(exists('nope.txt'), await Promise.resolve('awaited'));"
+let m = (js-run $mod { fs: state/jsdrill, module: true })?
+if $m.lines != ["lib 42", "hello from js", "lib.js,note.txt", "false awaited"] { (err "js-run module: lines $m.lines")? }
+if (cat state/jsdrill/note.txt)? != "hello from js" { (err "js-run module: the file was not written")? }
+echo "script: js-run modules ok"
+match (js-run "import { read } from 'moss:fs'; read('note.txt')" { module: true }) {
+  ok $v => (err "js-run: a program lent nothing reached a view")?
+  err $e => { if ($e | split "moss:fs" | len) < 2 { (err "js-run no view: $e")? } }
+}
+match (js-run "import { read } from 'moss:fs'; read('../fs.key')" { fs: state/jsdrill, module: true }) {
+  ok $v => (err "js-run: a program read outside its view")?
+  err $e => { if ($e | split "not_found" | len) < 2 { (err "js-run escape: $e")? } }
+}
 echo "script: jsrun ok"

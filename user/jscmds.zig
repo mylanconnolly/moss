@@ -1,15 +1,22 @@
-//! `js-run SOURCE`: a JavaScript program run the way a page's script
-//! would run — in a script domain holding nothing but the channel to
-//! this program, which is its host. The domain is spawned from the
-//! store's `jsrun` image for the one run and destroyed after it. The
-//! result is `{ value, lines }`: the completion value's text and the
-//! `print` lines; an uncaught exception, a syntax error or a script
-//! that dies of its heap is an error result carrying the reason.
+//! `js-run SOURCE [OPTIONS]`: a JavaScript program run the way a page's
+//! script would run — in a script domain holding nothing but the
+//! channel to this program, which is its host. The domain is spawned
+//! from the store's `jsrun` image for the one run and destroyed after
+//! it. OPTIONS is a record: `fs: PATH` lends the program one view, a
+//! directory of this script's own view derived for the run (its
+//! `moss:fs` module and its relative imports reach that directory and
+//! nothing else); `module: true` runs the source as a module, with
+//! `import` and top-level `await`. The result is `{ value, lines }`:
+//! the completion value's text (a module's is empty) and the printed
+//! lines; an uncaught exception, a syntax error or a script that dies
+//! of its heap is an error result carrying the reason.
 const std = @import("std");
 const mosslib = @import("mosslib");
 const mshl = mosslib.mshl;
 const Value = mshl.Value;
 const Shape = mshl.Shape;
+const usys = @import("usys.zig");
+const fsc = @import("fsclient.zig");
 const jshost = @import("jshost.zig");
 const progload = @import("progload.zig");
 const loader = @import("loader.zig");
@@ -20,14 +27,18 @@ pub const command_names = [_][]const u8{"js-run"};
 var spawner: u64 = 0;
 var stores: []const ?fscmds.Store = &.{};
 var log_h: u64 = 0;
+var view_chan: u64 = 0;
+var view_buf: [*]u8 = undefined;
 var host: jshost.Host = undefined;
 var host_ready = false;
 var stage: ?loader.Stage = null;
 var staged = false;
 
-pub fn setup(spawner_cap: u64, s: []const ?fscmds.Store, log: u64) void {
+pub fn setup(spawner_cap: u64, s: []const ?fscmds.Store, view: u64, vbuf: [*]u8, log: u64) void {
     spawner = spawner_cap;
     stores = s;
+    view_chan = view;
+    view_buf = vbuf;
     log_h = log;
 }
 
@@ -41,7 +52,7 @@ const run_shape = blk: {
 const run_result = mshl.resultShape(run_shape, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
-    if (std.mem.eql(u8, name, "js-run")) return .{ .params = &.{.{ .name = "source", .shape = .string }}, .ret = run_result };
+    if (std.mem.eql(u8, name, "js-run")) return .{ .params = &.{ .{ .name = "source", .shape = .string }, .{ .name = "options", .shape = .record, .optional = true } }, .ret = run_result };
     return null;
 }
 
@@ -54,6 +65,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (!std.mem.eql(u8, name, "js-run")) return null;
     if (args.len < 1 or args[0] != .str) return it.fail("js-run: the source is needed", .{});
     if (spawner == 0) return errResult(it, "js-run: this program holds no spawner", .{});
+    // The options: a view to lend, the module flag.
+    var opts: jshost.Options = .{};
+    var fs_path: ?[]const u8 = null;
+    if (args.len > 1 and args[1] == .record) {
+        const rec = args[1].record;
+        if (rec.get("fs")) |v| {
+            if (v != .str) return it.fail("js-run: fs must be a path", .{});
+            fs_path = v.str;
+        }
+        if (rec.get("module")) |v| opts.module = v.asBool();
+    }
     if (!host_ready) {
         host.reset(log_h, spawner);
         if (!host.init()) return errResult(it, "js-run: out of channels", .{});
@@ -64,7 +86,23 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         _ = progload.loadImage(it, "jsrun", stores, &stage.?) orelse return errResult(it, "js-run: the jsrun image is not in the store", .{});
         staged = true;
     }
-    const r = host.run(stage.?.handle, args[0].str);
+    // A derived view for the run: the program sees that directory as
+    // its root, and the view goes when the run does.
+    var derived: u64 = 0;
+    var derived_buf: u64 = 0;
+    if (fs_path) |p| {
+        if (view_chan == 0) return errResult(it, "js-run: this program holds no filesystem view to lend", .{});
+        const path = if (p.len > 0 and p[0] == '/') p[1..] else p;
+        derived = fsc.fsDerive(view_chan, view_buf, path, false) orelse return errResult(it, "js-run: no view at {s}", .{p});
+        const ab = fsc.attachBuf(derived);
+        derived_buf = ab.va;
+        opts.fs_chan = derived;
+        opts.fs_buf = @ptrFromInt(ab.va);
+    }
+    defer if (derived != 0) {
+        _ = usys.capDrop(derived);
+    };
+    const r = host.run(stage.?.handle, args[0].str, opts);
     switch (r.outcome) {
         .ok => {},
         .threw => return errResult(it, "js-run: uncaught {s}", .{r.text}),

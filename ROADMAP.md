@@ -961,9 +961,14 @@ supervises), and memory history per unit beside the CPU one.
       page domain's shape (one badged calling end to its host, a
       static heap, nothing else), `js-run` in the shell as its host,
       and the `jsrun` drill; the engine builds freestanding as the
-      decision requires. Still to come in (e): the domain's
-      capabilities offered as modules, `web-eval`, quickening, the
-      bench row, a real bookkeeping allocator for a script domain.
+      decision requires. Then the other half of the decision row: a
+      program's capabilities as modules — `js-run SOURCE { fs: DIR,
+      module: true }` lends one directory of the shell's view, derived
+      for the run, as `moss:fs` (read, write, list, stat, exists) and
+      as the place relative imports come from; `console`; top-level
+      `await`. Still to come in (e): the network view as a module over
+      the web host's broker, `web-eval`, quickening, the bench row, a
+      real bookkeeping allocator for a script domain.
       Residuals of (b)–(d): the moving nursery (the barrier is in
       place) and ephemeron keys for the weak collections, eval's
       `arguments` early errors, rooting natives' locals so collection

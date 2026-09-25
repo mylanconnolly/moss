@@ -4,9 +4,12 @@
 //! there, runs it with the engine in `lib/js` over a static heap, sends
 //! each `print` line back through the same buffer and finally reports
 //! the completion value or the uncaught exception. It holds no
-//! filesystem, no network and no clock; a script gets exactly what its
-//! domain holds, which is nothing but this channel. When its heap runs
-//! out it says so and dies, and the host sees a dead client.
+//! filesystem, no network and no clock of its own: what the host
+//! offers arrives as modules — `moss:fs` is the one view the host may
+//! lend, reached by calls back through the channel, and a relative
+//! import is a file of that view — so a program gets exactly what its
+//! domain holds. When its heap runs out it says so and dies, and the
+//! host sees a dead client.
 const std = @import("std");
 const shared = @import("shared");
 const mosslib = @import("mosslib");
@@ -15,6 +18,7 @@ const js = mosslib.js;
 const wire = shared.js;
 const Vm = js.vm.Vm;
 const Value = js.value.Value;
+const Error = js.vm.Error;
 
 comptime {
     asm (usys.imageHeaderStack("jsrun", 128));
@@ -40,6 +44,7 @@ var glog: u64 = 0;
 var host: u64 = 0;
 var data: [*]u8 = undefined;
 var data_len: usize = 0;
+var flags: u64 = 0;
 
 /// The engine's heap: every JavaScript value lives here.
 var region: [8 << 20]u8 align(16) = undefined;
@@ -72,6 +77,7 @@ fn attach() []const u8 {
     if (dm.err != .ok) usys.exit(3);
     data = @ptrFromInt(dm.data[0]);
     data_len = dm.data[1] * 4096;
+    flags = d.rep.data_buf.flags;
     return data[0..@min(d.rep.data_buf.len, data_len)];
 }
 
@@ -85,10 +91,14 @@ fn sendText(comptime req: enum { output, done }, ok: bool, text: []const u8) voi
     };
 }
 
-/// `print(...)`: the arguments' strings joined by spaces, one line.
-fn print(v: *Vm, _: Value, args: []const Value, _: Value) js.vm.Error!Value {
+// ------------------------------------------------------------ console
+
+/// The arguments' strings joined by spaces, as one output line with an
+/// optional tag in front.
+fn emitLine(v: *Vm, tag: []const u8, args: []const Value) Error!void {
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(v.meta);
+    try line.appendSlice(v.meta, tag);
     for (args, 0..) |a, i| {
         if (i > 0) try line.append(v.meta, ' ');
         const s = try v.toString(a);
@@ -97,7 +107,202 @@ fn print(v: *Vm, _: Value, args: []const Value, _: Value) js.vm.Error!Value {
         try line.appendSlice(v.meta, u);
     }
     sendText(.output, true, line.items);
+}
+
+fn print(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    try emitLine(v, "", args);
     return Value.undefined_;
+}
+
+fn consoleWarn(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    try emitLine(v, "[warn] ", args);
+    return Value.undefined_;
+}
+
+fn consoleError(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    try emitLine(v, "[error] ", args);
+    return Value.undefined_;
+}
+
+// ------------------------------------------------------------ moss:fs
+
+/// A path argument into the data buffer, for a request that names one.
+fn pathArg(v: *Vm, args: []const Value, at: usize) Error![]const u8 {
+    if (at >= args.len or !args[at].isString()) return v.throwTypeError("a path string is needed");
+    const s = try v.utf8(Vm.asString(args[at]), v.meta);
+    defer v.meta.free(s);
+    if (s.len == 0 or s.len > 1024) return v.throwRangeError("the path is empty or too long");
+    // A leading slash means the view's root, the same place as no slash.
+    const p = if (s[0] == '/') s[1..] else s;
+    @memcpy(data[0..p.len], p);
+    return data[0..p.len];
+}
+
+fn refusedError(v: *Vm, what: []const u8, path: []const u8, code: u64) Error {
+    const why = if (code == 0) "the domain holds no filesystem view" else if (std.enums.fromInt(shared.FsErr, code)) |e| @tagName(e) else "refused";
+    var msg: [1200]u8 = undefined;
+    const m = std.fmt.bufPrint(&msg, "{s} {s}: {s}", .{ what, path, why }) catch "filesystem call refused";
+    return v.throwError(.Error, m);
+}
+
+fn fsRead(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const path = try pathArg(v, args, 0);
+    var pcopy: [1024]u8 = undefined;
+    @memcpy(pcopy[0..path.len], path);
+    switch (call(.{ .fs_read = .{ .len = path.len } })) {
+        .text => |t| {
+            const n = @min(t.len, data_len);
+            return Vm.strValue(try v.strings.fromUtf8(data[0..n]));
+        },
+        .refused => |r| return refusedError(v, "read", pcopy[0..path.len], r.code),
+        else => return v.throwError(.Error, "read: the host answered with nonsense"),
+    }
+}
+
+fn fsWrite(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    if (args.len < 2) return v.throwTypeError("write(path, text) needs both");
+    const text = try v.utf8(try v.toString(args[1]), v.meta);
+    defer v.meta.free(text);
+    const path = try pathArg(v, args, 0);
+    var pcopy: [1024]u8 = undefined;
+    @memcpy(pcopy[0..path.len], path);
+    if (path.len + text.len > data_len) return v.throwRangeError("write: the text does not fit the data buffer");
+    @memcpy(data[path.len .. path.len + text.len], text);
+    switch (call(.{ .fs_write = .{ .path_len = path.len, .data_len = text.len } })) {
+        .ok => return Value.undefined_,
+        .refused => |r| return refusedError(v, "write", pcopy[0..path.len], r.code),
+        else => return v.throwError(.Error, "write: the host answered with nonsense"),
+    }
+}
+
+fn kindValue(v: *Vm, kind: u64) Error!Value {
+    const name: []const u8 = if (std.enums.fromInt(shared.FsType, kind)) |k| @tagName(k) else "unknown";
+    return v.str(name);
+}
+
+fn fsList(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const path = if (args.len == 0 or args[0].isUndefined()) blk: {
+        data[0] = '.';
+        break :blk data[0..1];
+    } else try pathArg(v, args, 0);
+    var pcopy: [1024]u8 = undefined;
+    @memcpy(pcopy[0..path.len], path);
+    switch (call(.{ .fs_list = .{ .len = path.len } })) {
+        .text => |t| {
+            const n = @min(t.len, data_len);
+            const out = try v.newArray(0);
+            var lines = std.mem.splitScalar(u8, data[0..n], '\n');
+            while (lines.next()) |line| {
+                if (line.len < 4) continue;
+                // "<kind> <size> <name>"
+                var parts = std.mem.splitScalar(u8, line, ' ');
+                const kind_s = parts.next() orelse continue;
+                const size_s = parts.next() orelse continue;
+                const name = parts.rest();
+                const entry = try v.newObject();
+                try v.defineValue(entry, "name", Vm.strValue(try v.strings.fromUtf8(name)), .default);
+                try v.defineValue(entry, "kind", try v.str(if (std.mem.eql(u8, kind_s, "d")) "dir" else if (std.mem.eql(u8, kind_s, "l")) "link" else "file"), .default);
+                try v.defineValue(entry, "size", Value.fromF64(@floatFromInt(std.fmt.parseInt(u64, size_s, 10) catch 0)), .default);
+                try v.arrayPush(out, entry.asValue());
+            }
+            return out.asValue();
+        },
+        .refused => |r| return refusedError(v, "list", pcopy[0..path.len], r.code),
+        else => return v.throwError(.Error, "list: the host answered with nonsense"),
+    }
+}
+
+fn fsStat(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const path = try pathArg(v, args, 0);
+    var pcopy: [1024]u8 = undefined;
+    @memcpy(pcopy[0..path.len], path);
+    switch (call(.{ .fs_stat = .{ .len = path.len } })) {
+        .stat => |st| {
+            const entry = try v.newObject();
+            try v.defineValue(entry, "kind", try kindValue(v, st.kind), .default);
+            try v.defineValue(entry, "size", Value.fromF64(@floatFromInt(st.size)), .default);
+            return entry.asValue();
+        },
+        .refused => |r| return refusedError(v, "stat", pcopy[0..path.len], r.code),
+        else => return v.throwError(.Error, "stat: the host answered with nonsense"),
+    }
+}
+
+fn fsExists(v: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const path = try pathArg(v, args, 0);
+    return switch (call(.{ .fs_stat = .{ .len = path.len } })) {
+        .stat => Value.true_,
+        else => Value.false_,
+    };
+}
+
+/// The `moss:fs` module's text: its exports are the natives on the
+/// hidden `__moss_fs` object, the domain's one view.
+const fs_module_source =
+    \\const fs = globalThis.__moss_fs;
+    \\export const read = fs.read;
+    \\export const write = fs.write;
+    \\export const list = fs.list;
+    \\export const stat = fs.stat;
+    \\export const exists = fs.exists;
+    \\export default fs;
+;
+
+/// The module loader: `moss:fs` is synthesized; anything else is a
+/// file of the view, resolved relative to the importing module.
+fn hostLoad(v: *Vm, referrer: ?[]const u8, specifier: []const u8) Error!?js.module.Loaded {
+    const a = v.meta;
+    if (std.mem.eql(u8, specifier, "moss:fs")) {
+        if (flags & wire.flag_fs == 0) return null;
+        return .{ .name = try a.dupe(u8, "moss:fs"), .source = try a.dupe(u8, fs_module_source) };
+    }
+    if (flags & wire.flag_fs == 0) return null;
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(a);
+    const relative = std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../");
+    if (relative) if (referrer) |ref| {
+        if (!std.mem.startsWith(u8, ref, "moss:")) if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| try path.appendSlice(a, ref[0..i]);
+    };
+    var it = std.mem.splitScalar(u8, specifier, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (std.mem.lastIndexOfScalar(u8, path.items, '/')) |i| path.shrinkRetainingCapacity(i) else path.clearRetainingCapacity();
+            continue;
+        }
+        if (path.items.len > 0) try path.append(a, '/');
+        try path.appendSlice(a, seg);
+    }
+    if (path.items.len == 0 or path.items.len > 1024) return null;
+    @memcpy(data[0..path.items.len], path.items);
+    switch (call(.{ .fs_read = .{ .len = path.items.len } })) {
+        .text => |t| {
+            const n = @min(t.len, data_len);
+            return .{ .name = try a.dupe(u8, path.items), .source = try a.dupe(u8, data[0..n]) };
+        },
+        else => return null,
+    }
+}
+
+fn installHostObjects() Error!void {
+    _ = try vm.defineNative(vm.global, "print", 1, print);
+    const console = try vm.newObject();
+    _ = try vm.defineNative(console, "log", 1, print);
+    _ = try vm.defineNative(console, "info", 1, print);
+    _ = try vm.defineNative(console, "debug", 1, print);
+    _ = try vm.defineNative(console, "warn", 1, consoleWarn);
+    _ = try vm.defineNative(console, "error", 1, consoleError);
+    try vm.defineValue(vm.global, "console", console.asValue(), .hidden);
+    if (flags & wire.flag_fs != 0) {
+        const fs = try vm.newObject();
+        _ = try vm.defineNative(fs, "read", 1, fsRead);
+        _ = try vm.defineNative(fs, "write", 2, fsWrite);
+        _ = try vm.defineNative(fs, "list", 1, fsList);
+        _ = try vm.defineNative(fs, "stat", 1, fsStat);
+        _ = try vm.defineNative(fs, "exists", 1, fsExists);
+        try vm.defineValue(vm.global, "__moss_fs", fs.asValue(), .frozen);
+    }
+    vm.host_load = hostLoad;
 }
 
 fn exceptionText(a: std.mem.Allocator) []const u8 {
@@ -123,8 +328,31 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, _: u64, _: u64) callconv(.c) 
         _ = usys.log(glog, "jsrun: the engine did not fit its heap");
         usys.exit(5);
     };
-    _ = vm.defineNative(vm.global, "print", 1, print) catch usys.exit(5);
+    installHostObjects() catch usys.exit(5);
     _ = usys.log(glog, "jsrun: up");
+    if (flags & wire.flag_module != 0) {
+        // A module: its evaluation is a promise (top-level await); an
+        // uncaught exception rejects it.
+        const p = js.module.runEntry(&vm, "main", src) catch |e| switch (e) {
+            error.OutOfMemory => {
+                _ = usys.log(glog, "jsrun: out of memory running");
+                usys.exit(5);
+            },
+            error.Exception => {
+                sendText(.done, false, exceptionText(meta));
+                usys.exit(0);
+            },
+        };
+        vm.runJobs() catch {};
+        const pd = Vm.asObject(p).internal(js.vm.PromiseData);
+        if (pd.state == 2) {
+            vm.exception = pd.result;
+            sendText(.done, false, exceptionText(meta));
+            usys.exit(0);
+        }
+        sendText(.done, true, "");
+        usys.exit(0);
+    }
     const code = js.compiler.compile(meta, &vm.heap, &vm.strings, src, .{ .name = "script" }) catch |e| switch (e) {
         error.OutOfMemory => {
             _ = usys.log(glog, "jsrun: out of memory compiling");
