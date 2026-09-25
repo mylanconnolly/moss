@@ -332,6 +332,9 @@ pub const Lexer = struct {
                 var t = try l.scanIdentifier();
                 t.kind = .private_name;
                 t.start = start;
+                // The text keeps the '#': a private name never collides
+                // with an identifier in any table keyed by name.
+                t.text = try std.mem.concat(l.a, u8, &.{ "#", t.text });
                 return t;
             },
             '0'...'9' => return l.scanNumber(),
@@ -977,7 +980,7 @@ test "lexer: identifiers with escapes, private names, unicode letters, and the n
     try std.testing.expectEqualStrings("await", ts[0].text);
     try std.testing.expect(ts[0].escaped and !ts[0].isWord("await"));
     try std.testing.expectEqual(Kind.private_name, ts[1].kind);
-    try std.testing.expectEqualStrings("priv", ts[1].text);
+    try std.testing.expectEqualStrings("#priv", ts[1].text);
     try std.testing.expectEqualStrings("ünïcode", ts[2].text);
     try std.testing.expect(ts[3].isWord("y") and ts[3].newline_before);
     try std.testing.expect(ts[4].isWord("w") and ts[4].newline_before);

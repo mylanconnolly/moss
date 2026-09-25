@@ -22,6 +22,16 @@ pub const Options = struct {
     module: bool = false,
     /// Code already strict (a class body, a "use strict" caller): eval.
     strict: bool = false,
+    /// Direct eval code inherits its caller's syntactic context
+    /// (§19.2.1.1 PerformEval steps 5–12).
+    in_function: bool = false,
+    allow_new_target: bool = false,
+    allow_super_property: bool = false,
+    allow_super_call: bool = false,
+    /// Inside a class field initializer: `arguments` is an error.
+    no_arguments: bool = false,
+    /// Private names of the enclosing classes, visible to eval code.
+    private_names: []const []const u8 = &.{},
 };
 
 /// Parse a Script or Module. Nodes live in `a`; the error message and
@@ -42,6 +52,7 @@ pub const Parser = struct {
 
     module: bool,
     strict: bool,
+    opts: Options,
     // The function context.
     in_function: bool = false,
     in_generator: bool = false,
@@ -107,7 +118,7 @@ pub const Parser = struct {
     };
 
     pub fn init(a: std.mem.Allocator, src: []const u8, opts: Options) Parser {
-        var p: Parser = .{ .a = a, .lex = lexer.Lexer.init(a, src), .tok = undefined, .module = opts.module, .strict = opts.strict or opts.module };
+        var p: Parser = .{ .a = a, .lex = lexer.Lexer.init(a, src), .tok = undefined, .module = opts.module, .strict = opts.strict or opts.module, .opts = opts };
         p.lex.module = opts.module;
         return p;
     }
@@ -304,7 +315,20 @@ pub const Parser = struct {
         if (p.module) {
             p.await_expr = true;
         } else {
-            p.allow_new_target = false;
+            p.allow_new_target = p.opts.allow_new_target;
+            p.in_function = p.opts.in_function;
+            p.allow_super_property = p.opts.allow_super_property;
+            p.allow_super_call = p.opts.allow_super_call;
+            p.no_arguments = p.opts.no_arguments;
+        }
+        // Eval code inside a class: its private names are declared.
+        var outer_privates: ?*PrivateScope = null;
+        if (p.opts.private_names.len > 0) {
+            const ps = try p.a.create(PrivateScope);
+            ps.* = .{ .parent = null };
+            for (p.opts.private_names) |n| try ps.declared.put(p.a, n, 1);
+            p.class_privates = ps;
+            outer_privates = ps;
         }
         var body: std.ArrayList(*Node) = .empty;
         // The directive prologue.
@@ -318,6 +342,9 @@ pub const Parser = struct {
         const top = p.scope.?;
         for (p.export_locals.items) |ex| {
             if (!top.lexical.contains(ex.name) and !top.vars.contains(ex.name) and !top.funcs.contains(ex.name)) return p.fail("export of an undeclared name", ex.pos);
+        }
+        if (outer_privates) |ps| {
+            for (ps.referenced.items) |r| if (!ps.declared.contains(r.name)) return p.fail("undeclared private name", r.pos);
         }
         p.popScope();
         return p.node(0, .{ .program = .{ .body = body.items, .module = p.module, .strict = p.strict } });
@@ -1260,7 +1287,7 @@ pub const Parser = struct {
             is_private = true;
             key_name = p.tok.text;
             key = try p.node(kpos, .{ .private_name = p.tok.text });
-            if (std.mem.eql(u8, p.tok.text, "constructor")) return p.fail("#constructor is not allowed", kpos);
+            if (std.mem.eql(u8, p.tok.text, "#constructor")) return p.fail("#constructor is not allowed", kpos);
             try p.advance();
         } else if (try p.eat(.lbracket)) {
             computed = true;

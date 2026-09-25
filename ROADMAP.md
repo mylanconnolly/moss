@@ -931,7 +931,15 @@ supervises), and memory history per unit beside the CPU one.
       domain's capabilities as modules, quickening, the `bench` row
       (Richards, DeltaBlue, Crypto on host and target). No JIT — see
       the decision row. *Exit:* test262 counts per directory asserted
-      as floors; the bench row in DESIGN's table.
+      as floors; the bench row in DESIGN's table. *Landed:* (a) on
+      2026-09-24 (test/language 23,043/23,726 parse as their front
+      matter says); (b) on 2026-09-25 — the engine executes the corpus:
+      test/language 13,905/23,725, test/built-ins 9,262/23,821 (DESIGN
+      has the per-directory numbers and what each miss is). Residuals
+      of (b): the moving nursery (the barrier is in place), Unicode
+      identifier tables, eval's `arguments` early errors, unmapped
+      `Iterator.prototype`, rooting natives' locals so collection can
+      run at any depth (today only at native depth zero).
     - **(11) Scripts meet the page.** Bindings generated from one
       comptime interface table; the event loop in `webpage` (tasks,
       microtasks, timers on a kernel timer, animation frames on the

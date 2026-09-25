@@ -11,8 +11,29 @@
 pub const lexer = @import("js/lexer.zig");
 pub const ast = @import("js/ast.zig");
 pub const parser = @import("js/parser.zig");
+pub const value = @import("js/value.zig");
+pub const heap = @import("js/heap.zig");
+pub const string = @import("js/string.zig");
+pub const object = @import("js/object.zig");
+pub const bytecode = @import("js/bytecode.zig");
+pub const scope = @import("js/scope.zig");
+pub const compiler = @import("js/compiler.zig");
+pub const vm = @import("js/vm.zig");
+pub const interp = @import("js/interp.zig");
+pub const realm = @import("js/realm.zig");
+pub const builtins = @import("js/builtins.zig");
 
 test {
     _ = lexer;
     _ = parser;
+    _ = value;
+    _ = heap;
+    _ = string;
+    _ = object;
+    _ = bytecode;
+    _ = scope;
+    _ = compiler;
+    _ = vm;
+    _ = interp;
+    _ = builtins.number;
 }

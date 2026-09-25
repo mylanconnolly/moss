@@ -365,6 +365,18 @@ barriers in the virtio drivers, and `user/vmm.zig`.
 
 ## Debugging techniques that have paid off
 
+- The JavaScript engine (`lib/js`): `zig build js -- file.js` runs a
+  script on the host; `JS_DUMP=1` prints its bytecode, `JS_TRACE=1`
+  every instruction with its frame, `JS_GC_STRESS=1` collects at every
+  safe point and poisons freed cells — a missing GC root then crashes
+  at its cause instead of a million instructions later (that is how the
+  accessor cells, the for-in enumerator and eval-made closures' scope
+  tables were found). `TEST262_GC_STRESS=1 zig build test262 -- dir`
+  does the same over a corpus directory; `TEST262_TRACE=1` prints each
+  file before it runs so a crash names its test. A hang in the runner is
+  a native loop without `vm.tick()` (the step budget only counts
+  backward jumps and calls); find it with `sample <pid>`.
+
 - One OS test by hand, without the whole gate: `zig build -D<name>-test`
   then `zig-out/bin/moss-check <name> zig-out/bin/moss-kernel.bin`
   (the runner is installed alongside the kernel). Logs land in

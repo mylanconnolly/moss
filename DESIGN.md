@@ -6980,6 +6980,125 @@ An afternoon from an empty directory to that number is what the
 reference corpus makes possible: every fix was a failing file's front
 matter, read, and the count is the claim.
 
+**Stage 10b, the engine that runs (as built, 2026-09-25).** The rest of
+`lib/js/`, ~13,000 lines, in the order a value travels. `value.zig`:
+JavaScriptCore's NaN-boxing — a double stored offset by 2^49 so its top
+sixteen bits are never zero or 0xFFFE, an int32 under 0xFFFE, a cell as
+its 48-bit pointer, `undefined`/`null`/`true`/`false` as small numbers
+no allocation produces, a hole (`empty`) as zero for array holes and
+the temporal dead zone; a double that is a small integer stays an int32
+so counters never touch the FPU. `heap.zig`: cells in a region the
+embedder hands over (a page will give part of its own), each starting
+with a `Cell` header naming its kind and size class; allocation is a
+free-list pop or a bump, and **collection runs only at the
+interpreter's safe points** — backward jumps and returns at native
+depth zero, where every live value is in a register window, a frame or
+an intrinsic — so built-ins hold values in Zig locals freely; the mark
+walks explicit roots (intrinsics, the global lexical record, frames and
+their windows, handlers, the exception, the embedder's), the sweep
+returns dead cells to size-class free lists and finalizes the ones with
+off-heap bookkeeping (a shape's transition table, a code's data, an
+atom's table entry). The moving nursery the design promised is the next
+step: the write barrier every store goes through is a no-op today and
+is where old-to-young pointers will be remembered. `string.zig`:
+Latin-1 or UTF-16 by content, ropes for concatenation flattened on first
+read (memoized in place), atoms for property keys interned in a weak
+table. `object.zig`: hidden classes — a `Shape` is the ordered map of
+keys to slots shared by every object that got its properties the same
+way, a transition per added key, a dictionary shape of the object's own
+once it deletes or changes attributes; the first four slots inline,
+then an overflow vector; arrays keep dense elements while they stay
+dense. The internal methods are the specification's, under its names,
+with the exotic objects (arrays and their `length`, arguments objects,
+string wrappers) handled where they differ.
+
+`scope.zig` is the compiler's first pass: every function, block, catch
+clause and class gets a scope listing what it declares, every
+identifier reference is resolved once so a binding used from an inner
+function is marked captured, and a function with a direct `eval` or a
+`with` is marked dynamic. `compiler.zig` then gives an uncaptured
+binding a register and a captured one a slot in an environment cell
+(`Env`, one per scope instance, chained; addressed by hops and slot
+resolved at compile time), and only a function that itself contains
+`eval` resolves its own references by name — its ancestors keep their
+bindings in named environments (the eval may ask for them) but their
+own references stay static. The instruction set (`bytecode.zig`) is a
+register machine: one 64-bit word per instruction, three 16-bit
+operands, jumps absolute, property and global sites carrying an inline
+cache. `finally` is compiled once and reached through a completion
+register (normal, throw, return, or a numbered jump), so a `break` or
+`return` crossing it sets the register and jumps in, and the block's
+tail dispatches; a for-of body runs under a handler that closes the
+iterator on the way out. Script and eval code thread a completion
+register through statements as §14's UpdateEmpty does, which is what
+`eval("try { 1 } finally { 2 }")` reads. Classes are a constructor
+function, a prototype, methods installed non-enumerable, fields
+gathered into one initializer function the constructor runs after
+`this` exists, private names as fresh symbols invisible to reflection,
+computed keys evaluated once into the class scope. Sloppy functions with
+simple parameters that use `arguments` keep their parameters in
+environment slots so the mapped arguments object can alias them.
+
+`interp.zig` runs frames on one register stack: a JS-to-JS call pushes
+a frame and continues the same loop (JS recursion depth is the stack's,
+not the machine's; a native calling back into JS re-enters `run` with an
+entry frame), exceptions unwind through a handler stack frame by frame,
+a property read with a cached shape is a compare and a slot load, a
+global read with the global object's shape and the lexical record's
+epoch likewise. `vm.zig` holds the realm's state and the abstract
+operations (`toPrimitive`, `toNumber`, `toPropertyKey`, `isLessThan`,
+`ordinaryDefineOwnProperty`, `arraySetLength`, iteration, calling);
+`realm.zig` the intrinsics, atoms and well-known symbols; `builtins/`
+Object, Function (including `Function(...)` compiled on the spot), Array
+(generic over array-likes with dense fast paths, species), String (over
+UTF-16 units, the regexp-taking methods delegating to the pattern's
+symbol methods), Number (exact decimal digits of a double through a
+small big-integer for `toFixed`/`toExponential`/`toPrecision`,
+non-decimal radixes to round-trip precision), Boolean, Symbol, Math,
+JSON, Error and the native errors with `cause`, Reflect, the global
+functions and Annex B's `escape`/`unescape`/HTML methods, the array and
+string iterators. A step budget (backward jumps, calls, native loop
+steps) turns a runaway script into a `RangeError` for the embedder.
+`tools/js.zig` runs scripts on the host; `tools/test262.zig` now
+*executes* the corpus: harness and includes in a fresh realm, sloppy
+and strict, negative phases and types judged, async files by what they
+print, `TEST262_GC_STRESS` collecting at every safe point.
+
+The numbers (commit `7ab7fafa`): `test/language` 13,905/23,725 (58.6%;
+statements 5,195/9,347, expressions 6,683/11,101, arguments-object
+146/263, eval-code 118/347, block-scope 145/145, asi 102/102,
+function-code 215/217, statementList 80/80, types 108/113);
+`test/built-ins` 9,262/23,821 (Object 3,166/3,411, Array 2,826/3,082,
+String 1,061/1,223, Function 458/509, Number 335/340, Math 311/327,
+Reflect 141/153, JSON 119/165, the URI functions and parseInt/parseFloat
+complete); `test/annexB` 654/1,086. What is missing is what the stages
+say: generators and async (2,700 language files throw "not supported
+yet"), modules (600 module-code files and 1,000 dynamic-import files),
+RegExp matching (1,765 of RegExp's 1,879), BigInt, Proxy, Map/Set/Weak*,
+Promise, Date, typed arrays, Temporal (4,605 files, not on any stage),
+`$262.createRealm`; and in this stage's own area: the exact Unicode
+identifier tables (124 identifier files), eval's early errors around a
+parameter named `arguments` (~40 eval-code files), `Iterator.prototype`
+(ES2025), a few `toString` source-text forms for class members.
+
+*Lessons the stress mode paid for.* Every one of these was a crash
+found in an hour by `JS_GC_STRESS=1` (collect at every safe point,
+poison freed cells), not by reasoning: (1) a swept cell put on a free
+list a second time by the next sweep — the sweep must skip cells
+already free (`Kind.free`), or two live objects share memory a million
+instructions later; (2) accessor pairs lived in untraced `bytes` cells,
+so getters died at the next collection — a kind of its own; (3) an
+environment's scope table is owned by the code that compiled it, and a
+closure made inside `eval` outlives the eval's code — environments now
+hold their code cell; (4) the for-in enumerator's target was behind a
+pointer, not a value, and never marked — iterator payloads share a
+traced head. Two more were plain: the frame list must never reallocate
+(the interpreter keeps pointers into it across nested calls), and eval
+code's hop count to a runtime environment counts every compile-time
+environment above it, not just the function's. And one that was not a
+bug but a discipline: the interpreter test suite runs twice, the second
+time under stress, so a missing root fails the unit tests, not a page.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

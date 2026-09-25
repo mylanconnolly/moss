@@ -32,9 +32,11 @@ The JavaScript engine's corpus is not vendored — 200 MB of tests beside
 3 MB of corpora — but fetched at a pinned commit into `test262/` (ignored
 by git) by `tools/fetch-test262.sh`: `7ab7fafa0003f73fc85c1b95d88094d33f7eb8bd`,
 `harness/`, `test/language`, `test/built-ins`, `test/annexB`. `zig build
-test262 [-- test/language/...]` runs the engine over it and prints
-pass/total per directory; `TEST262_VERBOSE=1` names each miss with the
-parser's reason. The pin is what makes the count mean the same on every
+test262 [-- test/language/...]` runs the engine over it — each file with
+the harness and its includes in a fresh realm, sloppy and strict — and
+prints pass/total per directory; `TEST262_VERBOSE=1` names each miss
+with the exception or the parser's reason (docs/javascript.md has the
+other switches). The pin is what makes the count mean the same on every
 machine; to move it, change `PIN` in the script and re-run it. Not part of
 `zig build check` (like `bench`).
 

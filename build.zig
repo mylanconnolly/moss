@@ -1365,9 +1365,24 @@ pub fn build(b: *std.Build) void {
         const tmod = b.createModule(.{ .root_source_file = b.path("tools/test262.zig"), .target = host_target, .optimize = .ReleaseSafe });
         tmod.addImport("mosslib", tlib);
         const texe = b.addExecutable(.{ .name = "test262", .root_module = tmod });
+        const tinstall = b.addInstallArtifact(texe, .{});
         const trun = b.addRunArtifact(texe);
+        trun.step.dependOn(&tinstall.step);
         if (b.args) |args| trun.addArgs(args);
         b.step("test262", "Run the JavaScript engine over test262 (fetch it first with tools/fetch-test262.sh)").dependOn(&trun.step);
+    }
+
+    // js: run JavaScript files on the host with the engine: `zig build js -- file.js`.
+    {
+        const jlib = b.createModule(.{ .root_source_file = b.path("lib/lib.zig"), .target = host_target, .optimize = .ReleaseSafe });
+        const jmod = b.createModule(.{ .root_source_file = b.path("tools/js.zig"), .target = host_target, .optimize = .ReleaseSafe });
+        jmod.addImport("mosslib", jlib);
+        const jexe = b.addExecutable(.{ .name = "js", .root_module = jmod });
+        const jinstall = b.addInstallArtifact(jexe, .{});
+        const jrun = b.addRunArtifact(jexe);
+        jrun.step.dependOn(&jinstall.step);
+        if (b.args) |args| jrun.addArgs(args);
+        b.step("js", "Run JavaScript files on the host with the engine").dependOn(&jrun.step);
     }
 
     const lib_test_mod = b.createModule(.{
