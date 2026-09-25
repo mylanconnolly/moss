@@ -35,6 +35,7 @@ pub const generator = @import("builtins/generator.zig");
 pub const regexp = @import("builtins/regexp.zig");
 pub const bigint = @import("builtins/bigint.zig");
 pub const proxy = @import("builtins/proxy.zig");
+pub const promise = @import("builtins/promise.zig");
 
 pub fn install(vm: *Vm) Error!void {
     try object.install(vm);
@@ -49,6 +50,7 @@ pub fn install(vm: *Vm) Error!void {
     try json.install(vm);
     try reflect.install(vm);
     try global.install(vm);
+    try promise.install(vm);
     try generator.install(vm);
     try regexp.install(vm);
     try bigint.install(vm);

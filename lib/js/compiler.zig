@@ -35,6 +35,8 @@ pub const Options = struct {
     eval_env: ?*bytecode.Env = null,
     eval_ctx: scope.Analysis.EvalContext = .{},
     name: []const u8 = "<script>",
+    /// The module record, for module code.
+    module_record: ?*anyopaque = null,
 };
 
 /// Compile a program; the result is the script's top-level code.
@@ -63,7 +65,7 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
     try an.analyzeProgram(prog);
     const source = try a.create(bytecode.Source);
     source.* = .{ .text = try a.dupe(u8, src), .refs = 0, .name = try a.dupe(u8, opts.name) };
-    var c = Compiler{ .a = a, .heap = h, .strings = strings, .an = &an, .source = source, .eval_env = opts.eval_env, .eval_mode = an.eval_mode };
+    var c = Compiler{ .a = a, .heap = h, .strings = strings, .an = &an, .source = source, .eval_env = opts.eval_env, .eval_mode = an.eval_mode, .module_record = opts.module_record };
     defer c.env_stack.deinit(a);
     defer c.pending_labels.deinit(a);
     const code = c.program(prog) catch |e| {
@@ -93,7 +95,9 @@ const Ref = union(enum) {
     /// A named function expression's own name: readable, assignment is
     /// silent in sloppy code and a TypeError in strict code.
     fn_name: struct { strict: bool, reg: ?u16, hops: u16, slot: u16 },
-    /// Assignment not allowed at all (an import binding).
+    /// An import binding: read through its cell, never assigned.
+    import: struct { hops: u16, slot: u16 },
+    /// Assignment not allowed at all.
     immutable,
 };
 
@@ -112,7 +116,7 @@ const Control = union(enum) {
     /// A try region to pop on the way out.
     try_region,
     /// A for-of's iterator to close on the way out.
-    for_of: struct { iter: u16 },
+    for_of: struct { iter: u16, is_await: bool = false },
     /// A `finally`: jumps out through it set the completion register.
     finally: struct {
         kind: u16,
@@ -145,6 +149,8 @@ const FuncState = struct {
     finally_ids: i32 = 3,
     /// Mapped arguments: the slot of each parameter (see CodeData).
     param_slots: []u32 = &.{},
+    /// A coroutine body: yields/awaits suspend the frame.
+    co: enum { none, generator, async_fn, async_gen } = .none,
     /// The register holding the class's home object for methods
     /// compiled inline (class bodies): none.
     last_pos: u32 = 0,
@@ -187,6 +193,7 @@ pub const Compiler = struct {
     pending_labels: std.ArrayList([]const u8) = .empty,
     eval_env: ?*bytecode.Env,
     eval_mode: bool,
+    module_record: ?*anyopaque = null,
     /// The optional chain being compiled: where `?.` short-circuits to.
     chain: ?*Chain = null,
     /// Script/eval code: the register statements leave their completion
@@ -291,11 +298,19 @@ pub const Compiler = struct {
         const result = try c.tmp();
         try c.emit(.ldundef, result, 0, 0);
         c.completion = result;
+        // A module: its body is a coroutine (top-level await), suspended
+        // once its environment and hoisted functions exist; it has no
+        // completion value (its promise resolves with undefined).
+        if (p.module) {
+            fs.co = .async_fn;
+            c.completion = null;
+        }
         try c.enterScope(c.an.root);
+        if (p.module) try c.emit(.modinit, 0, 0, 0);
         for (p.body) |st| try c.stmt(st);
         try c.leaveScope(c.an.root);
         try c.emit(.ret, result, 0, 0);
-        return c.finish(&fs, null, if (p.module) .normal else .normal, 0, 0);
+        return c.finish(&fs, null, if (p.module) .async_function else .normal, 0, 0);
     }
 
     /// A statement whose completion is undefined unless its body says
@@ -322,6 +337,7 @@ pub const Compiler = struct {
         d.strict = fs.strict;
         d.source = c.source;
         c.source.refs += 1;
+        d.module = c.module_record;
         d.start = start;
         d.end = end;
         if (name) |n| d.name = try c.strings.atom(n);
@@ -383,7 +399,7 @@ pub const Compiler = struct {
                 b.loc = .{ .reg = try c.tmp() };
             }
         }
-        if (names.items.len > 0 or dyn or s.kind == .with or (s.kind == .function and s.func.has_direct_eval)) {
+        if (names.items.len > 0 or dyn or s.kind == .with or s.kind == .module or (s.kind == .function and s.func.has_direct_eval)) {
             const info = try c.a.create(bytecode.ScopeInfo);
             info.* = .{
                 .names = try names.toOwnedSlice(c.a),
@@ -421,7 +437,7 @@ pub const Compiler = struct {
             const f = if (fnode.data == .function_decl) fnode.data.function_decl else fnode.data.function;
             const name = f.name orelse "*default*";
             const r = try c.tmp();
-            try c.closure(f, r, name);
+            try c.closure(f, r, f.name orelse "default");
             if (s.kind == .eval or s.kind == .script) {
                 try c.emit(.declfunc, 0, @intCast(try c.constString(name)), r);
             } else {
@@ -458,7 +474,7 @@ pub const Compiler = struct {
                     },
                     .slot => |slot| {
                         const hops = c.hopsTo(s);
-                        if (b.kind == .import) return .immutable;
+                        if (b.kind == .import) return .{ .import = .{ .hops = hops, .slot = @intCast(slot) } };
                         if (is_fn_name) return .{ .fn_name = .{ .strict = c.fs.strict, .reg = null, .hops = hops, .slot = @intCast(slot) } };
                         if (b.is_const) return .{ .const_env = .{ .hops = hops, .slot = @intCast(slot) } };
                         return .{ .env = .{ .hops = hops, .slot = @intCast(slot), .lexical = b.lexical } };
@@ -535,6 +551,7 @@ pub const Compiler = struct {
             .fn_name => |f| if (f.reg) |r| {
                 if (r != dst) try c.emit(.mov, dst, r, 0);
             } else try c.emit(.getenv, dst, f.hops, f.slot),
+            .import => |i| try c.emit(.getimport, dst, i.hops, i.slot),
             .immutable => try c.emitBc(.throwref, 0, try c.constString(name)),
         }
     }
@@ -567,7 +584,7 @@ pub const Compiler = struct {
             .global => |g| try c.emitBc(if (c.fs.strict) .setglobalstrict else .setglobal, src, g),
             .dynamic => |n| try c.emitBc(.setname, src, n),
             .fn_name => |f| if (f.strict) try c.emitBc(.throwtype, 0, try c.constString("assignment to constant variable")),
-            .immutable => try c.emitBc(.throwtype, 0, try c.constString("assignment to constant variable")),
+            .import, .immutable => try c.emitBc(.throwtype, 0, try c.constString("assignment to constant variable")),
         }
     }
 
@@ -579,7 +596,7 @@ pub const Compiler = struct {
             .const_env => |e| try c.emit(.setenv, src, e.hops, e.slot),
             .global => |g| try c.emitBc(.initglobal, src, g),
             .dynamic => |n| try c.emitBc(.initname, src, n),
-            .fn_name, .immutable => {},
+            .fn_name, .import, .immutable => {},
         }
         _ = name;
     }
@@ -702,6 +719,10 @@ pub const Compiler = struct {
                 try c.bindPattern(p, reg, .init);
             }
         }
+        // A generator suspends once its parameters are bound (§27.5.3.1:
+        // the body waits for the first next()); an async function runs on.
+        fs.co = if (f.is_generator and f.is_async) .async_gen else if (f.is_generator) .generator else if (f.is_async) .async_fn else .none;
+        if (f.is_generator) try c.emit(.genstart, 0, 0, 0);
         // The body.
         switch (f.body) {
             .block => |body| {
@@ -826,7 +847,7 @@ pub const Compiler = struct {
             .function_decl => |f| {
                 // Hoisted at scope entry; an Annex B block function also
                 // assigns its var-scoped twin here.
-                const b = c.scope.bindings.get(f.name.?);
+                const b = if (f.name) |n| c.scope.bindings.get(n) else null;
                 if (b != null and b.?.annexb and c.scope.kind != .function) {
                     const r = try c.tmp();
                     const inner = c.resolve(f.name.?);
@@ -842,9 +863,11 @@ pub const Compiler = struct {
             },
             .class_decl => |cl| {
                 const r = try c.tmp();
-                try c.classExpr(cl, r);
-                const ref = c.resolve(cl.name.?);
-                try c.initialize(ref, r, cl.name.?);
+                // `export default class {}` binds "*default*", named "default".
+                const bind = cl.name orelse "*default*";
+                if (cl.name == null) try c.classExprNamed(cl, r, "default") else try c.classExpr(cl, r);
+                const ref = c.resolve(bind);
+                try c.initialize(ref, r, bind);
                 c.release(r);
             },
             .block => |body| {
@@ -913,11 +936,13 @@ pub const Compiler = struct {
             },
             .return_stmt => |r| {
                 const top = c.fs.top;
-                const reg = if (r) |e| try c.expr(e, null) else blk: {
+                var reg = if (r) |e| try c.expr(e, null) else blk: {
                     const t = try c.tmp();
                     try c.emit(.ldundef, t, 0, 0);
                     break :blk t;
                 };
+                // An async generator awaits what it returns (§15.6: return).
+                if (c.fs.co == .async_gen and r != null) reg = try c.awaitInto(reg, null);
                 try c.emitReturn(reg);
                 c.release(top);
             },
@@ -973,11 +998,9 @@ pub const Compiler = struct {
                 .default => |d| {
                     if (d.data == .function_decl or d.data == .class_decl) {
                         try c.stmt(d);
-                    } else if (d.data == .function) {
-                        // Hoisted as *default*.
                     } else {
                         const r = try c.tmp();
-                        _ = try c.expr(d, r);
+                        if (isAnonymousFunction(d)) try c.namedInto(d, "default", r) else _ = try c.expr(d, r);
                         try c.initialize(c.resolve("*default*"), r, "*default*");
                         c.release(r);
                     }
@@ -1148,7 +1171,7 @@ pub const Compiler = struct {
                 .try_region => try c.emit(.poptry, 0, 0, 0),
                 .for_of => |f| {
                     try c.emit(.poptry, 0, 0, 0);
-                    try c.emit(.iterclose, f.iter, 0, 0);
+                    if (f.is_await) try c.asyncIteratorClose(f.iter, false) else try c.emit(.iterclose, f.iter, 0, 0);
                 },
                 .finally => |*fi| {
                     const id = c.fs.finally_ids;
@@ -1180,7 +1203,7 @@ pub const Compiler = struct {
             switch (c.fs.controls.items[i]) {
                 .for_of => |f| {
                     try c.emit(.poptry, 0, 0, 0);
-                    try c.emit(.iterclose, f.iter, 0, 0);
+                    if (f.is_await) try c.asyncIteratorClose(f.iter, false) else try c.emit(.iterclose, f.iter, 0, 0);
                 },
                 .finally => |*fi| {
                     try c.emit(.mov, fi.val, reg, 0);
@@ -1322,13 +1345,20 @@ pub const Compiler = struct {
         const ctl = try c.pushTarget(labels, true);
         const start = c.pc();
         const val = try c.tmp();
-        try c.emit(.iternext, val, iter, 0);
-        if (f.is_await) try c.emit(.await, val, val, 0);
+        if (f.is_await) {
+            // for await: the result object is awaited, then read.
+            const r = try c.tmp();
+            try c.emit(.iterstep, r, iter, 0);
+            _ = try c.awaitInto(r, r);
+            try c.emit(.chkobj, r, 0, 0);
+            try c.emit(.iterresult, val, r, 0);
+            c.release(r);
+        } else try c.emit(.iternext, val, iter, 0);
         const jdone = try c.jump(.jempty, val);
         // The body runs under a handler that closes the iterator.
         const exc = try c.tmp();
         const jtry = try c.jump(.pushtry, exc);
-        try c.fs.controls.append(c.a, .{ .for_of = .{ .iter = iter } });
+        try c.fs.controls.append(c.a, .{ .for_of = .{ .iter = iter, .is_await = f.is_await } });
         if (is_lexical) {
             try c.enterScope(s);
             if (s.has_env) try c.fs.controls.append(c.a, .env);
@@ -1345,11 +1375,34 @@ pub const Compiler = struct {
         try c.emitBc(.jmp, 0, start);
         // The handler: close the iterator, rethrow.
         c.patchHere(jtry);
-        try c.emit(.iterclosethrow, iter, 0, 0);
+        if (f.is_await) {
+            try c.asyncIteratorClose(iter, true);
+        } else try c.emit(.iterclosethrow, iter, 0, 0);
         try c.emit(.throw, exc, 0, 0);
         c.patchHere(jdone);
         try c.popTarget(ctl);
         c.scope = saved;
+        c.release(top);
+    }
+
+    /// AsyncIteratorClose (§7.4.11): call `return` if there is one and
+    /// await its result; in a throw completion, errors from it are dropped.
+    fn asyncIteratorClose(c: *Compiler, iter: u16, throwing: bool) Error!void {
+        const top = c.fs.top;
+        const t = try c.tmp();
+        try c.emit(.iterreturn, t, iter, 0);
+        const jskip = try c.jump(.jundef, t);
+        if (throwing) {
+            const exc = try c.tmp();
+            const jtry = try c.jump(.pushtry, exc);
+            _ = try c.awaitInto(t, t);
+            try c.emit(.poptry, 0, 0, 0);
+            c.patchHere(jtry);
+        } else {
+            _ = try c.awaitInto(t, t);
+            try c.emit(.chkobj, t, 0, 0);
+        }
+        c.patchHere(jskip);
         c.release(top);
     }
 
@@ -1881,14 +1934,19 @@ pub const Compiler = struct {
             },
             .spread => return c.fail("unexpected spread", n.pos),
             .yield => |y| {
+                if (y.delegate) return c.yieldStar(y.arg.?, dst);
                 const d = dst orelse try c.tmp();
                 const top = c.fs.top;
-                const arg = if (y.arg) |x| try c.expr(x, null) else blk: {
+                var arg = if (y.arg) |x| try c.expr(x, null) else blk: {
                     const t = try c.tmp();
                     try c.emit(.ldundef, t, 0, 0);
                     break :blk t;
                 };
-                try c.emit(if (y.delegate) .yieldstar else .yield, d, arg, 0);
+                // Yield in an async generator awaits its operand first (§27.5.3.7).
+                if (c.fs.co == .async_gen) arg = try c.awaitInto(arg, null);
+                const k = try c.tmp();
+                try c.emit(.yield, d, arg, k);
+                try c.resumeDispatch(d, k);
                 c.release(@max(top, d + 1));
                 return d;
             },
@@ -1896,7 +1954,7 @@ pub const Compiler = struct {
                 const d = dst orelse try c.tmp();
                 const top = c.fs.top;
                 const arg = try c.expr(x, null);
-                try c.emit(.await, d, arg, 0);
+                _ = try c.awaitInto(arg, d);
                 c.release(@max(top, d + 1));
                 return d;
             },
@@ -2320,6 +2378,102 @@ pub const Compiler = struct {
         const t = try c.tmp();
         _ = try c.expr(n, t);
         return t;
+    }
+
+    /// `dst = await reg` with the throw resumption rethrown here.
+    fn awaitInto(c: *Compiler, reg: u16, dst: ?u16) Error!u16 {
+        const d = dst orelse try c.tmp();
+        const k = try c.tmp();
+        try c.emit(.await, d, reg, k);
+        try c.throwDispatch(d, k);
+        c.release(k);
+        return d;
+    }
+
+    /// After a suspension: a throw resumption (kind 1) rethrows here.
+    fn throwDispatch(c: *Compiler, d: u16, k: u16) Error!void {
+        const t = try c.tmp();
+        try c.emitBc(.ldint, t, 1);
+        try c.emit(.seq, t, k, t);
+        const j = try c.jump(.jf, t);
+        try c.emit(.throw, d, 0, 0);
+        c.patchHere(j);
+        c.release(t);
+    }
+
+    /// After a yield: throw (kind 1) rethrows, return (kind 2) returns
+    /// through the enclosing finally blocks and iterator closes; an
+    /// async generator awaits the returned value first.
+    fn resumeDispatch(c: *Compiler, d: u16, k: u16) Error!void {
+        try c.throwDispatch(d, k);
+        const t = try c.tmp();
+        try c.emitBc(.ldint, t, 2);
+        try c.emit(.seq, t, k, t);
+        const j = try c.jump(.jf, t);
+        var r = d;
+        if (c.fs.co == .async_gen) r = try c.awaitInto(d, null);
+        try c.emitReturn(r);
+        c.patchHere(j);
+        c.release(t);
+    }
+
+    /// `yield* iterable` (§27.5.3.7 step 7): drive the inner iterator,
+    /// forwarding next/throw/return resumptions; the inner result
+    /// objects are yielded as they are in a sync generator, their
+    /// values in an async one.
+    fn yieldStar(c: *Compiler, arg: *Node, dst: ?u16) Error!u16 {
+        const d = dst orelse try c.tmp();
+        const top = c.fs.top;
+        const is_async = c.fs.co == .async_gen;
+        const obj = try c.expr(arg, null);
+        const base = try c.tmps(4); // iterator, next, kind, received
+        try c.emit(if (is_async) .iterasync else .iter, base, obj, 0);
+        try c.emitBc(.ldint, base + 2, 0);
+        try c.emit(.ldundef, base + 3, 0, 0);
+        const r = try c.tmps(2); // inner result, done
+        const loop = c.pc();
+        try c.emit(.ystep, r, base, 0);
+        // No `return` method on the inner iterator: return what was received.
+        const jret = try c.jump(.jempty, r);
+        if (is_async) {
+            _ = try c.awaitInto(r, r);
+            try c.emit(.chkobj, r, 0, 0);
+        }
+        try c.emit(.iterdone, r + 1, r, 0);
+        const jdone = try c.jump(.jt, r + 1);
+        if (is_async) {
+            const v = try c.tmp();
+            try c.emit(.itervalue, v, r, 0);
+            try c.emit(.yield, base + 3, v, base + 2);
+            c.release(v);
+        } else {
+            try c.emit(.yieldraw, base + 3, r, base + 2);
+        }
+        // A return resumption in an async generator awaits its value.
+        if (is_async) {
+            const t = try c.tmp();
+            try c.emitBc(.ldint, t, 2);
+            try c.emit(.seq, t, base + 2, t);
+            const jn = try c.jump(.jf, t);
+            _ = try c.awaitInto(base + 3, base + 3);
+            c.patchHere(jn);
+            c.release(t);
+        }
+        try c.emitBc(.jmp, 0, loop);
+        c.patchHere(jdone);
+        // Done: the value is the expression's result, or what is returned
+        // when the outer resumption was a return.
+        try c.emit(.itervalue, d, r, 0);
+        const t = try c.tmp();
+        try c.emitBc(.ldint, t, 2);
+        try c.emit(.seq, t, base + 2, t);
+        const jend = try c.jump(.jf, t);
+        try c.emitReturn(d);
+        c.patchHere(jret);
+        try c.emitReturn(base + 3);
+        c.patchHere(jend);
+        c.release(@max(top, d + 1));
+        return d;
     }
 
     /// Three registers for a super property reference: home, this, key.

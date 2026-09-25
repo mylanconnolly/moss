@@ -7099,6 +7099,78 @@ environment above it, not just the function's. And one that was not a
 bug but a discipline: the interpreter test suite runs twice, the second
 time under stress, so a missing root fails the unit tests, not a page.
 
+**Stage 10c, coroutines and modules (as built, 2026-09-25).** Generators,
+async functions, async generators and modules, on one mechanism: a
+frame that must outlive its activation is copied to a `CoroutineData`
+cell — the register window, the handler stack, pc, environment, `this`
+— and copied back onto the register stack on resumption, so a suspended
+body needs no stack of its own and the interpreter's one loop runs it
+(`interp.suspendFrame`/`resumeCoroutine`). The compiler emits `genstart`
+after a generator's parameters are bound (the generator object is
+created then, reading `prototype` at that moment as §27.5.3.1 says), and
+`yield`/`await` as a suspension whose resumption lands a value and a
+kind (next, throw, return) in two registers, followed by a dispatch the
+compiler writes out: a throw resumption rethrows there, a return
+resumption returns *through* the enclosing `finally` blocks and
+iterator closes — the same unwinding `return` uses, which is why
+`generator.return()` runs finally blocks for free. `yield*` is a loop in
+the compiled code around one `ystep` instruction forwarding the
+resumption to the inner iterator's next/throw/return; `for await` uses
+`iterstep`/`iterresult` with an `await` between and closes its iterator
+with an awaited `return`. Async functions are the same coroutine driven
+by promise reactions: `await` resolves its operand to a promise before
+suspending (so a throwing `then` getter throws at the `await`), the
+continuation resumes the frame with the settled value and kind, and the
+body's completion settles the function's promise. Async generators add
+a request queue (§27.6.3) drained as the body yields; sync iterables
+under `for await` are wrapped by %AsyncFromSyncIteratorPrototype%.
+`builtins/promise.zig` is §27.2 as written — states, reaction records,
+resolving functions sharing an already-resolved flag, thenable jobs,
+`then`/`catch`/`finally`, `all`/`allSettled`/`any`/`race`/`try`/
+`withResolvers` — on the VM's job queue; a native that must remember
+something (a reaction, a capability) closes over a record through its
+function object's data slot, which `Vm.current_native` hands it.
+
+Modules (`module.zig`): a source text module record holds its import
+and export entries as ParseModule lists them; the body compiles like an
+async function whose prologue creates the module environment,
+instantiates its hoisted functions and then suspends at `modinit` —
+that suspension is InitializeEnvironment, run for every module of the
+graph at link time before any evaluation, so a cyclic import can call a
+function declared later in the cycle. An import binding is an
+`ImportCell` in the importer's own slot pointing at the exporter's slot
+(or at a namespace), read by `getimport`: always the current value, the
+live binding; `ResolveExport` follows indirect and star exports with
+the specification's ambiguity rules and every indirect export is
+resolved at link time. Namespace objects are exotic (`Class.namespace`)
+over the sorted resolvable export names, read live. Evaluation is a
+depth-first walk that starts every dependency in order and, when one
+suspended at a top-level await, waits for the pending ones together
+before running the body — a synchronous sibling after an async
+dependency is not held up. `import()` links and evaluates through the
+host's loader and resolves with the namespace, rejecting on every
+failure; `import.meta` is a null-prototype object the host may fill.
+The host (`Vm.host_load`) is the only thing that turns a specifier into
+text: the runners resolve relative to the referrer's directory and
+canonicalize the path, which is what makes a cycle one record instead
+of an endless chain of `./././`.
+
+The numbers moved to: `test/language` 22,102/23,725 (93.2%; statements
+8,997/9,347, expressions 10,489/11,101, class 4,261/4,367, generators
+260/266 and 283/290, async-function 74/74 and 93/93, async-generator
+297/301 and 616/623, for-await-of 1,232/1,234, module-code 583/599,
+dynamic-import 836/1,005 — the `import.defer`/`import.source`
+proposals and import attributes count as misses); `test/built-ins`
+10,089/23,821 (Promise 637/732, GeneratorPrototype 61/61,
+AsyncGeneratorPrototype 48/48, AsyncFromSyncIteratorPrototype 38/38);
+`test/annexB` 654/1,086. Two things the stage taught: a module body
+must complete with `undefined`, not the script completion value the
+compiler threads for eval — a body whose last statement was a promise
+chain resolved the module's own promise with a promise that waited on
+the module, a deadlock no test but `import()` of oneself would show;
+and an empty module still needs an environment, or there is nothing
+for its importers' cells to point at.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

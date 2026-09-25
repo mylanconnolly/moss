@@ -256,18 +256,20 @@ pub const Analysis = struct {
             .function_decl => |f| {
                 if (direct) {
                     const vs = varScope(s);
+                    // `export default function () {}` binds "*default*".
+                    const fname = f.name orelse "*default*";
                     if (vs == s) {
-                        _ = try an.declare(s, f.name.?, .function);
+                        _ = try an.declare(s, fname, .function);
                     } else {
                         // A block-level function: lexical in the block; in
                         // sloppy code also var-bound in the function
                         // (Annex B.3.3) when no lexical name conflicts.
-                        _ = try an.declare(s, f.name.?, .let);
-                        const b = s.bindings.get(f.name.?).?;
+                        _ = try an.declare(s, fname, .let);
+                        const b = s.bindings.get(fname).?;
                         b.lexical = false; // block functions are initialized at block entry
                         if (!s.func.strict and !f.is_async and !f.is_generator) {
-                            if (an.annexBAllowed(s, f.name.?)) {
-                                const vb = try an.declare(vs, f.name.?, .@"var");
+                            if (an.annexBAllowed(s, fname)) {
+                                const vb = try an.declare(vs, fname, .@"var");
                                 vb.annexb = true;
                                 b.annexb = true;
                             }
@@ -277,7 +279,7 @@ pub const Analysis = struct {
                 }
             },
             .class_decl => |c| if (direct) {
-                _ = try an.declare(s, c.name.?, .class);
+                _ = try an.declare(s, c.name orelse "*default*", .class);
             },
             .if_stmt => |i| {
                 try an.hoistStatement(s, i.then, false);
@@ -311,11 +313,9 @@ pub const Analysis = struct {
                 .default => |d| {
                     if (d.data == .function_decl or d.data == .class_decl) {
                         try an.hoistStatement(s, d, direct);
-                    } else if (d.data == .function) {
-                        // An anonymous default function is hoisted as "*default*".
-                        _ = try an.declare(s, "*default*", .function);
-                        try s.hoisted.append(an.a, d);
                     } else {
+                        // `export default <expression>`: a const binding
+                        // initialized when the statement runs.
                         _ = try an.declare(s, "*default*", .@"const");
                     }
                 },

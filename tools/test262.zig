@@ -107,17 +107,13 @@ const Runner = struct {
     /// `TEST262_GC_STRESS=1`: collect at every safe point (slow; finds
     /// missing roots).
     gc_stress: bool = false,
+    /// The test being run (its path under the corpus root), the module
+    /// loader's referrer.
+    current_path: []const u8 = "",
 
     /// Run one file in every applicable mode.
     fn judge(r: *Runner, src: []const u8, meta: Meta) Outcome {
-        if (meta.module) {
-            // Modules are stage c: parse-negative files still judge by the parser.
-            var arena = std.heap.ArenaAllocator.init(r.gpa);
-            defer arena.deinit();
-            const ok = if (js.parser.parse(arena.allocator(), src, .{ .module = true })) |_| true else |_| false;
-            if (meta.negative_phase == .parse) return .{ .ok = !ok, .why = "module parsed" };
-            return .{ .ok = false, .why = "modules are not supported yet" };
-        }
+        if (meta.module) return r.runModule(src, meta);
         if (!meta.only_strict) {
             const o = r.runMode(src, meta, false);
             if (!o.ok) return o;
@@ -164,7 +160,8 @@ const Runner = struct {
             strict_buf = std.fmt.allocPrint(r.gpa, "\"use strict\";\n{s}", .{src}) catch return .{ .ok = false, .why = "oom" };
             text = strict_buf;
         }
-        const code = js.compiler.compile(r.gpa, &vm.heap, &vm.strings, text, .{ .name = "test" }) catch |e| switch (e) {
+        vm.host_load = hostLoad;
+        const code = js.compiler.compile(r.gpa, &vm.heap, &vm.strings, text, .{ .name = r.current_path }) catch |e| switch (e) {
             error.OutOfMemory => return .{ .ok = false, .why = "out of memory compiling" },
             error.SyntaxError => {
                 if (meta.negative_phase == .parse) return .{ .ok = true };
@@ -193,6 +190,85 @@ const Runner = struct {
                 return .{ .ok = false, .why = r.lastWhy(vm, "test") };
             },
         }
+    }
+
+    /// A module test: the file is the entry module; its `_FIXTURE.js`
+    /// imports come from the same directory through the host loader.
+    fn runModule(r: *Runner, src: []const u8, meta: Meta) Outcome {
+        const vm = r.gpa.create(Vm) catch return .{ .ok = false, .why = "oom" };
+        defer r.gpa.destroy(vm);
+        vm.init(r.region, r.gpa) catch return .{ .ok = false, .why = "vm init failed" };
+        defer vm.deinit();
+        r.printed.clearRetainingCapacity();
+        vm.step_limit = 20_000_000;
+        vm.heap.stress = r.gc_stress;
+        vm.print_fn = printHook;
+        vm.host_data = r;
+        vm.host_load = hostLoad;
+        installHost(vm) catch return .{ .ok = false, .why = "host install failed" };
+        if (!meta.raw) {
+            const preludes = [_][]const u8{ "assert.js", "sta.js" };
+            for (preludes) |p| {
+                const hs = r.harness.get(p) catch return .{ .ok = false, .why = "harness missing" };
+                if (!r.runSource(vm, hs, false, p)) return .{ .ok = false, .why = r.lastWhy(vm, "harness") };
+            }
+            if (meta.async_) {
+                const hs = r.harness.get("doneprintHandle.js") catch return .{ .ok = false, .why = "harness missing" };
+                if (!r.runSource(vm, hs, false, "doneprintHandle.js")) return .{ .ok = false, .why = r.lastWhy(vm, "harness") };
+            }
+            for (meta.includes[0..meta.n_includes]) |inc| {
+                const hs = r.harness.get(inc) catch return .{ .ok = false, .why = "include missing" };
+                if (!r.runSource(vm, hs, false, inc)) return .{ .ok = false, .why = r.lastWhy(vm, inc) };
+            }
+        }
+        // Parse errors are the parse phase; link errors the resolution phase.
+        var arena = std.heap.ArenaAllocator.init(r.gpa);
+        defer arena.deinit();
+        var pp = js.parser.Parser.init(arena.allocator(), src, .{ .module = true });
+        if (pp.parseProgram()) |_| {} else |_| {
+            if (meta.negative_phase == .parse) return .{ .ok = true };
+            return .{ .ok = false, .why = std.fmt.bufPrint(&r.why_buf, "SyntaxError (parse): {s}", .{pp.err}) catch "SyntaxError (parse)" };
+        }
+        if (meta.negative_phase == .parse) return .{ .ok = false, .why = "expected a SyntaxError, parsed" };
+        const m = js.module.create(vm, r.current_path, src) catch |e| switch (e) {
+            error.OutOfMemory => return .{ .ok = false, .why = "out of memory" },
+            error.Exception => return .{ .ok = false, .why = r.lastWhy(vm, "module") },
+        };
+        js.module.link(vm, m) catch |e| switch (e) {
+            error.OutOfMemory => return .{ .ok = false, .why = "out of memory" },
+            error.Exception => {
+                if (meta.negative_phase == .resolution) {
+                    const name = r.exceptionName(vm);
+                    if (std.mem.eql(u8, name, meta.negative_type)) return .{ .ok = true };
+                    return .{ .ok = false, .why = std.fmt.bufPrint(&r.why_buf, "expected {s}, got {s}", .{ meta.negative_type, name }) catch "wrong exception" };
+                }
+                return .{ .ok = false, .why = r.lastWhy(vm, "link") };
+            },
+        };
+        if (meta.negative_phase == .resolution) return .{ .ok = false, .why = "expected a resolution error, linked" };
+        const p = js.module.evaluate(vm, m) catch |e| switch (e) {
+            error.OutOfMemory => return .{ .ok = false, .why = "out of memory" },
+            error.Exception => return .{ .ok = false, .why = r.lastWhy(vm, "evaluate") },
+        };
+        vm.runJobs() catch {};
+        const pd = Vm.asObject(p).internal(js.vm.PromiseData);
+        if (pd.state == 2) {
+            vm.exception = pd.result;
+            if (meta.negative_phase == .runtime) {
+                const name = r.exceptionName(vm);
+                if (std.mem.eql(u8, name, meta.negative_type)) return .{ .ok = true };
+                return .{ .ok = false, .why = std.fmt.bufPrint(&r.why_buf, "expected {s}, got {s}", .{ meta.negative_type, name }) catch "wrong exception" };
+            }
+            return .{ .ok = false, .why = r.lastWhy(vm, "test") };
+        }
+        if (pd.state == 0) return .{ .ok = false, .why = "module evaluation never settled" };
+        if (meta.negative_phase == .runtime) return .{ .ok = false, .why = "expected an exception, completed" };
+        if (meta.async_) {
+            if (std.mem.indexOf(u8, r.printed.items, "Test262:AsyncTestComplete") != null) return .{ .ok = true };
+            if (std.mem.indexOf(u8, r.printed.items, "Test262:AsyncTestFailure") != null) return .{ .ok = false, .why = r.printedWhy() };
+            return .{ .ok = false, .why = "async test did not complete" };
+        }
+        return .{ .ok = true };
     }
 
     fn runSource(r: *Runner, vm: *Vm, src: []const u8, strict: bool, name: []const u8) bool {
@@ -237,6 +313,33 @@ const Runner = struct {
         return std.fmt.bufPrint(&r.why_buf, "{s}: {s}", .{ where, msg }) catch "?";
     }
 };
+
+/// The host loader: a specifier relative to the referrer's directory
+/// (test262 fixtures sit beside their tests), read from the corpus.
+fn hostLoad(vm: *Vm, referrer: ?[]const u8, specifier: []const u8) js.vm.Error!?js.module.Loaded {
+    const r: *Runner = @ptrCast(@alignCast(vm.host_data.?));
+    const gpa = r.gpa;
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(gpa);
+    if (std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../")) {
+        const ref = referrer orelse "";
+        const dir = if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| ref[0..i] else "";
+        try path.appendSlice(gpa, dir);
+        var rest = specifier;
+        while (true) {
+            if (std.mem.startsWith(u8, rest, "./")) {
+                rest = rest[2..];
+            } else if (std.mem.startsWith(u8, rest, "../")) {
+                rest = rest[3..];
+                if (std.mem.lastIndexOfScalar(u8, path.items, '/')) |i| path.shrinkRetainingCapacity(i) else path.clearRetainingCapacity();
+            } else break;
+        }
+        if (path.items.len > 0) try path.append(gpa, '/');
+        try path.appendSlice(gpa, rest);
+    } else try path.appendSlice(gpa, specifier);
+    const src = r.harness.dir.readFileAlloc(io, path.items, gpa, .limited(8 << 20)) catch return null;
+    return .{ .name = try gpa.dupe(u8, path.items), .source = src };
+}
 
 fn printHook(vm: *Vm, s: []const u8) void {
     const r: *Runner = @ptrCast(@alignCast(vm.host_data.?));
@@ -338,6 +441,9 @@ pub fn main(init: std.process.Init) !u8 {
             const key = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ sub, entry.path[0..slash] });
             const g = try by_dir.getOrPut(gpa, key);
             if (!g.found_existing) g.value_ptr.* = .{};
+            const full = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ sub, entry.path });
+            defer gpa.free(full);
+            runner.current_path = full;
             const o = runner.judge(src, meta);
             if (o.ok) {
                 g.value_ptr.pass += 1;

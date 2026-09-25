@@ -17,7 +17,7 @@ const Value = value.Value;
 
 /// `free` marks a swept cell on a free list: the sweep skips it (a
 /// cell must never be put on a free list twice).
-pub const Kind = enum(u8) { string, object, symbol, bigint, env, code, shape, accessor, bytes, free };
+pub const Kind = enum(u8) { string, object, symbol, bigint, env, code, shape, accessor, binding, bytes, free };
 
 /// Every heap cell's first word.
 pub const Cell = extern struct {

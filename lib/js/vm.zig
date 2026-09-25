@@ -21,6 +21,7 @@ const bytecode = @import("bytecode.zig");
 const compiler = @import("compiler.zig");
 const interp = @import("interp.zig");
 const realm = @import("realm.zig");
+const module = @import("module.zig");
 pub const Cell = heap.Cell;
 pub const Heap = heap.Heap;
 pub const Value = value.Value;
@@ -112,9 +113,79 @@ pub const ArgumentsData = extern struct {
     mapped: u64,
 };
 
+/// A generator's or async function's suspended frame (`Class.generator`):
+/// the register window copied to the heap on yield or await, copied
+/// back on resumption.
+pub const CoroutineData = extern struct {
+    /// 0 suspended at start, 1 at a yield, 2 at an await, 3 executing,
+    /// 4 completed, 5 completed and awaiting a `return` value (async gen).
+    state: u8,
+    /// 0 generator, 1 async function, 2 async generator.
+    kind: u8,
+    /// The yielded value is a result object to hand over as is (yield*).
+    yield_raw: bool,
+    _pad: [5]u8 = @splat(0),
+    code: *Code,
+    func: ?*Object,
+    this: Value,
+    new_target: Value,
+    env: ?*Env,
+    pc: u32,
+    resume_reg: u16,
+    kind_reg: u16,
+    nregs: u32,
+    nhandlers: u32,
+    /// The saved registers (a bytes cell of `nregs` values).
+    regs: ?*Cell,
+    /// The saved handler stack (a bytes cell of `nhandlers` Handlers).
+    handlers: ?*Cell,
+    /// What the last yield or await produced.
+    yielded: Value,
+    /// An async function's result promise and its resolving functions.
+    promise: Value,
+    resolve: Value,
+    reject: Value,
+    /// An async generator's request queue (an array of records).
+    queue: Value,
+
+    pub const suspended_start: u8 = 0;
+    pub const suspended_yield: u8 = 1;
+    pub const suspended_await: u8 = 2;
+    pub const executing: u8 = 3;
+    pub const completed: u8 = 4;
+    pub const awaiting_return: u8 = 5;
+
+    pub fn savedRegs(d: *CoroutineData) []Value {
+        const c = d.regs orelse return &.{};
+        const base: [*]u8 = @ptrCast(c);
+        const p: [*]Value = @ptrCast(@alignCast(base + 16));
+        return p[0..d.nregs];
+    }
+    pub fn savedHandlers(d: *CoroutineData) []Handler {
+        const c = d.handlers orelse return &.{};
+        const base: [*]u8 = @ptrCast(c);
+        const p: [*]Handler = @ptrCast(@alignCast(base + 16));
+        return p[0..d.nhandlers];
+    }
+};
+
+/// A promise's state (`Class.promise`).
+pub const PromiseData = extern struct {
+    /// 0 pending, 1 fulfilled, 2 rejected.
+    state: u8,
+    is_handled: bool,
+    _pad: [6]u8 = @splat(0),
+    result: Value,
+    /// Arrays of reaction records while pending.
+    fulfill_reactions: Value,
+    reject_reactions: Value,
+};
+
 pub const Frame = struct {
     code: *Code,
     func: ?*Object,
+    /// The coroutine this frame belongs to, if any.
+    co: ?*Object = null,
     pc: u32,
     /// The register window: `vm.stack[base..base+nregs]`.
     base: u32,
@@ -182,6 +253,13 @@ pub const Vm = struct {
     /// Values staged above the top frame's window (arguments awaiting
     /// their frame) that a nested call must not overwrite.
     sp_extra: u32 = 0,
+    /// The native function object being called (so a native reads the
+    /// data it closed over).
+    current_native: ?*Object = null,
+    /// Module records by canonical name, and the host's loader.
+    modules: std.StringArrayHashMapUnmanaged(*module.Module) = .empty,
+    host_load: ?module.HostLoad = null,
+    host_import_meta: ?*const fn (vm: *Vm, name: []const u8, meta: *Object) Error!void = null,
     /// Array.prototype and Object.prototype have no indexed properties
     /// (the usual case): array element stores need no prototype walk.
     proto_has_indexes: bool = false,
@@ -222,6 +300,11 @@ pub const Vm = struct {
         vm.handlers.deinit(vm.meta);
         vm.jobs.deinit(vm.meta);
         vm.join_stack.deinit(vm.meta);
+        for (vm.modules.values()) |m| {
+            m.deinit(vm.meta);
+            vm.meta.destroy(m);
+        }
+        vm.modules.deinit(vm.meta);
         vm.meta.free(vm.stack);
     }
 
@@ -249,6 +332,7 @@ pub const Vm = struct {
             .env => Env.trace(c.as(Env), m),
             .code => Code.trace(c.as(Code), m),
             .accessor => Objects.traceAccessor(c.as(Accessor), m),
+            .binding => module.ImportCell.trace(c.as(module.ImportCell), m),
             .bigint => {},
             .bytes, .free => {
                 // Slot and element vectors: traced by their owners.
@@ -289,7 +373,34 @@ pub const Vm = struct {
                 const e = o.internal(ErrorData);
                 if (e.code) |c| m.markCell(c.cell());
             },
-            .map, .set, .weak_map, .weak_set, .promise, .proxy, .regexp, .date, .array_buffer, .typed_array, .generator, .namespace => {
+            .generator => {
+                const d = o.internal(CoroutineData);
+                m.markCell(d.code.cell());
+                if (d.func) |f| m.markCell(f.cell());
+                m.markValue(d.this);
+                m.markValue(d.new_target);
+                if (d.env) |e| m.markCell(e.cell());
+                if (d.regs) |c| {
+                    m.markCell(c);
+                    for (d.savedRegs()) |v| m.markValue(v);
+                }
+                if (d.handlers) |c| {
+                    m.markCell(c);
+                    for (d.savedHandlers()) |h| if (h.env) |e| m.markCell(e.cell());
+                }
+                m.markValue(d.yielded);
+                m.markValue(d.promise);
+                m.markValue(d.resolve);
+                m.markValue(d.reject);
+                m.markValue(d.queue);
+            },
+            .promise => {
+                const d = o.internal(PromiseData);
+                m.markValue(d.result);
+                m.markValue(d.fulfill_reactions);
+                m.markValue(d.reject_reactions);
+            },
+            .map, .set, .weak_map, .weak_set, .proxy, .regexp, .date, .array_buffer, .typed_array, .namespace => {
                 // Stage c/d classes trace through their own hooks.
                 realm.traceExtra(o, m);
             },
@@ -336,6 +447,7 @@ pub const Vm = struct {
         for (vm.frames.items) |f| {
             m.markCell(f.code.cell());
             if (f.func) |fo| m.markCell(fo.cell());
+            if (f.co) |co| m.markCell(co.cell());
             m.markValue(f.this);
             m.markValue(f.new_target);
             if (f.env) |e| m.markCell(e.cell());
@@ -348,6 +460,7 @@ pub const Vm = struct {
             m.markValue(j.func);
             for (j.args[0..j.argc]) |a| m.markValue(a);
         }
+        for (vm.modules.values()) |mod| mod.trace(m);
         if (vm.embedder_roots) |r| r.trace(r.ctx, m);
     }
 
@@ -1041,6 +1154,7 @@ pub const Vm = struct {
             },
             .arguments => if (key == .index) if (try realm.argumentsGetOwn(vm, o, key.index)) |own| return own,
             .proxy => return realm.proxyGetOwnProperty(vm, o, key),
+            .namespace => return module.nsGetOwnProperty(vm, o, key),
             .typed_array => if (try realm.typedArrayGetOwn(vm, o, key)) |own| return own,
             else => {},
         }
@@ -1107,6 +1221,7 @@ pub const Vm = struct {
         var own_desc: ?Objects.Own = null;
         while (true) {
             if (cur.class == .proxy) return realm.proxySet(vm, cur, key, v, receiver);
+            if (cur.class == .namespace and key != .symbol) return false;
             own_desc = try vm.getOwnProperty(cur, key);
             if (own_desc != null) break;
             const p = cur.shape.proto;
@@ -1227,6 +1342,7 @@ pub const Vm = struct {
             },
             .arguments => if (key == .index) return realm.argumentsDefineOwn(vm, o, key.index, desc),
             .proxy => return realm.proxyDefineOwnProperty(vm, o, key, desc),
+            .namespace => return module.nsDefineOwnProperty(vm, o, key, desc),
             .typed_array => if (key == .index) return realm.typedArrayDefineOwn(vm, o, key.index, desc),
             .string => if (key == .index) {
                 // String index properties are not redefinable.
@@ -1416,6 +1532,7 @@ pub const Vm = struct {
         switch (o.class) {
             .array => if (key == .atom and key.atom == vm.atoms.length) return false,
             .proxy => return realm.proxyDelete(vm, o, key),
+            .namespace => return module.nsDelete(vm, o, key),
             .arguments => if (key == .index) return realm.argumentsDelete(vm, o, key.index),
             .string => if (key == .index) {
                 const s = o.internal(PrimitiveData).value;
@@ -1430,6 +1547,7 @@ pub const Vm = struct {
     pub fn ownPropertyKeys(vm: *Vm, o: *Object, out: *std.ArrayList(Key)) Error!void {
         switch (o.class) {
             .proxy => return realm.proxyOwnKeys(vm, o, out),
+            .namespace => return module.nsOwnKeys(vm, o, out),
             .typed_array => return realm.typedArrayOwnKeys(vm, o, out),
             else => {},
         }
@@ -1460,6 +1578,7 @@ pub const Vm = struct {
     /// [[SetPrototypeOf]].
     pub fn setPrototypeOf(vm: *Vm, o: *Object, p: Value) Error!bool {
         if (o.class == .proxy) return realm.proxySetPrototypeOf(vm, o, p);
+        if (o.class == .namespace) return p.isNull();
         if (o.class == .global and false) return false;
         if (o == vm.intrinsics.object_prototype and !p.isNull()) return false; // immutable prototype exotic
         return vm.objects.setProto(o, p);

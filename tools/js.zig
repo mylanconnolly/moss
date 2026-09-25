@@ -24,6 +24,37 @@ fn print(vm: *Vm, _: Value, args: []const Value, _: Value) js.vm.Error!Value {
     return Value.undefined_;
 }
 
+fn exceptionText(vm: *Vm, gpa: std.mem.Allocator) []const u8 {
+    const s = vm.toString(vm.exception) catch return "?";
+    return vm.utf8(s, gpa) catch "?";
+}
+
+/// Modules relative to the referrer's directory, or the working
+/// directory; the name is the normalized path (one record per file).
+fn hostLoad(vm: *Vm, referrer: ?[]const u8, specifier: []const u8) js.vm.Error!?js.module.Loaded {
+    const gpa = vm.meta;
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(gpa);
+    const relative = std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../");
+    if (relative and referrer != null) {
+        const ref = referrer.?;
+        if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| try path.appendSlice(gpa, ref[0..i]);
+    }
+    // Resolve the specifier's segments onto the directory.
+    var it = std.mem.splitScalar(u8, specifier, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (std.mem.lastIndexOfScalar(u8, path.items, '/')) |i| path.shrinkRetainingCapacity(i) else path.clearRetainingCapacity();
+            continue;
+        }
+        if (path.items.len > 0 or specifier[0] == '/') try path.append(gpa, '/');
+        try path.appendSlice(gpa, seg);
+    }
+    const src = std.Io.Dir.cwd().readFileAlloc(io, path.items, gpa, .limited(64 << 20)) catch return null;
+    return .{ .name = try gpa.dupe(u8, path.items), .source = src };
+}
+
 pub fn main(init: std.process.Init) !u8 {
     io = init.io;
     const gpa = init.gpa;
@@ -41,6 +72,7 @@ pub fn main(init: std.process.Init) !u8 {
     try vm.init(region, gpa);
     defer vm.deinit();
     _ = try vm.defineNative(vm.global, "print", 1, print);
+    vm.host_load = hostLoad;
     const dump = std.c.getenv("JS_DUMP") != null;
     js.interp.trace_enabled = std.c.getenv("JS_TRACE") != null;
     vm.heap.stress = std.c.getenv("JS_GC_STRESS") != null;
@@ -50,6 +82,23 @@ pub fn main(init: std.process.Init) !u8 {
             return 1;
         };
         defer gpa.free(src);
+        if (std.mem.endsWith(u8, path, ".mjs")) {
+            const p = js.module.runEntry(vm, path, src) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Exception => {
+                    std.debug.print("{s}: {s}\n", .{ path, exceptionText(vm, gpa) });
+                    return 1;
+                },
+            };
+            vm.runJobs() catch {};
+            const pd = Vm.asObject(p).internal(js.vm.PromiseData);
+            if (pd.state == 2) {
+                vm.exception = pd.result;
+                std.debug.print("{s}: uncaught {s}\n", .{ path, exceptionText(vm, gpa) });
+                return 1;
+            }
+            continue;
+        }
         const code = js.compiler.compile(gpa, &vm.heap, &vm.strings, src, .{ .name = path }) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.SyntaxError => {

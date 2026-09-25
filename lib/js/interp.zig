@@ -17,6 +17,7 @@ const string = @import("string.zig");
 const compiler = @import("compiler.zig");
 const realm = @import("realm.zig");
 const heap = @import("heap.zig");
+const modules = @import("module.zig");
 const Vm = vmod.Vm;
 const Value = vmod.Value;
 const Error = vmod.Error;
@@ -55,6 +56,9 @@ pub fn callValue(vm: *Vm, f: Value, this: Value, args: []const Value) Error!Valu
                 if (vm.depth > max_native_depth) return vm.throwRangeError("Maximum call stack size exceeded");
                 vm.depth += 1;
                 defer vm.depth -= 1;
+                const saved_native = vm.current_native;
+                vm.current_native = o;
+                defer vm.current_native = saved_native;
                 return n(vm, this, args, Value.undefined_);
             }
             if (fd.is_class_constructor) return vm.throwTypeError("Class constructor cannot be invoked without 'new'");
@@ -94,6 +98,9 @@ pub fn constructValue(vm: *Vm, f: Value, args: []const Value, new_target: Value)
                 if (vm.depth > max_native_depth) return vm.throwRangeError("Maximum call stack size exceeded");
                 vm.depth += 1;
                 defer vm.depth -= 1;
+                const saved_native = vm.current_native;
+                vm.current_native = o;
+                defer vm.current_native = saved_native;
                 return n(vm, Value.undefined_, args, new_target);
             }
             const code = fd.code.?;
@@ -154,6 +161,88 @@ fn coerceThis(vm: *Vm, fd: *FunctionData, this: Value) Error!Value {
             return (try vm.toObject(this)).asValue();
         },
     }
+}
+
+pub fn coerceThisFor(vm: *Vm, fd: *FunctionData, this: Value) Error!Value {
+    return coerceThis(vm, fd, this);
+}
+
+/// Start a coroutine body: an entry frame with the record attached.
+pub fn runCoroutineStart(vm: *Vm, code: *Code, f: ?*Object, this: Value, env: ?*Env, args: []const Value, co: ?*Object) Error!Value {
+    const base = try placeArgs(vm, args);
+    if (vm.depth > max_native_depth) return vm.throwRangeError("Maximum call stack size exceeded");
+    vm.depth += 1;
+    defer vm.depth -= 1;
+    try pushFrame(vm, code, f, this, Value.undefined_, env, base, @intCast(args.len), 0, false, true, null);
+    currentFrame(vm).co = co;
+    return run(vm);
+}
+
+/// Copy a suspended coroutine's frame back onto the stack and run it.
+pub fn resumeCoroutine(vm: *Vm, co_obj: *Object, value: Value, kind: u8) Error!Value {
+    const co = co_obj.internal(vmod.CoroutineData);
+    const base = vm.sp();
+    if (@as(usize, base) + co.nregs + 1 > vm.stack.len or vm.frames.items.len >= Vm.max_frames) return vm.throwRangeError("Maximum call stack size exceeded");
+    const regs = vm.stack[base .. base + co.nregs];
+    @memcpy(regs, co.savedRegs());
+    const frame_index: u32 = @intCast(vm.frames.items.len);
+    vm.frames.appendAssumeCapacity(.{
+        .code = co.code,
+        .func = co.func,
+        .co = co_obj,
+        .pc = co.pc,
+        .base = base,
+        .this = co.this,
+        .new_target = co.new_target,
+        .env = co.env,
+        .args_base = base,
+        .argc = 0,
+        .handlers_base = @intCast(vm.handlers.items.len),
+        .ret_dst = 0,
+        .is_construct = false,
+        .entry = true,
+        .saved_sp = base,
+    });
+    for (co.savedHandlers()) |h| try vm.handlers.append(vm.meta, .{ .pc = h.pc, .reg = h.reg, .env = h.env, .frame = frame_index });
+    // A frame suspended at its start takes no value.
+    if (co.resume_reg != 0xFFFF) {
+        regs[co.resume_reg] = value;
+        regs[co.kind_reg] = Value.fromInt(kind);
+    }
+    if (vm.depth > max_native_depth) return vm.throwRangeError("Maximum call stack size exceeded");
+    vm.depth += 1;
+    defer vm.depth -= 1;
+    return run(vm);
+}
+
+/// Save the running frame into its coroutine record and pop it.
+fn suspendFrame(vm: *Vm, frame: *Frame, pc: u32, resume_reg: u16, kind_reg: u16) Error!void {
+    const co_obj = frame.co.?;
+    const co = co_obj.internal(vmod.CoroutineData);
+    const nregs = frame.code.data.nregs;
+    if (co.regs == null or co.nregs != nregs) {
+        co.nregs = nregs;
+        co.regs = try vm.heap.alloc(.bytes, 16 + @as(usize, nregs) * @sizeOf(Value));
+    }
+    @memcpy(co.savedRegs(), vm.stack[frame.base .. frame.base + nregs]);
+    const hs = vm.handlers.items[frame.handlers_base..];
+    if (hs.len > 0) {
+        if (co.handlers == null or co.nhandlers != hs.len) {
+            co.nhandlers = @intCast(hs.len);
+            co.handlers = try vm.heap.alloc(.bytes, 16 + hs.len * @sizeOf(vmod.Handler));
+        }
+        @memcpy(co.savedHandlers(), hs);
+    } else {
+        co.nhandlers = 0;
+        co.handlers = null;
+    }
+    co.pc = pc;
+    co.resume_reg = resume_reg;
+    co.kind_reg = kind_reg;
+    co.env = frame.env;
+    co.this = frame.this;
+    co.new_target = frame.new_target;
+    _ = popFrame(vm);
 }
 
 /// The `this` of a [[Construct]]: a fresh object for a base
@@ -1097,10 +1186,88 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 regs[insn.a] = try realm.forInNext(vm, regs[insn.b]);
             },
 
-            // ------------------------------------------- generators
-            .yield, .yieldstar, .await, .genstart => {
+            // ------------------------------------------- coroutines
+            .genstart => {
+                // Parameters are bound: make the generator object (its
+                // prototype read now) and hand it back to the caller.
+                const co_obj = try realm.createGeneratorObject(vm, frame.func.?);
+                frame.co = co_obj;
+                try suspendFrame(vm, frame, pc, 0xFFFF, 0xFFFF);
+                co_obj.internal(vmod.CoroutineData).state = vmod.CoroutineData.suspended_start;
+                return co_obj.asValue();
+            },
+            .modinit => {
+                const co_obj = frame.co.?;
+                try suspendFrame(vm, frame, pc, 0xFFFF, 0xFFFF);
+                co_obj.internal(vmod.CoroutineData).state = vmod.CoroutineData.suspended_start;
+                return Value.undefined_;
+            },
+            .getimport => {
                 frame.pc = pc;
-                return realm.generatorOp(vm, frame, insn, regs);
+                const e = frame.env.?.up(insn.b);
+                regs[insn.a] = try modules.readImport(vm, e.slots()[insn.c], e.info.names[insn.c]);
+            },
+            .yield, .yieldraw => {
+                const co_obj = frame.co.?;
+                const co = co_obj.internal(vmod.CoroutineData);
+                co.yielded = regs[insn.b];
+                co.yield_raw = insn.op == .yieldraw;
+                try suspendFrame(vm, frame, pc, insn.a, insn.c);
+                co.state = vmod.CoroutineData.suspended_yield;
+                return Value.undefined_;
+            },
+            .await => {
+                frame.pc = pc;
+                const co_obj = frame.co.?;
+                const co = co_obj.internal(vmod.CoroutineData);
+                // PromiseResolve first: its errors are thrown here, in the body.
+                const p = try realm.promiseResolve(vm, regs[insn.b]);
+                co.yielded = p;
+                try suspendFrame(vm, frame, pc, insn.a, insn.c);
+                co.state = vmod.CoroutineData.suspended_await;
+                try realm.awaitValue(vm, co_obj, p);
+                return Value.undefined_;
+            },
+            .ystep => {
+                frame.pc = pc;
+                regs[insn.a] = try yieldStarStep(vm, regs[insn.b], regs[insn.b + 1], @intCast(regs[insn.b + 2].asInt()), regs[insn.b + 3]);
+            },
+            .iterstep => {
+                frame.pc = pc;
+                regs[insn.a] = try vm.call(regs[insn.b + 1], regs[insn.b], &.{});
+            },
+            .iterresult => {
+                frame.pc = pc;
+                const r = regs[insn.b];
+                if (!r.isObject()) return vm.throwTypeError("Iterator result is not an object");
+                const done = vm.toBoolean(try vm.get(asObject(r), .{ .atom = vm.atoms.done }, r));
+                regs[insn.a] = if (done) Value.empty else try vm.get(asObject(r), .{ .atom = vm.atoms.value }, r);
+            },
+            .iterdone => {
+                frame.pc = pc;
+                const r = regs[insn.b];
+                if (!r.isObject()) return vm.throwTypeError("Iterator result is not an object");
+                regs[insn.a] = Value.fromBool(vm.toBoolean(try vm.get(asObject(r), .{ .atom = vm.atoms.done }, r)));
+            },
+            .itervalue => {
+                frame.pc = pc;
+                const r = regs[insn.b];
+                if (!r.isObject()) return vm.throwTypeError("Iterator result is not an object");
+                regs[insn.a] = try vm.get(asObject(r), .{ .atom = vm.atoms.value }, r);
+            },
+            .iterreturn => {
+                frame.pc = pc;
+                if (regs[insn.b + 1].isEmpty()) {
+                    regs[insn.a] = Value.undefined_;
+                } else {
+                    regs[insn.b + 1] = Value.empty;
+                    const ret = try vm.getMethod(regs[insn.b], .{ .atom = vm.atoms.@"return" });
+                    regs[insn.a] = if (ret.isUndefined()) Value.undefined_ else try vm.call(ret, regs[insn.b], &.{});
+                }
+            },
+            .chkobj => if (!regs[insn.a].isObject()) {
+                frame.pc = pc;
+                return vm.throwTypeError("Iterator result is not an object");
             },
 
             // ------------------------------------------------- misc
@@ -1115,11 +1282,39 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     regs[insn.a] = try callSlow(vm, f, Value.undefined_, args, pc);
                 }
             },
-            .importmeta, .importcall => {
+            .importmeta => {
                 frame.pc = pc;
-                return vm.throwSyntaxError("modules are not supported yet");
+                regs[insn.a] = try modules.importMeta(vm, code);
+            },
+            .importcall => {
+                frame.pc = pc;
+                regs[insn.a] = try modules.dynamicImport(vm, code, regs[insn.b]);
             },
         }
+    }
+}
+
+/// One step of yield* (§27.5.3.7 step 7): forward the resumption to
+/// the inner iterator's next/throw/return. Returns the inner result
+/// object, or the hole when a `return` resumption finds no `return`
+/// method (the outer generator then returns the received value).
+fn yieldStarStep(vm: *Vm, iterator: Value, next: Value, kind: u8, received: Value) Error!Value {
+    switch (kind) {
+        0 => return vm.call(next, iterator, &.{received}),
+        1 => {
+            const thr = try vm.getMethod(iterator, .{ .atom = vm.atoms.throw });
+            if (thr.isUndefined()) {
+                // No throw method: close the iterator, then a TypeError.
+                try vm.iteratorClose(.{ .iterator = iterator, .next = next });
+                return vm.throwTypeError("The iterator does not provide a 'throw' method");
+            }
+            return vm.call(thr, iterator, &.{received});
+        },
+        else => {
+            const ret = try vm.getMethod(iterator, .{ .atom = vm.atoms.@"return" });
+            if (ret.isUndefined()) return Value.empty;
+            return vm.call(ret, iterator, &.{received});
+        },
     }
 }
 
@@ -1175,7 +1370,7 @@ fn getPropSlow(vm: *Vm, obj: Value, site: *bytecode.PropSite) Error!Value {
         var cur: *Object = o;
         var depth: u32 = 0;
         while (true) : (depth += 1) {
-            if (cur.class == .proxy or cur.class == .typed_array or (cur.class == .string and false)) break;
+            if (cur.class == .proxy or cur.class == .typed_array or cur.class == .namespace) break;
             if (cur.class == .array and site.key == vm.atoms.length) return Value.fromF64(@floatFromInt(Vm.arrayLength(cur)));
             if (cur.class == .arguments and cur == o) break;
             if (try vm.objects.getOwn(cur, key)) |own| {
@@ -1650,6 +1845,9 @@ const interp_cases = [_]struct { src: []const u8, want: f64 }{
     .{ .src = "function fa(a, b) { arguments[0] = 9; return a; } fa(1)", .want = 9 },
     .{ .src = "var w = 0; with ({v: 5}) { w = v; } w", .want = 5 },
     .{ .src = "var t = 0; for (let i = 0; i < 3; i++) { t += eval('i'); } t", .want = 3 },
+    .{ .src = "function* g(a) { var x = yield a; try { yield x * 2; } finally { a = 100; } return a; } var it = g(1); var r = it.next().value * 10 + it.next(5).value; it.return(7); r", .want = 20 },
+    .{ .src = "function* g() { yield* [1, 2]; return 3; } function* d() { const r = yield* g(); yield r; } var sum = 0; for (const v of d()) sum += v; sum", .want = 6 },
+    .{ .src = "var out = 0; async function f(v) { const a = await v; return a + (await Promise.resolve(1)); } f(1).then(function (v) { out = v; }); out", .want = 0 },
 };
 
 fn runCases(vm: *Vm) !void {

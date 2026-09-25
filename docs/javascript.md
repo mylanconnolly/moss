@@ -40,14 +40,20 @@ the as-built account with the test262 numbers.
   abstract operations, and the realm's intrinsics.
 - `builtins/` — Object, Function, Array, String, Number, Boolean,
   Symbol, Math, JSON, Error and the native errors, Reflect, the global
-  functions, the array and string iterators. Generators, async,
-  modules, RegExp matching, BigInt, Proxy, Map/Set, Date and Promise
-  are later stages and count as misses until they land.
+  functions, the array and string iterators, Promise, generators and
+  async functions (`generator.zig`: frames copied to the heap on yield
+  or await, resumed by `next` or a promise reaction).
+- `module.zig` — module records, linking with live import bindings,
+  namespace objects, evaluation with top-level await, `import()` and
+  `import.meta`; sources come only from the embedder's `Vm.host_load`.
+  RegExp matching, BigInt, Proxy, Map/Set and Date are later stages and
+  count as misses until they land.
 
 ## Running it
 
 ```
 zig build js -- file.js [more.js]     # scripts in one realm, `print` on the global
+zig build js -- entry.mjs             # a module graph (imports relative to the importer)
 JS_DUMP=1 zig build js -- file.js     # the bytecode of each file first
 JS_TRACE=1 ...                        # every instruction executed (debugging)
 JS_GC_STRESS=1 ...                    # collect at every safe point, poison freed cells
@@ -69,8 +75,9 @@ TEST262_TRACE=1 ...               # print each path before running it (finding a
 
 Every file runs as the harness would: `assert.js`, `sta.js` and its
 `includes:` first, in a fresh realm, then the test in sloppy and strict
-mode unless a flag says one (`onlyStrict`, `noStrict`, `raw`; `module`
-files are stage c and count as misses). A file passes when every mode
+mode unless a flag says one (`onlyStrict`, `noStrict`, `raw`); a `module`
+file is the entry of a graph whose `_FIXTURE` imports come from its own
+directory. A file passes when every mode
 completes without an exception; a `negative:` file when it fails in the
 named phase with the named error type; an `async` file when it prints
 `Test262:AsyncTestComplete`. The counts are recorded in DESIGN.md as each

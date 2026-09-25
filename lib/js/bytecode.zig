@@ -165,10 +165,19 @@ pub const Op = enum(u16) {
     forin, // a = for-in enumerator of b
     forinnext, // a = next key of enumerator b, or the hole
     // ------------------------------------------------- generators
-    yield, // a = yield b
-    yieldstar, // a = yield* b
-    await, // a = await b
+    yield, // suspend yielding b; on resumption a = the value sent, c = the kind (0 next, 1 throw, 2 return)
+    yieldraw, // like yield, but b is yielded as the result object itself (yield*)
+    await, // suspend on b; a = the settled value, c = the kind (0 fulfilled, 1 rejected)
     genstart, // the generator prologue: suspend after arguments are bound
+    modinit, // a module's environment exists: suspend until evaluation
+    getimport, // a = the import binding env^b[c] (an ImportCell), live
+    ystep, // yield* step: b: iterator, b+1: next, b+2: kind, b+3: received → a = inner result (hole: return received), a+1 unused
+    iterstep, // a = Call(next b+1, iterator b) — the raw result
+    iterresult, // a = value of result object b, or the hole when done (TypeError if not an object)
+    iterdone, // a = ToBoolean(b.done)
+    itervalue, // a = b.value
+    iterreturn, // a = Call(return, iterator b) or undefined without one; marks b+1 closed
+    chkobj, // TypeError unless a is an object
     // ------------------------------------------------------- misc
     eval, // a = direct eval of b (argc c at b+..)
     importmeta,
@@ -310,6 +319,9 @@ pub const CodeData = struct {
     end: u32 = 0,
     /// The function-scope info, when the function's scope is an Env.
     function_scope: ?*ScopeInfo = null,
+    /// The module record this code was compiled for (import.meta,
+    /// import() resolution), or null for a script.
+    module: ?*anyopaque = null,
     /// A mapped arguments object's aliasing: the environment slot of
     /// each parameter index (`unmapped` for a duplicate name's earlier
     /// index); empty when the arguments object is unmapped.

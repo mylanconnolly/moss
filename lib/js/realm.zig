@@ -48,8 +48,14 @@ pub const Intrinsics = struct {
     async_function_prototype: *Object,
     async_generator_function_prototype: *Object,
     async_generator_prototype: *Object,
+    async_iterator_prototype: *Object,
+    async_from_sync_iterator_prototype: *Object,
     regexp_prototype: *Object,
     promise_prototype: *Object,
+    promise_ctor: *Object,
+    generator_function: *Object,
+    async_generator_function: *Object,
+    async_function: *Object,
     object_ctor: *Object,
     function_ctor: *Object,
     array_ctor: *Object,
@@ -255,7 +261,9 @@ pub fn create(vm: *Vm) Error!void {
     i.generator_prototype = try mk.proto(vm, i.iterator_prototype);
     i.async_function_prototype = try mk.proto(vm, fnp);
     i.async_generator_function_prototype = try mk.proto(vm, fnp);
-    i.async_generator_prototype = try mk.proto(vm, objp);
+    i.async_iterator_prototype = try mk.proto(vm, objp);
+    i.async_from_sync_iterator_prototype = try mk.proto(vm, i.async_iterator_prototype);
+    i.async_generator_prototype = try mk.proto(vm, i.async_iterator_prototype);
     i.regexp_prototype = try mk.proto(vm, objp);
     i.promise_prototype = try mk.proto(vm, objp);
     // The global object.
@@ -450,16 +458,23 @@ pub fn arrayIteratorFast(vm: *Vm, it: Value, next: Value) ?Value {
 }
 
 pub fn getAsyncIterator(vm: *Vm, v: Value) Error!Vm.IteratorRecord {
-    _ = v;
-    return vm.throwTypeError("async iteration is not supported yet");
+    return builtins.generator.getAsyncIterator(vm, v);
 }
 
 pub fn callGenerator(vm: *Vm, f: *Object, this: Value, args: []const Value) Error!Value {
     return builtins.generator.call(vm, f, this, args);
 }
 
-pub fn generatorOp(vm: *Vm, frame: *Frame, insn: bytecode.Insn, regs: [*]Value) Error!?Value {
-    return builtins.generator.op(vm, frame, insn, regs);
+pub fn createGeneratorObject(vm: *Vm, f: *Object) Error!*Object {
+    return builtins.generator.createGeneratorObject(vm, f);
+}
+
+pub fn promiseResolve(vm: *Vm, v: Value) Error!Value {
+    return builtins.promise.promiseResolve(vm, vm.intrinsics.promise_ctor.asValue(), v);
+}
+
+pub fn awaitValue(vm: *Vm, co: *Object, p: Value) Error!void {
+    return builtins.generator.awaitValue(vm, co, p);
 }
 
 /// SetIntegrityLevel frozen for a literal-built array.
