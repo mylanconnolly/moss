@@ -403,7 +403,7 @@ pub const Vm = struct {
                 m.markValue(d.fulfill_reactions);
                 m.markValue(d.reject_reactions);
             },
-            .map, .set, .weak_map, .weak_set, .proxy, .regexp, .date, .array_buffer, .typed_array, .data_view, .namespace => {
+            .map, .set, .weak_map, .weak_set, .proxy, .regexp, .date, .array_buffer, .typed_array, .data_view, .iterator_helper, .namespace => {
                 // Stage c/d classes trace through their own hooks.
                 realm.traceExtra(o, m);
             },

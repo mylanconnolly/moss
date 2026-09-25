@@ -41,6 +41,7 @@ pub const date = @import("builtins/date.zig");
 pub const arraybuffer = @import("builtins/arraybuffer.zig");
 pub const typedarray = @import("builtins/typedarray.zig");
 pub const atomics = @import("builtins/atomics.zig");
+pub const iterhelpers = @import("builtins/iterhelpers.zig");
 
 pub fn install(vm: *Vm) Error!void {
     try object.install(vm);
@@ -65,6 +66,7 @@ pub fn install(vm: *Vm) Error!void {
     try arraybuffer.install(vm);
     try typedarray.install(vm);
     try atomics.install(vm);
+    try iterhelpers.install(vm);
 }
 
 pub fn traceExtra(o: *Object, m: *heap.Marker) void {
@@ -75,6 +77,7 @@ pub fn traceExtra(o: *Object, m: *heap.Marker) void {
         .map, .set, .weak_map, .weak_set => map.trace(o, m),
         .array_buffer, .data_view => arraybuffer.trace(o, m),
         .typed_array => typedarray.trace(o, m),
+        .iterator_helper => iterhelpers.trace(o, m),
         else => {},
     }
 }

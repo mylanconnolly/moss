@@ -55,7 +55,10 @@ the as-built account with the test262 numbers.
   typed arrays (`typedarray.zig`: %TypedArray% and its twelve
   constructors including Float16Array, the integer-indexed exotic
   object's internal methods, `Uint8Array`'s base64 and hex methods),
-  and Atomics (`atomics.zig`, for the one agent there is).
+  and Atomics (`atomics.zig`, for the one agent there is), and the
+  Iterator constructor with the ES2025 helpers (`iterhelpers.zig`:
+  helpers as native state machines that close what they hold open on
+  `return`; `Iterator.from`, `concat`, `zip`, `chunks`, `windows`).
 - `regexp.zig` — the regular expression engine: a parser for the
   ES2023 grammar with Annex B's tolerance (u/v modes, named groups,
   lookbehind, property escapes), a compiler to a small instruction set
@@ -70,8 +73,7 @@ the as-built account with the test262 numbers.
 - `module.zig` — module records, linking with live import bindings,
   namespace objects, evaluation with top-level await, `import()` and
   `import.meta`; sources come only from the embedder's `Vm.host_load`.
-  Iterator helpers and Temporal are later stages and count as misses
-  until they land.
+  Temporal is a later stage and counts as misses until it lands.
 
 ## Running it
 

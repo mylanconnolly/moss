@@ -953,14 +953,17 @@ supervises), and memory history per unit beside the CPU one.
       Atomics: TypedArray 1,453/1,453, TypedArrayConstructors 714/738,
       DataView 559/561, Atomics 271/389 (the rest need a second
       agent); test/built-ins 17,420/23,821 (73.1%), test/language
-      22,724/23,726 (95.8%).
-      Residuals of (b)–(d): Iterator helpers, the moving nursery (the
-      barrier is in place) and ephemeron keys for the weak
-      collections, eval's `arguments` early errors, rooting natives'
-      locals so collection can run at any depth (today only at native
-      depth zero), import attributes, `$262.createRealm` and
-      `$262.agent` in the runner, the regexp modifiers and
-      `unicodeSets` string properties, time zones for Date, Temporal.
+      22,724/23,726 (95.8%); and the Iterator constructor with the
+      ES2025 helpers (plus concat, zip, chunks, windows, includes,
+      join, Symbol.dispose): Iterator 653/654; test/built-ins 18,059/23,821
+      (75.8%), test/language 22,724/23,726 (95.8%).
+      Residuals of (b)–(d): the moving nursery (the barrier is in
+      place) and ephemeron keys for the weak collections, eval's
+      `arguments` early errors, rooting natives' locals so collection
+      can run at any depth (today only at native depth zero), import
+      attributes, `$262.createRealm` and `$262.agent` in the runner,
+      the regexp modifiers and `unicodeSets` string properties, time
+      zones for Date, Temporal (4,605 files, the last large block).
     - **(11) Scripts meet the page.** Bindings generated from one
       comptime interface table; the event loop in `webpage` (tasks,
       microtasks, timers on a kernel timer, animation frames on the

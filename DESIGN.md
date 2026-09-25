@@ -7314,6 +7314,30 @@ iterator records were then marked done — "is not a function" on the
 eleventh constructor. A one-line condition in `unwindTo` fixes it and
 the interpreter's own test table now has the nested-loop case.
 
+**Stage 10d, last part: the Iterator constructor and the iterator
+helpers (as built, 2026-09-25).** `builtins/iterhelpers.zig` is §27.1.3
+of ES2025 — `Iterator` (abstract: constructing it directly is a
+TypeError, subclassing it is the point), `Iterator.from` with
+%WrapForValidIteratorPrototype% around anything that is not already an
+Iterator, the `constructor` and `@@toStringTag` accessors whose setter
+ignores the prototype itself, and `map`, `filter`, `take`, `drop`,
+`flatMap`, `reduce`, `toArray`, `forEach`, `some`, `every`, `find` —
+plus the proposals test262 counts alongside them: `Iterator.concat`,
+`Iterator.zip` and `zipKeyed` with their `shortest`/`longest`/`strict`
+modes and padding, `chunks` and `windows`, `includes` and `join`, and
+`Symbol.dispose`. A helper is the specification's generator over an
+abstract closure written as a native state machine (`Class.iterator_helper`,
+its slots traced): `next` runs one step to the next yield and refuses
+re-entry while executing, `return` performs the closure's abrupt
+completion — closing the inner iterator then the outer for `flatMap`,
+every open iterator in reverse for `zip`, nothing for a `concat` that
+has opened nothing yet — and a step that throws completes the helper
+for good. The argument checks happen before the underlying iterator's
+`next` is read and close it on failure, as the 2025 text orders. The
+suite: Iterator 653/654 (the last needs `$262.createRealm`), the same
+under GC stress. Overall: `test/built-ins` 18,059/23,821 (75.8%),
+`test/language` 22,724/23,726 (95.8%).
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
