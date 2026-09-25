@@ -3770,6 +3770,27 @@ that paints under a clip into a canvas of sentinel pixels and expects
 them untouched. *Lesson (again):* look at the screendump — a scroll
 that is fast and wrong reads as fast.
 
+**The infobox that spilled its box (2026-09-24).** The user's Firefox
+beside ours: an article's infobox drew its border at 22em and laid its
+cells out 100 px wider, the title bar, picture and caption past the
+right edge. Two table rules were missing. A replaced box limited by a
+percentage — `img { max-width: 100% }`, the web's way of letting a
+picture shrink to its column — contributes no minimum width of its
+own, so a 330px picture no longer forces a 22em table's columns past
+it; and a table specified narrower than its columns' minimums widens
+its own box to them (and overflows its container, as browsers let it)
+instead of drawing a border its cells spill past. Both have unit
+tests. What is left is honest: the same infobox holds a route map
+that Firefox collapses through
+`.client-js .collapsible.collapsed > tbody > tr:not(:first-child)`,
+a rule that applies only once MediaWiki's script swaps the document's
+`client-nojs` class for `client-js` — we run no script yet, so we
+render the no-JS page, map expanded, box widened to hold it. That gap
+is the JavaScript stage's. `webshot` gained `WEBSHOT_TABLE=box`
+(every cell's min and max and the columns') and `WEBSHOT_SUB=box`
+(a subtree), and its dump prints a box's `min-width`, `max-width`,
+`white-space` and text.
+
 **Maximize (as built, 2026-09-10).** The green traffic-light, a stub since
 stage 1, now maximizes the window to fill the work area — full width, from
 just below the top bar's strut down to just above the dock — and a second

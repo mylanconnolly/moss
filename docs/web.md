@@ -213,7 +213,10 @@ log from inside `update`, where `echo` waits for the window to close).
 
 Very large pages outgrow the page's 40 MB for a document
 and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
-DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); no `position: fixed`/`sticky` beyond relative, no scaling or rotating
+DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); pages render as
+they do without JavaScript — a table Wikipedia collapses through a
+`.client-js` rule its script enables stays expanded, and an infobox
+widens to hold it; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,
@@ -241,6 +244,8 @@ what it fetches under `zig-out/webshot-cache` (delete it to refetch).
 or class holds the needle; `WEBSHOT_FRAG=text` prints the fragments
 carrying a string and the lines that reach them; `WEBSHOT_AT=x,y` the
 boxes under a point and `WEBSHOT_BOX=n` a box's ancestors;
+`WEBSHOT_SUB=box` prints a box's subtree; `WEBSHOT_TABLE=box` a table's
+cells' minimum and maximum widths and the columns they make.
 `WEBSHOT_PAGE=1` runs the parse, sheets, cascade and layout in the page
 domain's memory and prints a census — node, box and fragment counts and
 record sizes, list capacities, text and attribute buffers, and a

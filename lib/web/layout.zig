@@ -1965,6 +1965,18 @@ fn columnWidths(l: *Layout, g: TableGrid) Error!ColumnWidths {
     return .{ .min = min, .max = max, .pct = pct };
 }
 
+/// What a table's columns are made of, for the host's `webshot`
+/// (`WEBSHOT_TABLE=box`): every cell's min and max, then the columns'.
+pub fn debugTableColumns(l: *Layout, id: BoxId) Error!void {
+    const g = try tableGrid(l, id);
+    for (g.cells) |c| {
+        const pw = try preferredWidths(l, c.box);
+        std.debug.print("  cell box {d} col {d} span {d}: min {d:.1} max {d:.1}\n", .{ c.box, c.col, c.cols, pw.min, pw.max });
+    }
+    const cw = try columnWidths(l, g);
+    for (cw.min, cw.max, 0..) |a, b, k| std.debug.print("  column {d}: min {d:.1} max {d:.1}\n", .{ k, a, b });
+}
+
 /// Column widths for `avail`: percentage columns take their share (at
 /// least their minimum) first; the rest share what is left between their
 /// minimum and maximum, or past the maximum by it.
@@ -2049,6 +2061,16 @@ fn layoutTableContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
     _ = cb_w;
     const g = try tableGrid(l, id);
     const cw = try columnWidths(l, g);
+    // Columns are never narrower than their minimums: a table specified
+    // narrower than they need widens to them (and overflows its
+    // container, as browsers let it) rather than drawing a border its
+    // cells spill past.
+    {
+        var need: f64 = g.spacing_x * @as(f64, @floatFromInt(g.ncols + 1));
+        for (cw.min) |m| need += m;
+        const tb = l.box(id);
+        if (need > tb.contentW()) tb.w += need - tb.contentW();
+    }
     const t = l.get(id);
     const content_x = t.contentX();
     const content_w = t.contentW();
@@ -2195,7 +2217,12 @@ fn measureWidths(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
     const extras = horizontalExtras(b);
     if (isReplacedBox(l, b)) {
         const size = replacedSize(l, id, 0);
-        return .{ .min = size[0] + extras, .max = size[0] + extras };
+        // A replaced box limited by a percentage (`img { max-width: 100% }`,
+        // the web's way of letting a picture shrink to its column) has no
+        // minimum of its own: a 330px picture fits a 22em infobox, and
+        // the table's columns are not forced past its width (2026-09-24).
+        const shrinks = st.max_width == .percent or st.max_width == .calc or st.width == .percent;
+        return .{ .min = if (shrinks) extras else size[0] + extras, .max = size[0] + extras };
     }
     if (isTableBox(b)) {
         const tw = try tableWidths(l, id);
@@ -3788,6 +3815,27 @@ test "layout: a table sizes its columns from its cells and its rows from the tal
     // A bottom-aligned cell's line sits at the bottom.
     try std.testing.expect(be.lines.items[0].y > be.y + 20);
     try std.testing.expectApproxEqAbs(ba.y + ba.h + 4, bc.y, 0.001);
+}
+
+test "layout: a picture with a percentage max-width shrinks to a fixed-width table" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0'><table id=t style='width:200px;border-spacing:0'><tr><td style='padding:0'><img id=i width=300 height=100 style='max-width:100%'></td></tr></table>", 600);
+    const t = boxOf(l, l.doc, "#t");
+    try std.testing.expectApproxEqAbs(@as(f64, 200), t.w, 0.5);
+    const i = boxOf(l, l.doc, "#i");
+    try std.testing.expect(i.w <= 200.5);
+    try std.testing.expect(i.w >= 199.5);
+}
+
+test "layout: a table narrower than its columns' minimums widens to them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = try layoutText(a, "<!DOCTYPE html><body style='margin:0'><table id=t style='width:50px;border-spacing:0'><tr><td style='padding:0'><div style='width:120px;height:10px'></div></td></tr></table>", 600);
+    const t = boxOf(l, l.doc, "#t");
+    try std.testing.expect(t.w >= 120);
 }
 
 test "layout: percentage columns widen an auto table and take their share" {

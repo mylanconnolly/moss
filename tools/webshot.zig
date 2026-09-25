@@ -367,6 +367,14 @@ pub fn main(init: std.process.Init) !u8 {
             dumpBox(doc, l, @intCast(i), 3);
         }
     }
+    if (std.c.getenv("WEBSHOT_SUB")) |sb| {
+        const id = std.fmt.parseInt(u32, std.mem.span(sb), 10) catch 0;
+        dumpBox(doc, l, id, 0);
+    }
+    if (std.c.getenv("WEBSHOT_TABLE")) |tb| {
+        const id = std.fmt.parseInt(u32, std.mem.span(tb), 10) catch 0;
+        try web.layout.debugTableColumns(l, id);
+    }
     if (std.c.getenv("WEBSHOT_FRAG")) |needle_z| {
         const needle = std.mem.span(needle_z);
         for (0..l.fragments.len) |i| {
@@ -432,7 +440,7 @@ fn dumpBox(doc: *const dom.Document, l: *const web.layout.Layout, id: u32, depth
     var ind: [16]u8 = @splat(' ');
     const name = if (b.node) |n| (if (doc.get(n).kind == .element) doc.get(n).name else "#text") else "-";
     const cls = if (b.node) |n| (doc.getAttr(n, "class") orelse doc.getAttr(n, "id") orelse "") else "";
-    std.debug.print("{s}[{d}] {s} {s}.{s} at {d:.1},{d:.1} {d:.1}x{d:.1} disp={s} pos={s} order={d} w={any} h={any} m={any}\n", .{ ind[0..@min(16, depth * 2)], id, @tagName(b.kind), name, cls[0..@min(cls.len, 40)], b.x, b.y, b.w, b.h, @tagName(st.display), @tagName(st.position), st.order, st.width, st.height, b.margin });
+    std.debug.print("{s}[{d}] {s} {s}.{s} at {d:.1},{d:.1} {d:.1}x{d:.1} disp={s} pos={s} order={d} w={any} h={any} minw={any} maxw={any} ws={s} m={any} text=\"{s}\"\n", .{ ind[0..@min(16, depth * 2)], id, @tagName(b.kind), name, cls[0..@min(cls.len, 40)], b.x, b.y, b.w, b.h, @tagName(st.display), @tagName(st.position), st.order, st.width, st.height, st.min_width, st.max_width, @tagName(st.white_space), b.margin, b.text[0..@min(b.text.len, 48)] });
     if (depth >= 3) return;
     for (b.children.items) |c| dumpBox(doc, l, c, depth + 1);
 }
