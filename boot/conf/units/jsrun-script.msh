@@ -1,0 +1,9 @@
+# The JavaScript drill's client: a script runs programs in script
+# domains (the `jsrun` image, staged from the boot archive) and checks
+# what comes back — a value, the printed lines, an uncaught exception,
+# a syntax error. The spawner and the budget are for the child domains
+# (32 MB each, one at a time); the root view is where the program store
+# the image is staged from lives. Essential and oneshot: its exit ends
+# the boot.
+{ image: mshrun, script: scripts/jsrun-drill.msh, grant: [log, bootfs, spawner], budget: { user: 88mb, kobj: 8mb }, profiles: [jsrun], oneshot: true, essential: true,
+  give: [{ tag: view, fs: "", ro: true }] }

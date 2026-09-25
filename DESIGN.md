@@ -7338,6 +7338,43 @@ suite: Iterator 653/654 (the last needs `$262.createRealm`), the same
 under GC stress. Overall: `test/built-ins` 18,059/23,821 (75.8%),
 `test/language` 22,724/23,726 (95.8%).
 
+**Stage 10e, the first embedding: `jsrun` (as built, 2026-09-25).**
+The engine ran only on the host until now; this is the day it ran in
+a domain. `user/jsrun.zig` is a script domain in the page domain's
+exact shape: spawned with one capability — a badged calling end of the
+host's channel — it asks for its data buffer, finds the source there,
+runs it over two static heaps (8 MB of JavaScript values, the
+collector's region; 12 MB of bookkeeping behind a bump allocator that
+frees only its last block, the residual the stage names), sends each
+`print` line back through the buffer, and reports the completion
+value's text or the uncaught exception's, then exits; a script that
+outgrows its heap or faults dies alone and its host hears the badge's
+`client_dead`. The seam is `shared/js.zig`, three messages. The host
+is `user/jshost.zig`, a hundred lines against the thousand of the web
+host because a script fetches nothing: spawn from a staged image with
+limits (32 MB of user memory, 2 MB of kernel objects), serve the
+attach, the lines and the ending, destroy. `js-run SOURCE` in
+`mshrun` (`user/jscmds.zig`) stages the `jsrun` image from the
+program store as `web-render` stages `webpage`, and answers with
+`{ value, lines }` or an error result carrying the reason; the `jsrun`
+drill runs five programs — classes with private fields, a Map, a sort;
+a throw; a syntax error; a recursion without end, which is the
+engine's own `RangeError` and not the domain's death; a second run
+after the first, the host's channel kept open between them.
+
+Two things the first boot taught. The engine's compiler recorded its
+last error in a `threadlocal`, which HACKING's list already forbids
+for anything a user program links: with no thread-local storage set
+up, the store landed at the TLS base and the domain died of a data
+abort at address 0x10 on its first syntax error — found by
+symbolizing the fault's `elr` against the image, as the recipe says.
+And the boot archive's packer capped a file at 16 MB, which the guest
+kernel image — an archive inside an archive, since the guest node
+carries every program too — crossed once `jsrun` joined; the cap is
+64 MB now. Memory is what the stage bought: a page's script will run
+in the page domain's own heap next (stage 11), and `jsrun`'s modules
+over its capabilities are the other half of the decision row.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

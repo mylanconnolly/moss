@@ -25,7 +25,8 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         };
         const path = spec[0..eq];
-        const data = try cwd.readFileAlloc(io, spec[eq + 1 ..], gpa, .limited(1 << 24));
+        // 64 MB: the guest kernel image, an archive inside an archive, passed 16 MB in 2026-09.
+        const data = try cwd.readFileAlloc(io, spec[eq + 1 ..], gpa, .limited(1 << 26));
         var hdr: [8]u8 = undefined;
         std.mem.writeInt(u32, hdr[0..4], @intCast(path.len), .little);
         std.mem.writeInt(u32, hdr[4..8], @intCast(data.len), .little);

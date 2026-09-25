@@ -80,8 +80,8 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
 }
 
 /// Parse and compile errors: where and what (the last one).
-pub threadlocal var last_error: []const u8 = "";
-pub threadlocal var last_error_at: u32 = 0;
+pub var last_error: []const u8 = "";
+pub var last_error_at: u32 = 0;
 
 const Ref = union(enum) {
     reg: u16,

@@ -10,6 +10,7 @@
 //! Global sites cache the global object's shape the same way, guarded
 //! by the epoch of the global lexical record.
 const std = @import("std");
+const builtin = @import("builtin");
 const vmod = @import("vm.zig");
 const bytecode = @import("bytecode.zig");
 const object = @import("object.zig");
@@ -355,7 +356,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
     }
     while (true) {
         const insn = code.insns[pc];
-        if (trace_enabled) std.debug.print("[{d}] pc={d} {s} {d} {d} {d} base={d} nregs={d}\n", .{ vm.frames.items.len, pc, insn.op.name(), insn.a, insn.b, insn.c, frame.base, code.nregs });
+        if (comptime builtin.os.tag != .freestanding) if (trace_enabled) std.debug.print("[{d}] pc={d} {s} {d} {d} {d} base={d} nregs={d}\n", .{ vm.frames.items.len, pc, insn.op.name(), insn.a, insn.b, insn.c, frame.base, code.nregs });
         pc += 1;
         // Where the frame's pc is needed (calls, errors), it is stored.
         switch (insn.op) {

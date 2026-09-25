@@ -75,6 +75,29 @@ the as-built account with the test262 numbers.
   `import.meta`; sources come only from the embedder's `Vm.host_load`.
   Temporal is a later stage and counts as misses until it lands.
 
+## Embedding it
+
+`jsrun` (`user/jsrun.zig`) is the first host: a script domain in the
+page domain's shape, spawned with one capability — a badged calling
+end to whoever spawned it — that runs a program over its own static
+heap and reports back through a shared buffer (`shared/js.zig`: the
+attach, each `print` line, the ending). The shell's `js-run SOURCE`
+(`user/jscmds.zig` over `user/jshost.zig`) is its host: it stages the
+image from the program store, serves the run and destroys the domain,
+answering `{ value, lines }` or an error naming the uncaught exception,
+the syntax error or the death. A program gets exactly what its domain
+holds — today that is nothing but the channel; modules over the
+domain's capabilities are the next slice. The `jsrun` drill (`zig build
+check -Donly=jsrun`) is the integration test.
+
+```
+zig build check -Donly=jsrun            # the script-domain drill
+```
+
+Nothing the engine links may be `threadlocal` (a user program has no
+thread-local storage; the compiler's last-error slot was one, found by
+the first syntax error in a domain).
+
 ## Running it
 
 ```

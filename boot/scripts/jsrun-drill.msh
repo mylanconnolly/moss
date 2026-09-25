@@ -1,0 +1,26 @@
+# The JavaScript drill: programs run in script domains, holding nothing
+# but the channel to this script, and what they print and return comes
+# back through it. A program with classes, a Map, a template literal and
+# a sort; one that throws (an error result naming the exception); one
+# that is not JavaScript at all (a syntax error); and one that recurses
+# without end (the engine's own stack limit, not the domain's death).
+let prog = "let a = [3, 1, 2].sort(); print('sorted', a.join(',')); class P { #x = 2; get x() { return this.#x; } } const m = new Map([[1, 'one']]); print('map ' + m.get(1)); a.length * 10 + new P().x"
+let r = (js-run $prog)?
+if $r.value != "32" { (err "js-run: value $r.value")? }
+if $r.lines != ["sorted 1,2,3", "map one"] { (err "js-run: lines $r.lines")? }
+echo "script: js-run value ok"
+match (js-run "throw new TypeError('boom')") {
+  ok $v => (err "js-run: a throw came back ok")?
+  err $e => { if ($e | split "boom" | len) < 2 { (err "js-run throw: $e")? } }
+}
+match (js-run "let let = 1") {
+  ok $v => (err "js-run: a syntax error came back ok")?
+  err $e => { if ($e | split "SyntaxError" | len) < 2 { (err "js-run syntax: $e")? } }
+}
+match (js-run "function f() { return f() + 1; } f()") {
+  ok $v => (err "js-run: a runaway came back ok")?
+  err $e => { if ($e | split "RangeError" | len) < 2 { (err "js-run runaway: $e")? } }
+}
+let again = (js-run "[1, 2, 3].map(x => x * x).reduce((a, b) => a + b)")?
+if $again.value != "14" { (err "js-run again: $again.value")? }
+echo "script: jsrun ok"

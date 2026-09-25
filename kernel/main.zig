@@ -430,6 +430,12 @@ export fn kmain(boot_arg: u64) noreturn {
         };
     }
 
+    if (build_options.jsrun_test) {
+        _ = sched.spawn("boot-watch", jsrunTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
     if (build_options.browser_test) {
         _ = sched.spawn("boot-watch", browserTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -1278,6 +1284,10 @@ fn webpageTestWorker(_: u64) void {
 
 fn browserTestWorker(_: u64) void {
     systemDrill("browser");
+}
+
+fn jsrunTestWorker(_: u64) void {
+    systemDrill("jsrun");
 }
 
 /// The entropy driver: virtio-rng behind the standard driver grants plus

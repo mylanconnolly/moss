@@ -956,7 +956,14 @@ supervises), and memory history per unit beside the CPU one.
       22,724/23,726 (95.8%); and the Iterator constructor with the
       ES2025 helpers (plus concat, zip, chunks, windows, includes,
       join, Symbol.dispose): Iterator 653/654; test/built-ins 18,059/23,821
-      (75.8%), test/language 22,724/23,726 (95.8%).
+      (75.8%), test/language 22,724/23,726 (95.8%). (e) began the same
+      day with the first embedding: `jsrun`, a script domain in the
+      page domain's shape (one badged calling end to its host, a
+      static heap, nothing else), `js-run` in the shell as its host,
+      and the `jsrun` drill; the engine builds freestanding as the
+      decision requires. Still to come in (e): the domain's
+      capabilities offered as modules, `web-eval`, quickening, the
+      bench row, a real bookkeeping allocator for a script domain.
       Residuals of (b)–(d): the moving nursery (the barrier is in
       place) and ephemeron keys for the weak collections, eval's
       `arguments` early errors, rooting natives' locals so collection
