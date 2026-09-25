@@ -73,6 +73,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer vm.deinit();
     _ = try vm.defineNative(vm.global, "print", 1, print);
     vm.host_load = hostLoad;
+    vm.host_now = hostNow;
     const dump = std.c.getenv("JS_DUMP") != null;
     js.interp.trace_enabled = std.c.getenv("JS_TRACE") != null;
     vm.heap.stress = std.c.getenv("JS_GC_STRESS") != null;
@@ -127,4 +128,8 @@ pub fn main(init: std.process.Init) !u8 {
         vm.runJobs() catch {};
     }
     return 0;
+}
+
+fn hostNow() f64 {
+    return @floatFromInt(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
 }

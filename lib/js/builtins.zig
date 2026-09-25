@@ -36,6 +36,8 @@ pub const regexp = @import("builtins/regexp.zig");
 pub const bigint = @import("builtins/bigint.zig");
 pub const proxy = @import("builtins/proxy.zig");
 pub const promise = @import("builtins/promise.zig");
+pub const map = @import("builtins/map.zig");
+pub const date = @import("builtins/date.zig");
 
 pub fn install(vm: *Vm) Error!void {
     try object.install(vm);
@@ -55,6 +57,8 @@ pub fn install(vm: *Vm) Error!void {
     try regexp.install(vm);
     try bigint.install(vm);
     try proxy.install(vm);
+    try map.install(vm);
+    try date.install(vm);
 }
 
 pub fn traceExtra(o: *Object, m: *heap.Marker) void {
@@ -62,6 +66,7 @@ pub fn traceExtra(o: *Object, m: *heap.Marker) void {
         .regexp => regexp.trace(o, m),
         .generator => generator.trace(o, m),
         .proxy => proxy.trace(o, m),
+        .map, .set, .weak_map, .weak_set => map.trace(o, m),
         else => {},
     }
 }
@@ -70,6 +75,7 @@ pub fn finalizeExtra(vm: *Vm, o: *Object) void {
     switch (o.class) {
         .regexp => regexp.finalize(vm, o),
         .generator => generator.finalize(vm, o),
+        .map, .set, .weak_map, .weak_set => map.finalize(vm, o),
         else => {},
     }
 }

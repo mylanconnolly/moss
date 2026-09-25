@@ -51,7 +51,16 @@ pub const Intrinsics = struct {
     async_iterator_prototype: *Object,
     async_from_sync_iterator_prototype: *Object,
     regexp_prototype: *Object,
+    regexp_ctor: *Object,
+    regexp_string_iterator_prototype: *Object,
     promise_prototype: *Object,
+    map_prototype: *Object,
+    map_iterator_prototype: *Object,
+    set_prototype: *Object,
+    set_iterator_prototype: *Object,
+    weak_map_prototype: *Object,
+    weak_set_prototype: *Object,
+    date_prototype: *Object,
     promise_ctor: *Object,
     generator_function: *Object,
     async_generator_function: *Object,
@@ -266,6 +275,13 @@ pub fn create(vm: *Vm) Error!void {
     i.async_generator_prototype = try mk.proto(vm, i.async_iterator_prototype);
     i.regexp_prototype = try mk.proto(vm, objp);
     i.promise_prototype = try mk.proto(vm, objp);
+    i.map_prototype = try mk.proto(vm, objp);
+    i.map_iterator_prototype = try mk.proto(vm, i.iterator_prototype);
+    i.set_prototype = try mk.proto(vm, objp);
+    i.set_iterator_prototype = try mk.proto(vm, i.iterator_prototype);
+    i.weak_map_prototype = try mk.proto(vm, objp);
+    i.weak_set_prototype = try mk.proto(vm, objp);
+    i.date_prototype = try mk.proto(vm, objp);
     // The global object.
     vm.global = try vm.objects.create(objp.asValue(), .global, 0);
     // %ThrowTypeError%.
@@ -490,6 +506,9 @@ pub fn newRegExp(vm: *Vm, pattern: Value, flags: Value) Error!Value {
 
 pub fn bigintFromLiteral(vm: *Vm, s: *String) Error!Value {
     return builtins.bigint.fromLiteral(vm, s);
+}
+pub fn bigintFromI64(vm: *Vm, v: i64) Error!Value {
+    return builtins.bigint.fromI64(vm, v);
 }
 pub fn bigintIsNonZero(v: Value) bool {
     return builtins.bigint.isNonZero(v);

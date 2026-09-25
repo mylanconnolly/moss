@@ -22,6 +22,9 @@ pub const vm = @import("js/vm.zig");
 pub const interp = @import("js/interp.zig");
 pub const realm = @import("js/realm.zig");
 pub const builtins = @import("js/builtins.zig");
+pub const module = @import("js/module.zig");
+pub const regexp = @import("js/regexp.zig");
+pub const unicode = @import("js/unicode.zig");
 
 test {
     _ = lexer;
@@ -36,4 +39,7 @@ test {
     _ = vm;
     _ = interp;
     _ = builtins.number;
+    _ = regexp;
+    _ = unicode;
+    _ = builtins.date;
 }

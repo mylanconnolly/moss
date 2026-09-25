@@ -42,12 +42,29 @@ the as-built account with the test262 numbers.
   Symbol, Math, JSON, Error and the native errors, Reflect, the global
   functions, the array and string iterators, Promise, generators and
   async functions (`generator.zig`: frames copied to the heap on yield
-  or await, resumed by `next` or a promise reaction).
+  or await, resumed by `next` or a promise reaction), RegExp
+  (`builtins/regexp.zig`, the object and the string methods over the
+  engine below), Map/Set/WeakMap/WeakSet (`map.zig`, with the ES2025 set
+  methods and `getOrInsert`), Proxy (every trap with its invariants),
+  BigInt (`bigint.zig`, cells of limbs over `std.math.big`), Date
+  (`date.zig`, the calendar arithmetic of §21.4.1, the string formats
+  and their parsers; local time is UTC until a host offers a zone).
+- `regexp.zig` — the regular expression engine: a parser for the
+  ES2023 grammar with Annex B's tolerance (u/v modes, named groups,
+  lookbehind, property escapes), a compiler to a small instruction set
+  with counted loops and a greedy single-character fast path, and a
+  backtracking matcher over UTF-16 units with an explicit backtrack
+  stack and a step budget (a `RangeError` when exhausted, never a
+  hang).
+- `unicode.zig` + `unicode.bin` — the Unicode Character Database the
+  engine needs (identifier classes, `\p{}` properties and scripts,
+  case folding and the full case mappings), distilled from Unicode
+  17.0.0 by `tools/ucdgen.zig` into a vendored table read in place.
 - `module.zig` — module records, linking with live import bindings,
   namespace objects, evaluation with top-level await, `import()` and
   `import.meta`; sources come only from the embedder's `Vm.host_load`.
-  RegExp matching, BigInt, Proxy, Map/Set and Date are later stages and
-  count as misses until they land.
+  Typed arrays, ArrayBuffer, Iterator helpers and Temporal are later
+  stages and count as misses until they land.
 
 ## Running it
 
@@ -59,7 +76,14 @@ JS_TRACE=1 ...                        # every instruction executed (debugging)
 JS_GC_STRESS=1 ...                    # collect at every safe point, poison freed cells
 ```
 
-The runner is also the host program test262 drives.
+The runner is also the host program test262 drives. Its clock is the
+host's (`Vm.host_now`, what `Date.now` reads); an embedder without one
+gets the epoch.
+
+```
+tools/fetch-ucd.sh                # once: the Unicode data files at the pinned version
+zig build ucdgen                  # regenerate lib/js/unicode.bin from them
+```
 
 ## Measuring it
 

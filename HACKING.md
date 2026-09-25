@@ -375,7 +375,12 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   does the same over a corpus directory; `TEST262_TRACE=1` prints each
   file before it runs so a crash names its test. A hang in the runner is
   a native loop without `vm.tick()` (the step budget only counts
-  backward jumps and calls); find it with `sample <pid>`.
+  backward jumps and calls); find it with `sample <pid>`. A regular
+  expression that runs away hits the matcher's own budget instead
+  (`RangeError`). The Unicode tables are `lib/js/unicode.bin`, vendored;
+  `tools/fetch-ucd.sh` then `zig build ucdgen` regenerates them for a
+  new Unicode version (test262's generated property-escape tests encode
+  the version they expect).
 
 - One OS test by hand, without the whole gate: `zig build -D<name>-test`
   then `zig-out/bin/moss-check <name> zig-out/bin/moss-kernel.bin`

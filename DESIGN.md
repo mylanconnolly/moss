@@ -7171,6 +7171,95 @@ the module, a deadlock no test but `import()` of oneself would show;
 and an empty module still needs an environment, or there is nothing
 for its importers' cells to point at.
 
+**Stage 10d, the rest of the language's objects (as built, 2026-09-25).**
+Regular expressions are our own engine (`lib/js/regexp.zig`): a parser
+for the ES2023 pattern grammar that also accepts what Annex B does in
+non-`u` mode (unbalanced braces, octal-ish escapes, `\c` in classes)
+and validates literals at parse time so a bad pattern is an early
+error; a compiler to a small instruction set — character and class
+tests, splits, counted loops (`rep_init`/`rep_top`/`rep_enter`/`rep_end`
+with the empty-iteration check and capture clearing the specification's
+RepeatMatcher does), backreferences, lookahead and lookbehind (the
+latter compiled to match backwards), a `star` fast path that eats a
+greedy run of single-character matches and leaves one backtrack entry
+for the whole range; and a backtracking matcher over UTF-16 code units
+(code points under `u`/`v`) with an explicit backtrack stack rather than
+recursion, lookaround barriers, and a step budget — a pathological
+pattern raises `RangeError` instead of hanging the page. Property
+escapes, identifier classes, case folding and the full case mappings
+come from `lib/js/unicode.bin`, Unicode 17.0.0 distilled by
+`tools/ucdgen.zig` from the UCD files `tools/fetch-ucd.sh` pins (a
+directory of named tables — ranges, pairs, full mappings — read in
+place, 248 KB); the lexer's identifier tests moved onto it.
+`builtins/regexp.zig` is §22.2 over that: `lastIndex`, sticky and
+global, the `d` indices, named groups, `Symbol.match`/`matchAll`/
+`replace`/`search`/`split` with the species and `flags` protocol,
+`GetSubstitution` with `$<name>`, `RegExp.escape`.
+
+Map, Set, WeakMap and WeakSet (`builtins/map.zig`) keep an
+insertion-ordered entry list — a JS array of key/value pairs the
+collector already knows how to trace, deletions as holes — indexed by a
+hash table under SameValueZero (`-0` normalized to `+0`); iterators walk
+the list by index, which is what gives the specification's behaviour
+for entries added or removed mid-iteration, and a cleared collection
+leaves its iterators finished. The ES2025 set methods (`union`,
+`intersection`, `difference`, `symmetricDifference`, `isSubsetOf`,
+`isSupersetOf`, `isDisjointFrom`) read the argument through GetSetRecord
+and return plain Sets; `Map.groupBy` and the upsert proposal's
+`getOrInsert`/`getOrInsertComputed` are there because test262 counts
+them. The weak collections hold their keys strongly for now (ephemerons
+are the nursery's stage) but enforce CanBeHeldWeakly. Proxy
+(`builtins/proxy.zig`) is §10.5 trap by trap with every invariant check
+against the target, revocation, and callability inherited from the
+target so a function proxy is `typeof "function"`. BigInt
+(`builtins/bigint.zig`) is a heap cell of limbs (`Kind.bigint`, no
+children to trace) over `std.math.big` — operands viewed in place,
+results copied to fresh cells — with the literal parsed at first
+execution, the mixed comparisons against doubles done by sign, bit
+length and then the mantissa, `asIntN`/`asUintN` by modulus, and the
+step-limit on exponent and shift sizes. Date (`builtins/date.zig`) is
+§21.4.1's calendar arithmetic as written (Day, YearFromTime, MakeDay,
+MakeDate, TimeClip, all in doubles so ±8.64e15 ms round-trips), the
+Date Time String Format parser plus the `toString`/`toUTCString` forms
+for `Date.parse`, every getter and setter (coercing every argument
+before checking for an invalid date, as the specification orders), and
+the string formats; local time is UTC until a host offers a zone, and
+`Date.now` reads `Vm.host_now` (the runners install the real clock, an
+embedder without one gets the epoch).
+
+The suites this stage targeted went to: RegExp 1,681/1,879 (the
+`unicodeSets` string properties and `\q{}`, and the ES2025 regexp
+modifiers `(?i:)`, are the misses), RegExpStringIteratorPrototype 17/17,
+String 1,213/1,223, Map 202/204, Set 381/383, WeakMap 140/141, WeakSet
+84/85, Proxy 274/311 (the rest need `$262.createRealm`), BigInt 76/77,
+Date 583/594 (`toTemporalInstant` is Temporal's), Reflect 153/153,
+identifiers 268/268 and literals 536/536 (Unicode identifier tables),
+annexB 717/1,086. Overall: `test/language` 22,659/23,726 (95.5%; expressions 10,667/11,102, statements 9,043/9,347), `test/built-ins`
+13,914/23,821 (what remains is typed arrays, ArrayBuffer and DataView
+— 2,500 files — Temporal's 4,605, Iterator helpers 636, and cross-realm
+tests), annexB 717/1,086. Under `TEST262_GC_STRESS` every one of the new
+suites passes what it passes without it.
+
+Bugs the suites found, none in the new code's own tests: `this` inside
+an arrow function at a script's top level was the arrow's caller's
+`this` — the compiler resolved a global-level arrow's `this` to the
+frame's, and every `forEach(() => this, thisArg)` on the global lied
+(now a `ldgthis` that loads the global object, `undefined` in a
+module); ordinary [[Set]] skipped the receiver's own-property check
+when the walk began elsewhere, so a proxy target's missing key was
+created without the receiver's `defineProperty` trap seeing it; the
+array element store's fast path trusted a flag (`proto_has_indexes`)
+nothing ever set, so an array whose prototype was a proxy took the fast
+path past the trap — the flag is now raised when an array's prototype
+leaves the intrinsic chain or an index lands on `Array.prototype` or
+`Object.prototype`; `++`/`--` on a BigInt tried to add a Number; and
+comparing a BigInt with a double above 2^63 shifted a mantissa into a
+fixed four-limb buffer (the runner aborted on the first such test — a
+stale `test262` binary hid the fix for a full run, the second time a
+stale binary cost an hour: rebuild *both* runners). The lesson that
+generalizes: a fast path guarded by a flag needs a test that raises the
+flag, or the flag is a comment.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

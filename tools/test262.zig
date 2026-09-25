@@ -161,6 +161,7 @@ const Runner = struct {
             text = strict_buf;
         }
         vm.host_load = hostLoad;
+        vm.host_now = hostNow;
         const code = js.compiler.compile(r.gpa, &vm.heap, &vm.strings, text, .{ .name = r.current_path }) catch |e| switch (e) {
             error.OutOfMemory => return .{ .ok = false, .why = "out of memory compiling" },
             error.SyntaxError => {
@@ -205,6 +206,7 @@ const Runner = struct {
         vm.print_fn = printHook;
         vm.host_data = r;
         vm.host_load = hostLoad;
+        vm.host_now = hostNow;
         installHost(vm) catch return .{ .ok = false, .why = "host install failed" };
         if (!meta.raw) {
             const preludes = [_][]const u8{ "assert.js", "sta.js" };
@@ -459,4 +461,8 @@ pub fn main(init: std.process.Init) !u8 {
     while (it.next()) |e| std.debug.print("test262: {s}: {d}/{d}\n", .{ e.key_ptr.*, e.value_ptr.pass, e.value_ptr.pass + e.value_ptr.fail });
     std.debug.print("test262: total {d}/{d} pass\n", .{ total.pass, total.pass + total.fail });
     return 0;
+}
+
+fn hostNow() f64 {
+    return @floatFromInt(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
 }

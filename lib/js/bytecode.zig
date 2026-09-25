@@ -30,6 +30,7 @@ pub const Op = enum(u16) {
     ldfalse,
     ldempty, // a = the hole (TDZ)
     ldthis, // a = this (throws in a derived constructor before super())
+    ldgthis, // a = the global object (an arrow's `this` at a script's top level)
     ldnewtarget,
     ldfunc, // a = the running function object
     ldhome, // a = the running function's home object (super)

@@ -1372,6 +1372,16 @@ pub fn build(b: *std.Build) void {
         b.step("test262", "Run the JavaScript engine over test262 (fetch it first with tools/fetch-test262.sh)").dependOn(&trun.step);
     }
 
+    // ucdgen: distill the Unicode Character Database (tools/fetch-ucd.sh)
+    // into lib/js/unicode.bin, the vendored tables the engine reads.
+    {
+        const umod = b.createModule(.{ .root_source_file = b.path("tools/ucdgen.zig"), .target = host_target, .optimize = .ReleaseSafe });
+        const uexe = b.addExecutable(.{ .name = "ucdgen", .root_module = umod });
+        const urun = b.addRunArtifact(uexe);
+        if (b.args) |args| urun.addArgs(args);
+        b.step("ucdgen", "Regenerate lib/js/unicode.bin from tools/testdata/ucd").dependOn(&urun.step);
+    }
+
     // js: run JavaScript files on the host with the engine: `zig build js -- file.js`.
     {
         const jlib = b.createModule(.{ .root_source_file = b.path("lib/lib.zig"), .target = host_target, .optimize = .ReleaseSafe });

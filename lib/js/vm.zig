@@ -260,6 +260,9 @@ pub const Vm = struct {
     modules: std.StringArrayHashMapUnmanaged(*module.Module) = .empty,
     host_load: ?module.HostLoad = null,
     host_import_meta: ?*const fn (vm: *Vm, name: []const u8, meta: *Object) Error!void = null,
+    /// The host's clock for `Date.now` (milliseconds since the epoch);
+    /// without one every date is the epoch.
+    host_now: ?*const fn () f64 = null,
     /// Array.prototype and Object.prototype have no indexed properties
     /// (the usual case): array element stores need no prototype walk.
     proto_has_indexes: bool = false,
@@ -1252,7 +1255,16 @@ pub const Vm = struct {
             return vm.createDataProperty(r, key, v);
         }
         if (!receiver.isObject()) return false;
-        return vm.createDataProperty(asObject(receiver), key, v);
+        const r = asObject(receiver);
+        if (r != o) {
+            // The walk began elsewhere (Reflect.set, a proxy target):
+            // the receiver may own the key (§10.1.9.2 step 2.c).
+            if (try vm.getOwnProperty(r, key)) |rd| {
+                if (rd.attrs.accessor or !rd.attrs.writable) return false;
+                return vm.defineOwnProperty(r, key, .{ .value = v }, false);
+            }
+        }
+        return vm.createDataProperty(r, key, v);
     }
 
     /// Set on any value (PutValue for a member reference).
@@ -1382,6 +1394,7 @@ pub const Vm = struct {
     }
 
     pub fn ordinaryDefineOwnProperty(vm: *Vm, o: *Object, key: Key, desc: Descriptor) Error!bool {
+        if (key == .index and (o == vm.intrinsics.array_prototype or o == vm.intrinsics.object_prototype)) vm.proto_has_indexes = true;
         const current = try vm.objects.getOwn(o, key);
         if (current == null) {
             if (!o.extensible) return false;
@@ -1581,6 +1594,11 @@ pub const Vm = struct {
         if (o.class == .namespace) return p.isNull();
         if (o.class == .global and false) return false;
         if (o == vm.intrinsics.object_prototype and !p.isNull()) return false; // immutable prototype exotic
+        // An array whose chain leaves the intrinsic one may meet indexed
+        // properties or a proxy there: element stores take the slow path.
+        if (o.class == .array or o == vm.intrinsics.array_prototype) {
+            if (p.bits != vm.intrinsics.array_prototype.asValue().bits or o == vm.intrinsics.array_prototype) vm.proto_has_indexes = true;
+        }
         return vm.objects.setProto(o, p);
     }
 
@@ -1691,6 +1709,7 @@ pub const Vm = struct {
     /// OrdinaryCreateFromConstructor.
     pub fn createFromConstructor(vm: *Vm, new_target: Value, default: *Object, class: Class, extra: usize) Error!*Object {
         const proto = try vm.prototypeFromConstructor(new_target, default);
+        if (class == .array and proto != vm.intrinsics.array_prototype) vm.proto_has_indexes = true;
         return vm.objects.create(proto.asValue(), class, extra);
     }
 

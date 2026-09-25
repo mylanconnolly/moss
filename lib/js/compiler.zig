@@ -799,6 +799,10 @@ pub const Compiler = struct {
         if (tf.node == null) {
             if (c.eval_mode) {
                 try c.emitBc(.getname, dst, try c.constString("this"));
+            } else if (c.scope.func != tf) {
+                // An arrow at the top level: the script's `this` is the
+                // global object, a module's is undefined.
+                try c.emit(if (c.module_record != null) .ldundef else .ldgthis, dst, 0, 0);
             } else try c.emit(.ldthis, dst, 0, 0);
             return;
         }

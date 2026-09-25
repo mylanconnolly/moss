@@ -6,6 +6,7 @@ const std = @import("std");
 const b = @import("../builtins.zig");
 const vmod = @import("../vm.zig");
 const iterator = @import("iterator.zig");
+const unicode = @import("../unicode.zig");
 const Vm = b.Vm;
 const Value = b.Value;
 const Error = b.Error;
@@ -424,7 +425,7 @@ fn replaceImpl(vm: *Vm, this: Value, args: []const Value, all: bool) Error!Value
     if (this.isNullish()) return vm.throwTypeError("String.prototype.replace called on null or undefined");
     const search_v = arg(args, 0);
     const replace_v = arg(args, 1);
-    if (!search_v.isNullish()) {
+    if (search_v.isObject()) {
         if (all and try isRegExp(vm, search_v)) {
             const flags = try vm.toString(try vm.get(asObject(search_v), .{ .atom = vm.atoms.flags }, search_v));
             const ff = try vm.strings.flatten(flags);
@@ -481,7 +482,9 @@ fn replaceAll(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
 fn delegate(vm: *Vm, this: Value, args: []const Value, sym: *b.Symbol, name: []const u8) Error!?Value {
     if (this.isNullish()) return vm.throwTypeErrorFmt("String.prototype.{s} called on null or undefined", .{name});
     const v = arg(args, 0);
-    if (!v.isNullish()) {
+    // Only an object can carry the symbol method (a primitive's
+    // prototype is not consulted).
+    if (v.isObject()) {
         const m = try vm.getMethod(v, .{ .symbol = sym });
         if (!m.isUndefined()) return try vm.call(m, v, &.{this});
     }
@@ -498,7 +501,7 @@ fn match(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
 fn matchAll(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     if (this.isNullish()) return vm.throwTypeError("String.prototype.matchAll called on null or undefined");
     const v = arg(args, 0);
-    if (!v.isNullish()) {
+    if (v.isObject()) {
         if (try isRegExp(vm, v)) {
             const flags = try vm.toString(try vm.get(asObject(v), .{ .atom = vm.atoms.flags }, v));
             const ff = try vm.strings.flatten(flags);
@@ -537,7 +540,7 @@ fn split(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     if (this.isNullish()) return vm.throwTypeError("String.prototype.split called on null or undefined");
     const sep_v = arg(args, 0);
     const limit_v = arg(args, 1);
-    if (!sep_v.isNullish()) {
+    if (sep_v.isObject()) {
         const m = try vm.getMethod(sep_v, .{ .symbol = vm.symbols.split });
         if (!m.isUndefined()) return vm.call(m, sep_v, &.{ this, limit_v });
     }
@@ -607,76 +610,102 @@ fn caseMap(vm: *Vm, this: Value, upper: bool) Error!Value {
             return strValue(try vm.strings.fromLatin1(out));
         }
     }
-    // The full mapping (with expansions like ß → SS) through code points.
+    // The full mapping (with expansions like ß → SS) through code points;
+    // the final-sigma rule (SpecialCasing's one context-sensitive
+    // unconditional case) applies when lowercasing.
     var units: std.ArrayList(u16) = .empty;
     defer units.deinit(vm.meta);
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
         var cp: u21 = s.unitAt(i);
+        var w: usize = 1;
         if (cp >= 0xd800 and cp <= 0xdbff and i + 1 < s.len) {
             const lo = s.unitAt(i + 1);
             if (lo >= 0xdc00 and lo <= 0xdfff) {
                 cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
-                i += 1;
+                w = 2;
             }
         }
-        if (upper and cp == 0xdf) {
-            try units.appendSlice(vm.meta, &.{ 'S', 'S' });
-            continue;
-        }
-        const mapped: u21 = if (upper) unicodeUpper(cp) else unicodeLower(cp);
-        if (mapped < 0x10000) {
-            try units.append(vm.meta, @intCast(mapped));
-        } else {
-            const c = mapped - 0x10000;
-            try units.append(vm.meta, @intCast(0xd800 + (c >> 10)));
-            try units.append(vm.meta, @intCast(0xdc00 + (c & 0x3ff)));
+        var out: [3]u32 = undefined;
+        var n: usize = undefined;
+        if (!upper and cp == 0x3a3 and isFinalSigma(s, i)) {
+            out[0] = 0x3c2;
+            n = 1;
+        } else n = if (upper) unicode.toUpperFull(cp, &out) else unicode.toLowerFull(cp, &out);
+        i += w - 1;
+        for (out[0..n]) |m| {
+            if (m < 0x10000) {
+                try units.append(vm.meta, @intCast(m));
+            } else {
+                const c = m - 0x10000;
+                try units.append(vm.meta, @intCast(0xd800 + (c >> 10)));
+                try units.append(vm.meta, @intCast(0xdc00 + (c & 0x3ff)));
+            }
         }
     }
     return strValue(try vm.strings.fromUnits(units.items));
 }
 
-/// Simple case mappings for the common scripts (Latin, Greek, Cyrillic,
-/// Armenian, and the Latin Extended blocks by parity).
-fn unicodeUpper(cp: u21) u21 {
-    if (cp < 0x80) return std.ascii.toUpper(@intCast(cp));
-    if (cp >= 0xe0 and cp <= 0xfe and cp != 0xf7) return cp - 0x20;
-    if (cp == 0xff) return 0x178;
-    if (cp == 0xb5) return 0x39c;
-    if (cp >= 0x100 and cp <= 0x17f) {
-        if ((cp >= 0x139 and cp <= 0x148) or (cp >= 0x179 and cp <= 0x17e)) return if (cp % 2 == 0) cp - 1 else cp;
-        if (cp == 0x131) return 'I';
-        if (cp == 0x17f) return 'S';
-        return if (cp % 2 == 1) cp - 1 else cp;
+/// Final_Sigma (Unicode 3.13): a Σ preceded by a cased letter (skipping
+/// case-ignorable characters) and not followed by one.
+fn isFinalSigma(s: *String, index: usize) bool {
+    const cased = unicode.property("Cased", null) orelse return false;
+    const ignorable = unicode.property("Case_Ignorable", null) orelse return false;
+    // Before: skip case-ignorable, need a cased.
+    var i = index;
+    var before = false;
+    while (i > 0) {
+        i -= 1;
+        const c = cpBefore(s, i + 1);
+        if (unicode.inRanges(ignorable, c.cp)) {
+            i -= c.w - 1;
+            continue;
+        }
+        before = unicode.inRanges(cased, c.cp);
+        break;
     }
-    if (cp >= 0x3b1 and cp <= 0x3c9 and cp != 0x3c2) return cp - 0x20;
-    if (cp == 0x3c2) return 0x3a3;
-    if (cp >= 0x430 and cp <= 0x44f) return cp - 0x20;
-    if (cp >= 0x450 and cp <= 0x45f) return cp - 0x50;
-    if (cp >= 0x561 and cp <= 0x586) return cp - 0x30;
-    if (cp >= 0x1e00 and cp <= 0x1eff) return if (cp % 2 == 1) cp - 1 else cp;
-    if (cp >= 0xff41 and cp <= 0xff5a) return cp - 0x20;
-    if (cp >= 0x10428 and cp <= 0x1044f) return cp - 0x28;
-    return cp;
+    if (!before) return false;
+    // After: skip case-ignorable, must not be cased.
+    var j = index + 1;
+    while (j < s.len) {
+        const c = cpAt(s, j);
+        if (unicode.inRanges(ignorable, c.cp)) {
+            j += c.w;
+            continue;
+        }
+        return !unicode.inRanges(cased, c.cp);
+    }
+    return true;
 }
 
-fn unicodeLower(cp: u21) u21 {
-    if (cp < 0x80) return std.ascii.toLower(@intCast(cp));
-    if (cp >= 0xc0 and cp <= 0xde and cp != 0xd7) return cp + 0x20;
-    if (cp == 0x178) return 0xff;
-    if (cp >= 0x100 and cp <= 0x17f) {
-        if ((cp >= 0x139 and cp <= 0x148) or (cp >= 0x179 and cp <= 0x17e)) return if (cp % 2 == 1) cp + 1 else cp;
-        if (cp == 0x130) return 'i';
-        return if (cp % 2 == 0) cp + 1 else cp;
+const Cp = struct { cp: u32, w: usize };
+
+fn cpAt(s: *String, i: usize) Cp {
+    const c = s.unitAt(i);
+    if (c >= 0xd800 and c <= 0xdbff and i + 1 < s.len) {
+        const lo = s.unitAt(i + 1);
+        if (lo >= 0xdc00 and lo <= 0xdfff) return .{ .cp = 0x10000 + ((@as(u32, c) - 0xd800) << 10) + (lo - 0xdc00), .w = 2 };
     }
-    if (cp >= 0x391 and cp <= 0x3a9 and cp != 0x3a2) return cp + 0x20;
-    if (cp >= 0x410 and cp <= 0x42f) return cp + 0x20;
-    if (cp >= 0x400 and cp <= 0x40f) return cp + 0x50;
-    if (cp >= 0x531 and cp <= 0x556) return cp + 0x30;
-    if (cp >= 0x1e00 and cp <= 0x1eff) return if (cp % 2 == 0) cp + 1 else cp;
-    if (cp >= 0xff21 and cp <= 0xff3a) return cp + 0x20;
-    if (cp >= 0x10400 and cp <= 0x10427) return cp + 0x28;
-    return cp;
+    return .{ .cp = c, .w = 1 };
+}
+
+/// The code point ending at `end` (exclusive).
+fn cpBefore(s: *String, end: usize) Cp {
+    const c = s.unitAt(end - 1);
+    if (c >= 0xdc00 and c <= 0xdfff and end >= 2) {
+        const hi = s.unitAt(end - 2);
+        if (hi >= 0xd800 and hi <= 0xdbff) return .{ .cp = 0x10000 + ((@as(u32, hi) - 0xd800) << 10) + (c - 0xdc00), .w = 2 };
+    }
+    return .{ .cp = c, .w = 1 };
+}
+
+/// Simple case mappings (UnicodeData fields 12 and 13).
+pub fn unicodeUpper(cp: u21) u21 {
+    return @intCast(unicode.toUpperSimple(cp));
+}
+
+pub fn unicodeLower(cp: u21) u21 {
+    return @intCast(unicode.toLowerSimple(cp));
 }
 
 fn toLowerCase(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {

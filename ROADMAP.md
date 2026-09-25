@@ -939,11 +939,22 @@ supervises), and memory history per unit beside the CPU one.
       2026-09-25 — generators, async functions and generators, Promise
       and the job queue, modules with live bindings and top-level
       await, `import()`: test/language 22,102/23,725 (93.2%),
-      test/built-ins 10,089/23,821. Residuals of (b) and (c): the
-      moving nursery (the barrier is in place), Unicode identifier
-      tables, eval's `arguments` early errors, `Iterator.prototype`,
-      rooting natives' locals so collection can run at any depth
-      (today only at native depth zero), import attributes.
+      test/built-ins 10,089/23,821; (d) on 2026-09-25 — RegExp as our
+      own backtracker with a step budget over vendored Unicode 17
+      tables (`lib/js/unicode.bin`, `zig build ucdgen`), Map/Set/Weak*
+      with the ES2025 set methods, Proxy with every invariant, BigInt
+      over `std.math.big`, Date with §21.4.1's arithmetic (UTC until a
+      host offers a zone; `lib/civil` was never needed): RegExp
+      1,681/1,879, Map 202/204, Set 381/383, Proxy 274/311, BigInt
+      76/77, Date 583/594; test/language 22,659/23,726 (95.5%), test/built-ins
+      13,914/23,821. Residuals of (b)–(d): typed arrays, ArrayBuffer
+      and DataView (2,500 files, the largest remaining block), Iterator
+      helpers, the moving nursery (the barrier is in place) and
+      ephemeron keys for the weak collections, eval's `arguments`
+      early errors, rooting natives' locals so collection can run at
+      any depth (today only at native depth zero), import attributes,
+      `$262.createRealm` in the runner, the regexp modifiers and
+      `unicodeSets` string properties, time zones for Date.
     - **(11) Scripts meet the page.** Bindings generated from one
       comptime interface table; the event loop in `webpage` (tasks,
       microtasks, timers on a kernel timer, animation frames on the

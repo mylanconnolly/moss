@@ -368,6 +368,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
             .ldtrue => regs[insn.a] = Value.true_,
             .ldfalse => regs[insn.a] = Value.false_,
             .ldempty => regs[insn.a] = Value.empty,
+            .ldgthis => regs[insn.a] = vm.global.asValue(),
             .ldthis => {
                 if (frame.this.isEmpty()) {
                     frame.pc = pc;
@@ -559,7 +560,9 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     regs[insn.a] = Value.fromF64(v.asNumber() + @as(f64, @floatFromInt(delta)));
                 } else {
                     frame.pc = pc;
-                    regs[insn.a] = try vm.arith(if (insn.op == .inc) .add else .sub, v, Value.fromInt(1));
+                    const n = try vm.toNumeric(v);
+                    const one = if (n.isBigInt()) try realm.bigintFromI64(vm, 1) else Value.fromInt(1);
+                    regs[insn.a] = try vm.arith(if (insn.op == .inc) .add else .sub, n, one);
                 }
             },
             .tostring => {
@@ -1848,6 +1851,11 @@ const interp_cases = [_]struct { src: []const u8, want: f64 }{
     .{ .src = "function* g(a) { var x = yield a; try { yield x * 2; } finally { a = 100; } return a; } var it = g(1); var r = it.next().value * 10 + it.next(5).value; it.return(7); r", .want = 20 },
     .{ .src = "function* g() { yield* [1, 2]; return 3; } function* d() { const r = yield* g(); yield r; } var sum = 0; for (const v of d()) sum += v; sum", .want = 6 },
     .{ .src = "var out = 0; async function f(v) { const a = await v; return a + (await Promise.resolve(1)); } f(1).then(function (v) { out = v; }); out", .want = 0 },
+    .{ .src = "var m = new Map([[1, 'a'], [-0, 'z']]); m.set(NaN, 'n'); var st = new Set([1, 1, 2]); st.add(3); var ks = ''; for (const [k] of m) ks += k; m.delete(1); ks.length + m.size + m.get(0).length + st.size + (st.has(2) ? 1 : 0) + new Set([1, 2]).union(new Set([2, 3])).size", .want = 15 },
+    .{ .src = "var p = new Proxy({a: 1}, {get(t, k) { return k === 'b' ? 40 : t[k]; }, has() { return true; }}); var r = Proxy.revocable({}, {}); r.revoke(); var rv = 0; try { r.proxy.x; } catch (e) { rv = e instanceof TypeError ? 1 : 0; } p.a + p.b + ('zz' in p ? 1 : 0) + rv", .want = 43 },
+    .{ .src = "var b = 2n ** 64n; var q = -7n / 2n; Number(b >> 60n) + Number(q) + Number(BigInt.asIntN(8, 255n)) + Number(BigInt('0x1f') & 0xfn) + (b > 1.8e19 ? 1 : 0) + (5n == 5 ? 1 : 0) + ((b + 1n).toString(16).length)", .want = 46 },
+    .{ .src = "var d = new Date(2026, 8, 25, 10, 30, 15, 250); var u = Date.UTC(2000, 0, 1); d.getDay() + d.getMonth() + (d.toISOString() === '2026-09-25T10:30:15.250Z' ? 1 : 0) + (Date.parse(d.toString()) === d.getTime() - 250 ? 1 : 0) + (u === 946684800000 ? 1 : 0) + (Date.parse('Sat, 01 Jan 2000 00:00:00 GMT') === u ? 1 : 0) + (isNaN(new Date(8.64e15 + 1).getTime()) ? 1 : 0)", .want = 18 },
+    .{ .src = "/(?<y>\\d{4})-(?<m>\\d\\d)/u.exec('on 2026-09-25').groups.m * 1 + 'a-b_c'.replace(/[-_]/g, ' ').split(' ').length + ('x'.match(/y/) === null ? 1 : 0)", .want = 13 },
 };
 
 fn runCases(vm: *Vm) !void {

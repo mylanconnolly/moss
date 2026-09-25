@@ -11,6 +11,7 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
 const ast = @import("ast.zig");
+const regexp = @import("regexp.zig");
 
 const Token = lexer.Token;
 const Kind = lexer.Kind;
@@ -121,6 +122,31 @@ pub const Parser = struct {
         var p: Parser = .{ .a = a, .lex = lexer.Lexer.init(a, src), .tok = undefined, .module = opts.module, .strict = opts.strict or opts.module, .opts = opts };
         p.lex.module = opts.module;
         return p;
+    }
+
+    fn checkRegExpLiteral(p: *Parser, pattern: []const u8, flags: []const u8, pos: u32) Error!void {
+        var pat: std.ArrayList(u16) = .empty;
+        defer pat.deinit(p.a);
+        var it = std.unicode.Wtf8View.initUnchecked(pattern).iterator();
+        while (it.nextCodepoint()) |cp| {
+            if (cp < 0x10000) {
+                try pat.append(p.a, @intCast(cp));
+            } else {
+                const c = cp - 0x10000;
+                try pat.append(p.a, @intCast(0xd800 + (c >> 10)));
+                try pat.append(p.a, @intCast(0xdc00 + (c & 0x3ff)));
+            }
+        }
+        var fl: std.ArrayList(u16) = .empty;
+        defer fl.deinit(p.a);
+        for (flags) |c| try fl.append(p.a, c);
+        const f = regexp.Flags.parse(fl.items) orelse return p.fail("invalid regular expression flags", pos);
+        var err: []const u8 = "";
+        const prog = regexp.compile(p.a, pat.items, f, &err) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.SyntaxError => return p.fail("invalid regular expression", pos),
+        };
+        prog.deinit();
     }
 
     fn fail(p: *Parser, msg: []const u8, where: u32) Error {
@@ -2169,6 +2195,9 @@ pub const Parser = struct {
             .template, .template_head => return p.parseTemplate(false),
             .slash, .slash_assign => {
                 const re = p.lex.rescanRegExp(t) catch |e| return p.failLex(e);
+                // A literal's pattern is an early error when it does not
+                // compile (§13.2.7.1).
+                try p.checkRegExpLiteral(re.text, re.raw, pos);
                 p.tok = re;
                 try p.advance();
                 return p.node(pos, .{ .regexp = .{ .pattern = re.text, .flags = re.raw } });
