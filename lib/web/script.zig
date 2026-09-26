@@ -96,6 +96,8 @@ const style_computed: u32 = 1;
 /// A Storage: flags 0 = the host's `localStorage`, 1 = `sessionStorage`.
 const slot_storage: u32 = 4;
 const storage_session: u32 = 1;
+/// A CSSStyleSheet over a `<style>` or `<link>` element (`id`).
+const slot_sheet: u32 = 5;
 
 // Event flags.
 const ev_stop: u32 = 1 << 0;
@@ -199,6 +201,7 @@ pub const interfaces = [_]Iface{
         .{ .name = "images", .get = getImages },
         .{ .name = "links", .get = getLinks },
         .{ .name = "scripts", .get = getScripts },
+        .{ .name = "styleSheets", .get = getStyleSheets },
     }, .methods = &parent_methods ++ [_]Method{
         .{ .name = "getElementById", .len = 1, .f = getElementById },
         .{ .name = "createElement", .len = 1, .f = createElement },
@@ -354,6 +357,19 @@ pub const interfaces = [_]Iface{
         .{ .name = "composedPath", .f = eventComposedPath },
     } },
     .{ .name = "CustomEvent", .parent = "Event", .constructible = true },
+    .{ .name = "CSSStyleSheet", .attrs = &.{
+        .{ .name = "href", .get = sheetHref },
+        .{ .name = "ownerNode", .get = sheetOwnerNode },
+        .{ .name = "type", .get = sheetType },
+        .{ .name = "media", .get = sheetMedia },
+        .{ .name = "title", .get = sheetTitle },
+        .{ .name = "disabled", .get = sheetDisabled, .set = sheetSetDisabled },
+        .{ .name = "cssRules", .get = sheetRules },
+        .{ .name = "rules", .get = sheetRules },
+    }, .methods = &.{
+        .{ .name = "insertRule", .len = 1, .f = sheetInsertRule },
+        .{ .name = "deleteRule", .len = 1, .f = sheetDeleteRule },
+    } },
     .{ .name = "Storage", .attrs = &.{
         .{ .name = "length", .get = storageLength },
     }, .methods = &.{
@@ -483,6 +499,8 @@ const I = struct {
     const custom_event = ifaceIndex("CustomEvent");
     const xhr = ifaceIndex("XMLHttpRequest");
     const storage = ifaceIndex("Storage");
+    const sheet = ifaceIndex("CSSStyleSheet");
+    const keyboard_event = ifaceIndex("KeyboardEvent");
     const mouse_event = ifaceIndex("MouseEvent");
 };
 
@@ -1088,6 +1106,45 @@ pub const Page = struct {
         p.runJobs();
     }
 
+    /// The user pressed a key: `keydown` at the focused element (else
+    /// the body), `keypress` for a character, `keyup`. False when a
+    /// listener prevented the default — the page should then neither
+    /// type, move focus nor scroll for it. `keyFromByte` names a plain
+    /// byte; the page names its own codes with `keyNamed`.
+    pub fn fireKey(p: *Page, focus: ?NodeId, k: KeyInfo) bool {
+        const target_id: NodeId = focus orelse bodyOrDocument(p);
+        const target = p.wrapValue(target_id) catch return true;
+        var ok = p.fireKeyEvent(target, "keydown", k, true);
+        if (ok and k.printable) ok = p.fireKeyEvent(target, "keypress", k, true);
+        _ = p.fireKeyEvent(target, "keyup", k, false);
+        p.runJobs();
+        return ok;
+    }
+
+    fn fireKeyEvent(p: *Page, target: Value, name: []const u8, k: KeyInfo, cancelable: bool) bool {
+        const vm = p.vm;
+        const ev = p.newEvent(I.keyboard_event, name, true, cancelable, true) catch return true;
+        const props = [_]struct { n: []const u8, v: Value }{
+            .{ .n = "key", .v = vm.str(k.key) catch return true },
+            .{ .n = "code", .v = vm.str(k.code) catch return true },
+            .{ .n = "keyCode", .v = Value.fromInt(k.key_code) },
+            .{ .n = "which", .v = Value.fromInt(k.key_code) },
+            .{ .n = "charCode", .v = Value.fromInt(if (std.mem.eql(u8, name, "keypress")) k.char_code else 0) },
+            .{ .n = "altKey", .v = Value.false_ },
+            .{ .n = "ctrlKey", .v = Value.false_ },
+            .{ .n = "metaKey", .v = Value.false_ },
+            .{ .n = "shiftKey", .v = Value.fromBool(k.shift) },
+            .{ .n = "repeat", .v = Value.false_ },
+            .{ .n = "isComposing", .v = Value.false_ },
+            .{ .n = "location", .v = Value.fromInt(0) },
+        };
+        for (props) |pr| p.setEventProp(ev, pr.n, pr.v) catch return true;
+        return p.dispatch(target, ev) catch |e| {
+            p.reportError(e, name);
+            return true;
+        };
+    }
+
     /// Whether any listener anywhere could care about a click: the
     /// embedder may skip the dispatch when none does.
     pub fn hasListeners(p: *Page) bool {
@@ -1321,6 +1378,64 @@ pub const Page = struct {
 };
 
 // ------------------------------------------------------------ helpers
+
+/// What a key press is to the DOM: its `key`, `code` and `keyCode`.
+pub const KeyInfo = struct { key: []const u8, code: []const u8, key_code: i32, char_code: i32 = 0, printable: bool = false, shift: bool = false };
+
+/// A named key (an arrow, Home): `key` and `code` the DOM's names,
+/// `key_code` the legacy number.
+pub fn keyNamed(name: []const u8, key_code: i32, shift: bool) KeyInfo {
+    return .{ .key = name, .code = name, .key_code = key_code, .shift = shift };
+}
+
+/// A plain byte as the DOM sees it (Enter, Tab, Backspace, Escape,
+/// the printable ASCII; anything else is unidentified).
+pub fn keyFromByte(ch: u8) KeyInfo {
+    return switch (ch) {
+        '\n', '\r' => .{ .key = "Enter", .code = "Enter", .key_code = 13, .char_code = 13, .printable = true },
+        '\t' => .{ .key = "Tab", .code = "Tab", .key_code = 9 },
+        8, 127 => .{ .key = "Backspace", .code = "Backspace", .key_code = 8 },
+        27 => .{ .key = "Escape", .code = "Escape", .key_code = 27 },
+        ' ' => .{ .key = " ", .code = "Space", .key_code = 32, .char_code = 32, .printable = true },
+        else => if (ch >= 0x20 and ch < 0x7f) printableKey(ch) else .{ .key = "Unidentified", .code = "Unidentified", .key_code = 0 },
+    };
+}
+
+/// The printable ASCII keys, with the usual `code` names.
+fn printableKey(ch: u8) KeyInfo {
+    const upper = std.ascii.toUpper(ch);
+    if (std.ascii.isAlphabetic(ch)) {
+        const i = upper - 'A';
+        return .{ .key = key_names[ch], .code = letter_codes[i], .key_code = upper, .char_code = ch, .printable = true, .shift = std.ascii.isUpper(ch) };
+    }
+    if (std.ascii.isDigit(ch)) {
+        const i = ch - '0';
+        return .{ .key = key_names[ch], .code = digit_codes[i], .key_code = ch, .char_code = ch, .printable = true };
+    }
+    return .{ .key = key_names[ch], .code = "Unidentified", .key_code = ch, .char_code = ch, .printable = true };
+}
+
+/// One-character strings for every printable byte, so `key` needs no
+/// allocation.
+const key_names: [128][]const u8 = blk: {
+    var names: [128][]const u8 = undefined;
+    for (0..128) |i| {
+        const s: [1]u8 = .{@intCast(i)};
+        const final = s;
+        names[i] = &final;
+    }
+    break :blk names;
+};
+const letter_codes = [_][]const u8{ "KeyA", "KeyB", "KeyC", "KeyD", "KeyE", "KeyF", "KeyG", "KeyH", "KeyI", "KeyJ", "KeyK", "KeyL", "KeyM", "KeyN", "KeyO", "KeyP", "KeyQ", "KeyR", "KeyS", "KeyT", "KeyU", "KeyV", "KeyW", "KeyX", "KeyY", "KeyZ" };
+const digit_codes = [_][]const u8{ "Digit0", "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7", "Digit8", "Digit9" };
+
+fn bodyOrDocument(p: *Page) NodeId {
+    var c = p.doc.get(dom.document_id).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, "html")) {
+        if (childElementNamed(p, cid, "body")) |b| return b;
+    };
+    return dom.document_id;
+}
 
 inline fn pageOf(vm: *Vm) *Page {
     return @ptrCast(@alignCast(vm.host_data.?));
@@ -3788,6 +3903,201 @@ fn fetchNative(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
     return js.realm.promiseResolve(vm, try responseObject(vm, &out));
 }
 
+// ------------------------------------------------------- CSSStyleSheet
+
+fn isSheetElement(p: *Page, id: NodeId) bool {
+    if (p.doc.isHtml(id, "style")) return true;
+    if (!p.doc.isHtml(id, "link")) return false;
+    const rel = p.doc.getAttr(id, "rel") orelse return false;
+    var it = std.mem.tokenizeAny(u8, rel, " \t\r\n");
+    while (it.next()) |tok| if (std.ascii.eqlIgnoreCase(tok, "stylesheet")) return true;
+    return false;
+}
+
+fn sheetObject(p: *Page, id: NodeId) Error!Value {
+    const vm = p.vm;
+    const o = try vm.objects.create(p.protos[I.sheet].asValue(), .dom, @sizeOf(Slot));
+    o.internal(Slot).* = .{ .kind = slot_sheet, .id = id };
+    return o.asValue();
+}
+
+/// `document.styleSheets`: the `<style>` and `<link rel=stylesheet>`
+/// elements, in document order (a snapshot, as the other lists are).
+fn getStyleSheets(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    _ = try thisNode(vm, this);
+    const arr = try vm.newArray(0);
+    const mark = vm.heap.tempMark();
+    defer vm.heap.tempRelease(mark);
+    vm.heap.tempPush(arr.cell());
+    var w = p.doc.walk(dom.document_id);
+    while (w.next()) |id| if (p.doc.get(id).kind == .element and isSheetElement(p, id)) try vm.arrayPush(arr, try sheetObject(p, id));
+    return arr.asValue();
+}
+
+fn thisSheet(vm: *Vm, this: Value) Error!NodeId {
+    if (this.isObject()) {
+        const o = Vm.asObject(this);
+        if (o.class == .dom and o.internal(Slot).kind == slot_sheet) return o.internal(Slot).id;
+    }
+    return vm.throwTypeError("Illegal invocation");
+}
+
+fn sheetHref(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisSheet(vm, this);
+    if (!p.doc.isHtml(id, "link")) return Value.null_;
+    const raw = p.doc.getAttr(id, "href") orelse return Value.null_;
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const base = url.parse(sc.a(), p.url, null) catch null;
+    const u = url.parse(sc.a(), raw, if (base) |*b| b else null) catch return jsStr(vm, raw);
+    return jsStr(vm, try u.href(sc.a()));
+}
+
+fn sheetOwnerNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    return p.wrapValue(try thisSheet(vm, this));
+}
+
+fn sheetType(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    _ = try thisSheet(vm, this);
+    return jsStr(vm, "text/css");
+}
+
+fn sheetMedia(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisSheet(vm, this);
+    return jsStr(vm, p.doc.getAttr(id, "media") orelse "");
+}
+
+fn sheetTitle(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisSheet(vm, this);
+    if (p.doc.getAttr(id, "title")) |t| return jsStr(vm, t);
+    return Value.null_;
+}
+
+fn sheetDisabled(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisSheet(vm, this);
+    return Value.fromBool(p.doc.hasAttr(id, "disabled"));
+}
+
+fn sheetSetDisabled(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisSheet(vm, this);
+    if (vm.toBoolean(arg(args, 0))) try p.doc.setAttr(id, "disabled", "") else p.doc.removeAttr(id, "disabled");
+    p.touch();
+    return Value.undefined_;
+}
+
+/// A `<style>`'s text (a `<link>`'s is the page's, not here).
+fn sheetText(p: *Page, id: NodeId, a: std.mem.Allocator) Error![]const u8 {
+    if (!p.doc.isHtml(id, "style")) return "";
+    return p.doc.textContent(id, a);
+}
+
+/// The rules of a sheet's text, as plain rule objects (a snapshot).
+fn rulesOf(vm: *Vm, text: []const u8, a: std.mem.Allocator) Error!Value {
+    const arr = try vm.newArray(0);
+    const mark = vm.heap.tempMark();
+    defer vm.heap.tempRelease(mark);
+    vm.heap.tempPush(arr.cell());
+    var parser = css.Parser.init(a, text, false) catch return error.OutOfMemory;
+    const rules = parser.parseStylesheet() catch return error.OutOfMemory;
+    for (rules) |r| {
+        const o = try vm.newObject();
+        try vm.arrayPush(arr, o.asValue());
+        switch (r) {
+            .err => continue,
+            .qualified => |q| {
+                const sel = css.valuesText(a, q.prelude) catch return error.OutOfMemory;
+                const block = css.valuesText(a, q.block) catch return error.OutOfMemory;
+                try vm.defineValue(o, "type", Value.fromInt(1), .default);
+                try vm.defineValue(o, "selectorText", try vm.str(sel), .default);
+                try vm.defineValue(o, "cssText", try vm.str(try std.fmt.allocPrint(a, "{s} {{ {s} }}", .{ sel, block })), .default);
+                const style = try vm.newObject();
+                try vm.defineValue(style, "cssText", try vm.str(block), .default);
+                try vm.defineValue(o, "style", style.asValue(), .default);
+            },
+            .at => |at| {
+                const prelude = css.valuesText(a, at.prelude) catch return error.OutOfMemory;
+                const kind: i32 = if (std.ascii.eqlIgnoreCase(at.name, "media")) 4 else if (std.ascii.eqlIgnoreCase(at.name, "import")) 3 else if (std.ascii.eqlIgnoreCase(at.name, "font-face")) 5 else if (std.ascii.eqlIgnoreCase(at.name, "keyframes")) 7 else if (std.ascii.eqlIgnoreCase(at.name, "supports")) 12 else 0;
+                try vm.defineValue(o, "type", Value.fromInt(kind), .default);
+                const body = if (at.block) |b| (css.valuesText(a, b) catch return error.OutOfMemory) else null;
+                const rule_text = if (body) |b| try std.fmt.allocPrint(a, "@{s} {s} {{ {s} }}", .{ at.name, prelude, b }) else try std.fmt.allocPrint(a, "@{s} {s};", .{ at.name, prelude });
+                try vm.defineValue(o, "cssText", try vm.str(rule_text), .default);
+                try vm.defineValue(o, "conditionText", try vm.str(prelude), .default);
+            },
+        }
+    }
+    return arr.asValue();
+}
+
+fn sheetRules(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisSheet(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    return rulesOf(vm, try sheetText(p, id, sc.a()), sc.a());
+}
+
+/// The sheet's rules as text again, one per line, with `text` put in at
+/// `index` (or a rule taken out): a `<style>`'s content rewritten.
+fn rewriteSheet(vm: *Vm, id: NodeId, insert: ?[]const u8, index: usize, remove: bool) Error!void {
+    const p = pageOf(vm);
+    if (!p.doc.isHtml(id, "style")) return vm.throwError(.TypeError, "NotAllowedError: only a <style> sheet can be changed here");
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const a = sc.a();
+    const text = try sheetText(p, id, a);
+    var parser = css.Parser.init(a, text, false) catch return error.OutOfMemory;
+    const rules = parser.parseStylesheet() catch return error.OutOfMemory;
+    var texts: std.ArrayList([]const u8) = .empty;
+    for (rules) |r| switch (r) {
+        .err => {},
+        .qualified => |q| try texts.append(a, try std.fmt.allocPrint(a, "{s} {{ {s} }}", .{ css.valuesText(a, q.prelude) catch return error.OutOfMemory, css.valuesText(a, q.block) catch return error.OutOfMemory })),
+        .at => |at| {
+            const prelude = css.valuesText(a, at.prelude) catch return error.OutOfMemory;
+            if (at.block) |b| try texts.append(a, try std.fmt.allocPrint(a, "@{s} {s} {{ {s} }}", .{ at.name, prelude, css.valuesText(a, b) catch return error.OutOfMemory })) else try texts.append(a, try std.fmt.allocPrint(a, "@{s} {s};", .{ at.name, prelude }));
+        },
+    };
+    if (index > texts.items.len) return vm.throwError(.RangeError, "IndexSizeError: the index is past the rules");
+    if (remove) {
+        if (index == texts.items.len) return vm.throwError(.RangeError, "IndexSizeError: no rule at the index");
+        _ = texts.orderedRemove(index);
+    }
+    if (insert) |t| try texts.insert(a, index, t);
+    var out: std.ArrayList(u8) = .empty;
+    for (texts.items) |t| {
+        try out.appendSlice(a, t);
+        try out.append(a, '\n');
+    }
+    while (p.doc.get(id).first_child) |c| p.doc.detach(c);
+    p.doc.appendChild(id, try p.doc.createText(try p.doc.a.dupe(u8, out.items)));
+    p.touch();
+}
+
+fn sheetInsertRule(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const id = try thisSheet(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const text = try strArg(vm, arg(args, 0), sc.a());
+    const idx = if (arg(args, 1).isUndefined()) 0 else try vm.toIntegerOrInfinity(arg(args, 1));
+    if (idx < 0 or idx > 1e6) return vm.throwError(.RangeError, "IndexSizeError: the index is past the rules");
+    try rewriteSheet(vm, id, text, @intFromFloat(idx), false);
+    return Value.fromF64(idx);
+}
+
+fn sheetDeleteRule(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const id = try thisSheet(vm, this);
+    const idx = try vm.toIntegerOrInfinity(arg(args, 0));
+    if (idx < 0 or idx > 1e6) return vm.throwError(.RangeError, "IndexSizeError: the index is past the rules");
+    try rewriteSheet(vm, id, null, @intFromFloat(idx), true);
+    return Value.undefined_;
+}
+
 // ------------------------------------------------------------- Storage
 
 fn thisStorage(vm: *Vm, this: Value) Error!bool {
@@ -4543,6 +4853,47 @@ test "script: localStorage goes through the host, sessionStorage stays in the pa
     // (`join` renders a null as nothing.)
     try std.testing.expectEqualStrings("log:2 one two  a b  1  quota:true 2 v t  0 1 true\n", tp.host.lines.items);
     try std.testing.expectEqual(@as(usize, 1), tp.host.store.items.len);
+}
+
+test "script: keys reach the focused element as keyboard events, and stylesheets read and change" {
+    const tp = try TestPage.open(
+        \\<head><style id="s">h1 { color: red; }
+        \\@media (min-width: 10px) { p { margin: 0 } }</style><link rel="stylesheet" href="/x.css" media="print"></head>
+        \\<body><input id="i"><script>
+        \\  var out = [];
+        \\  var i = document.getElementById('i');
+        \\  i.addEventListener('keydown', function (e) { out.push('down:' + e.key + ':' + e.code + ':' + e.keyCode + ':' + e.shiftKey + ':' + (e.target === i) + ':' + (e instanceof KeyboardEvent)); if (e.key === 'x') e.preventDefault(); });
+        \\  i.addEventListener('keypress', function (e) { out.push('press:' + e.key + ':' + e.charCode); });
+        \\  document.body.addEventListener('keyup', function (e) { out.push('up:' + e.key); });
+        \\  var sheets = document.styleSheets;
+        \\  var s = sheets[0], l = sheets[1];
+        \\  out.push('sheets:' + sheets.length + ':' + (s instanceof CSSStyleSheet) + ':' + (s.ownerNode === document.getElementById('s')) + ':' + s.href + ':' + l.href + ':' + l.media + ':' + l.cssRules.length);
+        \\  out.push('rules:' + s.cssRules.length + ':' + s.cssRules[0].selectorText + ':' + s.cssRules[0].style.cssText + ':' + s.cssRules[1].type + ':' + s.cssRules[1].conditionText);
+        \\  s.insertRule('body { margin: 0 }', 0);
+        \\  s.deleteRule(2);
+        \\  out.push('after:' + s.cssRules.length + ':' + s.cssRules[0].cssText + ':' + s.cssRules[1].selectorText);
+        \\  window.report = function () { console.log(out.join(' ')); };
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    var w = tp.doc.walk(dom.document_id);
+    var input: NodeId = 0;
+    var style: NodeId = 0;
+    while (w.next()) |id| {
+        if (tp.doc.isHtml(id, "input")) input = id;
+        if (tp.doc.isHtml(id, "style")) style = id;
+    }
+    try std.testing.expect(tp.page.fireKey(input, keyFromByte('a')));
+    try std.testing.expect(!tp.page.fireKey(input, keyFromByte('x')));
+    try std.testing.expect(tp.page.fireKey(input, keyFromByte('\n')));
+    try std.testing.expect(tp.page.fireKey(null, keyNamed("ArrowUp", 38, false)));
+    tp.page.runSource("report()", "check");
+    try std.testing.expectEqualStrings(
+        \\log:sheets:2:true:true:null:http://example.test:8080/x.css:print:0 rules:2:h1:color: red;:4:(min-width: 10px) after:2:body { margin: 0 }:h1 down:a:KeyA:65:false:true:true press:a:97 up:a down:x:KeyX:88:false:true:true up:x down:Enter:Enter:13:false:true:true press:Enter:13 up:Enter up:ArrowUp
+        \\
+    , tp.host.lines.items);
+    try std.testing.expect(std.mem.indexOf(u8, tp.doc.textContent(style, tp.arena.allocator()) catch "", "body { margin: 0 }") != null);
 }
 
 test "script: the wrappers survive a collection at every safe point" {

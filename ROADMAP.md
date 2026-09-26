@@ -1041,9 +1041,12 @@ supervises), and memory history per unit beside the CPU one.
       panel over the administrator's policy in `conf/app/web.msh`
       (deny, allow, the user's list, the default), carried to the page
       domain as the `scripts` command before a load; `localStorage` on
-      disk under `state/browser/storage/` in the home. Next:
-      `document.styleSheets`, keyboard events, named storage access,
-      CORS with credentials, Acid3.
+      disk under `state/browser/storage/` in the home; (h) the same
+      day — keyboard events through the page's key path (`keydown`,
+      `keypress`, `keyup`, `preventDefault` honoured) and
+      `document.styleSheets` with `cssRules`, `insertRule` and
+      `deleteRule` over `<style>`. Next: named storage access, CORS
+      with credentials, `MutationObserver`, Acid3.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

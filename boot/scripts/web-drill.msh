@@ -145,6 +145,7 @@ if ($body | map { $it.data-submit }) != ["typed/post"] { (err "web-render app: t
 if $app.url != "http://www.moss.test:8080/app.html" { (err "web-render app: url after history: $app.url")? }
 if ($body | map { $it.data-cors-ok }) != ["ok"] { (err "web-render app: a CORS-allowed answer was refused: $body")? }
 if ($body | map { $it.data-visits }) != ["1/1/yes"] { (err "web-render app: storage: $body")? }
+if ($body | map { $it.data-sheets }) != ["1:.done"] { (err "web-render app: styleSheets: $body")? }
 # The same page again: the host kept its localStorage, the session store is new.
 let again = (web-render http://www.moss.test:8080/app.html)?
 let body2 = (($again.dom | html-select "body")? | first 1 | map { $it.attrs })

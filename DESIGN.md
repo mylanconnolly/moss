@@ -7192,6 +7192,29 @@ device with `unknown variable $state`, while a `let` copied from it
 host. The browser script binds what a closure needs to lets first;
 the difference is filed under the shell's runtime, not understood.
 
+**Stage 11h, keys and sheets (as built, 2026-09-26).** A key the page
+gets goes to the script first: `keydown` at the focused element (else
+the body), `keypress` for a character, `keyup` — a `KeyboardEvent`
+with `key`, `code`, `keyCode`, `charCode`, the modifier flags (none
+yet: the console carries no modifiers) — and a listener's
+`preventDefault` keeps the page from typing, moving focus or scrolling
+for it. The DOM's names for a plain byte are the library's
+(`keyFromByte`: Enter, Tab, Backspace, Escape, the printable ASCII with
+`KeyA`/`Digit1` codes); the page's own codes above 127 (`shared.
+keyboard`: the arrows, Home, End, Delete, Page Up/Down, back-tab) are
+named by the page (`keyNamed`), so the library never learns the wire.
+`document.styleSheets` is the `<style>` and `<link rel=stylesheet>`
+elements as `CSSStyleSheet` objects (`href` resolved, `ownerNode`,
+`media`, `disabled` over the attribute, `cssRules` parsed from a
+`<style>`'s text into plain rule objects with `selectorText`,
+`style.cssText`, `type` and `cssText`; a `<link>`'s rules are the
+page's, not here, so its list is empty), and `insertRule`/`deleteRule`
+rewrite a `<style>`'s text rule by rule, which marks the page dirty
+so the cascade takes it at the next layout. Snapshots, like every
+list the bindings hand out. The webpagecli drill sends a key with
+scripts on and finds it in the document; the web drill reads the
+sheet count and a rule's selector back.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

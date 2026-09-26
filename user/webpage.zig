@@ -1676,9 +1676,35 @@ fn activate(id: dom.NodeId, from_keyboard: bool) void {
     }
 }
 
+/// The page's key codes (`shared.keyboard`'s above 127) as the DOM
+/// names them; a plain byte is the library's.
+fn keyInfo(ch: u8) script.KeyInfo {
+    const kb = shared.keyboard;
+    return switch (ch) {
+        kb.back_tab => script.keyNamed("Tab", 9, true),
+        kb.up => script.keyNamed("ArrowUp", 38, false),
+        kb.down => script.keyNamed("ArrowDown", 40, false),
+        kb.left => script.keyNamed("ArrowLeft", 37, false),
+        kb.right => script.keyNamed("ArrowRight", 39, false),
+        kb.home => script.keyNamed("Home", 36, false),
+        kb.end => script.keyNamed("End", 35, false),
+        kb.delete => script.keyNamed("Delete", 46, false),
+        0x1e => script.keyNamed("PageUp", 33, false),
+        0x1f => script.keyNamed("PageDown", 34, false),
+        else => script.keyFromByte(ch),
+    };
+}
+
 fn key(ch: u8) void {
     const doc = page.doc orelse return;
     const kb = shared.keyboard;
+    // The script sees the key first: a listener that prevents the
+    // default keeps it from typing, moving focus or scrolling.
+    if (scripts_up) {
+        const go_on = scripts.fireKey(page.focus, keyInfo(ch));
+        afterScript();
+        if (!go_on) return;
+    }
     switch (ch) {
         '\t' => return moveFocus(false),
         kb.back_tab => return moveFocus(true),

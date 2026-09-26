@@ -216,6 +216,11 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     demand(host.send(a, .{ .dump = .html }), "send dump", 61);
     waitEvent(a, .dumped, 100);
     demand(std.mem.indexOf(u8, pa.dumped(), "data-loaded=\"complete\"") != null, "scripts did not run when on again", 62);
+    // A key goes to the script before the page acts on it.
+    demand(host.send(a, .{ .key = .{ .code = 0, .ch = 'k' } }), "send key", 63);
+    demand(host.send(a, .{ .dump = .html }), "send dump", 64);
+    waitEvent(a, .dumped, 100);
+    demand(std.mem.indexOf(u8, pa.dumped(), "data-key=\"k/KeyK\"") != null, "the key did not reach the script", 65);
     _ = usys.log(glog, "webpagecli: scripts off and on ok");
 
     // 4. A page that reads more than its arena dies of it; nothing else does.

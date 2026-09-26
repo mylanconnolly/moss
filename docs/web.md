@@ -145,9 +145,12 @@ administrator's `conf/app/web.msh` rules above it: `{ scripts: "on" |
 then the user's list, then the default. A page told scripts are off
 shows its `<noscript>` content and runs nothing. `localStorage`
 persists under `state/browser/storage/` in the home, one file per
-origin. Not yet: named storage access (`localStorage.foo`), CORS with
-credentials or a preflight, stylesheet objects (`document.styleSheets`),
-keyboard events.
+origin. Keys reach the script first (`keydown`, `keypress`, `keyup`;
+`preventDefault` keeps the page from acting), and
+`document.styleSheets` reads a `<style>`'s rules and changes them
+with `insertRule`/`deleteRule`. Not yet: named storage access
+(`localStorage.foo`), CORS with credentials or a preflight,
+`MutationObserver`, modifier keys.
 
 ### The window: Web
 

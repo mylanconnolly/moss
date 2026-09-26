@@ -59,6 +59,9 @@ document.body.setAttribute('data-popped', pops.join(',') + ':' + location.pathna
 var form = document.getElementById('form');
 form.addEventListener('submit', function (e) { e.preventDefault(); document.body.setAttribute('data-submit', form.elements[0].value + '/' + form.method); });
 form.requestSubmit();
+// Keys and sheets.
+document.addEventListener('keydown', function (e) { document.body.setAttribute('data-key', e.key + '/' + e.code); });
+document.body.setAttribute('data-sheets', document.styleSheets.length + ':' + document.styleSheets[0].cssRules[1].selectorText);
 var ticks = 0;
 var iv = setInterval(function () {
   ticks += 1;
