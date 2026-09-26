@@ -76,6 +76,8 @@ pub const Op = enum(u16) {
     jnundef,
     jnullish, // if a == null
     jnnullish,
+    isnullish, // a = (b == null)
+    isnnullish, // a = (b != null)
     jempty, // if a is the hole
     jnempty,
     // ---------------------------------------------------- properties

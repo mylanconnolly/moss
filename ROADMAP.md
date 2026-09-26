@@ -982,8 +982,13 @@ supervises), and memory history per unit beside the CPU one.
       size-class allocator over a region, is the script domain's
       bookkeeping heap now (the bump heap leaked a long run's shapes and
       lists), and the collector keeps its mark stack between
-      collections. Still to come in (e): the call path and register
-      traffic (the next round); `web-eval` folds into stage 11.
+      collections. The second quickening round (a `this` register per
+      function, `var` and compound assignments and `i++` straight into
+      their registers, `x == null` as one test, each gated on the
+      operand not mentioning the binding — which also caught a TDZ
+      miss in the older `let` fast path): the mean 2,246 to 2,416,
+      twice the first row; test262 unchanged. What is left in
+      the profile is the call sequence; `web-eval` folds into stage 11.
       Residuals of (b)–(d): the moving nursery (the barrier is in
       place) and ephemeron keys for the weak collections, eval's
       `arguments` early errors, rooting natives' locals so collection

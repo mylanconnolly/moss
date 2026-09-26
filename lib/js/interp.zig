@@ -817,6 +817,20 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 pc += 1;
                 continue :sw insn.op;
             },
+            .isnullish => {
+                regs[insn.a] = Value.fromBool(regs[insn.b].isNullish());
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .isnnullish => {
+                regs[insn.a] = Value.fromBool(!regs[insn.b].isNullish());
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
             .jf => {
                 if (!vm.toBoolean(regs[insn.a])) pc = insn.bc();
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
@@ -2547,6 +2561,10 @@ const interp_cases = [_]struct { src: []const u8, want: f64 }{
     .{ .src = "/(?<y>\\d{4})-(?<m>\\d\\d)/u.exec('on 2026-09-25').groups.m * 1 + 'a-b_c'.replace(/[-_]/g, ' ').split(' ').length + ('x'.match(/y/) === null ? 1 : 0)", .want = 13 },
     .{ .src = "var acc = 0; for (const x of [1, 2, 3, 4]) { if (x % 2) continue; acc += x; } outer: for (const a of [1, 2]) for (const c of [10, 20, 30]) { if (c === 20) continue outer; acc += c; } acc", .want = 26 },
     .{ .src = "var ta = new Int16Array([1, -2, 300]); var dv = new DataView(ta.buffer); ta.set([5], 2); Uint8Array.from('abc', c => c.charCodeAt(0)).length + ta[2] + dv.getInt16(2, true) + new Float32Array(ta).reduce((a, b) => a + b) + Atomics.add(ta, 0, 1) + ta[0] + new Uint8Array([200]).toBase64().length + (ta['1.5'] === undefined ? 1 : 0) + new Uint8Array(ta.buffer.transfer()).length + (ta.length === 0 ? 1 : 0)", .want = 25 },
+    // The register peepholes keep the operator's order: `x += e` reads the
+    // old x before e runs, an initializer that reads its own binding gets
+    // the old value (or its TDZ error), `i++` as a statement is ToNumeric.
+    .{ .src = "function t() { var x = 1; var y = (x += (x = 3)); var a = 1; var b = (a += a++); var w = 2; w -= w++ + w; var p = 5; var p = [p, 1]; var q = 2; var q = {v: q}; var m = 7; var m = m ? [m] : 0; var s = '5'; s++; var tdz = 0; try { let z = [z]; } catch (e) { tdz = e instanceof ReferenceError ? 1 : 0; } var i = 0; for (var k = 0; k < 3; k++) i++; var u; return x + y + a + b + w + p[0] + p.length + q.v + m[0] + s + tdz + i + k + (u == null ? 1 : 0) + (u != null ? 1 : 0) + (0 == null ? 1 : 0) + (this === undefined ? 0 : 1); } t()", .want = 40 },
     .{ .src = "function* gen() { yield 1; yield 2; yield 3; yield 4; } var closed = 0; var src = { next() { return { value: 7, done: false }; }, return() { closed++; return {}; } }; var h = Iterator.prototype.map.call(src, x => x + 1); h.next(); h.return(); gen().map(x => x * 2).filter(x => x > 2).take(2).toArray().length + gen().flatMap(x => [x, x]).drop(5).reduce((a, b) => a + b, 0) + Iterator.from('ab').toArray().length + Iterator.zip([[1, 2], [3]]).toArray().length + Iterator.concat([1], [2, 3]).toArray().length + gen().chunks(3).toArray()[1][0] + closed + (gen().find(x => x === 3) === 3 ? 1 : 0) + (new (class extends Iterator { next() { return { done: true }; } })().toArray().length)", .want = 25 },
 };
 

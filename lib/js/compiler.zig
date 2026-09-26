@@ -151,6 +151,10 @@ const FuncState = struct {
     param_slots: []u32 = &.{},
     /// A coroutine body: yields/awaits suspend the frame.
     co: enum { none, generator, async_fn, async_gen } = .none,
+    /// The register holding `this` for the whole body (a non-arrow
+    /// function that uses it and is not a derived constructor): every
+    /// `this.x` reads it directly instead of loading it first.
+    this_reg: ?u16 = null,
     /// The register holding the class's home object for methods
     /// compiled inline (class bodies): none.
     last_pos: u32 = 0,
@@ -696,6 +700,13 @@ pub const Compiler = struct {
         }
         // The prologue: implicit bindings and captured parameters.
         try c.prologue(f, fi, decl_scope, has_rest);
+        // `this` once, into a register the body keeps (Richards loaded it
+        // six million times for seven million property reads, 2026-09-25).
+        if (fi.uses_this and !f.is_arrow and f.kind != .derived_constructor and !fi.has_direct_eval and !fi.dynamic) {
+            const r = try c.tmp();
+            try c.emit(.ldthis, r, 0, 0);
+            fs.this_reg = r;
+        }
         // Parameter patterns and defaults.
         for (f.params, 0..) |p, i| {
             const reg: u16 = @intCast(i);
@@ -795,6 +806,10 @@ pub const Compiler = struct {
 
     /// The function's `this` reference.
     fn loadThis(c: *Compiler, dst: u16) Error!void {
+        if (c.fs.this_reg) |r| {
+            if (r != dst) try c.emit(.mov, dst, r, 0);
+            return;
+        }
         const tf = c.scope.func.this_func;
         if (tf.node == null) {
             if (c.eval_mode) {
@@ -881,7 +896,7 @@ pub const Compiler = struct {
             .empty, .debugger => {},
             .expr_stmt => |e| {
                 const top = c.fs.top;
-                _ = try c.expr(e, c.completion);
+                if (c.completion != null or !try c.updateDiscard(e)) _ = try c.expr(e, c.completion);
                 c.release(top);
             },
             .if_stmt => |i| {
@@ -1050,7 +1065,11 @@ pub const Compiler = struct {
                     const ref = c.resolve(name);
                     // Straight into the register when it has one.
                     const direct: ?u16 = switch (ref) {
-                        .reg => |r| if (kind != .@"var") r else null,
+                        // Not when the initializer reads the binding: an
+                        // array built straight into `p` would hold itself
+                        // in `var p = [p]`, and `let p = [p]` would miss its
+                        // TDZ error.
+                        .reg => |r| if (mentions(init, name)) null else r,
                         else => null,
                     };
                     const r = if (isAnonymousFunction(init)) blk: {
@@ -1257,7 +1276,7 @@ pub const Compiler = struct {
         if (per_iter) try c.emit(.copyenv, 0, 0, 0);
         if (f.update) |u| {
             const t = c.fs.top;
-            _ = try c.expr(u, null);
+            if (!try c.updateDiscard(u)) _ = try c.expr(u, null);
             c.release(t);
         }
         try c.emitBc(.jmp, 0, start);
@@ -1816,6 +1835,7 @@ pub const Compiler = struct {
                 return d;
             },
             .this => {
+                if (dst == null) if (c.fs.this_reg) |r| return r;
                 const d = dst orelse try c.tmp();
                 try c.loadThis(d);
                 return d;
@@ -1875,6 +1895,16 @@ pub const Compiler = struct {
                     try c.load(c.resolve(b.left.data.private_name), key, b.left.data.private_name);
                     const obj = try c.expr(b.right, null);
                     try c.emit(.haspriv, d, key, obj);
+                    c.release(@max(top, d + 1));
+                    return d;
+                }
+                if ((b.op == .eq or b.op == .ne) and (c.isNullishLiteral(b.left) or c.isNullishLiteral(b.right))) {
+                    // `x == null`: one test instead of a load and a compare.
+                    const other = if (c.isNullishLiteral(b.right)) b.left else b.right;
+                    const d = dst orelse try c.tmp();
+                    const top = c.fs.top;
+                    const x = try c.expr(other, null);
+                    try c.emit(if (b.op == .eq) .isnullish else .isnnullish, d, x, 0);
                     c.release(@max(top, d + 1));
                     return d;
                 }
@@ -2158,6 +2188,67 @@ pub const Compiler = struct {
         return d;
     }
 
+    /// Whether the expression `n` may read or write the binding `name`:
+    /// conservative (any node kind not listed says yes). A function or
+    /// class inside cannot reach a register local without capturing it,
+    /// and a captured binding is not a register local.
+    fn mentions(n: *Node, name: []const u8) bool {
+        return switch (n.data) {
+            .identifier => |id| std.mem.eql(u8, id, name),
+            .private_name, .number, .bigint, .string, .regexp, .null_lit, .bool_lit, .this, .super, .new_target, .import_meta, .function, .class => false,
+            .template => |t| mentionsAny(t.exprs, name),
+            .tagged_template => |t| mentions(t.tag, name) or mentions(t.quasi, name),
+            .array => |els| {
+                for (els) |e| if (e) |x| if (mentions(x, name)) return true;
+                return false;
+            },
+            .object => |props| {
+                for (props) |p| {
+                    if (p.computed and mentions(p.key, name)) return true;
+                    if (mentions(p.value, name)) return true;
+                }
+                return false;
+            },
+            .unary => |u| mentions(u.arg, name),
+            .update => |u| mentions(u.arg, name),
+            .binary => |b| mentions(b.left, name) or mentions(b.right, name),
+            .logical => |b| mentions(b.left, name) or mentions(b.right, name),
+            .assign => |a| mentions(a.target, name) or mentions(a.value, name),
+            .conditional => |t| mentions(t.cond, name) or mentions(t.then, name) or mentions(t.otherwise, name),
+            .call => |k| mentions(k.callee, name) or mentionsAny(k.args, name),
+            .new => |k| mentions(k.callee, name) or mentionsAny(k.args, name),
+            .member => |m| mentions(m.object, name) or (m.computed and mentions(m.property, name)),
+            .optional_chain => |x| mentions(x, name),
+            .sequence => |xs| mentionsAny(xs, name),
+            .spread => |x| mentions(x, name),
+            else => true,
+        };
+    }
+
+    fn mentionsAny(xs: []*Node, name: []const u8) bool {
+        for (xs) |x| if (mentions(x, name)) return true;
+        return false;
+    }
+
+    /// `null`, or the global `undefined` (a local of that name shadows it).
+    fn isNullishLiteral(c: *Compiler, n: *Node) bool {
+        if (n.data == .null_lit) return true;
+        if (n.data == .identifier and std.mem.eql(u8, n.data.identifier, "undefined")) return c.resolve("undefined") == .global;
+        return false;
+    }
+
+    /// `i++`/`i--` whose value nobody reads, on a register local: one
+    /// instruction in place (the general form is five).
+    fn updateDiscard(c: *Compiler, e: *Node) Error!bool {
+        if (e.data != .update) return false;
+        const u = e.data.update;
+        if (u.arg.data != .identifier) return false;
+        const ref = c.resolve(u.arg.data.identifier);
+        if (ref != .reg or c.isTdz(ref.reg)) return false;
+        try c.emit(if (u.increment) .inc else .dec, ref.reg, ref.reg, 0);
+        return true;
+    }
+
     fn update(c: *Compiler, increment: bool, prefix: bool, arg: *Node, dst: ?u16) Error!u16 {
         const d = dst orelse try c.tmp();
         const top = c.fs.top;
@@ -2331,6 +2422,17 @@ pub const Compiler = struct {
                 switch (target.data) {
                     .identifier => |name| {
                         const ref = c.resolve(name);
+                        if (ref == .reg and !c.isTdz(ref.reg) and !mentions(val, name)) {
+                            // `x += e` on a register local: one instruction
+                            // writing the register. Only when `e` cannot
+                            // touch `x` — `x += (x = 3)` reads the old `x`
+                            // first, as the operator says.
+                            const r = try c.expr(val, null);
+                            try c.emit(bop, ref.reg, ref.reg, r);
+                            if (dst) |dd| if (dd != ref.reg) try c.emit(.mov, dd, ref.reg, 0);
+                            c.release(@max(t2, d + 1));
+                            return if (dst) |dd| dd else ref.reg;
+                        }
                         const old = try c.tmp();
                         try c.load(ref, old, name);
                         const r = try c.expr(val, null);

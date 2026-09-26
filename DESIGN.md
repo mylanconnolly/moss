@@ -1039,17 +1039,18 @@ and `tools/bench-small.js`, a small workload of our own timed on the
 host and, as the same text in the `jsrun` drill, on the target under
 QEMU's emulation):
 
-| Octane (M3 Max) | first row (2026-09-25) | after the first quickening round (same day) |
-|---|---|---|
-| Richards | 1,274 | 2,111 |
-| DeltaBlue | 1,342 | 2,378 |
-| Crypto | 1,061 | 2,256 |
-| **geometric mean** | **1,220** | **2,246** |
+| Octane (M3 Max) | first row (2026-09-25) | quickening round 1 | round 2 (same day) |
+|---|---|---|---|
+| Richards | 1,274 | 2,111 | 2,390 |
+| DeltaBlue | 1,342 | 2,378 | 2,477 |
+| Crypto | 1,061 | 2,256 | 2,383 |
+| **geometric mean** | **1,220** | **2,246** | **2,416** |
 
 | bench-small | host (ReleaseFast) | target (`jsrun` under TCG, ReleaseSafe) |
 |---|---|---|
 | first row | 115 ms | 1,908 ms (16.6×) |
 | after the first quickening round | 55 ms | 1,007 ms (18.3×) |
+| after the second | 54 ms | 1,161–1,238 ms (22×; two runs — the TCG target moves ±15% run to run, and the host's gain is inside that) |
 
 Whole-stack (encrypted volume, alice's bench through IPC + fssvc +
 mossfs + ring + blkdrv + virtio), the full progression on HVF (w/r MB/s,
@@ -7544,6 +7545,47 @@ replaced (an A/B under TCG: 1,007 and 1,187 ms bump, 1,181 to 1,343 ms
 heap, the same workload). What it does not do yet: return large blocks
 to a coalescing pool (a class's blocks stay that class's), which is
 fine for a heap whose peak is what it is charged for anyway.
+
+**Stage 10e, the second quickening round (as built, 2026-09-25).** This
+round was the compiler's: an opcode histogram of one Richards run
+(`JS_TRACE` piped through `sort | uniq -c`) beside the profile. Of 30
+million instructions, 6 million were `ldthis` — one before every
+`this.x`, seven million property reads in all. A function that uses
+`this` and is not an arrow or a derived constructor now loads it once
+into a register the body keeps (`FuncState.this_reg`), and every `this`
+operand is that register: 6 million instructions became 1.4 million,
+one per call. `mov` was next: `var i = 0` compiled to a load and a
+move (`var` initializers were excluded from the register-targeting
+`let` already had, for no reason that survives a look); `total += x`
+loaded the variable into a temporary, added, and moved back, and is
+`add r, r, x` now; `i++` as a statement or a loop update was five
+instructions (load, ToNumeric, increment, store, the unused value) and
+is `inc r, r`. `x == null` was a load and a compare, and is one
+`isnullish` (the `undefined` identifier counts when it is the global's;
+a local of that name shadows it). Each of the register peepholes has
+the same guard, learned the hard way: the operand may not mention the
+binding. `x += (x = 3)` must read the old `x` first, so writing the
+register straight from the operator is only right when the operator's
+right side cannot touch it; `var p = [p, 1]` built straight into `p`'s
+register put the array inside itself; and the same aliasing had been
+there since the `let` fast path — `let z = [z]` built the array into
+the register the TDZ check reads, and the check saw an array, not the
+hole, and missed its ReferenceError. A conservative `mentions(expr,
+name)` (any node kind it does not know says yes) gates all three; the
+interp cases keep each of those programs. Together: Richards 2,111 to
+2,390, DeltaBlue 2,378 to 2,477, Crypto 2,256 to 2,383, the mean 2,246
+to 2,416 (run to run the mean moves about 2%; the TCG target's
+bench-small, at 1.2 s, sits inside its own ±15% and shows nothing
+either way — the host row is the instrument). One thing tried and
+taken out: fusing a compare with the
+branch after it inside the interpreter (peek at the next instruction,
+take the branch there) measured within noise of not doing it —
+threaded dispatch already makes the second jump predictable, and the
+peek costs what it saves. What remains in the profile is the call
+sequence itself (`pushFrame` at 8%: the frame record, the argument
+copy, the register clear) and the calls into natives; the object model
+is out of the picture. Twice the first row's mean, in a day, with
+test262 unchanged to the file.
 
 ## Distribution: the fabric
 

@@ -309,7 +309,7 @@ pub const Vm = struct {
     }
 
     /// The first free stack slot: above the top frame's window.
-    pub fn sp(vm: *Vm) u32 {
+    pub inline fn sp(vm: *Vm) u32 {
         if (vm.frames.items.len == 0) return vm.sp_extra;
         const f = vm.frames.items[vm.frames.items.len - 1];
         return f.base + f.code.data.nregs + vm.sp_extra;
