@@ -1045,8 +1045,17 @@ supervises), and memory history per unit beside the CPU one.
       day — keyboard events through the page's key path (`keydown`,
       `keypress`, `keyup`, `preventDefault` honoured) and
       `document.styleSheets` with `cssRules`, `insertRule` and
-      `deleteRule` over `<style>`. Next: named storage access, CORS
-      with credentials, `MutationObserver`, Acid3.
+      `deleteRule` over `<style>`; (i) the same day — `MutationObserver`
+      over the bindings' primitives, event handler attributes and
+      properties (`onclick="…"`, `el.onclick = f`, the body's `onload`),
+      `document.write` under a parser-inserted script, named storage
+      access through a `Proxy` the bindings make, and the exit number:
+      the `acid3` drill renders the fetched Acid3 test and prints its
+      score — 41/100 on the host, 25/100 on the target within its
+      settle (2026-09-26). Left: CORS with credentials, iframes (a page
+      within a page: a second document per domain, or a second domain),
+      DOM Range and Traversal, the SVG DOM, `DOMImplementation`, and
+      the rest of what Acid3 counts.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

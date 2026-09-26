@@ -1,0 +1,28 @@
+# The Acid3 drill: the score a page domain reaches on the Acid3 test,
+# printed. The fixture server serves the test from the archive when it
+# was fetched (tools/fetch-acid3.sh); without it the step is skipped, and
+# the drill still passes — the score is a measurement, not a gate.
+def try-fetch [url, n] {
+  match (fetch $url) {
+    ok $r => (ok $r)
+    err $e => (match ($n > 0) {
+        true => { sleep 500; try-fetch $url ($n - 1) }
+        _ => (err "fetch $url: $e")
+      })
+  }
+}
+let probe = (try-fetch http://www.moss.test:8080/acid3/test.html 60)?
+match $probe.status {
+  200 => {
+    match (web-render http://www.moss.test:8080/acid3/test.html { settle: 30000, select: "#result" }) {
+      ok $r => {
+        let score = (($r.dom | html-select "#score")? | map { $it | html-text } | join "")
+        let total = (($r.dom | html-select "span")? | map { $it | html-text } | last 1 | join "")
+        echo ("script: acid3 " + $score + "/" + $total)
+      }
+      err $e => echo ("script: acid3 render failed: " + $e)
+    }
+  }
+  _ => echo "script: acid3 not fetched; skipped (tools/fetch-acid3.sh)"
+}
+echo "script: acid3 done"

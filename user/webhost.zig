@@ -45,14 +45,14 @@ pub const Lock = struct {
 /// A page's memory: its arenas — the document-and-layout region (40 MB),
 /// the glyph cache (2), the picture store (6) and the picture scratch
 /// (6), the user-agent sheet (0.5), the script engine's heap (8) and its
-/// bookkeeping (8) — plus the image and its 512K stack: 70.5 MB of
-/// statics under a 76 MB budget, 5 MB of headroom. Wikipedia's front page,
+/// bookkeeping (16) — plus the image and its 512K stack: 78.5 MB of
+/// statics under an 84 MB budget, 5 MB of headroom. Wikipedia's front page,
 /// the first real site opened, died twice of a 28 MB page: of the
 /// pictures it decoded into the document arena, then of an 8 MB layout
 /// arena a 3900-node page asks 10 MB of (2026-09-18); a 1.2 MB article
 /// died of a 24 MB region a 17,800-node page asks 29 MB of, once its
 /// lists stopped leaving their old buffers behind (2026-09-24).
-pub const page_user_kb: u64 = 76 << 10;
+pub const page_user_kb: u64 = 84 << 10;
 /// A connection key: scheme|host|port, a host name's worst case.
 const conn_key_max = 320;
 pub const page_kobj_kb: u64 = 2 << 10;
@@ -182,7 +182,8 @@ pub const Command = union(enum) {
     scroll: i64,
     pointer: struct { kind: wire.PointerKind, x: u32, y: u32 },
     key: struct { code: u32, ch: u32 },
-    dump: wire.Dump,
+    /// A dump: the whole document, or the elements `select` matches.
+    dump: struct { what: wire.Dump, select: []const u8 = "" },
     resize: struct { w: u32, h: u32 },
     /// Find `text` (empty clears), showing match `index`.
     find: struct { text: []const u8, index: u32 },
@@ -203,7 +204,7 @@ pub const Command = union(enum) {
 const Queued = struct {
     cmd: Command,
 };
-const text_slots = 2; // 0: the queued load's URL, 1: the queued find's text
+const text_slots = 3; // 0: the queued load's URL, 1: the queued find's text, 2: a dump's selector
 
 pub const Page = struct {
     used: bool = false,
@@ -690,9 +691,9 @@ pub const Host = struct {
         // the caller's memory; a newer load or find supersedes a queued
         // one, which leaves the queue.
         var stored = cmd;
-        if (cmd == .load or cmd == .find) {
-            const slot: usize = if (cmd == .load) 0 else 1;
-            const text = if (cmd == .load) cmd.load else cmd.find.text;
+        if (cmd == .load or cmd == .find or cmd == .dump) {
+            const slot: usize = if (cmd == .load) 0 else if (cmd == .find) 1 else 2;
+            const text = if (cmd == .load) cmd.load else if (cmd == .find) cmd.find.text else cmd.dump.select;
             var i: usize = 0;
             while (i < p.qlen) {
                 if (std.meta.activeTag(p.queue[i].cmd) == std.meta.activeTag(cmd)) {
@@ -702,7 +703,7 @@ pub const Host = struct {
             }
             p.text_len[slot] = @min(text.len, p.texts[slot].len);
             @memcpy(p.texts[slot][0..p.text_len[slot]], text[0..p.text_len[slot]]);
-            stored = if (cmd == .load) .{ .load = "" } else .{ .find = .{ .text = "", .index = cmd.find.index } };
+            stored = if (cmd == .load) .{ .load = "" } else if (cmd == .find) .{ .find = .{ .text = "", .index = cmd.find.index } } else .{ .dump = .{ .what = cmd.dump.what, .select = "" } };
         }
         p.queue[p.qlen] = .{ .cmd = stored };
         p.qlen += 1;
@@ -726,7 +727,12 @@ pub const Host = struct {
             .scroll => |dy| .{ .scroll = .{ .dy = @bitCast(dy) } },
             .pointer => |pt| .{ .pointer = .{ .kind = @intFromEnum(pt.kind), .x = pt.x, .y = pt.y } },
             .key => |k| .{ .key = .{ .code = k.code, .ch = k.ch } },
-            .dump => |d| .{ .dump = .{ .what = @intFromEnum(d) } },
+            .dump => |d| blk: {
+                const text = p.texts[2][0..p.text_len[2]];
+                const n = @min(text.len, p.data_len);
+                @memcpy(p.data()[0..n], text[0..n]);
+                break :blk .{ .dump = .{ .what = @intFromEnum(d.what), .len = n } };
+            },
             .resize => |r| .{ .resize = .{ .w = r.w, .h = r.h } },
             .find => |f| blk: {
                 const text = p.texts[1][0..p.text_len[1]];

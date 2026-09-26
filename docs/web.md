@@ -136,7 +136,10 @@ page with a timer pending asks to be woken, and the browser's loop
 wakes it on its 40 ms tick — frames run at 25 a second, and no timer
 fires finer than the tick. `web-render URL` in the shell returns the
 document as the scripts left it, timers included: after `load` it
-ticks the page until nothing is pending, for two seconds at most.
+ticks the page until nothing is pending, for two seconds at most —
+`web-render URL { settle: MS }` for more, and `{ select: SELECTOR }`
+to get back only the matching elements (a big page's whole tree would
+not fit the script's heap).
 Scripts are on unless the site's origin is blocked: the Site panel
 shows the verdict and a button to block or allow scripts there (the
 list is `state/browser/noscript.msh` in the home), and an
@@ -148,9 +151,15 @@ persists under `state/browser/storage/` in the home, one file per
 origin. Keys reach the script first (`keydown`, `keypress`, `keyup`;
 `preventDefault` keeps the page from acting), and
 `document.styleSheets` reads a `<style>`'s rules and changes them
-with `insertRule`/`deleteRule`. Not yet: named storage access
-(`localStorage.foo`), CORS with credentials or a preflight,
-`MutationObserver`, modifier keys.
+with `insertRule`/`deleteRule`. `MutationObserver` reports the tree,
+attributes and text changing, delivered as a microtask; `onclick="…"`
+attributes and `el.onclick = f` properties run; `document.write` under
+a parser-inserted script inserts after it; `localStorage.foo` reads
+and writes items. The Acid3 score is measured by the `acid3` drill
+(`tools/fetch-acid3.sh` first): 41/100 on the host, 25/100 on the
+target within its settle, as of 2026-09-26. Not yet: CORS with
+credentials or a preflight, iframes, Range and TreeWalker, the SVG DOM,
+modifier keys.
 
 ### The window: Web
 

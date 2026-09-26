@@ -1,0 +1,9 @@
+# The Acid3 drill's client: a script renders the Acid3 test (when it was
+# fetched: tools/fetch-acid3.sh; the archive carries it under web/acid3/
+# and the fixture server serves it) in a page domain with its scripts
+# on, waits for the test's timer chain to settle, and prints the score
+# — a number the gate reports, never asserts, so the exit criterion of
+# stage 11 is measured every run. Without the files the step says so.
+# Essential and oneshot: its exit ends the boot.
+{ image: mshrun, script: scripts/acid3-drill.msh, grant: [log, bootfs, spawner], budget: { user: 104mb, kobj: 8mb }, profiles: [acid3], oneshot: true, essential: true,
+  give: [{ tag: net, netview: net }, { tag: view, fs: "", ro: false }] }

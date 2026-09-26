@@ -211,6 +211,10 @@ pub const interfaces = [_]Iface{
         .{ .name = "createDocumentFragment", .f = createDocumentFragment },
         .{ .name = "createEvent", .len = 1, .f = createEvent },
         .{ .name = "hasFocus", .f = hasFocus },
+        .{ .name = "write", .f = documentWrite },
+        .{ .name = "writeln", .f = documentWriteln },
+        .{ .name = "open", .f = noopNative },
+        .{ .name = "close", .f = noopNative },
     } },
     .{ .name = "DocumentFragment", .parent = "Node", .attrs = &parent_attrs, .methods = &parent_methods ++ [_]Method{
         .{ .name = "getElementById", .len = 1, .f = getElementById },
@@ -370,6 +374,11 @@ pub const interfaces = [_]Iface{
         .{ .name = "insertRule", .len = 1, .f = sheetInsertRule },
         .{ .name = "deleteRule", .len = 1, .f = sheetDeleteRule },
     } },
+    .{ .name = "MutationObserver", .constructible = true, .methods = &.{
+        .{ .name = "observe", .len = 1, .f = moObserve },
+        .{ .name = "disconnect", .f = moDisconnect },
+        .{ .name = "takeRecords", .f = moTakeRecords },
+    } },
     .{ .name = "Storage", .attrs = &.{
         .{ .name = "length", .get = storageLength },
     }, .methods = &.{
@@ -500,6 +509,7 @@ const I = struct {
     const xhr = ifaceIndex("XMLHttpRequest");
     const storage = ifaceIndex("Storage");
     const sheet = ifaceIndex("CSSStyleSheet");
+    const mutation_observer = ifaceIndex("MutationObserver");
     const keyboard_event = ifaceIndex("KeyboardEvent");
     const mouse_event = ifaceIndex("MouseEvent");
 };
@@ -520,6 +530,9 @@ pub const ReadyState = enum { loading, interactive, complete };
 
 const HistoryEntry = struct { url: []u8, state: Value };
 const SessionItem = struct { key: []u8, value: []u8 };
+const Observation = struct { observer: Value, target: NodeId, child_list: bool, attributes: bool, character_data: bool, subtree: bool };
+const PendingRecord = struct { observer: Value, record: Value };
+const MutationKind = enum { child_list, attributes, character_data };
 const session_quota: usize = 256 << 10;
 
 pub const Page = struct {
@@ -548,11 +561,18 @@ pub const Page = struct {
     url_owned: bool = false,
     /// The DOM changed since the embedder last asked.
     dirty: bool = false,
+    /// A stylesheet changed too (a `<style>`'s text, a `<link>`, a rule
+    /// inserted): the embedder must read the sheets again, which costs
+    /// a parse it should not pay for every other mutation.
+    sheets_dirty: bool = false,
     ready_state: ReadyState = .loading,
     /// When no host clock is set: the time the tests advance by hand.
     fake_now: f64 = 0,
     scripts_run: u32 = 0,
     script_errors: u32 = 0,
+    /// The parser-inserted script running now: `document.write` puts
+    /// its markup right after it, as the parser would have.
+    current_script: ?NodeId = null,
     /// The session history the page's scripts made: `pushState` entries
     /// and where the page is in them (the host keeps the real history).
     history: std.ArrayList(HistoryEntry) = .empty,
@@ -560,6 +580,12 @@ pub const Page = struct {
     modules_run: u32 = 0,
     /// `sessionStorage`: the page's own, gone with the document.
     session_items: std.ArrayList(SessionItem) = .empty,
+    /// MutationObservers: what each watches, and the records queued for
+    /// it until the delivery microtask runs.
+    observers: std.ArrayList(Observation) = .empty,
+    mutation_records: std.ArrayList(PendingRecord) = .empty,
+    deliver_fn: Value = Value.undefined_,
+    delivery_queued: bool = false,
 
     /// Install the bindings into `vm` for `doc`. The VM's `host_data`
     /// becomes this page and its embedder roots this page's tables.
@@ -587,6 +613,8 @@ pub const Page = struct {
             p.a.free(it.value);
         }
         p.session_items.deinit(p.a);
+        p.observers.deinit(p.a);
+        p.mutation_records.deinit(p.a);
         if (p.url_owned) p.a.free(p.url);
         p.vm.embedder_roots = null;
         p.vm.host_data = null;
@@ -608,6 +636,12 @@ pub const Page = struct {
             for (t.args[0..t.argc]) |v| m.markValue(v);
         }
         for (p.history.items) |h| m.markValue(h.state);
+        for (p.observers.items) |o| m.markValue(o.observer);
+        for (p.mutation_records.items) |r| {
+            m.markValue(r.observer);
+            m.markValue(r.record);
+        }
+        m.markValue(p.deliver_fn);
     }
 
     /// Whether the DOM changed since the last call (and forget it).
@@ -615,6 +649,20 @@ pub const Page = struct {
         const d = p.dirty;
         p.dirty = false;
         return d;
+    }
+
+    /// Whether a stylesheet changed since the last call (and forget it).
+    pub fn takeSheetsDirty(p: *Page) bool {
+        const d = p.sheets_dirty;
+        p.sheets_dirty = false;
+        return d;
+    }
+
+    /// Whether `id` is, or holds, a stylesheet element.
+    fn touchesSheets(p: *Page, id: NodeId) bool {
+        var w = p.doc.walk(id);
+        while (w.next()) |n| if (isSheetElement(p, n) or p.doc.isHtml(n, "style")) return true;
+        return false;
     }
 
     pub fn now(p: *Page) f64 {
@@ -714,7 +762,18 @@ pub const Page = struct {
         const session = try vm.objects.create(p.protos[I.storage].asValue(), .dom, @sizeOf(Slot));
         session.internal(Slot).* = .{ .kind = slot_storage, .id = 0, .flags = storage_session };
         try vm.defineValue(g, "sessionStorage", session.asValue(), .hidden);
+        p.deliver_fn = (try vm.newNative("deliverMutations", 0, deliverMutations, Value.undefined_)).asValue();
+        // Named access (`localStorage.foo`) through a Proxy over each store,
+        // made by the engine's own Proxy: the bindings have no exotic
+        // objects, the language has.
+        p.runSource(named_storage_source, "the storage proxies");
+        p.scripts_run = 0; // the page's own count starts at its scripts
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
+        _ = try vm.defineNative(g, "postMessage", 1, noopNative);
+        _ = try vm.defineNative(g, "open", 0, windowOpen);
+        _ = try vm.defineNative(g, "close", 0, noopNative);
+        _ = try vm.defineNative(g, "focus", 0, noopNative);
+        _ = try vm.defineNative(g, "blur", 0, noopNative);
         _ = try vm.defineNative(g, "scrollTo", 0, scrollToNative);
         _ = try vm.defineNative(g, "scroll", 0, scrollToNative);
         _ = try vm.defineNative(g, "scrollBy", 0, scrollByNative);
@@ -914,6 +973,8 @@ pub const Page = struct {
 
     fn runScriptElement(p: *Page, id: NodeId) void {
         const doc = p.doc;
+        p.current_script = id;
+        defer p.current_script = null;
         const module = isModuleScript(p, id);
         if (!module) if (doc.getAttr(id, "type")) |t| {
             const tt = std.mem.trim(u8, t, " \t\r\n");
@@ -1218,10 +1279,113 @@ pub const Page = struct {
     const flag_once: i32 = 2;
     const flag_passive: i32 = 4;
 
+    /// The `on<type>` handler of a target: a function a script set on
+    /// the object (`el.onclick = f`), else the element's `on<type>`
+    /// attribute compiled once into a function of `event` (cached on
+    /// the wrapper under the attribute's text); the body's `onload`
+    /// answers for the window's `load`. A handler returning false
+    /// prevents the default.
+    fn invokeHandlerAttribute(p: *Page, target: Value, ev: *Object, type_name: []const u8) Error!void {
+        const vm = p.vm;
+        if (!target.isObject()) return;
+        var o = Vm.asObject(target);
+        var node_id: ?NodeId = p.nodeOfValue(target);
+        if (o == vm.global) {
+            // The window's handlers live on the body element in markup.
+            if (node_id == null and (std.mem.eql(u8, type_name, "load") or std.mem.eql(u8, type_name, "unload") or std.mem.eql(u8, type_name, "error"))) {
+                const b = bodyOrDocument(p);
+                if (b != dom.document_id) node_id = b;
+            }
+        }
+        var name_buf: [64]u8 = undefined;
+        const prop = std.fmt.bufPrint(&name_buf, "on{s}", .{type_name}) catch return;
+        var handler = Value.undefined_;
+        if (try vm.objects.getOwn(o, .{ .atom = try vm.atom(prop) })) |own| handler = own.val;
+        if (!vm.isCallable(handler)) if (node_id) |id| {
+            if (p.doc.get(id).kind == .element) if (p.doc.getAttr(id, prop)) |text| {
+                // Compiled once per attribute text, on the element's wrapper.
+                const w = try p.wrap(id);
+                o = w;
+                const cache_key = try std.fmt.allocPrint(vm.meta, "__h_{s}", .{prop});
+                defer vm.meta.free(cache_key);
+                var cached = Value.undefined_;
+                if (try vm.objects.getOwn(w, .{ .atom = try vm.atom(cache_key) })) |own| cached = own.val;
+                var stale = true;
+                if (cached.isObject()) {
+                    const src = try vm.get(Vm.asObject(cached), .{ .atom = try vm.atom("src") }, cached);
+                    if (src.isString()) {
+                        var buf: [4096]u8 = undefined;
+                        const t = js.builtins.utf8Buf(vm, Vm.asString(src), &buf) catch "";
+                        stale = !std.mem.eql(u8, t, text);
+                    }
+                    if (!stale) handler = try vm.get(Vm.asObject(cached), .{ .atom = try vm.atom("fn") }, cached);
+                }
+                if (stale) {
+                    const source = try std.fmt.allocPrint(vm.meta, "(function (event) {{\n{s}\n}})", .{text});
+                    defer vm.meta.free(source);
+                    handler = p.evalSource(source) catch Value.undefined_;
+                    if (vm.isCallable(handler)) {
+                        const rec = try vm.newObject();
+                        try vm.defineValue(rec, "src", try vm.str(text), .default);
+                        try vm.defineValue(rec, "fn", handler, .default);
+                        _ = try vm.objects.defineOwn(w, .{ .atom = try vm.atom(cache_key) }, rec.asValue(), .hidden);
+                    }
+                }
+            };
+        };
+        if (!vm.isCallable(handler)) return;
+        const this_v = if (node_id) |id| try p.wrapValue(id) else target;
+        const r = vm.call(handler, this_v, &.{ev.asValue()}) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            error.Exception => {
+                var buf: [512]u8 = undefined;
+                const t = p.exceptionText(&buf);
+                vm.exception = Value.undefined_;
+                p.script_errors += 1;
+                p.logf(.err, "script: uncaught {s} (in {s})", .{ t, prop });
+                return;
+            },
+        };
+        if (r.isBool() and !r.asBool()) {
+            const s = ev.internal(Slot);
+            if (s.flags & ev_cancelable != 0) s.flags |= ev_canceled;
+        }
+    }
+
+    /// Compile and run an expression source, for a handler attribute;
+    /// the value of the script (its last expression).
+    fn evalSource(p: *Page, source: []const u8) Error!Value {
+        const vm = p.vm;
+        const src = try p.a.dupe(u8, source);
+        try p.sources.append(p.a, src);
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{ .name = "an event handler attribute" }) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.SyntaxError => {
+                p.script_errors += 1;
+                p.logf(.err, "script: SyntaxError: {s} (in an event handler attribute)", .{js.compiler.last_error});
+                return Value.undefined_;
+            },
+        };
+        return js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_);
+    }
+
     fn invokeListeners(p: *Page, target: Value, ev: *Object, capture: bool) Error!void {
         const vm = p.vm;
         if (!target.isObject()) return;
         const o = Vm.asObject(target);
+        if (!capture) {
+            const slot = ev.internal(Slot);
+            if (slot.flags & ev_stop_immediate == 0) {
+                var tbuf: [64]u8 = undefined;
+                const tv = try vm.get(ev, .{ .atom = try vm.atom("type") }, ev.asValue());
+                if (tv.isString()) {
+                    if (js.builtins.utf8Buf(vm, Vm.asString(tv), &tbuf)) |tn| {
+                        try p.setEventProp(ev, "currentTarget", target);
+                        try p.invokeHandlerAttribute(target, ev, tn);
+                    } else |_| {}
+                }
+            }
+        }
         const list = (try p.listenerList(o, false)) orelse return;
         // A snapshot: listeners added during dispatch do not run now.
         var snap: std.ArrayList(Value) = .empty;
@@ -1375,7 +1539,171 @@ pub const Page = struct {
     fn touch(p: *Page) void {
         p.dirty = true;
     }
+
+    // ---------------------------------------------- mutation records
+
+    /// A mutation at `node`: every observer watching it (or, with
+    /// `subtree`, an ancestor) for this kind gets a record, and the
+    /// delivery microtask is queued once.
+    fn notify(p: *Page, kind: MutationKind, node: NodeId, attr: ?[]const u8, added: []const NodeId, removed: []const NodeId) void {
+        if (p.observers.items.len == 0) return;
+        p.notifyInner(kind, node, attr, added, removed) catch {};
+    }
+
+    fn notifyInner(p: *Page, kind: MutationKind, node: NodeId, attr: ?[]const u8, added: []const NodeId, removed: []const NodeId) Error!void {
+        const vm = p.vm;
+        for (p.observers.items) |ob| {
+            const wants = switch (kind) {
+                .child_list => ob.child_list,
+                .attributes => ob.attributes,
+                .character_data => ob.character_data,
+            };
+            if (!wants) continue;
+            if (ob.target != node and !(ob.subtree and isAncestor(p.doc, ob.target, node))) continue;
+            const rec = try vm.newObject();
+            const mark = vm.heap.tempMark();
+            defer vm.heap.tempRelease(mark);
+            vm.heap.tempPush(rec.cell());
+            try vm.defineValue(rec, "type", try vm.str(switch (kind) {
+                .child_list => "childList",
+                .attributes => "attributes",
+                .character_data => "characterData",
+            }), .default);
+            try vm.defineValue(rec, "target", try p.wrapValue(node), .default);
+            try vm.defineValue(rec, "addedNodes", try nodeList(vm, added), .default);
+            try vm.defineValue(rec, "removedNodes", try nodeList(vm, removed), .default);
+            try vm.defineValue(rec, "attributeName", if (attr) |a| try vm.str(a) else Value.null_, .default);
+            try vm.defineValue(rec, "attributeNamespace", Value.null_, .default);
+            try vm.defineValue(rec, "oldValue", Value.null_, .default);
+            try vm.defineValue(rec, "previousSibling", Value.null_, .default);
+            try vm.defineValue(rec, "nextSibling", Value.null_, .default);
+            try p.mutation_records.append(p.a, .{ .observer = ob.observer, .record = rec.asValue() });
+        }
+        if (p.mutation_records.items.len > 0 and !p.delivery_queued and p.deliver_fn.isObject()) {
+            p.delivery_queued = true;
+            try vm.jobs.append(vm.meta, .{ .func = p.deliver_fn, .args = .{ Value.undefined_, Value.undefined_, Value.undefined_ }, .argc = 0 });
+        }
+    }
+
+    /// The records queued for `observer` (all of them with null), as an
+    /// array, and gone from the queue.
+    fn takeRecordsFor(p: *Page, observer: ?Value) Error!Value {
+        const vm = p.vm;
+        const arr = try vm.newArray(0);
+        const mark = vm.heap.tempMark();
+        defer vm.heap.tempRelease(mark);
+        vm.heap.tempPush(arr.cell());
+        var i: usize = 0;
+        while (i < p.mutation_records.items.len) {
+            const r = p.mutation_records.items[i];
+            if (observer == null or vm.isStrictlyEqual(r.observer, observer.?)) {
+                try vm.arrayPush(arr, r.record);
+                _ = p.mutation_records.orderedRemove(i);
+            } else i += 1;
+        }
+        return arr.asValue();
+    }
+
+    /// The DOM primitives, with the observers told.
+    fn setAttr(p: *Page, id: NodeId, name: []const u8, value: []const u8) Error!void {
+        if (p.doc.isHtml(id, "link") or p.doc.isHtml(id, "style")) p.sheets_dirty = true;
+        try p.doc.setAttr(id, name, value);
+        p.touch();
+        p.notify(.attributes, id, name, &.{}, &.{});
+    }
+
+    fn removeAttr(p: *Page, id: NodeId, name: []const u8) void {
+        if (!p.doc.hasAttr(id, name)) return;
+        if (p.doc.isHtml(id, "link") or p.doc.isHtml(id, "style")) p.sheets_dirty = true;
+        p.doc.removeAttr(id, name);
+        p.touch();
+        p.notify(.attributes, id, name, &.{}, &.{});
+    }
+
+    fn detachNode(p: *Page, id: NodeId) void {
+        const parent = p.doc.get(id).parent orelse return;
+        if (p.touchesSheets(id)) p.sheets_dirty = true;
+        p.doc.detach(id);
+        p.touch();
+        p.notify(.child_list, parent, null, &.{}, &.{id});
+    }
+
+    fn setText(p: *Page, id: NodeId, text: []const u8) Error!void {
+        const n = p.doc.node(id);
+        if (n.parent) |par| if (p.doc.isHtml(par, "style")) {
+            p.sheets_dirty = true;
+        };
+        n.text.clearRetainingCapacity();
+        try n.text.appendSlice(p.doc.a, text);
+        p.touch();
+        p.notify(.character_data, id, null, &.{}, &.{});
+    }
 };
+
+/// The delivery microtask: every observer with records gets its callback
+/// called once with them.
+fn deliverMutations(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    p.delivery_queued = false;
+    while (p.mutation_records.items.len > 0) {
+        const observer = p.mutation_records.items[0].observer;
+        const records = try p.takeRecordsFor(observer);
+        const mark = vm.heap.tempMark();
+        defer vm.heap.tempRelease(mark);
+        if (records.isCell()) vm.heap.tempPush(records.asCell());
+        const cb = try vm.get(Vm.asObject(observer), .{ .atom = try vm.atom("__callback") }, observer);
+        if (vm.isCallable(cb)) _ = vm.call(cb, observer, &.{ records, observer }) catch |e| p.reportError(e, "a MutationObserver callback");
+    }
+    return Value.undefined_;
+}
+
+fn thisObserver(vm: *Vm, this: Value) Error!*Object {
+    if (this.isObject()) {
+        const o = Vm.asObject(this);
+        if ((try vm.objects.getOwn(o, .{ .atom = try vm.atom("__callback") })) != null) return o;
+    }
+    return vm.throwTypeError("Illegal invocation");
+}
+
+fn moObserve(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisObserver(vm, this);
+    const target = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("observe needs a node");
+    var ob: Observation = .{ .observer = o.asValue(), .target = target, .child_list = false, .attributes = false, .character_data = false, .subtree = false };
+    const opts = arg(args, 1);
+    if (opts.isObject()) {
+        const oo = Vm.asObject(opts);
+        ob.child_list = vm.toBoolean(try vm.get(oo, .{ .atom = try vm.atom("childList") }, opts));
+        ob.attributes = vm.toBoolean(try vm.get(oo, .{ .atom = try vm.atom("attributes") }, opts)) or !(try vm.get(oo, .{ .atom = try vm.atom("attributeFilter") }, opts)).isUndefined() or !(try vm.get(oo, .{ .atom = try vm.atom("attributeOldValue") }, opts)).isUndefined();
+        ob.character_data = vm.toBoolean(try vm.get(oo, .{ .atom = try vm.atom("characterData") }, opts)) or !(try vm.get(oo, .{ .atom = try vm.atom("characterDataOldValue") }, opts)).isUndefined();
+        ob.subtree = vm.toBoolean(try vm.get(oo, .{ .atom = try vm.atom("subtree") }, opts));
+    }
+    if (!ob.child_list and !ob.attributes and !ob.character_data) return vm.throwTypeError("observe needs childList, attributes or characterData");
+    // One observation per (observer, target): the newer options win.
+    for (p.observers.items) |*x| if (vm.isStrictlyEqual(x.observer, ob.observer) and x.target == target) {
+        x.* = ob;
+        return Value.undefined_;
+    };
+    try p.observers.append(p.a, ob);
+    return Value.undefined_;
+}
+
+fn moDisconnect(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisObserver(vm, this);
+    var i: usize = 0;
+    while (i < p.observers.items.len) {
+        if (vm.isStrictlyEqual(p.observers.items[i].observer, o.asValue())) _ = p.observers.swapRemove(i) else i += 1;
+    }
+    _ = try p.takeRecordsFor(o.asValue());
+    return Value.undefined_;
+}
+
+fn moTakeRecords(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisObserver(vm, this);
+    return p.takeRecordsFor(o.asValue());
+}
 
 // ------------------------------------------------------------ helpers
 
@@ -1532,19 +1860,26 @@ fn insertNode(p: *Page, parent: NodeId, child: NodeId, before: ?NodeId) Error!vo
     const pk = doc.get(parent).kind;
     if (pk != .element and pk != .document and pk != .fragment) return vm.throwError(.TypeError, "HierarchyRequestError: this node cannot have children");
     if (before) |b| if (doc.get(b).parent != parent) return vm.throwError(.TypeError, "NotFoundError: the reference node is not a child");
+    if (p.touchesSheets(child) or doc.isHtml(parent, "style")) p.sheets_dirty = true;
     if (doc.get(child).kind == .fragment) {
+        var added: std.ArrayList(NodeId) = .empty;
+        defer added.deinit(p.a);
         var c = doc.get(child).first_child;
         while (c) |cid| {
             const next = doc.get(cid).next;
             doc.detach(cid);
             doc.insertBefore(parent, cid, before);
+            try added.append(p.a, cid);
             c = next;
         }
+        p.touch();
+        p.notify(.child_list, parent, null, added.items, &.{});
     } else {
-        doc.detach(child);
+        p.detachNode(child);
         doc.insertBefore(parent, child, before);
+        p.touch();
+        p.notify(.child_list, parent, null, &.{child}, &.{});
     }
-    p.touch();
 }
 
 /// A node argument for `append`-style methods: a node, or a string
@@ -1589,8 +1924,13 @@ fn parseInto(p: *Page, markup: []const u8, ctx: NodeId) Error!NodeId {
     const cn = doc.get(ctx);
     const name: []const u8 = if (cn.kind == .element) cn.name else "body";
     const ns: dom.Namespace = if (cn.kind == .element) cn.namespace else .html;
-    // Parsed into the document's own arena so the strings can be shared.
-    const frag_doc = try html.parseFragment(doc.a, markup, name, ns, .{ .scripting = true });
+    // Parsed in scratch that goes with the call (a parse costs a node
+    // store and a tokenizer beyond the nodes; a page that sets innerHTML
+    // a thousand times must not keep a thousand of them), then adopted
+    // by copy into the document's arena.
+    var scratch = std.heap.ArenaAllocator.init(p.a);
+    defer scratch.deinit();
+    const frag_doc = try html.parseFragment(scratch.allocator(), markup, name, ns, .{ .scripting = true });
     const frag = try doc.createFragment();
     // The fragment parser's output: the children of its root (the
     // synthetic `html` element's context child), adopted by copy.
@@ -1616,8 +1956,9 @@ fn adopt(p: *Page, from: *const dom.Document, id: NodeId) Error!NodeId {
     const n = from.get(id);
     const copy: NodeId = switch (n.kind) {
         .element => blk: {
-            const e = try doc.createElement(n.namespace, n.name);
-            for (n.attrs.items) |at| try doc.setAttr(e, at.name, at.value);
+            // The names and values are the parse's: copied, since it goes.
+            const e = try doc.createElement(n.namespace, try doc.a.dupe(u8, n.name));
+            for (n.attrs.items) |at| try doc.setAttr(e, try doc.a.dupe(u8, at.name), try doc.a.dupe(u8, at.value));
             break :blk e;
         },
         .text => try doc.createText(n.text.items),
@@ -1659,6 +2000,13 @@ fn construct(vm: *Vm, this: Value, args: []const Value, new_target: Value) Error
     if (!interfaces[idx].constructible) return vm.throwTypeError("Illegal constructor");
     if (idx == I.event_target) {
         const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
+        return o.asValue();
+    }
+    if (idx == I.mutation_observer) {
+        const cb = arg(args, 0);
+        if (!vm.isCallable(cb)) return vm.throwTypeError("MutationObserver needs a callback");
+        const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
+        try vm.defineValue(o, "__callback", cb, .hidden);
         return o.asValue();
     }
     if (idx == I.xhr) {
@@ -1798,9 +2146,7 @@ fn setNodeValue(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
     var sc = Scratch.init(vm);
     defer sc.deinit();
     const text = if (v.isNullish()) "" else try strArg(vm, v, sc.a());
-    n.text.clearRetainingCapacity();
-    try n.text.appendSlice(p.doc.a, text);
-    p.touch();
+    try p.setText(id, text);
     return Value.undefined_;
 }
 
@@ -1831,11 +2177,11 @@ fn setTextContent(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Val
     switch (n.kind) {
         .text, .comment => return setNodeValue(vm, this, args, Value.undefined_),
         .element, .fragment => {
-            while (n.first_child) |c| p.doc.detach(c);
+            while (n.first_child) |c| p.detachNode(c);
             const v = arg(args, 0);
             if (!v.isNullish()) {
                 const text = try docStr(vm, v);
-                if (text.len > 0) p.doc.appendChild(id, try p.doc.createText(text));
+                if (text.len > 0) try insertNode(p, id, try p.doc.createText(text), null);
             }
             p.touch();
         },
@@ -1930,8 +2276,7 @@ fn removeChild(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
     const parent = try thisNode(vm, this);
     const child = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("removeChild: not a node");
     if (p.doc.get(child).parent != parent) return vm.throwError(.TypeError, "NotFoundError: the node is not a child");
-    p.doc.detach(child);
-    p.touch();
+    p.detachNode(child);
     return arg(args, 0);
 }
 
@@ -1942,7 +2287,7 @@ fn replaceChild(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
     const old = p.nodeOfValue(arg(args, 1)) orelse return vm.throwTypeError("replaceChild: not a node");
     if (p.doc.get(old).parent != parent) return vm.throwError(.TypeError, "NotFoundError: the node is not a child");
     const next = p.doc.get(old).next;
-    p.doc.detach(old);
+    p.detachNode(old);
     try insertNode(p, parent, new_child, if (next == new_child) null else next);
     return arg(args, 1);
 }
@@ -2068,6 +2413,37 @@ fn setTitle(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     p.touch();
     if (p.host.changed) |f| f(p.host.ctx, .title, std.mem.trim(u8, text, " \t\r\n"));
     return Value.undefined_;
+}
+
+/// `document.write(...)`: while a parser-inserted script runs, its
+/// markup goes right after the script element, parsed as the parser
+/// would have parsed it there; from anywhere else it is refused with a
+/// log line (a document is never blown away here).
+fn documentWriteText(vm: *Vm, args: []const Value, newline: bool) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var text: std.ArrayList(u8) = .empty;
+    for (args) |a| try text.appendSlice(sc.a(), try strArg(vm, a, sc.a()));
+    if (newline) try text.append(sc.a(), '\n');
+    const script = p.current_script orelse {
+        p.log(.warn, "script: document.write outside a parser-inserted script is ignored");
+        return Value.undefined_;
+    };
+    const parent = p.doc.get(script).parent orelse return Value.undefined_;
+    const frag = try parseInto(p, text.items, parent);
+    try insertNode(p, parent, frag, p.doc.get(script).next);
+    return Value.undefined_;
+}
+
+fn documentWrite(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    _ = try thisNode(vm, this);
+    return documentWriteText(vm, args, false);
+}
+
+fn documentWriteln(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    _ = try thisNode(vm, this);
+    return documentWriteText(vm, args, true);
 }
 
 fn getLocation(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -2363,7 +2739,7 @@ fn replaceChildren(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     defer sc.deinit();
     var ids: std.ArrayList(NodeId) = .empty;
     for (args) |a| try ids.append(sc.a(), try nodeOrText(vm, a));
-    while (p.doc.get(parent).first_child) |c| p.doc.detach(c);
+    while (p.doc.get(parent).first_child) |c| p.detachNode(c);
     for (ids.items) |id| try insertNode(p, parent, id, null);
     p.touch();
     return Value.undefined_;
@@ -2374,10 +2750,7 @@ fn replaceChildren(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
 fn removeSelf(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisNode(vm, this);
-    if (p.doc.get(id).parent != null) {
-        p.doc.detach(id);
-        p.touch();
-    }
+    p.detachNode(id);
     return Value.undefined_;
 }
 
@@ -2403,7 +2776,7 @@ fn replaceWith(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
     const id = try thisNode(vm, this);
     const parent = p.doc.get(id).parent orelse return Value.undefined_;
     const next = p.doc.get(id).next;
-    p.doc.detach(id);
+    p.detachNode(id);
     for (args) |a| {
         const n = try nodeOrText(vm, a);
         try insertNode(p, parent, n, if (next == n) null else next);
@@ -2441,8 +2814,7 @@ fn attrGetter(vm: *Vm, this: Value, name: []const u8) Error!Value {
 fn attrSetter(vm: *Vm, this: Value, name: []const u8, v: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    try p.doc.setAttr(id, name, try docStr(vm, v));
-    p.touch();
+    try p.setAttr(id, name, try docStr(vm, v));
     return Value.undefined_;
 }
 
@@ -2454,8 +2826,7 @@ fn boolAttrGetter(vm: *Vm, this: Value, name: []const u8) Error!Value {
 fn boolAttrSetter(vm: *Vm, this: Value, name: []const u8, v: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    if (vm.toBoolean(v)) try p.doc.setAttr(id, name, "") else p.doc.removeAttr(id, name);
-    p.touch();
+    if (vm.toBoolean(v)) try p.setAttr(id, name, "") else p.removeAttr(id, name);
     return Value.undefined_;
 }
 
@@ -2596,8 +2967,7 @@ fn setAttribute(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
     const name = try attrKey(vm, arg(args, 0), p.doc.a);
     if (name.len == 0) return vm.throwError(.TypeError, "InvalidCharacterError: an empty attribute name");
     const value = try docStr(vm, arg(args, 1));
-    try p.doc.setAttr(id, name, value);
-    p.touch();
+    try p.setAttr(id, name, value);
     return Value.undefined_;
 }
 
@@ -2607,10 +2977,7 @@ fn removeAttribute(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     var sc = Scratch.init(vm);
     defer sc.deinit();
     const name = try attrKey(vm, arg(args, 0), sc.a());
-    if (p.doc.hasAttr(id, name)) {
-        p.doc.removeAttr(id, name);
-        p.touch();
-    }
+    p.removeAttr(id, name);
     return Value.undefined_;
 }
 
@@ -2635,9 +3002,8 @@ fn toggleAttribute(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     const has = p.doc.hasAttr(id, name);
     const force = arg(args, 1);
     const want = if (force.isUndefined()) !has else vm.toBoolean(force);
-    if (want and !has) try p.doc.setAttr(id, name, "");
-    if (!want and has) p.doc.removeAttr(id, name);
-    if (want != has) p.touch();
+    if (want and !has) try p.setAttr(id, name, "");
+    if (!want and has) p.removeAttr(id, name);
     return Value.fromBool(want);
 }
 
@@ -2713,7 +3079,7 @@ fn setInnerHTML(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
     const v = arg(args, 0);
     const markup = if (v.isNullish()) "" else try strArg(vm, v, sc.a());
     const frag = try parseInto(p, markup, id);
-    while (p.doc.get(id).first_child) |c| p.doc.detach(c);
+    while (p.doc.get(id).first_child) |c| p.detachNode(c);
     try insertNode(p, id, frag, null);
     return Value.undefined_;
 }
@@ -2737,7 +3103,7 @@ fn setOuterHTML(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
     const markup = try strArg(vm, arg(args, 0), sc.a());
     const frag = try parseInto(p, markup, parent);
     const next = p.doc.get(id).next;
-    p.doc.detach(id);
+    p.detachNode(id);
     try insertNode(p, parent, frag, next);
     return Value.undefined_;
 }
@@ -2853,8 +3219,7 @@ fn writeTokens(p: *Page, id: NodeId, list: []const []const u8) Error!void {
         if (i > 0) try out.append(p.doc.a, ' ');
         try out.appendSlice(p.doc.a, t);
     }
-    try p.doc.setAttr(id, "class", out.items);
-    p.touch();
+    try p.setAttr(id, "class", out.items);
 }
 
 fn tokensLength(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -2875,8 +3240,7 @@ fn tokensValue(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn tokensSetValue(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisTokens(vm, this);
-    try p.doc.setAttr(id, "class", try docStr(vm, arg(args, 0)));
-    p.touch();
+    try p.setAttr(id, "class", try docStr(vm, arg(args, 0)));
     return Value.undefined_;
 }
 
@@ -3080,6 +3444,20 @@ fn alert(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
     const text = try strArg(vm, arg(args, 0), sc.a());
     p.logf(.warn, "alert: {s}", .{text});
     return Value.undefined_;
+}
+
+/// `window.open(url)`: a popup is a navigation here (there is one
+/// window); null comes back, as for a blocked popup.
+fn windowOpen(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const u = arg(args, 0);
+    if (!u.isNullish()) {
+        var sc = Scratch.init(vm);
+        defer sc.deinit();
+        const raw = try strArg(vm, u, sc.a());
+        if (raw.len > 0) try p.navigateTo(raw);
+    }
+    return Value.null_;
 }
 
 fn confirmNative(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
@@ -3502,8 +3880,7 @@ fn writeDeclarations(p: *Page, id: NodeId, decls: []const Decl) Error!void {
         if (d.important) try out.appendSlice(p.doc.a, " !important");
         try out.append(p.doc.a, ';');
     }
-    if (out.items.len == 0) p.doc.removeAttr(id, "style") else try p.doc.setAttr(id, "style", out.items);
-    p.touch();
+    if (out.items.len == 0) p.removeAttr(id, "style") else try p.setAttr(id, "style", out.items);
 }
 
 fn stylePropertyGet(vm: *Vm, this: Value, name: []const u8) Error!Value {
@@ -3638,8 +4015,7 @@ fn styleSetCssText(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     if (ref.computed) return vm.throwError(.TypeError, "NoModificationAllowedError: a computed style is read-only");
     const v = arg(args, 0);
     const text = if (v.isNullish()) "" else try docStr(vm, v);
-    if (std.mem.trim(u8, text, " \t\r\n").len == 0) p.doc.removeAttr(ref.id, "style") else try p.doc.setAttr(ref.id, "style", text);
-    p.touch();
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) p.removeAttr(ref.id, "style") else try p.setAttr(ref.id, "style", text);
     return Value.undefined_;
 }
 
@@ -3987,8 +4363,7 @@ fn sheetDisabled(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn sheetSetDisabled(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisSheet(vm, this);
-    if (vm.toBoolean(arg(args, 0))) try p.doc.setAttr(id, "disabled", "") else p.doc.removeAttr(id, "disabled");
-    p.touch();
+    if (vm.toBoolean(arg(args, 0))) try p.setAttr(id, "disabled", "") else p.removeAttr(id, "disabled");
     return Value.undefined_;
 }
 
@@ -4077,6 +4452,7 @@ fn rewriteSheet(vm: *Vm, id: NodeId, insert: ?[]const u8, index: usize, remove: 
     while (p.doc.get(id).first_child) |c| p.doc.detach(c);
     p.doc.appendChild(id, try p.doc.createText(try p.doc.a.dupe(u8, out.items)));
     p.touch();
+    p.sheets_dirty = true;
 }
 
 fn sheetInsertRule(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
@@ -4097,6 +4473,27 @@ fn sheetDeleteRule(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     try rewriteSheet(vm, id, null, @intFromFloat(idx), true);
     return Value.undefined_;
 }
+
+/// Wraps `localStorage` and `sessionStorage` in Proxies so a name is
+/// an item: `s.foo`, `s.foo = 1`, `delete s.foo`, `'foo' in s`,
+/// `Object.keys(s)`. The interface's own members still win.
+const named_storage_source =
+    \\(function () {
+    \\  function wrap(store) {
+    \\    var own = function (k) { return typeof k === 'symbol' || k in Storage.prototype; };
+    \\    return new Proxy(store, {
+    \\      get: function (t, k) { if (own(k)) { var v = t[k]; return typeof v === 'function' ? v.bind(t) : v; } var r = t.getItem(String(k)); return r === null ? undefined : r; },
+    \\      set: function (t, k, v) { if (own(k)) { t[k] = v; return true; } t.setItem(String(k), String(v)); return true; },
+    \\      has: function (t, k) { return own(k) || t.getItem(String(k)) !== null; },
+    \\      deleteProperty: function (t, k) { if (!own(k)) t.removeItem(String(k)); return true; },
+    \\      ownKeys: function (t) { var ks = []; for (var i = 0; i < t.length; i++) ks.push(t.key(i)); return ks; },
+    \\      getOwnPropertyDescriptor: function (t, k) { if (own(k)) return undefined; var v = t.getItem(String(k)); return v === null ? undefined : { value: v, writable: true, enumerable: true, configurable: true }; }
+    \\    });
+    \\  }
+    \\  Object.defineProperty(window, 'localStorage', { value: wrap(window.localStorage), configurable: true, writable: true, enumerable: false });
+    \\  Object.defineProperty(window, 'sessionStorage', { value: wrap(window.sessionStorage), configurable: true, writable: true, enumerable: false });
+    \\})();
+;
 
 // ------------------------------------------------------------- Storage
 
@@ -4269,16 +4666,12 @@ fn xhrOpen(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return Value.undefined_;
 }
 
-/// An event handler IDL attribute (`onload`) called, then the event fired.
+/// An XHR event fired at the request object (its `on…` property is
+/// called by the dispatch, like any handler property).
 fn xhrHandler(vm: *Vm, o: *Object, attr: []const u8, event_name: []const u8) Error!void {
+    _ = attr;
     const p = pageOf(vm);
-    const h = try vm.get(o, .{ .atom = try vm.atom(attr) }, o.asValue());
     const ev = try p.newEvent(I.event, event_name, false, false, true);
-    if (vm.isCallable(h)) {
-        try p.setEventProp(ev, "target", o.asValue());
-        try p.setEventProp(ev, "currentTarget", o.asValue());
-        _ = vm.call(h, o.asValue(), &.{ev.asValue()}) catch |e| p.reportError(e, attr);
-    }
     _ = p.dispatch(o.asValue(), ev) catch |e| p.reportError(e, event_name);
 }
 
@@ -4358,6 +4751,25 @@ const TestHost = struct {
     activated: ?NodeId = null,
     /// A tiny in-memory store: key/value pairs per test host.
     store: std.ArrayList([2][]u8) = .empty,
+    /// A directory whose files answer fetches and requests by the URL's
+    /// last segment (the Acid3 support files), and what was read.
+    dir: ?[]const u8 = null,
+    served: std.ArrayList([]u8) = .empty,
+    fn serveFile(h: *TestHost, abs_url: []const u8) ?[]const u8 {
+        const dir = h.dir orelse return null;
+        const path_end = std.mem.indexOfAny(u8, abs_url, "?#") orelse abs_url.len;
+        const path = abs_url[0..path_end];
+        const name = path[(std.mem.lastIndexOfScalar(u8, path, '/') orelse return null) + 1 ..];
+        if (name.len == 0 or std.mem.indexOfScalar(u8, name, '.') == null) return null;
+        var pbuf: [512]u8 = undefined;
+        const full = std.fmt.bufPrint(&pbuf, "{s}/{s}", .{ dir, name }) catch return null;
+        const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, full, h.a, .limited(4 << 20)) catch return null;
+        h.served.append(h.a, text) catch {
+            h.a.free(text);
+            return null;
+        };
+        return text;
+    }
     fn log(ctx: *anyopaque, level: Level, text: []const u8) void {
         const h: *TestHost = @ptrCast(@alignCast(ctx));
         h.lines.appendSlice(h.a, @tagName(level)) catch {};
@@ -4378,7 +4790,9 @@ const TestHost = struct {
         const h: *TestHost = @ptrCast(@alignCast(ctx));
         h.scrolled_to = .{ x, y };
     }
-    fn fetch(_: *anyopaque, abs_url: []const u8) ?[]const u8 {
+    fn fetch(ctx: *anyopaque, abs_url: []const u8) ?[]const u8 {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        if (h.dir != null) return h.serveFile(abs_url);
         if (std.mem.endsWith(u8, abs_url, "/lib/greet.js")) return "import { name } from './name.js'; export function greet() { return 'hi ' + name; } export default 42;";
         if (std.mem.endsWith(u8, abs_url, "/lib/name.js")) return "export const name = 'moss';";
         if (std.mem.endsWith(u8, abs_url, "/late.js")) return "export const late = 'late';";
@@ -4459,8 +4873,21 @@ const TestHost = struct {
             .length => return .{ .count = @intCast(h.store.items.len) },
         }
     }
-    fn request(_: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, origin: []const u8, out: *Response) bool {
+    fn request(ctx: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, origin: []const u8, out: *Response) bool {
         out.url = abs_url;
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        if (h.dir != null) {
+            const text = h.serveFile(abs_url) orelse {
+                out.status = 404;
+                out.content_type = "text/plain";
+                out.body = "no such file";
+                return true;
+            };
+            out.status = 200;
+            out.content_type = if (std.mem.endsWith(u8, abs_url, ".xml")) "text/xml" else if (std.mem.endsWith(u8, abs_url, ".css")) "text/css" else if (std.mem.endsWith(u8, abs_url, ".html")) "text/html" else if (std.mem.endsWith(u8, abs_url, ".png")) "image/png" else "application/octet-stream";
+            out.body = text;
+            return true;
+        }
         // Another origin: allowed only with the origin sent (the broker
         // would check the answer's header); this one answers by echo.
         if (std.mem.indexOf(u8, abs_url, "elsewhere.test") != null) {
@@ -4533,6 +4960,8 @@ const TestPage = struct {
             ta.free(kv[1]);
         }
         tp.host.store.deinit(ta);
+        for (tp.host.served.items) |t| ta.free(t);
+        tp.host.served.deinit(ta);
         ta.destroy(tp.host);
         tp.arena.deinit();
         ta.destroy(tp);
@@ -4894,6 +5323,118 @@ test "script: keys reach the focused element as keyboard events, and stylesheets
         \\
     , tp.host.lines.items);
     try std.testing.expect(std.mem.indexOf(u8, tp.doc.textContent(style, tp.arena.allocator()) catch "", "body { margin: 0 }") != null);
+}
+
+test "script: mutation observers see the tree, attributes and text change, delivered as a microtask" {
+    const tp = try TestPage.open(
+        \\<body><div id="d"><p id="p">text</p></div><script>
+        \\  var out = [];
+        \\  var d = document.getElementById('d'), p = document.getElementById('p');
+        \\  var mo = new MutationObserver(function (records, observer) {
+        \\    out.push(records.map(function (r) { return r.type + ':' + (r.target.id || r.target.nodeName) + ':' + r.addedNodes.length + ':' + r.removedNodes.length + ':' + r.attributeName; }).join(',') + '|' + (observer === mo));
+        \\  });
+        \\  mo.observe(d, { childList: true, attributes: true, characterData: true, subtree: true });
+        \\  var e = document.createElement('span'); e.id = 'e'; d.appendChild(e);
+        \\  p.setAttribute('title', 't'); p.classList.add('c'); p.style.color = 'red';
+        \\  p.firstChild.data = 'changed';
+        \\  p.remove();
+        \\  out.push('sync:' + out.length);
+        \\  Promise.resolve().then(function () { out.push('after:' + out.length); });
+        \\  var other = new MutationObserver(function () { out.push('other'); });
+        \\  other.observe(document.body, { childList: true });
+        \\  d.appendChild(document.createElement('i'));
+        \\  out.push('taken:' + other.takeRecords().length);
+        \\  other.disconnect();
+        \\  document.body.appendChild(document.createElement('b'));
+        \\  window.report = function () { console.log(out.join(' ')); };
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    tp.page.runSource("report()", "check");
+    try std.testing.expectEqualStrings("log:sync:0 taken:0 childList:d:1:0:null,attributes:p:0:0:title,attributes:p:0:0:class,attributes:p:0:0:style,characterData:#text:0:0:null,childList:d:0:1:null,childList:d:1:0:null|true after:3\n", tp.host.lines.items);
+}
+
+test "script: a storage answers to names through its proxy" {
+    const tp = try TestPage.open(
+        \\<body><script>
+        \\  var out = [];
+        \\  localStorage.color = 'blue'; localStorage['n'] = 3;
+        \\  out.push(localStorage.color, localStorage.n, typeof localStorage.n, localStorage.getItem('color'), localStorage.length, 'color' in localStorage, 'zz' in localStorage, localStorage.zz);
+        \\  delete localStorage.color;
+        \\  out.push(localStorage.length, Object.keys(localStorage).join('+'), localStorage instanceof Storage, typeof localStorage.setItem);
+        \\  sessionStorage.x = 'y'; out.push(sessionStorage.getItem('x'), localStorage.getItem('x'));
+        \\  console.log(out.join(' '));
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    // (`join` renders undefined and null as nothing.)
+    try std.testing.expectEqualStrings("log:blue 3 string blue 2 true false  1 n true function y \n", tp.host.lines.items);
+}
+
+test "script: handler attributes and properties run, and document.write inserts after its script" {
+    const tp = try TestPage.open(
+        \\<body onload="window.loaded = 'body:' + (this === document.body) + ':' + event.type">
+        \\<button id="b" onclick="out.push('attr:' + event.type + ':' + (this === document.getElementById('b'))); return false">B</button>
+        \\<a id="l" href="/x" onclick="return false">x</a>
+        \\<p id="before">before</p><script>var out = []; document.write('<i id="w">w</i>'); out.push('written:' + (document.getElementById('w').previousSibling.tagName));</script><p id="after">after</p>
+        \\<script>
+        \\  var b = document.getElementById('b');
+        \\  b.addEventListener('click', function (e) { out.push('listener:' + e.defaultPrevented); });
+        \\  b.onclick = function (e) { out.push('prop'); };
+        \\  document.getElementById('w').onmouseover = null;
+        \\  window.addEventListener('load', function () { out.push(window.loaded); document.write('late'); console.log(out.join(' ')); });
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    var w = tp.doc.walk(dom.document_id);
+    var button: NodeId = 0;
+    var link: NodeId = 0;
+    while (w.next()) |id| {
+        if (tp.doc.isHtml(id, "button")) button = id;
+        if (tp.doc.isHtml(id, "a")) link = id;
+    }
+    // The property set by script replaced the attribute's handler: no
+    // 'return false' now, so the click goes on; the link's attribute
+    // still prevents.
+    try std.testing.expect(tp.page.click(button));
+    try std.testing.expect(!tp.page.click(link));
+    tp.page.runSource("console.log(out.join(' '))", "check");
+    // (The load listener's document.write is refused first, then it logs.)
+    try std.testing.expectEqualStrings("warn:script: document.write outside a parser-inserted script is ignored\nlog:written:SCRIPT body:true:load\nlog:written:SCRIPT body:true:load prop listener:false\n", tp.host.lines.items);
+}
+
+// Acid3 on the host, when fetched (tools/fetch-acid3.sh): the page's
+// scripts run, its timer chain is driven to the end on a fake clock,
+// and the score is printed with the document arena's growth — the
+// stage's exit criterion measured in the fast loop, never asserted.
+test "script: acid3 on the host (when fetched): the score, printed" {
+    const ta = std.testing.allocator;
+    const dir = "tools/testdata/acid3";
+    const markup = std.Io.Dir.cwd().readFileAlloc(std.testing.io, dir ++ "/test.html", ta, .limited(4 << 20)) catch return error.SkipZigTest;
+    defer ta.free(markup);
+    const tp = try TestPage.open(markup);
+    defer tp.close();
+    tp.host.dir = dir;
+    try tp.page.setUrl("http://acid3.test/acid3/test.html");
+    const arena_before = tp.arena.queryCapacity();
+    tp.page.runScripts();
+    var now: f64 = 0;
+    var ticks: usize = 0;
+    while (tp.page.nextDue()) |due| : (ticks += 1) {
+        now = @max(now + 1, due);
+        tp.page.fake_now = now;
+        _ = tp.page.runDue(now);
+        if (now > 300_000 or ticks > 100_000) break;
+    }
+    var score: []const u8 = "?";
+    var w = tp.doc.walk(dom.document_id);
+    while (w.next()) |id| if (tp.doc.get(id).kind == .element) if (tp.doc.getAttr(id, "id")) |i| if (std.mem.eql(u8, i, "score")) {
+        score = try tp.doc.textContent(id, tp.arena.allocator());
+    };
+    std.debug.print("acid3 (host): {s}/100 after {d} timer ticks and {d} ms of page time; document arena +{d} KB; {d} script errors\n", .{ score, ticks, @as(u64, @intFromFloat(now)), (tp.arena.queryCapacity() - arena_before) / 1024, tp.page.script_errors });
 }
 
 test "script: the wrappers survive a collection at every safe point" {

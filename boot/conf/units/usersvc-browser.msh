@@ -3,7 +3,7 @@
 # the plain `net` unit — the one the web fixture servers use — so the
 # session's browser and the fixtures share one network stack and its
 # loopback. Sized to host a session that opens the browser with two
-# page domains (76 MB each) beside the top bar and dock.
+# page domains (84 MB each) beside the top bar and dock.
 {
   image:    users
   arg:      1

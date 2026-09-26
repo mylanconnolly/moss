@@ -198,7 +198,7 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     _ = usys.log(glog, "webpagecli: clicked through to the second page");
 
     // 3. The document, read back.
-    demand(host.send(a, .{ .dump = .html }), "send dump", 45);
+    demand(host.send(a, .{ .dump = .{ .what = .html } }), "send dump", 45);
     waitEvent(a, .dumped, 100);
     demand(!pa.dumped_cut and std.mem.indexOf(u8, pa.dumped(), "<h1>About the fixtures</h1>") != null, "the dump lacks the heading", 46);
 
@@ -207,18 +207,18 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     const app = "http://www.moss.test:8080/app.html";
     demand(host.send(a, .{ .scripts = false }), "send scripts off", 56);
     loadPage(a, app);
-    demand(host.send(a, .{ .dump = .html }), "send dump", 57);
+    demand(host.send(a, .{ .dump = .{ .what = .html } }), "send dump", 57);
     waitEvent(a, .dumped, 100);
     demand(std.mem.indexOf(u8, pa.dumped(), "data-loaded") == null, "scripts ran while off", 58);
     demand(std.mem.indexOf(u8, pa.dumped(), "Scripts are off.") != null, "noscript content was not shown with scripts off", 59);
     demand(host.send(a, .{ .scripts = true }), "send scripts on", 60);
     loadPage(a, app);
-    demand(host.send(a, .{ .dump = .html }), "send dump", 61);
+    demand(host.send(a, .{ .dump = .{ .what = .html } }), "send dump", 61);
     waitEvent(a, .dumped, 100);
     demand(std.mem.indexOf(u8, pa.dumped(), "data-loaded=\"complete\"") != null, "scripts did not run when on again", 62);
     // A key goes to the script before the page acts on it.
     demand(host.send(a, .{ .key = .{ .code = 0, .ch = 'k' } }), "send key", 63);
-    demand(host.send(a, .{ .dump = .html }), "send dump", 64);
+    demand(host.send(a, .{ .dump = .{ .what = .html } }), "send dump", 64);
     waitEvent(a, .dumped, 100);
     demand(std.mem.indexOf(u8, pa.dumped(), "data-key=\"k/KeyK\"") != null, "the key did not reach the script", 65);
     _ = usys.log(glog, "webpagecli: scripts off and on ok");

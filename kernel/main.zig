@@ -436,6 +436,12 @@ export fn kmain(boot_arg: u64) noreturn {
         };
     }
 
+    if (build_options.acid3_test) {
+        _ = sched.spawn("boot-watch", acid3TestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
+
     if (build_options.browser_test) {
         _ = sched.spawn("boot-watch", browserTestWorker, 0, .{}) catch |e| {
             std.debug.panic("spawn boot-watch: {t}", .{e});
@@ -1198,6 +1204,12 @@ fn guiRunWorker(_: u64) void {
 }
 
 fn systemDrill(comptime name: []const u8) void {
+    systemDrillWithin(name, 60);
+}
+
+/// `systemDrill` with its own hang deadline: a drill that waits on a
+/// page's timer chain (Acid3's hundred tests) needs more than a minute.
+fn systemDrillWithin(comptime name: []const u8, comptime hang_seconds: u64) void {
     const frames_before = pmem.stats().free_bytes;
 
     log.info(name ++ ": spawning root (profile {t})", .{boot_profile});
@@ -1222,7 +1234,7 @@ fn systemDrill(comptime name: []const u8) void {
 
     // A hang is a failure with a dump, not a runner timeout on a silent
     // log: past the deadline, every thread and core is printed.
-    const hang_ticks = 60 * timer.ticks_per_second;
+    const hang_ticks = hang_seconds * timer.ticks_per_second;
     var waited: u64 = 0;
     while (!(root.state == .dying and domain.drained(root))) {
         sched.sleep(2);
@@ -1233,7 +1245,7 @@ fn systemDrill(comptime name: []const u8) void {
             ipc.debugDumpNotifications();
             irq.debugDump();
             trace.dump();
-            std.debug.panic(name ++ "-test: HANG — the system has not shut down after 60s", .{});
+            std.debug.panic(name ++ "-test: HANG — the system has not shut down after {d}s", .{hang_seconds});
         }
     }
     domain.finishTeardown(root);
@@ -1288,6 +1300,10 @@ fn browserTestWorker(_: u64) void {
 
 fn jsrunTestWorker(_: u64) void {
     systemDrill("jsrun");
+}
+
+fn acid3TestWorker(_: u64) void {
+    systemDrillWithin("acid3", 120);
 }
 
 /// The entropy driver: virtio-rng behind the standard driver grants plus

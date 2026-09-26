@@ -70,7 +70,8 @@ const render_shape = blk: {
 const render_result = mshl.resultShape(render_shape, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
-    if (std.mem.eql(u8, name, "web-render")) return .{ .params = &.{.{ .name = "url", .shape = .string }}, .ret = render_result };
+    if (std.mem.eql(u8, name, "web-render")) return .{ .params = &.{ .{ .name = "url", .shape = .string }, .{ .name = "options", .shape = .record, .optional = true } }, .ret = render_result };
+    // (`options`: `{ settle: MS, select: SELECTOR }`.)
     return null;
 }
 
@@ -83,6 +84,24 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (!std.mem.eql(u8, name, "web-render")) return null;
     if (args.len < 1 or args[0] != .str) return it.fail("web-render: a URL is needed", .{});
     const url = args[0].str;
+    // `{ settle: MS }`: how long to keep ticking a page whose scripts
+    // still have timers pending after `load` (a test suite that runs on
+    // a timer chain needs more than a page that lays itself out).
+    var settle_ms: u64 = 2000;
+    // `{ select: SELECTOR }`: hand back only the matching elements (as a
+    // fragment's children) — a big page's whole tree would not fit the
+    // script's line heap, and a script usually wants one part of it.
+    var select: ?[]const u8 = null;
+    if (args.len > 1 and args[1] == .record) {
+        if (args[1].record.get("settle")) |v| {
+            if (v != .int or v.int < 0) return it.fail("web-render: settle must be milliseconds", .{});
+            settle_ms = @intCast(@min(v.int, 120_000));
+        }
+        if (args[1].record.get("select")) |v| {
+            if (v != .str) return it.fail("web-render: select must be a selector", .{});
+            select = v.str;
+        }
+    }
     if (spawner == 0) return errResult(it, "web-render: this program holds no spawner", .{});
     const n = net orelse return errResult(it, "web-render: no network view", .{});
     if (n.chan == 0) return errResult(it, "web-render: no network view", .{});
@@ -101,8 +120,8 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         .dead => return errResult(it, "web-render: the page died", .{}),
         .stuck => return errResult(it, "web-render: the page never finished", .{}),
     }
-    if (!settle(h, id)) return errResult(it, "web-render: the page died", .{});
-    if (!h.send(id, .{ .dump = .html })) return errResult(it, "web-render: the page took no command", .{});
+    if (!settle(h, id, settle_ms)) return errResult(it, "web-render: the page died", .{});
+    if (!h.send(id, .{ .dump = if (select) |sel| .{ .what = .selected, .select = sel } else .{ .what = .html } })) return errResult(it, "web-render: the page took no command", .{});
     var steps: usize = 0;
     while (steps < 10_000) : (steps += 1) {
         switch (h.step()) {
@@ -112,9 +131,35 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
     } else return errResult(it, "web-render: the page never answered", .{});
     const p = h.page(id);
+    // The page selected on its side: what comes back is the matches'
+    // markup, parsed here as a fragment (`#fragment` with the matches
+    // as its children) — or the whole document as before.
     const markup = try it.arena.dupe(u8, p.dumped());
-    const doc = web.html.parse(it.arena, markup, .{}) catch return mshl.Error.OutOfMemory;
-    const dom_value = try webcmds.toDataFrom(it, doc, web.dom.document_id, false);
+    const doc = if (select != null)
+        web.html.parseFragment(it.arena, markup, "body", .html, .{}) catch return mshl.Error.OutOfMemory
+    else
+        web.html.parse(it.arena, markup, .{}) catch return mshl.Error.OutOfMemory;
+    const dom_value = if (select != null) blk: {
+        // The fragment parser's tree: an `html` root with the matches as
+        // its children; handed back as a fragment of them.
+        const frag = try doc.createFragment();
+        var root: ?web.dom.NodeId = null;
+        var w = doc.walk(web.dom.document_id);
+        while (w.next()) |nid| if (doc.isHtml(nid, "html")) {
+            root = nid;
+            break;
+        };
+        if (root) |b| {
+            var c = doc.get(b).first_child;
+            while (c) |cid| {
+                const next = doc.get(cid).next;
+                doc.detach(cid);
+                doc.appendChild(frag, cid);
+                c = next;
+            }
+        }
+        break :blk try webcmds.toDataFrom(it, doc, frag, false);
+    } else try webcmds.toDataFrom(it, doc, web.dom.document_id, false);
     const keys = try it.arena.dupe([]const u8, &.{ "url", "title", "dom" });
     const vals = try it.arena.dupe(Value, &.{ .{ .str = try it.arena.dupe(u8, p.urlText()) }, .{ .str = try it.arena.dupe(u8, p.titleText()) }, dom_value });
     return try it.mkResult(true, .{ .record = .{ .keys = keys, .vals = vals } });
@@ -124,13 +169,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
 /// and frames pending (a page that builds itself after `load`). This
 /// program is the page's clock, so it sleeps until each wake is due,
 /// ticks the page, and serves it until it parks again — for up to two
-/// seconds of wall time, which is a headless render's patience.
-fn settle(h: *webhost.Host, id: webhost.PageId) bool {
+/// seconds of wall time by default, which is a headless render's
+/// patience; `{ settle: MS }` asks for more.
+fn settle(h: *webhost.Host, id: webhost.PageId, budget_ms: u64) bool {
     const t0 = usys.nowMs();
     var rounds: usize = 0;
-    while (rounds < 200) : (rounds += 1) {
+    while (rounds < 20_000) : (rounds += 1) {
         const delay = h.wakeDelay(id) orelse return true;
-        if (usys.nowMs() - t0 > 2000) return true;
+        if (usys.nowMs() - t0 > budget_ms) return true;
         if (delay > 0) usys.sleepMs(@min(delay, 250));
         h.tickWakes();
         // Serve until the page has taken the tick and parked on `next`.

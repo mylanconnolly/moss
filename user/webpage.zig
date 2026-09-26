@@ -148,7 +148,9 @@ fn resetDocument() void {
 /// atoms, compiled code, the wrapper table), both reset per navigation
 /// — a document's scripts die with the document.
 var js_region: [8 << 20]u8 align(16) = undefined;
-var js_meta_buf: [8 << 20]u8 align(16) = undefined;
+/// 16 MB: compiling a 180 KB script (Acid3's) holds its parse tree
+/// here until the code is out, and a real site's script is larger.
+var js_meta_buf: [16 << 20]u8 align(16) = undefined;
 var js_meta: mosslib.heapalloc.Allocator = undefined;
 var vm: js.vm.Vm = undefined;
 var scripts: script.Page = undefined;
@@ -177,14 +179,14 @@ fn scriptNow() f64 {
 /// first (a browser flushes layout on such a read), then the box in CSS
 /// pixels relative to the viewport.
 fn scriptRect(_: *anyopaque, id: dom.NodeId) ?[4]f64 {
-    if (scripts_up and scripts.takeDirty()) relayout(true);
+    if (scripts_up and scripts.takeDirty()) relayout(scripts.takeSheetsDirty() or page.sheets.len == 0);
     const r = nodeRect(id) orelse return null;
     const s = zoomScale();
     return .{ r[0] / s, (r[1] - page.scroll_y) / s, r[2] / s, r[3] / s };
 }
 
 fn scriptComputed(_: *anyopaque, id: dom.NodeId, name: []const u8, buf: []u8) ?[]const u8 {
-    if (scripts_up and scripts.takeDirty()) relayout(true);
+    if (scripts_up and scripts.takeDirty()) relayout(scripts.takeSheetsDirty() or page.sheets.len == 0);
     const styles = page.styles orelse return null;
     if (id >= styles.computed.len) return null;
     return web.style.propertyText(styles.get(id), name, buf);
@@ -345,7 +347,11 @@ fn stopScripts() void {
 /// again; and if a timer is pending, ask the host for the wake.
 fn afterScript() void {
     if (!scripts_up) return;
-    if (scripts.takeDirty()) relayout(true);
+    // The sheets are read again only when a script touched one (or they
+    // were never read: a script running before the first layout): a
+    // relayout that recollects them parses them into the document arena
+    // (Acid3's thousand mutations grew it to 40 MB, 2026-09-26).
+    if (scripts.takeDirty()) relayout(scripts.takeSheetsDirty() or page.sheets.len == 0);
     scheduleWake();
     runPendingNavigation();
 }
@@ -1893,14 +1899,28 @@ fn find(text: []const u8, index: u64) void {
     paintAll();
 }
 
-fn dump(what: wire.Dump) void {
-    _ = what;
+fn dump(what: wire.Dump, selector: []const u8) void {
     const doc = page.doc orelse {
         event(.dumped, 0, 0);
         return;
     };
+    // Serialized in the layout arena's scratch: a dump is not the document's.
+    var scratch = std.heap.ArenaAllocator.init(layoutArena());
+    defer scratch.deinit();
+    const sa = scratch.allocator();
     var out: std.ArrayList(u8) = .empty;
-    web.html.serialize(arena(), doc, dom.document_id, &out) catch outOfMemory();
+    switch (what) {
+        .html => web.html.serialize(sa, doc, dom.document_id, &out) catch outOfMemory(),
+        .selected => {
+            const sel = web.selectors.Selector.parse(sa, selector) catch {
+                event(.dumped, 0, 0);
+                return;
+            };
+            var ids: std.ArrayList(dom.NodeId) = .empty;
+            sel.queryAll(doc, dom.document_id, sa, &ids) catch outOfMemory();
+            for (ids.items) |id| web.html.serializeOuter(sa, doc, id, &out) catch outOfMemory();
+        },
+    }
     const n = @min(out.items.len, data_len);
     @memcpy(data[0..n], out.items[0..n]);
     event(.dumped, n, if (n < out.items.len) 1 else 0);
@@ -1917,7 +1937,12 @@ fn serve() noreturn {
             .scroll => |s| scrollBy(@floatFromInt(@as(i64, @bitCast(s.dy)))),
             .pointer => |p| pointer(std.enums.fromInt(wire.PointerKind, p.kind) orelse .move, p.x, p.y),
             .key => |k| key(@truncate(k.ch)),
-            .dump => |d| dump(std.enums.fromInt(wire.Dump, d.what) orelse .html),
+            .dump => |d| {
+                var sel: [512]u8 = undefined;
+                const n = @min(@min(d.len, data_len), sel.len);
+                @memcpy(sel[0..n], data[0..n]);
+                dump(std.enums.fromInt(wire.Dump, d.what) orelse .html, sel[0..n]);
+            },
             .resize => |r| resize(r.w, r.h),
             .find => |f| {
                 var text: [256]u8 = undefined;

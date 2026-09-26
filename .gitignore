@@ -3,3 +3,4 @@ zig-out/
 tools/testdata/test262/
 tools/testdata/ucd/
 tools/testdata/octane/
+tools/testdata/acid3/

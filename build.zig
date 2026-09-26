@@ -383,6 +383,11 @@ pub fn build(b: *std.Build) void {
         "jsrun-test",
         "Run the JavaScript drill: a script runs programs in script domains and checks their values, output and errors",
     ) orelse false;
+    const acid3_test = b.option(
+        bool,
+        "acid3-test",
+        "Run the Acid3 drill: a page domain renders the Acid3 test (when fetched) and its score is printed",
+    ) orelse false;
     const browser_test = b.option(
         bool,
         "browser-test",
@@ -540,6 +545,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "webpage_test", webpage_test);
     build_opts.addOption(bool, "browser_test", browser_test);
     build_opts.addOption(bool, "jsrun_test", jsrun_test);
+    build_opts.addOption(bool, "acid3_test", acid3_test);
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -758,6 +764,7 @@ pub fn build(b: *std.Build) void {
         "conf/units/dotd.msh",              "conf/dot.msh",
         "conf/units/dot-script.msh",        "scripts/dot-drill.msh",
         "conf/units/webfix.msh",            "scripts/webfix.msh",
+        "conf/units/acid3-script.msh",      "scripts/acid3-drill.msh",
         "conf/units/webfix-tls.msh",        "scripts/webfix-tls.msh",
         "conf/units/web-script.msh",        "scripts/web-drill.msh",
         "conf/units/jsrun-script.msh",      "scripts/jsrun-drill.msh",
@@ -835,6 +842,15 @@ pub fn build(b: *std.Build) void {
         pack.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
         pack_guest.addPrefixedFileArg(b.fmt("{s}=", .{f}), b.path(b.fmt("boot/{s}", .{f})));
     }
+    // The Acid3 test, when fetched (tools/fetch-acid3.sh into
+    // tools/testdata/acid3, ignored by git): served by the web fixture
+    // under web/acid3/ for the acid3 drill, which skips without it.
+    if (std.Io.Dir.cwd().access(b.graph.io, "tools/testdata/acid3/test.html", .{})) |_| {
+        for ([_][]const u8{ "test.html", "empty.css", "empty.html", "empty.png", "empty.xml", "support-a.png", "support-b.png", "svg.xml", "xhtml.1", "xhtml.2", "xhtml.3" }) |f| {
+            pack.addPrefixedFileArg(b.fmt("web/acid3/{s}=", .{f}), b.path(b.fmt("tools/testdata/acid3/{s}", .{f})));
+            pack_guest.addPrefixedFileArg(b.fmt("web/acid3/{s}=", .{f}), b.path(b.fmt("tools/testdata/acid3/{s}", .{f})));
+        }
+    } else |_| {}
     // The language's standard library: mshl modules under lib/msh/,
     // host-tested with the interpreter, served by the archive as lib/
     // and installed into the store at boot (`use math`).
@@ -968,7 +984,7 @@ pub fn build(b: *std.Build) void {
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
             "editor_test",     "activity_test",  "netconf_test",    "console_test",
             "nodes_test",      "nodevm_test",    "web_test",        "webpage_test",
-            "browser_test",    "jsrun_test",
+            "browser_test",    "jsrun_test",     "acid3_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1502,7 +1518,7 @@ pub fn build(b: *std.Build) void {
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
         "editor_test",     "activity_test",  "netconf_test",    "console_test",
         "nodes_test",      "nodevm_test",    "web_test",        "webpage_test",
-        "browser_test",    "jsrun_test",
+        "browser_test",    "jsrun_test",     "acid3_test",
     };
     const variants = [_][]const u8{
         "panic",     "fault",     "sched",     "domain",   "ipc",        "init",
@@ -1517,7 +1533,7 @@ pub fn build(b: *std.Build) void {
         "localeupd", "desktop",   "topbar",    "dock",     "listdemo",   "explorer",
         "browse",    "netbrowse", "cascade",   "terminal", "editor",     "activity",
         "netconf",   "console",   "nodes",     "nodevm",   "web",        "webpage",
-        "browser",   "jsrun",
+        "browser",   "jsrun",     "acid3",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

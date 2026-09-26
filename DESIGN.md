@@ -7215,6 +7215,64 @@ list the bindings hand out. The webpagecli drill sends a key with
 scripts on and finds it in the document; the web drill reads the
 sheet count and a rule's selector back.
 
+**Stage 11i, observers, handlers, and the Acid3 number (as built,
+2026-09-26).** `MutationObserver` watches the DOM through the
+bindings' own primitives: every attribute write, child insertion or
+removal and text change goes through `Page.setAttr`, `insertNode`,
+`detachNode` and `setText`, which tell each observation that covers
+the node (its target, or an ancestor with `subtree`) and queue a
+record; the first record queues one delivery microtask (a native the
+page keeps rooted), which hands each observer its records — so a
+framework that batches its work on a microtask sees the batch, not
+the keystrokes. `takeRecords` and `disconnect` do what they say.
+Event handler attributes and properties run: `onclick="…"` is compiled
+once into a function of `event` and cached on the wrapper under its
+text, `el.onclick = f` replaces it, the body's `onload` answers for
+the window's `load`, and a handler returning false prevents the
+default — Acid3 starts from `<body onload="update()">`, which is how
+this got built. `document.write` while a parser-inserted script runs
+puts its markup right after the script, parsed as the parser would
+have parsed it there, and is refused with a log line from anywhere
+else. Named storage access (`localStorage.foo`) is a `Proxy` the
+bindings make with the language's own `Proxy` at install time — the
+bindings have no exotic objects, the engine has — over each store,
+so a name is an item and the interface's members still win.
+
+The Acid3 test is the stage's number, measured, never asserted:
+`tools/fetch-acid3.sh` fetches the web-platform-tests copy at a pinned
+commit into `tools/testdata/acid3` (ignored by git), the build packs it
+into the archive under `web/acid3/` when it is there, the fixture
+server serves it (`text/xml` and `application/xhtml+xml` where the test
+expects them), and the new `acid3` drill renders it in a page domain
+with `web-render`'s new `{ settle: 30000, select: "#result" }` — a
+budget for the test's timer chain, and only the result element handed
+back, since the whole page's tree would not fit the script's line heap
+(the page selects on its own side now: `Dump.selected` carries a
+selector, and the host parses a fragment) — and prints
+`script: acid3 N/100`; without the files it prints that it was
+skipped. The bindings' host tests run the same page on a fake clock
+that jumps to each timer, so the number is in the fast loop too:
+**41/100 on the host, 25/100 on the target** within the 30 s settle
+under emulation (the tests that wait for iframes retry for five
+seconds each, and there is no iframe here). The first target runs died
+of the document arena at 40 MB, twice: `innerHTML` parsed every
+fragment into the document's arena with a node store and a tokenizer
+of its own each time (a thousand sets, a thousand of them) — parsed in
+scratch and adopted by copy now — and the relayout after every script
+recollected the stylesheets into the same arena on every tick, since
+a page that had just mutated might have touched a `<style>`: the
+bindings keep a separate `sheets_dirty`, set only when a stylesheet
+element, its text or its rules change, and the page recollects only
+then (or when the sheets were never read). The kernel's drill watchdog
+is per drill (`systemDrillWithin`): Acid3 gets two minutes. *Lessons:*
+(1) a bump arena that lives as long as the document turns every
+"parse and copy" into a leak; anything a script can call in a loop
+must parse in scratch. (2) "Recollect the sheets when the DOM changed"
+is the wrong granularity once scripts change the DOM a thousand times
+a second; the dirty bit has to say what changed. (3) A conformance
+number needs a way to run in the fast loop: the host run found the
+memory bug's absence in seconds, the target run found the number.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

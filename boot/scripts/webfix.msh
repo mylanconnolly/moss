@@ -41,9 +41,21 @@ def page [req] {
     "/notes.download" => { status: 200, headers: { content-type: "application/octet-stream" }, body: { file: "notes.txt" } }
     "/submit" => { status: 200, headers: { content-type: "text/html; charset=utf-8" }, body: ("<!DOCTYPE html><title>moss fixture: submitted</title><h1>Submitted</h1><p>method " + $req.method + "</p><p>query " + $req.query + "</p><p>body " + $req.body + "</p>") }
     "/boom" => { status: 200, body: { file: "index.html", repeat: 40000 } }
-    _ => (match ($pages | find (fn [p] { $p.path == $req.path })) {
-        nothing => { status: 404, body: "no such page" }
-        $hit => { status: 200, body: { file: $hit.file } }
+    _ => (match ($req.path | split "/acid3/") {
+        # The Acid3 test, when fetched (tools/fetch-acid3.sh puts it in the
+        # archive under web/acid3/): its files by name, the XML ones typed
+        # as the test expects.
+        ["", $name] => (match ($name | split ".") {
+            [_, "xml"] => { status: 200, headers: { content-type: "text/xml" }, body: { file: ("acid3/" + $name) } }
+            [_, "1"] => { status: 200, headers: { content-type: "application/xhtml+xml" }, body: { file: ("acid3/" + $name) } }
+            [_, "2"] => { status: 200, headers: { content-type: "application/xhtml+xml" }, body: { file: ("acid3/" + $name) } }
+            [_, "3"] => { status: 200, headers: { content-type: "application/xhtml+xml" }, body: { file: ("acid3/" + $name) } }
+            _ => { status: 200, body: { file: ("acid3/" + $name) } }
+          })
+        _ => (match ($pages | find (fn [p] { $p.path == $req.path })) {
+            nothing => { status: 404, body: "no such page" }
+            $hit => { status: 200, body: { file: $hit.file } }
+          })
       })
   }
 }
