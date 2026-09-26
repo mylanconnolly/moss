@@ -1016,10 +1016,13 @@ supervises), and memory history per unit beside the CPU one.
       `querySelector`, `classList`, `innerHTML`, `console` to the log,
       timers and frames queued (run on demand), scripts on by default,
       `web-render` after scripts, the `app.html` fixture in the `web`
-      drill. Next: (b) the event loop proper (timers on the host's
-      wake, frames on the tick, relayout after them), then the CSSOM
+      drill; (b) the same day — the clock: the page reports `wake`
+      with the delay to its next timer or frame, the host answers on
+      its tick with `tick` (the browser's 40 ms loop; `web-render`
+      sleeps and ticks until the page settles, two seconds at most),
+      the page runs what is due and lays out again. Next: the CSSOM
       for `style`, `fetch`/XHR, storage, history, forms, the per-site
-      switch.
+      switch, module scripts.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

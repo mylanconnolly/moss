@@ -186,6 +186,8 @@ pub const Command = union(enum) {
     zoom: u32,
     theme: u64,
     idle,
+    /// Time passed: the page runs its due timers and frames.
+    tick,
     stop,
 };
 
@@ -240,6 +242,8 @@ pub const Page = struct {
     found_count: u64 = 0,
     found_index: u64 = 0,
     focus_rect: u64 = 0,
+    /// When the page asked to be woken (its next timer), or null.
+    wake_at: ?u64 = null,
 
     pub fn titleText(p: *const Page) []const u8 {
         return p.title[0..p.title_len];
@@ -552,7 +556,7 @@ pub const Host = struct {
         // and a pointer move replaces the move before it — a wheel under a
         // slow repaint filled the queue and dropped what came after
         // (2026-09-23).
-        if (cmd == .scroll or (cmd == .pointer and cmd.pointer.kind == .move) or cmd == .idle) {
+        if (cmd == .scroll or (cmd == .pointer and cmd.pointer.kind == .move) or cmd == .idle or cmd == .tick) {
             var i = p.qlen;
             while (i > 0) {
                 i -= 1;
@@ -566,10 +570,11 @@ pub const Host = struct {
                     return true;
                 }
                 if (cmd == .idle and q.* == .idle) return true;
+                if (cmd == .tick and q.* == .tick) return true;
                 // Anything else in between — a press, a load, a resize, a
                 // key — keeps its place: input folds only across input
                 // that folds.
-                if (q.* != .scroll and q.* != .idle and !(q.* == .pointer and q.pointer.kind == .move)) break;
+                if (q.* != .scroll and q.* != .idle and q.* != .tick and !(q.* == .pointer and q.pointer.kind == .move)) break;
             }
         }
         if (p.qlen == p.queue.len) {
@@ -627,6 +632,7 @@ pub const Host = struct {
             .zoom => |z| .{ .zoom = .{ .percent = z } },
             .theme => |t| .{ .theme = .{ .flags = t } },
             .idle => .idle,
+            .tick => .tick,
             .stop => .stop,
         };
         // Shift the queue.
@@ -748,7 +754,33 @@ pub const Host = struct {
                 p.found_index = b;
             },
             .want_idle => {}, // the host's runtime answers it, not the record
+            .wake => p.wake_at = usys.nowMs() + a,
         }
+    }
+
+    /// The clock the pages cannot hold: every page whose wake is due gets
+    /// a `tick`. A host's loop calls this on its own tick.
+    pub fn tickWakes(h: *Host) void {
+        h.lock.acquire();
+        defer h.lock.release();
+        const now = usys.nowMs();
+        for (&h.pages, 0..) |*p, i| {
+            if (!p.used or p.dead) continue;
+            const at = p.wake_at orelse continue;
+            if (at > now) continue;
+            p.wake_at = null;
+            _ = h.sendLocked(@intCast(i), .tick);
+        }
+    }
+
+    /// How long until the page's wake is due (0 = now), or null with none
+    /// asked for.
+    pub fn wakeDelay(h: *Host, id: PageId) ?u64 {
+        h.lock.acquire();
+        defer h.lock.release();
+        const at = h.pages[id].wake_at orelse return null;
+        const now = usys.nowMs();
+        return if (at > now) at - now else 0;
     }
 
     // ------------------------------------------------------- the broker

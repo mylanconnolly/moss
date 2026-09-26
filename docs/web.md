@@ -108,7 +108,8 @@ EventTarget), `document`, `location`, `navigator`, `console`, and the
 DOM core — Node, Element, HTMLElement, Text, Document, DocumentFragment,
 Event and CustomEvent — with `getElementById`, `querySelector(All)`,
 `createElement`, `appendChild` and kin, `textContent`, `innerHTML`,
-attributes, `classList`, `addEventListener` and `dispatchEvent`.
+attributes, `classList`, `addEventListener` and `dispatchEvent`,
+`setTimeout`/`setInterval`, `requestAnimationFrame`, `queueMicrotask`.
 Every interface comes from one table in that file (name, parent,
 methods, attributes, constants), which is where a missing member gets
 added. A click on the page dispatches `click` through the tree first;
@@ -116,12 +117,14 @@ a listener's `preventDefault` keeps the link unfollowed. A script that
 changes the document has the page laid out again. `console.log` lines
 and uncaught errors go to the kernel log as `webpage: console: …` and
 `webpage: console error: script: uncaught …`; the load line counts the
-scripts and their errors and the engine's heap. `setTimeout`,
-`setInterval`, `requestAnimationFrame` and `queueMicrotask` exist and
-queue; the loop that runs the timers while the page waits is the next
-stage, so today a timer fires only when the page next runs a script.
-`web-render URL` in the shell returns the document as the scripts left
-it. Not yet: `element.style` (the CSSOM), `fetch`/XHR from a page,
+scripts and their errors and the engine's heap. The page cannot hold a
+clock (it holds one capability, its host), so the host keeps it: a
+page with a timer pending asks to be woken, and the browser's loop
+wakes it on its 40 ms tick — frames run at 25 a second, and no timer
+fires finer than the tick. `web-render URL` in the shell returns the
+document as the scripts left it, timers included: after `load` it
+ticks the page until nothing is pending, for two seconds at most.
+Not yet: `element.style` (the CSSOM), `fetch`/XHR from a page,
 `localStorage`, `history`, module scripts, `getBoundingClientRect`,
 form submission from script, a per-site switch (scripts are on).
 
@@ -242,9 +245,8 @@ log from inside `update`, where `echo` waits for the window to close).
 Very large pages outgrow the page's 40 MB for a document
 and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
 DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run but
-without timers between events, `fetch`, the CSSOM or storage yet (see
-Scripts above), so a site that builds itself after `load` or from an
-API shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
+without `fetch`, the CSSOM or storage yet (see Scripts above), so a
+site that builds itself from an API shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,

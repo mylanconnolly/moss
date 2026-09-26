@@ -115,17 +115,25 @@ if $rh1 != ["A moss fixture"] { (err "web-render: h1 $rh1")? }
 # A page with scripts: an external one and an inline one ran in order
 # inside the page domain and changed the document before it was handed
 # back — the list they built, the count they kept, the title they set,
-# and the `load` listener's mark; the noscript block is not content.
+# the `load` listener's mark, and what a timer, an animation frame and
+# a self-stopping interval did after load (the render waits for the
+# page's timers to settle); the noscript block is not content.
 let app = (web-render http://www.moss.test:8080/app.html)?
 if $app.title != "moss fixture: app" { (err "web-render app: title $app.title")? }
-let items = (($app.dom | html-select "#list li")? | map { $it | html-text })
-if $items != ["• first", "• second", "• from inline"] { (err "web-render app: items $items")? }
+# Few selections: a script's whole run shares the shell's 1 MB line heap,
+# and each `html-select` rebuilds the document in it.
+let lis = ($app.dom | html-select "#list li")?
+let items = ($lis | map { $it | html-text })
+if $items != ["• first", "• second", "• from inline", "• after 30 ms"] { (err "web-render app: items $items")? }
+if ($lis | first 1 | map { $it.attrs.class }) != ["item done"] { (err "web-render app: classList")? }
 let count = (($app.dom | html-select "#count")? | map { $it | html-text })
-if $count != ["3"] { (err "web-render app: count $count")? }
+if $count != ["4"] { (err "web-render app: count $count")? }
 let heading = (($app.dom | html-select "h1")? | map { $it | html-text })
 if $heading != ["A page with a script: 3 items"] { (err "web-render app: h1 $heading")? }
-if (($app.dom | html-select "body[data-loaded=complete]")? | len) != 1 { (err "web-render app: load listener did not run")? }
-if (($app.dom | html-select "li.done")? | len) != 1 { (err "web-render app: classList")? }
+let body = (($app.dom | html-select "body")? | first 1 | map { $it.attrs })
+if ($body | map { $it.data-loaded }) != ["complete"] { (err "web-render app: load listener did not run: $body")? }
+if ($body | map { $it.data-frame }) != ["yes"] { (err "web-render app: the animation frame did not run: $body")? }
+if ($body | map { $it.data-ticks }) != ["2"] { (err "web-render app: the interval did not run twice and stop: $body")? }
 if (($app.dom | html-select "#noscript")? | len) != 0 { (err "web-render app: noscript content parsed as markup")? }
 echo "script: web-render scripts ok"
 match (web-render http://www.moss.test:8080/missing.html) {

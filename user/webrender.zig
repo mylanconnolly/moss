@@ -101,6 +101,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         .dead => return errResult(it, "web-render: the page died", .{}),
         .stuck => return errResult(it, "web-render: the page never finished", .{}),
     }
+    if (!settle(h, id)) return errResult(it, "web-render: the page died", .{});
     if (!h.send(id, .{ .dump = .html })) return errResult(it, "web-render: the page took no command", .{});
     var steps: usize = 0;
     while (steps < 10_000) : (steps += 1) {
@@ -113,10 +114,35 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     const p = h.page(id);
     const markup = try it.arena.dupe(u8, p.dumped());
     const doc = web.html.parse(it.arena, markup, .{}) catch return mshl.Error.OutOfMemory;
-    const dom_value = try webcmds.toData(it, doc, web.dom.document_id);
+    const dom_value = try webcmds.toDataFrom(it, doc, web.dom.document_id, false);
     const keys = try it.arena.dupe([]const u8, &.{ "url", "title", "dom" });
     const vals = try it.arena.dupe(Value, &.{ .{ .str = try it.arena.dupe(u8, p.urlText()) }, .{ .str = try it.arena.dupe(u8, p.titleText()) }, dom_value });
     return try it.mkResult(true, .{ .record = .{ .keys = keys, .vals = vals } });
+}
+
+/// A page loaded is not a page finished: its scripts may have timers
+/// and frames pending (a page that builds itself after `load`). This
+/// program is the page's clock, so it sleeps until each wake is due,
+/// ticks the page, and serves it until it parks again — for up to two
+/// seconds of wall time, which is a headless render's patience.
+fn settle(h: *webhost.Host, id: webhost.PageId) bool {
+    const t0 = usys.nowMs();
+    var rounds: usize = 0;
+    while (rounds < 200) : (rounds += 1) {
+        const delay = h.wakeDelay(id) orelse return true;
+        if (usys.nowMs() - t0 > 2000) return true;
+        if (delay > 0) usys.sleepMs(@min(delay, 250));
+        h.tickWakes();
+        // Serve until the page has taken the tick and parked on `next`.
+        var steps: usize = 0;
+        while (steps < 10_000 and h.page(id).parked == null) : (steps += 1) {
+            switch (h.step()) {
+                .dead, .failed, .idle => return false,
+                else => {},
+            }
+        }
+    }
+    return true;
 }
 
 const LoadEnd = union(enum) { done, failed: u64, dead, stuck };

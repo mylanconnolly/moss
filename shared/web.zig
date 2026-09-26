@@ -67,6 +67,8 @@ pub const HostResp = union(enum(u64)) {
     // Commands, in answer to `next`.
     /// Navigate to the URL at data[off..off+len].
     load: struct { off: u64, len: u64 },
+    /// Time passed (the `wake` the page asked for): run what is due.
+    tick: void,
     /// Scroll by `dy` document pixels (an i64).
     scroll: struct { dy: u64 },
     /// The pointer: `kind` is a `PointerKind`, at viewport (x, y).
@@ -125,6 +127,10 @@ pub const Event = enum(u64) {
     /// More of the work that waits for quiet remains (pictures near the
     /// viewport past one idle's budget): another `idle` is welcome.
     want_idle = 12,
+    /// The page's scripts have a timer or an animation frame due in `a`
+    /// ms (0 = now): a `tick` then, please. The page cannot wait on a
+    /// clock and its host at once, so the host keeps the clock.
+    wake = 13,
 };
 
 pub const ThemeFlags = struct {

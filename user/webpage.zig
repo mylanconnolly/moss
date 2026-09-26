@@ -192,6 +192,7 @@ fn runScripts(doc: *dom.Document) void {
     scripts.setViewport(@intCast(vw), @intCast(vh));
     scripts.setUrl(page.url()) catch {};
     scripts.runScripts();
+    scheduleWake();
 }
 
 fn stopScripts() void {
@@ -201,11 +202,29 @@ fn stopScripts() void {
     scripts_up = false;
 }
 
-/// After a script ran: if it changed the document, lay out and paint again.
+/// After a script ran: if it changed the document, lay out and paint
+/// again; and if a timer is pending, ask the host for the wake.
 fn afterScript() void {
     if (!scripts_up) return;
-    if (!scripts.takeDirty()) return;
-    relayout(true);
+    if (scripts.takeDirty()) relayout(true);
+    scheduleWake();
+}
+
+/// The page cannot wait on a clock and its host at once, so the host
+/// keeps the clock: tell it when the next timer or frame is due.
+fn scheduleWake() void {
+    if (!scripts_up) return;
+    const due = scripts.nextDue() orelse return;
+    const now: f64 = @floatFromInt(usys.nowMs());
+    const delay: u64 = if (due > now) @intFromFloat(due - now) else 0;
+    event(.wake, delay, 0);
+}
+
+/// The host's `tick`: run what is due, then what follows from it.
+fn tick() void {
+    if (!scripts_up) return;
+    _ = scripts.runDue(@floatFromInt(usys.nowMs()));
+    afterScript();
 }
 
 /// Rasterized glyphs, kept across navigations.
@@ -1704,6 +1723,7 @@ fn serve() noreturn {
                 find(text[0..n], f.index);
             },
             .idle => loadPictures(idle_picture_budget),
+            .tick => tick(),
             .zoom => |z| {
                 const pct = @min(400, @max(25, z.percent));
                 if (pct != zoom_pct) {

@@ -7014,6 +7014,33 @@ script (the load line does now). (3) A size-class allocator's ladder
 has to reach the sizes the program actually asks for, or the classes
 above the ladder are the waste.
 
+**Stage 11b, the clock (as built, 2026-09-25).** A page holds one
+capability and only calls: it cannot wait on a timer and on its host
+at once. So the host keeps the clock. When a script leaves a timer,
+interval or animation frame pending, the page reports `wake` with the
+delay to the next one (0 for a frame) and parks on `next` as always;
+the host records the moment and, on its own tick, answers a due wake
+with the new `tick` command, which folds in the queue like `idle`. The
+page runs what is due (`Page.runDue`), drains the microtasks, lays out
+again if the document changed, and reports the next wake. The
+browser's runtime ticks every 40 ms while a page is alive
+(`guipage.tick`, which already sends `idle`), so frames run at 25 a
+second and a 10 ms interval fires every 40 — the tick's grain is the
+clock's, by design: a page cannot make the desktop busier than the
+loop that hosts it. A headless `web-render` is its page's clock too:
+after `load` it sleeps until each wake is due, ticks, serves the page
+until it parks again, and gives up after two seconds of wall time — a
+page that builds itself after `load` (the fixture's timer, frame and
+self-stopping interval) is handed back built, and one that never
+settles is handed back as it stands. Found on the way: a script's
+whole run shares the shell's 1 MB line heap, and `html-select` rebuilt
+the document in it on every call — eight selections from one rendered
+page filled it. The rebuild goes in scratch now (an arena over the box
+pool, gone with the call) and only the matches stay, copied.
+*Lesson:* when the thing that cannot hold a clock is the one that
+needs it, the party that can answers on its own tick, and the wire
+carries a delay, not a deadline — the two clocks never have to agree.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

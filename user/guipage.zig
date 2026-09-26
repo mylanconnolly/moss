@@ -487,6 +487,7 @@ const idle_after_ms: u64 = 250;
 /// `idle`, once — its cue for the work that must not slow a scroll
 /// (fetching the pictures that came into view).
 pub fn tick() void {
+    host.tickWakes(); // the pages' timers: the host keeps the clock
     const now = usys.nowMs();
     for (&slots) |*s| {
         if (!s.used or s.idle_sent) continue;

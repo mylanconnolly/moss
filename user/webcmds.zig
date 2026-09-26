@@ -39,30 +39,39 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     const is = std.mem.eql;
     if (is(u8, name, "html-parse")) {
         const src = try source(it, "html-parse", args, 0, input);
-        const doc = try documentOf(it, src);
+        const doc = try documentOf(it, it.arena, src);
         return try toData(it, doc, dom.document_id);
     }
     if (is(u8, name, "html-select")) {
         const src = try source(it, "html-select", args, 1, input);
-        const doc = try documentOf(it, src);
-        const sel = web.selectors.Selector.parse(it.arena, args[0].str) catch |e| switch (e) {
+        // The document is rebuilt in scratch that goes when the call
+        // does; only the matches, copied, stay in the line heap (a
+        // script's whole run shares it, and a drill that selected eight
+        // times from a rendered page filled it).
+        var scratch = std.heap.ArenaAllocator.init(it.heap);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const doc = try documentOf(it, sa, src);
+        const sel = web.selectors.Selector.parse(sa, args[0].str) catch |e| switch (e) {
             error.OutOfMemory => return mshl.Error.OutOfMemory,
             error.Invalid => return try it.mkResult(false, .{ .str = try std.fmt.allocPrint(it.arena, "not a selector: {s}", .{args[0].str}) }),
         };
         var ids: std.ArrayList(dom.NodeId) = .empty;
-        sel.queryAll(doc, dom.document_id, it.arena, &ids) catch return mshl.Error.OutOfMemory;
+        sel.queryAll(doc, dom.document_id, sa, &ids) catch return mshl.Error.OutOfMemory;
         const out = try it.arena.alloc(Value, ids.items.len);
-        for (ids.items, 0..) |id, i| out[i] = try toData(it, doc, id);
+        for (ids.items, 0..) |id, i| out[i] = try toDataFrom(it, doc, id, true);
         return try it.mkResult(true, .{ .list = out });
     }
     if (is(u8, name, "html-text")) {
         const src = try source(it, "html-text", args, 0, input);
-        const doc = try documentOf(it, src);
-        return .{ .str = try web.text.extract(it.arena, doc, dom.document_id) };
+        var scratch = std.heap.ArenaAllocator.init(it.heap);
+        defer scratch.deinit();
+        const doc = try documentOf(it, scratch.allocator(), src);
+        return .{ .str = try it.arena.dupe(u8, try web.text.extract(scratch.allocator(), doc, dom.document_id)) };
     }
     if (is(u8, name, "html-style")) {
         const src = try source(it, "html-style", args, 1, input);
-        const doc = try documentOf(it, src);
+        const doc = try documentOf(it, it.arena, src);
         const sel = web.selectors.Selector.parse(it.arena, args[0].str) catch |e| switch (e) {
             error.OutOfMemory => return mshl.Error.OutOfMemory,
             error.Invalid => return try it.mkResult(false, .{ .str = try std.fmt.allocPrint(it.arena, "not a selector: {s}", .{args[0].str}) }),
@@ -84,7 +93,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         const src = try source(it, "css-parse", args, 0, input);
         // A stylesheet's text, or a page: every `<style>` in it, in order.
         const text: []const u8 = if (src == .str) src.str else blk: {
-            const doc = try documentOf(it, src);
+            const doc = try documentOf(it, it.arena, src);
             var out: std.ArrayList(u8) = .empty;
             var w = doc.walk(dom.document_id);
             while (w.next()) |id| if (doc.isHtml(id, "style")) {
@@ -242,12 +251,12 @@ fn source(it: *mshl.Interp, cmd: []const u8, args: []const Value, index: usize, 
 
 /// A document from markup (parsed) or from a tree `html-parse` made
 /// (rebuilt; a list of such trees becomes siblings under the document).
-fn documentOf(it: *mshl.Interp, v: Value) mshl.Error!*dom.Document {
+fn documentOf(it: *mshl.Interp, a: std.mem.Allocator, v: Value) mshl.Error!*dom.Document {
     switch (v) {
-        .str => |s| return web.html.parse(it.arena, s, .{}) catch return mshl.Error.OutOfMemory,
+        .str => |s| return web.html.parse(a, s, .{}) catch return mshl.Error.OutOfMemory,
         .record, .list => {
-            const doc = try it.arena.create(dom.Document);
-            doc.* = dom.Document.init(it.arena) catch return mshl.Error.OutOfMemory;
+            const doc = try a.create(dom.Document);
+            doc.* = dom.Document.init(a) catch return mshl.Error.OutOfMemory;
             try fromData(it, doc, dom.document_id, v);
             return doc;
         },
@@ -258,28 +267,39 @@ fn documentOf(it: *mshl.Interp, v: Value) mshl.Error!*dom.Document {
 // ---------------------------------------------------------- tree <-> data
 
 pub fn toData(it: *mshl.Interp, doc: *const dom.Document, id: dom.NodeId) mshl.Error!Value {
+    return toDataFrom(it, doc, id, false);
+}
+
+/// The tree as data; with `copy`, every string is copied into the line
+/// heap (the document is in memory that will not outlive the call).
+pub fn toDataFrom(it: *mshl.Interp, doc: *const dom.Document, id: dom.NodeId, copy: bool) mshl.Error!Value {
     const n = doc.get(id);
+    const keep = struct {
+        fn f(i: *mshl.Interp, c: bool, s: []const u8) mshl.Error![]const u8 {
+            return if (c) try i.arena.dupe(u8, s) else s;
+        }
+    }.f;
     switch (n.kind) {
-        .text => return record(it, &.{"text"}, &.{.{ .str = n.text.items }}),
-        .comment => return record(it, &.{"comment"}, &.{.{ .str = n.text.items }}),
-        .doctype => return record(it, &.{"doctype"}, &.{.{ .str = n.name }}),
+        .text => return record(it, &.{"text"}, &.{.{ .str = try keep(it, copy, n.text.items) }}),
+        .comment => return record(it, &.{"comment"}, &.{.{ .str = try keep(it, copy, n.text.items) }}),
+        .doctype => return record(it, &.{"doctype"}, &.{.{ .str = try keep(it, copy, n.name) }}),
         .document, .fragment, .element => {
             const tag: []const u8 = switch (n.kind) {
                 .document => "#document",
                 .fragment => "#fragment",
-                else => n.name,
+                else => try keep(it, copy, n.name),
             };
             const akeys = try it.arena.alloc([]const u8, n.attrs.items.len);
             const avals = try it.arena.alloc(Value, n.attrs.items.len);
             for (n.attrs.items, 0..) |at, i| {
-                akeys[i] = if (at.prefix) |pre| try std.mem.concat(it.arena, u8, &.{ pre, ":", at.name }) else at.name;
-                avals[i] = .{ .str = at.value };
+                akeys[i] = if (at.prefix) |pre| try std.mem.concat(it.arena, u8, &.{ pre, ":", at.name }) else try keep(it, copy, at.name);
+                avals[i] = .{ .str = try keep(it, copy, at.value) };
             }
             var children: std.ArrayList(Value) = .empty;
             // A template's contents stand in for its (always empty) children.
             const from: dom.NodeId = if (n.template_contents) |tc| tc else id;
             var c = doc.get(from).first_child;
-            while (c) |cid| : (c = doc.get(cid).next) try children.append(it.arena, try toData(it, doc, cid));
+            while (c) |cid| : (c = doc.get(cid).next) try children.append(it.arena, try toDataFrom(it, doc, cid, copy));
             return record(it, &.{ "tag", "attrs", "children" }, &.{
                 .{ .str = tag },
                 .{ .record = .{ .keys = akeys, .vals = avals } },
