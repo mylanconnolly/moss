@@ -769,6 +769,7 @@ pub fn build(b: *std.Build) void {
         "web/img/grad.jpg",                 "web/img/blue.gif",
         "web/img/prog.jpg",                 "web/img/plexserif.woff",
         "web/index.html",                   "web/about.html",
+        "web/app.html",                     "web/app.js",
         "web/hello.txt.gz",                 "scripts/worker-demo.msh",
         "conf/units/svc-pub.msh",           "scripts/svc-pub.msh",
         "conf/units/doubler.msh",           "scripts/doubler.msh",

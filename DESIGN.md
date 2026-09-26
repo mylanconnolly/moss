@@ -6946,6 +6946,74 @@ turns every list into a quadratic one; and a host model of a target's
 memory is only as good as the allocator it models — the histogram's
 "grown in place" column was the tell.
 
+**Stage 11a, scripts meet the page (as built, 2026-09-25).** The
+engine (`lib/js`) links into the page domain, and a page's `<script>`s
+run. The bindings are `lib/web/script.zig`, host-tested like the rest
+of `lib/web`: one comptime table (`interfaces`) names each interface,
+its parent, methods, attributes and constants — EventTarget, Node,
+Document, DocumentFragment, DocumentType, CharacterData, Text, Comment,
+Element, HTMLElement, HTMLInputElement, HTMLAnchorElement,
+DOMTokenList, Event, CustomEvent, UIEvent, MouseEvent, KeyboardEvent —
+and `Page.init` walks it once to build the prototype chain and the
+constructors on the global, so adding a member is one row and one
+native. A node's wrapper is an object of a new engine class `dom`
+whose internal slot is the node's index, made on first touch and kept
+in a table the collector traces through `Vm.embedder_roots`, so
+identity holds (`a === a.parentNode.firstChild`) and listeners live on
+the wrapper as a symbol-keyed flat array of (type, callback, flags).
+Events dispatch by the DOM's phases over the wrappers that exist — a
+node no script has touched has no listeners — with the window (the
+global object, an EventTarget) at the top of the path; `preventDefault`
+on a click keeps the page from following the link or toggling the box
+(the page asks `Page.click` before it acts). `querySelector` is
+`lib/web/selectors`; `innerHTML` parses through the fragment parser
+into the document's own arena and adopts the nodes by copy; a mutation
+sets a dirty bit the page reads after every script and click to lay
+out again (`relayout(true)`, sheets re-read because a script may add a
+`<style>`). Timers, intervals, animation frames and `queueMicrotask`
+queue in the page (`runDue(now)`, `nextDue()`) — the loop that runs
+them when nothing else is happening is stage 11b; the engine's job
+queue is the microtask queue and drains after every script, listener
+and timer. `console` goes to the page's log as `webpage: console: …`;
+an uncaught exception or syntax error is one log line and the next
+script still runs. The parser runs with scripting on, so `<noscript>`
+is raw text. In `present`, the scripts run after the parse and before
+the first layout, as the parser would have run them, then
+`DOMContentLoaded` and `load` fire, so `web-render` hands back the
+document as the scripts left it — the `web` drill's `app.html` fixture
+(an external `app.js` and an inline script building a list, a `load`
+listener marking the body) is the integration test.
+
+Memory, three ways. The page's image grew from 6.5 to 14 MB with the
+engine in it, and the drills' 16 MB test disk no longer held the
+program store and the web drill's two 4 MB streamed downloads
+(`fetch: writing the file failed` — nothing to do with the web): it is
+32 MB. The page's statics grew by the engine's 8 MB cell heap and 8 MB
+bookkeeping heap to 70.5 MB, past the kernel loader's 64 MB sanity
+bound on an image header (`BadImage`, seen as `spawn refused: bad_arg`
+with no chain to log): the bound is 128 MB, and the budgets are the
+page 76 MB, `Web` 168 for two, a session 256, its manager 288. And the
+engine's own bring-up cost 7.5 MB of the 8 MB bookkeeping heap before
+any script ran: the value stack (256K values, 2 MB) and the frame list
+(20,000 frames) are the runner's sizes, so `Vm.initWith` takes
+`Limits` and the page asks for 64K values and 4,000 frames; and
+`lib/heapalloc` rounded every block over 4 KB to a power of two (a 1.2
+MB table cost 2 MB), so its 1.5× ladder now runs to 1 MB. Bring-up is
+2.5 MB, and the load line reports `scripts N, errors N, script heap N
+KB` beside the arenas. One engine leak found by the bindings' tests:
+`Object.prototype.toString` with a string `Symbol.toStringTag` went
+through a UTF-8 conversion that grew a list inside a 160-byte stack
+buffer, fell back to the heap when the list asked for twice the text,
+and never freed — the conversion now sizes first and allocates once.
+*Lessons:* (1) an image that grows changes three budgets at once —
+the disk it is stored on, the header bound that admits it, and the
+spawner's grant; when a spawn is refused with no quota chain in the
+log, the refusal came before the chain existed. (2) An engine sized for
+a runner is not sized for a page: measure the bring-up before the first
+script (the load line does now). (3) A size-class allocator's ladder
+has to reach the sizes the program actually asks for, or the classes
+above the ladder are the waste.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

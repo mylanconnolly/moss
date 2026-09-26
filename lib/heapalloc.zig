@@ -16,8 +16,9 @@ const Alignment = std.mem.Alignment;
 
 const header_len: usize = 16;
 /// Size classes: the block sizes handed out, header included.
-const small_classes = [_]usize{ 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096 };
-const max_classes = small_classes.len + 24; // up to 4096 << 24 = 64 GB, far past any region
+const small_classes = [_]usize{ 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 393216, 524288, 786432, 1048576 };
+const large_base: usize = 1 << 20;
+const max_classes = small_classes.len + 20; // up to 1 MB << 20 = 1 TB, far past any region
 
 const Header = extern struct {
     /// The block's first byte (the payload may sit later, for a large
@@ -48,7 +49,7 @@ pub const Allocator = struct {
 
     fn classSize(ci: u32) usize {
         if (ci < small_classes.len) return small_classes[ci];
-        return @as(usize, 4096) << @intCast(ci - small_classes.len + 1);
+        return large_base << @intCast(ci - small_classes.len + 1);
     }
 
     /// The smallest class whose block holds `need` bytes.

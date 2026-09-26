@@ -307,22 +307,33 @@ pub const Strings = struct {
     /// UTF-8 of a string (lone surrogates as WTF-8), into `a`.
     pub fn toUtf8(t: *Strings, a: std.mem.Allocator, s_in: *String) Error![]u8 {
         const s = try t.flatten(s_in);
-        var out: std.ArrayList(u8) = .empty;
-        var i: usize = 0;
-        while (i < s.len) : (i += 1) {
-            var cp: u21 = s.unitAt(i);
-            if (cp >= 0xd800 and cp <= 0xdbff and i + 1 < s.len) {
-                const lo = s.unitAt(i + 1);
-                if (lo >= 0xdc00 and lo <= 0xdfff) {
-                    cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
-                    i += 1;
+        // Sized first, filled second: one allocation of the exact length,
+        // so a caller's fixed buffer holds what fits in it (a growing list
+        // asked for twice the text and fell back to the heap, and leaked).
+        var total: usize = 0;
+        var pass: u8 = 0;
+        var out: []u8 = &.{};
+        while (pass < 2) : (pass += 1) {
+            if (pass == 1) out = try a.alloc(u8, total);
+            var at: usize = 0;
+            var i: usize = 0;
+            while (i < s.len) : (i += 1) {
+                var cp: u21 = s.unitAt(i);
+                if (cp >= 0xd800 and cp <= 0xdbff and i + 1 < s.len) {
+                    const lo = s.unitAt(i + 1);
+                    if (lo >= 0xdc00 and lo <= 0xdfff) {
+                        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                        i += 1;
+                    }
                 }
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.wtf8Encode(cp, &buf) catch continue;
+                if (pass == 1) @memcpy(out[at .. at + n], buf[0..n]);
+                at += n;
             }
-            var buf: [4]u8 = undefined;
-            const n = std.unicode.wtf8Encode(cp, &buf) catch continue;
-            try out.appendSlice(a, buf[0..n]);
+            total = at;
         }
-        return out.toOwnedSlice(a);
+        return out;
     }
 
     /// Trace a string's references (a rope's children).

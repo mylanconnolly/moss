@@ -111,6 +111,16 @@ zig build check -Donly=jsrun            # the script-domain drill
         { fs: state/work, module: true })
 ```
 
+The page domain (`user/webpage.zig`) is the second host: the engine
+runs a page's `<script>`s over the DOM through `lib/web/script.zig`
+(see `docs/web.md`, Scripts). A host sizes the engine with
+`Vm.initWith(region, meta, .{ .stack_values, .max_frames })` — the
+value stack and the call depth are allocated from the bookkeeping
+allocator at init, 4 MB at the runner's defaults, which is why the page
+asks for 64K values and 4,000 frames — and reads `Vm.embedder_roots`
+and `Vm.host_data` as its hooks: the first traces the host's own tables
+at collection, the second is what a native reaches its host through.
+
 Nothing the engine links may be `threadlocal` (a user program has no
 thread-local storage; the compiler's last-error slot was one, found by
 the first syntax error in a domain).

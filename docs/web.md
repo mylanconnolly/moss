@@ -97,6 +97,34 @@ trust roots), no content coding requested, a 24 MB cap, a 10 s stall
 limit. A host that serves pages from one thread while another commands
 them (a window) takes the host's lock around its state.
 
+### Scripts
+
+A page's `<script>`s run inside the page domain, on the engine of
+`docs/javascript.md`, after the parse and before the first layout —
+the external ones fetched through the host's broker, then the inline
+ones, in document order — and then `DOMContentLoaded` and `load` fire.
+What a script sees is `lib/web/script.zig`: `window` (the global, an
+EventTarget), `document`, `location`, `navigator`, `console`, and the
+DOM core — Node, Element, HTMLElement, Text, Document, DocumentFragment,
+Event and CustomEvent — with `getElementById`, `querySelector(All)`,
+`createElement`, `appendChild` and kin, `textContent`, `innerHTML`,
+attributes, `classList`, `addEventListener` and `dispatchEvent`.
+Every interface comes from one table in that file (name, parent,
+methods, attributes, constants), which is where a missing member gets
+added. A click on the page dispatches `click` through the tree first;
+a listener's `preventDefault` keeps the link unfollowed. A script that
+changes the document has the page laid out again. `console.log` lines
+and uncaught errors go to the kernel log as `webpage: console: …` and
+`webpage: console error: script: uncaught …`; the load line counts the
+scripts and their errors and the engine's heap. `setTimeout`,
+`setInterval`, `requestAnimationFrame` and `queueMicrotask` exist and
+queue; the loop that runs the timers while the page waits is the next
+stage, so today a timer fires only when the page next runs a script.
+`web-render URL` in the shell returns the document as the scripts left
+it. Not yet: `element.style` (the CSSOM), `fetch`/XHR from a page,
+`localStorage`, `history`, module scripts, `getBoundingClientRect`,
+form submission from script, a per-site switch (scripts are on).
+
 ### The window: Web
 
 The desktop's **Web** app (`boot/scripts/browser.msh`, unit
@@ -132,8 +160,8 @@ A session app that hosts pages needs a `spawner`, the session's
 network view, the assets tier (`{ tag: assets, session: true }`: the
 trust roots and the fonts the pages rasterize — a session's own view is
 its home, never the disk root) and the system store the `webpage` image
-is staged from, and a budget for its pages: 60 MB each. `Web` is 136 MB
-for two.
+is staged from, and a budget for its pages: 76 MB each (16 of them the
+script engine's two heaps). `Web` is 168 MB for two.
 
 ### Using it
 
@@ -213,10 +241,10 @@ log from inside `update`, where `echo` waits for the window to close).
 
 Very large pages outgrow the page's 40 MB for a document
 and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
-DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); pages render as
-they do without JavaScript — a table Wikipedia collapses through a
-`.client-js` rule its script enables stays expanded, and an infobox
-widens to hold it; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
+DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run but
+without timers between events, `fetch`, the CSSOM or storage yet (see
+Scripts above), so a site that builds itself after `load` or from an
+API shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,
@@ -227,8 +255,7 @@ Hangul come from the fallback face); bold is synthesized and there is
 no italic; no cache, no cookie jar, and one parked connection per
 page rather than a pool (the session's `webfetch` unit of the plan); no content coding in the page;
 no stop button; a select cycles its options rather than opening a
-list; binary downloads wait for a bytes save in the picker; no
-JavaScript (stages 10–11: our own engine, off until it lands). Menus
+list; binary downloads wait for a bytes save in the picker. Menus
 are the generic window menu until client-defined menus exist. The
 `page` leaf does not yet follow a window resize with a fresh buffer of
 the new size in one step: the leaf's rect changes on the next render

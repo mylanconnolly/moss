@@ -44,14 +44,15 @@ pub const Lock = struct {
 
 /// A page's memory: its arenas — the document-and-layout region (40 MB),
 /// the glyph cache (2), the picture store (6) and the picture scratch
-/// (6), the user-agent sheet (0.5) — plus the image and its 512K stack:
-/// 54.5 MB of statics under a 60 MB budget, 5 MB of headroom. Wikipedia's front page,
+/// (6), the user-agent sheet (0.5), the script engine's heap (8) and its
+/// bookkeeping (8) — plus the image and its 512K stack: 70.5 MB of
+/// statics under a 76 MB budget, 5 MB of headroom. Wikipedia's front page,
 /// the first real site opened, died twice of a 28 MB page: of the
 /// pictures it decoded into the document arena, then of an 8 MB layout
 /// arena a 3900-node page asks 10 MB of (2026-09-18); a 1.2 MB article
 /// died of a 24 MB region a 17,800-node page asks 29 MB of, once its
 /// lists stopped leaving their old buffers behind (2026-09-24).
-pub const page_user_kb: u64 = 60 << 10;
+pub const page_user_kb: u64 = 76 << 10;
 /// A connection key: scheme|host|port, a host name's worst case.
 const conn_key_max = 320;
 pub const page_kobj_kb: u64 = 2 << 10;

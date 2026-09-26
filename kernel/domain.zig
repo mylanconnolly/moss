@@ -494,7 +494,10 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     if (header.magic != shared.UserImageHeader.expected_magic) return Error.BadImage;
     if (header.text_size > header.mem_size or header.load_size > header.mem_size)
         return Error.BadImage;
-    if (header.mem_size > (64 << 20)) return Error.BadImage;
+    // A sanity bound on the header, not a budget (the budget is the
+    // spawner's): the page domain carries 70 MB of arenas since the
+    // script engine moved in (2026-09-25), so 64 was too small.
+    if (header.mem_size > (128 << 20)) return Error.BadImage;
     // objcopy trims trailing zero padding, so an archive image may be
     // shorter than load_size: the missing tail is zeros (fresh pages).
     const avail = @min(header.load_size, image.len());

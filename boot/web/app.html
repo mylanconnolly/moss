@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>moss fixture: app</title>
+<style>
+  body { font-family: sans-serif; margin: 2em; }
+  .done { text-decoration: line-through; color: #888; }
+  #count { font-weight: bold; }
+</style>
+</head>
+<body>
+<h1 id="title">A page with a script</h1>
+<p>Items: <span id="count">0</span></p>
+<ul id="list"></ul>
+<button id="add">Add</button>
+<a id="home" href="/">home</a>
+<noscript><p id="noscript">Scripts are off.</p></noscript>
+<script src="/app.js"></script>
+<script>
+  // Inline after the external one: it sees what app.js defined.
+  addItem('from inline');
+  document.getElementById('title').textContent = 'A page with a script: ' + document.querySelectorAll('#list li').length + ' items';
+  console.log('app: ready', document.title, location.pathname);
+</script>
+</body>
+</html>

@@ -272,18 +272,28 @@ pub const Vm = struct {
     /// into it across nested calls): its capacity is the call depth.
     pub const max_frames = 20000;
 
+    /// What an embedder may size: the value stack and the call depth
+    /// (both allocated from `meta` at init, so a small host pays less).
+    pub const Limits = struct { stack_values: usize = stack_values, max_frames: u32 = max_frames };
+
     /// Create a VM over `region` (the heap the cells live in), with
     /// `meta` for bookkeeping memory, and its intrinsics.
     pub fn init(vm: *Vm, region: []u8, meta: std.mem.Allocator) !void {
+        return vm.initWith(region, meta, .{});
+    }
+
+    pub fn initWith(vm: *Vm, region: []u8, meta: std.mem.Allocator, limits: Limits) !void {
         vm.* = .{
             .meta = meta,
             .heap = Heap.init(region, meta, traceCell),
             .strings = undefined,
             .objects = undefined,
-            .stack = try meta.alloc(Value, stack_values),
+            .stack = try meta.alloc(Value, limits.stack_values),
         };
         vm.heap.finalizer = finalizeCell;
-        try vm.frames.ensureTotalCapacityPrecise(meta, max_frames);
+        // The frame list never reallocates (the interpreter keeps pointers
+        // into it): its capacity is the call depth, checked against.
+        try vm.frames.ensureTotalCapacityPrecise(meta, limits.max_frames);
         vm.strings = Strings.init(&vm.heap, meta);
         vm.objects = Objects.init(&vm.heap, &vm.strings, meta);
         try vm.heap.addRoot(.{ .ctx = vm, .trace = traceRoots });
@@ -404,7 +414,7 @@ pub const Vm = struct {
                 // Stage c/d classes trace through their own hooks.
                 realm.traceExtra(o, m);
             },
-            .ordinary, .array, .global => {},
+            .ordinary, .array, .global, .dom => {},
         }
         // Accessor properties: the slots hold accessor cells traced here.
         // (Marked as values already: an accessor cell is a cell value;

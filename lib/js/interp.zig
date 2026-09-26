@@ -185,7 +185,7 @@ pub fn runCoroutineStart(vm: *Vm, code: *Code, f: ?*Object, this: Value, env: ?*
 pub fn resumeCoroutine(vm: *Vm, co_obj: *Object, value: Value, kind: u8) Error!Value {
     const co = co_obj.internal(vmod.CoroutineData);
     const base = vm.sp();
-    if (@as(usize, base) + co.nregs + 1 > vm.stack.len or vm.frames.items.len >= Vm.max_frames) return vm.throwRangeError("Maximum call stack size exceeded");
+    if (@as(usize, base) + co.nregs + 1 > vm.stack.len or vm.frames.items.len >= vm.frames.capacity) return vm.throwRangeError("Maximum call stack size exceeded");
     const regs = vm.stack[base .. base + co.nregs];
     @memcpy(regs, co.savedRegs());
     const frame_index: u32 = @intCast(vm.frames.items.len);
@@ -269,7 +269,7 @@ fn initializeInstanceElements(vm: *Vm, o: *Object, f: *Object) Error!void {
 fn pushFrame(vm: *Vm, code: *Code, func: ?*Object, this: Value, new_target: Value, env: ?*Env, args_base: u32, argc: u32, ret_dst: u16, is_construct: bool, entry: bool, saved_sp: ?u32) Error!void {
     const d = code.data;
     const base: u32 = @max(vm.sp(), args_base + argc);
-    if (@as(usize, base) + d.nregs + 1 > vm.stack.len or vm.frames.items.len >= Vm.max_frames) return vm.throwRangeError("Maximum call stack size exceeded");
+    if (@as(usize, base) + d.nregs + 1 > vm.stack.len or vm.frames.items.len >= vm.frames.capacity) return vm.throwRangeError("Maximum call stack size exceeded");
     const regs = vm.stack[base .. base + d.nregs];
     const ncopy = @min(argc, d.nparams);
     if (ncopy > 0) @memcpy(regs[0..ncopy], vm.stack[args_base .. args_base + ncopy]);

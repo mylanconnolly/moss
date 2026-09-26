@@ -1008,7 +1008,18 @@ supervises), and memory history per unit beside the CPU one.
       `conf/app/web.msh` — the network allowlist's shape. `web-render`
       returns the DOM after scripts ran, so the shell scrapes a
       single-page app. *Exit:* an Acid3 score printed; a fixture
-      single-page app (fetch, update the DOM) drilled.
+      single-page app (fetch, update the DOM) drilled. *Landed:* (a) on
+      2026-09-25 — the engine in `webpage`, the bindings from one
+      comptime interface table (`lib/web/script.zig`: EventTarget, Node,
+      Document, Element, HTMLElement, Text, DOMTokenList, Event and
+      kin), DOM Events with the page's clicks going through them,
+      `querySelector`, `classList`, `innerHTML`, `console` to the log,
+      timers and frames queued (run on demand), scripts on by default,
+      `web-render` after scripts, the `app.html` fixture in the `web`
+      drill. Next: (b) the event loop proper (timers on the host's
+      wake, frames on the tick, relayout after them), then the CSSOM
+      for `style`, `fetch`/XHR, storage, history, forms, the per-site
+      switch.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

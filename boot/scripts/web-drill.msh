@@ -112,6 +112,22 @@ if $rendered.title != "moss fixture: home" { (err "web-render: title $rendered.t
 if $rendered.url != "http://www.moss.test:8080/" { (err "web-render: url $rendered.url")? }
 let rh1 = (($rendered.dom | html-select "h1")? | map { $it | html-text })
 if $rh1 != ["A moss fixture"] { (err "web-render: h1 $rh1")? }
+# A page with scripts: an external one and an inline one ran in order
+# inside the page domain and changed the document before it was handed
+# back — the list they built, the count they kept, the title they set,
+# and the `load` listener's mark; the noscript block is not content.
+let app = (web-render http://www.moss.test:8080/app.html)?
+if $app.title != "moss fixture: app" { (err "web-render app: title $app.title")? }
+let items = (($app.dom | html-select "#list li")? | map { $it | html-text })
+if $items != ["• first", "• second", "• from inline"] { (err "web-render app: items $items")? }
+let count = (($app.dom | html-select "#count")? | map { $it | html-text })
+if $count != ["3"] { (err "web-render app: count $count")? }
+let heading = (($app.dom | html-select "h1")? | map { $it | html-text })
+if $heading != ["A page with a script: 3 items"] { (err "web-render app: h1 $heading")? }
+if (($app.dom | html-select "body[data-loaded=complete]")? | len) != 1 { (err "web-render app: load listener did not run")? }
+if (($app.dom | html-select "li.done")? | len) != 1 { (err "web-render app: classList")? }
+if (($app.dom | html-select "#noscript")? | len) != 0 { (err "web-render app: noscript content parsed as markup")? }
+echo "script: web-render scripts ok"
 match (web-render http://www.moss.test:8080/missing.html) {
   ok $m => (err "web-render: a 404 rendered as ok")?
   err $e => { if ($e | split "refused" | len) < 2 { (err "web-render 404: $e")? } }

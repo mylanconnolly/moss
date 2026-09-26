@@ -5719,7 +5719,10 @@ fn makeDisk(path: []const u8) !void {
     }
     const f = try cwd.createFile(io, path, .{ .truncate = true });
     defer f.close(io);
-    try f.setLength(io, 16 * 1024 * 1024);
+    // 32 MB: the program store (the page domain's image is 14 MB with the
+    // script engine in it, the shell's 14) plus the web drill's two 4 MB
+    // streamed downloads and the rest of state/.
+    try f.setLength(io, 32 * 1024 * 1024);
 }
 
 /// Exercise live mode changes through the real Settings controls, including

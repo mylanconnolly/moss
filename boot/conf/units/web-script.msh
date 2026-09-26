@@ -2,8 +2,8 @@
 # TLS (the trust roots read from the assets tier through a root view,
 # writable for the streamed download under state/webdrill). The budget
 # is the point of the streaming step: the interpreter's line heap
-# cannot hold the 4 MB body. The spawner and the 48 MB are for the
-# headless render: a page domain (28 MB) is spawned as a child. Essential
+# cannot hold the 4 MB body. The spawner and the room past the script are for the
+# headless render: a page domain (76 MB) is spawned as a child. Essential
 # and oneshot: its exit ends the boot.
-{ image: mshrun, script: scripts/web-drill.msh, grant: [log, bootfs, spawner], budget: { user: 80mb, kobj: 8mb }, profiles: [web], oneshot: true, essential: true,
+{ image: mshrun, script: scripts/web-drill.msh, grant: [log, bootfs, spawner], budget: { user: 96mb, kobj: 8mb }, profiles: [web], oneshot: true, essential: true,
   give: [{ tag: net, netview: net }, { tag: view, fs: "", ro: false }] }

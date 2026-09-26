@@ -18,6 +18,8 @@ const font = mosslib.font;
 const ui = mosslib.ui;
 const wire = shared.web;
 const dom = web.dom;
+const js = mosslib.js;
+const script = web.script;
 
 comptime {
     asm (usys.imageHeaderStack("webpage", 128));
@@ -142,6 +144,70 @@ fn resetLayout() void {
 fn resetDocument() void {
     reg_lo = 0;
 }
+/// The script engine: the cells' heap and its bookkeeping (shapes,
+/// atoms, compiled code, the wrapper table), both reset per navigation
+/// — a document's scripts die with the document.
+var js_region: [8 << 20]u8 align(16) = undefined;
+var js_meta_buf: [8 << 20]u8 align(16) = undefined;
+var js_meta: mosslib.heapalloc.Allocator = undefined;
+var vm: js.vm.Vm = undefined;
+var scripts: script.Page = undefined;
+var scripts_up = false;
+/// Scripts run by default; the host may turn them off per site (`scripting`).
+var scripting = true;
+
+fn scriptLog(_: *anyopaque, level: script.Level, text: []const u8) void {
+    var line: [1200]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: {s}: {s}", .{ switch (level) {
+        .log => "console",
+        .warn => "console warn",
+        .err => "console error",
+    }, text }) catch "webpage: console: (a line too long to log)");
+}
+
+fn scriptFetch(_: *anyopaque, abs_url: []const u8) ?[]const u8 {
+    return fetchResource(abs_url, 4 << 20);
+}
+
+fn scriptNow() f64 {
+    return @floatFromInt(usys.nowMs());
+}
+
+/// Bring the engine up for the current document and run its scripts.
+fn runScripts(doc: *dom.Document) void {
+    if (!scripting) return;
+    js_meta = mosslib.heapalloc.Allocator.init(&js_meta_buf);
+    // A page's scripts get a shallower stack than the runner's: 64K
+    // values and 4,000 frames (the defaults cost 4 MB of the 8 here).
+    vm.initWith(&js_region, js_meta.allocator(), .{ .stack_values = 1 << 16, .max_frames = 4000 }) catch {
+        _ = usys.log(glog, "webpage: the script engine did not fit its heap");
+        return;
+    };
+    vm.host_now = scriptNow;
+    scripts_up = true;
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch }) catch {
+        _ = usys.log(glog, "webpage: the bindings did not fit");
+        return;
+    };
+    scripts.setViewport(@intCast(vw), @intCast(vh));
+    scripts.setUrl(page.url()) catch {};
+    scripts.runScripts();
+}
+
+fn stopScripts() void {
+    if (!scripts_up) return;
+    scripts.deinit();
+    vm.deinit();
+    scripts_up = false;
+}
+
+/// After a script ran: if it changed the document, lay out and paint again.
+fn afterScript() void {
+    if (!scripts_up) return;
+    if (!scripts.takeDirty()) return;
+    relayout(true);
+}
+
 /// Rasterized glyphs, kept across navigations.
 var glyph_heap: [2 << 20]u8 = undefined;
 /// The user-agent stylesheet, parsed once.
@@ -573,6 +639,7 @@ var fetch_ms: u64 = 0;
 
 /// Everything of the old page goes.
 fn fresh() void {
+    stopScripts();
     page = .{};
     resetDocument();
     resetLayout();
@@ -599,10 +666,16 @@ fn present(markup: []const u8, failure: u64) void {
     const a = arena();
     phase = "parsing the document";
     const t_parse = usys.nowMs();
-    const doc = web.html.parse(a, markup, .{}) catch outOfMemory();
+    const doc = web.html.parse(a, markup, .{ .scripting = scripting and failure == 0 }) catch outOfMemory();
     const t_parsed = usys.nowMs();
     page.doc = doc;
     page.base = web.url.parse(a, page.url(), null) catch null;
+    eventText(.url, page.url());
+    // Scripts run before the first layout, as the parser would have run
+    // them: what they build is what is laid out.
+    phase = "running its scripts";
+    if (failure == 0) runScripts(doc);
+    const t_scripts = usys.nowMs();
     var title: []const u8 = "";
     var w = doc.walk(dom.document_id);
     while (w.next()) |id| if (doc.isHtml(id, "title")) {
@@ -610,7 +683,6 @@ fn present(markup: []const u8, failure: u64) void {
         break;
     };
     eventText(.title, std.mem.trim(u8, title, " \t\r\n"));
-    eventText(.url, page.url());
     phase = "collecting its style sheets";
     page.sheets = collectSheets(doc);
     const t_sheets = usys.nowMs();
@@ -626,7 +698,7 @@ fn present(markup: []const u8, failure: u64) void {
     phase = "editing it";
     if (failure == 0) {
         var line: [256]u8 = undefined;
-        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes; document {d} KB, layout {d} KB of {d})", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_sheets - t_parsed, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024 }) catch "webpage: loaded");
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, scripts {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes; document {d} KB, layout {d} KB of {d}; {d} scripts, {d} errors, script heap {d} KB)", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_scripts - t_parsed, t_sheets - t_scripts, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024, if (scripts_up) scripts.scripts_run else 0, if (scripts_up) scripts.script_errors else 0, if (scripts_up) js_meta.live / 1024 else 0 }) catch "webpage: loaded");
     }
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
 }
@@ -1539,6 +1611,13 @@ fn pointer(kind: wire.PointerKind, x: u64, y: u64) void {
             const now = hitNode(x, y);
             if (was == null or now == null or was.? != now.?) return;
             const doc = page.doc orelse return;
+            // The script sees the click first: a listener that prevents
+            // the default keeps the link unfollowed and the box untoggled.
+            if (scripts_up) {
+                const go_on = scripts.click(now.?);
+                afterScript();
+                if (!go_on) return;
+            }
             // A click: focus what takes focus, then act on it.
             var target: ?dom.NodeId = now;
             while (target) |t| : (target = doc.get(t).parent) if (isFocusable(doc, t)) break;
