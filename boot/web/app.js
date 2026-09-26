@@ -39,6 +39,17 @@ var xhr = new XMLHttpRequest();
 xhr.onload = function () { document.body.setAttribute('data-xhr', String(xhr.status)); };
 xhr.open('GET', '/missing.html');
 xhr.send();
+// History and forms from script: an entry pushed and popped, a submit
+// the script keeps for itself.
+var pops = [];
+window.addEventListener('popstate', function (e) { pops.push((e.state && e.state.n) + ':' + location.pathname); });
+history.pushState({ n: 1 }, '', '/app.html?step=1');
+document.body.setAttribute('data-pushed', location.search);
+history.back();
+document.body.setAttribute('data-popped', pops.join(',') + ':' + location.pathname);
+var form = document.getElementById('form');
+form.addEventListener('submit', function (e) { e.preventDefault(); document.body.setAttribute('data-submit', form.elements[0].value + '/' + form.method); });
+form.requestSubmit();
 var ticks = 0;
 var iv = setInterval(function () {
   ticks += 1;

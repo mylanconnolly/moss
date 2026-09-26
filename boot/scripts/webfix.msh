@@ -26,6 +26,8 @@ let pages = [
   { path: "/linked.html", file: "linked.html" }
   { path: "/app.html", file: "app.html" }
   { path: "/app.js", file: "app.js" }
+  { path: "/mod.js", file: "mod.js" }
+  { path: "/mod2.js", file: "mod2.js" }
   { path: "/linked.css", file: "linked.css" }
   { path: "/css/imported.css", file: "css/imported.css" }
 ]

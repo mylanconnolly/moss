@@ -236,6 +236,45 @@ fn scriptRequest(_: *anyopaque, a: std.mem.Allocator, url_text: []const u8, post
     }
 }
 
+/// A script's navigation is taken once the script is done: a page
+/// cannot tear its own document down under a running script.
+var nav_pending = false;
+var nav_url: [2048]u8 = undefined;
+var nav_len: usize = 0;
+
+fn scriptNavigate(_: *anyopaque, abs_url: []const u8) void {
+    nav_len = @min(abs_url.len, nav_url.len);
+    @memcpy(nav_url[0..nav_len], abs_url[0..nav_len]);
+    nav_pending = true;
+}
+
+fn runPendingNavigation() void {
+    if (!nav_pending) return;
+    nav_pending = false;
+    load(nav_url[0..nav_len], false, "");
+}
+
+/// The document's URL or title changed under script: the host's chrome
+/// follows (the address bar, the tab's title).
+fn scriptChanged(_: *anyopaque, what: script.Changed, text: []const u8) void {
+    switch (what) {
+        .url => {
+            page.url_len = @min(text.len, page.url_buf.len);
+            @memcpy(page.url_buf[0..page.url_len], text[0..page.url_len]);
+            eventText(.url, page.url());
+        },
+        .title => eventText(.title, text),
+    }
+}
+
+fn scriptSubmit(_: *anyopaque, form: dom.NodeId) void {
+    submitFormOf(form, null);
+}
+
+fn scriptActivate(_: *anyopaque, id: dom.NodeId) void {
+    activate(id, false);
+}
+
 fn scriptScroll(_: *anyopaque, _: f64, y: f64) void {
     if (scrollTo(y * zoomScale())) paintAll();
     if (scripts_up) scripts.setScroll(0, page.scroll_y / zoomScale());
@@ -253,7 +292,7 @@ fn runScripts(doc: *dom.Document) void {
     };
     vm.host_now = scriptNow;
     scripts_up = true;
-    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest }) catch {
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate }) catch {
         _ = usys.log(glog, "webpage: the bindings did not fit");
         return;
     };
@@ -276,6 +315,7 @@ fn afterScript() void {
     if (!scripts_up) return;
     if (scripts.takeDirty()) relayout(true);
     scheduleWake();
+    runPendingNavigation();
 }
 
 /// The page cannot wait on a clock and its host at once, so the host
@@ -718,6 +758,7 @@ fn load(url_text: []const u8, post: bool, body_text: []const u8) void {
         return;
     }
     present(markupOf(got), 0);
+    runPendingNavigation();
 }
 
 /// The last load's timings, for the log line `present` writes.
@@ -727,6 +768,7 @@ var fetch_ms: u64 = 0;
 /// Everything of the old page goes.
 fn fresh() void {
     stopScripts();
+    nav_pending = false;
     page = .{};
     resetDocument();
     resetLayout();
@@ -1439,9 +1481,21 @@ fn typeInto(id: dom.NodeId, ch: u8) void {
     }
     setValue(id, buf[0..len]);
     relayout(false);
+    if (scripts_up) {
+        scripts.fireInput(id);
+        afterScript();
+    }
 }
 
 fn toggle(id: dom.NodeId) void {
+    toggleRaw(id);
+    if (scripts_up) {
+        scripts.fireChange(id);
+        afterScript();
+    }
+}
+
+fn toggleRaw(id: dom.NodeId) void {
     const doc = page.doc orelse return;
     const kind = web.paint.controlOf(doc, id) orelse return;
     switch (kind) {
@@ -1508,6 +1562,20 @@ fn submitForm(from: dom.NodeId) void {
         break;
     };
     const f = form orelse return;
+    // The script sees `submit` first; a listener may prevent it.
+    if (scripts_up) {
+        const go_on = scripts.fireSubmit(f);
+        afterScript();
+        if (!go_on) return;
+    }
+    submitFormOf(f, from);
+}
+
+/// Submit form `f`: its successful controls form-urlencoded, sent with
+/// the form's method to its action. `submitter` is the button that did
+/// it (its name and value count), null for a script's `submit()`.
+fn submitFormOf(f: dom.NodeId, submitter: ?dom.NodeId) void {
+    const doc = page.doc orelse return;
     var query: std.ArrayList(u8) = .empty;
     var w = doc.walk(f);
     while (w.next()) |c| {
@@ -1519,7 +1587,7 @@ fn submitForm(from: dom.NodeId) void {
             if (eq(t, "checkbox") or eq(t, "radio")) {
                 if (doc.hasAttr(c, "checked")) addPair(&query, name, doc.getAttr(c, "value") orelse "on");
             } else if (eq(t, "submit") or eq(t, "button") or eq(t, "reset")) {
-                if (c == from) addPair(&query, name, doc.getAttr(c, "value") orelse "");
+                if (submitter == c) addPair(&query, name, doc.getAttr(c, "value") orelse "");
             } else addPair(&query, name, doc.getAttr(c, "value") orelse "");
         } else if (doc.isHtml(c, "textarea")) {
             addPair(&query, name, doc.getAttr(c, "value") orelse (doc.textContent(c, arena()) catch ""));
@@ -1532,7 +1600,7 @@ fn submitForm(from: dom.NodeId) void {
                 if (doc.hasAttr(o, "selected")) chosen = o;
             };
             if (chosen orelse first) |o| addPair(&query, name, doc.getAttr(o, "value") orelse web.paint.selectedOption(doc, c));
-        } else if (doc.isHtml(c, "button") and c == from) {
+        } else if (doc.isHtml(c, "button") and submitter == c) {
             addPair(&query, name, doc.getAttr(c, "value") orelse "");
         }
     }

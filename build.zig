@@ -770,6 +770,7 @@ pub fn build(b: *std.Build) void {
         "web/img/prog.jpg",                 "web/img/plexserif.woff",
         "web/index.html",                   "web/about.html",
         "web/app.html",                     "web/app.js",
+        "web/mod.js",                       "web/mod2.js",
         "web/hello.txt.gz",                 "scripts/worker-demo.msh",
         "conf/units/svc-pub.msh",           "scripts/svc-pub.msh",
         "conf/units/doubler.msh",           "scripts/doubler.msh",

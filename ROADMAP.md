@@ -1028,8 +1028,13 @@ supervises), and memory history per unit beside the CPU one.
       dirty), `scrollTo`/`scrollIntoView`; (d) the same day — `fetch`
       and `XMLHttpRequest` through the page's broker (same-origin
       only, decided in the bindings; a request blocks the page while
-      its body comes). Next: storage per origin, history, forms from
-      script, CORS, the per-site switch, module scripts.
+      its body comes); (e) on 2026-09-26 — module scripts through the
+      page's loader (deferred, URL-named), `location` assignment and
+      `hash`, `history.pushState`/`back` with `popstate`, URL and title
+      changes reported to the host, `HTMLFormElement` with the
+      `submit`/`input`/`change` events the page fires. Next: storage
+      per origin, CORS, the per-site switch, `document.styleSheets`,
+      keyboard events, Acid3.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

@@ -15,8 +15,14 @@
 <ul id="list"></ul>
 <button id="add">Add</button>
 <a id="home" href="/">home</a>
+<form id="form" action="/submit" method="post"><input name="q" value="typed"><button type="submit">Send</button></form>
 <noscript><p id="noscript">Scripts are off.</p></noscript>
 <script src="/app.js"></script>
+<script type="module">
+  // A module script: deferred, its imports fetched through the broker.
+  import { greet } from '/mod.js';
+  document.body.setAttribute('data-module', greet('page'));
+</script>
 <script>
   // Inline after the external one: it sees what app.js defined.
   addItem('from inline');

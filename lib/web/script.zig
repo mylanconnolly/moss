@@ -51,7 +51,19 @@ pub const Host = struct {
     /// resource through the host's broker into `a`; false when refused,
     /// with `out.refused` saying why. Same-origin only, checked here.
     request: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, out: *Response) bool = null,
+    /// A script navigates (`location.href = …`, `assign`, `reload`): the
+    /// host loads the URL once the script is done.
+    navigate: ?*const fn (ctx: *anyopaque, abs_url: []const u8) void = null,
+    /// The document's URL (pushState, a hash) or title changed under
+    /// script: the host's chrome follows.
+    changed: ?*const fn (ctx: *anyopaque, what: Changed, text: []const u8) void = null,
+    /// `form.submit()`: the host submits the form as a click would.
+    submit: ?*const fn (ctx: *anyopaque, form: NodeId) void = null,
+    /// `el.click()` not prevented: the host does what a click does.
+    activate: ?*const fn (ctx: *anyopaque, id: NodeId) void = null,
 };
+
+pub const Changed = enum { url, title };
 
 /// What a request came back with.
 pub const Response = struct {
@@ -173,6 +185,11 @@ pub const interfaces = [_]Iface{
         .{ .name = "characterSet", .get = getCharacterSet },
         .{ .name = "compatMode", .get = getCompatMode },
         .{ .name = "activeElement", .get = getActiveElement },
+        .{ .name = "location", .get = getLocation },
+        .{ .name = "forms", .get = getForms },
+        .{ .name = "images", .get = getImages },
+        .{ .name = "links", .get = getLinks },
+        .{ .name = "scripts", .get = getScripts },
     }, .methods = &parent_methods ++ [_]Method{
         .{ .name = "getElementById", .len = 1, .f = getElementById },
         .{ .name = "createElement", .len = 1, .f = createElement },
@@ -269,6 +286,20 @@ pub const interfaces = [_]Iface{
         .{ .name = "type", .get = getTypeAttr, .set = setTypeAttr },
         .{ .name = "name", .get = getNameAttr, .set = setNameAttr },
         .{ .name = "placeholder", .get = getPlaceholder, .set = setPlaceholder },
+        .{ .name = "form", .get = getOwnerForm },
+        .{ .name = "selectedIndex", .get = getSelectedIndex },
+        .{ .name = "options", .get = getOptions },
+    } },
+    .{ .name = "HTMLFormElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "action", .get = getActionAttr, .set = setActionAttr },
+        .{ .name = "method", .get = getMethodAttr, .set = setMethodAttr },
+        .{ .name = "name", .get = getNameAttr, .set = setNameAttr },
+        .{ .name = "elements", .get = getFormElements },
+        .{ .name = "length", .get = getFormLength },
+    }, .methods = &.{
+        .{ .name = "submit", .f = formSubmit },
+        .{ .name = "requestSubmit", .f = formRequestSubmit },
+        .{ .name = "reset", .f = formReset },
     } },
     .{ .name = "HTMLAnchorElement", .parent = "HTMLElement", .attrs = &.{
         .{ .name = "href", .get = getHref, .set = setHref },
@@ -427,6 +458,7 @@ const I = struct {
     const html_element = ifaceIndex("HTMLElement");
     const input = ifaceIndex("HTMLInputElement");
     const anchor = ifaceIndex("HTMLAnchorElement");
+    const form = ifaceIndex("HTMLFormElement");
     const tokens = ifaceIndex("DOMTokenList");
     const style = ifaceIndex("CSSStyleDeclaration");
     const event = ifaceIndex("Event");
@@ -448,6 +480,8 @@ const Timer = struct {
 };
 
 pub const ReadyState = enum { loading, interactive, complete };
+
+const HistoryEntry = struct { url: []u8, state: Value };
 
 pub const Page = struct {
     vm: *Vm,
@@ -480,6 +514,11 @@ pub const Page = struct {
     fake_now: f64 = 0,
     scripts_run: u32 = 0,
     script_errors: u32 = 0,
+    /// The session history the page's scripts made: `pushState` entries
+    /// and where the page is in them (the host keeps the real history).
+    history: std.ArrayList(HistoryEntry) = .empty,
+    history_index: usize = 0,
+    modules_run: u32 = 0,
 
     /// Install the bindings into `vm` for `doc`. The VM's `host_data`
     /// becomes this page and its embedder roots this page's tables.
@@ -492,6 +531,7 @@ pub const Page = struct {
         p.sym_style = try vm.newSymbol(try vm.strings.fromUtf8("style"));
         try p.installInterfaces();
         try p.installWindow();
+        vm.host_load = hostLoad;
     }
 
     pub fn deinit(p: *Page) void {
@@ -499,6 +539,8 @@ pub const Page = struct {
         p.timers.deinit(p.a);
         for (p.sources.items) |src| p.a.free(src);
         p.sources.deinit(p.a);
+        for (p.history.items) |h| p.a.free(h.url);
+        p.history.deinit(p.a);
         if (p.url_owned) p.a.free(p.url);
         p.vm.embedder_roots = null;
         p.vm.host_data = null;
@@ -519,6 +561,7 @@ pub const Page = struct {
             m.markValue(t.func);
             for (t.args[0..t.argc]) |v| m.markValue(v);
         }
+        for (p.history.items) |h| m.markValue(h.state);
     }
 
     /// Whether the DOM changed since the last call (and forget it).
@@ -609,6 +652,16 @@ pub const Page = struct {
         _ = try vm.defineNative(g, "prompt", 0, promptNative);
         _ = try vm.defineNative(g, "getComputedStyle", 1, getComputedStyle);
         _ = try vm.defineNative(g, "fetch", 1, fetchNative);
+        const hist = try vm.newObject();
+        _ = try vm.defineNative(hist, "pushState", 2, historyPushState);
+        _ = try vm.defineNative(hist, "replaceState", 2, historyReplaceState);
+        _ = try vm.defineNative(hist, "back", 0, historyBack);
+        _ = try vm.defineNative(hist, "forward", 0, historyForward);
+        _ = try vm.defineNative(hist, "go", 0, historyGoNative);
+        try vm.defineGetter(hist, "length", historyLength);
+        try vm.defineGetter(hist, "state", historyState);
+        try vm.defineValue(hist, "scrollRestoration", try vm.str("auto"), .default);
+        try vm.defineValue(g, "history", hist.asValue(), .hidden);
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
         _ = try vm.defineNative(g, "scrollTo", 0, scrollToNative);
         _ = try vm.defineNative(g, "scroll", 0, scrollToNative);
@@ -664,7 +717,6 @@ pub const Page = struct {
         var port: []const u8 = "";
         var pathname: []const u8 = "";
         var search: []const u8 = "";
-        var hash: []const u8 = "";
         var origin: []const u8 = "null";
         if (u) |*uu| {
             href = try uu.href(sa);
@@ -679,7 +731,6 @@ pub const Page = struct {
                 }
             }
             if (uu.query) |q| search = try std.fmt.allocPrint(sa, "?{s}", .{q});
-            if (uu.fragment) |f| hash = try std.fmt.allocPrint(sa, "#{s}", .{f});
             origin = try uu.origin(sa);
             var copy = uu.*;
             copy.query = null;
@@ -688,19 +739,75 @@ pub const Page = struct {
             const prefix_len = protocol.len + (if (uu.host != null) 2 + hostport.len else 0);
             pathname = if (no_qf.len >= prefix_len) no_qf[prefix_len..] else "";
         }
-        try vm.defineValue(loc, "href", try vm.str(href), .default);
+        // `href` and `hash` are accessors: assigning them navigates.
+        if (try vm.objects.getOwn(loc, .{ .atom = try vm.atom("href") }) == null) {
+            const g = try vm.newNativeNamed(try vm.str("get href"), 0, locationGetHref, Value.undefined_, false);
+            const s = try vm.newNativeNamed(try vm.str("set href"), 1, locationSetHref, Value.undefined_, false);
+            try vm.defineAccessor(loc, .{ .atom = try vm.atom("href") }, g, s, .{ .enumerable = true, .configurable = true });
+            const hg = try vm.newNativeNamed(try vm.str("get hash"), 0, locationGetHash, Value.undefined_, false);
+            const hs = try vm.newNativeNamed(try vm.str("set hash"), 1, locationSetHash, Value.undefined_, false);
+            try vm.defineAccessor(loc, .{ .atom = try vm.atom("hash") }, hg, hs, .{ .enumerable = true, .configurable = true });
+        }
         try vm.defineValue(loc, "protocol", try vm.str(protocol), .default);
         try vm.defineValue(loc, "host", try vm.str(hostport), .default);
         try vm.defineValue(loc, "hostname", try vm.str(hostname), .default);
         try vm.defineValue(loc, "port", try vm.str(port), .default);
         try vm.defineValue(loc, "pathname", try vm.str(pathname), .default);
         try vm.defineValue(loc, "search", try vm.str(search), .default);
-        try vm.defineValue(loc, "hash", try vm.str(hash), .default);
         try vm.defineValue(loc, "origin", try vm.str(origin), .default);
         _ = try vm.defineNative(loc, "toString", 0, locationToString);
-        _ = try vm.defineNative(loc, "reload", 0, noopNative);
-        _ = try vm.defineNative(loc, "assign", 1, noopNative);
-        _ = try vm.defineNative(loc, "replace", 1, noopNative);
+        _ = try vm.defineNative(loc, "reload", 0, locationReload);
+        _ = try vm.defineNative(loc, "assign", 1, locationAssign);
+        _ = try vm.defineNative(loc, "replace", 1, locationAssign);
+    }
+
+    /// The document's URL changed under script (a hash, `pushState`):
+    /// `location` follows and the host is told.
+    fn urlChanged(p: *Page, abs: []const u8) Error!void {
+        try p.setUrl(abs);
+        if (p.host.changed) |f| f(p.host.ctx, .url, p.url);
+    }
+
+    /// A script's navigation: resolved against the document, handed to
+    /// the host for when the script is done.
+    fn navigateTo(p: *Page, raw: []const u8) Error!void {
+        var scratch = std.heap.ArenaAllocator.init(p.a);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const base = url.parse(sa, p.url, null) catch null;
+        const u = url.parse(sa, raw, if (base) |*b| b else null) catch return p.vm.throwError(.SyntaxError, "not a valid URL");
+        const abs = try u.href(sa);
+        // A change of fragment only is not a navigation.
+        if (base) |*b| {
+            const here = try b.serialize(sa, true);
+            const there = try u.serialize(sa, true);
+            if (std.mem.eql(u8, here, there) and u.fragment != null) {
+                try p.urlChanged(abs);
+                _ = p.fireSimple(p.vm.global.asValue(), "hashchange", false, false);
+                return;
+            }
+        }
+        if (p.host.navigate) |f| f(p.host.ctx, abs) else p.logf(.warn, "script: navigation to {s} has no host", .{abs});
+    }
+
+    // ------------------------------------------------------- history
+
+    fn historySeed(p: *Page) Error!void {
+        if (p.history.items.len > 0) return;
+        try p.history.append(p.a, .{ .url = try p.a.dupe(u8, p.url), .state = Value.null_ });
+        p.history_index = 0;
+    }
+
+    fn historyGo(p: *Page, delta: i64) Error!void {
+        try p.historySeed();
+        const target: i64 = @as(i64, @intCast(p.history_index)) + delta;
+        if (target < 0 or target >= @as(i64, @intCast(p.history.items.len))) return; // past the page's own entries: the host's history, not ours
+        p.history_index = @intCast(target);
+        const e = p.history.items[p.history_index];
+        try p.urlChanged(e.url);
+        const ev = try p.newEvent(I.event, "popstate", false, false, true);
+        try p.setEventProp(ev, "state", e.state);
+        _ = p.dispatch(p.vm.global.asValue(), ev) catch |err| p.reportError(err, "popstate");
     }
 
     // ------------------------------------------------------ wrappers
@@ -715,7 +822,7 @@ pub const Page = struct {
             .doctype => I.doctype,
             .text => I.text,
             .comment => I.comment,
-            .element => if (n.namespace != .html) I.element else if (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "textarea") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "button")) I.input else if (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) I.anchor else I.html_element,
+            .element => if (n.namespace != .html) I.element else if (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "textarea") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "button")) I.input else if (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) I.anchor else if (std.mem.eql(u8, n.name, "form")) I.form else I.html_element,
         };
         const o = try p.vm.objects.create(p.protos[k].asValue(), .dom, @sizeOf(Slot));
         o.internal(Slot).* = .{ .kind = slot_node, .id = id };
@@ -738,23 +845,29 @@ pub const Page = struct {
         defer list.deinit(p.a);
         var w = p.doc.walk(dom.document_id);
         while (w.next()) |id| if (p.doc.isHtml(id, "script")) list.append(p.a, id) catch return;
-        for (list.items) |id| p.runScriptElement(id);
+        // Classic scripts as the parser meets them; module scripts are
+        // deferred, so they run after, in document order.
+        for (list.items) |id| if (!isModuleScript(p, id)) p.runScriptElement(id);
+        for (list.items) |id| if (isModuleScript(p, id)) p.runScriptElement(id);
         p.ready_state = .interactive;
         _ = p.fireSimple(p.document_obj.asValue(), "DOMContentLoaded", true, false);
         p.ready_state = .complete;
         _ = p.fireSimple(p.vm.global.asValue(), "load", false, false);
     }
 
+    fn isModuleScript(p: *Page, id: NodeId) bool {
+        const t = p.doc.getAttr(id, "type") orelse return false;
+        return std.ascii.eqlIgnoreCase(std.mem.trim(u8, t, " \t\r\n"), "module");
+    }
+
     fn runScriptElement(p: *Page, id: NodeId) void {
         const doc = p.doc;
-        if (doc.getAttr(id, "type")) |t| {
+        const module = isModuleScript(p, id);
+        if (!module) if (doc.getAttr(id, "type")) |t| {
             const tt = std.mem.trim(u8, t, " \t\r\n");
             const classic = tt.len == 0 or std.ascii.eqlIgnoreCase(tt, "text/javascript") or std.ascii.eqlIgnoreCase(tt, "application/javascript") or std.ascii.eqlIgnoreCase(tt, "text/ecmascript") or std.ascii.eqlIgnoreCase(tt, "application/ecmascript");
-            if (!classic) {
-                if (std.ascii.eqlIgnoreCase(tt, "module")) p.log(.warn, "script: module scripts are not run yet");
-                return;
-            }
-        }
+            if (!classic) return;
+        };
         if (doc.getAttr(id, "nomodule") != null) return;
         if (doc.getAttr(id, "src")) |src| {
             const fetch = p.host.fetch orelse {
@@ -773,13 +886,37 @@ pub const Page = struct {
                 p.logf(.err, "script: could not load {s}", .{abs});
                 return;
             };
-            p.runSource(text, abs);
+            if (module) p.runModule(text, abs) else p.runSource(text, abs);
             return;
         }
         var scratch = std.heap.ArenaAllocator.init(p.a);
         defer scratch.deinit();
         const text = doc.textContent(id, scratch.allocator()) catch return;
-        p.runSource(text, "inline script");
+        if (module) {
+            // An inline module is named after the document, so its
+            // imports resolve against it; a fragment keeps each distinct.
+            p.modules_run += 1;
+            const name = std.fmt.allocPrint(scratch.allocator(), "{s}#module{d}", .{ p.url, p.modules_run }) catch return;
+            p.runModule(text, name);
+        } else p.runSource(text, "inline script");
+    }
+
+    /// Run a module script: link its graph through the host loader,
+    /// evaluate, and report how its promise settled.
+    pub fn runModule(p: *Page, source: []const u8, name: []const u8) void {
+        const vm = p.vm;
+        p.scripts_run += 1;
+        const promise = js.module.runEntry(vm, name, source) catch |e| {
+            p.reportError(e, name);
+            return;
+        };
+        p.runJobs();
+        if (!promise.isObject()) return;
+        const pd = Vm.asObject(promise).internal(js.vm.PromiseData);
+        if (pd.state == 2) {
+            vm.exception = pd.result;
+            p.reportError(error.Exception, name);
+        }
     }
 
     /// Compile and run one classic script; errors go to the log.
@@ -894,6 +1031,27 @@ pub const Page = struct {
         };
         p.runJobs();
         return ok;
+    }
+
+    /// The user submitted a form (a button, Enter in a field): the
+    /// `submit` event; false when a listener prevented it.
+    pub fn fireSubmit(p: *Page, form: NodeId) bool {
+        const target = p.wrapValue(form) catch return true;
+        return p.fireSimple(target, "submit", true, true);
+    }
+
+    /// The user typed into a control, or toggled one.
+    pub fn fireInput(p: *Page, id: NodeId) void {
+        const target = p.wrapValue(id) catch return;
+        _ = p.fireSimple(target, "input", true, false);
+        p.runJobs();
+    }
+
+    pub fn fireChange(p: *Page, id: NodeId) void {
+        const target = p.wrapValue(id) catch return;
+        _ = p.fireSimple(target, "input", true, false);
+        _ = p.fireSimple(target, "change", true, false);
+        p.runJobs();
     }
 
     /// Whether any listener anywhere could care about a click: the
@@ -1759,7 +1917,47 @@ fn setTitle(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     while (p.doc.get(t).first_child) |c| p.doc.detach(c);
     p.doc.appendChild(t, try p.doc.createText(text));
     p.touch();
+    if (p.host.changed) |f| f(p.host.ctx, .title, std.mem.trim(u8, text, " \t\r\n"));
     return Value.undefined_;
+}
+
+fn getLocation(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    _ = try thisNode(vm, this);
+    return pageOf(vm).location_obj.asValue();
+}
+
+fn collectByTag(vm: *Vm, this: Value, names: []const []const u8) Error!Value {
+    const p = pageOf(vm);
+    const root = try thisNode(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var ids: std.ArrayList(NodeId) = .empty;
+    var w = p.doc.walk(root);
+    while (w.next()) |id| for (names) |nm| if (p.doc.isHtml(id, nm)) {
+        try ids.append(sc.a(), id);
+        break;
+    };
+    return nodeList(vm, ids.items);
+}
+
+fn getForms(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return collectByTag(vm, this, &.{"form"});
+}
+fn getImages(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return collectByTag(vm, this, &.{"img"});
+}
+fn getScripts(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return collectByTag(vm, this, &.{"script"});
+}
+fn getLinks(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const root = try thisNode(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var ids: std.ArrayList(NodeId) = .empty;
+    var w = p.doc.walk(root);
+    while (w.next()) |id| if ((p.doc.isHtml(id, "a") or p.doc.isHtml(id, "area")) and p.doc.hasAttr(id, "href")) try ids.append(sc.a(), id);
+    return nodeList(vm, ids.items);
 }
 
 fn getDocumentURL(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -2159,9 +2357,26 @@ fn setTabIndex(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
 fn getValueAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    // A textarea's value is its text.
+    // A textarea's value is its text; a select's is its selected option's.
     if (p.doc.isHtml(id, "textarea")) return getTextContent(vm, this, &.{}, Value.undefined_);
+    if (p.doc.isHtml(id, "select")) {
+        var first: ?NodeId = null;
+        var w = p.doc.walk(id);
+        while (w.next()) |c| if (p.doc.isHtml(c, "option")) {
+            if (first == null) first = c;
+            if (p.doc.hasAttr(c, "selected")) return optionValue(vm, c);
+        };
+        return if (first) |f| optionValue(vm, f) else jsStr(vm, "");
+    }
     return attrGetter(vm, this, "value");
+}
+
+fn optionValue(vm: *Vm, id: NodeId) Error!Value {
+    const p = pageOf(vm);
+    if (p.doc.getAttr(id, "value")) |v| return jsStr(vm, v);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    return jsStr(vm, std.mem.trim(u8, try p.doc.textContent(id, sc.a()), " \t\r\n"));
 }
 fn setValueAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
@@ -2443,7 +2658,7 @@ fn insertAdjacentText(vm: *Vm, this: Value, args: []const Value, _: Value) Error
 fn clickNative(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    _ = p.click(id);
+    if (p.click(id)) if (p.host.activate) |f| f(p.host.ctx, id);
     return Value.undefined_;
 }
 
@@ -2790,6 +3005,242 @@ fn matchMedia(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
 
 fn locationToString(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
     return jsStr(vm, pageOf(vm).url);
+}
+
+fn locationGetHref(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return jsStr(vm, pageOf(vm).url);
+}
+
+fn locationSetHref(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    try p.navigateTo(try strArg(vm, arg(args, 0), sc.a()));
+    return Value.undefined_;
+}
+
+fn locationAssign(vm: *Vm, this: Value, args: []const Value, nt: Value) Error!Value {
+    return locationSetHref(vm, this, args, nt);
+}
+
+fn locationReload(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    if (p.host.navigate) |f| f(p.host.ctx, p.url);
+    return Value.undefined_;
+}
+
+fn locationGetHash(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    if (std.mem.indexOfScalar(u8, p.url, '#')) |i| {
+        if (i + 1 < p.url.len) return jsStr(vm, p.url[i..]);
+    }
+    return jsStr(vm, "");
+}
+
+fn locationSetHash(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var frag = try strArg(vm, arg(args, 0), sc.a());
+    if (frag.len > 0 and frag[0] == '#') frag = frag[1..];
+    const base = if (std.mem.indexOfScalar(u8, p.url, '#')) |i| p.url[0..i] else p.url;
+    const next = try std.fmt.allocPrint(sc.a(), "{s}#{s}", .{ base, frag });
+    if (std.mem.eql(u8, next, p.url)) return Value.undefined_;
+    try p.urlChanged(next);
+    _ = p.fireSimple(vm.global.asValue(), "hashchange", false, false);
+    return Value.undefined_;
+}
+
+fn historyPush(vm: *Vm, args: []const Value, replace: bool) Error!Value {
+    const p = pageOf(vm);
+    try p.historySeed();
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var next_url: []const u8 = p.url;
+    const u = arg(args, 2);
+    if (!u.isNullish()) {
+        const raw = try strArg(vm, u, sc.a());
+        next_url = sameOriginUrl(p, raw, sc.a()) orelse return vm.throwError(.TypeError, "SecurityError: a history entry must be same-origin");
+    }
+    const kept = try p.a.dupe(u8, next_url);
+    errdefer p.a.free(kept);
+    const entry: HistoryEntry = .{ .url = kept, .state = arg(args, 0) };
+    if (replace) {
+        p.a.free(p.history.items[p.history_index].url);
+        p.history.items[p.history_index] = entry;
+    } else {
+        // Entries after the current one go, as in every browser.
+        while (p.history.items.len > p.history_index + 1) {
+            const last = p.history.pop().?;
+            p.a.free(last.url);
+        }
+        try p.history.append(p.a, entry);
+        p.history_index = p.history.items.len - 1;
+    }
+    if (!std.mem.eql(u8, next_url, p.url)) try p.urlChanged(next_url);
+    return Value.undefined_;
+}
+
+fn historyPushState(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    return historyPush(vm, args, false);
+}
+
+fn historyReplaceState(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    return historyPush(vm, args, true);
+}
+
+fn historyBack(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    try pageOf(vm).historyGo(-1);
+    return Value.undefined_;
+}
+
+fn historyForward(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    try pageOf(vm).historyGo(1);
+    return Value.undefined_;
+}
+
+fn historyGoNative(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const d = try vm.toIntegerOrInfinity(arg(args, 0));
+    if (d == 0) {
+        const p = pageOf(vm);
+        if (p.host.navigate) |f| f(p.host.ctx, p.url);
+        return Value.undefined_;
+    }
+    if (d < -1000 or d > 1000) return Value.undefined_;
+    try pageOf(vm).historyGo(@intFromFloat(d));
+    return Value.undefined_;
+}
+
+fn historyLength(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    try p.historySeed();
+    return Value.fromInt(@intCast(p.history.items.len));
+}
+
+fn historyState(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    try p.historySeed();
+    return p.history.items[p.history_index].state;
+}
+
+// ------------------------------------------------------------ modules
+
+/// The module loader: a specifier resolved against the importing
+/// module's URL (or the document's), fetched through the host like a
+/// classic `src`; bare specifiers are not modules here.
+fn hostLoad(vm: *Vm, referrer: ?[]const u8, specifier: []const u8) Error!?js.module.Loaded {
+    const p = pageOf(vm);
+    const relative = std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../") or std.mem.startsWith(u8, specifier, "/");
+    const absolute = std.mem.indexOf(u8, specifier, "://") != null;
+    if (!relative and !absolute) return null;
+    var scratch = std.heap.ArenaAllocator.init(p.a);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+    const base = url.parse(sa, referrer orelse p.url, null) catch null;
+    const u = url.parse(sa, specifier, if (base) |*b| b else null) catch return null;
+    // The canonical name has no fragment: one module per resource.
+    const abs = u.serialize(sa, true) catch return null;
+    const fetch = p.host.fetch orelse return null;
+    const text = fetch(p.host.ctx, abs) orelse return null;
+    return .{ .name = try vm.meta.dupe(u8, abs), .source = try vm.meta.dupe(u8, text) };
+}
+
+// -------------------------------------------------------------- forms
+
+fn getActionAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "action");
+}
+fn setActionAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "action", arg(args, 0));
+}
+fn getMethodAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisElement(vm, this);
+    const m = pageOf(vm).doc.getAttr(id, "method") orelse "get";
+    return jsStr(vm, if (std.ascii.eqlIgnoreCase(m, "post")) "post" else "get");
+}
+fn setMethodAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "method", arg(args, 0));
+}
+
+fn isControl(p: *Page, id: NodeId) bool {
+    return p.doc.isHtml(id, "input") or p.doc.isHtml(id, "select") or p.doc.isHtml(id, "textarea") or p.doc.isHtml(id, "button");
+}
+
+fn getFormElements(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var ids: std.ArrayList(NodeId) = .empty;
+    var w = p.doc.walk(id);
+    while (w.next()) |c| if (isControl(p, c)) try ids.append(sc.a(), c);
+    return nodeList(vm, ids.items);
+}
+
+fn getFormLength(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var n: i32 = 0;
+    var w = p.doc.walk(id);
+    while (w.next()) |c| if (isControl(p, c)) {
+        n += 1;
+    };
+    return Value.fromInt(n);
+}
+
+fn formSubmit(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (p.host.submit) |f| f(p.host.ctx, id) else p.log(.warn, "script: form.submit() has no host");
+    return Value.undefined_;
+}
+
+fn formRequestSubmit(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (!p.fireSubmit(id)) return Value.undefined_;
+    if (p.host.submit) |f| f(p.host.ctx, id);
+    return Value.undefined_;
+}
+
+fn formReset(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const target = try p.wrapValue(id);
+    if (!p.fireSimple(target, "reset", true, true)) return Value.undefined_;
+    var w = p.doc.walk(id);
+    while (w.next()) |c| if (isControl(p, c)) {
+        // Back to the markup's values: what the user typed or toggled goes.
+        if (p.doc.isHtml(c, "textarea")) continue;
+        if (p.doc.getAttr(c, "type")) |t| if (std.ascii.eqlIgnoreCase(t, "checkbox") or std.ascii.eqlIgnoreCase(t, "radio")) continue;
+        if (p.doc.isHtml(c, "input")) p.doc.removeAttr(c, "value");
+    };
+    p.touch();
+    return Value.undefined_;
+}
+
+fn getOwnerForm(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var cur = p.doc.get(id).parent;
+    while (cur) |c| : (cur = p.doc.get(c).parent) if (p.doc.isHtml(c, "form")) return p.wrapValue(c);
+    return Value.null_;
+}
+
+fn getSelectedIndex(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var i: i32 = 0;
+    var w = p.doc.walk(id);
+    while (w.next()) |c| if (p.doc.isHtml(c, "option")) {
+        if (p.doc.hasAttr(c, "selected")) return Value.fromInt(i);
+        i += 1;
+    };
+    return Value.fromInt(if (i > 0) 0 else -1);
+}
+
+fn getOptions(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return collectByTag(vm, this, &.{"option"});
 }
 
 fn timerArgs(vm: *Vm, args: []const Value, interval: bool) Error!Value {
@@ -3405,6 +3856,10 @@ const TestHost = struct {
     lines: std.ArrayList(u8) = .empty,
     a: std.mem.Allocator,
     scrolled_to: [2]f64 = .{ 0, 0 },
+    navigated: std.ArrayList(u8) = .empty,
+    changes: std.ArrayList(u8) = .empty,
+    submitted: ?NodeId = null,
+    activated: ?NodeId = null,
     fn log(ctx: *anyopaque, level: Level, text: []const u8) void {
         const h: *TestHost = @ptrCast(@alignCast(ctx));
         h.lines.appendSlice(h.a, @tagName(level)) catch {};
@@ -3424,6 +3879,33 @@ const TestHost = struct {
     fn scroll(ctx: *anyopaque, x: f64, y: f64) void {
         const h: *TestHost = @ptrCast(@alignCast(ctx));
         h.scrolled_to = .{ x, y };
+    }
+    fn fetch(_: *anyopaque, abs_url: []const u8) ?[]const u8 {
+        if (std.mem.endsWith(u8, abs_url, "/lib/greet.js")) return "import { name } from './name.js'; export function greet() { return 'hi ' + name; } export default 42;";
+        if (std.mem.endsWith(u8, abs_url, "/lib/name.js")) return "export const name = 'moss';";
+        if (std.mem.endsWith(u8, abs_url, "/late.js")) return "export const late = 'late';";
+        if (std.mem.endsWith(u8, abs_url, "/classic.js")) return "var fromClassic = 'classic';";
+        return null;
+    }
+    fn navigate(ctx: *anyopaque, abs_url: []const u8) void {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        h.navigated.appendSlice(h.a, abs_url) catch {};
+        h.navigated.append(h.a, ';') catch {};
+    }
+    fn changed(ctx: *anyopaque, what: Changed, text: []const u8) void {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        h.changes.appendSlice(h.a, @tagName(what)) catch {};
+        h.changes.append(h.a, '=') catch {};
+        h.changes.appendSlice(h.a, text) catch {};
+        h.changes.append(h.a, ';') catch {};
+    }
+    fn submit(ctx: *anyopaque, form: NodeId) void {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        h.submitted = form;
+    }
+    fn activate(ctx: *anyopaque, id: NodeId) void {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        h.activated = id;
     }
     /// Canned answers: /data.json is JSON, /missing is a 404, /refuse is
     /// refused by policy, anything else echoes its URL and body.
@@ -3470,7 +3952,7 @@ const TestPage = struct {
         tp.doc = try html.parse(tp.arena.allocator(), markup, .{ .scripting = true });
         tp.host = try ta.create(TestHost);
         tp.host.* = .{ .a = ta };
-        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request });
+        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request, .fetch = TestHost.fetch, .navigate = TestHost.navigate, .changed = TestHost.changed, .submit = TestHost.submit, .activate = TestHost.activate });
         try tp.page.setUrl("http://example.test:8080/dir/page.html?q=1#top");
         return tp;
     }
@@ -3482,6 +3964,8 @@ const TestPage = struct {
         ta.destroy(tp.vm);
         ta.free(tp.region);
         tp.host.lines.deinit(ta);
+        tp.host.navigated.deinit(ta);
+        tp.host.changes.deinit(ta);
         ta.destroy(tp.host);
         tp.arena.deinit();
         ta.destroy(tp);
@@ -3693,6 +4177,91 @@ test "script: fetch and XMLHttpRequest go through the host, same-origin only" {
         \\log:cors:true end:1,4 f1:true:200:http://example.test:8080/api/data.json:application/json f2:false:404:Not Found json:7 post:POST http://example.test:8080/post a=1 refused:fetch: policy text:no such page xcors:true xhr:200:GET http://example.test:8080/thing?q=1 :text/plain; charset=utf-8:true yjson:7 zerr:true:0
         \\
     , tp.host.lines.items[last..]);
+}
+
+test "script: module scripts run deferred through the loader, location and history move the page" {
+    const tp = try TestPage.open(
+        \\<head><title>t</title></head><body>
+        \\<script type="module">import { greet } from './lib/greet.js'; import d from '/lib/greet.js'; window.m1 = greet() + ':' + d + ':' + (typeof fromClassic); import('/late.js').then(function (m) { window.late = m.late; });</script>
+        \\<script src="/classic.js"></script>
+        \\<script type="module">window.m2 = 'second:' + window.m1;</script>
+        \\<script type="module">import { nothing } from './lib/greet.js';</script>
+        \\<script>
+        \\  var out = [];
+        \\  out.push('classic-first:' + (typeof window.m1));
+        \\  window.addEventListener('hashchange', function () { out.push('hash:' + location.hash); });
+        \\  window.addEventListener('popstate', function (e) { out.push('pop:' + JSON.stringify(e.state) + ':' + location.pathname + location.search); });
+        \\  location.hash = 'sec';
+        \\  history.pushState({ n: 1 }, '', '/one?a=1');
+        \\  history.pushState({ n: 2 }, '', '/two');
+        \\  out.push('len:' + history.length + ':' + history.state.n + ':' + location.pathname);
+        \\  history.back();
+        \\  history.back();
+        \\  history.forward();
+        \\  history.replaceState({ n: 9 }, '', '/nine');
+        \\  out.push('state:' + history.state.n + ':' + location.pathname);
+        \\  document.title = ' New  Title ';
+        \\  var threw = false; try { history.pushState({}, '', 'http://other.test/x'); } catch (e) { threw = true; }
+        \\  out.push('xo:' + threw);
+        \\  location.href = 'next.html?q';
+        \\  location.assign('/abs');
+        \\  window.addEventListener('load', function () { out.push('modules:' + window.m1 + '|' + window.m2 + '|' + window.late); console.log(out.join(' ')); });
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    try std.testing.expect(std.mem.indexOf(u8, tp.host.lines.items, "does not provide an export named 'nothing'") != null);
+    const last = std.mem.lastIndexOf(u8, tp.host.lines.items, "log:").?;
+    try std.testing.expectEqualStrings(
+        \\log:classic-first:undefined hash:#sec len:3:2:/two pop:{"n":1}:/one?a=1 pop:null:/dir/page.html?q=1 pop:{"n":1}:/one?a=1 state:9:/nine xo:true modules:hi moss:42:string|second:hi moss:42:string|late
+        \\
+    , tp.host.lines.items[last..]);
+    // Relative to the document's URL as pushState left it (/nine).
+    try std.testing.expectEqualStrings("http://example.test:8080/next.html?q;http://example.test:8080/abs;", tp.host.navigated.items);
+    try std.testing.expectEqualStrings("url=http://example.test:8080/dir/page.html?q=1#sec;url=http://example.test:8080/one?a=1;url=http://example.test:8080/two;url=http://example.test:8080/one?a=1;url=http://example.test:8080/dir/page.html?q=1#sec;url=http://example.test:8080/one?a=1;url=http://example.test:8080/nine;title=New  Title;", tp.host.changes.items);
+}
+
+test "script: forms fire submit, input and change, and a script can submit or reset one" {
+    const tp = try TestPage.open(
+        \\<body><form id="f" action="/go" method="POST"><input id="q" name="q" value="v"><select id="s"><option value="a">A</option><option value="b" selected>B</option></select><textarea id="t">tt</textarea><button id="b">Go</button></form><a id="l" href="/x">x</a>
+        \\<script>
+        \\  var out = [];
+        \\  var f = document.getElementById('f'), q = document.getElementById('q');
+        \\  out.push(f.method, f.action, f.elements.length, f.length, q.form === f, document.forms.length, document.getElementById('s').value, document.getElementById('s').selectedIndex, document.getElementById('t').value, f instanceof HTMLFormElement);
+        \\  var prevent = true;
+        \\  f.addEventListener('submit', function (e) { out.push('submit:' + (e.target === f)); if (prevent) e.preventDefault(); });
+        \\  q.addEventListener('input', function (e) { out.push('input:' + q.value); });
+        \\  q.addEventListener('change', function (e) { out.push('change:' + q.value); });
+        \\  f.requestSubmit();
+        \\  prevent = false;
+        \\  f.requestSubmit();
+        \\  document.getElementById('l').addEventListener('click', function (e) { out.push('lclick'); });
+        \\  document.getElementById('l').click();
+        \\  window.report = function () { console.log(out.join(' ')); };
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    try std.testing.expect(tp.host.submitted != null);
+    var w = tp.doc.walk(dom.document_id);
+    var form: NodeId = 0;
+    var input: NodeId = 0;
+    var link: NodeId = 0;
+    while (w.next()) |id| {
+        if (tp.doc.isHtml(id, "form")) form = id;
+        if (tp.doc.isHtml(id, "input")) input = id;
+        if (tp.doc.isHtml(id, "a")) link = id;
+    }
+    try std.testing.expectEqual(form, tp.host.submitted.?);
+    try std.testing.expectEqual(link, tp.host.activated.?);
+    // The user types: the page reports input, then commits the change.
+    try tp.doc.setAttr(input, "value", "vw");
+    tp.page.fireInput(input);
+    tp.page.fireChange(input);
+    // The user presses Enter in the form: submit fires (not prevented now).
+    try std.testing.expect(tp.page.fireSubmit(form));
+    tp.page.runSource("report()", "check");
+    try std.testing.expectEqualStrings("log:post /go 4 4 true 1 b 1 tt true submit:true submit:true lclick input:vw input:vw change:vw submit:true\n", tp.host.lines.items);
 }
 
 test "script: the wrappers survive a collection at every safe point" {

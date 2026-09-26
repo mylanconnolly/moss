@@ -116,7 +116,11 @@ text), `getBoundingClientRect` and the offset/client sizes (the page's
 layout, brought up to date first), `scrollTo` and `scrollIntoView`,
 `fetch` and `XMLHttpRequest` (same-origin only, through the page's
 broker like everything else it loads; a request blocks the page until
-its body is in).
+its body is in), `<script type="module">` with `import` resolved
+against the module's URL, `location.href =` and `location.hash`,
+`history.pushState`/`back` with `popstate` (the address bar follows),
+forms with the `submit`, `input` and `change` events the page fires as
+the user acts.
 Every interface comes from one table in that file (name, parent,
 methods, attributes, constants), which is where a missing member gets
 added. A click on the page dispatches `click` through the tree first;
@@ -131,9 +135,9 @@ wakes it on its 40 ms tick — frames run at 25 a second, and no timer
 fires finer than the tick. `web-render URL` in the shell returns the
 document as the scripts left it, timers included: after `load` it
 ticks the page until nothing is pending, for two seconds at most.
-Not yet: cross-origin requests (CORS), `localStorage`, `history`,
-module scripts, form submission from script, stylesheet objects
-(`document.styleSheets`), a per-site switch (scripts are on).
+Not yet: cross-origin requests (CORS), `localStorage`, stylesheet
+objects (`document.styleSheets`), keyboard events, a per-site switch
+(scripts are on).
 
 ### The window: Web
 

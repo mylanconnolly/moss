@@ -138,6 +138,11 @@ if ($body | map { $it.data-box }) != ["yes"] { (err "web-render app: getBounding
 if ($body | map { $it.data-fetch }) != ["ok"] { (err "web-render app: fetch from the page: $body")? }
 if ($body | map { $it.data-cors }) != ["refused"] { (err "web-render app: a cross-origin fetch was not refused: $body")? }
 if ($body | map { $it.data-xhr }) != ["404"] { (err "web-render app: XMLHttpRequest: $body")? }
+if ($body | map { $it.data-module }) != ["hello page!"] { (err "web-render app: the module script: $body")? }
+if ($body | map { $it.data-pushed }) != ["?step=1"] { (err "web-render app: pushState: $body")? }
+if ($body | map { $it.data-popped }) != ["null:/app.html:/app.html"] { (err "web-render app: popstate: $body")? }
+if ($body | map { $it.data-submit }) != ["typed/post"] { (err "web-render app: the submit event: $body")? }
+if $app.url != "http://www.moss.test:8080/app.html" { (err "web-render app: url after history: $app.url")? }
 if ($body | map { $it.data-display }) != ["block"] { (err "web-render app: getComputedStyle: $body")? }
 let h1 = (($app.dom | html-select "h1")? | first 1 | map { $it.attrs.style })
 if $h1 != ["color: rgb(200, 0, 0);"] { (err "web-render app: style attribute from script: $h1")? }

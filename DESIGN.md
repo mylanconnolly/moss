@@ -7097,6 +7097,42 @@ other, so a page cannot tell — except by the clock. The fixture fetches
 a page of its own origin, is refused another origin, and reads a 404
 through XHR; the drill finds all three in the rendered document.
 
+**Stage 11e, modules, history, navigation and forms (as built,
+2026-09-26).** `<script type="module">` runs: the engine's module
+loader (`Vm.host_load`) is the page's — a specifier resolved against
+the importing module's URL (or the document's), fetched through the
+same hook a classic `src` is, named by its URL without fragment so a
+resource is one module however it is reached; an inline module is
+named after the document with a fragment per script so its imports
+resolve there; bare specifiers are not modules here. Module scripts are
+deferred, so they run after the classic ones in document order, and a
+module's promise is checked after the jobs drain — a failed import is
+one log line like any uncaught error. `location.href = …`, `assign`,
+`replace`, `reload` and `history.go(0)` navigate through the host's
+`navigate` hook, and the page takes the navigation once the script is
+done (a page cannot tear its own document down under a running
+script): the URL is kept, the load happens in `afterScript`, or after
+`present` when a script asked during load. A change of fragment only
+is not a navigation: `location.hash = x` updates the URL and fires
+`hashchange`. `history.pushState`/`replaceState` keep a stack of
+entries in the page (same-origin URLs, the state values traced as
+roots); `back`, `forward` and `go` move within it, update `location`
+and fire `popstate` with the entry's state; past the page's own
+entries they do nothing — the host's history is the host's. Whenever
+the URL or the title changes under script, the `changed` hook tells
+the host and the page reports the `url`/`title` events, so the address
+bar and the tab follow `pushState` and `document.title`. Forms:
+`HTMLFormElement` with `action`, `method`, `elements`, `length`,
+`submit()` (the host submits, no event), `requestSubmit()` (the
+`submit` event first) and `reset()`; a control's `form`; a select's
+`value`, `selectedIndex` and `options`; `document.forms/images/links/
+scripts`. The page fires `submit` (cancelable) before it submits a
+form the user activated, `input` as the user types, `input` and
+`change` when a box or option is toggled; `el.click()` on a link or
+control does what a pointer click does when no listener prevents it.
+The fixture imports a module of two files, pushes and pops a history
+entry, and keeps a submit for itself; the drill reads the marks.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is
