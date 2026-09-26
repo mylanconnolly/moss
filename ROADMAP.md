@@ -1052,10 +1052,24 @@ supervises), and memory history per unit beside the CPU one.
       access through a `Proxy` the bindings make, and the exit number:
       the `acid3` drill renders the fetched Acid3 test and prints its
       score — 41/100 on the host, 25/100 on the target within its
-      settle (2026-09-26). Left: CORS with credentials, iframes (a page
-      within a page: a second document per domain, or a second domain),
-      DOM Range and Traversal, the SVG DOM, `DOMImplementation`, and
-      the rest of what Acid3 counts.
+      settle (2026-09-26); (j) the same day — several documents per
+      page (an iframe's or object's `contentDocument`, fetched and
+      parsed on first touch; `document.implementation`'s
+      `createDocument`/`createHTMLDocument`/`createDocumentType`),
+      each native switching to its node's document, a cascade on
+      demand for documents the page does not lay out, name validation
+      in `createElement(NS)`: 57/100 on the host, 32/100 on the
+      target; (k) the same day — `DOMException` with codes,
+      `NodeIterator`/`TreeWalker`/`NodeFilter`, live `Range`s with the
+      standard's contents algorithms, `CharacterData` editing,
+      `Text.splitText`, `normalize`, `createEvent` kinds, named
+      collections: 73/100 on the host, 43/100 on the target. Left: the table and form DOM
+      (`tBodies`, `insertRow`, `value` as a dirty value, radio groups,
+      `defaultSelected`, `select.add`), the cascade's dynamic
+      `:checked` and `@media` in scripts' sheets, `cursor` values,
+      element namespaces beside HTML/SVG/MathML (`createElementNS`
+      with a prefix), the SVG DOM, CORS with credentials, iframes laid
+      out.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

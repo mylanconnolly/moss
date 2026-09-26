@@ -21,6 +21,7 @@ const html = @import("html.zig");
 const selectors = @import("selectors.zig");
 const url = @import("url.zig");
 const css = @import("css.zig");
+const stylelib = @import("style.zig");
 const Vm = js.vm.Vm;
 const Value = js.value.Value;
 const Object = js.object.Object;
@@ -54,6 +55,10 @@ pub const Host = struct {
     request: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, origin: []const u8, out: *Response) bool = null,
     /// `localStorage`, kept by the host per origin under a quota.
     storage: ?*const fn (ctx: *anyopaque, op: StorageOp, key: []const u8, value: []const u8, buf: []u8) StorageResult = null,
+    /// The user-agent stylesheet, parsed: what `getComputedStyle` runs
+    /// the cascade with for a document that is not the page's (an
+    /// iframe's, one a script made), which the page does not lay out.
+    ua_sheet: ?*const stylelib.Sheet = null,
     /// A script navigates (`location.href = …`, `assign`, `reload`): the
     /// host loads the URL once the script is done.
     navigate: ?*const fn (ctx: *anyopaque, abs_url: []const u8) void = null,
@@ -85,7 +90,8 @@ const Slot = extern struct {
     kind: u32,
     id: u32,
     flags: u32 = 0,
-    _pad: u32 = 0,
+    /// Which of the page's documents the node is in (0: the page's own).
+    doc: u32 = 0,
 };
 const slot_node: u32 = 0;
 const slot_tokens: u32 = 1;
@@ -98,6 +104,10 @@ const slot_storage: u32 = 4;
 const storage_session: u32 = 1;
 /// A CSSStyleSheet over a `<style>` or `<link>` element (`id`).
 const slot_sheet: u32 = 5;
+/// A NodeIterator or TreeWalker (`id` = its root; the rest in properties).
+const slot_traversal: u32 = 6;
+/// A Range (`id` unused; the boundary points in properties).
+const slot_range: u32 = 7;
 
 // Event flags.
 const ev_stop: u32 = 1 << 0;
@@ -183,6 +193,9 @@ pub const interfaces = [_]Iface{
         .{ .name = "hasChildNodes", .f = hasChildNodes },
         .{ .name = "compareDocumentPosition", .len = 1, .f = compareDocumentPosition },
         .{ .name = "getRootNode", .f = getRootNode },
+        .{ .name = "isSameNode", .len = 1, .f = isSameNode },
+        .{ .name = "isEqualNode", .len = 1, .f = isEqualNode },
+        .{ .name = "normalize", .f = normalizeNode },
     } },
     .{ .name = "Document", .parent = "Node", .attrs = &parent_attrs ++ [_]Attr{
         .{ .name = "documentElement", .get = getDocumentElement },
@@ -196,6 +209,8 @@ pub const interfaces = [_]Iface{
         .{ .name = "characterSet", .get = getCharacterSet },
         .{ .name = "compatMode", .get = getCompatMode },
         .{ .name = "activeElement", .get = getActiveElement },
+        .{ .name = "implementation", .get = getImplementation },
+        .{ .name = "doctype", .get = getDoctype },
         .{ .name = "location", .get = getLocation },
         .{ .name = "forms", .get = getForms },
         .{ .name = "images", .get = getImages },
@@ -210,6 +225,9 @@ pub const interfaces = [_]Iface{
         .{ .name = "createComment", .len = 1, .f = createComment },
         .{ .name = "createDocumentFragment", .f = createDocumentFragment },
         .{ .name = "createEvent", .len = 1, .f = createEvent },
+        .{ .name = "createNodeIterator", .len = 1, .f = createNodeIterator },
+        .{ .name = "createTreeWalker", .len = 1, .f = createTreeWalker },
+        .{ .name = "createRange", .f = createRange },
         .{ .name = "hasFocus", .f = hasFocus },
         .{ .name = "write", .f = documentWrite },
         .{ .name = "writeln", .f = documentWriteln },
@@ -230,9 +248,76 @@ pub const interfaces = [_]Iface{
         .{ .name = "before", .f = insertBeforeSelf },
         .{ .name = "after", .f = insertAfterSelf },
         .{ .name = "replaceWith", .f = replaceWith },
+        .{ .name = "substringData", .len = 2, .f = cdSubstringData },
+        .{ .name = "appendData", .len = 1, .f = cdAppendData },
+        .{ .name = "insertData", .len = 2, .f = cdInsertData },
+        .{ .name = "deleteData", .len = 2, .f = cdDeleteData },
+        .{ .name = "replaceData", .len = 3, .f = cdReplaceData },
     } },
     .{ .name = "Text", .parent = "CharacterData", .attrs = &.{
         .{ .name = "wholeText", .get = getNodeValue },
+    }, .methods = &.{
+        .{ .name = "splitText", .len = 1, .f = textSplit },
+    } },
+    .{ .name = "NodeIterator", .attrs = &.{
+        .{ .name = "root", .get = travRoot },
+        .{ .name = "whatToShow", .get = travWhatToShow },
+        .{ .name = "filter", .get = travFilter },
+        .{ .name = "referenceNode", .get = iterReferenceNode },
+        .{ .name = "pointerBeforeReferenceNode", .get = iterPointerBefore },
+    }, .methods = &.{
+        .{ .name = "nextNode", .f = iterNextNode },
+        .{ .name = "previousNode", .f = iterPreviousNode },
+        .{ .name = "detach", .f = noopNative },
+    } },
+    .{ .name = "TreeWalker", .attrs = &.{
+        .{ .name = "root", .get = travRoot },
+        .{ .name = "whatToShow", .get = travWhatToShow },
+        .{ .name = "filter", .get = travFilter },
+        .{ .name = "currentNode", .get = walkerCurrent, .set = walkerSetCurrent },
+    }, .methods = &.{
+        .{ .name = "parentNode", .f = walkerParentNode },
+        .{ .name = "firstChild", .f = walkerFirstChild },
+        .{ .name = "lastChild", .f = walkerLastChild },
+        .{ .name = "previousSibling", .f = walkerPreviousSibling },
+        .{ .name = "nextSibling", .f = walkerNextSibling },
+        .{ .name = "previousNode", .f = walkerPreviousNode },
+        .{ .name = "nextNode", .f = walkerNextNode },
+    } },
+    .{ .name = "Range", .constructible = true, .consts = &.{
+        .{ .name = "START_TO_START", .value = 0 },
+        .{ .name = "START_TO_END", .value = 1 },
+        .{ .name = "END_TO_END", .value = 2 },
+        .{ .name = "END_TO_START", .value = 3 },
+    }, .attrs = &.{
+        .{ .name = "startContainer", .get = rangeStartContainer },
+        .{ .name = "startOffset", .get = rangeStartOffset },
+        .{ .name = "endContainer", .get = rangeEndContainer },
+        .{ .name = "endOffset", .get = rangeEndOffset },
+        .{ .name = "collapsed", .get = rangeCollapsed },
+        .{ .name = "commonAncestorContainer", .get = rangeCommonAncestor },
+    }, .methods = &.{
+        .{ .name = "setStart", .len = 2, .f = rangeSetStart },
+        .{ .name = "setEnd", .len = 2, .f = rangeSetEnd },
+        .{ .name = "setStartBefore", .len = 1, .f = rangeSetStartBefore },
+        .{ .name = "setStartAfter", .len = 1, .f = rangeSetStartAfter },
+        .{ .name = "setEndBefore", .len = 1, .f = rangeSetEndBefore },
+        .{ .name = "setEndAfter", .len = 1, .f = rangeSetEndAfter },
+        .{ .name = "collapse", .f = rangeCollapse },
+        .{ .name = "selectNode", .len = 1, .f = rangeSelectNode },
+        .{ .name = "selectNodeContents", .len = 1, .f = rangeSelectNodeContents },
+        .{ .name = "compareBoundaryPoints", .len = 2, .f = rangeCompareBoundaryPoints },
+        .{ .name = "deleteContents", .f = rangeDeleteContents },
+        .{ .name = "extractContents", .f = rangeExtractContents },
+        .{ .name = "cloneContents", .f = rangeCloneContents },
+        .{ .name = "insertNode", .len = 1, .f = rangeInsertNode },
+        .{ .name = "surroundContents", .len = 1, .f = rangeSurroundContents },
+        .{ .name = "cloneRange", .f = rangeCloneRange },
+        .{ .name = "detach", .f = noopNative },
+        .{ .name = "toString", .f = rangeToString },
+        .{ .name = "isPointInRange", .len = 2, .f = rangeIsPointInRange },
+        .{ .name = "comparePoint", .len = 2, .f = rangeComparePoint },
+        .{ .name = "intersectsNode", .len = 1, .f = rangeIntersectsNode },
     } },
     .{ .name = "Comment", .parent = "CharacterData" },
     .{ .name = "Element", .parent = "Node", .attrs = &parent_attrs ++ [_]Attr{
@@ -285,12 +370,16 @@ pub const interfaces = [_]Iface{
         .{ .name = "lang", .get = getLang, .set = setLang },
         .{ .name = "dir", .get = getDir, .set = setDir },
         .{ .name = "tabIndex", .get = getTabIndex, .set = setTabIndex },
+        .{ .name = "htmlFor", .get = getHtmlFor, .set = setHtmlFor },
         .{ .name = "offsetWidth", .get = getClientWidth },
         .{ .name = "offsetHeight", .get = getClientHeight },
         .{ .name = "offsetTop", .get = getOffsetTop },
         .{ .name = "offsetLeft", .get = getOffsetLeft },
         .{ .name = "offsetParent", .get = getParentElement },
+        .{ .name = "contentDocument", .get = getContentDocument },
+        .{ .name = "contentWindow", .get = getContentWindow },
     }, .methods = &.{
+        .{ .name = "getSVGDocument", .f = getContentDocument },
         .{ .name = "click", .f = clickNative },
         .{ .name = "focus", .f = noopNative },
         .{ .name = "blur", .f = noopNative },
@@ -484,6 +573,7 @@ fn styleAttrs() []const Attr {
 
 fn ifaceIndex(comptime name: []const u8) comptime_int {
     comptime {
+        @setEvalBranchQuota(100_000);
         for (interfaces, 0..) |i, k| if (std.mem.eql(u8, i.name, name)) return k;
         @compileError("no interface " ++ name);
     }
@@ -510,6 +600,9 @@ const I = struct {
     const storage = ifaceIndex("Storage");
     const sheet = ifaceIndex("CSSStyleSheet");
     const mutation_observer = ifaceIndex("MutationObserver");
+    const node_iterator = ifaceIndex("NodeIterator");
+    const tree_walker = ifaceIndex("TreeWalker");
+    const range = ifaceIndex("Range");
     const keyboard_event = ifaceIndex("KeyboardEvent");
     const mouse_event = ifaceIndex("MouseEvent");
 };
@@ -530,14 +623,33 @@ pub const ReadyState = enum { loading, interactive, complete };
 
 const HistoryEntry = struct { url: []u8, state: Value };
 const SessionItem = struct { key: []u8, value: []u8 };
-const Observation = struct { observer: Value, target: NodeId, child_list: bool, attributes: bool, character_data: bool, subtree: bool };
+const Observation = struct { observer: Value, doc: u32, target: NodeId, child_list: bool, attributes: bool, character_data: bool, subtree: bool };
 const PendingRecord = struct { observer: Value, record: Value };
 const MutationKind = enum { child_list, attributes, character_data };
 const session_quota: usize = 256 << 10;
 
+/// A document the page holds: its own (index 0), an iframe's or an
+/// `<object>`'s (fetched and parsed on first `contentDocument`), or one a
+/// script made through `document.implementation`. `doc` on the page is
+/// the current one: every native switches to its `this` node's.
+const DocEntry = struct {
+    doc: *dom.Document,
+    /// The arena the document lives in (null: the page's, not ours).
+    arena: ?*std.heap.ArenaAllocator,
+    is_html: bool,
+    /// The element that holds it (an iframe, an object), if any.
+    owner: ?struct { doc: u32, id: NodeId },
+    /// Its `defaultView`, made on first use.
+    view: Value,
+    url: []const u8,
+};
+
 pub const Page = struct {
     vm: *Vm,
+    /// The current document (see `DocEntry`).
     doc: *dom.Document,
+    docs: std.ArrayList(DocEntry) = .empty,
+    cur: u32 = 0,
     /// Bookkeeping memory (the wrapper table, timers).
     a: std.mem.Allocator,
     host: Host,
@@ -546,7 +658,8 @@ pub const Page = struct {
     viewport_h: u32 = 600,
     scroll_x: f64 = 0,
     scroll_y: f64 = 0,
-    wrappers: std.AutoHashMapUnmanaged(NodeId, *Object) = .empty,
+    /// Node wrappers by (document, node).
+    wrappers: std.AutoHashMapUnmanaged(u64, *Object) = .empty,
     protos: [interfaces.len]*Object = undefined,
     ctors: [interfaces.len]*Object = undefined,
     sym_listeners: *Symbol = undefined,
@@ -554,6 +667,7 @@ pub const Page = struct {
     sym_style: *Symbol = undefined,
     document_obj: *Object = undefined,
     location_obj: *Object = undefined,
+    dom_exception_proto: Value = Value.undefined_,
     timers: std.ArrayList(Timer) = .empty,
     next_timer: u32 = 1,
     /// Every script's text, kept: the engine holds slices of it.
@@ -573,6 +687,9 @@ pub const Page = struct {
     /// The parser-inserted script running now: `document.write` puts
     /// its markup right after it, as the parser would have.
     current_script: ?NodeId = null,
+    /// Live ranges and node iterators: the DOM's mutations move them.
+    ranges: std.ArrayList(Value) = .empty,
+    iterators: std.ArrayList(Value) = .empty,
     /// The session history the page's scripts made: `pushState` entries
     /// and where the page is in them (the host keeps the real history).
     history: std.ArrayList(HistoryEntry) = .empty,
@@ -591,6 +708,7 @@ pub const Page = struct {
     /// becomes this page and its embedder roots this page's tables.
     pub fn init(p: *Page, vm: *Vm, doc: *dom.Document, a: std.mem.Allocator, host: Host) Error!void {
         p.* = .{ .vm = vm, .doc = doc, .a = a, .host = host };
+        try p.docs.append(a, .{ .doc = doc, .arena = null, .is_html = true, .owner = null, .view = Value.undefined_, .url = "" });
         vm.host_data = p;
         vm.embedder_roots = .{ .ctx = p, .trace = trace };
         p.sym_listeners = try vm.newSymbol(try vm.strings.fromUtf8("listeners"));
@@ -602,6 +720,11 @@ pub const Page = struct {
     }
 
     pub fn deinit(p: *Page) void {
+        for (p.docs.items) |d| if (d.arena) |ar| {
+            ar.deinit();
+            p.a.destroy(ar);
+        };
+        p.docs.deinit(p.a);
         p.wrappers.deinit(p.a);
         p.timers.deinit(p.a);
         for (p.sources.items) |src| p.a.free(src);
@@ -615,6 +738,8 @@ pub const Page = struct {
         p.session_items.deinit(p.a);
         p.observers.deinit(p.a);
         p.mutation_records.deinit(p.a);
+        p.ranges.deinit(p.a);
+        p.iterators.deinit(p.a);
         if (p.url_owned) p.a.free(p.url);
         p.vm.embedder_roots = null;
         p.vm.host_data = null;
@@ -631,6 +756,7 @@ pub const Page = struct {
         m.markCell(&p.sym_style.header);
         m.markCell(p.document_obj.cell());
         m.markCell(p.location_obj.cell());
+        m.markValue(p.dom_exception_proto);
         for (p.timers.items) |t| {
             m.markValue(t.func);
             for (t.args[0..t.argc]) |v| m.markValue(v);
@@ -642,6 +768,110 @@ pub const Page = struct {
             m.markValue(r.record);
         }
         m.markValue(p.deliver_fn);
+        for (p.docs.items) |d| m.markValue(d.view);
+        for (p.ranges.items) |r| m.markValue(r);
+        for (p.iterators.items) |r| m.markValue(r);
+    }
+
+    // ---------------------------------------------------- documents
+
+    fn key(p: *Page, id: NodeId) u64 {
+        return (@as(u64, p.cur) << 32) | id;
+    }
+
+    /// Make document `i` the current one.
+    fn switchTo(p: *Page, i: u32) void {
+        if (i >= p.docs.items.len) return;
+        p.cur = i;
+        p.doc = p.docs.items[i].doc;
+    }
+
+    /// Back to the page's own document (every entry from the embedder).
+    fn resetDoc(p: *Page) void {
+        p.switchTo(0);
+    }
+
+    fn isHtmlDoc(p: *Page) bool {
+        return p.docs.items[p.cur].is_html;
+    }
+
+    /// A new document of the page's, in an arena of its own.
+    fn newDocument(p: *Page, markup: ?[]const u8, is_html: bool, owner: ?struct { doc: u32, id: NodeId }, url_text: []const u8) Error!u32 {
+        const ar = try p.a.create(std.heap.ArenaAllocator);
+        ar.* = std.heap.ArenaAllocator.init(p.a);
+        errdefer {
+            ar.deinit();
+            p.a.destroy(ar);
+        }
+        const a = ar.allocator();
+        const doc: *dom.Document = if (markup) |m| try html.parse(a, m, .{ .scripting = true }) else blk: {
+            const d = try a.create(dom.Document);
+            d.* = try dom.Document.init(a);
+            break :blk d;
+        };
+        const idx: u32 = @intCast(p.docs.items.len);
+        try p.docs.append(p.a, .{ .doc = doc, .arena = ar, .is_html = is_html, .owner = if (owner) |o| .{ .doc = o.doc, .id = o.id } else null, .view = Value.undefined_, .url = try a.dupe(u8, url_text) });
+        return idx;
+    }
+
+    /// The document an iframe or object holds, loaded on first touch:
+    /// its `src` (an object's `data`) fetched through the host, parsed
+    /// as the page's document was; nothing to fetch gives an empty one.
+    fn frameDocument(p: *Page, id: NodeId) Error!u32 {
+        for (p.docs.items, 0..) |d, i| if (d.owner) |o| if (o.doc == p.cur and o.id == id) return @intCast(i);
+        const owner_doc = p.cur;
+        var scratch = std.heap.ArenaAllocator.init(p.a);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        var markup: []const u8 = "";
+        var abs: []const u8 = "about:blank";
+        const attr = if (p.doc.isHtml(id, "object")) "data" else "src";
+        if (p.doc.getAttr(id, attr)) |raw| if (raw.len > 0) {
+            const base = url.parse(sa, p.url, null) catch null;
+            if (url.parse(sa, raw, if (base) |*b| b else null)) |u| {
+                abs = try u.href(sa);
+                if (p.host.fetch) |f| if (f(p.host.ctx, abs)) |text| {
+                    markup = text;
+                };
+            } else |_| {}
+        };
+        // A picture or plain text in a frame is a document around it.
+        const lower = try std.ascii.allocLowerString(sa, abs);
+        if (std.mem.endsWith(u8, lower, ".png") or std.mem.endsWith(u8, lower, ".jpg") or std.mem.endsWith(u8, lower, ".jpeg") or std.mem.endsWith(u8, lower, ".gif") or std.mem.endsWith(u8, lower, ".webp")) {
+            markup = try std.fmt.allocPrint(sa, "<html><head><title></title></head><body><img src=\"{s}\"></body></html>", .{abs});
+        } else if (std.mem.endsWith(u8, lower, ".txt")) {
+            var esc: std.ArrayList(u8) = .empty;
+            for (markup) |ch| switch (ch) {
+                '<' => try esc.appendSlice(sa, "&lt;"),
+                '&' => try esc.appendSlice(sa, "&amp;"),
+                else => try esc.append(sa, ch),
+            };
+            markup = try std.fmt.allocPrint(sa, "<html><head><title></title></head><body><pre>{s}</pre></body></html>", .{esc.items});
+        }
+        return p.newDocument(markup, true, .{ .doc = owner_doc, .id = id }, abs);
+    }
+
+    /// A document's `defaultView`: the window for the page's own, a
+    /// window-like object for the others (their `document`, and
+    /// `getComputedStyle`), made once.
+    fn viewOf(p: *Page, i: u32) Error!Value {
+        if (i == 0) return p.vm.global.asValue();
+        if (p.docs.items[i].view.isObject()) return p.docs.items[i].view;
+        const vm = p.vm;
+        const o = try vm.newObject();
+        const saved = p.cur;
+        p.switchTo(i);
+        const docv = try p.wrapValue(dom.document_id);
+        p.switchTo(saved);
+        try vm.defineValue(o, "document", docv, .default);
+        try vm.defineValue(o, "window", o.asValue(), .default);
+        try vm.defineValue(o, "self", o.asValue(), .default);
+        try vm.defineValue(o, "parent", vm.global.asValue(), .default);
+        try vm.defineValue(o, "top", vm.global.asValue(), .default);
+        _ = try vm.defineNative(o, "getComputedStyle", 1, getComputedStyle);
+        _ = try vm.defineNative(o, "postMessage", 1, noopNative);
+        p.docs.items[i].view = o.asValue();
+        return o.asValue();
     }
 
     /// Whether the DOM changed since the last call (and forget it).
@@ -673,6 +903,7 @@ pub const Page = struct {
 
     fn installInterfaces(p: *Page) Error!void {
         const vm = p.vm;
+        @setEvalBranchQuota(100_000);
         inline for (interfaces, 0..) |iface, k| {
             const parent_proto: Value = if (iface.parent) |pn| p.protos[ifaceIndex(pn)].asValue() else vm.intrinsics.object_prototype.asValue();
             const proto = try vm.objects.create(parent_proto, .ordinary, 0);
@@ -769,6 +1000,7 @@ pub const Page = struct {
         p.runSource(named_storage_source, "the storage proxies");
         p.scripts_run = 0; // the page's own count starts at its scripts
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
+        try p.installDomException();
         _ = try vm.defineNative(g, "postMessage", 1, noopNative);
         _ = try vm.defineNative(g, "open", 0, windowOpen);
         _ = try vm.defineNative(g, "close", 0, noopNative);
@@ -784,6 +1016,28 @@ pub const Page = struct {
         try vm.defineValue(g, "scrollY", Value.fromInt(0), .hidden);
         try vm.defineValue(g, "pageXOffset", Value.fromInt(0), .hidden);
         try vm.defineValue(g, "pageYOffset", Value.fromInt(0), .hidden);
+    }
+
+    /// `DOMException`: an Error with a `name` and the legacy `code`, and
+    /// the code constants on the constructor; `NodeFilter`'s constants.
+    fn installDomException(p: *Page) Error!void {
+        const vm = p.vm;
+        const proto = try vm.objects.create(vm.intrinsics.error_prototype.asValue(), .ordinary, 0);
+        const ctor = try vm.newNativeNamed(try vm.str("DOMException"), 0, domExceptionCtor, Value.undefined_, true);
+        try vm.defineValue(ctor, "prototype", proto.asValue(), .frozen);
+        try vm.defineValue(proto, "constructor", ctor.asValue(), .hidden);
+        try vm.defineValue(proto, "name", try vm.str("Error"), .hidden);
+        try vm.defineValue(proto, "message", try vm.str(""), .hidden);
+        try vm.defineValue(proto, "code", Value.fromInt(0), .hidden);
+        inline for (dom_codes) |c| {
+            try vm.defineValue(ctor, c.legacy, Value.fromInt(c.code), .frozen);
+            try vm.defineValue(proto, c.legacy, Value.fromInt(c.code), .frozen);
+        }
+        try vm.defineValue(vm.global, "DOMException", ctor.asValue(), .hidden);
+        p.dom_exception_proto = proto.asValue();
+        const nf = try vm.newObject();
+        inline for (node_filter_consts) |c| try vm.defineValue(nf, c.name, Value.fromF64(c.value), .frozen);
+        try vm.defineValue(vm.global, "NodeFilter", nf.asValue(), .hidden);
     }
 
     /// The viewport size the window reports.
@@ -925,7 +1179,7 @@ pub const Page = struct {
 
     /// The node's wrapper, made on first touch.
     pub fn wrap(p: *Page, id: NodeId) Error!*Object {
-        if (p.wrappers.get(id)) |o| return o;
+        if (p.wrappers.get(p.key(id))) |o| return o;
         const n = p.doc.get(id);
         const k: usize = switch (n.kind) {
             .document => I.document,
@@ -933,11 +1187,11 @@ pub const Page = struct {
             .doctype => I.doctype,
             .text => I.text,
             .comment => I.comment,
-            .element => if (n.namespace != .html) I.element else if (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "textarea") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "button")) I.input else if (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) I.anchor else if (std.mem.eql(u8, n.name, "form")) I.form else I.html_element,
+            .element => if (n.namespace != .html or !p.isHtmlDoc()) I.element else if (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "textarea") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "button")) I.input else if (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) I.anchor else if (std.mem.eql(u8, n.name, "form")) I.form else I.html_element,
         };
         const o = try p.vm.objects.create(p.protos[k].asValue(), .dom, @sizeOf(Slot));
-        o.internal(Slot).* = .{ .kind = slot_node, .id = id };
-        try p.wrappers.put(p.a, id, o);
+        o.internal(Slot).* = .{ .kind = slot_node, .id = id, .doc = p.cur };
+        try p.wrappers.put(p.a, p.key(id), o);
         return o;
     }
 
@@ -952,14 +1206,22 @@ pub const Page = struct {
     /// classic, parser-inserted ones: inline text or a fetched `src`),
     /// then fire `DOMContentLoaded` and `load`.
     pub fn runScripts(p: *Page) void {
+        p.resetDoc();
         var list: std.ArrayList(NodeId) = .empty;
         defer list.deinit(p.a);
         var w = p.doc.walk(dom.document_id);
         while (w.next()) |id| if (p.doc.isHtml(id, "script")) list.append(p.a, id) catch return;
         // Classic scripts as the parser meets them; module scripts are
         // deferred, so they run after, in document order.
-        for (list.items) |id| if (!isModuleScript(p, id)) p.runScriptElement(id);
-        for (list.items) |id| if (isModuleScript(p, id)) p.runScriptElement(id);
+        for (list.items) |id| {
+            p.resetDoc();
+            if (!isModuleScript(p, id)) p.runScriptElement(id);
+        }
+        for (list.items) |id| {
+            p.resetDoc();
+            if (isModuleScript(p, id)) p.runScriptElement(id);
+        }
+        p.resetDoc();
         p.ready_state = .interactive;
         _ = p.fireSimple(p.document_obj.asValue(), "DOMContentLoaded", true, false);
         p.ready_state = .complete;
@@ -972,6 +1234,7 @@ pub const Page = struct {
     }
 
     fn runScriptElement(p: *Page, id: NodeId) void {
+        p.resetDoc();
         const doc = p.doc;
         p.current_script = id;
         defer p.current_script = null;
@@ -1017,6 +1280,7 @@ pub const Page = struct {
     /// Run a module script: link its graph through the host loader,
     /// evaluate, and report how its promise settled.
     pub fn runModule(p: *Page, source: []const u8, name: []const u8) void {
+        p.resetDoc();
         const vm = p.vm;
         p.scripts_run += 1;
         const promise = js.module.runEntry(vm, name, source) catch |e| {
@@ -1034,6 +1298,7 @@ pub const Page = struct {
 
     /// Compile and run one classic script; errors go to the log.
     pub fn runSource(p: *Page, source: []const u8, name: []const u8) void {
+        p.resetDoc();
         const vm = p.vm;
         // The engine keeps slices of the source (a function's text).
         const src = p.a.dupe(u8, source) catch return;
@@ -1133,6 +1398,12 @@ pub const Page = struct {
     /// event through the tree; false when a listener prevented the
     /// default (the link should not be followed, the box not toggled).
     pub fn click(p: *Page, id: NodeId) bool {
+        p.resetDoc();
+        return p.clickHere(id);
+    }
+
+    /// `click` on a node of the current document (a script's `el.click()`).
+    fn clickHere(p: *Page, id: NodeId) bool {
         const target = p.wrapValue(id) catch return true;
         const ev = p.newEvent(I.mouse_event, "click", true, true, true) catch return true;
         p.setEventProp(ev, "button", Value.fromInt(0)) catch {};
@@ -1149,18 +1420,25 @@ pub const Page = struct {
     /// The user submitted a form (a button, Enter in a field): the
     /// `submit` event; false when a listener prevented it.
     pub fn fireSubmit(p: *Page, form: NodeId) bool {
+        p.resetDoc();
+        return p.submitHere(form);
+    }
+
+    fn submitHere(p: *Page, form: NodeId) bool {
         const target = p.wrapValue(form) catch return true;
         return p.fireSimple(target, "submit", true, true);
     }
 
     /// The user typed into a control, or toggled one.
     pub fn fireInput(p: *Page, id: NodeId) void {
+        p.resetDoc();
         const target = p.wrapValue(id) catch return;
         _ = p.fireSimple(target, "input", true, false);
         p.runJobs();
     }
 
     pub fn fireChange(p: *Page, id: NodeId) void {
+        p.resetDoc();
         const target = p.wrapValue(id) catch return;
         _ = p.fireSimple(target, "input", true, false);
         _ = p.fireSimple(target, "change", true, false);
@@ -1173,6 +1451,7 @@ pub const Page = struct {
     /// type, move focus nor scroll for it. `keyFromByte` names a plain
     /// byte; the page names its own codes with `keyNamed`.
     pub fn fireKey(p: *Page, focus: ?NodeId, k: KeyInfo) bool {
+        p.resetDoc();
         const target_id: NodeId = focus orelse bodyOrDocument(p);
         const target = p.wrapValue(target_id) catch return true;
         var ok = p.fireKeyEvent(target, "keydown", k, true);
@@ -1216,6 +1495,7 @@ pub const Page = struct {
     /// up. Returns !defaultPrevented.
     pub fn dispatch(p: *Page, target: Value, ev: *Object) Error!bool {
         const vm = p.vm;
+        if (docOfValue(target)) |d| p.switchTo(d);
         const slot = ev.internal(Slot);
         if (slot.flags & ev_dispatching != 0) return vm.throwTypeError("the event is already being dispatched");
         slot.flags |= ev_dispatching;
@@ -1235,8 +1515,8 @@ pub const Page = struct {
         try path.append(p.a, target);
         if (p.nodeOfValue(target)) |id| {
             var cur = p.doc.get(id).parent;
-            while (cur) |c| : (cur = p.doc.get(c).parent) if (p.wrappers.get(c)) |o| try path.append(p.a, o.asValue());
-            try path.append(p.a, vm.global.asValue());
+            while (cur) |c| : (cur = p.doc.get(c).parent) if (p.wrappers.get(p.key(c))) |o| try path.append(p.a, o.asValue());
+            if (p.cur == 0) try path.append(p.a, vm.global.asValue());
         }
         const bubbles = slot.flags & ev_bubbles != 0;
         // Capture: from the window down to the target's parent.
@@ -1461,6 +1741,7 @@ pub const Page = struct {
     /// Run every timer and animation frame due at `now_ms`, in order;
     /// true when any ran. Microtasks run after each.
     pub fn runDue(p: *Page, now_ms: f64) bool {
+        p.resetDoc();
         var ran = false;
         while (true) {
             // The earliest due timer, by (when, id).
@@ -1485,6 +1766,7 @@ pub const Page = struct {
                 t.args[0] = Value.fromF64(now_ms);
                 t.argc = 1;
             }
+            p.resetDoc();
             _ = vm.call(t.func, vm.global.asValue(), t.args[0..t.argc]) catch |e| p.reportError(e, if (t.raf) "an animation frame" else "a timer");
             p.runJobs();
         }
@@ -1525,19 +1807,63 @@ pub const Page = struct {
     // ----------------------------------------------------- utilities
 
     /// The node a wrapper value stands for, or null for anything else.
+    /// The node a wrapper stands for, in the current document: a node of
+    /// another of the page's documents is adopted — copied over, as the
+    /// DOM adopts across documents (identity does not survive the copy).
     fn nodeOfValue(p: *Page, v: Value) ?NodeId {
-        _ = p;
         if (!v.isObject()) return null;
         const o = Vm.asObject(v);
         if (o.class != .dom) return null;
         const s = o.internal(Slot);
         if (s.kind != slot_node) return null;
+        if (s.doc != p.cur) return null;
         return s.id;
     }
 
-    /// Mark the DOM changed.
+    /// A node argument that is going to be inserted: one of another of
+    /// the page's documents is adopted — copied over, as the DOM adopts
+    /// across documents (identity does not survive the copy).
+    fn adoptArg(p: *Page, v: Value) ?NodeId {
+        if (!v.isObject()) return null;
+        const o = Vm.asObject(v);
+        if (o.class != .dom) return null;
+        const s = o.internal(Slot);
+        if (s.kind != slot_node) return null;
+        if (s.doc != p.cur) {
+            if (s.doc >= p.docs.items.len) return null;
+            return adopt(p, p.docs.items[s.doc].doc, s.id) catch null;
+        }
+        return s.id;
+    }
+
+    /// A node argument the operation belongs to (a range's point, a
+    /// traversal's root): the current document becomes the node's.
+    fn nodeSwitching(p: *Page, v: Value) ?NodeId {
+        if (!v.isObject()) return null;
+        const o = Vm.asObject(v);
+        if (o.class != .dom) return null;
+        const s = o.internal(Slot);
+        if (s.kind != slot_node) return null;
+        p.switchTo(s.doc);
+        return s.id;
+    }
+
+    /// The document index of a node wrapper, or null.
+    fn docOfValue(v: Value) ?u32 {
+        if (!v.isObject()) return null;
+        const o = Vm.asObject(v);
+        if (o.class != .dom) return null;
+        return o.internal(Slot).doc;
+    }
+
+    /// Mark the DOM changed (the page's own document: the others are
+    /// not laid out).
     fn touch(p: *Page) void {
-        p.dirty = true;
+        if (p.cur == 0) p.dirty = true;
+    }
+
+    fn markSheets(p: *Page) void {
+        if (p.cur == 0) p.sheets_dirty = true;
     }
 
     // ---------------------------------------------- mutation records
@@ -1559,6 +1885,7 @@ pub const Page = struct {
                 .character_data => ob.character_data,
             };
             if (!wants) continue;
+            if (ob.doc != p.cur) continue;
             if (ob.target != node and !(ob.subtree and isAncestor(p.doc, ob.target, node))) continue;
             const rec = try vm.newObject();
             const mark = vm.heap.tempMark();
@@ -1604,9 +1931,121 @@ pub const Page = struct {
         return arr.asValue();
     }
 
+    // ------------------------------------------- live ranges, iterators
+
+    /// `count` children inserted into `parent` at `index`: boundary
+    /// points in the parent past the index move by count.
+    fn rangesOnInsert(p: *Page, parent: NodeId, index: usize, count: usize) void {
+        const vm = p.vm;
+        for (p.ranges.items) |rv| {
+            const o = Vm.asObject(rv);
+            if (o.internal(Slot).doc != p.cur) continue;
+            var st = rangeState(vm, rv) catch continue;
+            var changed = false;
+            if (st.sc == parent and st.so > index) {
+                st.so += count;
+                changed = true;
+            }
+            if (st.ec == parent and st.eo > index) {
+                st.eo += count;
+                changed = true;
+            }
+            if (changed) setRangeState(vm, rv, st) catch {};
+        }
+    }
+
+    /// `id` about to leave `parent`: points inside it go to its place;
+    /// points in the parent past it move back by one. Iterators whose
+    /// reference is inside it move as the DOM says.
+    fn rangesOnRemove(p: *Page, id: NodeId, parent: NodeId) void {
+        const vm = p.vm;
+        const index = childIndex(p.doc, id);
+        for (p.ranges.items) |rv| {
+            const o = Vm.asObject(rv);
+            if (o.internal(Slot).doc != p.cur) continue;
+            var st = rangeState(vm, rv) catch continue;
+            var changed = false;
+            if (st.sc == id or isAncestor(p.doc, id, st.sc)) {
+                st.sc = parent;
+                st.so = index;
+                changed = true;
+            }
+            if (st.ec == id or isAncestor(p.doc, id, st.ec)) {
+                st.ec = parent;
+                st.eo = index;
+                changed = true;
+            }
+            if (st.sc == parent and st.so > index) {
+                st.so -= 1;
+                changed = true;
+            }
+            if (st.ec == parent and st.eo > index) {
+                st.eo -= 1;
+                changed = true;
+            }
+            if (changed) setRangeState(vm, rv, st) catch {};
+        }
+        for (p.iterators.items) |iv| {
+            const o = Vm.asObject(iv);
+            if (o.internal(Slot).doc != p.cur) continue;
+            const ref_v = slotGet(vm, o, "__ref") catch continue;
+            const ref = p.nodeOfValue(ref_v) orelse continue;
+            if (!(ref == id or isAncestor(p.doc, id, ref))) continue;
+            const root = o.internal(Slot).id;
+            const before = vm.toBoolean(slotGet(vm, o, "__before") catch Value.false_);
+            if (before) {
+                // The next node after the removed subtree, if any.
+                var next: ?NodeId = p.doc.get(id).next;
+                var up = id;
+                while (next == null) {
+                    up = p.doc.get(up).parent orelse break;
+                    if (up == root) break;
+                    next = p.doc.get(up).next;
+                }
+                if (next) |n| {
+                    slotSet(vm, o, "__ref", p.wrapValue(n) catch continue) catch {};
+                    continue;
+                }
+                slotSet(vm, o, "__before", Value.false_) catch {};
+            }
+            const target: NodeId = if (p.doc.get(id).prev) |s| lastDescendant(p.doc, s) else parent;
+            slotSet(vm, o, "__ref", p.wrapValue(target) catch continue) catch {};
+        }
+    }
+
+    /// Data replaced in a node: points after the replaced run move.
+    fn rangesOnReplaceData(p: *Page, id: NodeId, offset: usize, count: usize, new_len: usize) void {
+        const vm = p.vm;
+        for (p.ranges.items) |rv| {
+            const o = Vm.asObject(rv);
+            if (o.internal(Slot).doc != p.cur) continue;
+            var st = rangeState(vm, rv) catch continue;
+            var changed = false;
+            if (st.sc == id) {
+                if (st.so > offset and st.so <= offset + count) {
+                    st.so = offset;
+                    changed = true;
+                } else if (st.so > offset + count) {
+                    st.so = st.so - count + new_len;
+                    changed = true;
+                }
+            }
+            if (st.ec == id) {
+                if (st.eo > offset and st.eo <= offset + count) {
+                    st.eo = offset;
+                    changed = true;
+                } else if (st.eo > offset + count) {
+                    st.eo = st.eo - count + new_len;
+                    changed = true;
+                }
+            }
+            if (changed) setRangeState(vm, rv, st) catch {};
+        }
+    }
+
     /// The DOM primitives, with the observers told.
     fn setAttr(p: *Page, id: NodeId, name: []const u8, value: []const u8) Error!void {
-        if (p.doc.isHtml(id, "link") or p.doc.isHtml(id, "style")) p.sheets_dirty = true;
+        if (p.doc.isHtml(id, "link") or p.doc.isHtml(id, "style")) p.markSheets();
         try p.doc.setAttr(id, name, value);
         p.touch();
         p.notify(.attributes, id, name, &.{}, &.{});
@@ -1614,7 +2053,7 @@ pub const Page = struct {
 
     fn removeAttr(p: *Page, id: NodeId, name: []const u8) void {
         if (!p.doc.hasAttr(id, name)) return;
-        if (p.doc.isHtml(id, "link") or p.doc.isHtml(id, "style")) p.sheets_dirty = true;
+        if (p.doc.isHtml(id, "link") or p.doc.isHtml(id, "style")) p.markSheets();
         p.doc.removeAttr(id, name);
         p.touch();
         p.notify(.attributes, id, name, &.{}, &.{});
@@ -1622,7 +2061,8 @@ pub const Page = struct {
 
     fn detachNode(p: *Page, id: NodeId) void {
         const parent = p.doc.get(id).parent orelse return;
-        if (p.touchesSheets(id)) p.sheets_dirty = true;
+        if (p.touchesSheets(id)) p.markSheets();
+        p.rangesOnRemove(id, parent);
         p.doc.detach(id);
         p.touch();
         p.notify(.child_list, parent, null, &.{}, &.{id});
@@ -1631,7 +2071,7 @@ pub const Page = struct {
     fn setText(p: *Page, id: NodeId, text: []const u8) Error!void {
         const n = p.doc.node(id);
         if (n.parent) |par| if (p.doc.isHtml(par, "style")) {
-            p.sheets_dirty = true;
+            p.markSheets();
         };
         n.text.clearRetainingCapacity();
         try n.text.appendSlice(p.doc.a, text);
@@ -1668,8 +2108,8 @@ fn thisObserver(vm: *Vm, this: Value) Error!*Object {
 fn moObserve(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const o = try thisObserver(vm, this);
-    const target = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("observe needs a node");
-    var ob: Observation = .{ .observer = o.asValue(), .target = target, .child_list = false, .attributes = false, .character_data = false, .subtree = false };
+    const target = p.nodeSwitching(arg(args, 0)) orelse return vm.throwTypeError("observe needs a node");
+    var ob: Observation = .{ .observer = o.asValue(), .doc = p.cur, .target = target, .child_list = false, .attributes = false, .character_data = false, .subtree = false };
     const opts = arg(args, 1);
     if (opts.isObject()) {
         const oo = Vm.asObject(opts);
@@ -1680,7 +2120,7 @@ fn moObserve(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     }
     if (!ob.child_list and !ob.attributes and !ob.character_data) return vm.throwTypeError("observe needs childList, attributes or characterData");
     // One observation per (observer, target): the newer options win.
-    for (p.observers.items) |*x| if (vm.isStrictlyEqual(x.observer, ob.observer) and x.target == target) {
+    for (p.observers.items) |*x| if (vm.isStrictlyEqual(x.observer, ob.observer) and x.target == target and x.doc == ob.doc) {
         x.* = ob;
         return Value.undefined_;
     };
@@ -1775,7 +2215,22 @@ fn arg(args: []const Value, i: usize) Value {
 
 /// `this` as a node, or a TypeError.
 fn thisNode(vm: *Vm, this: Value) Error!NodeId {
-    return pageOf(vm).nodeOfValue(this) orelse vm.throwTypeError("Illegal invocation");
+    const p = pageOf(vm);
+    if (this.isObject()) {
+        const o = Vm.asObject(this);
+        if (o.class == .dom and o.internal(Slot).kind == slot_node) {
+            p.switchTo(o.internal(Slot).doc);
+            return o.internal(Slot).id;
+        }
+    }
+    return vm.throwTypeError("Illegal invocation");
+}
+
+/// `this` as its node record (the document switched first: a receiver
+/// read before the call would be the old document's).
+fn thisNodeRec(vm: *Vm, this: Value) Error!*const dom.Node {
+    const id = try thisNode(vm, this);
+    return pageOf(vm).doc.get(id);
 }
 
 fn thisElement(vm: *Vm, this: Value) Error!NodeId {
@@ -1840,6 +2295,25 @@ fn nodeList(vm: *Vm, ids: []const NodeId) Error!Value {
     return arr.asValue();
 }
 
+/// A collection that answers to names too (`document.forms.login`,
+/// `form.elements.q`): the array with each element's `id` and `name`
+/// as a property — a name shared by several (a radio group) gives the
+/// first, as `HTMLCollection` does.
+fn namedCollection(vm: *Vm, ids: []const NodeId) Error!Value {
+    const p = pageOf(vm);
+    const v = try nodeList(vm, ids);
+    const arr = Vm.asObject(v);
+    for (ids) |id| {
+        const el = try p.wrapValue(id);
+        for ([_][]const u8{ "id", "name" }) |attr| if (p.doc.getAttr(id, attr)) |nm| {
+            if (nm.len == 0 or std.ascii.isDigit(nm[0])) continue;
+            const k: Key = .{ .atom = try vm.atom(nm) };
+            if ((try vm.objects.getOwn(arr, k)) == null) _ = try vm.objects.defineOwn(arr, k, el, .hidden);
+        };
+    }
+    return v;
+}
+
 /// Element children of `id`, in order.
 fn elementChildren(p: *Page, id: NodeId, a: std.mem.Allocator, out: *std.ArrayList(NodeId)) Error!void {
     var c = p.doc.get(id).first_child;
@@ -1856,11 +2330,37 @@ fn isAncestor(doc: *const dom.Document, anc: NodeId, id: NodeId) bool {
 fn insertNode(p: *Page, parent: NodeId, child: NodeId, before: ?NodeId) Error!void {
     const vm = p.vm;
     const doc = p.doc;
-    if (child == parent or isAncestor(doc, child, parent)) return vm.throwError(.TypeError, "HierarchyRequestError: the new child is an ancestor of the parent");
+    if (child == parent or isAncestor(doc, child, parent)) return throwDom(vm, .HierarchyRequestError, "the new child is an ancestor of the parent");
     const pk = doc.get(parent).kind;
-    if (pk != .element and pk != .document and pk != .fragment) return vm.throwError(.TypeError, "HierarchyRequestError: this node cannot have children");
-    if (before) |b| if (doc.get(b).parent != parent) return vm.throwError(.TypeError, "NotFoundError: the reference node is not a child");
-    if (p.touchesSheets(child) or doc.isHtml(parent, "style")) p.sheets_dirty = true;
+    if (pk != .element and pk != .document and pk != .fragment) return throwDom(vm, .HierarchyRequestError, "this node cannot have children");
+    if (doc.get(child).kind == .document) return throwDom(vm, .HierarchyRequestError, "a document cannot be a child");
+    if (pk == .document) {
+        // A document holds one element, one doctype, no text.
+        const ck = doc.get(child).kind;
+        if (ck == .text) return throwDom(vm, .HierarchyRequestError, "a document cannot hold text");
+        var elements: usize = 0;
+        var c = doc.get(parent).first_child;
+        while (c) |cid| : (c = doc.get(cid).next) if (cid != child) {
+            if (doc.get(cid).kind == .element) elements += 1;
+            if (ck == .doctype and doc.get(cid).kind == .doctype) return throwDom(vm, .HierarchyRequestError, "a document holds one doctype");
+        };
+        if (ck == .element and elements > 0) return throwDom(vm, .HierarchyRequestError, "a document holds one element");
+        if (ck == .fragment) {
+            var fe: usize = 0;
+            var fc = doc.get(child).first_child;
+            while (fc) |fid| : (fc = doc.get(fid).next) {
+                if (doc.get(fid).kind == .text) return throwDom(vm, .HierarchyRequestError, "a document cannot hold text");
+                if (doc.get(fid).kind == .element) fe += 1;
+            }
+            if (fe > 1 or (fe == 1 and elements > 0)) return throwDom(vm, .HierarchyRequestError, "a document holds one element");
+        }
+    }
+    if (before) |b| if (doc.get(b).parent != parent) return throwDom(vm, .NotFoundError, "the reference node is not a child");
+    // The live ranges and iterators move with the insertion.
+    const at_index: usize = if (before) |b| childIndex(doc, b) else doc.childCount(parent);
+    const count: usize = if (doc.get(child).kind == .fragment) doc.childCount(child) else 1;
+    p.rangesOnInsert(parent, at_index, count);
+    if (p.touchesSheets(child) or doc.isHtml(parent, "style")) p.markSheets();
     if (doc.get(child).kind == .fragment) {
         var added: std.ArrayList(NodeId) = .empty;
         defer added.deinit(p.a);
@@ -1886,7 +2386,7 @@ fn insertNode(p: *Page, parent: NodeId, child: NodeId, before: ?NodeId) Error!vo
 /// that becomes a text node.
 fn nodeOrText(vm: *Vm, v: Value) Error!NodeId {
     const p = pageOf(vm);
-    if (p.nodeOfValue(v)) |id| return id;
+    if (p.adoptArg(v)) |id| return id;
     const text = try docStr(vm, v);
     return p.doc.createText(text);
 }
@@ -1956,13 +2456,14 @@ fn adopt(p: *Page, from: *const dom.Document, id: NodeId) Error!NodeId {
     const n = from.get(id);
     const copy: NodeId = switch (n.kind) {
         .element => blk: {
-            // The names and values are the parse's: copied, since it goes.
+            // The names and values are the source's: copied, since it may go.
             const e = try doc.createElement(n.namespace, try doc.a.dupe(u8, n.name));
             for (n.attrs.items) |at| try doc.setAttr(e, try doc.a.dupe(u8, at.name), try doc.a.dupe(u8, at.value));
             break :blk e;
         },
         .text => try doc.createText(n.text.items),
         .comment => try doc.createComment(n.text.items),
+        .doctype => try doc.createDoctype(try doc.a.dupe(u8, n.name), if (n.public_id) |x| try doc.a.dupe(u8, x) else null, if (n.system_id) |x| try doc.a.dupe(u8, x) else null),
         else => try doc.createFragment(),
     };
     var c = n.first_child;
@@ -2002,6 +2503,7 @@ fn construct(vm: *Vm, this: Value, args: []const Value, new_target: Value) Error
         const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
         return o.asValue();
     }
+    if (idx == I.range) return newRange(vm);
     if (idx == I.mutation_observer) {
         const cb = arg(args, 0);
         if (!vm.isCallable(cb)) return vm.throwTypeError("MutationObserver needs a callback");
@@ -2115,11 +2617,12 @@ fn getNodeType(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 
 fn getNodeName(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const id = try thisNode(vm, this);
-    const n = pageOf(vm).doc.get(id);
+    const p = pageOf(vm);
+    const n = p.doc.get(id);
     var sc = Scratch.init(vm);
     defer sc.deinit();
     return switch (n.kind) {
-        .element => jsStr(vm, if (n.namespace == .html) try upperName(n.name, sc.a()) else n.name),
+        .element => jsStr(vm, if (n.namespace == .html and p.isHtmlDoc()) try upperName(n.name, sc.a()) else n.name),
         .text => jsStr(vm, "#text"),
         .comment => jsStr(vm, "#comment"),
         .document => jsStr(vm, "#document"),
@@ -2217,29 +2720,29 @@ fn getChildNodes(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 
 fn getFirstChild(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
-    return p.wrapValue(p.doc.get(try thisNode(vm, this)).first_child);
+    return p.wrapValue((try thisNodeRec(vm, this)).first_child);
 }
 
 fn getLastChild(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
-    return p.wrapValue(p.doc.get(try thisNode(vm, this)).last_child);
+    return p.wrapValue((try thisNodeRec(vm, this)).last_child);
 }
 
 fn getPreviousSibling(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
-    return p.wrapValue(p.doc.get(try thisNode(vm, this)).prev);
+    return p.wrapValue((try thisNodeRec(vm, this)).prev);
 }
 
 fn getNextSibling(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
-    return p.wrapValue(p.doc.get(try thisNode(vm, this)).next);
+    return p.wrapValue((try thisNodeRec(vm, this)).next);
 }
 
 fn getOwnerDocument(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisNode(vm, this);
     if (id == dom.document_id) return Value.null_;
-    return p.document_obj.asValue();
+    return p.wrapValue(dom.document_id);
 }
 
 fn getIsConnected(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -2256,7 +2759,7 @@ fn getBaseURI(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn appendChild(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const parent = try thisNode(vm, this);
-    const child = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("appendChild: not a node");
+    const child = p.adoptArg(arg(args, 0)) orelse return vm.throwTypeError("appendChild: not a node");
     try insertNode(p, parent, child, null);
     return arg(args, 0);
 }
@@ -2264,7 +2767,7 @@ fn appendChild(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
 fn insertBefore(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const parent = try thisNode(vm, this);
-    const child = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("insertBefore: not a node");
+    const child = p.adoptArg(arg(args, 0)) orelse return vm.throwTypeError("insertBefore: not a node");
     const ref = arg(args, 1);
     const before: ?NodeId = if (ref.isNullish()) null else (p.nodeOfValue(ref) orelse return vm.throwTypeError("insertBefore: the reference is not a node"));
     try insertNode(p, parent, child, before);
@@ -2275,7 +2778,7 @@ fn removeChild(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
     const p = pageOf(vm);
     const parent = try thisNode(vm, this);
     const child = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("removeChild: not a node");
-    if (p.doc.get(child).parent != parent) return vm.throwError(.TypeError, "NotFoundError: the node is not a child");
+    if (p.doc.get(child).parent != parent) return throwDom(vm, .NotFoundError, "the node is not a child");
     p.detachNode(child);
     return arg(args, 0);
 }
@@ -2283,9 +2786,9 @@ fn removeChild(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
 fn replaceChild(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const parent = try thisNode(vm, this);
-    const new_child = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("replaceChild: not a node");
+    const new_child = p.adoptArg(arg(args, 0)) orelse return vm.throwTypeError("replaceChild: not a node");
     const old = p.nodeOfValue(arg(args, 1)) orelse return vm.throwTypeError("replaceChild: not a node");
-    if (p.doc.get(old).parent != parent) return vm.throwError(.TypeError, "NotFoundError: the node is not a child");
+    if (p.doc.get(old).parent != parent) return throwDom(vm, .NotFoundError, "the node is not a child");
     const next = p.doc.get(old).next;
     p.detachNode(old);
     try insertNode(p, parent, new_child, if (next == new_child) null else next);
@@ -2307,8 +2810,7 @@ fn containsNode(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
 }
 
 fn hasChildNodes(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
-    const p = pageOf(vm);
-    return Value.fromBool(p.doc.get(try thisNode(vm, this)).first_child != null);
+    return Value.fromBool((try thisNodeRec(vm, this)).first_child != null);
 }
 
 fn compareDocumentPosition(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
@@ -2446,6 +2948,134 @@ fn documentWriteln(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     return documentWriteText(vm, args, true);
 }
 
+/// `iframe.contentDocument` (an object's, a frame's): the document the
+/// element holds, loaded on first touch; null for any other element.
+fn getContentDocument(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (!(p.doc.isHtml(id, "iframe") or p.doc.isHtml(id, "object") or p.doc.isHtml(id, "frame") or p.doc.isHtml(id, "embed"))) return Value.null_;
+    const di = try p.frameDocument(id);
+    p.switchTo(di);
+    return p.wrapValue(dom.document_id);
+}
+
+fn getContentWindow(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (!(p.doc.isHtml(id, "iframe") or p.doc.isHtml(id, "object") or p.doc.isHtml(id, "frame"))) return Value.null_;
+    const di = try p.frameDocument(id);
+    return p.viewOf(di);
+}
+
+fn getDoctype(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    _ = try thisNode(vm, this);
+    var c = p.doc.get(dom.document_id).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.get(cid).kind == .doctype) return p.wrapValue(cid);
+    return Value.null_;
+}
+
+/// `document.implementation`, one object per document.
+fn getImplementation(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    _ = try thisNode(vm, this);
+    const w = try p.wrap(dom.document_id);
+    if (try vm.objects.getOwn(w, .{ .atom = try vm.atom("__impl") })) |own| return own.val;
+    const o = try vm.newObject();
+    _ = try vm.defineNative(o, "createDocument", 2, implCreateDocument);
+    _ = try vm.defineNative(o, "createHTMLDocument", 0, implCreateHTMLDocument);
+    _ = try vm.defineNative(o, "createDocumentType", 3, implCreateDocumentType);
+    _ = try vm.defineNative(o, "hasFeature", 0, implHasFeature);
+    _ = try vm.objects.defineOwn(w, .{ .atom = try vm.atom("__impl") }, o.asValue(), .hidden);
+    return o.asValue();
+}
+
+fn namespaceOf(text: []const u8) dom.Namespace {
+    if (std.mem.eql(u8, text, "http://www.w3.org/2000/svg")) return .svg;
+    if (std.mem.eql(u8, text, "http://www.w3.org/1998/Math/MathML")) return .mathml;
+    return .html;
+}
+
+/// A new, XML-flavoured document (names keep their case), with a root
+/// element when a name is given and the doctype adopted when given.
+fn implCreateDocument(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const di = try p.newDocument(null, false, null, "about:blank");
+    const saved = p.cur;
+    p.switchTo(di);
+    defer p.switchTo(saved);
+    const dt = arg(args, 2);
+    if (!dt.isNullish()) if (p.adoptArg(dt)) |d| if (p.doc.get(d).kind == .doctype) p.doc.appendChild(dom.document_id, d);
+    const qn = arg(args, 1);
+    if (!qn.isNullish()) {
+        const qname = try strArg(vm, qn, sc.a());
+        if (qname.len > 0) {
+            try checkName(vm, qname, true);
+            const nsv = arg(args, 0);
+            const ns: dom.Namespace = if (nsv.isNullish()) .html else namespaceOf(try strArg(vm, nsv, sc.a()));
+            const root = try p.doc.createElement(ns, try p.doc.a.dupe(u8, qname));
+            p.doc.appendChild(dom.document_id, root);
+        }
+    }
+    return p.wrapValue(dom.document_id);
+}
+
+fn implCreateHTMLDocument(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const t = arg(args, 0);
+    const title = if (t.isUndefined()) "" else try strArg(vm, t, sc.a());
+    const markup = if (t.isUndefined()) "<!DOCTYPE html><html><head></head><body></body></html>" else try std.fmt.allocPrint(sc.a(), "<!DOCTYPE html><html><head><title></title></head><body></body></html>", .{});
+    const di = try p.newDocument(markup, true, null, "about:blank");
+    const saved = p.cur;
+    p.switchTo(di);
+    defer p.switchTo(saved);
+    if (title.len > 0) if (titleElement(p)) |te| p.doc.appendChild(te, try p.doc.createText(try p.doc.a.dupe(u8, title)));
+    return p.wrapValue(dom.document_id);
+}
+
+/// A doctype node, in a document of its own until adopted.
+fn implCreateDocumentType(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const name = try strArg(vm, arg(args, 0), sc.a());
+    try checkName(vm, name, true);
+    const pub_id = try strArg(vm, arg(args, 1), sc.a());
+    const sys_id = try strArg(vm, arg(args, 2), sc.a());
+    const di = try p.newDocument(null, false, null, "about:blank");
+    const saved = p.cur;
+    p.switchTo(di);
+    defer p.switchTo(saved);
+    const dt = try p.doc.createDoctype(try p.doc.a.dupe(u8, name), try p.doc.a.dupe(u8, pub_id), try p.doc.a.dupe(u8, sys_id));
+    return p.wrapValue(dt);
+}
+
+fn implHasFeature(_: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return Value.true_;
+}
+
+/// An XML Name check, as createElement/createDocumentType want it: a
+/// letter, '_' or ':' first, then letters, digits, '-', '.', '_', ':';
+/// with `qualified`, at most one ':' and not at either end.
+fn checkName(vm: *Vm, name: []const u8, qualified: bool) Error!void {
+    if (name.len == 0) return throwDom(vm, .InvalidCharacterError, "an empty name");
+    var colons: usize = 0;
+    for (name, 0..) |c, i| {
+        const start_ok = std.ascii.isAlphabetic(c) or c == '_' or c == ':' or c >= 0x80;
+        const rest_ok = start_ok or std.ascii.isDigit(c) or c == '-' or c == '.';
+        if (i == 0 and !start_ok) return throwDom(vm, .InvalidCharacterError, "not a name");
+        if (!rest_ok) return throwDom(vm, .InvalidCharacterError, "not a name");
+        if (c == ':') colons += 1;
+    }
+    if (qualified) {
+        if (colons > 1 or name[0] == ':' or name[name.len - 1] == ':') return throwDom(vm, .NamespaceError, "not a qualified name");
+    }
+}
+
 fn getLocation(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     _ = try thisNode(vm, this);
     return pageOf(vm).location_obj.asValue();
@@ -2466,7 +3096,14 @@ fn collectByTag(vm: *Vm, this: Value, names: []const []const u8) Error!Value {
 }
 
 fn getForms(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
-    return collectByTag(vm, this, &.{"form"});
+    const p = pageOf(vm);
+    const root = try thisNode(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var ids: std.ArrayList(NodeId) = .empty;
+    var w = p.doc.walk(root);
+    while (w.next()) |id| if (p.doc.isHtml(id, "form")) try ids.append(sc.a(), id);
+    return namedCollection(vm, ids.items);
 }
 fn getImages(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     return collectByTag(vm, this, &.{"img"});
@@ -2496,8 +3133,9 @@ fn getReadyState(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 }
 
 fn getDefaultView(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
     _ = try thisNode(vm, this);
-    return vm.global.asValue();
+    return p.viewOf(p.cur);
 }
 
 fn getCharacterSet(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -2537,8 +3175,10 @@ fn createElement(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Valu
     const p = pageOf(vm);
     _ = try thisNode(vm, this);
     const name = try docStr(vm, arg(args, 0));
-    if (name.len == 0) return vm.throwError(.TypeError, "InvalidCharacterError: an empty tag name");
-    for (name) |*c| c.* = std.ascii.toLower(c.*);
+    try checkName(vm, name, false);
+    if (p.isHtmlDoc()) for (name) |*c| {
+        c.* = std.ascii.toLower(c.*);
+    };
     const id = try p.doc.createElement(.html, name);
     return p.wrapValue(id);
 }
@@ -2551,11 +3191,9 @@ fn createElementNS(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     const nsv = arg(args, 0);
     const ns_text = if (nsv.isNullish()) "" else try strArg(vm, nsv, sc.a());
     const ns: dom.Namespace = if (std.mem.eql(u8, ns_text, "http://www.w3.org/2000/svg")) .svg else if (std.mem.eql(u8, ns_text, "http://www.w3.org/1998/Math/MathML")) .mathml else .html;
-    var name = try docStr(vm, arg(args, 1));
-    if (std.mem.indexOfScalar(u8, name, ':')) |i| name = name[i + 1 ..];
-    if (ns == .html) for (name) |*c| {
-        c.* = std.ascii.toLower(c.*);
-    };
+    const name = try docStr(vm, arg(args, 1));
+    try checkName(vm, name, true);
+    // The qualified name stays as given (`prefix:local` is the tagName).
     return p.wrapValue(try p.doc.createElement(ns, name));
 }
 
@@ -2585,10 +3223,32 @@ fn createEvent(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
     var sc = Scratch.init(vm);
     defer sc.deinit();
     const kind = try strArg(vm, arg(args, 0), sc.a());
-    const iface: usize = if (std.ascii.eqlIgnoreCase(kind, "CustomEvent")) I.custom_event else if (std.ascii.eqlIgnoreCase(kind, "MouseEvent") or std.ascii.eqlIgnoreCase(kind, "MouseEvents")) I.mouse_event else I.event;
+    const eq = std.ascii.eqlIgnoreCase;
+    const iface: usize = if (eq(kind, "CustomEvent")) I.custom_event else if (eq(kind, "MouseEvent") or eq(kind, "MouseEvents")) I.mouse_event else if (eq(kind, "UIEvent") or eq(kind, "UIEvents")) ifaceIndex("UIEvent") else if (eq(kind, "KeyboardEvent") or eq(kind, "KeyEvents")) ifaceIndex("KeyboardEvent") else if (eq(kind, "Event") or eq(kind, "Events") or eq(kind, "HTMLEvents") or eq(kind, "MutationEvents") or eq(kind, "SVGEvents")) I.event else return throwDom(vm, .NotSupportedError, "not an event interface");
     const ev = try p.newEvent(iface, "", false, false, false);
     _ = try vm.defineNative(ev, "initEvent", 1, initEvent);
+    _ = try vm.defineNative(ev, "initUIEvent", 1, initUIEvent);
+    _ = try vm.defineNative(ev, "initCustomEvent", 1, initCustomEvent);
+    _ = try vm.defineNative(ev, "initMouseEvent", 1, initUIEvent);
+    _ = try vm.defineNative(ev, "initKeyboardEvent", 1, initUIEvent);
     return ev.asValue();
+}
+
+fn initUIEvent(vm: *Vm, this: Value, args: []const Value, nt: Value) Error!Value {
+    const p = pageOf(vm);
+    const ev = try thisEvent(vm, this);
+    _ = try initEvent(vm, this, args, nt);
+    try p.setEventProp(ev, "view", if (arg(args, 3).isNullish()) Value.null_ else arg(args, 3));
+    try p.setEventProp(ev, "detail", if (arg(args, 4).isUndefined()) Value.fromInt(0) else arg(args, 4));
+    return Value.undefined_;
+}
+
+fn initCustomEvent(vm: *Vm, this: Value, args: []const Value, nt: Value) Error!Value {
+    const p = pageOf(vm);
+    const ev = try thisEvent(vm, this);
+    _ = try initEvent(vm, this, args, nt);
+    try p.setEventProp(ev, "detail", if (arg(args, 3).isUndefined()) Value.null_ else arg(args, 3));
+    return Value.undefined_;
 }
 
 fn initEvent(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
@@ -2866,6 +3526,12 @@ fn getHidden(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn setHidden(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return boolAttrSetter(vm, this, "hidden", arg(args, 0));
 }
+fn getHtmlFor(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "for");
+}
+fn setHtmlFor(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "for", arg(args, 0));
+}
 fn getTabIndex(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const id = try thisElement(vm, this);
     const t = pageOf(vm).doc.getAttr(id, "tabindex") orelse return Value.fromInt(-1);
@@ -2919,7 +3585,10 @@ fn setDisabled(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value 
 fn getTypeAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const id = try thisElement(vm, this);
     const p = pageOf(vm);
-    return jsStr(vm, p.doc.getAttr(id, "type") orelse (if (p.doc.isHtml(id, "button")) "submit" else if (p.doc.isHtml(id, "input")) "text" else ""));
+    const t = p.doc.getAttr(id, "type") orelse (if (p.doc.isHtml(id, "button")) "submit" else if (p.doc.isHtml(id, "input")) "text" else "");
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    return jsStr(vm, try std.ascii.allocLowerString(sc.a(), t));
 }
 fn setTypeAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return attrSetter(vm, this, "type", arg(args, 0));
@@ -3110,14 +3779,14 @@ fn setOuterHTML(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
 
 fn getNextElementSibling(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
-    var c = p.doc.get(try thisNode(vm, this)).next;
+    var c = (try thisNodeRec(vm, this)).next;
     while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.get(cid).kind == .element) return p.wrapValue(cid);
     return Value.null_;
 }
 
 fn getPreviousElementSibling(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
-    var c = p.doc.get(try thisNode(vm, this)).prev;
+    var c = (try thisNodeRec(vm, this)).prev;
     while (c) |cid| : (c = p.doc.get(cid).prev) if (p.doc.get(cid).kind == .element) return p.wrapValue(cid);
     return Value.null_;
 }
@@ -3156,7 +3825,7 @@ fn insertAdjacentElement(vm: *Vm, this: Value, args: []const Value, _: Value) Er
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
     const place = try adjacentPlace(vm, id, arg(args, 0));
-    const el = p.nodeOfValue(arg(args, 1)) orelse return vm.throwTypeError("not an element");
+    const el = p.adoptArg(arg(args, 1)) orelse return vm.throwTypeError("not an element");
     try insertNode(p, place.parent, el, place.before);
     return arg(args, 1);
 }
@@ -3173,7 +3842,7 @@ fn insertAdjacentText(vm: *Vm, this: Value, args: []const Value, _: Value) Error
 fn clickNative(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    if (p.click(id)) if (p.host.activate) |f| f(p.host.ctx, id);
+    if (p.clickHere(id)) if (p.cur == 0) if (p.host.activate) |f| f(p.host.ctx, id);
     return Value.undefined_;
 }
 
@@ -3187,14 +3856,17 @@ fn getClassList(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
     const o = try vm.objects.create(p.protos[I.tokens].asValue(), .dom, @sizeOf(Slot));
-    o.internal(Slot).* = .{ .kind = slot_tokens, .id = id };
+    o.internal(Slot).* = .{ .kind = slot_tokens, .id = id, .doc = p.cur };
     return o.asValue();
 }
 
 fn thisTokens(vm: *Vm, this: Value) Error!NodeId {
     if (this.isObject()) {
         const o = Vm.asObject(this);
-        if (o.class == .dom and o.internal(Slot).kind == slot_tokens) return o.internal(Slot).id;
+        if (o.class == .dom and o.internal(Slot).kind == slot_tokens) {
+            pageOf(vm).switchTo(o.internal(Slot).doc);
+            return o.internal(Slot).id;
+        }
     }
     return vm.throwTypeError("Illegal invocation");
 }
@@ -3472,10 +4144,10 @@ fn promptNative(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
 
 fn getComputedStyle(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
-    const id = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("getComputedStyle needs an element");
+    const id = try thisElement(vm, arg(args, 0));
     if (p.doc.get(id).kind != .element) return vm.throwTypeError("getComputedStyle needs an element");
     const o = try vm.objects.create(p.protos[I.style].asValue(), .dom, @sizeOf(Slot));
-    o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = style_computed };
+    o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = style_computed, .doc = p.cur };
     return o.asValue();
 }
 
@@ -3701,7 +4373,7 @@ fn getFormElements(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value
     var ids: std.ArrayList(NodeId) = .empty;
     var w = p.doc.walk(id);
     while (w.next()) |c| if (isControl(p, c)) try ids.append(sc.a(), c);
-    return nodeList(vm, ids.items);
+    return namedCollection(vm, ids.items);
 }
 
 fn getFormLength(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -3725,8 +4397,8 @@ fn formSubmit(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn formRequestSubmit(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    if (!p.fireSubmit(id)) return Value.undefined_;
-    if (p.host.submit) |f| f(p.host.ctx, id);
+    if (!p.submitHere(id)) return Value.undefined_;
+    if (p.cur == 0) if (p.host.submit) |f| f(p.host.ctx, id);
     return Value.undefined_;
 }
 
@@ -3830,17 +4502,20 @@ fn getStyle(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const w = Vm.asObject(this);
     if (try vm.objects.getOwn(w, .{ .symbol = p.sym_style })) |own| return own.val;
     const o = try vm.objects.create(p.protos[I.style].asValue(), .dom, @sizeOf(Slot));
-    o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = 0 };
+    o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = 0, .doc = p.cur };
     _ = try vm.objects.defineOwn(w, .{ .symbol = p.sym_style }, o.asValue(), .hidden);
     return o.asValue();
 }
 
-const StyleRef = struct { id: NodeId, computed: bool };
+const StyleRef = struct { id: NodeId, computed: bool, doc: u32 };
 
 fn thisStyle(vm: *Vm, this: Value) Error!StyleRef {
     if (this.isObject()) {
         const o = Vm.asObject(this);
-        if (o.class == .dom and o.internal(Slot).kind == slot_style) return .{ .id = o.internal(Slot).id, .computed = o.internal(Slot).flags & style_computed != 0 };
+        if (o.class == .dom and o.internal(Slot).kind == slot_style) {
+            pageOf(vm).switchTo(o.internal(Slot).doc);
+            return .{ .id = o.internal(Slot).id, .computed = o.internal(Slot).flags & style_computed != 0, .doc = o.internal(Slot).doc };
+        }
     }
     return vm.throwTypeError("Illegal invocation");
 }
@@ -3889,7 +4564,19 @@ fn stylePropertyGet(vm: *Vm, this: Value, name: []const u8) Error!Value {
     var sc = Scratch.init(vm);
     defer sc.deinit();
     if (ref.computed) {
-        if (p.host.computed) |f| {
+        if (ref.doc != 0) {
+            // Not the page's document: the cascade run here, in scratch,
+            // with the host's user-agent sheet.
+            if (p.host.ua_sheet) |ua| {
+                const env: stylelib.Env = .{ .width = 1024, .height = 768 };
+                const sheets = stylelib.collectDocumentSheetsWith(sc.a(), p.doc, env, ua.*) catch return error.OutOfMemory;
+                const styles = stylelib.compute(sc.a(), p.doc, sheets, env) catch return error.OutOfMemory;
+                if (ref.id < styles.computed.len) {
+                    var buf: [256]u8 = undefined;
+                    if (stylelib.propertyText(styles.get(ref.id), name, &buf)) |text| return jsStr(vm, text);
+                }
+            }
+        } else if (p.host.computed) |f| {
             var buf: [256]u8 = undefined;
             if (f(p.host.ctx, ref.id, name, &buf)) |text| return jsStr(vm, text);
         }
@@ -4293,7 +4980,7 @@ fn isSheetElement(p: *Page, id: NodeId) bool {
 fn sheetObject(p: *Page, id: NodeId) Error!Value {
     const vm = p.vm;
     const o = try vm.objects.create(p.protos[I.sheet].asValue(), .dom, @sizeOf(Slot));
-    o.internal(Slot).* = .{ .kind = slot_sheet, .id = id };
+    o.internal(Slot).* = .{ .kind = slot_sheet, .id = id, .doc = p.cur };
     return o.asValue();
 }
 
@@ -4314,7 +5001,10 @@ fn getStyleSheets(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value 
 fn thisSheet(vm: *Vm, this: Value) Error!NodeId {
     if (this.isObject()) {
         const o = Vm.asObject(this);
-        if (o.class == .dom and o.internal(Slot).kind == slot_sheet) return o.internal(Slot).id;
+        if (o.class == .dom and o.internal(Slot).kind == slot_sheet) {
+            pageOf(vm).switchTo(o.internal(Slot).doc);
+            return o.internal(Slot).id;
+        }
     }
     return vm.throwTypeError("Illegal invocation");
 }
@@ -4452,7 +5142,7 @@ fn rewriteSheet(vm: *Vm, id: NodeId, insert: ?[]const u8, index: usize, remove: 
     while (p.doc.get(id).first_child) |c| p.doc.detach(c);
     p.doc.appendChild(id, try p.doc.createText(try p.doc.a.dupe(u8, out.items)));
     p.touch();
-    p.sheets_dirty = true;
+    p.markSheets();
 }
 
 fn sheetInsertRule(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
@@ -4494,6 +5184,1142 @@ const named_storage_source =
     \\  Object.defineProperty(window, 'sessionStorage', { value: wrap(window.sessionStorage), configurable: true, writable: true, enumerable: false });
     \\})();
 ;
+
+// ---------------------------------------------------------- DOMException
+
+/// The DOM's exception names and their legacy codes.
+const DomError = enum { IndexSizeError, HierarchyRequestError, WrongDocumentError, InvalidCharacterError, NotFoundError, NotSupportedError, InvalidStateError, SyntaxError, InvalidModificationError, NamespaceError, InvalidAccessError, TypeMismatchError, SecurityError, NetworkError, AbortError, InvalidNodeTypeError, DataCloneError, NotAllowedError, QuotaExceededError };
+
+const DomCode = struct { name: []const u8, legacy: []const u8, code: i32 };
+const dom_codes = [_]DomCode{
+    .{ .name = "IndexSizeError", .legacy = "INDEX_SIZE_ERR", .code = 1 },
+    .{ .name = "DOMStringSizeError", .legacy = "DOMSTRING_SIZE_ERR", .code = 2 },
+    .{ .name = "HierarchyRequestError", .legacy = "HIERARCHY_REQUEST_ERR", .code = 3 },
+    .{ .name = "WrongDocumentError", .legacy = "WRONG_DOCUMENT_ERR", .code = 4 },
+    .{ .name = "InvalidCharacterError", .legacy = "INVALID_CHARACTER_ERR", .code = 5 },
+    .{ .name = "NoDataAllowedError", .legacy = "NO_DATA_ALLOWED_ERR", .code = 6 },
+    .{ .name = "NoModificationAllowedError", .legacy = "NO_MODIFICATION_ALLOWED_ERR", .code = 7 },
+    .{ .name = "NotFoundError", .legacy = "NOT_FOUND_ERR", .code = 8 },
+    .{ .name = "NotSupportedError", .legacy = "NOT_SUPPORTED_ERR", .code = 9 },
+    .{ .name = "InUseAttributeError", .legacy = "INUSE_ATTRIBUTE_ERR", .code = 10 },
+    .{ .name = "InvalidStateError", .legacy = "INVALID_STATE_ERR", .code = 11 },
+    .{ .name = "SyntaxError", .legacy = "SYNTAX_ERR", .code = 12 },
+    .{ .name = "InvalidModificationError", .legacy = "INVALID_MODIFICATION_ERR", .code = 13 },
+    .{ .name = "NamespaceError", .legacy = "NAMESPACE_ERR", .code = 14 },
+    .{ .name = "InvalidAccessError", .legacy = "INVALID_ACCESS_ERR", .code = 15 },
+    .{ .name = "ValidationError", .legacy = "VALIDATION_ERR", .code = 16 },
+    .{ .name = "TypeMismatchError", .legacy = "TYPE_MISMATCH_ERR", .code = 17 },
+    .{ .name = "SecurityError", .legacy = "SECURITY_ERR", .code = 18 },
+    .{ .name = "NetworkError", .legacy = "NETWORK_ERR", .code = 19 },
+    .{ .name = "AbortError", .legacy = "ABORT_ERR", .code = 20 },
+    .{ .name = "URLMismatchError", .legacy = "URL_MISMATCH_ERR", .code = 21 },
+    .{ .name = "QuotaExceededError", .legacy = "QUOTA_EXCEEDED_ERR", .code = 22 },
+    .{ .name = "TimeoutError", .legacy = "TIMEOUT_ERR", .code = 23 },
+    .{ .name = "InvalidNodeTypeError", .legacy = "INVALID_NODE_TYPE_ERR", .code = 24 },
+    .{ .name = "DataCloneError", .legacy = "DATA_CLONE_ERR", .code = 25 },
+};
+
+fn domCodeOf(name: []const u8) i32 {
+    for (dom_codes) |c| if (std.mem.eql(u8, c.name, name)) return c.code;
+    return 0;
+}
+
+const node_filter_consts = [_]struct { name: []const u8, value: f64 }{
+    .{ .name = "FILTER_ACCEPT", .value = 1 },     .{ .name = "FILTER_REJECT", .value = 2 },                .{ .name = "FILTER_SKIP", .value = 3 },
+    .{ .name = "SHOW_ALL", .value = 4294967295 }, .{ .name = "SHOW_ELEMENT", .value = 1 },                 .{ .name = "SHOW_ATTRIBUTE", .value = 2 },
+    .{ .name = "SHOW_TEXT", .value = 4 },         .{ .name = "SHOW_CDATA_SECTION", .value = 8 },           .{ .name = "SHOW_ENTITY_REFERENCE", .value = 16 },
+    .{ .name = "SHOW_ENTITY", .value = 32 },      .{ .name = "SHOW_PROCESSING_INSTRUCTION", .value = 64 }, .{ .name = "SHOW_COMMENT", .value = 128 },
+    .{ .name = "SHOW_DOCUMENT", .value = 256 },   .{ .name = "SHOW_DOCUMENT_TYPE", .value = 512 },         .{ .name = "SHOW_DOCUMENT_FRAGMENT", .value = 1024 },
+    .{ .name = "SHOW_NOTATION", .value = 2048 },
+};
+
+/// A DOMException instance: name, message and the legacy code, own.
+fn domException(vm: *Vm, name: []const u8, msg: []const u8) Error!Value {
+    const p = pageOf(vm);
+    const proto = if (p.dom_exception_proto.isObject()) p.dom_exception_proto else vm.intrinsics.error_prototype.asValue();
+    const o = try vm.objects.create(proto, .error_, 0);
+    try vm.defineValue(o, "name", try vm.str(name), .hidden);
+    try vm.defineValue(o, "message", try vm.str(msg), .hidden);
+    try vm.defineValue(o, "code", Value.fromInt(domCodeOf(name)), .hidden);
+    return o.asValue();
+}
+
+fn throwDom(vm: *Vm, err: DomError, msg: []const u8) Error {
+    const v = domException(vm, @tagName(err), msg) catch |e| return e;
+    return vm.throwValue(v);
+}
+
+fn domExceptionCtor(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const msg = if (arg(args, 0).isUndefined()) "" else try strArg(vm, arg(args, 0), sc.a());
+    const name = if (arg(args, 1).isUndefined()) "Error" else try strArg(vm, arg(args, 1), sc.a());
+    return domException(vm, name, msg);
+}
+
+// ------------------------------------------------------- CharacterData
+
+/// UTF-16 length of UTF-8 text, and the byte offset of a UTF-16 offset.
+fn utf16Len(text: []const u8) usize {
+    var n: usize = 0;
+    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+    while (it.nextCodepoint()) |c| n += if (c >= 0x10000) 2 else 1;
+    return n;
+}
+
+fn byteOffsetOfUtf16(text: []const u8, off: usize) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len and n < off) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const c = std.unicode.utf8Decode(text[i .. i + @min(len, text.len - i)]) catch 0;
+        n += if (c >= 0x10000) 2 else 1;
+        i += len;
+    }
+    return @min(i, text.len);
+}
+
+fn thisCharacterData(vm: *Vm, this: Value) Error!NodeId {
+    const id = try thisNode(vm, this);
+    const k = pageOf(vm).doc.get(id).kind;
+    if (k != .text and k != .comment) return vm.throwTypeError("Illegal invocation");
+    return id;
+}
+
+/// The `replace data` algorithm: `count` units at `offset` replaced by
+/// `data`, the live ranges in the node moved as the DOM says.
+fn replaceData(vm: *Vm, id: NodeId, offset_in: usize, count_in: usize, data: []const u8) Error!void {
+    const p = pageOf(vm);
+    const n = p.doc.node(id);
+    const length = utf16Len(n.text.items);
+    if (offset_in > length) return throwDom(vm, .IndexSizeError, "the offset is past the data");
+    const count = @min(count_in, length - offset_in);
+    const b0 = byteOffsetOfUtf16(n.text.items, offset_in);
+    const b1 = byteOffsetOfUtf16(n.text.items, offset_in + count);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(sc.a(), n.text.items[0..b0]);
+    try out.appendSlice(sc.a(), data);
+    try out.appendSlice(sc.a(), n.text.items[b1..]);
+    try p.setText(id, out.items);
+    p.rangesOnReplaceData(id, offset_in, count, utf16Len(data));
+}
+
+fn cdSubstringData(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisCharacterData(vm, this);
+    const text = p.doc.get(id).text.items;
+    const length = utf16Len(text);
+    const offset: usize = @intFromFloat(@max(0, try vm.toIntegerOrInfinity(arg(args, 0))));
+    if (offset > length) return throwDom(vm, .IndexSizeError, "the offset is past the data");
+    const count: usize = @intFromFloat(@max(0, @min(1e9, try vm.toIntegerOrInfinity(arg(args, 1)))));
+    const end = @min(length, offset + count);
+    return jsStr(vm, text[byteOffsetOfUtf16(text, offset)..byteOffsetOfUtf16(text, end)]);
+}
+
+fn cdAppendData(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisCharacterData(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const data = try strArg(vm, arg(args, 0), sc.a());
+    try replaceData(vm, id, utf16Len(p.doc.get(id).text.items), 0, data);
+    return Value.undefined_;
+}
+
+fn cdInsertData(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const id = try thisCharacterData(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const offset: usize = @intFromFloat(@max(0, try vm.toIntegerOrInfinity(arg(args, 0))));
+    const data = try strArg(vm, arg(args, 1), sc.a());
+    try replaceData(vm, id, offset, 0, data);
+    return Value.undefined_;
+}
+
+fn cdDeleteData(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const id = try thisCharacterData(vm, this);
+    const offset: usize = @intFromFloat(@max(0, try vm.toIntegerOrInfinity(arg(args, 0))));
+    const count: usize = @intFromFloat(@max(0, @min(1e9, try vm.toIntegerOrInfinity(arg(args, 1)))));
+    try replaceData(vm, id, offset, count, "");
+    return Value.undefined_;
+}
+
+fn cdReplaceData(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const id = try thisCharacterData(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const offset: usize = @intFromFloat(@max(0, try vm.toIntegerOrInfinity(arg(args, 0))));
+    const count: usize = @intFromFloat(@max(0, @min(1e9, try vm.toIntegerOrInfinity(arg(args, 1)))));
+    const data = try strArg(vm, arg(args, 2), sc.a());
+    try replaceData(vm, id, offset, count, data);
+    return Value.undefined_;
+}
+
+/// `splitText(offset)`: the tail into a new text node after this one;
+/// live ranges in the tail move to it.
+fn splitText(vm: *Vm, id: NodeId, offset: usize) Error!NodeId {
+    const p = pageOf(vm);
+    const n = p.doc.node(id);
+    const length = utf16Len(n.text.items);
+    if (offset > length) return throwDom(vm, .IndexSizeError, "the offset is past the data");
+    const b = byteOffsetOfUtf16(n.text.items, offset);
+    const tail = try p.doc.createText(try p.doc.a.dupe(u8, n.text.items[b..]));
+    const parent = n.parent;
+    if (parent) |par| {
+        try insertNode(p, par, tail, n.next);
+        // Ranges: a point in the old node past the split goes to the new
+        // node; a point in the parent just after the old node moves past
+        // the new one.
+        for (p.ranges.items) |rv| {
+            const r = try rangeState(vm, rv);
+            var st = r;
+            var changed = false;
+            if (st.sc == id and st.so > offset) {
+                st.sc = tail;
+                st.so -= offset;
+                changed = true;
+            }
+            if (st.ec == id and st.eo > offset) {
+                st.ec = tail;
+                st.eo -= offset;
+                changed = true;
+            }
+            const idx = childIndex(p.doc, id);
+            if (st.sc == par and st.so == idx + 1) {
+                st.so += 1;
+                changed = true;
+            }
+            if (st.ec == par and st.eo == idx + 1) {
+                st.eo += 1;
+                changed = true;
+            }
+            if (changed) try setRangeState(vm, rv, st);
+        }
+    }
+    try replaceData(vm, id, offset, length - offset, "");
+    return tail;
+}
+
+fn textSplit(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisCharacterData(vm, this);
+    const offset: usize = @intFromFloat(@max(0, try vm.toIntegerOrInfinity(arg(args, 0))));
+    return p.wrapValue(try splitText(vm, id, offset));
+}
+
+fn isSameNode(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const id = try thisNode(vm, this);
+    const p = pageOf(vm);
+    const other = arg(args, 0);
+    if (Page.docOfValue(other)) |d| if (d == p.cur) if (p.nodeOfValue(other)) |o| return Value.fromBool(o == id);
+    return Value.false_;
+}
+
+fn isEqualNode(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const id = try thisNode(vm, this);
+    const p = pageOf(vm);
+    const other = p.nodeOfValue(arg(args, 0)) orelse return Value.false_;
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var a: std.ArrayList(u8) = .empty;
+    var b: std.ArrayList(u8) = .empty;
+    try html.serializeOuter(sc.a(), p.doc, id, &a);
+    try html.serializeOuter(sc.a(), p.doc, other, &b);
+    return Value.fromBool(std.mem.eql(u8, a.items, b.items));
+}
+
+/// `normalize()`: adjacent text nodes merged, empty ones removed.
+fn normalizeNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const root = try thisNode(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var ids: std.ArrayList(NodeId) = .empty;
+    var w = p.doc.walk(root);
+    while (w.step()) |id| if (p.doc.get(id).kind == .text) try ids.append(sc.a(), id);
+    for (ids.items) |id| {
+        if (p.doc.get(id).parent == null) continue;
+        if (p.doc.get(id).text.items.len == 0) {
+            p.detachNode(id);
+            continue;
+        }
+        while (p.doc.get(id).next) |nx| {
+            if (p.doc.get(nx).kind != .text) break;
+            const tail = try sc.a().dupe(u8, p.doc.get(nx).text.items);
+            try replaceData(vm, id, utf16Len(p.doc.get(id).text.items), 0, tail);
+            p.detachNode(nx);
+        }
+    }
+    return Value.undefined_;
+}
+
+// ------------------------------------------------------------ traversal
+
+fn nodeTypeBit(kind: dom.Kind) u32 {
+    return switch (kind) {
+        .element => 1,
+        .text => 4,
+        .comment => 128,
+        .document => 256,
+        .doctype => 512,
+        .fragment => 1024,
+    };
+}
+
+const TravKind = enum { iterator, walker };
+
+fn newTraversal(vm: *Vm, kind: TravKind, args: []const Value) Error!Value {
+    const p = pageOf(vm);
+    const root = p.nodeSwitching(arg(args, 0)) orelse return vm.throwTypeError("a root node is needed");
+    const what: f64 = if (arg(args, 1).isUndefined()) 4294967295 else (vm.toNumber(arg(args, 1)) catch 4294967295);
+    const filter = arg(args, 2);
+    const o = try vm.objects.create(p.protos[if (kind == .iterator) I.node_iterator else I.tree_walker].asValue(), .dom, @sizeOf(Slot));
+    o.internal(Slot).* = .{ .kind = slot_traversal, .id = root, .flags = if (kind == .iterator) 0 else 1, .doc = p.cur };
+    try vm.defineValue(o, "__what", Value.fromF64(what), .hidden);
+    try vm.defineValue(o, "__filter", if (filter.isNullish()) Value.null_ else filter, .hidden);
+    try vm.defineValue(o, "__ref", try p.wrapValue(root), .hidden);
+    try vm.defineValue(o, "__before", Value.true_, .hidden);
+    try vm.defineValue(o, "__active", Value.false_, .hidden);
+    if (kind == .iterator) try p.iterators.append(p.a, o.asValue());
+    return o.asValue();
+}
+
+fn createNodeIterator(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    _ = try thisNode(vm, this);
+    return newTraversal(vm, .iterator, args);
+}
+
+fn createTreeWalker(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    _ = try thisNode(vm, this);
+    return newTraversal(vm, .walker, args);
+}
+
+fn thisTraversal(vm: *Vm, this: Value) Error!*Object {
+    if (this.isObject()) {
+        const o = Vm.asObject(this);
+        if (o.class == .dom and o.internal(Slot).kind == slot_traversal) {
+            pageOf(vm).switchTo(o.internal(Slot).doc);
+            return o;
+        }
+    }
+    return vm.throwTypeError("Illegal invocation");
+}
+
+fn slotGet(vm: *Vm, o: *Object, name: []const u8) Error!Value {
+    return vm.get(o, .{ .atom = try vm.atom(name) }, o.asValue());
+}
+
+fn slotSet(vm: *Vm, o: *Object, name: []const u8, v: Value) Error!void {
+    try vm.defineValue(o, name, v, .hidden);
+}
+
+/// The filter's verdict on a node: 1 accept, 2 reject, 3 skip.
+fn filterNode(vm: *Vm, o: *Object, id: NodeId) Error!u32 {
+    const p = pageOf(vm);
+    if (vm.toBoolean(try slotGet(vm, o, "__active"))) return throwDom(vm, .InvalidStateError, "the filter is already running");
+    const what: u64 = @intFromFloat(@max(0, try vm.toNumber(try slotGet(vm, o, "__what"))));
+    if (what & nodeTypeBit(p.doc.get(id).kind) == 0) return 3;
+    const filter = try slotGet(vm, o, "__filter");
+    if (filter.isNullish()) return 1;
+    var callee = filter;
+    if (!vm.isCallable(filter)) {
+        if (!filter.isObject()) return 1;
+        callee = try vm.get(Vm.asObject(filter), .{ .atom = try vm.atom("acceptNode") }, filter);
+        if (!vm.isCallable(callee)) return vm.throwTypeError("the filter has no acceptNode");
+    }
+    try slotSet(vm, o, "__active", Value.true_);
+    const saved = p.cur;
+    const r = vm.call(callee, filter, &.{try p.wrapValue(id)});
+    p.switchTo(saved);
+    slotSet(vm, o, "__active", Value.false_) catch {};
+    const v = try r;
+    const n = try vm.toNumber(v);
+    if (std.math.isNan(n)) return 0;
+    return @intFromFloat(@max(0, @min(3, @floor(n))));
+}
+
+fn travRoot(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const o = try thisTraversal(vm, this);
+    return pageOf(vm).wrapValue(o.internal(Slot).id);
+}
+fn travWhatToShow(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisTraversal(vm, this), "__what");
+}
+fn travFilter(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisTraversal(vm, this), "__filter");
+}
+fn iterReferenceNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisTraversal(vm, this), "__ref");
+}
+fn iterPointerBefore(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisTraversal(vm, this), "__before");
+}
+
+/// The node after `id` in tree order, within `root`, or null.
+fn followingIn(doc: *const dom.Document, id: NodeId, root: NodeId) ?NodeId {
+    if (doc.get(id).first_child) |c| return c;
+    var cur = id;
+    while (cur != root) {
+        if (doc.get(cur).next) |n| return n;
+        cur = doc.get(cur).parent orelse return null;
+    }
+    return null;
+}
+
+fn lastDescendant(doc: *const dom.Document, id: NodeId) NodeId {
+    var cur = id;
+    while (doc.get(cur).last_child) |c| cur = c;
+    return cur;
+}
+
+/// The node before `id` in tree order, within `root`, or null.
+fn precedingIn(doc: *const dom.Document, id: NodeId, root: NodeId) ?NodeId {
+    if (id == root) return null;
+    if (doc.get(id).prev) |s| return lastDescendant(doc, s);
+    return doc.get(id).parent;
+}
+
+fn iterTraverse(vm: *Vm, this: Value, forward: bool) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisTraversal(vm, this);
+    const root = o.internal(Slot).id;
+    var node = p.nodeOfValue(try slotGet(vm, o, "__ref")) orelse root;
+    var before = vm.toBoolean(try slotGet(vm, o, "__before"));
+    while (true) {
+        if (forward) {
+            if (!before) node = followingIn(p.doc, node, root) orelse return Value.null_;
+            before = false;
+        } else {
+            if (before) node = precedingIn(p.doc, node, root) orelse return Value.null_;
+            before = true;
+        }
+        const ref_was = try slotGet(vm, o, "__ref");
+        const result = try filterNode(vm, o, node);
+        // The filter removed nodes: the pre-removing steps moved the
+        // iterator's reference, and the traversal goes on from there.
+        const ref_now = try slotGet(vm, o, "__ref");
+        const moved = !vm.isStrictlyEqual(ref_was, ref_now);
+        if (result == 1) {
+            // A node removed by its own filter is still returned, but the
+            // iterator stays where the removal left it.
+            if (rootOf(p.doc, node) == rootOf(p.doc, root)) {
+                try slotSet(vm, o, "__ref", try p.wrapValue(node));
+                try slotSet(vm, o, "__before", Value.fromBool(before));
+            }
+            return p.wrapValue(node);
+        }
+        if (moved) {
+            node = p.nodeOfValue(ref_now) orelse root;
+            before = vm.toBoolean(try slotGet(vm, o, "__before"));
+        }
+    }
+}
+
+fn iterNextNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return iterTraverse(vm, this, true);
+}
+fn iterPreviousNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return iterTraverse(vm, this, false);
+}
+
+fn walkerCurrent(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisTraversal(vm, this), "__ref");
+}
+fn walkerSetCurrent(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const o = try thisTraversal(vm, this);
+    if (Page.docOfValue(arg(args, 0)) == null) return vm.throwTypeError("currentNode must be a node");
+    try slotSet(vm, o, "__ref", arg(args, 0));
+    return Value.undefined_;
+}
+
+fn walkerSet(vm: *Vm, o: *Object, id: NodeId) Error!Value {
+    const v = try pageOf(vm).wrapValue(id);
+    try slotSet(vm, o, "__ref", v);
+    return v;
+}
+
+fn walkerParentNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisTraversal(vm, this);
+    const root = o.internal(Slot).id;
+    var node: ?NodeId = p.nodeOfValue(try slotGet(vm, o, "__ref"));
+    while (node) |n| {
+        if (n == root) return Value.null_;
+        node = p.doc.get(n).parent;
+        if (node) |pn| if (try filterNode(vm, o, pn) == 1) return walkerSet(vm, o, pn);
+    }
+    return Value.null_;
+}
+
+/// TreeWalker's "traverse children".
+fn walkerChildren(vm: *Vm, this: Value, first: bool) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisTraversal(vm, this);
+    const root = o.internal(Slot).id;
+    const current = p.nodeOfValue(try slotGet(vm, o, "__ref")) orelse root;
+    var node: ?NodeId = if (first) p.doc.get(current).first_child else p.doc.get(current).last_child;
+    while (node) |n| {
+        const result = try filterNode(vm, o, n);
+        if (result == 1) return walkerSet(vm, o, n);
+        if (result == 3) {
+            const child = if (first) p.doc.get(n).first_child else p.doc.get(n).last_child;
+            if (child) |c| {
+                node = c;
+                continue;
+            }
+        }
+        var cur = n;
+        while (true) {
+            const sibling = if (first) p.doc.get(cur).next else p.doc.get(cur).prev;
+            if (sibling) |sib| {
+                node = sib;
+                break;
+            }
+            const parent = p.doc.get(cur).parent orelse return Value.null_;
+            if (parent == root or parent == current) return Value.null_;
+            cur = parent;
+        }
+    }
+    return Value.null_;
+}
+
+fn walkerFirstChild(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return walkerChildren(vm, this, true);
+}
+fn walkerLastChild(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return walkerChildren(vm, this, false);
+}
+
+/// TreeWalker's "traverse siblings".
+fn walkerSiblings(vm: *Vm, this: Value, next: bool) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisTraversal(vm, this);
+    const root = o.internal(Slot).id;
+    var node = p.nodeOfValue(try slotGet(vm, o, "__ref")) orelse root;
+    if (node == root) return Value.null_;
+    while (true) {
+        var sibling: ?NodeId = if (next) p.doc.get(node).next else p.doc.get(node).prev;
+        while (sibling) |sib| {
+            node = sib;
+            const result = try filterNode(vm, o, node);
+            if (result == 1) return walkerSet(vm, o, node);
+            sibling = if (next) p.doc.get(node).first_child else p.doc.get(node).last_child;
+            if (result == 2 or sibling == null) sibling = if (next) p.doc.get(node).next else p.doc.get(node).prev;
+        }
+        node = p.doc.get(node).parent orelse return Value.null_;
+        if (node == root) return Value.null_;
+        if (try filterNode(vm, o, node) == 1) return Value.null_;
+    }
+}
+
+fn walkerNextSibling(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return walkerSiblings(vm, this, true);
+}
+fn walkerPreviousSibling(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return walkerSiblings(vm, this, false);
+}
+
+fn walkerNextNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisTraversal(vm, this);
+    const root = o.internal(Slot).id;
+    var node = p.nodeOfValue(try slotGet(vm, o, "__ref")) orelse root;
+    var result: u32 = 1;
+    while (true) {
+        while (result != 2 and p.doc.get(node).first_child != null) {
+            node = p.doc.get(node).first_child.?;
+            result = try filterNode(vm, o, node);
+            if (result == 1) return walkerSet(vm, o, node);
+        }
+        var sibling: ?NodeId = null;
+        var temp: ?NodeId = node;
+        while (temp) |t| {
+            if (t == root) return Value.null_;
+            sibling = p.doc.get(t).next;
+            if (sibling != null) break;
+            temp = p.doc.get(t).parent;
+        }
+        node = sibling orelse return Value.null_;
+        result = try filterNode(vm, o, node);
+        if (result == 1) return walkerSet(vm, o, node);
+    }
+}
+
+fn walkerPreviousNode(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisTraversal(vm, this);
+    const root = o.internal(Slot).id;
+    var node = p.nodeOfValue(try slotGet(vm, o, "__ref")) orelse root;
+    while (node != root) {
+        var sibling = p.doc.get(node).prev;
+        while (sibling) |sib| {
+            node = sib;
+            var result = try filterNode(vm, o, node);
+            while (result != 2 and p.doc.get(node).last_child != null) {
+                node = p.doc.get(node).last_child.?;
+                result = try filterNode(vm, o, node);
+            }
+            if (result == 1) return walkerSet(vm, o, node);
+            sibling = p.doc.get(node).prev;
+        }
+        if (node == root) return Value.null_;
+        node = p.doc.get(node).parent orelse return Value.null_;
+        if (try filterNode(vm, o, node) == 1) return walkerSet(vm, o, node);
+    }
+    return Value.null_;
+}
+
+// ---------------------------------------------------------------- Range
+
+const RangeState = struct { sc: NodeId, so: usize, ec: NodeId, eo: usize };
+
+fn thisRange(vm: *Vm, this: Value) Error!*Object {
+    if (this.isObject()) {
+        const o = Vm.asObject(this);
+        if (o.class == .dom and o.internal(Slot).kind == slot_range) {
+            pageOf(vm).switchTo(o.internal(Slot).doc);
+            return o;
+        }
+    }
+    return vm.throwTypeError("Illegal invocation");
+}
+
+fn rangeState(vm: *Vm, rv: Value) Error!RangeState {
+    const o = Vm.asObject(rv);
+    const p = pageOf(vm);
+    const sc = p.nodeOfValue(try slotGet(vm, o, "__sc")) orelse dom.document_id;
+    const ec = p.nodeOfValue(try slotGet(vm, o, "__ec")) orelse dom.document_id;
+    const so: usize = @intFromFloat(@max(0, try vm.toNumber(try slotGet(vm, o, "__so"))));
+    const eo: usize = @intFromFloat(@max(0, try vm.toNumber(try slotGet(vm, o, "__eo"))));
+    return .{ .sc = sc, .so = so, .ec = ec, .eo = eo };
+}
+
+fn setRangeState(vm: *Vm, rv: Value, st: RangeState) Error!void {
+    const o = Vm.asObject(rv);
+    const p = pageOf(vm);
+    try slotSet(vm, o, "__sc", try p.wrapValue(st.sc));
+    try slotSet(vm, o, "__so", Value.fromF64(@floatFromInt(st.so)));
+    try slotSet(vm, o, "__ec", try p.wrapValue(st.ec));
+    try slotSet(vm, o, "__eo", Value.fromF64(@floatFromInt(st.eo)));
+}
+
+fn newRange(vm: *Vm) Error!Value {
+    const p = pageOf(vm);
+    const o = try vm.objects.create(p.protos[I.range].asValue(), .dom, @sizeOf(Slot));
+    o.internal(Slot).* = .{ .kind = slot_range, .id = 0, .doc = p.cur };
+    try setRangeState(vm, o.asValue(), .{ .sc = dom.document_id, .so = 0, .ec = dom.document_id, .eo = 0 });
+    try p.ranges.append(p.a, o.asValue());
+    return o.asValue();
+}
+
+fn createRange(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    _ = try thisNode(vm, this);
+    return newRange(vm);
+}
+
+/// A node's length: its data in UTF-16 units, or its child count.
+fn nodeLength(doc: *const dom.Document, id: NodeId) usize {
+    const n = doc.get(id);
+    return switch (n.kind) {
+        .text, .comment => utf16Len(n.text.items),
+        .doctype => 0,
+        else => doc.childCount(id),
+    };
+}
+
+fn childIndex(doc: *const dom.Document, id: NodeId) usize {
+    var i: usize = 0;
+    var cur = doc.get(id).prev;
+    while (cur) |c| : (cur = doc.get(c).prev) i += 1;
+    return i;
+}
+
+fn childAt(doc: *const dom.Document, parent: NodeId, index: usize) ?NodeId {
+    var i: usize = 0;
+    var c = doc.get(parent).first_child;
+    while (c) |cid| : (c = doc.get(cid).next) {
+        if (i == index) return cid;
+        i += 1;
+    }
+    return null;
+}
+
+fn rootOf(doc: *const dom.Document, id: NodeId) NodeId {
+    var cur = id;
+    while (doc.get(cur).parent) |par| cur = par;
+    return cur;
+}
+
+/// Tree order: -1 when `a` comes before `b`, 1 after, 0 the same.
+fn treeOrder(doc: *const dom.Document, a: NodeId, b: NodeId) i8 {
+    if (a == b) return 0;
+    if (isAncestor(doc, a, b)) return -1;
+    if (isAncestor(doc, b, a)) return 1;
+    var w = doc.walk(rootOf(doc, a));
+    while (w.step()) |n| {
+        if (n == a) return -1;
+        if (n == b) return 1;
+    }
+    return 0;
+}
+
+/// The position of boundary point (a, ao) relative to (b, bo): -1
+/// before, 0 equal, 1 after — the DOM's algorithm.
+fn bpCompare(doc: *const dom.Document, a: NodeId, ao: usize, b: NodeId, bo: usize) i8 {
+    if (a == b) return if (ao == bo) 0 else if (ao < bo) -1 else 1;
+    if (isAncestor(doc, a, b)) {
+        // The child of a that holds b.
+        var child = b;
+        while (doc.get(child).parent) |par| {
+            if (par == a) break;
+            child = par;
+        }
+        return if (childIndex(doc, child) < ao) 1 else -1;
+    }
+    if (isAncestor(doc, b, a)) return -@as(i8, bpCompare(doc, b, bo, a, ao));
+    return treeOrder(doc, a, b);
+}
+
+fn rangeStartContainer(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisRange(vm, this), "__sc");
+}
+fn rangeStartOffset(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisRange(vm, this), "__so");
+}
+fn rangeEndContainer(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisRange(vm, this), "__ec");
+}
+fn rangeEndOffset(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return slotGet(vm, try thisRange(vm, this), "__eo");
+}
+fn rangeCollapsed(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const o = try thisRange(vm, this);
+    const st = try rangeState(vm, o.asValue());
+    return Value.fromBool(st.sc == st.ec and st.so == st.eo);
+}
+fn rangeCommonAncestor(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const st = try rangeState(vm, o.asValue());
+    return p.wrapValue(commonAncestor(p.doc, st.sc, st.ec));
+}
+
+fn commonAncestor(doc: *const dom.Document, a: NodeId, b: NodeId) NodeId {
+    var cur: ?NodeId = a;
+    while (cur) |c| : (cur = doc.get(c).parent) if (isAncestor(doc, c, b)) return c;
+    return rootOf(doc, a);
+}
+
+/// A boundary point argument: the node and offset checked.
+fn rangePoint(vm: *Vm, node_v: Value, offset_v: Value) Error!struct { node: NodeId, offset: usize } {
+    const p = pageOf(vm);
+    const node = p.nodeSwitching(node_v) orelse return vm.throwTypeError("a node is needed");
+    if (p.doc.get(node).kind == .doctype) return throwDom(vm, .InvalidNodeTypeError, "a doctype cannot be a boundary point");
+    const offset: usize = @intFromFloat(@max(0, try vm.toIntegerOrInfinity(offset_v)));
+    if (offset > nodeLength(p.doc, node)) return throwDom(vm, .IndexSizeError, "the offset is past the node's length");
+    return .{ .node = node, .offset = offset };
+}
+
+/// Set the start (or end) of a range: the other end collapses to it
+/// when it would come before (after), or lie in another tree.
+fn rangeSetPoint(vm: *Vm, rv: Value, node: NodeId, offset: usize, start: bool) Error!void {
+    const p = pageOf(vm);
+    const ro = Vm.asObject(rv);
+    // A point in another of the page's documents moves the range there.
+    const same_doc = ro.internal(Slot).doc == p.cur;
+    if (!same_doc) {
+        ro.internal(Slot).doc = p.cur;
+        try setRangeState(vm, rv, .{ .sc = node, .so = offset, .ec = node, .eo = offset });
+        return;
+    }
+    var st = try rangeState(vm, rv);
+    const same_root = rootOf(p.doc, node) == rootOf(p.doc, st.sc);
+    if (start) {
+        st.sc = node;
+        st.so = offset;
+        if (!same_root or bpCompare(p.doc, node, offset, st.ec, st.eo) > 0) {
+            st.ec = node;
+            st.eo = offset;
+        }
+    } else {
+        st.ec = node;
+        st.eo = offset;
+        if (!same_root or bpCompare(p.doc, node, offset, st.sc, st.so) < 0) {
+            st.sc = node;
+            st.so = offset;
+        }
+    }
+    try setRangeState(vm, rv, st);
+}
+
+fn rangeSetStart(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const o = try thisRange(vm, this);
+    const pt = try rangePoint(vm, arg(args, 0), arg(args, 1));
+    try rangeSetPoint(vm, o.asValue(), pt.node, pt.offset, true);
+    return Value.undefined_;
+}
+fn rangeSetEnd(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const o = try thisRange(vm, this);
+    const pt = try rangePoint(vm, arg(args, 0), arg(args, 1));
+    try rangeSetPoint(vm, o.asValue(), pt.node, pt.offset, false);
+    return Value.undefined_;
+}
+
+fn rangeBeside(vm: *Vm, this: Value, args: []const Value, start: bool, after: bool) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const node = p.nodeSwitching(arg(args, 0)) orelse return vm.throwTypeError("a node is needed");
+    const parent = p.doc.get(node).parent orelse return throwDom(vm, .InvalidNodeTypeError, "the node has no parent");
+    const idx = childIndex(p.doc, node) + @as(usize, if (after) 1 else 0);
+    try rangeSetPoint(vm, o.asValue(), parent, idx, start);
+    return Value.undefined_;
+}
+fn rangeSetStartBefore(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return rangeBeside(vm, this, args, true, false);
+}
+fn rangeSetStartAfter(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return rangeBeside(vm, this, args, true, true);
+}
+fn rangeSetEndBefore(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return rangeBeside(vm, this, args, false, false);
+}
+fn rangeSetEndAfter(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return rangeBeside(vm, this, args, false, true);
+}
+
+fn rangeCollapse(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const o = try thisRange(vm, this);
+    var st = try rangeState(vm, o.asValue());
+    if (vm.toBoolean(arg(args, 0))) {
+        st.ec = st.sc;
+        st.eo = st.so;
+    } else {
+        st.sc = st.ec;
+        st.so = st.eo;
+    }
+    try setRangeState(vm, o.asValue(), st);
+    return Value.undefined_;
+}
+
+fn rangeSelectNode(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const node = p.nodeSwitching(arg(args, 0)) orelse return vm.throwTypeError("a node is needed");
+    const parent = p.doc.get(node).parent orelse return throwDom(vm, .InvalidNodeTypeError, "the node has no parent");
+    const idx = childIndex(p.doc, node);
+    o.internal(Slot).doc = p.cur;
+    try setRangeState(vm, o.asValue(), .{ .sc = parent, .so = idx, .ec = parent, .eo = idx + 1 });
+    return Value.undefined_;
+}
+
+fn rangeSelectNodeContents(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const node = p.nodeSwitching(arg(args, 0)) orelse return vm.throwTypeError("a node is needed");
+    if (p.doc.get(node).kind == .doctype) return throwDom(vm, .InvalidNodeTypeError, "a doctype has no contents");
+    o.internal(Slot).doc = p.cur;
+    try setRangeState(vm, o.asValue(), .{ .sc = node, .so = 0, .ec = node, .eo = nodeLength(p.doc, node) });
+    return Value.undefined_;
+}
+
+fn rangeCompareBoundaryPoints(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const how = try vm.toIntegerOrInfinity(arg(args, 0));
+    const other_v = arg(args, 1);
+    if (!other_v.isObject() or Vm.asObject(other_v).class != .dom or Vm.asObject(other_v).internal(Slot).kind != slot_range) return vm.throwTypeError("a Range is needed");
+    if (how < 0 or how > 3) return throwDom(vm, .NotSupportedError, "not a comparison");
+    const a = try rangeState(vm, o.asValue());
+    const b = try rangeState(vm, other_v);
+    if (rootOf(p.doc, a.sc) != rootOf(p.doc, b.sc)) return throwDom(vm, .WrongDocumentError, "the ranges are in different trees");
+    const r: i8 = switch (@as(u8, @intFromFloat(how))) {
+        0 => bpCompare(p.doc, a.sc, a.so, b.sc, b.so),
+        1 => bpCompare(p.doc, a.ec, a.eo, b.sc, b.so),
+        2 => bpCompare(p.doc, a.ec, a.eo, b.ec, b.eo),
+        else => bpCompare(p.doc, a.sc, a.so, b.ec, b.eo),
+    };
+    return Value.fromInt(r);
+}
+
+/// Whether `node` is contained (wholly) or partially contained by the range.
+fn rangeContains(doc: *const dom.Document, st: RangeState, node: NodeId) bool {
+    if (rootOf(doc, node) != rootOf(doc, st.sc)) return false;
+    return bpCompare(doc, node, 0, st.sc, st.so) > 0 and bpCompare(doc, node, nodeLength(doc, node), st.ec, st.eo) < 0;
+}
+
+fn partiallyContains(doc: *const dom.Document, st: RangeState, node: NodeId) bool {
+    const a = isAncestor(doc, node, st.sc) and node != st.sc or node == st.sc;
+    const b = isAncestor(doc, node, st.ec) and node != st.ec or node == st.ec;
+    return (a and !b) or (b and !a);
+}
+
+const ContentsOp = enum { delete, extract, clone };
+
+/// The heart of deleteContents, extractContents and cloneContents: the
+/// DOM's algorithm with `op` deciding what becomes of the nodes.
+fn rangeContents(vm: *Vm, rv: Value, op: ContentsOp) Error!?NodeId {
+    const p = pageOf(vm);
+    const doc = p.doc;
+    const st = try rangeState(vm, rv);
+    const frag: ?NodeId = if (op == .delete) null else try doc.createFragment();
+    if (st.sc == st.ec and st.so == st.eo) return frag;
+    const kind_s = doc.get(st.sc).kind;
+    // One character data node: a substring.
+    if (st.sc == st.ec and (kind_s == .text or kind_s == .comment)) {
+        if (frag) |f| {
+            const text = doc.get(st.sc).text.items;
+            const b0 = byteOffsetOfUtf16(text, st.so);
+            const b1 = byteOffsetOfUtf16(text, st.eo);
+            const c = if (kind_s == .text) try doc.createText(try doc.a.dupe(u8, text[b0..b1])) else try doc.createComment(try doc.a.dupe(u8, text[b0..b1]));
+            doc.appendChild(f, c);
+        }
+        if (op != .clone) try replaceData(vm, st.sc, st.so, st.eo - st.so, "");
+        return frag;
+    }
+    const common = commonAncestor(doc, st.sc, st.ec);
+    // First and last partially contained children of the common ancestor.
+    var first_partial: ?NodeId = null;
+    var last_partial: ?NodeId = null;
+    if (!(isAncestor(doc, st.sc, st.ec))) {
+        var c = doc.get(common).first_child;
+        while (c) |cid| : (c = doc.get(cid).next) if (partiallyContains(doc, st, cid)) {
+            first_partial = cid;
+            break;
+        };
+    }
+    if (!(isAncestor(doc, st.ec, st.sc))) {
+        var c = doc.get(common).last_child;
+        while (c) |cid| : (c = doc.get(cid).prev) if (partiallyContains(doc, st, cid)) {
+            last_partial = cid;
+            break;
+        };
+    }
+    // The contained children, gathered before anything moves.
+    var sc_list = Scratch.init(vm);
+    defer sc_list.deinit();
+    var contained: std.ArrayList(NodeId) = .empty;
+    {
+        var c = doc.get(common).first_child;
+        while (c) |cid| : (c = doc.get(cid).next) if (rangeContains(doc, st, cid)) try contained.append(sc_list.a(), cid);
+    }
+    for (contained.items) |cid| if (doc.get(cid).kind == .doctype) return throwDom(vm, .HierarchyRequestError, "a doctype cannot be moved");
+    // Where the range ends up (delete/extract): the start, or just after
+    // the start's ancestor under the common ancestor.
+    var new_node = st.sc;
+    var new_offset = st.so;
+    if (!isAncestor(doc, st.sc, st.ec) and st.sc != st.ec) {
+        var ref = st.sc;
+        while (doc.get(ref).parent) |par| {
+            if (par == common) break;
+            ref = par;
+        }
+        if (doc.get(ref).parent) |par| {
+            new_node = par;
+            new_offset = childIndex(doc, ref) + 1;
+        }
+    }
+    // The first partially contained child.
+    if (first_partial) |fp| {
+        const fk = doc.get(fp).kind;
+        if (fk == .text or fk == .comment) {
+            if (frag) |f| {
+                const text = doc.get(fp).text.items;
+                const b0 = byteOffsetOfUtf16(text, st.so);
+                const c = if (fk == .text) try doc.createText(try doc.a.dupe(u8, text[b0..])) else try doc.createComment(try doc.a.dupe(u8, text[b0..]));
+                doc.appendChild(f, c);
+            }
+            if (op != .clone) try replaceData(vm, fp, st.so, nodeLength(doc, fp) - st.so, "");
+        } else {
+            const clone: ?NodeId = if (frag != null) try cloneSubtree(p, fp, false) else null;
+            if (frag) |f| doc.appendChild(f, clone.?);
+            const sub = try newRange(vm);
+            try setRangeState(vm, sub, .{ .sc = st.sc, .so = st.so, .ec = fp, .eo = nodeLength(doc, fp) });
+            const sub_frag = try rangeContents(vm, sub, op);
+            if (clone) |cl| if (sub_frag) |sf| {
+                while (doc.get(sf).first_child) |c| {
+                    doc.detach(c);
+                    doc.appendChild(cl, c);
+                }
+            };
+        }
+    }
+    // The contained children.
+    for (contained.items) |cid| {
+        switch (op) {
+            .clone => if (frag) |f| doc.appendChild(f, try cloneSubtree(p, cid, true)),
+            .extract => {
+                p.detachNode(cid);
+                if (frag) |f| doc.appendChild(f, cid);
+            },
+            .delete => p.detachNode(cid),
+        }
+    }
+    // The last partially contained child.
+    if (last_partial) |lp| {
+        const lk = doc.get(lp).kind;
+        if (lk == .text or lk == .comment) {
+            if (frag) |f| {
+                const text = doc.get(lp).text.items;
+                const b1 = byteOffsetOfUtf16(text, st.eo);
+                const c = if (lk == .text) try doc.createText(try doc.a.dupe(u8, text[0..b1])) else try doc.createComment(try doc.a.dupe(u8, text[0..b1]));
+                doc.appendChild(f, c);
+            }
+            if (op != .clone) try replaceData(vm, lp, 0, st.eo, "");
+        } else {
+            const clone: ?NodeId = if (frag != null) try cloneSubtree(p, lp, false) else null;
+            if (frag) |f| doc.appendChild(f, clone.?);
+            const sub = try newRange(vm);
+            try setRangeState(vm, sub, .{ .sc = lp, .so = 0, .ec = st.ec, .eo = st.eo });
+            const sub_frag = try rangeContents(vm, sub, op);
+            if (clone) |cl| if (sub_frag) |sf| {
+                while (doc.get(sf).first_child) |c| {
+                    doc.detach(c);
+                    doc.appendChild(cl, c);
+                }
+            };
+        }
+    }
+    if (op != .clone) try setRangeState(vm, rv, .{ .sc = new_node, .so = new_offset, .ec = new_node, .eo = new_offset });
+    return frag;
+}
+
+fn rangeDeleteContents(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const o = try thisRange(vm, this);
+    _ = try rangeContents(vm, o.asValue(), .delete);
+    return Value.undefined_;
+}
+fn rangeExtractContents(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const f = (try rangeContents(vm, o.asValue(), .extract)).?;
+    return p.wrapValue(f);
+}
+fn rangeCloneContents(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const f = (try rangeContents(vm, o.asValue(), .clone)).?;
+    return p.wrapValue(f);
+}
+
+fn rangeInsertNode(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const node = p.adoptArg(arg(args, 0)) orelse return vm.throwTypeError("a node is needed");
+    const st = try rangeState(vm, o.asValue());
+    const sk = p.doc.get(st.sc).kind;
+    if (sk == .comment or (sk == .text and p.doc.get(st.sc).parent == null)) return throwDom(vm, .HierarchyRequestError, "cannot insert here");
+    if (sk == .text and st.sc == node) return throwDom(vm, .HierarchyRequestError, "cannot insert a node into itself");
+    var reference: ?NodeId = null;
+    var parent: NodeId = st.sc;
+    if (sk == .text) {
+        parent = p.doc.get(st.sc).parent.?;
+        reference = try splitText(vm, st.sc, st.so);
+    } else {
+        reference = childAt(p.doc, st.sc, st.so);
+    }
+    if (reference == node) reference = p.doc.get(node).next;
+    const collapsed = st.sc == st.ec and st.so == st.eo;
+    if (p.doc.get(node).parent != null) p.detachNode(node);
+    var new_offset = if (reference) |r| childIndex(p.doc, r) else p.doc.childCount(parent);
+    new_offset += if (p.doc.get(node).kind == .fragment) p.doc.childCount(node) else 1;
+    try insertNode(p, parent, node, reference);
+    if (collapsed) {
+        var st2 = try rangeState(vm, o.asValue());
+        st2.ec = parent;
+        st2.eo = new_offset;
+        try setRangeState(vm, o.asValue(), st2);
+    }
+    return Value.undefined_;
+}
+
+fn rangeSurroundContents(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const new_parent = p.adoptArg(arg(args, 0)) orelse return vm.throwTypeError("a node is needed");
+    const npk = p.doc.get(new_parent).kind;
+    if (npk == .document or npk == .doctype or npk == .fragment) return throwDom(vm, .InvalidNodeTypeError, "cannot surround with that");
+    const st = try rangeState(vm, o.asValue());
+    // A partially contained non-text node cannot be surrounded.
+    var w = p.doc.walk(commonAncestor(p.doc, st.sc, st.ec));
+    while (w.step()) |n| if (n != st.sc and n != st.ec) if (partiallyContains(p.doc, st, n) and p.doc.get(n).kind != .text) return throwDom(vm, .InvalidStateError, "the range partially selects a node");
+    const frag = (try rangeContents(vm, o.asValue(), .extract)).?;
+    while (p.doc.get(new_parent).first_child) |c| p.detachNode(c);
+    _ = try rangeInsertNode(vm, this, &.{try p.wrapValue(new_parent)}, Value.undefined_);
+    try insertNode(p, new_parent, frag, null);
+    return rangeSelectNode(vm, this, &.{try p.wrapValue(new_parent)}, Value.undefined_);
+}
+
+fn rangeCloneRange(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const o = try thisRange(vm, this);
+    const st = try rangeState(vm, o.asValue());
+    const r = try newRange(vm);
+    try setRangeState(vm, r, st);
+    return r;
+}
+
+fn rangeToString(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const st = try rangeState(vm, o.asValue());
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    const sk = p.doc.get(st.sc).kind;
+    if (st.sc == st.ec and sk == .text) {
+        const text = p.doc.get(st.sc).text.items;
+        return jsStr(vm, text[byteOffsetOfUtf16(text, st.so)..byteOffsetOfUtf16(text, st.eo)]);
+    }
+    if (sk == .text) {
+        const text = p.doc.get(st.sc).text.items;
+        try out.appendSlice(sc.a(), text[byteOffsetOfUtf16(text, st.so)..]);
+    }
+    var w = p.doc.walk(rootOf(p.doc, st.sc));
+    while (w.step()) |n| if (p.doc.get(n).kind == .text and rangeContains(p.doc, st, n)) try out.appendSlice(sc.a(), p.doc.get(n).text.items);
+    if (p.doc.get(st.ec).kind == .text and st.ec != st.sc) {
+        const text = p.doc.get(st.ec).text.items;
+        try out.appendSlice(sc.a(), text[0..byteOffsetOfUtf16(text, st.eo)]);
+    }
+    return jsStr(vm, out.items);
+}
+
+fn rangeComparePointInner(vm: *Vm, this: Value, args: []const Value) Error!i8 {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const pt = try rangePoint(vm, arg(args, 0), arg(args, 1));
+    const st = try rangeState(vm, o.asValue());
+    if (rootOf(p.doc, pt.node) != rootOf(p.doc, st.sc)) return throwDom(vm, .WrongDocumentError, "the node is in another tree");
+    if (bpCompare(p.doc, pt.node, pt.offset, st.sc, st.so) < 0) return -1;
+    if (bpCompare(p.doc, pt.node, pt.offset, st.ec, st.eo) > 0) return 1;
+    return 0;
+}
+
+fn rangeIsPointInRange(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const r = rangeComparePointInner(vm, this, args) catch |e| switch (e) {
+        error.Exception => {
+            vm.exception = Value.undefined_;
+            return Value.false_;
+        },
+        else => return e,
+    };
+    return Value.fromBool(r == 0);
+}
+
+fn rangeComparePoint(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return Value.fromInt(try rangeComparePointInner(vm, this, args));
+}
+
+fn rangeIntersectsNode(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisRange(vm, this);
+    const node = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("a node is needed");
+    const st = try rangeState(vm, o.asValue());
+    if (rootOf(p.doc, node) != rootOf(p.doc, st.sc)) return Value.false_;
+    const parent = p.doc.get(node).parent orelse return Value.true_;
+    const idx = childIndex(p.doc, node);
+    return Value.fromBool(bpCompare(p.doc, parent, idx, st.ec, st.eo) < 0 and bpCompare(p.doc, parent, idx + 1, st.sc, st.so) > 0);
+}
 
 // ------------------------------------------------------------- Storage
 
@@ -4930,6 +6756,7 @@ const TestPage = struct {
     doc: *dom.Document,
     page: Page,
     host: *TestHost,
+    ua: stylelib.Sheet,
 
     fn open(markup: []const u8) !*TestPage {
         const ta = std.testing.allocator;
@@ -4941,7 +6768,8 @@ const TestPage = struct {
         tp.doc = try html.parse(tp.arena.allocator(), markup, .{ .scripting = true });
         tp.host = try ta.create(TestHost);
         tp.host.* = .{ .a = ta };
-        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request, .fetch = TestHost.fetch, .navigate = TestHost.navigate, .changed = TestHost.changed, .submit = TestHost.submit, .activate = TestHost.activate, .storage = TestHost.storage });
+        tp.ua = try stylelib.parseSheet(tp.arena.allocator(), stylelib.ua_sheet, .user_agent, .{ .width = 1024, .height = 768 });
+        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request, .fetch = TestHost.fetch, .navigate = TestHost.navigate, .changed = TestHost.changed, .submit = TestHost.submit, .activate = TestHost.activate, .storage = TestHost.storage, .ua_sheet = &tp.ua });
         try tp.page.setUrl("http://example.test:8080/dir/page.html?q=1#top");
         return tp;
     }
@@ -5435,6 +7263,10 @@ test "script: acid3 on the host (when fetched): the score, printed" {
         score = try tp.doc.textContent(id, tp.arena.allocator());
     };
     std.debug.print("acid3 (host): {s}/100 after {d} timer ticks and {d} ms of page time; document arena +{d} KB; {d} script errors\n", .{ score, ticks, @as(u64, @intFromFloat(now)), (tp.arena.queryCapacity() - arena_before) / 1024, tp.page.script_errors });
+    // The harness's log names each failing test: printed for the next round.
+    tp.page.runSource("console.log(typeof log === 'string' ? log : '(no log)')", "acid3 log");
+    const at = std.mem.lastIndexOf(u8, tp.host.lines.items, "log:") orelse 0;
+    std.debug.print("{s}\n", .{tp.host.lines.items[at..]});
 }
 
 test "script: the wrappers survive a collection at every safe point" {

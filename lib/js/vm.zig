@@ -1215,7 +1215,7 @@ pub const Vm = struct {
         if (v.isBool()) return vm.get(vm.intrinsics.boolean_prototype, key, v);
         if (v.isSymbol()) return vm.get(vm.intrinsics.symbol_prototype, key, v);
         if (v.isBigInt()) return vm.get(vm.intrinsics.bigint_prototype, key, v);
-        return vm.throwTypeErrorFmt("Cannot read properties of {s}", .{if (v.isNull()) "null" else "undefined"});
+        return vm.throwTypeErrorFmt("Cannot read properties of {s} (reading '{s}')", .{ if (v.isNull()) "null" else "undefined", vm.keyDebug(key) });
     }
 
     /// GetMethod (§7.3.11).

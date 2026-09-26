@@ -2132,7 +2132,13 @@ fn setPropSlow(vm: *Vm, obj: Value, site: *bytecode.PropSite, v: Value, strict: 
 }
 
 fn getElem(vm: *Vm, obj: Value, key: Value) Error!Value {
-    if (obj.isNullish()) return vm.throwTypeErrorFmt("Cannot read properties of {s}", .{if (obj.isNull()) "null" else "undefined"});
+    if (obj.isNullish()) {
+        // The key named when it is a string (a number is what an index
+        // usually is; a symbol has no cheap name).
+        var buf: [96]u8 = undefined;
+        const name: []const u8 = if (key.isString()) (@import("builtins.zig").utf8Buf(vm, Vm.asString(key), &buf) catch "?") else "?";
+        return vm.throwTypeErrorFmt("Cannot read properties of {s} (reading '{s}')", .{ if (obj.isNull()) "null" else "undefined", name });
+    }
     const k = try vm.toPropertyKey(key);
     return vm.getV(obj, k);
 }

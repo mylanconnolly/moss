@@ -156,10 +156,15 @@ attributes and text changing, delivered as a microtask; `onclick="…"`
 attributes and `el.onclick = f` properties run; `document.write` under
 a parser-inserted script inserts after it; `localStorage.foo` reads
 and writes items. The Acid3 score is measured by the `acid3` drill
-(`tools/fetch-acid3.sh` first): 41/100 on the host, 25/100 on the
-target within its settle, as of 2026-09-26. Not yet: CORS with
-credentials or a preflight, iframes, Range and TreeWalker, the SVG DOM,
-modifier keys.
+(`tools/fetch-acid3.sh` first): 73/100 on the host, 43/100 on the
+target within its settle, as of 2026-09-26. An iframe's or object's
+`contentDocument` is a document of its own (fetched on first touch,
+never laid out), as are the ones `document.implementation` makes.
+`Range`, `NodeIterator` and `TreeWalker` follow the DOM standard, with
+live updates under mutation. Not yet: the table and form DOM
+(`tBodies`, `insertRow`, a control's dirty `value`), CORS with
+credentials or a preflight, iframes laid out, the SVG DOM, modifier
+keys.
 
 ### The window: Web
 

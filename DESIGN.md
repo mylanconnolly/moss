@@ -7273,6 +7273,83 @@ a second; the dirty bit has to say what changed. (3) A conformance
 number needs a way to run in the fast loop: the host run found the
 memory bug's absence in seconds, the target run found the number.
 
+**Stage 11j, several documents per page (as built, 2026-09-26).** Half
+of Acid3 runs in a second document: the iframe's `contentDocument`
+(its `empty.html`, emptied and rebuilt by each test), documents a
+script makes through `document.implementation.createDocument`, and
+their `defaultView.getComputedStyle`. The bindings now hold a list of
+documents per page: index 0 the page's own, the rest made on demand —
+an iframe's or object's on first `contentDocument` (its `src` fetched
+through the host and parsed as the page's document was, an empty one
+when there is nothing to fetch), a script's through `createDocument`
+(XML-flavoured: names keep their case), `createHTMLDocument` and
+`createDocumentType`. Each lives in an arena of its own over the
+bookkeeping heap and dies with the page. A wrapper's slot names its
+document beside its node; the wrapper table is keyed by both; and
+every native switches the page's current document to its `this`
+node's before it reads anything — a one-line getter that read the
+document before the switch (`p.doc.get(try thisNode(...))`) read the
+old document with the new node's index, which the fast loop caught as
+an assertion in the node store. A node argument from another document
+is adopted by copy, as the DOM adopts across documents (identity does
+not survive, which no test here minds). Only the page's own document
+marks the page dirty; the others are never laid out — so
+`getComputedStyle` on one of them runs the cascade itself, in scratch,
+with the user-agent sheet the host lends (`Host.ua_sheet`), which is
+what the selector tests measure their `z-index` by. Every entry from
+the embedder resets to the page's document; a dispatch switches to
+its target's. Also in this round: `createElement` and
+`createElementNS` validate names (INVALID_CHARACTER_ERR for a `<`, a
+null byte or a leading digit), a qualified name keeps its prefix, and
+the engine's null-read TypeError names the property it was reading
+(`Cannot read properties of undefined (reading 'x')`), which turned a
+list of identical failures into a list of missing members. Acid3:
+**57/100 on the host, 32/100 on the target.**
+
+**Stage 11k, Traversal, Range and the DOM's exceptions (as built,
+2026-09-26).** `DOMException` is a constructor on the window whose
+instances carry `name`, `message` and the legacy `code`, with the
+`*_ERR` constants on the constructor and the prototype; every refusal
+the bindings make is one now (`throwDom(.HierarchyRequestError, …)`),
+so `e.code == 3` holds where a script checks it. `document.write` into
+a document, `appendChild` of a second element to a document, text
+under a document: HierarchyRequestError, as the DOM's insertion
+validity says. `NodeIterator` and `TreeWalker` (`createNodeIterator`,
+`createTreeWalker`, `NodeFilter`'s constants, `whatToShow`, a filter
+function or an `acceptNode` object, InvalidStateError when a filter
+runs itself) follow the DOM standard's algorithms — traverse,
+traverse children, traverse siblings, next and previous — with one
+concession to Acid3's second test: a node the filter removed from the
+tree is still returned when accepted, but the iterator stays where the
+removal's pre-removing steps left it, and a filter that removed the
+reference continues from the moved reference rather than the detached
+node. `Range` (`createRange`, `new Range`) keeps its boundary points
+as (container, offset) with the DOM's comparison of boundary points
+(`compareBoundaryPoints`, `comparePoint`, `isPointInRange`,
+`intersectsNode`); `deleteContents`, `extractContents` and
+`cloneContents` are one algorithm over the first partially contained
+child, the contained children and the last, recursing into a sub-range
+for a partially contained element; `insertNode` splits a text start
+and moves only the end of a collapsed range past what it put in;
+`surroundContents`, `cloneRange`, `toString`. Ranges and iterators are
+live: the DOM primitives (`insertNode`, `detachNode`, `replaceData`,
+`splitText`) move every range's points and every iterator's reference
+as the standard says, which is what the "ranges under mutations" tests
+check. `CharacterData` got `substringData`, `appendData`,
+`insertData`, `deleteData`, `replaceData` (offsets in UTF-16 units,
+the DOM's), `Text.splitText`, and `Node` got `normalize`,
+`isSameNode`, `isEqualNode`. `createEvent` knows the event interface
+names (`UIEvents`, `HTMLEvents`, `MouseEvents`, …) and the created
+event has `initEvent`, `initUIEvent`, `initCustomEvent`. Collections
+answer to names (`document.forms.login`, `form.elements.q`), a frame
+whose `src` is a picture or plain text gets a document around it,
+`label.htmlFor` reflects `for`, `input.type` is lowercase. A bug the
+fast loop found: `Document.walk`'s `next` yields elements only (as the
+parser's callers want), so a range's `toString`, `normalize`, tree
+order and the surround check walked past every text node — `step`
+yields all. Acid3: **73/100 on the host, 43/100 on the target** within
+its settle.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is
