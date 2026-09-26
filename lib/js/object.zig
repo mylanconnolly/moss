@@ -164,9 +164,13 @@ pub const Object = extern struct {
     /// attributes, or far past the dense part): the dense path must
     /// check there first.
     sparse_indexes: bool = false,
+    /// The object is some object's prototype: a structural change to it
+    /// (a property added, removed or redefined, its own prototype set)
+    /// bumps `Objects.proto_epoch`, which the add-property caches check.
+    is_prototype: bool = false,
     /// The class's internal slots, if any, follow the struct in the cell
     /// (a function's code and environment, a wrapper's primitive, ...).
-    _pad: [5]u8 = @splat(0),
+    _pad: [4]u8 = @splat(0),
     /// Property values by slot: inline for the first few, then an
     /// overflow vector.
     inline_slots: [4]Value,
@@ -236,6 +240,13 @@ pub const Objects = struct {
     /// prototype P start here. Keyed by the prototype's cell (null for
     /// no prototype).
     root_shapes: std.AutoHashMapUnmanaged(u64, *Shape) = .empty,
+    /// Bumped by every structural change to an object that is some
+    /// object's prototype: the add-property caches' validity.
+    proto_epoch: u64 = 1,
+    /// Some prototype carries an integer-keyed property (or an array's
+    /// chain left the intrinsic one): element stores into holes must
+    /// walk the chain. Never cleared.
+    proto_has_indexes: bool = false,
 
     pub fn init(h: *Heap, strings: *string.Strings, meta: std.mem.Allocator) Objects {
         return .{ .heap = h, .strings = strings, .meta = meta };
@@ -361,6 +372,7 @@ pub const Objects = struct {
     /// bytes of internal slots after the struct.
     pub fn create(os: *Objects, proto: Value, class: Class, extra: usize) Error!*Object {
         const shape = try os.rootShape(proto);
+        if (proto.isObject()) os.markPrototype(proto.asCell().as(Object));
         const c = try os.heap.alloc(.object, Object.internalOffset() + extra);
         const o = c.as(Object);
         o.shape = shape;
@@ -386,10 +398,23 @@ pub const Objects = struct {
         while (q.isObject()) : (q = q.asCell().as(Object).shape.proto) if (q.asCell() == &o.header) return false;
         try os.toDictionary(o);
         o.shape.proto = p;
+        if (p.isObject()) os.markPrototype(p.asCell().as(Object));
+        if (o.is_prototype) os.proto_epoch += 1;
         return true;
     }
 
-    fn growSlots(os: *Objects, o: *Object, need: u32) Error!void {
+    /// `p` is now some object's prototype: index keys it already has
+    /// count from here on.
+    fn markPrototype(os: *Objects, p: *Object) void {
+        if (p.is_prototype) return;
+        p.is_prototype = true;
+        if (p.sparse_indexes) os.proto_has_indexes = true;
+        if (p.elements) |e| if (e.len > 0) {
+            os.proto_has_indexes = true;
+        };
+    }
+
+    pub fn growSlots(os: *Objects, o: *Object, need: u32) Error!void {
         if (need <= Object.inline_count) return;
         const want = need - Object.inline_count;
         if (o.overflow) |ov| if (ov.cap >= want) return;
@@ -436,7 +461,10 @@ pub const Objects = struct {
     /// not extensible and the key is new, or the property is not
     /// configurable and the change is not allowed.
     pub fn defineOwn(os: *Objects, o: *Object, key: Key, v: Value, attrs: Attributes) Error!bool {
-        if (key == .index and o.class == .array) if (try os.defineElement(o, key.index, v, attrs)) return true;
+        if (o.is_prototype) os.proto_epoch += 1;
+        // Integer keys of arrays and of plain objects live in the dense
+        // elements (a BigInteger keeps its digits on `this[i]`, 2026-09-25).
+        if (key == .index and (o.class == .array or o.class == .ordinary)) if (try os.defineElement(o, key.index, v, attrs)) return true;
         if (try os.lookup(o.shape, key)) |e| {
             const same_attrs = @as(u8, @bitCast(e.attrs)) == @as(u8, @bitCast(attrs));
             if (!e.attrs.configurable) {
@@ -477,6 +505,7 @@ pub const Objects = struct {
     /// Define or redefine regardless of configurability (the caller has
     /// validated the change per §10.1.6.3).
     pub fn defineOwnForce(os: *Objects, o: *Object, key: Key, v: Value, attrs: Attributes) Error!bool {
+        if (o.is_prototype) os.proto_epoch += 1;
         if (try os.lookup(o.shape, key)) |e| {
             try os.toDictionary(o);
             try o.shape.table.?.map.put(os.meta, key, .{ .slot = e.slot, .attrs = attrs });
@@ -497,15 +526,19 @@ pub const Objects = struct {
 
     /// An array's dense element, when it stays dense (the index within
     /// or just past the used part, default attributes).
+    /// How far past the dense part an integer key may land and still be
+    /// an element (8 KB of holes at most); farther is a named property.
+    pub const elements_gap_max: u32 = 1024;
+
     fn defineElement(os: *Objects, o: *Object, i: u32, v: Value, attrs: Attributes) Error!bool {
         if (@as(u8, @bitCast(attrs)) != @as(u8, @bitCast(Attributes.default))) return false;
         if (o.sparse_indexes) if ((try os.lookup(o.shape, .{ .index = i })) != null) return false;
         const e = o.elements orelse blk: {
-            if (i > 8) return false;
-            break :blk try os.growElements(o, 8);
+            if (i > elements_gap_max) return false;
+            break :blk try os.growElements(o, @max(8, i + 1));
         };
         if (i >= e.cap) {
-            if (i > e.cap + 64) return false; // too sparse: a named property instead
+            if (i > e.cap + elements_gap_max) return false; // too sparse: a named property instead
             _ = try os.growElements(o, i + 1);
         }
         const el = o.elements.?;
@@ -536,6 +569,7 @@ pub const Objects = struct {
 
     /// [[Delete]]: false when the property is not configurable.
     pub fn delete(os: *Objects, o: *Object, key: Key) Error!bool {
+        if (o.is_prototype) os.proto_epoch += 1;
         if (key == .index) if (o.elements) |e| if (key.index < e.cap and !e.items()[key.index].isEmpty()) {
             e.items()[key.index] = Value.empty;
             return true;

@@ -973,9 +973,14 @@ supervises), and memory history per unit beside the CPU one.
       `zig build bench-js` runs Octane's Richards, DeltaBlue and Crypto
       at a pin (1,274 / 1,342 / 1,061, mean 1,220 on the M3) and a
       workload of our own that the `jsrun` drill also times on the
-      target (115 ms host, 1,908 ms under TCG). Still to come in (e):
-      quickening and inline-cache work against that row, `web-eval`, a
-      real bookkeeping allocator for a script domain.
+      target (115 ms host, 1,908 ms under TCG). The first quickening
+      round, the same day: threaded dispatch (Zig's labeled `switch`
+      continue), dense element growth on store, an add-property cache
+      guarded by a prototype epoch, a second read-cache entry, `==`
+      fast paths — the mean 1,220 to 2,246 (+84%), bench-small 55 ms
+      host / 1,007 ms target, test262 unchanged. Still to come in (e):
+      the call path and register traffic (the next round), `web-eval`,
+      a real bookkeeping allocator for a script domain.
       Residuals of (b)–(d): the moving nursery (the barrier is in
       place) and ephemeron keys for the weak collections, eval's
       `arguments` early errors, rooting natives' locals so collection

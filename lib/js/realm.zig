@@ -479,7 +479,7 @@ pub fn arrayIteratorFast(vm: *Vm, it: Value, next: Value) ?Value {
     if (d.kind != .values) return null;
     if (!d.target.isObject()) return Value.empty;
     const arr = asObject(d.target);
-    if (arr.class != .array or arr.sparse_indexes or vm.proto_has_indexes) return null;
+    if (arr.class != .array or arr.sparse_indexes or vm.objects.proto_has_indexes) return null;
     const len = Vm.arrayLength(arr);
     if (d.index >= len) {
         d.target = Value.undefined_;

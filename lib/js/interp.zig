@@ -23,6 +23,8 @@ const Vm = vmod.Vm;
 const Value = vmod.Value;
 const Error = vmod.Error;
 const Object = vmod.Object;
+const Shape = vmod.Shape;
+const Cell = vmod.Cell;
 const String = vmod.String;
 const Key = vmod.Key;
 const Code = vmod.Code;
@@ -153,7 +155,7 @@ fn isGeneratorKind(k: bytecode.FunctionKind) bool {
 }
 
 /// The `this` a non-arrow function sees (§10.2.1.2 OrdinaryCallBindThis).
-fn coerceThis(vm: *Vm, fd: *FunctionData, this: Value) Error!Value {
+inline fn coerceThis(vm: *Vm, fd: *FunctionData, this: Value) Error!Value {
     switch (fd.this_mode) {
         .lexical, .strict => return this,
         .sloppy => {
@@ -355,27 +357,90 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
         pc_p.* = pc;
     }
     while (true) {
-        const insn = code.insns[pc];
+        var insn = code.insns[pc];
         if (comptime builtin.os.tag != .freestanding) if (trace_enabled) std.debug.print("[{d}] pc={d} {s} {d} {d} {d} base={d} nregs={d}\n", .{ vm.frames.items.len, pc, insn.op.name(), insn.a, insn.b, insn.c, frame.base, code.nregs });
         pc += 1;
         // Where the frame's pc is needed (calls, errors), it is stored.
-        switch (insn.op) {
-            .nop, .debugger => {},
-            .mov => regs[insn.a] = regs[insn.b],
-            .ldc => regs[insn.a] = code.consts[insn.bc()],
-            .ldint => regs[insn.a] = Value.fromInt(@bitCast(insn.bc())),
-            .ldundef => regs[insn.a] = Value.undefined_,
-            .ldnull => regs[insn.a] = Value.null_,
-            .ldtrue => regs[insn.a] = Value.true_,
-            .ldfalse => regs[insn.a] = Value.false_,
-            .ldempty => regs[insn.a] = Value.empty,
-            .ldgthis => regs[insn.a] = vm.global.asValue(),
+        sw: switch (insn.op) {
+            .nop, .debugger => {
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .mov => {
+                regs[insn.a] = regs[insn.b];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldc => {
+                regs[insn.a] = code.consts[insn.bc()];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldint => {
+                regs[insn.a] = Value.fromInt(@bitCast(insn.bc()));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldundef => {
+                regs[insn.a] = Value.undefined_;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldnull => {
+                regs[insn.a] = Value.null_;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldtrue => {
+                regs[insn.a] = Value.true_;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldfalse => {
+                regs[insn.a] = Value.false_;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldempty => {
+                regs[insn.a] = Value.empty;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldgthis => {
+                regs[insn.a] = vm.global.asValue();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
             .ldthis => {
                 if (frame.this.isEmpty()) {
                     frame.pc = pc;
                     return vm.throwReferenceError("Must call super constructor in derived class before accessing 'this' or returning from derived constructor");
                 }
                 regs[insn.a] = frame.this;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setthis => {
                 if (!frame.this.isEmpty()) {
@@ -383,10 +448,32 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     return vm.throwReferenceError("Super constructor may only be called once");
                 }
                 frame.this = regs[insn.a];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .ldnewtarget => regs[insn.a] = frame.new_target,
-            .ldfunc => regs[insn.a] = if (frame.func) |f| f.asValue() else Value.undefined_,
-            .ldhome => regs[insn.a] = if (frame.func) |f| f.internal(FunctionData).home_object else Value.undefined_,
+            .ldnewtarget => {
+                regs[insn.a] = frame.new_target;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldfunc => {
+                regs[insn.a] = if (frame.func) |f| f.asValue() else Value.undefined_;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .ldhome => {
+                regs[insn.a] = if (frame.func) |f| f.internal(FunctionData).home_object else Value.undefined_;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
 
             // -------------------------------------------- operators
             .add => {
@@ -401,6 +488,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = try vm.add(a, b);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .sub => {
                 const a = regs[insn.b];
@@ -414,6 +505,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = try vm.arith(.sub, a, b);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .mul => {
                 const a = regs[insn.b];
@@ -424,6 +519,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = try vm.arith(.mul, a, b);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .div => {
                 const a = regs[insn.b];
@@ -434,6 +533,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = try vm.arith(.div, a, b);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .mod => {
                 const a = regs[insn.b];
@@ -444,10 +547,18 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = try vm.arith(.mod, a, b);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .exp => {
                 frame.pc = pc;
                 regs[insn.a] = try vm.arith(.exp, regs[insn.b], regs[insn.c]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .shl, .shr, .ushr, .band, .bor, .bxor => {
                 const a = regs[insn.b];
@@ -474,6 +585,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                         else => .bxor,
                     }, a, b);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .lt, .gt, .le, .ge => {
                 const a = regs[insn.b];
@@ -502,31 +617,83 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                         },
                     });
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .eq => {
-                frame.pc = pc;
-                regs[insn.a] = Value.fromBool(try vm.isLooselyEqual(regs[insn.b], regs[insn.c]));
+                const a = regs[insn.b];
+                const b = regs[insn.c];
+                if ((a.isInt() and b.isInt()) or (a.isObject() and b.isObject())) {
+                    regs[insn.a] = Value.fromBool(a.eqlBits(b));
+                } else if (a.isNullish() or b.isNullish()) {
+                    regs[insn.a] = Value.fromBool(a.isNullish() and b.isNullish());
+                } else {
+                    frame.pc = pc;
+                    regs[insn.a] = Value.fromBool(try vm.isLooselyEqual(a, b));
+                }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .ne => {
-                frame.pc = pc;
-                regs[insn.a] = Value.fromBool(!try vm.isLooselyEqual(regs[insn.b], regs[insn.c]));
+                const a = regs[insn.b];
+                const b = regs[insn.c];
+                if ((a.isInt() and b.isInt()) or (a.isObject() and b.isObject())) {
+                    regs[insn.a] = Value.fromBool(!a.eqlBits(b));
+                } else if (a.isNullish() or b.isNullish()) {
+                    regs[insn.a] = Value.fromBool(!(a.isNullish() and b.isNullish()));
+                } else {
+                    frame.pc = pc;
+                    regs[insn.a] = Value.fromBool(!try vm.isLooselyEqual(a, b));
+                }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .seq => regs[insn.a] = Value.fromBool(vm.isStrictlyEqual(regs[insn.b], regs[insn.c])),
-            .sne => regs[insn.a] = Value.fromBool(!vm.isStrictlyEqual(regs[insn.b], regs[insn.c])),
+            .seq => {
+                regs[insn.a] = Value.fromBool(vm.isStrictlyEqual(regs[insn.b], regs[insn.c]));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .sne => {
+                regs[insn.a] = Value.fromBool(!vm.isStrictlyEqual(regs[insn.b], regs[insn.c]));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
             .in => {
                 frame.pc = pc;
                 const target = regs[insn.c];
                 if (!target.isObject()) return vm.throwTypeError("Cannot use 'in' operator to search for a key in a non-object");
                 const key = try vm.toPropertyKey(regs[insn.b]);
                 regs[insn.a] = Value.fromBool(try vm.hasProperty(asObject(target), key));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .instanceof => {
                 frame.pc = pc;
                 regs[insn.a] = Value.fromBool(try vm.instanceOf(regs[insn.b], regs[insn.c]));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .neg => {
                 frame.pc = pc;
                 regs[insn.a] = try vm.negate(regs[insn.b]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .pos => {
                 const v = regs[insn.b];
@@ -536,6 +703,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = Value.fromF64(try vm.toNumber(v));
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .tonumeric => {
                 const v = regs[insn.b];
@@ -545,13 +716,33 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = try vm.toNumeric(v);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .bnot => {
                 frame.pc = pc;
                 regs[insn.a] = try vm.bitNot(regs[insn.b]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .not => regs[insn.a] = Value.fromBool(!vm.toBoolean(regs[insn.b])),
-            .typeof => regs[insn.a] = strValue(vm.typeOf(regs[insn.b])),
+            .not => {
+                regs[insn.a] = Value.fromBool(!vm.toBoolean(regs[insn.b]));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .typeof => {
+                regs[insn.a] = strValue(vm.typeOf(regs[insn.b]));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
             .inc, .dec => {
                 const v = regs[insn.b];
                 const delta: i32 = if (insn.op == .inc) 1 else -1;
@@ -565,6 +756,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     const one = if (n.isBigInt()) try realm.bigintFromI64(vm, 1) else Value.fromInt(1);
                     regs[insn.a] = try vm.arith(if (insn.op == .inc) .add else .sub, n, one);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .tostring => {
                 const v = regs[insn.b];
@@ -574,6 +769,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = strValue(try vm.toString(v));
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .topropkey => {
                 const v = regs[insn.b];
@@ -581,10 +780,18 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     frame.pc = pc;
                     regs[insn.a] = try keyValue(vm, try vm.toPropertyKey(v));
                 } else regs[insn.a] = v;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .toobject => {
                 frame.pc = pc;
                 regs[insn.a] = (try vm.toObject(regs[insn.b])).asValue();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
 
             // ------------------------------------------------ jumps
@@ -598,30 +805,66 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     try vm.tick();
                 }
                 pc = target;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jt => if (vm.toBoolean(regs[insn.a])) {
-                pc = insn.bc();
+            .jt => {
+                if (vm.toBoolean(regs[insn.a])) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jf => if (!vm.toBoolean(regs[insn.a])) {
-                pc = insn.bc();
+            .jf => {
+                if (!vm.toBoolean(regs[insn.a])) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jundef => if (regs[insn.a].isUndefined()) {
-                pc = insn.bc();
+            .jundef => {
+                if (regs[insn.a].isUndefined()) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jnundef => if (!regs[insn.a].isUndefined()) {
-                pc = insn.bc();
+            .jnundef => {
+                if (!regs[insn.a].isUndefined()) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jnullish => if (regs[insn.a].isNullish()) {
-                pc = insn.bc();
+            .jnullish => {
+                if (regs[insn.a].isNullish()) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jnnullish => if (!regs[insn.a].isNullish()) {
-                pc = insn.bc();
+            .jnnullish => {
+                if (!regs[insn.a].isNullish()) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jempty => if (regs[insn.a].isEmpty()) {
-                pc = insn.bc();
+            .jempty => {
+                if (regs[insn.a].isEmpty()) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .jnempty => if (!regs[insn.a].isEmpty()) {
-                pc = insn.bc();
+            .jnempty => {
+                if (!regs[insn.a].isEmpty()) pc = insn.bc();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
 
             // ------------------------------------------- properties
@@ -630,21 +873,49 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const site = &code.props[insn.c];
                 if (obj.isObject()) {
                     const o = asObject(obj);
+                    if (@as(*anyopaque, @ptrCast(o.shape)) == site.ic.shape2) {
+                        if (site.ic.holder2) |h| {
+                            const ho: *Object = @ptrCast(@alignCast(h));
+                            if (@as(*anyopaque, @ptrCast(ho.shape)) == site.ic.holder_shape2) {
+                                regs[insn.a] = ho.slot(site.ic.slot2).*;
+                                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                                insn = code.insns[pc];
+                                pc += 1;
+                                continue :sw insn.op;
+                            }
+                        } else {
+                            regs[insn.a] = o.slot(site.ic.slot2).*;
+                            if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                            insn = code.insns[pc];
+                            pc += 1;
+                            continue :sw insn.op;
+                        }
+                    }
                     if (@as(*anyopaque, @ptrCast(o.shape)) == site.ic.shape) {
                         if (site.ic.holder) |h| {
                             const ho: *Object = @ptrCast(@alignCast(h));
                             if (@as(*anyopaque, @ptrCast(ho.shape)) == site.ic.holder_shape) {
                                 regs[insn.a] = ho.slot(site.ic.slot).*;
-                                continue;
+                                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                                insn = code.insns[pc];
+                                pc += 1;
+                                continue :sw insn.op;
                             }
                         } else {
                             regs[insn.a] = o.slot(site.ic.slot).*;
-                            continue;
+                            if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                            insn = code.insns[pc];
+                            pc += 1;
+                            continue :sw insn.op;
                         }
                     }
                 }
                 frame.pc = pc;
                 regs[insn.a] = try getPropSlow(vm, obj, site);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setprop => {
                 const obj = regs[insn.a];
@@ -653,13 +924,39 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 if (obj.isObject()) {
                     const o = asObject(obj);
                     if (@as(*anyopaque, @ptrCast(o.shape)) == site.ic.shape and site.ic.holder == null) {
-                        vm.heap.writeBarrier(&o.header, v);
-                        o.slot(site.ic.slot).* = v;
-                        continue;
+                        if (site.ic.add_shape) |ns| {
+                            // The site adds this property: the shape moves to
+                            // the child recorded, while no prototype changed.
+                            if (o.extensible and vm.objects.proto_epoch == site.ic.epoch) {
+                                const child: *Shape = @ptrCast(@alignCast(ns));
+                                if (child.count > Object.inline_count) {
+                                    frame.pc = pc;
+                                    try vm.objects.growSlots(o, child.count);
+                                }
+                                o.shape = child;
+                                vm.heap.writeBarrier(&o.header, v);
+                                o.slot(site.ic.slot).* = v;
+                                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                                insn = code.insns[pc];
+                                pc += 1;
+                                continue :sw insn.op;
+                            }
+                        } else {
+                            vm.heap.writeBarrier(&o.header, v);
+                            o.slot(site.ic.slot).* = v;
+                            if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                            insn = code.insns[pc];
+                            pc += 1;
+                            continue :sw insn.op;
+                        }
                     }
                 }
                 frame.pc = pc;
                 try setPropSlow(vm, obj, site, v, code.strict);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .getelem => {
                 const obj = regs[insn.b];
@@ -667,16 +964,23 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 if (obj.isObject() and key.isInt()) {
                     const o = asObject(obj);
                     const i = key.asInt();
-                    if (i >= 0 and o.class == .array) if (o.elements) |e| if (@as(u32, @intCast(i)) < e.cap) {
+                    if (i >= 0 and (o.class == .array or o.class == .ordinary)) if (o.elements) |e| if (@as(u32, @intCast(i)) < e.cap) {
                         const v = e.items()[@intCast(i)];
                         if (!v.isEmpty()) {
                             regs[insn.a] = v;
-                            continue;
+                            if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                            insn = code.insns[pc];
+                            pc += 1;
+                            continue :sw insn.op;
                         }
                     };
                 }
                 frame.pc = pc;
                 regs[insn.a] = try getElem(vm, obj, key);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setelem => {
                 const obj = regs[insn.a];
@@ -685,9 +989,9 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 if (obj.isObject() and key.isInt()) {
                     const o = asObject(obj);
                     const i = key.asInt();
-                    if (i >= 0 and o.class == .array and !o.sparse_indexes and o.extensible) if (o.elements) |e| {
+                    if (i >= 0 and (o.class == .array or o.class == .ordinary) and !o.sparse_indexes and o.extensible) {
                         const ui: u32 = @intCast(i);
-                        if (ui < e.cap and (ui < e.len or vm.lengthWritable(o))) {
+                        if (o.elements) |e| if (ui < e.cap and (ui < e.len or vm.lengthWritable(o))) {
                             // Within the dense part: a hole may be filled only
                             // when no prototype setter would see it — arrays
                             // whose prototype chain is the intrinsic one.
@@ -695,13 +999,38 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                                 vm.heap.writeBarrier(&o.header, v);
                                 e.items()[ui] = v;
                                 if (ui >= e.len) e.len = ui + 1;
-                                continue;
+                                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                                insn = code.insns[pc];
+                                pc += 1;
+                                continue :sw insn.op;
                             }
+                        };
+                        // A store past the dense part — an append at the
+                        // capacity, or a digit array filled from the top down
+                        // (`r[i + n] = this[i]`, Crypto's shifts): the dense
+                        // part grows in place, holes up to it, as long as the
+                        // gap is small (a far index is a named property).
+                        const len: u32 = if (o.elements) |e| e.len else 0;
+                        const cap: u32 = if (o.elements) |e| e.cap else 0;
+                        if (ui >= len and ui >= cap and ui <= cap + elements_gap_max and vm.arrayProtoClean() and vm.lengthWritable(o)) {
+                            frame.pc = pc;
+                            const e = try vm.objects.growElements(o, ui + 1);
+                            vm.heap.writeBarrier(&o.header, v);
+                            e.items()[ui] = v;
+                            e.len = ui + 1;
+                            if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                            insn = code.insns[pc];
+                            pc += 1;
+                            continue :sw insn.op;
                         }
-                    };
+                    }
                 }
                 frame.pc = pc;
                 try setElem(vm, obj, key, v, code.strict);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .delprop => {
                 frame.pc = pc;
@@ -712,6 +1041,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const ok = try vm.deleteProperty(o, key);
                 if (!ok and code.strict) return vm.throwTypeErrorFmt("Cannot delete property '{s}'", .{vm.keyDebug(key)});
                 regs[insn.a] = Value.fromBool(ok);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .getsuper => {
                 frame.pc = pc;
@@ -722,6 +1055,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const proto = try vm.getPrototypeOf(asObject(home));
                 if (!proto.isObject()) return vm.throwTypeError("Cannot read properties of null (super)");
                 regs[insn.a] = try vm.get(asObject(proto), key, this);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setsuper => {
                 frame.pc = pc;
@@ -733,6 +1070,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 if (!proto.isObject()) return vm.throwTypeError("Cannot set properties of null (super)");
                 const ok = try vm.set(asObject(proto), key, regs[insn.c], this);
                 if (!ok and code.strict) return vm.throwTypeError("Cannot assign to read only property (super)");
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .defown => {
                 frame.pc = pc;
@@ -741,6 +1082,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const v = regs[insn.c];
                 try nameAnonymous(vm, v, .{ .atom = site.key }, null);
                 _ = try vm.createDataProperty(o, .{ .atom = site.key }, v);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .defelem => {
                 frame.pc = pc;
@@ -749,11 +1094,19 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const v = regs[insn.c];
                 try nameAnonymous(vm, v, key, null);
                 _ = try vm.createDataProperty(o, key, v);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .defproto => {
                 frame.pc = pc;
                 const v = regs[insn.b];
                 if (v.isObject() or v.isNull()) _ = try vm.objects.setProto(asObject(regs[insn.a]), v);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .defgetter, .defsetter, .defgetterc, .defsetterc => {
                 frame.pc = pc;
@@ -766,6 +1119,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 asObject(f).internal(FunctionData).home_object = o.asValue();
                 const desc: Vm.Descriptor = if (is_get) .{ .get = f, .enumerable = enumerable, .configurable = true } else .{ .set = f, .enumerable = enumerable, .configurable = true };
                 _ = try vm.defineOwnProperty(o, key, desc, true);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .defmethod, .defmethodc => {
                 frame.pc = pc;
@@ -775,28 +1132,52 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 try nameAnonymous(vm, f, key, null);
                 asObject(f).internal(FunctionData).home_object = o.asValue();
                 _ = try vm.defineOwnProperty(o, key, .{ .value = f, .writable = true, .enumerable = insn.op == .defmethod, .configurable = true }, true);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .sethome => {
                 asObject(regs[insn.a]).internal(FunctionData).home_object = regs[insn.b];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .spreadobj => {
                 frame.pc = pc;
                 const excluded: ?*Object = if (insn.c == 0xffff) null else asObject(regs[insn.c]);
                 try vm.copyDataProperties(asObject(regs[insn.a]), regs[insn.b], excluded);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .getpriv => {
                 frame.pc = pc;
                 regs[insn.a] = try getPrivate(vm, regs[insn.b], regs[insn.c]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setpriv => {
                 frame.pc = pc;
                 try setPrivate(vm, regs[insn.a], regs[insn.b], regs[insn.c]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .haspriv => {
                 frame.pc = pc;
                 const target = regs[insn.c];
                 if (!target.isObject()) return vm.throwTypeError("Cannot use 'in' operator to search for a private field in a non-object");
                 regs[insn.a] = Value.fromBool((try vm.objects.getOwn(asObject(target), .{ .symbol = Vm.asSymbol(regs[insn.b]) })) != null);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .defpriv, .defprivmethod => {
                 frame.pc = pc;
@@ -811,48 +1192,102 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     _ = try vm.objects.defineOwn(o, .{ .symbol = sym }, regs[insn.c], .{ .writable = insn.op == .defpriv, .enumerable = false, .configurable = false });
                     o.extensible = false;
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
 
             // ---------------------------------------------- objects
-            .newobj => regs[insn.a] = (try vm.newObject()).asValue(),
-            .newarr => regs[insn.a] = (try vm.newArray(0)).asValue(),
-            .arrpush => try vm.arrayPush(asObject(regs[insn.a]), regs[insn.b]),
+            .newobj => {
+                regs[insn.a] = (try vm.newObject()).asValue();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .newarr => {
+                regs[insn.a] = (try vm.newArray(0)).asValue();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .arrpush => {
+                try vm.arrayPush(asObject(regs[insn.a]), regs[insn.b]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
             .arrspread => {
                 frame.pc = pc;
                 const arr = asObject(regs[insn.a]);
                 var rec = try vm.getIterator(regs[insn.b]);
                 while (try vm.iteratorStepValue(&rec)) |v| try vm.arrayPush(arr, v);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .regexp => {
                 frame.pc = pc;
                 regs[insn.a] = try realm.newRegExp(vm, code.consts[insn.b], code.consts[insn.c]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .template => {
                 const site = &code.templates[insn.bc()];
                 if (site.cached.isUndefined()) site.cached = try templateObject(vm, site);
                 regs[insn.a] = site.cached;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .closure => {
                 frame.pc = pc;
                 const f = try vm.newFunction(code.functions[insn.bc()], frame.env, Value.undefined_);
                 regs[insn.a] = f.asValue();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .class => {
                 frame.pc = pc;
                 regs[insn.a] = try makeClass(vm, regs[insn.b], code.functions[insn.c], frame.env);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setfields => {
                 asObject(regs[insn.a]).internal(FunctionData).fields = regs[insn.b];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .bigint => {
                 frame.pc = pc;
                 regs[insn.a] = try realm.bigintFromLiteral(vm, asString(code.consts[insn.bc()]));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .privname => {
                 const desc = asString(code.consts[insn.bc()]);
                 const sym = try vm.newSymbol(desc);
                 sym.private = true;
                 regs[insn.a] = Value.fromCell(&sym.header);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
 
             // ------------------------------------------------ calls
@@ -871,10 +1306,17 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                         code = callee.data;
                         regs = vm.stack.ptr + frame.base;
                         pc = 0;
-                        continue;
+                        if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                        insn = code.insns[pc];
+                        pc += 1;
+                        continue :sw insn.op;
                     };
                 }
                 regs[insn.a] = try callSlow(vm, f, regs[insn.b + 1], vm.stack[args_base .. args_base + argc], pc);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .callspread => {
                 frame.pc = pc;
@@ -894,10 +1336,17 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                         code = callee.data;
                         regs = vm.stack.ptr + frame.base;
                         pc = 0;
-                        continue;
+                        if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                        insn = code.insns[pc];
+                        pc += 1;
+                        continue :sw insn.op;
                     };
                 }
                 regs[insn.a] = try callSlow(vm, f, regs[insn.b + 1], vm.stack[base .. base + n], pc);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .new => {
                 frame.pc = pc;
@@ -915,10 +1364,17 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                         code = callee.data;
                         regs = vm.stack.ptr + frame.base;
                         pc = 0;
-                        continue;
+                        if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                        insn = code.insns[pc];
+                        pc += 1;
+                        continue :sw insn.op;
                     }
                 }
                 regs[insn.a] = try vm.construct(f, vm.stack[args_base .. args_base + argc], f);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .newspread => {
                 frame.pc = pc;
@@ -930,6 +1386,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 if (n > 0) @memcpy(vm.stack[base .. base + n], arr.elements.?.items()[0..n]);
                 if (!vm.isConstructor(f)) return vm.throwTypeError("is not a constructor");
                 regs[insn.a] = try vm.construct(f, vm.stack[base .. base + n], f);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .supercall, .supercallspread => {
                 frame.pc = pc;
@@ -957,6 +1417,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 frame = currentFrame(vm);
                 regs = vm.stack.ptr + frame.base;
                 regs[insn.a] = result;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .ret, .retundef => {
                 var v = if (insn.op == .ret) regs[insn.a] else Value.undefined_;
@@ -984,19 +1448,37 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 pc = frame.pc;
                 regs[done.ret_dst] = v;
                 if (vm.depth == 0) vm.safePoint();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
 
             // ----------------------------------------- environments
             .pushenv => {
                 const info = code.scopes[insn.bc()];
                 frame.env = try newEnv(vm, info, frame.env, frame.code);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .popenv => frame.env = frame.env.?.parent,
+            .popenv => {
+                frame.env = frame.env.?.parent;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
             .copyenv => {
                 const e = frame.env.?;
                 const ne = try newEnv(vm, e.info, e.parent, e.owner);
                 @memcpy(ne.slots(), e.slots());
                 frame.env = ne;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .pushwith => {
                 frame.pc = pc;
@@ -1004,8 +1486,18 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const e = try newEnv(vm, &realm.with_scope_info, frame.env, null);
                 e.extra = &o.header;
                 frame.env = e;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
-            .getenv => regs[insn.a] = frame.env.?.up(insn.b).slots()[insn.c],
+            .getenv => {
+                regs[insn.a] = frame.env.?.up(insn.b).slots()[insn.c];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
             .getenvchk => {
                 const e = frame.env.?.up(insn.b);
                 const v = e.slots()[insn.c];
@@ -1014,11 +1506,19 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     return throwTdz(vm, e.info.names[insn.c]);
                 }
                 regs[insn.a] = v;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setenv => {
                 const e = frame.env.?.up(insn.b);
                 vm.heap.writeBarrier(e.cell(), regs[insn.a]);
                 e.slots()[insn.c] = regs[insn.a];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setenvchk => {
                 const e = frame.env.?.up(insn.b);
@@ -1028,6 +1528,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 }
                 vm.heap.writeBarrier(e.cell(), regs[insn.a]);
                 e.slots()[insn.c] = regs[insn.a];
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .chkconst => {
                 frame.pc = pc;
@@ -1043,56 +1547,107 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const site = &code.globals[insn.bc()];
                 if (site.ic.shape == @as(*anyopaque, @ptrCast(vm.global.shape)) and site.ic.holder == @as(?*anyopaque, @ptrFromInt(vm.global_lex_epoch))) {
                     regs[insn.a] = vm.global.slot(site.ic.slot).*;
-                    continue;
+                    if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                    insn = code.insns[pc];
+                    pc += 1;
+                    continue :sw insn.op;
                 }
                 frame.pc = pc;
                 regs[insn.a] = try getGlobal(vm, site, false);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .typeofglobal => {
                 frame.pc = pc;
                 regs[insn.a] = strValue(vm.typeOf(try getGlobal(vm, &code.globals[insn.bc()], true)));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setglobal, .setglobalstrict => {
                 frame.pc = pc;
                 try setGlobal(vm, &code.globals[insn.bc()], regs[insn.a], insn.op == .setglobalstrict);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .getname => {
                 frame.pc = pc;
                 regs[insn.a] = (try getName(vm, frame, asString(code.consts[insn.bc()]), false)).v;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .getnamethis => {
                 frame.pc = pc;
                 const r = try getName(vm, frame, asString(code.consts[insn.bc()]), false);
                 regs[insn.a] = r.v;
                 regs[insn.a + 1] = r.this;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .typeofname => {
                 frame.pc = pc;
                 regs[insn.a] = strValue(vm.typeOf((try getName(vm, frame, asString(code.consts[insn.bc()]), true)).v));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .setname => {
                 frame.pc = pc;
                 try setName(vm, frame, asString(code.consts[insn.bc()]), regs[insn.a], code.strict);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .initname => {
                 frame.pc = pc;
                 try initName(vm, frame, asString(code.consts[insn.bc()]), regs[insn.a]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .delname => {
                 frame.pc = pc;
                 regs[insn.a] = Value.fromBool(try deleteName(vm, frame, asString(code.consts[insn.bc()])));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .declvar => {
                 frame.pc = pc;
                 try declareVar(vm, frame, asString(code.consts[insn.bc()]), null);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .declfunc => {
                 frame.pc = pc;
                 try declareVar(vm, frame, asString(code.consts[insn.b]), regs[insn.c]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .decllex => {
                 frame.pc = pc;
                 try declareGlobalLexical(vm, asString(code.consts[insn.bc()]), insn.a != 0);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .initglobal => {
                 frame.pc = pc;
@@ -1102,16 +1657,28 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 } else {
                     _ = try vm.set(vm.global, .{ .atom = site.name }, regs[insn.a], vm.global.asValue());
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .initargs => {
                 frame.pc = pc;
                 regs[insn.a] = try realm.createArgumentsObject(vm, frame);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .initrest => {
                 const from = insn.bc();
                 const n: u32 = if (frame.argc > from) frame.argc - from else 0;
                 const arr = try vm.arrayFromList(vm.stack[frame.args_base + from .. frame.args_base + from + n]);
                 regs[insn.a] = arr.asValue();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
 
             // ------------------------------------------- exceptions
@@ -1130,8 +1697,20 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const msg = vm.utf8(asString(code.consts[insn.bc()]), fba.allocator()) catch "type error";
                 return vm.throwTypeError(msg);
             },
-            .pushtry => try vm.handlers.append(vm.meta, .{ .pc = insn.bc(), .reg = insn.a, .env = frame.env, .frame = @intCast(vm.frames.items.len - 1) }),
-            .poptry => _ = vm.handlers.pop(),
+            .pushtry => {
+                try vm.handlers.append(vm.meta, .{ .pc = insn.bc(), .reg = insn.a, .env = frame.env, .frame = @intCast(vm.frames.items.len - 1) });
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
+            .poptry => {
+                _ = vm.handlers.pop();
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
+            },
 
             // -------------------------------------------- iteration
             .iter => {
@@ -1139,12 +1718,20 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const rec = try vm.getIterator(regs[insn.b]);
                 regs[insn.a] = rec.iterator;
                 regs[insn.a + 1] = rec.next;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iterasync => {
                 frame.pc = pc;
                 const rec = try realm.getAsyncIterator(vm, regs[insn.b]);
                 regs[insn.a] = rec.iterator;
                 regs[insn.a + 1] = rec.next;
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iternext => {
                 frame.pc = pc;
@@ -1154,7 +1741,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 // plain array with an untouched prototype.
                 if (realm.arrayIteratorFast(vm, it, next)) |v| {
                     regs[insn.a] = v;
-                    continue;
+                    if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                    insn = code.insns[pc];
+                    pc += 1;
+                    continue :sw insn.op;
                 }
                 var rec = Vm.IteratorRecord{ .iterator = it, .next = next };
                 const v = vm.iteratorStepValue(&rec) catch |e| {
@@ -1167,6 +1757,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     regs[insn.b + 1] = Value.empty;
                     regs[insn.a] = Value.empty;
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iterclose => {
                 if (!regs[insn.a + 1].isEmpty()) {
@@ -1174,20 +1768,36 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     regs[insn.a + 1] = Value.empty;
                     try vm.iteratorClose(.{ .iterator = regs[insn.a], .next = Value.undefined_ });
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iterclosethrow => {
                 if (!regs[insn.a + 1].isEmpty()) {
                     regs[insn.a + 1] = Value.empty;
                     vm.iteratorCloseThrow(.{ .iterator = regs[insn.a], .next = Value.undefined_ });
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .forin => {
                 frame.pc = pc;
                 regs[insn.a] = try realm.createForInIterator(vm, regs[insn.b]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .forinnext => {
                 frame.pc = pc;
                 regs[insn.a] = try realm.forInNext(vm, regs[insn.b]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
 
             // ------------------------------------------- coroutines
@@ -1210,6 +1820,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 frame.pc = pc;
                 const e = frame.env.?.up(insn.b);
                 regs[insn.a] = try modules.readImport(vm, e.slots()[insn.c], e.info.names[insn.c]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .yield, .yieldraw => {
                 const co_obj = frame.co.?;
@@ -1235,10 +1849,18 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
             .ystep => {
                 frame.pc = pc;
                 regs[insn.a] = try yieldStarStep(vm, regs[insn.b], regs[insn.b + 1], @intCast(regs[insn.b + 2].asInt()), regs[insn.b + 3]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iterstep => {
                 frame.pc = pc;
                 regs[insn.a] = try vm.call(regs[insn.b + 1], regs[insn.b], &.{});
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iterresult => {
                 frame.pc = pc;
@@ -1246,18 +1868,30 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 if (!r.isObject()) return vm.throwTypeError("Iterator result is not an object");
                 const done = vm.toBoolean(try vm.get(asObject(r), .{ .atom = vm.atoms.done }, r));
                 regs[insn.a] = if (done) Value.empty else try vm.get(asObject(r), .{ .atom = vm.atoms.value }, r);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iterdone => {
                 frame.pc = pc;
                 const r = regs[insn.b];
                 if (!r.isObject()) return vm.throwTypeError("Iterator result is not an object");
                 regs[insn.a] = Value.fromBool(vm.toBoolean(try vm.get(asObject(r), .{ .atom = vm.atoms.done }, r)));
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .itervalue => {
                 frame.pc = pc;
                 const r = regs[insn.b];
                 if (!r.isObject()) return vm.throwTypeError("Iterator result is not an object");
                 regs[insn.a] = try vm.get(asObject(r), .{ .atom = vm.atoms.value }, r);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .iterreturn => {
                 frame.pc = pc;
@@ -1268,6 +1902,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                     const ret = try vm.getMethod(regs[insn.b], .{ .atom = vm.atoms.@"return" });
                     regs[insn.a] = if (ret.isUndefined()) Value.undefined_ else try vm.call(ret, regs[insn.b], &.{});
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .chkobj => if (!regs[insn.a].isObject()) {
                 frame.pc = pc;
@@ -1285,14 +1923,26 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 } else {
                     regs[insn.a] = try callSlow(vm, f, Value.undefined_, args, pc);
                 }
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .importmeta => {
                 frame.pc = pc;
                 regs[insn.a] = try modules.importMeta(vm, code);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
             .importcall => {
                 frame.pc = pc;
                 regs[insn.a] = try modules.dynamicImport(vm, code, regs[insn.b]);
+                if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
+                insn = code.insns[pc];
+                pc += 1;
+                continue :sw insn.op;
             },
         }
     }
@@ -1357,6 +2007,10 @@ pub fn newEnv(vm: *Vm, info: *const bytecode.ScopeInfo, parent: ?*Env, owner: ?*
     return e;
 }
 
+/// How far past its capacity a dense element store may land and still
+/// grow the dense part (the same bound as `Objects.defineElement`).
+const elements_gap_max: u32 = vmod.Objects.elements_gap_max;
+
 /// A call that is not a plain JS-to-JS call: natives, bound
 /// functions, class constructors (an error), generators, proxies.
 fn callSlow(vm: *Vm, f: Value, this: Value, args: []const Value, pc: u32) Error!Value {
@@ -1385,13 +2039,29 @@ fn getPropSlow(vm: *Vm, obj: Value, site: *bytecode.PropSite) Error!Value {
                 }
                 if (own.slot) |slot| {
                     if (!cur.shape.dictionary and !o.shape.dictionary) {
-                        site.ic.shape = @ptrCast(o.shape);
-                        site.ic.slot = slot;
-                        if (cur == o) {
-                            site.ic.holder = null;
+                        // The first entry, then the second; a third shape
+                        // replaces the second (the first stays: a site's
+                        // steadiest shape is usually the one it saw first).
+                        const first_free = site.ic.shape == null or site.ic.add_shape != null;
+                        if (first_free) {
+                            site.ic.shape = @ptrCast(o.shape);
+                            site.ic.slot = slot;
+                            site.ic.add_shape = null;
+                            if (cur == o) {
+                                site.ic.holder = null;
+                            } else {
+                                site.ic.holder = @ptrCast(cur);
+                                site.ic.holder_shape = @ptrCast(cur.shape);
+                            }
                         } else {
-                            site.ic.holder = @ptrCast(cur);
-                            site.ic.holder_shape = @ptrCast(cur.shape);
+                            site.ic.shape2 = @ptrCast(o.shape);
+                            site.ic.slot2 = slot;
+                            if (cur == o) {
+                                site.ic.holder2 = null;
+                            } else {
+                                site.ic.holder2 = @ptrCast(cur);
+                                site.ic.holder_shape2 = @ptrCast(cur.shape);
+                            }
                         }
                     }
                 }
@@ -1418,11 +2088,29 @@ fn setPropSlow(vm: *Vm, obj: Value, site: *bytecode.PropSite, v: Value, strict: 
                         site.ic.shape = @ptrCast(o.shape);
                         site.ic.slot = own.slot.?;
                         site.ic.holder = null;
+                        site.ic.add_shape = null;
                     }
                     vm.heap.writeBarrier(&o.header, v);
                     o.slot(own.slot.?).* = v;
                     return;
                 }
+            } else if (o.extensible and !o.shape.dictionary) {
+                // Not own: the ordinary set may add it. When it did — the
+                // shape is now a child of the old one keyed by this name —
+                // the site remembers the transition (the chain had no setter
+                // or read-only property, or nothing would have been added).
+                const old_shape = o.shape;
+                const epoch = vm.objects.proto_epoch;
+                try vm.setV(obj, key, v, strict);
+                const ns = o.shape;
+                if (ns != old_shape and ns.parent == old_shape and !ns.dictionary and ns.key_kind == 1 and ns.key_cell == @as(?*Cell, @ptrCast(site.key)) and vm.objects.proto_epoch == epoch) {
+                    site.ic.shape = @ptrCast(old_shape);
+                    site.ic.slot = ns.slot;
+                    site.ic.holder = null;
+                    site.ic.add_shape = @ptrCast(ns);
+                    site.ic.epoch = epoch;
+                }
+                return;
             }
         }
     }

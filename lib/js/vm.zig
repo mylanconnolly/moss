@@ -263,9 +263,6 @@ pub const Vm = struct {
     /// The host's clock for `Date.now` (milliseconds since the epoch);
     /// without one every date is the epoch.
     host_now: ?*const fn () f64 = null,
-    /// Array.prototype and Object.prototype have no indexed properties
-    /// (the usual case): array element stores need no prototype walk.
-    proto_has_indexes: bool = false,
 
     pub const GlobalLex = struct { v: Value, is_const: bool };
     pub const Job = struct { func: Value, args: [3]Value, argc: u8 };
@@ -320,7 +317,7 @@ pub const Vm = struct {
 
     /// Whether an array hole store can skip the prototype chain.
     pub fn arrayProtoClean(vm: *Vm) bool {
-        return !vm.proto_has_indexes;
+        return !vm.objects.proto_has_indexes;
     }
 
     // ------------------------------------------------------- tracing
@@ -476,7 +473,7 @@ pub const Vm = struct {
 
     /// A safe point: collect when the heap asks for it. Only the
     /// interpreter calls this, between instructions.
-    pub fn safePoint(vm: *Vm) void {
+    pub inline fn safePoint(vm: *Vm) void {
         if (vm.heap.wantsCollect()) vm.heap.collect();
     }
 
@@ -1400,7 +1397,7 @@ pub const Vm = struct {
     }
 
     pub fn ordinaryDefineOwnProperty(vm: *Vm, o: *Object, key: Key, desc: Descriptor) Error!bool {
-        if (key == .index and (o == vm.intrinsics.array_prototype or o == vm.intrinsics.object_prototype)) vm.proto_has_indexes = true;
+        if (key == .index and (o.is_prototype or o == vm.intrinsics.array_prototype or o == vm.intrinsics.object_prototype)) vm.objects.proto_has_indexes = true;
         const current = try vm.objects.getOwn(o, key);
         if (current == null) {
             if (!o.extensible) return false;
@@ -1498,6 +1495,12 @@ pub const Vm = struct {
                 var i: u32 = @min(old_len, e.cap);
                 while (i > new_len_num) : (i -= 1) e.items()[i - 1] = Value.empty;
                 e.len = new_len_num;
+            }
+            // A dense array has no index keys in its shape: the scan below
+            // (every own key, listed) was every `pop`'s cost (2026-09-25).
+            if (!o.sparse_indexes) {
+                if (desc.writable) |w| if (!w) try vm.setLengthWritable(o, false);
+                return true;
             }
             // Sparse index properties in the shape table.
             var keys: std.ArrayList(Key) = .empty;
@@ -1604,7 +1607,7 @@ pub const Vm = struct {
         // An array whose chain leaves the intrinsic one may meet indexed
         // properties or a proxy there: element stores take the slow path.
         if (o.class == .array or o == vm.intrinsics.array_prototype) {
-            if (p.bits != vm.intrinsics.array_prototype.asValue().bits or o == vm.intrinsics.array_prototype) vm.proto_has_indexes = true;
+            if (p.bits != vm.intrinsics.array_prototype.asValue().bits or o == vm.intrinsics.array_prototype) vm.objects.proto_has_indexes = true;
         }
         return vm.objects.setProto(o, p);
     }
@@ -1716,7 +1719,7 @@ pub const Vm = struct {
     /// OrdinaryCreateFromConstructor.
     pub fn createFromConstructor(vm: *Vm, new_target: Value, default: *Object, class: Class, extra: usize) Error!*Object {
         const proto = try vm.prototypeFromConstructor(new_target, default);
-        if (class == .array and proto != vm.intrinsics.array_prototype) vm.proto_has_indexes = true;
+        if (class == .array and proto != vm.intrinsics.array_prototype) vm.objects.proto_has_indexes = true;
         return vm.objects.create(proto.asValue(), class, extra);
     }
 

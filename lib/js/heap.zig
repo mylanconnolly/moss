@@ -172,7 +172,7 @@ pub const Heap = struct {
 
     /// Whether a safe point should collect: enough allocated since the
     /// last collection, or the region's free space running low.
-    pub fn wantsCollect(h: *const Heap) bool {
+    pub inline fn wantsCollect(h: *const Heap) bool {
         if (h.stress) return true;
         return h.allocated_since >= h.threshold or h.region.len - h.top < h.region.len / 8;
     }

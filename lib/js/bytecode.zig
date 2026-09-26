@@ -212,6 +212,16 @@ pub const InlineCache = struct {
     /// is the receiver's; the holder's shape must match too).
     holder: ?*anyopaque = null,
     holder_shape: ?*anyopaque = null,
+    /// A store site that added the property: the receiver's shape
+    /// afterwards, valid while no prototype anywhere has changed since
+    /// (`Objects.proto_epoch`).
+    add_shape: ?*anyopaque = null,
+    epoch: u64 = 0,
+    /// A second read entry, for a site that sees two shapes.
+    shape2: ?*anyopaque = null,
+    slot2: u32 = 0,
+    holder2: ?*anyopaque = null,
+    holder_shape2: ?*anyopaque = null,
 };
 
 pub const PropSite = struct { key: *String, ic: InlineCache = .{} };

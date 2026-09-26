@@ -1039,16 +1039,17 @@ and `tools/bench-small.js`, a small workload of our own timed on the
 host and, as the same text in the `jsrun` drill, on the target under
 QEMU's emulation):
 
-| Octane (2026-09-25, M3 Max) | score |
-|---|---|
-| Richards | 1,274 |
-| DeltaBlue | 1,342 |
-| Crypto | 1,061 |
-| **geometric mean** | **1,220** |
+| Octane (M3 Max) | first row (2026-09-25) | after the first quickening round (same day) |
+|---|---|---|
+| Richards | 1,274 | 2,111 |
+| DeltaBlue | 1,342 | 2,378 |
+| Crypto | 1,061 | 2,256 |
+| **geometric mean** | **1,220** | **2,246** |
 
 | bench-small | host (ReleaseFast) | target (`jsrun` under TCG, ReleaseSafe) |
 |---|---|---|
-| calls, objects, a Map, strings, array pipelines | 115 ms | 1,908 ms (16.6×) |
+| first row | 115 ms | 1,908 ms (16.6×) |
+| after the first quickening round | 55 ms | 1,007 ms (18.3×) |
 
 Whole-stack (encrypted volume, alice's bench through IPC + fssvc +
 mossfs + ring + blkdrv + virtio), the full progression on HVF (w/r MB/s,
@@ -7478,6 +7479,46 @@ values. `Date.now` in a script domain is the cycle counter's
 milliseconds since boot — monotonic, no syscall, no capability — which
 is the clock a script measuring itself needs; a wall clock would be a
 capability, and the domain holds none.
+
+**Stage 10e, the first quickening round (as built, 2026-09-25).** The
+row's first use: a `sample` of the bench binary, then the five things
+it named, each measured. (1) Dispatch: the loop's one `switch` was a
+single indirect jump every instruction, and the two lines that fetched
+and dispatched took 28% of all samples. Zig's labeled `switch` with
+`continue :label value` compiles into a jump per handler — threaded
+code, the classic remedy — so every handler that falls through now
+ends by fetching the next instruction and jumping straight to its
+case (a trace run falls back to the loop top, where the trace line
+prints). Alone this took the mean from 1,220 to 1,788. (2)
+`Array.prototype.pop` set `length` through the array length setter,
+whose shrink path listed every own key into an allocated list to find
+sparse indexes — on every pop, for arrays that had none; a dense array
+skips the scan. (3) An element store past the dense part went the slow
+way — through the whole [[Set]] and [[DefineOwnProperty]] chain — for
+every append at the capacity and for every digit array Crypto fills
+from the top down (`r[i + n] = this[i]`); the store fast path now
+grows the dense part in place, holes up to the index, while the gap is
+under 1,024 slots (the same bound `defineElement` uses, 8 KB of holes
+at most), and a plain object's integer keys are dense elements too.
+Crypto: 1,061 to 2,256. (4) A constructor's `this.x = v` added a
+property through the same slow chain each time: the store site now
+caches the add — the shape before, the shape after, the slot — valid
+while `Objects.proto_epoch` is unchanged, an epoch every structural
+change to any object that is some object's prototype bumps (objects are
+marked as prototypes when first used as one, and a prototype that
+already carries integer keys raises the has-indexes flag at that
+moment). (5) Property reads keep a second cache entry for a site that
+sees two shapes (Richards's task classes), and `==` handles two ints,
+two objects and a nullish side inline. The safe-point check and the
+`this` coercion are inlined. Numbers: Richards 1,274 to 2,111,
+DeltaBlue 1,342 to 2,378, Crypto 1,061 to 2,256, the mean 1,220 to
+2,246 (+84%); `bench-small` 115 ms to 55 ms on the host and 1,908 ms to
+1,007 ms on the target. test262 is unchanged to the file, under GC stress
+too. What the row says now: the interpreter's own time is 80% of the
+profile — dispatch, register moves and the call sequence (`pushFrame`
+is 7%) — and property misses are under 3%; the next round is the call
+path and register-to-register traffic (superinstructions, `mov`
+elision), not the object model.
 
 ## Distribution: the fabric
 

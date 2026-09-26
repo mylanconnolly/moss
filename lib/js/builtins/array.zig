@@ -652,7 +652,7 @@ fn shift(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
         return Value.undefined_;
     }
     const first = try getAt(vm, o, 0);
-    if (o.class == .array and !o.sparse_indexes and !vm.proto_has_indexes and vm.lengthWritable(o)) if (o.elements) |e| if (e.len <= e.cap) {
+    if (o.class == .array and !o.sparse_indexes and !vm.objects.proto_has_indexes and vm.lengthWritable(o)) if (o.elements) |e| if (e.len <= e.cap) {
         // Dense: slide the elements down.
         const items = e.items();
         std.mem.copyForwards(Value, items[0 .. e.len - 1], items[1..e.len]);
