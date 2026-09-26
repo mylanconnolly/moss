@@ -109,7 +109,14 @@ DOM core — Node, Element, HTMLElement, Text, Document, DocumentFragment,
 Event and CustomEvent — with `getElementById`, `querySelector(All)`,
 `createElement`, `appendChild` and kin, `textContent`, `innerHTML`,
 attributes, `classList`, `addEventListener` and `dispatchEvent`,
-`setTimeout`/`setInterval`, `requestAnimationFrame`, `queueMicrotask`.
+`setTimeout`/`setInterval`, `requestAnimationFrame`, `queueMicrotask`,
+`element.style` (over the `style` attribute, camelCase properties and
+`setProperty`/`cssText`), `getComputedStyle` (the page's cascade, as CSS
+text), `getBoundingClientRect` and the offset/client sizes (the page's
+layout, brought up to date first), `scrollTo` and `scrollIntoView`,
+`fetch` and `XMLHttpRequest` (same-origin only, through the page's
+broker like everything else it loads; a request blocks the page until
+its body is in).
 Every interface comes from one table in that file (name, parent,
 methods, attributes, constants), which is where a missing member gets
 added. A click on the page dispatches `click` through the tree first;
@@ -124,9 +131,9 @@ wakes it on its 40 ms tick — frames run at 25 a second, and no timer
 fires finer than the tick. `web-render URL` in the shell returns the
 document as the scripts left it, timers included: after `load` it
 ticks the page until nothing is pending, for two seconds at most.
-Not yet: `element.style` (the CSSOM), `fetch`/XHR from a page,
-`localStorage`, `history`, module scripts, `getBoundingClientRect`,
-form submission from script, a per-site switch (scripts are on).
+Not yet: cross-origin requests (CORS), `localStorage`, `history`,
+module scripts, form submission from script, stylesheet objects
+(`document.styleSheets`), a per-site switch (scripts are on).
 
 ### The window: Web
 
@@ -244,9 +251,9 @@ log from inside `update`, where `echo` waits for the window to close).
 
 Very large pages outgrow the page's 40 MB for a document
 and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
-DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run but
-without `fetch`, the CSSOM or storage yet (see Scripts above), so a
-site that builds itself from an API shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
+DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run, but a
+site whose API lives on another origin gets no answer yet (no CORS)
+and shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,

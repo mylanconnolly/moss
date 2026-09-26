@@ -2011,6 +2011,108 @@ fn expandFont(a: std.mem.Allocator, vals: []const css.Value, important: bool, de
 /// identical point at one copy (siblings in a list, cells in a table —
 /// a 30,000-node page has a few thousand distinct styles, and a
 /// `Computed` is well over a kilobyte).
+/// A computed property as CSS text, for a script's `getComputedStyle`:
+/// the properties the cascade computes to a value a script can use
+/// (lengths in px, colours as rgb()); null for the rest.
+pub fn propertyText(c: *const Computed, name: []const u8, buf: []u8) ?[]const u8 {
+    var fba = std.heap.FixedBufferAllocator.init(buf);
+    const a = fba.allocator();
+    const P = struct {
+        fn px(al: std.mem.Allocator, v: f64) ?[]const u8 {
+            return std.fmt.allocPrint(al, "{d}px", .{v}) catch null;
+        }
+        fn lengthAuto(al: std.mem.Allocator, l: LengthAuto) ?[]const u8 {
+            return switch (l) {
+                .px => |v| px(al, v),
+                .percent => |v| std.fmt.allocPrint(al, "{d}%", .{v}) catch null,
+                .auto => "auto",
+                .calc => |m| std.fmt.allocPrint(al, "calc({d}% + {d}px)", .{ m.pct, m.px }) catch null,
+            };
+        }
+        fn lengthPercent(al: std.mem.Allocator, l: LengthPercent) ?[]const u8 {
+            return switch (l) {
+                .px => |v| px(al, v),
+                .percent => |v| std.fmt.allocPrint(al, "{d}%", .{v}) catch null,
+                .calc => |m| std.fmt.allocPrint(al, "calc({d}% + {d}px)", .{ m.pct, m.px }) catch null,
+            };
+        }
+        fn side(nm: []const u8, prefix: []const u8) ?usize {
+            if (!std.mem.startsWith(u8, nm, prefix)) return null;
+            const rest = nm[prefix.len..];
+            if (std.mem.eql(u8, rest, "top")) return 0;
+            if (std.mem.eql(u8, rest, "right")) return 1;
+            if (std.mem.eql(u8, rest, "bottom")) return 2;
+            if (std.mem.eql(u8, rest, "left")) return 3;
+            return null;
+        }
+        fn kebab(al: std.mem.Allocator, tag: []const u8) ?[]const u8 {
+            const out = al.dupe(u8, tag) catch return null;
+            for (out) |*ch| if (ch.* == '_') {
+                ch.* = '-';
+            };
+            return out;
+        }
+    };
+    const eq = std.mem.eql;
+    if (eq(u8, name, "display")) return P.kebab(a, @tagName(c.display));
+    if (eq(u8, name, "position")) return @tagName(c.position);
+    if (eq(u8, name, "float")) return @tagName(c.float);
+    if (eq(u8, name, "visibility")) return @tagName(c.visibility);
+    if (eq(u8, name, "color")) return c.color.serialize(a) catch null;
+    if (eq(u8, name, "background-color")) return c.background_color.serialize(a) catch null;
+    if (eq(u8, name, "font-size")) return P.px(a, c.font_size);
+    if (eq(u8, name, "font-weight")) return std.fmt.allocPrint(a, "{d}", .{c.font_weight}) catch null;
+    if (eq(u8, name, "font-style")) return @tagName(c.font_style);
+    if (eq(u8, name, "font-family")) {
+        var out: std.ArrayList(u8) = .empty;
+        for (c.font_family, 0..) |f, i| {
+            if (i > 0) out.appendSlice(a, ", ") catch return null;
+            out.appendSlice(a, f) catch return null;
+        }
+        return out.items;
+    }
+    if (eq(u8, name, "line-height")) return switch (c.line_height) {
+        .normal => "normal",
+        .number => |n| std.fmt.allocPrint(a, "{d}", .{n}) catch null,
+        .px => |v| P.px(a, v),
+    };
+    if (eq(u8, name, "text-align")) return @tagName(c.text_align);
+    if (eq(u8, name, "text-decoration") or eq(u8, name, "text-decoration-line")) return if (c.text_decoration.underline) "underline" else if (c.text_decoration.line_through) "line-through" else if (c.text_decoration.overline) "overline" else "none";
+    if (eq(u8, name, "text-transform")) return @tagName(c.text_transform);
+    if (eq(u8, name, "white-space")) return P.kebab(a, @tagName(c.white_space));
+    if (eq(u8, name, "list-style-type")) return P.kebab(a, @tagName(c.list_style_type));
+    if (eq(u8, name, "opacity")) return std.fmt.allocPrint(a, "{d}", .{c.opacity}) catch null;
+    if (eq(u8, name, "z-index")) return if (c.z_index) |z| (std.fmt.allocPrint(a, "{d}", .{z}) catch null) else "auto";
+    if (eq(u8, name, "box-sizing")) return P.kebab(a, @tagName(c.box_sizing));
+    if (eq(u8, name, "overflow-x")) return @tagName(c.overflow_x);
+    if (eq(u8, name, "overflow-y")) return @tagName(c.overflow_y);
+    if (eq(u8, name, "overflow")) return @tagName(c.overflow_y);
+    if (eq(u8, name, "width")) return P.lengthAuto(a, c.width);
+    if (eq(u8, name, "height")) return P.lengthAuto(a, c.height);
+    if (eq(u8, name, "min-width")) return P.lengthPercent(a, c.min_width);
+    if (eq(u8, name, "min-height")) return P.lengthPercent(a, c.min_height);
+    if (P.side(name, "margin-")) |i| return P.lengthAuto(a, c.margin[i]);
+    if (P.side(name, "padding-")) |i| return P.lengthPercent(a, c.padding[i]);
+    if (P.side(name, "border-")) |i| return P.px(a, c.borderWidth(i));
+    if (std.mem.startsWith(u8, name, "border-") and std.mem.endsWith(u8, name, "-width")) {
+        if (P.side(name[0 .. name.len - "-width".len], "border-")) |i| return P.px(a, c.borderWidth(i));
+    }
+    if (std.mem.startsWith(u8, name, "border-") and std.mem.endsWith(u8, name, "-style")) {
+        if (P.side(name[0 .. name.len - "-style".len], "border-")) |i| return @tagName(c.border_style[i]);
+    }
+    if (eq(u8, name, "top")) return P.lengthAuto(a, c.inset[0]);
+    if (eq(u8, name, "right")) return P.lengthAuto(a, c.inset[1]);
+    if (eq(u8, name, "bottom")) return P.lengthAuto(a, c.inset[2]);
+    if (eq(u8, name, "left")) return P.lengthAuto(a, c.inset[3]);
+    if (eq(u8, name, "flex-direction")) return P.kebab(a, @tagName(c.flex_direction));
+    if (eq(u8, name, "flex-wrap")) return P.kebab(a, @tagName(c.flex_wrap));
+    if (eq(u8, name, "flex-grow")) return std.fmt.allocPrint(a, "{d}", .{c.flex_grow}) catch null;
+    if (eq(u8, name, "flex-shrink")) return std.fmt.allocPrint(a, "{d}", .{c.flex_shrink}) catch null;
+    if (eq(u8, name, "justify-content")) return P.kebab(a, @tagName(c.justify_content));
+    if (eq(u8, name, "align-items")) return P.kebab(a, @tagName(c.align_items));
+    return null;
+}
+
 pub const Styles = struct {
     computed: []*const Computed,
 

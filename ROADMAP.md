@@ -1020,9 +1020,16 @@ supervises), and memory history per unit beside the CPU one.
       with the delay to its next timer or frame, the host answers on
       its tick with `tick` (the browser's 40 ms loop; `web-render`
       sleeps and ticks until the page settles, two seconds at most),
-      the page runs what is due and lays out again. Next: the CSSOM
-      for `style`, `fetch`/XHR, storage, history, forms, the per-site
-      switch, module scripts.
+      the page runs what is due and lays out again; (c) the same day
+      — the CSSOM for `style` over the attribute (camelCase accessors
+      from one comptime list), `getComputedStyle` through the page's
+      cascade (`style.propertyText`), `getBoundingClientRect` and the
+      offset/client sizes through the page's layout (flushed first when
+      dirty), `scrollTo`/`scrollIntoView`; (d) the same day — `fetch`
+      and `XMLHttpRequest` through the page's broker (same-origin
+      only, decided in the bindings; a request blocks the page while
+      its body comes). Next: storage per origin, history, forms from
+      script, CORS, the per-site switch, module scripts.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

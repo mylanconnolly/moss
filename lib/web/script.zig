@@ -20,6 +20,7 @@ const dom = @import("dom.zig");
 const html = @import("html.zig");
 const selectors = @import("selectors.zig");
 const url = @import("url.zig");
+const css = @import("css.zig");
 const Vm = js.vm.Vm;
 const Value = js.value.Value;
 const Object = js.object.Object;
@@ -38,6 +39,27 @@ pub const Host = struct {
     ctx: *anyopaque,
     log: *const fn (ctx: *anyopaque, level: Level, text: []const u8) void,
     fetch: ?*const fn (ctx: *anyopaque, abs_url: []const u8) ?[]const u8 = null,
+    /// An element's box in CSS pixels relative to the viewport (x, y, w,
+    /// h), laid out fresh if the document changed; null when it has no box.
+    rect: ?*const fn (ctx: *anyopaque, id: NodeId) ?[4]f64 = null,
+    /// A computed property's value as CSS text, into `buf`; null when the
+    /// property is not one the cascade computes.
+    computed: ?*const fn (ctx: *anyopaque, id: NodeId, name: []const u8, buf: []u8) ?[]const u8 = null,
+    /// Scroll the viewport to a document position (CSS pixels).
+    scroll: ?*const fn (ctx: *anyopaque, x: f64, y: f64) void = null,
+    /// A script's own request (`fetch`, XMLHttpRequest): the whole
+    /// resource through the host's broker into `a`; false when refused,
+    /// with `out.refused` saying why. Same-origin only, checked here.
+    request: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, out: *Response) bool = null,
+};
+
+/// What a request came back with.
+pub const Response = struct {
+    status: u16 = 0,
+    url: []const u8 = "",
+    content_type: []const u8 = "",
+    body: []const u8 = "",
+    refused: []const u8 = "",
 };
 
 /// A node wrapper's, token list's or event's internal slot.
@@ -50,6 +72,9 @@ const Slot = extern struct {
 const slot_node: u32 = 0;
 const slot_tokens: u32 = 1;
 const slot_event: u32 = 2;
+/// An element's `style` (flags 0) or its computed style (flags 1).
+const slot_style: u32 = 3;
+const style_computed: u32 = 1;
 
 // Event flags.
 const ev_stop: u32 = 1 << 0;
@@ -189,7 +214,19 @@ pub const interfaces = [_]Iface{
         .{ .name = "nextElementSibling", .get = getNextElementSibling },
         .{ .name = "previousElementSibling", .get = getPreviousElementSibling },
         .{ .name = "attributes", .get = getAttributes },
+        .{ .name = "style", .get = getStyle },
+        .{ .name = "clientWidth", .get = getClientWidth },
+        .{ .name = "clientHeight", .get = getClientHeight },
+        .{ .name = "clientTop", .get = getZero },
+        .{ .name = "clientLeft", .get = getZero },
+        .{ .name = "scrollTop", .get = getZero, .set = setIgnored },
+        .{ .name = "scrollLeft", .get = getZero, .set = setIgnored },
+        .{ .name = "scrollWidth", .get = getClientWidth },
+        .{ .name = "scrollHeight", .get = getClientHeight },
     }, .methods = &parent_methods ++ [_]Method{
+        .{ .name = "getBoundingClientRect", .f = getBoundingClientRect },
+        .{ .name = "getClientRects", .f = getClientRects },
+        .{ .name = "scrollIntoView", .f = scrollIntoView },
         .{ .name = "getAttribute", .len = 1, .f = getAttribute },
         .{ .name = "setAttribute", .len = 2, .f = setAttribute },
         .{ .name = "removeAttribute", .len = 1, .f = removeAttribute },
@@ -215,6 +252,11 @@ pub const interfaces = [_]Iface{
         .{ .name = "lang", .get = getLang, .set = setLang },
         .{ .name = "dir", .get = getDir, .set = setDir },
         .{ .name = "tabIndex", .get = getTabIndex, .set = setTabIndex },
+        .{ .name = "offsetWidth", .get = getClientWidth },
+        .{ .name = "offsetHeight", .get = getClientHeight },
+        .{ .name = "offsetTop", .get = getOffsetTop },
+        .{ .name = "offsetLeft", .get = getOffsetLeft },
+        .{ .name = "offsetParent", .get = getParentElement },
     }, .methods = &.{
         .{ .name = "click", .f = clickNative },
         .{ .name = "focus", .f = noopNative },
@@ -230,6 +272,17 @@ pub const interfaces = [_]Iface{
     } },
     .{ .name = "HTMLAnchorElement", .parent = "HTMLElement", .attrs = &.{
         .{ .name = "href", .get = getHref, .set = setHref },
+    } },
+    .{ .name = "CSSStyleDeclaration", .attrs = styleAttrs() ++ [_]Attr{
+        .{ .name = "cssText", .get = styleCssText, .set = styleSetCssText },
+        .{ .name = "length", .get = styleLength },
+        .{ .name = "parentRule", .get = getNull },
+    }, .methods = &.{
+        .{ .name = "getPropertyValue", .len = 1, .f = styleGetPropertyValue },
+        .{ .name = "getPropertyPriority", .len = 1, .f = styleGetPropertyPriority },
+        .{ .name = "setProperty", .len = 2, .f = styleSetProperty },
+        .{ .name = "removeProperty", .len = 1, .f = styleRemoveProperty },
+        .{ .name = "item", .len = 1, .f = styleItem },
     } },
     .{ .name = "DOMTokenList", .attrs = &.{
         .{ .name = "length", .get = tokensLength },
@@ -261,10 +314,99 @@ pub const interfaces = [_]Iface{
         .{ .name = "composedPath", .f = eventComposedPath },
     } },
     .{ .name = "CustomEvent", .parent = "Event", .constructible = true },
+    .{ .name = "XMLHttpRequest", .parent = "EventTarget", .constructible = true, .consts = &.{
+        .{ .name = "UNSENT", .value = 0 },
+        .{ .name = "OPENED", .value = 1 },
+        .{ .name = "HEADERS_RECEIVED", .value = 2 },
+        .{ .name = "LOADING", .value = 3 },
+        .{ .name = "DONE", .value = 4 },
+    }, .methods = &.{
+        .{ .name = "open", .len = 2, .f = xhrOpen },
+        .{ .name = "setRequestHeader", .len = 2, .f = noopNative },
+        .{ .name = "overrideMimeType", .len = 1, .f = noopNative },
+        .{ .name = "send", .f = xhrSend },
+        .{ .name = "abort", .f = noopNative },
+        .{ .name = "getResponseHeader", .len = 1, .f = xhrGetResponseHeader },
+        .{ .name = "getAllResponseHeaders", .f = xhrGetAllResponseHeaders },
+    } },
     .{ .name = "UIEvent", .parent = "Event", .constructible = true },
     .{ .name = "MouseEvent", .parent = "UIEvent", .constructible = true },
     .{ .name = "KeyboardEvent", .parent = "UIEvent", .constructible = true },
 };
+
+/// The CSS properties `style` and `getComputedStyle` name as camelCase
+/// members (`backgroundColor`); any other is reached by `getPropertyValue`.
+const css_properties = [_][]const u8{
+    "display",             "position",          "float",            "clear",                 "visibility",
+    "opacity",             "z-index",           "box-sizing",       "overflow",              "overflow-x",
+    "overflow-y",          "width",             "height",           "min-width",             "min-height",
+    "max-width",           "max-height",        "top",              "right",                 "bottom",
+    "left",                "margin",            "margin-top",       "margin-right",          "margin-bottom",
+    "margin-left",         "padding",           "padding-top",      "padding-right",         "padding-bottom",
+    "padding-left",        "border",            "border-width",     "border-style",          "border-color",
+    "border-top",          "border-right",      "border-bottom",    "border-left",           "border-radius",
+    "color",               "background",        "background-color", "background-image",      "background-position",
+    "background-size",     "background-repeat", "font",             "font-size",             "font-weight",
+    "font-style",          "font-family",       "line-height",      "text-align",            "text-decoration",
+    "text-transform",      "text-indent",       "white-space",      "vertical-align",        "letter-spacing",
+    "word-spacing",        "list-style",        "list-style-type",  "cursor",                "pointer-events",
+    "transform",           "translate",         "transition",       "animation",             "flex",
+    "flex-direction",      "flex-wrap",         "flex-grow",        "flex-shrink",           "flex-basis",
+    "justify-content",     "align-items",       "align-self",       "align-content",         "gap",
+    "row-gap",             "column-gap",        "order",            "grid-template-columns", "grid-template-rows",
+    "grid-template-areas", "grid-area",         "grid-column",      "grid-row",              "outline",
+    "box-shadow",          "text-shadow",       "content",          "fill",                  "stroke",
+};
+
+/// `background-color` → `backgroundColor`; `float` is `cssFloat` too.
+fn camelCase(comptime kebab: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(20000);
+        var out: [kebab.len]u8 = undefined;
+        var n: usize = 0;
+        var up = false;
+        for (kebab) |c| {
+            if (c == '-') {
+                up = true;
+                continue;
+            }
+            out[n] = if (up) std.ascii.toUpper(c) else c;
+            up = false;
+            n += 1;
+        }
+        const final = out[0..n].*;
+        return &final;
+    }
+}
+
+fn styleAttrs() []const Attr {
+    comptime {
+        @setEvalBranchQuota(20000);
+        var attrs: [css_properties.len + 1]Attr = undefined;
+        for (css_properties, 0..) |name, i| {
+            const gen = struct {
+                fn get(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+                    return stylePropertyGet(vm, this, name);
+                }
+                fn set(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+                    return stylePropertySet(vm, this, name, arg(args, 0), false);
+                }
+            };
+            attrs[i] = .{ .name = camelCase(name), .get = gen.get, .set = gen.set };
+        }
+        attrs[css_properties.len] = .{ .name = "cssFloat", .get = struct {
+            fn get(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+                return stylePropertyGet(vm, this, "float");
+            }
+        }.get, .set = struct {
+            fn set(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+                return stylePropertySet(vm, this, "float", arg(args, 0), false);
+            }
+        }.set };
+        const final = attrs;
+        return &final;
+    }
+}
 
 fn ifaceIndex(comptime name: []const u8) comptime_int {
     comptime {
@@ -286,8 +428,10 @@ const I = struct {
     const input = ifaceIndex("HTMLInputElement");
     const anchor = ifaceIndex("HTMLAnchorElement");
     const tokens = ifaceIndex("DOMTokenList");
+    const style = ifaceIndex("CSSStyleDeclaration");
     const event = ifaceIndex("Event");
     const custom_event = ifaceIndex("CustomEvent");
+    const xhr = ifaceIndex("XMLHttpRequest");
     const mouse_event = ifaceIndex("MouseEvent");
 };
 
@@ -314,11 +458,14 @@ pub const Page = struct {
     url: []const u8 = "about:blank",
     viewport_w: u32 = 800,
     viewport_h: u32 = 600,
+    scroll_x: f64 = 0,
+    scroll_y: f64 = 0,
     wrappers: std.AutoHashMapUnmanaged(NodeId, *Object) = .empty,
     protos: [interfaces.len]*Object = undefined,
     ctors: [interfaces.len]*Object = undefined,
     sym_listeners: *Symbol = undefined,
     sym_slot: *Symbol = undefined,
+    sym_style: *Symbol = undefined,
     document_obj: *Object = undefined,
     location_obj: *Object = undefined,
     timers: std.ArrayList(Timer) = .empty,
@@ -342,6 +489,7 @@ pub const Page = struct {
         vm.embedder_roots = .{ .ctx = p, .trace = trace };
         p.sym_listeners = try vm.newSymbol(try vm.strings.fromUtf8("listeners"));
         p.sym_slot = try vm.newSymbol(try vm.strings.fromUtf8("slot"));
+        p.sym_style = try vm.newSymbol(try vm.strings.fromUtf8("style"));
         try p.installInterfaces();
         try p.installWindow();
     }
@@ -364,6 +512,7 @@ pub const Page = struct {
         for (p.ctors) |o| m.markCell(o.cell());
         m.markCell(&p.sym_listeners.header);
         m.markCell(&p.sym_slot.header);
+        m.markCell(&p.sym_style.header);
         m.markCell(p.document_obj.cell());
         m.markCell(p.location_obj.cell());
         for (p.timers.items) |t| {
@@ -459,10 +608,11 @@ pub const Page = struct {
         _ = try vm.defineNative(g, "confirm", 0, confirmNative);
         _ = try vm.defineNative(g, "prompt", 0, promptNative);
         _ = try vm.defineNative(g, "getComputedStyle", 1, getComputedStyle);
+        _ = try vm.defineNative(g, "fetch", 1, fetchNative);
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
-        _ = try vm.defineNative(g, "scrollTo", 0, noopNative);
-        _ = try vm.defineNative(g, "scroll", 0, noopNative);
-        _ = try vm.defineNative(g, "scrollBy", 0, noopNative);
+        _ = try vm.defineNative(g, "scrollTo", 0, scrollToNative);
+        _ = try vm.defineNative(g, "scroll", 0, scrollToNative);
+        _ = try vm.defineNative(g, "scrollBy", 0, scrollByNative);
         try vm.defineValue(g, "innerWidth", Value.fromInt(@intCast(p.viewport_w)), .hidden);
         try vm.defineValue(g, "innerHeight", Value.fromInt(@intCast(p.viewport_h)), .hidden);
         try vm.defineValue(g, "devicePixelRatio", Value.fromInt(1), .hidden);
@@ -478,6 +628,17 @@ pub const Page = struct {
         p.viewport_h = h;
         p.vm.defineValue(p.vm.global, "innerWidth", Value.fromInt(@intCast(w)), .hidden) catch {};
         p.vm.defineValue(p.vm.global, "innerHeight", Value.fromInt(@intCast(h)), .hidden) catch {};
+    }
+
+    /// The viewport's scroll position, for `window.scrollX/Y`.
+    pub fn setScroll(p: *Page, x: f64, y: f64) void {
+        p.scroll_x = x;
+        p.scroll_y = y;
+        const g = p.vm.global;
+        p.vm.defineValue(g, "scrollX", Value.fromF64(x), .hidden) catch {};
+        p.vm.defineValue(g, "scrollY", Value.fromF64(y), .hidden) catch {};
+        p.vm.defineValue(g, "pageXOffset", Value.fromF64(x), .hidden) catch {};
+        p.vm.defineValue(g, "pageYOffset", Value.fromF64(y), .hidden) catch {};
     }
 
     /// The document's URL: `location` and `document.URL` follow.
@@ -1191,6 +1352,18 @@ fn construct(vm: *Vm, this: Value, args: []const Value, new_target: Value) Error
     if (!interfaces[idx].constructible) return vm.throwTypeError("Illegal constructor");
     if (idx == I.event_target) {
         const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
+        return o.asValue();
+    }
+    if (idx == I.xhr) {
+        const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
+        try xhrReset(vm, o, 0);
+        try vm.defineValue(o, "responseType", try vm.str(""), .default);
+        try vm.defineValue(o, "timeout", Value.fromInt(0), .default);
+        try vm.defineValue(o, "withCredentials", Value.false_, .default);
+        try vm.defineValue(o, "onreadystatechange", Value.null_, .default);
+        try vm.defineValue(o, "onload", Value.null_, .default);
+        try vm.defineValue(o, "onloadend", Value.null_, .default);
+        try vm.defineValue(o, "onerror", Value.null_, .default);
         return o.asValue();
     }
     // An event: new Event(type, { bubbles, cancelable, detail }).
@@ -2555,15 +2728,53 @@ fn promptNative(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
     return Value.null_;
 }
 
-fn getComputedStyle(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
-    // Not yet the CSSOM: an empty declaration whose lookups give "".
-    const o = try vm.newObject();
-    _ = try vm.defineNative(o, "getPropertyValue", 1, emptyString);
+fn getComputedStyle(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = p.nodeOfValue(arg(args, 0)) orelse return vm.throwTypeError("getComputedStyle needs an element");
+    if (p.doc.get(id).kind != .element) return vm.throwTypeError("getComputedStyle needs an element");
+    const o = try vm.objects.create(p.protos[I.style].asValue(), .dom, @sizeOf(Slot));
+    o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = style_computed };
     return o.asValue();
 }
 
-fn emptyString(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
-    return jsStr(vm, "");
+fn scrollToNative(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var x: f64 = 0;
+    var y: f64 = 0;
+    const a0 = arg(args, 0);
+    if (a0.isObject()) {
+        const o = Vm.asObject(a0);
+        x = vm.toNumber(try vm.get(o, .{ .atom = try vm.atom("left") }, a0)) catch 0;
+        y = vm.toNumber(try vm.get(o, .{ .atom = try vm.atom("top") }, a0)) catch 0;
+    } else {
+        x = vm.toNumber(a0) catch 0;
+        y = vm.toNumber(arg(args, 1)) catch 0;
+    }
+    if (std.math.isNan(x)) x = 0;
+    if (std.math.isNan(y)) y = 0;
+    if (p.host.scroll) |f| f(p.host.ctx, x, y);
+    return Value.undefined_;
+}
+
+fn scrollByNative(vm: *Vm, this: Value, args: []const Value, nt: Value) Error!Value {
+    const p = pageOf(vm);
+    var dx: f64 = 0;
+    var dy: f64 = 0;
+    const a0 = arg(args, 0);
+    if (a0.isObject()) {
+        const o = Vm.asObject(a0);
+        dx = vm.toNumber(try vm.get(o, .{ .atom = try vm.atom("left") }, a0)) catch 0;
+        dy = vm.toNumber(try vm.get(o, .{ .atom = try vm.atom("top") }, a0)) catch 0;
+    } else {
+        dx = vm.toNumber(a0) catch 0;
+        dy = vm.toNumber(arg(args, 1)) catch 0;
+    }
+    _ = this;
+    _ = nt;
+    if (std.math.isNan(dx)) dx = 0;
+    if (std.math.isNan(dy)) dy = 0;
+    if (p.host.scroll) |f| f(p.host.ctx, p.scroll_x + dx, p.scroll_y + dy);
+    return Value.undefined_;
 }
 
 fn matchMedia(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
@@ -2622,17 +2833,622 @@ fn queueMicrotask(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value 
     return Value.undefined_;
 }
 
+// ---------------------------------------------------- CSSStyleDeclaration
+
+fn getNull(_: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return Value.null_;
+}
+fn getZero(_: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return Value.fromInt(0);
+}
+fn setIgnored(_: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return Value.undefined_;
+}
+
+/// `el.style`: one object per element, kept on the wrapper.
+fn getStyle(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const w = Vm.asObject(this);
+    if (try vm.objects.getOwn(w, .{ .symbol = p.sym_style })) |own| return own.val;
+    const o = try vm.objects.create(p.protos[I.style].asValue(), .dom, @sizeOf(Slot));
+    o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = 0 };
+    _ = try vm.objects.defineOwn(w, .{ .symbol = p.sym_style }, o.asValue(), .hidden);
+    return o.asValue();
+}
+
+const StyleRef = struct { id: NodeId, computed: bool };
+
+fn thisStyle(vm: *Vm, this: Value) Error!StyleRef {
+    if (this.isObject()) {
+        const o = Vm.asObject(this);
+        if (o.class == .dom and o.internal(Slot).kind == slot_style) return .{ .id = o.internal(Slot).id, .computed = o.internal(Slot).flags & style_computed != 0 };
+    }
+    return vm.throwTypeError("Illegal invocation");
+}
+
+const Decl = struct { name: []const u8, value: []const u8, important: bool };
+
+/// The element's `style` attribute as declarations (in `a`).
+fn declarationsOf(p: *Page, id: NodeId, a: std.mem.Allocator) Error![]Decl {
+    var list: std.ArrayList(Decl) = .empty;
+    const text = p.doc.getAttr(id, "style") orelse return list.items;
+    var parser = css.Parser.init(a, text, false) catch return error.OutOfMemory;
+    const items = parser.parseBlockContents() catch return error.OutOfMemory;
+    for (items) |item| if (item == .declaration) {
+        const d = item.declaration;
+        const name = try a.dupe(u8, d.name);
+        for (name) |*c| c.* = std.ascii.toLower(c.*);
+        const value = css.valuesText(a, d.value) catch return error.OutOfMemory;
+        // A later declaration of the same name replaces the earlier.
+        var replaced = false;
+        for (list.items) |*x| if (std.mem.eql(u8, x.name, name)) {
+            x.* = .{ .name = name, .value = value, .important = d.important };
+            replaced = true;
+        };
+        if (!replaced) try list.append(a, .{ .name = name, .value = value, .important = d.important });
+    };
+    return list.items;
+}
+
+/// Write declarations back as the `style` attribute.
+fn writeDeclarations(p: *Page, id: NodeId, decls: []const Decl) Error!void {
+    var out: std.ArrayList(u8) = .empty;
+    for (decls, 0..) |d, i| {
+        if (i > 0) try out.append(p.doc.a, ' ');
+        try out.appendSlice(p.doc.a, d.name);
+        try out.appendSlice(p.doc.a, ": ");
+        try out.appendSlice(p.doc.a, d.value);
+        if (d.important) try out.appendSlice(p.doc.a, " !important");
+        try out.append(p.doc.a, ';');
+    }
+    if (out.items.len == 0) p.doc.removeAttr(id, "style") else try p.doc.setAttr(id, "style", out.items);
+    p.touch();
+}
+
+fn stylePropertyGet(vm: *Vm, this: Value, name: []const u8) Error!Value {
+    const p = pageOf(vm);
+    const ref = try thisStyle(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    if (ref.computed) {
+        if (p.host.computed) |f| {
+            var buf: [256]u8 = undefined;
+            if (f(p.host.ctx, ref.id, name, &buf)) |text| return jsStr(vm, text);
+        }
+    }
+    const decls = try declarationsOf(p, ref.id, sc.a());
+    for (decls) |d| if (std.mem.eql(u8, d.name, name)) return jsStr(vm, d.value);
+    return jsStr(vm, "");
+}
+
+fn stylePropertySet(vm: *Vm, this: Value, name: []const u8, v: Value, important: bool) Error!Value {
+    const p = pageOf(vm);
+    const ref = try thisStyle(vm, this);
+    if (ref.computed) return vm.throwError(.TypeError, "NoModificationAllowedError: a computed style is read-only");
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const raw = if (v.isNullish()) "" else try strArg(vm, v, sc.a());
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    var decls = std.ArrayList(Decl).fromOwnedSlice(try declarationsOf(p, ref.id, sc.a()));
+    var i: usize = 0;
+    var found = false;
+    while (i < decls.items.len) {
+        if (std.mem.eql(u8, decls.items[i].name, name)) {
+            if (value.len == 0) {
+                _ = decls.orderedRemove(i);
+                continue;
+            }
+            decls.items[i].value = try p.doc.a.dupe(u8, value);
+            decls.items[i].important = important;
+            found = true;
+        }
+        i += 1;
+    }
+    if (!found and value.len > 0) try decls.append(sc.a(), .{ .name = try p.doc.a.dupe(u8, name), .value = try p.doc.a.dupe(u8, value), .important = important });
+    try writeDeclarations(p, ref.id, decls.items);
+    return Value.undefined_;
+}
+
+fn propertyNameArg(vm: *Vm, v: Value, a: std.mem.Allocator) Error![]u8 {
+    const s = try strArg(vm, v, a);
+    for (s) |*c| c.* = std.ascii.toLower(c.*);
+    return @constCast(std.mem.trim(u8, s, " \t\r\n"));
+}
+
+fn styleGetPropertyValue(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const name = try propertyNameArg(vm, arg(args, 0), sc.a());
+    return stylePropertyGet(vm, this, name);
+}
+
+fn styleGetPropertyPriority(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const ref = try thisStyle(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const name = try propertyNameArg(vm, arg(args, 0), sc.a());
+    const decls = try declarationsOf(p, ref.id, sc.a());
+    for (decls) |d| if (std.mem.eql(u8, d.name, name)) return jsStr(vm, if (d.important) "important" else "");
+    return jsStr(vm, "");
+}
+
+fn styleSetProperty(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const name = try propertyNameArg(vm, arg(args, 0), sc.a());
+    if (name.len == 0) return Value.undefined_;
+    const prio = arg(args, 2);
+    const important = !prio.isNullish() and std.ascii.eqlIgnoreCase(try strArg(vm, prio, sc.a()), "important");
+    return stylePropertySet(vm, this, name, arg(args, 1), important);
+}
+
+fn styleRemoveProperty(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const name = try propertyNameArg(vm, arg(args, 0), sc.a());
+    const old = try stylePropertyGet(vm, this, name);
+    _ = try stylePropertySet(vm, this, name, Value.undefined_, false);
+    return old;
+}
+
+fn styleItem(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const ref = try thisStyle(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const decls = try declarationsOf(p, ref.id, sc.a());
+    const i = try vm.toIntegerOrInfinity(arg(args, 0));
+    if (i < 0 or i >= @as(f64, @floatFromInt(decls.len))) return jsStr(vm, "");
+    return jsStr(vm, decls[@intFromFloat(i)].name);
+}
+
+fn styleLength(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const ref = try thisStyle(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const decls = try declarationsOf(p, ref.id, sc.a());
+    return Value.fromInt(@intCast(decls.len));
+}
+
+fn styleCssText(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const ref = try thisStyle(vm, this);
+    if (ref.computed) return jsStr(vm, "");
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const decls = try declarationsOf(p, ref.id, sc.a());
+    var out: std.ArrayList(u8) = .empty;
+    for (decls, 0..) |d, i| {
+        if (i > 0) try out.append(sc.a(), ' ');
+        try out.appendSlice(sc.a(), d.name);
+        try out.appendSlice(sc.a(), ": ");
+        try out.appendSlice(sc.a(), d.value);
+        if (d.important) try out.appendSlice(sc.a(), " !important");
+        try out.append(sc.a(), ';');
+    }
+    return jsStr(vm, out.items);
+}
+
+fn styleSetCssText(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const ref = try thisStyle(vm, this);
+    if (ref.computed) return vm.throwError(.TypeError, "NoModificationAllowedError: a computed style is read-only");
+    const v = arg(args, 0);
+    const text = if (v.isNullish()) "" else try docStr(vm, v);
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) p.doc.removeAttr(ref.id, "style") else try p.doc.setAttr(ref.id, "style", text);
+    p.touch();
+    return Value.undefined_;
+}
+
+// ------------------------------------------------------------- geometry
+
+fn rectOf(p: *Page, id: NodeId) ?[4]f64 {
+    const f = p.host.rect orelse return null;
+    return f(p.host.ctx, id);
+}
+
+fn getClientWidth(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const r = rectOf(p, id) orelse return Value.fromInt(0);
+    return Value.fromF64(@round(r[2]));
+}
+
+fn getClientHeight(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const r = rectOf(p, id) orelse return Value.fromInt(0);
+    return Value.fromF64(@round(r[3]));
+}
+
+fn getOffsetTop(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const r = rectOf(p, id) orelse return Value.fromInt(0);
+    return Value.fromF64(@round(r[1] + p.scroll_y));
+}
+
+fn getOffsetLeft(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const r = rectOf(p, id) orelse return Value.fromInt(0);
+    return Value.fromF64(@round(r[0] + p.scroll_x));
+}
+
+fn rectObject(vm: *Vm, r: [4]f64) Error!Value {
+    const o = try vm.newObject();
+    const mark = vm.heap.tempMark();
+    defer vm.heap.tempRelease(mark);
+    vm.heap.tempPush(o.cell());
+    try vm.defineValue(o, "x", Value.fromF64(r[0]), .default);
+    try vm.defineValue(o, "y", Value.fromF64(r[1]), .default);
+    try vm.defineValue(o, "width", Value.fromF64(r[2]), .default);
+    try vm.defineValue(o, "height", Value.fromF64(r[3]), .default);
+    try vm.defineValue(o, "top", Value.fromF64(r[1]), .default);
+    try vm.defineValue(o, "left", Value.fromF64(r[0]), .default);
+    try vm.defineValue(o, "right", Value.fromF64(r[0] + r[2]), .default);
+    try vm.defineValue(o, "bottom", Value.fromF64(r[1] + r[3]), .default);
+    return o.asValue();
+}
+
+fn getBoundingClientRect(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    return rectObject(vm, rectOf(p, id) orelse .{ 0, 0, 0, 0 });
+}
+
+fn getClientRects(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const arr = try vm.newArray(0);
+    if (rectOf(p, id)) |r| {
+        const mark = vm.heap.tempMark();
+        defer vm.heap.tempRelease(mark);
+        vm.heap.tempPush(arr.cell());
+        try vm.arrayPush(arr, try rectObject(vm, r));
+    }
+    return arr.asValue();
+}
+
+fn scrollIntoView(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const r = rectOf(p, id) orelse return Value.undefined_;
+    if (p.host.scroll) |f| f(p.host.ctx, p.scroll_x, p.scroll_y + r[1]);
+    return Value.undefined_;
+}
+
+// ------------------------------------------------------------ requests
+
+/// The absolute URL of a request, resolved against the document, when
+/// it is same-origin; null otherwise.
+fn sameOriginUrl(p: *Page, raw: []const u8, a: std.mem.Allocator) ?[]const u8 {
+    const base = url.parse(a, p.url, null) catch return null;
+    const u = url.parse(a, raw, &base) catch return null;
+    const o1 = base.origin(a) catch return null;
+    const o2 = u.origin(a) catch return null;
+    if (std.mem.eql(u8, o1, "null") or !std.mem.eql(u8, o1, o2)) return null;
+    return u.href(a) catch null;
+}
+
+fn rejectedPromise(vm: *Vm, kind: js.vm.ErrorKind, msg: []const u8) Error!Value {
+    const cap = try js.builtins.promise.newCapability(vm, vm.intrinsics.promise_ctor.asValue());
+    const err = try vm.newError(kind, msg);
+    _ = try vm.call(cap.reject, Value.undefined_, &.{err.asValue()});
+    return cap.promise;
+}
+
+const Request = struct { url: []const u8, post: bool, body: []const u8 };
+
+/// `fetch`'s and XHR's arguments read: the URL (resolved, same-origin),
+/// the method, the body.
+fn readRequest(vm: *Vm, url_v: Value, method_v: Value, body_v: Value, a: std.mem.Allocator) Error!union(enum) { ok: Request, bad: []const u8 } {
+    const p = pageOf(vm);
+    var raw_url: []const u8 = "";
+    if (url_v.isObject()) {
+        const uo = Vm.asObject(url_v);
+        const inner = try vm.get(uo, .{ .atom = try vm.atom("url") }, url_v);
+        raw_url = try strArg(vm, if (inner.isUndefined()) url_v else inner, a);
+    } else raw_url = try strArg(vm, url_v, a);
+    const abs = sameOriginUrl(p, raw_url, a) orelse return .{ .bad = "only same-origin requests are allowed from a page yet" };
+    var post = false;
+    if (!method_v.isNullish()) {
+        const m = try strArg(vm, method_v, a);
+        if (std.ascii.eqlIgnoreCase(m, "POST")) post = true else if (!std.ascii.eqlIgnoreCase(m, "GET") and !std.ascii.eqlIgnoreCase(m, "HEAD")) return .{ .bad = "only GET and POST are allowed from a page yet" };
+    }
+    var body: []const u8 = "";
+    if (!body_v.isNullish()) body = try strArg(vm, body_v, a);
+    return .{ .ok = .{ .url = abs, .post = post, .body = body } };
+}
+
+fn doRequest(p: *Page, req: Request, a: std.mem.Allocator, out: *Response) bool {
+    const f = p.host.request orelse {
+        out.refused = "this page has no network";
+        return false;
+    };
+    return f(p.host.ctx, a, req.url, req.post, req.body, out);
+}
+
+/// A native that closes over a string: `text()` and `json()` on a
+/// Response read their body from the function's data slot.
+fn nativeData(vm: *Vm) Value {
+    const fo = vm.current_native orelse return Value.undefined_;
+    return Vm.functionData(fo).data;
+}
+
+fn responseText(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return js.realm.promiseResolve(vm, nativeData(vm));
+}
+
+fn responseJson(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    const json = try vm.get(vm.global, .{ .atom = try vm.atom("JSON") }, vm.global.asValue());
+    if (!json.isObject()) return rejectedPromise(vm, .TypeError, "no JSON");
+    const parse = try vm.get(Vm.asObject(json), .{ .atom = try vm.atom("parse") }, json);
+    const v = vm.call(parse, json, &.{nativeData(vm)}) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        error.Exception => {
+            const ex = vm.exception;
+            vm.exception = Value.undefined_;
+            const cap = try js.builtins.promise.newCapability(vm, vm.intrinsics.promise_ctor.asValue());
+            _ = try vm.call(cap.reject, Value.undefined_, &.{ex});
+            return cap.promise;
+        },
+    };
+    return js.realm.promiseResolve(vm, v);
+}
+
+fn headersGet(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const name = try strArg(vm, arg(args, 0), sc.a());
+    if (std.ascii.eqlIgnoreCase(name, "content-type")) {
+        const ct = nativeData(vm);
+        return if (ct.isString() and Vm.asString(ct).len > 0) ct else Value.null_;
+    }
+    return Value.null_;
+}
+
+fn headersHas(vm: *Vm, this: Value, args: []const Value, nt: Value) Error!Value {
+    const v = try headersGet(vm, this, args, nt);
+    return Value.fromBool(!v.isNull());
+}
+
+fn statusText(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        else => "",
+    };
+}
+
+/// A Response object over what came back.
+fn responseObject(vm: *Vm, r: *const Response) Error!Value {
+    const o = try vm.newObject();
+    const mark = vm.heap.tempMark();
+    defer vm.heap.tempRelease(mark);
+    vm.heap.tempPush(o.cell());
+    const body = try vm.str(r.body);
+    const ctype = try vm.str(r.content_type);
+    try vm.defineValue(o, "ok", Value.fromBool(r.status >= 200 and r.status < 300), .default);
+    try vm.defineValue(o, "status", Value.fromInt(r.status), .default);
+    try vm.defineValue(o, "statusText", try vm.str(statusText(r.status)), .default);
+    try vm.defineValue(o, "url", try vm.str(r.url), .default);
+    try vm.defineValue(o, "redirected", Value.false_, .default);
+    try vm.defineValue(o, "type", try vm.str("basic"), .default);
+    try vm.defineValue(o, "bodyUsed", Value.false_, .default);
+    const headers = try vm.newObject();
+    const hget = try vm.newNative("get", 1, headersGet, ctype);
+    _ = try vm.objects.defineOwn(headers, .{ .atom = try vm.atom("get") }, hget.asValue(), .hidden);
+    const hhas = try vm.newNative("has", 1, headersHas, ctype);
+    _ = try vm.objects.defineOwn(headers, .{ .atom = try vm.atom("has") }, hhas.asValue(), .hidden);
+    try vm.defineValue(o, "headers", headers.asValue(), .default);
+    const text = try vm.newNative("text", 0, responseText, body);
+    _ = try vm.objects.defineOwn(o, .{ .atom = try vm.atom("text") }, text.asValue(), .hidden);
+    const json = try vm.newNative("json", 0, responseJson, body);
+    _ = try vm.objects.defineOwn(o, .{ .atom = try vm.atom("json") }, json.asValue(), .hidden);
+    return o.asValue();
+}
+
+/// `fetch(url, { method, body })`: the whole resource through the host,
+/// same-origin, as a promise of a Response. The page waits on the
+/// host while it comes (one resource at a time is what the page's
+/// channel carries), so a slow server is a slow script — the price of
+/// a page with one capability, paid once per request.
+fn fetchNative(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var method = Value.undefined_;
+    var body = Value.undefined_;
+    const init = arg(args, 1);
+    if (init.isObject()) {
+        const io = Vm.asObject(init);
+        method = try vm.get(io, .{ .atom = try vm.atom("method") }, init);
+        body = try vm.get(io, .{ .atom = try vm.atom("body") }, init);
+    }
+    const req = switch (try readRequest(vm, arg(args, 0), method, body, sc.a())) {
+        .ok => |r| r,
+        .bad => |why| return rejectedPromise(vm, .TypeError, why),
+    };
+    var out: Response = .{};
+    if (!doRequest(p, req, sc.a(), &out)) {
+        var msg: [256]u8 = undefined;
+        return rejectedPromise(vm, .TypeError, std.fmt.bufPrint(&msg, "fetch: {s}", .{out.refused}) catch "fetch refused");
+    }
+    return js.realm.promiseResolve(vm, try responseObject(vm, &out));
+}
+
+// ------------------------------------------------------- XMLHttpRequest
+
+fn xhrReset(vm: *Vm, o: *Object, ready: i32) Error!void {
+    try vm.defineValue(o, "readyState", Value.fromInt(ready), .default);
+    try vm.defineValue(o, "status", Value.fromInt(0), .default);
+    try vm.defineValue(o, "statusText", try vm.str(""), .default);
+    try vm.defineValue(o, "responseText", try vm.str(""), .default);
+    try vm.defineValue(o, "response", try vm.str(""), .default);
+    try vm.defineValue(o, "responseURL", try vm.str(""), .default);
+}
+
+fn thisXhr(vm: *Vm, this: Value) Error!*Object {
+    if (!this.isObject()) return vm.throwTypeError("Illegal invocation");
+    return Vm.asObject(this);
+}
+
+fn xhrOpen(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisXhr(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const method = try strArg(vm, arg(args, 0), sc.a());
+    const raw = try strArg(vm, arg(args, 1), sc.a());
+    if (!std.ascii.eqlIgnoreCase(method, "GET") and !std.ascii.eqlIgnoreCase(method, "POST") and !std.ascii.eqlIgnoreCase(method, "HEAD")) return vm.throwError(.SyntaxError, "XMLHttpRequest: only GET and POST are allowed from a page yet");
+    const abs = sameOriginUrl(p, raw, sc.a()) orelse return vm.throwError(.SyntaxError, "XMLHttpRequest: only same-origin requests are allowed from a page yet");
+    try vm.defineValue(o, "__method", try vm.str(method), .hidden);
+    try vm.defineValue(o, "__url", try vm.str(abs), .hidden);
+    try vm.defineValue(o, "__ctype", try vm.str(""), .hidden);
+    try xhrReset(vm, o, 1);
+    try xhrHandler(vm, o, "onreadystatechange", "readystatechange");
+    return Value.undefined_;
+}
+
+/// An event handler IDL attribute (`onload`) called, then the event fired.
+fn xhrHandler(vm: *Vm, o: *Object, attr: []const u8, event_name: []const u8) Error!void {
+    const p = pageOf(vm);
+    const h = try vm.get(o, .{ .atom = try vm.atom(attr) }, o.asValue());
+    const ev = try p.newEvent(I.event, event_name, false, false, true);
+    if (vm.isCallable(h)) {
+        try p.setEventProp(ev, "target", o.asValue());
+        try p.setEventProp(ev, "currentTarget", o.asValue());
+        _ = vm.call(h, o.asValue(), &.{ev.asValue()}) catch |e| p.reportError(e, attr);
+    }
+    _ = p.dispatch(o.asValue(), ev) catch |e| p.reportError(e, event_name);
+}
+
+fn xhrSend(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const o = try thisXhr(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const method_v = try vm.get(o, .{ .atom = try vm.atom("__method") }, this);
+    const url_v = try vm.get(o, .{ .atom = try vm.atom("__url") }, this);
+    if (!url_v.isString()) return vm.throwError(.TypeError, "InvalidStateError: send() before open()");
+    const req: Request = .{ .url = try strArg(vm, url_v, sc.a()), .post = std.ascii.eqlIgnoreCase(try strArg(vm, method_v, sc.a()), "POST"), .body = if (arg(args, 0).isNullish()) "" else try strArg(vm, arg(args, 0), sc.a()) };
+    var out: Response = .{};
+    const ok = doRequest(p, req, sc.a(), &out);
+    try vm.defineValue(o, "readyState", Value.fromInt(4), .default);
+    if (ok) {
+        try vm.defineValue(o, "status", Value.fromInt(out.status), .default);
+        try vm.defineValue(o, "statusText", try vm.str(statusText(out.status)), .default);
+        try vm.defineValue(o, "responseText", try vm.str(out.body), .default);
+        try vm.defineValue(o, "responseURL", try vm.str(out.url), .default);
+        try vm.defineValue(o, "__ctype", try vm.str(out.content_type), .hidden);
+        // `responseType` "json" parses; anything else is the text.
+        const rt = try vm.get(o, .{ .atom = try vm.atom("responseType") }, this);
+        var response = try vm.str(out.body);
+        if (rt.isString() and std.mem.eql(u8, try strArg(vm, rt, sc.a()), "json")) {
+            const json = try vm.get(vm.global, .{ .atom = try vm.atom("JSON") }, vm.global.asValue());
+            const parse = try vm.get(Vm.asObject(json), .{ .atom = try vm.atom("parse") }, json);
+            response = vm.call(parse, json, &.{response}) catch |e| switch (e) {
+                error.OutOfMemory => return e,
+                error.Exception => blk: {
+                    vm.exception = Value.undefined_;
+                    break :blk Value.null_;
+                },
+            };
+        }
+        try vm.defineValue(o, "response", response, .default);
+        try xhrHandler(vm, o, "onreadystatechange", "readystatechange");
+        try xhrHandler(vm, o, "onload", "load");
+    } else {
+        p.logf(.err, "script: XMLHttpRequest {s}: {s}", .{ req.url, out.refused });
+        try xhrHandler(vm, o, "onreadystatechange", "readystatechange");
+        try xhrHandler(vm, o, "onerror", "error");
+    }
+    try xhrHandler(vm, o, "onloadend", "loadend");
+    return Value.undefined_;
+}
+
+fn xhrGetResponseHeader(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const o = try thisXhr(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const name = try strArg(vm, arg(args, 0), sc.a());
+    if (!std.ascii.eqlIgnoreCase(name, "content-type")) return Value.null_;
+    const ct = try vm.get(o, .{ .atom = try vm.atom("__ctype") }, this);
+    return if (ct.isString() and Vm.asString(ct).len > 0) ct else Value.null_;
+}
+
+fn xhrGetAllResponseHeaders(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const o = try thisXhr(vm, this);
+    const ct = try vm.get(o, .{ .atom = try vm.atom("__ctype") }, this);
+    if (!ct.isString() or Vm.asString(ct).len == 0) return jsStr(vm, "");
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    return jsStr(vm, try std.fmt.allocPrint(sc.a(), "content-type: {s}\r\n", .{try strArg(vm, ct, sc.a())}));
+}
+
 // ----------------------------------------------------------------- tests
 
 const TestHost = struct {
     lines: std.ArrayList(u8) = .empty,
     a: std.mem.Allocator,
+    scrolled_to: [2]f64 = .{ 0, 0 },
     fn log(ctx: *anyopaque, level: Level, text: []const u8) void {
         const h: *TestHost = @ptrCast(@alignCast(ctx));
         h.lines.appendSlice(h.a, @tagName(level)) catch {};
         h.lines.append(h.a, ':') catch {};
         h.lines.appendSlice(h.a, text) catch {};
         h.lines.append(h.a, '\n') catch {};
+    }
+    /// Every element is a 100×20 box at (8, 8 + 30·id).
+    fn rect(_: *anyopaque, id: NodeId) ?[4]f64 {
+        return .{ 8, 8 + 30 * @as(f64, @floatFromInt(id)), 100, 20 };
+    }
+    fn computed(_: *anyopaque, _: NodeId, name: []const u8, buf: []u8) ?[]const u8 {
+        if (std.mem.eql(u8, name, "display")) return std.fmt.bufPrint(buf, "block", .{}) catch null;
+        if (std.mem.eql(u8, name, "color")) return std.fmt.bufPrint(buf, "rgb(0, 0, 0)", .{}) catch null;
+        return null;
+    }
+    fn scroll(ctx: *anyopaque, x: f64, y: f64) void {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        h.scrolled_to = .{ x, y };
+    }
+    /// Canned answers: /data.json is JSON, /missing is a 404, /refuse is
+    /// refused by policy, anything else echoes its URL and body.
+    fn request(_: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, out: *Response) bool {
+        out.url = abs_url;
+        if (std.mem.endsWith(u8, abs_url, "/data.json")) {
+            out.status = 200;
+            out.content_type = "application/json";
+            out.body = "{\"n\": 7}";
+            return true;
+        }
+        if (std.mem.endsWith(u8, abs_url, "/missing")) {
+            out.status = 404;
+            out.content_type = "text/plain";
+            out.body = "no such page";
+            return true;
+        }
+        if (std.mem.endsWith(u8, abs_url, "/refuse")) {
+            out.refused = "policy";
+            return false;
+        }
+        out.status = 200;
+        out.content_type = "text/plain; charset=utf-8";
+        out.body = std.fmt.allocPrint(a, "{s} {s} {s}", .{ if (post) "POST" else "GET", abs_url, body }) catch return false;
+        return true;
     }
 };
 
@@ -2654,7 +3470,7 @@ const TestPage = struct {
         tp.doc = try html.parse(tp.arena.allocator(), markup, .{ .scripting = true });
         tp.host = try ta.create(TestHost);
         tp.host.* = .{ .a = ta };
-        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log });
+        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request });
         try tp.page.setUrl("http://example.test:8080/dir/page.html?q=1#top");
         return tp;
     }
@@ -2809,6 +3625,74 @@ test "script: errors are reported and do not stop the next script, timers run wh
     try std.testing.expectEqual(@as(usize, 0), tp.page.pendingTimers());
     tp.page.runSource("console.log(order.join(' '))", "check");
     try std.testing.expect(std.mem.endsWith(u8, tp.host.lines.items, "log:qm raf:true t1 micro iv1 t2:xy iv2\n"));
+}
+
+test "script: the style object reads and writes the attribute, computed style and geometry come from the host" {
+    const tp = try TestPage.open(
+        \\<body><div id="d" style="color: blue; Background-Color : rgb(1, 2, 3)">x</div><p id="q">y</p>
+        \\<script>
+        \\  var d = document.getElementById('d'), q = document.getElementById('q');
+        \\  var out = [];
+        \\  out.push(d.style.color, d.style.backgroundColor, d.style.getPropertyValue('background-color'), d.style.length, d.style.item(1), d.style === d.style);
+        \\  d.style.color = 'red';
+        \\  d.style.setProperty('margin-top', '4px', 'important');
+        \\  d.style.cssFloat = 'left';
+        \\  out.push(d.getAttribute('style'), d.style.getPropertyPriority('margin-top'), d.style.cssText);
+        \\  out.push(d.style.removeProperty('color'), d.style.color, d.style.length);
+        \\  d.style.cssText = '';
+        \\  out.push(d.hasAttribute('style'));
+        \\  q.style.display = 'none';
+        \\  out.push(q.outerHTML);
+        \\  var cs = getComputedStyle(q);
+        \\  out.push(cs.display, cs.color, cs.getPropertyValue('display'), cs.width);
+        \\  var r = q.getBoundingClientRect();
+        \\  out.push(r.x, r.y, r.width, r.height, r.right, r.bottom, q.offsetWidth, q.clientHeight, q.offsetTop, q.getClientRects().length);
+        \\  var threw = false; try { cs.display = 'block'; } catch (e) { threw = e instanceof TypeError; }
+        \\  out.push(threw);
+        \\  window.scrollTo(0, 120); q.scrollIntoView();
+        \\  console.log(out.join('|'));
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    try std.testing.expectEqualStrings(
+        \\log:blue|rgb(1, 2, 3)|rgb(1, 2, 3)|2|background-color|true|color: red; background-color: rgb(1, 2, 3); margin-top: 4px !important; float: left;|important|color: red; background-color: rgb(1, 2, 3); margin-top: 4px !important; float: left;|red||3|false|<p id="q" style="display: none;">y</p>|block|rgb(0, 0, 0)|block||8|188|100|20|108|208|100|20|188|1|true
+        \\
+    , tp.host.lines.items);
+    // The last scroll asked was scrollIntoView's: the element's top.
+    try std.testing.expectEqual(@as(f64, 188), tp.host.scrolled_to[1]);
+}
+
+test "script: fetch and XMLHttpRequest go through the host, same-origin only" {
+    const tp = try TestPage.open(
+        \\<body><script>
+        \\  var out = [], ps = [];
+        \\  ps.push(fetch('/api/data.json').then(function (r) { out.push('f1:' + r.ok + ':' + r.status + ':' + r.url + ':' + r.headers.get('Content-Type')); return r.json(); }).then(function (j) { out.push('json:' + j.n); }));
+        \\  ps.push(fetch('missing').then(function (r) { out.push('f2:' + r.ok + ':' + r.status + ':' + r.statusText); return r.text(); }).then(function (t) { out.push('text:' + t); }));
+        \\  ps.push(fetch('/post', { method: 'POST', body: 'a=1' }).then(function (r) { return r.text(); }).then(function (t) { out.push('post:' + t); }));
+        \\  ps.push(fetch('http://elsewhere.test/x').catch(function (e) { out.push('cors:' + (e instanceof TypeError)); }));
+        \\  ps.push(fetch('/refuse').catch(function (e) { out.push('refused:' + e.message); }));
+        \\  var x = new XMLHttpRequest();
+        \\  var states = [];
+        \\  x.onreadystatechange = function () { states.push(x.readyState); };
+        \\  x.addEventListener('load', function (e) { out.push('xhr:' + x.status + ':' + x.responseText + ':' + x.getResponseHeader('content-type') + ':' + (e.target === x)); });
+        \\  x.onloadend = function () { out.push('end:' + states.join(',')); };
+        \\  x.open('GET', '/thing?q=1');
+        \\  x.send();
+        \\  var y = new XMLHttpRequest(); y.responseType = 'json'; y.open('GET', '/data.json'); y.send(); out.push('yjson:' + y.response.n);
+        \\  var z = new XMLHttpRequest(); var zerr = false; z.onerror = function () { zerr = true; }; z.open('GET', '/refuse'); z.send(); out.push('zerr:' + zerr + ':' + z.status);
+        \\  var threw = false; try { new XMLHttpRequest().open('GET', 'https://other.test/'); } catch (e) { threw = e.name === 'SyntaxError'; } out.push('xcors:' + threw);
+        \\  Promise.all(ps).then(function () { console.log(out.sort().join(' ')); });
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    try std.testing.expect(std.mem.indexOf(u8, tp.host.lines.items, "err:script: XMLHttpRequest http://example.test:8080/refuse: policy") != null);
+    const last = std.mem.lastIndexOf(u8, tp.host.lines.items, "log:").?;
+    try std.testing.expectEqualStrings(
+        \\log:cors:true end:1,4 f1:true:200:http://example.test:8080/api/data.json:application/json f2:false:404:Not Found json:7 post:POST http://example.test:8080/post a=1 refused:fetch: policy text:no such page xcors:true xhr:200:GET http://example.test:8080/thing?q=1 :text/plain; charset=utf-8:true yjson:7 zerr:true:0
+        \\
+    , tp.host.lines.items[last..]);
 }
 
 test "script: the wrappers survive a collection at every safe point" {

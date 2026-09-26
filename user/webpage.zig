@@ -173,6 +173,74 @@ fn scriptNow() f64 {
     return @floatFromInt(usys.nowMs());
 }
 
+/// A script asks where an element is: the layout is brought up to date
+/// first (a browser flushes layout on such a read), then the box in CSS
+/// pixels relative to the viewport.
+fn scriptRect(_: *anyopaque, id: dom.NodeId) ?[4]f64 {
+    if (scripts_up and scripts.takeDirty()) relayout(true);
+    const r = nodeRect(id) orelse return null;
+    const s = zoomScale();
+    return .{ r[0] / s, (r[1] - page.scroll_y) / s, r[2] / s, r[3] / s };
+}
+
+fn scriptComputed(_: *anyopaque, id: dom.NodeId, name: []const u8, buf: []u8) ?[]const u8 {
+    if (scripts_up and scripts.takeDirty()) relayout(true);
+    const styles = page.styles orelse return null;
+    if (id >= styles.computed.len) return null;
+    return web.style.propertyText(styles.get(id), name, buf);
+}
+
+/// A script's request: the resource whole through the host's broker,
+/// any status (a 404 is an answer, not a refusal), capped at 4 MB.
+fn scriptRequest(_: *anyopaque, a: std.mem.Allocator, url_text: []const u8, post: bool, body: []const u8, out: *script.Response) bool {
+    switch (openUrl(url_text, post, body)) {
+        .ok => |st| out.status = @intCast(@min(st, 999)),
+        .refused => |code| {
+            out.refused = @tagName(code);
+            return false;
+        },
+    }
+    out.url = a.dupe(u8, res_url[0..res_url_len]) catch return false;
+    out.content_type = a.dupe(u8, res_type[0..res_type_len]) catch return false;
+    var bytes: std.ArrayList(u8) = .empty;
+    while (true) {
+        const chunk = switch (call(.{ .read = .{ .max = data_len } })) {
+            .chunk => |c| c,
+            else => {
+                out.refused = "protocol";
+                return false;
+            },
+        };
+        const n = @min(chunk.len, data_len);
+        if (bytes.items.len + n > (4 << 20)) {
+            _ = call(.cancel);
+            out.refused = "too_large";
+            return false;
+        }
+        bytes.appendSlice(a, data[0..n]) catch {
+            _ = call(.cancel);
+            out.refused = "memory";
+            return false;
+        };
+        switch (std.enums.fromInt(wire.ChunkEnd, chunk.done) orelse .failed) {
+            .more => {},
+            .done => {
+                out.body = bytes.items;
+                return true;
+            },
+            .failed => {
+                out.refused = "the body was cut short";
+                return false;
+            },
+        }
+    }
+}
+
+fn scriptScroll(_: *anyopaque, _: f64, y: f64) void {
+    if (scrollTo(y * zoomScale())) paintAll();
+    if (scripts_up) scripts.setScroll(0, page.scroll_y / zoomScale());
+}
+
 /// Bring the engine up for the current document and run its scripts.
 fn runScripts(doc: *dom.Document) void {
     if (!scripting) return;
@@ -185,7 +253,7 @@ fn runScripts(doc: *dom.Document) void {
     };
     vm.host_now = scriptNow;
     scripts_up = true;
-    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch }) catch {
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest }) catch {
         _ = usys.log(glog, "webpage: the bindings did not fit");
         return;
     };
@@ -1082,6 +1150,7 @@ fn resize(w: u64, h: u64) void {
     }
     vw = @intCast(w);
     vh = @intCast(h);
+    if (scripts_up) scripts.setViewport(@intCast(vw), @intCast(vh));
     if (w > 0 and h > 0) {
         const p = callCap(.attach_pixels);
         switch (p.rep) {
@@ -1133,6 +1202,7 @@ fn paintAll() void {
 fn scrollBy(dy: f64) void {
     const before = page.scroll_y;
     if (!scrollTo(page.scroll_y + dy)) return;
+    if (scripts_up) scripts.setScroll(0, page.scroll_y / zoomScale());
     const moved: i64 = @intFromFloat(@round(page.scroll_y - before));
     if (!has_pixels or moved == 0 or @abs(moved) >= @as(i64, @intCast(vh))) {
         paintAll();

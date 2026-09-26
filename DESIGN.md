@@ -7041,6 +7041,62 @@ pool, gone with the call) and only the matches stay, copied.
 needs it, the party that can answers on its own tick, and the wire
 carries a delay, not a deadline — the two clocks never have to agree.
 
+**Stage 11c, the CSSOM for `style`, computed style and geometry (as
+built, 2026-09-25).** `element.style` is a `CSSStyleDeclaration` over
+the element's `style` attribute and nothing else: reads parse the
+attribute with the CSS parser (`lib/web/css`, `parseBlockContents`) into
+declarations, writes rebuild the attribute text — `name: value
+!important;` per declaration — and mark the page dirty like any other
+mutation, so the cascade sees the change on the next layout and the
+attribute is the one source of truth (the object is cached on the
+wrapper, so `el.style === el.style`). Its members are `cssText`,
+`length`, `item`, `getPropertyValue`, `getPropertyPriority`,
+`setProperty`, `removeProperty`, and a camelCase accessor for each of
+ninety-odd properties in one comptime list (`css_properties`, with
+`camelCase` computed at compile time and one getter and setter
+instantiated per name, so `backgroundColor` is a row, not a function).
+`getComputedStyle(el)` is the same object flagged read-only, whose reads
+go through the host's `computed` hook: the page answers from its
+`Styles` with `lib/web/style.propertyText`, which puts the cascade's
+values into CSS text (lengths in px, colours as `rgb()`, keywords as
+spelled) for the properties a script asks about — display, position,
+colours, fonts, sizes, margins, paddings, borders, insets, flex — and
+null for the rest, which fall back to the inline declaration or "".
+Geometry is the host's too: `getBoundingClientRect`, `getClientRects`,
+`offsetWidth/Height/Top/Left`, `clientWidth/Height` go through the
+`rect` hook, and the page flushes layout first when the document is
+dirty (a browser does the same on such a read), then answers the box
+in CSS pixels relative to the viewport — the layout's device pixels
+divided by the zoom, the scroll taken off. `window.scrollTo/scrollBy`,
+`scrollIntoView` and `scrollX/Y` go the other way through the `scroll`
+hook and `Page.setScroll`, which the page calls on every scroll. The
+fixture sets a colour from script, measures a box and reads a computed
+display; the drill reads them back from the rendered document.
+
+**Stage 11d, the network from a page (as built, 2026-09-25).** `fetch`
+and `XMLHttpRequest` reach the same broker the page's own loads do,
+through one `Host.request` hook: the page opens the URL on its channel
+as it opens a picture's, reads the chunks whole into the caller's
+scratch (4 MB cap; a 404 is an answer with a body, only the broker's
+refusals fail), and the bindings turn it into a `Response` (`ok`,
+`status`, `statusText`, `url`, `headers.get` for the content type,
+`text()` and `json()` as promises whose natives close over the body
+through the function's data slot) or into the XHR's `readyState`,
+`status`, `responseText`, `response` (parsed for `responseType =
+"json"`), `responseURL`, with `readystatechange`, `load`, `error` and
+`loadend` fired at the request object — an EventTarget instance — and
+its `on…` handlers called first. Same-origin only, decided in the
+bindings against the document's URL (`url.origin` of both; a
+cross-origin `fetch` rejects with a TypeError, a cross-origin `open`
+throws SyntaxError) — CORS is a later stage, and until it lands the
+broker never sees a page's cross-origin request at all. The request is
+synchronous underneath: the page holds one capability, so a fetch
+blocks the page until the body is in, and a slow server is a slow
+script; the promise resolves at the next microtask checkpoint like any
+other, so a page cannot tell — except by the clock. The fixture fetches
+a page of its own origin, is refused another origin, and reads a 404
+through XHR; the drill finds all three in the rendered document.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

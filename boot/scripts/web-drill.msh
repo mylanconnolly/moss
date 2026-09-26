@@ -134,6 +134,13 @@ let body = (($app.dom | html-select "body")? | first 1 | map { $it.attrs })
 if ($body | map { $it.data-loaded }) != ["complete"] { (err "web-render app: load listener did not run: $body")? }
 if ($body | map { $it.data-frame }) != ["yes"] { (err "web-render app: the animation frame did not run: $body")? }
 if ($body | map { $it.data-ticks }) != ["2"] { (err "web-render app: the interval did not run twice and stop: $body")? }
+if ($body | map { $it.data-box }) != ["yes"] { (err "web-render app: getBoundingClientRect gave no box: $body")? }
+if ($body | map { $it.data-fetch }) != ["ok"] { (err "web-render app: fetch from the page: $body")? }
+if ($body | map { $it.data-cors }) != ["refused"] { (err "web-render app: a cross-origin fetch was not refused: $body")? }
+if ($body | map { $it.data-xhr }) != ["404"] { (err "web-render app: XMLHttpRequest: $body")? }
+if ($body | map { $it.data-display }) != ["block"] { (err "web-render app: getComputedStyle: $body")? }
+let h1 = (($app.dom | html-select "h1")? | first 1 | map { $it.attrs.style })
+if $h1 != ["color: rgb(200, 0, 0);"] { (err "web-render app: style attribute from script: $h1")? }
 if (($app.dom | html-select "#noscript")? | len) != 0 { (err "web-render app: noscript content parsed as markup")? }
 echo "script: web-render scripts ok"
 match (web-render http://www.moss.test:8080/missing.html) {
