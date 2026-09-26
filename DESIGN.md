@@ -1032,6 +1032,24 @@ brought it to 2.3/2.5.)
 | encrypted, compressible | 1187 / 2557 MB/s | 435 / 688 MB/s |
 | encrypted, random | 476 / 893 MB/s | **93 / 110 MB/s** |
 
+The JavaScript engine's row (`zig build bench-js`, ReleaseFast on the
+host; Octane at its pin under Octane's own harness, scores as it prints
+them — a V8 with its JITs scores about 30,000 here, QuickJS about 1,000;
+and `tools/bench-small.js`, a small workload of our own timed on the
+host and, as the same text in the `jsrun` drill, on the target under
+QEMU's emulation):
+
+| Octane (2026-09-25, M3 Max) | score |
+|---|---|
+| Richards | 1,274 |
+| DeltaBlue | 1,342 |
+| Crypto | 1,061 |
+| **geometric mean** | **1,220** |
+
+| bench-small | host (ReleaseFast) | target (`jsrun` under TCG, ReleaseSafe) |
+|---|---|---|
+| calls, objects, a Map, strings, array pipelines | 115 ms | 1,908 ms (16.6×) |
+
 Whole-stack (encrypted volume, alice's bench through IPC + fssvc +
 mossfs + ring + blkdrv + virtio), the full progression on HVF (w/r MB/s,
 incompressible / compressible):
@@ -7439,6 +7457,27 @@ a promise of `{ ok, status, url, type, text }` with the body gathered a
 chunk at a time through the data buffer, which is what keeps a 24 MB
 resource off the script host's static memory. A program lent no
 network finds no `moss:net`.
+
+**Stage 10e, the bench row (as built, 2026-09-25).** Octane's
+Richards, DeltaBlue and Crypto under Octane's own harness, fetched at
+a pin by `tools/fetch-octane.sh` the way test262 is (BSD-licensed
+Google code is fetched, never vendored), run ReleaseFast by `zig build
+bench-js` through the host runner with `tools/benchjs-driver.js` as
+the harness's runner: Richards 1,274, DeltaBlue 1,342, Crypto 1,061, a
+geometric mean of 1,220 — the class of a good interpreter (QuickJS is
+near 1,000; V8's JITs are near 30,000), with quickening and inline-cache
+work still ahead, which is what the row is for. ReleaseSafe scores the
+same within noise (1,360 / 1,330 / 1,157): the interpreter is not
+bounds-check bound, its time is in dispatch and property access. The
+target half is `tools/bench-small.js`, a workload of our own (calls,
+objects, a Map, string building, array pipelines) so it can be inlined
+in the `jsrun` drill as the same text: 115 ms on the host, 1,908 ms in
+a script domain under QEMU's TCG (the user image is ReleaseSafe), a
+16.6× emulation ratio, logged by the drill and checked only for its
+values. `Date.now` in a script domain is the cycle counter's
+milliseconds since boot — monotonic, no syscall, no capability — which
+is the clock a script measuring itself needs; a wall clock would be a
+capability, and the domain holds none.
 
 ## Distribution: the fabric
 

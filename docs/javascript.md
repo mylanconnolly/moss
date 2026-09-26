@@ -133,6 +133,17 @@ tools/fetch-ucd.sh                # once: the Unicode data files at the pinned v
 zig build ucdgen                  # regenerate lib/js/unicode.bin from them
 ```
 
+## Benchmarking it
+
+```
+tools/fetch-octane.sh             # once: Octane's base.js, Richards, DeltaBlue, Crypto at the pin
+zig build bench-js                # the three scores and their geometric mean, ReleaseFast
+```
+
+DESIGN's baseline table carries the numbers, with `tools/bench-small.js`
+timed on the host and, as the same text in the `jsrun` drill, on the
+target.
+
 ## Measuring it
 
 ```

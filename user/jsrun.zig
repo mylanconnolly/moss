@@ -399,6 +399,13 @@ fn installHostObjects() Error!void {
     vm.host_load = hostLoad;
 }
 
+/// `Date.now`: milliseconds since boot from the cycle counter (no
+/// syscall, no capability) — a monotonic clock, not the wall's, which
+/// is what a script measuring itself needs.
+fn hostNow() f64 {
+    return @floatFromInt(usys.nowMs());
+}
+
 fn exceptionText(a: std.mem.Allocator) []const u8 {
     const s = vm.toString(vm.exception) catch return "uncaught exception";
     return vm.utf8(s, a) catch "uncaught exception";
@@ -423,6 +430,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, _: u64, _: u64) callconv(.c) 
         usys.exit(5);
     };
     installHostObjects() catch usys.exit(5);
+    vm.host_now = hostNow;
     _ = usys.log(glog, "jsrun: up");
     if (flags & wire.flag_module != 0) {
         // A module: its evaluation is a promise (top-level await); an

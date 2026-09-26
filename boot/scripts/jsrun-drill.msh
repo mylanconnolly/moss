@@ -65,4 +65,11 @@ match (js-run "import { fetch } from 'moss:net'; await fetch('http://www.moss.te
   err $e => { if ($e | split "moss:net" | len) < 2 { (err "js-run no net: $e")? } }
 }
 echo "script: js-run net ok"
+# The bench row's target half: tools/bench-small.js, the same text, timed
+# under emulation; the values are checked, the time is only logged.
+let bench = "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } class P { constructor(x, y) { this.x = x; this.y = y; } add(o) { return new P(this.x + o.x, this.y + o.y); } } const t0 = Date.now(); const f = fib(24); let p = new P(0, 0); for (let i = 0; i < 200000; i++) p = p.add(new P(i, -i)); const m = new Map(); for (let i = 0; i < 50000; i++) m.set('k' + (i % 1000), i); let s = ''; for (let i = 0; i < 20000; i++) s += i % 10; const a = []; for (let i = 0; i < 100000; i++) a.push(i * 2); const sum = a.filter(x => x % 3 === 0).map(x => x / 2).reduce((x, y) => x + y, 0); print('bench-small', Date.now() - t0, 'ms', f, p.x, m.size, s.length, sum);"
+let b = (js-run $bench)?
+let bl = ($b.lines | first 1 | join "")
+if ($bl | split " ms 46368 19999900000 1000 20000 1666683333" | len) < 2 { (err "js-run bench: $bl")? }
+echo "script: $bl"
 echo "script: jsrun ok"

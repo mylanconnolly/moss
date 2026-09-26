@@ -969,9 +969,13 @@ supervises), and memory history per unit beside the CPU one.
       `await`; and `net: true` lends the network as `moss:net`, whose
       `fetch` goes through the page host's broker — the broker now has
       a client-independent face (`webhost.Client`, `brokerOpen`/
-      `brokerRead`) that pages and script runs share. Still to come in
-      (e): `web-eval`, quickening, the bench row, a real bookkeeping
-      allocator for a script domain.
+      `brokerRead`) that pages and script runs share. The bench row:
+      `zig build bench-js` runs Octane's Richards, DeltaBlue and Crypto
+      at a pin (1,274 / 1,342 / 1,061, mean 1,220 on the M3) and a
+      workload of our own that the `jsrun` drill also times on the
+      target (115 ms host, 1,908 ms under TCG). Still to come in (e):
+      quickening and inline-cache work against that row, `web-eval`, a
+      real bookkeeping allocator for a script domain.
       Residuals of (b)–(d): the moving nursery (the barrier is in
       place) and ephemeron keys for the weak collections, eval's
       `arguments` early errors, rooting natives' locals so collection

@@ -1403,6 +1403,19 @@ pub fn build(b: *std.Build) void {
         b.step("js", "Run JavaScript files on the host with the engine").dependOn(&jrun.step);
     }
 
+    // bench-js: the engine's bench row — Octane's Richards, DeltaBlue and
+    // Crypto (tools/fetch-octane.sh, pinned) under Octane's own harness,
+    // ReleaseFast, scores as Octane prints them (DESIGN's table).
+    {
+        const blib = b.createModule(.{ .root_source_file = b.path("lib/lib.zig"), .target = host_target, .optimize = .ReleaseFast });
+        const bmod = b.createModule(.{ .root_source_file = b.path("tools/js.zig"), .target = host_target, .optimize = .ReleaseFast });
+        bmod.addImport("mosslib", blib);
+        const bexe = b.addExecutable(.{ .name = "moss-bench-js", .root_module = bmod });
+        const brun = b.addRunArtifact(bexe);
+        brun.addArgs(&.{ "tools/testdata/octane/base.js", "tools/testdata/octane/richards.js", "tools/testdata/octane/deltablue.js", "tools/testdata/octane/crypto.js", "tools/benchjs-driver.js", "tools/bench-small.js" });
+        b.step("bench-js", "The JavaScript engine's bench row: Octane Richards, DeltaBlue, Crypto (fetch with tools/fetch-octane.sh)").dependOn(&brun.step);
+    }
+
     const lib_test_mod = b.createModule(.{
         .root_source_file = b.path("lib/lib.zig"),
         .target = host_target,
