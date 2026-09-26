@@ -80,7 +80,8 @@ the as-built account with the test262 numbers.
 `jsrun` (`user/jsrun.zig`) is the first host: a script domain in the
 page domain's shape, spawned with one capability — a badged calling
 end to whoever spawned it — that runs a program over its own static
-heap and reports back through a shared buffer (`shared/js.zig`: the
+heaps (the collector's region, and `lib/heapalloc` for the engine's
+bookkeeping) and reports back through a shared buffer (`shared/js.zig`: the
 attach, each `print` line, the ending). The shell's `js-run SOURCE`
 (`user/jscmds.zig` over `user/jshost.zig`) is its host: it stages the
 image from the program store, serves the run and destroys the domain,

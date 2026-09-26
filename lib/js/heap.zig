@@ -78,6 +78,8 @@ pub const Heap = struct {
     large: std.ArrayList(*Cell) = .empty,
     /// Bookkeeping memory (mark stack, lists) — the embedder's allocator.
     meta: std.mem.Allocator,
+    /// The collector's work list, kept between collections.
+    mark_stack: std.ArrayList(*Cell) = .empty,
     roots: std.ArrayList(Root) = .empty,
     /// Bytes allocated since the last collection, and the threshold
     /// that triggers the next.
@@ -109,6 +111,7 @@ pub const Heap = struct {
             for (h.cells.items) |c| if (c.kind != .bytes and c.kind != .free) f(h, c);
         }
         h.cells.deinit(h.meta);
+        h.mark_stack.deinit(h.meta);
         h.large.deinit(h.meta);
         h.roots.deinit(h.meta);
         h.temps.deinit(h.meta);
@@ -208,8 +211,13 @@ pub const Heap = struct {
     /// Mark from every root, sweep every cell not marked onto its free
     /// list.
     pub fn collect(h: *Heap) void {
-        var m: Marker = .{ .heap = h, .stack = .empty };
-        defer m.stack.deinit(h.meta);
+        // The mark stack is kept between collections: a fresh list each
+        // time grew through every size class again — cheap with a bump
+        // allocator that extends its last block, a copy per step with a
+        // real one (found by the script domain's bench, 2026-09-25).
+        var m: Marker = .{ .heap = h, .stack = h.mark_stack };
+        m.stack.clearRetainingCapacity();
+        defer h.mark_stack = m.stack;
         for (h.temps.items) |c| m.markCell(c);
         for (h.roots.items) |r| r.trace(r.ctx, &m);
         while (m.stack.pop()) |c| h.traceCell(c, &m);

@@ -16,6 +16,7 @@ pub const locale = @import("locale.zig");
 pub const lz4 = @import("lz4.zig");
 pub const mshl = @import("mshl.zig");
 pub const pool = @import("pool.zig");
+pub const heapalloc = @import("heapalloc.zig");
 pub const settings = @import("settings.zig");
 pub const sntp = @import("sntp.zig");
 pub const tls = @import("tls.zig");
@@ -41,6 +42,7 @@ test {
     _ = locale;
     _ = lz4;
     _ = mshl;
+    _ = heapalloc;
     _ = pool;
     _ = settings;
     _ = sntp;

@@ -49,11 +49,10 @@ var flags: u64 = 0;
 /// The engine's heap: every JavaScript value lives here.
 var region: [8 << 20]u8 align(16) = undefined;
 /// The engine's bookkeeping (shapes, atoms, the register stack, the
-/// compiler's scratch): a bump heap for now, which frees only its last
-/// block — enough for a script's run, and the residual the design
-/// notes name.
+/// compiler's scratch): a size-class allocator over its own region
+/// (`lib/heapalloc`), so what a long run frees is what it reuses.
 var meta_buf: [12 << 20]u8 align(16) = undefined;
-var meta_fba: std.heap.FixedBufferAllocator = undefined;
+var meta_heap: mosslib.heapalloc.Allocator = undefined;
 var vm: Vm = undefined;
 
 fn call(req: wire.RunReq) wire.HostResp {
@@ -418,8 +417,8 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, _: u64, _: u64) callconv(.c) 
         _ = usys.log(glog, "jsrun: spawned without a host to serve");
         usys.exit(2);
     }
-    meta_fba = std.heap.FixedBufferAllocator.init(&meta_buf);
-    const meta = meta_fba.allocator();
+    meta_heap = mosslib.heapalloc.Allocator.init(&meta_buf);
+    const meta = meta_heap.allocator();
     // The source is copied out of the shared buffer: the engine keeps
     // slices of it (a function's text) and the buffer is about to carry
     // the output.

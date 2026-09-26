@@ -978,9 +978,12 @@ supervises), and memory history per unit beside the CPU one.
       continue), dense element growth on store, an add-property cache
       guarded by a prototype epoch, a second read-cache entry, `==`
       fast paths — the mean 1,220 to 2,246 (+84%), bench-small 55 ms
-      host / 1,007 ms target, test262 unchanged. Still to come in (e):
-      the call path and register traffic (the next round), `web-eval`,
-      a real bookkeeping allocator for a script domain.
+      host / 1,007 ms target, test262 unchanged. `lib/heapalloc`, a
+      size-class allocator over a region, is the script domain's
+      bookkeeping heap now (the bump heap leaked a long run's shapes and
+      lists), and the collector keeps its mark stack between
+      collections. Still to come in (e): the call path and register
+      traffic (the next round); `web-eval` folds into stage 11.
       Residuals of (b)–(d): the moving nursery (the barrier is in
       place) and ephemeron keys for the weak collections, eval's
       `arguments` early errors, rooting natives' locals so collection

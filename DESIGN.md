@@ -7520,6 +7520,31 @@ is 7%) — and property misses are under 3%; the next round is the call
 path and register-to-register traffic (superinstructions, `mov`
 elision), not the object model.
 
+**Stage 10e, a heap for the bookkeeping (as built, 2026-09-25).** The
+script domain's bookkeeping allocator was a bump heap that freed only
+its last block, so a long run leaked its own shapes, atoms and list
+growth until it died. `lib/heapalloc.zig` replaces it: a
+general-purpose allocator over one region — size classes from 32 bytes
+to 4 KB in steps of 1.5×, then powers of two up to the region, each
+with an intrusive free list, so a block freed is a block reused by the
+next allocation of its class and never lost; a 16-byte header before
+every payload names the block's start and class, which is what lets
+`free` find its list from a pointer of any alignment; and the newest
+block, at the region's top, grows in place into a larger class by
+taking the bytes after it, the one thing the bump heap did well (a
+list being built grows without a copy). It passes the standard
+library's allocator suite (alignment up to half a page, shrink,
+realloc) and its own tests, and `jsrun` runs on it. The measurement
+that came with it: the collector's mark stack was a fresh list each
+collection, which the bump heap extended in place and a real heap
+copies at every class step — the mark stack is kept between
+collections now, in `Heap`, which helps every embedder. On the target
+the allocator is within the run-to-run variance of the bump heap it
+replaced (an A/B under TCG: 1,007 and 1,187 ms bump, 1,181 to 1,343 ms
+heap, the same workload). What it does not do yet: return large blocks
+to a coalescing pool (a class's blocks stay that class's), which is
+fine for a heap whose peak is what it is charged for anyway.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on
