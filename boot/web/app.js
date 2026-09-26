@@ -34,7 +34,16 @@ document.body.setAttribute('data-display', getComputedStyle(document.getElementB
 fetch('/about.html').then(function (r) { return r.text(); }).then(function (t) {
   document.body.setAttribute('data-fetch', t.indexOf('About the fixtures') >= 0 ? 'ok' : 'bad');
 });
-fetch('http://elsewhere.test/').catch(function () { document.body.setAttribute('data-cors', 'refused'); });
+// Another origin (the TLS fixture, a different port): allowed where the
+// answer says so, refused where it does not.
+fetch('https://www.moss.test:8443/cors.json').then(function (r) { return r.json(); }).then(function (j) { document.body.setAttribute('data-cors-ok', j.cors); });
+fetch('https://www.moss.test:8443/about.html').catch(function () { document.body.setAttribute('data-cors', 'refused'); });
+// Storage: the host keeps localStorage per origin across the pages it
+// serves; sessionStorage is this document's.
+var visits = Number(localStorage.getItem('visits') || '0') + 1;
+localStorage.setItem('visits', String(visits));
+sessionStorage.setItem('here', 'yes');
+document.body.setAttribute('data-visits', String(visits) + '/' + localStorage.length + '/' + sessionStorage.getItem('here'));
 var xhr = new XMLHttpRequest();
 xhr.onload = function () { document.body.setAttribute('data-xhr', String(xhr.status)); };
 xhr.open('GET', '/missing.html');

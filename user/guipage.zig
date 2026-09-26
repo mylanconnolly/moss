@@ -50,7 +50,9 @@ pub const Slot = struct {
     sy: isize = 0,
     /// The page's commit count at the last blit: a newer one is dirty.
     blitted: usize = 0,
-    /// What the page was last told: its zoom, the appearance, the find.
+    /// What the page was last told: its zoom, the appearance, the find,
+    /// whether scripts run.
+    scripts: ?bool = null,
     zoom: u32 = 0,
     theme: u64 = std.math.maxInt(u64),
     find: [256]u8 = undefined,
@@ -149,6 +151,12 @@ pub fn setup(spawner_cap: u64, n: *netcmds.Net, view_chan: u64, buf: [*]u8, asse
     view_is_assets = assets_view;
     stores = s;
     log_h = log;
+}
+
+/// Where the pages' `localStorage` persists: a directory of the
+/// session's home, given by the program that has the view.
+pub fn setStorageDir(view_chan: u64, buf: [*]u8, dir: []const u8) void {
+    host.setStorageDir(view_chan, buf, dir);
 }
 
 /// Whether this program can host pages at all (a spawner and a net view).
@@ -411,7 +419,12 @@ pub fn info(s: *Slot) Info {
 
 /// Bring a page to what its leaf says: the viewport (a hidden leaf has
 /// none), then the URL and `nav` nonce.
-pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32) void {
+pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32, scripts: bool) void {
+    // Scripts on or off goes before the load it applies to.
+    if (s.scripts != scripts) {
+        s.scripts = scripts;
+        _ = host.send(s.page, .{ .scripts = scripts });
+    }
     if (s.w != w or s.h != h) {
         if (host.resize(s.page, w, h)) {
             s.w = w;

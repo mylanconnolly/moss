@@ -56,6 +56,9 @@ pub const page_user_kb: u64 = 76 << 10;
 /// A connection key: scheme|host|port, a host name's worst case.
 const conn_key_max = 320;
 pub const page_kobj_kb: u64 = 2 << 10;
+/// The storage buffer per host and each origin's share of it.
+pub const storage_bytes: usize = 128 << 10;
+pub const storage_quota: usize = 32 << 10;
 
 const stall_ms: u64 = 10_000;
 const max_redirects = 10;
@@ -188,6 +191,8 @@ pub const Command = union(enum) {
     idle,
     /// Time passed: the page runs its due timers and frames.
     tick,
+    /// Scripts on or off for the loads that follow.
+    scripts: bool,
     stop,
 };
 
@@ -331,6 +336,25 @@ pub const Host = struct {
     body: [8192]u8 = undefined,
     /// The URL being opened (redirects rewrite it), the broker's copy.
     url_buf: [2048]u8 = undefined,
+    /// A script request's origin, copied out of the page's buffer.
+    origin_buf: [512]u8 = undefined,
+    /// Per-origin storage for every page of this host (`localStorage`):
+    /// records of (origin, key, value), one per live key, in one buffer;
+    /// an origin may hold `storage_quota` bytes of keys and values. Held
+    /// while the host lives — a browser's pages share it, a headless
+    /// render's too.
+    storage: [storage_bytes]u8 = undefined,
+    storage_len: usize = 0,
+    /// Where the storage persists (a view and a directory under it), or
+    /// 0: memory only. Origins are loaded on first touch and written on
+    /// every change, one file per origin named by a hash of the origin.
+    store_view: u64 = 0,
+    store_buf: [*]u8 = undefined,
+    store_dir: [128]u8 = undefined,
+    store_dir_len: usize = 0,
+    store_dir_made: bool = false,
+    loaded: [32]u64 = @splat(0),
+    n_loaded: usize = 0,
     lock: Lock = .{},
     scratch: [head_max + request_max]u8 = undefined,
 
@@ -347,6 +371,87 @@ pub const Host = struct {
         h.chan = ch.data[0];
         h.chan_b = ch.data[1];
         return true;
+    }
+
+    /// Persist the pages' storage under `dir` of `view` (the session's
+    /// home): what is there is read as an origin is first touched, and
+    /// every change is written back.
+    pub fn setStorageDir(h: *Host, view: u64, buf: [*]u8, dir: []const u8) void {
+        h.store_view = view;
+        h.store_buf = buf;
+        h.store_dir_len = @min(dir.len, h.store_dir.len);
+        @memcpy(h.store_dir[0..h.store_dir_len], dir[0..h.store_dir_len]);
+    }
+
+    fn storePath(h: *Host, origin: []const u8, buf: []u8) ?[]const u8 {
+        const hash = std.hash.Wyhash.hash(0, origin);
+        return std.fmt.bufPrint(buf, "{s}/{x:0>16}.dat", .{ h.store_dir[0..h.store_dir_len], hash }) catch null;
+    }
+
+    /// The origin's file into the buffer, once per host life.
+    fn storageLoad(h: *Host, origin: []const u8) void {
+        if (h.store_view == 0) return;
+        const hash = std.hash.Wyhash.hash(0, origin);
+        for (h.loaded[0..h.n_loaded]) |x| if (x == hash) return;
+        if (h.n_loaded < h.loaded.len) {
+            h.loaded[h.n_loaded] = hash;
+            h.n_loaded += 1;
+        }
+        var pbuf: [192]u8 = undefined;
+        const path = h.storePath(origin, &pbuf) orelse return;
+        const dst = h.storage[h.storage_len..];
+        const got = fsc.readWhole(h.store_view, h.store_buf, path, dst) orelse return;
+        // Only whole records of this origin, none already present.
+        var at: usize = 0;
+        var kept: usize = 0;
+        while (at + Rec.head <= got.len) {
+            const r = got[at..];
+            const size = Rec.size(r);
+            if (at + size > got.len) break;
+            if (!std.mem.eql(u8, Rec.origin(r[0..size]), origin) or h.storageFind(origin, Rec.key(r[0..size])) != null) {
+                at += size;
+                continue;
+            }
+            if (kept != at) std.mem.copyForwards(u8, dst[kept .. kept + size], got[at .. at + size]);
+            kept += size;
+            h.storage_len += size;
+            at += size;
+        }
+        logf(h.log, "webhost: storage: loaded {s} ({d} bytes)", .{ origin, kept });
+    }
+
+    /// The origin's records to its file (rewritten whole).
+    fn storageSave(h: *Host, origin: []const u8) void {
+        if (h.store_view == 0) return;
+        if (!h.store_dir_made) {
+            _ = fsc.fsMkdir(h.store_view, h.store_buf, h.store_dir[0..h.store_dir_len]);
+            h.store_dir_made = true;
+        }
+        var pbuf: [192]u8 = undefined;
+        const path = h.storePath(origin, &pbuf) orelse return;
+        const fd = switch (fsc.fsOpen(h.store_view, h.store_buf, path, 1)) {
+            .fd => |fd| fd,
+            .err => |e| {
+                logf(h.log, "webhost: storage: cannot open {s}: {s}", .{ path, @tagName(e) });
+                return;
+            },
+        };
+        defer fsc.fsClose(h.store_view, fd);
+        _ = fsc.fsTruncate(h.store_view, fd, 0);
+        var off: u64 = 0;
+        var at: usize = 0;
+        while (at < h.storage_len) {
+            const r = h.storage[at..h.storage_len];
+            const size = Rec.size(r);
+            if (std.mem.eql(u8, Rec.origin(r), origin)) {
+                if (!fsc.fsWriteAt(h.store_view, h.store_buf, fd, off, r[0..size])) {
+                    logf(h.log, "webhost: storage: writing {s} failed", .{path});
+                    return;
+                }
+                off += size;
+            }
+            at += size;
+        }
     }
 
     /// Read the system faces from a view (`assets/fonts/...` under it)
@@ -633,6 +738,7 @@ pub const Host = struct {
             .theme => |t| .{ .theme = .{ .flags = t } },
             .idle => .idle,
             .tick => .tick,
+            .scripts => |on| .{ .scripts = .{ .on = if (on) 1 else 0 } },
             .stop => .stop,
         };
         // Shift the queue.
@@ -699,6 +805,7 @@ pub const Host = struct {
                 h.brokerCancel(&p.client);
                 h.reply(.ok, 0);
             },
+            .storage => |s| h.storageReq(p, s.op, s.key_len, s.value_len),
             .event => |e| {
                 const kind = std.enums.fromInt(wire.Event, e.kind) orelse {
                     h.reply(.ok, 0);
@@ -710,6 +817,168 @@ pub const Host = struct {
             },
         }
         return .{ .served = id };
+    }
+
+    // ------------------------------------------------------- storage
+
+    /// A record: origin, key and value lengths, then the three texts.
+    const Rec = struct {
+        const head = 8;
+        fn olen(b: []const u8) usize {
+            return std.mem.readInt(u16, b[0..2], .little);
+        }
+        fn klen(b: []const u8) usize {
+            return std.mem.readInt(u16, b[2..4], .little);
+        }
+        fn vlen(b: []const u8) usize {
+            return std.mem.readInt(u32, b[4..8], .little);
+        }
+        fn size(b: []const u8) usize {
+            return head + olen(b) + klen(b) + vlen(b);
+        }
+        fn origin(b: []const u8) []const u8 {
+            return b[head .. head + olen(b)];
+        }
+        fn key(b: []const u8) []const u8 {
+            return b[head + olen(b) .. head + olen(b) + klen(b)];
+        }
+        fn value(b: []const u8) []const u8 {
+            const o = head + olen(b) + klen(b);
+            return b[o .. o + vlen(b)];
+        }
+    };
+
+    /// The record for (origin, key): its offset, or null.
+    fn storageFind(h: *Host, origin: []const u8, key: []const u8) ?usize {
+        var at: usize = 0;
+        while (at < h.storage_len) {
+            const r = h.storage[at..h.storage_len];
+            if (std.mem.eql(u8, Rec.origin(r), origin) and std.mem.eql(u8, Rec.key(r), key)) return at;
+            at += Rec.size(r);
+        }
+        return null;
+    }
+
+    fn storageDrop(h: *Host, at: usize) void {
+        const n = Rec.size(h.storage[at..h.storage_len]);
+        std.mem.copyForwards(u8, h.storage[at .. h.storage_len - n], h.storage[at + n .. h.storage_len]);
+        h.storage_len -= n;
+    }
+
+    /// Bytes of keys and values the origin holds.
+    fn storageUsed(h: *Host, origin: []const u8) usize {
+        var used: usize = 0;
+        var at: usize = 0;
+        while (at < h.storage_len) {
+            const r = h.storage[at..h.storage_len];
+            if (std.mem.eql(u8, Rec.origin(r), origin)) used += Rec.klen(r) + Rec.vlen(r);
+            at += Rec.size(r);
+        }
+        return used;
+    }
+
+    /// The `n`th key of the origin, in record order.
+    fn storageKeyAt(h: *Host, origin: []const u8, n: usize) ?[]const u8 {
+        var i: usize = 0;
+        var at: usize = 0;
+        while (at < h.storage_len) {
+            const r = h.storage[at..h.storage_len];
+            if (std.mem.eql(u8, Rec.origin(r), origin)) {
+                if (i == n) return Rec.key(r);
+                i += 1;
+            }
+            at += Rec.size(r);
+        }
+        return null;
+    }
+
+    /// The page's origin, from the URL it reported (the host's truth,
+    /// not the page's word), into `buf`.
+    fn pageOrigin(p: *Page, buf: []u8) ?[]const u8 {
+        var fba = std.heap.FixedBufferAllocator.init(buf);
+        const u = web.url.parse(fba.allocator(), p.urlText(), null) catch return null;
+        const o = u.origin(fba.allocator()) catch return null;
+        if (std.mem.eql(u8, o, "null")) return null;
+        return o;
+    }
+
+    fn storageReq(h: *Host, p: *Page, op_raw: u64, key_len_raw: u64, value_len_raw: u64) void {
+        const d = p.data();
+        var obuf: [1024]u8 = undefined;
+        const origin = pageOrigin(p, &obuf) orelse return h.refuse(.policy);
+        const op = std.enums.fromInt(wire.StorageOp, op_raw) orelse return h.refuse(.bad_url);
+        h.storageLoad(origin);
+        const key_len: usize = @intCast(@min(key_len_raw, d.len));
+        const value_len: usize = @intCast(@min(value_len_raw, d.len - key_len));
+        // The key and value are copied out: the buffer carries the answer.
+        var kv: [4096]u8 = undefined;
+        if (op != .key_at and key_len + value_len > kv.len) return h.refuse(.quota);
+        const key: []const u8 = if (op == .key_at) "" else blk: {
+            @memcpy(kv[0..key_len], d[0..key_len]);
+            break :blk kv[0..key_len];
+        };
+        const value: []const u8 = if (op == .key_at) "" else blk: {
+            @memcpy(kv[key_len .. key_len + value_len], d[key_len .. key_len + value_len]);
+            break :blk kv[key_len .. key_len + value_len];
+        };
+        switch (op) {
+            .get => {
+                const at = h.storageFind(origin, key) orelse return h.reply(.none, 0);
+                const v = Rec.value(h.storage[at..h.storage_len]);
+                const n = @min(v.len, d.len);
+                @memcpy(d[0..n], v[0..n]);
+                h.reply(.{ .text = .{ .len = n } }, 0);
+            },
+            .set => {
+                if (origin.len > 0xffff or key.len > 0xffff) return h.refuse(.quota);
+                if (h.storageFind(origin, key)) |at| h.storageDrop(at);
+                if (h.storageUsed(origin) + key.len + value.len > storage_quota) return h.refuse(.quota);
+                const size = Rec.head + origin.len + key.len + value.len;
+                if (h.storage_len + size > h.storage.len) return h.refuse(.quota);
+                const r = h.storage[h.storage_len .. h.storage_len + size];
+                std.mem.writeInt(u16, r[0..2], @intCast(origin.len), .little);
+                std.mem.writeInt(u16, r[2..4], @intCast(key.len), .little);
+                std.mem.writeInt(u32, r[4..8], @intCast(value.len), .little);
+                @memcpy(r[Rec.head .. Rec.head + origin.len], origin);
+                @memcpy(r[Rec.head + origin.len .. Rec.head + origin.len + key.len], key);
+                @memcpy(r[Rec.head + origin.len + key.len ..], value);
+                h.storage_len += size;
+                h.storageSave(origin);
+                h.reply(.ok, 0);
+            },
+            .remove => {
+                if (h.storageFind(origin, key)) |at| {
+                    h.storageDrop(at);
+                    h.storageSave(origin);
+                }
+                h.reply(.ok, 0);
+            },
+            .clear => {
+                var at: usize = 0;
+                while (at < h.storage_len) {
+                    const r = h.storage[at..h.storage_len];
+                    if (std.mem.eql(u8, Rec.origin(r), origin)) h.storageDrop(at) else at += Rec.size(r);
+                }
+                h.storageSave(origin);
+                h.reply(.ok, 0);
+            },
+            .key_at => {
+                const k = h.storageKeyAt(origin, @intCast(key_len_raw)) orelse return h.reply(.none, 0);
+                const n = @min(k.len, d.len);
+                @memcpy(d[0..n], k[0..n]);
+                h.reply(.{ .text = .{ .len = n } }, 0);
+            },
+            .length => {
+                var n: u64 = 0;
+                var at: usize = 0;
+                while (at < h.storage_len) {
+                    const r = h.storage[at..h.storage_len];
+                    if (std.mem.eql(u8, Rec.origin(r), origin)) n += 1;
+                    at += Rec.size(r);
+                }
+                h.reply(.{ .count = .{ .n = n } }, 0);
+            },
+        }
     }
 
     fn noteEvent(h: *Host, p: *Page, kind: wire.Event, a: u64, b: u64) void {
@@ -813,6 +1082,14 @@ pub const Host = struct {
     /// followed, a parked connection tried first, the head parsed; the
     /// body is then read by `brokerRead`. `tag` names the client in the log.
     pub fn brokerOpen(h: *Host, c: *Client, url_in: []const u8, post_in: bool, body_in: []const u8, tag: []const u8) OpenOut {
+        return h.brokerOpenFrom(c, url_in, post_in, body_in, "", tag);
+    }
+
+    /// `brokerOpen` for a script's cross-origin request: `origin` (the
+    /// page's) goes as the `Origin` header, and the answer is admitted
+    /// only if its `Access-Control-Allow-Origin` names it or is `*` —
+    /// the simple CORS case (no credentials, no preflight).
+    pub fn brokerOpenFrom(h: *Host, c: *Client, url_in: []const u8, post_in: bool, body_in: []const u8, origin: []const u8, tag: []const u8) OpenOut {
         if (c.open) |*res| {
             res.conn.close(h.net);
             c.open = null;
@@ -877,7 +1154,9 @@ pub const Host = struct {
                 .{ .name = "User-Agent", .value = "moss/0.0 (webpage)" },
             };
             const headers_post = headers_get ++ [_]http.Header{.{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" }};
-            http.formatRequest(a, &req, if (post) "POST" else "GET", target.path, host_text, if (post) &headers_post else &headers_get, body, true) catch return .{ .refused = .memory };
+            const origin_hdr = [_]http.Header{.{ .name = "Origin", .value = origin }};
+            const hdrs: []const http.Header = if (origin.len == 0) (if (post) &headers_post else &headers_get) else if (post) &(headers_post ++ origin_hdr) else &(headers_get ++ origin_hdr);
+            http.formatRequest(a, &req, if (post) "POST" else "GET", target.path, host_text, hdrs, body, true) catch return .{ .refused = .memory };
             if (conn.send(h.net, req.items)) |_| {
                 conn.close(h.net);
                 if (reused) {
@@ -967,6 +1246,15 @@ pub const Host = struct {
                 conn.close(h.net);
                 return .{ .refused = .too_large };
             }
+            if (origin.len > 0) {
+                const allow = http.headerValue(head.headers, "access-control-allow-origin") orelse "";
+                const trimmed = std.mem.trim(u8, allow, " \t");
+                if (!std.mem.eql(u8, trimmed, "*") and !std.mem.eql(u8, trimmed, origin)) {
+                    conn.close(h.net);
+                    logf(h.log, "webhost: {s}: {s}: cross-origin answer not allowed for {s} (Access-Control-Allow-Origin: \"{s}\")", .{ tag, url, origin, trimmed });
+                    return .{ .refused = .policy };
+                }
+            }
             // Where the time went: the timings are what a slow page is
             // measured by (resolve+connect, the TLS handshake, the head).
             if (reused) {
@@ -1001,12 +1289,14 @@ pub const Host = struct {
         if (off > d.len or len > d.len - off or len == 0) return h.refuse(.bad_url);
         // A POST's body follows the URL in the data buffer; copied out,
         // since the buffer is about to carry the answer.
-        const body_len: usize = @intCast(@min(flags >> 8, h.body.len));
-        if (off + len + body_len > d.len) return h.refuse(.bad_url);
+        const body_len: usize = @intCast(@min((flags >> 8) & 0xffffff, h.body.len));
+        const origin_len: usize = @intCast(@min((flags >> 32) & 0xffff, h.origin_buf.len));
+        if (off + len + body_len + origin_len > d.len) return h.refuse(.bad_url);
         @memcpy(h.body[0..body_len], d[off + len .. off + len + body_len]);
+        @memcpy(h.origin_buf[0..origin_len], d[off + len + body_len .. off + len + body_len + origin_len]);
         var tag_buf: [24]u8 = undefined;
         const tag = std.fmt.bufPrint(&tag_buf, "page {d}", .{id}) catch "page";
-        switch (h.brokerOpen(&p.client, d[off .. off + len], flags & 1 != 0, h.body[0..body_len], tag)) {
+        switch (h.brokerOpenFrom(&p.client, d[off .. off + len], flags & 1 != 0, h.body[0..body_len], h.origin_buf[0..origin_len], tag)) {
             .refused => |code| h.refuse(code),
             .opened => |op| {
                 // The answer: status, then the final URL and the content

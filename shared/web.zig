@@ -39,9 +39,17 @@ pub const PageReq = union(enum(u64)) {
     /// The next command; the host parks the call until it has one.
     next: void,
     /// Open the resource at data[off..off+len] (an absolute URL).
-    /// `flags`: bit 0 = POST, with a body of `flags >> 8` bytes following
-    /// the URL in the data buffer (form-urlencoded).
+    /// `flags`: bit 0 = POST, with a body of `(flags >> 8) & 0xffffff`
+    /// bytes following the URL in the data buffer (form-urlencoded);
+    /// bits 32..47 = the length of the page's origin following the body,
+    /// for a script's cross-origin request: the broker sends `Origin`
+    /// and admits the answer only if `Access-Control-Allow-Origin` does.
     open: struct { off: u64, len: u64, flags: u64 },
+    /// Per-origin storage (`localStorage`), kept by the host under a
+    /// quota: `op` is a `StorageOp`; the key is data[0..key_len], the
+    /// value data[key_len..key_len+value_len]; for `key_at`, `key_len`
+    /// is the index. The origin is the page's, as the host knows it.
+    storage: struct { op: u64, key_len: u64, value_len: u64 },
     /// The next chunk of the open resource, at most `max` bytes, into
     /// data[0..].
     read: struct { max: u64 },
@@ -64,11 +72,17 @@ pub const HostResp = union(enum(u64)) {
     refused: struct { code: u64 },
     /// `len` bytes at data[0..]; `done` is a `ChunkEnd`.
     chunk: struct { len: u64, done: u64 },
+    /// A count (a storage's length).
+    count: struct { n: u64 },
+    /// `len` bytes at data[0..]: a storage value or key.
+    text: struct { len: u64 },
     // Commands, in answer to `next`.
     /// Navigate to the URL at data[off..off+len].
     load: struct { off: u64, len: u64 },
     /// Time passed (the `wake` the page asked for): run what is due.
     tick: void,
+    /// Whether the pages loaded from now on run their scripts (`on` = 1).
+    scripts: struct { on: u64 },
     /// Scroll by `dy` document pixels (an i64).
     scroll: struct { dy: u64 },
     /// The pointer: `kind` is a `PointerKind`, at viewport (x, y).
@@ -166,7 +180,12 @@ pub const RefuseCode = enum(u64) {
     busy = 8,
     policy = 9,
     memory = 10,
+    /// A storage write past the origin's quota.
+    quota = 11,
 };
+
+/// `PageReq.storage` operations.
+pub const StorageOp = enum(u64) { get = 0, set = 1, remove = 2, clear = 3, key_at = 4, length = 5 };
 
 /// The font buffer: `count` files, each a `[]u8` of `len` bytes, packed
 /// as a header of little-endian u32s (count, then each length) and the

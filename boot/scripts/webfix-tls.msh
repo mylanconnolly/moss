@@ -14,6 +14,7 @@ let pages = [
 def page [req] {
   match $req.path {
     "/big" => { status: 200, body: { file: "index.html", repeat: 8192 } }
+    "/cors.json" => { status: 200, headers: { content-type: "application/json", access-control-allow-origin: "*" }, body: "{\"cors\": \"ok\"}" }
     _ => (match ($pages | find (fn [p] { $p.path == $req.path })) {
         nothing => { status: 404, body: "no such page" }
         $hit => { status: 200, body: { file: $hit.file } }

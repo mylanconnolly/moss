@@ -192,8 +192,8 @@ fn scriptComputed(_: *anyopaque, id: dom.NodeId, name: []const u8, buf: []u8) ?[
 
 /// A script's request: the resource whole through the host's broker,
 /// any status (a 404 is an answer, not a refusal), capped at 4 MB.
-fn scriptRequest(_: *anyopaque, a: std.mem.Allocator, url_text: []const u8, post: bool, body: []const u8, out: *script.Response) bool {
-    switch (openUrl(url_text, post, body)) {
+fn scriptRequest(_: *anyopaque, a: std.mem.Allocator, url_text: []const u8, post: bool, body: []const u8, origin: []const u8, out: *script.Response) bool {
+    switch (openUrlFrom(url_text, post, body, origin)) {
         .ok => |st| out.status = @intCast(@min(st, 999)),
         .refused => |code| {
             out.refused = @tagName(code);
@@ -275,6 +275,38 @@ fn scriptActivate(_: *anyopaque, id: dom.NodeId) void {
     activate(id, false);
 }
 
+/// `localStorage`: the host keeps it per origin; one call per operation.
+fn scriptStorage(_: *anyopaque, op: script.StorageOp, k: []const u8, v: []const u8, buf: []u8) script.StorageResult {
+    if (k.len + v.len > data_len) return .quota;
+    const wop: wire.StorageOp = switch (op) {
+        .get => .get,
+        .set => .set,
+        .remove => .remove,
+        .clear => .clear,
+        .key_at => .key_at,
+        .length => .length,
+    };
+    var key_len: u64 = k.len;
+    if (op == .key_at) {
+        key_len = std.fmt.parseInt(u64, k, 10) catch return .none;
+    } else {
+        @memcpy(data[0..k.len], k);
+        @memcpy(data[k.len .. k.len + v.len], v);
+    }
+    switch (call(.{ .storage = .{ .op = @intFromEnum(wop), .key_len = key_len, .value_len = v.len } })) {
+        .ok => return .ok,
+        .none => return .none,
+        .text => |t| {
+            const n = @min(@min(t.len, data_len), buf.len);
+            @memcpy(buf[0..n], data[0..n]);
+            return .{ .text = buf[0..n] };
+        },
+        .count => |c| return .{ .count = @intCast(@min(c.n, std.math.maxInt(u32))) },
+        .refused => |r| return if (r.code == @intFromEnum(wire.RefuseCode.quota)) .quota else .none,
+        else => return .none,
+    }
+}
+
 fn scriptScroll(_: *anyopaque, _: f64, y: f64) void {
     if (scrollTo(y * zoomScale())) paintAll();
     if (scripts_up) scripts.setScroll(0, page.scroll_y / zoomScale());
@@ -292,7 +324,7 @@ fn runScripts(doc: *dom.Document) void {
     };
     vm.host_now = scriptNow;
     scripts_up = true;
-    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate }) catch {
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate }) catch {
         _ = usys.log(glog, "webpage: the bindings did not fit");
         return;
     };
@@ -591,10 +623,17 @@ var res_type: [256]u8 = undefined;
 var res_type_len: usize = 0;
 
 fn openUrl(url_text: []const u8, post: bool, body: []const u8) Opened {
-    if (url_text.len + body.len > data_len) return .{ .refused = .bad_url };
+    return openUrlFrom(url_text, post, body, "");
+}
+
+/// `openUrl` with the page's origin, for a script's cross-origin
+/// request (the broker does the CORS check).
+fn openUrlFrom(url_text: []const u8, post: bool, body: []const u8, origin: []const u8) Opened {
+    if (url_text.len + body.len + origin.len > data_len or body.len > 0xffffff or origin.len > 0xffff) return .{ .refused = .bad_url };
     @memcpy(data[0..url_text.len], url_text);
     @memcpy(data[url_text.len .. url_text.len + body.len], body);
-    const flags: u64 = (if (post) @as(u64, 1) else 0) | (@as(u64, body.len) << 8);
+    @memcpy(data[url_text.len + body.len .. url_text.len + body.len + origin.len], origin);
+    const flags: u64 = (if (post) @as(u64, 1) else 0) | (@as(u64, body.len) << 8) | (@as(u64, origin.len) << 32);
     const opened = switch (call(.{ .open = .{ .off = 0, .len = url_text.len, .flags = flags } })) {
         .opened => |o| o,
         .refused => |r| return .{ .refused = std.enums.fromInt(wire.RefuseCode, r.code) orelse .protocol },
@@ -1862,6 +1901,7 @@ fn serve() noreturn {
             },
             .idle => loadPictures(idle_picture_budget),
             .tick => tick(),
+            .scripts => |s| scripting = s.on != 0,
             .zoom => |z| {
                 const pct = @min(400, @max(25, z.percent));
                 if (pct != zoom_pct) {

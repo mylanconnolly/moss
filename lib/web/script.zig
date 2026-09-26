@@ -49,8 +49,11 @@ pub const Host = struct {
     scroll: ?*const fn (ctx: *anyopaque, x: f64, y: f64) void = null,
     /// A script's own request (`fetch`, XMLHttpRequest): the whole
     /// resource through the host's broker into `a`; false when refused,
-    /// with `out.refused` saying why. Same-origin only, checked here.
-    request: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, out: *Response) bool = null,
+    /// with `out.refused` saying why. `origin` is the page's for a
+    /// cross-origin request (the host does the CORS check), else empty.
+    request: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, origin: []const u8, out: *Response) bool = null,
+    /// `localStorage`, kept by the host per origin under a quota.
+    storage: ?*const fn (ctx: *anyopaque, op: StorageOp, key: []const u8, value: []const u8, buf: []u8) StorageResult = null,
     /// A script navigates (`location.href = …`, `assign`, `reload`): the
     /// host loads the URL once the script is done.
     navigate: ?*const fn (ctx: *anyopaque, abs_url: []const u8) void = null,
@@ -64,6 +67,9 @@ pub const Host = struct {
 };
 
 pub const Changed = enum { url, title };
+
+pub const StorageOp = enum { get, set, remove, clear, key_at, length };
+pub const StorageResult = union(enum) { ok, none, text: []const u8, count: u32, quota };
 
 /// What a request came back with.
 pub const Response = struct {
@@ -87,6 +93,9 @@ const slot_event: u32 = 2;
 /// An element's `style` (flags 0) or its computed style (flags 1).
 const slot_style: u32 = 3;
 const style_computed: u32 = 1;
+/// A Storage: flags 0 = the host's `localStorage`, 1 = `sessionStorage`.
+const slot_storage: u32 = 4;
+const storage_session: u32 = 1;
 
 // Event flags.
 const ev_stop: u32 = 1 << 0;
@@ -345,6 +354,15 @@ pub const interfaces = [_]Iface{
         .{ .name = "composedPath", .f = eventComposedPath },
     } },
     .{ .name = "CustomEvent", .parent = "Event", .constructible = true },
+    .{ .name = "Storage", .attrs = &.{
+        .{ .name = "length", .get = storageLength },
+    }, .methods = &.{
+        .{ .name = "getItem", .len = 1, .f = storageGetItem },
+        .{ .name = "setItem", .len = 2, .f = storageSetItem },
+        .{ .name = "removeItem", .len = 1, .f = storageRemoveItem },
+        .{ .name = "clear", .f = storageClear },
+        .{ .name = "key", .len = 1, .f = storageKey },
+    } },
     .{ .name = "XMLHttpRequest", .parent = "EventTarget", .constructible = true, .consts = &.{
         .{ .name = "UNSENT", .value = 0 },
         .{ .name = "OPENED", .value = 1 },
@@ -464,6 +482,7 @@ const I = struct {
     const event = ifaceIndex("Event");
     const custom_event = ifaceIndex("CustomEvent");
     const xhr = ifaceIndex("XMLHttpRequest");
+    const storage = ifaceIndex("Storage");
     const mouse_event = ifaceIndex("MouseEvent");
 };
 
@@ -482,6 +501,8 @@ const Timer = struct {
 pub const ReadyState = enum { loading, interactive, complete };
 
 const HistoryEntry = struct { url: []u8, state: Value };
+const SessionItem = struct { key: []u8, value: []u8 };
+const session_quota: usize = 256 << 10;
 
 pub const Page = struct {
     vm: *Vm,
@@ -519,6 +540,8 @@ pub const Page = struct {
     history: std.ArrayList(HistoryEntry) = .empty,
     history_index: usize = 0,
     modules_run: u32 = 0,
+    /// `sessionStorage`: the page's own, gone with the document.
+    session_items: std.ArrayList(SessionItem) = .empty,
 
     /// Install the bindings into `vm` for `doc`. The VM's `host_data`
     /// becomes this page and its embedder roots this page's tables.
@@ -541,6 +564,11 @@ pub const Page = struct {
         p.sources.deinit(p.a);
         for (p.history.items) |h| p.a.free(h.url);
         p.history.deinit(p.a);
+        for (p.session_items.items) |it| {
+            p.a.free(it.key);
+            p.a.free(it.value);
+        }
+        p.session_items.deinit(p.a);
         if (p.url_owned) p.a.free(p.url);
         p.vm.embedder_roots = null;
         p.vm.host_data = null;
@@ -662,6 +690,12 @@ pub const Page = struct {
         try vm.defineGetter(hist, "state", historyState);
         try vm.defineValue(hist, "scrollRestoration", try vm.str("auto"), .default);
         try vm.defineValue(g, "history", hist.asValue(), .hidden);
+        const local = try vm.objects.create(p.protos[I.storage].asValue(), .dom, @sizeOf(Slot));
+        local.internal(Slot).* = .{ .kind = slot_storage, .id = 0, .flags = 0 };
+        try vm.defineValue(g, "localStorage", local.asValue(), .hidden);
+        const session = try vm.objects.create(p.protos[I.storage].asValue(), .dom, @sizeOf(Slot));
+        session.internal(Slot).* = .{ .kind = slot_storage, .id = 0, .flags = storage_session };
+        try vm.defineValue(g, "sessionStorage", session.asValue(), .hidden);
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
         _ = try vm.defineNative(g, "scrollTo", 0, scrollToNative);
         _ = try vm.defineNative(g, "scroll", 0, scrollToNative);
@@ -3574,6 +3608,19 @@ fn scrollIntoView(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value 
 
 // ------------------------------------------------------------ requests
 
+/// A request's URL resolved against the document, and the document's
+/// origin when the request crosses it ("" when same-origin).
+const Resolved = struct { url: []const u8, origin: []const u8 };
+
+fn resolveRequest(p: *Page, raw: []const u8, a: std.mem.Allocator) ?Resolved {
+    const base = url.parse(a, p.url, null) catch return null;
+    const u = url.parse(a, raw, &base) catch return null;
+    const o1 = base.origin(a) catch return null;
+    const o2 = u.origin(a) catch return null;
+    if (std.mem.eql(u8, o1, "null")) return null;
+    return .{ .url = u.href(a) catch return null, .origin = if (std.mem.eql(u8, o1, o2)) "" else o1 };
+}
+
 /// The absolute URL of a request, resolved against the document, when
 /// it is same-origin; null otherwise.
 fn sameOriginUrl(p: *Page, raw: []const u8, a: std.mem.Allocator) ?[]const u8 {
@@ -3592,7 +3639,7 @@ fn rejectedPromise(vm: *Vm, kind: js.vm.ErrorKind, msg: []const u8) Error!Value 
     return cap.promise;
 }
 
-const Request = struct { url: []const u8, post: bool, body: []const u8 };
+const Request = struct { url: []const u8, post: bool, body: []const u8, origin: []const u8 = "" };
 
 /// `fetch`'s and XHR's arguments read: the URL (resolved, same-origin),
 /// the method, the body.
@@ -3604,7 +3651,7 @@ fn readRequest(vm: *Vm, url_v: Value, method_v: Value, body_v: Value, a: std.mem
         const inner = try vm.get(uo, .{ .atom = try vm.atom("url") }, url_v);
         raw_url = try strArg(vm, if (inner.isUndefined()) url_v else inner, a);
     } else raw_url = try strArg(vm, url_v, a);
-    const abs = sameOriginUrl(p, raw_url, a) orelse return .{ .bad = "only same-origin requests are allowed from a page yet" };
+    const r = resolveRequest(p, raw_url, a) orelse return .{ .bad = "not a URL a page can request" };
     var post = false;
     if (!method_v.isNullish()) {
         const m = try strArg(vm, method_v, a);
@@ -3612,7 +3659,7 @@ fn readRequest(vm: *Vm, url_v: Value, method_v: Value, body_v: Value, a: std.mem
     }
     var body: []const u8 = "";
     if (!body_v.isNullish()) body = try strArg(vm, body_v, a);
-    return .{ .ok = .{ .url = abs, .post = post, .body = body } };
+    return .{ .ok = .{ .url = r.url, .post = post, .body = body, .origin = r.origin } };
 }
 
 fn doRequest(p: *Page, req: Request, a: std.mem.Allocator, out: *Response) bool {
@@ -3620,7 +3667,7 @@ fn doRequest(p: *Page, req: Request, a: std.mem.Allocator, out: *Response) bool 
         out.refused = "this page has no network";
         return false;
     };
-    return f(p.host.ctx, a, req.url, req.post, req.body, out);
+    return f(p.host.ctx, a, req.url, req.post, req.body, req.origin, out);
 }
 
 /// A native that closes over a string: `text()` and `json()` on a
@@ -3741,6 +3788,143 @@ fn fetchNative(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
     return js.realm.promiseResolve(vm, try responseObject(vm, &out));
 }
 
+// ------------------------------------------------------------- Storage
+
+fn thisStorage(vm: *Vm, this: Value) Error!bool {
+    if (this.isObject()) {
+        const o = Vm.asObject(this);
+        if (o.class == .dom and o.internal(Slot).kind == slot_storage) return o.internal(Slot).flags & storage_session != 0;
+    }
+    return vm.throwTypeError("Illegal invocation");
+}
+
+fn sessionFind(p: *Page, key: []const u8) ?usize {
+    for (p.session_items.items, 0..) |it, i| if (std.mem.eql(u8, it.key, key)) return i;
+    return null;
+}
+
+fn sessionUsed(p: *Page) usize {
+    var n: usize = 0;
+    for (p.session_items.items) |it| n += it.key.len + it.value.len;
+    return n;
+}
+
+/// One storage operation on either store; the host's answer for the
+/// local one, the page's list for the session one.
+fn storageOp(vm: *Vm, session: bool, op: StorageOp, key: []const u8, value: []const u8, buf: []u8) Error!StorageResult {
+    const p = pageOf(vm);
+    if (!session) {
+        const f = p.host.storage orelse return .none;
+        return f(p.host.ctx, op, key, value, buf);
+    }
+    switch (op) {
+        .get => {
+            const i = sessionFind(p, key) orelse return .none;
+            return .{ .text = p.session_items.items[i].value };
+        },
+        .set => {
+            // The bytes the old entry for this key holds, freed by the write.
+            const old: usize = if (sessionFind(p, key)) |i| p.session_items.items[i].key.len + p.session_items.items[i].value.len else 0;
+            if (sessionUsed(p) - old + key.len + value.len > session_quota) return .quota;
+            const v = try p.a.dupe(u8, value);
+            if (sessionFind(p, key)) |i| {
+                p.a.free(p.session_items.items[i].value);
+                p.session_items.items[i].value = v;
+            } else {
+                const k = try p.a.dupe(u8, key);
+                try p.session_items.append(p.a, .{ .key = k, .value = v });
+            }
+            return .ok;
+        },
+        .remove => {
+            if (sessionFind(p, key)) |i| {
+                const it = p.session_items.orderedRemove(i);
+                p.a.free(it.key);
+                p.a.free(it.value);
+            }
+            return .ok;
+        },
+        .clear => {
+            for (p.session_items.items) |it| {
+                p.a.free(it.key);
+                p.a.free(it.value);
+            }
+            p.session_items.clearRetainingCapacity();
+            return .ok;
+        },
+        .key_at => {
+            const n = std.fmt.parseInt(usize, key, 10) catch return .none;
+            if (n >= p.session_items.items.len) return .none;
+            return .{ .text = p.session_items.items[n].key };
+        },
+        .length => return .{ .count = @intCast(p.session_items.items.len) },
+    }
+}
+
+fn storageGetItem(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const session = try thisStorage(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const key = try strArg(vm, arg(args, 0), sc.a());
+    var buf: [4096]u8 = undefined;
+    return switch (try storageOp(vm, session, .get, key, "", &buf)) {
+        .text => |t| jsStr(vm, t),
+        else => Value.null_,
+    };
+}
+
+fn storageSetItem(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const session = try thisStorage(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const key = try strArg(vm, arg(args, 0), sc.a());
+    const value = try strArg(vm, arg(args, 1), sc.a());
+    var buf: [16]u8 = undefined;
+    return switch (try storageOp(vm, session, .set, key, value, &buf)) {
+        .quota => vm.throwError(.Error, "QuotaExceededError: the origin's storage is full"),
+        else => Value.undefined_,
+    };
+}
+
+fn storageRemoveItem(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const session = try thisStorage(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const key = try strArg(vm, arg(args, 0), sc.a());
+    var buf: [16]u8 = undefined;
+    _ = try storageOp(vm, session, .remove, key, "", &buf);
+    return Value.undefined_;
+}
+
+fn storageClear(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const session = try thisStorage(vm, this);
+    var buf: [16]u8 = undefined;
+    _ = try storageOp(vm, session, .clear, "", "", &buf);
+    return Value.undefined_;
+}
+
+fn storageKey(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const session = try thisStorage(vm, this);
+    const n = try vm.toIntegerOrInfinity(arg(args, 0));
+    if (n < 0 or n > 1e9) return Value.null_;
+    var nbuf: [24]u8 = undefined;
+    const ntext = std.fmt.bufPrint(&nbuf, "{d}", .{@as(u64, @intFromFloat(n))}) catch return Value.null_;
+    var buf: [4096]u8 = undefined;
+    return switch (try storageOp(vm, session, .key_at, ntext, "", &buf)) {
+        .text => |t| jsStr(vm, t),
+        else => Value.null_,
+    };
+}
+
+fn storageLength(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const session = try thisStorage(vm, this);
+    var buf: [16]u8 = undefined;
+    return switch (try storageOp(vm, session, .length, "", "", &buf)) {
+        .count => |n| Value.fromInt(@intCast(n)),
+        else => Value.fromInt(0),
+    };
+}
+
 // ------------------------------------------------------- XMLHttpRequest
 
 fn xhrReset(vm: *Vm, o: *Object, ready: i32) Error!void {
@@ -3765,9 +3949,10 @@ fn xhrOpen(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const method = try strArg(vm, arg(args, 0), sc.a());
     const raw = try strArg(vm, arg(args, 1), sc.a());
     if (!std.ascii.eqlIgnoreCase(method, "GET") and !std.ascii.eqlIgnoreCase(method, "POST") and !std.ascii.eqlIgnoreCase(method, "HEAD")) return vm.throwError(.SyntaxError, "XMLHttpRequest: only GET and POST are allowed from a page yet");
-    const abs = sameOriginUrl(p, raw, sc.a()) orelse return vm.throwError(.SyntaxError, "XMLHttpRequest: only same-origin requests are allowed from a page yet");
+    const r = resolveRequest(p, raw, sc.a()) orelse return vm.throwError(.SyntaxError, "XMLHttpRequest: not a URL a page can request");
     try vm.defineValue(o, "__method", try vm.str(method), .hidden);
-    try vm.defineValue(o, "__url", try vm.str(abs), .hidden);
+    try vm.defineValue(o, "__url", try vm.str(r.url), .hidden);
+    try vm.defineValue(o, "__origin", try vm.str(r.origin), .hidden);
     try vm.defineValue(o, "__ctype", try vm.str(""), .hidden);
     try xhrReset(vm, o, 1);
     try xhrHandler(vm, o, "onreadystatechange", "readystatechange");
@@ -3795,7 +3980,8 @@ fn xhrSend(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     const method_v = try vm.get(o, .{ .atom = try vm.atom("__method") }, this);
     const url_v = try vm.get(o, .{ .atom = try vm.atom("__url") }, this);
     if (!url_v.isString()) return vm.throwError(.TypeError, "InvalidStateError: send() before open()");
-    const req: Request = .{ .url = try strArg(vm, url_v, sc.a()), .post = std.ascii.eqlIgnoreCase(try strArg(vm, method_v, sc.a()), "POST"), .body = if (arg(args, 0).isNullish()) "" else try strArg(vm, arg(args, 0), sc.a()) };
+    const origin_v = try vm.get(o, .{ .atom = try vm.atom("__origin") }, this);
+    const req: Request = .{ .url = try strArg(vm, url_v, sc.a()), .post = std.ascii.eqlIgnoreCase(try strArg(vm, method_v, sc.a()), "POST"), .body = if (arg(args, 0).isNullish()) "" else try strArg(vm, arg(args, 0), sc.a()), .origin = if (origin_v.isString()) try strArg(vm, origin_v, sc.a()) else "" };
     var out: Response = .{};
     const ok = doRequest(p, req, sc.a(), &out);
     try vm.defineValue(o, "readyState", Value.fromInt(4), .default);
@@ -3860,6 +4046,8 @@ const TestHost = struct {
     changes: std.ArrayList(u8) = .empty,
     submitted: ?NodeId = null,
     activated: ?NodeId = null,
+    /// A tiny in-memory store: key/value pairs per test host.
+    store: std.ArrayList([2][]u8) = .empty,
     fn log(ctx: *anyopaque, level: Level, text: []const u8) void {
         const h: *TestHost = @ptrCast(@alignCast(ctx));
         h.lines.appendSlice(h.a, @tagName(level)) catch {};
@@ -3909,8 +4097,72 @@ const TestHost = struct {
     }
     /// Canned answers: /data.json is JSON, /missing is a 404, /refuse is
     /// refused by policy, anything else echoes its URL and body.
-    fn request(_: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, out: *Response) bool {
+    fn storage(ctx: *anyopaque, op: StorageOp, key: []const u8, value: []const u8, buf: []u8) StorageResult {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        var found: ?usize = null;
+        for (h.store.items, 0..) |kv, i| if (std.mem.eql(u8, kv[0], key)) {
+            found = i;
+        };
+        switch (op) {
+            .get => {
+                const i = found orelse return .none;
+                const v = h.store.items[i][1];
+                const n = @min(v.len, buf.len);
+                @memcpy(buf[0..n], v[0..n]);
+                return .{ .text = buf[0..n] };
+            },
+            .set => {
+                if (key.len + value.len > 64) return .quota;
+                const v = h.a.dupe(u8, value) catch return .quota;
+                if (found) |i| {
+                    h.a.free(h.store.items[i][1]);
+                    h.store.items[i][1] = v;
+                } else {
+                    const k = h.a.dupe(u8, key) catch return .quota;
+                    h.store.append(h.a, .{ k, v }) catch return .quota;
+                }
+                return .ok;
+            },
+            .remove => {
+                if (found) |i| {
+                    const kv = h.store.orderedRemove(i);
+                    h.a.free(kv[0]);
+                    h.a.free(kv[1]);
+                }
+                return .ok;
+            },
+            .clear => {
+                for (h.store.items) |kv| {
+                    h.a.free(kv[0]);
+                    h.a.free(kv[1]);
+                }
+                h.store.clearRetainingCapacity();
+                return .ok;
+            },
+            .key_at => {
+                const n = std.fmt.parseInt(usize, key, 10) catch return .none;
+                if (n >= h.store.items.len) return .none;
+                const k = h.store.items[n][0];
+                @memcpy(buf[0..k.len], k);
+                return .{ .text = buf[0..k.len] };
+            },
+            .length => return .{ .count = @intCast(h.store.items.len) },
+        }
+    }
+    fn request(_: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, origin: []const u8, out: *Response) bool {
         out.url = abs_url;
+        // Another origin: allowed only with the origin sent (the broker
+        // would check the answer's header); this one answers by echo.
+        if (std.mem.indexOf(u8, abs_url, "elsewhere.test") != null) {
+            if (origin.len == 0) {
+                out.refused = "no origin";
+                return false;
+            }
+            out.status = 200;
+            out.content_type = "text/plain";
+            out.body = std.fmt.allocPrint(a, "cors from {s}", .{origin}) catch return false;
+            return true;
+        }
         if (std.mem.endsWith(u8, abs_url, "/data.json")) {
             out.status = 200;
             out.content_type = "application/json";
@@ -3952,7 +4204,7 @@ const TestPage = struct {
         tp.doc = try html.parse(tp.arena.allocator(), markup, .{ .scripting = true });
         tp.host = try ta.create(TestHost);
         tp.host.* = .{ .a = ta };
-        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request, .fetch = TestHost.fetch, .navigate = TestHost.navigate, .changed = TestHost.changed, .submit = TestHost.submit, .activate = TestHost.activate });
+        try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request, .fetch = TestHost.fetch, .navigate = TestHost.navigate, .changed = TestHost.changed, .submit = TestHost.submit, .activate = TestHost.activate, .storage = TestHost.storage });
         try tp.page.setUrl("http://example.test:8080/dir/page.html?q=1#top");
         return tp;
     }
@@ -3966,6 +4218,11 @@ const TestPage = struct {
         tp.host.lines.deinit(ta);
         tp.host.navigated.deinit(ta);
         tp.host.changes.deinit(ta);
+        for (tp.host.store.items) |kv| {
+            ta.free(kv[0]);
+            ta.free(kv[1]);
+        }
+        tp.host.store.deinit(ta);
         ta.destroy(tp.host);
         tp.arena.deinit();
         ta.destroy(tp);
@@ -4154,7 +4411,7 @@ test "script: fetch and XMLHttpRequest go through the host, same-origin only" {
         \\  ps.push(fetch('/api/data.json').then(function (r) { out.push('f1:' + r.ok + ':' + r.status + ':' + r.url + ':' + r.headers.get('Content-Type')); return r.json(); }).then(function (j) { out.push('json:' + j.n); }));
         \\  ps.push(fetch('missing').then(function (r) { out.push('f2:' + r.ok + ':' + r.status + ':' + r.statusText); return r.text(); }).then(function (t) { out.push('text:' + t); }));
         \\  ps.push(fetch('/post', { method: 'POST', body: 'a=1' }).then(function (r) { return r.text(); }).then(function (t) { out.push('post:' + t); }));
-        \\  ps.push(fetch('http://elsewhere.test/x').catch(function (e) { out.push('cors:' + (e instanceof TypeError)); }));
+        \\  ps.push(fetch('http://elsewhere.test/x').then(function (r) { return r.text(); }).then(function (t) { out.push('cors:' + t); }));
         \\  ps.push(fetch('/refuse').catch(function (e) { out.push('refused:' + e.message); }));
         \\  var x = new XMLHttpRequest();
         \\  var states = [];
@@ -4165,7 +4422,7 @@ test "script: fetch and XMLHttpRequest go through the host, same-origin only" {
         \\  x.send();
         \\  var y = new XMLHttpRequest(); y.responseType = 'json'; y.open('GET', '/data.json'); y.send(); out.push('yjson:' + y.response.n);
         \\  var z = new XMLHttpRequest(); var zerr = false; z.onerror = function () { zerr = true; }; z.open('GET', '/refuse'); z.send(); out.push('zerr:' + zerr + ':' + z.status);
-        \\  var threw = false; try { new XMLHttpRequest().open('GET', 'https://other.test/'); } catch (e) { threw = e.name === 'SyntaxError'; } out.push('xcors:' + threw);
+        \\  var threw = false; try { new XMLHttpRequest().open('GET', 'http://a b/'); } catch (e) { threw = e.name === 'SyntaxError'; } out.push('xcors:' + threw);
         \\  Promise.all(ps).then(function () { console.log(out.sort().join(' ')); });
         \\</script></body>
     );
@@ -4174,7 +4431,7 @@ test "script: fetch and XMLHttpRequest go through the host, same-origin only" {
     try std.testing.expect(std.mem.indexOf(u8, tp.host.lines.items, "err:script: XMLHttpRequest http://example.test:8080/refuse: policy") != null);
     const last = std.mem.lastIndexOf(u8, tp.host.lines.items, "log:").?;
     try std.testing.expectEqualStrings(
-        \\log:cors:true end:1,4 f1:true:200:http://example.test:8080/api/data.json:application/json f2:false:404:Not Found json:7 post:POST http://example.test:8080/post a=1 refused:fetch: policy text:no such page xcors:true xhr:200:GET http://example.test:8080/thing?q=1 :text/plain; charset=utf-8:true yjson:7 zerr:true:0
+        \\log:cors:cors from http://example.test:8080 end:1,4 f1:true:200:http://example.test:8080/api/data.json:application/json f2:false:404:Not Found json:7 post:POST http://example.test:8080/post a=1 refused:fetch: policy text:no such page xcors:true xhr:200:GET http://example.test:8080/thing?q=1 :text/plain; charset=utf-8:true yjson:7 zerr:true:0
         \\
     , tp.host.lines.items[last..]);
 }
@@ -4262,6 +4519,30 @@ test "script: forms fire submit, input and change, and a script can submit or re
     try std.testing.expect(tp.page.fireSubmit(form));
     tp.page.runSource("report()", "check");
     try std.testing.expectEqualStrings("log:post /go 4 4 true 1 b 1 tt true submit:true submit:true lclick input:vw input:vw change:vw submit:true\n", tp.host.lines.items);
+}
+
+test "script: localStorage goes through the host, sessionStorage stays in the page" {
+    const tp = try TestPage.open(
+        \\<body><script>
+        \\  var out = [];
+        \\  localStorage.setItem('a', '1'); localStorage.setItem('b', 'two'); localStorage.setItem('a', 'one');
+        \\  out.push(localStorage.length, localStorage.getItem('a'), localStorage.getItem('b'), localStorage.getItem('zz'), localStorage.key(0), localStorage.key(1), localStorage.key(2));
+        \\  localStorage.removeItem('a');
+        \\  out.push(localStorage.length, localStorage.getItem('a'));
+        \\  var q = false; try { localStorage.setItem('big', 'x'.repeat(100)); } catch (e) { q = /QuotaExceededError/.test(e.message); }
+        \\  out.push('quota:' + q);
+        \\  sessionStorage.setItem('s', 'v'); sessionStorage.setItem('t', 'w');
+        \\  out.push(sessionStorage.length, sessionStorage.getItem('s'), sessionStorage.key(1), localStorage.getItem('s'));
+        \\  sessionStorage.clear();
+        \\  out.push(sessionStorage.length, localStorage.length, localStorage instanceof Storage);
+        \\  console.log(out.join(' '));
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    // (`join` renders a null as nothing.)
+    try std.testing.expectEqualStrings("log:2 one two  a b  1  quota:true 2 v t  0 1 true\n", tp.host.lines.items);
+    try std.testing.expectEqual(@as(usize, 1), tp.host.store.items.len);
 }
 
 test "script: the wrappers survive a collection at every safe point" {

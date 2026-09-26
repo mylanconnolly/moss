@@ -202,6 +202,22 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     waitEvent(a, .dumped, 100);
     demand(!pa.dumped_cut and std.mem.indexOf(u8, pa.dumped(), "<h1>About the fixtures</h1>") != null, "the dump lacks the heading", 46);
 
+    // 3b. Scripts off: the fixture app loads without its script's marks;
+    // on again, with them.
+    const app = "http://www.moss.test:8080/app.html";
+    demand(host.send(a, .{ .scripts = false }), "send scripts off", 56);
+    loadPage(a, app);
+    demand(host.send(a, .{ .dump = .html }), "send dump", 57);
+    waitEvent(a, .dumped, 100);
+    demand(std.mem.indexOf(u8, pa.dumped(), "data-loaded") == null, "scripts ran while off", 58);
+    demand(std.mem.indexOf(u8, pa.dumped(), "Scripts are off.") != null, "noscript content was not shown with scripts off", 59);
+    demand(host.send(a, .{ .scripts = true }), "send scripts on", 60);
+    loadPage(a, app);
+    demand(host.send(a, .{ .dump = .html }), "send dump", 61);
+    waitEvent(a, .dumped, 100);
+    demand(std.mem.indexOf(u8, pa.dumped(), "data-loaded=\"complete\"") != null, "scripts did not run when on again", 62);
+    _ = usys.log(glog, "webpagecli: scripts off and on ok");
+
     // 4. A page that reads more than its arena dies of it; nothing else does.
     const b = host.spawn(stage.handle, 640, 100) orelse fail("second spawn refused", 47);
     demand(host.send(b, .{ .load = boom }), "send boom", 48);

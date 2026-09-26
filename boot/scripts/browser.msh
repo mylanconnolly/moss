@@ -95,6 +95,76 @@ def save-bookmarks [marks] {
   save ($store + "/bookmarks.msh") (to-data $marks)
 }
 
+# Scripts per site: the user's list of origins with scripts off
+# (state/browser/noscript.msh in the home) under the administrator's
+# policy (conf/app/web.msh: { scripts: "on" | "off", allow: [origins],
+# deny: [origins] }; deny wins, then allow, then the user's list, then
+# the default, which is on). The page leaf carries the verdict, and the
+# page domain honours it from its next load.
+def load-noscript [] {
+  match (cat ($store + "/noscript.msh")) {
+    ok $text => (match ($text | from-data) {
+        ok $v => $v
+        _ => []
+      })
+    _ => []
+  }
+}
+
+def save-noscript [list] {
+  match (mkdir $store) {
+    _ => ""
+  }
+  save ($store + "/noscript.msh") (to-data $list)
+}
+
+def load-policy [] {
+  match (sysconf-read "web") {
+    ok $t => (match ($t | from-data) {
+        ok $v => $v
+        _ => { scripts: "on" }
+      })
+    _ => { scripts: "on" }
+  }
+}
+
+def origin-of [url] {
+  $url | split "/" | first 3 | join "/"
+}
+
+def in-list [list, item] {
+  $list | any (fn [o] { $o == $item })
+}
+
+# A record's value under `key`, or `dflt` when it has none.
+def field-or [rec, key, dflt] {
+  match ($rec | keys | any (fn [k] { $k == $key })) {
+    true => ($rec | get $key)
+    _ => $dflt
+  }
+}
+
+def list-of [rec, key] {
+  field-or $rec $key []
+}
+
+# Whether the administrator's policy names the origin (deny or allow).
+def ruled-by-policy [policy, origin] {
+  (in-list (list-of $policy "deny") $origin) or (in-list (list-of $policy "allow") $origin)
+}
+
+def scripts-for [policy, noscript, url] {
+  let origin = (origin-of $url)
+  let default_on = (match (field-or $policy "scripts" "on") { "off" => false; _ => true })
+  match (in-list (list-of $policy "deny") $origin) {
+    true => false
+    _ => (match (in-list (list-of $policy "allow") $origin) {
+        true => true
+        _ => (match (in-list $noscript $origin) { true => false; _ => $default_on })
+      })
+  }
+}
+
 def note-history [url] {
   match (mkdir $store) {
     _ => ""
@@ -128,15 +198,22 @@ def status-line [state, tab] {
 def site-panel [state, tab] {
   let info = (page-info $tab.id)
   let origin = ($tab.url | split "/" | first 3 | join "/")
+  let on = (scripts-for $state.policy $state.noscript $tab.url)
+  let user_off = (in-list $state.noscript $origin)
+  let ruled = (ruled-by-policy $state.policy $origin)
   { kind: "section", title: "Site", children: [
       { kind: "label", text: ("Origin: " + $origin) }
+      { kind: "row", gap: 6, children: [
+          { kind: "label", text: ("Scripts: " + (match $on { true => "on"; _ => "off" }) + (match $ruled { true => " (set by the administrator)"; _ => "" })) }
+          { kind: "button", id: "toggle-scripts", label: (match $user_off { true => "Allow scripts here"; _ => "Block scripts here" }), disabled: $ruled }
+        ] }
       { kind: "label", text: ("Page domain: " + (match $info.alive { true => "alive"; _ => "gone" }) + ", " + (str $info.used_kb) + " KB of " + (str $info.limit_kb) + " KB") }
       { kind: "label", muted: true, wrap: true, text: "The page holds one channel to this window and nothing else: no filesystem, no network of its own, no cookies yet. What it fetches goes through this window's broker." }
     ] }
 }
 
 let final = (gui {
-    init:  { tabs: [(new-tab "t1" $home)], active: "t1", next: 2, bookmarks: (load-bookmarks), show: "", find: "", find_nav: 0, fgen: 0, zoom: 100, note: "" }
+    init:  { tabs: [(new-tab "t1" $home)], active: "t1", next: 2, bookmarks: (load-bookmarks), show: "", find: "", find_nav: 0, fgen: 0, zoom: 100, note: "", noscript: (load-noscript), policy: (load-policy) }
     title: "Web"
     width: 1000
     view: (fn [state] {
@@ -171,7 +248,9 @@ let final = (gui {
             "site" => [(site-panel $state $cur)]
             _ => []
           })
-        let pages = ($state.tabs | map (fn [t] { { kind: "page", id: $t.id, url: $t.url, nav: $t.nav, visible: ($t.id == $state.active), h: 520, grow: true, zoom: $state.zoom, find: $state.find, find_nav: $state.find_nav } }))
+        let policy = $state.policy
+        let noscript = $state.noscript
+        let pages = ($state.tabs | map (fn [t] { { kind: "page", id: $t.id, url: $t.url, nav: $t.nav, visible: ($t.id == $state.active), h: 520, grow: true, zoom: $state.zoom, find: $state.find, find_nav: $state.find_nav, scripts: (scripts-for $policy $noscript $t.url) } }))
         let status = [{ kind: "label", muted: true, text: (status-line $state $cur) }]
         # The pages share one gap-less column: a hidden tab's leaf takes no
         # room at all, so the window's height is the shown page's. (`map`
@@ -247,6 +326,20 @@ let final = (gui {
                 })
             })
           "site" => ($state | merge { show: (match $state.show { "site" => ""; _ => "site" }) })
+          "toggle-scripts" => {
+            # Flip the site's entry in the user's list, keep it, and reload
+            # the tab so the page domain takes the new word.
+            let cur = (active-tab $state)
+            let origin = (origin-of $cur.url)
+            let list = (match (in-list $state.noscript $origin) {
+                true => ($state.noscript | filter (fn [o] { $o != $origin }))
+                _ => ($state.noscript + [$origin])
+              })
+            match (save-noscript $list) {
+              _ => ""
+            }
+            set-tab ($state | merge { noscript: $list }) $cur.id { nav: ($cur.nav + 1), state: "loading", skip: true }
+          }
           "find" => ($state | merge { find: ($ev.fields | get ("find-" + (str $state.fgen))), find_nav: ($state.find_nav + 1), note: "" })
           "zoomin" => ($state | merge { zoom: (match (($state.zoom + 25) > 300) { true => 300; _ => ($state.zoom + 25) }) })
           "zoomout" => ($state | merge { zoom: (match (($state.zoom - 25) < 50) { true => 50; _ => ($state.zoom - 25) }) })

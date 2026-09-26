@@ -7133,6 +7133,65 @@ control does what a pointer click does when no listener prevents it.
 The fixture imports a module of two files, pushes and pops a history
 entry, and keeps a submit for itself; the drill reads the marks.
 
+**Stage 11f, CORS and storage (as built, 2026-09-26).** A script's
+request may cross origins now, and the broker decides: the page puts
+its origin after the body in the `open` message (`flags` bits 32..47
+carry its length), the broker sends it as the `Origin` header, and
+admits the answer only if `Access-Control-Allow-Origin` is `*` or names
+that origin — the simple CORS case (no credentials, no preflight); any
+other answer is closed unread and refused as `policy`, with a log line
+naming the header it saw. Same-origin requests carry no origin and are
+admitted as before; a `null` origin (a page not from a URL) can request
+nothing. The check is the host's because the host is the party the
+page cannot lie to: a page cannot forge its origin, since the broker
+knows the URL it loaded. `localStorage` is the host's too: per-origin
+records of (origin, key, value) in one 128 KB buffer per host, one
+record per live key (a write replaces, a remove drops, `clear` sweeps
+the origin), 32 KB of keys and values per origin, past which `setItem`
+throws `QuotaExceededError`. The origin is the page's URL as the host
+recorded it from the page's own `url` event, not a word in the
+request. The store lives as long as the host: the browser's pages
+share one across a session and the headless `web-render`'s across a
+script's run (the drill renders the fixture twice and finds the visit
+count at two); it is not written to disk yet — persistence under the
+home is the next cut, once the runtime holds a view for it.
+`sessionStorage` is the page's own list, gone with the document, 256
+KB at most. Named access (`localStorage.foo`) is not there: the
+bindings have no exotic objects yet, so it is `getItem`/`setItem`.
+
+**Stage 11g, the switch and the disk (as built, 2026-09-26).** Scripts
+are on by default and off per site: the `Site` panel of the Web window
+shows the origin's verdict and a button that blocks or allows scripts
+there, the user's list lives in `state/browser/noscript.msh` in the
+home, and above it the administrator's policy in `conf/app/web.msh`
+(`{ scripts: "on" | "off", allow: [origins], deny: [origins] }` — deny
+wins, then allow, then the user's list, then the default), read through
+the session's conf view when the unit has one (an optional give: the
+`browser` drill's manager hands out none, and the app runs without a
+policy). The verdict travels as a field of the page leaf (`scripts:`),
+the runtime sends the new `scripts` command before the load it applies
+to, and the page domain parses the next document with scripting off —
+`<noscript>` shows, nothing runs — so the sandbox, not the window, is
+where the switch takes effect. The webpagecli drill loads the fixture
+app with scripts off and on and reads both documents back. And
+`localStorage` reached the disk: the browser runtime hands the host the
+program's own view (a session app's home) as the store's directory,
+`state/browser/storage/`, one file per origin named by a hash of it;
+an origin's records are read on its first touch and its file rewritten
+on every change, so a page's storage is there at the next boot. The
+headless `web-render` stays in memory. Found on the way: the fabric
+service's 16 MB budget, which pays for the shells it spawns on a peer,
+was tipped by the storage buffers in every `mshrun`'s two hosts (the
+`flogin` drill: `spawn by fabric refused: QuotaExceeded`, the quota
+chain in the log naming it in one line) — 32 MB now, and a note in the
+unit that an mshrun is 8 MB of statics and growing. And a shell fact
+the host tests could not show: inside a `gui` view, a `fn` closure that
+passes the view's *parameter* (`$state`) to a `def` failed on the
+device with `unknown variable $state`, while a `let` copied from it
+(`let policy = $state.policy`) passes fine — the same code ran on the
+host. The browser script binds what a closure needs to lets first;
+the difference is filed under the shell's runtime, not understood.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

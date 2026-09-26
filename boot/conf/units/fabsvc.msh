@@ -3,13 +3,15 @@
 # with its certificate, in state/fabric — the root of trust is needed
 # only to certify a new identity. Revocations it accepts are kept there
 # too. Once certified it dials the seeds (skipping itself). Its budget
-# pays for the children it spawns for peers (remote stages): memory
+# pays for the children it spawns for peers (remote stages, an mshrun of
+# 8 MB of statics and growing — the pages' storage buffers tipped 16 MB
+# on 2026-09-26): memory
 # accounts nest, and a child's pages are the parent's.
 {
   image:  fabric
   arg:    1
   node:   boot
-  budget: { kobj: 4mb, user: 16mb }
+  budget: { kobj: 4mb, user: 32mb }
   grant:  [log, spawner, bootfs]
   give: [
     { tag: buf, shm: 1 }

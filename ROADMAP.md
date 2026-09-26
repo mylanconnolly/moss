@@ -1032,9 +1032,18 @@ supervises), and memory history per unit beside the CPU one.
       page's loader (deferred, URL-named), `location` assignment and
       `hash`, `history.pushState`/`back` with `popstate`, URL and title
       changes reported to the host, `HTMLFormElement` with the
-      `submit`/`input`/`change` events the page fires. Next: storage
-      per origin, CORS, the per-site switch, `document.styleSheets`,
-      keyboard events, Acid3.
+      `submit`/`input`/`change` events the page fires; (f) the same
+      day — simple CORS in the broker (`Origin` sent, the answer
+      admitted only when `Access-Control-Allow-Origin` allows it) and
+      `localStorage` kept by the host per origin under a quota (in
+      memory for the host's life; the disk is next), `sessionStorage`
+      in the page; (g) the same day — the per-site switch in the Site
+      panel over the administrator's policy in `conf/app/web.msh`
+      (deny, allow, the user's list, the default), carried to the page
+      domain as the `scripts` command before a load; `localStorage` on
+      disk under `state/browser/storage/` in the home. Next:
+      `document.styleSheets`, keyboard events, named storage access,
+      CORS with credentials, Acid3.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

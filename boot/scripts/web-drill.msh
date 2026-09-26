@@ -143,6 +143,12 @@ if ($body | map { $it.data-pushed }) != ["?step=1"] { (err "web-render app: push
 if ($body | map { $it.data-popped }) != ["null:/app.html:/app.html"] { (err "web-render app: popstate: $body")? }
 if ($body | map { $it.data-submit }) != ["typed/post"] { (err "web-render app: the submit event: $body")? }
 if $app.url != "http://www.moss.test:8080/app.html" { (err "web-render app: url after history: $app.url")? }
+if ($body | map { $it.data-cors-ok }) != ["ok"] { (err "web-render app: a CORS-allowed answer was refused: $body")? }
+if ($body | map { $it.data-visits }) != ["1/1/yes"] { (err "web-render app: storage: $body")? }
+# The same page again: the host kept its localStorage, the session store is new.
+let again = (web-render http://www.moss.test:8080/app.html)?
+let body2 = (($again.dom | html-select "body")? | first 1 | map { $it.attrs })
+if ($body2 | map { $it.data-visits }) != ["2/1/yes"] { (err "web-render app again: storage did not persist across pages: $body2")? }
 if ($body | map { $it.data-display }) != ["block"] { (err "web-render app: getComputedStyle: $body")? }
 let h1 = (($app.dom | html-select "h1")? | first 1 | map { $it.attrs.style })
 if $h1 != ["color: rgb(200, 0, 0);"] { (err "web-render app: style attribute from script: $h1")? }

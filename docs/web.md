@@ -114,9 +114,11 @@ attributes, `classList`, `addEventListener` and `dispatchEvent`,
 `setProperty`/`cssText`), `getComputedStyle` (the page's cascade, as CSS
 text), `getBoundingClientRect` and the offset/client sizes (the page's
 layout, brought up to date first), `scrollTo` and `scrollIntoView`,
-`fetch` and `XMLHttpRequest` (same-origin only, through the page's
-broker like everything else it loads; a request blocks the page until
-its body is in), `<script type="module">` with `import` resolved
+`fetch` and `XMLHttpRequest` (through the page's broker like everything
+else it loads, cross-origin when the answer's
+`Access-Control-Allow-Origin` allows it; a request blocks the page
+until its body is in), `localStorage` (per origin, kept by the host
+for as long as it runs) and `sessionStorage`, `<script type="module">` with `import` resolved
 against the module's URL, `location.href =` and `location.hash`,
 `history.pushState`/`back` with `popstate` (the address bar follows),
 forms with the `submit`, `input` and `change` events the page fires as
@@ -135,9 +137,17 @@ wakes it on its 40 ms tick — frames run at 25 a second, and no timer
 fires finer than the tick. `web-render URL` in the shell returns the
 document as the scripts left it, timers included: after `load` it
 ticks the page until nothing is pending, for two seconds at most.
-Not yet: cross-origin requests (CORS), `localStorage`, stylesheet
-objects (`document.styleSheets`), keyboard events, a per-site switch
-(scripts are on).
+Scripts are on unless the site's origin is blocked: the Site panel
+shows the verdict and a button to block or allow scripts there (the
+list is `state/browser/noscript.msh` in the home), and an
+administrator's `conf/app/web.msh` rules above it: `{ scripts: "on" |
+"off", allow: [origins], deny: [origins] }`, deny first, then allow,
+then the user's list, then the default. A page told scripts are off
+shows its `<noscript>` content and runs nothing. `localStorage`
+persists under `state/browser/storage/` in the home, one file per
+origin. Not yet: named storage access (`localStorage.foo`), CORS with
+credentials or a preflight, stylesheet objects (`document.styleSheets`),
+keyboard events.
 
 ### The window: Web
 
@@ -255,9 +265,9 @@ log from inside `update`, where `echo` waits for the window to close).
 
 Very large pages outgrow the page's 40 MB for a document
 and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
-DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run, but a
-site whose API lives on another origin gets no answer yet (no CORS)
-and shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
+DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run, with
+the simple CORS case and no cookies, so a site whose API wants
+credentials shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,

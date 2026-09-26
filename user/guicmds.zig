@@ -151,6 +151,20 @@ pub fn setupPages(spawner: u64, n: *@import("netcmds.zig").Net, view_chan: u64, 
     guipage.setup(spawner, n, view_chan, view_buf, assets_view, stores, log);
 }
 
+/// The pages' `localStorage` persists under the program's own view (a
+/// session app's home), in `state/browser/storage`.
+pub fn setStorageView(view_chan: u64, view_buf: [*]u8) void {
+    guipage.setStorageDir(view_chan, view_buf, "state/browser/storage");
+}
+
+fn boolField(rec: mshl.Record, key: []const u8, dflt: bool) bool {
+    const v = rec.get(key) orelse return dflt;
+    return switch (v) {
+        .bool => |b| b,
+        else => dflt,
+    };
+}
+
 /// Whether the host holds a display — `gui` is offered only then.
 pub fn on() bool {
     return wf.display != 0;
@@ -615,7 +629,7 @@ fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     const url = strField(rec, "url");
     const nav: i64 = if (rec.get("nav")) |n| (if (n == .int) n.int else 0) else 0;
     if (!visible) {
-        if (paint) if (page_it) |it| if (guipage.slotFor(it, id)) |s| guipage.sync(s, url, nav, 0, 0);
+        if (paint) if (page_it) |it| if (guipage.slotFor(it, id)) |s| guipage.sync(s, url, nav, 0, 0, boolField(rec, "scripts", true));
         return .{};
     }
     const h = @max(@as(usize, @intCast(std.math.clamp(intField(rec, "h", 300), 40, 4000))), avail_h);
@@ -629,7 +643,7 @@ fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     s.x = x;
     s.y = y;
     s.sy = wf.screenY(y);
-    guipage.sync(s, url, nav, @intCast(avail_w), @intCast(h));
+    guipage.sync(s, url, nav, @intCast(avail_w), @intCast(h), boolField(rec, "scripts", true));
     guipage.syncExtras(s, pageExtras(rec));
     if (s.sy >= 0 and (s.logged_x != wf.win_x + x or s.logged_y != wf.win_y + @as(usize, @intCast(s.sy)) or s.logged_w != avail_w or s.logged_h != h)) {
         s.logged_x = wf.win_x + x;
