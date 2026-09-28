@@ -263,6 +263,10 @@ pub const Vm = struct {
     /// The host's clock for `Date.now` (milliseconds since the epoch);
     /// without one every date is the epoch.
     host_now: ?*const fn () f64 = null,
+    /// The embedder's scratch for compiles (`compiler.Options.scratch`):
+    /// the transient half of a compile — the AST, the analysis, the
+    /// tables while they grow — off the bookkeeping heap.
+    compile_scratch: ?std.mem.Allocator = null,
 
     pub const GlobalLex = struct { v: Value, is_const: bool };
     pub const Job = struct { func: Value, args: [3]Value, argc: u8 };
@@ -1753,6 +1757,19 @@ pub const Vm = struct {
         return interp.callValue(vm, f, this, args);
     }
 
+    /// A call from an entry point that holds no unrooted cell across it
+    /// (a job, a timer, an event listener — what a page mostly runs):
+    /// the callee runs as top-level code does, so its safe points
+    /// collect. `call` counts native depth and the collector waits for
+    /// depth zero, since a native may hold a cell in a Zig local; a
+    /// site whose work is all callbacks then never collected and filled
+    /// the region with nothing live (2026-09-28).
+    pub fn callRooted(vm: *Vm, f: Value, this: Value, args: []const Value) Error!Value {
+        if (!vm.isCallable(f)) return vm.throwTypeError("is not a function");
+        try vm.tick();
+        return interp.callValueRooted(vm, f, this, args);
+    }
+
     /// Construct (§7.3.15).
     pub fn construct(vm: *Vm, f: Value, args: []const Value, new_target: Value) Error!Value {
         if (!vm.isConstructor(f)) return vm.throwTypeError("is not a constructor");
@@ -1769,7 +1786,7 @@ pub const Vm = struct {
     pub fn runJobs(vm: *Vm) Error!void {
         while (vm.jobs.items.len > 0) {
             const j = vm.jobs.orderedRemove(0);
-            _ = vm.call(j.func, Value.undefined_, j.args[0..j.argc]) catch |e| switch (e) {
+            _ = vm.callRooted(j.func, Value.undefined_, j.args[0..j.argc]) catch |e| switch (e) {
                 error.Exception => {
                     // A job's exception is reported by the host; drop it.
                     vm.exception = Value.undefined_;

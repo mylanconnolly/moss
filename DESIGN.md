@@ -7430,6 +7430,99 @@ in the frame's own global with its parent as `parent` — the engine has
 one realm, so frame scripts do not run at all yet — and XML
 well-formedness and namespace errors to stop them.
 
+**Real sites with scripts on (as built, 2026-09-28).** The Acid3
+number said the DOM's corners were right; this round pointed the
+engine at fifteen real front pages and fixed what they hit, on the
+host first. `webshot` gained `WEBSHOT_SCRIPTS=1`: the page's scripts
+run before layout, as the page domain runs them — the same engine over
+the same heap sizes, the bindings' hooks answered from webshot's own
+pipeline (a layout on demand for `getBoundingClientRect` and
+`getComputedStyle`, scripts and requests from the curl cache) — and
+settle on a fake clock; every console line and uncaught error prints
+with the script-meta and cell-heap sizes beside it, and
+`WEBSHOT_VERBOSE=1` adds a line per compile (functions, instructions,
+property sites, positions, with their bytes) and, at the end, the
+bookkeeping heap's live bytes by size and by the source line that
+asked (a side table keyed by block address, symbolized through the
+standard library). An uncaught error now names its throw site —
+`script:line:col` and sixty characters of source either side, from the
+error's recorded position and the code's kept text — which turned
+every "Cannot read properties of undefined" into the member it was.
+*What the sweep found, in the order it was fixed.* (1) Five sites ran
+the 16 MB bookkeeping heap dry with 6 MB live: `lib/heapalloc` kept
+every block in the size class it was born in, so a compile's arena
+chunks (1, 2, 4, 8 MB, freed together) sat in their classes while the
+next compile's chunk found the region full. The allocator was
+rewritten: classes up to 4 KB, exact-sized blocks above that which
+coalesce with free neighbours, and a block freed at the top lowers the
+top. (2) The compile's transient half — the AST, the analysis, the
+tables while they grow — no longer touches that heap at all:
+`compiler.Options.scratch` (and `vm.compile_scratch`, for eval and
+modules) takes the embedder's scratch, the page's layout stack, and
+the code keeps exact-size copies. (3) A rest parameter, or any
+parameter bound by a pattern, had no register: the compiler gave one
+only to simple parameters, so the binding stayed unresolved, was
+looked up by name at run time, and landed on a captured outer binding
+of the same name — `function(...e)` beside `const e` — which broke
+Apple's memoize helper and read as "is not a function". (4) Wikipedia's
+module registry, a thousand keys added one at a time, cost five
+megabytes: every shape past eight properties built a lookup table of
+all its keys on first use, one per key added. An object past 32
+properties keeps its own table now (`dictionary_threshold`), tables
+start at 16. (5) Inline caches were 72 bytes at ten thousand sites per
+300 KB of source and outweighed the instructions: the second entry
+moved out of line (`IcMore`, made when a site sees a second shape),
+the epoch to 32 bits — 56 bytes a site. (6) A Map keyed by a
+concatenated string hashed a rope by walking units it did not have.
+(7) A module's text was held three times (the loader's copy, the
+record's, the code's); the record's goes once compiled. (8) Real pages
+never collected: the collector runs at safe points only at native
+depth zero, and a page's work is all callbacks — jobs, timers,
+listeners, module bodies (coroutines) — so GitHub filled its region
+with nothing live. `Vm.callRooted` runs a callback from an entry point
+that holds no unrooted cell as top-level code does, module bodies
+start the same way, and `newobj`/`newarr`/`closure`/`class` are safe
+points too, since a bundle's top level is straight-line code that
+reaches neither a back jump nor a return. (9) What the scripts asked
+for and did not find, answered by a prelude in JavaScript
+(`lib/web/script_prelude.zig`, run at a page's start over three
+natives — the URL parser, the clock, the current script): `URL` and
+`URLSearchParams`, `performance`, `btoa`/`atob`, `TextEncoder`/
+`TextDecoder`, `Headers`/`Request`/`Response`, `AbortController`,
+`Blob`/`File`/`FormData`, `DOMParser`, `customElements`, the observers
+(an intersection observer reports every target visible once, so lazy
+pictures load), `crypto`, a `WebSocket` and a `Worker` that never come
+up, `Image`/`Audio`/`Option`, `CSS`, `screen`, `DOMMatrix`, the
+navigator's and the document's remaining members (`cookie` as an
+in-memory jar, `currentScript`, `fonts`), `dataset` (a Proxy over the
+`data-*` attributes), `NodeList`/`HTMLCollection` and the element
+interfaces the table does not name as aliases, `Element.animate`, an
+`Intl` that formats plainly; natively, `HTMLScriptElement`,
+`HTMLTemplateElement.content` (the `content` reflection on every
+element had shadowed it), `HTMLMetaElement`, import maps
+(`<script type="importmap">`, exact and prefix entries) and
+`import.meta.url`. (10) The page's script heaps grew to what the sites
+need — 16 MB of cells, 32 MB of bookkeeping — which took the page to
+108 MB and the chain above it with it (a browser keeps two pages: 240
+MB; its session 344; the user's record 312; init 376), and the program
+stage to 4 MB since the page image passed 3 MB. *Where it stands:*
+Wikipedia (both pages), Python's docs, MDN, lobste.rs, Stack Overflow,
+Reddit, Google, Rust, Hacker News, DuckDuckGo run their scripts with no
+uncaught error on the host; on the device Wikipedia's article loads in
+5.9 s (scripts 0.3 s, pictures 2.9 s), Hacker News in 1.4 s, Python's
+docs in 1.6 s (scripts 1.3 s), DuckDuckGo in 4.0 s (31 scripts, 2.5 s,
+11.6 MB of script heap), each with no script error. GitHub, the BBC,
+the Guardian and Apple still run out of the 32 MB: their bundles cost
+about ten bytes of bookkeeping per byte of source — instructions,
+property sites, positions, a function record per function, the text
+kept for `toString` — and most of those functions never run. *Lessons:*
+attribute memory by the caller before slimming anything (the per-site
+table found the shapes' tables and the module copies in minutes, where
+size histograms only said "many 10 KB blocks"); a throw site in every
+error message is worth more than any amount of guessing about which
+member a minified bundle wanted; and safe points must sit where a
+program allocates, not only where it loops or returns.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

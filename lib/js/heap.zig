@@ -92,6 +92,9 @@ pub const Heap = struct {
     finalizer: ?*const fn (heap: *Heap, cell: *Cell) void = null,
     collections: usize = 0,
     live_bytes: usize = 0,
+    /// Set when an allocation found no room (after a collection): the
+    /// embedder can tell the cell heap's exhaustion from its own.
+    exhausted: bool = false,
     /// Temporary roots: cells the runtime holds in Zig locals across an
     /// allocation that could collect. Pushed and released in scopes.
     temps: std.ArrayList(*Cell) = .empty,
@@ -156,14 +159,20 @@ pub const Heap = struct {
         var cell: *Cell = undefined;
         if (classOf(sz)) |ci| {
             const csize = classes[ci];
-            cell = h.takeFree(ci) orelse h.bump(csize) orelse return error.OutOfMemory;
+            cell = h.takeFree(ci) orelse h.bump(csize) orelse {
+                h.exhausted = true;
+                return error.OutOfMemory;
+            };
             const bytes: [*]u8 = @ptrCast(cell);
             @memset(bytes[0..csize], 0);
             cell.* = .{ .kind = kind, .class = ci, .size = csize };
             h.allocated_since += csize;
         } else {
             const rounded = (sz + align_bytes - 1) & ~@as(u32, align_bytes - 1);
-            cell = h.bump(rounded) orelse return error.OutOfMemory;
+            cell = h.bump(rounded) orelse {
+                h.exhausted = true;
+                return error.OutOfMemory;
+            };
             const bytes: [*]u8 = @ptrCast(cell);
             @memset(bytes[0..rounded], 0);
             cell.* = .{ .kind = kind, .class = 0xff, .size = rounded };

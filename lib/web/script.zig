@@ -380,8 +380,6 @@ pub const interfaces = [_]Iface{
         .{ .name = "dir", .get = getDir, .set = setDir },
         .{ .name = "tabIndex", .get = getTabIndex, .set = setTabIndex },
         .{ .name = "htmlFor", .get = getHtmlFor, .set = setHtmlFor },
-        .{ .name = "httpEquiv", .get = getHttpEquiv, .set = setHttpEquiv },
-        .{ .name = "content", .get = getContentAttr, .set = setContentAttr },
         .{ .name = "data", .get = getDataAttr, .set = setDataAttr },
         .{ .name = "src", .get = getSrcAttr, .set = setSrcAttr },
         .{ .name = "alt", .get = getAltAttr, .set = setAltAttr },
@@ -464,6 +462,24 @@ pub const interfaces = [_]Iface{
     .{ .name = "SVGTextContentElement", .parent = "SVGElement", .methods = &.{
         .{ .name = "getNumberOfChars", .f = svgNumberOfChars },
         .{ .name = "getComputedTextLength", .f = svgComputedTextLength },
+    } },
+    .{ .name = "HTMLTemplateElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "content", .get = templateContent },
+    } },
+    .{ .name = "HTMLMetaElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "httpEquiv", .get = getHttpEquiv, .set = setHttpEquiv },
+        .{ .name = "content", .get = getContentAttr, .set = setContentAttr },
+        .{ .name = "media", .get = getMediaAttr, .set = setMediaAttr },
+    } },
+    .{ .name = "HTMLScriptElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "src", .get = getSrcAttr, .set = setSrcAttr },
+        .{ .name = "type", .get = getTypeAttrRaw, .set = setTypeAttr },
+        .{ .name = "async", .get = getAsyncAttr, .set = setAsyncAttr },
+        .{ .name = "defer", .get = getDeferAttr, .set = setDeferAttr },
+        .{ .name = "noModule", .get = getNoModuleAttr, .set = setNoModuleAttr },
+        .{ .name = "text", .get = getTextContent, .set = setTextContent },
+        .{ .name = "crossOrigin", .get = getCrossOriginAttr, .set = setCrossOriginAttr },
+        .{ .name = "integrity", .get = getIntegrityAttr, .set = setIntegrityAttr },
     } },
     .{ .name = "HTMLImageElement", .parent = "HTMLElement", .attrs = &.{
         .{ .name = "width", .get = imageWidth, .set = setWidthAttr },
@@ -683,6 +699,9 @@ const I = struct {
     const table_cell = ifaceIndex("HTMLTableCellElement");
     const option = ifaceIndex("HTMLOptionElement");
     const image = ifaceIndex("HTMLImageElement");
+    const script_el = ifaceIndex("HTMLScriptElement");
+    const template = ifaceIndex("HTMLTemplateElement");
+    const meta = ifaceIndex("HTMLMetaElement");
     const svg_element = ifaceIndex("SVGElement");
     const svg_rect = ifaceIndex("SVGRectElement");
     const svg_text = ifaceIndex("SVGTextContentElement");
@@ -741,6 +760,8 @@ const DocEntry = struct {
     write_buf: std.ArrayList(u8) = .empty,
 };
 
+const ImportEntry = struct { key: []const u8, value: []const u8 };
+
 pub const Page = struct {
     vm: *Vm,
     /// The current document (see `DocEntry`).
@@ -768,7 +789,6 @@ pub const Page = struct {
     timers: std.ArrayList(Timer) = .empty,
     next_timer: u32 = 1,
     /// Every script's text, kept: the engine holds slices of it.
-    sources: std.ArrayList([]u8) = .empty,
     url_owned: bool = false,
     /// The DOM changed since the embedder last asked.
     dirty: bool = false,
@@ -781,12 +801,17 @@ pub const Page = struct {
     fake_now: f64 = 0,
     scripts_run: u32 = 0,
     script_errors: u32 = 0,
+    /// A line per compile (a tool's diagnosis of a site's scripts).
+    verbose: bool = false,
     /// The parser-inserted script running now: `document.write` puts
     /// its markup right after it, as the parser would have.
     current_script: ?NodeId = null,
     /// Live ranges and node iterators: the DOM's mutations move them.
     ranges: std.ArrayList(Value) = .empty,
     iterators: std.ArrayList(Value) = .empty,
+    /// The import map's `imports`, keys and values as given, read from
+    /// the document on the first module load (null until then).
+    import_map: ?std.ArrayList(ImportEntry) = null,
     /// Frames and pictures inserted by script: each gets its `load`
     /// event from the next turn of the loop (a task, not a microtask).
     pending_loads: std.ArrayList(struct { doc: u32, id: NodeId }) = .empty,
@@ -817,6 +842,7 @@ pub const Page = struct {
         try p.installInterfaces();
         try p.installWindow();
         vm.host_load = hostLoad;
+        vm.host_import_meta = hostImportMeta;
     }
 
     pub fn deinit(p: *Page) void {
@@ -828,8 +854,6 @@ pub const Page = struct {
         p.docs.deinit(p.a);
         p.wrappers.deinit(p.a);
         p.timers.deinit(p.a);
-        for (p.sources.items) |src| p.a.free(src);
-        p.sources.deinit(p.a);
         for (p.history.items) |h| p.a.free(h.url);
         p.history.deinit(p.a);
         for (p.session_items.items) |it| {
@@ -842,9 +866,17 @@ pub const Page = struct {
         p.ranges.deinit(p.a);
         p.iterators.deinit(p.a);
         p.pending_loads.deinit(p.a);
+        if (p.import_map) |*m| {
+            for (m.items) |e| {
+                p.a.free(e.key);
+                p.a.free(e.value);
+            }
+            m.deinit(p.a);
+        }
         if (p.url_owned) p.a.free(p.url);
         p.vm.embedder_roots = null;
         p.vm.host_data = null;
+        p.vm.compile_scratch = null;
     }
 
     fn trace(ctx: *anyopaque, m: *js.heap.Marker) void {
@@ -1115,6 +1147,12 @@ pub const Page = struct {
         // objects, the language has.
         p.runSource(named_storage_source, "the storage proxies");
         p.runSource(live_rules_source, "the live rule lists");
+        // The platform's smaller APIs, in JavaScript (`script_prelude.zig`),
+        // over three natives: the URL parser, the clock, the current script.
+        _ = try vm.defineNative(g, "__urlParse", 2, urlParseNative);
+        _ = try vm.defineNative(g, "__perfNow", 0, perfNowNative);
+        _ = try vm.defineNative(g, "__currentScript", 0, currentScriptNative);
+        p.runSource(@import("script_prelude.zig").source, "the web APIs prelude");
         p.scripts_run = 0; // the page's own count starts at its scripts
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
         try p.installDomException();
@@ -1323,6 +1361,9 @@ pub const Page = struct {
         if (eq(u8, name, "td") or eq(u8, name, "th")) return I.table_cell;
         if (eq(u8, name, "option")) return I.option;
         if (eq(u8, name, "img")) return I.image;
+        if (eq(u8, name, "script")) return I.script_el;
+        if (eq(u8, name, "template")) return I.template;
+        if (eq(u8, name, "meta")) return I.meta;
         return I.html_element;
     }
 
@@ -1438,13 +1479,10 @@ pub const Page = struct {
     pub fn runSource(p: *Page, source: []const u8, name: []const u8) void {
         p.resetDoc();
         const vm = p.vm;
-        // The engine keeps slices of the source (a function's text).
-        const src = p.a.dupe(u8, source) catch return;
-        p.sources.append(p.a, src) catch {
-            p.a.free(src);
-            return;
-        };
-        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{ .name = name }) catch |e| switch (e) {
+        // The compile copies the source into the code (a function keeps
+        // its text): no second copy here.
+        vm.compile_scratch = p.scratchBase();
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = name, .scratch = p.scratchBase() }) catch |e| switch (e) {
             error.OutOfMemory => {
                 p.log(.err, "script: out of memory compiling");
                 return;
@@ -1456,9 +1494,33 @@ pub const Page = struct {
             },
         };
         p.scripts_run += 1;
+        if (p.verbose) {
+            var t: CodeTally = .{};
+            t.add(code);
+            p.logf(.log, "script: compiled {s}: {d} KB of source; {d} functions, {d} instructions ({d} KB), {d} positions ({d} KB), {d} property sites ({d} KB), {d} global sites ({d} KB), {d} constants ({d} KB)", .{ name[0..@min(name.len, 100)], source.len / 1024, t.functions, t.insns, t.insns * @sizeOf(js.bytecode.Insn) / 1024, t.positions, t.positions * @sizeOf(js.bytecode.Position) / 1024, t.props, t.props * @sizeOf(js.bytecode.PropSite) / 1024, t.globals, t.globals * @sizeOf(js.bytecode.GlobalSite) / 1024, t.consts, t.consts * @sizeOf(Value) / 1024 });
+        }
         _ = js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch |e| p.reportError(e, name);
         p.runJobs();
     }
+
+    /// What a compiled script holds, over every nested function.
+    const CodeTally = struct {
+        functions: usize = 0,
+        insns: usize = 0,
+        positions: usize = 0,
+        props: usize = 0,
+        globals: usize = 0,
+        consts: usize = 0,
+        fn add(t: *CodeTally, code: *js.bytecode.Code) void {
+            t.functions += 1;
+            t.insns += code.data.insns.len;
+            t.positions += code.data.positions.len;
+            t.props += code.data.props.len;
+            t.globals += code.data.globals.len;
+            t.consts += code.data.consts.len;
+            for (code.data.functions) |f| t.add(f);
+        }
+    };
 
     /// A host's expression, run as a script: its completion value as
     /// text (an exception's text prefixed `error:`), or null when the
@@ -1467,12 +1529,7 @@ pub const Page = struct {
     pub fn evalText(p: *Page, source: []const u8, a: std.mem.Allocator) ?[]const u8 {
         p.resetDoc();
         const vm = p.vm;
-        const src = p.a.dupe(u8, source) catch return null;
-        p.sources.append(p.a, src) catch {
-            p.a.free(src);
-            return null;
-        };
-        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{ .name = "eval" }) catch return null;
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = "eval", .scratch = p.scratchBase() }) catch return null;
         const v = js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch |e| switch (e) {
             error.OutOfMemory => return null,
             error.Exception => {
@@ -1484,6 +1541,57 @@ pub const Page = struct {
         };
         p.runJobs();
         return strArg(vm, v, a) catch null;
+    }
+
+    /// A module specifier through the page's import map: the entry
+    /// whose key equals it, else the longest key ending in `/` that
+    /// prefixes it (the rest appended to the value); else unchanged.
+    fn mapImport(p: *Page, spec: []const u8, a: std.mem.Allocator) Error![]const u8 {
+        if (p.import_map == null) try p.readImportMap();
+        const m = p.import_map.?;
+        var best: ?usize = null;
+        for (m.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.key, spec)) return e.value;
+            if (e.key.len > 0 and e.key[e.key.len - 1] == '/' and std.mem.startsWith(u8, spec, e.key)) {
+                if (best == null or e.key.len > m.items[best.?].key.len) best = i;
+            }
+        }
+        if (best) |i| return try std.mem.concat(a, u8, &.{ m.items[i].value, spec[m.items[i].key.len..] });
+        return spec;
+    }
+
+    /// `<script type="importmap">`'s `imports`, parsed once (every such
+    /// script in the document counts; `scopes` are not read).
+    fn readImportMap(p: *Page) Error!void {
+        var list: std.ArrayList(ImportEntry) = .empty;
+        errdefer list.deinit(p.a);
+        var scratch = std.heap.ArenaAllocator.init(p.a);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const doc = p.docs.items[0].doc;
+        var w = doc.walk(dom.document_id);
+        while (w.next()) |id| {
+            if (!doc.isHtml(id, "script")) continue;
+            const t = doc.getAttr(id, "type") orelse continue;
+            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, t, " "), "importmap")) continue;
+            const text = doc.textContent(id, sa) catch continue;
+            const parsed = std.json.parseFromSliceLeaky(std.json.Value, sa, text, .{}) catch continue;
+            if (parsed != .object) continue;
+            const imports = parsed.object.get("imports") orelse continue;
+            if (imports != .object) continue;
+            var it = imports.object.iterator();
+            while (it.next()) |e| {
+                if (e.value_ptr.* != .string) continue;
+                try list.append(p.a, .{ .key = try p.a.dupe(u8, e.key_ptr.*), .value = try p.a.dupe(u8, e.value_ptr.string) });
+            }
+        }
+        p.import_map = list;
+    }
+
+    /// The host's scratch for heavy transient work (a compile, a frame's
+    /// cascade), else the page's own allocator.
+    pub fn scratchBase(p: *Page) std.mem.Allocator {
+        return if (p.host.scratch) |f| f(p.host.ctx) else p.a;
     }
 
     fn runJobs(p: *Page) void {
@@ -1506,14 +1614,50 @@ pub const Page = struct {
     fn exceptionText(p: *Page, buf: []u8) []const u8 {
         const vm = p.vm;
         const ex = vm.exception;
-        // An Error: "Name: message" and its stack line if present.
+        // An Error: "Name: message" and its stack line if present, then
+        // the throw site — script:line:col and the source around it —
+        // which is what names the missing member on a real site.
+        var text: []const u8 = undefined;
         if (ex.isObject()) {
             const o = Vm.asObject(ex);
             const stack = vm.get(o, .{ .atom = vm.atom("stack") catch return "exception" }, ex) catch Value.undefined_;
-            if (stack.isString()) return js.builtins.utf8Buf(vm, Vm.asString(stack), buf) catch "exception";
+            if (stack.isString()) {
+                text = js.builtins.utf8Buf(vm, Vm.asString(stack), buf) catch return "exception";
+            } else {
+                const s = vm.toString(ex) catch return "exception";
+                text = js.builtins.utf8Buf(vm, s, buf) catch return "exception";
+            }
+            if (o.class == .error_) if (throwSite(o, buf[text.len..])) |site| return buf[0 .. text.len + site.len];
+            return text;
         }
         const s = vm.toString(ex) catch return "exception";
         return js.builtins.utf8Buf(vm, s, buf) catch "exception";
+    }
+
+    /// " at NAME:LINE:COL «source»" for an Error made while code ran.
+    fn throwSite(o: *Object, buf: []u8) ?[]const u8 {
+        const ed = o.internal(js.vm.ErrorData);
+        const code = ed.code orelse return null;
+        const src = code.data.source orelse return null;
+        const pos: usize = @min(ed.pos, src.text.len);
+        var line: usize = 1;
+        var col: usize = 1;
+        for (src.text[0..pos]) |ch| {
+            if (ch == '\n') {
+                line += 1;
+                col = 1;
+            } else col += 1;
+        }
+        const from = pos -| 60;
+        const to = @min(src.text.len, pos + 60);
+        var snippet_buf: [128]u8 = undefined;
+        var n: usize = 0;
+        for (src.text[from..to]) |ch| {
+            if (n >= snippet_buf.len) break;
+            snippet_buf[n] = if (ch == '\n' or ch == '\r' or ch == '\t') ' ' else ch;
+            n += 1;
+        }
+        return std.fmt.bufPrint(buf, " at {s}:{d}:{d} «{s}»", .{ src.name[0..@min(src.name.len, 80)], line, col, snippet_buf[0..n] }) catch null;
     }
 
     pub fn log(p: *Page, level: Level, text: []const u8) void {
@@ -1521,8 +1665,11 @@ pub const Page = struct {
     }
 
     pub fn logf(p: *Page, level: Level, comptime fmt: []const u8, args: anytype) void {
-        var buf: [1024]u8 = undefined;
-        p.log(level, std.fmt.bufPrint(&buf, fmt, args) catch fmt);
+        // A line too long is cut, not replaced by its format string.
+        var buf: [1536]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        w.print(fmt, args) catch {};
+        p.log(level, w.buffered());
     }
 
     // -------------------------------------------------------- events
@@ -1806,9 +1953,7 @@ pub const Page = struct {
     /// the value of the script (its last expression).
     fn evalSource(p: *Page, source: []const u8) Error!Value {
         const vm = p.vm;
-        const src = try p.a.dupe(u8, source);
-        try p.sources.append(p.a, src);
-        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{ .name = "an event handler attribute" }) catch |e| switch (e) {
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = "an event handler attribute", .scratch = p.scratchBase() }) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.SyntaxError => {
                 p.script_errors += 1;
@@ -1841,6 +1986,11 @@ pub const Page = struct {
         var snap: std.ArrayList(Value) = .empty;
         defer snap.deinit(p.a);
         try vm.listFromArrayLike(list.asValue(), &snap);
+        // The snapshot's cells are rooted for the calls (a listener may
+        // remove another, and the collector may run inside a listener).
+        const snap_mark = vm.heap.tempMark();
+        defer vm.heap.tempRelease(snap_mark);
+        for (snap.items) |v| if (v.isCell()) vm.heap.tempPush(v.asCell());
         const type_v = try vm.get(ev, .{ .atom = try vm.atom("type") }, ev.asValue());
         const slot = ev.internal(Slot);
         var k: usize = 0;
@@ -1854,11 +2004,12 @@ pub const Page = struct {
             if (!try p.hasListener(list, snap.items[k], cb, flags)) continue;
             if (flags & flag_once != 0) try p.removeListener(list, snap.items[k], cb, flags);
             try p.setEventProp(ev, "currentTarget", target);
-            const r: Error!Value = if (vm.isCallable(cb)) vm.call(cb, target, &.{ev.asValue()}) else blk: {
+            const r: Error!Value = if (vm.isCallable(cb)) vm.callRooted(cb, target, &.{ev.asValue()}) else blk: {
                 if (!cb.isObject()) break :blk Value.undefined_;
                 const h = try vm.get(Vm.asObject(cb), .{ .atom = try vm.atom("handleEvent") }, cb);
                 if (!vm.isCallable(h)) break :blk Value.undefined_;
-                break :blk vm.call(h, cb, &.{ev.asValue()});
+                if (h.isCell()) vm.heap.tempPush(h.asCell());
+                break :blk vm.callRooted(h, cb, &.{ev.asValue()});
             };
             _ = r catch |e| switch (e) {
                 error.OutOfMemory => return e,
@@ -1952,7 +2103,7 @@ pub const Page = struct {
                 t.argc = 1;
             }
             p.resetDoc();
-            _ = vm.call(t.func, vm.global.asValue(), t.args[0..t.argc]) catch |e| p.reportError(e, if (t.raf) "an animation frame" else "a timer");
+            _ = vm.callRooted(t.func, vm.global.asValue(), t.args[0..t.argc]) catch |e| p.reportError(e, if (t.raf) "an animation frame" else "a timer");
             p.runJobs();
         }
         return ran;
@@ -2288,7 +2439,8 @@ fn deliverMutations(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
         defer vm.heap.tempRelease(mark);
         if (records.isCell()) vm.heap.tempPush(records.asCell());
         const cb = try vm.get(Vm.asObject(observer), .{ .atom = try vm.atom("__callback") }, observer);
-        if (vm.isCallable(cb)) _ = vm.call(cb, observer, &.{ records, observer }) catch |e| p.reportError(e, "a MutationObserver callback");
+        if (cb.isCell()) vm.heap.tempPush(cb.asCell());
+        if (vm.isCallable(cb)) _ = vm.callRooted(cb, observer, &.{ records, observer }) catch |e| p.reportError(e, "a MutationObserver callback");
     }
     return Value.undefined_;
 }
@@ -3801,6 +3953,55 @@ fn getHidden(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn setHidden(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return boolAttrSetter(vm, this, "hidden", arg(args, 0));
 }
+fn getTypeAttrRaw(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "type");
+}
+fn getAsyncAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return boolAttrGetter(vm, this, "async");
+}
+fn setAsyncAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return boolAttrSetter(vm, this, "async", arg(args, 0));
+}
+fn getDeferAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return boolAttrGetter(vm, this, "defer");
+}
+fn setDeferAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return boolAttrSetter(vm, this, "defer", arg(args, 0));
+}
+fn getNoModuleAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return boolAttrGetter(vm, this, "nomodule");
+}
+fn setNoModuleAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return boolAttrSetter(vm, this, "nomodule", arg(args, 0));
+}
+fn getCrossOriginAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisElement(vm, this);
+    const v = pageOf(vm).doc.getAttr(id, "crossorigin") orelse return Value.null_;
+    return jsStr(vm, v);
+}
+fn setCrossOriginAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "crossorigin", arg(args, 0));
+}
+fn getIntegrityAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "integrity");
+}
+fn setIntegrityAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "integrity", arg(args, 0));
+}
+/// A template's contents: the fragment the parser filled (made on
+/// first touch for a template a script created).
+fn templateContent(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (p.doc.get(id).template_contents == null) p.doc.node(id).template_contents = try p.doc.createFragment();
+    return p.wrapValue(p.doc.get(id).template_contents.?);
+}
+fn getMediaAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "media");
+}
+fn setMediaAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "media", arg(args, 0));
+}
 fn getHttpEquiv(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     return attrGetter(vm, this, "http-equiv");
 }
@@ -4831,14 +5032,22 @@ fn historyState(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
 /// The module loader: a specifier resolved against the importing
 /// module's URL (or the document's), fetched through the host like a
 /// classic `src`; bare specifiers are not modules here.
-fn hostLoad(vm: *Vm, referrer: ?[]const u8, specifier: []const u8) Error!?js.module.Loaded {
+/// `import.meta.url`: the module's own URL.
+fn hostImportMeta(vm: *Vm, name: []const u8, meta: *Object) Error!void {
+    try vm.defineValue(meta, "url", try jsStr(vm, name), .default);
+}
+
+fn hostLoad(vm: *Vm, referrer: ?[]const u8, specifier_in: []const u8) Error!?js.module.Loaded {
     const p = pageOf(vm);
-    const relative = std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../") or std.mem.startsWith(u8, specifier, "/");
-    const absolute = std.mem.indexOf(u8, specifier, "://") != null;
-    if (!relative and !absolute) return null;
     var scratch = std.heap.ArenaAllocator.init(p.a);
     defer scratch.deinit();
     const sa = scratch.allocator();
+    // The page's import map (`<script type="importmap">`), read once:
+    // a bare specifier maps by its entry or its longest prefix entry.
+    const specifier = try p.mapImport(specifier_in, sa);
+    const relative = std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../") or std.mem.startsWith(u8, specifier, "/");
+    const absolute = std.mem.indexOf(u8, specifier, "://") != null;
+    if (!relative and !absolute) return null;
     const base = url.parse(sa, referrer orelse p.url, null) catch null;
     const u = url.parse(sa, specifier, if (base) |*b| b else null) catch return null;
     // The canonical name has no fragment: one module per resource.
@@ -5517,7 +5726,7 @@ fn stylePropertyGet(vm: *Vm, this: Value, name: []const u8) Error!Value {
 /// (none: 0×0, as a frame the page hides), or a nominal one.
 fn frameComputed(p: *Page, id: NodeId, name: []const u8, buf: []u8) Error!?[]const u8 {
     const ua = p.host.ua_sheet orelse return null;
-    var arena = std.heap.ArenaAllocator.init(if (p.host.scratch) |f| f(p.host.ctx) else p.a);
+    var arena = std.heap.ArenaAllocator.init(p.scratchBase());
     defer arena.deinit();
     const a = arena.allocator();
     const env = frameEnv(p);
@@ -6153,6 +6362,71 @@ const live_rules_source =
     \\  } });
     \\})();
 ;
+
+// ------------------------------------------------- the prelude's natives
+
+/// `__urlParse(input, base?)`: the URL's components as the `URL`
+/// interface names them, or null when it does not parse. The base is
+/// the document's when none is given.
+fn urlParseNative(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const a = sc.a();
+    const input = try strArg(vm, arg(args, 0), a);
+    const base_v = arg(args, 1);
+    // The base: the one given, else the document's (a relative `new
+    // URL('x')` throws in browsers; here it resolves, which serves pages
+    // better than an error would).
+    const base_text = if (base_v.isUndefined()) p.url else try strArg(vm, base_v, a);
+    var base = url.parse(a, base_text, null) catch return Value.null_;
+    const u = url.parse(a, input, &base) catch return Value.null_;
+    const o = try vm.newObject();
+    const mark = vm.heap.tempMark();
+    defer vm.heap.tempRelease(mark);
+    vm.heap.tempPush(o.cell());
+    const protocol = try std.fmt.allocPrint(a, "{s}:", .{u.scheme});
+    var hostport: []const u8 = "";
+    var hostname: []const u8 = "";
+    var port: []const u8 = "";
+    if (u.host != null) {
+        hostport = try u.hostString(a);
+        hostname = hostport;
+        if (u.port) |pt| {
+            port = try std.fmt.allocPrint(a, "{d}", .{pt});
+            if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |i| hostname = hostport[0..i];
+        }
+    }
+    var copy = u;
+    copy.query = null;
+    copy.fragment = null;
+    const no_qf = try copy.serialize(a, true);
+    const prefix_len = protocol.len + (if (u.host != null) 2 + hostport.len + (if (u.username.len > 0) u.username.len + 1 + (if (u.password.len > 0) u.password.len + 1 else 0) else 0) else 0);
+    const pathname = if (no_qf.len >= prefix_len) no_qf[prefix_len..] else "";
+    const search = if (u.query) |q| (if (q.len > 0) try std.fmt.allocPrint(a, "?{s}", .{q}) else "") else "";
+    const hash = if (u.fragment) |f| (if (f.len > 0) try std.fmt.allocPrint(a, "#{s}", .{f}) else "") else "";
+    try vm.defineValue(o, "href", try jsStr(vm, try u.href(a)), .default);
+    try vm.defineValue(o, "protocol", try jsStr(vm, protocol), .default);
+    try vm.defineValue(o, "username", try jsStr(vm, u.username), .default);
+    try vm.defineValue(o, "password", try jsStr(vm, u.password), .default);
+    try vm.defineValue(o, "host", try jsStr(vm, hostport), .default);
+    try vm.defineValue(o, "hostname", try jsStr(vm, hostname), .default);
+    try vm.defineValue(o, "port", try jsStr(vm, port), .default);
+    try vm.defineValue(o, "pathname", try jsStr(vm, pathname), .default);
+    try vm.defineValue(o, "search", try jsStr(vm, search), .default);
+    try vm.defineValue(o, "hash", try jsStr(vm, hash), .default);
+    try vm.defineValue(o, "origin", try jsStr(vm, try u.origin(a)), .default);
+    return o.asValue();
+}
+
+fn perfNowNative(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return Value.fromF64(pageOf(vm).now());
+}
+
+fn currentScriptNative(vm: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    return p.wrapValue(p.current_script);
+}
 
 // ---------------------------------------------------------- DOMException
 

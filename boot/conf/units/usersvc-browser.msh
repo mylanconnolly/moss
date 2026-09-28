@@ -7,7 +7,7 @@
 {
   image:    users
   arg:      1
-  budget:   { kobj: 8mb, user: 288mb }
+  budget:   { kobj: 8mb, user: 344mb }
   grant:    [log, spawner, bootfs]
   profiles: [browser]
   after:    apply

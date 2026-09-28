@@ -11,12 +11,25 @@
 //! WIDTH is the viewport (1280), HEIGHT the canvas (the page's extent,
 //! at most 6000), ZOOM the page zoom in percent (100). The cache is
 //! zig-out/webshot-cache.
+//!
+//! WEBSHOT_SCRIPTS=1 runs the page's scripts first, as the page domain
+//! would — the same engine over the same 16 MB cell heap and 32 MB
+//! bookkeeping heap, the bindings' hooks answered from this pipeline
+//! (a layout on demand for `getBoundingClientRect` and
+//! `getComputedStyle`, scripts and requests from the cache) — and
+//! settles the timers on a fake clock (WEBSHOT_SETTLE ms of page time,
+//! 3000 by default) before laying out what the scripts left. Every
+//! console line and script error prints, with the time each took: the
+//! rough edges of a real site's JavaScript, found in a second.
 const std = @import("std");
 const mosslib = @import("mosslib");
 const web = mosslib.web;
 const font = mosslib.font;
 const ui = mosslib.ui;
 const dom = web.dom;
+
+const script = web.script;
+const js = mosslib.js;
 
 const cache_dir = "zig-out/webshot-cache";
 const user_agent = "moss/0.0 (webpage)";
@@ -187,7 +200,8 @@ pub fn main(init: std.process.Init) !u8 {
     const page_mode = std.c.getenv("WEBSHOT_PAGE") != null;
     const region_mb: usize = if (std.c.getenv("WEBSHOT_REGION")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 24;
     var dom_fba = std.heap.FixedBufferAllocator.init(if (page_mode) try gpa.alloc(u8, region_mb << 20) else &[_]u8{});
-    const doc = try web.html.parse(if (page_mode) dom_fba.allocator() else gpa, text, .{});
+    const scripts_on = std.c.getenv("WEBSHOT_SCRIPTS") != null;
+    const doc = try web.html.parse(if (page_mode) dom_fba.allocator() else gpa, text, .{ .scripting = scripts_on });
     if (page_mode) {
         var text_bytes: usize = 0;
         var attr_bytes: usize = 0;
@@ -203,6 +217,7 @@ pub fn main(init: std.process.Init) !u8 {
     web.style.px_scale = zoom;
     const env: web.style.Env = .{ .width = @as(f64, @floatFromInt(vw)) / zoom, .height = @as(f64, @floatFromInt(vh)) / zoom };
     const ua = try web.style.parseSheet(gpa, web.style.ua_sheet, .user_agent, env);
+    if (scripts_on) try runPageScripts(doc, &ua, env, &faces, vw, vh);
     var dummy: u8 = 0;
     const loader: web.style.Loader = .{ .ctx = @ptrCast(&dummy), .fetch = sheetFetch };
     // WEBSHOT_PAGE=1: the page domain's memory — sheets parsed through a
@@ -432,6 +447,312 @@ pub fn main(init: std.process.Init) !u8 {
     for (px) |p| ppm.appendSliceAssumeCapacity(&.{ @truncate(p >> 16), @truncate(p >> 8), @truncate(p) });
     try cwd.writeFile(io, .{ .sub_path = out_path, .data = ppm.items });
     return 0;
+}
+
+// ------------------------------------------------------------ scripts
+
+/// The page domain's script memory, sized as there (`user/webpage.zig`):
+/// a site that runs out here runs out on the target.
+var js_region: []align(16) u8 = &.{};
+var js_meta_buf: []align(16) u8 = &.{};
+var js_meta: mosslib.heapalloc.Allocator = undefined;
+
+/// The bookkeeping heap's live bytes by request size (WEBSHOT_VERBOSE):
+/// what a site's scripts keep there.
+const MetaHisto = struct { count: usize = 0, bytes: usize = 0, live_count: usize = 0, live_bytes: usize = 0 };
+var meta_histo: [40]MetaHisto = @splat(.{});
+fn metaBucket(n: usize) usize {
+    return @min(39, if (n == 0) 0 else std.math.log2_int_ceil(usize, n));
+}
+/// Live bytes by the caller that asked (the return address), for the
+/// top consumers to be named.
+const Site = struct { ra: usize = 0, live: usize = 0, count: usize = 0 };
+var meta_sites: [512]Site = @splat(.{});
+fn siteOf(ra: usize) ?*Site {
+    var i: usize = (ra >> 4) % meta_sites.len;
+    var n: usize = 0;
+    while (n < meta_sites.len) : (n += 1) {
+        const s = &meta_sites[i];
+        if (s.ra == ra) return s;
+        if (s.ra == 0) {
+            s.ra = ra;
+            return s;
+        }
+        i = (i + 1) % meta_sites.len;
+    }
+    return null;
+}
+/// The site a block came from, kept in a side table keyed by address
+/// (the allocator's blocks have no room for it).
+const Owner = struct { ptr: usize = 0, site: ?*Site = null, len: usize = 0 };
+var meta_owners: [1 << 18]Owner = @splat(.{});
+fn ownerSlot(ptr: usize) *Owner {
+    var i: usize = (ptr >> 4) % meta_owners.len;
+    while (meta_owners[i].ptr != 0 and meta_owners[i].ptr != ptr) i = (i + 1) % meta_owners.len;
+    return &meta_owners[i];
+}
+fn metaAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+    const b = &meta_histo[metaBucket(len)];
+    b.count += 1;
+    b.bytes += len;
+    b.live_count += 1;
+    b.live_bytes += len;
+    const p = js_meta.allocator().rawAlloc(len, alignment, ra) orelse return null;
+    if (siteOf(ra)) |s| {
+        s.live += len;
+        s.count += 1;
+        const o = ownerSlot(@intFromPtr(p));
+        o.* = .{ .ptr = @intFromPtr(p), .site = s, .len = len };
+    }
+    return p;
+}
+fn metaForget(ptr: [*]u8) void {
+    const o = ownerSlot(@intFromPtr(ptr));
+    if (o.ptr == 0) return;
+    if (o.site) |s| s.live -= o.len;
+    o.site = null;
+    // Kept as a tombstone (the probe never clears); a re-used address
+    // takes the slot again.
+    o.len = 0;
+}
+fn metaTrack(ptr: [*]u8, new_len: usize) void {
+    const o = ownerSlot(@intFromPtr(ptr));
+    if (o.ptr == 0) return;
+    if (o.site) |s| s.live = s.live - o.len + new_len;
+    o.len = new_len;
+}
+fn metaResize(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+    const ok = js_meta.allocator().rawResize(mem, alignment, new_len, ra);
+    if (ok) {
+        metaTrack(mem.ptr, new_len);
+        const ob = &meta_histo[metaBucket(mem.len)];
+        ob.live_count -= 1;
+        ob.live_bytes -= mem.len;
+        const nb = &meta_histo[metaBucket(new_len)];
+        nb.live_count += 1;
+        nb.live_bytes += new_len;
+    }
+    return ok;
+}
+fn metaRemap(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+    const p = js_meta.allocator().rawRemap(mem, alignment, new_len, ra) orelse return null;
+    metaTrack(mem.ptr, new_len);
+    const ob = &meta_histo[metaBucket(mem.len)];
+    ob.live_count -= 1;
+    ob.live_bytes -= mem.len;
+    const nb = &meta_histo[metaBucket(new_len)];
+    nb.live_count += 1;
+    nb.live_bytes += new_len;
+    return p;
+}
+fn metaFree(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) void {
+    const b = &meta_histo[metaBucket(mem.len)];
+    b.live_count -= 1;
+    b.live_bytes -= mem.len;
+    metaForget(mem.ptr);
+    js_meta.allocator().rawFree(mem, alignment, ra);
+}
+const meta_vtable: std.mem.Allocator.VTable = .{ .alloc = metaAlloc, .resize = metaResize, .remap = metaRemap, .free = metaFree };
+var meta_dummy: u8 = 0;
+fn metaAllocator() std.mem.Allocator {
+    return .{ .ptr = @ptrCast(&meta_dummy), .vtable = &meta_vtable };
+}
+var vm: js.vm.Vm = undefined;
+var page: script.Page = undefined;
+var fake_now: f64 = 0;
+
+/// What the bindings' hooks lay out against: the current document,
+/// re-cascaded and re-laid-out when a script changed it and asks.
+const ScriptCtx = struct {
+    doc: *dom.Document,
+    ua: *const web.style.Sheet,
+    env: web.style.Env,
+    faces: *web.fonts.FaceFonts,
+    vw: usize,
+    vh: usize,
+    styles: ?*web.style.Styles = null,
+    layout: ?*web.layout.Layout = null,
+    layouts: usize = 0,
+    layout_ms: i64 = 0,
+    requests: usize = 0,
+    errors: usize = 0,
+    lines: usize = 0,
+
+    fn layoutNow(c: *ScriptCtx) void {
+        if (page.takeDirty() or c.layout == null) {
+            _ = page.takeSheetsDirty();
+            const t1 = std.Io.Clock.awake.now(io);
+            var dummy: u8 = 0;
+            const loader: web.style.Loader = .{ .ctx = @ptrCast(&dummy), .fetch = sheetFetch };
+            const sheets = web.style.collectDocumentSheetsLoading(gpa, c.doc, c.env, c.ua.*, loader) catch return;
+            const st = gpa.create(web.style.Styles) catch return;
+            st.* = web.style.compute(gpa, c.doc, sheets, c.env) catch return;
+            const images: web.layout.Images = .{ .ctx = @ptrCast(&dummy), .vtable = &images_vtable };
+            const l = web.layout.layoutDocumentWith(gpa, c.doc, st, c.faces.fonts(), images, @floatFromInt(c.vw), @floatFromInt(c.vh)) catch return;
+            c.styles = st;
+            c.layout = l;
+            c.layouts += 1;
+            c.layout_ms += @intCast(@divTrunc(t1.durationTo(std.Io.Clock.awake.now(io)).nanoseconds, std.time.ns_per_ms));
+        }
+    }
+};
+
+fn ctxOf(ctx: *anyopaque) *ScriptCtx {
+    return @ptrCast(@alignCast(ctx));
+}
+
+fn scriptLog(ctx: *anyopaque, level: script.Level, text: []const u8) void {
+    const c = ctxOf(ctx);
+    c.lines += 1;
+    if (level == .err) c.errors += 1;
+    std.debug.print("webshot: script {s} [meta {d} KB, heap {d} KB]: {s}\n", .{ switch (level) {
+        .log => "console",
+        .warn => "warn",
+        .err => "error",
+    }, js_meta.live / 1024, vm.heap.live_bytes / 1024, text[0..@min(text.len, 400)] });
+}
+
+fn scriptFetch(_: *anyopaque, abs_url: []const u8) ?[]const u8 {
+    const f = fetch(abs_url) orelse return null;
+    if (f.status >= 400) return null;
+    return web.encoding.decode(gpa, web.encoding.detect(f.body, f.content_type), f.body) catch null;
+}
+
+fn scriptRequest(ctx: *anyopaque, a: std.mem.Allocator, abs_url: []const u8, post: bool, body: []const u8, origin: []const u8, out: *script.Response) bool {
+    _ = post;
+    _ = body;
+    _ = origin;
+    ctxOf(ctx).requests += 1;
+    const f = fetch(abs_url) orelse {
+        out.refused = "network";
+        return false;
+    };
+    out.status = @intCast(@min(f.status, 999));
+    out.url = a.dupe(u8, f.url) catch return false;
+    out.content_type = a.dupe(u8, f.content_type) catch return false;
+    out.body = a.dupe(u8, f.body) catch return false;
+    return true;
+}
+
+fn scriptRect(ctx: *anyopaque, id: dom.NodeId) ?[4]f64 {
+    const c = ctxOf(ctx);
+    c.layoutNow();
+    const l = c.layout orelse return null;
+    var have = false;
+    var r: [4]f64 = .{ 0, 0, 0, 0 };
+    for (0..l.boxes.len) |i| {
+        const b = l.boxes.get(i);
+        if (b.node != id) continue;
+        switch (b.kind) {
+            .inline_box, .text => for (0..l.fragments.len) |fi| {
+                const f = l.fragments.get(fi);
+                if (f.dead or f.box != @as(web.layout.BoxId, @intCast(i))) continue;
+                r = if (have) union4(r, .{ f.x, f.y, f.w, f.h }) else .{ f.x, f.y, f.w, f.h };
+                have = true;
+            },
+            else => {
+                r = if (have) union4(r, .{ b.x, b.y, b.w, b.h }) else .{ b.x, b.y, b.w, b.h };
+                have = true;
+            },
+        }
+    }
+    return if (have) r else null;
+}
+
+fn union4(a: [4]f64, b: [4]f64) [4]f64 {
+    const x0 = @min(a[0], b[0]);
+    const y0 = @min(a[1], b[1]);
+    const x1 = @max(a[0] + a[2], b[0] + b[2]);
+    const y1 = @max(a[1] + a[3], b[1] + b[3]);
+    return .{ x0, y0, x1 - x0, y1 - y0 };
+}
+
+fn scriptComputed(ctx: *anyopaque, id: dom.NodeId, name: []const u8, buf: []u8) ?[]const u8 {
+    const c = ctxOf(ctx);
+    c.layoutNow();
+    const st = c.styles orelse return null;
+    if (id >= st.computed.len) return null;
+    return web.style.propertyText(st.get(id), name, buf);
+}
+
+fn scriptNavigate(_: *anyopaque, abs_url: []const u8) void {
+    std.debug.print("webshot: script navigates to {s} (not followed)\n", .{abs_url});
+}
+
+fn scriptScratch(_: *anyopaque) std.mem.Allocator {
+    return gpa;
+}
+
+fn scriptNow() f64 {
+    return fake_now;
+}
+
+/// Run the document's scripts and settle their timers, as the page
+/// domain does after parsing, then report.
+fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style.Env, faces: *web.fonts.FaceFonts, vw: usize, vh: usize) !void {
+    const settle_ms: f64 = if (std.c.getenv("WEBSHOT_SETTLE")) |v| @floatFromInt(try std.fmt.parseInt(u32, std.mem.span(v), 10)) else 3000;
+    var ctx: ScriptCtx = .{ .doc = doc, .ua = ua, .env = env, .faces = faces, .vw = vw, .vh = vh };
+    // WEBSHOT_META_MB / WEBSHOT_HEAP_MB: the bookkeeping and cell heaps'
+    // sizes (the page's: 32 and 16).
+    const meta_mb: usize = if (std.c.getenv("WEBSHOT_META_MB")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 32;
+    const heap_mb: usize = if (std.c.getenv("WEBSHOT_HEAP_MB")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 16;
+    js_meta_buf = try gpa.alignedAlloc(u8, .@"16", meta_mb << 20);
+    js_region = try gpa.alignedAlloc(u8, .@"16", heap_mb << 20);
+    js_meta = mosslib.heapalloc.Allocator.init(js_meta_buf);
+    const meta = metaAllocator();
+    vm.initWith(js_region, meta, .{ .stack_values = 1 << 16, .max_frames = 4000 }) catch {
+        std.debug.print("webshot: the script engine did not fit its heap\n", .{});
+        return;
+    };
+    vm.host_now = scriptNow;
+    page.init(&vm, doc, meta, .{ .ctx = @ptrCast(&ctx), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .request = scriptRequest, .navigate = scriptNavigate, .ua_sheet = ua, .scratch = scriptScratch }) catch {
+        std.debug.print("webshot: the bindings did not fit\n", .{});
+        return;
+    };
+    page.verbose = std.c.getenv("WEBSHOT_VERBOSE") != null;
+    page.setViewport(@intCast(vw), @intCast(vh));
+    const href = try page_base.href(gpa);
+    try page.setUrl(href);
+    const t0 = std.Io.Clock.awake.now(io);
+    page.runScripts();
+    const t_run = std.Io.Clock.awake.now(io);
+    // The clock is ours: jump to each due time, as the drill does,
+    // until the page is quiet or the settle budget is spent.
+    var ticks: usize = 0;
+    var last_report: f64 = 0;
+    while (page.nextDue()) |due| : (ticks += 1) {
+        const at = @max(fake_now + 1, due);
+        if (at > settle_ms or ticks > 20_000) break;
+        fake_now = at;
+        _ = page.runDue(at);
+        if (fake_now - last_report >= 1000) {
+            last_report = fake_now;
+            std.debug.print("webshot: scripts: {d} ms of page time, {d} timers pending, heap {d} KB, meta {d} KB\n", .{ @as(u64, @intFromFloat(fake_now)), page.pendingTimers(), vm.heap.live_bytes / 1024, js_meta.live / 1024 });
+        }
+    }
+    const t_settle = std.Io.Clock.awake.now(io);
+    var rbuf: [1024]u8 = undefined;
+    std.debug.print("webshot: scripts: meta {s}; cell heap {s}\n", .{ js_meta.report(&rbuf), if (vm.heap.exhausted) "EXHAUSTED" else "fit" });
+    if (page.verbose) {
+        for (meta_histo, 0..) |h, i| if (h.live_bytes > 0) {
+            std.debug.print("webshot: scripts: meta live <{d} B: {d} blocks, {d} KB ({d} allocations in all)\n", .{ @as(usize, 1) << @intCast(i), h.live_count, h.live_bytes / 1024, h.count });
+        };
+        // The dozen callers holding the most, each named by its source line.
+        var shown: usize = 0;
+        while (shown < 12) : (shown += 1) {
+            var best: ?*Site = null;
+            for (&meta_sites) |*s| if (s.ra != 0 and s.live > 0 and (best == null or s.live > best.?.live)) {
+                best = s;
+            };
+            const b = best orelse break;
+            std.debug.print("webshot: scripts: meta site {d} KB live in {d} blocks from:\n", .{ b.live / 1024, b.count });
+            var addrs = [_]usize{b.ra};
+            const st: std.debug.StackTrace = .{ .return_addresses = &addrs, .skipped = .none };
+            std.debug.dumpStackTrace(&st);
+            b.live = 0;
+        }
+    }
+    std.debug.print("webshot: scripts: {d} scripts ran in {d} ms, {d} errors; settled {d} ticks to {d} ms of page time in {d} ms wall ({d} timers left); {d} layouts for script reads ({d} ms); {d} requests; heap {d} KB of {d}, meta {d} KB of {d}\n", .{ page.scripts_run, @divTrunc(t0.durationTo(t_run).nanoseconds, std.time.ns_per_ms), page.script_errors, ticks, @as(u64, @intFromFloat(fake_now)), @divTrunc(t_run.durationTo(t_settle).nanoseconds, std.time.ns_per_ms), page.pendingTimers(), ctx.layouts, ctx.layout_ms, ctx.requests, vm.heap.live_bytes / 1024, js_region.len / 1024, js_meta.live / 1024, js_meta_buf.len / 1024 });
 }
 
 fn dumpBox(doc: *const dom.Document, l: *const web.layout.Layout, id: u32, depth: usize) void {

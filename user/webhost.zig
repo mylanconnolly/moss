@@ -52,7 +52,7 @@ pub const Lock = struct {
 /// arena a 3900-node page asks 10 MB of (2026-09-18); a 1.2 MB article
 /// died of a 24 MB region a 17,800-node page asks 29 MB of, once its
 /// lists stopped leaving their old buffers behind (2026-09-24).
-pub const page_user_kb: u64 = 84 << 10;
+pub const page_user_kb: u64 = 108 << 10;
 /// A connection key: scheme|host|port, a host name's worst case.
 const conn_key_max = 320;
 pub const page_kobj_kb: u64 = 2 << 10;

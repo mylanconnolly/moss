@@ -1075,9 +1075,31 @@ supervises), and memory history per unit beside the CPU one.
       a frame's own viewport for its cascade, `cursor`; two cascade
       bugs found (the ancestor bloom filter pruned `A ~ B C` rules;
       `surroundContents` skipped its boundary nodes): 99/100 on the
-      host, 99/100 on the target. Left: test 80 (a frame's
-      XHTML scripts in their own realm, XML errors stopping them), CORS
-      with credentials, iframes laid out, the rest of the SVG DOM.
+      host, 99/100 on the target; (m) 2026-09-28 — real sites with
+      scripts on: `webshot` runs a page's scripts on the host with the
+      page's heap sizes and names every uncaught error's throw site;
+      the sweep of fifteen front pages found and fixed the bookkeeping
+      allocator's partitioning (rewritten: classes to 4 KB, coalescing
+      blocks above), compiles' transient memory on the heap (an
+      embedder scratch now), pattern parameters without registers (a
+      rest parameter wrote into a captured outer binding of its name),
+      quadratic shape tables (a dictionary past 32 properties), 72-byte
+      inline caches (56, the second entry out of line), a rope hashed
+      by a Map, modules' text held three times, and a collector that
+      never ran under callbacks (`callRooted`, rooted module bodies,
+      safe points at allocation opcodes); a JavaScript prelude answers
+      the platform's smaller APIs; the page's script heaps are 16 + 32
+      MB and the page 108 MB. Ten of the fifteen run clean; GitHub, the
+      BBC, the Guardian and Apple still outgrow 32 MB. Left: test 80
+      (a frame's XHTML scripts in their own realm, XML errors stopping
+      them), CORS with credentials, iframes laid out, the rest of the
+      SVG DOM; **lazy function compilation** (a bundle's functions
+      compiled on first call: the code costs ten bytes per byte of
+      source and most of it never runs — the one change that would let
+      the four heavy sites fit), the collector under natives (natives
+      rooting their locals, so every callback collects), the small
+      classes' fragmentation after a collection (Apple: 14 MB free in
+      no block over 4 KB).
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

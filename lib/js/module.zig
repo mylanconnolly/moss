@@ -143,17 +143,22 @@ pub fn create(vm: *Vm, name: []const u8, source: []const u8) Error!*Module {
     }
     // Parse once for the entries (the compiler parses again; the tree
     // is small compared to running it).
-    var arena = std.heap.ArenaAllocator.init(vm.meta);
+    var arena = std.heap.ArenaAllocator.init(vm.compile_scratch orelse vm.meta);
     defer arena.deinit();
     const prog = parser.parse(arena.allocator(), m.source, .{ .module = true }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => return vm.throwSyntaxError(compiler.last_error),
     };
     try collectEntries(vm, m, prog);
-    m.code = compiler.compile(vm.meta, &vm.heap, &vm.strings, m.source, .{ .module = true, .name = m.name, .module_record = m }) catch |e| switch (e) {
+    m.code = compiler.compile(vm.meta, &vm.heap, &vm.strings, m.source, .{ .module = true, .name = m.name, .module_record = m, .scratch = vm.compile_scratch }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => return vm.throwSyntaxError(compiler.last_error),
     };
+    // The code keeps the text (a function's `toString`); the record's
+    // copy has served (a site's two megabytes of modules were held
+    // twice, 2026-09-28).
+    vm.meta.free(m.source);
+    m.source = &.{};
     // Remembered only once it exists in full: a failed parse leaves no trace.
     m.index = @intCast(vm.modules.count());
     try vm.modules.put(vm.meta, m.name, m);
@@ -381,7 +386,7 @@ fn instantiate(vm: *Vm, m: *Module) Error!void {
     m.reject_fn = cap.reject;
     const co = try generator.newModuleRecord(vm, code, cap);
     m.co = co;
-    _ = try interp.runCoroutineStart(vm, code, null, Value.undefined_, null, &.{}, co);
+    _ = try interp.runCoroutineStart(vm, code, null, Value.undefined_, null, &.{}, co, true);
     m.env = co.internal(vmod.CoroutineData).env;
 }
 

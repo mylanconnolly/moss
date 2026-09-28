@@ -155,6 +155,36 @@ DESIGN's baseline table carries the numbers, with `tools/bench-small.js`
 timed on the host and, as the same text in the `jsrun` drill, on the
 target.
 
+## What a page taught it (2026-09-28)
+
+Running fifteen real sites' scripts (see `docs/web.md`, "Looking at a
+real site") changed the engine in ways any embedder sees:
+
+- `lib/heapalloc` — the bookkeeping allocator — keeps size classes up
+  to 4 KB and exact-sized, coalescing blocks above; a block freed at
+  the top lowers the top. A compile's arena chunks and a list's
+  doublings no longer partition the region by size.
+- A compile's transient memory goes to `compiler.Options.scratch`
+  (`vm.compile_scratch` for eval and modules) when the embedder gives
+  one; the code keeps exact-size copies of its tables.
+- Parameters bound by a pattern (a rest parameter, a destructured
+  one) get registers like simple ones; before, they resolved by name
+  at run time and could land on a captured outer binding.
+- An object past `object.dictionary_threshold` (32) properties keeps
+  its own table; a shared shape builds a lookup table at
+  `table_threshold` (16). Adding a thousand keys one by one used to
+  build a thousand tables.
+- An inline cache is 56 bytes (`bytecode.InlineCache`); a site's
+  second shape lives out of line in `IcMore`.
+- The collector runs at safe points at native depth zero — and
+  `Vm.callRooted` lets an embedder run a callback that holds nothing
+  unrooted (a job, a timer, a listener) as top-level code, module
+  bodies start rooted, and `newobj`, `newarr`, `closure` and `class`
+  are safe points, since straight-line code allocates without looping.
+- A module record drops its copy of the source once compiled; the
+  code's copy serves `Function.prototype.toString`.
+- `Map` and `Set` flatten a rope key before hashing it.
+
 ## Measuring it
 
 ```

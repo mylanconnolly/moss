@@ -49,6 +49,22 @@ pub fn runScript(vm: *Vm, code: *Code, this: Value, env: ?*Env, func: ?*Object, 
     return run(vm);
 }
 
+/// `callValue` for a caller at native depth zero holding nothing the
+/// collector cannot see: a plain function runs without the depth count,
+/// so the collector may run inside it (see `Vm.callRooted`).
+pub fn callValueRooted(vm: *Vm, f: Value, this: Value, args: []const Value) Error!Value {
+    if (vm.depth != 0 or !f.isObject()) return callValue(vm, f, this, args);
+    const o = asObject(f);
+    if (o.class != .function) return callValue(vm, f, this, args);
+    const fd = o.internal(FunctionData);
+    if (fd.native != null or fd.is_class_constructor) return callValue(vm, f, this, args);
+    const code = fd.code.?;
+    if (isGeneratorKind(code.data.kind)) return callValue(vm, f, this, args);
+    const base = try placeArgs(vm, args);
+    try pushFrame(vm, code, o, try coerceThis(vm, fd, this), Value.undefined_, fd.env, base, @intCast(args.len), 0, false, true, null);
+    return run(vm);
+}
+
 /// Call any callable with arguments from Zig.
 pub fn callValue(vm: *Vm, f: Value, this: Value, args: []const Value) Error!Value {
     const o = asObject(f);
@@ -171,11 +187,18 @@ pub fn coerceThisFor(vm: *Vm, fd: *FunctionData, this: Value) Error!Value {
 }
 
 /// Start a coroutine body: an entry frame with the record attached.
-pub fn runCoroutineStart(vm: *Vm, code: *Code, f: ?*Object, this: Value, env: ?*Env, args: []const Value, co: ?*Object) Error!Value {
+/// `rooted`: the caller at depth zero holds no unrooted cell (a
+/// module's evaluator), so the body runs as top-level code and its
+/// safe points collect — a site whose scripts are all modules filled
+/// the region with nothing live otherwise (2026-09-28).
+pub fn runCoroutineStart(vm: *Vm, code: *Code, f: ?*Object, this: Value, env: ?*Env, args: []const Value, co: ?*Object, rooted: bool) Error!Value {
     const base = try placeArgs(vm, args);
     if (vm.depth > max_native_depth) return vm.throwRangeError("Maximum call stack size exceeded");
-    vm.depth += 1;
-    defer vm.depth -= 1;
+    const counted = !(rooted and vm.depth == 0);
+    if (counted) vm.depth += 1;
+    defer if (counted) {
+        vm.depth -= 1;
+    };
     try pushFrame(vm, code, f, this, Value.undefined_, env, base, @intCast(args.len), 0, false, true, null);
     currentFrame(vm).co = co;
     return run(vm);
@@ -887,24 +910,24 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 const site = &code.props[insn.c];
                 if (obj.isObject()) {
                     const o = asObject(obj);
-                    if (@as(*anyopaque, @ptrCast(o.shape)) == site.ic.shape2) {
-                        if (site.ic.holder2) |h| {
+                    if (site.ic.more) |m| if (@as(*anyopaque, @ptrCast(o.shape)) == m.shape2) {
+                        if (m.holder2) |h| {
                             const ho: *Object = @ptrCast(@alignCast(h));
-                            if (@as(*anyopaque, @ptrCast(ho.shape)) == site.ic.holder_shape2) {
-                                regs[insn.a] = ho.slot(site.ic.slot2).*;
+                            if (@as(*anyopaque, @ptrCast(ho.shape)) == m.holder_shape2) {
+                                regs[insn.a] = ho.slot(m.slot2).*;
                                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                                 insn = code.insns[pc];
                                 pc += 1;
                                 continue :sw insn.op;
                             }
                         } else {
-                            regs[insn.a] = o.slot(site.ic.slot2).*;
+                            regs[insn.a] = o.slot(m.slot2).*;
                             if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                             insn = code.insns[pc];
                             pc += 1;
                             continue :sw insn.op;
                         }
-                    }
+                    };
                     if (@as(*anyopaque, @ptrCast(o.shape)) == site.ic.shape) {
                         if (site.ic.holder) |h| {
                             const ho: *Object = @ptrCast(@alignCast(h));
@@ -941,7 +964,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                         if (site.ic.add_shape) |ns| {
                             // The site adds this property: the shape moves to
                             // the child recorded, while no prototype changed.
-                            if (o.extensible and vm.objects.proto_epoch == site.ic.epoch) {
+                            if (o.extensible and @as(u32, @truncate(vm.objects.proto_epoch)) == site.ic.epoch) {
                                 const child: *Shape = @ptrCast(@alignCast(ns));
                                 if (child.count > Object.inline_count) {
                                     frame.pc = pc;
@@ -1214,6 +1237,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
 
             // ---------------------------------------------- objects
             .newobj => {
+                // A safe point at an allocation site: a bundle's top level is
+                // straight-line code — no back jump, no return — and could
+                // fill the region between the safe points it never reached.
+                if (vm.depth == 0) vm.safePoint();
                 regs[insn.a] = (try vm.newObject()).asValue();
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
@@ -1221,6 +1248,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 continue :sw insn.op;
             },
             .newarr => {
+                // A safe point at an allocation site: a bundle's top level is
+                // straight-line code — no back jump, no return — and could
+                // fill the region between the safe points it never reached.
+                if (vm.depth == 0) vm.safePoint();
                 regs[insn.a] = (try vm.newArray(0)).asValue();
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
@@ -1262,6 +1293,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 continue :sw insn.op;
             },
             .closure => {
+                // A safe point at an allocation site: a bundle's top level is
+                // straight-line code — no back jump, no return — and could
+                // fill the region between the safe points it never reached.
+                if (vm.depth == 0) vm.safePoint();
                 frame.pc = pc;
                 const f = try vm.newFunction(code.functions[insn.bc()], frame.env, Value.undefined_);
                 regs[insn.a] = f.asValue();
@@ -1271,6 +1306,10 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 continue :sw insn.op;
             },
             .class => {
+                // A safe point at an allocation site: a bundle's top level is
+                // straight-line code — no back jump, no return — and could
+                // fill the region between the safe points it never reached.
+                if (vm.depth == 0) vm.safePoint();
                 frame.pc = pc;
                 regs[insn.a] = try makeClass(vm, regs[insn.b], code.functions[insn.c], frame.env);
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
@@ -2068,13 +2107,20 @@ fn getPropSlow(vm: *Vm, obj: Value, site: *bytecode.PropSite) Error!Value {
                                 site.ic.holder_shape = @ptrCast(cur.shape);
                             }
                         } else {
-                            site.ic.shape2 = @ptrCast(o.shape);
-                            site.ic.slot2 = slot;
+                            // The second entry, made when first needed.
+                            const m = site.ic.more orelse blk: {
+                                const nm = try vm.meta.create(bytecode.IcMore);
+                                nm.* = .{};
+                                site.ic.more = nm;
+                                break :blk nm;
+                            };
+                            m.shape2 = @ptrCast(o.shape);
+                            m.slot2 = slot;
                             if (cur == o) {
-                                site.ic.holder2 = null;
+                                m.holder2 = null;
                             } else {
-                                site.ic.holder2 = @ptrCast(cur);
-                                site.ic.holder_shape2 = @ptrCast(cur.shape);
+                                m.holder2 = @ptrCast(cur);
+                                m.holder_shape2 = @ptrCast(cur.shape);
                             }
                         }
                     }
@@ -2122,7 +2168,7 @@ fn setPropSlow(vm: *Vm, obj: Value, site: *bytecode.PropSite, v: Value, strict: 
                     site.ic.slot = ns.slot;
                     site.ic.holder = null;
                     site.ic.add_shape = @ptrCast(ns);
-                    site.ic.epoch = epoch;
+                    site.ic.epoch = @truncate(epoch);
                 }
                 return;
             }
@@ -2509,6 +2555,7 @@ fn directEval(vm: *Vm, frame: *Frame, x: Value, strict_caller: bool) Error!Value
     }
     const is_arrow = kind == .arrow or kind == .async_arrow;
     const code = compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{
+        .scratch = vm.compile_scratch,
         .strict = strict_caller,
         .eval_env = frame.env,
         .eval_ctx = .{

@@ -25,8 +25,13 @@ const Index = std.HashMapUnmanaged(Value, u32, KeyContext, 80);
 const KeyContext = struct {
     vm: *Vm,
     pub fn hash(ctx: KeyContext, v: Value) u64 {
-        if (v.isString()) return asString(v).hash();
-        _ = ctx;
+        if (v.isString()) {
+            // A rope has no units to walk until it is flat (a site keyed
+            // a Map by a concatenation, 2026-09-28).
+            const s = asString(v);
+            const flat = if (s.form == .rope) (ctx.vm.strings.flatten(s) catch return 0) else s;
+            return flat.hash();
+        }
         return std.hash.Wyhash.hash(0, std.mem.asBytes(&v.bits));
     }
     pub fn eql(ctx: KeyContext, a: Value, b_: Value) bool {

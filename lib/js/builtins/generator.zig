@@ -122,7 +122,7 @@ pub fn call(vm: *Vm, f: *Object, this: Value, args: []const Value) Error!Value {
         co.reject = cap.reject;
     }
     const coerced = try interp.coerceThisFor(vm, fd, this);
-    const result = interp.runCoroutineStart(vm, code, f, coerced, fd.env, args, co_obj);
+    const result = interp.runCoroutineStart(vm, code, f, coerced, fd.env, args, co_obj, false);
     switch (kind) {
         1 => {
             try settleAsync(vm, co_obj.?, result);

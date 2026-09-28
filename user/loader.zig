@@ -42,7 +42,9 @@ pub const Stage = struct {
     // and sat 2 KB under 2 MB on 2026-09-23 with the web engine's grid,
     // tables and SVG in it, so a 4 KB change stopped the greeter. Bounded
     // by ipc.shm_max_pages (2250), far above.
-    pub const default_pages: u64 = 768;
+    /// The page image passed 3 MB when its scripts' prelude landed
+    /// (2026-09-28: 3,152,712 bytes against 768 pages' 3,145,728).
+    pub const default_pages: u64 = 1024;
 
     /// Why the last `load` refused, for the caller's log: a stage too
     /// small once read as "image missing" for a day.

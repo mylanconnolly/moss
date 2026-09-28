@@ -5,5 +5,5 @@
 # — a number the gate reports, never asserts, so the exit criterion of
 # stage 11 is measured every run. Without the files the step says so.
 # Essential and oneshot: its exit ends the boot.
-{ image: mshrun, script: scripts/acid3-drill.msh, grant: [log, bootfs, spawner], budget: { user: 104mb, kobj: 8mb }, profiles: [acid3], oneshot: true, essential: true,
+{ image: mshrun, script: scripts/acid3-drill.msh, grant: [log, bootfs, spawner], budget: { user: 128mb, kobj: 8mb }, profiles: [acid3], oneshot: true, essential: true,
   give: [{ tag: net, netview: net }, { tag: view, fs: "", ro: false }] }

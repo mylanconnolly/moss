@@ -90,6 +90,15 @@ pub const Accessor = extern struct {
 };
 
 /// A hidden class: an ordered map from keys to slots, shared.
+/// Past this many properties an object keeps its own table (see
+/// `defineOwn`); shapes stay for the small objects that share them.
+pub const dictionary_threshold: u32 = 32;
+/// A shape with this many properties gets a lookup table on first use;
+/// below it the chain is walked (pointer compares, at most fifteen).
+/// Was 8: a React site made five thousand tables for its literals'
+/// shapes, 1.4 MB of maps for objects of eight to fifteen keys.
+pub const table_threshold: u32 = 16;
+
 pub const Shape = extern struct {
     header: Cell,
     parent: ?*Shape,
@@ -315,10 +324,10 @@ pub const Objects = struct {
     }
 
     /// Where `key` lives in `shape`: walking the chain, or the table
-    /// when there is one (built at 8 properties).
+    /// when there is one (built at `table_threshold` properties).
     pub fn lookup(os: *Objects, shape: *Shape, key: Key) Error!?Table.Entry {
         if (shape.table) |t| return t.map.get(key);
-        if (shape.count >= 8 and !shape.dictionary) {
+        if (shape.count >= table_threshold and !shape.dictionary) {
             try os.buildTable(shape);
             return shape.table.?.map.get(key);
         }
@@ -495,6 +504,15 @@ pub const Objects = struct {
             os.heap.writeBarrier(&o.header, v);
             o.slot(slot).* = v;
             return true;
+        }
+        // An object growing past the threshold goes to a dictionary of
+        // its own: a shape per added key each built its lookup table
+        // (every key so far) on first use, so a registry of a thousand
+        // entries cost a thousand tables — a quadratic five megabytes
+        // (Wikipedia's module registry, 2026-09-28).
+        if (o.shape.count >= dictionary_threshold) {
+            try os.toDictionary(o);
+            return os.defineOwn(o, key, v, attrs);
         }
         const child = try os.transition(o.shape, key, attrs);
         try os.growSlots(o, child.count);

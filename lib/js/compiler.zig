@@ -37,13 +37,19 @@ pub const Options = struct {
     name: []const u8 = "<script>",
     /// The module record, for module code.
     module_record: ?*anyopaque = null,
+    /// Where the compile's transient memory comes from — the AST, the
+    /// analysis, the tables while they grow (a big site's bundle takes
+    /// tens of megabytes of it for a moment) — when not `a`: an
+    /// embedder's scratch, so the bookkeeping heap keeps only the code.
+    scratch: ?std.mem.Allocator = null,
 };
 
 /// Compile a program; the result is the script's top-level code.
 pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, src: []const u8, opts: Options) Error!*Code {
-    var arena = std.heap.ArenaAllocator.init(a);
+    var arena = std.heap.ArenaAllocator.init(opts.scratch orelse a);
     defer arena.deinit();
-    var p = parser.Parser.init(arena.allocator(), src, .{
+    const scratch = arena.allocator();
+    var p = parser.Parser.init(scratch, src, .{
         .module = opts.module,
         .strict = opts.strict,
         .in_function = opts.eval_ctx.has_this_function,
@@ -58,16 +64,16 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
         last_error_at = p.err_at;
         return e;
     };
-    var an = scope.Analysis.init(a);
+    var an = scope.Analysis.init(scratch);
     defer an.deinit();
     an.eval_mode = opts.eval_env != null or opts.eval_ctx.eval;
     an.eval_ctx = opts.eval_ctx;
     try an.analyzeProgram(prog);
     const source = try a.create(bytecode.Source);
     source.* = .{ .text = try a.dupe(u8, src), .refs = 0, .name = try a.dupe(u8, opts.name) };
-    var c = Compiler{ .a = a, .heap = h, .strings = strings, .an = &an, .source = source, .eval_env = opts.eval_env, .eval_mode = an.eval_mode, .module_record = opts.module_record };
-    defer c.env_stack.deinit(a);
-    defer c.pending_labels.deinit(a);
+    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = source, .eval_env = opts.eval_env, .eval_mode = an.eval_mode, .module_record = opts.module_record };
+    defer c.env_stack.deinit(scratch);
+    defer c.pending_labels.deinit(scratch);
     const code = c.program(prog) catch |e| {
         if (source.refs == 0) {
             a.free(source.text);
@@ -186,6 +192,8 @@ const FuncState = struct {
 
 pub const Compiler = struct {
     a: std.mem.Allocator,
+    /// The compile's transient memory (see `Options.scratch`).
+    scratch: std.mem.Allocator,
     heap: *heap.Heap,
     strings: *string.Strings,
     an: *scope.Analysis,
@@ -216,10 +224,10 @@ pub const Compiler = struct {
     // ------------------------------------------------------ emission
 
     fn emit(c: *Compiler, op: Op, a: u16, b: u16, cc: u16) Error!void {
-        try c.fs.insns.append(c.a, .{ .op = op, .a = a, .b = b, .c = cc });
+        try c.fs.insns.append(c.scratch, .{ .op = op, .a = a, .b = b, .c = cc });
     }
     fn emitBc(c: *Compiler, op: Op, a: u16, bc: u32) Error!void {
-        try c.fs.insns.append(c.a, Insn.withBc(op, a, bc));
+        try c.fs.insns.append(c.scratch, Insn.withBc(op, a, bc));
     }
     fn pc(c: *Compiler) u32 {
         return @intCast(c.fs.insns.items.len);
@@ -240,7 +248,7 @@ pub const Compiler = struct {
     fn pos(c: *Compiler, p: u32) Error!void {
         if (p == c.fs.last_pos) return;
         c.fs.last_pos = p;
-        try c.fs.positions.append(c.a, .{ .pc = c.pc(), .pos = p });
+        try c.fs.positions.append(c.scratch, .{ .pc = c.pc(), .pos = p });
     }
 
     fn tmp(c: *Compiler) Error!u16 {
@@ -265,28 +273,28 @@ pub const Compiler = struct {
         if (c.fs.const_strings.get(s)) |i| return i;
         const atom = try c.strings.atom(s);
         const i: u32 = @intCast(c.fs.consts.items.len);
-        try c.fs.consts.append(c.a, Value.fromCell(atom.cell()));
-        try c.fs.const_strings.put(c.a, s, i);
+        try c.fs.consts.append(c.scratch, Value.fromCell(atom.cell()));
+        try c.fs.const_strings.put(c.scratch, s, i);
         return i;
     }
     fn constNumber(c: *Compiler, d: f64) Error!u32 {
         const v = Value.fromF64(d);
         for (c.fs.consts.items, 0..) |x, i| if (x.eqlBits(v)) return @intCast(i);
         const i: u32 = @intCast(c.fs.consts.items.len);
-        try c.fs.consts.append(c.a, v);
+        try c.fs.consts.append(c.scratch, v);
         return i;
     }
     fn propSite(c: *Compiler, name: []const u8) Error!u16 {
         const atom = try c.strings.atom(name);
         const i = c.fs.props.items.len;
         if (i >= std.math.maxInt(u16)) return c.fail("too many property sites", 0);
-        try c.fs.props.append(c.a, .{ .key = atom });
+        try c.fs.props.append(c.scratch, .{ .key = atom });
         return @intCast(i);
     }
     fn globalSite(c: *Compiler, name: []const u8) Error!u32 {
         const atom = try c.strings.atom(name);
         const i: u32 = @intCast(c.fs.globals.items.len);
-        try c.fs.globals.append(c.a, .{ .name = atom });
+        try c.fs.globals.append(c.scratch, .{ .name = atom });
         return i;
     }
 
@@ -295,7 +303,7 @@ pub const Compiler = struct {
     fn program(c: *Compiler, prog: *Node) Error!*Code {
         const p = prog.data.program;
         var fs = FuncState{ .func = c.an.root_func, .parent = null, .strict = c.an.root_func.strict, .env_base = 0 };
-        defer fs.deinit(c.a);
+        defer fs.deinit(c.scratch);
         c.fs = &fs;
         c.scope = c.an.root;
         // The completion value of the script (eval's result).
@@ -326,14 +334,15 @@ pub const Compiler = struct {
     fn finish(c: *Compiler, fs: *FuncState, name: ?[]const u8, kind: bytecode.FunctionKind, start: u32, end: u32) Error!*Code {
         const d = try c.a.create(CodeData);
         d.* = .{};
-        d.insns = try fs.insns.toOwnedSlice(c.a);
-        d.consts = try fs.consts.toOwnedSlice(c.a);
-        d.functions = try fs.functions.toOwnedSlice(c.a);
-        d.props = try fs.props.toOwnedSlice(c.a);
-        d.globals = try fs.globals.toOwnedSlice(c.a);
-        d.scopes = try fs.scopes.toOwnedSlice(c.a);
-        d.templates = try fs.templates.toOwnedSlice(c.a);
-        d.positions = try fs.positions.toOwnedSlice(c.a);
+        // The tables grew in scratch; the code keeps exact-size copies.
+        d.insns = try c.a.dupe(Insn, fs.insns.items);
+        d.consts = try c.a.dupe(Value, fs.consts.items);
+        d.functions = try c.a.dupe(*Code, fs.functions.items);
+        d.props = try c.a.dupe(bytecode.PropSite, fs.props.items);
+        d.globals = try c.a.dupe(bytecode.GlobalSite, fs.globals.items);
+        d.scopes = try c.a.dupe(*bytecode.ScopeInfo, fs.scopes.items);
+        d.templates = try c.a.dupe(bytecode.TemplateSite, fs.templates.items);
+        d.positions = try c.a.dupe(bytecode.Position, fs.positions.items);
         d.nregs = fs.max;
         d.nparams = fs.nparams;
         d.param_slots = fs.param_slots;
@@ -398,7 +407,12 @@ pub const Compiler = struct {
                 try consts.append(c.a, b.is_const);
                 try lexical.append(c.a, b.lexical);
             } else if (b.kind == .param) {
-                // Parameters have their registers already.
+                // A simple parameter has its register already; one bound by
+                // a pattern (a rest parameter, a destructured one) gets its
+                // own here — left unresolved, its name was looked up at
+                // run time and landed on a captured outer binding of the
+                // same name (`function(...e)` beside `const e`, 2026-09-28).
+                b.loc = .{ .reg = try c.tmp() };
             } else {
                 b.loc = .{ .reg = try c.tmp() };
             }
@@ -414,10 +428,10 @@ pub const Compiler = struct {
                 .dynamic = s.kind == .function and s.func.has_direct_eval,
             };
             const idx: u32 = @intCast(fs.scopes.items.len);
-            try fs.scopes.append(c.a, info);
+            try fs.scopes.append(c.scratch, info);
             if (s.kind != .with) try c.emitBc(.pushenv, 0, idx);
             s.has_env = true;
-            try c.env_stack.append(c.a, s);
+            try c.env_stack.append(c.scratch, s);
         }
         // Script code: GlobalDeclarationInstantiation — vars become global
         // object properties, lexical declarations global lexical bindings.
@@ -615,7 +629,7 @@ pub const Compiler = struct {
     fn closure(c: *Compiler, f: *ast.Function, dst: u16, name: ?[]const u8) Error!void {
         const code = try c.function(f, name);
         const idx: u32 = @intCast(c.fs.functions.items.len);
-        try c.fs.functions.append(c.a, code);
+        try c.fs.functions.append(c.scratch, code);
         try c.emitBc(.closure, dst, idx);
     }
 
@@ -629,7 +643,7 @@ pub const Compiler = struct {
         c.chain = null;
         c.completion = null;
         var fs = FuncState{ .func = fi, .parent = saved_fs, .strict = fi.strict, .env_base = c.env_stack.items.len };
-        defer fs.deinit(c.a);
+        defer fs.deinit(c.scratch);
         c.fs = &fs;
         defer {
             c.fs = saved_fs;
@@ -982,7 +996,7 @@ pub const Compiler = struct {
                 try c.switchStmt(st);
             },
             .labeled => |l| {
-                try c.pending_labels.append(c.a, l.label);
+                try c.pending_labels.append(c.scratch, l.label);
                 switch (l.body.data) {
                     .for_stmt, .for_in, .for_of, .while_stmt, .do_while => try c.stmt(l.body),
                     else => {
@@ -1000,8 +1014,8 @@ pub const Compiler = struct {
                 try c.emit(.pushwith, obj, 0, 0);
                 c.release(top);
                 s.has_env = true;
-                try c.env_stack.append(c.a, s);
-                try c.fs.controls.append(c.a, .env);
+                try c.env_stack.append(c.scratch, s);
+                try c.fs.controls.append(c.scratch, .env);
                 const saved = c.scope;
                 c.scope = s;
                 try c.stmt(w.body);
@@ -1047,7 +1061,7 @@ pub const Compiler = struct {
         const top = c.fs.top;
         c.scope = s;
         try c.enterScope(s);
-        if (s.has_env) try c.fs.controls.append(c.a, .env);
+        if (s.has_env) try c.fs.controls.append(c.scratch, .env);
         for (body) |st| try c.stmt(st);
         if (s.has_env) _ = c.fs.controls.pop();
         try c.leaveScope(s);
@@ -1121,12 +1135,12 @@ pub const Compiler = struct {
     // ------------------------------------------------- control flow
 
     fn takeLabels(c: *Compiler) Error![]const []const u8 {
-        const l = try c.pending_labels.toOwnedSlice(c.a);
+        const l = try c.pending_labels.toOwnedSlice(c.scratch);
         return l;
     }
 
     fn pushTarget(c: *Compiler, labels: []const []const u8, is_loop: bool) Error!usize {
-        try c.fs.controls.append(c.a, .{ .target = .{ .labels = labels, .is_loop = is_loop, .top = c.fs.top } });
+        try c.fs.controls.append(c.scratch, .{ .target = .{ .labels = labels, .is_loop = is_loop, .top = c.fs.top } });
         return c.fs.controls.items.len - 1;
     }
 
@@ -1135,9 +1149,9 @@ pub const Compiler = struct {
         std.debug.assert(c.fs.controls.items.len == idx);
         const here = c.pc();
         for (ctl.target.breaks.items) |at| c.patch(at, here);
-        ctl.target.breaks.deinit(c.a);
-        ctl.target.continues.deinit(c.a);
-        c.a.free(ctl.target.labels);
+        ctl.target.breaks.deinit(c.scratch);
+        ctl.target.continues.deinit(c.scratch);
+        c.scratch.free(ctl.target.labels);
     }
 
     fn patchContinues(c: *Compiler, idx: usize, target: u32) Error!void {
@@ -1202,18 +1216,18 @@ pub const Compiler = struct {
                 .finally => |*fi| {
                     const id = c.fs.finally_ids;
                     c.fs.finally_ids += 1;
-                    try fi.pending.append(c.a, .{ .id = id, .target = target, .is_continue = is_continue });
+                    try fi.pending.append(c.scratch, .{ .id = id, .target = target, .is_continue = is_continue });
                     try c.emitBc(.ldint, fi.kind, @bitCast(id));
-                    try fi.entries.append(c.a, try c.jump(.jmp, 0));
+                    try fi.entries.append(c.scratch, try c.jump(.jmp, 0));
                     return;
                 },
             }
         }
         const t = &c.fs.controls.items[target].target;
         if (is_continue) {
-            try t.continues.append(c.a, try c.jump(.jmp, 0));
+            try t.continues.append(c.scratch, try c.jump(.jmp, 0));
         } else {
-            try t.breaks.append(c.a, try c.jump(.jmp, 0));
+            try t.breaks.append(c.scratch, try c.jump(.jmp, 0));
         }
     }
 
@@ -1234,7 +1248,7 @@ pub const Compiler = struct {
                 .finally => |*fi| {
                     try c.emit(.mov, fi.val, reg, 0);
                     try c.emitBc(.ldint, fi.kind, 2);
-                    try fi.entries.append(c.a, try c.jump(.jmp, 0));
+                    try fi.entries.append(c.scratch, try c.jump(.jmp, 0));
                     return;
                 },
                 else => {},
@@ -1251,7 +1265,7 @@ pub const Compiler = struct {
         const top = c.fs.top;
         c.scope = s;
         try c.enterScope(s);
-        if (s.has_env) try c.fs.controls.append(c.a, .env);
+        if (s.has_env) try c.fs.controls.append(c.scratch, .env);
         if (f.init) |i| {
             if (i.data == .var_decl) try c.stmt(i) else {
                 const t = c.fs.top;
@@ -1328,7 +1342,7 @@ pub const Compiler = struct {
         // Each iteration binds afresh.
         if (is_lexical) {
             try c.enterScope(s);
-            if (s.has_env) try c.fs.controls.append(c.a, .env);
+            if (s.has_env) try c.fs.controls.append(c.scratch, .env);
         }
         try c.forBind(f.left, key);
         try c.stmt(f.body);
@@ -1384,10 +1398,10 @@ pub const Compiler = struct {
         // The body runs under a handler that closes the iterator.
         const exc = try c.tmp();
         const jtry = try c.jump(.pushtry, exc);
-        try c.fs.controls.append(c.a, .{ .for_of = .{ .iter = iter, .is_await = f.is_await } });
+        try c.fs.controls.append(c.scratch, .{ .for_of = .{ .iter = iter, .is_await = f.is_await } });
         if (is_lexical) {
             try c.enterScope(s);
-            if (s.has_env) try c.fs.controls.append(c.a, .env);
+            if (s.has_env) try c.fs.controls.append(c.scratch, .env);
         }
         try c.forBind(f.left, val);
         try c.stmt(f.body);
@@ -1453,13 +1467,13 @@ pub const Compiler = struct {
             kind_reg = try c.tmp();
             val_reg = try c.tmp();
             try c.emitBc(.ldint, kind_reg, 0);
-            try c.fs.controls.append(c.a, .{ .finally = .{ .kind = kind_reg, .val = val_reg } });
+            try c.fs.controls.append(c.scratch, .{ .finally = .{ .kind = kind_reg, .val = val_reg } });
             fin_idx = c.fs.controls.items.len - 1;
         }
         const exc = try c.tmp();
         // try block
         const jcatch = try c.jump(.pushtry, exc);
-        try c.fs.controls.append(c.a, .try_region);
+        try c.fs.controls.append(c.scratch, .try_region);
         try c.stmt(t.block);
         _ = c.fs.controls.pop();
         try c.emit(.poptry, 0, 0, 0);
@@ -1473,13 +1487,13 @@ pub const Compiler = struct {
             var jfin: ?u32 = null;
             if (t.finalizer != null) {
                 jfin = try c.jump(.pushtry, val_reg);
-                try c.fs.controls.append(c.a, .try_region);
+                try c.fs.controls.append(c.scratch, .try_region);
             }
             const cs = c.an.scopeOf(st);
             const saved = c.scope;
             c.scope = cs;
             try c.enterScope(cs);
-            if (cs.has_env) try c.fs.controls.append(c.a, .env);
+            if (cs.has_env) try c.fs.controls.append(c.scratch, .env);
             if (t.param) |p| try c.bindPattern(p, exc, .init);
             // The handler block is compiled in the catch scope directly
             // (its own scope holds the block's declarations).
@@ -1513,7 +1527,7 @@ pub const Compiler = struct {
             var ctl = c.fs.controls.pop().?;
             std.debug.assert(c.fs.controls.items.len == fin_idx.?);
             for (ctl.finally.entries.items) |j| c.patchHere(j);
-            ctl.finally.entries.deinit(c.a);
+            ctl.finally.entries.deinit(c.scratch);
             const saved_completion = c.completion;
             c.completion = null;
             try c.stmt(fin);
@@ -1539,7 +1553,7 @@ pub const Compiler = struct {
                 try c.unwindTo(p.target, p.is_continue, c.fs.controls.items.len);
                 c.patchHere(jn);
             }
-            ctl.finally.pending.deinit(c.a);
+            ctl.finally.pending.deinit(c.scratch);
             c.release(t0);
         } else {
             for (jends[0..njend]) |j| c.patchHere(j);
@@ -1557,11 +1571,11 @@ pub const Compiler = struct {
         const saved = c.scope;
         c.scope = s;
         try c.enterScope(s);
-        if (s.has_env) try c.fs.controls.append(c.a, .env);
+        if (s.has_env) try c.fs.controls.append(c.scratch, .env);
         const ctl = try c.pushTarget(labels, false);
         // Tests, then bodies.
-        const jumps = try c.a.alloc(u32, sw.cases.len);
-        defer c.a.free(jumps);
+        const jumps = try c.scratch.alloc(u32, sw.cases.len);
+        defer c.scratch.free(jumps);
         var default_idx: ?usize = null;
         const t = try c.tmp();
         for (sw.cases, 0..) |cs, i| {
@@ -1948,7 +1962,7 @@ pub const Compiler = struct {
             .optional_chain => |inner| {
                 const d = dst orelse try c.tmp();
                 var chain = Chain{ .dst = d };
-                defer chain.jumps.deinit(c.a);
+                defer chain.jumps.deinit(c.scratch);
                 const saved = c.chain;
                 c.chain = &chain;
                 _ = try c.expr(inner, d);
@@ -2141,12 +2155,12 @@ pub const Compiler = struct {
                     .optional_chain => |inner| {
                         // delete a?.b
                         var chain = Chain{ .dst = d };
-                        defer chain.jumps.deinit(c.a);
+                        defer chain.jumps.deinit(c.scratch);
                         const saved = c.chain;
                         c.chain = &chain;
                         const m = inner.data.member;
                         const obj = try c.expr(m.object, null);
-                        if (m.optional) try chain.jumps.append(c.a, try c.jump(.jnullish, obj));
+                        if (m.optional) try chain.jumps.append(c.scratch, try c.jump(.jnullish, obj));
                         const k = try c.tmp();
                         if (m.computed) {
                             _ = try c.expr(m.property, k);
@@ -2607,7 +2621,7 @@ pub const Compiler = struct {
             return d;
         }
         const obj = try c.expr(object, null);
-        if (optional) try c.chain.?.jumps.append(c.a, try c.jump(.jnullish, obj));
+        if (optional) try c.chain.?.jumps.append(c.scratch, try c.jump(.jnullish, obj));
         if (property.data == .private_name) {
             const key = try c.tmp();
             try c.load(c.resolve(property.data.private_name), key, property.data.private_name);
@@ -2689,7 +2703,7 @@ pub const Compiler = struct {
                     c.release(sb);
                 } else {
                     _ = try c.expr(m.object, base + 1);
-                    if (m.optional) try c.chain.?.jumps.append(c.a, try c.jump(.jnullish, base + 1));
+                    if (m.optional) try c.chain.?.jumps.append(c.scratch, try c.jump(.jnullish, base + 1));
                     if (m.property.data == .private_name) {
                         const key = try c.tmp();
                         try c.load(c.resolve(m.property.data.private_name), key, m.property.data.private_name);
@@ -2718,7 +2732,7 @@ pub const Compiler = struct {
                 try c.emit(.ldundef, base + 1, 0, 0);
             },
         }
-        if (optional) try c.chain.?.jumps.append(c.a, try c.jump(.jnullish, base));
+        if (optional) try c.chain.?.jumps.append(c.scratch, try c.jump(.jnullish, base));
         if (spread) {
             const arr = try c.tmp();
             try c.argsArray(args, arr);
@@ -2825,7 +2839,7 @@ pub const Compiler = struct {
         for (t.cooked, 0..) |cs, i| cooked[i] = if (cs) |s| try c.strings.atom(s) else null;
         for (t.raws, 0..) |r, i| raws[i] = try c.strings.atom(r);
         const site: u32 = @intCast(c.fs.templates.items.len);
-        try c.fs.templates.append(c.a, .{ .cooked = cooked, .raw = raws });
+        try c.fs.templates.append(c.scratch, .{ .cooked = cooked, .raw = raws });
         const abase = try c.tmps(@intCast(1 + t.exprs.len));
         try c.emitBc(.template, abase, site);
         for (t.exprs, 0..) |e, i| _ = try c.expr(e, abase + 1 + @as(u16, @intCast(i)));
@@ -2927,7 +2941,7 @@ pub const Compiler = struct {
         const top = c.fs.top;
         c.scope = cs;
         try c.enterScope(cs);
-        if (cs.has_env) try c.fs.controls.append(c.a, .env);
+        if (cs.has_env) try c.fs.controls.append(c.scratch, .env);
         // Private names.
         for (cs.bindings.values()) |b| if (b.kind == .implicit and b.name.len > 0 and b.name[0] == '#') {
             const r = try c.tmp();
@@ -2947,18 +2961,18 @@ pub const Compiler = struct {
         };
         const ctor_code = if (ctor) |f| try c.function(f, name) else try c.defaultConstructor(cl, name);
         const fidx: u32 = @intCast(c.fs.functions.items.len);
-        try c.fs.functions.append(c.a, ctor_code);
+        try c.fs.functions.append(c.scratch, ctor_code);
         try c.emit(.class, dst, parent, @intCast(fidx));
         const proto = try c.tmp();
         try c.emit(.getprop, proto, dst, try c.propSite("prototype"));
         // Members: methods and accessors now; fields into initializers.
         var key_n: usize = 0;
         var instance_fields: std.ArrayList(ast.Class.Member) = .empty;
-        defer instance_fields.deinit(c.a);
+        defer instance_fields.deinit(c.scratch);
         var static_inits: std.ArrayList(ast.Class.Member) = .empty;
-        defer static_inits.deinit(c.a);
+        defer static_inits.deinit(c.scratch);
         var private_methods: std.ArrayList(ast.Class.Member) = .empty;
-        defer private_methods.deinit(c.a);
+        defer private_methods.deinit(c.scratch);
         for (cl.members) |m| {
             if (m.kind == .method and !m.is_static and !m.computed and m.key.data == .string and std.mem.eql(u8, m.key.data.string, "constructor")) continue;
             const mtop = c.fs.top;
@@ -2980,7 +2994,7 @@ pub const Compiler = struct {
                                 .getter => .defgetterc,
                                 else => .defsetterc,
                             }, home, key, f);
-                        } else try private_methods.append(c.a, m);
+                        } else try private_methods.append(c.scratch, m);
                         continue;
                     }
                     const k = try c.tmp();
@@ -3013,16 +3027,16 @@ pub const Compiler = struct {
                         try c.emit(.topropkey, k, k, 0);
                         try c.initialize(c.resolve(nm), k, nm);
                     }
-                    if (m.is_static) try static_inits.append(c.a, m) else try instance_fields.append(c.a, m);
+                    if (m.is_static) try static_inits.append(c.scratch, m) else try instance_fields.append(c.scratch, m);
                 },
-                .static_block => try static_inits.append(c.a, m),
+                .static_block => try static_inits.append(c.scratch, m),
             }
         }
         // The instance field initializer.
         if (instance_fields.items.len > 0 or private_methods.items.len > 0) {
             const init_code = try c.fieldInitializer(cl, instance_fields.items, private_methods.items, false, proto);
             const iidx: u32 = @intCast(c.fs.functions.items.len);
-            try c.fs.functions.append(c.a, init_code);
+            try c.fs.functions.append(c.scratch, init_code);
             const f = try c.tmp();
             try c.emitBc(.closure, f, iidx);
             try c.emit(.sethome, f, proto, 0);
@@ -3033,7 +3047,7 @@ pub const Compiler = struct {
         if (static_inits.items.len > 0) {
             const init_code = try c.fieldInitializer(cl, static_inits.items, &.{}, true, dst);
             const sidx: u32 = @intCast(c.fs.functions.items.len);
-            try c.fs.functions.append(c.a, init_code);
+            try c.fs.functions.append(c.scratch, init_code);
             const base = try c.tmps(2);
             try c.emitBc(.closure, base, sidx);
             try c.emit(.sethome, base, dst, 0);
@@ -3052,7 +3066,7 @@ pub const Compiler = struct {
     /// `constructor(...args) { super(...args); }` or `constructor() {}`.
     fn defaultConstructor(c: *Compiler, cl: *ast.Class, name: ?[]const u8) Error!*Code {
         var fs = FuncState{ .func = c.an.root_func, .parent = c.fs, .strict = true, .env_base = c.env_stack.items.len };
-        defer fs.deinit(c.a);
+        defer fs.deinit(c.scratch);
         const saved_fs = c.fs;
         c.fs = &fs;
         defer c.fs = saved_fs;
@@ -3078,7 +3092,7 @@ pub const Compiler = struct {
         _ = home;
         _ = cl;
         var fs = FuncState{ .func = c.an.root_func, .parent = c.fs, .strict = true, .env_base = c.env_stack.items.len };
-        defer fs.deinit(c.a);
+        defer fs.deinit(c.scratch);
         const saved_fs = c.fs;
         c.fs = &fs;
         defer c.fs = saved_fs;

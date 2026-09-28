@@ -147,10 +147,10 @@ fn resetDocument() void {
 /// The script engine: the cells' heap and its bookkeeping (shapes,
 /// atoms, compiled code, the wrapper table), both reset per navigation
 /// — a document's scripts die with the document.
-var js_region: [8 << 20]u8 align(16) = undefined;
+var js_region: [16 << 20]u8 align(16) = undefined;
 /// 16 MB: compiling a 180 KB script (Acid3's) holds its parse tree
 /// here until the code is out, and a real site's script is larger.
-var js_meta_buf: [16 << 20]u8 align(16) = undefined;
+var js_meta_buf: [32 << 20]u8 align(16) = undefined;
 var js_meta: mosslib.heapalloc.Allocator = undefined;
 var vm: js.vm.Vm = undefined;
 var scripts: script.Page = undefined;

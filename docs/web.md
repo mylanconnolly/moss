@@ -170,9 +170,22 @@ checkedness, radio groups, `select.add`, `click()` activating) are
 there; `sheet.cssRules` is live. `web-render URL { eval: SOURCE }`
 evaluates a script expression in the settled page and returns its text
 as `eval`, which is how the drill prints the harness's failure list.
-Not yet: a frame's own scripts (the
-engine has one realm, so they do not run), CORS with credentials or a
-preflight, iframes laid out, most of the SVG DOM, modifier keys.
+The platform's smaller APIs come from a prelude in JavaScript
+(`lib/web/script_prelude.zig`): `URL`/`URLSearchParams`, `performance`,
+base64, text encoding, `Headers`/`Request`/`Response`,
+`AbortController`, `Blob`/`File`/`FormData`, `DOMParser`,
+`customElements`, the observers, `crypto`, `dataset`, `document.cookie`
+(in memory), `DOMMatrix`, `screen`, an `Intl` that formats plainly, and
+the element interfaces as aliases; import maps and `import.meta.url`
+are native. Real front pages — Wikipedia, Python's docs, MDN,
+lobste.rs, Stack Overflow, Reddit, Google, Rust, Hacker News,
+DuckDuckGo — run their scripts without an uncaught error (2026-09-28);
+GitHub, the BBC, the Guardian and Apple outgrow the page's 32 MB script
+bookkeeping heap until functions compile lazily. A page domain is 108
+MB (16 MB of script cells, 32 MB of bookkeeping, 40 MB of document and
+layout); a browser window keeps two. Not yet: a frame's own scripts
+(the engine has one realm, so they do not run), CORS with credentials
+or a preflight, iframes laid out, most of the SVG DOM, modifier keys.
 
 ### The window: Web
 
@@ -321,6 +334,17 @@ carrying a string and the lines that reach them; `WEBSHOT_AT=x,y` the
 boxes under a point and `WEBSHOT_BOX=n` a box's ancestors;
 `WEBSHOT_SUB=box` prints a box's subtree; `WEBSHOT_TABLE=box` a table's
 cells' minimum and maximum widths and the columns they make.
+`WEBSHOT_SCRIPTS=1` runs the page's scripts first, as the page domain
+would (the same engine over the same heap sizes, hooks answered from
+webshot's pipeline, timers settled on a fake clock: `WEBSHOT_SETTLE`
+ms of page time, 3000 by default), printing every console line and
+uncaught error — each with its throw site, `script:line:col` and the
+source around it — and a summary (scripts, errors, layouts for script
+reads, requests, heap and bookkeeping bytes); `WEBSHOT_VERBOSE=1` adds
+a line per compile and the bookkeeping heap's live bytes by size and
+by allocating source line; `WEBSHOT_META_MB` and `WEBSHOT_HEAP_MB`
+change the two heaps (32 and 16, the page's). This is how a real
+site's script failures are found in a second rather than a boot.
 `WEBSHOT_PAGE=1` runs the parse, sheets, cascade and layout in the page
 domain's memory and prints a census — node, box and fragment counts and
 record sizes, list capacities, text and attribute buffers, and a

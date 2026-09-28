@@ -94,13 +94,14 @@ fn spawnInit(log_h: u64, arg: u64) u64 {
         arg,
         ch.data[0],
         shared.SpawnFlags.grant_log | shared.SpawnFlags.grant_spawner | shared.SpawnFlags.grant_bootfs | shared.SpawnFlags.chan_side_a | shared.SpawnFlags.grant_hypervisor,
-        // init's slice: 12MB kobj, 256MB user (its units nest inside). 64MB
+        // init's slice: 12MB kobj, 376MB user (its units nest inside). 64MB
         // ran out on 2026-09-17 once every GUI boot also ran the network
         // service; 96MB cannot hold a guest node (a VMM with 128MB of
-        // guest RAM) beside the desktop. The hypervisor flag is honoured
+        // guest RAM) beside the desktop; 320MB could not hold a session
+        // whose browser keeps two 108MB pages (2026-09-28). The hypervisor flag is honoured
         // only when root holds the cap (the kernel checks), so a boot
         // without one simply has no VMM to start.
-        usys.kbLimits(12 << 10, 320 << 10),
+        usys.kbLimits(12 << 10, 376 << 10),
     );
     _ = usys.capDrop(ch.data[0]);
     if (r.err != .ok) {

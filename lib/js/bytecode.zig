@@ -206,24 +206,31 @@ pub const Insn = packed struct(u64) {
     }
 };
 
-/// A property site's inline cache: the shape seen and the slot.
+/// A property site's inline cache: the shape seen and the slot. Kept
+/// small — a real site's bundle has ten thousand sites per 300 KB of
+/// source, and these outweighed its instructions (2026-09-28) — so the
+/// second entry, which few sites need, lives out of line.
 pub const InlineCache = struct {
     shape: ?*anyopaque = null,
-    slot: u32 = 0,
     /// The property was found on the prototype at `holder` (the shape
     /// is the receiver's; the holder's shape must match too).
     holder: ?*anyopaque = null,
     holder_shape: ?*anyopaque = null,
     /// A store site that added the property: the receiver's shape
     /// afterwards, valid while no prototype anywhere has changed since
-    /// (`Objects.proto_epoch`).
+    /// (`Objects.proto_epoch`, its low bits).
     add_shape: ?*anyopaque = null,
-    epoch: u64 = 0,
     /// A second read entry, for a site that sees two shapes.
+    more: ?*IcMore = null,
+    slot: u32 = 0,
+    epoch: u32 = 0,
+};
+
+pub const IcMore = struct {
     shape2: ?*anyopaque = null,
-    slot2: u32 = 0,
     holder2: ?*anyopaque = null,
     holder_shape2: ?*anyopaque = null,
+    slot2: u32 = 0,
 };
 
 pub const PropSite = struct { key: *String, ic: InlineCache = .{} };
