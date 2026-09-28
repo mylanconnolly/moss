@@ -847,6 +847,7 @@ pub const Page = struct {
         try p.docs.append(a, .{ .doc = doc, .arena = null, .is_html = true, .owner = null, .view = Value.undefined_, .url = "" });
         vm.host_data = p;
         vm.embedder_roots = .{ .ctx = p, .trace = trace };
+        vm.on_budget = budgetHook;
         p.sym_listeners = try vm.newSymbol(try vm.strings.fromUtf8("listeners"));
         p.sym_slot = try vm.newSymbol(try vm.strings.fromUtf8("slot"));
         p.sym_style = try vm.newSymbol(try vm.strings.fromUtf8("style"));
@@ -1512,7 +1513,7 @@ pub const Page = struct {
         if (p.verbose) {
             var t: CodeTally = .{};
             t.add(code);
-            p.logf(.log, "script: compiled {s}: {d} KB of source; {d} functions, {d} instructions ({d} KB), {d} positions ({d} KB), {d} property sites ({d} KB), {d} global sites ({d} KB), {d} constants ({d} KB)", .{ name[0..@min(name.len, 100)], source.len / 1024, t.functions, t.insns, t.insns * @sizeOf(js.bytecode.Insn) / 1024, t.positions, t.positions * @sizeOf(js.bytecode.Position) / 1024, t.props, t.props * @sizeOf(js.bytecode.PropSite) / 1024, t.globals, t.globals * @sizeOf(js.bytecode.GlobalSite) / 1024, t.consts, t.consts * @sizeOf(Value) / 1024 });
+            p.logf(.log, "script: compiled {s}: {d} KB of source; {d} functions, {d} instructions ({d} KB), {d} positions ({d} KB), {d} property sites ({d} KB), {d} global sites ({d} KB), {d} constants ({d} KB); scratch {d} KB", .{ name[0..@min(name.len, 100)], source.len / 1024, t.functions, t.insns, t.insns * @sizeOf(js.bytecode.Insn) / 1024, t.positions, t.positions * @sizeOf(js.bytecode.Position) / 1024, t.props, t.props * @sizeOf(js.bytecode.PropSite) / 1024, t.globals, t.globals * @sizeOf(js.bytecode.GlobalSite) / 1024, t.consts, t.consts * @sizeOf(Value) / 1024, js.compiler.stats.last_scratch / 1024 });
         }
         _ = js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch |e| p.reportError(e, name);
         p.runJobs();
@@ -1629,6 +1630,12 @@ pub const Page = struct {
     fn exceptionText(p: *Page, buf: []u8) []const u8 {
         const vm = p.vm;
         const ex = vm.exception;
+        // Describing the value runs code (a getter, toString): past the
+        // embedder's budget that would throw again and the message be
+        // lost, so the budget is off for the description.
+        const budget = vm.step_limit;
+        vm.step_limit = std.math.maxInt(u64);
+        defer vm.step_limit = budget;
         // An Error: "Name: message" and its stack line if present, then
         // the throw site — script:line:col and the source around it —
         // which is what names the missing member on a real site.
@@ -1647,6 +1654,42 @@ pub const Page = struct {
         }
         const s = vm.toString(ex) catch return "exception";
         return js.builtins.utf8Buf(vm, s, buf) catch "exception";
+    }
+
+    /// The budget ran out: the frames, innermost first, so the log says
+    /// which function was looping (a native loop shows as its caller).
+    fn budgetHook(vm: *Vm) void {
+        const p: *Page = @ptrCast(@alignCast(vm.host_data orelse return));
+        p.logf(.err, "script: execution budget exceeded after {d} steps; frames:", .{vm.steps});
+        var shown: usize = 0;
+        var i: usize = vm.frames.items.len;
+        while (i > 0 and shown < 16) : (shown += 1) {
+            i -= 1;
+            const f = vm.frames.items[i];
+            const d = f.code.data;
+            var nb: [96]u8 = undefined;
+            const fname: []const u8 = if (d.name) |n| (js.builtins.utf8Buf(vm, n, &nb) catch "?") else "(anonymous)";
+            if (d.source) |src| {
+                const lc = lineCol(src.text, d.posOf(f.pc));
+                var sn: [96]u8 = undefined;
+                const sname = if (src.name.len > 0) src.name[0..@min(src.name.len, sn.len)] else "script";
+                @memcpy(sn[0..sname.len], sname);
+                p.logf(.err, "script:   at {s} ({s}:{d}:{d})", .{ fname, sn[0..sname.len], lc[0], lc[1] });
+            } else p.logf(.err, "script:   at {s}", .{fname});
+        }
+    }
+
+    fn lineCol(text: []const u8, pos_in: usize) [2]usize {
+        const pos = @min(pos_in, text.len);
+        var line: usize = 1;
+        var col: usize = 1;
+        for (text[0..pos]) |ch| {
+            if (ch == '\n') {
+                line += 1;
+                col = 1;
+            } else col += 1;
+        }
+        return .{ line, col };
     }
 
     /// " at NAME:LINE:COL «source»" for an Error made while code ran.
@@ -2465,7 +2508,7 @@ fn thisObserver(vm: *Vm, this: Value) Error!*Object {
         const o = Vm.asObject(this);
         if ((try vm.objects.getOwn(o, .{ .atom = try vm.atom("__callback") })) != null) return o;
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisObserver)");
 }
 
 fn moObserve(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
@@ -2586,7 +2629,7 @@ fn thisNode(vm: *Vm, this: Value) Error!NodeId {
             return o.internal(Slot).id;
         }
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (not a Node)");
 }
 
 /// `this` as its node record (the document switched first: a receiver
@@ -2598,7 +2641,7 @@ fn thisNodeRec(vm: *Vm, this: Value) Error!*const dom.Node {
 
 fn thisElement(vm: *Vm, this: Value) Error!NodeId {
     const id = try thisNode(vm, this);
-    if (pageOf(vm).doc.get(id).kind != .element) return vm.throwTypeError("Illegal invocation");
+    if (pageOf(vm).doc.get(id).kind != .element) return vm.throwTypeError("Illegal invocation (wrong receiver for thisElement)");
     return id;
 }
 
@@ -2608,7 +2651,7 @@ fn thisEvent(vm: *Vm, this: Value) Error!*Object {
         const o = Vm.asObject(this);
         if (o.class == .dom and o.internal(Slot).kind == slot_event) return o;
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisEvent)");
 }
 
 /// A string argument as UTF-8 in `a` (the caller's scratch).
@@ -2918,7 +2961,12 @@ fn construct(vm: *Vm, this: Value, args: []const Value, new_target: Value) Error
 /// The listener target: a node wrapper, the window, or a plain
 /// EventTarget instance.
 fn thisTarget(vm: *Vm, this: Value) Error!*Object {
-    if (!this.isObject()) return vm.throwTypeError("Illegal invocation");
+    // A bare call — `const add = window.addEventListener; add(...)`, or a
+    // patched method's `t.call(this, …)` from one — has no receiver, and
+    // a browser takes the window (a [Global] interface's operations do;
+    // GitHub's fetch helper, 2026-09-28).
+    if (this.isNullish()) return vm.global;
+    if (!this.isObject()) return vm.throwTypeError("Illegal invocation (not an object)");
     return Vm.asObject(this);
 }
 
@@ -4606,7 +4654,7 @@ fn thisTokens(vm: *Vm, this: Value) Error!NodeId {
             return o.internal(Slot).id;
         }
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisTokens)");
 }
 
 fn tokensOf(p: *Page, id: NodeId, a: std.mem.Allocator) Error!std.ArrayList([]const u8) {
@@ -5693,7 +5741,7 @@ fn thisStyle(vm: *Vm, this: Value) Error!StyleRef {
             return .{ .id = o.internal(Slot).id, .computed = o.internal(Slot).flags & style_computed != 0, .doc = o.internal(Slot).doc };
         }
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisStyle)");
 }
 
 const Decl = struct { name: []const u8, value: []const u8, important: bool };
@@ -6197,7 +6245,7 @@ fn thisSheet(vm: *Vm, this: Value) Error!NodeId {
             return o.internal(Slot).id;
         }
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisSheet)");
 }
 
 fn sheetHref(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -6558,7 +6606,7 @@ fn byteOffsetOfUtf16(text: []const u8, off: usize) usize {
 fn thisCharacterData(vm: *Vm, this: Value) Error!NodeId {
     const id = try thisNode(vm, this);
     const k = pageOf(vm).doc.get(id).kind;
-    if (k != .text and k != .comment) return vm.throwTypeError("Illegal invocation");
+    if (k != .text and k != .comment) return vm.throwTypeError("Illegal invocation (wrong receiver for thisCharacterData)");
     return id;
 }
 
@@ -6780,7 +6828,7 @@ fn thisTraversal(vm: *Vm, this: Value) Error!*Object {
             return o;
         }
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisTraversal)");
 }
 
 fn slotGet(vm: *Vm, o: *Object, name: []const u8) Error!Value {
@@ -7059,7 +7107,7 @@ fn thisRange(vm: *Vm, this: Value) Error!*Object {
             return o;
         }
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisRange)");
 }
 
 fn rangeState(vm: *Vm, rv: Value) Error!RangeState {
@@ -7604,7 +7652,7 @@ fn thisStorage(vm: *Vm, this: Value) Error!bool {
         const o = Vm.asObject(this);
         if (o.class == .dom and o.internal(Slot).kind == slot_storage) return o.internal(Slot).flags & storage_session != 0;
     }
-    return vm.throwTypeError("Illegal invocation");
+    return vm.throwTypeError("Illegal invocation (wrong receiver for thisStorage)");
 }
 
 fn sessionFind(p: *Page, key: []const u8) ?usize {
@@ -7746,7 +7794,7 @@ fn xhrReset(vm: *Vm, o: *Object, ready: i32) Error!void {
 }
 
 fn thisXhr(vm: *Vm, this: Value) Error!*Object {
-    if (!this.isObject()) return vm.throwTypeError("Illegal invocation");
+    if (!this.isObject()) return vm.throwTypeError("Illegal invocation (wrong receiver for thisXhr)");
     return Vm.asObject(this);
 }
 

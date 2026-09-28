@@ -13,7 +13,7 @@
   app:       { name: "Web", description: "Browse the web in sandboxed pages", icon: network, window: "Web", dock: true, order: 55 }
   image:     mshrun
   script:    scripts/browser.msh
-  budget:    { user: 240mb, kobj: 8mb }
+  budget:    { user: 256mb, kobj: 8mb }
   grant:     [log, spawner, bootfs]
   essential: false
   give: [

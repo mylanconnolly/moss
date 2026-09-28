@@ -46,6 +46,32 @@ pub const ChunkArena = struct {
         return .{ .ptr = a, .vtable = &vtable };
     }
 
+    /// A point to come back to: what was allocated after it goes back
+    /// to the child (the parser drops a function body it has summarised).
+    pub const Mark = struct { top: ?*Header, end: usize };
+    pub fn mark(a: *const ChunkArena) Mark {
+        return .{ .top = a.top, .end = a.end };
+    }
+    /// Free every chunk made since `m` and rewind the one it was in.
+    pub fn reset(a: *ChunkArena, m: Mark) void {
+        while (a.top != m.top) {
+            const h = a.top.?;
+            const prev = h.prev;
+            const bytes: [*]align(16) u8 = @ptrCast(@alignCast(h));
+            a.child.free(bytes[0..h.len]);
+            a.top = prev;
+        }
+        a.end = m.end;
+    }
+
+    /// Bytes held from the child right now: every chunk, whole.
+    pub fn held(a: *const ChunkArena) usize {
+        var n: usize = 0;
+        var cur = a.top;
+        while (cur) |h| : (cur = h.prev) n += h.len;
+        return n;
+    }
+
     const vtable: Allocator.VTable = .{ .alloc = allocFn, .resize = resizeFn, .remap = remapFn, .free = freeFn };
 
     fn chunkBytes(h: *Header) [*]u8 {
@@ -118,4 +144,22 @@ test "scratch: chunks fill in order, the last allocation grows in place, all goe
     const small = try al.alloc(u8, 16);
     small[0] = 7;
     try std.heap.testAllocator(al);
+}
+
+test "scratch: a reset gives back what came after the mark, chunks and all" {
+    var arena = ChunkArena.init(std.testing.allocator, 4096);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const keep = try al.alloc(u8, 100);
+    keep[0] = 1;
+    const m = arena.mark();
+    _ = try al.alloc(u8, 3000);
+    _ = try al.alloc(u8, 3000); // a second chunk
+    _ = try al.alloc(u8, 10_000); // a chunk of its own
+    try std.testing.expect(arena.held() > 16_000);
+    arena.reset(m);
+    try std.testing.expectEqual(@as(usize, 4096), arena.held());
+    const again = try al.alloc(u8, 100);
+    try std.testing.expectEqual(@intFromPtr(keep.ptr) + 100, @intFromPtr(again.ptr)); // right after what was kept
+    try std.testing.expectEqual(@as(u8, 1), keep[0]);
 }

@@ -7681,6 +7681,117 @@ only what is free, or it is no reserve; a content-addressed store
 needs a collector from its first day; and a queue per input device is
 two orders, so a busy client sees one.
 
+**The 32 MB edge: bookkeeping pressure, a loop, and the preparse (as
+built, 2026-09-28).** The BBC and Apple, the two front pages still
+running out of the 32 MB bookkeeping heap, were the next mandate, and
+webshot's census — taught to capture four frames per allocation site,
+since the nearest was the standard library's own `rawAlloc` — named
+the first thing at once: 12 MB of the BBC's 32 were regular
+expressions' programs, thousands of them, each with its parse tree,
+alive because nothing had asked the collector to run. The cell heap
+was a fifth used; the collector's only triggers were the cell heap's,
+and what a dead object owns in the bookkeeping heap — its property
+slots and tables, a RegExp's program — comes back only when it is
+collected. *Bookkeeping pressure collects now:* `Vm.meta` is the
+embedder's allocator counted (`Heap.counted`), every byte the runtime
+takes through it adds to `foreign_since`, and past a stride (an eighth
+of the heap: `Limits.meta_stride`) the next safe point collects. A
+compile holds the collector off meanwhile (`Heap.hold`): the code cells
+it has made sit in scratch lists the stack scan does not read, which
+the exhaustion rescue had been able to hit all along. *The loop.* With
+the BBC no longer dying of memory it ran forever, and the page host has
+no budget; webshot got one (`WEBSHOT_STEPS`, 300 million), the
+`RangeError` it throws could not be described past the budget (the
+description runs code), and the VM got `on_budget`, a hook the page
+host uses to log the frames innermost first. They named axios's
+`toFlatObject`, whose prototype walk `e = !1 !== r && k(e)` never
+reached `Object.prototype` — because the compiler put the assignment's
+value straight into the local's register, so the staged `&&` wrote
+`true` there before `k(e)` read it, and the walk climbed
+`Boolean.prototype` for ever. An assignment whose value mentions the
+local it assigns now goes through a temporary (the declaration path
+already checked; the assignment path did not). *The preparse.* Apple's
+466 KB analytics bundle still would not compile: its tree took 14 MB of
+scratch (118,000 nodes of 80 bytes: 33 bytes of tree per byte of
+source), and the heap, fragmented by then into free runs of a few KB,
+had no 512 KB chunk to give with 17 MB free. The parser now does what
+the big engines do: a function that will compile on its first call is
+parsed, summarised, and dropped. The summary is the scope analysis run
+over the function alone under a root that declares nothing
+(`scope.Summary`): every name that resolves nowhere is one the body
+reaches for, and the enclosing analysis resolves those from the
+function's scope as the references would have, marking captures; the
+flags say whether it used `this`, `super` or `new.target` (an arrow's
+belong to its enclosing method). The tree goes back to the chunk arena
+by a mark taken before the body (`ChunkArena.mark`/`reset`) — before
+the `}` is passed, since the token after it is lexed into the arena —
+and what the lexer cooked (a private name's `#`, an escaped
+identifier) is copied out from under the reset and back in after it,
+the class's list of referenced private names living outside the arena
+for the same reason. Kept: the outermost function of a lazy compile,
+class parts, a function called on the spot (the source after it says,
+as the compiler's rule did), one with `eval` or `with` in it, an arrow
+that says `super`; and a dropped body the compiler wants after all — a
+function in a parameter default, a dynamic ancestor — is parsed again
+from its source under the scope it was analysed in (`Compiler.reparse`;
+the first version analysed it under the emitter's current scope, the
+body's, and twenty test262 files found the parameter default's function
+reading the body's `var x`). The analytics bundle compiles in 2 MB of
+scratch; the locale switcher's 7 MB became 512 KB. Two more limits
+showed then: the heap's flat list of every cell needed a 915 KB
+contiguous block the fragmented heap could not give, so the cell heap
+read as full with ten megabytes free — the sweep walks the region now,
+cells end to end each saying its size, and the list is gone — and the
+compile's chunks are 64 KB, small enough to find room in a heap that
+has been in use a while. *Where it stands on the host:* the BBC runs
+its 54 scripts in 394 ms with one error of the site's own (a style
+target its bootstrap cannot find), 26 MB of bookkeeping live, 19,130
+bodies dropped; Apple runs its 13 in 249 ms with two of its own, 16 MB
+live, 12,171 dropped. test262 is unchanged: language 22,724 of 23,726,
+built-ins 18,059 of 23,821. *GitHub, further along.* With the two edge
+sites running, GitHub — which had stopped at its eighth script on the
+committed tree too, of bookkeeping — now runs that script far enough to
+fill the cell heap: 16.3 MB of live cells, real ones (the census with
+the stack scan off crashes, as it should; the region walk counts only
+marked cells). The page's cell heap is 24 MB now (webshot's default
+with it), the page 116 MB, and the chain above it eight more at each
+step: browser and `webpagecli` 256, session managers 360, the users'
+records 328, init 392, root 400. Three smaller things from the same
+log: the page host's `EventTarget` methods take a missing receiver as
+the window (a bare `addEventListener(...)`, or a patched method's
+`t.call(this, …)` from one — a [Global] interface's operations do; the
+error had read "Illegal invocation" since the first real sites), each
+"Illegal invocation" names the receiver it wanted, the prelude's
+`AbortSignal` is a native `EventTarget` re-pointed at its prototype,
+and a rescue that found nothing to free does not run again until 64 KB
+has been allocated since — a full heap ran a whole collection per
+refused allocation and GitHub spent five minutes in them. GitHub now
+reaches 17.6 MB of cells and fills the 32 MB bookkeeping heap instead;
+its census says where the next levers are: module sources held twice
+(the record's copy and the code's, 6 MB), property tables and slots
+(6 MB), the code of 1,495 lazily compiled functions (4 MB), regular
+expressions (2 MB). *On the device* (a fresh disk, the headless
+desktop): Apple's front page loads in 17.0 s (scripts 13.0 s; 13
+scripts, one error of its own, 14 MB of script heap), GitHub in 42.6 s
+(scripts 24.7 s, layout 5.2 s, pictures 7.3 s; its eight scripts run,
+the bookkeeping heap full at 32 MB as on the host), Wikipedia's article
+in 4.8 s (scripts 0.9 s). The BBC crashes, and the log says exactly
+how: the page domain now logs each script fetched with the document
+arena's fill beside it, and the arena stood at 4.6 MB after the last of
+34 fetches, then at 40.9 MB ten seconds later when the next script
+asked — the ten seconds the site's runtime ran with real-time timers,
+the node count flat at 2,171. A periodic DOM update fills an arena
+that never frees; the host never sees it because its clock is fake and
+settles in fourteen ticks. That is the document arena's next lever,
+named and measured (a fetched body's list now gives back its slack —
+up to as much again, for the page's life — which was the smaller
+half of the same picture). *Lessons:* a collector must feel every heap it
+frees into, not only the one it allocates from; an execution budget
+with a frame dump is the tool that turns "it hangs" into a line number;
+a sound summary of a dropped body is exactly the analysis already
+written, run once more under an empty root; and every refusal message
+should say what it wanted.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

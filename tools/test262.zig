@@ -418,6 +418,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const verbose = std.c.getenv("TEST262_VERBOSE") != null;
     eager = std.c.getenv("TEST262_EAGER") != null;
+    // TEST262_NODROP=1: the parser keeps every body (bisecting a preparse
+    // fault from a lazy-compile one).
+    if (std.c.getenv("TEST262_NODROP") != null) js.parser.drop_enabled = false;
     const trace = std.c.getenv("TEST262_TRACE") != null;
     const filter: ?[]const u8 = if (std.c.getenv("TEST262_FILTER")) |f| std.mem.span(f) else null;
     var root_dir = cwd.openDir(io, root, .{}) catch {

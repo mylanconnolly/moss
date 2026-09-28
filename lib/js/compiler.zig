@@ -49,11 +49,20 @@ pub const Options = struct {
 
 /// Compile a program; the result is the script's top-level code.
 /// The compile's scratch arena: chunks of this size, freed together.
-pub const scratch_chunk: usize = 512 << 10;
+/// 64 KB: small enough to find room in a bookkeeping heap that has
+/// been in use a while (its free runs are a few KB each by then, and a
+/// 512 KB chunk found none on Apple's page with 17 MB free), big enough
+/// that a compile takes a handful (the preparse left a 466 KB script's
+/// compile at 2 MB).
+pub const scratch_chunk: usize = 64 << 10;
 
 pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, src: []const u8, opts: Options) Error!*Code {
+    // No collection while the code cells made here sit in scratch lists.
+    h.hold += 1;
+    defer h.hold -= 1;
     var arena = @import("scratch.zig").ChunkArena.init(opts.scratch orelse a, scratch_chunk);
     defer arena.deinit();
+    defer stats.last_scratch = arena.held(); // before the deinit above: what the compile took
     const scratch = arena.allocator();
     var p = parser.Parser.init(scratch, src, .{
         .module = opts.module,
@@ -64,6 +73,10 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
         .allow_super_call = opts.eval_ctx.allow_super_call,
         .no_arguments = opts.eval_ctx.no_arguments,
         .private_names = opts.eval_ctx.private_names,
+        // Bodies that will compile on their first call are dropped as
+        // they are parsed (eval code keeps everything: it is dynamic).
+        .lazy = opts.lazy and opts.eval_env == null and !opts.eval_ctx.eval,
+        .scratch_arena = &arena,
     });
     const prog = p.parseProgram() catch |e| {
         last_error = p.err;
@@ -103,6 +116,8 @@ pub fn compileLazy(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings
     const src = d.source.?;
     stats.lazy_compiles += 1;
     stats.lazy_source_bytes += d.end - d.start;
+    h.hold += 1;
+    defer h.hold -= 1;
     // A small function's compile takes a small chunk.
     var arena = @import("scratch.zig").ChunkArena.init(scratch_opt orelse a, @min(scratch_chunk, @max(16 << 10, (d.end - d.start) * 8)));
     defer arena.deinit();
@@ -115,6 +130,9 @@ pub fn compileLazy(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings
         .allow_super_property = true,
         .allow_super_call = true,
         .private_names = private_names,
+        .lazy = true,
+        .keep_outer = true,
+        .scratch_arena = &arena,
     });
     const is_decl = d.lazy_form == 1;
     const fnode: *ast.Node = if (d.lazy_form == 2) blk: {
@@ -181,7 +199,7 @@ pub fn compileLazy(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings
 }
 
 /// What the compiles added up to, for a tool's report.
-pub var stats: struct { stubs: usize = 0, eager: usize = 0, lazy_compiles: usize = 0, lazy_source_bytes: usize = 0, not_normal: usize = 0, dynamic: usize = 0, in_params: usize = 0, super_arrow: usize = 0, called_at_once: usize = 0 } = .{};
+pub var stats: struct { stubs: usize = 0, eager: usize = 0, lazy_compiles: usize = 0, lazy_source_bytes: usize = 0, not_normal: usize = 0, dynamic: usize = 0, in_params: usize = 0, super_arrow: usize = 0, called_at_once: usize = 0, last_scratch: usize = 0 } = .{};
 
 /// Parse and compile errors: where and what (the last one).
 pub var last_error: []const u8 = "";
@@ -763,11 +781,72 @@ pub const Compiler = struct {
         try c.emitBc(.closure, dst, idx);
     }
 
+    /// The tree of a function whose body the parser dropped, from its
+    /// source again — into the scratch, and into the analysis under the
+    /// scope the function sits in, so the emitter finds what it expects.
+    fn reparse(c: *Compiler, f: *ast.Function) Error!*ast.Function {
+        const lz = f.body.lazy;
+        // The scope the function was analysed under (a named expression's
+        // own-name scope, else the enclosing one), not the emitter's
+        // current one: a function in a parameter default is compiled
+        // with the body's scope current, and resolved `x` to the body's
+        // `var x` (twenty test262 files, 2026-09-28).
+        const fi0 = c.an.funcOf(f);
+        const outer = (fi0.params_scope orelse fi0.scope).parent.?;
+        // The private names in scope, for the parser's early errors.
+        var privates: std.ArrayList([]const u8) = .empty;
+        var sc: ?*Scope = outer;
+        while (sc) |s| : (sc = s.parent) {
+            for (s.bindings.values()) |b| if (b.kind == .implicit and b.name.len > 0 and b.name[0] == '#') try privates.append(c.scratch, b.name);
+        }
+        var p = parser.Parser.init(c.scratch, c.source.text, .{
+            .module = c.module_record != null,
+            .strict = f.strict,
+            .in_function = true,
+            .allow_new_target = true,
+            .allow_super_property = true,
+            .allow_super_call = true,
+            .private_names = privates.items,
+            .lazy = false,
+        });
+        const f2: *ast.Function = if (f.kind != .normal) blk: {
+            const parse_kind: ast.Function.Kind = switch (f.kind) {
+                .getter => .getter,
+                .setter => .setter,
+                else => .method,
+            };
+            const mf = p.parseMethodAt(f.params_start, parse_kind, f.is_async, f.is_generator) catch |e| return c.parseFailed(&p, e);
+            mf.is_generator = f.is_generator;
+            mf.kind = f.kind;
+            break :blk mf;
+        } else blk: {
+            const decl = lz.is_decl and f.name != null;
+            const n = p.parseFunctionAt(f.start, decl) catch |e| return c.parseFailed(&p, e);
+            break :blk if (decl) n.data.function_decl else n.data.function;
+        };
+        f2.name = f.name;
+        try c.an.function(outer, f2);
+        // A named expression's own-name scope is `outer` itself: the
+        // emitter asks for it by the new node.
+        if (f.name != null and !f.is_arrow and !lz.is_decl) try c.an.scopes.put(c.an.a, @ptrCast(&f2.body), outer);
+        return f2;
+    }
+
+    fn parseFailed(c: *Compiler, p: *parser.Parser, e: parser.Error) Error {
+        _ = c;
+        last_error = p.err;
+        last_error_at = p.err_at;
+        return e;
+    }
+
     /// Whether `f` waits for its first call: a plain function or arrow
     /// (methods, accessors and class parts compile with their class)
     /// with nothing dynamic in it, not called on the spot (`(function
     /// () {…})()`, `.call(this)`: the source right after it says).
     fn lazyEligible(c: *Compiler, f: *ast.Function) bool {
+        // A dropped body passes the parser's part of these rules already;
+        // the rest (a parameter default, a dynamic ancestor) still apply,
+        // and a body wanted after all is parsed again (`reparse`).
         if (!c.lazy) return false;
         // Constructors, field initializers and static blocks compile
         // with their class; methods and accessors wait like functions.
@@ -850,7 +929,11 @@ pub const Compiler = struct {
     }
 
     /// Compile a function to its code (a nested FuncState).
-    fn function(c: *Compiler, f: *ast.Function, name: ?[]const u8) Error!*Code {
+    fn function(c: *Compiler, f0: *ast.Function, name: ?[]const u8) Error!*Code {
+        // A dropped body wanted after all (a class part, a function in a
+        // parameter default): parsed again from its source, analysed in
+        // its scope, compiled from that tree.
+        const f = if (f0.body == .lazy) try c.reparse(f0) else f0;
         const fi = c.an.funcOf(f);
         const saved_fs = c.fs;
         const saved_scope = c.scope;
@@ -968,6 +1051,7 @@ pub const Compiler = struct {
         if (f.is_generator) try c.emit(.genstart, 0, 0, 0);
         // The body.
         switch (f.body) {
+            .lazy => unreachable, // parsed again above
             .block => |body| {
                 for (body) |st| try c.stmt(st);
                 try c.emit(.retundef, 0, 0, 0);
@@ -2560,8 +2644,13 @@ pub const Compiler = struct {
                 switch (target.data) {
                     .identifier => |name| {
                         const ref = c.resolve(name);
-                        // Into the local's register directly when possible.
-                        const direct: ?u16 = if (ref == .reg and !c.isTdz(ref.reg)) ref.reg else null;
+                        // Into the local's register directly when possible —
+                        // not when the value reads the local: a staged
+                        // expression (`e = ok && k(e)`) writes its first
+                        // part there before the rest runs, and axios's
+                        // toFlatObject walked Boolean.prototype forever
+                        // (the BBC, 2026-09-28).
+                        const direct: ?u16 = if (ref == .reg and !c.isTdz(ref.reg) and !mentions(val, name)) ref.reg else null;
                         const r = if (isAnonymousFunction(val)) blk: {
                             const t = direct orelse dst orelse try c.tmp();
                             try c.namedInto(val, name, t);

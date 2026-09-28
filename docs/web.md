@@ -183,7 +183,7 @@ DuckDuckGo, the Guardian — run their scripts without an uncaught error
 (2026-09-28), with functions compiled on first call and a collector
 that runs under natives; GitHub runs to the end with two errors of its
 own scripts' making; the BBC and Apple still outgrow the page's 32 MB
-script bookkeeping heap. A page domain is 108 MB (16 MB of script
+script bookkeeping heap. A page domain is 116 MB (24 MB of script
 cells, 32 MB of bookkeeping, 40 MB of document and layout); a browser
 window keeps two. Not yet: a frame's own scripts
 (the engine has one realm, so they do not run), CORS with credentials
@@ -355,8 +355,13 @@ bytes by allocating source line, and the inline layouts' counts
 (lines made, appends that grew a list, the scratch stack's peak and
 how often a pass fell back to the arena) — and `WEBSHOT_REGION=MB`
 sizes the region it probes (default 40). `WEBSHOT_NOSCAN=1` turns the
-collector's stack scan off (unsafe; for comparison). Headless Chrome
-with the page's User-Agent (`moss/0.0 (webpage)`) makes the reference.
+collector's stack scan off (unsafe; for comparison). `WEBSHOT_STEPS=N`
+is the scripts' execution budget in millions of steps (300 by default):
+a script that never ends stops with a RangeError, and the log carries
+the frames it was in, innermost first, and the compile tallies (how
+many bodies the parser dropped and why the rest stayed). Headless
+Chrome with the page's User-Agent (`moss/0.0 (webpage)`) makes the
+reference.
 
 On the device, `tools/guidrive.py LOG PORT URL...` drives a headless
 desktop: start `run-gui`'s QEMU by hand with `-display none -qmp
@@ -364,7 +369,10 @@ tcp:127.0.0.1:PORT,server=on,wait=off -serial file:LOG -append
 "profile=guishell interactive"`, and the script signs in, opens Web,
 types each URL and waits for the page domain's `webpage: loaded in`
 line, which carries the phase times, the document and layout bytes,
-the script count and errors, and the script heap. A page that says
+the script count and errors, and the script heap; every script fetched
+logs its size and the document arena's fill beside it, which is how a
+page that fills the arena between two fetches is told from one that is
+merely big. A page that says
 "No page host: …" in its status line names the step of the host's
 setup that refused (the image's manifest, the stage, the spawn);
 init's `store:` line at boot says what the program store installed,

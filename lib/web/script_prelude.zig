@@ -134,11 +134,20 @@ pub const source =
     \\    def(g, 'Response', Rs);
     \\  }
     \\  if (miss('AbortController')) {
-    \\    var AS = function AbortSignal() { this.aborted = false; this.reason = undefined; this.onabort = null; this._l = []; };
-    \\    AS.prototype = { constructor: AS, addEventListener: function (t, f) { if (t === 'abort') this._l.push(f); }, removeEventListener: function (t, f) { this._l = this._l.filter(function (x) { return x !== f; }); }, dispatchEvent: function () { return true; }, throwIfAborted: function () { if (this.aborted) throw this.reason; } };
-    \\    AS.abort = function (r) { var s = new AS(); s.aborted = true; s.reason = r; return s; };
+    \\    // An AbortSignal is an EventTarget (GitHub's fetch helper calls
+    \\    // EventTarget.prototype.addEventListener on one: "Illegal
+    \\    // invocation" on a plain object, 2026-09-28): a native one when the
+    \\    // page has the interface, re-pointed at our prototype.
+    \\    var hasET = typeof EventTarget === 'function';
+    \\    var AS = function AbortSignal() { var s = hasET ? new EventTarget() : {}; Object.setPrototypeOf(s, AS.prototype); s.aborted = false; s.reason = undefined; s.onabort = null; s._l = []; return s; };
+    \\    AS.prototype = Object.create(hasET ? EventTarget.prototype : Object.prototype);
+    \\    AS.prototype.constructor = AS;
+    \\    if (!hasET) { AS.prototype.addEventListener = function (t, f) { if (t === 'abort') this._l.push(f); }; AS.prototype.removeEventListener = function (t, f) { this._l = this._l.filter(function (x) { return x !== f; }); }; AS.prototype.dispatchEvent = function (ev) { var ls = this._l.slice(); for (var i = 0; i < ls.length; i++) ls[i].call(this, ev); return true; }; }
+    \\    AS.prototype.throwIfAborted = function () { if (this.aborted) throw this.reason; };
+    \\    AS.abort = function (r) { var s = new AS(); s.aborted = true; s.reason = r === undefined ? new Error('AbortError') : r; return s; };
     \\    AS.timeout = function (ms) { var s = new AS(); setTimeout(function () { s._fire(new Error('TimeoutError')); }, ms); return s; };
-    \\    AS.prototype._fire = function (r) { if (this.aborted) return; this.aborted = true; this.reason = r === undefined ? new Error('AbortError') : r; var ev = { type: 'abort', target: this }; if (this.onabort) this.onabort(ev); this._l.forEach(function (f) { f.call(this, ev); }, this); };
+    \\    AS.any = function (sigs) { var s = new AS(); for (var i = 0; i < sigs.length; i++) { if (sigs[i].aborted) { s.aborted = true; s.reason = sigs[i].reason; break; } sigs[i].addEventListener('abort', function () { s._fire(this.reason); }); } return s; };
+    \\    AS.prototype._fire = function (r) { if (this.aborted) return; this.aborted = true; this.reason = r === undefined ? new Error('AbortError') : r; var ev = (typeof Event === 'function') ? new Event('abort') : { type: 'abort', target: this }; if (typeof this.onabort === 'function') this.onabort(ev); this.dispatchEvent(ev); };
     \\    var AC = function AbortController() { this.signal = new AS(); };
     \\    AC.prototype.abort = function (r) { this.signal._fire(r); };
     \\    def(g, 'AbortSignal', AS); def(g, 'AbortController', AC);

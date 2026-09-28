@@ -241,6 +241,10 @@ pub const Vm = struct {
     /// Test262's `$262` host object needs `createRealm`, `evalScript`:
     /// provided by the runner through this hook.
     host_data: ?*anyopaque = null,
+    /// Called once when the execution budget runs out, before the
+    /// RangeError, with the frames still standing: the embedder says
+    /// where the script was.
+    on_budget: ?*const fn (vm: *Vm) void = null,
     /// Bumped when a global lexical binding is added: global-site caches
     /// carry the epoch they were filled at.
     global_lex_epoch: usize = 1,
@@ -278,7 +282,14 @@ pub const Vm = struct {
 
     /// What an embedder may size: the value stack and the call depth
     /// (both allocated from `meta` at init, so a small host pays less).
-    pub const Limits = struct { stack_values: usize = stack_values, max_frames: u32 = max_frames };
+    pub const Limits = struct {
+        stack_values: usize = stack_values,
+        max_frames: u32 = max_frames,
+        /// Bookkeeping bytes taken between collections before one is
+        /// asked for at the next safe point (an eighth of the bookkeeping
+        /// heap is a fair stride).
+        meta_stride: usize = 4 << 20,
+    };
 
     /// Create a VM over `region` (the heap the cells live in), with
     /// `meta` for bookkeeping memory, and its intrinsics.
@@ -294,15 +305,19 @@ pub const Vm = struct {
             .objects = undefined,
             .stack = try meta.alloc(Value, limits.stack_values),
         };
+        // What the runtime takes from the bookkeeping allocator is
+        // counted, so its pressure reaches a safe point too.
+        vm.heap.foreign_stride = limits.meta_stride;
+        vm.meta = vm.heap.counted();
         // The collector scans the native stack up to here: the frame of
         // whoever set the engine up sits above every frame it runs in.
         vm.heap.stack_hi = @frameAddress();
         vm.heap.finalizer = finalizeCell;
         // The frame list never reallocates (the interpreter keeps pointers
         // into it): its capacity is the call depth, checked against.
-        try vm.frames.ensureTotalCapacityPrecise(meta, limits.max_frames);
-        vm.strings = Strings.init(&vm.heap, meta);
-        vm.objects = Objects.init(&vm.heap, &vm.strings, meta);
+        try vm.frames.ensureTotalCapacityPrecise(vm.meta, limits.max_frames);
+        vm.strings = Strings.init(&vm.heap, vm.meta);
+        vm.objects = Objects.init(&vm.heap, &vm.strings, vm.meta);
         try vm.heap.addRoot(.{ .ctx = vm, .trace = traceRoots });
         try realm.create(vm);
     }
@@ -485,7 +500,7 @@ pub const Vm = struct {
     /// call, an element of a native loop): RangeError past the limit.
     pub inline fn tick(vm: *Vm) Error!void {
         vm.steps += 1;
-        if (vm.steps > vm.step_limit) return vm.throwRangeError("execution budget exceeded");
+        if (vm.steps > vm.step_limit) return vm.budgetExceeded();
     }
 
     /// A safe point: collect when the heap asks for it. Only the
@@ -493,6 +508,14 @@ pub const Vm = struct {
     /// depth, since the collector reads the native stack too.
     pub inline fn safePoint(vm: *Vm) void {
         if (vm.heap.wantsCollect()) vm.heap.collect();
+    }
+
+    fn budgetExceeded(vm: *Vm) Error {
+        if (vm.on_budget) |f| {
+            vm.on_budget = null; // once
+            f(vm);
+        }
+        return vm.throwRangeError("execution budget exceeded");
     }
 
     /// The accessor cell value's tracer is needed when a slot holds one:

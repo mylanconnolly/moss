@@ -87,6 +87,48 @@ pub const Func = struct {
 
 pub const Error = error{OutOfMemory};
 
+/// What a function body reaches for and does, for the parser to keep in
+/// place of the body (`ast.Function.Lazy`): the analysis run over the
+/// function alone, under a root that declares nothing, so every name
+/// that resolves nowhere is one of the function's free names.
+pub const Summary = struct {
+    a: std.mem.Allocator,
+    free: std.ArrayList([]const u8) = .empty,
+    seen: std.StringHashMapUnmanaged(void) = .empty,
+    uses_this: bool = false,
+    uses_new_target: bool = false,
+    uses_super: bool = false,
+    uses_super_call: bool = false,
+    /// A direct eval or a `with` in it or below it: the body stays.
+    dynamic: bool = false,
+
+    pub fn add(k: *Summary, name: []const u8) Error!void {
+        const r = try k.seen.getOrPut(k.a, name);
+        if (!r.found_existing) try k.free.append(k.a, name);
+    }
+
+    /// Everything allocated comes from `a` (the parser's arena above
+    /// its mark) and goes with it.
+    pub fn run(a: std.mem.Allocator, f: *ast.Function, is_decl: bool) Error!Summary {
+        var k: Summary = .{ .a = a };
+        var an = Analysis.init(a);
+        an.free_sink = &k;
+        const root_func = try an.newFunc(null, null);
+        root_func.strict = f.strict;
+        an.root_func = root_func;
+        const root = try an.newScope(.script, null, root_func, null);
+        an.root = root;
+        if (is_decl) try an.function(root, f) else try an.functionExpr(root, f);
+        const fi = an.funcOf(f);
+        k.dynamic = fi.dynamic or fi.has_direct_eval or fi.has_with or root_func.dynamic;
+        k.uses_this = fi.uses_this or root_func.uses_this;
+        k.uses_new_target = fi.uses_new_target or root_func.uses_new_target;
+        k.uses_super = fi.uses_super or root_func.uses_super;
+        k.uses_super_call = fi.uses_super_call or root_func.uses_super_call;
+        return k;
+    }
+};
+
 /// The analysis of one program (script, module, or eval code).
 pub const Analysis = struct {
     a: std.mem.Allocator,
@@ -104,6 +146,9 @@ pub const Analysis = struct {
     eval_mode: bool = false,
     /// Eval code inside a function with `this`, `new.target`, super.
     eval_ctx: EvalContext = .{},
+    /// A summary in progress (`Summary`): a name no scope resolves is
+    /// one the function reaches out for.
+    free_sink: ?*Summary = null,
 
     pub const EvalContext = struct {
         has_this_function: bool = false,
@@ -504,7 +549,6 @@ pub const Analysis = struct {
     /// Resolve a reference: the binding found on the chain is captured
     /// when it belongs to another function.
     pub fn reference(an: *Analysis, s: *Scope, name: []const u8) Error!void {
-        _ = an;
         var cur: ?*Scope = s;
         while (cur) |c| : (cur = c.parent) {
             if (c.bindings.get(name)) |b| {
@@ -512,6 +556,40 @@ pub const Analysis = struct {
                 if (c.func != s.func or c.dynamic) c.needs_env = true;
                 return;
             }
+        }
+        if (an.free_sink) |k| try k.add(name);
+    }
+
+    /// A dropped body (`ast.Function.Lazy`): its free names resolve from
+    /// the function's scope as its references would have, and what it
+    /// used of `this`, `super` and `new.target` reaches the function
+    /// that carries them.
+    fn lazyBody(an: *Analysis, fs: *Scope, lz: ast.Function.Lazy) Error!void {
+        for (lz.free) |name| {
+            if (std.mem.eql(u8, name, "arguments")) {
+                var id: Node = .{ .pos = 0, .data = .{ .identifier = name } };
+                try an.expr(fs, &id);
+            } else try an.reference(fs, name);
+        }
+        const tf = fs.func.this_func;
+        if (lz.uses_this) {
+            tf.uses_this = true;
+            try an.implicit(fs, "this");
+        }
+        if (lz.uses_new_target) {
+            tf.uses_new_target = true;
+            try an.implicit(fs, "new.target");
+        }
+        if (lz.uses_super) {
+            tf.uses_super = true;
+            try an.implicit(fs, ".home");
+            try an.implicit(fs, "this");
+        }
+        if (lz.uses_super_call) {
+            tf.uses_super_call = true;
+            try an.implicit(fs, "this");
+            try an.implicit(fs, "new.target");
+            try an.implicit(fs, ".func");
         }
     }
 
@@ -528,7 +606,7 @@ pub const Analysis = struct {
         }
     }
 
-    fn function(an: *Analysis, s: *Scope, f: *ast.Function) Error!void {
+    pub fn function(an: *Analysis, s: *Scope, f: *ast.Function) Error!void {
         const fi = try an.newFunc(f, s.func);
         var outer = s;
         // A named function expression binds its name in its own scope
@@ -548,7 +626,7 @@ pub const Analysis = struct {
         // Body declarations.
         switch (f.body) {
             .block => |body| try an.hoistDeclarations(fs, body, true),
-            .expr => {},
+            .expr, .lazy => {},
         }
         // References: parameter defaults in the params scope, the body in
         // the function scope.
@@ -556,6 +634,7 @@ pub const Analysis = struct {
         switch (f.body) {
             .block => |body| try an.stmts(fs, body),
             .expr => |e| try an.expr(fs, e),
+            .lazy => |lz| try an.lazyBody(fs, lz),
         }
         if (fi.has_direct_eval) an.markDynamic(fi);
         // A mapped arguments object aliases the parameters: they live in
@@ -577,7 +656,7 @@ pub const Analysis = struct {
     }
 
     /// A function expression: an optional own-name scope.
-    fn functionExpr(an: *Analysis, s: *Scope, f: *ast.Function) Error!void {
+    pub fn functionExpr(an: *Analysis, s: *Scope, f: *ast.Function) Error!void {
         if (f.name != null and !f.is_arrow) {
             const ns = try an.newScope(.block, s, s.func, @ptrCast(f.name.?.ptr));
             _ = try an.declare(ns, f.name.?, .@"const");

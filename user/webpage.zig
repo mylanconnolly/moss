@@ -147,7 +147,7 @@ fn resetDocument() void {
 /// The script engine: the cells' heap and its bookkeeping (shapes,
 /// atoms, compiled code, the wrapper table), both reset per navigation
 /// — a document's scripts die with the document.
-var js_region: [16 << 20]u8 align(16) = undefined;
+var js_region: [24 << 20]u8 align(16) = undefined;
 /// 16 MB: compiling a 180 KB script (Acid3's) holds its parse tree
 /// here until the code is out, and a real site's script is larger.
 var js_meta_buf: [32 << 20]u8 align(16) = undefined;
@@ -168,7 +168,13 @@ fn scriptLog(_: *anyopaque, level: script.Level, text: []const u8) void {
 }
 
 fn scriptFetch(_: *anyopaque, abs_url: []const u8) ?[]const u8 {
-    return fetchResource(abs_url, 4 << 20);
+    const body = fetchResource(abs_url, 4 << 20);
+    // One line per script, with the arena's fill: the BBC's page filled
+    // its 40 MB document arena with 2 MB of document on the device
+    // (2026-09-28), and this is where the rest was to be found.
+    var line: [256]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: script {d} KB fetched (document {d} KB, layout {d} KB); {s}", .{ if (body) |b| b.len / 1024 else 0, reg_lo / 1024, (region.len - reg_hi) / 1024, abs_url[0..@min(abs_url.len, 120)] }) catch "webpage: script fetched");
+    return body;
 }
 
 fn scriptNow() f64 {
@@ -326,7 +332,7 @@ fn runScripts(doc: *dom.Document) void {
     js_meta = mosslib.heapalloc.Allocator.init(&js_meta_buf);
     // A page's scripts get a shallower stack than the runner's: 64K
     // values and 4,000 frames (the defaults cost 4 MB of the 8 here).
-    vm.initWith(&js_region, js_meta.allocator(), .{ .stack_values = 1 << 16, .max_frames = 4000 }) catch {
+    vm.initWith(&js_region, js_meta.allocator(), .{ .stack_values = 1 << 16, .max_frames = 4000, .meta_stride = js_meta_buf.len / 8 }) catch {
         _ = usys.log(glog, "webpage: the script engine did not fit its heap");
         return;
     };
@@ -402,7 +408,11 @@ var phase: []const u8 = "loading";
 
 fn outOfMemory() noreturn {
     var line: [256]u8 = undefined;
-    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB; viewport {d}x{d} at {d}%)", .{ phase, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024, vw, vh, zoom_pct }) catch "webpage: out of memory");
+    // The node count and the scripts run say whether the page is big
+    // or its scripts churned the document (the arena never frees:
+    // the BBC filled 40 MB on the device with 2 MB of document on the
+    // host, 2026-09-28).
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB; viewport {d}x{d} at {d}%; {d} nodes, {d} scripts run)", .{ phase, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024, vw, vh, zoom_pct, if (page.doc) |d| d.nodes.len else 0, scripts.scripts_run }) catch "webpage: out of memory");
     // How far a layout got: the counts say whether the page is big or
     // the layout is wasteful.
     if (web.layout.in_progress) |l| {
@@ -701,7 +711,12 @@ fn fetchResourceInto(a: std.mem.Allocator, url_text: []const u8, max: usize) ?[]
         };
         switch (std.enums.fromInt(wire.ChunkEnd, chunk.done) orelse .failed) {
             .more => {},
-            .done => return body.items,
+            .done => {
+                // The list's slack goes back: in the document arena it
+                // would stay for the page's life, up to as much again.
+                body.shrinkAndFree(a, body.items.len);
+                return body.items;
+            },
             .failed => return null,
         }
     }

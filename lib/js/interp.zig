@@ -2601,6 +2601,12 @@ fn directEval(vm: *Vm, frame: *Frame, x: Value, strict_caller: bool) Error!Value
 }
 
 const interp_cases = [_]struct { src: []const u8, want: f64 }{
+    // An assignment whose value reads the local it assigns: the staged
+    // expression must not write the local's register early (`e = ok && k(e)`
+    // ran axios's prototype walk on `true` forever, 2026-09-28).
+    .{ .src = "function k(x) { return x === 7 ? 1 : 0; } function f(e) { e = (1 !== null) && k(e); return e; } f(7)", .want = 1 },
+    .{ .src = "function f(e) { e = e ? [e, e + 1][1] : 0; return e; } f(4)", .want = 5 },
+    .{ .src = "var x = 3; function f() { x = (x > 1) ? x * 2 : x; return x; } f()", .want = 6 },
     .{ .src = "1 + 2 * 3", .want = 7 },
     .{ .src = "var x = 10; function f(a, b) { return a * b + x; } f(2, 3)", .want = 16 },
     .{ .src = "function mk(n) { return function () { return n += 1; }; } var c = mk(5); c(); c()", .want = 7 },

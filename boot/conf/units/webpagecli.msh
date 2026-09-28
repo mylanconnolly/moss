@@ -6,5 +6,5 @@
 # pages at 28 MB each. The root view (read-only) is for the system
 # fonts it packs for the pages and the trust roots. Essential and
 # native: its exit ends the boot.
-{ image: webpagecli, grant: [log, spawner, bootfs], budget: { user: 240mb, kobj: 8mb }, profiles: [webpage], essential: true,
+{ image: webpagecli, grant: [log, spawner, bootfs], budget: { user: 256mb, kobj: 8mb }, profiles: [webpage], essential: true,
   give: [{ tag: net, netview: net }, { tag: view, fs: "", ro: true }] }

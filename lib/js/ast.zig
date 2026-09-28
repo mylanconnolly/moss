@@ -142,7 +142,25 @@ pub const Function = struct {
     /// Where the parameter list opens (a method compiled lazily is
     /// parsed again from here; arrows from `start`).
     params_start: Pos = 0,
-    pub const Body = union(enum) { block: []*Node, expr: *Node };
+    pub const Body = union(enum) {
+        block: []*Node,
+        expr: *Node,
+        /// The body was parsed, summarised and dropped (the parser's
+        /// preparse): what the analysis needs of it, and no tree. The
+        /// function compiles on its first call from its source.
+        lazy: Lazy,
+    };
+    pub const Lazy = struct {
+        /// Names the body reaches for that it does not declare itself,
+        /// `arguments` among them when an arrow uses it.
+        free: []const []const u8,
+        uses_this: bool = false,
+        uses_new_target: bool = false,
+        uses_super: bool = false,
+        uses_super_call: bool = false,
+        /// Parsed as a declaration (its name is the enclosing scope's).
+        is_decl: bool = false,
+    };
     pub const Kind = enum { normal, method, getter, setter, constructor, derived_constructor, class_field_init, static_block };
 };
 

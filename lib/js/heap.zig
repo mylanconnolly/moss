@@ -89,9 +89,27 @@ pub const Heap = struct {
     /// Bytes taken from the region's top since the last collection
     /// (a free-list reuse costs no room): what the low-room rule counts.
     bumped_since: usize = 0,
-    /// Every cell ever allocated, for the sweep (a class-indexed
-    /// segregated list would do without this; it is the simple form).
-    cells: std.ArrayList(*Cell) = .empty,
+    /// Bytes the runtime took from the bookkeeping allocator since the
+    /// last collection (through `counted`), and how many of them ask
+    /// for one: what a dead object owns there — its slots and tables,
+    /// a RegExp's program — comes back only when it is collected, and
+    /// the cell heap alone never asked (the BBC's page filled 32 MB of
+    /// bookkeeping with 6 MB of cells live and no collection, 2026-09-28).
+    foreign_since: usize = 0,
+    foreign_stride: usize = 4 << 20,
+    /// While nonzero no collection runs: a compile keeps the code cells
+    /// it has made in scratch lists the scanner does not read.
+    hold: u32 = 0,
+    /// The last exhaustion rescue found nothing to free: no rescue again
+    /// until some allocation has succeeded since (a full heap otherwise
+    /// ran a whole collection per refused allocation — GitHub's page
+    /// spent five minutes in them, 2026-09-28).
+    rescue_failed: bool = false,
+    /// (The sweep walks the region: cells lie end to end from its start
+    /// to `top`, each saying its size. A list of them cost eight bytes a
+    /// cell and one contiguous block that a fragmented bookkeeping heap
+    /// could not grow — 915 KB on Apple's page, 2026-09-28 — and the
+    /// cell heap read as full with ten megabytes free.)
     tracer: *const fn (heap: *Heap, cell: *Cell, m: *Marker) void,
     finalizer: ?*const fn (heap: *Heap, cell: *Cell) void = null,
     collections: usize = 0,
@@ -129,10 +147,9 @@ pub const Heap = struct {
     /// bookkeeping freed), then the lists. The region is the embedder's.
     pub fn deinit(h: *Heap) void {
         if (h.finalizer) |f| {
-            // (Large cells are in `cells` too.)
-            for (h.cells.items) |c| if (c.kind != .bytes and c.kind != .free) f(h, c);
+            var w = h.walk();
+            while (w.next()) |c| if (c.kind != .bytes and c.kind != .free) f(h, c);
         }
-        h.cells.deinit(h.meta);
         h.mark_stack.deinit(h.meta);
         h.large.deinit(h.meta);
         h.roots.deinit(h.meta);
@@ -142,6 +159,34 @@ pub const Heap = struct {
 
     pub fn addRoot(h: *Heap, r: Root) !void {
         try h.roots.append(h.meta, r);
+    }
+
+    /// The bookkeeping allocator, counted: what the runtime takes through
+    /// it adds to `foreign_since`, so bookkeeping pressure reaches the
+    /// next safe point. Growth in place counts too; frees do not (what a
+    /// collection frees is the point).
+    pub fn counted(h: *Heap) std.mem.Allocator {
+        return .{ .ptr = h, .vtable = &counted_vtable };
+    }
+    const counted_vtable: std.mem.Allocator.VTable = .{ .alloc = countedAlloc, .resize = countedResize, .remap = countedRemap, .free = countedFree };
+    fn countedAlloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const h: *Heap = @ptrCast(@alignCast(ctx));
+        h.foreign_since += n;
+        return h.meta.rawAlloc(n, alignment, ra);
+    }
+    fn countedResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const h: *Heap = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len) h.foreign_since += new_len - memory.len;
+        return h.meta.rawResize(memory, alignment, new_len, ra);
+    }
+    fn countedRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const h: *Heap = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len) h.foreign_since += new_len - memory.len;
+        return h.meta.rawRemap(memory, alignment, new_len, ra);
+    }
+    fn countedFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const h: *Heap = @ptrCast(@alignCast(ctx));
+        h.meta.rawFree(memory, alignment, ra);
     }
 
     /// Keep `c` alive until the matching `tempRelease`.
@@ -215,8 +260,10 @@ pub const Heap = struct {
     /// Whether a safe point should collect: enough allocated since the
     /// last collection, or the region's free space running low.
     pub inline fn wantsCollect(h: *const Heap) bool {
+        if (h.hold != 0) return false;
         if (h.stress) return true;
         if (h.allocated_since >= h.threshold) return true;
+        if (h.foreign_since >= h.foreign_stride) return true;
         // The bump space nearly gone: collect once half of what is left
         // has been taken — not at every safe point (the top never comes
         // down, so that once meant a collection per instruction on a
@@ -231,19 +278,39 @@ pub const Heap = struct {
     /// native stack — whatever the caller holds in a local is a root —
     /// so it waits for a `stack_hi` to scan to.
     fn rescue(h: *Heap, ci: ?u8, size: u32) ?*Cell {
-        if (h.stack_hi == 0 or h.cell_map.len == 0) return null;
+        if (h.stack_hi == 0 or h.cell_map.len == 0 or h.hold != 0) return null;
+        if (h.rescue_failed and h.allocated_since < (64 << 10)) return null;
         h.collect();
-        if (ci) |c| if (h.takeFree(c)) |cell| return cell;
-        if (ci == null) if (h.takeLarge(size)) |c| {
-            const bytes: [*]u8 = @ptrCast(c);
-            @memset(bytes[0..c.size], 0);
-            return c;
+        const got: ?*Cell = blk: {
+            if (ci) |c| if (h.takeFree(c)) |cell| break :blk cell;
+            if (ci == null) if (h.takeLarge(size)) |c| {
+                const bytes: [*]u8 = @ptrCast(c);
+                @memset(bytes[0..c.size], 0);
+                break :blk c;
+            };
+            break :blk h.bump(size);
         };
-        return h.bump(size);
+        h.rescue_failed = got == null;
+        return got;
     }
 
     /// The smallest dead large cell of at least `size` bytes (at most
     /// twice it, so a small request does not take a huge block).
+    /// The cells in address order, from the region's start to `top`.
+    pub const Walk = struct {
+        h: *const Heap,
+        at: usize = 0,
+        pub fn next(w: *Walk) ?*Cell {
+            if (w.at >= w.h.top) return null;
+            const c: *Cell = @ptrCast(@alignCast(w.h.region.ptr + w.at));
+            w.at = (w.at + c.size + align_bytes - 1) & ~@as(usize, align_bytes - 1);
+            return c;
+        }
+    };
+    pub fn walk(h: *const Heap) Walk {
+        return .{ .h = h };
+    }
+
     fn takeLarge(h: *Heap, size: u32) ?*Cell {
         var best: ?*Cell = null;
         for (h.large.items) |c| {
@@ -259,14 +326,13 @@ pub const Heap = struct {
         return @ptrCast(f);
     }
 
-    /// Fresh bytes from the region's top, registered in the cell list.
+    /// Fresh bytes from the region's top.
     fn bump(h: *Heap, size: u32) ?*Cell {
         const start = (h.top + align_bytes - 1) & ~@as(usize, align_bytes - 1);
         if (start + size > h.region.len) return null;
         h.top = start + size;
         h.bumped_since += size;
         const cell: *Cell = @ptrCast(@alignCast(h.region.ptr + start));
-        h.cells.append(h.meta, cell) catch return null;
         const bit = start / align_bytes;
         if (bit / 8 < h.cell_map.len) h.cell_map[bit / 8] |= @as(u8, 1) << @intCast(bit % 8);
         return cell;
@@ -334,50 +400,37 @@ pub const Heap = struct {
         }
         while (m.stack.pop()) |c| h.traceCell(c, &m);
         var live: usize = 0;
-        var kept: usize = 0;
-        for (h.cells.items) |c| {
+        var w = h.walk();
+        while (w.next()) |c| {
             if (c.marked) {
                 c.marked = false;
                 live += c.size;
-                h.cells.items[kept] = c;
-                kept += 1;
                 continue;
             }
-            if (c.kind == .free) {
-                // Already on a free list from an earlier sweep.
-                h.cells.items[kept] = c;
-                kept += 1;
-                continue;
-            }
+            // Already on a free list from an earlier sweep.
+            if (c.kind == .free) continue;
             if (h.finalizer) |f| f(h, c);
             if (c.class == 0xff) {
                 // A large cell: dead in place, for `takeLarge`.
-                h.cells.items[kept] = c;
-                kept += 1;
                 c.marked = false;
                 c.kind = .free;
                 continue;
             }
-            if (c.class != 0xff) {
-                if (h.stress) {
-                    const bytes: [*]u8 = @ptrCast(c);
-                    @memset(bytes[@sizeOf(FreeCell)..c.size], 0xAA);
-                }
-                const fc: *FreeCell = @ptrCast(@alignCast(c));
-                fc.next = h.free[c.class];
-                h.free[c.class] = fc;
-                // Keep it in the cell list: a freed cell is reused in place.
-                h.cells.items[kept] = c;
-                kept += 1;
-                c.marked = false;
-                c.kind = .free;
+            if (h.stress) {
+                const bytes: [*]u8 = @ptrCast(c);
+                @memset(bytes[@sizeOf(FreeCell)..c.size], 0xAA);
             }
+            const fc: *FreeCell = @ptrCast(@alignCast(c));
+            fc.next = h.free[c.class];
+            h.free[c.class] = fc;
+            c.marked = false;
+            c.kind = .free;
         }
-        h.cells.shrinkRetainingCapacity(kept);
         h.live_bytes = live;
         h.collections += 1;
         h.allocated_since = 0;
         h.bumped_since = 0;
+        h.foreign_since = 0;
         // The next collection after as much again as is live, at least
         // 1 MB — capped so a large region still collects before it fills
         // (a longer stride let the top run through the region class by

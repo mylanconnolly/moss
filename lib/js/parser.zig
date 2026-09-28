@@ -11,6 +11,8 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
 const ast = @import("ast.zig");
+const analysis = @import("scope.zig");
+const ChunkArena = @import("scratch.zig").ChunkArena;
 const regexp = @import("regexp.zig");
 
 const Token = lexer.Token;
@@ -33,7 +35,23 @@ pub const Options = struct {
     no_arguments: bool = false,
     /// Private names of the enclosing classes, visible to eval code.
     private_names: []const []const u8 = &.{},
+    /// Preparse: a function body that will compile on its first call is
+    /// parsed, summarised (`ast.Function.Lazy`) and dropped from the
+    /// arena, so a bundle's tree is the code that runs now (what the
+    /// big engines do; a 466 KB script's tree cost 14 MB, 2026-09-28).
+    /// Needs `scratch_arena`, the arena the nodes live in.
+    lazy: bool = false,
+    /// The outermost function keeps its body (it is the one being
+    /// compiled: `compileLazy`).
+    keep_outer: bool = false,
+    scratch_arena: ?*ChunkArena = null,
 };
+
+/// What the preparse did, for the tools' tallies.
+pub var stats: struct { dropped: usize = 0, kept_called: usize = 0, kept_dynamic: usize = 0, kept_super: usize = 0 } = .{};
+/// Off, every body is kept (the test262 tool's `TEST262_NODROP=1`, to
+/// tell a preparse fault from a lazy-compile one).
+pub var drop_enabled: bool = true;
 
 /// Parse a Script or Module. Nodes live in `a`; the error message and
 /// position stay on the parser.
@@ -85,6 +103,8 @@ pub const Parser = struct {
     await_count: u32 = 0,
     /// A class heritage is a LeftHandSideExpression: no arrow may end it.
     no_arrow: bool = false,
+    /// Function nesting, the outermost body at 1 (`Options.keep_outer`).
+    fn_depth: u32 = 0,
     /// A module's exported names (each once) and the local names its
     /// `export { x }` clauses name, resolved against the top scope at the
     /// end.
@@ -339,6 +359,11 @@ pub const Parser = struct {
     /// positions absolute, in a function context with private names
     /// from `opts` declared.
     pub fn parseFunctionAt(p: *Parser, start: u32, declaration: bool) Error!*Node {
+        // The private names of the enclosing classes: their references
+        // are never checked here (the runtime chain has them); the list
+        // only needs freeing.
+        var owned_privates: ?*PrivateScope = null;
+        defer if (owned_privates) |ps| p.freeReferenced(ps);
         p.lex.pos = start;
         try p.advance();
         _ = try p.pushScope(true);
@@ -352,6 +377,7 @@ pub const Parser = struct {
             ps.* = .{ .parent = null };
             for (p.opts.private_names) |n| try ps.declared.put(p.a, n, 1);
             p.class_privates = ps;
+            owned_privates = ps;
         }
         if (declaration) return p.parseFunctionDeclaration(false);
         const e = try p.parseAssignment(true);
@@ -364,6 +390,11 @@ pub const Parser = struct {
     /// A method, getter or setter at its parameter list, as a lazily
     /// compiled one is parsed again: the function, positions absolute.
     pub fn parseMethodAt(p: *Parser, params_start: u32, kind: ast.Function.Kind, is_async: bool, is_generator: bool) Error!*ast.Function {
+        // The private names of the enclosing classes: their references
+        // are never checked here (the runtime chain has them); the list
+        // only needs freeing.
+        var owned_privates: ?*PrivateScope = null;
+        defer if (owned_privates) |ps| p.freeReferenced(ps);
         p.lex.pos = params_start;
         try p.advance();
         _ = try p.pushScope(true);
@@ -372,8 +403,9 @@ pub const Parser = struct {
             ps.* = .{ .parent = null };
             for (p.opts.private_names) |n| try ps.declared.put(p.a, n, 1);
             p.class_privates = ps;
+            owned_privates = ps;
         }
-        return p.parseFunctionRest(params_start, null, is_async, is_generator, kind);
+        return p.parseFunctionRest(params_start, null, is_async, is_generator, kind, false);
     }
 
     pub fn parseProgram(p: *Parser) Error!*Node {
@@ -412,6 +444,7 @@ pub const Parser = struct {
             if (!top.lexical.contains(ex.name) and !top.vars.contains(ex.name) and !top.funcs.contains(ex.name)) return p.fail("export of an undeclared name", ex.pos);
         }
         if (outer_privates) |ps| {
+            defer p.freeReferenced(ps);
             for (ps.referenced.items) |r| if (!ps.declared.contains(r.name)) return p.fail("undeclared private name", r.pos);
         }
         p.popScope();
@@ -1056,7 +1089,7 @@ pub const Parser = struct {
         // context's rules for yield/await.
         const name = try p.bindingIdentifier();
         try p.declare(name, if (is_async or is_generator) .function_special else .function, npos);
-        const f = try p.parseFunctionRest(pos, name, is_async, is_generator, .normal);
+        const f = try p.parseFunctionRest(pos, name, is_async, is_generator, .normal, true);
         return p.node(pos, .{ .function_decl = f });
     }
 
@@ -1082,14 +1115,16 @@ pub const Parser = struct {
             _ = npos;
             p.restoreContext(c);
         }
-        const f = try p.parseFunctionRest(pos, name, is_async, is_generator, .normal);
+        const f = try p.parseFunctionRest(pos, name, is_async, is_generator, .normal, false);
         return p.node(pos, .{ .function = f });
     }
 
     /// Parameters and body, in the function's own context.
-    fn parseFunctionRest(p: *Parser, pos: u32, name: ?[]const u8, is_async: bool, is_generator: bool, kind: ast.Function.Kind) Error!*ast.Function {
+    fn parseFunctionRest(p: *Parser, pos: u32, name: ?[]const u8, is_async: bool, is_generator: bool, kind: ast.Function.Kind, is_decl: bool) Error!*ast.Function {
         const c = p.saveContext();
         defer p.restoreContext(c);
+        p.fn_depth += 1;
+        defer p.fn_depth -= 1;
         p.in_function = true;
         p.in_generator = is_generator;
         p.in_async = is_async;
@@ -1150,8 +1185,11 @@ pub const Parser = struct {
         if (kind == .getter and params.items.len != 0) return p.fail("a getter takes no parameters", pos);
         if (kind == .setter and (params.items.len != 1 or params.items[0].data == .rest)) return p.fail("a setter takes exactly one parameter", pos);
         for (names.items) |n| try scope.params.put(p.a, n.name, {});
-        // The body, with its own directive prologue.
+        // The body, with its own directive prologue. The function node
+        // sits below the mark: a dropped body takes everything after it.
         try p.expect(.lbrace, "expected '{'");
+        const f = try p.a.create(ast.Function);
+        const mark = p.bodyMark();
         var body: std.ArrayList(*Node) = .empty;
         var body_strict = p.strict;
         const directive = try p.directivePrologue(&body, &body_strict);
@@ -1165,13 +1203,95 @@ pub const Parser = struct {
             if (name) |nm| try p.checkBindingName(nm, pos);
         }
         while (!p.at(.rbrace) and !p.at(.eof)) try body.append(p.a, try p.parseStatementListItem());
+        if (!p.at(.rbrace)) return p.fail("expected '}'", p.tok.start);
         const end = p.tok.end;
-        try p.expect(.rbrace, "expected '}'");
         if (p.cover_init_at) |at_| return p.fail("invalid shorthand property initializer", at_);
         p.popScope();
-        const f = try p.a.create(ast.Function);
         f.* = .{ .name = name, .params = params.items, .body = .{ .block = body.items }, .kind = kind, .is_async = is_async, .is_generator = is_generator, .strict = p.strict, .simple_params = simple, .start = pos, .params_start = params_at, .end = end };
+        // Before the `}` is passed: the token after it is lexed into a
+        // live arena, whichever way this goes.
+        try p.maybeDrop(f, mark, is_decl);
+        try p.expect(.rbrace, "expected '}'");
         return f;
+    }
+
+    /// Memory that must outlive a dropped body: the lists a class keeps
+    /// of the private names its members reference grow inside those
+    /// members' bodies. From the arena's child when bodies are dropped.
+    fn stable(p: *Parser) std.mem.Allocator {
+        return if (p.opts.scratch_arena) |ar| ar.child else p.a;
+    }
+
+    fn freeReferenced(p: *Parser, ps: *PrivateScope) void {
+        for (ps.referenced.items) |r| p.stable().free(r.name);
+        ps.referenced.deinit(p.stable());
+    }
+
+    /// Whether a name's text is the source's own (else the lexer cooked
+    /// it into the arena, where a dropped body would take it).
+    fn inSource(p: *const Parser, text: []const u8) bool {
+        const lo = @intFromPtr(p.lex.src.ptr);
+        return @intFromPtr(text.ptr) >= lo and @intFromPtr(text.ptr) + text.len <= lo + p.lex.src.len;
+    }
+
+    /// Where a body starts in the arena, when bodies may be dropped.
+    fn bodyMark(p: *Parser) ChunkArena.Mark {
+        return if (p.opts.scratch_arena) |ar| ar.mark() else .{ .top = null, .end = 0 };
+    }
+
+    /// The source right after a function says it is called on the spot
+    /// (`(function () {…})()`, `.call(this)`): compiled with its script.
+    fn calledAtOnce(text: []const u8, end: u32) bool {
+        var i: usize = end;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == ')')) i += 1;
+        return i < text.len and (text[i] == '(' or text[i] == '.');
+    }
+
+    /// The preparse: a function that will compile on its first call
+    /// keeps a summary of its body (`ast.Function.Lazy`) and gives the
+    /// tree back to the arena. Kept: the outermost function when the
+    /// caller compiles it now, class parts, one called on the spot, one
+    /// with a direct eval or a `with` in it, an arrow that says `super`
+    /// (its enclosing method's) — the compiler's own rules, decided here
+    /// with the tree still in hand, and the compiler asks for a parse
+    /// again should it ever need a dropped body.
+    fn maybeDrop(p: *Parser, f: *ast.Function, mark: ChunkArena.Mark, is_decl: bool) Error!void {
+        const arena = p.opts.scratch_arena orelse return;
+        if (!p.opts.lazy or !drop_enabled) return;
+        if (p.fn_depth == 1 and p.opts.keep_outer) return;
+        if (f.kind != .normal and f.kind != .method and f.kind != .getter and f.kind != .setter) return;
+        if (calledAtOnce(p.lex.src, f.end)) {
+            stats.kept_called += 1;
+            return;
+        }
+        const sum = try analysis.Summary.run(p.a, f, is_decl);
+        if (sum.dynamic) {
+            stats.kept_dynamic += 1;
+            return;
+        }
+        if (f.is_arrow and (sum.uses_super or sum.uses_super_call)) {
+            stats.kept_super += 1;
+            return;
+        }
+        // The names mostly live in the source; a cooked one (escapes, a
+        // private name's '#') is copied out from under the reset and
+        // back in after it, the list with it.
+        const n = sum.free.items.len;
+        const held = try arena.child.alloc([]const u8, n);
+        defer arena.child.free(held);
+        var copied: usize = 0;
+        defer for (held[0..copied]) |h| if (!p.inSource(h)) arena.child.free(h);
+        for (sum.free.items, 0..) |name, i| {
+            held[i] = if (p.inSource(name)) name else try arena.child.dupe(u8, name);
+            copied = i + 1;
+        }
+        const lz: ast.Function.Lazy = .{ .free = &.{}, .uses_this = sum.uses_this, .uses_new_target = sum.uses_new_target, .uses_super = sum.uses_super, .uses_super_call = sum.uses_super_call, .is_decl = is_decl };
+        arena.reset(mark);
+        const free = try p.a.alloc([]const u8, n);
+        for (held, 0..) |h, i| free[i] = if (p.inSource(h)) h else try p.a.dupe(u8, h);
+        f.body = .{ .lazy = lz };
+        f.body.lazy.free = free;
+        stats.dropped += 1;
     }
 
     fn collectNames(p: *Parser, pat: *Node, out: *std.ArrayList(NameAt)) Error!void {
@@ -1221,8 +1341,11 @@ pub const Parser = struct {
             if (std.mem.eql(u8, n.name, "yield") and (p.strict or c.in_generator)) return p.fail("'yield' cannot be a parameter here", n.pos);
         }
         const f = try p.a.create(ast.Function);
+        p.fn_depth += 1;
+        defer p.fn_depth -= 1;
         if (p.at(.lbrace)) {
             try p.advance();
+            const mark = p.bodyMark();
             var body: std.ArrayList(*Node) = .empty;
             var body_strict = p.strict;
             const directive = try p.directivePrologue(&body, &body_strict);
@@ -1230,13 +1353,19 @@ pub const Parser = struct {
             p.strict = body_strict;
             if (p.strict) try p.checkParamNames(names.items, false);
             while (!p.at(.rbrace) and !p.at(.eof)) try body.append(p.a, try p.parseStatementListItem());
+            if (!p.at(.rbrace)) return p.fail("expected '}'", p.tok.start);
             const end = p.tok.end;
-            try p.expect(.rbrace, "expected '}'");
+            if (p.cover_init_at) |at_| return p.fail("invalid shorthand property initializer", at_);
+            p.popScope();
             f.* = .{ .params = params, .body = .{ .block = body.items }, .is_async = is_async, .is_arrow = true, .strict = p.strict, .simple_params = simple, .start = pos, .end = end };
-        } else {
-            const e = try p.parseAssignment(true);
-            f.* = .{ .params = params, .body = .{ .expr = e }, .is_async = is_async, .is_arrow = true, .strict = p.strict, .simple_params = simple, .start = pos, .end = p.prev_end };
+            try p.maybeDrop(f, mark, false);
+            try p.expect(.rbrace, "expected '}'");
+            return p.node(pos, .{ .function = f });
         }
+        // An expression body stays: it is small, and the token after it
+        // is already lexed.
+        const e = try p.parseAssignment(true);
+        f.* = .{ .params = params, .body = .{ .expr = e }, .is_async = is_async, .is_arrow = true, .strict = p.strict, .simple_params = simple, .start = pos, .end = p.prev_end };
         if (p.cover_init_at) |at_| return p.fail("invalid shorthand property initializer", at_);
         p.popScope();
         return p.node(pos, .{ .function = f });
@@ -1287,6 +1416,7 @@ pub const Parser = struct {
         privates.* = .{ .parent = p.class_privates };
         p.class_privates = privates;
         defer p.class_privates = privates.parent;
+        defer p.freeReferenced(privates);
         var members: std.ArrayList(ast.Class.Member) = .empty;
         var saw_constructor = false;
         while (!p.at(.rbrace)) {
@@ -1307,7 +1437,7 @@ pub const Parser = struct {
             };
             if (!found) {
                 if (privates.parent == null) return p.fail("undeclared private name", r.pos);
-                try privates.parent.?.referenced.append(p.a, r);
+                try privates.parent.?.referenced.append(p.stable(), .{ .name = try p.stable().dupe(u8, r.name), .pos = r.pos });
             }
         }
         const cl = try p.a.create(ast.Class);
@@ -1438,7 +1568,7 @@ pub const Parser = struct {
             kind = if (derived) .derived_constructor else .constructor;
         };
         if (is_static and !computed and !is_private and key_name != null and std.mem.eql(u8, key_name.?, "prototype")) return p.fail("a static member cannot be named 'prototype'", kpos);
-        const f = try p.parseFunctionRest(pos, null, is_async, is_generator, kind);
+        const f = try p.parseFunctionRest(pos, null, is_async, is_generator, kind, false);
         f.is_generator = is_generator;
         const fnode = try p.node(pos, .{ .function = f });
         return .{ .kind = switch (accessor) {
@@ -1638,7 +1768,7 @@ pub const Parser = struct {
                     name = try p.bindingIdentifier();
                     try p.declare(name.?, .function, npos);
                 }
-                const f = try p.parseFunctionRest(fpos, name, is_async, is_generator, .normal);
+                const f = try p.parseFunctionRest(fpos, name, is_async, is_generator, .normal, true);
                 return p.node(pos, .{ .export_decl = .{ .default = try p.node(fpos, .{ .function_decl = f }) } });
             }
             if (p.atWord("class")) {
@@ -2101,7 +2231,9 @@ pub const Parser = struct {
 
     fn notePrivateReference(p: *Parser, name: []const u8, pos: u32) Error!void {
         const ps = p.class_privates orelse return p.fail("private name outside a class", pos);
-        try ps.referenced.append(p.a, .{ .name = name, .pos = pos });
+        // The name's text is the lexer's (a '#' put before it), in the
+        // arena: a dropped body would take it, so the list keeps a copy.
+        try ps.referenced.append(p.stable(), .{ .name = try p.stable().dupe(u8, name), .pos = pos });
     }
 
     /// Calls, members and optional chains after a callee.
@@ -2433,7 +2565,7 @@ pub const Parser = struct {
                         .get => .getter,
                         .set => .setter,
                     };
-                    const f = try p.parseFunctionRest(ppos, null, is_async, is_generator, kind);
+                    const f = try p.parseFunctionRest(ppos, null, is_async, is_generator, kind, false);
                     const fnode = try p.node(ppos, .{ .function = f });
                     try props.append(p.a, .{ .kind = switch (accessor) {
                         .none => .method,

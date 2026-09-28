@@ -308,9 +308,7 @@ pub fn main(init: std.process.Init) !u8 {
             };
             const bs = best orelse break;
             std.debug.print("webshot: page memory: {d} KB live in {d} blocks from:\n", .{ bs.live / 1024, bs.count });
-            var addrs = [_]usize{bs.ra};
-            const trace: std.debug.StackTrace = .{ .return_addresses = &addrs, .skipped = .none };
-            std.debug.dumpStackTrace(&trace);
+            dumpSite(bs);
             bs.live = 0;
         }
         std.debug.print("webshot: page memory: {d} inline layouts made {d} lines, {d} into lists without room; scratch peak {d} KB, {d} fallbacks to the arena\n", .{ web.layout.stat_inline_layouts, web.layout.stat_lines, web.layout.stat_line_growth, web.layout.stat_scratch_peak / 1024, web.layout.stat_scratch_fallbacks });
@@ -486,23 +484,58 @@ var meta_histo: [40]MetaHisto = @splat(.{});
 fn metaBucket(n: usize) usize {
     return @min(39, if (n == 0) 0 else std.math.log2_int_ceil(usize, n));
 }
-/// Live bytes by the caller that asked (the return address), for the
-/// top consumers to be named.
-const Site = struct { ra: usize = 0, live: usize = 0, count: usize = 0 };
-var meta_sites: [512]Site = @splat(.{});
-fn siteOf(ra: usize) ?*Site {
-    var i: usize = (ra >> 4) % meta_sites.len;
+/// Live bytes by the callers that asked — the four frames above the
+/// allocator, since the nearest is often the standard library's own
+/// `rawAlloc` — for the top consumers to be named.
+const site_frames = 4;
+const Site = struct { ra: usize = 0, ras: [site_frames]usize = @splat(0), live: usize = 0, count: usize = 0 };
+var meta_sites: [1 << 16]Site = @splat(.{});
+var meta_unattributed: usize = 0;
+/// The return addresses of the frames above the caller's, by the frame
+/// pointer chain (kept in every build mode this tool uses).
+fn captureFrames(out: []usize) void {
+    @memset(out, 0);
+    var fp: usize = @frameAddress();
+    var n: usize = 0;
+    var skip: usize = 1; // this function's own frame
+    while (n < out.len and fp != 0) {
+        const prev: usize = @as(*const usize, @ptrFromInt(fp)).*;
+        const ra: usize = @as(*const usize, @ptrFromInt(fp + @sizeOf(usize))).*;
+        if (ra == 0) break;
+        if (skip > 0) {
+            skip -= 1;
+        } else {
+            out[n] = ra;
+            n += 1;
+        }
+        if (prev <= fp) break;
+        fp = prev;
+    }
+}
+fn siteOf(_: usize) ?*Site {
+    var ras: [site_frames]usize = undefined;
+    captureFrames(&ras);
+    const key: usize = @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(&ras)) | 1);
+    var i: usize = (key >> 4) % meta_sites.len;
     var n: usize = 0;
     while (n < meta_sites.len) : (n += 1) {
         const s = &meta_sites[i];
-        if (s.ra == ra) return s;
+        if (s.ra == key) return s;
         if (s.ra == 0) {
-            s.ra = ra;
+            s.ra = key;
+            s.ras = ras;
             return s;
         }
         i = (i + 1) % meta_sites.len;
     }
     return null;
+}
+fn dumpSite(s: *const Site) void {
+    var n: usize = 0;
+    while (n < site_frames and s.ras[n] != 0) n += 1;
+    var addrs: [site_frames]usize = s.ras;
+    const st: std.debug.StackTrace = .{ .return_addresses = addrs[0..n], .skipped = .none };
+    std.debug.dumpStackTrace(&st);
 }
 /// The site a block came from, kept in a side table keyed by address
 /// (the allocator's blocks have no room for it).
@@ -521,13 +554,18 @@ fn metaAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize)
     b.bytes += len;
     b.live_count += 1;
     b.live_bytes += len;
-    const p = js_meta.allocator().rawAlloc(len, alignment, ra) orelse return null;
-    if (meta_owners_used < meta_owners.len / 2) if (siteOf(ra)) |s| {
-        s.live += len;
-        s.count += 1;
-        const o = ownerSlot(@intFromPtr(p));
-        o.* = .{ .ptr = @intFromPtr(p), .site = s, .len = len };
+    const p = js_meta.allocator().rawAlloc(len, alignment, ra) orelse {
+        std.debug.print("webshot: scripts: meta refused {d} bytes (live {d} KB, top {d} KB of {d})\n", .{ len, js_meta.live / 1024, js_meta.top / 1024, js_meta_buf.len / 1024 });
+        return null;
     };
+    if (meta_owners_used < meta_owners.len / 2) {
+        if (siteOf(ra)) |s| {
+            s.live += len;
+            s.count += 1;
+            const o = ownerSlot(@intFromPtr(p));
+            o.* = .{ .ptr = @intFromPtr(p), .site = s, .len = len };
+        } else meta_unattributed += len;
+    } else meta_unattributed += len;
     return p;
 }
 fn metaForget(ptr: [*]u8) void {
@@ -719,12 +757,17 @@ fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style
     // WEBSHOT_META_MB / WEBSHOT_HEAP_MB: the bookkeeping and cell heaps'
     // sizes (the page's: 32 and 16).
     const meta_mb: usize = if (std.c.getenv("WEBSHOT_META_MB")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 32;
-    const heap_mb: usize = if (std.c.getenv("WEBSHOT_HEAP_MB")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 16;
+    const heap_mb: usize = if (std.c.getenv("WEBSHOT_HEAP_MB")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 24;
     js_meta_buf = try gpa.alignedAlloc(u8, .@"16", meta_mb << 20);
     js_region = try gpa.alignedAlloc(u8, .@"16", heap_mb << 20);
     js_meta = mosslib.heapalloc.Allocator.init(js_meta_buf);
     const meta = metaAllocator();
-    vm.initWith(js_region, meta, .{ .stack_values = 1 << 16, .max_frames = 4000 }) catch {
+    // A budget (backward jumps and calls), so a script that never ends
+    // names itself instead of running the tool forever: `WEBSHOT_STEPS`
+    // in millions, 300 by default.
+    const steps_mb: u64 = if (std.c.getenv("WEBSHOT_STEPS")) |v| std.fmt.parseInt(u64, std.mem.span(v), 10) catch 300 else 300;
+    defer vm.step_limit = std.math.maxInt(u64);
+    vm.initWith(js_region, meta, .{ .stack_values = 1 << 16, .max_frames = 4000, .meta_stride = js_meta_buf.len / 8 }) catch {
         std.debug.print("webshot: the script engine did not fit its heap\n", .{});
         return;
     };
@@ -732,6 +775,7 @@ fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style
     // WEBSHOT_NOSCAN=1: the collector without the native-stack scan (to
     // see what the scan keeps alive; unsafe under natives).
     if (std.c.getenv("WEBSHOT_NOSCAN") != null) vm.heap.stack_hi = 0;
+    vm.step_limit = steps_mb * 1_000_000;
     page.init(&vm, doc, meta, .{ .ctx = @ptrCast(&ctx), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .request = scriptRequest, .navigate = scriptNavigate, .ua_sheet = ua, .scratch = scriptScratch }) catch {
         std.debug.print("webshot: the bindings did not fit\n", .{});
         return;
@@ -763,22 +807,23 @@ fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style
     std.debug.print("webshot: scripts: {d} documents in the page (frames and made ones live in the bookkeeping heap)\n", .{page.docs.items.len});
     const cs = js.compiler.stats;
     std.debug.print("webshot: scripts: {d} functions compiled with their scripts, {d} left as stubs, {d} stubs compiled on call ({d} KB of source parsed again); not stubs because: {d} methods or class parts, {d} dynamic, {d} in parameter defaults, {d} arrows with super, {d} called at once\n", .{ cs.eager, cs.stubs, cs.lazy_compiles, cs.lazy_source_bytes / 1024, cs.not_normal, cs.dynamic, cs.in_params, cs.super_arrow, cs.called_at_once });
+    const ps = js.parser.stats;
+    std.debug.print("webshot: scripts: the parser dropped {d} bodies and kept {d} called at once, {d} dynamic, {d} arrows with super\n", .{ ps.dropped, ps.kept_called, ps.kept_dynamic, ps.kept_super });
     if (page.verbose) {
         for (meta_histo, 0..) |h, i| if (h.live_bytes > 0) {
             std.debug.print("webshot: scripts: meta live <{d} B: {d} blocks, {d} KB ({d} allocations in all)\n", .{ @as(usize, 1) << @intCast(i), h.live_count, h.live_bytes / 1024, h.count });
         };
         // The dozen callers holding the most, each named by its source line.
+        std.debug.print("webshot: scripts: meta {d} KB allocated without a site (table full)\n", .{meta_unattributed / 1024});
         var shown: usize = 0;
-        while (shown < 12) : (shown += 1) {
+        while (shown < 16) : (shown += 1) {
             var best: ?*Site = null;
             for (&meta_sites) |*s| if (s.ra != 0 and s.live > 0 and (best == null or s.live > best.?.live)) {
                 best = s;
             };
             const b = best orelse break;
             std.debug.print("webshot: scripts: meta site {d} KB live in {d} blocks from:\n", .{ b.live / 1024, b.count });
-            var addrs = [_]usize{b.ra};
-            const st: std.debug.StackTrace = .{ .return_addresses = &addrs, .skipped = .none };
-            std.debug.dumpStackTrace(&st);
+            dumpSite(b);
             b.live = 0;
         }
     }

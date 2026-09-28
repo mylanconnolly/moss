@@ -1120,7 +1120,33 @@ supervises), and memory history per unit beside the CPU one.
       scripts, one script out of memory), `Computed` is 1,776 bytes
       (the Guardian's cascade 8.6 MB), the second parse of every stub
       (Wikipedia's scripts three times slower than eager on the
-      device).
+      device); (p) the 32 MB edge (2026-09-28): bookkeeping pressure
+      triggers the collector (12 MB of the BBC's heap was dead RegExp
+      programs nothing had asked to collect), the compiler no longer
+      compiles an assignment's value into the register of a local the
+      value reads (axios's prototype walk climbed Boolean.prototype for
+      ever), and the preparse: the parser drops the bodies of functions
+      that will compile on their first call, keeping the scope
+      analysis's summary of them (Apple's 466 KB bundle: 14 MB of
+      scratch to 2), the sweep walks the region instead of a cell list,
+      compile chunks are 64 KB; the BBC and Apple run to the end; the
+      page's cell heap is 24 MB (page 116, chain +8 a step). Left:
+      GitHub fills the 32 MB bookkeeping heap on its eighth script —
+      module sources held twice (record and code: 6 MB), property
+      tables and slots (6), lazily compiled code (4), regexps (2) are
+      the levers, in that order; the bookkeeping heap's fragmentation
+      (free runs of a few KB after a page has run a while: a segregated
+      design would bound it); the sites' own errors (the BBC's style
+      target, Apple's `split` and `replace` on undefined, GitHub's
+      Turbo-Frame header on a null). On the device Apple loads in 17 s,
+      GitHub in 43 s, Wikipedia in 5 s; the BBC crashes because a
+      periodic DOM update fills the 40 MB document arena in ten
+      seconds of real-time timers (4.6 MB to 40.9 MB with the node
+      count flat) — the arena never frees, and the host's fake clock
+      never shows it. **Next: a document store that frees** (detached
+      nodes, replaced text and attributes reclaimed — a free list per
+      record kind, or a mark from the live tree), the top lever for any
+      live page.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

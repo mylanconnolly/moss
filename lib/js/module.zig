@@ -145,7 +145,7 @@ pub fn create(vm: *Vm, name: []const u8, source: []const u8) Error!*Module {
     // is small compared to running it).
     var arena = @import("scratch.zig").ChunkArena.init(vm.compile_scratch orelse vm.meta, compiler.scratch_chunk);
     defer arena.deinit();
-    const prog = parser.parse(arena.allocator(), m.source, .{ .module = true }) catch |e| switch (e) {
+    const prog = parser.parse(arena.allocator(), m.source, .{ .module = true, .lazy = true, .scratch_arena = &arena }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => return vm.throwSyntaxError(compiler.last_error),
     };

@@ -220,6 +220,52 @@ The `js` tool takes `JS_REGION_MB` (the cell heap's size), `JS_STATS=1`
 (collections and live bytes at the end), `JS_NOSCAN=1` (no stack scan,
 unsafe, for comparison) and `JS_EAGER=1`.
 
+And a day later, four more (the BBC's and Apple's front pages at the
+32 MB edge):
+
+- **The parser drops the bodies it will not need** (the preparse,
+  `parser.Options.lazy` with a `scratch_arena`): a function that will
+  compile on its first call is parsed, summarised by the scope
+  analysis run over it alone (`scope.Summary`: its free names and
+  whether it uses `this`, `super`, `new.target`, or is dynamic), and
+  its tree given back to the arena (`ChunkArena.mark`/`reset`) —
+  `ast.Function.Body.lazy` holds the summary. The analysis of the
+  enclosing code resolves the free names as the body's references
+  would have. Kept: the outermost function of a lazy compile
+  (`keep_outer`), class parts, a function called on the spot, one
+  with `eval` or `with` in it, an arrow saying `super`, and any body
+  the lexer cooked a name into is copied out first. A dropped body the
+  compiler wants after all (a function in a parameter default, a
+  dynamic ancestor) is parsed again from its source under the scope it
+  was analysed in (`Compiler.reparse`). A 466 KB bundle's compile went
+  from 14 MB of scratch to 2. `TEST262_NODROP=1` keeps every body, to
+  tell a preparse fault from a lazy-compile one.
+- **Bookkeeping pressure collects.** `Vm.meta` is the embedder's
+  allocator counted (`Heap.counted`): every byte the runtime takes
+  through it adds to `Heap.foreign_since`, and past
+  `Limits.meta_stride` (an eighth of the bookkeeping heap is a fair
+  stride; 4 MB by default) the next safe point collects. What a dead
+  object owns there — its slots and tables, a RegExp's program — comes
+  back only when it is collected, and the cell heap alone never asked.
+  A compile holds the collector off (`Heap.hold`): its code cells sit
+  in scratch lists the stack scan does not read.
+- **The sweep walks the region.** Cells lie end to end from the
+  region's start to its top, each saying its size (`Heap.walk`); the
+  list of every cell is gone (eight bytes a cell, and one contiguous
+  block a fragmented bookkeeping heap could not grow).
+- **The budget names its frames.** `Vm.on_budget` is called once when
+  `step_limit` runs out, with the frames still standing; the page host
+  logs them innermost first. Compile scratch chunks are 64 KB
+  (`compiler.scratch_chunk`), small enough to find room in a heap that
+  has been in use a while. A rescue (the collection an exhausted cell
+  heap runs before giving up) that frees nothing does not run again
+  until 64 KB has been allocated since (`Heap.rescue_failed`).
+
+A compiler rule found by the BBC: an assignment whose value reads the
+local it assigns (`e = ok && k(e)`) no longer compiles the value into
+the local's own register — a staged expression wrote its first part
+there before the rest ran.
+
 ## Measuring it
 
 ```
