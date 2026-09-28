@@ -59,6 +59,12 @@ pub const Host = struct {
     /// the cascade with for a document that is not the page's (an
     /// iframe's, one a script made), which the page does not lay out.
     ua_sheet: ?*const stylelib.Sheet = null,
+    /// An allocator for a native's heavy transient work (a frame's
+    /// cascade), used as a stack within one native and freed before it
+    /// returns: the page's layout scratch, not the script heap, whose
+    /// size classes never give a big block back (2026-09-28: three
+    /// hundred frame cascades exhausted a 16 MB heap). Null: `a`.
+    scratch: ?*const fn (ctx: *anyopaque) std.mem.Allocator = null,
     /// A script navigates (`location.href = …`, `assign`, `reload`): the
     /// host loads the URL once the script is done.
     navigate: ?*const fn (ctx: *anyopaque, abs_url: []const u8) void = null,
@@ -231,14 +237,16 @@ pub const interfaces = [_]Iface{
         .{ .name = "hasFocus", .f = hasFocus },
         .{ .name = "write", .f = documentWrite },
         .{ .name = "writeln", .f = documentWriteln },
-        .{ .name = "open", .f = noopNative },
-        .{ .name = "close", .f = noopNative },
+        .{ .name = "open", .f = documentOpen },
+        .{ .name = "close", .f = documentClose },
     } },
     .{ .name = "DocumentFragment", .parent = "Node", .attrs = &parent_attrs, .methods = &parent_methods ++ [_]Method{
         .{ .name = "getElementById", .len = 1, .f = getElementById },
     } },
     .{ .name = "DocumentType", .parent = "Node", .attrs = &.{
         .{ .name = "name", .get = getNodeName },
+        .{ .name = "publicId", .get = getPublicId },
+        .{ .name = "systemId", .get = getSystemId },
     } },
     .{ .name = "CharacterData", .parent = "Node", .attrs = &.{
         .{ .name = "data", .get = getNodeValue, .set = setNodeValue },
@@ -323,6 +331,7 @@ pub const interfaces = [_]Iface{
     .{ .name = "Element", .parent = "Node", .attrs = &parent_attrs ++ [_]Attr{
         .{ .name = "tagName", .get = getTagName },
         .{ .name = "localName", .get = getLocalName },
+        .{ .name = "prefix", .get = getPrefix },
         .{ .name = "namespaceURI", .get = getNamespaceURI },
         .{ .name = "id", .get = getId, .set = setId },
         .{ .name = "className", .get = getClassName, .set = setClassName },
@@ -371,6 +380,11 @@ pub const interfaces = [_]Iface{
         .{ .name = "dir", .get = getDir, .set = setDir },
         .{ .name = "tabIndex", .get = getTabIndex, .set = setTabIndex },
         .{ .name = "htmlFor", .get = getHtmlFor, .set = setHtmlFor },
+        .{ .name = "httpEquiv", .get = getHttpEquiv, .set = setHttpEquiv },
+        .{ .name = "content", .get = getContentAttr, .set = setContentAttr },
+        .{ .name = "data", .get = getDataAttr, .set = setDataAttr },
+        .{ .name = "src", .get = getSrcAttr, .set = setSrcAttr },
+        .{ .name = "alt", .get = getAltAttr, .set = setAltAttr },
         .{ .name = "offsetWidth", .get = getClientWidth },
         .{ .name = "offsetHeight", .get = getClientHeight },
         .{ .name = "offsetTop", .get = getOffsetTop },
@@ -392,8 +406,79 @@ pub const interfaces = [_]Iface{
         .{ .name = "name", .get = getNameAttr, .set = setNameAttr },
         .{ .name = "placeholder", .get = getPlaceholder, .set = setPlaceholder },
         .{ .name = "form", .get = getOwnerForm },
-        .{ .name = "selectedIndex", .get = getSelectedIndex },
+        .{ .name = "selectedIndex", .get = getSelectedIndex, .set = setSelectedIndex },
         .{ .name = "options", .get = getOptions },
+        .{ .name = "defaultValue", .get = getValueAttrRaw, .set = setValueAttrRaw },
+        .{ .name = "defaultChecked", .get = getDefaultChecked, .set = setDefaultChecked },
+        .{ .name = "maxLength", .get = getMaxLength, .set = setMaxLength },
+    }, .methods = &.{
+        .{ .name = "add", .len = 1, .f = selectAdd },
+        .{ .name = "remove", .f = selectRemove },
+        .{ .name = "select", .f = noopNative },
+        .{ .name = "checkValidity", .f = trueNative },
+        .{ .name = "reportValidity", .f = trueNative },
+    } },
+    .{ .name = "HTMLTableElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "caption", .get = tableCaption, .set = tableSetCaption },
+        .{ .name = "tHead", .get = tableTHead, .set = tableSetTHead },
+        .{ .name = "tFoot", .get = tableTFoot, .set = tableSetTFoot },
+        .{ .name = "tBodies", .get = tableTBodies },
+        .{ .name = "rows", .get = tableRows },
+    }, .methods = &.{
+        .{ .name = "createCaption", .f = tableCreateCaption },
+        .{ .name = "deleteCaption", .f = tableDeleteCaption },
+        .{ .name = "createTHead", .f = tableCreateTHead },
+        .{ .name = "deleteTHead", .f = tableDeleteTHead },
+        .{ .name = "createTFoot", .f = tableCreateTFoot },
+        .{ .name = "deleteTFoot", .f = tableDeleteTFoot },
+        .{ .name = "createTBody", .f = tableCreateTBody },
+        .{ .name = "insertRow", .f = tableInsertRow },
+        .{ .name = "deleteRow", .len = 1, .f = tableDeleteRow },
+    } },
+    .{ .name = "HTMLTableSectionElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "rows", .get = sectionRows },
+    }, .methods = &.{
+        .{ .name = "insertRow", .f = sectionInsertRow },
+        .{ .name = "deleteRow", .len = 1, .f = sectionDeleteRow },
+    } },
+    .{ .name = "HTMLTableRowElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "rowIndex", .get = rowIndex },
+        .{ .name = "sectionRowIndex", .get = sectionRowIndex },
+        .{ .name = "cells", .get = rowCells },
+    }, .methods = &.{
+        .{ .name = "insertCell", .f = rowInsertCell },
+        .{ .name = "deleteCell", .len = 1, .f = rowDeleteCell },
+    } },
+    .{ .name = "HTMLTableCellElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "cellIndex", .get = cellIndex },
+    } },
+    .{ .name = "SVGElement", .parent = "Element", .attrs = &.{
+        .{ .name = "ownerSVGElement", .get = svgOwner },
+    } },
+    .{ .name = "SVGRectElement", .parent = "SVGElement", .attrs = &.{
+        .{ .name = "x", .get = svgLengthX },
+        .{ .name = "y", .get = svgLengthY },
+        .{ .name = "width", .get = svgLengthWidth },
+        .{ .name = "height", .get = svgLengthHeight },
+    } },
+    .{ .name = "SVGTextContentElement", .parent = "SVGElement", .methods = &.{
+        .{ .name = "getNumberOfChars", .f = svgNumberOfChars },
+        .{ .name = "getComputedTextLength", .f = svgComputedTextLength },
+    } },
+    .{ .name = "HTMLImageElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "width", .get = imageWidth, .set = setWidthAttr },
+        .{ .name = "height", .get = imageHeight, .set = setHeightAttr },
+        .{ .name = "naturalWidth", .get = imageWidth },
+        .{ .name = "naturalHeight", .get = imageHeight },
+        .{ .name = "complete", .get = trueNative },
+    } },
+    .{ .name = "HTMLOptionElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "defaultSelected", .get = getSelectedAttr, .set = setSelectedAttr },
+        .{ .name = "selected", .get = getSelectedAttr, .set = setSelectedAttr },
+        .{ .name = "value", .get = optionValueAttr, .set = setValueAttr },
+        .{ .name = "text", .get = getTextContent, .set = setTextContent },
+        .{ .name = "index", .get = optionIndex },
+        .{ .name = "disabled", .get = getDisabled, .set = setDisabled },
     } },
     .{ .name = "HTMLFormElement", .parent = "HTMLElement", .attrs = &.{
         .{ .name = "action", .get = getActionAttr, .set = setActionAttr },
@@ -592,6 +677,15 @@ const I = struct {
     const input = ifaceIndex("HTMLInputElement");
     const anchor = ifaceIndex("HTMLAnchorElement");
     const form = ifaceIndex("HTMLFormElement");
+    const table = ifaceIndex("HTMLTableElement");
+    const table_section = ifaceIndex("HTMLTableSectionElement");
+    const table_row = ifaceIndex("HTMLTableRowElement");
+    const table_cell = ifaceIndex("HTMLTableCellElement");
+    const option = ifaceIndex("HTMLOptionElement");
+    const image = ifaceIndex("HTMLImageElement");
+    const svg_element = ifaceIndex("SVGElement");
+    const svg_rect = ifaceIndex("SVGRectElement");
+    const svg_text = ifaceIndex("SVGTextContentElement");
     const tokens = ifaceIndex("DOMTokenList");
     const style = ifaceIndex("CSSStyleDeclaration");
     const event = ifaceIndex("Event");
@@ -642,6 +736,9 @@ const DocEntry = struct {
     /// Its `defaultView`, made on first use.
     view: Value,
     url: []const u8,
+    /// `document.open()`'s state: what `write` gathers until `close`.
+    open: bool = false,
+    write_buf: std.ArrayList(u8) = .empty,
 };
 
 pub const Page = struct {
@@ -690,6 +787,9 @@ pub const Page = struct {
     /// Live ranges and node iterators: the DOM's mutations move them.
     ranges: std.ArrayList(Value) = .empty,
     iterators: std.ArrayList(Value) = .empty,
+    /// Frames and pictures inserted by script: each gets its `load`
+    /// event from the next turn of the loop (a task, not a microtask).
+    pending_loads: std.ArrayList(struct { doc: u32, id: NodeId }) = .empty,
     /// The session history the page's scripts made: `pushState` entries
     /// and where the page is in them (the host keeps the real history).
     history: std.ArrayList(HistoryEntry) = .empty,
@@ -724,6 +824,7 @@ pub const Page = struct {
             ar.deinit();
             p.a.destroy(ar);
         };
+        for (p.docs.items) |*d| d.write_buf.deinit(p.a);
         p.docs.deinit(p.a);
         p.wrappers.deinit(p.a);
         p.timers.deinit(p.a);
@@ -740,6 +841,7 @@ pub const Page = struct {
         p.mutation_records.deinit(p.a);
         p.ranges.deinit(p.a);
         p.iterators.deinit(p.a);
+        p.pending_loads.deinit(p.a);
         if (p.url_owned) p.a.free(p.url);
         p.vm.embedder_roots = null;
         p.vm.host_data = null;
@@ -888,6 +990,20 @@ pub const Page = struct {
         return d;
     }
 
+    /// The frames, pictures and stylesheet links in a subtree about to
+    /// be inserted get a `load` event from the loop's next turn.
+    fn scheduleLoads(p: *Page, id: NodeId) void {
+        var w = p.doc.walk(id);
+        var cur: ?NodeId = if (p.doc.get(id).kind == .element) id else null;
+        while (true) {
+            const n = cur orelse (w.next() orelse break);
+            cur = null;
+            if (p.doc.isHtml(n, "iframe") or p.doc.isHtml(n, "object") or p.doc.isHtml(n, "frame") or p.doc.isHtml(n, "img") or p.doc.isHtml(n, "link") or p.doc.isHtml(n, "script")) {
+                p.pending_loads.append(p.a, .{ .doc = p.cur, .id = n }) catch {};
+            }
+        }
+    }
+
     /// Whether `id` is, or holds, a stylesheet element.
     fn touchesSheets(p: *Page, id: NodeId) bool {
         var w = p.doc.walk(id);
@@ -998,6 +1114,7 @@ pub const Page = struct {
         // made by the engine's own Proxy: the bindings have no exotic
         // objects, the language has.
         p.runSource(named_storage_source, "the storage proxies");
+        p.runSource(live_rules_source, "the live rule lists");
         p.scripts_run = 0; // the page's own count starts at its scripts
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
         try p.installDomException();
@@ -1187,12 +1304,33 @@ pub const Page = struct {
             .doctype => I.doctype,
             .text => I.text,
             .comment => I.comment,
-            .element => if (n.namespace != .html or !p.isHtmlDoc()) I.element else if (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "textarea") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "button")) I.input else if (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) I.anchor else if (std.mem.eql(u8, n.name, "form")) I.form else I.html_element,
+            .element => if (n.namespace == .svg) svgInterfaceFor(n.name) else if (n.namespace != .html or !p.isHtmlDoc()) I.element else htmlInterfaceFor(n.name),
         };
         const o = try p.vm.objects.create(p.protos[k].asValue(), .dom, @sizeOf(Slot));
         o.internal(Slot).* = .{ .kind = slot_node, .id = id, .doc = p.cur };
         try p.wrappers.put(p.a, p.key(id), o);
         return o;
+    }
+
+    fn htmlInterfaceFor(name: []const u8) usize {
+        const eq = std.mem.eql;
+        if (eq(u8, name, "input") or eq(u8, name, "textarea") or eq(u8, name, "select") or eq(u8, name, "button")) return I.input;
+        if (eq(u8, name, "a") or eq(u8, name, "area")) return I.anchor;
+        if (eq(u8, name, "form")) return I.form;
+        if (eq(u8, name, "table")) return I.table;
+        if (eq(u8, name, "thead") or eq(u8, name, "tbody") or eq(u8, name, "tfoot")) return I.table_section;
+        if (eq(u8, name, "tr")) return I.table_row;
+        if (eq(u8, name, "td") or eq(u8, name, "th")) return I.table_cell;
+        if (eq(u8, name, "option")) return I.option;
+        if (eq(u8, name, "img")) return I.image;
+        return I.html_element;
+    }
+
+    fn svgInterfaceFor(name: []const u8) usize {
+        const eq = std.mem.eql;
+        if (eq(u8, name, "rect")) return I.svg_rect;
+        if (eq(u8, name, "text") or eq(u8, name, "tspan") or eq(u8, name, "textPath")) return I.svg_text;
+        return I.svg_element;
     }
 
     fn wrapValue(p: *Page, id: ?NodeId) Error!Value {
@@ -1258,10 +1396,10 @@ pub const Page = struct {
                 const u = url.parse(sa, src, if (base) |*b| b else null) catch break :blk src;
                 break :blk u.href(sa) catch src;
             };
-            const text = fetch(p.host.ctx, abs) orelse {
+            const text: []const u8 = if (url.decodeData(sa, abs) catch null) |d| d.bytes else (fetch(p.host.ctx, abs) orelse {
                 p.logf(.err, "script: could not load {s}", .{abs});
                 return;
-            };
+            });
             if (module) p.runModule(text, abs) else p.runSource(text, abs);
             return;
         }
@@ -1320,6 +1458,32 @@ pub const Page = struct {
         p.scripts_run += 1;
         _ = js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch |e| p.reportError(e, name);
         p.runJobs();
+    }
+
+    /// A host's expression, run as a script: its completion value as
+    /// text (an exception's text prefixed `error:`), or null when the
+    /// source does not compile. For a headless render to ask the page
+    /// what its scripts concluded.
+    pub fn evalText(p: *Page, source: []const u8, a: std.mem.Allocator) ?[]const u8 {
+        p.resetDoc();
+        const vm = p.vm;
+        const src = p.a.dupe(u8, source) catch return null;
+        p.sources.append(p.a, src) catch {
+            p.a.free(src);
+            return null;
+        };
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{ .name = "eval" }) catch return null;
+        const v = js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch |e| switch (e) {
+            error.OutOfMemory => return null,
+            error.Exception => {
+                var buf: [512]u8 = undefined;
+                const text = p.exceptionText(&buf);
+                p.vm.exception = Value.undefined_;
+                return std.fmt.allocPrint(a, "error: {s}", .{text}) catch null;
+            },
+        };
+        p.runJobs();
+        return strArg(vm, v, a) catch null;
     }
 
     fn runJobs(p: *Page) void {
@@ -1439,10 +1603,16 @@ pub const Page = struct {
 
     pub fn fireChange(p: *Page, id: NodeId) void {
         p.resetDoc();
+        p.changeHere(id);
+        p.runJobs();
+    }
+
+    /// `input` then `change` at a control in the current document (a
+    /// script's click() on a box or radio; no reset, no job run).
+    fn changeHere(p: *Page, id: NodeId) void {
         const target = p.wrapValue(id) catch return;
         _ = p.fireSimple(target, "input", true, false);
         _ = p.fireSimple(target, "change", true, false);
-        p.runJobs();
     }
 
     /// The user pressed a key: `keydown` at the focused element (else
@@ -1743,6 +1913,21 @@ pub const Page = struct {
     pub fn runDue(p: *Page, now_ms: f64) bool {
         p.resetDoc();
         var ran = false;
+        // Frames and pictures inserted since: loaded, then their `load`.
+        while (p.pending_loads.items.len > 0) {
+            const item = p.pending_loads.orderedRemove(0);
+            ran = true;
+            p.switchTo(item.doc);
+            if (p.doc.get(item.id).kind != .element) continue;
+            if (p.doc.isHtml(item.id, "iframe") or p.doc.isHtml(item.id, "object") or p.doc.isHtml(item.id, "frame")) {
+                _ = p.frameDocument(item.id) catch {};
+                p.switchTo(item.doc);
+            }
+            const target = p.wrapValue(item.id) catch continue;
+            _ = p.fireSimple(target, "load", false, false);
+            p.runJobs();
+            p.resetDoc();
+        }
         while (true) {
             // The earliest due timer, by (when, id).
             var best: ?usize = null;
@@ -1775,6 +1960,7 @@ pub const Page = struct {
 
     /// When the next timer is due, or null with none pending.
     pub fn nextDue(p: *Page) ?f64 {
+        if (p.pending_loads.items.len > 0) return p.now();
         var best: ?f64 = null;
         for (p.timers.items) |t| if (best == null or t.when < best.?) {
             best = t.when;
@@ -1831,7 +2017,17 @@ pub const Page = struct {
         if (s.kind != slot_node) return null;
         if (s.doc != p.cur) {
             if (s.doc >= p.docs.items.len) return null;
-            return adopt(p, p.docs.items[s.doc].doc, s.id) catch null;
+            const from = p.docs.items[s.doc].doc;
+            // Detached from where it was, copied here; the wrapper follows
+            // the copy, so the script's reference is the adopted node.
+            if (from.get(s.id).parent != null) from.detach(s.id);
+            const copy = adopt(p, from, s.id) catch return null;
+            const old_key = (@as(u64, s.doc) << 32) | s.id;
+            _ = p.wrappers.remove(old_key);
+            s.doc = p.cur;
+            s.id = copy;
+            p.wrappers.put(p.a, p.key(copy), o) catch {};
+            return copy;
         }
         return s.id;
     }
@@ -2361,6 +2557,7 @@ fn insertNode(p: *Page, parent: NodeId, child: NodeId, before: ?NodeId) Error!vo
     const count: usize = if (doc.get(child).kind == .fragment) doc.childCount(child) else 1;
     p.rangesOnInsert(parent, at_index, count);
     if (p.touchesSheets(child) or doc.isHtml(parent, "style")) p.markSheets();
+    p.scheduleLoads(child);
     if (doc.get(child).kind == .fragment) {
         var added: std.ArrayList(NodeId) = .empty;
         defer added.deinit(p.a);
@@ -2459,6 +2656,8 @@ fn adopt(p: *Page, from: *const dom.Document, id: NodeId) Error!NodeId {
             // The names and values are the source's: copied, since it may go.
             const e = try doc.createElement(n.namespace, try doc.a.dupe(u8, n.name));
             for (n.attrs.items) |at| try doc.setAttr(e, try doc.a.dupe(u8, at.name), try doc.a.dupe(u8, at.value));
+            if (n.ns_uri) |u| doc.node(e).ns_uri = try doc.a.dupe(u8, u);
+            doc.node(e).flags = n.flags;
             break :blk e;
         },
         .text => try doc.createText(n.text.items),
@@ -2928,6 +3127,11 @@ fn documentWriteText(vm: *Vm, args: []const Value, newline: bool) Error!Value {
     var text: std.ArrayList(u8) = .empty;
     for (args) |a| try text.appendSlice(sc.a(), try strArg(vm, a, sc.a()));
     if (newline) try text.append(sc.a(), '\n');
+    // A document opened by script gathers what is written until close.
+    if (p.docs.items[p.cur].open) {
+        try p.docs.items[p.cur].write_buf.appendSlice(p.a, text.items);
+        return Value.undefined_;
+    }
     const script = p.current_script orelse {
         p.log(.warn, "script: document.write outside a parser-inserted script is ignored");
         return Value.undefined_;
@@ -2936,6 +3140,52 @@ fn documentWriteText(vm: *Vm, args: []const Value, newline: bool) Error!Value {
     const frag = try parseInto(p, text.items, parent);
     try insertNode(p, parent, frag, p.doc.get(script).next);
     return Value.undefined_;
+}
+
+/// `document.open()`: the document emptied, what `write` adds gathered
+/// until `close()` parses it whole and adopts the tree — a document's
+/// nodes cannot be replaced in place, so they are copied in.
+fn documentOpen(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    _ = try thisNode(vm, this);
+    if (p.cur == 0) {
+        p.log(.warn, "script: document.open() on the page's own document is ignored");
+        return this;
+    }
+    while (p.doc.get(dom.document_id).first_child) |c| p.detachNode(c);
+    p.docs.items[p.cur].open = true;
+    p.docs.items[p.cur].write_buf.clearRetainingCapacity();
+    return this;
+}
+
+fn documentClose(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    _ = try thisNode(vm, this);
+    const entry = &p.docs.items[p.cur];
+    if (!entry.open) return Value.undefined_;
+    entry.open = false;
+    var scratch = std.heap.ArenaAllocator.init(p.a);
+    defer scratch.deinit();
+    const parsed = try html.parse(scratch.allocator(), entry.write_buf.items, .{ .scripting = true });
+    entry.write_buf.clearRetainingCapacity();
+    var c = parsed.get(dom.document_id).first_child;
+    while (c) |cid| : (c = parsed.get(cid).next) {
+        const copy = try adopt(p, parsed, cid);
+        p.doc.appendChild(dom.document_id, copy);
+    }
+    p.doc.quirks = parsed.quirks;
+    p.touch();
+    return Value.undefined_;
+}
+
+fn getPublicId(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisNode(vm, this);
+    return jsStr(vm, pageOf(vm).doc.get(id).public_id orelse "");
+}
+
+fn getSystemId(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisNode(vm, this);
+    return jsStr(vm, pageOf(vm).doc.get(id).system_id orelse "");
 }
 
 fn documentWrite(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
@@ -3190,11 +3440,23 @@ fn createElementNS(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     defer sc.deinit();
     const nsv = arg(args, 0);
     const ns_text = if (nsv.isNullish()) "" else try strArg(vm, nsv, sc.a());
-    const ns: dom.Namespace = if (std.mem.eql(u8, ns_text, "http://www.w3.org/2000/svg")) .svg else if (std.mem.eql(u8, ns_text, "http://www.w3.org/1998/Math/MathML")) .mathml else .html;
     const name = try docStr(vm, arg(args, 1));
     try checkName(vm, name, true);
+    // The standard's namespace rules: a prefix needs a namespace, `xml:`
+    // its own, `xmlns` (as name or prefix) the xmlns namespace and the
+    // xmlns namespace nothing else.
+    const eq = std.mem.eql;
+    const prefix: ?[]const u8 = if (std.mem.indexOfScalar(u8, name, ':')) |c| name[0..c] else null;
+    const xmlns_ns = "http://www.w3.org/2000/xmlns/";
+    if (prefix != null and ns_text.len == 0) return throwDom(vm, .NamespaceError, "a prefix needs a namespace");
+    if (prefix != null and eq(u8, prefix.?, "xml") and !eq(u8, ns_text, "http://www.w3.org/XML/1998/namespace")) return throwDom(vm, .NamespaceError, "the xml prefix has its own namespace");
+    const is_xmlns = eq(u8, name, "xmlns") or (prefix != null and eq(u8, prefix.?, "xmlns"));
+    if (is_xmlns != eq(u8, ns_text, xmlns_ns)) return throwDom(vm, .NamespaceError, "xmlns and its namespace go together");
+    const ns: dom.Namespace = if (eq(u8, ns_text, "http://www.w3.org/2000/svg")) .svg else if (eq(u8, ns_text, "http://www.w3.org/1998/Math/MathML")) .mathml else if (ns_text.len == 0 or eq(u8, ns_text, "http://www.w3.org/1999/xhtml")) .html else .other;
     // The qualified name stays as given (`prefix:local` is the tagName).
-    return p.wrapValue(try p.doc.createElement(ns, name));
+    const id = try p.doc.createElement(ns, name);
+    if (ns == .other) p.doc.node(id).ns_uri = try p.doc.a.dupe(u8, ns_text);
+    return p.wrapValue(id);
 }
 
 fn createTextNode(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
@@ -3453,15 +3715,28 @@ fn getTagName(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 
 fn getLocalName(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const id = try thisElement(vm, this);
-    return jsStr(vm, pageOf(vm).doc.get(id).name);
+    const n = pageOf(vm).doc.get(id);
+    // An element made in another namespace keeps `prefix:local` as its
+    // name; the parser's elements have no prefix.
+    if (n.namespace == .other) if (std.mem.indexOfScalar(u8, n.name, ':')) |c| return jsStr(vm, n.name[c + 1 ..]);
+    return jsStr(vm, n.name);
+}
+
+fn getPrefix(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisElement(vm, this);
+    const n = pageOf(vm).doc.get(id);
+    if (n.namespace == .other) if (std.mem.indexOfScalar(u8, n.name, ':')) |c| return jsStr(vm, n.name[0..c]);
+    return Value.null_;
 }
 
 fn getNamespaceURI(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const id = try thisElement(vm, this);
-    return jsStr(vm, switch (pageOf(vm).doc.get(id).namespace) {
+    const n = pageOf(vm).doc.get(id);
+    return jsStr(vm, switch (n.namespace) {
         .html => "http://www.w3.org/1999/xhtml",
         .svg => "http://www.w3.org/2000/svg",
         .mathml => "http://www.w3.org/1998/Math/MathML",
+        .other => n.ns_uri orelse "",
     });
 }
 
@@ -3526,6 +3801,52 @@ fn getHidden(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn setHidden(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return boolAttrSetter(vm, this, "hidden", arg(args, 0));
 }
+fn getHttpEquiv(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "http-equiv");
+}
+fn setHttpEquiv(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "http-equiv", arg(args, 0));
+}
+fn getContentAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "content");
+}
+fn setContentAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "content", arg(args, 0));
+}
+fn getAltAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "alt");
+}
+fn setAltAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "alt", arg(args, 0));
+}
+
+/// A URL attribute resolved against the document, as the IDL wants.
+fn urlAttrGetter(vm: *Vm, this: Value, name: []const u8) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const raw = p.doc.getAttr(id, name) orelse return jsStr(vm, "");
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const base = url.parse(sc.a(), p.url, null) catch null;
+    const u = url.parse(sc.a(), raw, if (base) |*b| b else null) catch return jsStr(vm, raw);
+    return jsStr(vm, try u.href(sc.a()));
+}
+fn getDataAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return urlAttrGetter(vm, this, "data");
+}
+fn setDataAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "data", arg(args, 0));
+}
+fn getSrcAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return urlAttrGetter(vm, this, "src");
+}
+fn setSrcAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const r = try attrSetter(vm, this, "src", arg(args, 0));
+    if (p.doc.get(id).parent != null) p.pending_loads.append(p.a, .{ .doc = p.cur, .id = id }) catch {};
+    return r;
+}
 fn getHtmlFor(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     return attrGetter(vm, this, "for");
 }
@@ -3540,11 +3861,27 @@ fn getTabIndex(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 fn setTabIndex(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return attrSetter(vm, this, "tabindex", try vm.toStringValue(arg(args, 0)));
 }
+/// A control's value as a script sees it: what the script set (the
+/// "dirty" value, kept on the wrapper and never an attribute) over the
+/// `value` attribute; the page's own typing writes the attribute.
+pub fn controlValue(p: *Page, id: NodeId, buf: []u8) ?[]const u8 {
+    const vm = p.vm;
+    if (p.wrappers.get(p.key(id))) |w| {
+        const dirty = vm.objects.getOwn(w, .{ .atom = vm.atom("__value") catch return null }) catch return null;
+        if (dirty) |own| if (own.val.isString()) return js.builtins.utf8Buf(vm, Vm.asString(own.val), buf) catch null;
+    }
+    return p.doc.getAttr(id, "value");
+}
+
 fn getValueAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
     // A textarea's value is its text; a select's is its selected option's.
     if (p.doc.isHtml(id, "textarea")) return getTextContent(vm, this, &.{}, Value.undefined_);
+    if (p.doc.isHtml(id, "input")) {
+        const w = Vm.asObject(this);
+        if (try vm.objects.getOwn(w, .{ .atom = try vm.atom("__value") })) |own| return own.val;
+    }
     if (p.doc.isHtml(id, "select")) {
         var first: ?NodeId = null;
         var w = p.doc.walk(id);
@@ -3568,13 +3905,155 @@ fn setValueAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
     if (p.doc.isHtml(id, "textarea")) return setTextContent(vm, this, args, Value.undefined_);
+    if (p.doc.isHtml(id, "input")) {
+        // The dirty value: on the wrapper, not in the markup.
+        const w = Vm.asObject(this);
+        _ = try vm.objects.defineOwn(w, .{ .atom = try vm.atom("__value") }, try vm.toStringValue(arg(args, 0)), .hidden);
+        return Value.undefined_;
+    }
     return attrSetter(vm, this, "value", arg(args, 0));
 }
+
+/// The `value` attribute itself (`defaultValue`).
+fn getValueAttrRaw(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "value");
+}
+fn setValueAttrRaw(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "value", arg(args, 0));
+}
+fn getMaxLength(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisElement(vm, this);
+    const t = pageOf(vm).doc.getAttr(id, "maxlength") orelse return Value.fromInt(-1);
+    return Value.fromInt(std.fmt.parseInt(i32, std.mem.trim(u8, t, " "), 10) catch -1);
+}
+fn setMaxLength(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "maxlength", try vm.toStringValue(arg(args, 0)));
+}
+fn trueNative(_: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
+    return Value.true_;
+}
+
+fn getSelectedAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return boolAttrGetter(vm, this, "selected");
+}
+fn setSelectedAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    // One option selected per select: the others let go.
+    if (vm.toBoolean(arg(args, 0))) if (p.doc.get(id).parent) |par| {
+        var sel: ?NodeId = par;
+        while (sel) |s| : (sel = p.doc.get(s).parent) if (p.doc.isHtml(s, "select")) break;
+        if (sel) |s| {
+            var w = p.doc.walk(s);
+            while (w.next()) |o| if (o != id and p.doc.isHtml(o, "option")) p.removeAttr(o, "selected");
+        }
+    };
+    return boolAttrSetter(vm, this, "selected", arg(args, 0));
+}
+fn optionValueAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisElement(vm, this);
+    return optionValue(vm, id);
+}
+fn optionIndex(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sel: ?NodeId = p.doc.get(id).parent;
+    while (sel) |s| : (sel = p.doc.get(s).parent) if (p.doc.isHtml(s, "select")) break;
+    const s = sel orelse return Value.fromInt(0);
+    var i: i32 = 0;
+    var w = p.doc.walk(s);
+    while (w.next()) |o| if (p.doc.isHtml(o, "option")) {
+        if (o == id) return Value.fromInt(i);
+        i += 1;
+    };
+    return Value.fromInt(0);
+}
+fn setSelectedIndex(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const want = try vm.toIntegerOrInfinity(arg(args, 0));
+    var i: f64 = 0;
+    var w = p.doc.walk(id);
+    while (w.next()) |o| if (p.doc.isHtml(o, "option")) {
+        if (i == want) try p.setAttr(o, "selected", "") else p.removeAttr(o, "selected");
+        i += 1;
+    };
+    return Value.undefined_;
+}
+/// `select.add(option, before)`: before an option, an index, or at the end.
+fn selectAdd(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const opt = p.adoptArg(arg(args, 0)) orelse return vm.throwTypeError("add needs an option");
+    const before_v = arg(args, 1);
+    var before: ?NodeId = null;
+    if (before_v.isNumber()) {
+        const n = before_v.asNumber();
+        var i: f64 = 0;
+        var w = p.doc.walk(id);
+        while (w.next()) |o| if (p.doc.isHtml(o, "option")) {
+            if (i == n) before = o;
+            i += 1;
+        };
+    } else if (!before_v.isNullish()) before = p.nodeOfValue(before_v);
+    const parent = if (before) |b| (p.doc.get(b).parent orelse id) else id;
+    try insertNode(p, parent, opt, before);
+    return Value.undefined_;
+}
+fn selectRemove(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (arg(args, 0).isUndefined()) {
+        p.detachNode(id);
+        return Value.undefined_;
+    }
+    const n = try vm.toIntegerOrInfinity(arg(args, 0));
+    var i: f64 = 0;
+    var w = p.doc.walk(id);
+    while (w.next()) |o| if (p.doc.isHtml(o, "option")) {
+        if (i == n) {
+            p.detachNode(o);
+            break;
+        }
+        i += 1;
+    };
+    return Value.undefined_;
+}
+/// `checked` is the control's state (what the user or a script set),
+/// `defaultChecked` the attribute; `:checked` and the form's submission
+/// follow the state.
 fn getChecked(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const id = try thisElement(vm, this);
+    return Value.fromBool(pageOf(vm).doc.isChecked(id));
+}
+fn getDefaultChecked(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     return boolAttrGetter(vm, this, "checked");
 }
-fn setChecked(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+fn setDefaultChecked(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return boolAttrSetter(vm, this, "checked", arg(args, 0));
+}
+fn setChecked(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    // A radio checked unchecks the rest of its group (same name, same
+    // form, or the same document without one).
+    if (vm.toBoolean(arg(args, 0))) if (p.doc.getAttr(id, "type")) |t| if (std.ascii.eqlIgnoreCase(t, "radio")) if (p.doc.getAttr(id, "name")) |name| {
+        var scope: NodeId = dom.document_id;
+        var up = p.doc.get(id).parent;
+        while (up) |u| : (up = p.doc.get(u).parent) if (p.doc.isHtml(u, "form")) {
+            scope = u;
+            break;
+        };
+        var w = p.doc.walk(scope);
+        while (w.next()) |o| if (o != id and p.doc.isHtml(o, "input")) {
+            const ot = p.doc.getAttr(o, "type") orelse continue;
+            if (!std.ascii.eqlIgnoreCase(ot, "radio")) continue;
+            if (std.mem.eql(u8, p.doc.getAttr(o, "name") orelse "", name)) p.doc.setChecked(o, false);
+        };
+    };
+    p.doc.setChecked(id, vm.toBoolean(arg(args, 0)));
+    p.touch();
+    return Value.undefined_;
 }
 fn getDisabled(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     return boolAttrGetter(vm, this, "disabled");
@@ -3842,7 +4321,32 @@ fn insertAdjacentText(vm: *Vm, this: Value, args: []const Value, _: Value) Error
 fn clickNative(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    if (p.clickHere(id)) if (p.cur == 0) if (p.host.activate) |f| f(p.host.ctx, id);
+    if (!p.clickHere(id)) return Value.undefined_;
+    // The activation behaviour a script's click() has here: a box
+    // toggles, a radio checks, a submit button submits its form (the
+    // `submit` event, then the host); a link is the host's to follow.
+    if (p.doc.isHtml(id, "input") or p.doc.isHtml(id, "button")) {
+        const t = p.doc.getAttr(id, "type") orelse (if (p.doc.isHtml(id, "button")) "submit" else "text");
+        if (std.ascii.eqlIgnoreCase(t, "checkbox")) {
+            _ = try setChecked(vm, this, &.{Value.fromBool(!p.doc.isChecked(id))}, Value.undefined_);
+            p.changeHere(id);
+            return Value.undefined_;
+        }
+        if (std.ascii.eqlIgnoreCase(t, "radio")) {
+            _ = try setChecked(vm, this, &.{Value.true_}, Value.undefined_);
+            p.changeHere(id);
+            return Value.undefined_;
+        }
+        if (std.ascii.eqlIgnoreCase(t, "submit")) {
+            var up = p.doc.get(id).parent;
+            while (up) |u| : (up = p.doc.get(u).parent) if (p.doc.isHtml(u, "form")) {
+                if (p.submitHere(u)) if (p.cur == 0) if (p.host.submit) |f| f(p.host.ctx, u);
+                return Value.undefined_;
+            };
+            return Value.undefined_;
+        }
+    }
+    if (p.cur == 0) if (p.host.activate) |f| f(p.host.ctx, id);
     return Value.undefined_;
 }
 
@@ -4344,6 +4848,436 @@ fn hostLoad(vm: *Vm, referrer: ?[]const u8, specifier: []const u8) Error!?js.mod
     return .{ .name = try vm.meta.dupe(u8, abs), .source = try vm.meta.dupe(u8, text) };
 }
 
+// ------------------------------------------------------------- tables
+
+fn childNamed(p: *Page, parent: NodeId, name: []const u8) ?NodeId {
+    var c = p.doc.get(parent).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, name)) return cid;
+    return null;
+}
+
+fn tableCaption(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    return p.wrapValue(childNamed(p, id, "caption"));
+}
+fn tableTHead(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    return p.wrapValue(childNamed(p, id, "thead"));
+}
+fn tableTFoot(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    return p.wrapValue(childNamed(p, id, "tfoot"));
+}
+
+/// Setting caption/tHead/tFoot: the old one goes, the new one takes
+/// its place (a caption first; a head after captions and colgroups; a
+/// foot at the end).
+fn tableSetPart(vm: *Vm, this: Value, v: Value, name: []const u8) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const new_part: ?NodeId = if (v.isNullish()) null else (p.adoptArg(v) orelse return vm.throwTypeError("not an element"));
+    if (new_part) |np| if (!p.doc.isHtml(np, name)) return throwDom(vm, .HierarchyRequestError, "not the right element");
+    if (childNamed(p, id, name)) |old| if (new_part == null or old != new_part.?) p.detachNode(old);
+    if (new_part) |np| {
+        if (p.doc.get(np).parent == id) return Value.undefined_;
+        try insertNode(p, id, np, tablePartPlace(p, id, name));
+    }
+    return Value.undefined_;
+}
+
+/// Where a caption, head or foot goes among a table's children.
+fn tablePartPlace(p: *Page, table: NodeId, name: []const u8) ?NodeId {
+    if (std.mem.eql(u8, name, "caption")) return p.doc.get(table).first_child;
+    if (std.mem.eql(u8, name, "thead")) {
+        var c = p.doc.get(table).first_child;
+        while (c) |cid| : (c = p.doc.get(cid).next) if (!(p.doc.isHtml(cid, "caption") or p.doc.isHtml(cid, "colgroup"))) return cid;
+        return null;
+    }
+    return null;
+}
+
+fn tableSetCaption(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return tableSetPart(vm, this, arg(args, 0), "caption");
+}
+fn tableSetTHead(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return tableSetPart(vm, this, arg(args, 0), "thead");
+}
+fn tableSetTFoot(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return tableSetPart(vm, this, arg(args, 0), "tfoot");
+}
+
+fn tableCreatePart(vm: *Vm, this: Value, name: []const u8) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (childNamed(p, id, name)) |old| return p.wrapValue(old);
+    const part = try p.doc.createElement(.html, name);
+    try insertNode(p, id, part, tablePartPlace(p, id, name));
+    return p.wrapValue(part);
+}
+fn tableDeletePart(vm: *Vm, this: Value, name: []const u8) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    if (childNamed(p, id, name)) |old| p.detachNode(old);
+    return Value.undefined_;
+}
+fn tableCreateCaption(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return tableCreatePart(vm, this, "caption");
+}
+fn tableDeleteCaption(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return tableDeletePart(vm, this, "caption");
+}
+fn tableCreateTHead(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return tableCreatePart(vm, this, "thead");
+}
+fn tableDeleteTHead(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return tableDeletePart(vm, this, "thead");
+}
+fn tableCreateTFoot(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return tableCreatePart(vm, this, "tfoot");
+}
+fn tableDeleteTFoot(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return tableDeletePart(vm, this, "tfoot");
+}
+fn tableCreateTBody(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const body = try p.doc.createElement(.html, "tbody");
+    // After the last tbody, else at the end.
+    var last: ?NodeId = null;
+    var c = p.doc.get(id).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, "tbody")) {
+        last = cid;
+    };
+    try insertNode(p, id, body, if (last) |l| p.doc.get(l).next else null);
+    return p.wrapValue(body);
+}
+
+fn tableTBodies(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    var ids: std.ArrayList(NodeId) = .empty;
+    var c = p.doc.get(id).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, "tbody")) try ids.append(sc.a(), cid);
+    return nodeList(vm, ids.items);
+}
+
+/// A table's rows: the head's, then the bodies' and the table's own in
+/// tree order, then the foot's.
+fn tableRowIds(p: *Page, table: NodeId, a: std.mem.Allocator) Error![]NodeId {
+    var ids: std.ArrayList(NodeId) = .empty;
+    var c = p.doc.get(table).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, "thead")) {
+        var r = p.doc.get(cid).first_child;
+        while (r) |rid| : (r = p.doc.get(rid).next) if (p.doc.isHtml(rid, "tr")) try ids.append(a, rid);
+    };
+    c = p.doc.get(table).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) {
+        if (p.doc.isHtml(cid, "tr")) try ids.append(a, cid);
+        if (p.doc.isHtml(cid, "tbody")) {
+            var r = p.doc.get(cid).first_child;
+            while (r) |rid| : (r = p.doc.get(rid).next) if (p.doc.isHtml(rid, "tr")) try ids.append(a, rid);
+        }
+    }
+    c = p.doc.get(table).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, "tfoot")) {
+        var r = p.doc.get(cid).first_child;
+        while (r) |rid| : (r = p.doc.get(rid).next) if (p.doc.isHtml(rid, "tr")) try ids.append(a, rid);
+    };
+    return ids.items;
+}
+
+fn tableRows(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    return nodeList(vm, try tableRowIds(p, id, sc.a()));
+}
+
+fn indexArg(vm: *Vm, v: Value, len: usize) Error!?usize {
+    const n = if (v.isUndefined()) -1 else try vm.toIntegerOrInfinity(v);
+    if (n < -1 or n > @as(f64, @floatFromInt(len))) return throwDom(vm, .IndexSizeError, "the index is past the rows");
+    if (n == -1 or n == @as(f64, @floatFromInt(len))) return null;
+    return @intFromFloat(n);
+}
+
+fn tableInsertRow(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const rows = try tableRowIds(p, id, sc.a());
+    const at = try indexArg(vm, arg(args, 0), rows.len);
+    const row = try p.doc.createElement(.html, "tr");
+    if (at) |i| {
+        try insertNode(p, p.doc.get(rows[i]).parent.?, row, rows[i]);
+    } else {
+        // At the end: into the last tbody, made if the table has none.
+        var last_body: ?NodeId = null;
+        var c = p.doc.get(id).first_child;
+        while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, "tbody")) {
+            last_body = cid;
+        };
+        if (last_body == null and rows.len == 0) {
+            const body = try p.doc.createElement(.html, "tbody");
+            try insertNode(p, id, body, null);
+            last_body = body;
+        }
+        if (last_body) |b| try insertNode(p, b, row, null) else try insertNode(p, id, row, null);
+    }
+    return p.wrapValue(row);
+}
+
+fn tableDeleteRow(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const rows = try tableRowIds(p, id, sc.a());
+    const n = try vm.toIntegerOrInfinity(arg(args, 0));
+    if (n == -1) {
+        if (rows.len > 0) p.detachNode(rows[rows.len - 1]);
+        return Value.undefined_;
+    }
+    if (n < 0 or n >= @as(f64, @floatFromInt(rows.len))) return throwDom(vm, .IndexSizeError, "no row at the index");
+    p.detachNode(rows[@intFromFloat(n)]);
+    return Value.undefined_;
+}
+
+fn sectionRowIds(p: *Page, section: NodeId, a: std.mem.Allocator) Error![]NodeId {
+    var ids: std.ArrayList(NodeId) = .empty;
+    var r = p.doc.get(section).first_child;
+    while (r) |rid| : (r = p.doc.get(rid).next) if (p.doc.isHtml(rid, "tr")) try ids.append(a, rid);
+    return ids.items;
+}
+
+fn sectionRows(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    return nodeList(vm, try sectionRowIds(p, id, sc.a()));
+}
+
+fn sectionInsertRow(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const rows = try sectionRowIds(p, id, sc.a());
+    const at = try indexArg(vm, arg(args, 0), rows.len);
+    const row = try p.doc.createElement(.html, "tr");
+    try insertNode(p, id, row, if (at) |i| rows[i] else null);
+    return p.wrapValue(row);
+}
+
+fn sectionDeleteRow(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const rows = try sectionRowIds(p, id, sc.a());
+    const n = try vm.toIntegerOrInfinity(arg(args, 0));
+    if (n == -1) {
+        if (rows.len > 0) p.detachNode(rows[rows.len - 1]);
+        return Value.undefined_;
+    }
+    if (n < 0 or n >= @as(f64, @floatFromInt(rows.len))) return throwDom(vm, .IndexSizeError, "no row at the index");
+    p.detachNode(rows[@intFromFloat(n)]);
+    return Value.undefined_;
+}
+
+fn rowTable(p: *Page, row: NodeId) ?NodeId {
+    var up = p.doc.get(row).parent;
+    while (up) |u| : (up = p.doc.get(u).parent) if (p.doc.isHtml(u, "table")) return u;
+    return null;
+}
+
+fn rowIndex(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const table = rowTable(p, id) orelse return Value.fromInt(-1);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    for (try tableRowIds(p, table, sc.a()), 0..) |r, i| if (r == id) return Value.fromInt(@intCast(i));
+    return Value.fromInt(-1);
+}
+
+fn sectionRowIndex(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const parent = p.doc.get(id).parent orelse return Value.fromInt(-1);
+    var i: i32 = 0;
+    var r = p.doc.get(parent).first_child;
+    while (r) |rid| : (r = p.doc.get(rid).next) if (p.doc.isHtml(rid, "tr")) {
+        if (rid == id) return Value.fromInt(i);
+        i += 1;
+    };
+    return Value.fromInt(-1);
+}
+
+fn rowCellIds(p: *Page, row: NodeId, a: std.mem.Allocator) Error![]NodeId {
+    var ids: std.ArrayList(NodeId) = .empty;
+    var c = p.doc.get(row).first_child;
+    while (c) |cid| : (c = p.doc.get(cid).next) if (p.doc.isHtml(cid, "td") or p.doc.isHtml(cid, "th")) try ids.append(a, cid);
+    return ids.items;
+}
+
+fn rowCells(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    return nodeList(vm, try rowCellIds(p, id, sc.a()));
+}
+
+fn rowInsertCell(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const cells = try rowCellIds(p, id, sc.a());
+    const at = try indexArg(vm, arg(args, 0), cells.len);
+    const cell = try p.doc.createElement(.html, "td");
+    try insertNode(p, id, cell, if (at) |i| cells[i] else null);
+    return p.wrapValue(cell);
+}
+
+fn rowDeleteCell(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const cells = try rowCellIds(p, id, sc.a());
+    const n = try vm.toIntegerOrInfinity(arg(args, 0));
+    if (n == -1) {
+        if (cells.len > 0) p.detachNode(cells[cells.len - 1]);
+        return Value.undefined_;
+    }
+    if (n < 0 or n >= @as(f64, @floatFromInt(cells.len))) return throwDom(vm, .IndexSizeError, "no cell at the index");
+    p.detachNode(cells[@intFromFloat(n)]);
+    return Value.undefined_;
+}
+
+fn cellIndex(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const parent = p.doc.get(id).parent orelse return Value.fromInt(-1);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    for (try rowCellIds(p, parent, sc.a()), 0..) |c, i| if (c == id) return Value.fromInt(@intCast(i));
+    return Value.fromInt(-1);
+}
+
+// ---------------------------------------------------------------- SVG
+
+fn svgOwner(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var up = p.doc.get(id).parent;
+    while (up) |u| : (up = p.doc.get(u).parent) if (p.doc.isElement(u, .svg, "svg")) return p.wrapValue(u);
+    return Value.null_;
+}
+
+/// An SVGAnimatedLength: `baseVal` and `animVal` (no animation runs
+/// here, so the same), each an SVGLength read from the attribute as a
+/// user-unit number.
+fn svgLength(vm: *Vm, this: Value, name: []const u8) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const raw = std.mem.trim(u8, p.doc.getAttr(id, name) orelse "0", " \t\r\n");
+    var end: usize = 0;
+    while (end < raw.len and (std.ascii.isDigit(raw[end]) or raw[end] == '.' or raw[end] == '-' or raw[end] == '+' or raw[end] == 'e' or raw[end] == 'E')) end += 1;
+    const value = std.fmt.parseFloat(f64, raw[0..end]) catch 0;
+    const unit_type: i32 = if (end == raw.len) 1 else if (std.mem.eql(u8, raw[end..], "px")) 5 else if (std.mem.eql(u8, raw[end..], "%")) 2 else 0;
+    const animated = try vm.newObject();
+    const mark = vm.heap.tempMark();
+    defer vm.heap.tempRelease(mark);
+    vm.heap.tempPush(animated.cell());
+    for ([_][]const u8{ "baseVal", "animVal" }) |k| {
+        const len = try vm.newObject();
+        vm.heap.tempPush(len.cell());
+        try vm.defineValue(len, "value", Value.fromF64(value), .default);
+        try vm.defineValue(len, "valueInSpecifiedUnits", Value.fromF64(value), .default);
+        try vm.defineValue(len, "unitType", Value.fromInt(unit_type), .default);
+        try vm.defineValue(len, "valueAsString", try jsStr(vm, raw), .default);
+        try vm.defineValue(animated, k, len.asValue(), .default);
+    }
+    return animated.asValue();
+}
+fn svgLengthX(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return svgLength(vm, this, "x");
+}
+fn svgLengthY(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return svgLength(vm, this, "y");
+}
+fn svgLengthWidth(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return svgLength(vm, this, "width");
+}
+fn svgLengthHeight(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return svgLength(vm, this, "height");
+}
+
+/// The characters of a text element (UTF-16 units, as the DOM counts).
+fn svgNumberOfChars(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const text = p.doc.textContent(id, sc.a()) catch return error.OutOfMemory;
+    return Value.fromInt(@intCast(utf16Len(text)));
+}
+
+/// No SVG text is laid out here: the length is the characters' count at
+/// the font size, the plainest estimate.
+fn svgComputedTextLength(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    var sc = Scratch.init(vm);
+    defer sc.deinit();
+    const text = p.doc.textContent(id, sc.a()) catch return error.OutOfMemory;
+    const size = std.fmt.parseFloat(f64, std.mem.trim(u8, p.doc.getAttr(id, "font-size") orelse "16", " ")) catch 16;
+    return Value.fromF64(@as(f64, @floatFromInt(utf16Len(text))) * size * 0.5);
+}
+
+// ------------------------------------------------------------- images
+
+/// An image's rendered size: its box in the page; in a frame, which is
+/// not laid out, the cascade's `width`/`height` when they are lengths,
+/// else the attributes.
+fn imageSize(vm: *Vm, this: Value, axis: u8) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const name: []const u8 = if (axis == 0) "width" else "height";
+    if (p.cur == 0) {
+        if (p.host.rect) |f| if (f(p.host.ctx, id)) |r| return Value.fromF64(@round(r[2 + axis]));
+    } else {
+        var buf: [64]u8 = undefined;
+        if (try frameComputed(p, id, name, &buf)) |text| if (std.mem.endsWith(u8, text, "px")) {
+            if (std.fmt.parseFloat(f64, text[0 .. text.len - 2])) |px| return Value.fromF64(@round(px)) else |_| {}
+        };
+    }
+    const attr = p.doc.getAttr(id, name) orelse return Value.fromInt(0);
+    return Value.fromInt(std.fmt.parseInt(i32, std.mem.trim(u8, attr, " "), 10) catch 0);
+}
+fn imageWidth(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return imageSize(vm, this, 0);
+}
+fn imageHeight(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return imageSize(vm, this, 1);
+}
+fn setWidthAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "width", try vm.toStringValue(arg(args, 0)));
+}
+fn setHeightAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "height", try vm.toStringValue(arg(args, 0)));
+}
+
 // -------------------------------------------------------------- forms
 
 fn getActionAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
@@ -4565,17 +5499,8 @@ fn stylePropertyGet(vm: *Vm, this: Value, name: []const u8) Error!Value {
     defer sc.deinit();
     if (ref.computed) {
         if (ref.doc != 0) {
-            // Not the page's document: the cascade run here, in scratch,
-            // with the host's user-agent sheet.
-            if (p.host.ua_sheet) |ua| {
-                const env: stylelib.Env = .{ .width = 1024, .height = 768 };
-                const sheets = stylelib.collectDocumentSheetsWith(sc.a(), p.doc, env, ua.*) catch return error.OutOfMemory;
-                const styles = stylelib.compute(sc.a(), p.doc, sheets, env) catch return error.OutOfMemory;
-                if (ref.id < styles.computed.len) {
-                    var buf: [256]u8 = undefined;
-                    if (stylelib.propertyText(styles.get(ref.id), name, &buf)) |text| return jsStr(vm, text);
-                }
-            }
+            var buf: [256]u8 = undefined;
+            if (try frameComputed(p, ref.id, name, &buf)) |text| return jsStr(vm, text);
         } else if (p.host.computed) |f| {
             var buf: [256]u8 = undefined;
             if (f(p.host.ctx, ref.id, name, &buf)) |text| return jsStr(vm, text);
@@ -4584,6 +5509,30 @@ fn stylePropertyGet(vm: *Vm, this: Value, name: []const u8) Error!Value {
     const decls = try declarationsOf(p, ref.id, sc.a());
     for (decls) |d| if (std.mem.eql(u8, d.name, name)) return jsStr(vm, d.value);
     return jsStr(vm, "");
+}
+
+/// A computed property in the current document when it is not the
+/// page's: the cascade run here, in scratch, with the host's user-agent
+/// sheet, for the frame's viewport — the box its owner has in the page
+/// (none: 0×0, as a frame the page hides), or a nominal one.
+fn frameComputed(p: *Page, id: NodeId, name: []const u8, buf: []u8) Error!?[]const u8 {
+    const ua = p.host.ua_sheet orelse return null;
+    var arena = std.heap.ArenaAllocator.init(if (p.host.scratch) |f| f(p.host.ctx) else p.a);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env = frameEnv(p);
+    const sheets = stylelib.collectDocumentSheetsWith(a, p.doc, env, ua.*) catch return error.OutOfMemory;
+    const styles = stylelib.compute(a, p.doc, sheets, env) catch return error.OutOfMemory;
+    if (id >= styles.computed.len) return null;
+    return stylelib.propertyText(styles.get(id), name, buf);
+}
+
+fn frameEnv(p: *Page) stylelib.Env {
+    const owner = p.docs.items[p.cur].owner orelse return .{ .width = 1024, .height = 768 };
+    if (owner.doc != 0) return .{ .width = 1024, .height = 768 };
+    const rect = p.host.rect orelse return .{ .width = 1024, .height = 768 };
+    const r = rect(p.host.ctx, owner.id) orelse return .{ .width = 0, .height = 0 };
+    return .{ .width = r[2], .height = r[3] };
 }
 
 fn stylePropertySet(vm: *Vm, this: Value, name: []const u8, v: Value, important: bool) Error!Value {
@@ -5182,6 +6131,26 @@ const named_storage_source =
     \\  }
     \\  Object.defineProperty(window, 'localStorage', { value: wrap(window.localStorage), configurable: true, writable: true, enumerable: false });
     \\  Object.defineProperty(window, 'sessionStorage', { value: wrap(window.sessionStorage), configurable: true, writable: true, enumerable: false });
+    \\})();
+;
+
+/// `sheet.cssRules` is live: a list held across an `insertRule` shows
+/// the new rule. The bindings hand back a fresh array per read, so the
+/// list a script keeps is a Proxy that re-reads the sheet on every access.
+const live_rules_source =
+    \\(function () {
+    \\  var d = Object.getOwnPropertyDescriptor(CSSStyleSheet.prototype, 'cssRules');
+    \\  if (!d || !d.get) return;
+    \\  var raw = d.get;
+    \\  Object.defineProperty(CSSStyleSheet.prototype, 'cssRules', { configurable: true, enumerable: true, get: function () {
+    \\    var sheet = this;
+    \\    return new Proxy({}, {
+    \\      get: function (t, k) { var r = raw.call(sheet); if (k === 'item') return function (i) { var v = r[i]; return v === undefined ? null : v; }; var v = r[k]; return typeof v === 'function' ? v.bind(r) : v; },
+    \\      has: function (t, k) { return k in raw.call(sheet); },
+    \\      ownKeys: function () { return Reflect.ownKeys(raw.call(sheet)); },
+    \\      getOwnPropertyDescriptor: function (t, k) { var dd = Object.getOwnPropertyDescriptor(raw.call(sheet), k); if (dd) dd.configurable = true; return dd; }
+    \\    });
+    \\  } });
     \\})();
 ;
 
@@ -6243,7 +7212,7 @@ fn rangeSurroundContents(vm: *Vm, this: Value, args: []const Value, _: Value) Er
     const st = try rangeState(vm, o.asValue());
     // A partially contained non-text node cannot be surrounded.
     var w = p.doc.walk(commonAncestor(p.doc, st.sc, st.ec));
-    while (w.step()) |n| if (n != st.sc and n != st.ec) if (partiallyContains(p.doc, st, n) and p.doc.get(n).kind != .text) return throwDom(vm, .InvalidStateError, "the range partially selects a node");
+    while (w.step()) |n| if (partiallyContains(p.doc, st, n) and p.doc.get(n).kind != .text) return throwDom(vm, .InvalidStateError, "the range partially selects a node");
     const frag = (try rangeContents(vm, o.asValue(), .extract)).?;
     while (p.doc.get(new_parent).first_child) |c| p.detachNode(c);
     _ = try rangeInsertNode(vm, this, &.{try p.wrapValue(new_parent)}, Value.undefined_);
@@ -6581,6 +7550,10 @@ const TestHost = struct {
     /// last segment (the Acid3 support files), and what was read.
     dir: ?[]const u8 = null,
     served: std.ArrayList([]u8) = .empty,
+    /// The page's document and the user-agent sheet: `computed` runs
+    /// the cascade over them, as the page's layout would.
+    doc: ?*dom.Document = null,
+    ua: ?*const stylelib.Sheet = null,
     fn serveFile(h: *TestHost, abs_url: []const u8) ?[]const u8 {
         const dir = h.dir orelse return null;
         const path_end = std.mem.indexOfAny(u8, abs_url, "?#") orelse abs_url.len;
@@ -6604,10 +7577,38 @@ const TestHost = struct {
         h.lines.append(h.a, '\n') catch {};
     }
     /// Every element is a 100×20 box at (8, 8 + 30·id).
-    fn rect(_: *anyopaque, id: NodeId) ?[4]f64 {
+    fn rect(ctx: *anyopaque, id: NodeId) ?[4]f64 {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        // A frame is as big as its style attribute says, else 0×0 (the
+        // page hides its frames); anything else a nominal box.
+        if (h.doc) |doc| if (doc.isHtml(id, "iframe")) {
+            var w: f64 = 0;
+            var ht: f64 = 0;
+            if (doc.getAttr(id, "style")) |st| {
+                var it = std.mem.splitScalar(u8, st, ';');
+                while (it.next()) |decl| {
+                    const colon = std.mem.indexOfScalar(u8, decl, ':') orelse continue;
+                    const k = std.mem.trim(u8, decl[0..colon], " ");
+                    const v = std.mem.trim(u8, decl[colon + 1 ..], " ");
+                    const px = if (std.mem.endsWith(u8, v, "px")) std.fmt.parseFloat(f64, v[0 .. v.len - 2]) catch 0 else 0;
+                    if (std.mem.eql(u8, k, "width")) w = px else if (std.mem.eql(u8, k, "height")) ht = px;
+                }
+            }
+            return .{ 0, 0, w, ht };
+        };
         return .{ 8, 8 + 30 * @as(f64, @floatFromInt(id)), 100, 20 };
     }
-    fn computed(_: *anyopaque, _: NodeId, name: []const u8, buf: []u8) ?[]const u8 {
+    fn computed(ctx: *anyopaque, id: NodeId, name: []const u8, buf: []u8) ?[]const u8 {
+        const h: *TestHost = @ptrCast(@alignCast(ctx));
+        if (h.doc) |doc| if (h.ua) |ua| {
+            var arena = std.heap.ArenaAllocator.init(h.a);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const env: stylelib.Env = .{ .width = 1024, .height = 768 };
+            const sheets = stylelib.collectDocumentSheetsWith(a, doc, env, ua.*) catch return null;
+            const styles = stylelib.compute(a, doc, sheets, env) catch return null;
+            if (id < styles.computed.len) if (stylelib.propertyText(styles.get(id), name, buf)) |t| return t;
+        };
         if (std.mem.eql(u8, name, "display")) return std.fmt.bufPrint(buf, "block", .{}) catch null;
         if (std.mem.eql(u8, name, "color")) return std.fmt.bufPrint(buf, "rgb(0, 0, 0)", .{}) catch null;
         return null;
@@ -6769,6 +7770,8 @@ const TestPage = struct {
         tp.host = try ta.create(TestHost);
         tp.host.* = .{ .a = ta };
         tp.ua = try stylelib.parseSheet(tp.arena.allocator(), stylelib.ua_sheet, .user_agent, .{ .width = 1024, .height = 768 });
+        tp.host.doc = tp.doc;
+        tp.host.ua = &tp.ua;
         try tp.page.init(tp.vm, tp.doc, ta, .{ .ctx = tp.host, .log = TestHost.log, .rect = TestHost.rect, .computed = TestHost.computed, .scroll = TestHost.scroll, .request = TestHost.request, .fetch = TestHost.fetch, .navigate = TestHost.navigate, .changed = TestHost.changed, .submit = TestHost.submit, .activate = TestHost.activate, .storage = TestHost.storage, .ua_sheet = &tp.ua });
         try tp.page.setUrl("http://example.test:8080/dir/page.html?q=1#top");
         return tp;
@@ -6964,7 +7967,7 @@ test "script: the style object reads and writes the attribute, computed style an
     defer tp.close();
     tp.page.runScripts();
     try std.testing.expectEqualStrings(
-        \\log:blue|rgb(1, 2, 3)|rgb(1, 2, 3)|2|background-color|true|color: red; background-color: rgb(1, 2, 3); margin-top: 4px !important; float: left;|important|color: red; background-color: rgb(1, 2, 3); margin-top: 4px !important; float: left;|red||3|false|<p id="q" style="display: none;">y</p>|block|rgb(0, 0, 0)|block||8|188|100|20|108|208|100|20|188|1|true
+        \\log:blue|rgb(1, 2, 3)|rgb(1, 2, 3)|2|background-color|true|color: red; background-color: rgb(1, 2, 3); margin-top: 4px !important; float: left;|important|color: red; background-color: rgb(1, 2, 3); margin-top: 4px !important; float: left;|red||3|false|<p id="q" style="display: none;">y</p>|none|rgb(0, 0, 0)|none|auto|8|188|100|20|108|208|100|20|188|1|true
         \\
     , tp.host.lines.items);
     // The last scroll asked was scrollIntoView's: the element's top.

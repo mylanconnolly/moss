@@ -7350,6 +7350,86 @@ order and the surround check walked past every text node — `step`
 yields all. Acid3: **73/100 on the host, 43/100 on the target** within
 its settle.
 
+**Stage 11l, the Acid3 round (as built, 2026-09-28).** The round that
+went down Acid3's failing list. The table DOM: `HTMLTableElement`
+(`caption`/`tHead`/`tFoot` read and set, `tBodies`, `rows` in the
+standard's order — head, bodies and loose rows, foot — `create*`/
+`delete*`, `createTBody`, `insertRow`/`deleteRow` with the index rules
+and `IndexSizeError`), `HTMLTableSectionElement`, `HTMLTableRowElement`
+(`rowIndex`, `sectionRowIndex`, `cells`, `insertCell`/`deleteCell`)
+and `HTMLTableCellElement` (`cellIndex`); `wrap` picks the interface
+from the tag through `htmlInterfaceFor`. Forms: an input's `value` is
+the **dirty value** — what a script set, kept on the wrapper as a
+hidden `__value`, never an attribute (`defaultValue` is the attribute;
+`Page.controlValue` gives the page the value a submission should send);
+`checked` is likewise state, but state the cascade and the painter must
+see, so it lives in the DOM node (`dom.Flags.checked_set/checked`,
+`Document.isChecked/setChecked`) and the `checked` attribute is only
+the default (`defaultChecked`): `:checked` reads the state and matches
+only checkboxes, radios and selected options, the page's own toggling
+and its submission read it too. A radio checked unchecks its group
+(same name, same form or document); `select.add(option, before)`,
+`remove`, `selectedIndex` set, `option.defaultSelected/selected/value/
+text/index`; `click()` on a control has the activation behaviour: a
+box toggles and fires `change`, a radio checks, a submit button fires
+its form's `submit` (then the host's submission). Reflections:
+`httpEquiv`, `content`, `alt`, and `data`/`src` resolved against the
+document. Frames: an inserted iframe, object, image, link or script
+gets a `load` event from the loop's next turn (`pending_loads`, drained
+by `runDue`, due at once for `nextDue`) and `frame.src = …` reloads;
+`document.open()` on a frame document empties it and gathers what
+`write` adds until `close()` parses the text whole and adopts the tree
+(`DocumentType` gained `publicId`/`systemId`); a node adopted into
+another document keeps its wrapper (`adoptArg` re-points it, so the
+script's reference is the adopted node); `<script src="data:…">`
+decodes in the bindings. `createElementNS` enforces the standard's
+namespace rules (a prefix needs a namespace, `xml:` its own, `xmlns`
+and its namespace together) and elements in namespaces beside HTML,
+SVG and MathML keep their URI (`dom.Namespace.other`, the node's
+`ns_uri`; `prefix`/`localName` split the qualified name). Two SVG
+interfaces (`SVGRectElement`'s lengths as `SVGAnimatedLength`,
+`SVGTextContentElement.getNumberOfChars`). `img.width/height` come
+from the box in the page and, in a frame, from the cascade's lengths.
+`sheet.cssRules` is **live** through a Proxy the bindings run at
+startup over the getter (the same move as the storages): a list kept
+across `insertRule` shows the new rule. Media queries gained `color`
+and `monochrome` with their `min-`/`max-` forms and Level 4's rule that
+an unknown feature makes its query false, `not` or no `not`, while the
+other queries of the comma list still count; a frame's cascade uses
+the frame's own viewport — its owner's box in the page, 0×0 when the
+page hides it — so `@media (max-width: 1em)` holds in a hidden frame.
+`cursor` is a computed property with the CSS3 keywords. *Bugs found:*
+the cascade's **ancestor bloom filter** collected every compound left
+of a child/descendant combinator as an ancestor with a sticky flag, so
+in `#div1 ~ div div + div > div` the `#div1` (a sibling of an ancestor)
+was required among the ancestors and the rule never matched an element
+the selector matched under `querySelector` — the flag is per compound
+now (`A B ~ C` puts A above C; `A ~ B C` does not). `surroundContents`
+exempted the range's own boundary nodes from the partial-containment
+check and so wrapped a range that started in one comment and ended in
+another; only text nodes are exempt. A native firing `change` went
+through the page-level entry, which resets to the page's document —
+`changeHere` stays in the current one (the same class as `clickHere`).
+The host test's `computed` fake gave `block` for everything; it runs
+the real cascade over the test document now, which is how Acid3's test
+0 (`:last-child` recomputed after a removal) passes on the host, and
+one older expectation moved from the fake's answer to the cascade's.
+The target reached the host's number only after two more fixes the
+drill's new failure list named (the `acid3` drill now asks the page for
+the harness's `log` through `web-render`'s `{ eval: SOURCE }`, a third
+dump kind — `Dump.eval`, the expression's completion value as text —
+so the target's misses are printed, not guessed): the page domain never
+handed the bindings its user-agent sheet, so every frame cascade
+answered nothing; and the cascades' scratch arenas came from the 16 MB
+script-meta heap, whose size classes never return a big block to the
+region, so three hundred of them ran it dry (`script: out of memory`
+at test 37) — `Host.scratch` now lends the layout region's top, a
+stack a native pops before it returns. Acid3: **99/100 on the host,
+99/100 on the target** within its settle. The one left, test 80, wants a frame's XHTML scripts to run
+in the frame's own global with its parent as `parent` — the engine has
+one realm, so frame scripts do not run at all yet — and XML
+well-formedness and namespace errors to stop them.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

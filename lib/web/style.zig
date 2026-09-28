@@ -110,6 +110,7 @@ pub const ListStyleType = enum { disc, circle, square, decimal, lower_alpha, upp
 pub const ListStylePosition = enum { inside, outside };
 pub const Overflow = enum { visible, hidden, scroll, auto, clip };
 pub const Visibility = enum { visible, hidden, collapse };
+pub const Cursor = enum { auto, default, none, context_menu, help, pointer, progress, wait, cell, crosshair, text, vertical_text, alias, copy, move, no_drop, not_allowed, grab, grabbing, e_resize, n_resize, ne_resize, nw_resize, s_resize, se_resize, sw_resize, w_resize, ew_resize, ns_resize, nesw_resize, nwse_resize, col_resize, row_resize, all_scroll, zoom_in, zoom_out };
 pub const BoxSizing = enum { content_box, border_box };
 pub const BorderCollapse = enum { separate, collapse };
 pub const BackgroundRepeat = enum { repeat, repeat_x, repeat_y, no_repeat };
@@ -178,6 +179,7 @@ pub const Computed = struct {
     overflow_x: Overflow = .visible,
     overflow_y: Overflow = .visible,
     visibility: Visibility = .visible,
+    cursor: Cursor = .auto,
     opacity: f64 = 1,
     box_sizing: BoxSizing = .content_box,
     z_index: ?i32 = null,
@@ -318,6 +320,7 @@ pub const Prop = enum {
     overflow_x,
     overflow_y,
     visibility,
+    cursor,
     opacity,
     box_sizing,
     z_index,
@@ -367,7 +370,7 @@ pub const Prop = enum {
 
     pub fn inherited(p: Prop) bool {
         return switch (p) {
-            .color, .font_size, .font_weight, .font_style, .font_family, .line_height, .text_align, .text_indent, .text_transform, .white_space, .list_style_type, .list_style_position, .visibility, .border_spacing_x, .border_spacing_y, .border_collapse, .fill => true,
+            .color, .font_size, .font_weight, .font_style, .font_family, .line_height, .text_align, .text_indent, .text_transform, .white_space, .list_style_type, .list_style_position, .visibility, .cursor, .border_spacing_x, .border_spacing_y, .border_collapse, .fill => true,
             else => false,
         };
     }
@@ -2058,6 +2061,7 @@ pub fn propertyText(c: *const Computed, name: []const u8, buf: []u8) ?[]const u8
     if (eq(u8, name, "position")) return @tagName(c.position);
     if (eq(u8, name, "float")) return @tagName(c.float);
     if (eq(u8, name, "visibility")) return @tagName(c.visibility);
+    if (eq(u8, name, "cursor")) return P.kebab(a, @tagName(c.cursor));
     if (eq(u8, name, "color")) return c.color.serialize(a) catch null;
     if (eq(u8, name, "background-color")) return c.background_color.serialize(a) catch null;
     if (eq(u8, name, "font-size")) return P.px(a, c.font_size);
@@ -2342,13 +2346,16 @@ const RuleIndex = struct {
             ix.sheet_of[gi] = @intCast(si);
             ix.rule_of[gi] = @intCast(ri);
             const comps = r.selector.compounds;
-            // A compound with a child or descendant combinator anywhere to
-            // its right is an ancestor of the subject.
+            // A compound whose own combinator (the one to its right) is
+            // child or descendant sits at an ancestor of the subject —
+            // siblings share ancestors, so `A B ~ C` puts A above C, but
+            // `A ~ B C` puts A beside an ancestor, not above the subject
+            // (a sticky flag here once pruned that rule wrongly).
             var need: Bloom = @splat(0);
-            var ancestor = false;
             var ci = comps.len;
             while (ci > 1) {
                 ci -= 1;
+                var ancestor = false;
                 if (comps[ci].combinator) |comb| if (comb == .descendant or comb == .child) {
                     ancestor = true;
                 };
@@ -2829,6 +2836,7 @@ fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
         .overflow_x => out.overflow_x = from.overflow_x,
         .overflow_y => out.overflow_y = from.overflow_y,
         .visibility => out.visibility = from.visibility,
+        .cursor => out.cursor = from.cursor,
         .opacity => out.opacity = from.opacity,
         .flex_direction => out.flex_direction = from.flex_direction,
         .flex_wrap => out.flex_wrap = from.flex_wrap,
@@ -3404,6 +3412,7 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
         .overflow_x => out.overflow_x = keyword(Overflow, v) orelse return error.Invalid,
         .overflow_y => out.overflow_y = keyword(Overflow, v) orelse return error.Invalid,
         .visibility => out.visibility = keyword(Visibility, v) orelse return error.Invalid,
+        .cursor => out.cursor = keyword(Cursor, v) orelse return error.Invalid,
         .opacity => {
             const x: f64 = if (v == .token and v.token == .number) v.token.number.value else if (v == .token and v.token == .percentage) v.token.percentage.value / 100 else return error.Invalid;
             out.opacity = @min(1, @max(0, x));

@@ -334,7 +334,15 @@ fn matchPseudo(doc: *const Document, id: NodeId, ps: Pseudo) bool {
             }
             return false;
         },
-        .checked => return attrValue(doc, id, "checked") != null or attrValue(doc, id, "selected") != null,
+        .checked => {
+            // A checkbox or radio that is checked (its state, not only its
+            // attribute), or a selected option.
+            if (std.mem.eql(u8, n.name, "option")) return attrValue(doc, id, "selected") != null;
+            if (!std.mem.eql(u8, n.name, "input")) return false;
+            const t = attrValue(doc, id, "type") orelse return false;
+            if (!(std.ascii.eqlIgnoreCase(t, "checkbox") or std.ascii.eqlIgnoreCase(t, "radio"))) return false;
+            return doc.isChecked(id);
+        },
         .disabled => return attrValue(doc, id, "disabled") != null,
         .enabled => return attrValue(doc, id, "disabled") == null and (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "button") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "textarea")),
         .link => return (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) and attrValue(doc, id, "href") != null,

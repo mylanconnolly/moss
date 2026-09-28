@@ -25,7 +25,12 @@ pub const Env = struct {
     can_hover: bool = true,
 };
 
-const Feature = enum { width, height, min_width, max_width, min_height, max_height, orientation, prefers_color_scheme, prefers_contrast, prefers_reduced_motion, hover, pointer, unknown };
+const Feature = enum { width, height, min_width, max_width, min_height, max_height, color, min_color, max_color, monochrome, min_monochrome, max_monochrome, orientation, prefers_color_scheme, prefers_contrast, prefers_reduced_motion, hover, pointer, unknown };
+
+/// The screen's bits per colour component, and its monochrome bits (a
+/// colour screen has none).
+const color_bits: f64 = 8;
+const monochrome_bits: f64 = 0;
 
 const Cmp = enum { lt, le, gt, ge, eq };
 
@@ -102,6 +107,10 @@ fn parseOneValues(a: std.mem.Allocator, values: []const css.Value) Error!Node {
     var terms: std.ArrayList(Node) = .empty;
     var any_or = false;
     var first = true;
+    // A feature this file does not know makes the whole query false,
+    // `not` or no `not` (Level 4's "unknown" at the top level); the other
+    // queries of a comma list still count.
+    var saw_unknown = false;
     while (i < toks.len) {
         if (!first) {
             const w = identOf(toks[i]) orelse return .unknown;
@@ -131,11 +140,14 @@ fn parseOneValues(a: std.mem.Allocator, values: []const css.Value) Error!Node {
             continue;
         }
         if (t == .block and t.block.kind == '(') {
-            try terms.append(a, try parseBlock(a, t.block.values));
+            const term = try parseBlock(a, t.block.values);
+            if (isUnknown(term)) saw_unknown = true;
+            try terms.append(a, term);
             continue;
         }
         return .unknown;
     }
+    if (saw_unknown) return .unknown;
     const body: Node = if (terms.items.len == 1) terms.items[0] else if (any_or) .{ .any_of = terms.items } else .{ .all_of = terms.items };
     if (!negate) return body;
     const boxed = try a.create(Node);
@@ -184,6 +196,22 @@ fn parseBlock(a: std.mem.Allocator, values: []const css.Value) Error!Node {
     return .unknown;
 }
 
+fn isUnknown(n: Node) bool {
+    return switch (n) {
+        .unknown => true,
+        .feature => |f| f.feature == .unknown,
+        .not => |inner| isUnknown(inner.*),
+        .all_of, .any_of => |list| for (list) |x| {
+            if (isUnknown(x)) break true;
+        } else false,
+        .media_type => false,
+    };
+}
+
+fn numberOf(v: css.Value) ?f64 {
+    return if (v == .token and v.token == .number) v.token.number.value else null;
+}
+
 fn delimOf(v: css.Value) ?u8 {
     return if (v == .token and v.token == .delim) v.token.delim else null;
 }
@@ -196,6 +224,12 @@ fn featureNamed(name: []const u8) Feature {
     if (eq(name, "max-width")) return .max_width;
     if (eq(name, "min-height")) return .min_height;
     if (eq(name, "max-height")) return .max_height;
+    if (eq(name, "color")) return .color;
+    if (eq(name, "min-color")) return .min_color;
+    if (eq(name, "max-color")) return .max_color;
+    if (eq(name, "monochrome")) return .monochrome;
+    if (eq(name, "min-monochrome")) return .min_monochrome;
+    if (eq(name, "max-monochrome")) return .max_monochrome;
     if (eq(name, "orientation")) return .orientation;
     if (eq(name, "prefers-color-scheme")) return .prefers_color_scheme;
     if (eq(name, "prefers-contrast")) return .prefers_contrast;
@@ -210,6 +244,9 @@ fn featureNode(feature: Feature, cmp: Cmp, v: css.Value) Node {
         .min_width, .min_height => return .{ .feature = .{ .feature = feature, .cmp = .ge, .value = lengthOf(v) orelse return .unknown, .ident = "" } },
         .max_width, .max_height => return .{ .feature = .{ .feature = feature, .cmp = .le, .value = lengthOf(v) orelse return .unknown, .ident = "" } },
         .width, .height => return .{ .feature = .{ .feature = feature, .cmp = cmp, .value = lengthOf(v) orelse return .unknown, .ident = "" } },
+        .min_color, .min_monochrome => return .{ .feature = .{ .feature = feature, .cmp = .ge, .value = numberOf(v) orelse return .unknown, .ident = "" } },
+        .max_color, .max_monochrome => return .{ .feature = .{ .feature = feature, .cmp = .le, .value = numberOf(v) orelse return .unknown, .ident = "" } },
+        .color, .monochrome => return .{ .feature = .{ .feature = feature, .cmp = cmp, .value = numberOf(v) orelse return .unknown, .ident = "" } },
         .orientation, .prefers_color_scheme, .prefers_contrast, .prefers_reduced_motion, .hover, .pointer => return .{ .feature = .{ .feature = feature, .cmp = .eq, .value = 0, .ident = identOf(v) orelse return .unknown } },
         .unknown => return .unknown,
     }
@@ -352,6 +389,8 @@ fn eval(n: Node, env: Env) bool {
             switch (f.feature) {
                 .width, .min_width, .max_width => return compare(env.width, f.cmp, f.value),
                 .height, .min_height, .max_height => return compare(env.height, f.cmp, f.value),
+                .color, .min_color, .max_color => return compare(color_bits, f.cmp, f.value),
+                .monochrome, .min_monochrome, .max_monochrome => return compare(monochrome_bits, f.cmp, f.value),
                 .orientation => return if (f.ident.len == 0) true else if (eq(f.ident, "landscape")) env.width >= env.height else if (eq(f.ident, "portrait")) env.height > env.width else false,
                 .prefers_color_scheme => return if (eq(f.ident, "dark")) env.dark else if (eq(f.ident, "light")) !env.dark else f.ident.len == 0,
                 .prefers_contrast => return if (eq(f.ident, "more")) env.high_contrast else if (eq(f.ident, "no-preference")) !env.high_contrast else if (f.ident.len == 0) env.high_contrast else false,

@@ -14,7 +14,14 @@ pub const Error = error{OutOfMemory};
 pub const NodeId = u32;
 pub const document_id: NodeId = 0;
 
-pub const Namespace = enum(u8) { html, svg, mathml };
+/// `other`: an element made by script in a namespace the parser never
+/// produces (its URI is the node's `ns_uri`).
+pub const Namespace = enum(u8) { html, svg, mathml, other };
+
+/// Element state that is not an attribute: a checkbox or radio's
+/// checkedness once the user or a script has set it (the `checked`
+/// attribute is only the default until then).
+pub const Flags = packed struct(u8) { checked_set: bool = false, checked: bool = false, _pad: u6 = 0 };
 
 pub const Kind = enum(u8) { document, doctype, element, text, comment, fragment };
 
@@ -45,6 +52,9 @@ pub const Node = struct {
     /// Doctypes only.
     public_id: ?[]const u8 = null,
     system_id: ?[]const u8 = null,
+    /// Elements in the `other` namespace: its URI.
+    ns_uri: ?[]const u8 = null,
+    flags: Flags = .{},
     /// A `template` element's contents: a fragment node that is not one
     /// of the element's children.
     template_contents: ?NodeId = null,
@@ -173,6 +183,19 @@ pub const Document = struct {
 
     pub fn isHtml(d: *const Document, id: NodeId, name: []const u8) bool {
         return d.isElement(id, .html, name);
+    }
+
+    /// A checkbox or radio's checkedness: what the user or a script set,
+    /// else the `checked` attribute (its default).
+    pub fn isChecked(d: *const Document, id: NodeId) bool {
+        const n = d.get(id);
+        return if (n.flags.checked_set) n.flags.checked else d.hasAttr(id, "checked");
+    }
+
+    pub fn setChecked(d: *Document, id: NodeId, on: bool) void {
+        const n = d.node(id);
+        n.flags.checked_set = true;
+        n.flags.checked = on;
     }
 
     pub fn childCount(d: *const Document, id: NodeId) usize {

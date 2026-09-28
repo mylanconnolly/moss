@@ -736,7 +736,7 @@ const Painter = struct {
             .checkbox, .radio => {
                 p.fill(b.x, b.y, b.w, b.h, white);
                 p.stroke(b.x, b.y, b.w, b.h, 1, p.opts.frame);
-                if (doc.hasAttr(node, "checked")) p.fill(b.x + 3, b.y + 3, @max(1, b.w - 6), @max(1, b.h - 6), p.opts.accent);
+                if (doc.isChecked(node)) p.fill(b.x + 3, b.y + 3, @max(1, b.w - 6), @max(1, b.h - 6), p.opts.accent);
                 return;
             },
             else => {},

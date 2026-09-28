@@ -64,6 +64,7 @@ const render_shape = blk: {
         .{ .key = "url", .shape = .string },
         .{ .key = "title", .shape = .string },
         .{ .key = "dom", .shape = .record },
+        .{ .key = "eval", .shape = .string },
     };
     break :blk Shape{ .record_of = &fields };
 };
@@ -71,7 +72,7 @@ const render_result = mshl.resultShape(render_shape, .string);
 
 pub fn signature(name: []const u8) ?mshl.Signature {
     if (std.mem.eql(u8, name, "web-render")) return .{ .params = &.{ .{ .name = "url", .shape = .string }, .{ .name = "options", .shape = .record, .optional = true } }, .ret = render_result };
-    // (`options`: `{ settle: MS, select: SELECTOR }`.)
+    // (`options`: `{ settle: MS, select: SELECTOR, eval: SOURCE }`.)
     return null;
 }
 
@@ -92,7 +93,15 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // fragment's children) — a big page's whole tree would not fit the
     // script's line heap, and a script usually wants one part of it.
     var select: ?[]const u8 = null;
+    // `{ eval: SOURCE }`: a script expression the page evaluates once it
+    // has settled, its value handed back as text (`eval` in the result)
+    // — the way to ask a test page what it concluded.
+    var eval_src: ?[]const u8 = null;
     if (args.len > 1 and args[1] == .record) {
+        if (args[1].record.get("eval")) |v| {
+            if (v != .str) return it.fail("web-render: eval must be a script", .{});
+            eval_src = v.str;
+        }
         if (args[1].record.get("settle")) |v| {
             if (v != .int or v.int < 0) return it.fail("web-render: settle must be milliseconds", .{});
             settle_ms = @intCast(@min(v.int, 120_000));
@@ -121,15 +130,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         .stuck => return errResult(it, "web-render: the page never finished", .{}),
     }
     if (!settle(h, id, settle_ms)) return errResult(it, "web-render: the page died", .{});
+    var evaluated: []const u8 = "";
+    if (eval_src) |src| {
+        if (!h.send(id, .{ .dump = .{ .what = .eval, .select = src } })) return errResult(it, "web-render: the page took no command", .{});
+        if (!awaitDump(h, id)) return errResult(it, "web-render: the page never answered", .{});
+        evaluated = try it.arena.dupe(u8, h.page(id).dumped());
+    }
     if (!h.send(id, .{ .dump = if (select) |sel| .{ .what = .selected, .select = sel } else .{ .what = .html } })) return errResult(it, "web-render: the page took no command", .{});
-    var steps: usize = 0;
-    while (steps < 10_000) : (steps += 1) {
-        switch (h.step()) {
-            .event => |e| if (e.page == id and e.kind == .dumped) break,
-            .dead, .failed, .idle => return errResult(it, "web-render: the page died", .{}),
-            else => {},
-        }
-    } else return errResult(it, "web-render: the page never answered", .{});
+    if (!awaitDump(h, id)) return errResult(it, "web-render: the page never answered", .{});
     const p = h.page(id);
     // The page selected on its side: what comes back is the matches'
     // markup, parsed here as a fragment (`#fragment` with the matches
@@ -160,9 +168,22 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         }
         break :blk try webcmds.toDataFrom(it, doc, frag, false);
     } else try webcmds.toDataFrom(it, doc, web.dom.document_id, false);
-    const keys = try it.arena.dupe([]const u8, &.{ "url", "title", "dom" });
-    const vals = try it.arena.dupe(Value, &.{ .{ .str = try it.arena.dupe(u8, p.urlText()) }, .{ .str = try it.arena.dupe(u8, p.titleText()) }, dom_value });
+    const keys = try it.arena.dupe([]const u8, &.{ "url", "title", "dom", "eval" });
+    const vals = try it.arena.dupe(Value, &.{ .{ .str = try it.arena.dupe(u8, p.urlText()) }, .{ .str = try it.arena.dupe(u8, p.titleText()) }, dom_value, .{ .str = evaluated } });
     return try it.mkResult(true, .{ .record = .{ .keys = keys, .vals = vals } });
+}
+
+/// Serve until the page answers a dump (false: it never did).
+fn awaitDump(h: *webhost.Host, id: webhost.PageId) bool {
+    var steps: usize = 0;
+    while (steps < 10_000) : (steps += 1) {
+        switch (h.step()) {
+            .event => |e| if (e.page == id and e.kind == .dumped) return true,
+            .dead, .failed, .idle => return false,
+            else => {},
+        }
+    }
+    return false;
 }
 
 /// A page loaded is not a page finished: its scripts may have timers

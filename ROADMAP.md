@@ -1063,13 +1063,21 @@ supervises), and memory history per unit beside the CPU one.
       `NodeIterator`/`TreeWalker`/`NodeFilter`, live `Range`s with the
       standard's contents algorithms, `CharacterData` editing,
       `Text.splitText`, `normalize`, `createEvent` kinds, named
-      collections: 73/100 on the host, 43/100 on the target. Left: the table and form DOM
-      (`tBodies`, `insertRow`, `value` as a dirty value, radio groups,
-      `defaultSelected`, `select.add`), the cascade's dynamic
-      `:checked` and `@media` in scripts' sheets, `cursor` values,
-      element namespaces beside HTML/SVG/MathML (`createElementNS`
-      with a prefix), the SVG DOM, CORS with credentials, iframes laid
-      out.
+      collections: 73/100 on the host, 43/100 on the target; (l)
+      2026-09-28 — the Acid3 round: the table DOM, forms' dirty
+      `value` and checkedness as state (in the DOM node, so `:checked`
+      and the painter see it), radio groups, `select.add`,
+      `defaultSelected`, activation on `click()`, frames' `load`
+      events and `document.open/write/close`, adopted nodes keeping
+      their wrapper, `createElementNS` namespace rules and namespaces
+      beside HTML/SVG/MathML, two SVG interfaces, live `cssRules`,
+      `color`/`monochrome` media features and Level 4's unknown rule,
+      a frame's own viewport for its cascade, `cursor`; two cascade
+      bugs found (the ancestor bloom filter pruned `A ~ B C` rules;
+      `surroundContents` skipped its boundary nodes): 99/100 on the
+      host, 99/100 on the target. Left: test 80 (a frame's
+      XHTML scripts in their own realm, XML errors stopping them), CORS
+      with credentials, iframes laid out, the rest of the SVG DOM.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

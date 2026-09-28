@@ -167,8 +167,11 @@ pub const PointerKind = enum(u64) { move = 0, down = 1, up = 2 };
 
 /// What a dump carries: the whole document as markup, or only the
 /// elements a selector matches (their outer markup, one after another)
-/// — a host that wants one part of a big page pays for that part.
-pub const Dump = enum(u64) { html = 0, selected = 1 };
+/// — a host that wants one part of a big page pays for that part; or
+/// the value of a script expression the host sends (`eval`: data[0..len]
+/// is the source, the dump its completion value as text — a headless
+/// render asking the page what its scripts concluded).
+pub const Dump = enum(u64) { html = 0, selected = 1, eval = 2 };
 
 pub const ChunkEnd = enum(u64) { more = 0, done = 1, failed = 2 };
 

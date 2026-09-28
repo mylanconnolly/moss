@@ -185,6 +185,12 @@ fn scriptRect(_: *anyopaque, id: dom.NodeId) ?[4]f64 {
     return .{ r[0] / s, (r[1] - page.scroll_y) / s, r[2] / s, r[3] / s };
 }
 
+/// The bindings' heavy scratch: the layout region's top, a stack the
+/// native pops before it returns (nothing lays out in between).
+fn scriptScratch(_: *anyopaque) std.mem.Allocator {
+    return layoutArena();
+}
+
 fn scriptComputed(_: *anyopaque, id: dom.NodeId, name: []const u8, buf: []u8) ?[]const u8 {
     if (scripts_up and scripts.takeDirty()) relayout(scripts.takeSheetsDirty() or page.sheets.len == 0);
     const styles = page.styles orelse return null;
@@ -326,7 +332,10 @@ fn runScripts(doc: *dom.Document) void {
     };
     vm.host_now = scriptNow;
     scripts_up = true;
-    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate }) catch {
+    // The bindings cascade a frame's document themselves (the page lays
+    // out only its own): they need the user-agent sheet, parsed once.
+    _ = uaSheet(env());
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate, .ua_sheet = &ua_sheet.?, .scratch = scriptScratch }) catch {
         _ = usys.log(glog, "webpage: the bindings did not fit");
         return;
     };
@@ -1544,13 +1553,13 @@ fn toggleRaw(id: dom.NodeId) void {
     const doc = page.doc orelse return;
     const kind = web.paint.controlOf(doc, id) orelse return;
     switch (kind) {
-        .checkbox => if (doc.hasAttr(id, "checked")) doc.removeAttr(id, "checked") else doc.setAttr(id, "checked", "") catch outOfMemory(),
+        .checkbox => doc.setChecked(id, !doc.isChecked(id)),
         .radio => {
             // One of a name: the others of the group let go.
             const name = doc.getAttr(id, "name") orelse "";
             var w = doc.walk(dom.document_id);
-            while (w.next()) |o| if (o != id and doc.isHtml(o, "input") and std.mem.eql(u8, doc.getAttr(o, "name") orelse "", name)) doc.removeAttr(o, "checked");
-            doc.setAttr(id, "checked", "") catch outOfMemory();
+            while (w.next()) |o| if (o != id and doc.isHtml(o, "input") and std.mem.eql(u8, doc.getAttr(o, "name") orelse "", name)) doc.setChecked(o, false);
+            doc.setChecked(id, true);
         },
         .select => {
             // Cycle the chosen option (no popup here).
@@ -1630,7 +1639,7 @@ fn submitFormOf(f: dom.NodeId, submitter: ?dom.NodeId) void {
             const t = doc.getAttr(c, "type") orelse "text";
             const eq = std.ascii.eqlIgnoreCase;
             if (eq(t, "checkbox") or eq(t, "radio")) {
-                if (doc.hasAttr(c, "checked")) addPair(&query, name, doc.getAttr(c, "value") orelse "on");
+                if (doc.isChecked(c)) addPair(&query, name, doc.getAttr(c, "value") orelse "on");
             } else if (eq(t, "submit") or eq(t, "button") or eq(t, "reset")) {
                 if (submitter == c) addPair(&query, name, doc.getAttr(c, "value") orelse "");
             } else addPair(&query, name, doc.getAttr(c, "value") orelse "");
@@ -1919,6 +1928,13 @@ fn dump(what: wire.Dump, selector: []const u8) void {
             var ids: std.ArrayList(dom.NodeId) = .empty;
             sel.queryAll(doc, dom.document_id, sa, &ids) catch outOfMemory();
             for (ids.items) |id| web.html.serializeOuter(sa, doc, id, &out) catch outOfMemory();
+        },
+        .eval => {
+            // The expression's value as text, when scripts run here.
+            if (scripts_up and scripting) {
+                if (scripts.evalText(selector, sa)) |text| out.appendSlice(sa, text) catch outOfMemory();
+                afterScript();
+            }
         },
     }
     const n = @min(out.items.len, data_len);

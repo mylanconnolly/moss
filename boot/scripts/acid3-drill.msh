@@ -14,11 +14,15 @@ def try-fetch [url, n] {
 let probe = (try-fetch http://www.moss.test:8080/acid3/test.html 60)?
 match $probe.status {
   200 => {
-    match (web-render http://www.moss.test:8080/acid3/test.html { settle: 30000, select: "#result" }) {
+    # The harness keeps each failing test's message in its `log`
+    # variable: asked for and printed, so the target's misses are named.
+    let opts = { settle: 30000, select: "#result", eval: "typeof log === 'string' ? log : ''" }
+    match (web-render http://www.moss.test:8080/acid3/test.html $opts) {
       ok $r => {
         let score = (($r.dom | html-select "#score")? | map { $it | html-text } | join "")
         let total = (($r.dom | html-select "span")? | map { $it | html-text } | last 1 | join "")
-        echo ("script: acid3 " + $score + "/" + $total)
+        let misses = ($r.eval | lines | map { "script: acid3 " + $it } | join "\n")
+        echo ("script: acid3 " + $score + "/" + $total + "\n" + $misses)
       }
       err $e => echo ("script: acid3 render failed: " + $e)
     }

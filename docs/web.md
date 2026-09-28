@@ -156,15 +156,23 @@ attributes and text changing, delivered as a microtask; `onclick="…"`
 attributes and `el.onclick = f` properties run; `document.write` under
 a parser-inserted script inserts after it; `localStorage.foo` reads
 and writes items. The Acid3 score is measured by the `acid3` drill
-(`tools/fetch-acid3.sh` first): 73/100 on the host, 43/100 on the
-target within its settle, as of 2026-09-26. An iframe's or object's
+(`tools/fetch-acid3.sh` first): 99/100 on the host, 99/100 on
+the target within its settle, as of 2026-09-28. An iframe's or object's
 `contentDocument` is a document of its own (fetched on first touch,
-never laid out), as are the ones `document.implementation` makes.
-`Range`, `NodeIterator` and `TreeWalker` follow the DOM standard, with
-live updates under mutation. Not yet: the table and form DOM
-(`tBodies`, `insertRow`, a control's dirty `value`), CORS with
-credentials or a preflight, iframes laid out, the SVG DOM, modifier
-keys.
+never laid out; its cascade runs on demand with the frame's own
+viewport), as are the ones `document.implementation` makes; a frame
+inserted by script gets its `load` event, and `document.open()`/
+`write()`/`close()` rebuild a frame's document. `Range`,
+`NodeIterator` and `TreeWalker` follow the DOM standard, with live
+updates under mutation. The table DOM (`rows`, `tBodies`, `insertRow`,
+`insertCell`, …) and the form DOM (a control's dirty `value` and
+checkedness, radio groups, `select.add`, `click()` activating) are
+there; `sheet.cssRules` is live. `web-render URL { eval: SOURCE }`
+evaluates a script expression in the settled page and returns its text
+as `eval`, which is how the drill prints the harness's failure list.
+Not yet: a frame's own scripts (the
+engine has one realm, so they do not run), CORS with credentials or a
+preflight, iframes laid out, most of the SVG DOM, modifier keys.
 
 ### The window: Web
 

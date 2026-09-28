@@ -242,6 +242,7 @@ pub const Parser = struct {
             },
             .mathml => return inList(n.name, &scope_mathml),
             .svg => return inList(n.name, &scope_svg),
+            .other => return false,
         }
     }
 
@@ -509,6 +510,7 @@ pub const Parser = struct {
             .html => inList(n.name, &special),
             .mathml => inList(n.name, &scope_mathml),
             .svg => inList(n.name, &scope_svg),
+            .other => false,
         };
     }
 
@@ -2054,6 +2056,7 @@ fn writeNode(a: std.mem.Allocator, doc: *const Document, id: NodeId, depth: usiz
                 .html => {},
                 .svg => try out.appendSlice(a, "svg "),
                 .mathml => try out.appendSlice(a, "math "),
+                .other => try out.appendSlice(a, "ns "),
             }
             try out.appendSlice(a, n.name);
             try out.appendSlice(a, ">\n");
