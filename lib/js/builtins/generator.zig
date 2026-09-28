@@ -108,6 +108,7 @@ fn coKind(kind: bytecode.FunctionKind) u8 {
 pub fn call(vm: *Vm, f: *Object, this: Value, args: []const Value) Error!Value {
     const fd = f.internal(FunctionData);
     const code = fd.code.?;
+    try interp.ensureCompiled(vm, code, f);
     const kind = coKind(code.data.kind);
     // A generator's object is made by `genstart`, after its parameters
     // are bound (§27.5.3.1: the prototype is read then); an async

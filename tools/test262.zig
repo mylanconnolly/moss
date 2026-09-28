@@ -162,7 +162,7 @@ const Runner = struct {
         }
         vm.host_load = hostLoad;
         vm.host_now = hostNow;
-        const code = js.compiler.compile(r.gpa, &vm.heap, &vm.strings, text, .{ .name = r.current_path }) catch |e| switch (e) {
+        const code = js.compiler.compile(r.gpa, &vm.heap, &vm.strings, text, .{ .name = r.current_path, .lazy = !eager }) catch |e| switch (e) {
             error.OutOfMemory => return .{ .ok = false, .why = "out of memory compiling" },
             error.SyntaxError => {
                 if (meta.negative_phase == .parse) return .{ .ok = true };
@@ -274,7 +274,7 @@ const Runner = struct {
     }
 
     fn runSource(r: *Runner, vm: *Vm, src: []const u8, strict: bool, name: []const u8) bool {
-        const code = js.compiler.compile(r.gpa, &vm.heap, &vm.strings, src, .{ .strict = strict, .name = name }) catch return false;
+        const code = js.compiler.compile(r.gpa, &vm.heap, &vm.strings, src, .{ .strict = strict, .name = name, .lazy = !eager }) catch return false;
         _ = js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch return false;
         return true;
     }
@@ -375,7 +375,7 @@ fn hostEvalScript(vm: *Vm, _: Value, args: []const Value, _: Value) js.vm.Error!
     const s = try vm.toString(if (args.len > 0) args[0] else Value.undefined_);
     const src = try vm.utf8(s, vm.meta);
     defer vm.meta.free(src);
-    const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{ .name = "evalScript" }) catch |e| switch (e) {
+    const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, src, .{ .name = "evalScript", .lazy = !eager }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => return vm.throwSyntaxError(js.compiler.last_error),
     };
@@ -398,6 +398,10 @@ fn hostUnsupported(vm: *Vm, _: Value, _: []const Value, _: Value) js.vm.Error!Va
     return vm.throwTypeError("$262 feature not supported by this host");
 }
 
+/// TEST262_EAGER=1: every function compiled with its script (bisecting
+/// a failure to the stubs' compile).
+var eager = false;
+
 pub fn main(init: std.process.Init) !u8 {
     io = init.io;
     const gpa = init.gpa;
@@ -413,6 +417,7 @@ pub fn main(init: std.process.Init) !u8 {
         try dirs.append(gpa, "test/language");
     }
     const verbose = std.c.getenv("TEST262_VERBOSE") != null;
+    eager = std.c.getenv("TEST262_EAGER") != null;
     const trace = std.c.getenv("TEST262_TRACE") != null;
     const filter: ?[]const u8 = if (std.c.getenv("TEST262_FILTER")) |f| std.mem.span(f) else null;
     var root_dir = cwd.openDir(io, root, .{}) catch {

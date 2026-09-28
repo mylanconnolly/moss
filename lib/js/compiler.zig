@@ -42,6 +42,9 @@ pub const Options = struct {
     /// tens of megabytes of it for a moment) — when not `a`: an
     /// embedder's scratch, so the bookkeeping heap keeps only the code.
     scratch: ?std.mem.Allocator = null,
+    /// Functions compile on their first call (`compileLazy`); off, every
+    /// function compiles with its script (tests of the emitter, mostly).
+    lazy: bool = true,
 };
 
 /// Compile a program; the result is the script's top-level code.
@@ -71,7 +74,7 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
     try an.analyzeProgram(prog);
     const source = try a.create(bytecode.Source);
     source.* = .{ .text = try a.dupe(u8, src), .refs = 0, .name = try a.dupe(u8, opts.name) };
-    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = source, .eval_env = opts.eval_env, .eval_mode = an.eval_mode, .module_record = opts.module_record };
+    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = source, .eval_env = opts.eval_env, .eval_mode = an.eval_mode, .module_record = opts.module_record, .lazy = opts.lazy };
     defer c.env_stack.deinit(scratch);
     defer c.pending_labels.deinit(scratch);
     const code = c.program(prog) catch |e| {
@@ -84,6 +87,97 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
     };
     return code;
 }
+
+/// Compile a stub (see `Compiler.lazyStub`) now that it is called: its
+/// source parsed again from where it starts, analysed as code whose
+/// outer names resolve against the closure's runtime environment chain
+/// — the way eval code resolves its caller's — and emitted into the
+/// stub's own record, so every closure of the function shares the
+/// result. `private_names`: the enclosing classes', from the chain.
+pub fn compileLazy(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, code: *Code, env: ?*bytecode.Env, private_names: []const []const u8, scratch_opt: ?std.mem.Allocator) Error!void {
+    const d = code.data;
+    if (!d.lazy) return;
+    const src = d.source.?;
+    stats.lazy_compiles += 1;
+    stats.lazy_source_bytes += d.end - d.start;
+    var arena = std.heap.ArenaAllocator.init(scratch_opt orelse a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var p = parser.Parser.init(scratch, src.text, .{
+        .module = d.module != null,
+        .strict = d.strict,
+        .in_function = true,
+        .allow_new_target = true,
+        .allow_super_property = true,
+        .allow_super_call = true,
+        .private_names = private_names,
+    });
+    const is_decl = d.lazy_form == 1;
+    const fnode: *ast.Node = if (d.lazy_form == 2) blk: {
+        // A method: parsed from its parameter list, its kind and
+        // colouring from the stub.
+        const parse_kind: ast.Function.Kind = switch (d.kind) {
+            .getter => .getter,
+            .setter => .setter,
+            else => .method,
+        };
+        const is_async = d.kind == .async_function or d.kind == .async_generator;
+        const is_generator = d.kind == .generator or d.kind == .async_generator;
+        const mf = p.parseMethodAt(d.lazy_params, parse_kind, is_async, is_generator) catch |e| {
+            last_error = p.err;
+            last_error_at = p.err_at;
+            return e;
+        };
+        mf.is_generator = is_generator;
+        const n = try scratch.create(ast.Node);
+        n.* = .{ .pos = d.start, .data = .{ .function = mf } };
+        break :blk n;
+    } else p.parseFunctionAt(d.start, is_decl) catch |e| {
+        last_error = p.err;
+        last_error_at = p.err_at;
+        return e;
+    };
+    const f = if (is_decl) fnode.data.function_decl else fnode.data.function;
+    const name_text: ?[]const u8 = if (d.name) |n| n.latin1() else null;
+    // The analysis and the emitter want a program at the root: one
+    // holding the function, never run. A declaration is a statement
+    // of it (an expression would bind its name inside).
+    const stmt = if (is_decl) fnode else blk: {
+        const st = try scratch.create(ast.Node);
+        st.* = .{ .pos = fnode.pos, .data = .{ .expr_stmt = fnode } };
+        break :blk st;
+    };
+    const body = try scratch.alloc(*ast.Node, 1);
+    body[0] = stmt;
+    const prog = try scratch.create(ast.Node);
+    prog.* = .{ .pos = fnode.pos, .data = .{ .program = .{ .body = body, .module = false, .strict = d.strict } } };
+    var an = scope.Analysis.init(scratch);
+    defer an.deinit();
+    an.eval_mode = true;
+    an.eval_ctx = .{ .has_this_function = true, .allow_new_target = true, .allow_super = true, .strict = d.strict, .global = false, .private_names = private_names };
+    try an.analyzeProgram(prog);
+    // A declaration's name is the enclosing scope's binding, on the
+    // runtime chain: the root's own goes.
+    if (is_decl) if (f.name) |n| {
+        _ = an.root.bindings.swapRemove(n);
+    };
+    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = src, .eval_env = env, .eval_mode = true, .module_record = d.module, .lazy_root = true };
+    defer c.env_stack.deinit(scratch);
+    defer c.pending_labels.deinit(scratch);
+    var fs = FuncState{ .func = an.root_func, .parent = null, .strict = an.root_func.strict, .env_base = 0 };
+    defer fs.deinit(scratch);
+    c.fs = &fs;
+    c.scope = an.root;
+    const built = try c.function(f, name_text orelse f.name);
+    // The stub's record becomes the code; the fresh record takes the
+    // stub's empty tables and goes with its own cell, unreferenced.
+    const stub = d.*;
+    d.* = built.data.*;
+    built.data.* = stub;
+}
+
+/// What the compiles added up to, for a tool's report.
+pub var stats: struct { stubs: usize = 0, eager: usize = 0, lazy_compiles: usize = 0, lazy_source_bytes: usize = 0, not_normal: usize = 0, dynamic: usize = 0, in_params: usize = 0, super_arrow: usize = 0, called_at_once: usize = 0 } = .{};
 
 /// Parse and compile errors: where and what (the last one).
 pub var last_error: []const u8 = "";
@@ -146,6 +240,8 @@ const FuncState = struct {
     templates: std.ArrayList(bytecode.TemplateSite) = .empty,
     positions: std.ArrayList(bytecode.Position) = .empty,
     controls: std.ArrayList(Control) = .empty,
+    /// Compiling the parameter defaults (see `lazyEligible`).
+    in_params: bool = false,
     top: u16 = 0,
     max: u16 = 0,
     nparams: u16 = 0,
@@ -211,6 +307,12 @@ pub const Compiler = struct {
     /// Script/eval code: the register statements leave their completion
     /// value in (§14: UpdateEmpty); null inside functions.
     completion: ?u16 = null,
+    /// Nested functions become stubs, compiled on first call.
+    lazy: bool = true,
+    /// This compile is a stub's (`compileLazy`): an outer name the
+    /// runtime chain does not hold is a global, not a dynamic lookup,
+    /// and an arrow's `this` is the chain's or the global one.
+    lazy_root: bool = false,
 
     const Chain = struct { dst: u16, jumps: std.ArrayList(u32) = .empty };
 
@@ -332,6 +434,7 @@ pub const Compiler = struct {
     }
 
     fn finish(c: *Compiler, fs: *FuncState, name: ?[]const u8, kind: bytecode.FunctionKind, start: u32, end: u32) Error!*Code {
+        stats.eager += 1;
         const d = try c.a.create(CodeData);
         d.* = .{};
         // The tables grew in scratch; the code keeps exact-size copies.
@@ -390,6 +493,8 @@ pub const Compiler = struct {
         defer consts.deinit(c.a);
         var lexical: std.ArrayList(bool) = .empty;
         defer lexical.deinit(c.a);
+        var imports: std.ArrayList(bool) = .empty;
+        defer imports.deinit(c.a);
         for (s.bindings.values()) |b| {
             if (b.loc != .unresolved) continue;
             if (is_global) {
@@ -406,6 +511,7 @@ pub const Compiler = struct {
                 try names.append(c.a, try c.strings.atom(b.name));
                 try consts.append(c.a, b.is_const);
                 try lexical.append(c.a, b.lexical);
+                try imports.append(c.a, b.kind == .import);
             } else if (b.kind == .param) {
                 // A simple parameter has its register already; one bound by
                 // a pattern (a rest parameter, a destructured one) gets its
@@ -423,6 +529,7 @@ pub const Compiler = struct {
                 .names = try names.toOwnedSlice(c.a),
                 .consts = try consts.toOwnedSlice(c.a),
                 .lexical = try lexical.toOwnedSlice(c.a),
+                .imports = try imports.toOwnedSlice(c.a),
                 .is_function = s.kind == .function or s.kind == .params or s.kind == .eval or s.kind == .module,
                 .is_with = s.kind == .with,
                 .dynamic = s.kind == .function and s.func.has_direct_eval,
@@ -455,7 +562,7 @@ pub const Compiler = struct {
             const f = if (fnode.data == .function_decl) fnode.data.function_decl else fnode.data.function;
             const name = f.name orelse "*default*";
             const r = try c.tmp();
-            try c.closure(f, r, f.name orelse "default");
+            try c.closureDecl(f, r, f.name orelse "default", fnode.data == .function_decl);
             if (s.kind == .eval or s.kind == .script) {
                 try c.emit(.declfunc, 0, @intCast(try c.constString(name)), r);
             } else {
@@ -504,9 +611,15 @@ pub const Compiler = struct {
             if (s.func.has_eval_refs and (s.kind == .function or s.kind == .eval)) crossed_dynamic = true;
         }
         if (crossed_with or crossed_dynamic or c.eval_env != null) {
-            // Eval code: the runtime chain may resolve it to a slot.
+            // Eval code: the runtime chain may resolve it to a slot. A
+            // stub's compile whose chain has no such name, and nothing
+            // dynamic, has a global — what its eager compile would have.
             if (c.eval_env) |env| if (!crossed_with and !crossed_dynamic) {
-                if (c.resolveRuntime(env, name)) |r| return r;
+                switch (c.resolveRuntime(env, name)) {
+                    .found => |r| return r,
+                    .absent => if (c.lazy_root) return .{ .global = c.globalSite(name) catch 0 },
+                    .unknown => {},
+                }
             };
             return .{ .dynamic = c.constString(name) catch 0 };
         }
@@ -521,24 +634,33 @@ pub const Compiler = struct {
     }
 
     /// Eval code: resolve against the runtime environment chain.
-    fn resolveRuntime(c: *Compiler, env: *bytecode.Env, name: []const u8) ?Ref {
+    const RuntimeRef = union(enum) { found: Ref, absent, unknown };
+
+    fn resolveRuntime(c: *Compiler, env: *bytecode.Env, name: []const u8) RuntimeRef {
         // Every compile-time environment of the eval code sits above the
         // runtime chain it was given.
         var hops: u16 = @intCast(c.env_stack.items.len);
+        // The layouts hold atoms: the name's atom is the same cell (a
+        // Latin-1 read missed every name beyond it, 2026-09-28).
+        const key = c.strings.atom(name) catch return .unknown;
         var cur: ?*bytecode.Env = env;
         while (cur) |e| : (cur = e.parent) {
             const info = e.info;
-            if (info.is_with or info.dynamic or e.extra != null) return null;
+            if (info.is_with or info.dynamic or e.extra != null) return .unknown;
             for (info.names, 0..) |n, i| {
-                const bytes = n.latin1() orelse continue;
-                if (std.mem.eql(u8, bytes, name)) {
-                    if (info.consts[i]) return .{ .const_env = .{ .hops = hops, .slot = @intCast(i) } };
-                    return .{ .env = .{ .hops = hops, .slot = @intCast(i), .lexical = info.lexical[i] } };
+                if (n == key) {
+                    if (i < info.imports.len and info.imports[i]) return .{ .found = .{ .import = .{ .hops = hops, .slot = @intCast(i) } } };
+                    // A named function expression's own name: the one
+                    // scope of one const, non-lexical binding (assignment
+                    // to it is silent in sloppy code, not an error).
+                    if (info.consts[i] and !info.lexical[i] and info.names.len == 1 and !info.is_function) return .{ .found = .{ .fn_name = .{ .strict = c.fs.strict, .reg = null, .hops = hops, .slot = @intCast(i) } } };
+                    if (info.consts[i]) return .{ .found = .{ .const_env = .{ .hops = hops, .slot = @intCast(i) } } };
+                    return .{ .found = .{ .env = .{ .hops = hops, .slot = @intCast(i), .lexical = info.lexical[i] } } };
                 }
             }
             hops += 1;
         }
-        return null;
+        return .absent;
     }
 
     fn hopsTo(c: *Compiler, s: *Scope) u16 {
@@ -627,10 +749,100 @@ pub const Compiler = struct {
 
     /// Emit a closure of `f` into `dst`.
     fn closure(c: *Compiler, f: *ast.Function, dst: u16, name: ?[]const u8) Error!void {
-        const code = try c.function(f, name);
+        return c.closureDecl(f, dst, name, false);
+    }
+
+    fn closureDecl(c: *Compiler, f: *ast.Function, dst: u16, name: ?[]const u8, is_decl: bool) Error!void {
+        const code = if (c.lazyEligible(f)) try c.lazyStub(f, name, is_decl) else try c.function(f, name);
         const idx: u32 = @intCast(c.fs.functions.items.len);
         try c.fs.functions.append(c.scratch, code);
         try c.emitBc(.closure, dst, idx);
+    }
+
+    /// Whether `f` waits for its first call: a plain function or arrow
+    /// (methods, accessors and class parts compile with their class)
+    /// with nothing dynamic in it, not called on the spot (`(function
+    /// () {…})()`, `.call(this)`: the source right after it says).
+    fn lazyEligible(c: *Compiler, f: *ast.Function) bool {
+        if (!c.lazy) return false;
+        // Constructors, field initializers and static blocks compile
+        // with their class; methods and accessors wait like functions.
+        if (f.kind != .normal and f.kind != .method and f.kind != .getter and f.kind != .setter) {
+            stats.not_normal += 1;
+            return false;
+        }
+        const fi = c.an.funcOf(f);
+        if (fi.has_direct_eval or fi.dynamic or fi.has_with) {
+            stats.dynamic += 1;
+            return false;
+        }
+        // In a parameter default: the runtime chain there holds the
+        // body's environment too, which the static scopes do not.
+        if (c.fs.in_params) {
+            stats.in_params += 1;
+            return false;
+        }
+        const text = c.source.text;
+        // An arrow's `super` is the enclosing method's: compiled with it.
+        if (f.is_arrow and std.mem.indexOf(u8, text[f.start..f.end], "super") != null) {
+            stats.super_arrow += 1;
+            return false;
+        }
+        var i: usize = f.end;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == ')')) i += 1;
+        if (i < text.len and (text[i] == '(' or text[i] == '.')) {
+            stats.called_at_once += 1;
+            return false;
+        }
+        return true;
+    }
+
+    /// A stub for `f`: what a function object needs before a call —
+    /// kind, strictness, name, length, the source span — and no body.
+    /// A bundle's functions mostly never run; this is what they cost.
+    fn lazyStub(c: *Compiler, f: *ast.Function, name: ?[]const u8, is_decl: bool) Error!*Code {
+        const fi = c.an.funcOf(f);
+        stats.stubs += 1;
+        const d = try c.a.create(CodeData);
+        d.* = .{};
+        d.kind = functionKind(f);
+        d.strict = fi.strict;
+        d.source = c.source;
+        c.source.refs += 1;
+        d.module = c.module_record;
+        d.start = f.start;
+        d.end = f.end;
+        if (name orelse f.name) |n| d.name = try c.strings.atom(n);
+        d.length = 0;
+        for (f.params) |pm| {
+            if (pm.data == .rest or pm.data == .assign_pattern) break;
+            d.length += 1;
+        }
+        d.is_constructor = d.kind == .normal;
+        d.uses_this = fi.uses_this;
+        d.uses_arguments = fi.uses_arguments;
+        d.lazy = true;
+        // An anonymous declaration (`export default function () {}`)
+        // parses again as an expression like any other.
+        d.lazy_form = if (f.kind != .normal) 2 else if (is_decl and f.name != null) 1 else 0;
+        d.lazy_params = f.params_start;
+        const cell = try c.heap.alloc(.code, @sizeOf(Code));
+        const code = cell.as(Code);
+        code.data = d;
+        return code;
+    }
+
+    fn functionKind(f: *ast.Function) bytecode.FunctionKind {
+        return switch (f.kind) {
+            .normal => if (f.is_arrow) (if (f.is_async) .async_arrow else .arrow) else if (f.is_generator and f.is_async) .async_generator else if (f.is_generator) .generator else if (f.is_async) .async_function else .normal,
+            .method => if (f.is_generator and f.is_async) .async_generator else if (f.is_generator) .generator else if (f.is_async) .async_function else .method,
+            .getter => .getter,
+            .setter => .setter,
+            .constructor => .class_constructor,
+            .derived_constructor => .derived_constructor,
+            .class_field_init => .field_init,
+            .static_block => .static_block,
+        };
     }
 
     /// Compile a function to its code (a nested FuncState).
@@ -722,6 +934,7 @@ pub const Compiler = struct {
             fs.this_reg = r;
         }
         // Parameter patterns and defaults.
+        fs.in_params = true;
         for (f.params, 0..) |p, i| {
             const reg: u16 = @intCast(i);
             if (p.data == .identifier) {
@@ -744,6 +957,7 @@ pub const Compiler = struct {
                 try c.bindPattern(p, reg, .init);
             }
         }
+        fs.in_params = false;
         // A generator suspends once its parameters are bound (§27.5.3.1:
         // the body waits for the first next()); an async function runs on.
         fs.co = if (f.is_generator and f.is_async) .async_gen else if (f.is_generator) .generator else if (f.is_async) .async_fn else .none;
@@ -762,17 +976,7 @@ pub const Compiler = struct {
         try c.leaveScope(fscope);
         if (pscope) |ps| try c.leaveScope(ps);
         if (name_scope) |ns| try c.leaveScope(ns);
-        const kind: bytecode.FunctionKind = switch (f.kind) {
-            .normal => if (f.is_arrow) (if (f.is_async) .async_arrow else .arrow) else if (f.is_generator and f.is_async) .async_generator else if (f.is_generator) .generator else if (f.is_async) .async_function else .normal,
-            .method => if (f.is_generator and f.is_async) .async_generator else if (f.is_generator) .generator else if (f.is_async) .async_function else .method,
-            .getter => .getter,
-            .setter => .setter,
-            .constructor => .class_constructor,
-            .derived_constructor => .derived_constructor,
-            .class_field_init => .field_init,
-            .static_block => .static_block,
-        };
-        return c.finish(&fs, name orelse f.name, kind, f.start, f.end);
+        return c.finish(&fs, name orelse f.name, functionKind(f), f.start, f.end);
     }
 
     fn prologue(c: *Compiler, f: *ast.Function, fi: *scope.Func, decl_scope: *Scope, has_rest: bool) Error!void {
@@ -826,6 +1030,28 @@ pub const Compiler = struct {
         }
         const tf = c.scope.func.this_func;
         if (tf.node == null) {
+            if (c.lazy_root) {
+                // A stub arrow's `this` is the enclosing function's,
+                // captured into its environment; none on the chain means
+                // the script's global (a module's undefined).
+                if (c.eval_env) |env| switch (c.resolveRuntime(env, "this")) {
+                    .found => |r| switch (r) {
+                        // Checked: a derived constructor's `this` is the
+                        // hole until `super()` returns.
+                        .env => |e| {
+                            try c.emit(.getenvchk, dst, e.hops, e.slot);
+                            return;
+                        },
+                        else => {
+                            try c.load(r, dst, "this");
+                            return;
+                        },
+                    },
+                    else => {},
+                };
+                try c.emit(if (c.module_record != null) .ldundef else .ldgthis, dst, 0, 0);
+                return;
+            }
             if (c.eval_mode) {
                 try c.emitBc(.getname, dst, try c.constString("this"));
             } else if (c.scope.func != tf) {
@@ -3287,7 +3513,7 @@ test "compiler: a script compiles to code with the expected shape" {
     defer h.deinit();
     var strings = string.Strings.init(&h, std.testing.allocator);
     defer strings.deinit();
-    const code = try compile(std.testing.allocator, &h, &strings, "var x = 1; function f(a) { return a + x; } f(2);", .{});
+    const code = try compile(std.testing.allocator, &h, &strings, "var x = 1; function f(a) { return a + x; } f(2);", .{ .lazy = false });
     try std.testing.expect(code.data.insns.len > 5);
     try std.testing.expectEqual(@as(usize, 1), code.data.functions.len);
     try std.testing.expectEqual(@as(u32, 1), code.data.functions[0].data.nparams);

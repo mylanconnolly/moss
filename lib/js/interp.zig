@@ -287,9 +287,32 @@ fn initializeInstanceElements(vm: *Vm, o: *Object, f: *Object) Error!void {
     _ = try vm.call(fd.fields, o.asValue(), &.{});
 }
 
+/// A stub's first call: compile it against the closure's environment
+/// chain (the enclosing classes' private names come from the chain too).
+pub fn ensureCompiled(vm: *Vm, code: *Code, func: ?*Object) Error!void {
+    if (!code.data.lazy) return;
+    const env: ?*Env = if (func) |f| f.internal(FunctionData).env else null;
+    var privates: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (privates.items) |n| vm.meta.free(n);
+        privates.deinit(vm.meta);
+    }
+    var cur: ?*Env = env;
+    while (cur) |e| : (cur = e.parent) {
+        for (e.info.names) |n| if (n.len > 0 and n.unitAt(0) == '#') {
+            try privates.append(vm.meta, try vm.utf8(n, vm.meta));
+        };
+    }
+    compiler.compileLazy(vm.meta, &vm.heap, &vm.strings, code, env, privates.items, vm.compile_scratch) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.SyntaxError => return vm.throwSyntaxError(compiler.last_error),
+    };
+}
+
 /// Push a frame for `code`: the register window is above the
 /// current stack top; parameters are copied from the arguments.
 fn pushFrame(vm: *Vm, code: *Code, func: ?*Object, this: Value, new_target: Value, env: ?*Env, args_base: u32, argc: u32, ret_dst: u16, is_construct: bool, entry: bool, saved_sp: ?u32) Error!void {
+    if (code.data.lazy) try ensureCompiled(vm, code, func);
     const d = code.data;
     const base: u32 = @max(vm.sp(), args_base + argc);
     if (@as(usize, base) + d.nregs + 1 > vm.stack.len or vm.frames.items.len >= vm.frames.capacity) return vm.throwRangeError("Maximum call stack size exceeded");
@@ -823,7 +846,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 if (target <= pc) {
                     // A backward jump is a safe point, and where a runaway
                     // loop meets the embedder's budget.
-                    if (vm.depth == 0) vm.safePoint();
+                    vm.safePoint();
                     frame.pc = pc;
                     try vm.tick();
                 }
@@ -1240,7 +1263,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 // A safe point at an allocation site: a bundle's top level is
                 // straight-line code — no back jump, no return — and could
                 // fill the region between the safe points it never reached.
-                if (vm.depth == 0) vm.safePoint();
+                vm.safePoint();
                 regs[insn.a] = (try vm.newObject()).asValue();
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
@@ -1251,7 +1274,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 // A safe point at an allocation site: a bundle's top level is
                 // straight-line code — no back jump, no return — and could
                 // fill the region between the safe points it never reached.
-                if (vm.depth == 0) vm.safePoint();
+                vm.safePoint();
                 regs[insn.a] = (try vm.newArray(0)).asValue();
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
@@ -1296,7 +1319,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 // A safe point at an allocation site: a bundle's top level is
                 // straight-line code — no back jump, no return — and could
                 // fill the region between the safe points it never reached.
-                if (vm.depth == 0) vm.safePoint();
+                vm.safePoint();
                 frame.pc = pc;
                 const f = try vm.newFunction(code.functions[insn.bc()], frame.env, Value.undefined_);
                 regs[insn.a] = f.asValue();
@@ -1309,7 +1332,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 // A safe point at an allocation site: a bundle's top level is
                 // straight-line code — no back jump, no return — and could
                 // fill the region between the safe points it never reached.
-                if (vm.depth == 0) vm.safePoint();
+                vm.safePoint();
                 frame.pc = pc;
                 regs[insn.a] = try makeClass(vm, regs[insn.b], code.functions[insn.c], frame.env);
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
@@ -1500,7 +1523,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 regs = vm.stack.ptr + frame.base;
                 pc = frame.pc;
                 regs[done.ret_dst] = v;
-                if (vm.depth == 0) vm.safePoint();
+                vm.safePoint();
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
                 pc += 1;

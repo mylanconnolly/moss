@@ -294,6 +294,9 @@ pub const Vm = struct {
             .objects = undefined,
             .stack = try meta.alloc(Value, limits.stack_values),
         };
+        // The collector scans the native stack up to here: the frame of
+        // whoever set the engine up sits above every frame it runs in.
+        vm.heap.stack_hi = @frameAddress();
         vm.heap.finalizer = finalizeCell;
         // The frame list never reallocates (the interpreter keeps pointers
         // into it): its capacity is the call depth, checked against.
@@ -486,7 +489,8 @@ pub const Vm = struct {
     }
 
     /// A safe point: collect when the heap asks for it. Only the
-    /// interpreter calls this, between instructions.
+    /// interpreter calls this, between instructions — at any native
+    /// depth, since the collector reads the native stack too.
     pub inline fn safePoint(vm: *Vm) void {
         if (vm.heap.wantsCollect()) vm.heap.collect();
     }

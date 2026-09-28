@@ -1090,16 +1090,22 @@ supervises), and memory history per unit beside the CPU one.
       safe points at allocation opcodes); a JavaScript prelude answers
       the platform's smaller APIs; the page's script heaps are 16 + 32
       MB and the page 108 MB. Ten of the fifteen run clean; GitHub, the
-      BBC, the Guardian and Apple still outgrow 32 MB. Left: test 80
-      (a frame's XHTML scripts in their own realm, XML errors stopping
-      them), CORS with credentials, iframes laid out, the rest of the
-      SVG DOM; **lazy function compilation** (a bundle's functions
-      compiled on first call: the code costs ten bytes per byte of
-      source and most of it never runs — the one change that would let
-      the four heavy sites fit), the collector under natives (natives
-      rooting their locals, so every callback collects), the small
-      classes' fragmentation after a collection (Apple: 14 MB free in
-      no block over 4 KB).
+      BBC, the Guardian and Apple still outgrow 32 MB; (n) the same
+      day — lazy compilation (functions, arrows, methods and accessors
+      are stubs until called, compiled then against the closure's
+      runtime chain) and a conservative collector (the native stack
+      scanned, safe points at any depth, a collection on exhaustion,
+      dead large cells reused): the Guardian runs clean, GitHub to the
+      end, the working sites use a fifth to a third less; test262
+      unchanged. Left: test 80 (a frame's XHTML scripts in their own
+      realm, XML errors stopping them), CORS with credentials, iframes
+      laid out, the rest of the SVG DOM; the BBC and Apple at the 32
+      MB edge — a slimmer stub record (256 bytes now), objects'
+      property slots on the collectable heap rather than the
+      bookkeeping one, and the small classes' fragmentation after a
+      collection; a preparser (syntax and captures only) so a bundle's
+      first compile stops building the AST of functions it will not
+      run.
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

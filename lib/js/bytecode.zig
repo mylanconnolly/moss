@@ -247,6 +247,9 @@ pub const ScopeInfo = struct {
     is_with: bool = false,
     /// Lexical (TDZ) slots start as the hole; others as undefined.
     lexical: []bool,
+    /// Import bindings: the slot holds the indirection cell, read
+    /// through it (a stub compiled against a module's chain must know).
+    imports: []bool = &.{},
     /// A function scope with a direct eval: `var`s may be added later
     /// (`Env.extra`), so nothing under it resolves to a fixed slot.
     dynamic: bool = false,
@@ -342,6 +345,14 @@ pub const CodeData = struct {
     /// The module record this code was compiled for (import.meta,
     /// import() resolution), or null for a script.
     module: ?*anyopaque = null,
+    /// A stub: the function's source, name, length and kind are known,
+    /// its body is compiled on the first call (`compiler.compileLazy`).
+    lazy: bool = false,
+    /// How a stub is parsed again: 0 an expression (a function or an
+    /// arrow at `start`), 1 a declaration (its name is the enclosing
+    /// scope's binding), 2 a method, getter or setter at `lazy_params`.
+    lazy_form: u8 = 0,
+    lazy_params: u32 = 0,
     /// A mapped arguments object's aliasing: the environment slot of
     /// each parameter index (`unmapped` for a duplicate name's earlier
     /// index); empty when the arguments object is unmapped.
@@ -359,6 +370,7 @@ pub const CodeData = struct {
             a.free(s.names);
             a.free(s.consts);
             a.free(s.lexical);
+            a.free(s.imports);
             a.destroy(s);
         }
         a.free(d.scopes);

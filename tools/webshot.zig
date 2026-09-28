@@ -705,6 +705,9 @@ fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style
         return;
     };
     vm.host_now = scriptNow;
+    // WEBSHOT_NOSCAN=1: the collector without the native-stack scan (to
+    // see what the scan keeps alive; unsafe under natives).
+    if (std.c.getenv("WEBSHOT_NOSCAN") != null) vm.heap.stack_hi = 0;
     page.init(&vm, doc, meta, .{ .ctx = @ptrCast(&ctx), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .request = scriptRequest, .navigate = scriptNavigate, .ua_sheet = ua, .scratch = scriptScratch }) catch {
         std.debug.print("webshot: the bindings did not fit\n", .{});
         return;
@@ -733,6 +736,9 @@ fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style
     const t_settle = std.Io.Clock.awake.now(io);
     var rbuf: [1024]u8 = undefined;
     std.debug.print("webshot: scripts: meta {s}; cell heap {s}\n", .{ js_meta.report(&rbuf), if (vm.heap.exhausted) "EXHAUSTED" else "fit" });
+    std.debug.print("webshot: scripts: {d} documents in the page (frames and made ones live in the bookkeeping heap)\n", .{page.docs.items.len});
+    const cs = js.compiler.stats;
+    std.debug.print("webshot: scripts: {d} functions compiled with their scripts, {d} left as stubs, {d} stubs compiled on call ({d} KB of source parsed again); not stubs because: {d} methods or class parts, {d} dynamic, {d} in parameter defaults, {d} arrows with super, {d} called at once\n", .{ cs.eager, cs.stubs, cs.lazy_compiles, cs.lazy_source_bytes / 1024, cs.not_normal, cs.dynamic, cs.in_params, cs.super_arrow, cs.called_at_once });
     if (page.verbose) {
         for (meta_histo, 0..) |h, i| if (h.live_bytes > 0) {
             std.debug.print("webshot: scripts: meta live <{d} B: {d} blocks, {d} KB ({d} allocations in all)\n", .{ @as(usize, 1) << @intCast(i), h.live_count, h.live_bytes / 1024, h.count });

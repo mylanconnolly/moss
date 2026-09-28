@@ -65,7 +65,9 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("usage: js file.js [more.js...]\n", .{});
         return 2;
     }
-    const region = try gpa.alloc(u8, 256 << 20);
+    // JS_REGION_MB: the cell heap's size (256 by default; a page's is 16).
+    const region_mb: usize = if (std.c.getenv("JS_REGION_MB")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 256;
+    const region = try gpa.alloc(u8, region_mb << 20);
     defer gpa.free(region);
     const vm = try gpa.create(Vm);
     defer gpa.destroy(vm);
@@ -77,6 +79,10 @@ pub fn main(init: std.process.Init) !u8 {
     const dump = std.c.getenv("JS_DUMP") != null;
     js.interp.trace_enabled = std.c.getenv("JS_TRACE") != null;
     vm.heap.stress = std.c.getenv("JS_GC_STRESS") != null;
+    // JS_NOSCAN=1: no native-stack scan (unsafe; to see what it keeps).
+    if (std.c.getenv("JS_NOSCAN") != null) vm.heap.stack_hi = 0;
+    // JS_STATS=1: the heap's collections and live bytes at the end.
+    defer if (std.c.getenv("JS_STATS") != null) std.debug.print("js: {d} collections, {d} KB live of {d}, top {d} KB\n", .{ vm.heap.collections, vm.heap.live_bytes / 1024, region.len / 1024, vm.heap.top / 1024 });
     for (args.items[1..]) |path| {
         const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 20)) catch |e| {
             std.debug.print("js: cannot read {s}: {s}\n", .{ path, @errorName(e) });
@@ -100,7 +106,7 @@ pub fn main(init: std.process.Init) !u8 {
             }
             continue;
         }
-        const code = js.compiler.compile(gpa, &vm.heap, &vm.strings, src, .{ .name = path }) catch |e| switch (e) {
+        const code = js.compiler.compile(gpa, &vm.heap, &vm.strings, src, .{ .name = path, .lazy = std.c.getenv("JS_EAGER") == null }) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.SyntaxError => {
                 std.debug.print("{s}: SyntaxError: {s} (at {d})\n", .{ path, js.compiler.last_error, js.compiler.last_error_at });

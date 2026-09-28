@@ -334,6 +334,48 @@ pub const Parser = struct {
 
     // ------------------------------------------------------- program
 
+    /// A function or arrow expression at `start` in the source, as a
+    /// lazily compiled function is parsed again: the node, with the
+    /// positions absolute, in a function context with private names
+    /// from `opts` declared.
+    pub fn parseFunctionAt(p: *Parser, start: u32, declaration: bool) Error!*Node {
+        p.lex.pos = start;
+        try p.advance();
+        _ = try p.pushScope(true);
+        p.allow_new_target = true;
+        p.in_function = true;
+        p.allow_super_property = p.opts.allow_super_property;
+        p.allow_super_call = p.opts.allow_super_call;
+        p.no_arguments = p.opts.no_arguments;
+        if (p.opts.private_names.len > 0) {
+            const ps = try p.a.create(PrivateScope);
+            ps.* = .{ .parent = null };
+            for (p.opts.private_names) |n| try ps.declared.put(p.a, n, 1);
+            p.class_privates = ps;
+        }
+        if (declaration) return p.parseFunctionDeclaration(false);
+        const e = try p.parseAssignment(true);
+        return switch (e.data) {
+            .function => e,
+            else => p.fail("expected a function", start),
+        };
+    }
+
+    /// A method, getter or setter at its parameter list, as a lazily
+    /// compiled one is parsed again: the function, positions absolute.
+    pub fn parseMethodAt(p: *Parser, params_start: u32, kind: ast.Function.Kind, is_async: bool, is_generator: bool) Error!*ast.Function {
+        p.lex.pos = params_start;
+        try p.advance();
+        _ = try p.pushScope(true);
+        if (p.opts.private_names.len > 0) {
+            const ps = try p.a.create(PrivateScope);
+            ps.* = .{ .parent = null };
+            for (p.opts.private_names) |n| try ps.declared.put(p.a, n, 1);
+            p.class_privates = ps;
+        }
+        return p.parseFunctionRest(params_start, null, is_async, is_generator, kind);
+    }
+
     pub fn parseProgram(p: *Parser) Error!*Node {
         try p.advance();
         const scope = try p.pushScope(true);
@@ -1079,6 +1121,7 @@ pub const Parser = struct {
             .static_block => {},
         }
         const scope = try p.pushScope(true);
+        const params_at = p.tok.start;
         try p.expect(.lparen, "expected '('");
         var params: std.ArrayList(*Node) = .empty;
         var simple = true;
@@ -1127,7 +1170,7 @@ pub const Parser = struct {
         if (p.cover_init_at) |at_| return p.fail("invalid shorthand property initializer", at_);
         p.popScope();
         const f = try p.a.create(ast.Function);
-        f.* = .{ .name = name, .params = params.items, .body = .{ .block = body.items }, .kind = kind, .is_async = is_async, .is_generator = is_generator, .strict = p.strict, .simple_params = simple, .start = pos, .end = end };
+        f.* = .{ .name = name, .params = params.items, .body = .{ .block = body.items }, .kind = kind, .is_async = is_async, .is_generator = is_generator, .strict = p.strict, .simple_params = simple, .start = pos, .params_start = params_at, .end = end };
         return f;
     }
 

@@ -185,6 +185,34 @@ real site") changed the engine in ways any embedder sees:
   code's copy serves `Function.prototype.toString`.
 - `Map` and `Set` flatten a rope key before hashing it.
 
+And later the same day, two changes any embedder feels:
+
+- **Functions compile on their first call.** `compiler.compile` leaves
+  eligible functions, arrows, methods and accessors as stubs
+  (`CodeData.lazy`); `interp.ensureCompiled` compiles a stub when it is
+  first called (`pushFrame`, a generator's start), parsing it again
+  from its source and resolving its outer names against the closure's
+  runtime environment chain. `compiler.Options.lazy = false` (the
+  tools' `JS_EAGER=1` / `TEST262_EAGER=1`) compiles everything up
+  front. What is never a stub: constructors and class parts, code
+  with `eval`/`with` in or above it, functions in parameter defaults,
+  arrows using `super`, and functions the source calls at once.
+- **The collector scans the native stack.** `Heap.cell_map` says
+  where cells start, `Heap.stack_hi` (set by `Vm.initWith` to its
+  caller's frame) where to stop, and every word between the
+  collector's frame and there that names a cell keeps it, registers
+  included. So safe points fire at any native depth, and an allocation
+  that finds the region full collects and retries. An embedder that
+  sets the VM up from a frame that outlives the engine's use needs
+  nothing more; one that moves the VM between threads must set
+  `stack_hi` itself. Dead large cells are reused by later large
+  requests, and the low-room rule collects once half the remaining
+  bump space has been taken.
+
+The `js` tool takes `JS_REGION_MB` (the cell heap's size), `JS_STATS=1`
+(collections and live bytes at the end), `JS_NOSCAN=1` (no stack scan,
+unsafe, for comparison) and `JS_EAGER=1`.
+
 ## Measuring it
 
 ```

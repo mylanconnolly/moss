@@ -139,6 +139,9 @@ pub const Function = struct {
     /// Source span for `toString`.
     start: Pos = 0,
     end: Pos = 0,
+    /// Where the parameter list opens (a method compiled lazily is
+    /// parsed again from here; arrows from `start`).
+    params_start: Pos = 0,
     pub const Body = union(enum) { block: []*Node, expr: *Node };
     pub const Kind = enum { normal, method, getter, setter, constructor, derived_constructor, class_field_init, static_block };
 };

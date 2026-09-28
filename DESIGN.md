@@ -7523,6 +7523,72 @@ error message is worth more than any amount of guessing about which
 member a minified bundle wanted; and safe points must sit where a
 program allocates, not only where it loops or returns.
 
+**Lazy compilation and a conservative collector (as built,
+2026-09-28).** What the real sites asked for next, done the way the
+big engines do it. *Functions compile on their first call.* A script's
+compile still parses and analyses the whole text — the analysis must
+know what every inner function captures — but a plain function, an
+arrow, a method or an accessor that is eligible becomes a **stub**: a
+code record with what a function object needs before a call (kind,
+strictness, name, length, the source span, the module) and no body
+(`CodeData.lazy`). Constructors, field initializers, static blocks,
+anything with a direct `eval` or `with` in or above it, a function in
+a parameter default (the runtime chain there holds the body's
+environment, which the static scopes do not), an arrow that says
+`super`, and a function the source calls on the spot (`(function
+() {…})()`, `.call(this)`) compile with their script. The first call —
+`pushFrame`, or a generator's start — runs `compiler.compileLazy`: the
+stub's text is parsed again from its start (a declaration through the
+declaration grammar, so `function* yield() {}` still parses; a method
+from its parameter list, `params_start`), analysed as code whose outer
+names resolve against the closure's *runtime* environment chain the
+way eval code resolves its caller's, and emitted into the stub's own
+record in place, so every closure of the function shares the result.
+The runtime chain answers three ways now (`resolveRuntime`): a slot,
+absent (a global, as the eager compile would have said, not a dynamic
+lookup), or unknown (a `with` or an eval'd environment: dynamic); an
+import slot reads through its cell (`ScopeInfo.imports`), a named
+function expression's own name is recognised by its scope's shape (one
+const, non-lexical binding: assignment to it is silent in sloppy code),
+and the names compare as atoms, since a Latin-1 read of them lost every
+`#℘` (892 test262 files, before the fix). An arrow's `this` is the
+chain's captured one or the global. `TEST262_EAGER=1` and `JS_EAGER=1`
+compile everything up front, for bisecting. Ten to fifteen thousand
+functions per site stay stubs; the fraction that runs is compiled
+again on call, one to five megabytes of source per site. *The
+collector reads the native stack.* Safe points ran only at native
+depth zero, and `callRooted` covered the page's own entry points, but
+a native such as `forEach` calling module factories in a loop still
+ran without a collection until the region was gone. The heap now keeps
+one bit per sixteen bytes saying where a cell starts (`cell_map`),
+spills the callee-saved registers into a local (`spillRegisters`, on
+both ports), and scans every word from the collector's frame up to the
+frame that made the VM (`stack_hi`, set in `Vm.initWith`): a word that
+is a cell's address, or points into a small cell (a Zig local may
+hold a function's data with the object itself dead in a register),
+keeps the cell. Safe points therefore fire at any depth, and `alloc`
+collects once when the region is gone and tries again (`rescue`),
+which is safe for the same reason. Under `TEST262_GC_STRESS` the
+scanned collector passes what the exact one did. Two heap policies
+changed with it: the low-room rule counts bytes taken from the top
+since the last collection (a free-list reuse costs no room) and
+collects once half of what is left has gone — the old rule collected
+at every safe point once the top passed seven eighths, which the top
+never recrosses, and GitHub spent 24 s in collections — and a dead
+large cell (an array's outgrown store, a flattened string) is used
+again by the next large request that fits, where before it was gone
+for good and the script drill's bench ran an 8 MB heap out. *Where it
+stands:* on the host, the Guardian runs its 17 scripts clean (6.7 MB of
+bookkeeping, 17 MB before), DuckDuckGo 7.8 MB (11.5), MDN 3.8 (5.4),
+Wikipedia's article 2.9 (3.5); GitHub runs to the end with two errors
+of its own scripts' making (30 MB, twelve thousand stubs); the BBC and
+Apple sit at the 32 MB edge and still run out. test262 is unchanged:
+language 22,724 of 23,726, built-ins 18,059 of 23,821. *What the
+bookkeeping heap holds now* is the runtime's data rather than code:
+objects' out-of-line property slots and tables, then stubs (256 bytes
+each, a slimmer record would halve that), then the scripts' text kept
+for `toString` and for compiling the stubs.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

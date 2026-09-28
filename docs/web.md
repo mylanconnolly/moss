@@ -179,11 +179,13 @@ base64, text encoding, `Headers`/`Request`/`Response`,
 the element interfaces as aliases; import maps and `import.meta.url`
 are native. Real front pages — Wikipedia, Python's docs, MDN,
 lobste.rs, Stack Overflow, Reddit, Google, Rust, Hacker News,
-DuckDuckGo — run their scripts without an uncaught error (2026-09-28);
-GitHub, the BBC, the Guardian and Apple outgrow the page's 32 MB script
-bookkeeping heap until functions compile lazily. A page domain is 108
-MB (16 MB of script cells, 32 MB of bookkeeping, 40 MB of document and
-layout); a browser window keeps two. Not yet: a frame's own scripts
+DuckDuckGo, the Guardian — run their scripts without an uncaught error
+(2026-09-28), with functions compiled on first call and a collector
+that runs under natives; GitHub runs to the end with two errors of its
+own scripts' making; the BBC and Apple still outgrow the page's 32 MB
+script bookkeeping heap. A page domain is 108 MB (16 MB of script
+cells, 32 MB of bookkeeping, 40 MB of document and layout); a browser
+window keeps two. Not yet: a frame's own scripts
 (the engine has one realm, so they do not run), CORS with credentials
 or a preflight, iframes laid out, most of the SVG DOM, modifier keys.
 
