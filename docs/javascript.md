@@ -166,7 +166,14 @@ real site") changed the engine in ways any embedder sees:
   doublings no longer partition the region by size.
 - A compile's transient memory goes to `compiler.Options.scratch`
   (`vm.compile_scratch` for eval and modules) when the embedder gives
-  one; the code keeps exact-size copies of its tables.
+  one, and to the bookkeeping heap otherwise; the code keeps
+  exact-size copies of its tables. Either way it is taken in fixed
+  chunks (`lib/js/scratch.zig`, `ChunkArena`: `compiler.scratch_chunk`
+  of 512 KB for a script, eight bytes per source byte for a stub's
+  compile) with an intrusive header per chunk, so a stack-shaped
+  child gets them back newest-first and a heap gets whole blocks
+  back — a standard arena's doubling chunks cost three times the
+  peak and, listed on the same stack, could not be returned in order.
 - Parameters bound by a pattern (a rest parameter, a destructured
   one) get registers like simple ones; before, they resolved by name
   at run time and could land on a captured outer binding.

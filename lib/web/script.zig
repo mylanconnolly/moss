@@ -471,6 +471,16 @@ pub const interfaces = [_]Iface{
         .{ .name = "content", .get = getContentAttr, .set = setContentAttr },
         .{ .name = "media", .get = getMediaAttr, .set = setMediaAttr },
     } },
+    .{ .name = "HTMLLinkElement", .parent = "HTMLElement", .attrs = &.{
+        .{ .name = "href", .get = getHrefAttrResolved, .set = setHrefAttrRaw },
+        .{ .name = "rel", .get = getRelAttr, .set = setRelAttr },
+        .{ .name = "type", .get = getTypeAttrRaw, .set = setTypeAttr },
+        .{ .name = "media", .get = getMediaAttr, .set = setMediaAttr },
+        .{ .name = "as", .get = getAsAttr, .set = setAsAttr },
+        .{ .name = "crossOrigin", .get = getCrossOriginAttr, .set = setCrossOriginAttr },
+        .{ .name = "integrity", .get = getIntegrityAttr, .set = setIntegrityAttr },
+        .{ .name = "disabled", .get = getDisabled, .set = setDisabled },
+    } },
     .{ .name = "HTMLScriptElement", .parent = "HTMLElement", .attrs = &.{
         .{ .name = "src", .get = getSrcAttr, .set = setSrcAttr },
         .{ .name = "type", .get = getTypeAttrRaw, .set = setTypeAttr },
@@ -700,6 +710,7 @@ const I = struct {
     const option = ifaceIndex("HTMLOptionElement");
     const image = ifaceIndex("HTMLImageElement");
     const script_el = ifaceIndex("HTMLScriptElement");
+    const link = ifaceIndex("HTMLLinkElement");
     const template = ifaceIndex("HTMLTemplateElement");
     const meta = ifaceIndex("HTMLMetaElement");
     const svg_element = ifaceIndex("SVGElement");
@@ -1362,6 +1373,7 @@ pub const Page = struct {
         if (eq(u8, name, "option")) return I.option;
         if (eq(u8, name, "img")) return I.image;
         if (eq(u8, name, "script")) return I.script_el;
+        if (eq(u8, name, "link")) return I.link;
         if (eq(u8, name, "template")) return I.template;
         if (eq(u8, name, "meta")) return I.meta;
         return I.html_element;
@@ -1480,9 +1492,12 @@ pub const Page = struct {
         p.resetDoc();
         const vm = p.vm;
         // The compile copies the source into the code (a function keeps
-        // its text): no second copy here.
-        vm.compile_scratch = p.scratchBase();
-        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = name, .scratch = p.scratchBase() }) catch |e| switch (e) {
+        // its text): no second copy here. Its scratch is the script
+        // heap itself, in fixed chunks the heap gives back whole: the
+        // page's layout stack held the document and the layout too, and
+        // a big bundle's compile ran it out on the device (2026-09-28).
+        vm.compile_scratch = null;
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = name }) catch |e| switch (e) {
             error.OutOfMemory => {
                 p.log(.err, "script: out of memory compiling");
                 return;
@@ -1529,7 +1544,7 @@ pub const Page = struct {
     pub fn evalText(p: *Page, source: []const u8, a: std.mem.Allocator) ?[]const u8 {
         p.resetDoc();
         const vm = p.vm;
-        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = "eval", .scratch = p.scratchBase() }) catch return null;
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = "eval" }) catch return null;
         const v = js.interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch |e| switch (e) {
             error.OutOfMemory => return null,
             error.Exception => {
@@ -1600,7 +1615,7 @@ pub const Page = struct {
 
     fn reportError(p: *Page, e: Error, where: []const u8) void {
         switch (e) {
-            error.OutOfMemory => p.log(.err, "script: out of memory"),
+            error.OutOfMemory => p.logf(.err, "script: out of memory ({s}; cells {d} KB live of {d})", .{ if (p.vm.heap.exhausted) "the cell heap is full" else "the bookkeeping heap is full", p.vm.heap.live_bytes / 1024, p.vm.heap.region.len / 1024 }),
             error.Exception => {
                 p.script_errors += 1;
                 var buf: [512]u8 = undefined;
@@ -1953,7 +1968,7 @@ pub const Page = struct {
     /// the value of the script (its last expression).
     fn evalSource(p: *Page, source: []const u8) Error!Value {
         const vm = p.vm;
-        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = "an event handler attribute", .scratch = p.scratchBase() }) catch |e| switch (e) {
+        const code = js.compiler.compile(vm.meta, &vm.heap, &vm.strings, source, .{ .name = "an event handler attribute" }) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.SyntaxError => {
                 p.script_errors += 1;
@@ -3952,6 +3967,24 @@ fn getHidden(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
 }
 fn setHidden(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
     return boolAttrSetter(vm, this, "hidden", arg(args, 0));
+}
+fn getHrefAttrResolved(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return urlAttrGetter(vm, this, "href");
+}
+fn setHrefAttrRaw(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "href", arg(args, 0));
+}
+fn getRelAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "rel");
+}
+fn setRelAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "rel", arg(args, 0));
+}
+fn getAsAttr(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    return attrGetter(vm, this, "as");
+}
+fn setAsAttr(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    return attrSetter(vm, this, "as", arg(args, 0));
 }
 fn getTypeAttrRaw(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     return attrGetter(vm, this, "type");

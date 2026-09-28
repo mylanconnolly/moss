@@ -157,13 +157,19 @@ const Surface = struct {
     // delivered one per re-park. Consecutive moves coalesce onto the tail so
     // move spam can't overflow the queue, but every button transition is
     // kept, so a whole click that lands while the client is busy still
-    // arrives as a press then a release.
+    // arrives as a press then a release. Keys for a busy surface queue
+    // here too, behind whatever pointer events precede them: the key ring
+    // and this queue drained in the serve loop's order, not arrival's,
+    // so a click on a field and the text typed straight after it reached
+    // a busy window text first (the browser drill's second tab, under
+    // three drills at once, 2026-09-28).
     pend: [pend_cap]PendEv = undefined,
     pend_head: usize = 0,
     pend_tail: usize = 0,
 };
-const PendEv = struct { lx: u64, ly: u64, buttons: u32 };
-const pend_cap = 8;
+const PendEv = union(enum) { ptr: struct { lx: u64, ly: u64, buttons: u32 }, key: u8 };
+/// Room for a typed line behind a click; the oldest goes on overflow.
+const pend_cap = 64;
 var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
 /// The compositor's ground, seen wherever no surface covers the scanout.
@@ -1069,8 +1075,9 @@ fn dropReader(badge: u64) void {
 
 /// Hand buffered keys to the client that owns the focused surface. Alt-Tab is
 /// absorbed here (it cycles focus, never reaches a client). A key with no
-/// reader waiting on the focused surface stays in the ring until one
-/// parks — buffered, like a terminal's own fifo, never delivered elsewhere.
+/// reader waiting on the focused surface joins that surface's queue until
+/// one parks — buffered, like a terminal's own fifo, never delivered
+/// elsewhere, and in order with the pointer events around it.
 fn dispatchKeys(chan_h: u64) void {
     while (keyRingPeek()) |c| {
         if (c == shared.keyboard.menu_focus or c == shared.keyboard.launcher) {
@@ -1092,12 +1099,21 @@ fn dispatchKeys(chan_h: u64) void {
             if (focused != before) _ = composite();
             continue; // reserved even with only one window
         }
-        const owner = if (findSurface(focused)) |sf| sf.owner else {
+        const sf = findSurface(focused) orelse {
             keyRingPop(); // nothing focused: the key has nowhere to go
             continue;
         };
-        const token = takeReader(owner) orelse break; // hold until a reader parks
         keyRingPop();
+        // Behind anything already waiting for this surface, or held for it
+        // until a reader parks: its queue keeps arrival order.
+        if (sf.pend_head != sf.pend_tail) {
+            pendPush(sf, .{ .key = c });
+            continue;
+        }
+        const token = takeReader(sf.owner) orelse {
+            pendPush(sf, .{ .key = c });
+            continue;
+        };
         _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = focused, .kind = 0, .arg = c } }, 0, token);
     }
 }
@@ -1309,7 +1325,7 @@ fn dispatchPointer(chan_h: u64) void {
     // First, flush any pointer event that had to wait for a busy client to
     // park a reader again (see the coalescing below): the client is back, so
     // hand it the latest cursor + button state it missed.
-    flushPendingPtr(chan_h);
+    flushPending(chan_h);
     // Drain the ring completely. An event whose target has no reader parked
     // (the client is busy — e.g. the dock blocking on a launch) is NOT left
     // to wedge the ring — that stalls every later event and, under a real
@@ -1335,7 +1351,7 @@ fn dispatchPointer(chan_h: u64) void {
         if (buttons == 0) pointer_capture = 0;
         if (id != hover_surface and buttons == 0 and !changed) {
             if (findSurface(hover_surface)) |old| {
-                if (old.pointer_tracking) pendPush(old, .{ .lx = 0xffff, .ly = 0xffff, .buttons = 0 });
+                if (old.pointer_tracking) pendPush(old, .{ .ptr = .{ .lx = 0xffff, .ly = 0xffff, .buttons = 0 } });
             }
         }
         hover_surface = id;
@@ -1366,21 +1382,25 @@ fn dispatchPointer(chan_h: u64) void {
             var lb: [80]u8 = undefined;
             _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: press queued surface={d}", .{id}) catch "comp: press queued");
         }
-        pendPush(sf, .{ .lx = lx, .ly = ly, .buttons = e.buttons });
+        pendPush(sf, .{ .ptr = .{ .lx = lx, .ly = ly, .buttons = e.buttons } });
     }
-    flushPendingPtr(chan_h);
+    flushPending(chan_h);
 }
 
-/// Queue a pointer event for a busy surface. Consecutive moves (buttons
+/// Queue an input event for a busy surface. Consecutive moves (buttons
 /// after the initial transition) overwrite the tail so move spam cannot
-/// erase the press coordinates. On overflow the oldest is dropped.
+/// erase the press coordinates; keys never coalesce. On overflow the
+/// oldest is dropped.
 fn pendPush(sf: *Surface, e: PendEv) void {
-    if (sf.pend_head != sf.pend_tail) {
+    if (e == .ptr and sf.pend_head != sf.pend_tail) {
         const last = (sf.pend_tail + pend_cap - 1) % pend_cap;
-        const before: ?u32 = if (last != sf.pend_head) sf.pend[(last + pend_cap - 1) % pend_cap].buttons else null;
-        if (shared.pointerCanCoalesce(before, sf.pend[last].buttons, e.buttons)) {
-            sf.pend[last] = e; // coalesce a move onto the tail
-            return;
+        if (sf.pend[last] == .ptr) {
+            const prev = if (last != sf.pend_head) sf.pend[(last + pend_cap - 1) % pend_cap] else null;
+            const before: ?u32 = if (prev) |p| (if (p == .ptr) p.ptr.buttons else null) else null;
+            if (shared.pointerCanCoalesce(before, sf.pend[last].ptr.buttons, e.ptr.buttons)) {
+                sf.pend[last] = e; // coalesce a move onto the tail
+                return;
+            }
         }
     }
     sf.pend[sf.pend_tail] = e;
@@ -1388,21 +1408,26 @@ fn pendPush(sf: *Surface, e: PendEv) void {
     if (sf.pend_tail == sf.pend_head) sf.pend_head = (sf.pend_head + 1) % pend_cap; // full: drop oldest
 }
 
-/// Hand each busy surface one queued pointer event, now that it may have
+/// Hand each busy surface one queued event, now that it may have
 /// re-parked — one per park keeps the client's button transitions in order.
-fn flushPendingPtr(chan_h: u64) void {
+fn flushPending(chan_h: u64) void {
     for (&surfaces, 0..) |*sf, i| {
         if (!sf.used or sf.pend_head == sf.pend_tail) continue;
         const token = takeReader(sf.owner) orelse continue;
         const e = sf.pend[sf.pend_head];
         sf.pend_head = (sf.pend_head + 1) % pend_cap;
-        // A press delivered late is worth a line (the pill-click hunt);
-        // the moves and releases around it are not.
-        if (e.buttons & 1 != 0) {
-            var lb: [80]u8 = undefined;
-            _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: flush press surface={d}", .{i + 1}) catch "comp: flush press");
+        switch (e) {
+            .key => |c| _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = 0, .arg = c } }, 0, token),
+            .ptr => |p| {
+                // A press delivered late is worth a line (the pill-click hunt);
+                // the moves and releases around it are not.
+                if (p.buttons & 1 != 0) {
+                    var lb: [80]u8 = undefined;
+                    _ = usys.log(comp_log, std.fmt.bufPrint(&lb, "comp: flush press surface={d}", .{i + 1}) catch "comp: flush press");
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(p.lx, p.ly, p.buttons) } }, 0, token);
+            },
         }
-        _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .input = .{ .surface = i + 1, .kind = if (sf.pointer_tracking) 6 else 1, .arg = shared.ptrArg(e.lx, e.ly, e.buttons) } }, 0, token);
     }
 }
 

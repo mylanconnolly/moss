@@ -166,30 +166,47 @@ pub fn available() bool {
     return n.chan != 0;
 }
 
-/// Why a page cannot be hosted, for the app's event.
+/// Why a page cannot be hosted, for the app's event: the step of
+/// `ensureHost` that refused, named (every one read as "the webpage
+/// image is not in the store" until 2026-09-28, when a desktop booted
+/// on an old disk showed that message for a stale image).
 pub fn unavailableReason() []const u8 {
     if (spawner == 0) return "this program holds no spawner";
     if (net == null or net.?.chan == 0) return "this program holds no network view";
-    return "the webpage image is not in the store";
+    return host_refusal;
+}
+
+var host_refusal: []const u8 = "the page host is not set up";
+var refusal_buf: [160]u8 = undefined;
+
+/// Keep the reason (a copy: the loader's may live in a call scope) and
+/// log it when it changes, not at every render that asks again.
+fn refuse(why: []const u8) bool {
+    const n = @min(why.len, refusal_buf.len);
+    const changed = !std.mem.eql(u8, host_refusal, why[0..n]);
+    @memcpy(refusal_buf[0..n], why[0..n]);
+    host_refusal = refusal_buf[0..n];
+    if (changed) webhost.logf(log_h, "page host: {s}", .{host_refusal});
+    return false;
 }
 
 fn ensureHost(it: *mshl.Interp) bool {
     if (!available()) return false;
     if (!host_ready) {
         host.reset(log_h, spawner, net.?);
-        if (!host.init()) return false;
+        if (!host.init()) return refuse("no channel for the pages");
         if (view != 0) _ = host.loadFontsFrom(view, view_buf, if (view_is_assets) "" else "assets/");
         tlscmds.warmRoots(); // before the first page's handshake
         host_ready = true;
     }
-    if (stage == null) stage = loader.Stage.init(loader.Stage.default_pages) orelse return false;
+    if (stage == null) stage = loader.Stage.init(loader.Stage.default_pages) orelse return refuse("no memory for the program stage");
     if (!staged) {
-        _ = progload.loadImage(it, "webpage", stores, &stage.?) orelse return false;
+        _ = progload.loadImage(it, "webpage", stores, &stage.?) orelse return refuse(progload.last_refusal);
         staged = true;
     }
     if (!thread_up) {
         @memset(&thread_stack, stack_paint);
-        if (usys.threadCreate(serve, 0, &thread_stack) != .ok) return false;
+        if (usys.threadCreate(serve, 0, &thread_stack) != .ok) return refuse("no thread for the pages");
         thread_up = true;
     }
     return true;

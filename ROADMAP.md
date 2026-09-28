@@ -1105,7 +1105,22 @@ supervises), and memory history per unit beside the CPU one.
       bookkeeping one, and the small classes' fragmentation after a
       collection; a preparser (syntax and captures only) so a bundle's
       first compile stops building the AST of functions it will not
-      run.
+      run; (o) the device round (2026-09-28): compile scratch in fixed
+      chunks off the page region (`lib/js/scratch.zig`), the layout's
+      scratch stack, dead-fragment truncation and compaction, `moveBox`
+      in place (the Guardian's layout 167 → 6 MB on the host, and it
+      loads on the device in 41 s where it died), `HTMLLinkElement`; a
+      desktop disk kept across builds had filled with every build's
+      images and the page host said "not in the store" — the store
+      prunes before it installs, replaces manifests atomically and
+      reports, the page host names its refusal, and mossfs's reserve
+      counts what a txg has promised so a full volume still deletes
+      (DESIGN, "On the device, and what an old disk taught"). Left on
+      the device: the document arena never frees (GitHub 19 MB after
+      scripts, one script out of memory), `Computed` is 1,776 bytes
+      (the Guardian's cascade 8.6 MB), the second parse of every stub
+      (Wikipedia's scripts three times slower than eager on the
+      device).
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on
@@ -3269,7 +3284,10 @@ supervises), and memory history per unit beside the CPU one.
   and `install NAME` copies a program into it. The login drill runs
   `ps` from the system store inside a session, installs it, and runs
   the home's copy. Residuals: the system store is the only source of
-  programs; `run` arguments are 24 bytes.
+  programs; `run` arguments are 24 bytes. (2026-09-28: init prunes the
+  system store of earlier builds' images before installing, since a
+  disk kept across builds filled with them; a home's own store is not
+  pruned — nothing knows which of its images a user still wants.)
 - ✅ **Entropy: virtio-rng + getrandom/rng_seed** (done): the kernel
   carries a ChaCha8 fast-key-erasure CSPRNG (`kernel/rng.zig`) that it
   never seeds itself — hardware entropy enters only through `rng_seed`,

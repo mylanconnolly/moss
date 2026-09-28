@@ -143,7 +143,7 @@ pub fn create(vm: *Vm, name: []const u8, source: []const u8) Error!*Module {
     }
     // Parse once for the entries (the compiler parses again; the tree
     // is small compared to running it).
-    var arena = std.heap.ArenaAllocator.init(vm.compile_scratch orelse vm.meta);
+    var arena = @import("scratch.zig").ChunkArena.init(vm.compile_scratch orelse vm.meta, compiler.scratch_chunk);
     defer arena.deinit();
     const prog = parser.parse(arena.allocator(), m.source, .{ .module = true }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,

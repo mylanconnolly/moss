@@ -128,7 +128,14 @@ fn histoAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize
     const b = &histo[bucket(len)];
     b.count += 1;
     b.bytes += len;
-    return histo_inner.rawAlloc(len, alignment, ra);
+    const p = histo_inner.rawAlloc(len, alignment, ra) orelse return null;
+    if (meta_owners_used < meta_owners.len / 2) if (siteOf(ra)) |st| {
+        st.live += len;
+        st.count += 1;
+        const o = ownerSlot(@intFromPtr(p));
+        o.* = .{ .ptr = @intFromPtr(p), .site = st, .len = len };
+    };
+    return p;
 }
 fn histoResize(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
     const ok = histo_inner.rawResize(mem, alignment, new_len, ra);
@@ -292,6 +299,21 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("webshot: page memory: allocs <{d} B: {d} for {d} KB (freed {d}, resized {d}, grown in place {d})\n", .{ @as(usize, 1) << @intCast(i), h.count, h.bytes / 1024, h.freed, h.resized, h.grown });
         };
         std.debug.print("webshot: page memory: children lists {d} KB capacity for {d} entries, line lists {d} KB capacity for {d} lines (line {d} B), dead fragments {d}, display-none boxes {d}\n", .{ kids_cap * 4 / 1024, kids_n, lines_cap * @sizeOf(web.layout.Line) / 1024, lines_n, @sizeOf(web.layout.Line), dead_frags, dead_boxes });
+        // The dozen callers holding the most of the layout arena.
+        var shown: usize = 0;
+        while (shown < 12) : (shown += 1) {
+            var best: ?*Site = null;
+            for (&meta_sites) |*site| if (site.ra != 0 and site.live > 0 and (best == null or site.live > best.?.live)) {
+                best = site;
+            };
+            const bs = best orelse break;
+            std.debug.print("webshot: page memory: {d} KB live in {d} blocks from:\n", .{ bs.live / 1024, bs.count });
+            var addrs = [_]usize{bs.ra};
+            const trace: std.debug.StackTrace = .{ .return_addresses = &addrs, .skipped = .none };
+            std.debug.dumpStackTrace(&trace);
+            bs.live = 0;
+        }
+        std.debug.print("webshot: page memory: {d} inline layouts made {d} lines, {d} into lists without room; scratch peak {d} KB, {d} fallbacks to the arena\n", .{ web.layout.stat_inline_layouts, web.layout.stat_lines, web.layout.stat_line_growth, web.layout.stat_scratch_peak / 1024, web.layout.stat_scratch_fallbacks });
         std.debug.print("webshot: page memory: cascade {d} KB ({d} computed styles of {d} B), layout {d} KB ({d} boxes of {d} B, capacity {d}; {d} fragments of {d} B, capacity {d})\n", .{ after_style / 1024, st.computed.len, @sizeOf(web.style.Computed), (fba.end_index - after_style) / 1024, pl.boxes.len, @sizeOf(web.layout.Box), pl.boxes.capacity(), pl.fragments.len, @sizeOf(web.layout.Fragment), pl.fragments.capacity() });
     }
     var styles = try gpa.create(web.style.Styles);
@@ -485,10 +507,12 @@ fn siteOf(ra: usize) ?*Site {
 /// The site a block came from, kept in a side table keyed by address
 /// (the allocator's blocks have no room for it).
 const Owner = struct { ptr: usize = 0, site: ?*Site = null, len: usize = 0 };
-var meta_owners: [1 << 18]Owner = @splat(.{});
+var meta_owners: [1 << 22]Owner = @splat(.{});
+var meta_owners_used: usize = 0;
 fn ownerSlot(ptr: usize) *Owner {
     var i: usize = (ptr >> 4) % meta_owners.len;
     while (meta_owners[i].ptr != 0 and meta_owners[i].ptr != ptr) i = (i + 1) % meta_owners.len;
+    if (meta_owners[i].ptr == 0) meta_owners_used += 1;
     return &meta_owners[i];
 }
 fn metaAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
@@ -498,12 +522,12 @@ fn metaAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize)
     b.live_count += 1;
     b.live_bytes += len;
     const p = js_meta.allocator().rawAlloc(len, alignment, ra) orelse return null;
-    if (siteOf(ra)) |s| {
+    if (meta_owners_used < meta_owners.len / 2) if (siteOf(ra)) |s| {
         s.live += len;
         s.count += 1;
         const o = ownerSlot(@intFromPtr(p));
         o.* = .{ .ptr = @intFromPtr(p), .site = s, .len = len };
-    }
+    };
     return p;
 }
 fn metaForget(ptr: [*]u8) void {

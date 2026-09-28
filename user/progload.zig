@@ -33,7 +33,7 @@ pub fn find(it: *mshl.Interp, name: []const u8, stores: []const ?Store) mshl.Err
         @memcpy(mpath[name.len .. name.len + shared.img_manifest_ext.len], shared.img_manifest_ext);
         const mp = mpath[0 .. name.len + shared.img_manifest_ext.len];
         const text = fscmds.readFileVia(it, st.chan, st.buf, mp) catch continue;
-        const v = try it.parseData(text);
+        const v = it.parseData(text) catch return it.fail("run: {s}: the manifest in {s} does not parse ({d} bytes: {s})", .{ name, st.name, text.len, it.err_msg });
         if (v != .record) return it.fail("run: {s}: the manifest in {s} is not a record", .{ name, st.name });
         const img = v.record.get("image") orelse return it.fail("run: {s}: manifest names no image", .{name});
         if (img != .str or img.str.len != shared.img_digest_hex_len) return it.fail("run: {s}: manifest image is not a digest", .{name});
@@ -73,8 +73,23 @@ pub fn stageInto(prog: *const Program, stage: *loader.Stage) ?usize {
 /// returning the stage handle for `spawn` — null on any failure. The
 /// loadStage callback a worker host wires into workcmds.
 pub fn loadImage(it: *mshl.Interp, name: []const u8, stores: []const ?Store, stage: *loader.Stage) ?u64 {
-    const prog = (find(it, name, stores) catch return null) orelse return null;
-    const len = stageInto(&prog, stage) orelse return null;
-    if (!stage.verify(len, &prog.digest)) return null;
+    const prog = (find(it, name, stores) catch {
+        last_refusal = if (it.err_msg.len > 0) it.err_msg else "the manifest could not be read";
+        return null;
+    }) orelse {
+        last_refusal = "the image is not in the store";
+        return null;
+    };
+    const len = stageInto(&prog, stage) orelse {
+        last_refusal = "the image could not be read into the stage";
+        return null;
+    };
+    if (!stage.verify(len, &prog.digest)) {
+        last_refusal = if (len >= stage.bytes) "the image is larger than the program stage" else "the image does not match its digest";
+        return null;
+    }
     return stage.handle;
 }
+
+/// Why the last `loadImage` refused, for a host's log.
+pub var last_refusal: []const u8 = "";

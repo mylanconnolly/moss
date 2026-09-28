@@ -7589,6 +7589,98 @@ objects' out-of-line property slots and tables, then stubs (256 bytes
 each, a slimmer record would halve that), then the scripts' text kept
 for `toString` and for compiling the stubs.
 
+**On the device, and what an old disk taught (as built, 2026-09-28).**
+The lazy engine went to the target next, through `tools/guidrive.py`
+against a headless `run-gui` (QEMU with `-display none`, QMP on a
+port, the serial log in a file): sign in, open Web, type a URL, wait
+for the page domain's `loaded` line. *What the first pass found.*
+DuckDuckGo died with "out of memory compiling": the compile's scratch
+was a standard arena on the page's layout stack, whose chunks double
+(1, 2, 4, 8 MB — three times the peak) and whose chunk list, kept on
+the same stack *above* the chunks, stopped the stack taking them back
+in order. `lib/js/scratch.zig` replaced it: fixed 512 KB chunks
+(`compiler.scratch_chunk`; a stub's compile takes eight bytes per
+source byte, 16 KB at least), an intrusive header per chunk so a
+stack child returns them newest-first, grow-in-place for the last
+allocation — and then the scratch left the page region altogether:
+`Page.runSource`, eval and handler attributes compile with no
+`scratch`, so the chunks come from the script's bookkeeping heap,
+which gives fixed-size blocks back whole. The Guardian, which the
+first sweep never reached, loaded in 41 s — and `WEBSHOT_PAGE=1`,
+taught to attribute the layout arena by allocating site (the same
+side table the bookkeeping heap uses), put its layout at 167 MB on
+the host: 662,518 dead fragments (every `resetLines` of a re-laid box
+left its old fragments in the arena), a quarter of a million
+transient lists (the items, pending floats and open-stack of each
+inline layout; flex lines; measurement passes; `spanFragments`'s
+seen-list), and `moveBox` duplicating a box's child list per move
+(41,670 times). The layout keeps a 2 MB scratch stack now
+(`Layout.scratch_fba`, mark and release around each inline layout,
+flex layout, measurement and span walk, falling back to the arena
+when a pass outgrows it and counting how often), `resetLines` marks
+the subtree's fragments dead and truncates the fragment store when
+they are the tail — or compacts it (`compactFragments`: every line's
+`first_frag` rewritten by a prefix count of the dead) once dead ones
+are past half of a store over 4,096 — and `moveBox` walks the child
+list in place. The Guardian's layout is 6 MB, Wikipedia's article 9
+(13.5 before), GitHub's 3.8. `HTMLLinkElement` landed (`href`
+resolved, `rel`, `as`, `media`, `crossOrigin`, `integrity`,
+`disabled`) for GitHub's favicon script, and a script's out-of-memory
+error now names which heap is full. *Where it stands on the device:*
+Wikipedia's article in 6.3 s (scripts 0.3 s), DuckDuckGo 4.6 s (31
+scripts, 3.1 s), the Guardian 41 s (scripts 15.3 s, layout 10.6 s,
+pictures 12.8 s; document 17 MB, layout 15 MB of 40), GitHub 24 s
+(scripts 6.7 s; document 19 MB) with one script out of memory — the
+document arena never frees, which is the page region's next lever.
+*The old disk.* Then the desktop booted on the disk `run-gui` had kept
+since the eleventh, and the Web window's Go did nothing: the log had
+the action and the field re-rendered, and no page. Two runs' logs
+differed in one line — the old disk's window laid out no page leaf —
+and the leaf's host had refused it with the one message every failure
+of its setup shared, "the webpage image is not in the store". Named,
+the refusal was a manifest that did not parse; sized, it was 0 bytes;
+and the store, asked to say what it did each boot, said 52 writes had
+failed with 0 of 64 MB free. The chain: `img/` is content-addressed
+and nothing ever removed an image, so a disk reused across builds
+kept every build's 46; when it filled, the new build's images could
+not be written, and a manifest rewrite — truncate in place, then
+write — left the truncation. Four things changed. Init prunes the
+store *before* installing (the digests this build names are computed
+first; anything else 32-hex under `img/`, and any `.new` a
+replacement left behind, goes), replaces a manifest by writing beside
+it and renaming over it and only when its text changed, and logs one
+line per boot — images installed, stale removed, manifests rewritten,
+writes failed, MB free (a changed program on a kept disk: 1, 1, 1, 0).
+The page host names which step refused. A directory listing's bound
+went from 2 KB to 24 KB (`shared.fs_list_max`): the store's own
+listing had not fit for weeks. And the filesystem: the delete that
+should have freed the disk was refused with `no_space`, because
+`dirRemove` zeroes its entry through the gated `writeObj`, and the
+gate — the free total against a 96-block reserve — had let the
+reserve go: every write in a txg passed it with the *same* free count,
+since the overlay allocates at commit, so a burst promised more than
+the disk had and the commit took it all. `hasRoom` now subtracts what
+the txg has promised (`pendingBlocks`: dirty data blocks and dnode
+leaves), the reserve is 160 (a txg's metadata over the promised
+data), and removal goes through the ungated write — a full volume
+takes a delete, commits it, and takes writes again, which a host test
+proves by filling one. The disk that was at zero cannot be recovered
+(a delete needs a commit; a commit needs blocks); `run-gui` makes a
+fresh one when none exists. *And the gate.* The browser drill failed
+once under three drills at once: the second tab's URL arrived empty
+because the window was busy for 700 ms after opening the tab, the
+click on its field waited in the compositor's per-surface queue, and
+the letters typed after it — held in the key ring — were delivered
+first when the window parked. Keys for a busy surface join that
+surface's queue now (`PendEv` is a key or a pointer event; the queue
+holds 64), behind the pointer events that preceded them. *Lessons:*
+name a refusal at the point it happens — a catch-all message cost the
+first hour and three theories, and the named chain took ten minutes;
+a copy-on-write filesystem's reserve must count what is promised, not
+only what is free, or it is no reserve; a content-addressed store
+needs a collector from its first day; and a queue per input device is
+two orders, so a busy client sees one.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

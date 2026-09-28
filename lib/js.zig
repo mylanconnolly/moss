@@ -18,6 +18,7 @@ pub const object = @import("js/object.zig");
 pub const bytecode = @import("js/bytecode.zig");
 pub const scope = @import("js/scope.zig");
 pub const compiler = @import("js/compiler.zig");
+pub const scratch = @import("js/scratch.zig");
 pub const vm = @import("js/vm.zig");
 pub const interp = @import("js/interp.zig");
 pub const realm = @import("js/realm.zig");

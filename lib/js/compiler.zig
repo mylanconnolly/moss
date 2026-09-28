@@ -48,8 +48,11 @@ pub const Options = struct {
 };
 
 /// Compile a program; the result is the script's top-level code.
+/// The compile's scratch arena: chunks of this size, freed together.
+pub const scratch_chunk: usize = 512 << 10;
+
 pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, src: []const u8, opts: Options) Error!*Code {
-    var arena = std.heap.ArenaAllocator.init(opts.scratch orelse a);
+    var arena = @import("scratch.zig").ChunkArena.init(opts.scratch orelse a, scratch_chunk);
     defer arena.deinit();
     const scratch = arena.allocator();
     var p = parser.Parser.init(scratch, src, .{
@@ -100,7 +103,8 @@ pub fn compileLazy(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings
     const src = d.source.?;
     stats.lazy_compiles += 1;
     stats.lazy_source_bytes += d.end - d.start;
-    var arena = std.heap.ArenaAllocator.init(scratch_opt orelse a);
+    // A small function's compile takes a small chunk.
+    var arena = @import("scratch.zig").ChunkArena.init(scratch_opt orelse a, @min(scratch_chunk, @max(16 << 10, (d.end - d.start) * 8)));
     defer arena.deinit();
     const scratch = arena.allocator();
     var p = parser.Parser.init(scratch, src.text, .{

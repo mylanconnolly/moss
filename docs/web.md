@@ -350,9 +350,25 @@ site's script failures are found in a second rather than a boot.
 `WEBSHOT_PAGE=1` runs the parse, sheets, cascade and layout in the page
 domain's memory and prints a census — node, box and fragment counts and
 record sizes, list capacities, text and attribute buffers, and a
-histogram of the layout's allocations by size — and `WEBSHOT_REGION=MB`
-sizes the region it probes (default 40). Headless Chrome with
-the page's User-Agent (`moss/0.0 (webpage)`) makes the reference.
+histogram of the layout's allocations by size, the layout arena's
+bytes by allocating source line, and the inline layouts' counts
+(lines made, appends that grew a list, the scratch stack's peak and
+how often a pass fell back to the arena) — and `WEBSHOT_REGION=MB`
+sizes the region it probes (default 40). `WEBSHOT_NOSCAN=1` turns the
+collector's stack scan off (unsafe; for comparison). Headless Chrome
+with the page's User-Agent (`moss/0.0 (webpage)`) makes the reference.
+
+On the device, `tools/guidrive.py LOG PORT URL...` drives a headless
+desktop: start `run-gui`'s QEMU by hand with `-display none -qmp
+tcp:127.0.0.1:PORT,server=on,wait=off -serial file:LOG -append
+"profile=guishell interactive"`, and the script signs in, opens Web,
+types each URL and waits for the page domain's `webpage: loaded in`
+line, which carries the phase times, the document and layout bytes,
+the script count and errors, and the script heap. A page that says
+"No page host: …" in its status line names the step of the host's
+setup that refused (the image's manifest, the stage, the spawn);
+init's `store:` line at boot says what the program store installed,
+pruned and failed to write, and the MB left.
 
 ## Dig deeper
 

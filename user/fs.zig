@@ -1135,7 +1135,7 @@ fn doList(v: *View, path_off: u64, path_len: u64) shared.FsResp {
     const path = viewPath(v, path_off, path_len) orelse return ferr(.bad_path);
     if (v.buf == 0) return ferr(.bad_path);
     var scratch: [64]u8 = undefined;
-    const out = @as([*]u8, @ptrFromInt(v.buf))[0..2048];
+    const out = @as([*]u8, @ptrFromInt(v.buf))[0..shared.fs_list_max];
     var n: usize = 0;
     switch (resolve(v, path, &scratch, true)) {
         .bad => return ferr(.bad_path),

@@ -1432,6 +1432,11 @@ pub const rng_min_seed: u64 = 32;
 /// round trip AND let full 4K blocks skip the read-modify-write path.
 pub const fs_buf_pages: u64 = 8;
 pub const fs_max_io: u64 = fs_buf_pages * 4096;
+/// A directory listing's bound (newline-separated names in the view
+/// buffer). It was 2 KB until 2026-09-28, which the program store
+/// passed long before: 44 images and their manifests per build, and a
+/// desktop disk keeps every build's.
+pub const fs_list_max: usize = 24 << 10;
 
 pub const FsReq = union(enum(u64)) {
     /// + shm cap: this view's path/data buffer. (Badge 0's buffer, the

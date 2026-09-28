@@ -175,7 +175,15 @@ const max_gt_dirty = 32; // dirty group-table leaves / path nodes per txg
 const commit_data_threshold = 144; // fits a 512K stream in one txg (dd cap 160)
 const commit_dnode_threshold = 32;
 const drain_budget = 48; // deleting-set frees per commit
-pub const alloc_reserve = 96; // headroom so a commit can always land
+/// Headroom so a commit can always land: what one txg's metadata can
+/// take (dnode leaves and their path, bitmaps, group-table nodes), over
+/// what the data already dirty will take — the gate counts that
+/// separately (`pendingBlocks`). It was 96, counted against the free
+/// total alone: a burst of writes each passed the gate with the same
+/// free count, the commit then took their blocks, and a desktop disk
+/// reached 0 free, where a delete (a directory write, gated the same
+/// way) could no longer commit either (2026-09-28).
+pub const alloc_reserve = 160;
 
 // --------------------------------------------------------------- codecs
 
@@ -645,8 +653,24 @@ pub const Fs = struct {
         return n;
     }
 
+    /// Blocks the dirty overlay will take at commit: one per dirty data
+    /// block, one per dirty dnode leaf. Freed only when the txg lands.
+    pub fn pendingBlocks(fs: *Fs) u64 {
+        var n: u64 = fs.dd_count;
+        for (&fs.ddn) |*e| if (e.used) {
+            n += 1;
+        };
+        return n;
+    }
+
+    /// Whether an allocating write may proceed: the free total, less
+    /// what is already promised to this txg, must leave the reserve.
+    pub fn hasRoom(fs: *Fs) Error!bool {
+        return try fs.freeBlocksTotal() >= alloc_reserve + fs.pendingBlocks();
+    }
+
     pub fn writeObj(fs: *Fs, obj: u32, off: u64, src: []const u8, now: u64) Error!usize {
-        if (try fs.freeBlocksTotal() < alloc_reserve) return Error.NoSpace;
+        if (!try fs.hasRoom()) return Error.NoSpace;
         const end = off + src.len;
         if (end > 0) {
             const last_idx = (end - 1) / block_size;
@@ -1105,10 +1129,13 @@ pub const Fs = struct {
         try fs.dirAdd(to_dir, to, source.obj, source.typ, now);
     }
 
+    /// Removal is not gated on free space: it dirties one directory
+    /// block, which the reserve covers, and it is how a full volume gets
+    /// its room back.
     pub fn dirRemove(fs: *Fs, dir: u32, name: []const u8, now: u64) Error!bool {
         const found = (try fs.dirLookup(dir, name)) orelse return false;
         var ent: [dirent_size]u8 = @splat(0);
-        _ = try fs.writeObj(dir, found.index * dirent_size, &ent, now);
+        _ = try fs.writeObjRaw(dir, found.index * dirent_size, &ent, now);
         return true;
     }
 
@@ -2313,6 +2340,62 @@ test "failed rename restores target, source and deletion overlays" {
     try testing.expectError(Error.NoSpace, renameTestApply(&t_fs));
     try testing.expectEqual(objs.old, (try t_fs.dirLookup(root_obj, "document")).?.obj);
     try testing.expectEqual(objs.fresh, (try t_fs.dirLookup(root_obj, "staging")).?.obj);
+}
+
+test "a full volume still takes a delete, commits it, and has room again" {
+    t_key = null;
+    var rd: RamDev = undefined;
+    const dev = freshDev(&rd);
+    try fmtDev(dev);
+    try t_fs.mount(dev);
+    // Fill it: files of 512 KB (dd-sized writes) until a write is refused.
+    var chunk: [block_size]u8 = undefined;
+    for (&chunk, 0..) |*b, i| b.* = @truncate(i * 7 + 13); // incompressible enough
+    var n_files: u32 = 0;
+    var full = false;
+    while (!full and n_files < 64) : (n_files += 1) {
+        const obj = try t_fs.allocObject(.file, 1);
+        var name: [16]u8 = undefined;
+        try t_fs.dirAdd(root_obj, try std.fmt.bufPrint(&name, "big{d}", .{n_files}), obj, .file, 1);
+        var off: u64 = 0;
+        while (off < 512 * 1024) : (off += block_size) {
+            var prng = std.Random.DefaultPrng.init(off ^ n_files);
+            prng.random().bytes(&chunk);
+            _ = t_fs.writeObj(obj, off, &chunk, 1) catch |err| {
+                try testing.expectEqual(Error.NoSpace, err);
+                // Refused against what this txg has promised: land it and
+                // ask once more. Refused again is full.
+                try t_fs.sync(1);
+                _ = t_fs.writeObj(obj, off, &chunk, 1) catch |again| {
+                    try testing.expectEqual(Error.NoSpace, again);
+                    full = true;
+                    break;
+                };
+                continue;
+            };
+            try t_fs.maybeCommit(1);
+        }
+    }
+    try testing.expect(full);
+    try t_fs.sync(2);
+    // The reserve held: the commit landed with room to spare.
+    try testing.expect(try t_fs.freeBlocksTotal() > 0);
+    // A delete goes through, commits, and after the deleting set drains
+    // the volume takes writes again.
+    const gone = (try t_fs.dirLookup(root_obj, "big0")).?;
+    try testing.expect(try t_fs.dirRemove(root_obj, "big0", 3));
+    try t_fs.freeObject(gone.obj, 3);
+    try t_fs.sync(3);
+    var rounds: u32 = 0;
+    while (t_fs.deletingPending() and rounds < 64) : (rounds += 1) try t_fs.sync(4 + rounds);
+    try testing.expect(!t_fs.deletingPending());
+    const fresh = try t_fs.allocObject(.file, 80);
+    try t_fs.dirAdd(root_obj, "after", fresh, .file, 80);
+    _ = try t_fs.writeObj(fresh, 0, &chunk, 80);
+    try t_fs.sync(80);
+    try t_fs2.mount(dev);
+    try testing.expect((try t_fs2.dirLookup(root_obj, "big0")) == null);
+    try testing.expect((try t_fs2.dirLookup(root_obj, "after")) != null);
 }
 
 test "failed cross-directory rename rolls back partial hash conversion" {

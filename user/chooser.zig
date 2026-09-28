@@ -13,6 +13,9 @@
 //! after `hello`.
 const std = @import("std");
 const shared = @import("shared");
+
+/// The listing, copied out of the view buffer (which the reads reuse).
+var listing_names: [shared.fs_list_max]u8 = undefined;
 const ui = @import("mosslib").ui;
 const p = shared.picker;
 const usys = @import("usys.zig");
@@ -78,17 +81,17 @@ fn refresh() void {
     count = 0;
     scroll = 0;
     selected = 0;
+    const names = &listing_names;
     const n = fs.fsList(view, buffer, directory[0..dir_len]) orelse {
         status = "Unable to list this folder.";
         return;
     };
-    if (n > 2048) {
+    if (n > names.len) {
         status = "Unable to list this folder.";
         return;
     }
     listing_ok = true;
-    if (n > 2048 - 57) status = "Folder list may be incomplete. Type a name to open an unlisted file.";
-    var names: [2048]u8 = undefined;
+    if (n > names.len - 57) status = "Folder list may be incomplete. Type a name to open an unlisted file.";
     @memcpy(names[0..n], buffer[0..n]);
     var it = std.mem.splitScalar(u8, names[0..n], '\n');
     while (it.next()) |name| {

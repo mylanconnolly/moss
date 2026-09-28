@@ -268,6 +268,16 @@ pub const Layout = struct {
     /// fragment, and a bump arena never pays for a doubling.
     boxes: store.Chunked(Box, 8) = .{},
     fragments: store.Chunked(Fragment, 9) = .{},
+    /// A stack for what one inline layout or measurement needs and
+    /// drops — its items, its open-box lists — marked and released
+    /// around each; the layout arena is a bump allocator, and a
+    /// container measuring and placing its subtrees left 255,000 such
+    /// lists behind on the Guardian's front page (2026-09-28). Full,
+    /// it falls back to the arena.
+    scratch_buf: []u8 = &.{},
+    scratch_fba: std.heap.FixedBufferAllocator = undefined,
+    /// Dead fragments in the store (see `resetLines`).
+    dead_fragments: usize = 0,
     root: BoxId = 0,
     viewport_w: f64,
     viewport_h: f64,
@@ -308,6 +318,8 @@ pub var in_progress: ?*const Layout = null;
 pub fn layoutDocumentWith(a: std.mem.Allocator, doc: *const Document, styles: *const style.Styles, fonts: Fonts, images: ?Images, viewport_w: f64, viewport_h: f64) Error!*Layout {
     const l = try a.create(Layout);
     l.* = .{ .a = a, .doc = doc, .styles = styles, .fonts = fonts, .images = images, .viewport_w = viewport_w, .viewport_h = viewport_h };
+    l.scratch_buf = try a.alloc(u8, scratch_size);
+    l.scratch_fba = std.heap.FixedBufferAllocator.init(l.scratch_buf);
     in_progress = l;
     l.root_style.display = .block;
     try l.boxes.append(a, .{ .kind = .root, .node = null, .style = &l.root_style });
@@ -837,8 +849,10 @@ fn moveBox(l: *Layout, id: BoxId, dx: f64, dy: f64) Error!void {
         f.x += dx;
         f.y += dy;
     };
-    const children = try l.a.dupe(BoxId, b.children.items);
-    for (children) |c| try moveBox(l, c, dx, dy);
+    // The box store is chunked: a box never moves, so its children list
+    // is walked in place (a copy per move was 41,000 allocations on the
+    // Guardian's front page, whose lines move their boxes at every pass).
+    for (b.children.items) |c| try moveBox(l, c, dx, dy);
 }
 
 // ------------------------------------------------------- block layout
@@ -2268,6 +2282,8 @@ fn measureWidths(l: *Layout, id: BoxId, contents_only: bool) Error!Widths {
             if (st.flex_wrap == .nowrap) min += gap;
         }
     } else if (hasInlineContent(l, id)) {
+        const mark = l.scratch_fba.end_index;
+        defer l.scratch_fba.end_index = mark;
         const items = try collectItemsFor(l, id, l.fonts, true);
         var line: f64 = 0;
         var word: f64 = 0;
@@ -2349,7 +2365,7 @@ fn collectItemsFor(l: *Layout, id: BoxId, fonts: Fonts, measure: bool) Error![]c
     if (b.marker_text.len > 0 and b.style.list_style_position == .inside) {
         const font = fontOf(b.style);
         const m = fonts.metrics(font);
-        try items.append(l.a, .{ .kind = .marker, .box = id, .text = b.marker_text, .w = fonts.advance(font, b.marker_text), .h = m.ascent + m.descent, .baseline = m.ascent });
+        try items.append(sa(l), .{ .kind = .marker, .box = id, .text = b.marker_text, .w = fonts.advance(font, b.marker_text), .h = m.ascent + m.descent, .baseline = m.ascent });
     }
     var prev_space = true; // a line starts as if after a space
     try collectInto(l, id, fonts, &items, &prev_space, measure);
@@ -2367,33 +2383,33 @@ fn collectInto(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item),
         if (cb.isFloat()) {
             // Placed when the line is built: an atomic item of no width
             // stands in so the position is known.
-            try items.append(l.a, .{ .kind = .atomic, .box = c, .w = 0, .h = 0 });
+            try items.append(sa(l), .{ .kind = .atomic, .box = c, .w = 0, .h = 0 });
             continue;
         }
         switch (cb.kind) {
             .text => try textItems(l, c, fonts, items, prev_space),
             .br => {
-                try items.append(l.a, .{ .kind = .br, .box = c });
+                try items.append(sa(l), .{ .kind = .br, .box = c });
                 prev_space.* = true;
             },
             .inline_box => {
                 const cb_w = containerWidth(l, c);
                 _ = resolveEdges(cb, cb_w);
                 cb.margin = .{ 0, resolveLA(cb.style.margin[1], cb_w) orelse 0, 0, resolveLA(cb.style.margin[3], cb_w) orelse 0 };
-                try items.append(l.a, .{ .kind = .inline_open, .box = c, .w = cb.margin[3] + cb.border[3] + cb.padding[3] });
+                try items.append(sa(l), .{ .kind = .inline_open, .box = c, .w = cb.margin[3] + cb.border[3] + cb.padding[3] });
                 try collectInto(l, c, fonts, items, prev_space, measure);
-                try items.append(l.a, .{ .kind = .inline_close, .box = c, .w = cb.margin[1] + cb.border[1] + cb.padding[1] });
+                try items.append(sa(l), .{ .kind = .inline_close, .box = c, .w = cb.margin[1] + cb.border[1] + cb.padding[1] });
             },
             .inline_block, .block, .anon_block => {
                 if (measure) {
                     const pw = try preferredWidths(l, c);
                     const m = (resolveLA(cb.style.margin[1], 0) orelse 0) + (resolveLA(cb.style.margin[3], 0) orelse 0);
-                    try items.append(l.a, .{ .kind = .atomic, .box = c, .w = pw.max + m, .min_w = pw.min + m });
+                    try items.append(sa(l), .{ .kind = .atomic, .box = c, .w = pw.max + m, .min_w = pw.min + m });
                     prev_space.* = false;
                     continue;
                 }
                 const size = try layoutAtomic(l, c);
-                try items.append(l.a, .{ .kind = .atomic, .box = c, .w = size.w, .h = size.h, .baseline = size.baseline });
+                try items.append(sa(l), .{ .kind = .atomic, .box = c, .w = size.w, .h = size.h, .baseline = size.baseline });
                 prev_space.* = false;
             },
             else => {},
@@ -2424,7 +2440,7 @@ fn textItems(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item), p
     while (i < text.len) {
         const c = text[i];
         if (c == '\n' and keep_newlines) {
-            try items.append(l.a, .{ .kind = .newline, .box = id });
+            try items.append(sa(l), .{ .kind = .newline, .box = id });
             prev_space.* = true;
             i += 1;
             continue;
@@ -2433,13 +2449,13 @@ fn textItems(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item), p
             if (preserve) {
                 // Every space is kept; a tab is eight of them.
                 const s: []const u8 = if (c == '\t') "        " else " ";
-                try items.append(l.a, .{ .kind = .space, .box = id, .text = s, .w = fonts.advance(font, s), .h = m.ascent + m.descent, .baseline = m.ascent, .no_break = no_break });
+                try items.append(sa(l), .{ .kind = .space, .box = id, .text = s, .w = fonts.advance(font, s), .h = m.ascent + m.descent, .baseline = m.ascent, .no_break = no_break });
                 i += 1;
                 continue;
             }
             var j = i;
             while (j < text.len and (text[j] == ' ' or text[j] == '\t' or text[j] == '\n' or text[j] == '\r' or text[j] == 0x0c)) j += 1;
-            if (!prev_space.*) try items.append(l.a, .{ .kind = .space, .box = id, .text = " ", .w = fonts.advance(font, " "), .h = m.ascent + m.descent, .baseline = m.ascent, .no_break = no_break });
+            if (!prev_space.*) try items.append(sa(l), .{ .kind = .space, .box = id, .text = " ", .w = fonts.advance(font, " "), .h = m.ascent + m.descent, .baseline = m.ascent, .no_break = no_break });
             prev_space.* = true;
             i = j;
             continue;
@@ -2455,7 +2471,7 @@ fn textItems(l: *Layout, id: BoxId, fonts: Fonts, items: *std.ArrayList(Item), p
             if (isCjk(cp)) break;
         }
         const word = text[i..j];
-        try items.append(l.a, .{ .kind = .text, .box = id, .text = word, .w = fonts.advance(font, word), .h = m.ascent + m.descent, .baseline = m.ascent, .no_break = no_break });
+        try items.append(sa(l), .{ .kind = .text, .box = id, .text = word, .w = fonts.advance(font, word), .h = m.ascent + m.descent, .baseline = m.ascent, .no_break = no_break });
         prev_space.* = false;
         i = j;
     }
@@ -2717,12 +2733,56 @@ const Pending = struct {
 
 /// Lay out the inline content of block container `id` into line
 /// boxes; returns the content height.
-fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
+const scratch_size: usize = 2 << 20;
+
+/// The scratch stack, falling back to the arena when it is full.
+fn sa(l: *Layout) std.mem.Allocator {
+    return .{ .ptr = l, .vtable = &scratch_vtable };
+}
+const scratch_vtable: std.mem.Allocator.VTable = .{ .alloc = scratchAlloc, .resize = scratchResize, .remap = scratchRemap, .free = scratchFree };
+fn scratchOwns(l: *Layout, mem: []u8) bool {
+    const p = @intFromPtr(mem.ptr);
+    return p >= @intFromPtr(l.scratch_buf.ptr) and p < @intFromPtr(l.scratch_buf.ptr) + l.scratch_buf.len;
+}
+pub var stat_scratch_fallbacks: usize = 0;
+pub var stat_scratch_peak: usize = 0;
+fn scratchAlloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+    const l: *Layout = @ptrCast(@alignCast(ctx));
+    if (l.scratch_fba.allocator().rawAlloc(n, alignment, ra)) |p| {
+        stat_scratch_peak = @max(stat_scratch_peak, l.scratch_fba.end_index);
+        return p;
+    }
+    stat_scratch_fallbacks += 1;
+    return l.a.rawAlloc(n, alignment, ra);
+}
+fn scratchResize(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+    const l: *Layout = @ptrCast(@alignCast(ctx));
+    return if (scratchOwns(l, mem)) l.scratch_fba.allocator().rawResize(mem, alignment, new_len, ra) else l.a.rawResize(mem, alignment, new_len, ra);
+}
+fn scratchRemap(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+    const l: *Layout = @ptrCast(@alignCast(ctx));
+    return if (scratchOwns(l, mem)) l.scratch_fba.allocator().rawRemap(mem, alignment, new_len, ra) else l.a.rawRemap(mem, alignment, new_len, ra);
+}
+fn scratchFree(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) void {
+    const l: *Layout = @ptrCast(@alignCast(ctx));
+    if (scratchOwns(l, mem)) l.scratch_fba.allocator().rawFree(mem, alignment, ra) else l.a.rawFree(mem, alignment, ra);
+}
+
+/// Counts for a tool's census: inline layouts run, lines made, and
+/// lines made into a list that had no room (a fresh list, or growth).
+pub var stat_inline_layouts: usize = 0;
+pub var stat_lines: usize = 0;
+pub var stat_line_growth: usize = 0;
+
+noinline fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
+    stat_inline_layouts += 1;
     const b = l.box(id);
     const st = b.style;
     const cx = b.contentX();
     const cw = b.contentW();
     var y = b.contentY();
+    const mark = l.scratch_fba.end_index;
+    defer l.scratch_fba.end_index = mark;
     const items = try collectItems(l, id, l.fonts);
     const strut_font = fontOf(st);
     const strut_m = l.fonts.metrics(strut_font);
@@ -2742,7 +2802,7 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
         var x: f64 = line_x;
         pending.clearRetainingCapacity();
         line_open.clearRetainingCapacity();
-        try line_open.appendSlice(l.a, open_stack.items);
+        try line_open.appendSlice(sa(l), open_stack.items);
         var last_break: ?usize = null; // index in pending after which we may break
         var forced = false;
         var consumed = i;
@@ -2756,7 +2816,7 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
             }
             if (it.kind == .atomic and l.get(it.box).isFloat()) {
                 // A float already placed (this line was re-run) stays.
-                if (!l.get(it.box).laid_out) try float_here.append(l.a, it.box);
+                if (!l.get(it.box).laid_out) try float_here.append(sa(l), it.box);
                 consumed += 1;
                 continue;
             }
@@ -2781,9 +2841,9 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
                     consumed = pending.items[keep - 1].item_index_after;
                     pending.items.len = keep;
                     line_open.clearRetainingCapacity();
-                    try line_open.appendSlice(l.a, open_stack.items);
+                    try line_open.appendSlice(sa(l), open_stack.items);
                     for (pending.items) |pi| {
-                        if (pi.item.kind == .inline_open) try line_open.append(l.a, pi.item.box);
+                        if (pi.item.kind == .inline_open) try line_open.append(sa(l), pi.item.box);
                         if (pi.item.kind == .inline_close and line_open.items.len > 0) line_open.items.len -= 1;
                     }
                 } else break;
@@ -2797,11 +2857,11 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
                     continue;
                 };
             }
-            try pending.append(l.a, .{ .item = it, .x = x, .item_index_after = consumed + 1 });
+            try pending.append(sa(l), .{ .item = it, .x = x, .item_index_after = consumed + 1 });
             x += it.w;
             if (it.kind == .space and !it.no_break) last_break = pending.items.len - 1;
             if (it.kind == .text and endsWithCjk(it.text)) last_break = pending.items.len - 1;
-            if (it.kind == .inline_open) try line_open.append(l.a, it.box);
+            if (it.kind == .inline_open) try line_open.append(sa(l), it.box);
             if (it.kind == .inline_close) {
                 if (line_open.items.len > 0) line_open.items.len -= 1;
             }
@@ -2945,12 +3005,14 @@ fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
         // its open (or the line start) to its close (or the line end).
         try spanFragments(l, id, first_frag, line_x + shift_x, line_x + shift_x + used + extra_so_far, y, line_h, baseline);
         used = used;
+        stat_lines += 1;
+        if (b.lines.items.len == b.lines.capacity) stat_line_growth += 1;
         try b.lines.append(l.a, .{ .x = line_x, .y = y, .w = avail, .h = line_h, .baseline = baseline, .first_frag = first_frag, .frag_count = @intCast(l.fragments.len - first_frag) });
         if (b.first_baseline == null) b.first_baseline = baseline;
         b.last_baseline = baseline;
         // Inline boxes still open carry to the next line.
         open_stack.clearRetainingCapacity();
-        try open_stack.appendSlice(l.a, line_open.items);
+        try open_stack.appendSlice(sa(l), line_open.items);
         y += line_h;
         first_line = false;
         if (i >= items.len and !forced) break;
@@ -3005,12 +3067,15 @@ fn baselineShift(st: *const Computed, h: f64, baseline: f64) f64 {
 /// For each inline box with content on this line, a span fragment from
 /// its open fragment (or the line start, when it opened earlier) to its
 /// close fragment (or the line end).
-fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64, line_end: f64, y: f64, h: f64, baseline: f64) Error!void {
+noinline fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64, line_end: f64, y: f64, h: f64, baseline: f64) Error!void {
     _ = container;
     // The line's fragments are the range [first_frag, last_frag) of the
     // list; the spans appended below join the same list past it.
     const last_frag = l.fragments.len;
     // Boxes seen on this line, in order of first appearance.
+    // The line's boxes seen so far: scratch, released with the line.
+    const mark = l.scratch_fba.end_index;
+    defer l.scratch_fba.end_index = mark;
     var seen: std.ArrayList(BoxId) = .empty;
     for (first_frag..last_frag) |fi| {
         const f = l.fragments.get(fi);
@@ -3026,14 +3091,14 @@ fn spanFragments(l: *Layout, container: BoxId, first_frag: u32, line_start: f64,
             for (seen.items) |s| if (s == pid) {
                 known = true;
             };
-            if (!known) try seen.append(l.a, pid);
+            if (!known) try seen.append(sa(l), pid);
         }
         if (f.kind == .inline_open or f.kind == .inline_close) {
             var known = false;
             for (seen.items) |s| if (s == f.box) {
                 known = true;
             };
-            if (!known) try seen.append(l.a, f.box);
+            if (!known) try seen.append(sa(l), f.box);
         }
     }
     for (seen.items) |bid| {
@@ -3131,6 +3196,8 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
     const cross_gap = resolveLP(if (row) st.row_gap else st.column_gap, content_w);
 
     // The items, in `order`, absolutes set aside.
+    const mark = l.scratch_fba.end_index;
+    defer l.scratch_fba.end_index = mark;
     var items: std.ArrayList(FlexItem) = .empty;
     for (container.children.items) |c| {
         const cb = l.box(c);
@@ -3207,7 +3274,7 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
         min = @max(0, min);
         max = @max(min, max);
         const hyp = @min(@max(base.?, min), max);
-        try items.append(l.a, .{ .box = c, .base = base.?, .hyp = hyp, .min = min, .max = max, .outer = extras + main_margins, .auto_main = auto_main });
+        try items.append(sa(l), .{ .box = c, .base = base.?, .hyp = hyp, .min = min, .max = max, .outer = extras + main_margins, .auto_main = auto_main });
     }
     // `order`: a stable sort on the property.
     std.mem.sort(FlexItem, items.items, l, struct {
@@ -3220,7 +3287,7 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
     var lines: std.ArrayList(FlexLine) = .empty;
     if (items.items.len > 0) {
         if (st.flex_wrap == .nowrap or main_avail == null) {
-            try lines.append(l.a, .{ .first = 0, .count = items.items.len });
+            try lines.append(sa(l), .{ .first = 0, .count = items.items.len });
         } else {
             var first: usize = 0;
             var used: f64 = 0;
@@ -3228,12 +3295,12 @@ fn layoutFlexContents(l: *Layout, id: BoxId, cb_w: f64) Error!f64 {
                 const outer = it.hyp + it.outer;
                 const with_gap = if (i > first) used + main_gap + outer else outer;
                 if (i > first and with_gap > main_avail.? + 0.01) {
-                    try lines.append(l.a, .{ .first = first, .count = i - first });
+                    try lines.append(sa(l), .{ .first = first, .count = i - first });
                     first = i;
                     used = outer;
                 } else used = with_gap;
             }
-            try lines.append(l.a, .{ .first = first, .count = items.items.len - first });
+            try lines.append(sa(l), .{ .first = first, .count = items.items.len - first });
         }
     }
 
@@ -3510,17 +3577,68 @@ fn purgeSubtree(l: *Layout, root_id: BoxId) Error!void {
     try resetLines(l, root_id);
 }
 
-/// A subtree's lines go, and the fragments they held die with them.
+/// A subtree's lines go, and the fragments they held die with them —
+/// and when the dead ones are the store's newest, the store shrinks
+/// back over them. A subtree laid out again was most often laid out
+/// last (a container measuring its items, then placing them), so its
+/// fragments sit at the end; kept, they piled up to 662,000 dead
+/// against 6,600 live on the Guardian's front page, 40 MB the page
+/// domain did not have (2026-09-28).
 fn resetLines(l: *Layout, id: BoxId) Error!void {
-    const b = l.box(id);
-    for (b.lines.items) |ln| for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
-        l.fragments.at(fi).dead = true;
+    var low: usize = l.fragments.len;
+    try resetLinesFrom(l, id, &low);
+    var i = low;
+    while (i < l.fragments.len) : (i += 1) if (!l.fragments.get(i).dead) break;
+    if (i == l.fragments.len) {
+        l.dead_fragments -= @min(l.dead_fragments, l.fragments.len - low);
+        l.fragments.len = low;
+        return;
+    }
+    // Dead ones under live ones (a container's items laid out in turn,
+    // then again): once they are most of the store, pack the live ones
+    // down and renumber every line — 175,000 dead against 6,600 live
+    // on the Guardian's front page were 11 MB (2026-09-28).
+    if (l.fragments.len >= 4096 and l.dead_fragments > l.fragments.len / 2) compactFragments(l);
+}
+
+/// The live fragments packed down in order, every line's first index
+/// rewritten (a line's fragments are consecutive, dead or live together).
+fn compactFragments(l: *Layout) void {
+    const mark = l.scratch_fba.end_index;
+    defer l.scratch_fba.end_index = mark;
+    const n = l.fragments.len;
+    const dead_before = sa(l).alloc(u32, n) catch return;
+    var dead: u32 = 0;
+    for (0..n) |i| {
+        dead_before[i] = dead;
+        if (l.fragments.get(i).dead) dead += 1;
+    }
+    for (0..l.boxes.len) |bi| for (l.boxes.at(bi).lines.items) |*ln| {
+        if (ln.frag_count > 0) ln.first_frag -= dead_before[ln.first_frag];
     };
-    b.lines = .empty;
+    var w: usize = 0;
+    for (0..n) |r| {
+        const f = l.fragments.get(r).*;
+        if (f.dead) continue;
+        l.fragments.at(w).* = f;
+        w += 1;
+    }
+    l.fragments.len = w;
+    l.dead_fragments = 0;
+}
+
+fn resetLinesFrom(l: *Layout, id: BoxId, low: *usize) Error!void {
+    const b = l.box(id);
+    for (b.lines.items) |ln| {
+        if (ln.frag_count > 0) low.* = @min(low.*, ln.first_frag);
+        for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| l.fragments.at(fi).dead = true;
+        l.dead_fragments += ln.frag_count;
+    }
+    b.lines.clearRetainingCapacity();
     b.first_baseline = null;
     b.last_baseline = null;
     b.laid_out = false;
-    for (b.children.items) |c| try resetLines(l, c);
+    for (b.children.items) |c| try resetLinesFrom(l, c, low);
 }
 
 /// Whether `id` is `root_id` or below it.

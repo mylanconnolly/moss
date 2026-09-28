@@ -1266,15 +1266,41 @@ fn installImages(view: u64, buf: [*]u8) u64 {
         _ = usys.log(glog, "init: no img/ tier on this volume; store not installed");
         return 0;
     }
-    var installed: u64 = 0;
+    // Every digest this build names — the images, then the library's
+    // modules, in the order the loops below visit them — so the store can
+    // be pruned of earlier builds' before anything is written: a desktop
+    // disk reused across builds kept every build's images (content-
+    // addressed, never removed) until it was full, and then nothing of
+    // the new build could be installed at all (2026-09-28).
+    var nlive: usize = 0;
     inline for (std.enums.values(shared.ImageId)) |id| {
         if (shared.marcFind(blob, shared.imagePath(id))) |image| {
-            const digest = loader.digestHex(image);
+            if (nlive < live_digests.len) {
+                live_digests[nlive] = loader.digestHex(image);
+                nlive += 1;
+            }
+        }
+    }
+    var lit = shared.marcIter(blob);
+    while (lit.next()) |e| {
+        if (!std.mem.startsWith(u8, e.path, shared.lib_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
+        if (nlive < live_digests.len) {
+            live_digests[nlive] = loader.digestHex(e.data);
+            nlive += 1;
+        }
+    }
+    const pruned = pruneStore(view, buf, live_digests[0..nlive]);
+    var installed: u64 = 0;
+    var k: usize = 0;
+    inline for (std.enums.values(shared.ImageId)) |id| {
+        if (shared.marcFind(blob, shared.imagePath(id))) |image| {
+            const digest = if (k < nlive) live_digests[k] else loader.digestHex(image);
+            k += 1;
             var path: [4 + shared.img_digest_hex_len]u8 = undefined;
             @memcpy(path[0..4], "img/");
             @memcpy(path[4..], &digest);
             if (fsc.fsStat(view, buf, &path) == null) {
-                if (writeFile(view, buf, &path, image)) installed += 1;
+                if (writeFile(view, buf, &path, image)) installed += 1 else store_failed += 1;
             }
             writeManifest(view, buf, @tagName(id), &digest);
         }
@@ -1306,12 +1332,13 @@ fn installImages(view: u64, buf: [*]u8) u64 {
     while (it.next()) |e| {
         if (!std.mem.startsWith(u8, e.path, shared.lib_dir) or !std.mem.endsWith(u8, e.path, shared.unit_ext)) continue;
         const mname = e.path[shared.lib_dir.len .. e.path.len - shared.unit_ext.len];
-        const digest = loader.digestHex(e.data);
+        const digest = if (k < nlive) live_digests[k] else loader.digestHex(e.data);
+        k += 1;
         var path: [4 + shared.img_digest_hex_len]u8 = undefined;
         @memcpy(path[0..4], "img/");
         @memcpy(path[4..], &digest);
         if (fsc.fsStat(view, buf, &path) == null) {
-            if (writeFile(view, buf, &path, e.data)) installed += 1;
+            if (writeFile(view, buf, &path, e.data)) installed += 1 else store_failed += 1;
         }
         var scratch: [4 << 10]u8 = undefined;
         var sfba = std.heap.FixedBufferAllocator.init(&scratch);
@@ -1322,11 +1349,98 @@ fn installImages(view: u64, buf: [*]u8) u64 {
         out.append(a, '\n') catch continue;
         var mpath: [64]u8 = undefined;
         const mp = cat3(&mpath, "img/", mname, shared.img_manifest_ext);
-        _ = writeFile(view, buf, mp, out.items);
+        replaceManifest(view, buf, mp, out.items);
     }
     _ = fsc.fsSync(view);
-    if (installed > 0) _ = usys.log(glog, "init: installed images into img/ (content-addressed)");
+    // One line per boot: what changed, what failed, and the room left. A
+    // desktop disk reused across builds keeps every build's images (the
+    // store is content-addressed and never pruned) and filled up on
+    // 2026-09-28; the writes that failed then went unlogged.
+    var line: [160]u8 = undefined;
+    const st = fsc.fsStatfs(view);
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "init: store: {d} images installed, {d} stale removed, {d} manifests rewritten, {d} writes failed; {d} of {d} MB free", .{
+        installed,
+        pruned,
+        store_rewritten,
+        store_failed,
+        if (st) |x| x.free_blocks * 4096 / (1 << 20) else 0,
+        if (st) |x| x.total_blocks * 4096 / (1 << 20) else 0,
+    }) catch "init: store installed");
     return installed;
+}
+
+var store_failed: u64 = 0;
+var store_rewritten: u64 = 0;
+var live_digests: [256][shared.img_digest_hex_len]u8 = undefined;
+var store_names: [shared.fs_list_max]u8 = undefined;
+
+/// Remove from `img/` what this build does not name: the digests of
+/// earlier builds' images and modules, and the leftover of a manifest
+/// replacement that never finished. Manifests and anything else stay.
+fn pruneStore(view: u64, buf: [*]u8, live: []const [shared.img_digest_hex_len]u8) u64 {
+    const n = fsc.fsList(view, buf, "img") orelse {
+        _ = usys.log(glog, "init: store: img/ could not be listed");
+        return 0;
+    };
+    const k: usize = @intCast(@min(n, store_names.len));
+    @memcpy(store_names[0..k], buf[0..k]);
+    var removed: u64 = 0;
+    var it = std.mem.splitScalar(u8, store_names[0..k], '\n');
+    while (it.next()) |name| {
+        const stale = if (name.len == shared.img_digest_hex_len and isHexName(name)) blk: {
+            for (live) |d| if (std.mem.eql(u8, &d, name)) break :blk false;
+            break :blk true;
+        } else std.mem.endsWith(u8, name, ".new");
+        if (!stale) continue;
+        var path: [96]u8 = undefined;
+        const p = cat3(&path, "img/", name, "");
+        switch (fsc.fsDelete(view, buf, p)) {
+            .ok => removed += 1,
+            .err => |e| {
+                var lb: [128]u8 = undefined;
+                _ = usys.log(glog, std.fmt.bufPrint(&lb, "init: store: could not remove {s}: {s}", .{ name, @tagName(e) }) catch "init: store: remove failed");
+            },
+        }
+    }
+    return removed;
+}
+
+fn isHexName(name: []const u8) bool {
+    for (name) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
+}
+
+/// A small file's text (a manifest) into `out`; null when absent.
+fn readSmall(view: u64, buf: [*]u8, path: []const u8, out: []u8) ?[]const u8 {
+    const fd = switch (fsc.fsOpen(view, buf, path, 0)) {
+        .fd => |fd| fd,
+        .err => return null,
+    };
+    defer fsc.fsClose(view, fd);
+    const n = fsc.fsRead(view, fd, out.len) orelse return null;
+    const k: usize = @intCast(@min(n, out.len));
+    @memcpy(out[0..k], buf[0..k]);
+    return out[0..k];
+}
+
+/// Put `data` at `path` without a moment in which the file is empty or
+/// half-written: an unchanged file is left alone (the usual boot: the
+/// same build again), a changed one is written beside it and renamed
+/// over it, which the filesystem does in one step. `writeFile` in place
+/// truncates first, and the browser on an old desktop disk found the
+/// page image's manifest at 0 bytes: the disk was full, the truncate
+/// had gone through and the write had not (2026-09-28).
+fn replaceManifest(view: u64, buf: [*]u8, path: []const u8, data: []const u8) void {
+    var have: [4096]u8 = undefined;
+    if (readSmall(view, buf, path, &have)) |old| if (std.mem.eql(u8, old, data)) return;
+    var tmp: [96]u8 = undefined;
+    const tp = cat3(&tmp, path, ".new", "");
+    if (!writeFile(view, buf, tp, data) or !fsc.fsRename(view, buf, tp, path)) {
+        _ = fsc.fsDelete(view, buf, tp);
+        store_failed += 1;
+        return;
+    }
+    store_rewritten += 1;
 }
 
 /// The manifest is a record like a unit file's, with the image named by
@@ -1372,7 +1486,7 @@ fn writeManifest(view: u64, buf: [*]u8, name: []const u8, digest: *const [shared
     out.append(a, '\n') catch return;
     var mpath: [64]u8 = undefined;
     const mp = cat3(&mpath, "img/", name, shared.img_manifest_ext);
-    _ = writeFile(view, buf, mp, out.items);
+    replaceManifest(view, buf, mp, out.items);
 }
 
 fn cat3(out: []u8, a: []const u8, b: []const u8, c: []const u8) []const u8 {
