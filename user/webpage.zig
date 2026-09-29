@@ -259,8 +259,8 @@ fn maybeReclaim() void {
     const nodes_before = if (page.doc) |d| d.nodes.len else 0;
     const freed = scripts.reclaim();
     reclaim_at = @max(8 << 20, doc_heap.live * 2);
-    var line: [256]u8 = undefined;
-    var rep: [160]u8 = undefined;
+    var line: [512]u8 = undefined;
+    var rep: [256]u8 = undefined;
     _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: reclaimed {d} of {d} nodes: document {d} KB to {d} KB; script heap {d} KB, bookkeeping {s}", .{ freed, nodes_before, before / 1024, doc_heap.live / 1024, vm.heap.live_bytes / 1024, js_meta.report(&rep) }) catch "webpage: reclaimed");
 }
 

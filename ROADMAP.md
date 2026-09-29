@@ -1134,7 +1134,13 @@ supervises), and memory history per unit beside the CPU one.
       GitHub fills the 32 MB bookkeeping heap on its eighth script —
       module sources held twice (record and code: 6 MB), property
       tables and slots (6), lazily compiled code (4), regexps (2) are
-      the levers, in that order; the bookkeeping heap's fragmentation
+      the levers, in that order — (r) sources are packed now
+      (2026-09-28: `bytecode.Source` in 16 KB LZ4 blocks, unpacked by
+      span for a lazy compile or `toString`; GitHub's module text 6 MB
+      to 3.4), and a shape builds its lookup table on its fourth
+      lookup, not its first (8,220 tables on GitHub, 2.6 MB, were for
+      shapes passed through once) — GitHub's eight scripts run within
+      the heap now; the bookkeeping heap's fragmentation
       (free runs of a few KB after a page has run a while: a segregated
       design would bound it); the sites' own errors (the BBC's style
       target, Apple's `split` and `replace` on undefined, GitHub's

@@ -98,6 +98,8 @@ pub const dictionary_threshold: u32 = 32;
 /// Was 8: a React site made five thousand tables for its literals'
 /// shapes, 1.4 MB of maps for objects of eight to fifteen keys.
 pub const table_threshold: u32 = 16;
+/// Chain walks a shape past the threshold answers before it builds its table.
+pub const table_after: u8 = 4;
 
 pub const Shape = extern struct {
     header: Cell,
@@ -108,7 +110,13 @@ pub const Shape = extern struct {
     /// This object's layout is its own: a dictionary shape's `table` is
     /// authoritative and transitions are not shared.
     dictionary: bool = false,
-    _pad: u8 = 0,
+    /// Lookups this shape has answered by walking its chain, up to
+    /// `table_after`: a table is built for a shape that is asked again
+    /// and again, not for every shape on the way to one (an object
+    /// built one property at a time passes through one shape per
+    /// property, each looked up once — 8,220 tables on GitHub's page,
+    /// 2.6 MB, 2026-09-28).
+    lookups: u8 = 0,
     key_index: u32 = 0, // for key_kind 3
     key_cell: ?*Cell, // for key kinds 1 and 2
     /// The slot the key occupies; the shape's property count is slot + 1.
@@ -328,8 +336,11 @@ pub const Objects = struct {
     pub fn lookup(os: *Objects, shape: *Shape, key: Key) Error!?Table.Entry {
         if (shape.table) |t| return t.map.get(key);
         if (shape.count >= table_threshold and !shape.dictionary) {
-            try os.buildTable(shape);
-            return shape.table.?.map.get(key);
+            if (shape.lookups >= table_after) {
+                try os.buildTable(shape);
+                return shape.table.?.map.get(key);
+            }
+            shape.lookups += 1;
         }
         var s: ?*Shape = shape;
         while (s) |sh| : (s = sh.parent) {

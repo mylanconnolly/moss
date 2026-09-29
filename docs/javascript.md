@@ -266,6 +266,17 @@ local it assigns (`e = ok && k(e)`) no longer compiles the value into
 the local's own register — a staged expression wrote its first part
 there before the rest ran.
 
+- **Sources are packed.** `bytecode.Source` keeps a text of 16 KB or
+  more as LZ4 blocks of 16 KB (`Source.pack_from`, `Source.block`) and
+  unpacks by span: `view(lo, hi, a)` for a parser (a full-length slice
+  valid around the span; `Parser.initAt` starts there), `slice` and
+  `read` for a copy, `lineCol` for a position. An embedder that reads
+  `Source.text` directly finds it empty for a packed source; `len` is
+  the text's length either way. Minified code packs about two to one.
+- **A shape's table waits for the fourth lookup** (`object.table_after`):
+  the shapes an object passes through while it is built are looked up
+  once each and got a table apiece before.
+
 ## Measuring it
 
 ```

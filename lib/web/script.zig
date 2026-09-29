@@ -1772,7 +1772,7 @@ pub const Page = struct {
             var nb: [96]u8 = undefined;
             const fname: []const u8 = if (d.name) |n| (js.builtins.utf8Buf(vm, n, &nb) catch "?") else "(anonymous)";
             if (d.source) |src| {
-                const lc = lineCol(src.text, d.posOf(f.pc));
+                const lc = src.lineCol(d.posOf(f.pc));
                 var sn: [96]u8 = undefined;
                 const sname = if (src.name.len > 0) src.name[0..@min(src.name.len, sn.len)] else "script";
                 @memcpy(sn[0..sname.len], sname);
@@ -1799,25 +1799,20 @@ pub const Page = struct {
         const ed = o.internal(js.vm.ErrorData);
         const code = ed.code orelse return null;
         const src = code.data.source orelse return null;
-        const pos: usize = @min(ed.pos, src.text.len);
-        var line: usize = 1;
-        var col: usize = 1;
-        for (src.text[0..pos]) |ch| {
-            if (ch == '\n') {
-                line += 1;
-                col = 1;
-            } else col += 1;
-        }
+        const pos: usize = @min(ed.pos, src.len);
+        const lc = src.lineCol(pos);
         const from = pos -| 60;
-        const to = @min(src.text.len, pos + 60);
+        const to = @min(src.len, pos + 60);
+        var raw: [128]u8 = undefined;
+        const got = src.read(from, to, &raw);
         var snippet_buf: [128]u8 = undefined;
         var n: usize = 0;
-        for (src.text[from..to]) |ch| {
+        for (got) |ch| {
             if (n >= snippet_buf.len) break;
             snippet_buf[n] = if (ch == '\n' or ch == '\r' or ch == '\t') ' ' else ch;
             n += 1;
         }
-        return std.fmt.bufPrint(buf, " at {s}:{d}:{d} «{s}»", .{ src.name[0..@min(src.name.len, 80)], line, col, snippet_buf[0..n] }) catch null;
+        return std.fmt.bufPrint(buf, " at {s}:{d}:{d} «{s}»", .{ src.name[0..@min(src.name.len, 80)], lc[0], lc[1], snippet_buf[0..n] }) catch null;
     }
 
     pub fn log(p: *Page, level: Level, text: []const u8) void {

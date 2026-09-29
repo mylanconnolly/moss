@@ -2008,8 +2008,10 @@ pub const Vm = struct {
             const f = o.internal(FunctionData);
             if (f.code) |code| {
                 const d = code.data;
-                if (d.source) |src| if (d.end > d.start and d.end <= src.text.len) {
-                    return vm.str(src.text[d.start..d.end]);
+                if (d.source) |src| if (d.end > d.start and d.end <= src.len) {
+                    const text = try src.slice(d.start, d.end, vm.meta);
+                    defer vm.meta.free(text);
+                    return vm.str(text);
                 };
             }
             const name = try vm.get(o, .{ .atom = vm.atoms.name }, o.asValue());

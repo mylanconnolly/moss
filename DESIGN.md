@@ -7849,6 +7849,43 @@ run; a wrapper's lifetime is its node's tree membership or a script's
 reference, never the page's; and string ownership must be a bit on the
 record, not a convention.
 
+**Packed sources (as built, 2026-09-28).** GitHub's census had 6 MB of
+module text in the bookkeeping heap: the text a script's code keeps for
+`Function.prototype.toString` and for compiling its stubs on first
+call. `bytecode.Source` keeps a text of 16 KB or more packed now — LZ4
+(`lib/lz4`, mossfs's) in 16 KB blocks, a block that would not shrink
+stored raw and marked so — and hands it out by the span asked for. A
+lazy compile gets a `view`: the blocks from the one holding the
+function's start through the one holding its end and a kilobyte after
+(the token after the closing brace, the source right after it that says
+whether it is called on the spot), unpacked into the compile's scratch,
+and returned to the parser as a slice of the full length whose pointer
+is the buffer's less the first block's offset — so every position in
+the tree, the code and the errors stays absolute, and nothing is read
+outside the unpacked run: `Parser.initAt` starts the lexer at the
+function without the hashbang look at byte zero. `toString` copies its
+span (`slice`); an error's snippet reads through a block-sized stack
+buffer (`read`); line and column stream the blocks up to the position
+(`lineCol`). The compiler carries the plain text it is compiling
+(`Compiler.text`: the script's, or the unpacked span's) for its own
+looks at the source. A small text stays plain and answers the same
+calls. Minified code packs about two to one in 16 KB blocks (GitHub's
+module text 6 MB to 3.4); the unpacking costs a lazy compile one or two
+blocks. *And the shape tables.* The other 6 MB of GitHub's census were
+the object model's lookup tables — 8,220 of them, one per shape past
+sixteen properties on its first lookup. An object built one property at
+a time passes through one shape per property, each looked up once on
+the way (the next assignment asks whether the key exists), and every
+one of those intermediate shapes built a table it never used again. A
+shape counts the lookups it answers by walking its chain and builds its
+table on the fourth (`Shape.lookups`, `object.table_after`); the tables
+left GitHub's top sites, and its eight scripts run with 2.9 MB of
+bookkeeping to spare where the heap was full. *Lessons:* absolute
+positions survive a partial buffer when the slice's pointer carries the
+offset; the alternative — a base offset in every position — touches
+every line of the parser; and a cache built on first use is built for
+every shape on the road to the one that is used.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

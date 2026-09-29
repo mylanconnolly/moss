@@ -144,6 +144,15 @@ pub const Parser = struct {
         return p;
     }
 
+    /// A parser that starts at `start` and never reads before it: for
+    /// a function parsed again from a source whose text is unpacked
+    /// only around that span (`bytecode.Source.view`).
+    pub fn initAt(a: std.mem.Allocator, src: []const u8, start: u32, opts: Options) Parser {
+        var p: Parser = .{ .a = a, .lex = .{ .src = src, .a = a, .pos = start }, .tok = undefined, .module = opts.module, .strict = opts.strict or opts.module, .opts = opts };
+        p.lex.module = opts.module;
+        return p;
+    }
+
     fn checkRegExpLiteral(p: *Parser, pattern: []const u8, flags: []const u8, pos: u32) Error!void {
         var pat: std.ArrayList(u16) = .empty;
         defer pat.deinit(p.a);

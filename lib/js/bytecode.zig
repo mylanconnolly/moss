@@ -303,10 +303,182 @@ pub const Env = extern struct {
 pub const FunctionKind = enum(u8) { normal, arrow, method, getter, setter, class_constructor, derived_constructor, field_init, static_block, generator, async_function, async_generator, async_arrow };
 
 /// The source text a script's codes share, freed with the last of them.
+/// A big script's text is kept packed — LZ4 in 16 KB blocks, about four
+/// to one on minified code — and unpacked by the span a lazy compile
+/// or a `toString` wants; a small one stays plain. GitHub's page held
+/// 6 MB of module text in the bookkeeping heap (2026-09-28).
 pub const Source = struct {
+    /// The whole text when plain; empty when packed.
     text: []u8,
     refs: usize,
     name: []u8,
+    /// The text's length either way.
+    len: usize = 0,
+    blocks: ?Packed = null,
+
+    pub const block_bits = 14;
+    pub const block: usize = 1 << block_bits;
+    /// Texts under this stay plain.
+    pub const pack_from: usize = block;
+    pub const Packed = struct {
+        /// The blocks' bytes back to back; `offsets[i]..offsets[i+1]` is block i.
+        data: []u8,
+        offsets: []u32,
+        /// One bit per block: stored raw (LZ4 would not have made it smaller).
+        raw: []u8,
+    };
+
+    /// A view of `[lo, hi)` for a parser: the returned text is a slice
+    /// of the full length whose bytes are valid from the block holding
+    /// `lo` through the block holding `hi` and a margin after (the
+    /// token after a function's end, the source right after it), so
+    /// every position stays absolute. `buf` is what was unpacked (empty
+    /// for a plain source); it belongs to `a`.
+    pub const View = struct { text: []const u8, buf: []u8 };
+
+    pub fn init(a: std.mem.Allocator, text: []const u8, name: []const u8) std.mem.Allocator.Error!*Source {
+        const s = try a.create(Source);
+        errdefer a.destroy(s);
+        s.* = .{ .text = &.{}, .refs = 0, .name = try a.dupe(u8, name), .len = text.len };
+        errdefer a.free(s.name);
+        if (text.len < pack_from) {
+            s.text = try a.dupe(u8, text);
+            return s;
+        }
+        const lz4 = @import("../lz4.zig");
+        const n = (text.len + block - 1) / block;
+        var data = try a.alloc(u8, text.len + n * 16);
+        errdefer a.free(data);
+        const offsets = try a.alloc(u32, n + 1);
+        errdefer a.free(offsets);
+        const raw = try a.alloc(u8, (n + 7) / 8);
+        errdefer a.free(raw);
+        @memset(raw, 0);
+        var tbl: lz4.EncTable = undefined;
+        var op: usize = 0;
+        for (0..n) |i| {
+            offsets[i] = @intCast(op);
+            const plain = text[i * block .. @min(text.len, (i + 1) * block)];
+            // A block that does not shrink is kept as it is.
+            const room = data[op..];
+            const packed_len = lz4.compress(plain, room[0..@min(room.len, plain.len - 1)], &tbl);
+            if (packed_len) |pl| {
+                op += pl;
+            } else {
+                @memcpy(data[op .. op + plain.len], plain);
+                raw[i / 8] |= @as(u8, 1) << @intCast(i % 8);
+                op += plain.len;
+            }
+        }
+        offsets[n] = @intCast(op);
+        if (a.resize(data, op)) data = data[0..op] else {
+            const tight = try a.dupe(u8, data[0..op]);
+            a.free(data);
+            data = tight;
+        }
+        s.blocks = .{ .data = data, .offsets = offsets, .raw = raw };
+        return s;
+    }
+
+    pub fn deinit(s: *Source, a: std.mem.Allocator) void {
+        if (s.blocks) |p| {
+            a.free(p.data);
+            a.free(p.offsets);
+            a.free(p.raw);
+        }
+        a.free(s.text);
+        a.free(s.name);
+        a.destroy(s);
+    }
+
+    fn blockCount(s: *const Source) usize {
+        return (s.len + block - 1) / block;
+    }
+
+    /// Block `i` into `dst` (at least `block` bytes); the bytes written.
+    fn unpackBlock(s: *const Source, i: usize, dst: []u8) usize {
+        const p = s.blocks.?;
+        const bytes = p.data[p.offsets[i]..p.offsets[i + 1]];
+        const want = @min(block, s.len - i * block);
+        if (p.raw[i / 8] & (@as(u8, 1) << @intCast(i % 8)) != 0) {
+            @memcpy(dst[0..want], bytes[0..want]);
+            return want;
+        }
+        const lz4 = @import("../lz4.zig");
+        return lz4.decompress(bytes, dst[0..want]) catch 0;
+    }
+
+    pub fn view(s: *const Source, lo: usize, hi: usize, a: std.mem.Allocator) std.mem.Allocator.Error!View {
+        if (s.blocks == null) return .{ .text = s.text, .buf = &.{} };
+        const b0 = @min(lo, s.len -| 1) >> block_bits;
+        const last = @min(s.len, hi + 1024);
+        const b1 = @min(s.blockCount() - 1, (last -| 1) >> block_bits);
+        const buf = try a.alloc(u8, (b1 - b0 + 1) * block);
+        var i = b0;
+        while (i <= b1) : (i += 1) _ = s.unpackBlock(i, buf[(i - b0) * block ..]);
+        const base: [*]const u8 = @ptrFromInt(@intFromPtr(buf.ptr) - b0 * block);
+        return .{ .text = base[0..s.len], .buf = buf };
+    }
+
+    /// `[lo, hi)` copied into `out` (as much as fits); the bytes written.
+    pub fn read(s: *const Source, lo: usize, hi_in: usize, out: []u8) []u8 {
+        const hi = @min(hi_in, s.len);
+        if (lo >= hi) return out[0..0];
+        const n = @min(hi - lo, out.len);
+        if (s.blocks == null) {
+            @memcpy(out[0..n], s.text[lo .. lo + n]);
+            return out[0..n];
+        }
+        var tmp: [block]u8 = undefined;
+        var done: usize = 0;
+        while (done < n) {
+            const at = lo + done;
+            const bi = at >> block_bits;
+            const got = s.unpackBlock(bi, &tmp);
+            const off = at - bi * block;
+            if (off >= got) break;
+            const take = @min(n - done, got - off);
+            @memcpy(out[done .. done + take], tmp[off .. off + take]);
+            done += take;
+        }
+        return out[0..done];
+    }
+
+    /// `[lo, hi)` as a copy of its own, in `a`.
+    pub fn slice(s: *const Source, lo: usize, hi: usize, a: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        const out = try a.alloc(u8, @min(hi, s.len) -| lo);
+        return s.read(lo, hi, out);
+    }
+
+    /// The line and column (both from 1) of `pos`.
+    pub fn lineCol(s: *const Source, pos_in: usize) [2]usize {
+        const pos = @min(pos_in, s.len);
+        var line: usize = 1;
+        var col: usize = 1;
+        if (s.blocks == null) {
+            for (s.text[0..pos]) |ch| {
+                if (ch == '\n') {
+                    line += 1;
+                    col = 1;
+                } else col += 1;
+            }
+            return .{ line, col };
+        }
+        var tmp: [block]u8 = undefined;
+        var at: usize = 0;
+        while (at < pos) {
+            const got = s.unpackBlock(at >> block_bits, &tmp);
+            if (got == 0) break;
+            for (tmp[0..@min(got, pos - at)]) |ch| {
+                if (ch == '\n') {
+                    line += 1;
+                    col = 1;
+                } else col += 1;
+            }
+            at += got;
+        }
+        return .{ line, col };
+    }
 };
 
 pub const Position = struct { pc: u32, pos: u32 };
@@ -383,11 +555,7 @@ pub const CodeData = struct {
         a.free(d.param_slots);
         if (d.source) |src| {
             src.refs -= 1;
-            if (src.refs == 0) {
-                a.free(src.text);
-                a.free(src.name);
-                a.destroy(src);
-            }
+            if (src.refs == 0) src.deinit(a);
         }
     }
 
@@ -469,4 +637,40 @@ test "bytecode: an instruction is one word and the immediate round-trips" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(Insn));
     const i = Insn.withBc(.jmp, 0, 0x12345678);
     try std.testing.expectEqual(@as(u32, 0x12345678), i.bc());
+}
+
+test "source: a big text packs in blocks and reads back by span, view and line" {
+    const a = std.testing.allocator;
+    // Repetitive text, 100 KB: it packs; every 1000th byte a newline.
+    const n: usize = 100_000;
+    const text = try a.alloc(u8, n);
+    defer a.free(text);
+    for (text, 0..) |*c, i| c.* = if (i % 1000 == 999) '\n' else "function f(){ return a + b; }"[i % 29];
+    const s = try Source.init(a, text, "big.js");
+    defer s.deinit(a);
+    try std.testing.expect(s.blocks != null);
+    try std.testing.expect(s.blocks.?.data.len < n / 2);
+    try std.testing.expectEqual(n, s.len);
+    // A span across a block boundary, three ways.
+    const lo: usize = Source.block - 100;
+    const hi: usize = Source.block + 300;
+    const copy = try s.slice(lo, hi, a);
+    defer a.free(copy);
+    try std.testing.expectEqualStrings(text[lo..hi], copy);
+    var small: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(text[lo .. lo + 64], s.read(lo, hi, &small));
+    const v = try s.view(lo, hi, a);
+    defer a.free(v.buf);
+    try std.testing.expectEqual(n, v.text.len);
+    try std.testing.expectEqualStrings(text[lo..hi], v.text[lo..hi]);
+    try std.testing.expectEqualStrings(text[hi .. hi + 1024], v.text[hi .. hi + 1024]); // the margin after
+    // Lines: one every 1000 bytes.
+    const lc = s.lineCol(45_500);
+    try std.testing.expectEqual(@as(usize, 46), lc[0]);
+    try std.testing.expectEqual(@as(usize, 501), lc[1]);
+    // A small text stays plain and answers the same.
+    const small_src = try Source.init(a, "let x = 1;\nlet y = 2;", "s.js");
+    defer small_src.deinit(a);
+    try std.testing.expect(small_src.blocks == null);
+    try std.testing.expectEqual(@as(usize, 2), small_src.lineCol(15)[0]);
 }

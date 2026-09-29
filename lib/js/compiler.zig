@@ -88,16 +88,13 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
     an.eval_mode = opts.eval_env != null or opts.eval_ctx.eval;
     an.eval_ctx = opts.eval_ctx;
     try an.analyzeProgram(prog);
-    const source = try a.create(bytecode.Source);
-    source.* = .{ .text = try a.dupe(u8, src), .refs = 0, .name = try a.dupe(u8, opts.name) };
-    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = source, .eval_env = opts.eval_env, .eval_mode = an.eval_mode, .module_record = opts.module_record, .lazy = opts.lazy };
+    const source = try bytecode.Source.init(a, src, opts.name);
+    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = source, .text = src, .eval_env = opts.eval_env, .eval_mode = an.eval_mode, .module_record = opts.module_record, .lazy = opts.lazy };
     defer c.env_stack.deinit(scratch);
     defer c.pending_labels.deinit(scratch);
     const code = c.program(prog) catch |e| {
         if (source.refs == 0) {
-            a.free(source.text);
-            a.free(source.name);
-            a.destroy(source);
+            source.deinit(a);
         }
         return e;
     };
@@ -122,7 +119,9 @@ pub fn compileLazy(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings
     var arena = @import("scratch.zig").ChunkArena.init(scratch_opt orelse a, @min(scratch_chunk, @max(16 << 10, (d.end - d.start) * 8)));
     defer arena.deinit();
     const scratch = arena.allocator();
-    var p = parser.Parser.init(scratch, src.text, .{
+    // The text around the function, unpacked (a big script's is packed).
+    const view = try src.view(d.start, d.end, scratch);
+    var p = parser.Parser.initAt(scratch, view.text, if (d.lazy_form == 2) d.lazy_params else d.start, .{
         .module = d.module != null,
         .strict = d.strict,
         .in_function = true,
@@ -183,7 +182,7 @@ pub fn compileLazy(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings
     if (is_decl) if (f.name) |n| {
         _ = an.root.bindings.swapRemove(n);
     };
-    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = src, .eval_env = env, .eval_mode = true, .module_record = d.module, .lazy_root = true };
+    var c = Compiler{ .a = a, .scratch = scratch, .heap = h, .strings = strings, .an = &an, .source = src, .text = view.text, .eval_env = env, .eval_mode = true, .module_record = d.module, .lazy_root = true };
     defer c.env_stack.deinit(scratch);
     defer c.pending_labels.deinit(scratch);
     var fs = FuncState{ .func = an.root_func, .parent = null, .strict = an.root_func.strict, .env_base = 0 };
@@ -316,6 +315,9 @@ pub const Compiler = struct {
     strings: *string.Strings,
     an: *scope.Analysis,
     source: *bytecode.Source,
+    /// The text being compiled, whole for a script, the unpacked span of
+    /// a lazy compile: what the eligibility rules and a parse again read.
+    text: []const u8 = &.{},
     fs: *FuncState = undefined,
     scope: *Scope = undefined,
     /// Scopes with an environment on the chain, outermost first.
@@ -799,7 +801,7 @@ pub const Compiler = struct {
         while (sc) |s| : (sc = s.parent) {
             for (s.bindings.values()) |b| if (b.kind == .implicit and b.name.len > 0 and b.name[0] == '#') try privates.append(c.scratch, b.name);
         }
-        var p = parser.Parser.init(c.scratch, c.source.text, .{
+        var p = parser.Parser.initAt(c.scratch, c.text, if (f.kind != .normal) f.params_start else f.start, .{
             .module = c.module_record != null,
             .strict = f.strict,
             .in_function = true,
@@ -865,7 +867,7 @@ pub const Compiler = struct {
             stats.in_params += 1;
             return false;
         }
-        const text = c.source.text;
+        const text = c.text;
         // An arrow's `super` is the enclosing method's: compiled with it.
         if (f.is_arrow and std.mem.indexOf(u8, text[f.start..f.end], "super") != null) {
             stats.super_arrow += 1;
