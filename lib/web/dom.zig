@@ -21,7 +21,13 @@ pub const Namespace = enum(u8) { html, svg, mathml, other };
 /// Element state that is not an attribute: a checkbox or radio's
 /// checkedness once the user or a script has set it (the `checked`
 /// attribute is only the default until then).
-pub const Flags = packed struct(u8) { checked_set: bool = false, checked: bool = false, _pad: u6 = 0 };
+/// `freed`: the slot was reclaimed (`sweep`) and waits in `free_ids`;
+/// nothing reaches it until `add` hands it out again.
+/// `owns_strings`: the node's name, attribute names and values and
+/// namespace URI are its own allocations (a node a script made, or one
+/// adopted from a fragment parse), freed with it; a parser's node shares
+/// its strings with the token stream and static names.
+pub const Flags = packed struct(u8) { checked_set: bool = false, checked: bool = false, freed: bool = false, owns_strings: bool = false, _pad: u4 = 0 };
 
 pub const Kind = enum(u8) { document, doctype, element, text, comment, fragment };
 
@@ -64,6 +70,8 @@ pub const Document = struct {
     a: std.mem.Allocator,
     /// Chunked: an appended node never moves the others (`store`).
     nodes: store.Chunked(Node, 7) = .{},
+    /// Slots a `sweep` reclaimed, for `add` to use again.
+    free_ids: std.ArrayList(NodeId) = .empty,
     quirks: QuirksMode = .no_quirks,
 
     pub fn init(a: std.mem.Allocator) Error!Document {
@@ -81,8 +89,59 @@ pub const Document = struct {
     }
 
     fn add(d: *Document, n: Node) Error!NodeId {
+        if (d.free_ids.pop()) |id| {
+            d.nodes.at(id).* = n;
+            return id;
+        }
         try d.nodes.append(d.a, n);
         return @intCast(d.nodes.len - 1);
+    }
+
+    /// Set the bit of every node under `root` (`root` included), and of
+    /// every template's contents met on the way.
+    pub fn markTree(d: *const Document, root: NodeId, bits: []u8) void {
+        // Every kind of node, the root first (`Walker.next` is elements
+        // only, and `step` starts below the root).
+        bits[root / 8] |= @as(u8, 1) << @intCast(root % 8);
+        if (d.get(root).template_contents) |t| if (bits[t / 8] & (@as(u8, 1) << @intCast(t % 8)) == 0) d.markTree(t, bits);
+        var w = d.walk(root);
+        while (w.step()) |id| {
+            bits[id / 8] |= @as(u8, 1) << @intCast(id % 8);
+            if (d.get(id).template_contents) |t| if (bits[t / 8] & (@as(u8, 1) << @intCast(t % 8)) == 0) d.markTree(t, bits);
+        }
+    }
+
+    /// Reclaim every node whose bit is not set: its text and attribute
+    /// lists go back to the allocator, the slot waits in `free_ids`, and
+    /// `on_freed` hears of it (a host drops what it kept by the id). The
+    /// document node itself is never swept. Strings a node names (its
+    /// name, an attribute's name and value) may be shared or static and
+    /// are left alone.
+    pub fn sweep(d: *Document, bits: []const u8, ctx: *anyopaque, on_freed: ?*const fn (ctx: *anyopaque, id: NodeId) void) usize {
+        var freed: usize = 0;
+        var id: NodeId = 1;
+        while (id < d.nodes.len) : (id += 1) {
+            if (bits[id / 8] & (@as(u8, 1) << @intCast(id % 8)) != 0) continue;
+            const n = d.node(id);
+            if (n.flags.freed) continue;
+            if (n.flags.owns_strings) {
+                if (n.kind == .element or n.kind == .doctype) d.a.free(n.name);
+                for (n.attrs.items) |at| {
+                    d.a.free(at.name);
+                    d.a.free(at.value);
+                }
+                if (n.ns_uri) |u| d.a.free(u);
+                if (n.public_id) |x| d.a.free(x);
+                if (n.system_id) |x| d.a.free(x);
+            }
+            n.text.deinit(d.a);
+            n.attrs.deinit(d.a);
+            n.* = .{ .kind = .fragment, .flags = .{ .freed = true } };
+            d.free_ids.append(d.a, id) catch {};
+            if (on_freed) |f| f(ctx, id);
+            freed += 1;
+        }
+        return freed;
     }
 
     pub fn createElement(d: *Document, ns: Namespace, name: []const u8) Error!NodeId {
@@ -112,6 +171,9 @@ pub const Document = struct {
     pub fn setAttr(d: *Document, id: NodeId, name: []const u8, value: []const u8) Error!void {
         const n = d.node(id);
         for (n.attrs.items) |*at| if (std.mem.eql(u8, at.name, name)) {
+            // A node that owns its strings gives the old value back (a
+            // style attribute set on every frame is the common churn).
+            if (n.flags.owns_strings and at.value.ptr != value.ptr) d.a.free(at.value);
             at.value = value;
             return;
         };

@@ -131,7 +131,7 @@ const specs = [_]Spec{
     .{ .name = "acid3", .kind = .web, .pass = "acid3-test: PASS", .extra = "mshrun: script: acid3 done", .append = "profile=acid3", .timeout_s = 150 },
     .{ .name = "web", .kind = .web, .pass = "web-test: PASS", .extra = "mshrun: script: web fixtures ok", .append = "profile=web" },
     .{ .name = "browser", .kind = .browser, .pass = "browser-test: PASS", .extra = "browser: closed tabs=1", .always_extra = "page t1: load done", .extra2 = "topbar: exit note=logging out", .append = "profile=browser", .timeout_s = 180 },
-    .{ .name = "webpage", .kind = .web, .pass = "webpage-test: PASS", .extra = "webpagecli: page domains ok", .extra2 = "webpagecli: the page that read past its arena died, as it should", .append = "profile=webpage", .timeout_s = 150 },
+    .{ .name = "webpage", .kind = .web, .pass = "webpage-test: PASS", .extra = "webpagecli: page domains ok", .extra2 = "webpagecli: the page that read past its arena died, as it should", .extra3 = "webpage: reclaimed ", .append = "profile=webpage", .timeout_s = 200 },
     .{
         .name = "users",
         .kind = .blk,

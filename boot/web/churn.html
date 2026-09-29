@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>moss fixture: churn</title>
+</head>
+<body>
+<h1>A page that re-renders on a timer</h1>
+<div id="view"></div>
+<script>
+  // Two hundred re-renders of a thousand nodes: twenty megabytes of
+  // document through a page that reclaims at eight. A bump arena died
+  // of this on the BBC's front page (2026-09-28); a heap that reclaims
+  // detached nodes holds only the last render.
+  var n = 0, view = document.getElementById('view');
+  var t = setInterval(function () {
+    var s = '';
+    for (var i = 0; i < 1000; i++) s += '<p class="k' + i + '">' + (n * 1000 + i) + '</p>';
+    view.innerHTML = s;
+    if (++n >= 200) { clearInterval(t); document.title = 'churned ' + view.childNodes.length; }
+  }, 1);
+</script>
+</body>
+</html>

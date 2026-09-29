@@ -245,6 +245,9 @@ pub const Vm = struct {
     /// RangeError, with the frames still standing: the embedder says
     /// where the script was.
     on_budget: ?*const fn (vm: *Vm) void = null,
+    /// Called for a `.dom` object the collector frees: the embedder
+    /// forgets the wrapper.
+    dom_finalizer: ?*const fn (vm: *Vm, o: *Object) void = null,
     /// Bumped when a global lexical binding is added: global-site caches
     /// carry the epoch they were filled at.
     global_lex_epoch: usize = 1,

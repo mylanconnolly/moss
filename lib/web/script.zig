@@ -40,6 +40,15 @@ pub const Host = struct {
     ctx: *anyopaque,
     log: *const fn (ctx: *anyopaque, level: Level, text: []const u8) void,
     fetch: ?*const fn (ctx: *anyopaque, abs_url: []const u8) ?[]const u8 = null,
+    /// A fetched body is done with (the code keeps its own copy): the
+    /// host may free it.
+    release: ?*const fn (ctx: *anyopaque, body: []const u8) void = null,
+    /// A reclaim (`Page.reclaim`) asks the host for the nodes it holds
+    /// by id (a focus, a pressed control): `p.markRoot` each.
+    roots: ?*const fn (ctx: *anyopaque, p: *Page) void = null,
+    /// A node's slot was reclaimed: whatever the host kept by its id (a
+    /// decoded picture) goes.
+    swept: ?*const fn (ctx: *anyopaque, id: NodeId) void = null,
     /// An element's box in CSS pixels relative to the viewport (x, y, w,
     /// h), laid out fresh if the document changed; null when it has no box.
     rect: ?*const fn (ctx: *anyopaque, id: NodeId) ?[4]f64 = null,
@@ -789,6 +798,13 @@ pub const Page = struct {
     scroll_y: f64 = 0,
     /// Node wrappers by (document, node).
     wrappers: std.AutoHashMapUnmanaged(u64, *Object) = .empty,
+    /// The page's own document (the one `reclaim` sweeps), whatever
+    /// `doc` currently is.
+    main_doc: *dom.Document = undefined,
+    /// Slots the last `reclaim` freed, for the host's line.
+    reclaimed: usize = 0,
+    /// The bitmap of a reclaim in progress (`markRoot` sets bits in it).
+    reclaim_bits: ?[]u8 = null,
     protos: [interfaces.len]*Object = undefined,
     ctors: [interfaces.len]*Object = undefined,
     sym_listeners: *Symbol = undefined,
@@ -843,11 +859,12 @@ pub const Page = struct {
     /// Install the bindings into `vm` for `doc`. The VM's `host_data`
     /// becomes this page and its embedder roots this page's tables.
     pub fn init(p: *Page, vm: *Vm, doc: *dom.Document, a: std.mem.Allocator, host: Host) Error!void {
-        p.* = .{ .vm = vm, .doc = doc, .a = a, .host = host };
+        p.* = .{ .vm = vm, .doc = doc, .main_doc = doc, .a = a, .host = host };
         try p.docs.append(a, .{ .doc = doc, .arena = null, .is_html = true, .owner = null, .view = Value.undefined_, .url = "" });
         vm.host_data = p;
         vm.embedder_roots = .{ .ctx = p, .trace = trace };
         vm.on_budget = budgetHook;
+        vm.dom_finalizer = domFinalizer;
         p.sym_listeners = try vm.newSymbol(try vm.strings.fromUtf8("listeners"));
         p.sym_slot = try vm.newSymbol(try vm.strings.fromUtf8("slot"));
         p.sym_style = try vm.newSymbol(try vm.strings.fromUtf8("style"));
@@ -893,8 +910,15 @@ pub const Page = struct {
 
     fn trace(ctx: *anyopaque, m: *js.heap.Marker) void {
         const p: *Page = @ptrCast(@alignCast(ctx));
-        var it = p.wrappers.valueIterator();
-        while (it.next()) |o| m.markCell(o.*.cell());
+        // A wrapper is a root while its node is in the page's tree (its
+        // listeners and expandos live with the node); a detached node's
+        // wrapper lives only as long as a script holds it, and its node
+        // with it (`reclaim`). Other documents' wrappers all stay.
+        var it = p.wrappers.iterator();
+        while (it.next()) |e| {
+            const k = e.key_ptr.*;
+            if ((k >> 32) != 0 or p.inMainTree(@truncate(k))) m.markCell(e.value_ptr.*.cell());
+        }
         for (p.protos) |o| m.markCell(o.cell());
         for (p.ctors) |o| m.markCell(o.cell());
         m.markCell(&p.sym_listeners.header);
@@ -1344,6 +1368,81 @@ pub const Page = struct {
 
     // ------------------------------------------------------ wrappers
 
+    /// Whether the main document's node `id` is under its document node.
+    fn inMainTree(p: *const Page, id: NodeId) bool {
+        const d = p.main_doc;
+        if (id >= d.nodes.len) return false;
+        var cur: NodeId = id;
+        while (d.get(cur).parent) |par| cur = par;
+        return cur == dom.document_id;
+    }
+
+    /// A `.dom` object the collector freed: its wrapper entry goes, so a
+    /// reclaim can free the node and `wrap` makes a fresh one if the
+    /// node is ever touched again.
+    fn domFinalizer(vm: *Vm, o: *Object) void {
+        const p: *Page = @ptrCast(@alignCast(vm.host_data orelse return));
+        const s = o.internal(Slot);
+        if (s.kind != slot_node) return;
+        const k = (@as(u64, s.doc) << 32) | s.id;
+        if (p.wrappers.get(k)) |w| if (w == o) {
+            _ = p.wrappers.remove(k);
+        };
+    }
+
+    /// Keep the tree `id` is in (a detached subtree, from its top) through
+    /// the reclaim in progress.
+    pub fn markRoot(p: *Page, id: NodeId) void {
+        const bits = p.reclaim_bits orelse return;
+        const d = p.main_doc;
+        if (id >= d.nodes.len or d.get(id).flags.freed) return;
+        var top: NodeId = id;
+        while (d.get(top).parent) |par| top = par;
+        if (top == dom.document_id) return; // the tree walk has it
+        if (bits[top / 8] & (@as(u8, 1) << @intCast(top % 8)) != 0) return;
+        d.markTree(top, bits);
+    }
+
+    /// Reclaim the main document's detached nodes: everything under the
+    /// document node stays, everything a live DOM-backed object names
+    /// (a wrapper, a style, a class list, a sheet, a traversal — with
+    /// the whole detached tree it is in), the page's own references
+    /// (the current script, a pending form), an observer's target, and
+    /// whatever the host holds; the rest goes back (`dom.sweep`). A
+    /// collection runs first so a wrapper nothing holds is gone. Called
+    /// between tasks, never from a native.
+    pub fn reclaim(p: *Page) usize {
+        if (p.cur != 0) return 0;
+        p.vm.heap.collect();
+        const d = p.main_doc;
+        const n = d.nodes.len;
+        const bits = p.a.alloc(u8, n / 8 + 1) catch return 0;
+        defer p.a.free(bits);
+        @memset(bits, 0);
+        p.reclaim_bits = bits;
+        defer p.reclaim_bits = null;
+        d.markTree(dom.document_id, bits);
+        var w = p.vm.heap.walk();
+        while (w.next()) |c| {
+            if (c.kind != .object) continue;
+            const o = c.as(Object);
+            if (o.class != .dom) continue;
+            const s = o.internal(Slot);
+            if (s.doc != 0) continue;
+            switch (s.kind) {
+                slot_node, slot_tokens, slot_style, slot_sheet, slot_traversal => p.markRoot(s.id),
+                else => {},
+            }
+        }
+        if (p.current_script) |id| p.markRoot(id);
+        for (p.observers.items) |ob| if (ob.doc == 0) p.markRoot(ob.target);
+        if (p.host.roots) |f| f(p.host.ctx, p);
+        const freed = d.sweep(bits, p.host.ctx, p.host.swept);
+        p.reclaimed = freed;
+        if (freed > 0) p.touch();
+        return freed;
+    }
+
     /// The node's wrapper, made on first touch.
     pub fn wrap(p: *Page, id: NodeId) Error!*Object {
         if (p.wrappers.get(p.key(id))) |o| return o;
@@ -1450,11 +1549,14 @@ pub const Page = struct {
                 const u = url.parse(sa, src, if (base) |*b| b else null) catch break :blk src;
                 break :blk u.href(sa) catch src;
             };
-            const text: []const u8 = if (url.decodeData(sa, abs) catch null) |d| d.bytes else (fetch(p.host.ctx, abs) orelse {
+            const inline_data = url.decodeData(sa, abs) catch null;
+            const text: []const u8 = if (inline_data) |d| d.bytes else (fetch(p.host.ctx, abs) orelse {
                 p.logf(.err, "script: could not load {s}", .{abs});
                 return;
             });
             if (module) p.runModule(text, abs) else p.runSource(text, abs);
+            // The compile copied what it keeps: the body goes back.
+            if (inline_data == null) if (p.host.release) |rel| rel(p.host.ctx, text);
             return;
         }
         var scratch = std.heap.ArenaAllocator.init(p.a);
@@ -2804,14 +2906,22 @@ fn cloneSubtree(p: *Page, id: NodeId, deep: bool) Error!NodeId {
     const n = doc.get(id);
     const copy: NodeId = switch (n.kind) {
         .element => blk: {
-            const e = try doc.createElement(n.namespace, n.name);
-            for (n.attrs.items) |at| try doc.setAttr(e, at.name, at.value);
+            // Its own copies of the strings: the original may be swept
+            // while the clone lives, or the other way round.
+            const e = try doc.createElement(n.namespace, try doc.a.dupe(u8, n.name));
+            for (n.attrs.items) |at| try doc.setAttr(e, try doc.a.dupe(u8, at.name), try doc.a.dupe(u8, at.value));
+            if (n.ns_uri) |u| doc.node(e).ns_uri = try doc.a.dupe(u8, u);
+            doc.node(e).flags.owns_strings = true;
             break :blk e;
         },
         .text => try doc.createText(n.text.items),
         .comment => try doc.createComment(n.text.items),
         .fragment => try doc.createFragment(),
-        .doctype => try doc.createDoctype(n.name, n.public_id, n.system_id),
+        .doctype => blk: {
+            const dt = try doc.createDoctype(try doc.a.dupe(u8, n.name), if (n.public_id) |x| try doc.a.dupe(u8, x) else null, if (n.system_id) |x| try doc.a.dupe(u8, x) else null);
+            doc.node(dt).flags.owns_strings = true;
+            break :blk dt;
+        },
         .document => try doc.createFragment(),
     };
     if (deep) {
@@ -2868,6 +2978,7 @@ fn adopt(p: *Page, from: *const dom.Document, id: NodeId) Error!NodeId {
             for (n.attrs.items) |at| try doc.setAttr(e, try doc.a.dupe(u8, at.name), try doc.a.dupe(u8, at.value));
             if (n.ns_uri) |u| doc.node(e).ns_uri = try doc.a.dupe(u8, u);
             doc.node(e).flags = n.flags;
+            doc.node(e).flags.owns_strings = true; // every string above is this node's
             break :blk e;
         },
         .text => try doc.createText(n.text.items),
@@ -3645,6 +3756,7 @@ fn createElement(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Valu
         c.* = std.ascii.toLower(c.*);
     };
     const id = try p.doc.createElement(.html, name);
+    p.doc.node(id).flags.owns_strings = true; // the name is this node's copy
     return p.wrapValue(id);
 }
 
@@ -3671,6 +3783,7 @@ fn createElementNS(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Va
     // The qualified name stays as given (`prefix:local` is the tagName).
     const id = try p.doc.createElement(ns, name);
     if (ns == .other) p.doc.node(id).ns_uri = try p.doc.a.dupe(u8, ns_text);
+    p.doc.node(id).flags.owns_strings = true; // the name and the URI are this node's copies
     return p.wrapValue(id);
 }
 
@@ -6378,8 +6491,18 @@ fn rewriteSheet(vm: *Vm, id: NodeId, insert: ?[]const u8, index: usize, remove: 
         try out.appendSlice(a, t);
         try out.append(a, '\n');
     }
-    while (p.doc.get(id).first_child) |c| p.doc.detach(c);
-    p.doc.appendChild(id, try p.doc.createText(try p.doc.a.dupe(u8, out.items)));
+    // The element's one text node takes the new text in place: a rule
+    // inserted a thousand times over (a CSS-in-JS library's habit) costs
+    // the sheet's size once, not a new node and text each time.
+    const first = p.doc.get(id).first_child;
+    if (first != null and p.doc.get(first.?).kind == .text and p.doc.get(first.?).next == null) {
+        const n = p.doc.node(first.?);
+        n.text.clearRetainingCapacity();
+        try n.text.appendSlice(p.doc.a, out.items);
+    } else {
+        while (p.doc.get(id).first_child) |c| p.doc.detach(c);
+        p.doc.appendChild(id, try p.doc.createText(out.items));
+    }
     p.touch();
     p.markSheets();
 }
@@ -8106,6 +8229,16 @@ const TestHost = struct {
 };
 
 const TestPage = struct {
+    /// Evaluate `source`; an uncaught error fails the test with its text.
+    fn evalOk(tp: *TestPage, source: []const u8) !void {
+        const out = tp.page.evalText(source, std.testing.allocator) orelse return;
+        defer std.testing.allocator.free(out);
+        if (std.mem.startsWith(u8, out, "error:")) {
+            std.debug.print("eval: {s}\n", .{out});
+            return error.TestUnexpectedResult;
+        }
+    }
+
     arena: std.heap.ArenaAllocator,
     region: []u8,
     vm: *Vm,
@@ -8625,6 +8758,41 @@ test "script: acid3 on the host (when fetched): the score, printed" {
     tp.page.runSource("console.log(typeof log === 'string' ? log : '(no log)')", "acid3 log");
     const at = std.mem.lastIndexOf(u8, tp.host.lines.items, "log:") orelse 0;
     std.debug.print("{s}\n", .{tp.host.lines.items[at..]});
+}
+
+test "script: a reclaim frees detached nodes and keeps what a script or the tree holds" {
+    const tp = try TestPage.open(
+        \\<body><div id="d"><span>a</span></div>
+        \\<script>
+        \\  var d = document.getElementById('d');
+        \\  for (var i = 0; i < 300; i++) d.innerHTML = '<p class="c' + i + '">' + i + '</p><b>x</b>';
+        \\  globalThis.keep = document.createElement('div');
+        \\  keep.foo = 7; keep.appendChild(document.createElement('span')); keep.firstChild.textContent = 'held';
+        \\  var gone = document.createElement('i'); gone.appendChild(document.createElement('u')); gone = null;
+        \\  document.body.expando = 42;
+        \\  document.body.addEventListener('click', function () { document.body.setAttribute('hit', 'yes'); });
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    const before = tp.doc.nodes.len;
+    try std.testing.expect(before > 600);
+    const freed = tp.page.reclaim();
+    try std.testing.expect(freed >= 590); // 300 rewrites, two elements and a text each, less the last
+    try std.testing.expectEqual(freed, tp.doc.free_ids.items.len);
+    // The held subtree, the in-tree expando and the listener are all there.
+    try tp.evalOk("var q = document.querySelector('#d p'); console.log(keep.foo, keep.firstChild && keep.firstChild.textContent, document.body.expando, q && q.textContent, d.childNodes.length, keep.childNodes.length)");
+    try std.testing.expectEqualStrings("log:7 held 42 299 2 1\n", tp.host.lines.items);
+    // New nodes take the freed slots: the store does not grow.
+    try tp.evalOk("for (var j = 0; j < 100; j++) d.innerHTML = '<p>' + j + '</p>'");
+    try std.testing.expectEqual(before, tp.doc.nodes.len);
+    var w2 = tp.doc.walk(dom.document_id);
+    var body: NodeId = 0;
+    while (w2.next()) |id| if (tp.doc.isHtml(id, "body")) {
+        body = id;
+    };
+    try std.testing.expect(tp.page.click(body));
+    try std.testing.expectEqualStrings("yes", tp.doc.getAttr(body, "hit").?);
 }
 
 test "script: the wrappers survive a collection at every safe point" {

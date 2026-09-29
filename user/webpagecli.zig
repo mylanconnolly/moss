@@ -223,6 +223,24 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     demand(std.mem.indexOf(u8, pa.dumped(), "data-key=\"k/KeyK\"") != null, "the key did not reach the script", 65);
     _ = usys.log(glog, "webpagecli: scripts off and on ok");
 
+    // 3c. A page that re-renders on a timer: twenty megabytes of
+    // document through a page that reclaims at eight. It lives, because
+    // the page reclaims what it no longer shows (the log says how much).
+    // The host keeps the pages' clock (`tickWakes`): the page asks to be
+    // woken for its timers, and this loop grants every wake as it comes.
+    loadPage(a, "http://www.moss.test:8080/churn.html");
+    var churn_tries: usize = 0;
+    while (true) : (churn_tries += 1) {
+        demand(churn_tries < 400, "the churning page never finished", 66);
+        usys.sleepMs(20);
+        host.tickWakes();
+        demand(host.send(a, .{ .dump = .{ .what = .eval, .select = "document.title" } }), "send eval", 67);
+        waitEvent(a, .dumped, 2000);
+        if (std.mem.startsWith(u8, pa.dumped(), "churned ")) break;
+    }
+    demand(std.mem.eql(u8, pa.dumped(), "churned 1000"), "the last render is not what shows", 68);
+    _ = usys.log(glog, "webpagecli: the churning page lived through twenty megabytes");
+
     // 4. A page that reads more than its arena dies of it; nothing else does.
     const b = host.spawn(stage.handle, 640, 100) orelse fail("second spawn refused", 47);
     demand(host.send(b, .{ .load = boom }), "send boom", 48);

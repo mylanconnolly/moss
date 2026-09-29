@@ -59,9 +59,21 @@ var host: u64 = 0;
 /// document and sheets, the Python docs lay out 30,000 nodes, and two
 /// fixed halves fit neither (2026-09-23).
 var region: [40 << 20]u8 align(16) = undefined;
-/// The document arena is [0, lo); the layout arena [hi, len).
-var reg_lo: usize = 0;
+/// The document heap is [0, hi) and grows up from 0; the layout stack
+/// [hi, len) grows down. The document side is a heap that frees (size
+/// classes, coalescing large blocks — `lib/heapalloc`), not a bump
+/// arena: a text set again, an attribute list regrown, a fetched script
+/// compiled, give their bytes back. The BBC's page filled a 40 MB bump
+/// arena in ten seconds of timers with its node count flat — a CSS-in-JS
+/// library rewriting one style element's text 1,382 times (2026-09-28).
+var doc_heap: mosslib.heapalloc.Allocator = .{ .region = &region };
 var reg_hi: usize = region.len;
+
+/// The layout stack's new bottom; the document heap ends where it starts.
+fn setHi(hi: usize) void {
+    reg_hi = hi;
+    doc_heap.region.len = hi;
+}
 
 fn regionOffset(p: [*]u8) usize {
     return @intFromPtr(p) - @intFromPtr(&region);
@@ -69,30 +81,66 @@ fn regionOffset(p: [*]u8) usize {
 
 const doc_vtable: std.mem.Allocator.VTable = .{ .alloc = docAlloc, .resize = docResize, .remap = docRemap, .free = docFree };
 
-fn docAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
-    const base = @intFromPtr(&region);
-    const start = alignment.forward(base + reg_lo) - base;
-    if (start + len > reg_hi) return null;
-    reg_lo = start + len;
-    return region[start..].ptr;
+fn docAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+    const p = doc_heap.allocator().rawAlloc(len, alignment, ra) orelse return null;
+    docNote(len, ra);
+    return p;
 }
 
-fn docResize(_: *anyopaque, mem: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
-    const start = regionOffset(mem.ptr);
-    // Only the last allocation grows in place; any may shrink.
-    if (start + mem.len != reg_lo) return new_len <= mem.len;
-    if (start + new_len > reg_hi) return false;
-    reg_lo = start + new_len;
-    return true;
+fn docResize(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+    return doc_heap.allocator().rawResize(mem, alignment, new_len, ra);
 }
 
-fn docRemap(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
-    return if (docResize(ctx, mem, alignment, new_len, ra)) mem.ptr else null;
+fn docRemap(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+    return doc_heap.allocator().rawRemap(mem, alignment, new_len, ra);
 }
 
-fn docFree(_: *anyopaque, mem: []u8, _: std.mem.Alignment, _: usize) void {
-    const start = regionOffset(mem.ptr);
-    if (start + mem.len == reg_lo) reg_lo = start;
+fn docFree(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ra: usize) void {
+    doc_heap.allocator().rawFree(mem, alignment, ra);
+}
+
+/// The document arena's census: bytes by the caller that asked (its
+/// return address, symbolized with objdump on the host) and by size,
+/// printed when the arena runs out. The BBC's page filled 40 MB in ten
+/// seconds of timers with the node count flat (2026-09-28), and the
+/// arena never frees: this says what the churn is made of.
+const DocSite = struct { ra: usize = 0, bytes: usize = 0, count: usize = 0 };
+var doc_sites: [512]DocSite = @splat(.{});
+var doc_histo: [32]struct { count: usize = 0, bytes: usize = 0 } = @splat(.{});
+
+fn docNote(len: usize, ra: usize) void {
+    const b = if (len == 0) 0 else @min(31, std.math.log2_int_ceil(usize, len));
+    doc_histo[b].count += 1;
+    doc_histo[b].bytes += len;
+    var i: usize = (ra >> 2) % doc_sites.len;
+    var n: usize = 0;
+    while (n < doc_sites.len) : (n += 1) {
+        const s = &doc_sites[i];
+        if (s.ra == ra or s.ra == 0) {
+            s.ra = ra;
+            s.bytes += len;
+            s.count += 1;
+            return;
+        }
+        i = (i + 1) % doc_sites.len;
+    }
+}
+
+fn docCensus() void {
+    var line: [200]u8 = undefined;
+    for (doc_histo, 0..) |h, i| if (h.count > 0) {
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: document allocs <{d} B: {d} for {d} KB", .{ @as(usize, 1) << @intCast(i), h.count, h.bytes / 1024 }) catch "");
+    };
+    var shown: usize = 0;
+    while (shown < 10) : (shown += 1) {
+        var best: ?*DocSite = null;
+        for (&doc_sites) |*s| if (s.ra != 0 and s.bytes > 0 and (best == null or s.bytes > best.?.bytes)) {
+            best = s;
+        };
+        const b = best orelse break;
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: document site 0x{x}: {d} KB in {d} blocks", .{ b.ra, b.bytes / 1024, b.count }) catch "");
+        b.bytes = 0;
+    }
 }
 
 const layout_vtable: std.mem.Allocator.VTable = .{ .alloc = layoutAlloc, .resize = layoutResize, .remap = layoutRemap, .free = layoutFree };
@@ -101,8 +149,8 @@ fn layoutAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize
     const base = @intFromPtr(&region);
     if (len > reg_hi) return null;
     const start = alignment.backward(base + reg_hi - len) - base;
-    if (start < reg_lo) return null;
-    reg_hi = start;
+    if (start < doc_heap.top) return null;
+    setHi(start);
     return region[start..].ptr;
 }
 
@@ -121,15 +169,15 @@ fn layoutRemap(_: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: 
     const start = regionOffset(mem.ptr);
     if (start != reg_hi or new_len > reg_hi + mem.len) return null;
     const new_start = alignment.backward(base + reg_hi + mem.len - new_len) - base;
-    if (new_start < reg_lo) return null;
+    if (new_start < doc_heap.top) return null;
     std.mem.copyForwards(u8, region[new_start .. new_start + mem.len], region[start .. start + mem.len]);
-    reg_hi = new_start;
+    setHi(new_start);
     return region[new_start..].ptr;
 }
 
 fn layoutFree(_: *anyopaque, mem: []u8, _: std.mem.Alignment, _: usize) void {
     const start = regionOffset(mem.ptr);
-    if (start == reg_hi) reg_hi = start + mem.len;
+    if (start == reg_hi) setHi(start + mem.len);
 }
 
 fn layoutArena() std.mem.Allocator {
@@ -137,12 +185,12 @@ fn layoutArena() std.mem.Allocator {
 }
 
 fn resetLayout() void {
-    reg_hi = region.len;
+    setHi(region.len);
     web.layout.in_progress = null; // a failed layout's struct lived here
 }
 
 fn resetDocument() void {
-    reg_lo = 0;
+    doc_heap = mosslib.heapalloc.Allocator.init(region[0..reg_hi]);
 }
 /// The script engine: the cells' heap and its bookkeeping (shapes,
 /// atoms, compiled code, the wrapper table), both reset per navigation
@@ -173,8 +221,47 @@ fn scriptFetch(_: *anyopaque, abs_url: []const u8) ?[]const u8 {
     // its 40 MB document arena with 2 MB of document on the device
     // (2026-09-28), and this is where the rest was to be found.
     var line: [256]u8 = undefined;
-    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: script {d} KB fetched (document {d} KB, layout {d} KB); {s}", .{ if (body) |b| b.len / 1024 else 0, reg_lo / 1024, (region.len - reg_hi) / 1024, abs_url[0..@min(abs_url.len, 120)] }) catch "webpage: script fetched");
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: script {d} KB fetched (document {d} KB, layout {d} KB); {s}", .{ if (body) |b| b.len / 1024 else 0, doc_heap.live / 1024, (region.len - reg_hi) / 1024, abs_url[0..@min(abs_url.len, 120)] }) catch "webpage: script fetched");
     return body;
+}
+
+/// A fetched script's body, compiled: its bytes go back to the heap.
+fn scriptRelease(_: *anyopaque, body: []const u8) void {
+    arena().free(body);
+}
+
+/// A reclaim: the nodes this side holds by id stay.
+fn scriptRoots(_: *anyopaque, p: *script.Page) void {
+    if (page.focus) |id| p.markRoot(id);
+    if (page.pressed) |id| p.markRoot(id);
+}
+
+/// A node's slot was reclaimed: its picture, if any, goes with it (the
+/// id will name another node).
+fn scriptSwept(_: *anyopaque, id: dom.NodeId) void {
+    var i: usize = 0;
+    while (i < page.n_pictures) {
+        if (page.pictures[i].node == id) {
+            page.pictures[i] = page.pictures[page.n_pictures - 1];
+            page.n_pictures -= 1;
+        } else i += 1;
+    }
+}
+
+/// Between tasks: when the document heap has grown past the mark, the
+/// detached nodes go back (`Page.reclaim`), and the next mark is twice
+/// what stayed live. A page that re-renders on a timer (the BBC's
+/// CSS-in-JS, React trees) holds only what it shows.
+var reclaim_at: usize = 8 << 20;
+fn maybeReclaim() void {
+    if (!scripts_up or doc_heap.live < reclaim_at) return;
+    const before = doc_heap.live;
+    const nodes_before = if (page.doc) |d| d.nodes.len else 0;
+    const freed = scripts.reclaim();
+    reclaim_at = @max(8 << 20, doc_heap.live * 2);
+    var line: [256]u8 = undefined;
+    var rep: [160]u8 = undefined;
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: reclaimed {d} of {d} nodes: document {d} KB to {d} KB; script heap {d} KB, bookkeeping {s}", .{ freed, nodes_before, before / 1024, doc_heap.live / 1024, vm.heap.live_bytes / 1024, js_meta.report(&rep) }) catch "webpage: reclaimed");
 }
 
 fn scriptNow() f64 {
@@ -341,7 +428,7 @@ fn runScripts(doc: *dom.Document) void {
     // The bindings cascade a frame's document themselves (the page lays
     // out only its own): they need the user-agent sheet, parsed once.
     _ = uaSheet(env());
-    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate, .ua_sheet = &ua_sheet.?, .scratch = scriptScratch }) catch {
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .release = scriptRelease, .roots = scriptRoots, .swept = scriptSwept, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate, .ua_sheet = &ua_sheet.?, .scratch = scriptScratch }) catch {
         _ = usys.log(glog, "webpage: the bindings did not fit");
         return;
     };
@@ -385,6 +472,7 @@ fn scheduleWake() void {
 fn tick() void {
     if (!scripts_up) return;
     _ = scripts.runDue(@floatFromInt(usys.nowMs()));
+    maybeReclaim();
     afterScript();
 }
 
@@ -412,7 +500,8 @@ fn outOfMemory() noreturn {
     // or its scripts churned the document (the arena never frees:
     // the BBC filled 40 MB on the device with 2 MB of document on the
     // host, 2026-09-28).
-    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB; viewport {d}x{d} at {d}%; {d} nodes, {d} scripts run)", .{ phase, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024, vw, vh, zoom_pct, if (page.doc) |d| d.nodes.len else 0, scripts.scripts_run }) catch "webpage: out of memory");
+    _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: out of memory while {s} (document {d} KB and layout {d} KB of {d} KB; viewport {d}x{d} at {d}%; {d} nodes, {d} scripts run)", .{ phase, doc_heap.live / 1024, (region.len - reg_hi) / 1024, region.len / 1024, vw, vh, zoom_pct, if (page.doc) |d| d.nodes.len else 0, scripts.scripts_run }) catch "webpage: out of memory");
+    docCensus();
     // How far a layout got: the counts say whether the page is big or
     // the layout is wasteful.
     if (web.layout.in_progress) |l| {
@@ -896,7 +985,7 @@ fn present(markup: []const u8, failure: u64) void {
     phase = "editing it";
     if (failure == 0) {
         var line: [256]u8 = undefined;
-        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, scripts {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes; document {d} KB, layout {d} KB of {d}; {d} scripts, {d} errors, script heap {d} KB)", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_scripts - t_parsed, t_sheets - t_scripts, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len, reg_lo / 1024, (region.len - reg_hi) / 1024, region.len / 1024, if (scripts_up) scripts.scripts_run else 0, if (scripts_up) scripts.script_errors else 0, if (scripts_up) js_meta.live / 1024 else 0 }) catch "webpage: loaded");
+        _ = usys.log(glog, std.fmt.bufPrint(&line, "webpage: loaded in {d} ms: fetch {d}, parse {d}, scripts {d}, sheets {d}, fonts {d}, style+layout {d}, paint {d}, pictures {d} ({d} nodes; document {d} KB, layout {d} KB of {d}; {d} scripts, {d} errors, script heap {d} KB)", .{ t_pictures - load_t0, fetch_ms, t_parsed - t_parse, t_scripts - t_parsed, t_sheets - t_scripts, t_fonts - t_sheets, last_layout_ms, last_paint_ms, t_pictures - t_laid, doc.nodes.len, doc_heap.live / 1024, (region.len - reg_hi) / 1024, region.len / 1024, if (scripts_up) scripts.scripts_run else 0, if (scripts_up) scripts.script_errors else 0, if (scripts_up) js_meta.live / 1024 else 0 }) catch "webpage: loaded");
     }
     event(.load, @intFromEnum(if (failure == 0) wire.LoadState.done else wire.LoadState.failed), failure);
 }

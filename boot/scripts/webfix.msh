@@ -25,6 +25,8 @@ let pages = [
   { path: "/img/plexserif.woff", file: "img/plexserif.woff" }
   { path: "/linked.html", file: "linked.html" }
   { path: "/app.html", file: "app.html" }
+
+  { path: "/churn.html", file: "churn.html" }
   { path: "/app.js", file: "app.js" }
   { path: "/mod.js", file: "mod.js" }
   { path: "/mod2.js", file: "mod2.js" }

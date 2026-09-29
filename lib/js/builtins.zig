@@ -88,6 +88,7 @@ pub fn finalizeExtra(vm: *Vm, o: *Object) void {
         .generator => generator.finalize(vm, o),
         .map, .set, .weak_map, .weak_set => map.finalize(vm, o),
         .array_buffer => arraybuffer.finalize(vm, o),
+        .dom => if (vm.dom_finalizer) |f| f(vm, o),
         else => {},
     }
 }

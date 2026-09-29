@@ -1143,10 +1143,21 @@ supervises), and memory history per unit beside the CPU one.
       periodic DOM update fills the 40 MB document arena in ten
       seconds of real-time timers (4.6 MB to 40.9 MB with the node
       count flat) — the arena never frees, and the host's fake clock
-      never shows it. **Next: a document store that frees** (detached
-      nodes, replaced text and attributes reclaimed — a free list per
-      record kind, or a mark from the live tree), the top lever for any
-      live page.
+      never shows it; (q) the document store frees (2026-09-28): the
+      document arena is a `heapalloc` heap that gives back replaced text,
+      regrown attribute lists and compiled script bodies, the sheet
+      rewrite fills its text node in place, and `Page.reclaim` sweeps
+      detached nodes between tasks (wrappers are roots only while their
+      node is in the tree; the mark starts from the tree and every live
+      DOM-backed object; nodes a script made own their strings) — the
+      BBC loads on the device, and the `webpage` drill's `churn.html`
+      lives through twenty megabytes with the heap returning to the
+      same 4.2 MB each reclaim. Residuals: a parser node's strings are
+      shared with its token stream and never freed (a page that detaches
+      its own markup leaks them once); `setAttribute` of an existing
+      name leaks the duplicated name; the reclaim mark is a per-node
+      walk to the root (fine at thousands of wrappers, to watch at
+      hundreds of thousands).
     - **(12) The fabric.** A page domain placed on another node (the
       viewport buffer over the bulk transport, the broker's channel
       proxied — a heavy site rendered where the memory is); a broker on

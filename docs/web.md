@@ -185,7 +185,14 @@ that runs under natives; GitHub runs to the end with two errors of its
 own scripts' making; the BBC and Apple still outgrow the page's 32 MB
 script bookkeeping heap. A page domain is 116 MB (24 MB of script
 cells, 32 MB of bookkeeping, 40 MB of document and layout); a browser
-window keeps two. Not yet: a frame's own scripts
+window keeps two. The document side of the region is a heap that frees
+(`lib/heapalloc`), not a bump arena: replaced text, regrown attribute
+lists and fetched scripts once compiled go back, and between tasks the
+page reclaims detached nodes (`Page.reclaim`, once the heap has grown
+past a mark: a mark from the tree and from every node a live
+DOM-backed object names, then a sweep whose slots `add` reuses), so a
+page that re-renders on a timer holds only what it shows — the BBC's
+front page filled a 40 MB arena in ten seconds before (2026-09-28). Not yet: a frame's own scripts
 (the engine has one realm, so they do not run), CORS with credentials
 or a preflight, iframes laid out, most of the SVG DOM, modifier keys.
 
@@ -370,9 +377,12 @@ tcp:127.0.0.1:PORT,server=on,wait=off -serial file:LOG -append
 types each URL and waits for the page domain's `webpage: loaded in`
 line, which carries the phase times, the document and layout bytes,
 the script count and errors, and the script heap; every script fetched
-logs its size and the document arena's fill beside it, which is how a
-page that fills the arena between two fetches is told from one that is
-merely big. A page that says
+logs its size and the document heap's fill beside it, which is how a
+page that fills the heap between two fetches is told from one that is
+merely big; each reclaim logs what it freed and both script heaps; and
+when the region runs out the page prints its document allocations by
+size and by the return address that asked (`objdump -d -l` on the page
+image names them). A page that says
 "No page host: …" in its status line names the step of the host's
 setup that refused (the image's manifest, the stage, the spawn);
 init's `store:` line at boot says what the program store installed,

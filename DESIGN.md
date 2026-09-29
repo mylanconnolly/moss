@@ -7792,6 +7792,63 @@ a sound summary of a dropped body is exactly the analysis already
 written, run once more under an empty root; and every refusal message
 should say what it wanted.
 
+**A document store that frees (as built, 2026-09-28).** The BBC's
+crash on the device, with the arena at 40 MB and the node count flat,
+got a census of its own: the page domain now counts the document
+arena's allocations by the return address that asked and by size, and
+prints the top sites when the arena runs out; `objdump -d -l` on the
+page image names them. Two sites held 34 MB in 1,400 blocks of 25 to
+50 KB: `Document.createText` and `script.rewriteSheet` — a CSS-in-JS
+library inserting rules into one `<style>` element 1,382 times in ten
+seconds, each insert rewriting the whole sheet text into the arena
+twice. *The document arena is a heap now.* `lib/heapalloc` over the
+region's lower part (`doc_heap`), the layout stack still growing down
+from the top and the two meeting where they meet (`setHi` keeps the
+heap's end at the stack's bottom): a text set again, an attribute list
+regrown, a fetched script compiled (`Host.release`: the code keeps its
+own copy) give their bytes back, and the sheet rewrite fills its one
+text node in place. *And it reclaims.* A wrapper was a root for as long
+as the page lived, so every node a script ever touched stayed; now a
+wrapper is a root while its node is in the page's tree, and a detached
+node's wrapper lives only as long as a script holds it — the collector
+frees it, and a `.dom` finalizer (`Vm.dom_finalizer`) drops the map
+entry. Between tasks, once the document heap has grown past a mark
+(8 MB, then twice what stayed live), the page domain calls
+`Page.reclaim`: a collection first, then a mark of the main document's
+nodes — everything under the document node, the whole detached tree of
+every node a live DOM-backed object names (a wrapper, a style, a class
+list, a sheet, a traversal; found by walking the cell heap for `.dom`
+objects), the current script, observers' targets, and what the host
+holds (its focus, a pressed control: `Host.roots`) — and a sweep
+(`Document.sweep`) that gives an unmarked node's text and attribute
+lists back, frees its strings when the node owns them
+(`Flags.owns_strings`: a node a script made, adopted from a fragment
+parse or cloned owns its name, attribute names and values and
+namespace URI; a parser's node shares its strings with the token stream
+and static names, and keeps them), puts the slot on a free list `add`
+draws from first, and tells the host (`Host.swept`: a decoded picture
+by that id goes). Three tests in `script.zig` hold it: 300 rewrites of
+a div reclaim 590 nodes while a subtree a script holds, an in-tree
+expando and a listener survive, and the slots are reused; and the
+`webpage` drill's new fixture (`churn.html`, 200 renders of a thousand
+nodes on a 1 ms interval, the drill client granting the page's wakes)
+lives through twenty megabytes, the log showing each reclaim return
+to the same 4,232 KB and 22,032 slots. *What it took to get there:*
+the clone path shared string slices between an original and its copy,
+which the sweep would have freed under one of them (clones own copies
+now); the first mark used the tree walker's element-only `next` and
+missed every text node and the root of a held subtree; the drill's
+timers never ran, because a page asks its host for a wake and the drill
+client never granted one (`tickWakes`, as the desktop's host does); and
+a log line that formatted the heap's report into a slice of the buffer
+it printed into met `@memcpy`'s alias check. *Where it stands:* the BBC
+loads on the device in 21.7 s, all 54 scripts, the document heap at
+5 MB where the arena had overflowed 40. *Lessons:* a census by return
+address, symbolized after the fact, finds a device-only fill in one
+run; a wrapper's lifetime is its node's tree membership or a script's
+reference, never the page's; and string ownership must be a bit on the
+record, not a convention.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is
