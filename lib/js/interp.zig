@@ -78,6 +78,11 @@ pub fn callValue(vm: *Vm, f: Value, this: Value, args: []const Value) Error!Valu
                 const saved_native = vm.current_native;
                 vm.current_native = o;
                 defer vm.current_native = saved_native;
+                // A native runs in its realm too (what it makes gets
+                // that realm's prototypes).
+                const caller_realm = vm.realm;
+                if (fd.realm) |r| vm.switchRealm(r);
+                defer vm.switchRealm(caller_realm);
                 return n(vm, this, args, Value.undefined_);
             }
             if (fd.is_class_constructor) return vm.throwTypeError("Class constructor cannot be invoked without 'new'");
@@ -120,6 +125,9 @@ pub fn constructValue(vm: *Vm, f: Value, args: []const Value, new_target: Value)
                 const saved_native = vm.current_native;
                 vm.current_native = o;
                 defer vm.current_native = saved_native;
+                const caller_realm = vm.realm;
+                if (fd.realm) |r| vm.switchRealm(r);
+                defer vm.switchRealm(caller_realm);
                 return n(vm, Value.undefined_, args, new_target);
             }
             const code = fd.code.?;
@@ -212,7 +220,12 @@ pub fn resumeCoroutine(vm: *Vm, co_obj: *Object, value: Value, kind: u8) Error!V
     const regs = vm.stack[base .. base + co.nregs];
     @memcpy(regs, co.savedRegs());
     const frame_index: u32 = @intCast(vm.frames.items.len);
+    // The coroutine's body runs in its function's realm; the resumer's
+    // comes back when the frame pops or suspends.
+    const caller_realm = vm.realm;
+    if (co.func) |fo| if (fo.internal(FunctionData).realm) |r| vm.switchRealm(r);
     vm.frames.appendAssumeCapacity(.{
+        .realm = caller_realm,
         .code = co.code,
         .func = co.func,
         .co = co_obj,
@@ -320,7 +333,12 @@ fn pushFrame(vm: *Vm, code: *Code, func: ?*Object, this: Value, new_target: Valu
     const ncopy = @min(argc, d.nparams);
     if (ncopy > 0) @memcpy(regs[0..ncopy], vm.stack[args_base .. args_base + ncopy]);
     @memset(regs[ncopy..], Value.undefined_);
+    // The callee runs in its function's realm; the caller's comes back
+    // when the frame pops.
+    const caller_realm = vm.realm;
+    if (func) |fo| if (fo.internal(FunctionData).realm) |r| vm.switchRealm(r);
     vm.frames.appendAssumeCapacity(.{
+        .realm = caller_realm,
         .code = code,
         .func = func,
         .pc = 0,
@@ -343,6 +361,7 @@ fn pushFrame(vm: *Vm, code: *Code, func: ?*Object, this: Value, new_target: Valu
 fn popFrame(vm: *Vm) Frame {
     const f = vm.frames.pop().?;
     vm.handlers.shrinkRetainingCapacity(f.handlers_base);
+    vm.switchRealm(f.realm);
     return f;
 }
 
@@ -2680,6 +2699,59 @@ test "interp: arithmetic, calls, closures, exceptions and objects" {
     try vm.init(region, std.testing.allocator);
     defer vm.deinit();
     try runCases(vm);
+}
+
+test "interp: a second realm has its own globals and intrinsics, and calls switch realms" {
+    const region = try std.testing.allocator.alloc(u8, 8 << 20);
+    defer std.testing.allocator.free(region);
+    const vm = try std.testing.allocator.create(Vm);
+    defer std.testing.allocator.destroy(vm);
+    try vm.init(region, std.testing.allocator);
+    defer vm.deinit();
+    const a = vm.realm;
+    const b = try vm.createRealm();
+    try std.testing.expect(vm.realm == b);
+    // In B: a global, a prototype change, a function that makes an array.
+    _ = try evalIn(vm, "globalThis.marker = 5; Object.prototype.z = 2; globalThis.mk = function () { return [1, 2]; }; 0");
+    const b_global = vm.global;
+    vm.switchRealm(a);
+    try std.testing.expect(vm.global != b_global);
+    try vm.defineValue(vm.global, "B", b_global.asValue(), .default);
+    // A sees neither B's global nor its prototype change; B's function
+    // runs in B and its array has B's Array.prototype.
+    const v = try evalIn(vm,
+        \\var r = 0;
+        \\if (typeof marker === 'undefined') r += 1;
+        \\if (({}).z === undefined) r += 10;
+        \\if (B.marker === 5 && B.Object.prototype.z === 2) r += 100;
+        \\var arr = B.mk();
+        \\if (Array.isArray(arr) && !(arr instanceof Array) && Object.getPrototypeOf(arr) === B.Array.prototype) r += 1000;
+        \\if (B.Object !== Object && B.Array.isArray([]) === true) r += 10000;
+        \\r
+    );
+    try std.testing.expectEqual(@as(f64, 11111), v.asNumber());
+    // After the calls, A is current again and its own globals answer.
+    try std.testing.expect(vm.realm == a);
+    try std.testing.expect(vm.heap.collections >= 0);
+    vm.heap.collect();
+    const again = try evalIn(vm, "B.mk().length + (typeof marker === 'undefined' ? 10 : 0)");
+    try std.testing.expectEqual(@as(f64, 12), again.asNumber());
+}
+
+fn evalIn(vm: *Vm, src: []const u8) !Value {
+    const code = compiler.compile(std.testing.allocator, &vm.heap, &vm.strings, src, .{}) catch |e| {
+        std.debug.print("compile failed: {s}: {s}\n", .{ src, compiler.last_error });
+        return e;
+    };
+    return runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_) catch |e| {
+        if (e == error.Exception) {
+            const s = vm.toString(vm.exception) catch unreachable;
+            const u = try vm.utf8(s, std.testing.allocator);
+            defer std.testing.allocator.free(u);
+            std.debug.print("threw: {s}\n", .{u});
+        }
+        return e;
+    };
 }
 
 test "interp: the same cases collecting at every safe point" {

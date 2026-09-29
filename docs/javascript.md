@@ -276,6 +276,15 @@ there before the rest ran.
 - **A shape's table waits for the fourth lookup** (`object.table_after`):
   the shapes an object passes through while it is built are looked up
   once each and got a table apiece before.
+- **Realms.** `vm.Realm` holds a realm's intrinsics, global and global
+  lexical record; the VM's `intrinsics`/`global`/`global_lex` fields are
+  the current realm's live copy. `vm.createRealm()` makes a second one
+  (and makes it current), `vm.switchRealm(r)` switches,
+  `vm.globalOf(r)` reads a realm's global (the live one when current).
+  A function carries the realm it was made in (`FunctionData.realm`)
+  and calls switch to it and back; an embedder that runs code in a
+  realm switches first and compiles as usual. Every realm's state is
+  traced; realms live as long as the VM.
 
 ## Measuring it
 

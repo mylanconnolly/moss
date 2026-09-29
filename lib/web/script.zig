@@ -765,6 +765,11 @@ const session_quota: usize = 256 << 10;
 /// `<object>`'s (fetched and parsed on first `contentDocument`), or one a
 /// script made through `document.implementation`. `doc` on the page is
 /// the current one: every native switches to its `this` node's.
+/// A realm's DOM interface objects: one table per frame document.
+const Ifaces = struct { protos: [interfaces.len]*Object = undefined, ctors: [interfaces.len]*Object = undefined };
+/// The element a frame document hangs from, in which document.
+const FrameOwner = struct { doc: u32, id: NodeId };
+
 const DocEntry = struct {
     doc: *dom.Document,
     /// The arena the document lives in (null: the page's, not ours).
@@ -772,9 +777,19 @@ const DocEntry = struct {
     is_html: bool,
     /// The element that holds it (an iframe, an object), if any.
     owner: ?struct { doc: u32, id: NodeId },
-    /// Its `defaultView`, made on first use.
+    /// Its `defaultView`, made on first use (a plain object standing in
+    /// for a window when the document has no realm of its own).
     view: Value,
     url: []const u8,
+    /// A frame's document runs its scripts in a realm of its own, with
+    /// its own interface objects; null for the page's document (whose
+    /// table is the page's) and for documents made by scripts (a
+    /// DOMParser's), which use their maker's.
+    realm: ?*js.vm.Realm = null,
+    ifaces: ?*Ifaces = null,
+    /// An XHTML frame that was not well-formed, or whose root is not in
+    /// the XHTML namespace: its scripts do not run (Acid3's test 80).
+    scripts_off: bool = false,
     /// `document.open()`'s state: what `write` gathers until `close`.
     open: bool = false,
     write_buf: std.ArrayList(u8) = .empty,
@@ -805,6 +820,8 @@ pub const Page = struct {
     reclaimed: usize = 0,
     /// The bitmap of a reclaim in progress (`markRoot` sets bits in it).
     reclaim_bits: ?[]u8 = null,
+    /// The page's own document's interface prototypes and constructors
+    /// (`protosOf` picks the current document's table).
     protos: [interfaces.len]*Object = undefined,
     ctors: [interfaces.len]*Object = undefined,
     sym_listeners: *Symbol = undefined,
@@ -869,12 +886,13 @@ pub const Page = struct {
         p.sym_slot = try vm.newSymbol(try vm.strings.fromUtf8("slot"));
         p.sym_style = try vm.newSymbol(try vm.strings.fromUtf8("style"));
         try p.installInterfaces();
-        try p.installWindow();
+        try p.installWindow(null);
         vm.host_load = hostLoad;
         vm.host_import_meta = hostImportMeta;
     }
 
     pub fn deinit(p: *Page) void {
+        for (p.docs.items) |d| if (d.ifaces) |t| p.a.destroy(t);
         for (p.docs.items) |d| if (d.arena) |ar| {
             ar.deinit();
             p.a.destroy(ar);
@@ -956,6 +974,40 @@ pub const Page = struct {
         p.doc = p.docs.items[i].doc;
     }
 
+    /// The current document's interface prototypes and constructors.
+    fn protosOf(p: *Page) *[interfaces.len]*Object {
+        if (p.docs.items[p.cur].ifaces) |t| return &t.protos;
+        return &p.protos;
+    }
+    fn ctorsOf(p: *Page) *[interfaces.len]*Object {
+        if (p.docs.items[p.cur].ifaces) |t| return &t.ctors;
+        return &p.ctors;
+    }
+
+    /// A frame document gets a realm of its own: the interfaces and the
+    /// window installed on a fresh global (its `parent` the owner's
+    /// window, its `top` the page's, its `frameElement` the frame), then
+    /// its scripts run there. A script of the frame reaching for
+    /// `parent.f` calls into the page's realm and back (Acid3's test 80:
+    /// the XHTML frames' scripts, 2026-09-28).
+    fn realmFor(p: *Page, idx: u32, owner: FrameOwner) Error!void {
+        const vm = p.vm;
+        const saved_doc = p.cur;
+        const saved_realm = vm.realm;
+        const table = try p.a.create(Ifaces);
+        table.* = .{};
+        p.docs.items[idx].ifaces = table;
+        const r = try vm.createRealm();
+        p.docs.items[idx].realm = r;
+        defer {
+            vm.switchRealm(saved_realm);
+            p.switchTo(saved_doc);
+        }
+        p.switchTo(idx);
+        try p.installInterfaces();
+        try p.installWindow(owner);
+    }
+
     /// Back to the page's own document (every entry from the embedder).
     fn resetDoc(p: *Page) void {
         p.switchTo(0);
@@ -1018,14 +1070,33 @@ pub const Page = struct {
             };
             markup = try std.fmt.allocPrint(sa, "<html><head><title></title></head><body><pre>{s}</pre></body></html>", .{esc.items});
         }
-        return p.newDocument(markup, true, .{ .doc = owner_doc, .id = id }, abs);
+        // XHTML by the look of it is held to XML's rules: a document that
+        // is not well-formed shows an error and runs nothing, and one whose
+        // root is not in the XHTML namespace is not HTML, so its <script>
+        // is not a script (Acid3's test 80).
+        var scripts_ok = true;
+        if (looksXml(markup)) {
+            if (!xmlWellFormed(sa, markup)) {
+                markup = "<html><head><title>XML parse error</title></head><body><p>This page contains the following errors: XML parse error</p></body></html>";
+                scripts_ok = false;
+            } else if (xmlRootNamespace(markup)) |ns| {
+                if (!std.mem.eql(u8, ns, "http://www.w3.org/1999/xhtml")) scripts_ok = false;
+            }
+        }
+        const idx = try p.newDocument(markup, true, .{ .doc = owner_doc, .id = id }, abs);
+        p.docs.items[idx].scripts_off = !scripts_ok;
+        // Its own realm, and its scripts run in it.
+        p.realmFor(idx, .{ .doc = owner_doc, .id = id }) catch |e| p.reportError(e, "a frame's realm");
+        if (scripts_ok) p.runScriptsIn(idx);
+        return idx;
     }
 
     /// A document's `defaultView`: the window for the page's own, a
     /// window-like object for the others (their `document`, and
     /// `getComputedStyle`), made once.
     fn viewOf(p: *Page, i: u32) Error!Value {
-        if (i == 0) return p.vm.global.asValue();
+        if (i == 0) return p.vm.globalOf(p.vm.realms.items[0]).asValue();
+        if (p.docs.items[i].realm) |r| return p.vm.globalOf(r).asValue();
         if (p.docs.items[i].view.isObject()) return p.docs.items[i].view;
         const vm = p.vm;
         const o = try vm.newObject();
@@ -1089,12 +1160,12 @@ pub const Page = struct {
         const vm = p.vm;
         @setEvalBranchQuota(100_000);
         inline for (interfaces, 0..) |iface, k| {
-            const parent_proto: Value = if (iface.parent) |pn| p.protos[ifaceIndex(pn)].asValue() else vm.intrinsics.object_prototype.asValue();
+            const parent_proto: Value = if (iface.parent) |pn| p.protosOf()[ifaceIndex(pn)].asValue() else vm.intrinsics.object_prototype.asValue();
             const proto = try vm.objects.create(parent_proto, .ordinary, 0);
-            p.protos[k] = proto;
+            p.protosOf()[k] = proto;
             const ctor = try vm.newNativeNamed(try vm.str(iface.name), 0, construct, Value.fromInt(@intCast(k)), true);
-            p.ctors[k] = ctor;
-            if (iface.parent) |pn| _ = try vm.setPrototypeOf(ctor, p.ctors[ifaceIndex(pn)].asValue());
+            p.ctorsOf()[k] = ctor;
+            if (iface.parent) |pn| _ = try vm.setPrototypeOf(ctor, p.ctorsOf()[ifaceIndex(pn)].asValue());
             try vm.defineValue(ctor, "prototype", proto.asValue(), .frozen);
             try vm.defineValue(proto, "constructor", ctor.asValue(), .hidden);
             try vm.defineValue(vm.global, iface.name, ctor.asValue(), .hidden);
@@ -1112,22 +1183,39 @@ pub const Page = struct {
         }
     }
 
-    fn installWindow(p: *Page) Error!void {
+    fn installWindow(p: *Page, frame_owner: ?FrameOwner) Error!void {
         const vm = p.vm;
         const g = vm.global;
         // The window is the global: an EventTarget with the Window's
         // members on it.
-        _ = try vm.setPrototypeOf(g, p.protos[I.event_target].asValue());
+        _ = try vm.setPrototypeOf(g, p.protosOf()[I.event_target].asValue());
         try vm.defineValue(g, "window", g.asValue(), .hidden);
         try vm.defineValue(g, "self", g.asValue(), .hidden);
         try vm.defineValue(g, "frames", g.asValue(), .hidden);
-        try vm.defineValue(g, "parent", g.asValue(), .hidden);
-        try vm.defineValue(g, "top", g.asValue(), .hidden);
-        p.document_obj = try p.wrap(dom.document_id);
-        try vm.defineValue(g, "document", p.document_obj.asValue(), .hidden);
-        p.location_obj = try vm.newObject();
-        try p.fillLocation();
-        try vm.defineValue(g, "location", p.location_obj.asValue(), .hidden);
+        const docv = try p.wrap(dom.document_id);
+        try vm.defineValue(g, "document", docv.asValue(), .hidden);
+        if (frame_owner) |fo| {
+            // A frame's window: its parent is the owner document's window,
+            // its top the page's, and it knows its element.
+            const cur = p.cur;
+            const parent_v = try p.viewOf(fo.doc);
+            try vm.defineValue(g, "parent", parent_v, .hidden);
+            try vm.defineValue(g, "top", vm.globalOf(vm.realms.items[0]).asValue(), .hidden);
+            p.switchTo(fo.doc);
+            const fe = try p.wrapValue(fo.id);
+            p.switchTo(cur);
+            try vm.defineValue(g, "frameElement", fe, .hidden);
+            const loc = try vm.newObject();
+            try vm.defineValue(loc, "href", try vm.str(p.docs.items[cur].url), .default);
+            try vm.defineValue(g, "location", loc.asValue(), .hidden);
+        } else {
+            try vm.defineValue(g, "parent", g.asValue(), .hidden);
+            try vm.defineValue(g, "top", g.asValue(), .hidden);
+            p.document_obj = docv;
+            p.location_obj = try vm.newObject();
+            try p.fillLocation();
+            try vm.defineValue(g, "location", p.location_obj.asValue(), .hidden);
+        }
         const nav = try vm.newObject();
         try vm.defineValue(nav, "userAgent", try vm.str("Mozilla/5.0 (moss) moss/0.1"), .default);
         try vm.defineValue(nav, "language", try vm.str("en"), .default);
@@ -1171,13 +1259,13 @@ pub const Page = struct {
         try vm.defineGetter(hist, "state", historyState);
         try vm.defineValue(hist, "scrollRestoration", try vm.str("auto"), .default);
         try vm.defineValue(g, "history", hist.asValue(), .hidden);
-        const local = try vm.objects.create(p.protos[I.storage].asValue(), .dom, @sizeOf(Slot));
+        const local = try vm.objects.create(p.protosOf()[I.storage].asValue(), .dom, @sizeOf(Slot));
         local.internal(Slot).* = .{ .kind = slot_storage, .id = 0, .flags = 0 };
         try vm.defineValue(g, "localStorage", local.asValue(), .hidden);
-        const session = try vm.objects.create(p.protos[I.storage].asValue(), .dom, @sizeOf(Slot));
+        const session = try vm.objects.create(p.protosOf()[I.storage].asValue(), .dom, @sizeOf(Slot));
         session.internal(Slot).* = .{ .kind = slot_storage, .id = 0, .flags = storage_session };
         try vm.defineValue(g, "sessionStorage", session.asValue(), .hidden);
-        p.deliver_fn = (try vm.newNative("deliverMutations", 0, deliverMutations, Value.undefined_)).asValue();
+        if (frame_owner == null) p.deliver_fn = (try vm.newNative("deliverMutations", 0, deliverMutations, Value.undefined_)).asValue();
         // Named access (`localStorage.foo`) through a Proxy over each store,
         // made by the engine's own Proxy: the bindings have no exotic
         // objects, the language has.
@@ -1189,7 +1277,7 @@ pub const Page = struct {
         _ = try vm.defineNative(g, "__perfNow", 0, perfNowNative);
         _ = try vm.defineNative(g, "__currentScript", 0, currentScriptNative);
         p.runSource(@import("script_prelude.zig").source, "the web APIs prelude");
-        p.scripts_run = 0; // the page's own count starts at its scripts
+        if (frame_owner == null) p.scripts_run = 0; // the page's own count starts at its scripts
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
         try p.installDomException();
         _ = try vm.defineNative(g, "postMessage", 1, noopNative);
@@ -1455,7 +1543,7 @@ pub const Page = struct {
             .comment => I.comment,
             .element => if (n.namespace == .svg) svgInterfaceFor(n.name) else if (n.namespace != .html or !p.isHtmlDoc()) I.element else htmlInterfaceFor(n.name),
         };
-        const o = try p.vm.objects.create(p.protos[k].asValue(), .dom, @sizeOf(Slot));
+        const o = try p.vm.objects.create(p.protosOf()[k].asValue(), .dom, @sizeOf(Slot));
         o.internal(Slot).* = .{ .kind = slot_node, .id = id, .doc = p.cur };
         try p.wrappers.put(p.a, p.key(id), o);
         return o;
@@ -1497,7 +1585,21 @@ pub const Page = struct {
     /// classic, parser-inserted ones: inline text or a fetched `src`),
     /// then fire `DOMContentLoaded` and `load`.
     pub fn runScripts(p: *Page) void {
-        p.resetDoc();
+        p.runScriptsIn(0);
+    }
+
+    /// Document `di`'s scripts, in its realm when it has one.
+    fn runScriptsIn(p: *Page, di: u32) void {
+        const vm = p.vm;
+        const saved_doc = p.cur;
+        const saved_realm = vm.realm;
+        defer {
+            vm.switchRealm(saved_realm);
+            p.switchTo(saved_doc);
+        }
+        p.switchTo(di);
+        if (p.docs.items[di].scripts_off) return;
+        if (p.docs.items[di].realm) |r| vm.switchRealm(r);
         var list: std.ArrayList(NodeId) = .empty;
         defer list.deinit(p.a);
         var w = p.doc.walk(dom.document_id);
@@ -1505,14 +1607,14 @@ pub const Page = struct {
         // Classic scripts as the parser meets them; module scripts are
         // deferred, so they run after, in document order.
         for (list.items) |id| {
-            p.resetDoc();
+            p.switchTo(di);
             if (!isModuleScript(p, id)) p.runScriptElement(id);
         }
         for (list.items) |id| {
-            p.resetDoc();
+            p.switchTo(di);
             if (isModuleScript(p, id)) p.runScriptElement(id);
         }
-        p.resetDoc();
+        p.switchTo(di);
         p.ready_state = .interactive;
         _ = p.fireSimple(p.document_obj.asValue(), "DOMContentLoaded", true, false);
         p.ready_state = .complete;
@@ -1525,7 +1627,8 @@ pub const Page = struct {
     }
 
     fn runScriptElement(p: *Page, id: NodeId) void {
-        p.resetDoc();
+        // In the current document and realm: the caller set them (a
+        // frame's scripts run in the frame's).
         const doc = p.doc;
         p.current_script = id;
         defer p.current_script = null;
@@ -1832,7 +1935,7 @@ pub const Page = struct {
     /// A new event object of `iface` with `type`.
     fn newEvent(p: *Page, iface: usize, type_name: []const u8, bubbles: bool, cancelable: bool, trusted: bool) Error!*Object {
         const vm = p.vm;
-        const o = try vm.objects.create(p.protos[iface].asValue(), .dom, @sizeOf(Slot));
+        const o = try vm.objects.create(p.protosOf()[iface].asValue(), .dom, @sizeOf(Slot));
         var flags: u32 = 0;
         if (bubbles) flags |= ev_bubbles;
         if (cancelable) flags |= ev_cancelable;
@@ -2708,6 +2811,130 @@ fn bodyOrDocument(p: *Page) NodeId {
     return dom.document_id;
 }
 
+/// Whether markup is XHTML by its opening: an XML declaration, or an
+/// `html` root carrying an `xmlns` attribute.
+fn looksXml(markup: []const u8) bool {
+    const t = std.mem.trimStart(u8, markup, " \t\r\n");
+    if (std.mem.startsWith(u8, t, "<?xml")) return true;
+    if (!std.mem.startsWith(u8, t, "<html")) return false;
+    const end = std.mem.indexOfScalar(u8, t, '>') orelse return false;
+    return std.mem.indexOf(u8, t[0..end], "xmlns=") != null;
+}
+
+/// The value of `xmlns` on the first start tag, if any.
+fn xmlRootNamespace(markup: []const u8) ?[]const u8 {
+    const lt = std.mem.indexOf(u8, markup, "<html") orelse return null;
+    const end = std.mem.indexOfScalarPos(u8, markup, lt, '>') orelse return null;
+    const tag = markup[lt..end];
+    const at = std.mem.indexOf(u8, tag, "xmlns=") orelse return null;
+    const rest = tag[at + 6 ..];
+    if (rest.len < 2) return null;
+    const q = rest[0];
+    if (q != '"' and q != '\'') return null;
+    const close = std.mem.indexOfScalar(u8, rest[1..], q) orelse return null;
+    return rest[1 .. 1 + close];
+}
+
+fn xmlNameByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == ':' or c == '-' or c == '_' or c == '.' or c >= 0x80;
+}
+
+/// XML well-formedness, the parts a frame test can tell: tags balance
+/// and nest, attributes are quoted, entities are named or numeric,
+/// comments, processing instructions and CDATA sections close. Not a
+/// parser: the HTML tree builder still builds the document.
+fn xmlWellFormed(a: std.mem.Allocator, m: []const u8) bool {
+    var stack: std.ArrayList([]const u8) = .empty;
+    defer stack.deinit(a);
+    var i: usize = 0;
+    while (i < m.len) {
+        const c = m[i];
+        if (c == '<') {
+            if (std.mem.startsWith(u8, m[i..], "<!--")) {
+                i = (std.mem.indexOfPos(u8, m, i + 4, "-->") orelse return false) + 3;
+            } else if (std.mem.startsWith(u8, m[i..], "<?")) {
+                i = (std.mem.indexOfPos(u8, m, i + 2, "?>") orelse return false) + 2;
+            } else if (std.mem.startsWith(u8, m[i..], "<![CDATA[")) {
+                i = (std.mem.indexOfPos(u8, m, i + 9, "]]>") orelse return false) + 3;
+            } else if (std.mem.startsWith(u8, m[i..], "<!")) {
+                i = (std.mem.indexOfScalarPos(u8, m, i + 2, '>') orelse return false) + 1;
+            } else if (i + 1 < m.len and m[i + 1] == '/') {
+                var j = i + 2;
+                const ns = j;
+                while (j < m.len and xmlNameByte(m[j])) j += 1;
+                if (j == ns) return false;
+                const name = m[ns..j];
+                while (j < m.len and std.ascii.isWhitespace(m[j])) j += 1;
+                if (j >= m.len or m[j] != '>') return false;
+                const open = stack.pop() orelse return false;
+                if (!std.mem.eql(u8, open, name)) return false;
+                i = j + 1;
+            } else {
+                var j = i + 1;
+                const ns = j;
+                while (j < m.len and xmlNameByte(m[j])) j += 1;
+                if (j == ns) return false;
+                const name = m[ns..j];
+                var closed = false;
+                while (true) {
+                    while (j < m.len and std.ascii.isWhitespace(m[j])) j += 1;
+                    if (j >= m.len) return false;
+                    if (m[j] == '/') {
+                        if (j + 1 >= m.len or m[j + 1] != '>') return false;
+                        closed = true;
+                        j += 2;
+                        break;
+                    }
+                    if (m[j] == '>') {
+                        j += 1;
+                        break;
+                    }
+                    const an = j;
+                    while (j < m.len and xmlNameByte(m[j])) j += 1;
+                    if (j == an) return false;
+                    while (j < m.len and std.ascii.isWhitespace(m[j])) j += 1;
+                    if (j >= m.len or m[j] != '=') return false;
+                    j += 1;
+                    while (j < m.len and std.ascii.isWhitespace(m[j])) j += 1;
+                    if (j >= m.len or (m[j] != '"' and m[j] != '\'')) return false;
+                    const q = m[j];
+                    const close = std.mem.indexOfScalarPos(u8, m, j + 1, q) orelse return false;
+                    if (std.mem.indexOfScalar(u8, m[j + 1 .. close], '<') != null) return false;
+                    j = close + 1;
+                }
+                if (!closed) stack.append(a, name) catch return false;
+                i = j;
+            }
+        } else if (c == '&') {
+            const semi = std.mem.indexOfScalarPos(u8, m, i + 1, ';') orelse return false;
+            const ent = m[i + 1 .. semi];
+            if (ent.len == 0 or ent.len > 12) return false;
+            if (ent[0] == '#') {
+                const digits = if (ent.len > 1 and (ent[1] == 'x' or ent[1] == 'X')) ent[2..] else ent[1..];
+                if (digits.len == 0) return false;
+                for (digits) |d| if (!std.ascii.isHex(d)) return false;
+            } else for (ent) |d| if (!std.ascii.isAlphanumeric(d)) return false;
+            i = semi + 1;
+        } else i += 1;
+    }
+    return stack.items.len == 0;
+}
+
+test "script: the XML well-formedness check tells Acid3's frames apart" {
+    const a = std.testing.allocator;
+    const good = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>T</title></head><body><p> <strong> X </strong> </p><br/><!-- c --><script type=\"text/javascript\">parent.notify(\"x\")</script></body></html>";
+    try std.testing.expect(looksXml(good));
+    try std.testing.expect(xmlWellFormed(a, good));
+    try std.testing.expectEqualStrings("http://www.w3.org/1999/xhtml", xmlRootNamespace(good).?);
+    const bad = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p> <strong/> Parsing Test </strong> </p></body></html>";
+    try std.testing.expect(!xmlWellFormed(a, bad));
+    try std.testing.expect(!xmlWellFormed(a, "<a b=c></a>"));
+    try std.testing.expect(!xmlWellFormed(a, "<a>&nbsp</a>"));
+    try std.testing.expect(xmlWellFormed(a, "<?xml version=\"1.0\"?><a x='1'>&amp;&#160;&#xA0;<![CDATA[<>]]></a>"));
+    try std.testing.expect(!looksXml("<!DOCTYPE html><html><body></body></html>"));
+    try std.testing.expectEqualStrings("http://www.w3.org/1999/xhtml#", xmlRootNamespace("<html xmlns=\"http://www.w3.org/1999/xhtml#\"></html>").?);
+}
+
 inline fn pageOf(vm: *Vm) *Page {
     return @ptrCast(@alignCast(vm.host_data.?));
 }
@@ -3015,19 +3242,19 @@ fn construct(vm: *Vm, this: Value, args: []const Value, new_target: Value) Error
     if (new_target.isUndefined()) return vm.throwTypeError("a constructor needs new");
     if (!interfaces[idx].constructible) return vm.throwTypeError("Illegal constructor");
     if (idx == I.event_target) {
-        const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
+        const o = try vm.objects.create(p.protosOf()[idx].asValue(), .ordinary, 0);
         return o.asValue();
     }
     if (idx == I.range) return newRange(vm);
     if (idx == I.mutation_observer) {
         const cb = arg(args, 0);
         if (!vm.isCallable(cb)) return vm.throwTypeError("MutationObserver needs a callback");
-        const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
+        const o = try vm.objects.create(p.protosOf()[idx].asValue(), .ordinary, 0);
         try vm.defineValue(o, "__callback", cb, .hidden);
         return o.asValue();
     }
     if (idx == I.xhr) {
-        const o = try vm.objects.create(p.protos[idx].asValue(), .ordinary, 0);
+        const o = try vm.objects.create(p.protosOf()[idx].asValue(), .ordinary, 0);
         try xhrReset(vm, o, 0);
         try vm.defineValue(o, "responseType", try vm.str(""), .default);
         try vm.defineValue(o, "timeout", Value.fromInt(0), .default);
@@ -3055,7 +3282,7 @@ fn construct(vm: *Vm, this: Value, args: []const Value, new_target: Value) Error
     const ev = try p.newEvent(idx, type_name, bubbles, cancelable, false);
     if (idx == I.custom_event) try p.setEventProp(ev, "detail", detail);
     // The prototype a subclass asked for.
-    if (new_target.isObject() and Vm.asObject(new_target) != p.ctors[idx]) {
+    if (new_target.isObject() and Vm.asObject(new_target) != p.ctorsOf()[idx]) {
         const proto = try vm.get(Vm.asObject(new_target), .{ .atom = try vm.atom("prototype") }, new_target);
         if (proto.isObject()) _ = try vm.setPrototypeOf(ev, proto);
     }
@@ -4749,7 +4976,7 @@ fn noopNative(_: *Vm, _: Value, _: []const Value, _: Value) Error!Value {
 fn getClassList(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const p = pageOf(vm);
     const id = try thisElement(vm, this);
-    const o = try vm.objects.create(p.protos[I.tokens].asValue(), .dom, @sizeOf(Slot));
+    const o = try vm.objects.create(p.protosOf()[I.tokens].asValue(), .dom, @sizeOf(Slot));
     o.internal(Slot).* = .{ .kind = slot_tokens, .id = id, .doc = p.cur };
     return o.asValue();
 }
@@ -5040,7 +5267,7 @@ fn getComputedStyle(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Valu
     const p = pageOf(vm);
     const id = try thisElement(vm, arg(args, 0));
     if (p.doc.get(id).kind != .element) return vm.throwTypeError("getComputedStyle needs an element");
-    const o = try vm.objects.create(p.protos[I.style].asValue(), .dom, @sizeOf(Slot));
+    const o = try vm.objects.create(p.protosOf()[I.style].asValue(), .dom, @sizeOf(Slot));
     o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = style_computed, .doc = p.cur };
     return o.asValue();
 }
@@ -5833,7 +6060,7 @@ fn getStyle(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
     const id = try thisElement(vm, this);
     const w = Vm.asObject(this);
     if (try vm.objects.getOwn(w, .{ .symbol = p.sym_style })) |own| return own.val;
-    const o = try vm.objects.create(p.protos[I.style].asValue(), .dom, @sizeOf(Slot));
+    const o = try vm.objects.create(p.protosOf()[I.style].asValue(), .dom, @sizeOf(Slot));
     o.internal(Slot).* = .{ .kind = slot_style, .id = id, .flags = 0, .doc = p.cur };
     _ = try vm.objects.defineOwn(w, .{ .symbol = p.sym_style }, o.asValue(), .hidden);
     return o.asValue();
@@ -6326,7 +6553,7 @@ fn isSheetElement(p: *Page, id: NodeId) bool {
 
 fn sheetObject(p: *Page, id: NodeId) Error!Value {
     const vm = p.vm;
-    const o = try vm.objects.create(p.protos[I.sheet].asValue(), .dom, @sizeOf(Slot));
+    const o = try vm.objects.create(p.protosOf()[I.sheet].asValue(), .dom, @sizeOf(Slot));
     o.internal(Slot).* = .{ .kind = slot_sheet, .id = id, .doc = p.cur };
     return o.asValue();
 }
@@ -6917,7 +7144,7 @@ fn newTraversal(vm: *Vm, kind: TravKind, args: []const Value) Error!Value {
     const root = p.nodeSwitching(arg(args, 0)) orelse return vm.throwTypeError("a root node is needed");
     const what: f64 = if (arg(args, 1).isUndefined()) 4294967295 else (vm.toNumber(arg(args, 1)) catch 4294967295);
     const filter = arg(args, 2);
-    const o = try vm.objects.create(p.protos[if (kind == .iterator) I.node_iterator else I.tree_walker].asValue(), .dom, @sizeOf(Slot));
+    const o = try vm.objects.create(p.protosOf()[if (kind == .iterator) I.node_iterator else I.tree_walker].asValue(), .dom, @sizeOf(Slot));
     o.internal(Slot).* = .{ .kind = slot_traversal, .id = root, .flags = if (kind == .iterator) 0 else 1, .doc = p.cur };
     try vm.defineValue(o, "__what", Value.fromF64(what), .hidden);
     try vm.defineValue(o, "__filter", if (filter.isNullish()) Value.null_ else filter, .hidden);
@@ -7249,7 +7476,7 @@ fn setRangeState(vm: *Vm, rv: Value, st: RangeState) Error!void {
 
 fn newRange(vm: *Vm) Error!Value {
     const p = pageOf(vm);
-    const o = try vm.objects.create(p.protos[I.range].asValue(), .dom, @sizeOf(Slot));
+    const o = try vm.objects.create(p.protosOf()[I.range].asValue(), .dom, @sizeOf(Slot));
     o.internal(Slot).* = .{ .kind = slot_range, .id = 0, .doc = p.cur };
     try setRangeState(vm, o.asValue(), .{ .sc = dom.document_id, .so = 0, .ec = dom.document_id, .eo = 0 });
     try p.ranges.append(p.a, o.asValue());
@@ -8097,6 +8324,7 @@ const TestHost = struct {
         if (std.mem.endsWith(u8, abs_url, "/lib/name.js")) return "export const name = 'moss';";
         if (std.mem.endsWith(u8, abs_url, "/late.js")) return "export const late = 'late';";
         if (std.mem.endsWith(u8, abs_url, "/classic.js")) return "var fromClassic = 'classic';";
+        if (std.mem.endsWith(u8, abs_url, "/frame.html")) return "<html><body><p id='fp'>in the frame</p><script>parent.got = (typeof top.marker) + ':' + (Array === parent.Array ? 'same' : 'own') + ':' + (frameElement.tagName) + ':' + document.getElementById('fp').textContent; parent.count = (parent.count || 0) + 1; window.fromFrame = 7;</script></body></html>";
         return null;
     }
     fn navigate(ctx: *anyopaque, abs_url: []const u8) void {
@@ -8246,7 +8474,7 @@ const TestPage = struct {
         const ta = std.testing.allocator;
         const tp = try ta.create(TestPage);
         tp.arena = std.heap.ArenaAllocator.init(ta);
-        tp.region = try ta.alloc(u8, 8 << 20);
+        tp.region = try ta.alloc(u8, 24 << 20); // the page domain's size: a frame realm costs a set of intrinsics
         tp.vm = try ta.create(Vm);
         try tp.vm.init(tp.region, ta);
         tp.doc = try html.parse(tp.arena.allocator(), markup, .{ .scripting = true });
@@ -8753,6 +8981,20 @@ test "script: acid3 on the host (when fetched): the score, printed" {
     tp.page.runSource("console.log(typeof log === 'string' ? log : '(no log)')", "acid3 log");
     const at = std.mem.lastIndexOf(u8, tp.host.lines.items, "log:") orelse 0;
     std.debug.print("{s}\n", .{tp.host.lines.items[at..]});
+}
+
+test "script: a frame's scripts run in a realm of their own and reach the parent" {
+    const tp = try TestPage.open(
+        \\<body><script>
+        \\  var marker = 1; var got = null;
+        \\  var f = document.createElement('iframe'); f.src = '/frame.html'; document.body.appendChild(f);
+        \\</script></body>
+    );
+    defer tp.close();
+    tp.page.runScripts();
+    _ = tp.page.runDue(1000); // the frame's load: its document, realm and scripts
+    try tp.evalOk("console.log(got, count, f.contentWindow.fromFrame, f.contentWindow.Array === Array, f.contentWindow.document.getElementById('fp') instanceof f.contentWindow.HTMLElement, f.contentWindow.parent === window, f.contentDocument.body.tagName)");
+    try std.testing.expectEqualStrings("log:number:own:IFRAME:in the frame 1 7 false true true BODY\n", tp.host.lines.items);
 }
 
 test "script: a reclaim frees detached nodes and keeps what a script or the tree holds" {

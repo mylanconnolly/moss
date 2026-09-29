@@ -60,6 +60,10 @@ pub const FunctionData = extern struct {
     /// The class constructor's [[ConstructorKind]] derived.
     derived: bool,
     _pad: [4]u8 = @splat(0),
+    /// The realm the function was made in (§9.3): the one its calls run
+    /// in — its intrinsics, its global. Null: the realm current at the
+    /// call (what every function got before there were two, 2026-09-28).
+    realm: ?*Realm = null,
 };
 
 pub const BoundData = extern struct {
@@ -203,9 +207,27 @@ pub const Frame = struct {
     entry: bool,
     /// The stack height to restore when the frame pops.
     saved_sp: u32,
+    /// The realm current when the frame was pushed (the caller's), made
+    /// current again when it pops; the callee's is its function's.
+    realm: *Realm = undefined,
 };
 
 pub const Handler = struct { pc: u32, reg: u16, env: ?*Env, frame: u32 };
+
+/// A realm (§9.3): the intrinsics, the global object and the global
+/// lexical record a set of code shares. The VM keeps the current
+/// realm's in its own fields (`intrinsics`, `global`, `global_lex`,
+/// `global_lex_epoch`) and swaps them on a switch, so the hundreds of
+/// natives that read `vm.intrinsics.x` read the current realm's. The
+/// first realm is made with the VM; a page makes one per frame.
+pub const Realm = struct {
+    intrinsics: realm.Intrinsics = undefined,
+    global: *Object = undefined,
+    global_lex: std.AutoHashMapUnmanaged(*String, Vm.GlobalLex) = .empty,
+    global_lex_epoch: usize = 1,
+    /// The embedder's handle (a page's document index).
+    tag: usize = 0,
+};
 
 pub const ErrorKind = enum { Error, TypeError, RangeError, ReferenceError, SyntaxError, EvalError, URIError, AggregateError };
 
@@ -223,6 +245,9 @@ pub const Vm = struct {
     global: *Object = undefined,
     /// The global lexical declarative record (script let/const/class).
     global_lex: std.AutoHashMapUnmanaged(*String, GlobalLex) = .empty,
+    /// The realm the fields above are the live copy of, and every realm.
+    realm: *Realm = undefined,
+    realms: std.ArrayList(*Realm) = .empty,
     symbols: realm.WellKnownSymbols = undefined,
     symbol_registry: std.HashMapUnmanaged(*String, *Symbol, string.Strings.AtomContext, 80) = .empty,
     atoms: realm.Atoms = undefined,
@@ -322,7 +347,53 @@ pub const Vm = struct {
         vm.strings = Strings.init(&vm.heap, vm.meta);
         vm.objects = Objects.init(&vm.heap, &vm.strings, vm.meta);
         try vm.heap.addRoot(.{ .ctx = vm, .trace = traceRoots });
+        // The first realm: the shared atoms and symbols, then its own
+        // intrinsics and global, kept in the VM's live fields.
+        const main = try vm.meta.create(Realm);
+        main.* = .{};
+        vm.realm = main;
+        try vm.realms.append(vm.meta, main);
         try realm.create(vm);
+        try realm.createIntrinsics(vm);
+    }
+
+    /// Make the current realm's live state the record's, and load `r`'s.
+    pub fn switchRealm(vm: *Vm, r: *Realm) void {
+        if (vm.realm == r) return;
+        vm.stashRealm();
+        vm.intrinsics = r.intrinsics;
+        vm.global = r.global;
+        vm.global_lex = r.global_lex;
+        vm.global_lex_epoch = r.global_lex_epoch;
+        vm.realm = r;
+    }
+
+    /// A realm's global object: the live one for the current realm (its
+    /// record is written only on a switch).
+    pub fn globalOf(vm: *Vm, r: *Realm) *Object {
+        return if (r == vm.realm) vm.global else r.global;
+    }
+
+    fn stashRealm(vm: *Vm) void {
+        const cur = vm.realm;
+        cur.intrinsics = vm.intrinsics;
+        cur.global = vm.global;
+        cur.global_lex = vm.global_lex;
+        cur.global_lex_epoch = vm.global_lex_epoch;
+    }
+
+    /// A new realm with its own intrinsics and global, made current.
+    /// The caller switches back to whichever realm it wants (`switchRealm`).
+    pub fn createRealm(vm: *Vm) Error!*Realm {
+        const r = try vm.meta.create(Realm);
+        r.* = .{};
+        try vm.realms.append(vm.meta, r);
+        vm.stashRealm();
+        vm.realm = r;
+        vm.global_lex = .empty;
+        vm.global_lex_epoch = 1;
+        try realm.createIntrinsics(vm);
+        return r;
     }
 
     pub fn deinit(vm: *Vm) void {
@@ -330,6 +401,11 @@ pub const Vm = struct {
         vm.objects.deinit();
         vm.strings.deinit();
         vm.global_lex.deinit(vm.meta);
+        for (vm.realms.items) |r| {
+            if (r != vm.realm) r.global_lex.deinit(vm.meta);
+            vm.meta.destroy(r);
+        }
+        vm.realms.deinit(vm.meta);
         vm.symbol_registry.deinit(vm.meta);
         vm.frames.deinit(vm.meta);
         vm.handlers.deinit(vm.meta);
@@ -465,13 +541,24 @@ pub const Vm = struct {
         const vm: *Vm = @ptrCast(@alignCast(ctx));
         vm.strings.markRoots(m);
         vm.objects.markRoots(m);
-        realm.traceIntrinsics(vm, m);
+        realm.traceShared(vm, m);
+        realm.traceIntrinsics(&vm.intrinsics, m);
         m.markCell(vm.global.cell());
         var it = vm.global_lex.iterator();
         while (it.next()) |e| {
             m.markCell(e.key_ptr.*.cell());
             m.markValue(e.value_ptr.v);
         }
+        // The other realms' state, kept in their records.
+        for (vm.realms.items) |r| if (r != vm.realm) {
+            realm.traceIntrinsics(&r.intrinsics, m);
+            m.markCell(r.global.cell());
+            var rit = r.global_lex.iterator();
+            while (rit.next()) |e| {
+                m.markCell(e.key_ptr.*.cell());
+                m.markValue(e.value_ptr.v);
+            }
+        };
         var sit = vm.symbol_registry.iterator();
         while (sit.next()) |e| {
             m.markCell(e.key_ptr.*.cell());
@@ -1076,6 +1163,7 @@ pub const Vm = struct {
         const o = try vm.objects.create(proto.asValue(), .function, @sizeOf(FunctionData));
         const f = o.internal(FunctionData);
         f.* = .{
+            .realm = vm.realm,
             .code = code,
             .env = env,
             .native = null,
@@ -1125,6 +1213,7 @@ pub const Vm = struct {
         const o = try vm.objects.create(vm.intrinsics.function_prototype.asValue(), .function, @sizeOf(FunctionData));
         const fd = o.internal(FunctionData);
         fd.* = .{
+            .realm = vm.realm,
             .code = null,
             .env = null,
             .native = f,

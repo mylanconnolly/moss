@@ -1140,7 +1140,15 @@ supervises), and memory history per unit beside the CPU one.
       to 3.4), and a shape builds its lookup table on its fourth
       lookup, not its first (8,220 tables on GitHub, 2.6 MB, were for
       shapes passed through once) — GitHub's eight scripts run within
-      the heap now; the bookkeeping heap's fragmentation
+      the heap now; (s) realms (2026-09-28): the engine keeps a realm
+      record per set of intrinsics and switches on calls by the
+      function's realm; a frame's document runs its scripts in a realm
+      of its own with `parent`/`top`/`frameElement` back to the page,
+      and XHTML frames are held to well-formedness and namespace —
+      Acid3 100/100 on the host (test 80 was the last). Residuals: a
+      frame realm lives for the page; frames' `location` is an href; no
+      XML parser (the HTML tree builder builds XHTML); the bookkeeping
+      heap's fragmentation
       (free runs of a few KB after a page has run a while: a segregated
       design would bound it); the sites' own errors (the BBC's style
       target, Apple's `split` and `replace` on undefined, GitHub's

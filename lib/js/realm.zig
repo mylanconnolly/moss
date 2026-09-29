@@ -203,12 +203,6 @@ fn symbolDescription(comptime field: []const u8) []const u8 {
 /// The `with` environment's scope info (no names; the object is `extra`).
 pub var with_scope_info: bytecode.ScopeInfo = .{ .names = &.{}, .consts = &.{}, .lexical = &.{}, .is_with = true };
 
-pub fn traceIntrinsics(vm: *Vm, m: *heap.Marker) void {
-    vm.intrinsics.each(m);
-    vm.symbols.each(m);
-    vm.atoms.each(m);
-}
-
 /// Extra tracing for stage c/d classes with off-object state.
 pub fn traceExtra(o: *Object, m: *heap.Marker) void {
     builtins.traceExtra(o, m);
@@ -243,11 +237,28 @@ pub fn create(vm: *Vm) Error!void {
         if (desc.len == 0) s.private = true;
         @field(vm.symbols, f.name) = s;
     }
+}
+
+/// Trace one realm's intrinsics.
+pub fn traceIntrinsics(i: *Intrinsics, m: *heap.Marker) void {
+    i.each(m);
+}
+
+/// Trace what every realm shares: the atoms and the well-known symbols.
+pub fn traceShared(vm: *Vm, m: *heap.Marker) void {
+    vm.symbols.each(m);
+    vm.atoms.each(m);
+}
+
+/// A realm's own state: the intrinsics and the global object, built into
+/// the VM's live fields (the current realm's), then the standard
+/// library installed on them.
+pub fn createIntrinsics(vm: *Vm) Error!void {
     // The prototypes first (everything hangs off them).
     const objp = try vm.objects.create(Value.null_, .ordinary, 0);
     vm.intrinsics.object_prototype = objp;
     const fnp = try vm.objects.create(objp.asValue(), .function, @sizeOf(vmod.FunctionData));
-    fnp.internal(vmod.FunctionData).* = .{ .code = null, .env = null, .native = builtins.function.prototypeCall, .home_object = Value.undefined_, .fields = Value.undefined_, .data = Value.undefined_, .this_mode = .strict, .is_class_constructor = false, .is_constructor = false, .derived = false };
+    fnp.internal(vmod.FunctionData).* = .{ .realm = vm.realm, .code = null, .env = null, .native = builtins.function.prototypeCall, .home_object = Value.undefined_, .fields = Value.undefined_, .data = Value.undefined_, .this_mode = .strict, .is_class_constructor = false, .is_constructor = false, .derived = false };
     vm.intrinsics.function_prototype = fnp;
     inline for (@typeInfo(Intrinsics).@"struct".fields) |f| {
         if (!std.mem.eql(u8, f.name, "object_prototype") and !std.mem.eql(u8, f.name, "function_prototype")) {

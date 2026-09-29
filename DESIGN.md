@@ -7886,6 +7886,50 @@ offset; the alternative — a base offset in every position — touches
 every line of the parser; and a cache built on first use is built for
 every shape on the road to the one that is used.
 
+**Realms, and the frames that run (as built, 2026-09-28).** The engine
+had one realm: one set of intrinsics, one global, and a frame's
+document got a plain object standing in for a window and never ran a
+script — Acid3's test 80, and every embedded iframe. *The engine.* A
+realm (§9.3) is a record now (`vm.Realm`: the intrinsics, the global,
+the global lexical record and its epoch), the VM keeps the *current*
+realm's in the fields it always had — the hundreds of natives that read
+`vm.intrinsics.x` read the current realm's — and `switchRealm` swaps
+them (`stashRealm` writes the live state back to the record it belongs
+to, then loads the other's). A function records the realm it was made
+in (`FunctionData.realm`, null for "the current one"), and a frame
+records the caller's (`Frame.realm`): `pushFrame` switches to the
+callee's, `popFrame` restores the caller's, the two native call paths
+switch around the native, and a resumed coroutine's frame does the
+same. `createRealm` builds a second set of intrinsics into the live
+fields (`realm.createIntrinsics`, split from the shared atoms and
+well-known symbols) and hands the record back; `globalOf(r)` answers
+with the live global for the current realm, whose record is stale until
+a switch. The collector traces the live state and every other realm's
+record. *The page.* A frame's document gets a realm of its own
+(`Page.realmFor`): its interface prototypes and constructors in a table
+of its own (`Ifaces`; `protosOf`/`ctorsOf` pick the current document's,
+the page's document keeping the page's arrays), the window installed on
+the fresh global with `parent` the owner document's window, `top` the
+page's and `frameElement` the frame, then the document's scripts run
+there (`runScriptsIn`), and `contentWindow`, `defaultView` and
+`frames[i]` answer with the realm's global. A script in a frame that
+calls `parent.notify(...)` calls into the page's realm and back. And
+an XHTML frame is held to XML's rules by a small well-formedness check
+(`xmlWellFormed`: tags balance and nest, attributes are quoted,
+entities are named or numeric, comments and CDATA sections close): a
+document that is not well-formed shows an error page and runs nothing,
+and one whose root is not in the XHTML namespace is not HTML, so its
+`<script>` is not a script — test 80's other two thirds. *Acid3 is
+100/100 on the host.* *Found on the way:* a realm's record is written
+only on a switch, so reading `realms[0].global` before any switch read
+garbage (`defaultView` was undefined for a moment); the intrinsics
+tracer had to keep tracing the shared atoms and symbols; a coroutine's
+resumed frame needed its realm too; and the host tests' 8 MB cell heap
+could not hold Acid3's six frame realms (24 MB now, the page's size).
+*Residuals:* a frame realm lives for the page (a realm's global is a
+root); a frame's `location` is only its `href`; the HTML tree builder
+still builds an XHTML document.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

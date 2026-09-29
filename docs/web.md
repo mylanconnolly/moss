@@ -192,9 +192,13 @@ page reclaims detached nodes (`Page.reclaim`, once the heap has grown
 past a mark: a mark from the tree and from every node a live
 DOM-backed object names, then a sweep whose slots `add` reuses), so a
 page that re-renders on a timer holds only what it shows — the BBC's
-front page filled a 40 MB arena in ten seconds before (2026-09-28). Not yet: a frame's own scripts
-(the engine has one realm, so they do not run), CORS with credentials
-or a preflight, iframes laid out, most of the SVG DOM, modifier keys.
+front page filled a 40 MB arena in ten seconds before (2026-09-28).
+Not yet: CORS with credentials or a preflight, iframes laid out, most
+of the SVG DOM, modifier keys. A frame's document runs its scripts in a realm
+of its own (its `parent` and `top` are the page's windows, its
+`frameElement` the frame), an XHTML frame that is not well-formed shows
+an error page and runs nothing, and one whose root is not in the XHTML
+namespace runs nothing either; Acid3 is 100/100 on the host.
 
 ### The window: Web
 
