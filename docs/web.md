@@ -330,6 +330,15 @@ with the window. A node offers this by running the `webnode` unit
 (profile `webnode`; the `webfab` drill is the two-node proof). The
 `page` leaf's `node:` is the knob for any mshl GUI.
 
+The other direction works too: "Fetch via" in the same panel sends the
+tab's fetches out through a peer's network — its `webexit` unit, which
+opens and reads with that node's network view and trust roots and hands
+the bytes back; the page itself may live anywhere. The policy's `exit:`
+makes it the default. A node offers this by running the `webexit` unit
+(profile `webexithost`; the `webexit` drill is the two-node proof: a
+name the window cannot reach, fetched through the peer that can). The
+`page` leaf's `exit:` is the knob.
+
 ### What is not built
 
 Very large pages outgrow the page's 40 MB for a document
@@ -349,8 +358,8 @@ page rather than a pool (the session's `webfetch` unit of the plan); no content 
 no stop button; a select cycles its options rather than opening a
 list; binary downloads wait for a bytes save in the picker. A page on
 another node streams a resource one 32 KB chunk per poll and shows no
-memory figure in the Site panel; a broker on another node (an exit
-node) is not built. Menus
+memory figure in the Site panel; an exit node fetches for its clients
+one at a time. Menus
 are the generic window menu until client-defined menus exist. The
 `page` leaf does not yet follow a window resize with a fresh buffer of
 the new size in one step: the leaf's rect changes on the next render

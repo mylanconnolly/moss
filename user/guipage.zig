@@ -38,6 +38,9 @@ pub const Slot = struct {
     /// The node hosting the page (0: this one); a leaf naming another
     /// gets a fresh page there.
     node: u64 = 0,
+    /// The node whose network the page's fetches leave through (0:
+    /// this one), as last told to the host.
+    exit: u64 = 0,
     /// The URL last commanded, and the `nav` nonce it was commanded under.
     url: [2048]u8 = undefined,
     url_len: usize = 0,
@@ -445,25 +448,36 @@ pub fn selectionOf(s: *Slot) []const u8 {
 
 /// What the page domain holds, for a "Site" view: its memory against
 /// its budget, in KB, and whether it is alive.
-pub const Info = struct { used_kb: u64 = 0, limit_kb: u64 = 0, alive: bool = false, node: u64 = 0 };
+pub const Info = struct { used_kb: u64 = 0, limit_kb: u64 = 0, alive: bool = false, node: u64 = 0, exit: u64 = 0 };
 
 pub fn info(s: *Slot) Info {
     host.lock.acquire();
     defer host.lock.release();
     const p = host.page(s.page);
-    if (!p.used or p.dead) return .{ .node = s.node };
+    if (!p.used or p.dead) return .{ .node = s.node, .exit = s.exit };
     // A remote page's memory is its node's business; it is alive while
     // its relay answers.
-    if (p.remote != null) return .{ .alive = true, .node = s.node };
-    if (p.ctl == 0) return .{};
+    if (p.remote != null) return .{ .alive = true, .node = s.node, .exit = s.exit };
+    if (p.ctl == 0) return .{ .exit = s.exit };
     const st = usys.domainStat(p.ctl);
-    if (st.err != .ok) return .{};
-    return .{ .used_kb = st.data[3] >> 32, .limit_kb = st.data[3] & 0xffff_ffff, .alive = st.data[0] != @intFromEnum(shared.DomainState.dead) };
+    if (st.err != .ok) return .{ .exit = s.exit };
+    return .{ .used_kb = st.data[3] >> 32, .limit_kb = st.data[3] & 0xffff_ffff, .alive = st.data[0] != @intFromEnum(shared.DomainState.dead), .exit = s.exit };
 }
 
-/// Bring a page to what its leaf says: the viewport (a hidden leaf has
-/// none), then the URL and `nav` nonce.
-pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32, scripts: bool) void {
+/// Bring a page to what its leaf says: the exit its fetches leave
+/// through, the viewport (a hidden leaf has none), then the URL and
+/// `nav` nonce.
+pub fn sync(s: *Slot, url: []const u8, nav: i64, w: u32, h: u32, scripts: bool, exit: u64) void {
+    // The exit goes before the load that fetches through it. A dial
+    // that fails leaves the page fetching from here, and says so.
+    if (s.exit != exit) {
+        if (exit != 0 and fab == 0) {
+            webhost.logf(log_h, "page {s}: no fabric to fetch through node {d}", .{ s.idText(), exit });
+        } else if (host.setExit(s.page, fab, exit)) {
+            webhost.logf(log_h, "page {s}: fetching through node {d}", .{ s.idText(), exit });
+        } else webhost.logf(log_h, "page {s}: could not fetch through node {d}", .{ s.idText(), exit });
+        s.exit = exit;
+    }
     // Scripts on or off goes before the load it applies to.
     if (s.scripts != scripts) {
         s.scripts = scripts;

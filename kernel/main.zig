@@ -452,6 +452,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.webexit_test) {
+        _ = sched.spawn("boot-watch", webexitTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.cpu_test) {
         _ = sched.spawn("cpu-test", cpuTestWorker, 0, .{}) catch @panic("spawn cpu-test");
@@ -1311,6 +1316,13 @@ fn browserTestWorker(_: u64) void {
 /// drive, and node 2, which never exits, is killed by the runner first.
 fn webfabTestWorker(_: u64) void {
     systemDrillWithin("webfab", 240);
+}
+
+/// The exit-node drill: node 1 (profile webfab) is the desktop; node 2
+/// (profile webexithost) is the exit, fetching for node 1's tab from
+/// its own loopback. Both nodes run this worker, as in webfab.
+fn webexitTestWorker(_: u64) void {
+    systemDrillWithin("webexit", 240);
 }
 
 fn jsrunTestWorker(_: u64) void {

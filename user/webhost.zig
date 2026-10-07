@@ -373,11 +373,31 @@ pub const Remote = struct {
     }
 };
 
+/// A client's link to an exit node's broker.
+pub const Exit = struct {
+    chan: u64 = 0,
+    node: u64 = 0,
+    buf_va: u64 = 0,
+    buf_len: usize = 0,
+    id: u64 = 0,
+    key: u64 = 0,
+    /// A read is under way there (its chunk lands in the buffer).
+    reading: bool = false,
+
+    fn buf(x: *const Exit) []u8 {
+        return @as([*]u8, @ptrFromInt(x.buf_va))[0..x.buf_len];
+    }
+};
+
 /// A broker client's state: the resource it has open and the
 /// connection it parks between requests. A page has one; a script
 /// domain lent the network has one.
 pub const Client = struct {
     open: ?Resource = null,
+    /// The fetches leave through a peer's `webexit` (stage 12's other
+    /// half): the dialed session and its buffer, and the client this
+    /// one is there.
+    exit: ?Exit = null,
     /// A connection kept open after a response that allowed it, for the
     /// next request to the same host (a site's pictures came one fresh
     /// TLS handshake each, ~400 ms under emulation, 2026-09-23).
@@ -432,6 +452,8 @@ pub const Host = struct {
     url_buf: [2048]u8 = undefined,
     /// A script request's origin, copied out of the page's buffer.
     origin_buf: [512]u8 = undefined,
+    /// An exit's content type for the open just answered.
+    ct_buf: [256]u8 = undefined,
     /// Per-origin storage for every page of this host (`localStorage`):
     /// records of (origin, key, value), one per live key, in one buffer;
     /// an origin may hold `storage_quota` bytes of keys and values. Held
@@ -742,6 +764,7 @@ pub const Host = struct {
         if (!p.used) return;
         h.brokerCancel(&p.client);
         h.dropParked(&p.client);
+        h.clearExitLocked(&p.client);
         if (p.remote) |*r| {
             // The pump is mid-call on the session: it closes the page
             // when the reply comes (the slot stays taken until then).
@@ -2091,6 +2114,7 @@ pub const Host = struct {
     /// only if its `Access-Control-Allow-Origin` names it or is `*` —
     /// the simple CORS case (no credentials, no preflight).
     pub fn brokerOpenFrom(h: *Host, c: *Client, url_in: []const u8, post_in: bool, body_in: []const u8, origin: []const u8, tag: []const u8) OpenOut {
+        if (c.exit) |*x| return h.exitOpen(x, url_in, post_in, body_in, origin, tag);
         if (c.open) |*res| {
             res.conn.close(h.net);
             c.open = null;
@@ -2316,6 +2340,7 @@ pub const Host = struct {
     }
 
     pub fn brokerRead(h: *Host, c: *Client, out: []u8, tag: []const u8) ReadOut {
+        if (c.exit) |*x| return h.exitRead(x, out, tag);
         const res: *Resource = if (c.open) |*r| r else return .{ .len = 0, .end = .failed };
         var produced: usize = 0;
         // Fill the chunk: a page reading a document in 256 KB pieces
@@ -2405,8 +2430,181 @@ pub const Host = struct {
 
     /// Drop what `c` has open (a cancel, a teardown).
     pub fn brokerCancel(h: *Host, c: *Client) void {
+        if (c.exit) |*x| {
+            if (x.reading) x.reading = false;
+            _ = usys.callTyped(wire.ExitReq, wire.ExitResp, x.chan, .{ .cancel = .{ .client = x.id, .key = x.key } }, 0);
+            return;
+        }
         if (c.open) |*res| res.conn.close(h.net);
         c.open = null;
+    }
+
+    // ------------------------------------------- the exit node (node 1)
+    //
+    // Window side: a client whose fetches go through a peer's `webexit`.
+    // Every call there answers at once (a fetch may stall past the
+    // fabric's call limit), so an open or a read is started and polled
+    // for; the serving thread waits here as it would on a socket.
+
+    /// How long an open or a read is waited for at the exit before it
+    /// is given up (the exit's own stall limit is shorter).
+    const exit_wait_ms: u64 = 20_000;
+    const exit_poll_ms: u64 = 10;
+
+    /// Route the page's fetches through `node`'s exit, dialed via `fab`
+    /// (what was open is dropped). False with why in the log.
+    pub fn setExit(h: *Host, id: PageId, fab: u64, node: u64) bool {
+        h.lock.acquire();
+        defer h.lock.release();
+        const p = &h.pages[id];
+        if (!p.used) return false;
+        h.clearExitLocked(&p.client);
+        if (node == 0) return true;
+        h.brokerCancel(&p.client);
+        h.dropParked(&p.client);
+        const words = shared.strToWords(wire.exit_name);
+        const chan: u64 = switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab, .{ .remote_connect = .{ .node = node, .a = words[0], .b = words[1] } }, 0)) {
+            .ok => |ok| switch (ok.rep) {
+                .found => ok.cap,
+                .fab_err => |e| {
+                    logf(h.log, "webhost: node {d}: dialing {s} refused: {s}", .{ node, wire.exit_name, @tagName(std.enums.fromInt(shared.FabErr, e.code) orelse .refused) });
+                    return false;
+                },
+                else => return false,
+            },
+            .err => |e| {
+                logf(h.log, "webhost: node {d}: the fabric did not answer: {s}", .{ node, @tagName(e) });
+                return false;
+            },
+        };
+        if (chan == 0) return false;
+        const sh = usys.shmCreate(shared.fab_bulk_pages);
+        if (sh.err != .ok) {
+            _ = usys.capDrop(chan);
+            return false;
+        }
+        const m = usys.shmMap(sh.data[0]);
+        if (m.err != .ok) {
+            _ = usys.capDrop(sh.data[0]);
+            _ = usys.capDrop(chan);
+            return false;
+        }
+        switch (usys.callTyped(wire.ExitReq, wire.ExitResp, chan, .hello, sh.data[0])) {
+            .ok => |rep| switch (rep) {
+                .client => |cl| {
+                    p.client.exit = .{ .chan = chan, .node = node, .buf_va = m.data[0], .buf_len = @intCast(m.data[1] * 4096), .id = cl.id, .key = cl.key };
+                    logf(h.log, "webhost: page {d}: fetching through node {d} (exit client {d})", .{ id, node, cl.id });
+                    return true;
+                },
+                else => logf(h.log, "webhost: node {d}: the exit refused a client", .{node}),
+            },
+            .err => |e| logf(h.log, "webhost: node {d}: the exit did not answer the hello: {s}", .{ node, @tagName(e) }),
+        }
+        _ = usys.shmUnmap(m.data[0]);
+        _ = usys.capDrop(chan);
+        return false;
+    }
+
+    /// Which exit node the page fetches through (0: none).
+    pub fn exitOf(h: *Host, id: PageId) u64 {
+        h.lock.acquire();
+        defer h.lock.release();
+        const p = &h.pages[id];
+        if (!p.used) return 0;
+        return if (p.client.exit) |x| x.node else 0;
+    }
+
+    fn clearExitLocked(h: *Host, c: *Client) void {
+        _ = h;
+        const x = &(c.exit orelse return);
+        _ = usys.callTyped(wire.ExitReq, wire.ExitResp, x.chan, .{ .bye = .{ .client = x.id, .key = x.key } }, 0);
+        _ = usys.capDrop(x.chan);
+        _ = usys.shmUnmap(x.buf_va);
+        c.exit = null;
+    }
+
+    fn exitOpen(h: *Host, x: *Exit, url_in: []const u8, post: bool, body: []const u8, origin: []const u8, tag: []const u8) OpenOut {
+        const buf = x.buf();
+        if (url_in.len == 0 or url_in.len > h.url_buf.len or 6 + url_in.len + body.len + origin.len > buf.len) return .{ .refused = .bad_url };
+        wire.putU16(buf[0..2], url_in.len);
+        wire.putU16(buf[2..4], body.len);
+        wire.putU16(buf[4..6], origin.len);
+        @memcpy(buf[6 .. 6 + url_in.len], url_in);
+        @memcpy(buf[6 + url_in.len .. 6 + url_in.len + body.len], body);
+        @memcpy(buf[6 + url_in.len + body.len .. 6 + url_in.len + body.len + origin.len], origin);
+        x.reading = false;
+        switch (usys.callTyped(wire.ExitReq, wire.ExitResp, x.chan, .{ .open = .{ .client = x.id, .flags = if (post) 1 else 0, .key = x.key } }, 0)) {
+            .ok => |rep| switch (rep) {
+                .pending => {},
+                .refused => |rf| return .{ .refused = std.enums.fromInt(wire.RefuseCode, rf.code) orelse .policy },
+                else => return .{ .refused = .connect },
+            },
+            .err => |e| {
+                logf(h.log, "webhost: {s}: the exit on node {d} is gone: {s}", .{ tag, x.node, @tagName(e) });
+                return .{ .refused = .connect };
+            },
+        }
+        const started = usys.nowMs();
+        while (usys.nowMs() - started < exit_wait_ms) {
+            usys.sleepMs(exit_poll_ms);
+            switch (usys.callTyped(wire.ExitReq, wire.ExitResp, x.chan, .{ .poll = .{ .client = x.id, .key = x.key } }, 0)) {
+                .ok => |rep| switch (rep) {
+                    .pending => continue,
+                    .opened => |op| {
+                        const un: usize = @intCast(@min(op.url_len, h.url_buf.len));
+                        @memcpy(h.url_buf[0..un], buf[0..un]);
+                        const cn: usize = @intCast(@min(op.type_len, h.ct_buf.len));
+                        @memcpy(h.ct_buf[0..cn], buf[op.url_len .. op.url_len + cn]);
+                        logf(h.log, "webhost: {s}: {s}: opened through node {d} in {d} ms", .{ tag, h.url_buf[0..un], x.node, usys.nowMs() - started });
+                        return .{ .opened = .{ .status = op.status, .url = h.url_buf[0..un], .ct = h.ct_buf[0..cn] } };
+                    },
+                    .refused => |rf| return .{ .refused = std.enums.fromInt(wire.RefuseCode, rf.code) orelse .policy },
+                    else => return .{ .refused = .connect },
+                },
+                .err => return .{ .refused = .connect },
+            }
+        }
+        logf(h.log, "webhost: {s}: the exit on node {d} took too long to open", .{ tag, x.node });
+        _ = usys.callTyped(wire.ExitReq, wire.ExitResp, x.chan, .{ .cancel = .{ .client = x.id, .key = x.key } }, 0);
+        return .{ .refused = .connect };
+    }
+
+    fn exitRead(h: *Host, x: *Exit, out: []u8, tag: []const u8) ReadOut {
+        const buf = x.buf();
+        const max = @min(out.len, buf.len);
+        switch (usys.callTyped(wire.ExitReq, wire.ExitResp, x.chan, .{ .read = .{ .client = x.id, .max = max, .key = x.key } }, 0)) {
+            .ok => |rep| switch (rep) {
+                .pending => {},
+                .chunk => |ch| {
+                    const n: usize = @intCast(@min(ch.len, max));
+                    @memcpy(out[0..n], buf[0..n]);
+                    return .{ .len = n, .end = std.enums.fromInt(wire.ChunkEnd, ch.done) orelse .failed };
+                },
+                else => return .{ .len = 0, .end = .failed },
+            },
+            .err => |e| {
+                logf(h.log, "webhost: {s}: the exit on node {d} is gone: {s}", .{ tag, x.node, @tagName(e) });
+                return .{ .len = 0, .end = .failed };
+            },
+        }
+        const started = usys.nowMs();
+        while (usys.nowMs() - started < exit_wait_ms) {
+            usys.sleepMs(exit_poll_ms);
+            switch (usys.callTyped(wire.ExitReq, wire.ExitResp, x.chan, .{ .poll = .{ .client = x.id, .key = x.key } }, 0)) {
+                .ok => |rep| switch (rep) {
+                    .pending => continue,
+                    .chunk => |ch| {
+                        const n: usize = @intCast(@min(ch.len, max));
+                        @memcpy(out[0..n], buf[0..n]);
+                        return .{ .len = n, .end = std.enums.fromInt(wire.ChunkEnd, ch.done) orelse .failed };
+                    },
+                    else => return .{ .len = 0, .end = .failed },
+                },
+                .err => return .{ .len = 0, .end = .failed },
+            }
+        }
+        logf(h.log, "webhost: {s}: the exit on node {d} took too long to read", .{ tag, x.node });
+        return .{ .len = 0, .end = .failed };
     }
 
     fn finish(h: *Host, c: *Client) void {

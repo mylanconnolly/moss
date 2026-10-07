@@ -617,11 +617,13 @@ fn containsPage(node: Value, id: []const u8) bool {
 /// The interpreter of the running `gui`, for staging the page image.
 var page_it: ?*mshl.Interp = null;
 
-/// `{ kind: "page", id, url, nav, visible, h, node }`: a page domain's
-/// viewport. The leaf takes the height offered (or `h`, 300 by
-/// default); a `visible: false` leaf takes no room and its page keeps
-/// its document without a pixel buffer; `node` (0, the default: this
-/// machine) hosts the page on that fabric node, this window its broker. The page's pixels are blitted
+/// `{ kind: "page", id, url, nav, visible, h, node, exit }`: a page
+/// domain's viewport. The leaf takes the height offered (or `h`, 300
+/// by default); a `visible: false` leaf takes no room and its page
+/// keeps its document without a pixel buffer; `node` (0, the default:
+/// this machine) hosts the page on that fabric node, this window its
+/// broker; `exit` (0: this machine) sends the page's fetches out
+/// through that node's network. The page's pixels are blitted
 /// inside the rect and nowhere else — the chrome above it is this
 /// window's, whatever the page paints.
 fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize, paint: bool) Size {
@@ -630,8 +632,9 @@ fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     const url = strField(rec, "url");
     const nav: i64 = if (rec.get("nav")) |n| (if (n == .int) n.int else 0) else 0;
     const node: u64 = @intCast(std.math.clamp(intField(rec, "node", 0), 0, 0xffff));
+    const exit: u64 = @intCast(std.math.clamp(intField(rec, "exit", 0), 0, 0xffff));
     if (!visible) {
-        if (paint) if (page_it) |it| if (guipage.slotFor(it, id, node)) |s| guipage.sync(s, url, nav, 0, 0, boolField(rec, "scripts", true));
+        if (paint) if (page_it) |it| if (guipage.slotFor(it, id, node)) |s| guipage.sync(s, url, nav, 0, 0, boolField(rec, "scripts", true), exit);
         return .{};
     }
     const h = @max(@as(usize, @intCast(std.math.clamp(intField(rec, "h", 300), 40, 4000))), avail_h);
@@ -645,7 +648,7 @@ fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     s.x = x;
     s.y = y;
     s.sy = wf.screenY(y);
-    guipage.sync(s, url, nav, @intCast(avail_w), @intCast(h), boolField(rec, "scripts", true));
+    guipage.sync(s, url, nav, @intCast(avail_w), @intCast(h), boolField(rec, "scripts", true), exit);
     guipage.syncExtras(s, pageExtras(rec));
     if (s.sy >= 0 and (s.logged_x != wf.win_x + x or s.logged_y != wf.win_y + @as(usize, @intCast(s.sy)) or s.logged_w != avail_w or s.logged_h != h)) {
         s.logged_x = wf.win_x + x;
@@ -1957,15 +1960,17 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var limit: i64 = 0;
         var alive = false;
         var node: i64 = 0;
+        var exit: i64 = 0;
         if (guipage.slotById(args[0].str)) |s| {
             const inf = guipage.info(s);
             used = @intCast(inf.used_kb);
             limit = @intCast(inf.limit_kb);
             alive = inf.alive;
             node = @intCast(inf.node);
+            exit = @intCast(inf.exit);
         }
-        const keys = try it.arena.dupe([]const u8, &.{ "alive", "used_kb", "limit_kb", "node" });
-        const vals = try it.arena.dupe(Value, &.{ .{ .bool = alive }, .{ .int = used }, .{ .int = limit }, .{ .int = node } });
+        const keys = try it.arena.dupe([]const u8, &.{ "alive", "used_kb", "limit_kb", "node", "exit" });
+        const vals = try it.arena.dupe(Value, &.{ .{ .bool = alive }, .{ .int = used }, .{ .int = limit }, .{ .int = node }, .{ .int = exit } });
         return .{ .record = .{ .keys = keys, .vals = vals } };
     }
     if (std.mem.eql(u8, name, "display-info")) {

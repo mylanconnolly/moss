@@ -404,6 +404,48 @@ pub fn getU64(b: []const u8) u64 {
     return std.mem.readInt(u64, b[0..8], .little);
 }
 
+// -------------------------------------------------------- the exit node
+//
+// A broker on another node (the other half of stage 12): a window's
+// fetches leave through a peer's network. Node 2 runs `webexit`, a
+// durable service dialed by name; the window says `hello` with a
+// session buffer and then asks it to open and read — but a fetch can
+// stall past the fabric's call limit, so every call answers at once:
+// `open` and `read` *start* the work on the exit's worker for that
+// client and reply `pending`, and the window polls for the outcome.
+// The texts and bytes ride in the session buffer: a request's URL, body
+// and origin down, the final URL and content type or a chunk up.
+
+pub const exit_name = "webexit";
+
+pub const ExitReq = union(enum(u64)) {
+    /// Become a client (the call carries the session buffer cap). Reply
+    /// `client`.
+    hello: void,
+    /// Start opening: data[0..6] = url_len, body_len, origin_len (u16
+    /// each), then the three texts; `flags` bit 0 = POST. Reply
+    /// `pending` (poll for `opened`/`refused`), or `refused` at once.
+    open: struct { client: u64, flags: u64, key: u64 },
+    /// Start reading up to `max` bytes of the open resource into
+    /// data[0..]. Reply `pending` (poll for `chunk`).
+    read: struct { client: u64, max: u64, key: u64 },
+    /// The outcome of the open or read under way, or `pending` still.
+    poll: struct { client: u64, key: u64 },
+    /// Drop what is open.
+    cancel: struct { client: u64, key: u64 },
+    bye: struct { client: u64, key: u64 },
+};
+
+pub const ExitResp = union(enum(u64)) {
+    client: struct { id: u64, key: u64 },
+    pending: void,
+    /// The final URL then the content type at data[0..].
+    opened: struct { status: u64, url_len: u64, type_len: u64 },
+    refused: struct { code: u64 },
+    chunk: struct { len: u64, done: u64 },
+    ok: void,
+};
+
 test "relay records round trip" {
     var buf: [64]u8 = undefined;
     var w: RecWriter = .{ .buf = &buf };

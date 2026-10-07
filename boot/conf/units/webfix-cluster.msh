@@ -1,6 +1,8 @@
-# The fixture web server on the cluster stack (profile webnode, node 2 of
-# the two-node browser drill): the same boot/web/ pages as webfix, served
-# on 8080 over net-cluster, so node 1's broker fetches them across the
-# hub as node2.moss.test (dnsd-cluster's name for this node).
-{ image: mshrun, script: scripts/webfix.msh, grant: [log, bootfs], budget: { user: 16mb }, profiles: [webnode],
+# The fixture web server on the cluster stack (node 2 of the two-node
+# browser drills): the same boot/web/ pages as webfix, served on 8080
+# over net-cluster. In `webfab`, node 1's broker fetches them across the
+# hub as node2.moss.test (dnsd-cluster's name for this node); in
+# `webexit`, node 2's own exit fetches them on its loopback as
+# www.moss.test, a name node 1 can resolve but not reach.
+{ image: mshrun, script: scripts/webfix.msh, grant: [log, bootfs], budget: { user: 16mb }, profiles: [webnode, webexithost],
   give: [{ tag: net, netview: net-cluster }, { tag: view, fs: boot/web, ro: true }] }

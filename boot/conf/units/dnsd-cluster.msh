@@ -7,6 +7,6 @@
 # name is answered from fabsvc's live membership (up -> 10.77.0.N/fdcc::N,
 # a known-but-down node -> NXDOMAIN), so cluster names track membership
 # rather than a hardcoded list.
-{ image: dnsd, profiles: [system, flogin, fjoin, fabgui, webfab], grant: [log],
+{ image: dnsd, profiles: [system, flogin, fjoin, fabgui, webfab, webexithost], grant: [log],
   give: [{ tag: net, netview: net-cluster }, { tag: buf, shm: 1 },
     { file: conf/dns.msh }, { tag: fabric, unit: fabsvc }] }

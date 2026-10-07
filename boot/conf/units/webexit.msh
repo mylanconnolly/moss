@@ -1,0 +1,20 @@
+# The exit node (profile webexithost): a durable native service reached
+# by name over the fabric (`dial NODE "webexit"` through this node's
+# init). A window elsewhere opens and reads what its pages fetch through
+# this program — this node's network view, trust roots (the assets
+# tier) and policy — so a tab browses through here. Every call answers
+# at once (a fetch may stall past the fabric's call limit): the work
+# runs on a worker per client and the window polls. Giving `fabric`
+# pulls fabsvc up so this node joins the mesh. Essential + never exits.
+{
+  image:     webexit
+  grant:     [log, bootfs]
+  budget:    { user: 24mb, kobj: 2mb }
+  profiles:  [webexithost]
+  essential: true
+  give: [
+    { tag: fabric, unit: fabsvc }
+    { tag: net, netview: net-cluster }
+    { tag: assets, fs: assets, ro: true }
+  ]
+}

@@ -8003,7 +8003,39 @@ remote stage spawn under, so seven unrelated drills failed on
 `QuotaExceeded`. They are mapped on demand now (`mapPages`: when a
 window attaches to a relay's page, when a host first hosts a remote
 page), and an mshrun that does neither pays 77 KB. Residuals are in
-ROADMAP's stage 12 entry; the exit-node broker is the open half.
+ROADMAP's stage 12 entry.
+
+**Stage 12, the exit node (as built, 2026-10-06).** The symmetric
+half: `webexit` (`user/webexit.zig`) is a durable service dialed by
+name that holds a node's network view and trust roots and brokers for
+windows elsewhere, so a tab browses through a peer. The window's side is
+one field: a broker `Client` with `exit` set routes `brokerOpenFrom`,
+`brokerRead` and `brokerCancel` to the exit (`setExit` dials, attaches
+a session buffer and says `hello`; a page's `destroy` says `bye`), and
+nothing above the broker knows — the page, the relay of a remote page,
+a script's `moss:net` all fetch as before. The fabric's call limit
+shaped the protocol as it shaped the relay's: a fetch stalls for
+seconds and a remote call held that long drops the peer link, so the
+exit's `open` and `read` *start* the work on the client's worker
+thread (one per client, a deep stack for the TLS handshake) and answer
+`pending`; the window polls every 10 ms for `opened`, `refused` or
+`chunk`, up to 20 s, and the texts and bytes ride the session buffer
+(the request's URL, body and origin down; the final URL and content
+type, or a chunk, up). The workers broker one at a time under the
+host's lock, where the broker's scratch lives. A client whose window
+stops asking for 20 s is dropped by the exit's clock. The `webexit`
+drill is the proof with a twist that proves the route: node 2 serves
+the fixtures on its own loopback as `www.moss.test`, a name node 1's
+resolver answers with *its* loopback, where nothing listens — the tab's
+direct load fails, and through node 2's exit it loads (105 ms). The GUI
+is the "Fetch via" list beside "Render on" in the Site panel, both
+stacked and two rows tall: two lists in a `row` were laid out where
+their logged geometry was not, and a panel that outgrew the window
+(sized once, at creation) put its last rows past the body's clip, where
+a click is refused — the second list's rows sat 19 px short of the
+window's bottom and took nothing. The exit is a trusted proxy by
+construction: it does the TLS handshake with its own roots and the
+window takes its word, which is what a unit file on that node means.
 
 ## JavaScript
 

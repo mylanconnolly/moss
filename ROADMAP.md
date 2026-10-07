@@ -1233,11 +1233,37 @@ supervises), and memory history per unit beside the CPU one.
       a secret, so another certified member could command a page it did
       not open; the pump brokers under the host lock, so a slow fetch
       for a remote page stalls the window's commands to local ones as a
-      local fetch does today. Still open: *a broker on another node*
-      (browse through a peer's network: an exit node is a unit file
-      there) — the symmetric case, a synchronous open/read RPC behind
-      `brokerOpenFrom`; the window itself remote is `gui { node }`
-      already.
+      local fetch does today. ✅ *A broker on another node* (landed the
+      same day): `webexit` (`user/webexit.zig`, unit `webexit.msh`,
+      profile `webexithost`) is the exit node — a durable service dialed
+      by name holding the node's network view and trust roots — and a
+      window's broker client can be routed through it (`Client.exit`:
+      `brokerOpenFrom`, `brokerRead` and `brokerCancel` branch there).
+      The fabric's call limit shaped it: a fetch stalls for seconds, so
+      `open` and `read` *start* the work on the client's worker thread
+      at the exit and answer `pending`, and the window polls every 10
+      ms for `opened`/`refused`/`chunk` (`ExitReq`/`ExitResp` in
+      `shared/web.zig`; the texts and bytes in the session buffer, a
+      chunk per round trip). The `page` leaf takes `exit:`, the Site
+      panel lists "Fetch via" beside "Render on", `page-info` says both,
+      and the policy's `exit:` is the default. The `webexit` drill: node
+      2 is the exit and serves the fixtures on its own loopback as
+      `www.moss.test`, a name node 1 resolves to its own loopback where
+      nothing listens — the tab's direct load fails, the runner picks
+      node 2 in the panel, the page reloads through the exit (105 ms)
+      and its heading lands in node 1's rect; closing the window says
+      goodbye and the exit reports the client gone. Found: two lists in
+      a `row` are laid out where their logged geometry is not, and a
+      Site panel that outgrows the window (sized once, at creation)
+      puts its last rows past the body's clip where a click is refused
+      — the panel is compact now (both node lists stacked, two rows
+      each, the paragraph gone). Residuals: the exit's clients broker
+      one at a time under its host lock (a stalled read holds the
+      others up to the 10 s stall limit); the exit does the TLS
+      handshake with *its* roots and the window trusts the answer — the
+      exit is a trusted proxy by construction, as a unit file there
+      says; one chunk per round trip. The window itself remote is `gui
+      { node }` already; stage 12 is complete.
     - **Track F — what the browser asks of the network** (as a stage
       asks): TLS session resumption and HSTS; certificate errors as an
       interstitial that names the failure and is never bypassed
